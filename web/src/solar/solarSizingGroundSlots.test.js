@@ -12,7 +12,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 3,
-    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "ids": [
     "leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308",
@@ -26,7 +29,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 0,
-    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "count 0",
    "ok": false
@@ -35,7 +41,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": true,
-    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "count bool",
    "ok": false
@@ -44,7 +53,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 4,
-    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "count one more",
    "ok": false
@@ -53,7 +65,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v2",
     "count": 3,
-    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "codec other",
    "ok": false
@@ -62,7 +77,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 3,
-    "panel_ids": null
+    "panel_ids": null,
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "panel_ids not text",
    "ok": false
@@ -71,7 +89,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 3,
-    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "ids": [
     "leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308",
@@ -85,7 +106,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 3,
-    "panel_ids": "pOJc\n3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc\n3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "panel_ids with newline",
    "ok": false
@@ -94,7 +118,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 3,
-    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh_I"
+    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh_I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "panel_ids urlsafe alphabet",
    "ok": false
@@ -103,7 +130,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 3,
-    "panel_ids": "pOJc3Wd1ED2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc3Wd1ED2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "uuid version 1",
    "ok": false
@@ -112,7 +142,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 3,
-    "panel_ids": "pOJc3Wd1QD3eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc3Wd1QD3eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "uuid variant c",
    "ok": false
@@ -121,7 +154,10 @@ const SERVER = {
    "block": {
     "codec": "leaf.solar-ground-slots.v1",
     "count": 3,
-    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCKTiXN1ndUA9ngwnVABpkwilPO0HCrdNyo7ByPGYLh/I"
+    "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCKTiXN1ndUA9ngwnVABpkwilPO0HCrdNyo7ByPGYLh/I",
+    "centres": 'A'.repeat(64),
+    "angle": 0,
+    "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
    },
    "label": "duplicate id inside one block",
    "ok": false
@@ -141,14 +177,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -182,14 +224,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 1,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCA=="
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCA==",
+       "centres": btoa('\0'.repeat(1 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -229,7 +277,10 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -267,7 +318,10 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 1,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCA=="
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCA==",
+       "centres": btoa('\0'.repeat(1 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {}
@@ -307,14 +361,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -355,14 +415,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -403,14 +469,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -449,14 +521,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -512,14 +590,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -569,14 +653,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -624,14 +714,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -686,14 +782,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -741,14 +843,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -801,14 +909,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -856,14 +970,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -916,14 +1036,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -974,14 +1100,20 @@ const SERVER = {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 3,
-       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I"
+       "panel_ids": "pOJc3Wd1QD2eDCdUAGmTCGcLwrBGQEWOsS59L2ZKZ2alPO0HCrdNyo7ByPGYLh/I",
+       "centres": 'A'.repeat(64),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      },
      {
       "ground_slots": {
        "codec": "leaf.solar-ground-slots.v1",
        "count": 2,
-       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE="
+       "panel_ids": "qJ+t4fMxRXidcTMkFzN7mc5D4m6mYUILgk3eP/egvgE=",
+       "centres": btoa('\0'.repeat(2 * 16)),
+       "angle": 0,
+       "panel": { rev: 0, provenance: {}, validity: {}, extra: {} }
       }
      }
     ],
@@ -1035,7 +1167,9 @@ const slotBlock = (count, seed = 0) => {
     bytes += String.fromCharCode((n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255,
       0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, seed & 255, 1)
   }
-  return { codec: 'leaf.solar-ground-slots.v1', count, panel_ids: btoa(bytes) }
+  return { codec: 'leaf.solar-ground-slots.v1', count, panel_ids: btoa(bytes),
+    centres: btoa('\0'.repeat(count * 16)), angle: 0,
+    panel: { rev: 0, provenance: {}, validity: {}, extra: {} } }
 }
 
 describe('solarSizingModel on a converted Ground design', () => {
@@ -1073,7 +1207,7 @@ describe('solarSizingModel on a converted Ground design', () => {
   })
 
   it('GSZ5 refuses a block that is not a plain object, a non-integer count and frames that are not a list', () => {
-    for (const block of [null, [], 'x', 7, { codec: 'leaf.solar-ground-slots.v1', count: 1.5, panel_ids: '' }]) {
+    for (const block of [null, [], 'x', 7, { ...slotBlock(1), count: 1.5 }]) {
       const graph = converted()
       graph.frames = [{ ground_slots: block }]
       expect(read(graph), JSON.stringify(block)).toEqual(UNAVAILABLE)
