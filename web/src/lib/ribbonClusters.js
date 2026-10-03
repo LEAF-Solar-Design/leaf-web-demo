@@ -647,7 +647,9 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
                 ? REASONS.writeUnentitled
                 : dirtyBlocked
                   ? REASONS.unsavedEngineEdits
-                  : ''
+                  : tool.availability && typeof tool.availability === 'object' && !Array.isArray(tool.availability)
+                    ? solarRailReason(tool.availability, { openTypedForm: false })
+                    : ''
       return {
         id: tool.name,
         label: tool.name,
@@ -658,7 +660,7 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
         title: tool.description || tool.name,
         write: isWrite,
         ...(mcpSource ? { mcpSource } : {}),
-        disabled: !!mcpSource || !!running || !!previewing || locked || entBlocked || dirtyBlocked,
+        disabled: !!reason,
         reason,
         onClick: () => onRequestRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       }
