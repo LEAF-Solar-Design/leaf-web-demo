@@ -5,9 +5,102 @@ import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/acti
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { setupStep, stackInstanceRef, UnsupportedLocalError } from './fixtures.mjs'
+import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+test('engine recipes use live Draw panels and Author uses Manage', () => {
+  for (const action of ACTIONS.filter((action) => action.id === 'author-tool'
+    || ['createBlock', 'createInsert', 'createText', 'dimLinear', 'dimAligned'].includes(action.op))) {
+    const entry = map.entries.find((entry) => entry.source_id === action.id && entry.kind === 'action')
+    assert.ok(entry, action.id)
+    for (const state of entry.states) {
+      const tab = resolveProbe(entry, state).setup.steps.find((step) => ['ribbon-tab', 'failed-drawing-ribbon-tab'].includes(step.kind))
+      assert.equal(tab.name, action.id === 'author-tool' ? 'Manage' : 'Draw')
+    }
+  }
+})
+
+test('a panel hidden again after state setup is disclosed once', async () => {
+  let visible = true, expanded = false, clicks = 0
+  const page = { getByRole: () => ({ getByRole: (role, options) => {
+    if (role === 'group') {
+      assert.equal(options.name, 'Block')
+      assert.equal(options.includeHidden, true)
+      return { count: async () => 1, isVisible: async () => visible }
+    }
+    assert.equal(options.name, 'More panels')
+    return { isVisible: async () => true, getAttribute: async () => String(expanded),
+      click: async () => { clicks++; expanded = true; visible = true } }
+  } }) }
+  // State setup leaves ribbon focus and closes its overflow.
+  visible = false
+  await discloseControlPanel(page, { group: 'block' })
+  await discloseControlPanel(page, { group: 'block' })
+  assert.equal(clicks, 1)
+  assert.equal(visible, true)
+})
+
+test('WASM hold drains concurrent and late continuations before idempotent unroute', async () => {
+  let handler, unroutes = 0, finish, late
+  const calls = [0, 0, 0]
+  const blocked = new Promise((resolve) => { finish = resolve })
+  const page = {
+    route: async (pattern, callback) => { assert.equal(pattern, '**/engine/engine_bg.wasm'); handler = callback },
+    unroute: async (pattern, callback) => {
+      assert.equal(callback, handler)
+      assert.deepEqual(calls, [1, 1, 1])
+      unroutes++
+    },
+  }
+  const runtime = { page, evidence: {}, cleanup: [] }
+  await setupStep({}, runtime, { kind: 'hold-engine-boot' })
+  const [cleanup] = runtime.cleanup
+  const first = handler({ continue: async () => { calls[0]++; await blocked } })
+  const second = handler({ continue: async () => { calls[1]++; late = handler({ continue: async () => { calls[2]++ } }) } })
+  assert.deepEqual(calls, [0, 0, 0])
+  const closing = cleanup()
+  assert.equal(cleanup(), closing)
+  await Promise.resolve()
+  assert.equal(unroutes, 0)
+  finish()
+  await closing
+  await Promise.all([first, second, late])
+  await cleanup()
+  assert.deepEqual(calls, [1, 1, 1])
+  assert.equal(unroutes, 1)
+})
+
+test('property selects retain identity and read only the enclosing widget reason', async () => {
+  const probe = resolveProbe(map.entries.find((entry) => entry.id === 'action:modify-set-color'), 'engine-busy')
+  let parentReason = probe.assertion.reason, disabledChecks = 0, nameChecks = 0, titleChecks = 0
+  const parent = { title: () => parentReason }
+  const select = { locator: (selector) => { assert.match(selector, /ancestor::label.*ribbon-widget/); return parent } }
+  const assertions = (target) => ({
+    toBeDisabled: async () => { assert.equal(target, select); disabledChecks++ },
+    toHaveAccessibleName: async (pattern) => { assert.equal(target, select); assert.match(probe.locator.name, pattern); nameChecks++ },
+    toHaveAttribute: async (name, pattern) => { assert.equal(target, parent); assert.equal(name, 'title'); titleChecks++; assert.match(target.title(), pattern) },
+  })
+  await assertEffect(probe, { page: {} }, select, {}, assertions)
+  assert.deepEqual([disabledChecks, nameChecks, titleChecks], [1, 1, 1])
+  parentReason = 'a different reason'
+  await assert.rejects(assertEffect(probe, { page: {} }, select, {}, assertions), /did not match/)
+})
+
+test('clipboard and undo setup use the registry and rendered quick names', async () => {
+  const names = []
+  const page = { getByRole: (role, options) => {
+    names.push(options.name)
+    if (role === 'group') return { count: async () => 1, isVisible: async () => true, getByRole: page.getByRole }
+    return { getByRole: page.getByRole, click: async () => {} }
+  } }
+  const runtime = { page, evidence: {} }
+  await setupStep({}, runtime, { kind: 'copy-selection' })
+  await setupStep({}, runtime, { kind: 'undo-edit' })
+  assert.ok(names.includes(ACTIONS.find((action) => action.op === 'copyClip').label))
+  assert.ok(names.includes('copy-clip'))
+  assert.ok(names.includes('Undo edit'))
+  assert.ok(!names.includes('Copy') && !names.includes('Undo'))
+})
 test('catalog-tool evidence stays compact and hashes the catalog once per worker', async () => {
   const record = { name: 'count-by-layer', description: 'Count entities by layer',
     availability: { entitled: true, implemented: true }, input_schema: { type: 'object', properties: {} } }
@@ -84,6 +177,30 @@ const evidenceFixture = new AsyncFunction('use', 'testInfo', 'workerFacts', fixt
   fixtureSource.indexOf('walkEvidence: [async ({ workerFacts }, use, testInfo) => {')
     + 'walkEvidence: [async ({ workerFacts }, use, testInfo) => {'.length,
   fixtureSource.indexOf('}, { auto: true }]')))
+
+test('a failing WASM continuation never masks the original assertion and all cleanup runs', async () => {
+  const original = Object.assign(new Error('original assertion'), { matcherResult: {} })
+  let handler, continued = 0, unrouted = 0, otherCleanup = 0
+  const page = {
+    route: async (_pattern, callback) => { handler = callback },
+    unroute: async () => { unrouted++ },
+  }
+  const runtime = { page, evidence: { steps: [] }, testInfo: { annotations: [] } }
+  const probe = { setup: { steps: [{ kind: 'hold-engine-boot' }] }, assertion: { assertionId: 'unit/oracle' } }
+  await assert.rejects(probeRunner(probe, runtime, { step: async (_name, fn) => fn() }, async (_probe, current) => {
+    current.cleanup.push(async () => { otherCleanup++ })
+    const cleanup = await holdJobRoutes(page, '**/engine/engine_bg.wasm')
+    current.cleanup.push(cleanup)
+    handler({ continue: async () => { continued++; throw new Error('continuation failed') } }).catch(() => {})
+    throw original
+  }, UnsupportedLocalError), (error) => error === original)
+  await assert.rejects(runtime.cleanup[0](), /continuation failed/)
+  assert.equal(continued, 1)
+  assert.equal(unrouted, 1)
+  assert.equal(otherCleanup, 1)
+  assert.equal(runtime.evidence.failure.message, original.message)
+  assert.deepEqual(runtime.evidence.cleanupErrors, [{ message: 'continuation failed' }])
+})
 
 async function unsupportedRuntime(error, log = [], attachments = []) {
   const testInfo = { title: 'unsupported unit probe', project: { name: 'desktop' }, annotations: [],

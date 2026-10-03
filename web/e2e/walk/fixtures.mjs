@@ -15,14 +15,13 @@ export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
 export const COACH_STORAGE_KEY = 'leaf.coach.dismissed.v1'
 
-export async function holdJobRoutes(page) {
+export async function holdJobRoutes(page, pattern = '**/api/jobs/**') {
   let release
   let passing = false
   let cleanupPromise
   const gate = new Promise((resolve) => { release = resolve })
   const active = new Set()
   const errors = []
-  const pattern = '**/api/jobs/**'
   const hold = (route) => {
     const continuation = (async () => {
       if (!passing) await gate
@@ -42,6 +41,7 @@ export async function holdJobRoutes(page) {
       release()
       while (active.size) await Promise.allSettled([...active])
       await page.unroute(pattern, hold)
+      while (active.size) await Promise.allSettled([...active])
       if (errors.length) throw errors[0]
     })()
     return cleanupPromise
@@ -224,6 +224,17 @@ const control = (page, recipe) => {
     scope = scope.getByRole('group', { name: groupNames[recipe.group], exact: true })
   }
   return scope.getByRole(recipe.role, { name: recipe.name, exact: recipe.exact !== false })
+}
+
+export async function discloseControlPanel(page, recipe) {
+  if (!recipe.group || !groupNames[recipe.group]) return
+  const toolbar = page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+  const panel = toolbar.getByRole('group', { name: groupNames[recipe.group], exact: true, includeHidden: true })
+  if (await panel.count() === 0 || await panel.isVisible()) return
+  const more = toolbar.getByRole('button', { name: 'More panels', exact: true })
+  if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') {
+    await more.click({ timeout: 15_000 })
+  }
 }
 const panelButton = (page, name) => page.getByRole('group', { name: 'Workspace panels', exact: true })
   .getByRole('button', { name, exact: true })
@@ -710,12 +721,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       })
       return
     case 'hold-engine-boot': {
-      let release
-      const gate = new Promise((resolve) => { release = resolve })
-      const pattern = '**/engine/engine_bg.wasm'
-      const hold = async (route) => { await gate; await route.continue() }
-      await page.route(pattern, hold)
-      runtime.cleanup.push(async () => { release(); await page.unroute(pattern, hold) })
+      runtime.cleanup.push(await holdJobRoutes(page, '**/engine/engine_bg.wasm'))
       return
     }
     case 'navigate': await page.goto(recipe.url); return
@@ -852,8 +858,9 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     case 'select-entity': await selectEntity(probe, runtime, recipe); return
     case 'clear-selection': await page.keyboard.press('Escape'); return
     case 'copy-selection':
+      await discloseControlPanel(page, { group: 'clipboard' })
       await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('group', { name: 'Clipboard', exact: true })
-        .getByRole('button', { name: 'Copy', exact: true }).click()
+        .getByRole('button', { name: ACTIONS.find((action) => action.op === 'copyClip').label, exact: true }).click()
       return
     case 'drawer-state': await setDrawer(page, recipe.name, recipe.open); return
     case 'tool-rail-state': await setToolRail(page, recipe.open, runtime.testInfo.project.name === 'phone'); return
@@ -1027,7 +1034,8 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       expect(await engineCount(page)).toBeGreaterThan(0)
       return
     case 'undo-edit':
-      await page.getByRole('toolbar', { name: 'Quick access', exact: true }).getByRole('button', { name: 'Undo', exact: true }).click()
+      // App's engine quick controls use these labels, distinct from version Undo/Redo.
+      await page.getByRole('toolbar', { name: 'Quick access', exact: true }).getByRole('button', { name: 'Undo edit', exact: true }).click()
       return
     case 'preview-version': await previewVersion(probe, runtime, assertions); return
     case 'zoom-before-fit': {
@@ -1254,7 +1262,8 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       const variant = probe.locator.disabledVariants.find((variant) => variant.name === name)
       expect(variant, 'Rendered disabled control must expose a registry reason').toBeTruthy()
       await expect(locator).toHaveAccessibleName(variant.name)
-      await expect(locator).toHaveAttribute('title', new RegExp(variant.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+      await expect(probe.locator.trigger === 'select' ? locator.locator('xpath=ancestor::label[contains(concat(" ", normalize-space(@class), " "), " ribbon-widget ")][1]') : locator)
+        .toHaveAttribute('title', new RegExp(variant.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
       runtime.evidence.failedDrawing.renderedReason = variant.reason
       runtime.evidence.failedDrawing.renderedReasonCode = variant.reason_code
       return
@@ -1262,7 +1271,8 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     // The accessible name is user-facing evidence, unlike a data-reason-code
     // alone. Exact registry text must also remain on the native tooltip.
     await expect(locator).toHaveAccessibleName(new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-    await expect(locator).toHaveAttribute('title', new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    await expect(probe.locator.trigger === 'select' ? locator.locator('xpath=ancestor::label[contains(concat(" ", normalize-space(@class), " "), " ribbon-widget ")][1]') : locator)
+      .toHaveAttribute('title', new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     return
   }
   if (target === 'drafting-grid') {
@@ -1462,7 +1472,9 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target === 'browser-clipboard') {
-    await expect(page.getByRole('group', { name: 'Clipboard', exact: true }).getByRole('button', { name: 'Paste', exact: true })).toBeEnabled()
+    await expect(page.getByRole('group', { name: 'Clipboard', exact: true }).getByRole('button', {
+      name: ACTIONS.find((action) => action.op === 'pasteClip').label, exact: true,
+    })).toBeEnabled()
     return
   }
   if (target.startsWith('drawing-version-')) {
@@ -1497,6 +1509,7 @@ export async function runProbe(probe, runtime) {
   runtime.cleanup = []
   runtime.workerFacts ||= evidence.workerFacts || { engineMounted: undefined }
   const setupStartedAt = Date.now()
+  let originalError
   try {
     if (probe.kind === 'tool' && typeof workerCatalog === 'function') {
       await workerCatalog(runtime.workerFacts, page.request)
@@ -1518,6 +1531,8 @@ export async function runProbe(probe, runtime) {
     }
     page = runtime.page
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
+    // Source-extracted fake runners may omit module dependencies.
+    if (typeof discloseControlPanel === 'function') await discloseControlPanel(page, probe.locator)
     const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : probe.locator)
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)
@@ -1558,11 +1573,15 @@ export async function runProbe(probe, runtime) {
     if (probe.assertion.kind !== 'disabled_with_reason') {
       await test.step(`Activate ${probe.featureId}`, () => activate(probe, runtime, locator))
     }
-    await test.step(probe.assertion.assertionId, () => assertEffect(probe, runtime, locator, before))
+    await test.step(probe.assertion.assertionId, () => {
+      evidence.oracleReached = probe.assertion.assertionId
+      return assertEffect(probe, runtime, locator, before)
+    })
     if (runtime.failedDrawing) evidence.failedDrawing.actionAvailability = probe.assertion.kind === 'disabled_with_reason'
       ? 'disabled_with_reason' : 'available'
     evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
   } catch (error) {
+    originalError = error
     if (error instanceof UnsupportedLocalError) {
       runtime.testInfo.annotations.push({ type: 'unsupported_local', description: error.reason })
       return { unsupported: true, reason: error.reason }
@@ -1570,8 +1589,15 @@ export async function runProbe(probe, runtime) {
     evidence.failure = { message: error.message, assertionId: probe.assertion.assertionId }
     throw error
   } finally {
-    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
-    evidence.cleanupCompleted = true
+    const cleanupErrors = []
+    for (const cleanup of runtime.cleanup.reverse()) {
+      try { await cleanup() } catch (error) { cleanupErrors.push(error) }
+    }
+    evidence.cleanupCompleted = cleanupErrors.length === 0
+    if (cleanupErrors.length) {
+      evidence.cleanupErrors = cleanupErrors.map((error) => ({ message: error.message }))
+      if (!originalError || originalError instanceof UnsupportedLocalError) throw cleanupErrors[0]
+    }
   }
 }
 
