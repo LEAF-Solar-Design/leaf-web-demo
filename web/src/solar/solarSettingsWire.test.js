@@ -16,6 +16,21 @@ const refused = { ok: false, error: { error_code: 'bad_params', message: 'invali
 const association = (envelope) => ({ intentId: 'i1', drawingId: 'd1', drawingVersion: 3, envelope })
 
 describe('Solar settings wiring rules', () => {
+  it('H11 strings are chosen only for a live standalone drawing', () => {
+    for (const toolName of ['solar-string-add', 'solar-string-multi-add']) {
+      const input = { enabled: true, mock: false, toolName, context: C }
+      expect(solarSettingsFormChoice(input)).toBe('strings')
+      for (const override of [{ enabled: false }, { mock: true }, { context: { ...C, projectId: 'p1' } },
+        { context: { ...C, drawingId: '' } }]) {
+        expect(solarSettingsFormChoice({ ...input, ...override })).toBe('generic')
+      }
+    }
+    for (const [toolName, choice] of [['solar-size-strings', 'sizing'], ['solar-string-conductors', 'conductors'],
+      ['solar-settings', 'typed'], ['solar-homeruns', 'generic']]) {
+      expect(solarSettingsFormChoice({ enabled: true, mock: false, toolName, context: C })).toBe(choice)
+    }
+  })
+
   it('SZ19 sizing is chosen only for a live standalone drawing', () => {
     const input = { enabled: true, mock: false, toolName: 'solar-size-strings', context: C }
     expect(solarSettingsFormChoice(input)).toBe('sizing')
@@ -152,9 +167,9 @@ describe('Solar settings wiring rules', () => {
     expect(Object.isFrozen(loaders)).toBe(true)
   })
 
-  it('SF2 row34 the wire module imports nothing and carries no fenced text', () => {
+  it('SF2 row34 the wire module imports only string tool constants and carries no fenced text', () => {
     const source = readFileSync(resolve(process.cwd(), 'src', 'solar', 'solarSettingsWire.js'), 'utf8')
-    expect(source).not.toMatch(/^\s*import\b/m)
+    expect(source.match(/^\s*import[^\n]+/gm)).toEqual(["import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL } from './solarStringComposerModel.js'"])
     expect(source).not.toMatch(/\bimport\s*\(/)
     expect(source).not.toMatch(/\brequire\s*\(/)
     expect(source).not.toContain('solar-settings-form')
