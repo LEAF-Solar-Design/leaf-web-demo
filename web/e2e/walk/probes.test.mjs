@@ -5,9 +5,144 @@ import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/acti
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect } from './fixtures.mjs'
+import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+test('W1x catalog recipes retain their family panel and reseat it after state setup', () => {
+  for (const [id, state, setup] of [
+    ['tool:solar-panel-add', 'unsaved-engine-edits', 'create-line'],
+    ['tool:solar-design-presets', 'write-unentitled', 'private-policy'],
+  ]) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === id), state)
+    assert.ok(probe.locator.panelName)
+    assert.ok(probe.locator.panelId)
+    assert.equal(probe.setup.steps.at(-1).kind, 'catalog-tool')
+    assert.ok(probe.setup.steps.findIndex((step) => step.kind === setup) < probe.setup.steps.length - 1)
+  }
+})
+
+test('Solar actions derive Solar surface and tab from their panel while Rail uses Manage', () => {
+  for (const action of ACTIONS.filter((action) => action.panel === 'solar-panels')) {
+    const entry = map.entries.find((entry) => entry.kind === 'action' && entry.source_id === action.id)
+    for (const state of entry.states.filter((state) => state !== 'no-drawing')) {
+      const probe = resolveProbe(entry, state)
+      assert.equal(probe.setup.steps.find((step) => step.kind === 'open-private-drawing').surface, 'solar')
+      assert.equal(probe.setup.steps.find((step) => step.kind === 'ribbon-tab').name, 'Solar')
+    }
+  }
+  const rail = resolveProbe(map.entries.find((entry) => entry.id === 'action:rail-expand'), 'ready')
+  assert.equal(rail.setup.steps.find((step) => step.kind === 'ribbon-tab').name, 'Manage')
+})
+
+test('Solar panel selection recipes declare the calibration fixture gap before setup', () => {
+  assert.equal(SOLAR_PANEL_CALIBRATION_REASON, 'The private DXF fixture has no two uncovered calibration points for solar panel placement.')
+  for (const action of ACTIONS.filter((action) => action.panel === 'solar-panels')) {
+    const entry = map.entries.find((entry) => entry.kind === 'action' && entry.source_id === action.id)
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      const needsSelection = probe.setup.steps.some((recipe) => recipe.kind === 'select-entity' && !recipe.viewerOnly)
+      if (needsSelection) assert.equal(unsupportedBeforeSetup(probe), SOLAR_PANEL_CALIBRATION_REASON, `${entry.id}/${state}`)
+      else assert.notEqual(unsupportedBeforeSetup(probe), SOLAR_PANEL_CALIBRATION_REASON, `${entry.id}/${state}`)
+    }
+  }
+  const move = resolveProbe(map.entries.find((entry) => entry.id === 'action:solar-panels-move'), 'ready')
+  assert.equal(unsupportedBeforeSetup(move), SOLAR_PANEL_CALIBRATION_REASON)
+  const rectangle = resolveProbe(map.entries.find((entry) => entry.id === 'action:solar-panels-create-rectangle'), 'ready')
+  assert.equal(unsupportedBeforeSetup(rectangle), null)
+})
+
+test('Solar panel disclosure resolves the actual Solar tab seat inside Drafting tools', async () => {
+  const page = { getByRole: (role, options) => {
+    assert.equal(role, 'toolbar')
+    assert.equal(options.name, 'Drafting tools')
+    return { getByRole: (role, options) => {
+      assert.equal(role, 'group')
+      assert.equal(options.name, 'Panel placement')
+      assert.equal(options.exact, true)
+      return { count: async () => 1, isVisible: async () => true }
+    } }
+  } }
+  const probe = resolveProbe(map.entries.find((entry) => entry.id === 'action:solar-panels-create-rectangle'), 'ready')
+  assert.equal(probe.locator.group, 'solar-panels')
+  assert.equal(probe.locator.name, 'Panel outline')
+  await discloseControlPanel(page, probe.locator)
+})
+
+test('clipboard input is seeded for paste and never as setup for copy or cut', () => {
+  for (const entry of map.entries.filter((entry) => entry.kind === 'action')) {
+    const action = ACTIONS.find((action) => action.id === entry.source_id)
+    if (action.group !== 'clipboard') continue
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      const copy = probe.setup.steps.findIndex((step) => step.kind === 'copy-selection')
+      if (action.op !== 'pasteClip' || !probe.setup.context.session?.clipboard || !probe.setup.context.session?.engineParsed) {
+        assert.equal(copy, -1, `${entry.id}/${state}`)
+      } else {
+        assert.ok(copy > 0)
+        assert.deepEqual(probe.setup.steps[copy - 1], { kind: 'select-entity', type: 'LINE', editable: true })
+        assert.equal(probe.setup.steps[copy + 1].kind, 'clear-selection')
+        for (const kind of ['hold-engine-edit', 'crash-engine-worker', 'preview-version']) {
+          const blocked = probe.setup.steps.findIndex((step) => step.kind === kind)
+          if (blocked >= 0) assert.ok(copy < blocked)
+        }
+      }
+    }
+  }
+})
+
+test('version navigation seeds saved versions separately from engine edit history', () => {
+  for (const id of ['undo', 'redo']) {
+    const entry = map.entries.find((entry) => entry.id === `action:${id}`)
+    const ready = resolveProbe(entry, 'ready')
+    assert.ok(ready.setup.steps.some((step) => step.kind === 'saved-version-history' && step.redo === (id === 'redo')))
+    assert.ok(ready.setup.steps.every((step) => !['create-line', 'undo-edit'].includes(step.kind)))
+    const edit = structuredClone(entry)
+    edit.expected_effect.ready.target = 'browser-edit-' + id
+    assert.ok(resolveProbe(edit, 'ready').setup.steps.some((step) => step.kind === 'undo-edit'))
+  }
+})
+
+test('only the UI-unreachable versionless state is declared before setup for every probe kind', () => {
+  assert.ok(Object.isFrozen(UI_UNREACHABLE_STATES))
+  assert.deepEqual([...UI_UNREACHABLE_STATES], ['no-versioned-drawing'])
+  assert.equal(VERSIONLESS_DRAWING_REASON, 'The product creates a saved root version for every private drawing and renders the ribbon only with a drawing open, so no-versioned-drawing is unreachable through the UI.')
+  const entries = map.entries.filter((entry) => entry.states.includes('no-versioned-drawing'))
+  for (const id of ['action:history', 'action:undo', 'action:redo']) assert.ok(entries.some((entry) => entry.id === id))
+  for (const entry of entries) {
+    assert.equal(unsupportedBeforeSetup(resolveProbe(entry, 'no-versioned-drawing')), VERSIONLESS_DRAWING_REASON)
+  }
+  for (const kind of ['action', 'tool', 'control', 'tab', 'surface', 'drawer']) {
+    // The declaration must not inspect recipes or query catalog/engine availability.
+    assert.equal(unsupportedBeforeSetup({ kind, state: 'no-versioned-drawing' }), VERSIONLESS_DRAWING_REASON)
+  }
+  for (const id of ['action:history', 'action:undo', 'action:redo']) {
+    assert.equal(unsupportedBeforeSetup(resolveProbe(map.entries.find((entry) => entry.id === id), 'ready')), null)
+  }
+})
+
+for (const reset of ['policy reload', 'LINE command entry']) test(`catalog overflow is reopened after ${reset}`, async () => {
+  let visible = false, expanded = false, clicks = 0
+  const page = { getByRole: () => ({ getByRole: (role, options) => {
+    if (role === 'group') {
+      assert.equal(options.name, 'Solar design')
+      assert.equal(options.includeHidden, true)
+      return { count: async () => 1, isVisible: async () => visible }
+    }
+    assert.equal(options.name, 'More panels')
+    return { isVisible: async () => true, getAttribute: async () => String(expanded),
+      click: async () => { clicks++; visible = true; expanded = true } }
+  } }) }
+  await discloseControlPanel(page, { panelName: 'Solar design' })
+  visible = false; expanded = false
+  await discloseControlPanel(page, { panelName: 'Solar design' })
+  assert.equal(clicks, 2)
+  assert.equal(visible, true)
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const runner = source.slice(source.indexOf('export async function runProbe'))
+  assert.ok(runner.indexOf('evidence.setupCompleted') < runner.indexOf('await discloseControlPanel'))
+  assert.ok(runner.indexOf('await discloseControlPanel') < runner.indexOf('await expect(locator).toBeVisible()'))
+})
+
 test('engine recipes use live Draw panels and Author uses Manage', () => {
   for (const action of ACTIONS.filter((action) => action.id === 'author-tool'
     || ['createBlock', 'createInsert', 'createText', 'dimLinear', 'dimAligned'].includes(action.op))) {
