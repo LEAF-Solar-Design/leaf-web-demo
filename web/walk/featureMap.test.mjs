@@ -18,6 +18,59 @@ const clone = (value) => structuredClone(value)
 const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
+
+test('reachable map states and phone-only drawers remove exactly thirty-four triples', () => {
+  const triples = (featureMap) => featureMap.entries.flatMap((entry) => entry.states.flatMap((state) =>
+    entry.viewports.map((viewport) => `${entry.id}/${state}/${viewport}`))).sort()
+  for (const entry of map.entries) {
+    for (const state of ['read-only-entity', 'no-versioned-drawing']) {
+      assert.ok(!entry.states.includes(state), entry.id + '/' + state)
+      assert.equal(entry.expected_effect[state], undefined)
+      assert.equal(entry.state_contexts[state], undefined)
+    }
+  }
+  for (const id of ['drawer:plan', 'drawer:result']) {
+    assert.deepEqual(entryFor(id).states, ['closed', 'open'])
+    assert.deepEqual(entryFor(id).viewports, ['phone'])
+  }
+  // Reconstruct the previous inventory to pin removals without a map snapshot.
+  const previous = clone(overrides)
+  previous.state_cases.action.patches['read-only-entity'] = {
+    session: { selected: { editable: false, type: 'LINE' } },
+  }
+  previous.state_cases.action.patches['no-versioned-drawing'] = { hasVersions: false }
+  for (const id of ['drawer:plan', 'drawer:result']) previous.overrides[id].viewports = ['desktop', 'phone']
+  const previousTriples = triples(buildFeatureMap({ overrides: previous }))
+  assert.equal(previousTriples.length, 793)
+  assert.equal(triples(map).length, 759)
+  assert.deepEqual(triples(map), previousTriples.filter((triple) =>
+    !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
+      && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
+  // Removing an unreachable setup must not remove the registry's actual gate.
+  for (const id of ['history', 'redo', 'undo']) {
+    assert.equal(ACTIONS.find((action) => action.id === id).when({ hasVersions: false }), REASONS.noVersions)
+  }
+})
+
+test('DIMENSION Copy, Cut and Explode render refusals with clipboard and geometry unchanged', () => {
+  for (const [id, refusal] of [
+    ['action:clipboard-copy-clip', 'Copy refused: a DIMENSION of this kind cannot go on the clipboard yet.'],
+    ['action:clipboard-cut-clip', 'Cut refused: a DIMENSION of this kind cannot go on the clipboard yet.'],
+    ['action:modify-explode', 'a dimension is placed, not edited, in this round'],
+  ]) {
+    const entry = entryFor(id)
+    assert.ok(entry.states.includes('placed-dimension'), id)
+    assert.deepEqual(entry.expected_effect['placed-dimension'], {
+      kind: 'renders', target: 'engine-refusal', refusal,
+      clipboard: 'unchanged', geometry: 'unchanged',
+    })
+    assert.equal(ACTIONS.find((action) => featureId('action', action.id) === id)
+      .when(entry.state_contexts['placed-dimension']), '')
+    assert.notEqual(entry.expected_effect.ready.target, 'engine-refusal')
+    assert.notEqual(entry.expected_effect['placed-insert'].target, 'engine-refusal')
+  }
+})
+
 test('batch three declares exactly seventeen default-build semantic controls with complete states', () => {
   const expected = [
   [
@@ -401,7 +454,7 @@ test('all rows declare valid unique ids, sources, states, effects, viewports and
     assert.ok(entry.states.length > 0)
     assert.deepEqual(Object.keys(entry.expected_effect).sort(), entry.states)
     assert.ok(entry.sources.length > 0)
-    assert.ok(entry.viewports.includes('desktop'))
+    assert.ok(entry.viewports.length > 0)
     assert.ok(['local', 'staging', 'both', 'unsupported_local'].includes(entry.certify))
     if (entry.certify !== 'both') assert.ok(entry.certify_reason.trim())
     for (const state of entry.states) {
@@ -412,6 +465,7 @@ test('all rows declare valid unique ids, sources, states, effects, viewports and
   }
   for (const patch of [
     { states: [] }, { id: 'action:bad*' }, { sources: ['C:/secret/file.js'] },
+    { viewports: [] }, { viewports: ['tablet'] },
     { certify: 'local', certify_reason: ' ' }, { expected_effect: {} },
     { expected_effect: { ready: { kind: 'unknown', target: 'somewhere' } } },
   ]) {
@@ -532,7 +586,7 @@ test('action cases project registry gates and engine prompt behavior', () => {
     }
   }
   assert.equal(entryFor('action:draw-create-line').expected_effect['no-drawing'].reason, DRAW_REASONS.noDocument)
-  assert.equal(entryFor('action:modify-move').expected_effect['read-only-entity'].reason, MODIFY_REASONS.readOnlyKind)
+  assert.equal(entryFor('action:modify-move').expected_effect['placed-dimension'].kind, 'opens')
   assert.equal(entryFor('action:modify-move').expected_effect['placed-insert'].kind, 'opens')
   assert.deepEqual(entryFor('action:clipboard-copy-clip').expected_effect.ready, { kind: 'toggles', target: 'browser-clipboard' })
   assert.ok(!entryFor('action:fit').states.includes('unentitled'))
