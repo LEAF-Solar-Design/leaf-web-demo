@@ -4,9 +4,72 @@ import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH } from './probes.mjs'
 import { readFileSync } from 'node:fs'
-import { stackInstanceRef, UnsupportedLocalError } from './fixtures.mjs'
+import { createHash } from 'node:crypto'
+import { setupStep, stackInstanceRef, UnsupportedLocalError } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+test('catalog-tool evidence stays compact and hashes the catalog once per worker', async () => {
+  const record = { name: 'count-by-layer', description: 'Count entities by layer',
+    availability: { entitled: true, implemented: true }, input_schema: { type: 'object', properties: {} } }
+  const catalog = { families: [
+    { name: 'drawing', capabilities: [record] },
+    { name: 'other', capabilities: Array.from({ length: 200 }, (_, index) => ({
+      name: `other-tool-${index}`, description: 'A catalog capability. '.repeat(30),
+      input_schema: { type: 'object', properties: { layer: { type: 'string' } } },
+    })) },
+  ] }
+  const serialized = JSON.stringify(catalog)
+  assert.ok(Buffer.byteLength(serialized) >= 100 * 1024)
+  const digest = createHash('sha256').update(serialized).digest('hex')
+  let serializations = 0, requests = 0
+  Object.defineProperty(catalog, 'toJSON', { value() { serializations++; return { families: this.families } } })
+  const tabs = []
+  const page = {
+    request: { get: async (path) => {
+      assert.equal(path, '/api/capabilities')
+      requests++
+      return { ok: () => true, json: async () => catalog }
+    } },
+    getByRole: (role, options) => {
+      if (role === 'tablist') {
+        assert.equal(options.name, 'Ribbon')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'tab')
+          return { click: async () => { tabs.push(options.name) } }
+        } }
+      }
+      assert.equal(role, 'button')
+      assert.equal(options.name, 'More panels')
+      return { isVisible: async () => false }
+    },
+  }
+  const probe = { featureId: 'tool:count-by-layer', state: 'ready', certify: 'local' }
+  const workerFacts = {}
+  const run = async (name, facts = workerFacts) => {
+    const runtime = { page, workerFacts: facts, evidence: {}, testInfo: { attach: async () => {} } }
+    const pending = setupStep(probe, runtime, { kind: 'catalog-tool', name })
+    if (name === 'missing-tool') await assert.rejects(pending, UnsupportedLocalError)
+    else await pending
+    return runtime.evidence
+  }
+  for (const name of ['count-by-layer', 'other-tool-0', 'missing-tool']) {
+    const evidence = await run(name)
+    const expected = catalog.families.flatMap((family) => family.capabilities).find((tool) => tool.name === name) || null
+    assert.deepEqual(evidence.catalog, { requestedTool: name, record: expected,
+      catalog_sha256: digest, families: 2, capabilities: 201 })
+    assert.equal(evidence.catalog.record, expected)
+    assert.equal(Object.hasOwn(evidence.catalog, 'response'), false)
+    assert.ok(Buffer.byteLength(JSON.stringify(evidence, null, 2)) < 16 * 1024)
+    if (!expected) assert.equal(evidence.result.result, 'unsupported_local')
+  }
+  assert.deepEqual(tabs, ['Manage', 'Manage'])
+  assert.equal(requests, 1)
+  assert.equal(serializations, 1)
+  await run('count-by-layer', {})
+  assert.equal(requests, 2)
+  assert.equal(serializations, 2)
+})
+
 // As in uxProbe.test.mjs, exercise the actual runner with fake Playwright
 // steps; also run the evidence fixture's teardown to check its attachment.
 const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
