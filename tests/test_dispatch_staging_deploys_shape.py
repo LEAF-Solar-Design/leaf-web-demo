@@ -24,10 +24,15 @@ is the whole regression. Every assertion is proven RED by mutation below.
 """
 
 from pathlib import Path
+import re
 
 import pytest
 
-from test_contract_workflow_shape import _load
+import yaml
+
+
+def _load(text):
+    return yaml.safe_load(text)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELAY = REPO_ROOT / ".github" / "workflows" / "dispatch-staging-deploys.yml"
@@ -118,6 +123,56 @@ def test_relay_group_predicate_is_the_dispatch_job_gate_verbatim():
     assert wf["concurrency"]["group"] == EXPECTED_GROUP
 
 
+def test_relay_fleet_executor_is_gated_and_isolated():
+    wf = _load(_relay_text())
+    job = wf["jobs"]["dispatch"]
+    assert wf["env"]["RELAY_FLEET_CONVERGENCE_ENABLED"] == "true"
+    assert job["timeout-minutes"] == 95 + 80 + 15 == 190
+    assert job["concurrency"] == {"group": "reconcile-staging-fleet", "cancel-in-progress": False}
+    steps = job["steps"]
+    checkout = next(s for s in steps if s.get("uses") == "actions/checkout@v4")
+    fleet = next(s for s in steps if s.get("id") == "fleet")
+    gate = "steps.deploy.outputs.converged == 'true' && env.RELAY_FLEET_CONVERGENCE_ENABLED == 'true'"
+    assert " ".join(checkout["if"].split()) == gate
+    assert " ".join(fleet["if"].split()) == gate
+    assert checkout["with"] == {"ref": "${{ github.workflow_sha }}", "path": "fleet-executor", "persist-credentials": False}
+    assert fleet["working-directory"] == "fleet-executor"
+    assert fleet["env"] == {"APP_GITHUB_TOKEN": "${{ github.token }}", "TERRAFORM_GITHUB_TOKEN": "${{ secrets.TERRAFORM_REPO_TOKEN }}"}
+    assert "--in-relay --relay-run-id" in fleet["run"]
+    for flag, file in (("--relay-receipt", "staging-converged.json"), ("--supply-set", "staging-supply-set.json"),
+                       ("--supply-evidence", "staging-supply-evidence.b64"), ("--consumer-contract", "staging-consumer-contract.b64")):
+        assert f"{flag} ../{file}" in fleet["run"]
+    assert "--execute --timeout-seconds 4800" in fleet["run"]
+    assert steps.index(checkout) > next(i for i, s in enumerate(steps) if s.get("id") == "deploy")
+    assert steps.index(fleet) < next(i for i, s in enumerate(steps) if s["name"] == "Publish the convergence receipt")
+    result = next(s for s in steps if s.get("id") == "fleet_result")
+    assert result["continue-on-error"] is True
+    assert result["with"]["path"] == "fleet-result/staging-fleet-result.json"
+    assert result["with"]["retention-days"] == 3
+    assert "!cancelled()" in result["if"]
+    assert "always()" not in result["if"]
+    for step in steps:
+        if step["name"].startswith("Publish "):
+            assert "always()" not in step["if"]
+
+
+def test_switch_off_preserves_the_web_app_product_path():
+    wf = _load(_relay_text())
+    wf["env"]["RELAY_FLEET_CONVERGENCE_ENABLED"] = "false"
+    steps = wf["jobs"]["dispatch"]["steps"]
+    deploy = next(s for s in steps if s.get("id") == "deploy")
+    assert "RELAY_FLEET_CONVERGENCE_ENABLED" not in deploy["if"]
+    assert set(re.findall(r'SERVICES="([^"]*)"', deploy["run"])) == {"web app", "app web"}
+    assert 'automatic_surfaces: ["web", "app"]' in deploy["run"]
+    assert 'full_fleet_identity_stamped: false' in deploy["run"]
+    for step in steps:
+        if step.get("id") in {"fleet", "fleet_result"} or step.get("uses") == "actions/checkout@v4":
+            assert "env.RELAY_FLEET_CONVERGENCE_ENABLED == 'true'" in step["if"]
+    for step in steps:
+        if step["name"].startswith("Publish "):
+            assert "RELAY_FLEET_CONVERGENCE_ENABLED" not in step["if"]
+
+
 # --------------------------------------------------------------------------
 # Mutation battery: each fixture is the real file with ONE regression applied,
 # and the same check must report it.
@@ -125,8 +180,9 @@ def test_relay_group_predicate_is_the_dispatch_job_gate_verbatim():
 
 def _mutate(old: str, new: str) -> str:
     text = _relay_text()
-    assert text.count(old) == 1, f"battery fixture drifted: {old!r} occurs {text.count(old)} times"
-    return text.replace(old, new)
+    pattern = re.compile("^" + re.escape(old), re.MULTILINE)
+    assert len(pattern.findall(text)) == 1, f"battery fixture drifted: {old!r}"
+    return pattern.sub(lambda match: new, text)
 
 
 _NEGATIVES = {

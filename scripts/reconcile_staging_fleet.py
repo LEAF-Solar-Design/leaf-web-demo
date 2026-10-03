@@ -1,48 +1,26 @@
-"""Resolve the staging fleet reconcile-and-restamp plan. READ ONLY.
+"""Plan and execute staging fleet reconcile legs against frozen relay evidence.
 
-WHY THIS EXISTS. The staging relay converges exactly two surfaces, web and
-app, and says so in its own receipt: automatic_surfaces ["web","app"],
-non_relay_services all "not_automatically_reconciled",
-full_fleet_identity_stamped false. The convergence receipt that
-scripts/platform_staging_convergence.py emits needs more than that. Its
-deployment identity is a FIVE-service stamp built from LIVE ECS digests (the
-provider samples running tasks and checks their health before writing the
-body), so it exists only once broker, harness and canonical-worker are also
-live on the release, and only after an app run with
-app_deploy_intent=configuration stamps it. Nothing dispatches any of that:
-the relay only ever sends app_deploy_intent=forward. Measured 2026-09-03 on
-the dad27a10 wave, every one of those four runs (broker 33698179237, harness
-33698719439, canonical-worker 33699214170, restamp 33699604872) was
-triggering_actor=Evan-Haug, event=workflow_dispatch. This module computes, on
-evidence alone, what those four dispatches should be.
-
-WHY IT PLANS INSTEAD OF DEPLOYING, and why the plan is not per-release.
-Every staging mutation funnels through one shared concurrency group
-(leaf-platform-staging-ecs-mutation, shared by 39 workflows) which holds a
-single slot. Measured over the 60 most recent staging deploys to 2026-09-03,
-median wall clock per service: web 11.2, app 26.9, broker 5.4, harness 6.0,
-canonical-worker 7.8 minutes, so all five serialized is ~57 minutes, ~63 with
-the restamp, against a 19.4-minute median merge cadence on main and a lock
-already busy 70.3% of a 25.2h sample. Converging EVERY release is therefore
-3.2x oversubscribed: a per-release reconciler would queue forever and starve
-the web and app deploys that carry the product. So the plan always targets the
-NEWEST converged release and is expected to skip releases, and the lane that
-runs it yields to the relay rather than competing with it.
-
-This module NEVER dispatches and never mutates. It reads provider evidence and
-returns a closed plan for a human to read, which is the milestone that comes
-before arming anything.
+Scheduled discovery targets the newest published release and yields to relays.
+An in-relay execution binds local frozen files to its own run, completes the
+three non-product services sequentially, and configuration-restamps app. Both
+call the same planner and executor; neither rolls back landed product surfaces.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import sys
+import time
+import urllib.request
 from typing import Any
 
+from scripts import platform_staging_convergence as convergence
 from scripts.platform_staging_convergence import (
     APP_REPOSITORY,
     ARTIFACT_FILE,
@@ -216,7 +194,7 @@ def _unstartable_dispatch(
     return True
 
 
-def _live_runs(provider: Provider, repository: str, workflow: str) -> list[int]:
+def _live_runs(provider: Provider, repository: str, workflow: str, relay_run_id: int | None = None) -> list[int]:
     """Run ids of anything not settled. Fails CLOSED: a read that cannot be
     parsed is reported as busy, never as quiet, because standing down costs one
     idle cycle while proceeding could race the relay for the staging lock."""
@@ -229,13 +207,19 @@ def _live_runs(provider: Provider, repository: str, workflow: str) -> list[int]:
         if not isinstance(status, str):
             raise ContractError("PROVIDER_RUN_LIST_INVALID")
         if status in BUSY_STATUSES:
+            run_id = _positive(row.get("id"), "PROVIDER_RUN_LIST_INVALID")
+            if relay_run_id is not None and (
+                run_id == relay_run_id
+                or (run_id > relay_run_id and status in {"queued", "waiting", "requested", "pending"})
+            ):
+                continue
             if _unstartable_dispatch(provider, repository, workflow, row):
                 continue
             live.append(_positive(row.get("id"), "PROVIDER_RUN_LIST_INVALID"))
     return live
 
 
-def yield_check(provider: Provider) -> dict[str, Any]:
+def yield_check(provider: Provider, relay_run_id: int | None = None) -> dict[str, Any]:
     """Stand down whenever the relay, or any staging deploy, is live.
 
     This lane is strictly lower priority than the relay: the relay carries the
@@ -244,7 +228,7 @@ def yield_check(provider: Provider) -> dict[str, Any]:
     make the thing it is trying to fix worse. Same shape as the provider's own
     prewarm self-yield, including its fail-closed posture.
     """
-    relay_live = _live_runs(provider, APP_REPOSITORY, "dispatch-staging-deploys.yml")
+    relay_live = _live_runs(provider, APP_REPOSITORY, "dispatch-staging-deploys.yml", relay_run_id)
     deploy_live = _live_runs(provider, TF_REPOSITORY, "deploy-leaf-platform-staging.yml")
     if relay_live:
         return {
@@ -569,6 +553,14 @@ def build_plan(provider: Provider) -> dict[str, Any]:
         prefix="staging-consumer-contract",
         file="staging-consumer-contract.b64",
     )
+    return plan_release(release, settled, yielded, envelope, contract)
+
+
+def plan_release(
+    release: dict[str, Any], settled: dict[str, dict[str, Any]],
+    yielded: dict[str, Any], envelope: dict[str, Any], contract: dict[str, Any],
+) -> dict[str, Any]:
+    """Shared planning core; callers supply the frozen release and evidence."""
 
     services: dict[str, Any] = {}
     for service in SERVICE_ORDER:
@@ -714,6 +706,364 @@ def build_plan(provider: Provider) -> dict[str, Any]:
     }
 
 
+def _decode_envelope(raw: bytes) -> dict[str, Any]:
+    try:
+        if not raw or len(raw) > 512 * 1024 or not re.fullmatch(rb"[A-Za-z0-9_-]+", raw):
+            raise ValueError("invalid envelope")
+        value = convergence._load_json(base64.b64decode(
+            raw + b"=" * (-len(raw) % 4), altchars=b"-_", validate=True
+        ))
+        if not isinstance(value, dict):
+            raise ValueError("invalid envelope")
+        return value
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ContractError("FROZEN_ENVELOPE_INVALID") from exc
+
+
+def bind_relay_inputs(
+    relay_run_id: int, receipt: dict[str, Any], supply_raw: bytes,
+    evidence_raw: bytes, contract_raw: bytes,
+    *, check_current_run: bool = True,
+) -> dict[str, Any]:
+    """Bind local inputs without looking up any other release or artifact."""
+    run_id = _positive(relay_run_id, "RELAY_RUN_ID_INVALID")
+    try:
+        manifest = convergence._load_json(supply_raw)
+        evidence = _decode_envelope(evidence_raw)
+        contract = _decode_envelope(contract_raw)
+        producer = evidence["producer"]
+        build = {
+            "run_id": producer["run_id"], "run_attempt": producer["run_attempt"],
+            "head_sha": producer["source_revision"],
+        }
+        supply = convergence._supply(
+            manifest, build, producer["source_tree"],
+            file_sha256=hashlib.sha256(supply_raw).hexdigest(),
+        )
+        convergence._relay_receipt(receipt, build, supply, run_id, manifest)
+        relay = evidence["relay"]
+        if (
+            evidence["schema"] != "leaf.staging-supply-dispatch-evidence.v1"
+            or relay["run_id"] != run_id
+            or relay["repository"] != APP_REPOSITORY
+            or relay["workflow_path"] != ".github/workflows/dispatch-staging-deploys.yml"
+            or producer["repository"] != APP_REPOSITORY
+            or producer["workflow_path"] != ".github/workflows/build-platform-images.yml"
+            or producer["event"] != "push"
+            or evidence["manifest"]["sha256"] != supply["manifest_sha256"]
+            or evidence["manifest"]["source_revision"] != supply["source_revision"]
+            or evidence["manifest"]["source_tree"] != supply["source_tree"]
+            or evidence["manifest"]["schema"] != manifest["schema"]
+            or base64.urlsafe_b64decode(evidence["manifest"]["json_b64"] + "=" * (
+                -len(evidence["manifest"]["json_b64"]) % 4)) != supply_raw
+        ):
+            raise ContractError("FROZEN_SUPPLY_BINDING_MISMATCH")
+        _positive(relay["run_attempt"], "RELAY_RUN_ID_INVALID")
+        _positive(evidence["supply_artifact"]["id"], "FROZEN_SUPPLY_BINDING_MISMATCH")
+        convergence._sha64(evidence["supply_artifact"]["provider_archive_sha256"], "FROZEN_SUPPLY_BINDING_MISMATCH")
+        if not isinstance(evidence["supply_artifact"]["name"], str) or not evidence["supply_artifact"]["name"]:
+            raise ContractError("FROZEN_SUPPLY_BINDING_MISMATCH")
+        if check_current_run and os.environ.get("GITHUB_RUN_ID") and int(os.environ["GITHUB_RUN_ID"]) != run_id:
+            raise ContractError("RELAY_RUN_ID_MISMATCH")
+        if check_current_run and os.environ.get("GITHUB_RUN_ATTEMPT") and int(os.environ["GITHUB_RUN_ATTEMPT"]) != relay["run_attempt"]:
+            raise ContractError("RELAY_RUN_ATTEMPT_MISMATCH")
+        unsigned = dict(contract)
+        envelope_hash = unsigned.pop("envelope_sha256")
+        if (
+            contract["schema"] != convergence.CONSUMER_DISPATCH_SCHEMA
+            or hashlib.sha256(convergence._canonical(unsigned)).hexdigest() != envelope_hash
+        ):
+            raise ContractError("FROZEN_CONSUMER_CONTRACT_INVALID")
+        body = contract["contract"]
+        convergence._exact(contract, {"schema", "contract", "artifact", "envelope_sha256"}, "FROZEN_CONSUMER_CONTRACT_INVALID")
+        convergence._exact(body, {"schema", "version", "producer", "consumer", "artifact", "payload_sha256"}, "FROZEN_CONSUMER_CONTRACT_INVALID")
+        unsigned_body = dict(body)
+        payload_hash = unsigned_body.pop("payload_sha256")
+        if (
+            body["schema"] != convergence.CONSUMER_CONTRACT_SCHEMA
+            or body["version"] != 1
+            or hashlib.sha256(convergence._canonical(unsigned_body)).hexdigest() != payload_hash
+            or body["consumer"]["deploy_workflow_path"] != DEPLOY_WORKFLOW
+        ):
+            raise ContractError("FROZEN_CONSUMER_CONTRACT_INVALID")
+        blob = _sha40(body["consumer"]["deploy_workflow_blob"], "FROZEN_CONSUMER_CONTRACT_INVALID")
+        consumer = body["consumer"]
+        if (
+            consumer["contract_schema_path"] != convergence.CONSUMER_CONTRACT_SCHEMA_PATH
+            or consumer["contract_version"] != 1
+            or consumer["pins"] != {"deployment_environment": "aws-apply",
+                                     "digest_aware_marker": "leaf.staging-digest-aware-consumer.v1",
+                                     "mutation_group": "leaf-platform-staging-ecs-mutation"}
+            or body["producer"]["repository"] != TF_REPOSITORY
+            or body["producer"]["workflow_path"] != convergence.CONSUMER_CONTRACT_WORKFLOW
+            or body["producer"]["event"] != "push" or body["producer"]["branch"] != "main"
+            or body["artifact"]["file"] != "consumer-contract.json"
+            or body["artifact"]["name"] != contract["artifact"]["name"]
+            or body["producer"]["run_id"] != contract["artifact"]["producer_run_id"]
+            or body["producer"]["run_attempt"] != contract["artifact"]["producer_run_attempt"]
+            or contract["artifact"]["provider_sha256"] != contract["artifact"]["archive_sha256"]
+        ):
+            raise ContractError("FROZEN_CONSUMER_CONTRACT_INVALID")
+        for key in ("head_sha", "head_tree", "workflow_blob"):
+            _sha40(body["producer"][key], "FROZEN_CONSUMER_CONTRACT_INVALID")
+        _sha40(consumer["contract_schema_blob"], "FROZEN_CONSUMER_CONTRACT_INVALID")
+        for key in ("provider_sha256", "archive_sha256", "file_sha256"):
+            convergence._sha64(contract["artifact"][key], "FROZEN_CONSUMER_CONTRACT_INVALID")
+        for key in ("id", "producer_run_id", "producer_run_attempt"):
+            _positive(contract["artifact"][key], "FROZEN_CONSUMER_CONTRACT_INVALID")
+        for service in RELAY_SERVICES:
+            surface = receipt["surface_results"][service]
+            if not isinstance(surface, dict):
+                raise ContractError("RELAY_SURFACE_RESULT_INVALID")
+            if (
+                surface.get("schema") != "leaf.staging-surface-result.v1"
+                or surface.get("service") != service
+                or surface.get("release_source_revision") != supply["source_revision"]
+                or surface.get("convergence_id") != f"{supply['source_revision']}-{build['run_attempt']}-{service}"
+                or surface.get("candidate_image_digest") != supply["service_digests"][service]
+                or surface.get("terminal_image_digest") != supply["service_digests"][service]
+                or surface.get("terraform_workflow_blob") != blob
+                or not re.fullmatch(r"[0-9a-f]{64}", str(surface.get("surface_receipt_sha256", "")))
+                or not ((surface.get("outcome") == "skipped" and surface.get("aws_mutation_count") == 0)
+                        or (surface.get("outcome") == "deployed" and type(surface.get("aws_mutation_count")) is int
+                            and surface["aws_mutation_count"] > 0))
+            ):
+                raise ContractError("RELAY_SURFACE_RESULT_INVALID")
+        release = {
+            "relay_run_id": run_id, "build_run_id": build["run_id"],
+            "relay_run_attempt": relay["run_attempt"],
+            "release_source_revision": supply["source_revision"],
+            "supply_set_sha256": supply["manifest_sha256"],
+            "service_digests": supply["service_digests"],
+            "service_tags": {
+                s: _image_tag(manifest["services"][s]["immutable_lookup_tag"], "SUPPLY_MANIFEST_INVALID")
+                for s in SERVICE_ORDER
+            },
+        }
+        return {
+            "release": release, "supply": supply, "workflow_blob": blob,
+            "evidence": evidence_raw, "contract": contract_raw,
+            "supply_artifact": evidence["supply_artifact"], "producer": producer,
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("FROZEN_INPUT_INVALID") from exc
+
+
+def build_relay_plan(provider: Provider, context: dict[str, Any]) -> dict[str, Any]:
+    release = context["release"]
+    return plan_release(
+        release, _settled_service_state(provider),
+        yield_check(provider, release["relay_run_id"]),
+        {"present": True, "local": True}, {"present": True, "local": True},
+    )
+
+
+def _evidence_slot(raw: bytes) -> dict[str, Any]:
+    return {"status": "produced", "sha256": hashlib.sha256(raw).hexdigest(), "utf8_bytes": len(raw)}
+
+
+def validate_leg(
+    provider: Provider, run_id: int, step: dict[str, Any], context: dict[str, Any],
+) -> dict[str, Any]:
+    """A green run is insufficient: prove its baseline, supply and terminal state."""
+    run = convergence._provider_run(
+        provider.json(TF_REPOSITORY, f"/actions/runs/{run_id}"),
+        TF_REPOSITORY, DEPLOY_WORKFLOW, "workflow_dispatch",
+    )
+    name = f"leaf-platform-staging-service-run-{run_id}-attempt-{run['run_attempt']}"
+    artifact, raw = _one_artifact(provider, TF_REPOSITORY, run_id, name, ARTIFACT_FILE)
+    receipt = convergence._service_receipt(raw)
+    requested = receipt["requested"]
+    rp = receipt["provider"]
+    if (
+        rp["run_id"] != run_id or rp["run_attempt"] != run["run_attempt"]
+        or rp["head_sha"] != run["head_sha"]
+        or rp["workflow_blob"] != context["workflow_blob"]
+        or requested["supply_evidence"] != _evidence_slot(context["evidence"])
+        or requested["consumer_contract"] != _evidence_slot(context["contract"])
+        or requested["deploy_mode"] != "normal"
+        or requested["digest_aware_reconcile"] is not False
+        or not convergence._receipt_matches_supply(receipt, context["supply"])
+    ):
+        raise ContractError("SERVICE_RECEIPT_BINDING_MISMATCH")
+    for key in ("service", "image_tag", "expected_task_definition", "app_deploy_intent", "deploy_strategy"):
+        if requested[key] != step["inputs"][key]:
+            raise ContractError("SERVICE_RECEIPT_REQUEST_MISMATCH")
+    if step["kind"] == "identity_restamp" and requested["configuration_task_definition"] != step["inputs"]["configuration_task_definition"]:
+        raise ContractError("SERVICE_RECEIPT_BASELINE_MISMATCH")
+    facts = receipt["facts"]
+    if facts["predecessor_task_definition"] != {
+        "status": "produced", "value": step["inputs"]["expected_task_definition"],
+    }:
+        raise ContractError("SERVICE_RECEIPT_BASELINE_MISMATCH")
+    producer = context["producer"]
+    expected_supply = {
+        "artifact_id": context["supply_artifact"]["id"],
+        "artifact_name": context["supply_artifact"]["name"],
+        "manifest_sha256": context["supply"]["manifest_sha256"],
+        "producer_run_id": producer["run_id"],
+        "producer_run_attempt": producer["run_attempt"],
+    }
+    if facts["supply"] != {"status": "produced", "value": expected_supply}:
+        raise ContractError("SERVICE_SUPPLY_EVIDENCE_MISMATCH")
+    outcome = convergence._normalized_outcome(provider, run, receipt)
+    child = {
+        "terminal": facts["terminal"], "outcome": outcome,
+        "deployment_identity": facts["deployment_identity"], "provider": {"run_id": run_id},
+    }
+    if convergence._terminal_digest(child) != context["supply"]["service_digests"][step["service"]]:
+        raise ContractError("SERVICE_DIGEST_MISMATCH")
+    if facts["terminal"]["value"]["service"] != f"leaf-platform-{step['service']}":
+        raise ContractError("SERVICE_RECEIPT_REQUEST_MISMATCH")
+    terminal = _task_definition(facts["terminal"]["value"]["task_definition"], "SERVICE_TERMINAL_INVALID")
+    result = {"run_id": run_id, "service": step["service"], "kind": step["kind"], "task_definition": terminal}
+    if step["kind"] == "identity_restamp":
+        result["identity"] = convergence._identity(child, context["supply"])
+    return result
+
+
+class WorkflowExecutor:
+    """Single POST per leg, followed by bounded provider reads; never retries a POST."""
+
+    def __init__(self, provider: Provider, clock=time.monotonic, sleep=time.sleep) -> None:
+        self.provider, self.clock, self.sleep = provider, clock, sleep
+
+    def dispatch(self, step: dict[str, Any], context: dict[str, Any], deadline: float) -> int:
+        before = convergence._listing_top_id(_freshest_run_page(
+            self.provider, TF_REPOSITORY, "deploy-leaf-platform-staging.yml", "per_page=20",
+        ))
+        inputs = dict(step["inputs"])
+        inputs.update(
+            supply_evidence_b64=context["evidence"].decode("ascii"),
+            consumer_contract_b64=context["contract"].decode("ascii"),
+            digest_aware_reconcile="false",
+        )
+        if self.clock() >= deadline:
+            raise ContractError("LEG_TIMEOUT")
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{TF_REPOSITORY}/actions/workflows/deploy-leaf-platform-staging.yml/dispatches",
+            data=json.dumps({"ref": "main", "inputs": inputs}).encode(),
+            headers={
+                "Authorization": "Bearer " + os.environ["TERRAFORM_GITHUB_TOKEN"],
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "Content-Type": "application/json",
+                "User-Agent": "leaf-staging-fleet-reconciler/1.0",
+            }, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=min(45, max(1, deadline - self.clock()))) as response:
+                if response.status != 204:
+                    raise ContractError("LEG_DISPATCH_FAILED")
+        except OSError as exc:
+            raise ContractError("LEG_DISPATCH_UNRESOLVED") from exc
+        resolve_by = min(deadline, self.clock() + 300)
+        title = f"Deploy leaf-platform staging {step['service']} ({step['inputs']['image_tag']})"
+        while self.clock() < resolve_by:
+            rows = _run_page(self.provider, TF_REPOSITORY, "deploy-leaf-platform-staging.yml", "per_page=20")
+            matches = [r for r in rows if _positive(r.get("id"), "PROVIDER_RUN_LIST_INVALID") > before
+                       and r.get("display_title") == title and r.get("event") == "workflow_dispatch"]
+            if len(matches) > 1:
+                raise ContractError("LEG_RUN_AMBIGUOUS")
+            if matches:
+                return matches[0]["id"]
+            self.sleep(min(5, max(0, resolve_by - self.clock())))
+        raise ContractError("LEG_RUN_UNRESOLVED")
+
+    def watch(self, run_id: int, deadline: float) -> None:
+        while self.clock() < deadline:
+            row = self.provider.json(TF_REPOSITORY, f"/actions/runs/{run_id}")
+            if not isinstance(row, dict):
+                raise ContractError("PROVIDER_RUN_INVALID")
+            if row.get("status") == "completed":
+                if row.get("conclusion") != "success":
+                    raise ContractError("LEG_RUN_UNSUCCESSFUL")
+                return
+            self.sleep(min(20, max(0, deadline - self.clock())))
+        raise ContractError("LEG_TIMEOUT")
+
+
+def execute_plan(
+    provider: Provider, plan: dict[str, Any], context: dict[str, Any], *,
+    relay_run_id: int | None = None, timeout_seconds: int = 4800,
+    executor: WorkflowExecutor | None = None,
+) -> dict[str, Any]:
+    executor = executor or WorkflowExecutor(provider)
+    result: dict[str, Any] = {
+        "schema": "leaf.staging-fleet-result.v1", "release": plan["release"],
+        "status": "failed", "children": [], "restamp_frontier": None,
+        "failed_leg": None, "failed_run_id": None, "reason": None,
+    }
+    deadline = executor.clock() + timeout_seconds
+    try:
+        if not plan["armable"]:
+            raise ContractError("PLAN_NOT_ARMABLE")
+        for step in plan["steps"]:
+            result["failed_leg"] = f"{step['kind']}:{step['service']}"
+            result["failed_run_id"] = None
+            service = step["service"]
+            if not (
+                (service in NON_RELAY_SERVICES and step["kind"] == "reconcile"
+                 and step["inputs"]["app_deploy_intent"] == "forward")
+                or (service == "app" and step["kind"] == "identity_restamp"
+                    and step["inputs"]["app_deploy_intent"] == "configuration")
+            ):
+                raise ContractError("LEG_NOT_ALLOWED")
+            _task_definition(step["inputs"]["expected_task_definition"], "SERVICE_BASELINE_INVALID")
+            if (step["inputs"]["image_tag"] != context["release"]["service_tags"][service]
+                    or step["inputs"]["deploy_strategy"] != "direct"):
+                raise ContractError("LEG_NOT_ALLOWED")
+            if executor.clock() >= deadline:
+                raise ContractError("LEG_TIMEOUT")
+            idle = yield_check(provider, relay_run_id)
+            if idle["status"] != "clear":
+                if relay_run_id is None:
+                    result.update(status="yielded", reason=idle["reason"])
+                    return result
+                raise ContractError(idle["reason"])
+            # Re-read the exact baseline before each POST. The consumer also
+            # checks under its mutation lock, closing the read/dispatch gap.
+            settled = _settled_service_state(provider)
+            current = settled.get(step["service"])
+            if current is None or current["task_definition"] != step["inputs"]["expected_task_definition"]:
+                raise ContractError("SERVICE_BASELINE_STALE")
+            run_id = executor.dispatch(step, context, deadline)
+            result["failed_run_id"] = run_id
+            executor.watch(run_id, deadline)
+            child = validate_leg(provider, run_id, step, context)
+            result["children"].append(child)
+            if step["kind"] == "identity_restamp":
+                result["restamp_frontier"] = child
+        result.update(status="success", failed_leg=None, failed_run_id=None)
+    except (ContractError, OSError, ValueError, KeyError, TypeError) as exc:
+        result["reason"] = exc.reason if isinstance(exc, ContractError) else "LEG_EVIDENCE_INVALID"
+    return result
+
+
+def _published_envelope(provider: Provider, reference: dict[str, Any]) -> bytes:
+    return convergence._zip_member(
+        provider.bytes(APP_REPOSITORY, f"/actions/artifacts/{reference['artifact_id']}/zip"),
+        reference["file"],
+    )
+
+
+def scheduled_context(provider: Provider, plan: dict[str, Any]) -> dict[str, Any]:
+    """Load only the envelopes named by the already resolved scheduled plan."""
+    evidence = _published_envelope(provider, plan["supply_evidence"])
+    contract = _published_envelope(provider, plan["consumer_contract"])
+    decoded = _decode_envelope(evidence)
+    manifest = decoded["manifest"]["json_b64"]
+    supply_raw = base64.urlsafe_b64decode(manifest + "=" * (-len(manifest) % 4))
+    release = plan["release"]
+    # Retrieve THIS relay's receipt, never discover a newer release mid-plan.
+    ref = plan["supply_evidence"]
+    name = ref["artifact_name"].replace("staging-supply-evidence-", "staging-converged-", 1)
+    _, receipt = _one_artifact(provider, APP_REPOSITORY, release["relay_run_id"], name, RELAY_ARTIFACT_FILE)
+    return bind_relay_inputs(release["relay_run_id"], receipt, supply_raw, evidence, contract, check_current_run=False)
+
+
 def _render_summary(plan: dict[str, Any]) -> str:
     lines = [f"# Staging fleet reconcile plan ({plan['mode']})", ""]
     y = plan["yield"]
@@ -747,10 +1097,19 @@ def _render_summary(plan: dict[str, Any]) -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Resolve the staging fleet reconcile-and-restamp plan (read only)."
+        description="Plan or execute staging fleet reconcile-and-restamp legs."
     )
     parser.add_argument("--output")
     parser.add_argument("--summary", required=False)
+    parser.add_argument("--in-relay", action="store_true")
+    parser.add_argument("--relay-run-id", type=int)
+    parser.add_argument("--relay-receipt")
+    parser.add_argument("--supply-set")
+    parser.add_argument("--supply-evidence")
+    parser.add_argument("--consumer-contract")
+    parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--plan-file")
+    parser.add_argument("--timeout-seconds", type=int, default=4800)
     parser.add_argument("--check-idle", action="store_true",
                         help="Check the same lane predicate before a dispatch; exit 1 if busy.")
     return parser
@@ -761,26 +1120,52 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if not args.check_idle and not args.output:
         parser.error("--output is required unless --check-idle is set")
-    provider = GitHubProvider(
-        os.environ.get("APP_GITHUB_TOKEN", ""),
-        os.environ.get("TERRAFORM_GITHUB_TOKEN", ""),
-    )
+    if args.timeout_seconds <= 0 or args.timeout_seconds > 4800:
+        parser.error("--timeout-seconds must be between 1 and 4800")
+    if args.in_relay and not all((args.relay_run_id, args.relay_receipt, args.supply_set,
+                                  args.supply_evidence, args.consumer_contract)):
+        parser.error("--in-relay requires the relay run and all four frozen files")
     try:
+        provider = GitHubProvider(
+            os.environ.get("APP_GITHUB_TOKEN", ""),
+            os.environ.get("TERRAFORM_GITHUB_TOKEN", ""),
+        )
         if args.check_idle:
             result = yield_check(provider)
             print(json.dumps(result, sort_keys=True))
             return 0 if result["status"] == "clear" else 1
-        plan = build_plan(provider)
-    except ContractError as exc:
+        if args.in_relay:
+            context = bind_relay_inputs(
+                args.relay_run_id, convergence._load_json(Path(args.relay_receipt).read_bytes()),
+                Path(args.supply_set).read_bytes(), Path(args.supply_evidence).read_bytes(),
+                Path(args.consumer_contract).read_bytes(),
+            )
+            plan = build_relay_plan(provider, context)
+        else:
+            plan = (convergence._load_json(Path(args.plan_file).read_bytes())
+                    if args.plan_file else build_plan(provider))
+        if args.execute:
+            if not args.in_relay:
+                context = scheduled_context(provider, plan)
+                if context["release"]["supply_set_sha256"] != plan["release"]["supply_set_sha256"]:
+                    raise ContractError("FROZEN_SUPPLY_BINDING_MISMATCH")
+            plan = execute_plan(provider, plan, context, relay_run_id=args.relay_run_id if args.in_relay else None,
+                                timeout_seconds=args.timeout_seconds)
+    except (ContractError, OSError, ValueError, KeyError, TypeError) as exc:
         print(f"ERROR:{exc}", file=sys.stderr)
-        return 2
+        if args.check_idle or not args.execute:
+            return 2
+        plan = {"schema": "leaf.staging-fleet-result.v1", "status": "failed",
+                "reason": exc.reason if isinstance(exc, ContractError) else "FROZEN_INPUT_INVALID",
+                "relay_run_id": args.relay_run_id, "children": [], "restamp_frontier": None}
     raw = json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n"
     with open(args.output, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(raw)
     if args.summary:
         with open(args.summary, "a", encoding="utf-8", newline="\n") as handle:
-            handle.write(_render_summary(plan))
-    return 0
+            handle.write(_render_summary(plan) if "services" in plan else
+                         "# Staging fleet result\n\n```json\n" + raw + "```\n")
+    return 1 if plan.get("status") == "failed" else 0
 
 
 if __name__ == "__main__":  # pragma: no cover

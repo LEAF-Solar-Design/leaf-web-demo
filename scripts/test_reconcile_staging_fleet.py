@@ -737,34 +737,28 @@ class LaneShapeTests(unittest.TestCase):
         acting = [
             s
             for s in steps
-            if "gh workflow run" in str(s.get("run", ""))
+            if "--execute" in str(s.get("run", ""))
         ]
         self.assertEqual(len(acting), 1, "exactly one step may dispatch")
         step = acting[0]
         self.assertEqual(step["if"], "steps.arm.outputs.act == 'true'")
-        self.assertEqual(step["env"]["GH_TOKEN"], infra_token)
+        self.assertEqual(step["env"]["TERRAFORM_GITHUB_TOKEN"], infra_token)
         # And the decision it is gated on holds NO token of its own.
         decider = next(s for s in steps if s.get("id") == "arm")
         self.assertNotIn(infra_token, str(decider.get("env", {})))
         self.assertNotIn("gh ", str(decider.get("run", "")))
 
-    def test_the_acting_step_rechecks_the_lock_and_watches_each_leg(self) -> None:
-        """The plan's yield is minutes old by the time a leg dispatches, so the
-        relay may have started since. It owns the product surfaces and wins."""
+    def test_the_acting_step_uses_the_shared_executor(self) -> None:
         steps = self.lane()["jobs"]["plan"]["steps"]
-        code = next(s["run"] for s in steps if "gh workflow run" in str(s.get("run", "")))
-        self.assertIn("staging_is_busy", code)
-        self.assertIn("--check-idle", code)
-        # Re-checked INSIDE the per-leg loop, not once before it.
-        self.assertLess(code.index("for i in $(seq"), code.index("if staging_is_busy"))
-        # Each leg is watched to a terminal state and anything but success stops
-        # the sequence before the restamp.
-        self.assertIn('if [ "$CONCLUSION" != "success" ]', code)
-        # The envelope is passed through, never rebuilt.
-        self.assertIn("staging-supply-evidence.b64", code)
-        self.assertIn('-f "supply_evidence_b64=$EVIDENCE"', code)
-        self.assertIn('-f "consumer_contract_b64=$CONTRACT"', code)
-        self.assertIn("staging-consumer-contract.b64", code)
+        acting = next(s for s in steps if "--execute" in str(s.get("run", "")))
+        self.assertEqual(acting["if"], "steps.arm.outputs.act == 'true'")
+        self.assertEqual(acting["env"], {
+            "APP_GITHUB_TOKEN": "${{ github.token }}",
+            "TERRAFORM_GITHUB_TOKEN": "${{ secrets.TERRAFORM_REPO_TOKEN }}",
+        })
+        self.assertIn("--plan-file staging-fleet-reconcile-plan.json", acting["run"])
+        self.assertIn("--timeout-seconds 4800", acting["run"])
+        self.assertNotIn("gh workflow run", acting["run"])
 
     def test_the_schedule_acts_only_through_the_same_decider(self) -> None:
         """Scheduled and manual arming share the decider, and neither can act
@@ -800,10 +794,465 @@ fi
 """)
         acting = next(
             s for s in lane["jobs"]["plan"]["steps"]
-            if "gh workflow run" in str(s.get("run", ""))
+            if "--execute" in str(s.get("run", ""))
         )
         self.assertEqual(acting["if"], "steps.arm.outputs.act == 'true'")
         self.assertNotIn("workflow_run", acting["run"])
+
+
+def frozen_fixture():
+    from scripts.platform_release_manifest import build_v3_manifest
+    import base64
+
+    entries = {}
+    for service in subject.SERVICE_ORDER:
+        fingerprint = hashlib.sha256(service.encode()).hexdigest()
+        entry = {
+            "repository": f"leaf-platform-{service}", "image_digest": release_digests()[service],
+            "immutable_lookup_tag": f"surface-v1-{fingerprint}",
+            "producer_source_revision": SOURCE, "producer_source_tree": "b" * 40,
+            "surface_fingerprint": fingerprint, "recipe_fingerprint": "c" * 64,
+            "producer_workflow_path": ".github/workflows/build-platform-images.yml",
+            "producer_workflow_blob": "d" * 40, "producer_run_id": 800000,
+            "producer_run_attempt": 1,
+            "provenance_subject": f"807034087062.dkr.ecr.us-east-1.amazonaws.com/leaf-platform-{service}",
+            "provenance_digest": digest(service), "build_disposition": "built",
+        }
+        if service == "web":
+            entry["artifact_sha256"] = "e" * 64
+        if service == "canonical-worker":
+            entry["solver_provenance"] = {"solver_source_revision": "f" * 40, "solver_source_sha256": "a" * 64}
+        entries[service] = entry
+    manifest = build_v3_manifest(SOURCE, "b" * 40, "800000", "1", entries)
+    supply_raw = canonical(manifest) + b"\n"
+    supply_hash = hashlib.sha256(supply_raw).hexdigest()
+    evidence = {
+        "schema": "leaf.staging-supply-dispatch-evidence.v1",
+        "relay": {"repository": APP, "workflow_path": ".github/workflows/dispatch-staging-deploys.yml",
+                  "run_id": RELAY_RUN, "run_attempt": 1},
+        "producer": {"repository": APP, "workflow_path": ".github/workflows/build-platform-images.yml",
+                     "event": "push", "run_id": 800000, "run_attempt": 1,
+                     "source_revision": SOURCE, "source_tree": "b" * 40},
+        "manifest": {"schema": manifest["schema"], "sha256": supply_hash, "source_revision": SOURCE,
+                     "source_tree": "b" * 40, "json_b64": base64.urlsafe_b64encode(supply_raw).rstrip(b"=").decode()},
+        "supply_artifact": {"id": 1000, "name": "supply", "provider_archive_sha256": "a" * 64},
+    }
+    body = {
+        "schema": subject.convergence.CONSUMER_CONTRACT_SCHEMA, "version": 1,
+        "consumer": {"deploy_workflow_path": subject.DEPLOY_WORKFLOW, "deploy_workflow_blob": "d" * 40,
+                     "contract_schema_path": subject.convergence.CONSUMER_CONTRACT_SCHEMA_PATH,
+                     "contract_schema_blob": "e" * 40, "contract_version": 1,
+                     "pins": {"deployment_environment": "aws-apply", "digest_aware_marker": "leaf.staging-digest-aware-consumer.v1",
+                              "mutation_group": "leaf-platform-staging-ecs-mutation"}},
+        "producer": {"repository": TF, "workflow_path": subject.convergence.CONSUMER_CONTRACT_WORKFLOW,
+                     "workflow_blob": "f" * 40, "event": "push", "branch": "main",
+                     "head_sha": "d" * 40, "head_tree": "b" * 40, "run_id": 123456, "run_attempt": 1},
+        "artifact": {"file": "consumer-contract.json", "name": "contract"},
+    }
+    body["payload_sha256"] = hashlib.sha256(canonical(body)).hexdigest()
+    contract = {"schema": subject.convergence.CONSUMER_DISPATCH_SCHEMA, "contract": body,
+                "artifact": {"id": 2000, "name": "contract", "producer_run_id": 123456, "producer_run_attempt": 1,
+                             "provider_sha256": "a" * 64, "archive_sha256": "a" * 64, "file_sha256": "b" * 64}}
+    contract["envelope_sha256"] = hashlib.sha256(canonical(contract)).hexdigest()
+    encode = lambda value: base64.urlsafe_b64encode(canonical(value)).rstrip(b"=")
+    receipt = {
+        "schema": "leaf.staging-converged.v2", "release_source_revision": SOURCE,
+        "build_run_attempt": 1, "relay_run_id": RELAY_RUN,
+        "supply_set_sha256": supply_hash, "candidate_supply_set": manifest,
+        "automatic_surfaces": ["web", "app"], "full_fleet_identity_stamped": False,
+        "non_relay_services": {s: "not_automatically_reconciled" for s in subject.NON_RELAY_SERVICES},
+        "surface_results": {
+            s: {"schema": "leaf.staging-surface-result.v1", "service": s,
+                "release_source_revision": SOURCE, "convergence_id": f"{SOURCE}-1-{s}",
+                "candidate_image_digest": release_digests()[s], "terminal_image_digest": release_digests()[s],
+                "terraform_workflow_blob": "d" * 40, "surface_receipt_sha256": "e" * 64,
+                "outcome": "deployed", "aws_mutation_count": 1}
+            for s in subject.RELAY_SERVICES
+        },
+    }
+    return receipt, supply_raw, encode(evidence), encode(contract)
+
+
+def frozen_context():
+    return subject.bind_relay_inputs(RELAY_RUN, *frozen_fixture(), check_current_run=False)
+
+
+class RecordingExecutor:
+    def __init__(self, failure=None, stage="watch"):
+        self.events = []
+        self.failure, self.stage = failure, stage
+
+    def clock(self):
+        return 0
+
+    def dispatch(self, step, context, deadline):
+        service = step["service"]
+        self.events.append(("dispatch", service, copy.deepcopy(step["inputs"]),
+                            context["evidence"], context["contract"]))
+        if service == self.failure and self.stage == "dispatch":
+            raise subject.ContractError("LEG_RUN_UNRESOLVED")
+        return 10000 + len(self.events)
+
+    def watch(self, run_id, deadline):
+        self.events.append(("watch", run_id))
+        if self.events[-2][1] == self.failure and self.stage == "watch":
+            raise subject.ContractError("LEG_RUN_UNSUCCESSFUL")
+
+
+class RelayExecutionTests(unittest.TestCase):
+    def test_frozen_binding_rejects_every_cross_release_input(self):
+        import base64
+        original = frozen_fixture()
+        for part in ("run", "receipt", "supply", "evidence", "contract", "surface"):
+            receipt, supply, evidence, contract = copy.deepcopy(original)
+            run_id = RELAY_RUN
+            if part == "run":
+                run_id += 1
+            elif part == "receipt":
+                receipt["supply_set_sha256"] = "0" * 64
+            elif part == "supply":
+                supply += b" "
+            elif part == "evidence":
+                decoded = subject._decode_envelope(evidence)
+                decoded["relay"]["run_id"] += 1
+                evidence = base64.urlsafe_b64encode(canonical(decoded)).rstrip(b"=")
+            elif part == "contract":
+                decoded = subject._decode_envelope(contract)
+                decoded["contract"]["consumer"]["deploy_workflow_blob"] = "0" * 40
+                contract = base64.urlsafe_b64encode(canonical(decoded)).rstrip(b"=")
+            else:
+                receipt["surface_results"]["web"]["terminal_image_digest"] = digest("wrong")
+            with self.subTest(part=part), self.assertRaises(subject.ContractError):
+                subject.bind_relay_inputs(run_id, receipt, supply, evidence, contract, check_current_run=False)
+
+    def test_self_and_queued_successor_do_not_interrupt_but_other_activity_does(self):
+        provider = fixture(relay_status="in_progress")
+        endpoint = (APP, runs_endpoint(RELAY_WF, "per_page=50"))
+        provider.json_values[endpoint]["workflow_runs"].append(run_row(RELAY_RUN + 1, status="queued"))
+        self.assertEqual(subject.yield_check(provider, RELAY_RUN)["status"], "clear")
+        self.assertEqual(subject.yield_check(provider)["reason"], "RELAY_LIVE")
+        for status in ("in_progress", "queued"):
+            provider.json_values[endpoint]["workflow_runs"] = [
+                run_row(RELAY_RUN, status="in_progress"), run_row(RELAY_RUN - 1, status=status),
+            ]
+            self.assertEqual(subject.yield_check(provider, RELAY_RUN)["reason"], "RELAY_LIVE")
+        provider.json_values[endpoint]["workflow_runs"] = [run_row(RELAY_RUN, status="in_progress")]
+        provider.json_values[(TF, runs_endpoint(DEPLOY_WF, "per_page=50"))]["workflow_runs"][0]["status"] = "in_progress"
+        self.assertEqual(subject.yield_check(provider, RELAY_RUN)["reason"], "STAGING_DEPLOY_LIVE")
+
+    def test_explicit_release_never_rediscovers_or_reads_relay_artifacts(self):
+        provider = fixture(relay_status="in_progress", lagging=subject.NON_RELAY_SERVICES)
+        context = frozen_context()
+        plan = subject.build_relay_plan(provider, context)
+        self.assertTrue(plan["armable"], plan["not_armable_because"])
+        self.assertEqual(plan["release"]["build_run_id"], 800000)
+        self.assertEqual([s["service"] for s in plan["steps"]], ["broker", "harness", "canonical-worker", "app"])
+        self.assertFalse(any(repo == APP and ("artifacts" in endpoint or "status=success" in endpoint)
+                             for _, repo, endpoint in provider.calls))
+
+    def test_sequential_legs_then_restamp_pass_envelopes_unchanged_and_never_rollback(self):
+        from unittest.mock import patch
+        provider = fixture(relay_status="in_progress", lagging=subject.NON_RELAY_SERVICES)
+        context = frozen_context()
+        plan = subject.build_relay_plan(provider, context)
+        executor = RecordingExecutor()
+        def valid(provider, run_id, step, context):
+            return {"run_id": run_id, "service": step["service"], "kind": step["kind"]}
+        with patch.object(subject, "validate_leg", side_effect=valid):
+            result = subject.execute_plan(provider, plan, context, relay_run_id=RELAY_RUN, executor=executor)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual([e[0] for e in executor.events], ["dispatch", "watch"] * 4)
+        dispatches = executor.events[::2]
+        self.assertEqual([e[1] for e in dispatches], ["broker", "harness", "canonical-worker", "app"])
+        for event in dispatches:
+            self.assertEqual(event[3:], (context["evidence"], context["contract"]))
+            self.assertNotEqual(event[2]["expected_task_definition"], "auto-live")
+            self.assertEqual(event[2]["deploy_strategy"], "direct")
+            self.assertNotEqual(event[2]["app_deploy_intent"], "rollback")
+        self.assertEqual(dispatches[-1][2]["app_deploy_intent"], "configuration")
+        self.assertEqual(result["restamp_frontier"]["service"], "app")
+
+    def test_each_failure_boundary_stops_all_later_legs(self):
+        from unittest.mock import patch
+        for index, service in enumerate(("broker", "harness", "canonical-worker", "app")):
+            for stage in ("dispatch", "watch", "receipt", "baseline"):
+                with self.subTest(service=service, stage=stage):
+                    provider = fixture(relay_status="in_progress", lagging=subject.NON_RELAY_SERVICES)
+                    context = frozen_context()
+                    plan = subject.build_relay_plan(provider, context)
+                    executor = RecordingExecutor(service, stage)
+                    settled = subject._settled_service_state(provider)
+                    calls = 0
+                    def state(provider):
+                        nonlocal calls
+                        calls += 1
+                        value = copy.deepcopy(settled)
+                        if stage == "baseline" and calls == index + 1:
+                            value[service]["task_definition"] = f"{ACCOUNT}/changed:1"
+                        return value
+                    def validate(provider, run_id, step, context):
+                        if stage == "receipt" and step["service"] == service:
+                            raise subject.ContractError("SERVICE_RECEIPT_BINDING_MISMATCH")
+                        return {"run_id": run_id, "service": step["service"], "kind": step["kind"]}
+                    with patch.object(subject, "_settled_service_state", side_effect=state), \
+                         patch.object(subject, "validate_leg", side_effect=validate):
+                        result = subject.execute_plan(provider, plan, context, relay_run_id=RELAY_RUN, executor=executor)
+                    self.assertEqual(result["status"], "failed")
+                    self.assertIn(service, result["failed_leg"])
+                    self.assertEqual(len(result["children"]), index)
+                    self.assertIsNone(result["restamp_frontier"])
+                    dispatches = [e for e in executor.events if e[0] == "dispatch"]
+                    self.assertEqual(len(dispatches), index + (stage != "baseline"))
+                    if stage in ("watch", "receipt"):
+                        self.assertIsNotNone(result["failed_run_id"])
+
+    def test_scheduled_wrapper_keeps_the_same_plan(self):
+        provider = fixture(lagging=("broker",))
+        plan = subject.build_plan(provider)
+        release = subject._newest_relay_release(provider)
+        shared = subject.plan_release(release, subject._settled_service_state(provider),
+                                      subject.yield_check(provider), plan["supply_evidence"], plan["consumer_contract"])
+        self.assertEqual(plan, shared)
+
+    def test_busy_timeout_and_rollback_plan_stop_before_any_dispatch(self):
+        for failure in ("busy", "timeout", "rollback"):
+            with self.subTest(failure=failure):
+                provider = fixture(relay_status="in_progress", lagging=subject.NON_RELAY_SERVICES)
+                context = frozen_context()
+                plan = subject.build_relay_plan(provider, context)
+                executor = RecordingExecutor()
+                if failure == "busy":
+                    provider.json_values[(TF, runs_endpoint(DEPLOY_WF, "per_page=50"))]["workflow_runs"][0]["status"] = "in_progress"
+                elif failure == "rollback":
+                    plan["steps"][0]["inputs"]["app_deploy_intent"] = "rollback"
+                result = subject.execute_plan(provider, plan, context, relay_run_id=RELAY_RUN,
+                                              executor=executor, timeout_seconds=0 if failure == "timeout" else 4800)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["children"], [])
+                self.assertIsNone(result["restamp_frontier"])
+                self.assertEqual(executor.events, [])
+
+
+def landed_receipt(context, step, run_id):
+    service = step["service"]
+    predecessor = step["inputs"]["expected_task_definition"]
+    terminal_td = f"{ACCOUNT}/leaf-platform-{service}:763"
+    with_identity = step["kind"] == "identity_restamp"
+    produced = lambda value: {"status": "produced", "value": value}
+    missing = lambda: {"status": "not_produced"}
+    contract_slot = subject._evidence_slot(context["contract"])
+    requested = {
+        "allow_non_forward_image": missing(),
+        "app_deploy_intent": "configuration" if with_identity else "forward",
+        "configuration_delta": missing(),
+        "configuration_task_definition": predecessor if with_identity else "not_produced",
+        "convergence_id": "not_produced",
+        "deploy_mode": "normal",
+        "consumer_contract": contract_slot,
+        "deploy_strategy": "direct",
+        "digest_aware_evidence": missing(),
+        "digest_aware_reconcile": False,
+        "expected_task_definition": predecessor,
+        "hold_seconds": "0",
+        "image_tag": context["release"]["service_tags"][service],
+        "p4a_session_identity_cutover": missing(),
+        "quarantine_recovery_snapshot_identifier": missing(),
+        "required_broker_task_definition": "not_produced",
+        "service": service,
+        "snapshot_overflow_acknowledgement": missing(),
+        "source_revision": SOURCE,
+        "start_from_zero": False,
+        "start_from_zero_confirmation": missing(),
+        "supply_evidence": subject._evidence_slot(context["evidence"]),
+        "target_color": "live",
+    }
+    facts = {
+        "schema": "leaf.platform-staging-service-facts.v1",
+        "service": produced(service),
+        "source": {"revision": produced(SOURCE), "tree": produced("b" * 40)},
+        "supply": produced(
+            {
+                "artifact_id": 1000,
+                "artifact_name": context["supply_artifact"]["name"],
+                "manifest_sha256": context["supply"]["manifest_sha256"],
+                "producer_run_id": context["producer"]["run_id"],
+                "producer_run_attempt": 1,
+            }
+        ),
+        "predecessor_task_definition": produced(predecessor),
+        "candidate": {
+            "task_definition": produced(terminal_td),
+            "image_digest": produced(context["supply"]["service_digests"][service]),
+        },
+        "terminal": produced(
+            {
+                "service": f"leaf-platform-{service}",
+                "task_definition": terminal_td,
+                "image_digest": produced(context["supply"]["service_digests"][service]),
+                "capacity": {"desired": 1, "running": 1, "pending": 0},
+                "primary_deployments": [
+                    {
+                        "task_definition": terminal_td,
+                        "rollout_state": "COMPLETED",
+                        "status": "PRIMARY",
+                    }
+                ],
+                "stable_1_1_0": True,
+            }
+        ),
+        "mutation_count": produced(1),
+        "prior_job_status": produced("success"),
+        "rollback": produced(
+            {
+                "bluegreen_step": "skipped",
+                "bluegreen_detail": "not_produced",
+                "direct_failure_step": "skipped",
+                "direct_cancel_step": "skipped",
+                "authority_result": "not_produced",
+            }
+        ),
+        "route": missing(),
+        "p4a": missing(),
+        "deployment_identity": missing(),
+        "marker": missing(),
+        "writer_census": missing(),
+    }
+    value = {
+        "schema": "leaf.platform-staging-service-run.v1",
+        "environment": "staging",
+        "provider": {
+            "repository": subject.TF_REPOSITORY,
+            "workflow_path": subject.DEPLOY_WORKFLOW,
+            "workflow_blob": context["workflow_blob"],
+            "run_id": run_id,
+            "run_attempt": 1,
+            "event": "workflow_dispatch",
+            "head_sha": "d" * 40,
+        },
+        "requested": requested,
+        "path": "deploy",
+        "preflight_result": "skipped",
+        "deploy_result": "success",
+        "terminal_result": "success",
+        "failed_stage": missing(),
+        "facts": facts,
+        "receipt_sha256": "",
+    }
+    if with_identity:
+        body = {
+            "schema": "leaf.deployment-identity.v1", "environment": "staging", "source_revision": SOURCE,
+            "services": {s: {"image_digest": context["supply"]["service_digests"][s], "source_revision": SOURCE}
+                         for s in subject.SERVICE_ORDER},
+        }
+        raw = (json.dumps(body, indent=2, ensure_ascii=False) + "\n").encode()
+        facts["deployment_identity"] = produced({"body": body, "sha256": hashlib.sha256(raw).hexdigest()})
+    value["receipt_sha256"] = hashlib.sha256(canonical(value)).hexdigest()
+    return value
+
+
+
+class ChildReceiptTests(unittest.TestCase):
+    def setup_leg(self, service="broker", restamp=False):
+        context = frozen_context()
+        provider = FakeProvider()
+        baseline = f"{ACCOUNT}/leaf-platform-{service}:762"
+        step = (subject._restamp_step(baseline, image_tag(service), position=1) if restamp else
+                subject._dispatch_step(service, image_tag(service), baseline, position=1))
+        run_id = 10001
+        receipt = landed_receipt(context, step, run_id)
+        row = run_row(run_id, head_sha="d" * 40, service=service)
+        row.update(event="workflow_dispatch", head_branch="main", path=subject.DEPLOY_WORKFLOW)
+        provider.json_values[(TF, f"/actions/runs/{run_id}")] = row
+        name = f"leaf-platform-staging-service-run-{run_id}-attempt-1"
+        provider.json_values[(TF, f"/actions/runs/{run_id}/artifacts?per_page=100")] = {
+            "total_count": 1, "artifacts": [artifact_row(11001, name, run_id)],
+        }
+        provider.json_values[(TF, f"/actions/runs/{run_id}/attempts/1/jobs?per_page=100")] = {
+            "total_count": 1, "jobs": [{"name": "Deploy", "steps": [{"name": "Promote", "number": 1, "conclusion": "success"}]}],
+        }
+        provider.byte_values[(TF, "/actions/artifacts/11001/zip")] = archive(subject.ARTIFACT_FILE, canonical(receipt))
+        return provider, context, step, receipt, run_id
+
+    def test_landed_child_and_final_identity_are_validated(self):
+        for service, restamp in (("broker", False), ("app", True)):
+            with self.subTest(service=service):
+                provider, context, step, receipt, run_id = self.setup_leg(service, restamp)
+                child = subject.validate_leg(provider, run_id, step, context)
+                self.assertEqual(child["run_id"], run_id)
+                if restamp:
+                    self.assertEqual(child["identity"]["body"]["services"]["web"]["image_digest"],
+                                     context["supply"]["service_digests"]["web"])
+
+    def test_green_run_with_invalid_receipt_is_refused(self):
+        for field in ("checksum", "baseline", "supply", "envelope", "contract", "run", "blob", "digest", "health", "identity", "rollback"):
+            with self.subTest(field=field):
+                provider, context, step, receipt, run_id = self.setup_leg("app", True)
+                if field == "checksum":
+                    receipt["receipt_sha256"] = "0" * 64
+                elif field == "baseline":
+                    receipt["facts"]["predecessor_task_definition"]["value"] = f"{ACCOUNT}/changed:1"
+                elif field == "supply":
+                    receipt["facts"]["supply"]["value"]["manifest_sha256"] = "0" * 64
+                elif field == "envelope":
+                    receipt["requested"]["supply_evidence"]["sha256"] = "0" * 64
+                elif field == "contract":
+                    receipt["requested"]["consumer_contract"]["sha256"] = "0" * 64
+                elif field == "run":
+                    receipt["provider"]["run_id"] += 1
+                elif field == "blob":
+                    receipt["provider"]["workflow_blob"] = "0" * 40
+                elif field == "digest":
+                    receipt["facts"]["terminal"]["value"]["image_digest"]["value"] = digest("wrong")
+                elif field == "health":
+                    receipt["facts"]["terminal"]["value"]["capacity"]["running"] = 0
+                elif field == "identity":
+                    receipt["facts"]["deployment_identity"]["value"]["body"]["services"]["web"]["image_digest"] = digest("wrong")
+                else:
+                    receipt["requested"]["app_deploy_intent"] = "rollback"
+                if field != "checksum":
+                    receipt["receipt_sha256"] = ""
+                    receipt["receipt_sha256"] = hashlib.sha256(canonical(receipt)).hexdigest()
+                provider.byte_values[(TF, "/actions/artifacts/11001/zip")] = archive(subject.ARTIFACT_FILE, canonical(receipt))
+                with self.assertRaises(subject.ContractError):
+                    subject.validate_leg(provider, run_id, step, context)
+
+
+class DispatchBindingTests(unittest.TestCase):
+    def test_post_carries_frozen_bytes_and_resolves_only_the_matching_child(self):
+        from unittest.mock import patch
+        context = frozen_context()
+        provider = FakeProvider()
+        endpoint = (TF, runs_endpoint(DEPLOY_WF, "per_page=20"))
+        provider.json_values[endpoint] = {"workflow_runs": [run_row(100)]}
+        step = subject._dispatch_step("broker", image_tag("broker"), f"{ACCOUNT}/leaf-platform-broker:762", position=1)
+        posted = []
+        class Response:
+            status = 204
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+        def post(request, timeout):
+            posted.append(json.loads(request.data))
+            matching = run_row(1001, service="broker")
+            matching.update(event="workflow_dispatch",
+                            display_title=f"Deploy leaf-platform staging broker ({image_tag('broker')})")
+            unrelated = run_row(1002, service="harness")
+            unrelated["event"] = "workflow_dispatch"
+            provider.json_values[endpoint] = {"workflow_runs": [unrelated, matching]}
+            return Response()
+        executor = subject.WorkflowExecutor(provider, clock=lambda: 0, sleep=lambda seconds: None)
+        with patch.dict(subject.os.environ, {"TERRAFORM_GITHUB_TOKEN": "fixture-token"}), \
+             patch.object(subject.urllib.request, "urlopen", side_effect=post):
+            self.assertEqual(executor.dispatch(step, context, 4800), 1001)
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0]["ref"], "main")
+        inputs = posted[0]["inputs"]
+        self.assertEqual(inputs["supply_evidence_b64"].encode(), context["evidence"])
+        self.assertEqual(inputs["consumer_contract_b64"].encode(), context["contract"])
+        self.assertEqual(inputs["digest_aware_reconcile"], "false")
+        self.assertEqual(inputs["expected_task_definition"], step["inputs"]["expected_task_definition"])
+        self.assertEqual(inputs["deploy_strategy"], "direct")
 
 
 class ValidationTests(unittest.TestCase):
