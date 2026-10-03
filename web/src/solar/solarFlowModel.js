@@ -230,8 +230,16 @@ export function solarFlowReasonCodes(availability) {
 /** A run envelope reduced to what the rail shows: ok, and the first well-formed reason code or null. */
 export function solarFlowRunOutcome(envelope) {
   const ok = plainObject(envelope) && envelope.ok === true
-  const candidates = [ownValue(envelope, 'reason_code'), ownValue(ownValue(envelope, 'error'), 'error_code')]
-  return { ok, code: ok ? null : (candidates.find(validReasonCode) ?? null) }
+  if (ok) return { ok, code: null }
+  // Candidates are read lazily in precedence order: the first well-formed code wins, and no later
+  // nested value is read once an earlier one has decided the outcome.
+  const readers = [() => ownValue(envelope, 'reason_code'), () => ownValue(ownValue(envelope, 'error'), 'reason_code'),
+    () => ownValue(ownValue(envelope, 'error'), 'error_code')]
+  for (const read of readers) {
+    const code = read()
+    if (validReasonCode(code)) return { ok, code }
+  }
+  return { ok, code: null }
 }
 
 /** The rail's run memory after one settled run; a run for another drawing starts a fresh memory. */

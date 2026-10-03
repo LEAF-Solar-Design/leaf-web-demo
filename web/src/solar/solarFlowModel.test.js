@@ -632,6 +632,51 @@ describe('solarFlowPrefill', () => {
 })
 
 describe('run memory', () => {
+  it('G1A-5 preserves first well-formed own-property precedence', () => {
+    const error = { reason_code: 'CLOUD_AUTH_MISSING', error_code: 'FORBIDDEN' }
+    expect(solarFlowRunOutcome({ ok: false, reason_code: 'UNLISTED_REASON', error })).toEqual({ ok: false, code: 'UNLISTED_REASON' })
+    expect(solarFlowRunOutcome({ ok: false, reason_code: 'bad code!', error })).toEqual({ ok: false, code: 'CLOUD_AUTH_MISSING' })
+    expect(solarFlowRunOutcome({ ok: false, error: { ...error, reason_code: 'bad code!' } })).toEqual({ ok: false, code: 'FORBIDDEN' })
+    expect(solarFlowRunOutcome({ ok: true, reason_code: 'TIMEOUT', error })).toEqual({ ok: true, code: null })
+    for (const reason_code of ['A'.repeat(65), '9_LEAD', '', 7]) {
+      expect(solarFlowRunOutcome({ error: { reason_code, error_code: 'FORBIDDEN' } })).toEqual({ ok: false, code: 'FORBIDDEN' })
+    }
+    expect(solarFlowRunOutcome({ error: { reason_code: 'A'.repeat(64) } })).toEqual({ ok: false, code: 'A'.repeat(64) })
+    expect(solarFlowRunOutcome(Object.create({ reason_code: 'TIMEOUT' }))).toEqual({ ok: false, code: null })
+    expect(solarFlowRunOutcome({ error: Object.create(error) })).toEqual({ ok: false, code: null })
+    const array = []; array.reason_code = 'TIMEOUT'
+    expect(solarFlowRunOutcome({ error: array })).toEqual({ ok: false, code: null })
+    expect(solarFlowRunOutcome(Object.assign(Object.create(null), { error: Object.assign(Object.create(null), error) })))
+      .toEqual({ ok: false, code: 'CLOUD_AUTH_MISSING' })
+    expect(solarFlowRunOutcome({ error_code: 'TIMEOUT', message: 'TIMEOUT', classification: 'TIMEOUT', next_action: 'TIMEOUT', retryable: true }))
+      .toEqual({ ok: false, code: null })
+  })
+
+  it('G1A-6 stores nested cloud refusals with drawing isolation and unchanged statuses', () => {
+    const memory = solarFlowRecordRun(null, { tool: 'solar-size-strings', drawingId: 'd1' },
+      { ok: false, error: { reason_code: 'CLOUD_AUTH_MISSING', error_code: 'FORBIDDEN' } })
+    const runs = solarFlowRunsFor(memory, 'd1')
+    expect(runs['solar-size-strings']).toEqual({ ok: false, code: 'CLOUD_AUTH_MISSING' })
+    expect(solarFlowRunsFor(memory, 'd2')).toEqual({})
+    expect(solarFlowRunStatus('solar-size-strings', null, runs)).toBe('failed')
+    expect(solarFlowRunStatus('solar-size-strings', 'solar-size-strings', runs)).toBe('pending')
+    const moved = solarFlowRecordRun(memory, { tool: 'solar-size-strings', drawingId: 'd2' }, { ok: true })
+    expect(solarFlowRunsFor(moved, 'd1')).toEqual({})
+    expect(solarFlowRunStatus('solar-size-strings', null, solarFlowRunsFor(moved, 'd2'))).toBe('finished')
+  })
+
+  it('G1A-12 an ok envelope or an earlier well-formed code reads no later nested value', () => {
+    const trap = () => { throw new Error('a later nested value was read') }
+    const nested = Object.defineProperty({ error_code: 'BAD_PARAMS' }, 'reason_code', { get: trap, enumerable: true })
+    expect(solarFlowRunOutcome({ ok: true, reason_code: 'STALE_GRAPH_REVISION', error: nested })).toEqual({ ok: true, code: null })
+    expect(solarFlowRunOutcome({ ok: false, reason_code: 'STALE_GRAPH_REVISION', error: nested }))
+      .toEqual({ ok: false, code: 'STALE_GRAPH_REVISION' })
+    const later = Object.defineProperty({ reason_code: 'CLOUD_AUTH_MISSING' }, 'error_code', { get: trap, enumerable: true })
+    expect(solarFlowRunOutcome({ ok: false, error: later })).toEqual({ ok: false, code: 'CLOUD_AUTH_MISSING' })
+    const okFirst = Object.defineProperty({ ok: true }, 'error', { get: trap, enumerable: true })
+    expect(solarFlowRunOutcome(okFirst)).toEqual({ ok: true, code: null })
+  })
+
   it('reduces an envelope to ok and the first well-formed code', () => {
     expect(solarFlowRunOutcome({ ok: true, reason_code: 'ignored' })).toEqual({ ok: true, code: null })
     expect(solarFlowRunOutcome({ ok: false, reason_code: 'invalid_seed_parent' })).toEqual({ ok: false, code: 'invalid_seed_parent' })

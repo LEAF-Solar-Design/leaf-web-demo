@@ -2,13 +2,16 @@ import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SolarSizingForm from './SolarSizingForm.jsx'
+import { recordToEnvelope, runToolAsync } from '../api.js'
+import { solarFlowRunOutcome } from './solarFlowModel.js'
+import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 
 const MIN = { cells: 81, voc: 52.58, isc: 13.9965, pmp: 595.5, vmp: 44.64, imp: 13.33,
   bpmp: -1.4875, bvoc: -0.13145, alpha_sc: .007, min_temp: -2.7,
   simulation_results: { standard: { Conditions: 'P99.5 Voc', max_module_voltage: 51.26,
     string_design_voltage: 1500, string_length: 28 } } }
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 const id = (kind, n) => `leaf:${kind}:00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 const S = id('settings', 1), P1 = id('panel', 1), P2 = id('panel', 2)
 const ZA = id('zone', 1), ZB = id('zone', 2)
@@ -45,6 +48,115 @@ function invalid(label) {
 }
 
 describe('SolarSizingForm', () => {
+  it('G1A-7 terminal job record preserves the nested cloud reason into the alert', async () => {
+    const envelope = recordToEnvelope({ status: 'failed', tool: 'solar-size-strings',
+      error: { reason_code: 'CLOUD_AUTH_MISSING', error_code: 'FORBIDDEN', message: '<script>hostile</script>', retryable: false } })
+    const outcome = solarFlowRunOutcome(envelope)
+    expect(outcome).toEqual({ ok: false, code: 'CLOUD_AUTH_MISSING' })
+    await mount(G7(), { status: 'failed', failureCode: outcome.code })
+    expect(screen.getByRole('alert').textContent).toBe(SOLAR_SIZING_RUN_REASONS.grant_missing)
+  })
+
+  it('G1A-9 no-ok settings refusal reaches the sizing alert through runToolAsync', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ({
+      reason_code: 'valid_settings_required',
+      error: { error_code: 'BAD_PARAMS', retryable: false, message: '<script>hostile</script>' },
+    }) }))
+    const envelope = await runToolAsync({ name: 'solar-size-strings' }, {}, 'd1', {})
+    await mount(G7(), { status: 'failed', failureCode: solarFlowRunOutcome(envelope).code })
+    expect(screen.getByRole('alert').textContent).toBe(SOLAR_SIZING_RUN_REASONS.settings)
+  })
+
+  it.each([
+    ['CLOUD_AUTH_MISSING', 'grant_missing'],
+    [null, 'access'],
+  ])('G1A-8 async 202 and failed GET render %s as %s', async (reason_code, klass) => {
+    const response = (body, status) => ({ ok: status >= 200 && status < 300, status, json: async () => body })
+    const fetch = vi.fn().mockResolvedValueOnce(response({ job_id: 'sizing-job' }, 202))
+      .mockResolvedValueOnce(response({ job_id: 'sizing-job', tool: 'solar-size-strings', status: 'failed',
+        error: { ...(reason_code ? { reason_code } : {}), error_code: 'FORBIDDEN', retryable: false,
+          message: '<script>hostile</script>' } }, 200))
+    vi.stubGlobal('fetch', fetch)
+    vi.stubGlobal('EventSource', undefined)
+    const envelope = await runToolAsync({ name: 'solar-size-strings' }, {}, 'd1', {})
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(fetch.mock.calls[0][1].method).toBe('POST')
+    expect(new URL(fetch.mock.calls[1][0], 'https://example.test').pathname).toBe('/api/jobs/sizing-job')
+    await mount(G7(), { status: 'failed', failureCode: solarFlowRunOutcome(envelope).code })
+    expect(screen.getByRole('alert').textContent).toBe(SOLAR_SIZING_RUN_REASONS[klass])
+  })
+
+  it.each([
+    ["grant_missing","CLOUD_AUTH_MISSING","FORBIDDEN"],
+    ["grant_scope","CLOUD_TENANT_UNAUTHORIZED","FORBIDDEN"],
+    ["request_invalid","CLOUD_REQUEST_INVALID","BAD_PARAMS"],
+    ["coverage_invalid","INVALID_SIZING_COVERAGE","BAD_PARAMS"],
+    ["models_mismatch","SIZING_MODEL_MISMATCH","BAD_PARAMS"],
+    ["project_mismatch","SIZING_PROJECT_MISMATCH","BAD_PARAMS"],
+    ["cloud_unavailable","CLOUD_UPSTREAM_FAILURE","WORKITEM_FAILED"],
+    ["cloud_response_invalid","CLOUD_RESPONSE_INVALID","WORKITEM_FAILED"],
+    ["cold_voltage","COLD_VOLTAGE_FAILED","BAD_PARAMS"],
+    ["stale","STALE_GRAPH_REVISION","BAD_PARAMS"],
+    ["settings","valid_settings_required","BAD_PARAMS"],
+    ["units","UNRESOLVED_UNITS","BAD_PARAMS"],
+    ["panels","MISSING_PANEL","BAD_PARAMS"],
+    ["confirmation","SIZING_CONFIRMATION_REQUIRED","BAD_PARAMS"],
+    ["graph_unavailable","drawing_context_required","BAD_PARAMS"],
+    ["graph_invalid","GRAPH_DIGEST_MISMATCH","BAD_PARAMS"],
+    ["checkout","CHECKOUT_REQUIRED","FORBIDDEN"],
+    ["storage","GRAPH_STORE_UNAVAILABLE","INTERNAL"],
+    ["commit_unconfirmed","GRAPH_COMMIT_READBACK_FAILED","INTERNAL"],
+    ["commit_refused","INVALID_JOB_BINDING","BAD_PARAMS"],
+    ["cancelled","GRAPH_COMMIT_CANCELLED","BAD_PARAMS"],
+    ["broker_unavailable","BROKER_UNREACHABLE","BROKER_UNREACHABLE"],
+    ["timeout","TIMEOUT","TIMEOUT"],
+    ["access","FORBIDDEN","FORBIDDEN"],
+    ["quota","quota_exceeded","quota_exceeded"],
+    ["unknown","INTERNAL","INTERNAL"],
+  ])('G1A-10 %s renders fixed alert copy for %s', async (klass, reason_code, error_code) => {
+    for (const envelope of [
+      { ok: false, reason_code, error: { error_code, message: '<script>hostile</script>' } },
+      { ok: false, error: { reason_code, error_code, message: '<script>hostile</script>' } },
+    ]) {
+      await mount(G7(), { status: 'failed', failureCode: solarFlowRunOutcome(envelope).code })
+      const alert = screen.getByRole('alert')
+      expect(alert.textContent).toBe(SOLAR_SIZING_RUN_REASONS[klass])
+      expect(alert.textContent).not.toContain(reason_code)
+      expect(alert.textContent).not.toContain(error_code)
+      expect(alert.textContent).not.toContain('<script>hostile</script>')
+      expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+      cleanup()
+    }
+  })
+
+  it('G1A-11 Retry retains the request once and is independent of copy selection', async () => {
+    const { props, rerender } = await mount(); fill()
+    for (const failureCode of ['CLOUD_AUTH_MISSING', 'FORBIDDEN', 'UNKNOWN_REFUSAL', '<script>hostile</script>', null]) {
+      rerender(<SolarSizingForm {...props} status="failed" failureCode={failureCode} />)
+      expect(screen.getByRole('button', { name: 'Retry' }).disabled).toBe(false)
+      expect(screen.getByLabelText('Module').value).toBe(R.module_name)
+      expect(screen.getByLabelText('Grant reference').value).toBe('grant_1')
+    }
+    const retry = screen.getByRole('button', { name: 'Retry' })
+    fireEvent.click(retry); fireEvent.click(retry)
+    expect(props.onSubmit).toHaveBeenCalledExactlyOnceWith(props.row, {
+      expected_rev: 7, mode: 'global', requests: { [S]: R }, grant_ref: 'grant_1', confirm: true,
+    })
+    rerender(<SolarSizingForm {...props} status="pending" />)
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    rerender(<SolarSizingForm {...props} status="finished" failureCode="CLOUD_AUTH_MISSING" />)
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
+  it('G1A-10 unknown top-level refusal keeps generic copy over a known nested reason', async () => {
+    const envelope = { ok: false, reason_code: 'UNLISTED_REASON',
+      error: { reason_code: 'CLOUD_AUTH_MISSING', error_code: 'FORBIDDEN', message: '<script>hostile</script>' } }
+    await mount(G7(), { status: 'failed', failureCode: solarFlowRunOutcome(envelope).code })
+    expect(screen.getByRole('alert').textContent).toBe(SOLAR_SIZING_RUN_REASONS.unknown)
+  })
+
   it('SZ1 global submits the saved revision and ZIP with the typed request', async () => {
     const { props } = await mount()
     expect(screen.getByText('Saved project ZIP: 44224-1234')).toBeTruthy()
@@ -227,7 +339,7 @@ describe('SolarSizingForm', () => {
     expect(screen.getByText('This step is running. Confirm or wait for it to finish.')).toBeTruthy()
     expect(run().disabled).toBe(true)
     rerender(<SolarSizingForm {...props} status="failed" failureCode="STALE_GRAPH_REVISION" />)
-    expect(screen.getByText('This run failed: STALE_GRAPH_REVISION. Your inputs are kept.')).toBeTruthy()
+    expect(screen.getByText('String sizing needs the current drawing revision. Review the drawing before retrying. Your inputs are kept.')).toBeTruthy()
     expect(screen.getByLabelText('Module').value).toBe(R.module_name)
     const retry = screen.getByRole('button', { name: 'Retry' })
     fireEvent.click(retry); fireEvent.click(retry)

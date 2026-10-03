@@ -1,11 +1,36 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { getCapabilities, runToolAsync } from './api.js'
-import { solarFlowRunOutcome } from './solar/solarFlowModel.js'
-import { SOLAR_SIZING_RUN_REASONS, solarSizingRunSentence } from './solar/solarSizingRunReasons.js'
+import { describe, expect, it } from 'vitest'
+import { SOLAR_SIZING_RUN_REASONS, solarSizingRunSentence } from './solarSizingRunReasons.js'
+import { solarFlowRunOutcome } from './solarFlowModel.js'
 
-const I = { schema_version: 1, source_intake_sha256: 'a'.repeat(64), units: { drawing_units: 'ft', wcs_to_ucs: [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1], elevation_datum: 'unknown', crs: null } }
-const P = { expected_rev: 0, changes: { panels_in_sequence: 3 }, initialize: I }
-const sizingAliases = [
+const sentences = {
+  "grant_missing": "String sizing needs a valid cloud sizing grant, which is unavailable for this workspace. Your inputs are kept.",
+  "grant_scope": "The cloud sizing grant does not authorize string sizing for this workspace. Your inputs are kept.",
+  "request_invalid": "Some sizing inputs are invalid or incomplete. Review the form before retrying. Your inputs are kept.",
+  "coverage_invalid": "The sizing requests must cover every target, with each panel in exactly one zone when using zones. Your inputs are kept.",
+  "models_mismatch": "The sizing equipment does not match the saved zone equipment. Review the module and inverter. Your inputs are kept.",
+  "project_mismatch": "The sizing location does not match the saved project ZIP. Review the project location. Your inputs are kept.",
+  "cloud_unavailable": "The cloud sizing service could not complete this request. Try again later. Your inputs are kept.",
+  "cloud_response_invalid": "The cloud sizing service returned a result that could not be validated. Your inputs are kept.",
+  "cold_voltage": "The proposed string length exceeds the inverter voltage limit in cold conditions. Your inputs are kept.",
+  "stale": "String sizing needs the current drawing revision. Review the drawing before retrying. Your inputs are kept.",
+  "settings": "Complete valid Solar settings before sizing strings. Your inputs are kept.",
+  "units": "Resolve the drawing units before sizing strings. Your inputs are kept.",
+  "panels": "The drawing needs panels before strings can be sized. Your inputs are kept.",
+  "confirmation": "The sizing result could not be confirmed against this drawing. Your inputs are kept.",
+  "graph_unavailable": "This saved drawing is not available for string sizing. Review its version and format. Your inputs are kept.",
+  "graph_invalid": "The saved design contains data that string sizing cannot validate. Review the drawing. Your inputs are kept.",
+  "checkout": "String sizing needs your active checkout of this drawing. Your inputs are kept.",
+  "storage": "Drawing storage is unavailable, so the sizing result could not be confirmed. Your inputs are kept.",
+  "commit_unconfirmed": "The saved sizing result could not be verified. Check the current drawing before retrying. Your inputs are kept.",
+  "commit_refused": "String sizing cannot update this drawing with the current run request. Your inputs are kept.",
+  "cancelled": "The string sizing request was cancelled. Your inputs are kept.",
+  "broker_unavailable": "The sizing worker could not be reached. Check the current run before retrying. Your inputs are kept.",
+  "timeout": "The sizing run did not finish within its time limit. Check the current run before retrying. Your inputs are kept.",
+  "access": "This workspace or session is not permitted to run string sizing. Your inputs are kept.",
+  "quota": "A workspace run or spending limit prevented string sizing. Your inputs are kept.",
+  "unknown": "String sizing did not return a confirmed result. Your inputs are kept."
+}
+const aliases = [
   ["CLOUD_AUTH_MISSING","grant_missing","FORBIDDEN"],
   ["CLOUD_TENANT_UNAUTHORIZED","grant_scope","FORBIDDEN"],
   ["CLOUD_REQUEST_INVALID","request_invalid","BAD_PARAMS"],
@@ -120,87 +145,57 @@ const sizingAliases = [
   ["WORKITEM_FAILED","unknown","WORKITEM_FAILED"],
   ["APS_UNAVAILABLE","unknown","APS_UNAVAILABLE"],
 ]
-const error = { error_code: 'bad_params', message: 'invalid_seed_parent', retryable: false }
 
-function stubResponse(body, status = 200) {
-  const fetch = vi.fn().mockResolvedValue({ ok: status >= 200 && status < 300, status, json: async () => body })
-  vi.stubGlobal('fetch', fetch)
-  return fetch
-}
-
-const pathAndQuery = (url) => {
-  const parsed = new URL(url, 'https://example.test')
-  return parsed.pathname + parsed.search
-}
-
-afterEach(() => vi.unstubAllGlobals())
-
-describe('Solar settings API transport', () => {
-  it.each(sizingAliases)('G1A-9 %s survives the sizing wrapper without ok as %s', async (reason_code, klass, error_code) => {
-    for (const reason of new Set([reason_code, reason_code.toUpperCase()])) {
-      stubResponse({ error: { ...error, error_code }, reason_code: reason }, 409)
-      const envelope = await runToolAsync({ name: 'solar-size-strings' }, P, 'd1', {})
-      expect(solarFlowRunOutcome(envelope)).toEqual({ ok: false, code: reason })
-      expect(SOLAR_SIZING_RUN_REASONS).toHaveProperty(klass)
-      expect(solarSizingRunSentence(solarFlowRunOutcome(envelope).code)).toBe(SOLAR_SIZING_RUN_REASONS[klass])
-    }
-  })
-
-  it('G1A-9 keeps sizing refusal reasons without ok and preserves tool exclusions and malformed fallback', async () => {
-    stubResponse({ error: { ...error, error_code: 'BAD_PARAMS' }, reason_code: 'valid_settings_required' }, 409)
-    const sizing = await runToolAsync({ name: 'solar-size-strings' }, P, 'd1', {})
-    expect(sizing.reason_code).toBe('valid_settings_required')
-    expect(solarSizingRunSentence(solarFlowRunOutcome(sizing).code))
-      .toBe('Complete valid Solar settings before sizing strings. Your inputs are kept.')
-    stubResponse({ error, reason_code: 'valid_settings_required' }, 409)
-    expect(await runToolAsync({ name: 'solar-panel-groups' }, P, 'd1', {})).not.toHaveProperty('reason_code')
-    for (const tool of ['solar-settings', 'solar-size-strings']) {
-      for (const reason_code of [null, 7, '', 'A'.repeat(65), 'bad code!', '__proto__']) {
-        stubResponse({ error, reason_code }, 409)
-        const envelope = await runToolAsync({ name: tool }, P, 'd1', {})
-        expect(envelope).not.toHaveProperty('reason_code')
-        expect(envelope.error).toEqual(error)
+describe('Sizing run sentences', () => {
+  it.each(aliases)('G1A-1 %s selects %s for reason shapes and case variants', (code, klass, error_code) => {
+    for (const reason of new Set([code, code.toUpperCase()])) {
+      expect(solarSizingRunSentence(reason)).toBe(sentences[klass])
+      for (const envelope of [
+        { ok: false, reason_code: reason, error: { error_code } },
+        { ok: false, error: { reason_code: reason, error_code } },
+      ]) {
+        expect(solarFlowRunOutcome(envelope)).toEqual({ ok: false, code: reason })
+        expect(solarSizingRunSentence(solarFlowRunOutcome(envelope).code)).toBe(sentences[klass])
       }
     }
   })
 
-  it('SF2 row20a the settings 409 keeps its reason_code', async () => {
-    const fetch = stubResponse({ error, reason_code: 'invalid_seed_parent', degraded_mode: false }, 409)
-    const envelope = await runToolAsync({ name: 'solar-settings' }, P, 'd1', {})
-    expect(envelope).toMatchObject({ ok: false, tool: 'solar-settings', reason_code: 'invalid_seed_parent', error })
-    expect(fetch).toHaveBeenCalledTimes(1)
-  })
-
-  it('SF2 row23 getCapabilities sends the drawing context', async () => {
-    const fetch = stubResponse({ families: [] })
-    await getCapabilities(false, { drawing_id: 'd1', drawing_version: 3 })
-    expect(fetch).toHaveBeenCalledTimes(1)
-    expect(pathAndQuery(fetch.mock.calls[0][0])).toBe('/api/capabilities?drawing_id=d1&drawing_version=3')
-  })
-
-  it('SF2 row24 getCapabilities without a drawing sends the bare path', async () => {
-    const fetch = stubResponse({ families: [] })
-    await getCapabilities(false)
-    await getCapabilities(false, { drawing_id: '' })
-    expect(fetch).toHaveBeenCalledTimes(2)
-    for (const [url] of fetch.mock.calls) expect(pathAndQuery(url)).toBe('/api/capabilities')
-  })
-
-  it('SF2 row27 another tool 409 keeps the old envelope', async () => {
-    stubResponse({ error, reason_code: 'invalid_seed_parent', degraded_mode: false }, 409)
-    const envelope = await runToolAsync({ name: 'solar-panel-groups' }, P, 'd1', {})
-    expect(envelope).toEqual({ ok: false, tool: 'solar-panel-groups', version: null, result: null, overlay: null,
-      timing_ms: 0, cost: null, error, degraded_mode: false })
-    expect(Object.hasOwn(envelope, 'reason_code')).toBe(false)
-  })
-
-  it('SF2 row28 a malformed reason_code is dropped', async () => {
-    for (const [tool, reason_code] of ['solar-settings', 'solar-size-strings'].flatMap((tool) =>
-      ['x'.repeat(65), 'bad code!', 7].map((reason) => [tool, reason]))) {
-      stubResponse({ error, reason_code, degraded_mode: false }, 409)
-      const envelope = await runToolAsync({ name: tool }, P, 'd1', {})
-      expect(Object.hasOwn(envelope, 'reason_code')).toBe(false)
-      expect(envelope.error).toEqual(error)
+  it('G1A-2 freezes exactly 26 exact sentences with no code interpolation', () => {
+    expect(Object.isFrozen(SOLAR_SIZING_RUN_REASONS)).toBe(true)
+    expect(Object.keys(SOLAR_SIZING_RUN_REASONS)).toHaveLength(26)
+    expect(SOLAR_SIZING_RUN_REASONS).toEqual(sentences)
+    for (const sentence of Object.values(SOLAR_SIZING_RUN_REASONS)) {
+      expect(sentence.length).toBeGreaterThanOrEqual(12)
+    expect(sentence.includes('${')).toBe(false)
+    expect(sentence).not.toMatch(/failureCode|reason_code|error_code/)
     }
+  })
+
+  // The empty, length and trim checks are implied by the ASCII grammar and the exact cases, so no
+  // output can tell them apart; they bound the work before toUpperCase. The grammar check is the one
+  // that decides: these non-ASCII spellings uppercase onto real server codes.
+  it.each([['mıssıng_panel', 'MISSING_PANEL'], ['ſtale_graph_reviſion', 'STALE_GRAPH_REVISION'],
+    ['MIßING_PANEL', 'MISSING_PANEL'], ['tımeout', 'TIMEOUT']])(
+    'G1A-13 a non-ASCII spelling %s that uppercases onto %s stays unknown', (code, server) => {
+      expect(code.toUpperCase()).toBe(server)
+      expect(solarSizingRunSentence(server)).not.toBe(sentences.unknown)
+      expect(solarSizingRunSentence(code)).toBe(sentences.unknown)
+    })
+
+  it.each([null, undefined, 7, false, {}, [], new String('TIMEOUT'), '', 'A'.repeat(65),
+    'bad code', 'bad-code', '9_LEAD', '__proto__', 'constructor', 'toString', 'UNLISTED_REASON',
+    '<script>hostile</script>', 'TIMEOUT\n'])('G1A-3 rejects unknown or malformed value %s', (code) => {
+    expect(solarSizingRunSentence(code)).toBe(sentences.unknown)
+  })
+
+  it('G1A-4 distinguishes category-only access from a missing valid cloud grant', () => {
+    expect(solarSizingRunSentence('FORBIDDEN')).toBe(sentences.access)
+    expect(solarSizingRunSentence('FORBIDDEN')).not.toBe(sentences.grant_missing)
+    expect(solarSizingRunSentence('CLOUD_AUTH_MISSING')).toBe(sentences.grant_missing)
+    for (const [code, klass] of aliases) {
+      expect(solarSizingRunSentence(solarFlowRunOutcome({ ok: false, error: { error_code: code } }).code))
+        .toBe(sentences[klass])
+    }
+    expect(solarSizingRunSentence(solarFlowRunOutcome(null).code)).toBe(sentences.unknown)
   })
 })
