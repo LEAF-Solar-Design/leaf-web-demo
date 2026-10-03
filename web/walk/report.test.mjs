@@ -438,6 +438,32 @@ test('redaction strips credentials and user paths from all returned data, with a
   assert.equal(validateReceipt(receipt).valid, true)
 })
 
+test('zero-count observations are omitted while timing and axe rows are preserved', () => {
+  const spec = structuredClone(featureSpec(sample))
+  spec.tests[0].results = [firstResult(spec)]
+  firstResult(spec).attachments = [attach({ consoleErrors: [], pageErrors: [], failedRequests: [], steps: [],
+    timeToTaskMs: 0, accessibility: { violations: [{ id: 'color-contrast', nodes: [] }] } })]
+  const receipt = build({ suites: [{ specs: [spec] }] })
+  assert.deepEqual(receipt.findings, [
+    { feature_id: 'drawer:nav', category: 'time_to_task',
+      evidence: { kind: 'time_to_task', state: 'closed', viewport: 'desktop', milliseconds: 0 } },
+    { feature_id: 'drawer:nav', category: 'axe_violation',
+      evidence: { kind: 'axe_violation', state: 'closed', viewport: 'desktop', violation_id: 'color-contrast', count: 0 } },
+  ])
+})
+
+test('each count-one observation retains exactly one row with its original shape', () => {
+  for (const [key, category] of [['consoleErrors', 'console_errors'], ['pageErrors', 'page_errors'],
+    ['failedRequests', 'failed_requests'], ['steps', 'steps']]) {
+    const spec = structuredClone(featureSpec(sample))
+    spec.tests[0].results = [firstResult(spec)]
+    firstResult(spec).attachments = [attach({ [key]: [{}] })]
+    const receipt = build({ suites: [{ specs: [spec] }] })
+    assert.deepEqual(receipt.findings, [{ feature_id: 'drawer:nav', category,
+      evidence: { kind: category, state: 'closed', viewport: 'desktop', count: 1 } }])
+  }
+})
+
 test('findings are typed counts under their feature id; page/model strings never become paths or commands', () => {
   const payload = 'echo walk-payload && rm -rf ./owned'
   const pathPayload = '/etc/walk-payload/owned.json'
