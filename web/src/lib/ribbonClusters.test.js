@@ -839,9 +839,48 @@ describe('CAD catalog solar availability', () => {
       wave: 1, order: 10, entitlement: 'run_write', interaction: { mode: 'none' } },
   })
   const families = (tool) => [{ family_id: 'stringing', label: 'Stringing', capabilities: [tool] }]
-  const cad = (tool, gate = {}) => catalogClusters(families(tool), gate)[0].tools[0]
-  const rail = (tool) => profileRibbonTabs('solar', { solarRail: { families: families(tool) } })[1]
+  const cad = (tool, gate = {}) => catalogClusters(families(tool), { solarRail: {}, ...gate })[0].tools[0]
+  const rail = (tool, options = {}) => profileRibbonTabs('solar', { ...options, solarRail: { families: families(tool) } })[1]
     .clusters.flatMap((cluster) => cluster.tools).find((item) => item.id === tool.name)
+
+  it('disables a solar tool whose readiness field is missing when the Solar feature is on', () => {
+    const tool = row(ready)
+    delete tool.availability
+    expect(cad(tool)).toMatchObject({ disabled: true, reason: 'Tool readiness has not loaded for this drawing' })
+    expect(cad(tool).reason).toBe(rail(tool).reason)
+  })
+
+  it('enables the same solar tool without readiness when the Solar feature is off', () => {
+    const tool = row(ready)
+    delete tool.availability
+    for (const solarRail of [null, undefined]) {
+      expect(cad(tool, { solarRail })).toMatchObject({ disabled: false, reason: '' })
+    }
+  })
+
+  it.each([
+    ['array', []], ['string', 'ready'], ['null', null],
+  ])('disables a solar tool with %s readiness', (_label, availability) => {
+    const tool = row(availability)
+    expect(cad(tool)).toMatchObject({ disabled: true, reason: 'Tool readiness has not loaded for this drawing' })
+    expect(cad(tool).reason).toBe(rail(tool).reason)
+  })
+
+  it('disables an invalid Solar view even when its readiness is ready', () => {
+    const tool = { ...row(ready), solar: { schema: 'x' } }
+    expect(cad(tool)).toMatchObject({ disabled: true, reason: 'Tool readiness has not loaded for this drawing' })
+    expect(cad(tool).reason).toBe(rail(tool).reason)
+  })
+
+  it('keeps an input-unready form disabled on CAD while the Solar typed-form opener enables it', () => {
+    const tool = row({ ...ready, input_ready: false, refusal_reasons: ['strings_required'] })
+    tool.solar.interaction = { mode: 'form' }
+    const solarTypedForm = vi.fn(() => true)
+    expect(cad(tool)).toMatchObject({ disabled: true, reason: SOLAR_REFUSAL_REASONS.strings_required })
+    expect(cad(tool).reason).toBe(rail(tool).reason)
+    expect(rail(tool, { solarTypedForm })).toMatchObject({ disabled: false, reason: '' })
+    expect(solarTypedForm).toHaveBeenCalledWith(tool.name, tool.availability)
+  })
 
   it('disables an input-unready solar tool with the same reason as the Solar rail', () => {
     const tool = row({ ...ready, input_ready: false, refusal_reasons: ['drawing_context_required'] })
@@ -870,7 +909,10 @@ describe('CAD catalog solar availability', () => {
   })
 
   it('keeps every existing gate ahead of the availability refusal', () => {
-    const tool = row({ ...ready, input_ready: false, refusal_reasons: ['drawing_context_required'] })
+    const tools = [
+      row({ ...ready, input_ready: false, refusal_reasons: ['drawing_context_required'] }),
+      row(undefined), row([]), row('ready'), row(null), { ...row(ready), solar: { schema: 'x' } },
+    ]
     for (const [gate, reason] of [
       [{ running: true, previewing: true, writeLocked: true }, REASONS.running],
       [{ previewing: true, writeLocked: true }, REASONS.previewing],
@@ -878,9 +920,13 @@ describe('CAD catalog solar availability', () => {
       [{ writeLocked: true, writeLockNote: 'Held by another editor' }, 'Held by another editor'],
       [{ writeEntitled: false, engineDirty: true }, REASONS.writeUnentitled],
       [{ engineDirty: true }, REASONS.unsavedEngineEdits],
-    ]) expect(cad(tool, gate)).toMatchObject({ disabled: true, reason })
-    const mcp = { ...tool, mcp_source: { server_id: 'abcdef0123456789abcdef01', tool: 'list-items' } }
-    expect(cad(mcp, { running: true })).toMatchObject({ disabled: true, reason: REASONS.mcpToolNotWired })
+    ]) {
+      for (const tool of tools) expect(cad(tool, gate)).toMatchObject({ disabled: true, reason })
+    }
+    for (const tool of tools) {
+      const mcp = { ...tool, mcp_source: { server_id: 'abcdef0123456789abcdef01', tool: 'list-items' } }
+      expect(cad(mcp, { running: true })).toMatchObject({ disabled: true, reason: REASONS.mcpToolNotWired })
+    }
   })
 
   it('maps ordered, unknown and absent refusal codes exactly like the Solar rail', () => {

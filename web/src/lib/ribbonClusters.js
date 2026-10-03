@@ -418,6 +418,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
       }))
     const gate = {
       ...catalogOptions,
+      solarRail,
       writeEntitled: catalogOptions.writeEntitled ?? true,
       onRequestRun: onRun ? (tool) => onRun(tool) : undefined,
     }
@@ -543,6 +544,7 @@ export function profileRibbonTabs(profile, ctx = {}) {
 export function catalogClusters(families, {
   onRequestRun,
   onOpenFamily = null,
+  solarRail = null,
   running = false,
   previewing = false,
   writeLocked = false,
@@ -554,7 +556,7 @@ export function catalogClusters(families, {
   if (list.length === 0) {
     return [{ id: 'tools', label: 'Tools', kind: 'group', note: 'No tools for this surface yet.', tools: [] }]
   }
-  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty }
+  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty, solarRail }
   // Tools that name their own tab leave this cluster (they are built by
   // catalogTabClusters instead); a family whose tools ALL moved leaves no
   // empty panel behind.
@@ -583,6 +585,7 @@ export function catalogClusters(families, {
 export function catalogTabClusters(families, {
   onRequestRun,
   onOpenFamily = null,
+  solarRail = null,
   running = false,
   previewing = false,
   writeLocked = false,
@@ -591,7 +594,7 @@ export function catalogTabClusters(families, {
   engineDirty = false,
 } = {}) {
   const list = Array.isArray(families) ? families : []
-  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty }
+  const gate = { onRequestRun, running, previewing, writeLocked, writeEntitled, writeLockNote, engineDirty, solarRail }
   const byTab = {}
   for (const fam of list) {
     // One pass per family, bucketed by tab: no per-tab rescan of the catalog.
@@ -626,6 +629,7 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
     onLabelClick: onOpenFamily ? () => onOpenFamily(fam) : null,
     labelTitle: onOpenFamily ? `Open ${fam.label} in the tool rail (${(fam.capabilities || []).length} tools)` : '',
     tools: tools.map((tool) => {
+      const result = solarView(tool)
       const isWrite = isWriteTool(tool)
       const locked = !!writeLocked && isWrite
       const entBlocked = isWrite && !writeEntitled
@@ -647,9 +651,15 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
                 ? REASONS.writeUnentitled
                 : dirtyBlocked
                   ? REASONS.unsavedEngineEdits
-                  : tool.availability && typeof tool.availability === 'object' && !Array.isArray(tool.availability)
-                    ? solarRailReason(tool.availability, { openTypedForm: false })
-                    : ''
+                  : gate.solarRail && result.state === 'invalid'
+                    ? SOLAR_REFUSAL_REASONS.capability_availability_unavailable
+                    : gate.solarRail ? result.state !== 'absent'
+                      // CAD has no typed-form opener; input-unready form tools are reached through the Solar surface.
+                      ? solarRailReason(tool.availability, { openTypedForm: false })
+                      : ''
+                      : plainRecord(tool.availability)
+                        ? solarRailReason(tool.availability, { openTypedForm: false })
+                        : ''
       return {
         id: tool.name,
         label: tool.name,
