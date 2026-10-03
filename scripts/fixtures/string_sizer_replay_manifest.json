@@ -1,0 +1,14 @@
+{
+  "schema": "leaf.synthetic-string-sizing-fixtures.v1",
+  "label": "SYNTHETIC, TEST ONLY: recorded String Sizer replay, not live sizing.",
+  "fixtures": [
+    {
+      "id": "w1-string-length-recorded",
+      "path": "server/tests/fixtures/w1_string_length_recorded_response.json",
+      "fixture_sha256": "6e807695b9b36bbaf9007f3322d3570ea748853c746c33dcefcfdfe07c1c299a",
+      "request_wire_sha256": "c2adcc2616b290a64eacbdc9f3857447d5de567a3d297bb23b87d7bdabe269b5",
+      "response_wire_sha256": "5d44f0bde6ec7ff27873b4902db5e07fb6004e0d5281db92ce00fa57c27b12ed",
+      "response_encoding": "original-utf8-json-value-span"
+    }
+  ]
+}
