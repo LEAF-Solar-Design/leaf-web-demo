@@ -1004,7 +1004,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_w1_sizing_groups.py"), 52),
         # sf-solar-project-readiness: project setup, sizing invalidation, and ZIP binding.
         Suite("server-w1-project-settings", "server tests/test_w1_project_settings.py", "pytest", SERVER,
-              _py_pytest("tests/test_w1_project_settings.py"), 46),
+              _py_pytest("tests/test_w1_project_settings.py"), 57),
         # sf-solar-module-power: confirmed module power, zone coverage, and frame refresh.
         Suite("server-w1-module-power", "server tests/test_w1_module_power.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_module_power.py"), 10),

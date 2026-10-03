@@ -72,6 +72,11 @@ export function solarSizingRunSentence(failureCode) {
     case 'NOT_CURRENT_HEAD':
       return SOLAR_SIZING_RUN_REASONS.stale
     case 'VALID_SETTINGS_REQUIRED':
+    case 'PROJECT_NAME_REQUIRED':
+    case 'PROJECT_ZIP_REQUIRED':
+    case 'INVALID_PROJECT_ZIP':
+    case 'INVALID_PROJECT_COORDINATES':
+    case 'PROJECT_UNITS_REQUIRED':
       return SOLAR_SIZING_RUN_REASONS.settings
     case 'UNRESOLVED_UNITS':
       return SOLAR_SIZING_RUN_REASONS.units
