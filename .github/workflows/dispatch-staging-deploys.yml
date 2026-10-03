@@ -265,6 +265,10 @@ on:
     workflows: ["Build platform images"]
     types: [completed]
 
+env:
+  # Rollback restores the product-only relay; the armed schedule remains.
+  RELAY_FLEET_CONVERGENCE_ENABLED: "true"
+
 permissions:
   actions: read
   contents: read
@@ -294,9 +298,11 @@ jobs:
     environment: ecr-release
     # The relay now watches both deploys to completion (observed: ~8 min for
     # web, ~14 min for app, plus time queued behind the shared staging lock).
-    # Comfortably above the step's own 95-minute deadline so the step reports
-    # WHICH service was left undeployed instead of dying to a job timeout.
-    timeout-minutes: 105
+    # 95 minutes product + 80 minutes fleet + 15 minutes setup/publication.
+    timeout-minutes: 190
+    concurrency:
+      group: reconcile-staging-fleet
+      cancel-in-progress: false
 
     env:
       AWS_REGION: us-east-1
@@ -2143,6 +2149,53 @@ jobs:
                 services: ($services | split(" "))}' > staging-converged.json
           fi
           echo "converged=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the trusted fleet executor separately
+        if: >-
+          steps.deploy.outputs.converged == 'true' &&
+          env.RELAY_FLEET_CONVERGENCE_ENABLED == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: fleet-executor
+          persist-credentials: false
+
+      - name: Converge remaining staging services and stamp identity
+        id: fleet
+        if: >-
+          steps.deploy.outputs.converged == 'true' &&
+          env.RELAY_FLEET_CONVERGENCE_ENABLED == 'true'
+        working-directory: fleet-executor
+        env:
+          APP_GITHUB_TOKEN: ${{ github.token }}
+          TERRAFORM_GITHUB_TOKEN: ${{ secrets.TERRAFORM_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../fleet-result
+          python -m scripts.reconcile_staging_fleet \
+            --in-relay --relay-run-id "$GITHUB_RUN_ID" \
+            --relay-receipt ../staging-converged.json \
+            --supply-set ../staging-supply-set.json \
+            --supply-evidence ../staging-supply-evidence.b64 \
+            --consumer-contract ../staging-consumer-contract.b64 \
+            --execute --timeout-seconds 4800 \
+            --output ../fleet-result/staging-fleet-result.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      # Fleet diagnostics are independent of the v2 product receipt. Failure
+      # leaves the landed product surfaces in place and blocks publication.
+      - name: Upload the separate fleet result
+        id: fleet_result
+        if: >-
+          !cancelled() && steps.deploy.outputs.converged == 'true' &&
+          env.RELAY_FLEET_CONVERGENCE_ENABLED == 'true'
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: staging-fleet-result-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: fleet-result/staging-fleet-result.json
+          if-no-files-found: warn
+          retention-days: 3
 
       # Publishing is a SEPARATE step because the deploy step above exits
       # non-zero on every unconverged path, and a step that has failed cannot

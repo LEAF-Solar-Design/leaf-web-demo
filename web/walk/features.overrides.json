@@ -1623,7 +1623,6 @@
       },
       "patches": {
         "no-drawing": {"hasDrawing": false, "hasVersions": false, "session": null},
-        "no-versioned-drawing": {"hasVersions": false},
         "version-changing": {"versionBusy": true},
         "job-running": {"running": true},
         "read-only": {"previewing": true},
@@ -1637,7 +1636,6 @@
         "engine-busy": {"session": {"busy": true}},
         "no-selection": {"session": {"selected": null, "selectedIds": []}},
         "multiple-selected": {"session": {"selectedIds": ["one", "two"]}},
-        "read-only-entity": {"session": {"selected": {"editable": false, "type": "LINE"}}},
         "placed-insert": {"session": {"selected": {"editable": false, "type": "INSERT"}}},
         "placed-dimension": {"session": {"selected": {"editable": false, "type": "DIMENSION"}}},
         "empty-clipboard": {"session": {"clipboard": null}},
@@ -1696,8 +1694,8 @@
     "action:clipboard-cut-clip": {"effect": {"kind": "submits", "target": "browser-clipboard-cut"}, "sources": ["web/src/cadedit/EngineRibbonClusters.jsx"]},
     "drawer:nav": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx", "web/src/site/NavRail.jsx"]},
     "drawer:jobs": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
-    "drawer:result": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
-    "drawer:plan": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "drawer:result": {"viewports": ["phone"], "sources": ["web/src/App.jsx"]},
+    "drawer:plan": {"viewports": ["phone"], "sources": ["web/src/App.jsx"]},
     "drawer:none": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
     "surface:ios": {"certify": "staging", "certify_reason": "Mounted Apple readiness is provided by the staging ship lane; the local stack cannot certify that provider."},
     "tab:ship:ship": {"certify": "staging", "certify_reason": "The ship profile requires mounted Apple readiness on staging."}

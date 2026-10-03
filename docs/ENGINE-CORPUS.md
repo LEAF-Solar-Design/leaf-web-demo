@@ -266,17 +266,25 @@ proves that one controlled mutation of each property, on keyed, handle-less
 and block-child entities, fails the style receipt while the geometry
 comparison still passes, and that every tracked drawing passes unchanged.
 
-Not covered by the style receipt: text, dimension and multileader style (the
-intake parser does not read it), the own style of a handle-less INSERT (the
-intake keys INSERT style by handle), block children past the intake's
-60-child cap, blocks past its 200-block cap, anonymous blocks, and layer
-table styles.
+The declared-style comparison (`compare_declared_styles`, run by
+`--style-proof`) reads raw ENTITIES and BLOCKS records with no intake caps, so
+it also covers anonymous block children, handle-less INSERTs and text style
+(group 7) on TEXT, MTEXT, ATTRIB and ATTDEF. A VERTEX or SEQEND with no layer
+of its own sits on its owning POLYLINE's (or INSERT's) layer, as DXF defines;
+acadrust writes that layer explicitly and the comparison accepts it.
+
+Measured on the real engine (2026-10-03, leaf-web-demo main 2e68a6c3, acadrust
+WASM `cb8c4c81`, wasm-pack 0.15.0, rustc 1.98.0, node 22.17.1):
+`python engine/export_fidelity.py --adapter=acadrust --style-proof
+--evidence=docs/evidence/tracked-export-style-acadrust.json` passes geometry and
+all five declared style properties on all 8 tracked drawings (2,357 style
+records, 0 mismatches). The evidence file holds the per-drawing receipts.
+
+Not covered by either style receipt: dimension and multileader style, font
+definitions, layer table styles and resolved on-screen appearance.
 
 Not proven here:
 
 - Native CI execution: runners have no Rust toolchain. This is the
   `cad-export-fidelity-ci` follow-on.
-- Real-engine style fidelity: the style receipt is proven against the
-  identity adapter and controlled mutations only; no acadrust style receipt
-  has been measured.
 - The DWG path.
