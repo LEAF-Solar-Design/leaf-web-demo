@@ -460,8 +460,9 @@ it('J1 row7 mounted Project upload is enabled while absent handlers retain hones
   expect(absent.onClick).toBeUndefined()
   // Availability comes from the served mount, not a test-only callback.
   const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
-  expect(app).toContain("files: { onUpload: !mock && signedIn && openProjectId ? () => setProjectPane('material') : null }")
+  expect(app).toContain("files: { onUpload: !mock && (openProjectId ? signedIn : standalonePolicyReady) ? () => setProjectPane('material') : null }")
   expect(app).toContain('<LiveProjectMaterialIntake')
+  expect(app).toContain('<StandaloneMaterialUpload')
 })
 
 describe('C-05 ship contract status rows', () => {

@@ -28,7 +28,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
-import { REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
@@ -172,6 +172,7 @@ import useDrawingVersionController from './controllers/useDrawingVersionControll
 import usePlatformTrustController from './controllers/platform/usePlatformTrustController.js'
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
 import useDrawingUploadController from './controllers/upload/useDrawingUploadController.js'
+import DrawingUploadControl from './components/DrawingUploadControl.jsx'
 import ProjectWorkspacePanels, { paneForCapability } from './workspace/ProjectWorkspacePanels.jsx'
 import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
@@ -303,6 +304,64 @@ function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
     onRetry={materialIntake.retry} mock={false} />
 }
 
+function promoteStandaloneUpload({ receipt }, attempt, current, setFromUpload) {
+  if (!attempt || current.token !== attempt.token || current.pane !== 'material'
+    || current.selection !== attempt.selection) return
+  if (typeof receipt?.drawing_id !== 'string' || !receipt.drawing_id) return
+  // No asynchronous work between the current-context check and promotion.
+  setFromUpload(receipt)
+}
+
+function StandaloneMaterialUpload({ token, pane, selection, getContext, onPolicy, onReady, onBack }) {
+  const lifetime = useRef(false)
+  const attempt = useRef(null)
+  // Render-time context changes invalidate callbacks before passive cleanup.
+  const current = getContext()
+  if (attempt.current && (current.token !== token || pane !== 'material'
+    || selection !== attempt.current.selection)) attempt.current.valid = false
+  const upload = useDrawingUploadController({ onReady: (result) => {
+    const pending = attempt.current
+    if (!lifetime.current || !pending?.valid) return
+    const context = getContext()
+    if (context.token !== pending.token || context.pane !== 'material' || context.selection !== pending.selection) {
+      pending.valid = false
+      return
+    }
+    attempt.current = null
+    onReady(result, pending)
+  } })
+  const policyReady = upload.policyLoading === false && upload.policy?.enabled === true
+  useLayoutEffect(() => {
+    lifetime.current = true
+    return () => { lifetime.current = false; attempt.current = null }
+  }, [])
+  useLayoutEffect(() => { onPolicy(token, policyReady) }, [token, policyReady, onPolicy])
+  useLayoutEffect(() => {
+    if (attempt.current && !attempt.current.valid) {
+      attempt.current = null
+      upload.actions.cancel()
+    }
+  }, [pane, selection, token, upload.actions])
+  const cancel = () => { attempt.current = null; upload.actions.cancel() }
+  const start = (file) => {
+    const snapshot = upload.getSnapshot()
+    const context = getContext()
+    if (!lifetime.current || context.token !== token || context.pane !== 'material'
+      || snapshot.busy || snapshot.policyLoading !== false || snapshot.policy?.enabled !== true) return
+    attempt.current = { token, selection: context.selection, valid: true }
+    return upload.actions.upload(file)
+  }
+  if (pane !== 'material') return null
+  return <section className="project-material-intake">
+    <button type="button" className="btn ghost" onClick={() => { cancel(); onBack() }}>Back to board</button>
+    {!policyReady && <p>{PROFILE_REASONS.uploadDrawing}</p>}
+    <DrawingUploadControl policy={upload.policy} policyLoading={upload.policyLoading}
+      busy={upload.busy} phase={upload.phase} error={upload.error} engine={upload.engine}
+      disabled={!policyReady || upload.busy} onUpload={start} onCancel={cancel}
+      onEngineChange={upload.actions.setEngine} />
+  </section>
+}
+
 function ConsoleDrawingObjects({ index, selectedHandle }) {
   const { publish, publishSelection } = useDrawingObjects()
   useEffect(() => index ? publish('console', { index }) : undefined, [index, publish])
@@ -322,8 +381,8 @@ export default function App() {
   // web/src/app-wiring.test.mjs's pins) reads exactly as it did before, so
   // this change moves ownership and nothing else. The console keeps its
   // module-const behavior — the seed is frozen at mount and nothing in this
-  // shell promotes a new identity yet.
-  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE } = useDrawingIdentity()
+  // shell promotes an upload only through the standalone adapter below.
+  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, setFromUpload } = useDrawingIdentity()
   const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
   requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
   // W3 one-shell: the studio ground node, which the Viewer portals into.
@@ -2925,6 +2984,27 @@ export default function App() {
   // instead of the bare contract; byte-identical to `surfaceContract(id)`
   // for a tenant with no overlay (useSurfaceContract's own contract).
   const surfaceSlots = useSurfaceContract(activeSurface, mock)
+  const standaloneMounted = !!studioGround && surfaceSlots.ground === 'board' && !mock && !openProjectId
+  const standaloneToken = useMemo(() => standaloneMounted ? {} : null, [standaloneMounted, studioGround])
+  const standaloneSelection = useMemo(() => ({}), [REQUESTED_DRAWING_ID, DRAWING_SOURCE])
+  const standaloneContextRef = useRef(null)
+  standaloneContextRef.current = { token: standaloneToken, pane: projectPane, selection: standaloneSelection }
+  const standaloneAliveRef = useRef(true)
+  const [standalonePolicy, setStandalonePolicy] = useState(null)
+  const getStandaloneContext = useCallback(() => standaloneContextRef.current, [])
+  const publishStandalonePolicy = useCallback((token, ready) => {
+    if (!standaloneAliveRef.current || token !== standaloneContextRef.current.token || !token) return
+    setStandalonePolicy({ token, ready })
+  }, [])
+  const onStandaloneReady = useCallback((result, attempt) => {
+    if (standaloneAliveRef.current) promoteStandaloneUpload(result, attempt, standaloneContextRef.current, setFromUpload)
+  }, [setFromUpload])
+  useLayoutEffect(() => {
+    standaloneAliveRef.current = true
+    return () => { standaloneAliveRef.current = false }
+  }, [])
+  // Guest-upload policy fails closed for every standalone caller, including signed-in accounts.
+  const standalonePolicyReady = standaloneToken !== null && standalonePolicy?.token === standaloneToken && standalonePolicy.ready === true
   useEffect(() => {
     if (!ENV_SOLAR_SETTINGS_FORM) return
     catalogController.setContext(solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext }))
@@ -3159,7 +3239,7 @@ export default function App() {
         onCreate: !mock && signedIn && orgId && !projectsErr && !projectBusy
           ? () => setProjectCreateRequest((count) => count + 1) : null,
       },
-      files: { onUpload: !mock && signedIn && openProjectId ? () => setProjectPane('material') : null },
+      files: { onUpload: !mock && (openProjectId ? signedIn : standalonePolicyReady) ? () => setProjectPane('material') : null },
       conversation: {
         onNew: !agentDisabled && signedIn && !running && !routing
           ? () => { clearAgentSession(); openAgentMode(); barInputRef.current?.focus() } : null,
@@ -3169,7 +3249,7 @@ export default function App() {
     })
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
-    orgId, openProjectId, projectBusy, agentDisabled, routing, clearAgentSession,
+    orgId, openProjectId, standalonePolicyReady, projectBusy, agentDisabled, routing, clearAgentSession,
     openAgentMode, jobs.length, ship, setNavExpanded, setJobRailExpanded,
     solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool, catalogRunContext?.projectId])
   const previousRibbonProfile = useRef(null)
@@ -3928,7 +4008,7 @@ export default function App() {
               <ProjectWorkspacePanels
                 project={workspace?.project}
                 workspace={workspace}
-                pane={projectPane}
+                pane={standaloneMounted && projectPane === 'material' ? null : projectPane}
                 onSelectPane={setProjectPane}
                 onBack={() => setProjectPane(null)}
                 receipts={workspace?.receipts}
@@ -3939,7 +4019,12 @@ export default function App() {
                 currentJob={boardJob}
                 mock={mock}
               />
-              {projectPane === 'material' && (mock || !signedIn || !openProjectId
+              {standaloneMounted && <StandaloneMaterialUpload
+                token={standaloneToken} pane={projectPane} selection={standaloneSelection}
+                getContext={getStandaloneContext} onPolicy={publishStandalonePolicy}
+                onReady={onStandaloneReady} onBack={() => setProjectPane(null)}
+              />}
+              {projectPane === 'material' && !standaloneMounted && (mock || !signedIn || !openProjectId
                 ? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />
                 : <LiveProjectMaterialIntake
                   key={openProjectId}
