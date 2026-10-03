@@ -1,14 +1,13 @@
 name: Reconcile staging fleet
 
 # ---------------------------------------------------------------------------
-# DORMANT BY DEFAULT. The dispatch path below ships complete and tested, but
-# RECONCILE_ARMED is "false", so a scheduled run only publishes the plan that
-# WOULD bring the non-relay services onto the newest converged release and then
-# stamp the five-service deployment identity the convergence receipt needs.
-# Arming the schedule is a one-line change to that flag, reviewed on its own;
-# a single run can be armed deliberately with the workflow_dispatch input,
-# which is how this gets exercised for real before any schedule mutates
-# anything. Same idiom as the build workflow's DIGEST_AWARE_CONVERGENCE_ENABLED.
+# ARMED (R6, 2026-10-03). RECONCILE_ARMED is "true", so a scheduled run acts on
+# its plan, bringing the non-relay services onto the newest converged release
+# and then stamping the five-service deployment identity. It acts only when
+# the plan is armable, yields while any relay or staging deployment is active,
+# and stands down mid-plan when staging turns busy. It shipped dormant (#958)
+# and was proven by two manual armed runs before the schedule was armed.
+# Setting the flag back to "false" returns every scheduled run to report-only.
 #
 # WHY THIS LANE EXISTS. The staging relay converges web and app only, and says
 # so: automatic_surfaces ["web","app"], every other service
