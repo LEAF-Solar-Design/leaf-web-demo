@@ -492,7 +492,8 @@ describe('SolarStringComposer', () => {
     fill()
     expect(queueLabels()[0]).toBe(Q[0])
     expect(strings().getAllByRole('listitem')[0].textContent).toBe('String 1: 1 panels')
-  })
+    // Its own budget: 571 ms on an idle host; the 5 s default timed out twice under CI shard load.
+  }, 30_000)
 
   it('CMP25 a scope change before the first read runs starts no read', async () => {
     const before = vi.fn(async () => envelope())
