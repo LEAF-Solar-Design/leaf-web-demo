@@ -924,6 +924,13 @@ def build_suites() -> List[Suite]:
         # Hermetic and nothing skips: the floor is the exact count, 37.
         Suite("server-solar-terrain-route", "server tests/test_solar_terrain_route.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_terrain_route.py"), 37),
+        # sf-w3-tracker-rows-route: bounded manual tracker row creation with drawing
+        # checkout authorization and the closed tracker row refusal vocabulary.
+        # Hermetic and nothing skips: the floor is the exact count, 40.
+        Suite("server-solar-tracker-rows-route",
+              "server tests/test_solar_tracker_rows_route.py",
+              "pytest", SERVER,
+              _py_pytest("tests/test_solar_tracker_rows_route.py"), 40),
         # sf-w5-terrain: Ground terrain operations over the reopened physical state
         # (server/solar_ground_terrain_adapter.py): the frozen frame, units and current-state selection,
         # the slope mesh and the tracker slope check and clear published as preview children of the

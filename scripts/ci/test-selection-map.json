@@ -502,6 +502,7 @@
     "server-solar-tool-solaredge-tracking-read",
     "server-solar-tool-terrain-read",
     "server-solar-tracker-rows",
+    "server-solar-tracker-rows-route",
     "server-solar-w2-registration",
     "server-solar-workflow-flow",
     "server-solar-xlsx",
