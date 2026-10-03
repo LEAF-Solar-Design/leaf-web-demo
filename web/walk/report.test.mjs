@@ -90,17 +90,37 @@ test('the frozen report without stack witnesses keeps its receipt unchanged', ()
   assert.deepEqual(validateReceipt(receipt), { valid: true, errors: [] })
 })
 
-test('malformed stack witnesses name their feature and distinct ref overflow names its count', () => {
+test('malformed stack witnesses name their feature', () => {
   for (const stack of [null, [], true, {}, { ready: 'true', instance: stackRefA },
     { ready: true }, { ready: false, instance: 1 }, { ready: true, instance: 'A'.repeat(64) },
     { ready: true, instance: 'a'.repeat(63) }, { ready: true, instance: 'g'.repeat(64) }]) {
     assert.throws(() => build(stackReport([stack])), /Invalid stack witness for control-census:stack-0/)
   }
-  const stacks = Array.from({ length: 17 }, (_, index) => ({ ready: true, instance: index.toString(16).padStart(64, '0') }))
-  const accepted = build(stackReport(stacks.slice(0, 16)))
-  assert.equal(accepted.evidence.context.stack_refs.length, 16)
-  assert.deepEqual(validateReceipt(accepted), { valid: true, errors: [] })
-  assert.throws(() => build(stackReport(stacks)), /17 distinct instance refs/)
+})
+
+test('22 restarted-worker stack refs over 199 evidence runs are accepted and sorted', () => {
+  const refs = Array.from({ length: 22 }, (_, index) => index.toString(16).padStart(64, '0'))
+  const stacks = Array.from({ length: 199 }, (_, index) => ({ ready: true, instance: refs[21 - index % 22] }))
+  const receipt = build(stackReport(stacks))
+  assert.deepEqual(receipt.evidence.context, { stack_ready: true, stack_refs: refs })
+  assert.deepEqual(validateReceipt(receipt), { valid: true, errors: [] })
+})
+
+test('stack refs cannot exceed the evidence run count', (t) => {
+  // Each input run contributes at most one ref. Inject an extra accumulator
+  // entry to exercise the defensive run-count bound independently of parsing.
+  const add = Set.prototype.add
+  t.mock.method(Set.prototype, 'add', function (value) {
+    if (value === stackRefA) add.call(this, stackRefB)
+    return add.call(this, value)
+  })
+  assert.throws(() => build(stackReport([{ ready: true, instance: stackRefA }])),
+    /Stack witness has 2 distinct instance refs; maximum is 1/)
+})
+
+test('stack refs never exceed 1024 even when every run has its own witness', () => {
+  const stacks = Array.from({ length: 1025 }, (_, index) => ({ ready: true, instance: index.toString(16).padStart(64, '0') }))
+  assert.throws(() => build(stackReport(stacks)), /Stack witness has 1025 distinct instance refs; maximum is 1024/)
 })
 
 test('typed UX observations project only positive count metrics and preserve the functional receipt', () => {
