@@ -1050,7 +1050,7 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
     if (body && body.error) {
       return { ok: false, tool: toolName, version: null, result: null, overlay: null,
         timing_ms: 0, cost: null, error: body.error, degraded_mode: false,
-        ...(toolName === 'solar-settings' && isSolarReasonCode(body.reason_code) ? { reason_code: body.reason_code } : {}) }
+        ...((toolName === 'solar-settings' || toolName === 'solar-size-strings') && isSolarReasonCode(body.reason_code) ? { reason_code: body.reason_code } : {}) }
     }
     throw new Error(`POST /api/run -> ${res.status}`)
   }

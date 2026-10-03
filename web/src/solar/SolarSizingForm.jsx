@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { solarSizingRunSentence } from './solarSizingRunReasons.js'
 import { buildSizingParams, MODULE_PARAMETER_KEYS, sizingGraph, sizingTargets, SOLAR_SIZING_REASONS } from './solarSizingModel.js'
 
 export default function SolarSizingForm({
@@ -88,7 +89,7 @@ export default function SolarSizingForm({
     {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, key))}
     {!built.ok && <p role="status">{SOLAR_SIZING_REASONS[built.reason]}</p>}
     {busy && <p role="status">This step is running. Confirm or wait for it to finish.</p>}
-    {status === 'failed' && <p role="alert">{failureCode ? `This run failed: ${failureCode}. Your inputs are kept.` : 'This run failed. Your inputs are kept.'}</p>}
+    {status === 'failed' && <p role="alert">{solarSizingRunSentence(failureCode)}</p>}
     {status === 'finished' && <p role="status">String sizing applied.</p>}
     <button type="button" disabled={busy || !built.ok} onClick={submit}>Review &amp; run</button>
     {status === 'failed' && <button type="button" disabled={busy || !built.ok} onClick={submit}>Retry</button>}
