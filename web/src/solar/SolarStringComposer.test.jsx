@@ -79,17 +79,18 @@ const props7 = (overrides = {}) => ({ row: { name: STRING_ADD_TOOL }, drawingId:
   onSubmit: vi.fn(), ...overrides })
 
 describe('SolarStringComposer', () => {
-  it('CMP0 remains unmounted throughout src', () => {
+  it('CMP0 mounted only in the step editor', () => {
     const src = fs.existsSync(path.resolve(process.cwd(), 'src/solar/SolarStringComposer.jsx'))
       ? path.resolve(process.cwd(), 'src') : path.resolve(process.cwd(), 'web/src')
-    const allowed = new Set(['solar/SolarStringComposer.jsx', 'solar/SolarStringComposer.test.jsx'])
+    const hosts = []
     for (const relative of fs.readdirSync(src, { recursive: true })) {
       const normalized = relative.split(path.sep).join('/')
       const full = path.join(src, relative)
-      if (allowed.has(normalized) || !fs.statSync(full).isFile()) continue
+      if (normalized === 'solar/SolarStringComposer.jsx' || normalized.includes('__fixtures__/') || /\.test\./.test(normalized) || !fs.statSync(full).isFile()) continue
       const text = fs.readFileSync(full, 'utf8')
-      expect(referencesComposer(text), normalized).toBe(false)
+      if (referencesComposer(text)) hosts.push(normalized)
     }
+    expect(hosts.sort()).toEqual(['solar/SolarStepEditor.jsx'])
   })
 
   it('CMP0b the unmounted check sees every import spelling', () => {
@@ -491,7 +492,8 @@ describe('SolarStringComposer', () => {
     fill()
     expect(queueLabels()[0]).toBe(Q[0])
     expect(strings().getAllByRole('listitem')[0].textContent).toBe('String 1: 1 panels')
-  })
+    // Its own budget: 571 ms on an idle host; the 5 s default timed out twice under CI shard load.
+  }, 30_000)
 
   it('CMP25 a scope change before the first read runs starts no read', async () => {
     const before = vi.fn(async () => envelope())

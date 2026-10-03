@@ -1,10 +1,14 @@
 import React from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { solarRailReason } from '../lib/ribbonClusters.js'
 import SolarFlowRail from './SolarFlowRail.jsx'
 import SolarStepEditor from './SolarStepEditor.jsx'
 import conductorDeclaration from '../../../server/solar_tools/solar_string_conductors.json'
+import ground from './__fixtures__/stringComposerGround.json'
+import rooftop from './__fixtures__/stringComposerRooftop.json'
+import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL, SOLAR_STRING_COMPOSER_REASONS,
+  composeStringRequest, stringComposerView } from './solarStringComposerModel.js'
 import { SOLAR_FLOW_MATURITY_NOTES, SOLAR_FLOW_UNAVAILABLE_REASONS, solarFlowStepId } from './solarFlowModel.js'
 
 afterEach(cleanup)
@@ -342,6 +346,191 @@ describe('SolarFlowRail', () => {
 })
 
 describe('SolarStepEditor', () => {
+  const stringEnvelope = (graph = ground) => ({ intake: { solar_design_graph: structuredClone(graph) },
+    version: 7, head: 7, latest: 7 })
+  const stringTools = [STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL]
+  const stringButton = (name) => screen.getByRole('button', { name })
+  const stringClick = (name) => fireEvent.click(stringButton(name))
+  const stringChange = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } })
+  const stringQueue = () => within(screen.getByRole('region', { name: 'Selection queue' }))
+    .queryAllByRole('listitem').map((item) => item.querySelector('span').textContent)
+  const stringRange = () => ({ kind: 'range', frameIndex: 0, frameId: ground.frames[0].id, fromSlot: 1, toSlot: 3 })
+  const fillString = () => {
+    stringClick('Select row 1 Group 1')
+    stringChange('First slot', '1'); stringChange('Last slot', '3'); stringClick('Add range')
+  }
+  async function mountString(toolName = STRING_ADD_TOOL, graph = ground, overrides = {}) {
+    const props = { row: row(toolName, 25, 'Compose strings', READY), drawingId: 'd1', drawingVersion: 7,
+      projectId: null, readIntake: vi.fn(async () => stringEnvelope(graph)), onSubmit: vi.fn(), onClose: vi.fn(),
+      ...overrides }
+    const result = render(<SolarStepEditor {...props} />)
+    await act(async () => {})
+    return { ...result, props }
+  }
+  const expectComposer = (graph) => {
+    expect(screen.getAllByRole('button', { name: graph === ground ? /^Select row 1 / : /^Add panel / }).length).toBeGreaterThan(0)
+    expect(screen.getByRole('region', { name: 'Selection queue' })).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'Composed strings' })).toBeTruthy()
+    for (const label of ['Ordered panel refs', 'Expected rev']) expect(screen.queryByLabelText(label)).toBeNull()
+    expect(document.querySelector('textarea')).toBeNull()
+  }
+
+  it('H1 single add mounts the composer for Ground and Rooftop', async () => {
+    for (const graph of [ground, rooftop]) {
+      await mountString(STRING_ADD_TOOL, graph)
+      expectComposer(graph)
+      expect(screen.queryByLabelText('String length')).toBeNull()
+      cleanup()
+    }
+  })
+
+  it('H2 multi add mounts the composer with String length for both designs', async () => {
+    for (const graph of [ground, rooftop]) {
+      await mountString(STRING_MULTI_ADD_TOOL, graph)
+      expectComposer(graph)
+      expect(screen.getByLabelText('String length')).toBeTruthy()
+      cleanup()
+    }
+  })
+
+  it('H3 sizing conductors and Homeruns keep their hosts', async () => {
+    for (const [step, label, action] of [[row('solar-size-strings', 20, 'Size strings', READY), 'Scope', 'Review & run'],
+      [{ ...conductorDeclaration, label: 'String conductors' }, 'Conductor', 'Apply to selected strings'],
+      [homeruns(), 'Note', 'Review & run']]) {
+      render(<SolarStepEditor row={step} drawingId="d1" drawingVersion={7}
+        readIntake={vi.fn(async () => stringEnvelope())} onSubmit={vi.fn()} onClose={vi.fn()} />)
+      await act(async () => {})
+      expect(screen.getByLabelText(label)).toBeTruthy()
+      expect(screen.getByRole('button', { name: action })).toBeTruthy()
+      expect(screen.queryByRole('region', { name: 'Selection queue' })).toBeNull()
+      expect(screen.queryByLabelText('Search rows')).toBeNull()
+      expect(screen.queryByLabelText('Search panels')).toBeNull()
+      cleanup()
+    }
+  })
+
+  it('H4 composed single and multi requests hand off once and stay mounted', async () => {
+    for (const toolName of stringTools) {
+      let finishHead
+      const readIntake = vi.fn().mockResolvedValueOnce(stringEnvelope())
+        .mockImplementationOnce(() => new Promise((resolve) => { finishHead = resolve }))
+      const { props } = await mountString(toolName, ground, { readIntake })
+      fillString()
+      if (toolName === STRING_MULTI_ADD_TOOL) stringChange('String length', '3')
+      stringClick('Review & run')
+      await act(async () => {})
+      expect(readIntake.mock.calls).toEqual([['d1', 7], ['d1', 'head']])
+      expect(props.onSubmit).not.toHaveBeenCalled()
+      await act(async () => { finishHead(stringEnvelope()) })
+      const expected = composeStringRequest({ view: stringComposerView({ envelope: stringEnvelope(),
+        drawingId: 'd1', drawingVersion: 7, projectId: null }), toolName, queue: [stringRange()], stringLength: 3 })
+      expect(expected.ok).toBe(true)
+      expect(props.onSubmit).toHaveBeenCalledExactlyOnceWith(props.row, expected.params)
+      expect(props.onSubmit.mock.calls[0][0]).toBe(props.row)
+      expect(props.onClose).not.toHaveBeenCalled()
+      expectComposer(ground)
+      expect(stringQueue()).toEqual(['Group 1 slots 1 to 3'])
+      cleanup()
+    }
+  })
+
+  it('H5 run status reaches the composer and retains then clears the queue', async () => {
+    const { props, rerender, container } = await mountString(STRING_MULTI_ADD_TOOL)
+    fillString(); stringChange('String length', '3')
+    rerender(<SolarStepEditor {...props} status="pending" />)
+    for (const label of ['Search rows', 'First slot', 'Last slot', 'String length']) {
+      expect(screen.getByLabelText(label).disabled).toBe(true)
+    }
+    for (const name of ['Select row 1 Group 1', 'Add range', 'Remove selection 1', 'Review & run']) {
+      expect(stringButton(name).disabled).toBe(true)
+    }
+    expect(screen.getAllByText(SOLAR_STRING_COMPOSER_REASONS.pending)).toHaveLength(1)
+    expect(container.querySelector('#solar-step-editor > .solar-step-note')).toBeNull()
+    rerender(<SolarStepEditor {...props} status="failed" failureCode="STRING_TOO_LONG" />)
+    expect(screen.getByRole('alert').textContent).toBe(SOLAR_STRING_COMPOSER_REASONS.tooLong)
+    expect(stringQueue()).toEqual(['Group 1 slots 1 to 3'])
+    expect(container.textContent).not.toContain('Your inputs are kept.')
+    rerender(<SolarStepEditor {...props} status="finished" />)
+    await act(async () => {})
+    expect(stringQueue()).toEqual([])
+    expect(props.readIntake.mock.calls).toEqual([['d1', 7], ['d1', 7]])
+  })
+
+  it('H6 string scope refusals have one Cancel and perform no reads or submissions', async () => {
+    for (const toolName of stringTools) {
+      for (const scope of [{ projectId: 'p1' }, { drawingId: '' }, { drawingVersion: null }]) {
+        const { props, container } = await mountString(toolName, ground, scope)
+        expect(screen.getByText(SOLAR_STRING_COMPOSER_REASONS.scope)).toBeTruthy()
+        expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1)
+        expect(container.querySelector('input')).toBeNull()
+        expect(props.readIntake).not.toHaveBeenCalled()
+        expect(props.onSubmit).not.toHaveBeenCalled()
+        cleanup()
+      }
+    }
+  })
+
+  it('H7 composer Cancel closes once and focuses its rail button', async () => {
+    for (const toolName of stringTools) {
+      render(<button id={solarFlowStepId(toolName)}>String step</button>)
+      const rail = screen.getByRole('button', { name: 'String step' })
+      const { props } = await mountString(toolName)
+      expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1)
+      stringClick('Cancel')
+      expect(props.onClose).toHaveBeenCalledTimes(1)
+      expect(props.onSubmit).not.toHaveBeenCalled()
+      expect(document.activeElement).toBe(rail)
+      cleanup()
+    }
+  })
+
+  it('H8 Escape from the row search closes focuses the rail and stops propagation', async () => {
+    const parentKey = vi.fn()
+    render(<button id={solarFlowStepId(STRING_ADD_TOOL)}>String step</button>)
+    const rail = screen.getByRole('button', { name: 'String step' })
+    const { props, container } = await mountString()
+    const parent = container.parentElement
+    parent.addEventListener('keydown', parentKey)
+    const search = screen.getByLabelText('Search rows')
+    search.focus()
+    fireEvent.keyDown(search, { key: 'Escape' })
+    expect(props.onClose).toHaveBeenCalledTimes(1)
+    expect(props.onSubmit).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(rail)
+    expect(parentKey).not.toHaveBeenCalled()
+    parent.removeEventListener('keydown', parentKey)
+  })
+
+  it('H9 each string tool owns its only numeric read and Homeruns still prefills', async () => {
+    for (const toolName of stringTools) {
+      const { props } = await mountString(toolName)
+      expect(props.readIntake).toHaveBeenCalledExactlyOnceWith('d1', 7)
+      cleanup()
+    }
+    const readIntake = vi.fn(async () => stringEnvelope())
+    render(<SolarStepEditor row={homeruns()} drawingId="d1" drawingVersion={7} readIntake={readIntake}
+      onSubmit={vi.fn()} onClose={vi.fn()} />)
+    await act(async () => {})
+    expect(readIntake).toHaveBeenCalledExactlyOnceWith('d1', 7)
+    expect(screen.getByLabelText('Expected rev').value).toBe(String(ground.rev))
+  })
+
+  it('H10 same tick review clicks read the head and submit once without closing', async () => {
+    let finishHead
+    const readIntake = vi.fn().mockResolvedValueOnce(stringEnvelope())
+      .mockImplementationOnce(() => new Promise((resolve) => { finishHead = resolve }))
+    const { props } = await mountString(STRING_ADD_TOOL, ground, { readIntake })
+    fillString()
+    const review = stringButton('Review & run')
+    act(() => { fireEvent.click(review); fireEvent.click(review) })
+    await act(async () => {})
+    expect(readIntake.mock.calls).toEqual([['d1', 7], ['d1', 'head']])
+    await act(async () => { finishHead(stringEnvelope()) })
+    expect(props.onSubmit).toHaveBeenCalledTimes(1)
+    expect(props.onClose).not.toHaveBeenCalled()
+    expectComposer(ground)
+  })
+
   it('SZ22 sizing mounts its Scope control and owns the only intake read', async () => {
     const step = row('solar-size-strings', 20, 'Size strings', READY)
     const readIntake = vi.fn(async () => ({ version: 3, intake: { solar_design_graph: {

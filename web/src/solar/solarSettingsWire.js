@@ -1,3 +1,5 @@
+import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL } from './solarStringComposerModel.js'
+
 export const SOLAR_SETTINGS_TOOL_NAME = 'solar-settings'
 export const SEED_OPENABLE_REASON_CODES = Object.freeze(['graph_seed_required', 'persisted_graph_unavailable'])
 
@@ -29,6 +31,7 @@ export function solarSettingsFormChoice({ enabled, mock, toolName, context }) {
   if (!standalone) return 'generic'
   if (toolName === SOLAR_SETTINGS_TOOL_NAME) return 'typed'
   if (toolName === 'solar-size-strings') return 'sizing'
+  if (toolName === STRING_ADD_TOOL || toolName === STRING_MULTI_ADD_TOOL) return 'strings'
   return toolName === 'solar-string-conductors' ? 'conductors' : 'generic'
 }
 

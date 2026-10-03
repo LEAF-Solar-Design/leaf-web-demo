@@ -240,7 +240,7 @@ const occluderSource = decomment(readFileSync(new URL('./site/drawingOccluders.j
 describe('Conductor form wiring', () => {
   it('SZ23 the live ribbon branch routes conductors and sizing to the step editor', () => {
     const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
-    const start = live.indexOf('["conductors", "sizing"].includes(solarSettingsFormChoice(')
+    const start = live.indexOf('["conductors", "sizing", "strings"].includes(solarSettingsFormChoice(')
     assert.ok(start >= 0)
     const branch = live.slice(start, start + 1600)
     assert.match(branch, /React.createElement\(\s*SolarStepEditor/)
@@ -251,7 +251,7 @@ describe('Conductor form wiring', () => {
 
   it('CF15 the ribbon conductor choice mounts the step editor with live context and loaders', () => {
     const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
-    const start = live.indexOf('["conductors", "sizing"].includes(solarSettingsFormChoice(')
+    const start = live.indexOf('["conductors", "sizing", "strings"].includes(solarSettingsFormChoice(')
     assert.ok(start >= 0)
     const host = live.slice(start, start + 1600)
     assert.match(host, /React.createElement\(\s*SolarStepEditor/)
@@ -271,6 +271,17 @@ describe('Conductor form wiring', () => {
     const start = live.indexOf('catalogRunOverlays({ enabled')
     assert.ok(start >= 0)
     assert.match(live.slice(start, start + 220), /toolName: tool\?\.name/)
+  })
+
+  it('H12 the ribbon string choice keeps the step editor and generic fallback', () => {
+    const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+    const choice = '["conductors", "sizing", "strings"].includes(solarSettingsFormChoice('
+    assert.equal(live.split(choice).length - 1, 1)
+    const start = live.indexOf(choice)
+    const mount = live.slice(start).search(/React\.createElement\(\s*SolarStepEditor\b/)
+    assert.ok(mount > 0 && mount < 1600)
+    const fallback = live.slice(start + mount).search(/React\.createElement\(\s*SolarToolForm,/)
+    assert.ok(fallback > 0)
   })
 })
 
