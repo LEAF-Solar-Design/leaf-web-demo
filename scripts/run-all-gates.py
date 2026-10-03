@@ -1625,7 +1625,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_customization_store_scaling.py"), 3),
         Suite("server-deployment-source-identity",
               "server tests/test_deployment_source_identity.py", "pytest", SERVER,
-              _py_pytest("tests/test_deployment_source_identity.py"), 14),
+              _py_pytest("tests/test_deployment_source_identity.py")
+              + ["tests/test_dockerfile_app_version.py"], 14),
         Suite("server-deployment-identity",
               "server tests/test_deployment_identity.py", "pytest", SERVER,
               _py_pytest("tests/test_deployment_identity.py"), 12),
