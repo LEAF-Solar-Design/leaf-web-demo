@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as api from '../api.js'
 import * as landxmlUpload from './SolarLandxmlUpload.jsx'
 import * as terrainClients from './solarTerrainClient.js'
+import * as trackerClients from './solarTrackerRowsClient.js'
+import { TRACKER_ROWS_PANEL_REASONS as TRACKER_SENTENCES } from './SolarTrackerRowsPanel.jsx'
 import SolarWorkspaceTools, { TERRAIN_WORKSPACE_REASONS } from './SolarWorkspaceTools.jsx'
 import { COMBINER_INTAKE_REASONS } from './solarCombinerIntakeClient.js'
 
@@ -172,6 +174,407 @@ const terrainGets = (props) => props.transport.fetchImpl.mock.calls.filter(([, i
 const terrainPosts = (props) => props.transport.fetchImpl.mock.calls.filter(([url, init]) =>
   init.method === 'POST' && url.includes('/terrain/operations'))
 
+const trackerM1 = () => ({ operation: 'manual-create', rows: [
+  { axis_start: [0, 0], axis_end: [0, 6], cross_axis_width_du: 2, slots: 3 },
+  { axis_start: [4, 0], axis_end: [4, 10], cross_axis_width_du: 1, slots: 2 },
+], module_power_watts: 450, expected_head: null })
+function trackerAnswer(request = trackerM1(), status = 201, projectId = TERRAIN_PROJECT) {
+  const head = terrainHead()
+  head.parent = request.expected_head
+  head.index = request.expected_head === null ? 0 : 1
+  head.project_id = projectId
+  return { schema: 'leaf.solar-tracker-rows.v1', operation: 'manual-create', outcome: status === 201 ? 'published' : 'retry',
+    created: status === 201, drawing_id: 'solar', project_id: projectId, expected_head: request.expected_head,
+    head, frame: terrainFrame(), summary: { rows: request.rows.length,
+      slots: request.rows.reduce((sum, row) => sum + row.slots, 0), module_power_watts: request.module_power_watts },
+    terrain_standing: { schema: 'leaf.solar-frames-piles-terrain-standing.v1', maturity: 'preview', grid_sha256: null,
+      frames: { state: 'absent', checked: 0, stale: 0 }, piles: { state: 'absent', checked: 0, stale: 0 } },
+    error: null, degraded_mode: false }
+}
+const trackerTrigger = () => screen.getByRole('button', { name: 'Create tracker rows', exact: true })
+const trackerPanel = () => screen.getByTestId('solar-tracker-rows-panel')
+const trackerPublish = () => screen.getByRole('button', { name: 'Publish tracker rows' })
+const trackerRefresh = () => screen.getByRole('button', { name: 'Refresh physical state' })
+const trackerPosts = (p) => p.transport.fetchImpl.mock.calls.filter(([url, init]) =>
+  init.method === 'POST' && url.includes('/tracker-rows'))
+function trackerProps(overrides = {}) {
+  const p = supplied(overrides)
+  let published = false
+  p.transport.readIntake = vi.fn(async () => ({ version: p.drawingVersion, head: p.drawingVersion,
+    intake: { solar_design_graph: { project: { id: p.projectId ?? TERRAIN_PROJECT,
+      units: { drawing_units: 'm', meters_per_unit: 1 } } } } }))
+  p.transport.fetchImpl.mockImplementation(async (url, init) => {
+    if (url.includes('/tracker-rows')) {
+      published = true
+      return terrainResponse(trackerAnswer(JSON.parse(init.body), 201, p.projectId ?? TERRAIN_PROJECT), 201)
+    }
+    if (url.includes('/terrain') && init.method === 'GET') {
+      if (!published) return terrainResponse({ schema: 'leaf.solar-terrain-view-response.v1', stored: false,
+        head: null, terrain: null, error: null, degraded_mode: false })
+      const view = terrainView(); view.terrain.grid = null
+      view.head.project_id = p.projectId ?? TERRAIN_PROJECT
+      view.terrain.project_id = view.head.project_id
+      return terrainResponse(view)
+    }
+    if (url.includes('/imports/combiner-intake')) return combinerResponse()
+    return response()
+  })
+  return p
+}
+async function openTracker() {
+  fireEvent.click(trackerTrigger())
+  await waitFor(() => expect(trackerPanel().getAttribute('data-phase')).toBe('invalid'))
+}
+function fillTracker() {
+  fireEvent.change(screen.getByLabelText('Module power'), { target: { value: '450' } })
+  for (let index = 0; index < 2; index += 1) {
+    if (index) fireEvent.click(screen.getByRole('button', { name: 'Add row' }))
+    const inputs = trackerPanel().querySelectorAll('fieldset fieldset')[index].querySelectorAll('input')
+    const row = trackerM1().rows[index]
+    const numbers = [...row.axis_start, ...row.axis_end, row.cross_axis_width_du, row.slots]
+    inputs.forEach((input, i) => fireEvent.change(input, { target: { value: String(numbers[i]) } }))
+  }
+}
+async function trackerPublished() {
+  await waitFor(() => expect(trackerPanel().getAttribute('data-phase')).toBe('published'))
+}
+
+describe('tracker workspace integration', () => {
+  it('c01_flow_panel_inventory', () => {
+    const p = trackerProps()
+    const view = render(<SolarWorkspaceTools {...p} />)
+    for (const drawingId of [null, 'solar']) for (const projectId of [null, TERRAIN_PROJECT]) {
+      for (const flow of ['rooftop', 'ground-physical', 'ground-electrical', 'solaredge-import', 'pvcase-tutorial']) {
+        view.rerender(<SolarWorkspaceTools {...p} drawingId={drawingId} projectId={projectId} flow={flow} />)
+        expect(!!screen.queryByRole('button', { name: 'Create tracker rows' })).toBe(!!drawingId && flow === 'ground-physical')
+        expect(screen.queryByTestId('solar-tracker-rows-panel')).toBeNull()
+      }
+    }
+    expect(p.transport.fetchImpl).not.toHaveBeenCalled()
+    expect(p.transport.readIntake).not.toHaveBeenCalled()
+  })
+  it('c02_open_close_focus', async () => {
+    const p = trackerProps()
+    render(<SolarWorkspaceTools {...p} />)
+    await openTracker()
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Tracker layout' }))
+    fillTracker()
+    open()
+    expect(screen.queryByRole('region', { name: 'Tracker layout' })).toBeNull()
+    expect(screen.getByLabelText('LandXML file')).toBe(document.activeElement)
+    expect(screen.getByLabelText('Module power').value).toBe('450')
+    fireEvent.click(trackerTrigger())
+    await waitFor(() => expect(trackerPublish().disabled).toBe(false))
+    expect(screen.queryByTestId('solar-landxml-upload')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(document.activeElement).toBe(trackerTrigger())
+    expect(screen.queryByRole('region', { name: 'Tracker layout' })).toBeNull()
+  })
+  it('c03_default_transport', async () => {
+    const p = trackerProps()
+    delete p.transport.headers
+    delete p.transport.onResponse
+    const observer = vi.spyOn(api, 'noteUnauthorized').mockImplementation(() => {})
+    const view = render(<SolarWorkspaceTools {...p} />)
+    localStorage.setItem('leaf.jwt', 'tracker-a')
+    await openTracker()
+    const firstTenant = api.config.tenant
+    const oldTenant = api.config.tenant
+    try {
+      api.config.tenant = 'tracker-new-tenant'
+      localStorage.setItem('leaf.jwt', 'tracker-b')
+      view.rerender(<SolarWorkspaceTools {...p} />)
+      fillTracker()
+      fireEvent.click(trackerPublish())
+      await trackerPublished()
+      const posts = trackerPosts(p)
+      expect(posts).toHaveLength(1)
+      expect(p.transport.fetchImpl.mock.calls[0][1].headers).toMatchObject({ 'X-Tenant-Id': firstTenant, Authorization: 'Bearer tracker-a' })
+      expect(posts[0][1].headers).toMatchObject({ 'X-Tenant-Id': 'tracker-new-tenant', Authorization: 'Bearer tracker-b' })
+      expect(observer.mock.calls.some(([, , sent]) => sent === 'Bearer tracker-b')).toBe(true)
+    } finally { api.config.tenant = oldTenant }
+  })
+  it('c04_capability_replacement', async () => {
+    for (const cap of ['current-proof', '']) {
+      const p = trackerProps({ getCheckoutCapability: () => 'first-proof' })
+      p.transport.headers = () => ({ 'X-Tenant-Id': 'workspace-test', 'x-checkout-capability': 'old-a',
+        'X-CHECKOUT-CAPABILITY': 'old-b', 'x-Checkout-Capability': 'old-c' })
+      const view = render(<SolarWorkspaceTools {...p} />)
+      await openTracker()
+      view.rerender(<SolarWorkspaceTools {...p} getCheckoutCapability={() => cap} />)
+      fillTracker()
+      fireEvent.click(trackerPublish())
+      await trackerPublished()
+      const [, init] = trackerPosts(p)[0]
+      expect(Object.keys(init.headers).filter((key) => key.toLowerCase() === 'x-checkout-capability')).toEqual(cap ? ['X-Checkout-Capability'] : [])
+      if (cap) expect(init.headers['X-Checkout-Capability']).toBe(cap)
+      expect(JSON.parse(init.body)).toEqual(trackerM1())
+      expect(init.body).not.toContain('proof')
+      cleanup()
+    }
+  })
+  it('c05_transport_override', async () => {
+    const p = trackerProps()
+    render(<SolarWorkspaceTools {...p} />)
+    await openTracker()
+    expect(p.transport.readIntake).toHaveBeenCalledExactlyOnceWith('solar', 'head')
+    fillTracker()
+    fireEvent.click(trackerPublish())
+    await trackerPublished()
+    expect(p.transport.headers).toHaveBeenCalledWith('solar')
+    expect(p.transport.onResponse).toHaveBeenCalled()
+    cleanup()
+    for (const headers of [null, [], new Headers(), { Authorization: 42 }]) {
+      const invalid = trackerProps()
+      vi.spyOn(terrainClients, 'createSolarTerrainClient').mockReturnValue({
+        getTerrain: vi.fn(async () => ({ ok: true, value: { schema: 'leaf.solar-terrain-view-response.v1',
+          stored: false, head: null, terrain: null } })), runTerrainOperation: vi.fn(),
+      })
+      invalid.transport.headers = () => headers
+      render(<SolarWorkspaceTools {...invalid} />)
+      await openTracker()
+      fillTracker()
+      fireEvent.click(trackerPublish())
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(trackerClients.TRACKER_ROWS_CLIENT_REASONS.TRACKER_ROWS_CLIENT_REQUEST_INVALID))
+      expect(invalid.transport.fetchImpl).not.toHaveBeenCalled()
+      cleanup(); vi.restoreAllMocks()
+    }
+  })
+  it('c06_scope_binding', async () => {
+    const p = trackerProps({ projectId: 'scope & project' })
+    const view = render(<SolarWorkspaceTools {...p} />)
+    await openTracker()
+    fillTracker()
+    fireEvent.click(trackerPublish())
+    await trackerPublished()
+    for (const [url] of p.transport.fetchImpl.mock.calls) expect(new URL(url, 'http://local').searchParams.get('project_id')).toBe('scope & project')
+    expect(trackerPosts(p)[0][1].body).toBe(JSON.stringify(trackerM1()))
+    view.rerender(<SolarWorkspaceTools {...p} drawingId="new" projectId="new-project" />)
+    expect(screen.queryByTestId('solar-tracker-rows-panel')).toBeNull()
+    expect(p.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+  })
+  it('c07_landxml_blocks_tracker', async () => {
+    const p = trackerProps()
+    const held = workspaceDeferred()
+    const real = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => url.includes('/imports/landxml') ? held.promise : real(url, init))
+    render(<SolarWorkspaceTools {...p} />)
+    open(); submit()
+    await waitFor(() => expect(trackerTrigger().disabled).toBe(true))
+    expect(screen.getByTestId('solar-tracker-workspace-reason').textContent).toBe(TRACKER_SENTENCES.landxml_pending)
+    expect(trackerPosts(p)).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel import' }))
+    await waitFor(() => expect(trackerTrigger().disabled).toBe(false))
+    await act(async () => held.resolve(response()))
+    expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  })
+  it('c08_terrain_blocks_tracker', async () => {
+    const p = terrainProps()
+    p.transport.readIntake = vi.fn()
+    const held = workspaceDeferred()
+    const real = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => init.method === 'POST' ? held.promise : real(url, init))
+    render(<SolarWorkspaceTools {...p} />)
+    openTerrain(); await terrainReady()
+    fireEvent.click(terrainMesh())
+    await waitFor(() => expect(trackerTrigger().disabled).toBe(true))
+    expect(screen.getByTestId('solar-tracker-workspace-reason').textContent).toBe(TRACKER_SENTENCES.terrain_pending)
+    expect(trackerPosts(p)).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(trackerTrigger().disabled).toBe(false))
+    openTerrain(); await terrainReady()
+    const newer = workspaceDeferred()
+    p.transport.fetchImpl.mockImplementation((url, init) => init.method === 'POST' ? newer.promise : real(url, init))
+    fireEvent.click(terrainMesh())
+    await waitFor(() => expect(trackerTrigger().disabled).toBe(true))
+    await act(async () => held.resolve(terrainResponse(terrainResult())))
+    expect(trackerTrigger().disabled).toBe(true)
+    await act(async () => newer.resolve(terrainResponse(terrainResult())))
+    await waitFor(() => expect(trackerTrigger().disabled).toBe(false))
+  })
+  it('c09_combiner_blocks_tracker', async () => {
+    const p = trackerProps({ flow: 'rooftop' })
+    const held = workspaceDeferred()
+    const real = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => url.includes('/imports/combiner-intake') ? held.promise : real(url, init))
+    const view = render(<SolarWorkspaceTools {...p} />)
+    openCombiner(); chooseCombiner(); fireEvent.click(combinerImport())
+    await waitFor(() => expect(p.transport.fetchImpl).toHaveBeenCalledTimes(1))
+    view.rerender(<SolarWorkspaceTools {...p} flow="ground-physical" />)
+    await waitFor(() => expect(trackerTrigger().disabled).toBe(false))
+    await act(async () => held.resolve(combinerResponse()))
+    expect(trackerPosts(p)).toHaveLength(0)
+    expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+  })
+  it('c10_combiner_refresh_blocks_tracker', async () => {
+    for (const refreshResult of [undefined, false]) {
+      const p = trackerProps({ flow: 'rooftop', onDrawingVersionChanged: vi.fn(() => refreshResult) })
+      const view = render(<SolarWorkspaceTools {...p} />)
+      openCombiner(); chooseCombiner(); await importCombiner()
+      view.rerender(<SolarWorkspaceTools {...p} flow="ground-physical" />)
+      expect(trackerTrigger().disabled).toBe(true)
+      expect(screen.getByTestId('solar-tracker-workspace-reason').textContent).toBe(TRACKER_SENTENCES.drawing_refresh)
+      view.rerender(<SolarWorkspaceTools {...p} drawingVersion={2} flow="ground-physical" />)
+      await waitFor(() => expect(trackerTrigger().disabled).toBe(false))
+      expect(trackerPosts(p)).toHaveLength(0)
+      cleanup()
+    }
+  })
+  it('c11_tracker_blocks_others', async () => {
+    const p = trackerProps()
+    const held = workspaceDeferred()
+    const real = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => url.includes('/tracker-rows') ? held.promise : real(url, init))
+    const view = render(<SolarWorkspaceTools {...p} />)
+    await openTracker(); fillTracker(); fireEvent.click(trackerPublish())
+    await waitFor(() => expect(trackerPosts(p)).toHaveLength(1))
+    expect(trigger().disabled).toBe(true)
+    expect(terrainTrigger().disabled).toBe(true)
+    expect(screen.getByTestId('solar-tracker-pending-reason').textContent).toBe(TRACKER_SENTENCES.tracker_pending)
+    view.rerender(<SolarWorkspaceTools {...p} flow="rooftop" />)
+    expect(combinerTrigger().disabled).toBe(true)
+    fireEvent.click(combinerTrigger())
+    expect(screen.queryByLabelText('Combiner intake file')).toBeNull()
+    expect(p.transport.fetchImpl.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1)
+    await act(async () => held.resolve(terrainResponse(trackerAnswer(), 201)))
+    await waitFor(() => expect(combinerTrigger().disabled).toBe(false))
+    expect(p.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+  })
+  it('c12_synchronous_interlock', async () => {
+    const p = trackerProps()
+    let uploadHandler
+    vi.spyOn(landxmlUpload, 'default').mockImplementation(({ upload }) => {
+      uploadHandler = upload
+      return <button type="button">Captured import</button>
+    })
+    const held = workspaceDeferred()
+    const real = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => url.includes('/imports/landxml') ? held.promise : real(url, init))
+    render(<SolarWorkspaceTools {...p} />)
+    open()
+    await openTracker(); fillTracker()
+    let losing
+    await act(async () => {
+      const controller = new AbortController()
+      losing = uploadHandler({ drawingId: 'solar', projectId: null, drawingUnits: 'm',
+        file: new File(['xml'], 'site.xml'), signal: controller.signal })
+      fireEvent.click(trackerPublish())
+      await Promise.resolve()
+    })
+    expect(trackerPosts(p)).toHaveLength(0)
+    expect(trackerPanel().textContent).toContain(trackerClients.TRACKER_ROWS_CLIENT_REASONS.TRACKER_ROWS_CLIENT_REQUEST_INVALID)
+    await act(async () => { held.resolve(response()); await losing })
+  })
+  it('c17_double_landxml_keeps_the_tracker_interlock', async () => {
+    const p = trackerProps()
+    const helds = [workspaceDeferred(), workspaceDeferred()]
+    let calls = 0
+    const real = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => url.includes('/imports/landxml') ? helds[calls++].promise : real(url, init))
+    render(<SolarWorkspaceTools {...p} />)
+    open()
+    fireEvent.change(screen.getByLabelText('Drawing units'), { target: { value: 'm' } })
+    fireEvent.change(screen.getByLabelText('LandXML file'), {
+      target: { files: [new File([new Uint8Array(45305)], 'site.xml', { type: 'application/xml' })] },
+    })
+    const importButton = screen.getByRole('button', { name: 'Import terrain' })
+    // Two submissions in one React batch: both reach the transport.
+    await act(async () => { fireEvent.click(importButton); fireEvent.click(importButton) })
+    await waitFor(() => expect(calls).toBe(2))
+    const reason = () => screen.queryByTestId('solar-tracker-workspace-reason')?.textContent ?? ''
+    await waitFor(() => expect(trackerTrigger().disabled).toBe(true))
+    // The second settles while the first is still unresolved: the interlock must hold.
+    await act(async () => { helds[1].resolve(response()); await helds[1].promise })
+    expect(trackerTrigger().disabled).toBe(true)
+    expect(reason()).toBe(TRACKER_SENTENCES.landxml_pending)
+    expect(trackerPosts(p)).toHaveLength(0)
+    await act(async () => { helds[0].resolve(response()); await helds[0].promise })
+    await waitFor(() => expect(reason()).not.toBe(TRACKER_SENTENCES.landxml_pending))
+    expect(trackerPosts(p)).toHaveLength(0)
+  })
+  it('c13_publication_head_signal', async () => {
+    for (const status of [201, 200]) {
+      const p = trackerProps()
+      const real = p.transport.fetchImpl.getMockImplementation()
+      p.transport.fetchImpl.mockImplementation((url, init) => url.includes('/tracker-rows')
+        ? Promise.resolve(terrainResponse(trackerAnswer(JSON.parse(init.body), status), status)) : real(url, init))
+      render(<SolarWorkspaceTools {...p} />)
+      await openTracker(); fillTracker(); fireEvent.click(trackerPublish())
+      await waitFor(() => expect(p.onPhysicalHeadChanged).toHaveBeenCalledTimes(1))
+      expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('0')
+      expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+      openTerrain()
+      await waitFor(() => expect(terrainGets(p)).toHaveLength(3))
+      expect(p.onPhysicalHeadChanged.mock.calls[0][0].head.state.artifact_id).toBe(TERRAIN_H1)
+      cleanup()
+    }
+  })
+  it('c14_refresh_fanout', async () => {
+    const p = trackerProps()
+    render(<SolarWorkspaceTools {...p} />)
+    await openTracker(); fillTracker(); fireEvent.click(trackerPublish())
+    await trackerPublished()
+    await waitFor(() => expect(terrainGets(p)).toHaveLength(2))
+    expect(terrainPanel()).toBeNull()
+    expect(p.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    openTerrain(); await terrainReady()
+    expect(terrainGets(p)).toHaveLength(3)
+    expect(terrainPanel().getAttribute('data-head')).toBe(TERRAIN_H1)
+    expect(p.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+  })
+  it('c15_external_head_and_late_answers', async () => {
+    const p = trackerProps()
+    const view = render(<SolarWorkspaceTools {...p} />)
+    await openTracker(); fillTracker()
+    open(); submit()
+    await waitFor(() => expect(p.onPhysicalHeadChanged).toHaveBeenCalledTimes(1))
+    expect(terrainGets(p)).toHaveLength(1)
+    fireEvent.click(trackerTrigger())
+    await waitFor(() => expect(terrainGets(p)).toHaveLength(2))
+    expect(screen.getByLabelText('Module power').value).toBe('450')
+    const late = workspaceDeferred()
+    const real = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => init.method === 'GET' ? late.promise : real(url, init))
+    fireEvent.click(trackerRefresh())
+    await waitFor(() => expect(terrainGets(p)).toHaveLength(3))
+    view.rerender(<SolarWorkspaceTools {...p} drawingId="other" />)
+    view.rerender(<SolarWorkspaceTools {...p} />)
+    expect(screen.queryByTestId('solar-tracker-rows-panel')).toBeNull()
+    await act(async () => late.resolve(terrainResponse(terrainView(true))))
+    expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBeNull()
+    expect(p.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+  })
+  it('c16_preserved_legacy_and_receipt', async () => {
+    for (const outcome of ['published', 'unknown']) {
+      const p = trackerProps()
+      if (outcome === 'unknown') {
+        vi.spyOn(trackerClients, 'createSolarTrackerRowsClient').mockReturnValue({ createTrackerRows:
+          vi.fn(async () => ({ ok: false, code: 'TRACKER_ROWS_CLIENT_NETWORK' })) })
+      }
+      const view = render(<SolarWorkspaceTools {...p} />)
+      await openTracker(); fillTracker(); fireEvent.click(trackerPublish())
+      await waitFor(() => expect(trackerPanel().getAttribute('data-phase')).toBe(outcome))
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+      openTerrain()
+      await waitFor(() => expect(terrainPanel()).not.toBeNull())
+      expect(screen.queryByRole('region', { name: 'Tracker layout' })).toBeNull()
+      view.rerender(<SolarWorkspaceTools {...p} flow="rooftop" />)
+      openCombiner()
+      expect(document.activeElement).toBe(combinerFile())
+      view.rerender(<SolarWorkspaceTools {...p} />)
+      fireEvent.click(trackerTrigger())
+      await waitFor(() => expect(trackerPanel().getAttribute('data-phase')).toBe(outcome === 'unknown' ? 'retry-ready' : 'published'))
+      expect(screen.getByLabelText('Module power').value).toBe('450')
+      expect(trackerPublish().disabled).toBe(true)
+      if (outcome === 'published') expect(screen.getByLabelText('Published tracker rows').textContent).toContain('450 W')
+      else expect(screen.getByRole('button', { name: 'Retry original request' })).toBeTruthy()
+      cleanup(); vi.restoreAllMocks()
+    }
+  })
+})
+
 describe('terrain workspace integration', () => {
   it('CHECKOUT-GATE CG4 terrain GET and POST replace transport proofs with the current getter value', async () => {
     for (const casing of ['x-checkout-capability', 'X-CHECKOUT-CAPABILITY', 'x-Checkout-Capability']) {
@@ -263,6 +666,8 @@ describe('terrain workspace integration', () => {
           view.rerender(<SolarWorkspaceTools {...props} projectId={projectId} drawingId={drawingId} flow={flow} />)
           expect(!!screen.queryByRole('button', { name: 'Terrain preview', exact: true }))
             .toBe(!!drawingId && flow === 'ground-physical')
+          expect(!!screen.queryByRole('button', { name: 'Create tracker rows', exact: true }))
+            .toBe(!!drawingId && flow === 'ground-physical')
           expect(!!screen.queryByRole('button', { name: 'Import combiner intake' }))
             .toBe(!!drawingId && projectId === null && flow === 'rooftop')
           expect(terrainPanel()).toBeNull()
@@ -285,6 +690,9 @@ describe('terrain workspace integration', () => {
     expect(document.activeElement).toBe(screen.getByLabelText('LandXML file'))
     expect(terrainTrigger().getAttribute('aria-expanded')).toBe('false')
     expect(trigger().getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: 'Create tracker rows' }))
+    expect(control()).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Tracker layout' }))
     openTerrain()
     expect(control()).toBeNull()
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Terrain preview' }))
@@ -825,6 +1233,7 @@ describe('combiner workspace integration', () => {
       view.rerender(<SolarWorkspaceTools {...props} flow={flow} />)
       expect(!!screen.queryByRole('button', { name: 'Import combiner intake' })).toBe(flow === 'rooftop')
       expect(!!screen.queryByRole('button', { name: 'Import LandXML terrain' })).toBe(flow === 'ground-physical')
+      expect(!!screen.queryByRole('button', { name: 'Create tracker rows' })).toBe(flow === 'ground-physical')
       expect(document.querySelectorAll('section[aria-label="Solar workspace tools"]').length)
         .toBe(['rooftop', 'ground-physical'].includes(flow) ? 1 : 0)
     }
