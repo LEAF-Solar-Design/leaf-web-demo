@@ -36,6 +36,8 @@ export default defineConfig({
     ['json', { outputFile: './artifacts/walk/results.json' }],
   ],
   use: {
+    actionTimeout: 15000,
+    navigationTimeout: 60000,
     browserName: 'chromium',
     headless: true,
     trace: 'retain-on-failure',
