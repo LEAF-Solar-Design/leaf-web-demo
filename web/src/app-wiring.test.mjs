@@ -16,8 +16,59 @@ import { readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
 import esbuild from 'esbuild'
+import { parse as parseJs } from '@babel/parser'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const CSU_UPLOAD_READS = ['mock', 'openProjectId', 'signedIn', 'standalonePolicyReady']
+function csuWalk(node, visit, parent = null) {
+  if (!node || typeof node.type !== 'string') return
+  visit(node, parent)
+  for (const key of Object.keys(node)) {
+    if (key === 'loc' || key === 'start' || key === 'end' || key === 'extra') continue
+    const value = node[key]
+    if (Array.isArray(value)) value.forEach((child) => csuWalk(child, visit, node))
+    else if (value && typeof value.type === 'string') csuWalk(value, visit, node)
+  }
+}
+function csuKey(prop) {
+  if (!prop || prop.type !== 'ObjectProperty' || prop.computed) return null
+  return prop.key.type === 'Identifier' ? prop.key.name : prop.key.type === 'StringLiteral' ? prop.key.value : null
+}
+// Binds to the real profileTabs useMemo by AST, never by text search, so a lookalike memo or object elsewhere
+// cannot satisfy it, and only identifier reads count (a string or a member property named mock does not).
+function csuUploadProblems(source) {
+  const memos = []
+  csuWalk(parseJs(source, { sourceType: 'module', plugins: ['jsx'] }), (node) => {
+    if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && node.id.name === 'profileTabs'
+      && node.init?.type === 'CallExpression' && node.init.callee.type === 'Identifier' && node.init.callee.name === 'useMemo') memos.push(node.init)
+  })
+  if (memos.length !== 1) return [`expected one profileTabs useMemo, found ${memos.length}`]
+  const [callback, depsNode] = memos[0].arguments
+  if (!depsNode || depsNode.type !== 'ArrayExpression') return ['the profileTabs memo has no dependency array']
+  const deps = new Set(depsNode.elements.filter((el) => el?.type === 'Identifier').map((el) => el.name))
+  const uploads = []
+  csuWalk(callback, (node) => {
+    if (node.type !== 'ObjectExpression') return
+    const files = node.properties.find((prop) => csuKey(prop) === 'files')
+    if (files?.value?.type !== 'ObjectExpression') return
+    const upload = files.value.properties.find((prop) => csuKey(prop) === 'onUpload')
+    if (upload) uploads.push(upload.value)
+  })
+  if (uploads.length !== 1) return [`expected one files.onUpload inside the profileTabs memo, found ${uploads.length}`]
+  const reads = new Set()
+  csuWalk(uploads[0], (node, parent) => {
+    if (node.type !== 'Identifier') return
+    if (parent && (parent.type === 'MemberExpression' || parent.type === 'OptionalMemberExpression') && parent.property === node && !parent.computed) return
+    if (parent && parent.type === 'ObjectProperty' && parent.key === node && !parent.computed) return
+    reads.add(node.name)
+  })
+  const problems = []
+  for (const name of CSU_UPLOAD_READS) {
+    if (!reads.has(name)) problems.push(`${name} is not read by the Upload drawing action`)
+    if (!deps.has(name)) problems.push(`${name} must be a dependency of the ribbon memo`)
+  }
+  return problems
+}
 describe('W20-07b combiner workspace wiring', () => {
   const appNoComments = decomment(appSource)
   it('W20-07b mounts the placement callback on the existing workspace container', () => {
@@ -638,7 +689,7 @@ describe('J1 Browser composition', () => {
     assert.match(live, /project_id:\s*openProjectId/)
     assert.match(live, /onAttached:\s*rehydrate/)
     assert.match(live, /artifacts:\s*workspace\?\.drawing_artifacts \|\| \[\]/)
-    assert.equal((compiled.match(/= useDrawingUploadController\(/g) || []).length, 1)
+    assert.equal((compiled.match(/= useDrawingUploadController\(/g) || []).length, 2)
     assert.equal((compiled.match(/= useMaterialIntake\(/g) || []).length, 1)
 
     // Execute only the mounted adapter, with the two IO controllers replaced.
@@ -677,13 +728,37 @@ describe('J1 Browser composition', () => {
 
   it('J1 row6 demo material mounts the disabled component without an IO controller', () => {
     const source = codeOnly(appSource)
-    assert.match(source, /projectPane === 'material' && \(mock \|\| !signedIn \|\| !openProjectId/)
+    assert.ok(source.includes("projectPane === 'material' && !standaloneMounted && (mock || !signedIn || !openProjectId"))
     assert.ok(source.includes('? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />'))
     assert.ok(source.includes(': <LiveProjectMaterialIntake'))
     const appBody = source.slice(source.indexOf('export default function App()'))
     assert.doesNotMatch(appBody, /useDrawingUploadController\(/)
     assert.doesNotMatch(appBody, /useMaterialIntake\(/)
     mount('ProjectMaterialIntake')
+    const standalone = mount('StandaloneMaterialUpload')
+    assert.match(standalone, /token:\s*standaloneToken/)
+    assert.match(standalone, /onReady:\s*onStandaloneReady/)
+    assert.ok(source.includes("surfaceSlots.ground === 'board' && !mock && !openProjectId"))
+    assert.ok(source.includes("pane={standaloneMounted && projectPane === 'material' ? null : projectPane}"))
+    assert.ok(source.includes('PROFILE_REASONS.uploadDrawing'))
+  })
+
+  it('CSU wiring: the ribbon memo lists every value the Upload drawing action reads', () => {
+    assert.deepEqual(csuUploadProblems(appSource), [])
+  })
+
+  it('CSU wiring: the memo binding refuses a decoy memo, a string action and a member read', () => {
+    const action = "files: { onUpload: !mock && (openProjectId ? signedIn : standalonePolicyReady) ? go : null }"
+    const all = '[mock, openProjectId, signedIn, standalonePolicyReady]'
+    const memo = (name, body, deps) => `const ${name} = useMemo(() => ({ ${body} }), ${deps})\n`
+    assert.deepEqual(csuUploadProblems(memo('profileTabs', action, all)), [])
+    assert.deepEqual(csuUploadProblems(memo('decoy', action, all) + memo('profileTabs', action, '[mock, openProjectId, signedIn]')),
+      ['standalonePolicyReady must be a dependency of the ribbon memo'])
+    assert.equal(csuUploadProblems(memo('profileTabs', "files: { onUpload: 'mock openProjectId signedIn standalonePolicyReady' }", all)).length, 4)
+    assert.deepEqual(csuUploadProblems(memo('profileTabs', action.replace('!mock', '!window.mock'), all)),
+      ['mock is not read by the Upload drawing action'])
+    assert.deepEqual(csuUploadProblems(memo('profileTabs', `${action}, again: { ${action} }`, all)),
+      ['expected one files.onUpload inside the profileTabs memo, found 2'])
   })
 
   // Both placements of a project panel, in source order: [inline, board].

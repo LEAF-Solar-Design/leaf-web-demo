@@ -66,6 +66,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
         await services.wait(pollMs)
         if (run !== sequence) return null
         status = await services.status(receipt.drawing_id, receipt.guest_session, receipt.tenant_id)
+        if (run !== sequence) return null
       }
       if (status.status === 'failed') {
         throw new Error(status.error?.message || status.error || 'Drawing extraction failed.')
