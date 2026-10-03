@@ -2963,11 +2963,13 @@ test.describe('route matrix, rail ON', () => {
     await expect(ribbon.locator('.ribbon-cluster:visible')).toHaveCount(0)
     await tools.click()
     await ribbon.locator('[data-tool="solar-panels:createRectangle"]').click()
+    // Activating a tool picked from the open disclosure closes it at once (#292), before focus moves.
+    await expect(tools).toHaveAttribute('aria-expanded', 'false')
     const operand = page.getByLabel('ribbon x', { exact: true })
     await operand.fill('12')
     await expect(operand).toHaveValue('12')
     await expect(operand).toBeInViewport({ ratio: 1 })
-    // Focus left the disclosure for the operand; blur closes it as before.
+    // The disclosure stays closed while the operand is edited.
     await expect(tools).toHaveAttribute('aria-expanded', 'false')
     await operand.press('Escape')
     await expect(page.getByTestId('cockpit-prompt')).toHaveCount(0)

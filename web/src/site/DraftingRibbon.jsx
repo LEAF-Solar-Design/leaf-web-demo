@@ -311,7 +311,21 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
         if (open && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
       }}
     >
-      <div id="drafting-ribbon-panels" className="ribbon-panels" ref={panelsRef}>
+      <div
+        id="drafting-ribbon-panels"
+        className="ribbon-panels"
+        ref={panelsRef}
+        // Activating an enabled tool from the open overflow closes it, so the form or prompt the tool opens is not
+        // left under the overflow. Focus moving between tools fires no click, so keyboard navigation keeps it open;
+        // a disabled tool, a widget, a label and More panels itself are not tools and change nothing here. A tool is
+        // a RibbonTool, which always carries data-tool: a panel's own controls (Script's Choose script and Run
+        // script wear the ribbon-tool class for styling) are not tools, so the feedback they show stays visible.
+        onClickCapture={(event) => {
+          if (!open) return
+          const button = event.target instanceof Element ? event.target.closest('button.ribbon-tool[data-tool]') : null
+          if (button && event.currentTarget.contains(button) && !button.disabled) setOpen(false)
+        }}
+      >
       {children}
       {list.length === 0 && !children && (
         // Honest empty: a sentence, never a fabricated cluster.
