@@ -16,6 +16,13 @@ export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
 export const COACH_STORAGE_KEY = 'leaf.coach.dismissed.v1'
 
+export function injectWalkEntities(source) {
+  // Walk selection targets stay outside the panel polygon in the pinned corpus fixture.
+  const lines = [190, 470].map((y, index) => `0\nLINE\n5\nA10${index}\n8\nWalk\n10\n111\n20\n${y}\n11\n333\n21\n${y}\n`).join('')
+  const dimension = '0\nDIMENSION\n5\nD100\n8\nWalk\n100\nAcDbEntity\n100\nAcDbDimension\n70\n32\n3\nStandard\n10\n333\n20\n160\n30\n0\n11\n222\n21\n160\n31\n0\n100\nAcDbAlignedDimension\n13\n111\n23\n175\n33\n0\n14\n333\n24\n175\n34\n0\n100\nAcDbRotatedDimension\n50\n0\n'
+  return source.replace('0\nENDSEC\n0\nEOF', `${lines}${dimension}0\nENDSEC\n0\nEOF`)
+}
+
 export async function holdJobRoutes(page, pattern = '**/api/jobs/**') {
   let release
   let passing = false
@@ -881,10 +888,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       let source = await readFile(new URL(selected?.type === 'INSERT' ? '../fixtures/block-fixture.dxf'
         : '../fixtures/distinctive-panel.dxf', import.meta.url), 'utf8')
       if (selected?.type !== 'INSERT') {
-        // Two LINEs outside the real panel polygon give single and multiple
-        // selection deterministic targets without API or UI state fabrication.
-        const lines = [190, 470].map((y, index) => `0\nLINE\n5\nA10${index}\n8\nWalk\n10\n111\n20\n${y}\n11\n333\n21\n${y}\n`).join('')
-        source = source.replace('0\nENDSEC\n0\nEOF', `${lines}0\nENDSEC\n0\nEOF`)
+        source = injectWalkEntities(source)
       }
       const uploaded = await page.request.post('/api/drawings/upload', {
         multipart: { file: { name: 'walk.dxf', mimeType: 'application/dxf', buffer: Buffer.from(source) } },

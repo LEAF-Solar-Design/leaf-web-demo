@@ -5,7 +5,7 @@ import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/acti
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure } from './fixtures.mjs'
+import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
 test('scoped catalogs reevaluate each drawing and version without reusing worker readiness', async () => {
@@ -62,7 +62,7 @@ test('every ready Solar catalog recipe opens a standalone drawing on the Solar p
 })
 
 test('the DIMENSION pick lies on the fixture dimension line and outside the other fixture geometry', () => {
-  const dxf = readFileSync(new URL('../fixtures/distinctive-panel.dxf', import.meta.url), 'utf8').trim().split(/\r?\n/)
+  const dxf = injectWalkEntities(readFileSync(new URL('../fixtures/distinctive-panel.dxf', import.meta.url), 'utf8')).trim().split(/\r?\n/)
   const start = dxf.indexOf('DIMENSION')
   assert.ok(start > 0)
   const fields = new Map()
