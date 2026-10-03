@@ -188,6 +188,10 @@ export function locatorRecipe(entry, state) {
 }
 
 function actionTab(action) {
+  // App's byTab seats Author on Manage; EngineRibbonClusters seats every
+  // live engine panel on Draw (Insert/Annotate contain static placeholders).
+  if (action.surface === 'engine') return 'Draw'
+  if (action.cluster === 'author') return 'Manage'
   if (['annotation', 'block'].includes(action.panel)) return action.panel === 'annotation' ? 'Annotate' : 'Insert'
   if (['view', 'version'].includes(action.cluster)) return 'View'
   return 'Draw'
