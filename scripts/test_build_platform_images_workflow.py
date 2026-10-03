@@ -3485,7 +3485,8 @@ def check_docs_noop_filter(text: str) -> None:
     relay_wf = _strict_yaml(relay_text)
     # Workflow shape is frozen top to bottom (PyYAML reads the bare `on`
     # key as True). A new trigger, job, or permission grant must land here.
-    assert set(relay_wf) == {"name", True, "permissions", "concurrency", "jobs"}
+    assert set(relay_wf) == {"name", True, "env", "permissions", "concurrency", "jobs"}
+    assert relay_wf["env"] == {"RELAY_FLEET_CONVERGENCE_ENABLED": "true"}
     assert relay_wf["name"] == "Dispatch staging deploys"
     assert relay_wf[True] == {
         "workflow_run": {
@@ -3541,7 +3542,7 @@ def check_docs_noop_filter(text: str) -> None:
     assert set(relay_wf["jobs"]) == {"dispatch"}
     dispatch_job = relay_wf["jobs"]["dispatch"]
     assert set(dispatch_job) == {
-        "if", "runs-on", "environment", "timeout-minutes", "env", "steps",
+        "if", "runs-on", "environment", "timeout-minutes", "env", "steps", "concurrency",
     }
     assert dispatch_job["environment"] == "ecr-release"
     # Pinned VALUES, not just keys: on a persistent self-hosted runner the
@@ -3562,7 +3563,8 @@ def check_docs_noop_filter(text: str) -> None:
     # plus time queued behind the shared staging lock. Must stay above the
     # step's own 95-minute deadline; check_staging_relay_convergence asserts
     # that relationship rather than the literal.
-    assert dispatch_job["timeout-minutes"] == 105
+    assert dispatch_job["timeout-minutes"] == 95 + 80 + 15 == 190
+    assert dispatch_job["concurrency"] == {"group": "reconcile-staging-fleet", "cancel-in-progress": False}
     # BUILD_RUN_ATTEMPT moved from the manifest step to the JOB on 2026-08-07
     # with the convergence receipt. The manifest step names the build's own
     # supply set and marker with it, and the receipt publish step names the
@@ -3610,17 +3612,33 @@ def check_docs_noop_filter(text: str) -> None:
     # job skipped, nothing mutated). Publishing one without the other lets a
     # consumer get exactly halfway. Same pure-upload shape, no run: and no env:.
     assert [s.get("id") for s in relay_steps] == [
-        "tip", None, "manifest", "consumer_contract", "deploy", None, None, None]
+        "tip", None, "manifest", "consumer_contract", "deploy", None, "fleet", "fleet_result", None, None, None]
     (
         tip_step,
         aws_step,
         manifest_step,
         contract_step,
         dispatch_step,
+        fleet_checkout,
+        fleet_step,
+        fleet_result,
         receipt_step,
         contract_envelope_step,
         evidence_step,
     ) = relay_steps
+    fleet_gate = "steps.deploy.outputs.converged == 'true' && env.RELAY_FLEET_CONVERGENCE_ENABLED == 'true'"
+    assert _folded(fleet_checkout["if"]) == fleet_gate
+    assert fleet_checkout["uses"] == "actions/checkout@v4"
+    assert fleet_checkout["with"] == {"ref": "${{ github.workflow_sha }}", "path": "fleet-executor", "persist-credentials": False}
+    assert _folded(fleet_step["if"]) == fleet_gate
+    assert fleet_step["working-directory"] == "fleet-executor"
+    assert fleet_step["env"] == {"APP_GITHUB_TOKEN": "${{ github.token }}", "TERRAFORM_GITHUB_TOKEN": "${{ secrets.TERRAFORM_REPO_TOKEN }}"}
+    assert "--in-relay --relay-run-id" in fleet_step["run"]
+    assert "--execute --timeout-seconds 4800" in fleet_step["run"]
+    assert fleet_result["continue-on-error"] is True
+    assert fleet_result["with"]["retention-days"] == 3
+    assert fleet_result["with"]["path"] == "fleet-result/staging-fleet-result.json"
+    assert _folded(fleet_result["if"]) == "!cancelled() && " + fleet_gate
     assert set(contract_envelope_step) == {"name", "if", "uses", "with"}
     assert (
         contract_envelope_step["with"]["path"] == "staging-consumer-contract.b64"
@@ -3719,11 +3737,12 @@ def check_docs_noop_filter(text: str) -> None:
         for path, value in _walk_strings(relay_wf)
         if "secrets." in value
     ]
-    assert len(secret_refs) == 3, (
-        f"exactly three scoped secret references may exist in the relay: {secret_refs}"
+    assert len(secret_refs) == 4, (
+        f"exactly four scoped secret references may exist in the relay: {secret_refs}"
     )
     assert sorted(value for _, value in secret_refs) == sorted([
         "${{ secrets.AWS_ECR_PUSH_ROLE }}",
+        "${{ secrets.TERRAFORM_REPO_TOKEN }}",
         "${{ secrets.TERRAFORM_REPO_TOKEN }}",
         "${{ secrets.TERRAFORM_REPO_TOKEN }}",
     ])
@@ -5177,7 +5196,7 @@ def check_staging_relay_convergence_battery(relay_path: Path) -> None:
         ),
         (
             "job timeout cut below the step's own watch deadline",
-            mutate(original, "timeout-minutes: 105", "timeout-minutes: 5"),
+            mutate(original, "timeout-minutes: 190", "timeout-minutes: 5"),
         ),
         (
             "one service quietly dropped from the loop",
@@ -7031,18 +7050,24 @@ def test_relay_receipt_archive_stays_single_member() -> None:
         for step in relay["jobs"]["dispatch"]["steps"]
         if str(step.get("uses", "")).startswith("actions/upload-artifact")
     ]
-    paths = [step["with"]["path"] for step in uploads]
-    assert paths == [
+    receipt_paths = [
         "staging-converged.json",
         "staging-consumer-contract.b64",
         "staging-supply-evidence.b64",
     ]
+    receipts = [step for step in uploads if step["with"]["path"] in receipt_paths]
+    assert [step["with"]["path"] for step in receipts] == receipt_paths
+    fleet = [step for step in uploads if step["with"]["path"] not in receipt_paths]
+    assert len(fleet) == 1, "only the separate fleet diagnostic upload may be added"
+    assert fleet[0]["with"]["path"] == "fleet-result/staging-fleet-result.json"
+    assert 0 < fleet[0]["with"]["retention-days"] <= 3
+    assert "always()" not in fleet[0]["if"]
     for step in uploads:
         # One path each, no globs, no directories: each archive holds one file.
         assert chr(10) not in str(step["with"]["path"])
         assert "*" not in str(step["with"]["path"])
     names = [step["with"]["name"] for step in uploads]
-    assert len(set(names)) == 3, "the three artifacts must not collide"
+    assert len(set(names)) == 4, "the receipt and fleet artifacts must not collide"
 
 
 def test_digest_aware_producer_is_source_controlled_and_dormant() -> None:
