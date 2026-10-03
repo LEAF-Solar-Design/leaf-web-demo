@@ -17,6 +17,7 @@ import queue
 import re
 import runpy
 import secrets
+import signal
 import socket
 import sys
 import tempfile
@@ -488,6 +489,13 @@ def supervise(args):
     launcher = None
     previous_argv = sys.argv
     code = 1
+    # The TTL watchdog stops the launcher through _thread.interrupt_main(), which does
+    # nothing while SIGINT is ignored or default. A CI job or a background shell inherits
+    # SIGINT as ignored, so the supervisor owns the disposition for the run and restores it.
+    sigint_owned = threading.current_thread() is threading.main_thread()
+    previous_sigint = signal.getsignal(signal.SIGINT) if sigint_owned else None
+    if sigint_owned:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
     watcher = threading.Thread(target=watchdog, daemon=True)
     try:
         publish()
@@ -549,6 +557,8 @@ def supervise(args):
             sys.argv = previous_argv
             if watcher.ident is not None:
                 watcher.join()
+            if sigint_owned and previous_sigint is not None:
+                signal.signal(signal.SIGINT, previous_sigint)
     return 0 if code == 0 and receipt["ok"] else 1
 
 

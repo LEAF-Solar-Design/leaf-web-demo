@@ -846,3 +846,33 @@ def test_g2a_31_manifest_top_level_keys_exact(tmp_path, monkeypatch):
         with pytest.raises(replay.ReplayConfigError, match="manifest keys"):
             replay.load_manifest(path, REPO)
         assert path.read_bytes() == before
+
+
+_SIGINT_IGNORED_CHILD = r"""
+import json, signal, sys
+from pathlib import Path
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+sys.path.insert(0, sys.argv[1])
+import test_proof_string_sizer as rows
+root = Path(sys.argv[2])
+launcher, directory = rows.fake_launcher(root, mode="ttl")
+code, _, receipt = rows.supervise(root, launcher, directory, max_seconds=1)
+print(json.dumps({"code": code, "ttl_expired": receipt["ttl_expired"], "ok": receipt["ok"],
+                  "restored": signal.getsignal(signal.SIGINT) == signal.SIG_IGN}))
+"""
+
+
+def test_g2a_33_ttl_fires_while_sigint_is_ignored(tmp_path):
+    # A CI job inherits SIGINT as ignored; the watchdog's interrupt must still stop the run.
+    env = dict(os.environ, LEAF_AUTH_LIVE="0", LEAF_RUNTIME_ENV="", LEAF_ENV="")
+    try:
+        done = subprocess.run([sys.executable, "-B", "-c", _SIGINT_IGNORED_CHILD, str(SCRIPTS),
+                               str(tmp_path / "ignored")], env=env, capture_output=True,
+                              text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the TTL watchdog did not stop a run whose SIGINT was ignored")
+    assert done.returncode == 0, done.stderr[-2000:]
+    result = json.loads(done.stdout.strip().splitlines()[-1])
+    assert result == {"code": 1, "ttl_expired": True, "ok": False, "restored": True}
+    cleaned = json.loads((tmp_path / "ignored" / "cleaned.json").read_bytes())
+    assert len(cleaned) == 1 and cleaned[0] is not None
