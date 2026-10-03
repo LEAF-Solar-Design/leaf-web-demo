@@ -687,11 +687,10 @@ class LaneShapeTests(unittest.TestCase):
         )
         return yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    def test_the_lane_ships_dormant(self) -> None:
-        """Source-controlled and off, the same idiom as the build workflow's
-        DIGEST_AWARE_CONVERGENCE_ENABLED. Arming the SCHEDULE must be its own
-        one-line change, not something that rides along inside another edit."""
-        self.assertEqual(self.lane()["env"]["RECONCILE_ARMED"], "false")
+    def test_the_schedule_is_armed_for_five_service_convergence(self) -> None:
+        """R6 arms the schedule for the operator's five-service staging rule
+        after two proven manual armed runs; reverting the flag restores reporting."""
+        self.assertEqual(self.lane()["env"]["RECONCILE_ARMED"], "true")
 
     def test_the_diagnostic_upload_is_best_effort_and_short_lived(self) -> None:
         """The plan artifact has no consumer in the repo: every later step
@@ -747,18 +746,24 @@ class LaneShapeTests(unittest.TestCase):
         self.assertIn('-f "consumer_contract_b64=$CONTRACT"', code)
         self.assertIn("staging-consumer-contract.b64", code)
 
-    def test_the_schedule_cannot_act_while_the_flag_is_false(self) -> None:
-        """The scheduled trigger has no way to set the manual arm input, so a
-        dormant flag means every scheduled run reports and nothing else."""
+    def test_the_schedule_acts_only_through_the_same_decider(self) -> None:
+        """Scheduled and manual arming share the decider, and neither can act
+        unless the plan is armable."""
         lane = self.lane()
         triggers = lane[True] if True in lane else lane["on"]
         self.assertIn("schedule", triggers)
-        self.assertEqual(lane["env"]["RECONCILE_ARMED"], "false")
         decider = next(
             s for s in lane["jobs"]["plan"]["steps"] if s.get("id") == "arm"
         )
         self.assertEqual(decider["env"]["ARMED_BY_DEFAULT"], "${{ env.RECONCILE_ARMED }}")
         self.assertEqual(decider["env"]["ARMED_BY_INPUT"], "${{ inputs.arm }}")
+        self.assertIn('ARMABLE=$(jq -r \'.armable\' staging-fleet-reconcile-plan.json)', decider["run"])
+        self.assertIn('if [ "$WANTED" = "true" ] && [ "$ARMABLE" = "true" ]; then', decider["run"])
+        acting = next(
+            s for s in lane["jobs"]["plan"]["steps"]
+            if "gh workflow run" in str(s.get("run", ""))
+        )
+        self.assertEqual(acting["if"], "steps.arm.outputs.act == 'true'")
 
 
 class ValidationTests(unittest.TestCase):
