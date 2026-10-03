@@ -6,6 +6,7 @@ import { PRODUCT_SURFACES, productSurfaceStates } from '../src/site/productSurfa
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../src/lib/studioDrawers.js'
 import { PROMPTS } from '../src/cadedit/promptKeys.js'
+import { clipboardRecord } from '../src/cadedit/clipboard.js'
 import { isWriteTool, toolMcpSource } from '../src/lib/toolRecord.js'
 
 const readJson = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'))
@@ -415,6 +416,16 @@ function cases(config, kind) {
 function actionEffect(action, ctx, override) {
   const why = action.when(ctx)
   if (why) return disabled(why)
+  // These buttons are live for a placed DIMENSION; the store refuses after
+  // activation, before changing either the clipboard or the document.
+  if (ctx.session?.selected?.type === 'DIMENSION'
+      && ['copyClip', 'cutClip', 'explode'].includes(action.op)) {
+    const refusal = action.op === 'explode'
+      ? 'a dimension is placed, not edited, in this round'
+      : clipboardRecord(ctx.session.selected, action.op === 'cutClip' ? 'Cut' : 'Copy').refusal
+    return { kind: 'renders', target: 'engine-refusal', refusal,
+      clipboard: 'unchanged', geometry: 'unchanged' }
+  }
   if (action.id === 'bar:escape') return { kind: 'toggles', target: `escape:${escapeRung(ctx)}` }
   if (action.id === 'bar:retry') return { kind: 'submits', target: `retry:${retryRung(ctx)}` }
   if (override.effect) return override.effect
@@ -467,6 +478,10 @@ function buildEntry(item, config, snapshot, registries) {
     entry.title = override.title || record.title({})
     entry.sources = ['web/src/lib/actionRegistry.js']
     if (record.op) entry.sources.push('web/src/cadedit/promptKeys.js', 'web/src/cadedit/EngineRibbonClusters.jsx')
+    if (['copyClip', 'cutClip', 'explode'].includes(record.op)) {
+      entry.sources.push('web/src/cadedit/engineSession.js')
+      if (record.op !== 'explode') entry.sources.push('web/src/cadedit/clipboard.js')
+    }
     const candidates = cases(config, kind)
     if (record.id === 'bar:retry') {
       for (const target of Object.keys(RETRY_RUNGS)) candidates.push([`retry-${target}`, { ...candidates[0][1], rTarget: target }])
@@ -549,7 +564,7 @@ export function validateFeatureMap(map) {
     if (!CERTIFY_CLASSES.has(entry.certify) || (entry.certify !== 'both' && !nonempty(entry.certify_reason))) {
       throw new Error(`featureMap: ${entry.id} needs a certify class and a reason when not both`)
     }
-    if (!Array.isArray(entry.viewports) || !entry.viewports.includes('desktop')
+    if (!Array.isArray(entry.viewports) || !entry.viewports.length
         || entry.viewports.some((value) => !['desktop', 'phone'].includes(value))) throw new Error(`featureMap: invalid viewports for ${entry.id}`)
     if (!entry.expected_effect || typeof entry.expected_effect !== 'object' || Array.isArray(entry.expected_effect)
         || Object.keys(entry.expected_effect).length !== entry.states.length) throw new Error(`featureMap: ${entry.id} effect/state mismatch`)

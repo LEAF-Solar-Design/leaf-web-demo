@@ -102,15 +102,12 @@ test('version navigation seeds saved versions separately from engine edit histor
   }
 })
 
-test('only the UI-unreachable versionless state is declared before setup for every probe kind', () => {
+test('the map omits the versionless state while its before-setup guard remains for every probe kind', () => {
   assert.ok(Object.isFrozen(UI_UNREACHABLE_STATES))
   assert.deepEqual([...UI_UNREACHABLE_STATES], ['no-versioned-drawing'])
   assert.equal(VERSIONLESS_DRAWING_REASON, 'The product creates a saved root version for every private drawing and renders the ribbon only with a drawing open, so no-versioned-drawing is unreachable through the UI.')
   const entries = map.entries.filter((entry) => entry.states.includes('no-versioned-drawing'))
-  for (const id of ['action:history', 'action:undo', 'action:redo']) assert.ok(entries.some((entry) => entry.id === id))
-  for (const entry of entries) {
-    assert.equal(unsupportedBeforeSetup(resolveProbe(entry, 'no-versioned-drawing')), VERSIONLESS_DRAWING_REASON)
-  }
+  assert.deepEqual(entries, [])
   for (const kind of ['action', 'tool', 'control', 'tab', 'surface', 'drawer']) {
     // The declaration must not inspect recipes or query catalog/engine availability.
     assert.equal(unsupportedBeforeSetup({ kind, state: 'no-versioned-drawing' }), VERSIONLESS_DRAWING_REASON)
