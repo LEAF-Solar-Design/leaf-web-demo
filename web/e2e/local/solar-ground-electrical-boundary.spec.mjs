@@ -7,10 +7,11 @@ import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
-// With a blank project name and ZIP the server's readiness refuses sizing as valid_settings_required, so the flow rail disables
-// the step with this sentence before its form can open (measured, W4 run 2026-10-03); the form's own ZIP sentence is
-// therefore not what a drafter sees from the rail.
-const BLANK_ZIP = 'Complete valid Solar settings first'
+// With a blank project name and ZIP the server's readiness refuses sizing and names the first missing project field
+// (project_name_required, recomputed from the project's own fields by solar_project.project_validity), so the flow rail
+// disables the step with this sentence before its form can open; the form's own ZIP sentence is therefore not what a
+// drafter sees from the rail.
+const BLANK_PROJECT = 'Name the project in Solar settings first'
 const NO_GRANT = 'String sizing needs a valid cloud sizing grant, which is unavailable for this workspace. Your inputs are kept.'
 const EXPECTED_M1_BODY = {
   operation: 'manual-create',
@@ -291,7 +292,7 @@ test('G1b ground electrical boundary through the browser', async ({ page }, test
   if (await editor.isVisible()) await click(editor.getByRole('button', { name: 'Cancel', exact: true }).last())
   const sizingStep = page.locator('#solar-step-solar-size-strings')
   await expect(sizingStep).toBeDisabled({ timeout: 30000 })
-  await expect(page.locator('#solar-step-solar-size-strings-reason')).toHaveText(BLANK_ZIP)
+  await expect(page.locator('#solar-step-solar-size-strings-reason')).toHaveText(BLANK_PROJECT)
   expect(runCount('solar-size-strings')).toHaveLength(0)
   await screenshot('g1b-sizing-blank-zip.png')
   await click(page.locator('#solar-step-solar-settings'))
@@ -388,7 +389,7 @@ test('G1b ground electrical boundary through the browser', async ({ page }, test
       'UI-only initialization and all 60 preset settings; preset and conversion revisions are automatic',
       'exact four-key measured tracker publication occurs once and leaves drawing v3 unchanged',
       'conversion creates revision 3, v4, two Ground frames with five slots, measured centres and 450 W power',
-      BLANK_ZIP, NO_GRANT,
+      BLANK_PROJECT, NO_GRANT,
       'correlated browser job refuses with CLOUD_AUTH_MISSING, FORBIDDEN and retryable false; inputs retained and Retry enabled',
       'fresh UI history before and after sizing retains exactly v1-v5, v5 head and the same displayed digest prefix; zero added versions'],
     result: { verdict: 'pass', record_id: 'sf-w3-ground-boundary-walk', entry_route: '/app?surface=browser',

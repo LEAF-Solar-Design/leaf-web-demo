@@ -68,7 +68,7 @@ def test_project_blank_zip_keeps_sizing_unavailable(empty_graph):
     assert result["project"]["validity"] == {
         "state": "unknown", "reasons": ["project_zip_required"]}
     assert availability.w1_graph_readiness(result)["solar-size-strings"] == {
-        "input_ready": False, "input_reason": "valid_settings_required"}
+        "input_ready": False, "input_reason": "project_zip_required"}
 
 
 @pytest.mark.parametrize("patch,code", [
@@ -296,6 +296,98 @@ def test_project_seed_cancel_or_stale_publishes_nothing(product, override, code)
     assert response.json()["reason_code"] == code
     assert_parent(backend, drawing_id, digest)
     assert len(store.load_manifest(backend, TENANT, drawing_id)["versions"]) == 1
+
+
+# The drafter-facing sizing reason names the first missing or invalid project field, recomputed
+# from the project's own fields because the seed stores the reason "seed_defaults", which names
+# none. Readiness itself stays the two stored validity states.
+PROJECT_REASONS = ("project_name_required", "project_zip_required", "invalid_project_zip",
+                   "invalid_project_coordinates", "project_units_required")
+
+
+def sizing_readiness(graph):
+    return availability.w1_graph_readiness(graph)["solar-size-strings"]
+
+
+def with_stored_project(graph, **fields):
+    graph = copy.deepcopy(graph)
+    graph["project"].update(fields)
+    graph["project"]["validity"] = {"state": "unknown", "reasons": ["seed_defaults"]}
+    return graph
+
+
+def valid_project(empty_graph):
+    return settings.run(empty_graph, {"expected_rev": 0, "project_changes": {
+        "name": "Roof A", "zip_code": "44224"}})
+
+
+def test_p293_fresh_seed_names_the_project_name(empty_graph):
+    assert empty_graph["project"]["validity"] == {"state": "unknown", "reasons": ["seed_defaults"]}
+    assert sizing_readiness(empty_graph) == {
+        "input_ready": False, "input_reason": "project_name_required"}
+
+
+@pytest.mark.parametrize("fields,reason", [
+    ({"name": "", "zip_code": "44224"}, "project_name_required"),
+    ({"name": "Roof A", "zip_code": ""}, "project_zip_required"),
+    ({"name": "Roof A", "zip_code": "4422"}, "invalid_project_zip"),
+    ({"name": "Roof A", "zip_code": "ABCDE"}, "invalid_project_zip"),
+    ({"name": "Roof A", "zip_code": "44224", "latitude": 10.0, "longitude": None},
+     "invalid_project_coordinates"),
+])
+def test_p293_sizing_reason_names_the_first_invalid_field(empty_graph, fields, reason):
+    graph = with_stored_project(valid_project(empty_graph), **fields)
+    assert sizing_readiness(graph) == {"input_ready": False, "input_reason": reason}
+
+
+def test_p293_zip_only_repair_then_name_makes_sizing_ready(empty_graph):
+    zip_only = settings.run(copy.deepcopy(empty_graph), {"expected_rev": 0, "project_changes": {
+        "zip_code": "44224"}})
+    assert zip_only["project"]["validity"] == {"state": "unknown", "reasons": ["project_name_required"]}
+    assert sizing_readiness(zip_only) == {"input_ready": False, "input_reason": "project_name_required"}
+    named = settings.run(zip_only, {"expected_rev": zip_only["rev"], "project_changes": {
+        "name": "Roof A"}})
+    assert sizing_readiness(named) == {"input_ready": True, "input_reason": None}
+
+
+def test_p293_settings_fallback_keeps_the_generic_reason(empty_graph):
+    graph = copy.deepcopy(valid_project(empty_graph))
+    graph["settings"]["validity"] = {"state": "invalid", "reasons": ["settings_invalid"]}
+    assert sizing_readiness(graph) == {"input_ready": False, "input_reason": "valid_settings_required"}
+    stale = copy.deepcopy(valid_project(empty_graph))
+    stale["project"]["validity"] = {"state": "stale", "reasons": ["project_changed"]}
+    assert sizing_readiness(stale) == {"input_ready": False, "input_reason": "valid_settings_required"}
+
+
+def test_p293_stored_valid_project_is_trusted(empty_graph):
+    graph = copy.deepcopy(empty_graph)
+    graph["project"]["validity"] = {"state": "valid", "reasons": []}
+    assert sizing_readiness(graph) == {"input_ready": True, "input_reason": None}
+
+
+def test_p293_project_validity_reasons_stay_the_mapped_five():
+    source = (SERVER / "solar_project.py").read_text(encoding="utf-8")
+    body = source[source.index("def project_validity("):source.index("def apply_project_changes(")]
+    emitted = tuple(body.split('reasons.append("')[i].split('"')[0]
+                    for i in range(1, body.count('reasons.append("') + 1))
+    assert emitted == PROJECT_REASONS
+
+
+def test_p293_sizing_run_refusal_names_the_field(product):
+    client, backend, tools = product
+    drawing_id, digest = upload(client)
+    capability = checkout(client, drawing_id)
+    seeded = product_run(client, tools, drawing_id, seed_params(digest), capability=capability)
+    assert seeded.status_code == 200, seeded.text
+    versions = len(store.load_manifest(backend, TENANT, drawing_id)["versions"])
+    response = product_run(client, tools, drawing_id, {
+        "expected_rev": 1, "mode": "global", "requests": {}, "grant_ref": "fixture-grant",
+        "confirm": False}, tool="solar-size-strings", capability=capability)
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert body["reason_code"] == "project_name_required"
+    assert body["availability"]["refusal_reasons"][0] == "project_name_required"
+    assert len(store.load_manifest(backend, TENANT, drawing_id)["versions"]) == versions
 
 
 def test_project_readiness_flips_after_setup(empty_graph):

@@ -1555,6 +1555,8 @@ describe('solar refusal copy', () => {
       'guardrails_sizing_ambiguous', 'guardrails_project_coordinates_required',
       'guardrails_mixed_inverters', 'guardrails_input_unsupported', 'solar_output_not_current',
       'ground_installation_required', 'ground_conversion_in_use', 'ground_physical_state_required',
+      'project_name_required', 'project_zip_required', 'invalid_project_zip', 'invalid_project_coordinates',
+      'project_units_required',
     ]
     for (const code of SERVER_CODES) {
       expect(Object.hasOwn(SOLAR_REFUSAL_REASONS, code)).toBe(true)
@@ -1601,9 +1603,11 @@ describe('solar refusal copy', () => {
       'ground_layout_too_large', 'ground_physical_state_required', 'ground_tracker_rows_required',
       'ground_units_mismatch', 'guardrails_input_unsupported', 'guardrails_mixed_inverters',
       'guardrails_project_coordinates_required', 'guardrails_sizing_ambiguous', 'guardrails_sizing_required',
-      'invalid_drawing_context', 'invalid_route_point', 'invalid_seed_request', 'inverter_assignment_mismatch',
+      'invalid_drawing_context', 'invalid_project_coordinates', 'invalid_project_zip', 'invalid_route_point',
+      'invalid_seed_request', 'inverter_assignment_mismatch',
       'licensed_graph_commit_required', 'module_power_required', 'not_current_head', 'panel_layer_filter_required',
-      'panels_already_present', 'panels_required', 'persisted_graph_unavailable', 'proposal_job_required',
+      'panels_already_present', 'panels_required', 'persisted_graph_unavailable', 'project_name_required',
+      'project_units_required', 'project_zip_required', 'proposal_job_required',
       'roof_installation_required', 'rooftop_required', 'routing_topology_required', 'schedules_input_unsupported',
       'schedules_kernel_refused', 'schedules_mapping_failed', 'schedules_optimizers_unsupported',
       'schedules_zone_sizing_unsupported', 'seed_project_scope_unsupported', 'sized_panel_groups_required',
@@ -1649,6 +1653,24 @@ describe('solar refusal copy', () => {
     for (const [code, sentence] of Object.entries(BASE_COPY)) {
       expect(SOLAR_REFUSAL_REASONS[code]).toBe(sentence)
     }
+  })
+
+  it('P293 a project refusal names the missing field', () => {
+    const FIELD_COPY = {
+      project_name_required: 'Name the project in Solar settings first',
+      project_zip_required: 'Enter the project ZIP code in Solar settings first',
+      invalid_project_zip: 'Enter a valid project ZIP code in Solar settings first',
+      invalid_project_coordinates: 'Enter a valid project latitude and longitude in Solar settings first',
+      project_units_required: 'Set the project drawing units in Solar settings first',
+    }
+    for (const [code, sentence] of Object.entries(FIELD_COPY)) {
+      expect(SOLAR_REFUSAL_REASONS[code]).toBe(sentence)
+      expect(solarRailReason(availabilityFor(code))).toBe(sentence)
+      expect(sentence).not.toBe(SOLAR_REFUSAL_REASONS.valid_settings_required)
+    }
+    expect(solarRailReason({ ...availabilityFor('project_zip_required'),
+      refusal_reasons: ['project_zip_required', 'entitlement_required'] }))
+      .toBe('Enter the project ZIP code in Solar settings first; Your plan does not include this solar tool')
   })
 
   it('RC9 a stale solar output asks for the earlier steps again', () => {

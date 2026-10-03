@@ -377,7 +377,17 @@ def w1_graph_readiness(graph):
     result.update(w1_local_commit_inputs(graph))
     settings_ready = all(item["validity"]["state"] == "valid"
                          for item in (graph["project"], graph["settings"]))
-    mark(["solar-size-strings"], settings_ready, "valid_settings_required")
+    # The seed stores the project as "unknown" with the reason "seed_defaults", which names no
+    # field, so the drafter-facing reason is recomputed from the project's own fields: the first
+    # one project_validity names, else the generic settings reason (settings validity has no
+    # field calculator). Readiness itself is unchanged: it is still both stored states.
+    sizing_reason = "valid_settings_required"
+    if graph["project"]["validity"]["state"] != "valid":
+        from solar_project import project_validity
+        project_reasons = project_validity(graph["project"])["reasons"]
+        if project_reasons:
+            sizing_reason = project_reasons[0]
+    mark(["solar-size-strings"], settings_ready, sizing_reason)
     sized = False
     if settings_ready:
         try:

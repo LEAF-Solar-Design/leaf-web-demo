@@ -144,6 +144,11 @@ const aliases = [
   ["UNKNOWN_TOOL","unknown","UNKNOWN_TOOL"],
   ["WORKITEM_FAILED","unknown","WORKITEM_FAILED"],
   ["APS_UNAVAILABLE","unknown","APS_UNAVAILABLE"],
+  ["project_name_required","settings","BAD_PARAMS"],
+  ["project_zip_required","settings","BAD_PARAMS"],
+  ["invalid_project_zip","settings","BAD_PARAMS"],
+  ["invalid_project_coordinates","settings","BAD_PARAMS"],
+  ["project_units_required","settings","BAD_PARAMS"],
 ]
 
 describe('Sizing run sentences', () => {
