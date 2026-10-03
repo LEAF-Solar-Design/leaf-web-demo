@@ -578,6 +578,11 @@ def _declared_records(raw: bytes) -> dict:
 
     BLOCK and ENDBLK are the block's own header and terminator, not children,
     so they carry no compared style. The first value of each group wins.
+    A VERTEX or SEQEND with no group 8 sits on its owner's layer: the open
+    POLYLINE for a VERTEX, the open POLYLINE or INSERT for a SEQEND. An open
+    sequence runs POLYLINE then VERTEX records, or INSERT then ATTRIB records;
+    anything else, a SEQEND, or a section or block boundary closes it. An
+    orphan keeps the "0" default; no owner is invented.
     """
     if len(raw) > MAX_OUTPUT_BYTES:
         raise ValueError(f"style scan exceeds {MAX_OUTPUT_BYTES} bytes")
@@ -586,15 +591,26 @@ def _declared_records(raw: bytes) -> dict:
         raise ValueError("odd number of DXF lines")
     keyed, ordered = {}, []
     record = None
+    owner = None
     section = None
     section_pending = False
     block_name = ""
     block_header = False
 
     def keep_record():
+        nonlocal owner
         if record is None:
             return
         record["style"] = _declared_style(record)
+        kind = record["type"]
+        if (kind in ("VERTEX", "SEQEND") and 8 not in record["groups"] and owner is not None
+                and (kind == "SEQEND" or owner["type"] == "POLYLINE")):
+            record["style"]["layer"] = owner["style"]["layer"]
+        if kind in ("POLYLINE", "INSERT"):
+            owner = record
+        elif not (owner is not None and (kind, owner["type"]) in (
+                ("VERTEX", "POLYLINE"), ("ATTRIB", "INSERT"))):
+            owner = None
         record["handle"] = _real_handle({"handle": record["groups"].get(5, "")})
         handle = record["handle"]
         if handle is not None:
@@ -612,6 +628,8 @@ def _declared_records(raw: bytes) -> dict:
             record = None
             block_header = False
             kind = value.upper()
+            if kind in ("SECTION", "ENDSEC", "BLOCK", "ENDBLK"):
+                owner = None
             if kind == "SECTION":
                 section_pending = True
                 section = None
