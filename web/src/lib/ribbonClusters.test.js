@@ -831,6 +831,70 @@ describe('profileRibbonTabs', () => {
   })
 })
 
+describe('CAD catalog solar availability', () => {
+  const ready = { entitled: true, engine_ready: true, input_ready: true, implemented: true, refusal_reasons: [] }
+  const row = (availability) => ({
+    name: 'solar-correct-string', capabilities: ['drawing.write'], availability,
+    solar: { schema: 'leaf.solar-tool-view.v1', name: 'solar-correct-string', family: 'stringing',
+      wave: 1, order: 10, entitlement: 'run_write', interaction: { mode: 'none' } },
+  })
+  const families = (tool) => [{ family_id: 'stringing', label: 'Stringing', capabilities: [tool] }]
+  const cad = (tool, gate = {}) => catalogClusters(families(tool), gate)[0].tools[0]
+  const rail = (tool) => profileRibbonTabs('solar', { solarRail: { families: families(tool) } })[1]
+    .clusters.flatMap((cluster) => cluster.tools).find((item) => item.id === tool.name)
+
+  it('disables an input-unready solar tool with the same reason as the Solar rail', () => {
+    const tool = row({ ...ready, input_ready: false, refusal_reasons: ['drawing_context_required'] })
+    expect(cad(tool)).toMatchObject({ disabled: true, reason: SOLAR_REFUSAL_REASONS.drawing_context_required })
+    expect(cad(tool).reason).toBe(rail(tool).reason)
+    const placed = { ...tool, placement: { tab: 'manage' } }
+    expect(catalogTabClusters(families(placed)).manage[0].tools[0])
+      .toMatchObject({ disabled: true, reason: rail(tool).reason })
+  })
+
+  it('enables all-four-ready solar tools and keeps their catalog click handler', () => {
+    const tool = row(ready)
+    const onRequestRun = vi.fn()
+    const projected = cad(tool, { onRequestRun })
+    expect(projected).toMatchObject({ disabled: false, reason: '' })
+    projected.onClick()
+    expect(onRequestRun).toHaveBeenCalledWith(tool, null, RIBBON_RATIONALE, 'ribbon')
+  })
+
+  it('leaves a generic tool without availability enabled under the existing gates', () => {
+    const tool = { name: 'count-by-layer', capabilities: ['drawing.read'] }
+    expect(cad(tool)).toMatchObject({ disabled: false, reason: '', write: false })
+    expect(cad(tool, { writeLocked: true, writeEntitled: false, engineDirty: true }))
+      .toMatchObject({ disabled: false, reason: '' })
+    expect(cad(tool, { running: true })).toMatchObject({ disabled: true, reason: REASONS.running })
+  })
+
+  it('keeps every existing gate ahead of the availability refusal', () => {
+    const tool = row({ ...ready, input_ready: false, refusal_reasons: ['drawing_context_required'] })
+    for (const [gate, reason] of [
+      [{ running: true, previewing: true, writeLocked: true }, REASONS.running],
+      [{ previewing: true, writeLocked: true }, REASONS.previewing],
+      [{ writeLocked: true, writeEntitled: false, engineDirty: true }, REASONS.writeLocked],
+      [{ writeLocked: true, writeLockNote: 'Held by another editor' }, 'Held by another editor'],
+      [{ writeEntitled: false, engineDirty: true }, REASONS.writeUnentitled],
+      [{ engineDirty: true }, REASONS.unsavedEngineEdits],
+    ]) expect(cad(tool, gate)).toMatchObject({ disabled: true, reason })
+    const mcp = { ...tool, mcp_source: { server_id: 'abcdef0123456789abcdef01', tool: 'list-items' } }
+    expect(cad(mcp, { running: true })).toMatchObject({ disabled: true, reason: REASONS.mcpToolNotWired })
+  })
+
+  it('maps ordered, unknown and absent refusal codes exactly like the Solar rail', () => {
+    for (const refusal_reasons of [
+      ['valid_settings_required', 'entitlement_required'], ['constructor'], [], null,
+    ]) {
+      const tool = row({ ...ready, input_ready: false, refusal_reasons })
+      const reason = solarRailReason(tool.availability, { openTypedForm: false })
+      expect(cad(tool)).toMatchObject({ disabled: true, reason })
+      expect(cad(tool).reason).toBe(rail(tool).reason)
+    }
+  })
+})
+
 describe('catalogClusters', () => {
   it('maps one family cluster per family and arms the catalog run path with ribbon attribution', () => {
     const onRequestRun = vi.fn()
