@@ -212,7 +212,7 @@ export class UnsupportedLocalError extends Error {
 
 async function unsupported(probe, runtime, reason) {
   const result = { featureId: probe.featureId, state: probe.state, result: 'unsupported_local',
-    declaredCertify: probe.certify, reason }
+    declaredCertify: probe.certify, reason, ...runtime.unsupportedAvailability }
   runtime.evidence.result = result
   await runtime.testInfo.attach('walk-result', { body: Buffer.from(JSON.stringify(result)), contentType: 'application/json' })
   throw new UnsupportedLocalError(probe, reason)
@@ -485,7 +485,45 @@ export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
 ]))
 const localFixtureReason = (recipe) => `The isolated stack has no public fixture recipe for ${recipe.state}; required context ${JSON.stringify(recipe.context)}`
 
+export const TOOL_ARM_EFFECT_KINDS = Object.freeze(new Set(['opens']))
+const AVAILABILITY_FIELDS = Object.freeze(['entitled', 'engine_ready', 'input_ready', 'implemented'])
+
+export async function workerCatalog(workerFacts, request) {
+  workerFacts.catalogFetch ||= (async () => {
+    try {
+      const response = await request.get('/api/capabilities')
+      if (!response.ok()) throw new Error(`Catalog request failed: ${response.status()}`)
+      const catalog = await response.json()
+      if (!Array.isArray(catalog.families)
+        || !catalog.families.every((family) => Array.isArray(family.capabilities))) {
+        throw new Error('Catalog response has no capability families')
+      }
+      workerFacts.catalog = catalog
+    } catch (error) { workerFacts.catalogError = error }
+    return workerFacts.catalog
+  })()
+  return workerFacts.catalogFetch
+}
+
+export function toolAvailabilityEvidence(probe, workerFacts = {}) {
+  if (probe.kind !== 'tool' || !TOOL_ARM_EFFECT_KINDS.has(probe.assertion.kind)
+    || probe.assertion.target !== 'catalog-run-decision') return null
+  const tool = workerFacts.catalog?.families.flatMap((family) => family.capabilities)
+    .find((tool) => tool.name === probe.sourceId)
+  if (!tool?.availability || typeof tool.availability !== 'object'
+    || Array.isArray(tool.availability)) return null
+  const fields = AVAILABILITY_FIELDS.filter((field) => tool.availability[field] !== true)
+  if (!fields.length) return null
+  return { tool: tool.name, availability_fields_false: fields,
+    refusal_codes: Array.isArray(tool.availability.refusal_reasons) ? [...tool.availability.refusal_reasons] : [] }
+}
+
 export function unsupportedBeforeSetup(probe, workerFacts = {}) {
+  const unavailable = toolAvailabilityEvidence(probe, workerFacts)
+  if (unavailable) {
+    const codes = unavailable.refusal_codes.length ? ` (${unavailable.refusal_codes.join(',')})` : ''
+    return `The isolated stack cannot run ${unavailable.tool}: ${unavailable.availability_fields_false[0]} is false${codes}`
+  }
   for (const recipe of probe.setup.steps) {
     if (!HANDLED_SETUP_KINDS.has(recipe.kind) || recipe.kind === 'require-local-state') {
       return localFixtureReason({ state: probe.state, context: probe.setup.context, ...recipe })
@@ -804,9 +842,8 @@ export async function setupStep(probe, runtime, recipe) {
       await expect(page.getByRole('button', { name: `Run ${recipe.tool}`, exact: true })).toBeVisible()
       return
     case 'catalog-tool': {
-      const response = await page.request.get('/api/capabilities')
-      expect(response.ok()).toBe(true)
-      const catalog = await response.json()
+      const catalog = await workerCatalog(runtime.workerFacts, page.request)
+      if (!catalog) throw runtime.workerFacts.catalogError
       const tool = catalog.families.flatMap((family) => family.capabilities).find((tool) => tool.name === recipe.name)
       evidence.catalog = { requestedTool: recipe.name, response: catalog }
       if (!tool) await unsupported(probe, runtime, `The isolated catalog does not provide ${recipe.name}`)
@@ -1362,10 +1399,18 @@ export async function runProbe(probe, runtime) {
   runtime.cleanup = []
   runtime.workerFacts ||= evidence.workerFacts || { engineMounted: undefined }
   try {
+    if (probe.kind === 'tool' && typeof workerCatalog === 'function') {
+      await workerCatalog(runtime.workerFacts, page.request)
+    }
     // Source-extracted fake runners may omit module dependencies.
     const reason = typeof unsupportedBeforeSetup === 'function'
       ? unsupportedBeforeSetup(probe, runtime.workerFacts) : null
-    if (reason) await unsupported(probe, runtime, reason)
+    if (reason) {
+      if (typeof toolAvailabilityEvidence === 'function') {
+        runtime.unsupportedAvailability = toolAvailabilityEvidence(probe, runtime.workerFacts)
+      }
+      await unsupported(probe, runtime, reason)
+    }
     for (const recipe of probe.setup.steps) {
       await test.step(`Setup: ${recipe.kind}`, async () => {
         await setupStep(probe, runtime, recipe)

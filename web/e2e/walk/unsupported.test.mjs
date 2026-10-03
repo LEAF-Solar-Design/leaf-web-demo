@@ -2,7 +2,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { HANDLED_SETUP_KINDS, ENGINE_SETUP_KINDS, unsupportedBeforeSetup,
-  UnsupportedLocalError, setupStep } from './fixtures.mjs'
+  UnsupportedLocalError, setupStep, TOOL_ARM_EFFECT_KINDS, workerCatalog,
+  toolAvailabilityEvidence } from './fixtures.mjs'
+import { buildFeatureMap } from '../../walk/featureMap.mjs'
+import { resolveProbe } from './probes.mjs'
 
 const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -12,7 +15,7 @@ const unavailable = new AsyncFunction('probe', 'runtime', 'reason', 'Unsupported
   body('async function unsupported(probe, runtime, reason) {', '\nasync function engineReady'))
 const runner = new AsyncFunction('probe', 'runtime', 'test', 'setupStep', 'UnsupportedLocalError',
   'unsupportedBeforeSetup', 'unsupported', 'control', 'expect', 'collectProbeUxEvidence',
-  'captureBefore', 'activate', 'assertEffect',
+  'captureBefore', 'activate', 'assertEffect', 'workerCatalog', 'toolAvailabilityEvidence',
   body('export async function runProbe(probe, runtime) {', '\n// This reporter'))
 const evidenceFixture = new AsyncFunction('workerFacts', 'use', 'testInfo', source.slice(
   source.indexOf('walkEvidence: [async ({ workerFacts }, use, testInfo) => {')
@@ -23,14 +26,14 @@ const probeFor = (steps) => ({ featureId: 'action:unit', kind: 'action', state: 
   assertion: { assertionId: 'unit/effect', kind: 'renders' } })
 const engineReason = 'The production bundle has no mounted browser editing engine'
 
-async function run(probe, facts, { precheck = unsupportedBeforeSetup, fallbackReason } = {}) {
+async function run(probe, facts, { precheck = unsupportedBeforeSetup, fallbackReason, request } = {}) {
   const log = [], attachments = []
   const testInfo = { title: 'unit', project: { name: 'desktop' }, annotations: [],
     attach: async (name, attachment) => attachments.push({ name, ...attachment }) }
   let runtime, result
   await evidenceFixture(facts, async (evidence) => {
     evidence.stack = { ready: true, instance: 'one-worker' }
-    runtime = { page: {}, evidence, testInfo }
+    runtime = { page: { request }, evidence, testInfo }
     result = await runner(probe, runtime, { step: async (_name, fn) => fn() },
       async (_probe, current, recipe) => {
         log.push(recipe.kind)
@@ -39,7 +42,8 @@ async function run(probe, facts, { precheck = unsupportedBeforeSetup, fallbackRe
       (probe, current, reason) => unavailable(probe, current, reason, UnsupportedLocalError),
       () => ({}), () => ({ toBeVisible: async () => {} }),
       async () => { log.push('ux'); return [] }, async () => ({}),
-      async () => { log.push('activate') }, async () => { log.push('assert') })
+      async () => { log.push('activate') }, async () => { log.push('assert') },
+      workerCatalog, toolAvailabilityEvidence)
   }, testInfo)
   return { result, runtime, log, attachments }
 }
@@ -151,4 +155,89 @@ test('setup kind sets match dispatch and all transitive engine requirements', ()
       || text.includes("getByTestId('cad-edit-workbench')") || text.includes('page.workers()')
   }).map((match) => match[1])
   assert.deepEqual([...ENGINE_SETUP_KINDS].sort(), engineKinds.sort())
+})
+
+const solarEntry = buildFeatureMap().entries.find((entry) => entry.id === 'tool:solar-correct-string')
+const solarProbe = (state = 'ready') => resolveProbe(solarEntry, state)
+const readyAvailability = { entitled: true, engine_ready: true, input_ready: true, implemented: true }
+const catalogFor = (availability) => ({ families: [{ capabilities: [
+  { name: 'solar-correct-string', ...(availability === undefined ? {} : { availability }) },
+] }] })
+const requestFor = (catalog) => ({ get: async (path) => {
+  assert.equal(path, '/api/capabilities')
+  return { ok: () => true, json: async () => catalog }
+} })
+
+test('catalog input readiness declares a run decision before setup with availability evidence', async () => {
+  const catalog = catalogFor({ ...readyAvailability, input_ready: false,
+    refusal_reasons: ['drawing_context_required', 'solar_profile_required'] })
+  const early = await run(solarProbe(), {}, { request: requestFor(catalog) })
+  const reason = 'The isolated stack cannot run solar-correct-string: input_ready is false (drawing_context_required,solar_profile_required)'
+  assert.deepEqual(early.log, [])
+  assert.deepEqual(early.result, { unsupported: true, reason })
+  assert.deepEqual(early.runtime.testInfo.annotations, [{ type: 'unsupported_local', description: reason }])
+  assert.deepEqual(early.runtime.evidence.result, { featureId: solarEntry.id, state: 'ready',
+    result: 'unsupported_local', declaredCertify: solarProbe().certify, reason,
+    tool: 'solar-correct-string', availability_fields_false: ['input_ready'],
+    refusal_codes: ['drawing_context_required', 'solar_profile_required'] })
+  assert.deepEqual(JSON.parse(early.attachments[0].body).availability_fields_false, ['input_ready'])
+  assert.equal(early.runtime.evidence.steps.length, 0)
+})
+
+test('catalog availability leaves gate probes, ready tools and unknown facts on the normal path', async () => {
+  for (const [probe, catalog] of [
+    [solarProbe('write-locked'), catalogFor({ ...readyAvailability, input_ready: false })],
+    [solarProbe(), catalogFor(readyAvailability)],
+    [solarProbe(), catalogFor(undefined)],
+    [solarProbe(), { families: [] }],
+  ]) {
+    const normal = await run(probe, {}, { request: requestFor(catalog) })
+    assert.deepEqual(normal.log, [...probe.setup.steps.map((step) => step.kind), 'ux',
+      ...(probe.assertion.kind === 'disabled_with_reason' ? [] : ['activate']), 'assert'])
+    assert.equal(normal.runtime.evidence.result.result, 'passed')
+    assert.deepEqual(normal.runtime.testInfo.annotations, [])
+  }
+})
+
+test('catalog fetch is shared once per worker, including failures and concurrent callers', async () => {
+  for (const failure of [false, true]) {
+    const facts = {}, request = { get: async () => {
+      calls++
+      if (failure) throw new Error('catalog offline')
+      return { ok: () => true, json: async () => catalogFor(readyAvailability) }
+    } }
+    let calls = 0
+    await Promise.all([workerCatalog(facts, request), workerCatalog(facts, request)])
+    for (let index = 0; index < 2; index++) {
+      const normal = await run(solarProbe(), facts, { request })
+      assert.equal(normal.runtime.evidence.result.result, 'passed')
+      assert.equal(unsupportedBeforeSetup(solarProbe(), facts), null)
+    }
+    assert.equal(calls, 1)
+    if (failure) assert.equal(facts.catalog, undefined)
+  }
+})
+
+test('the frozen tool arm effect split follows the registry and excludes every refusal gate', () => {
+  assert.equal(Object.isFrozen(TOOL_ARM_EFFECT_KINDS), true)
+  assert.deepEqual([...TOOL_ARM_EFFECT_KINDS], ['opens'])
+  const map = buildFeatureMap()
+  const kinds = new Set()
+  for (const entry of map.entries.filter((entry) => entry.kind === 'tool')) {
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      if (probe.assertion.target === 'catalog-run-decision') kinds.add(probe.assertion.kind)
+      else assert.equal(TOOL_ARM_EFFECT_KINDS.has(probe.assertion.kind), false)
+    }
+  }
+  assert.deepEqual([...kinds].sort(), [...TOOL_ARM_EFFECT_KINDS].sort())
+  const facts = { catalog: catalogFor({ entitled: false, engine_ready: false,
+    input_ready: false, implemented: false }) }
+  assert.deepEqual(toolAvailabilityEvidence(solarProbe(), facts).availability_fields_false,
+    ['entitled', 'engine_ready', 'input_ready', 'implemented'])
+  assert.equal(unsupportedBeforeSetup(solarProbe(), facts),
+    'The isolated stack cannot run solar-correct-string: entitled is false')
+  for (const state of ['write-locked', 'write-unentitled', 'read-only', 'job-running', 'unsaved-engine-edits']) {
+    assert.equal(toolAvailabilityEvidence(solarProbe(state), facts), null)
+  }
 })
