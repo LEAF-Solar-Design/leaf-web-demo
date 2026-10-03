@@ -940,7 +940,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 106),
         # sf-w3-tracker-rows-domain: explicit manual tracker rows created once on the drawing's physical
         # head (server/solar_tracker_rows.py), converted end to end by the Ground conversion kernel.
-        # Hermetic and nothing skips: the floor is the exact count, 36.
+        # Hermetic and nothing skips: the floor is the exact count, 38.
         Suite("server-solar-tracker-rows", "server tests/test_solar_tracker_rows.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tracker_rows.py"), 38),
         # W5 dialog batch (2026-09-23, contract G30): server/solar_ground_dialogs.py (the shading
