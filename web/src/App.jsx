@@ -4141,7 +4141,7 @@ export default function App() {
                 />
               </div>
             ) : (
-            ENV_SOLAR_SETTINGS_FORM && ['conductors', 'sizing'].includes(solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext })) ? (
+            ENV_SOLAR_SETTINGS_FORM && ['conductors', 'sizing', 'strings'].includes(solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext })) ? (
               <SolarStepEditor
                 key={`${catalogRunContext?.drawingId ?? ''}:${solarFormTool.name}`}
                 row={solarFormTool}

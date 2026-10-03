@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
 import SolarConductorForm from './SolarConductorForm.jsx'
 import SolarSizingForm from './SolarSizingForm.jsx'
+import SolarStringComposer from './SolarStringComposer.jsx'
+import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL } from './solarStringComposerModel.js'
 import { solarFormKeys, solarView } from './solarView.js'
 import { solarFlowPrefill, solarFlowStepId } from './solarFlowModel.js'
 
@@ -31,7 +33,7 @@ export default function SolarStepEditor({
   const pending = status === 'pending'
 
   useEffect(() => {
-    if (['solar-string-conductors', 'solar-size-strings'].includes(row.name) || typeof readIntake !== 'function' || Object.keys(solarFlowPrefill(row, 0)).length === 0) return undefined
+    if (['solar-string-conductors', 'solar-size-strings', STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(row.name) || typeof readIntake !== 'function' || Object.keys(solarFlowPrefill(row, 0)).length === 0) return undefined
     let current = true
     Promise.resolve()
       .then(() => readIntake(drawingId, drawingVersion))
@@ -78,6 +80,9 @@ export default function SolarStepEditor({
       ) : row.name === 'solar-size-strings' ? (
         <SolarSizingForm row={row} drawingId={drawingId} drawingVersion={drawingVersion} projectId={projectId}
           readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} />
+      ) : [STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(row.name) ? (
+        <SolarStringComposer row={row} drawingId={drawingId} drawingVersion={drawingVersion} projectId={projectId}
+          readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} onClose={close} />
       ) : <>
       <SchemaForm schema={schema} values={values} onChange={change} />
       {pending && <p role="status" className="solar-step-note">This step is running. Confirm or wait for it to finish.</p>}
@@ -93,7 +98,7 @@ export default function SolarStepEditor({
         <button type="button" className="chip-act" onClick={() => onSubmit(row, values)}>Retry</button>
       )}
       </>}
-      <button type="button" className="chip-act" onClick={close}>Cancel</button>
+      {![STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(row.name) && <button type="button" className="chip-act" onClick={close}>Cancel</button>}
     </section>
   )
 }
