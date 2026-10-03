@@ -3,13 +3,14 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { connect, createServer } from 'node:net'
-import { freemem, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { prepareProductionBundle, startSameOriginProxy } from './sameOriginProxy.mjs'
 import { createStackDatabase, dropStaleStackDatabases, prepareStackDatabase } from './pgStack.mjs'
 import { readProcessTable, measureWithRetry } from './processTable.mjs'
+import { availableMemory } from './memory.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const python = process.env.LEAF_TEST_PYTHON || process.env.PYTHON || 'python'
@@ -159,7 +160,7 @@ async function executeAdmission(argv) {
 export async function defaultAdmission() {
   if (process.env.LEAF_WALK_ADMISSION_CMD) return executeAdmission(commandArgs(process.env.LEAF_WALK_ADMISSION_CMD))
   if (existsSync(admissionScript)) return executeAdmission([python, '-B', admissionScript, '--kind', 'walk_local', '--json'])
-  return freemem() >= ramFloor ? { status: 'admitted', slots: 2, source: 'local' } : { status: 'queued', slots: 0, reason: 'Less than 6 GiB free RAM' }
+  return availableMemory() >= ramFloor ? { status: 'admitted', slots: 2, source: 'local' } : { status: 'queued', slots: 0, reason: 'Less than 6 GiB free RAM' }
 }
 
 function slotCap(value, label) {
@@ -339,7 +340,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
   if (status === 'queued') throw new QueuedError(answer?.reason, answer)
   if (status !== 'admitted') throw new StoppedError(answer?.reason || 'Admission did not explicitly admit the stack', answer)
   const cap = Math.min(slotCap(slots, 'slots'), slotCap(process.env.LEAF_WALK_SLOTS, 'LEAF_WALK_SLOTS'), slotCap(answer?.slots, 'admission slots'))
-  if (cap === 0 || freemem() < ramFloor) throw new QueuedError(cap === 0 ? 'Zero local stack slots available' : 'Less than 6 GiB free RAM', answer)
+  if (cap === 0 || availableMemory() < ramFloor) throw new QueuedError(cap === 0 ? 'Zero local stack slots available' : 'Less than 6 GiB free RAM', answer)
   if (pendingSlots.has(slot)) throw new QueuedError(`Stack slot ${slot} is already owned`)
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError('timeoutMs must be positive')
   pendingSlots.add(slot)
@@ -426,7 +427,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
       ...['app', 'broker', 'harness', 'web'].flatMap((role) => [`--${role}-port`, String(state.ports[role])])]
     // The cached build/preparation may have waited on another worker. An
     // earlier admission never licenses crossing the RAM floor at spawn time.
-    if (freemem() < ramFloor) throw new QueuedError('Less than 6 GiB free RAM before stack launch', answer)
+    if (availableMemory() < ramFloor) throw new QueuedError('Less than 6 GiB free RAM before stack launch', answer)
     const start = performance.now()
     state.child = spawn(python, args, { cwd: repo, env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     if (state.child.pid) state.pids.add(state.child.pid)
