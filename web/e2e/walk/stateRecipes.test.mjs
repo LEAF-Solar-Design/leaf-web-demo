@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
-import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON } from './fixtures.mjs'
+import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure } from './fixtures.mjs'
 
 // Exercise the real runner seams without booting the worker-stack fixture.
 const expect = (value) => ({
@@ -11,6 +11,111 @@ const expect = (value) => ({
   toBeVisible: async () => assert.equal(value.visible, true),
   toBeHidden: async () => assert.equal(value.visible, false),
   toHaveCount: async (expected) => assert.equal(value.countValue, expected),
+})
+
+test('failed drawing setup accepts an empty canvas and requires the product no-drawing signal on each surface', async () => {
+  for (const surface of ['cad', 'solar', 'browser', 'ios']) {
+    const undo = { visible: true, disabled: true }
+    const page = {
+      goto: async (url) => assert.equal(url, `/app?surface=${surface}&drawing=missing.invalid`),
+      waitForResponse: async (predicate) => {
+        const response = { url: () => 'http://walk/api/session?dwg=missing.invalid',
+          status: () => 404, json: async () => ({ error: 'missing drawing' }) }
+        assert.equal(predicate(response), true)
+        return response
+      },
+      locator: () => assert.fail('canvas count cannot establish drawing readiness'),
+      getByRole: (role, options) => {
+        if (role === 'alert') return { filter: () => ({ visible: true }) }
+        assert.equal(role, 'toolbar')
+        assert.deepEqual(options, { name: 'Quick access', exact: true })
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          assert.deepEqual(options, { name: 'Undo version (unavailable: no versioned drawing)', exact: true })
+          return undo
+        } }
+      },
+    }
+    const assertions = (value) => ({ ...expect(value),
+      toContain: (expected) => assert.ok(value.includes(expected)),
+      toBeDisabled: async () => assert.equal(value.disabled, true),
+    })
+    const runtime = { page, evidence: {} }
+    await setupStep({}, runtime, { kind: 'open-failed-drawing',
+      url: `/app?surface=${surface}&drawing=missing.invalid` }, assertions)
+    assert.equal(runtime.failedDrawing, true)
+    assert.equal(runtime.evidence.failedDrawing.status, 404)
+    undo.disabled = false
+    await assert.rejects(requireNoDrawing(page, assertions), assert.AssertionError)
+    undo.disabled = true
+    undo.visible = false
+    await assert.rejects(requireNoDrawing(page, assertions), assert.AssertionError)
+  }
+})
+
+test('ready Solar catalog setup requires the browser drawing query and exact enabled tool', async () => {
+  for (const name of ['solar-settings', 'solar-string-data']) {
+    const events = []
+    const button = { visible: true, enabled: true }
+    const page = {
+      waitForResponse: async (predicate, options) => {
+        assert.equal(options.timeout, 15_000)
+        const response = (query) => ({ url: () => `http://walk/api/capabilities${query}`,
+          request: () => ({ method: () => 'GET' }), ok: () => true })
+        assert.equal(predicate(response('')), false)
+        assert.equal(predicate(response('?drawing_id=other')), false)
+        assert.equal(predicate(response('?drawing_id=private&drawing_version=2')), true)
+        events.push('browser catalog')
+        return response('?drawing_id=private&drawing_version=2')
+      },
+      goto: async (url) => {
+        assert.equal(url, '/app?drawing=private&surface=solar')
+        events.push('private drawing')
+      },
+      request: { get: async (path) => {
+        assert.equal(path, '/api/capabilities?drawing_id=private&drawing_version=2')
+        return { ok: () => true, json: async () => ({ families: [{ label: 'Stringing', capabilities: [{ name,
+          availability: { entitled: true, engine_ready: true, input_ready: true, implemented: true } }] }] }) }
+      } },
+      getByRole: (role, options) => {
+        if (role === 'tablist') return { getByRole: (_role, options) => ({ click: async () => events.push(options.name) }) }
+        if (role === 'button') {
+          assert.equal(options.name, 'More panels')
+          return { isVisible: async () => false }
+        }
+        assert.equal(role, 'toolbar')
+        assert.equal(options.name, 'Drafting tools')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'group')
+          assert.equal(options.name, 'Stringing')
+          return { getByRole: (role, options) => {
+            assert.equal(role, 'button')
+            assert.deepEqual(options, { name, exact: true })
+            events.push('exact tool')
+            return button
+          } }
+        } }
+      },
+    }
+    const assertions = (value) => ({
+      toBe: (expected) => assert.equal(value, expected),
+      toBeVisible: async () => { events.push('visible'); assert.equal(value.visible, true) },
+      toBeEnabled: async () => { events.push('enabled'); assert.equal(value.enabled, true) },
+    })
+    const probe = { kind: 'tool', sourceId: name, state: 'ready', assertion: { kind: 'opens', target: 'catalog-run-decision' } }
+    const runtime = { page, drawingId: 'private', drawingVersion: 2, evidence: {}, recipeAssertions: assertions }
+    await setupStep(probe, runtime, { kind: 'catalog-tool', name })
+    assert.deepEqual(events, ['Manage', 'browser catalog', 'private drawing', 'Manage', 'exact tool', 'visible', 'enabled'])
+    assert.equal(runtime.evidence.browserCatalog.drawingId, 'private')
+    button.enabled = false
+    await assert.rejects(setupStep(probe, runtime, { kind: 'catalog-tool', name }), assert.AssertionError)
+    button.enabled = true
+    button.visible = false
+    await assert.rejects(setupStep(probe, runtime, { kind: 'catalog-tool', name }), assert.AssertionError)
+    button.visible = true
+    page.waitForResponse = async () => { throw new Error('No browser drawing query') }
+    await assert.rejects(setupStep(probe, runtime, { kind: 'catalog-tool', name }), /No browser drawing query/)
+  }
 })
 
 function fakePage() {
@@ -86,26 +191,35 @@ test('versionless probes attach unsupported evidence before requests, setup or a
   }
 })
 
-test('Solar panel selection declares its fixture gap without attempting canvas calibration', async () => {
+test('Solar panel selection declares only an observed calibration failure after setup starts', async () => {
   const attachments = []
   const runtime = { evidence: { steps: [] }, page: {},
-    runStep: async () => assert.fail('missing calibration must not run setup'),
+    runStep: async (name, callback) => {
+      assert.equal(name, 'Setup: select-entity')
+      await callback()
+    },
     testInfo: { annotations: [], attach: async (name, attachment) => {
       attachments.push({ name, body: JSON.parse(attachment.body.toString()) })
     } } }
   const probe = { featureId: 'action:solar-panels-move', kind: 'action', state: 'ready', certify: 'local',
     locator: { group: 'solar-panels' },
-    setup: { steps: [{ kind: 'open-private-drawing' }, { kind: 'select-entity', type: 'LINE', editable: true }] },
+    setup: { steps: [{ kind: 'select-entity', type: 'LINE', editable: true }] },
     assertion: { assertionId: 'solar-panels-move/oracle' } }
-  assert.deepEqual(await runProbe(probe, runtime), { unsupported: true, reason: SOLAR_PANEL_CALIBRATION_REASON })
-  assert.equal(runtime.evidence.result.result, 'unsupported_local')
-  assert.equal(runtime.evidence.result.reason, SOLAR_PANEL_CALIBRATION_REASON)
+  // Classification is deliberately recipe-, surface- and exact-message-specific.
+  const recipe = probe.setup.steps[0]
+  const error = new Error('The drawing needs two uncovered calibration points')
+  assert.equal(solarCalibrationFailure(probe, recipe, error), true)
+  assert.equal(solarCalibrationFailure({ ...probe, locator: { group: 'modify' } }, recipe, error), false)
+  assert.equal(solarCalibrationFailure(probe, { ...recipe, viewerOnly: true }, error), false)
+  // A missing page seam is an ordinary setup error, never an early Solar declaration.
+  await assert.rejects(runProbe(probe, runtime))
+  assert.equal(runtime.evidence.result, undefined)
   assert.equal(runtime.evidence.setupCompleted, undefined)
   assert.equal(runtime.evidence.oracleReached, undefined)
   assert.deepEqual(runtime.evidence.steps, [])
   assert.equal(runtime.evidence.cleanupCompleted, true)
-  assert.deepEqual(attachments, [{ name: 'walk-result', body: runtime.evidence.result }])
-  assert.deepEqual(runtime.testInfo.annotations, [{ type: 'unsupported_local', description: SOLAR_PANEL_CALIBRATION_REASON }])
+  assert.deepEqual(attachments, [])
+  assert.deepEqual(runtime.testInfo.annotations, [])
 })
 
 test('ready redo restores a saved version, undoes it and checks the real head before seating the workspace', async () => {
@@ -139,6 +253,7 @@ test('read-only uses the registry History name, explicitly previews non-head and
   assert.equal(page.events.find((event) => event.role === 'button' && event.name === 'history').name,
     accessibleName(ACTIONS.find((action) => action.id === 'history').label))
   assert.deepEqual(runtime.evidence.versionPreview, { head: 2, preview: 1, restoredFrom: 1 })
+  assert.equal(runtime.drawingVersion, 1)
   assert.equal(runtime.ribbonTab, 'Manage')
   assert.equal(page.events.at(-1).name, 'Manage')
   assert.ok(page.events.find((event) => event.reload))
@@ -179,17 +294,20 @@ test('job setup requires accepted submission and visible pending UI, then restor
     assert.equal(selector, '.strip-running')
     return { get visible() { return pending } }
   }
-  const runtime = { page, evidence: {}, cleanup: [], ribbonTab: 'View', workerFacts: {} }
+  const runtime = { page, evidence: {}, cleanup: [], ribbonTab: 'View', catalogPanelName: 'Original panel', workerFacts: {} }
   await startPendingRun({}, runtime, expect)
   assert.deepEqual(runtime.evidence.pendingRun, { tool: 'count-by-layer', jobId: 'real-job', status: 202, pendingVisible: true })
   assert.equal(runtime.ribbonTab, 'View')
+  assert.equal(runtime.catalogPanelName, 'Original panel')
   await runtime.cleanup.pop()()
   status = 200
   await assert.rejects(startPendingRun({}, runtime, expect))
+  assert.equal(runtime.catalogPanelName, 'Original panel')
   await runtime.cleanup.pop()()
   status = 202
   pending = false
   await assert.rejects(startPendingRun({}, runtime, expect))
+  assert.equal(runtime.catalogPanelName, 'Original panel')
   await runtime.cleanup.pop()()
 })
 

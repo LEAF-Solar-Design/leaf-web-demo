@@ -13,6 +13,7 @@ const knownProofSpecs = [
   'w1p-states.spec.mjs',
   'w1w-engine-recipes.spec.mjs',
   'w1x-recipes.spec.mjs',
+  'w1y-recipes.spec.mjs',
 ]
 
 function specFiles(directory, prefix = '') {
