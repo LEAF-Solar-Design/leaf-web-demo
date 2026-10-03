@@ -1,7 +1,8 @@
 name: Reconcile staging fleet
 
 # ---------------------------------------------------------------------------
-# ARMED (R6, 2026-10-03). RECONCILE_ARMED is "true", so a scheduled run acts on
+# ARMED (R6, 2026-10-03). RECONCILE_ARMED is "true", so a scheduled run or a
+# successful staging relay completion on main acts on
 # its plan, bringing the non-relay services onto the newest converged release
 # and then stamping the five-service deployment identity. It acts only when
 # the plan is armable, yields while any relay or staging deployment is active,
@@ -51,6 +52,10 @@ name: Reconcile staging fleet
 # ---------------------------------------------------------------------------
 
 on:
+  workflow_run:
+    workflows: [Dispatch staging deploys]
+    types: [completed]
+    branches: [main]
   schedule:
     # Every 30 minutes. The lane is cheap when it only reports (a bounded set
     # of GET reads) and coalescing means a missed tick costs nothing: the next
@@ -84,6 +89,7 @@ concurrency:
 jobs:
   plan:
     name: Resolve the staging fleet reconcile plan
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: codebuild-leaf-gha-runner-web-demo-${{ github.run_id }}-${{ github.run_attempt }}
     # Long enough for a full armed sequence behind the shared staging lock
     # (~63 minutes of legs at the medians above) plus its own polling.
