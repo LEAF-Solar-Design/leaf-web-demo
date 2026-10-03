@@ -234,10 +234,11 @@ function observations(feature_id, state, viewport, evidence) {
   const findings = []
   const add = (kind, measurement) => findings.push({ feature_id, category: kind,
     evidence: { kind, state, viewport, ...measurement } })
-  add('console_errors', { count: count(evidence.consoleErrors) })
-  add('page_errors', { count: count(evidence.pageErrors) })
-  add('failed_requests', { count: count(evidence.failedRequests) })
-  add('steps', { count: count(evidence.steps) })
+  for (const [kind, values] of [['console_errors', evidence.consoleErrors], ['page_errors', evidence.pageErrors],
+    ['failed_requests', evidence.failedRequests], ['steps', evidence.steps]]) {
+    const total = count(values)
+    if (total > 0) add(kind, { count: total })
+  }
   if (Number.isFinite(evidence.timeToTaskMs) && evidence.timeToTaskMs >= 0) add('time_to_task', { milliseconds: evidence.timeToTaskMs })
   for (const violation of evidence.accessibility?.violations || []) {
     // Never propagate html, targets, help text, model prose or arbitrary ids.
