@@ -692,6 +692,26 @@ class LaneShapeTests(unittest.TestCase):
         after two proven manual armed runs; reverting the flag restores reporting."""
         self.assertEqual(self.lane()["env"]["RECONCILE_ARMED"], "true")
 
+    def test_successful_main_relay_completion_also_triggers_the_plan(self) -> None:
+        lane = self.lane()
+        triggers = lane[True] if True in lane else lane["on"]
+        self.assertEqual(triggers["workflow_run"], {
+            "workflows": ["Dispatch staging deploys"],
+            "types": ["completed"],
+            "branches": ["main"],
+        })
+        self.assertEqual(triggers["schedule"], [{"cron": "7,37 * * * *"}])
+        self.assertIn("workflow_dispatch", triggers)
+        self.assertEqual(
+            lane["jobs"]["plan"]["if"],
+            "github.event_name != 'workflow_run' || "
+            "github.event.workflow_run.conclusion == 'success'",
+        )
+        self.assertEqual(lane["concurrency"], {
+            "group": "reconcile-staging-fleet",
+            "cancel-in-progress": False,
+        })
+
     def test_the_diagnostic_upload_is_best_effort_and_short_lived(self) -> None:
         """The plan artifact has no consumer in the repo: every later step
         reads the local file. Its upload sits BEFORE the arm decision and the
@@ -759,11 +779,31 @@ class LaneShapeTests(unittest.TestCase):
         self.assertEqual(decider["env"]["ARMED_BY_INPUT"], "${{ inputs.arm }}")
         self.assertIn('ARMABLE=$(jq -r \'.armable\' staging-fleet-reconcile-plan.json)', decider["run"])
         self.assertIn('if [ "$WANTED" = "true" ] && [ "$ARMABLE" = "true" ]; then', decider["run"])
+        self.assertEqual(decider["run"], """\
+set -euo pipefail
+ARMABLE=$(jq -r '.armable' staging-fleet-reconcile-plan.json)
+WANTED=false
+if [ "$ARMED_BY_DEFAULT" = "true" ] || [ "$ARMED_BY_INPUT" = "true" ]; then
+  WANTED=true
+fi
+# Fails CLOSED: anything that is not the exact string "true" on both
+# sides leaves this reporting only.
+if [ "$WANTED" = "true" ] && [ "$ARMABLE" = "true" ]; then
+  echo "act=true" >> "$GITHUB_OUTPUT"
+  echo "::notice::Armed and armable; acting on the plan."
+else
+  echo "act=false" >> "$GITHUB_OUTPUT"
+  echo "::notice::Report only (armed=$WANTED, armable=$ARMABLE)."
+  jq -r '.not_armable_because[]?' staging-fleet-reconcile-plan.json \\
+    | sed 's/^/::notice::blocked by: /'
+fi
+""")
         acting = next(
             s for s in lane["jobs"]["plan"]["steps"]
             if "gh workflow run" in str(s.get("run", ""))
         )
         self.assertEqual(acting["if"], "steps.arm.outputs.act == 'true'")
+        self.assertNotIn("workflow_run", acting["run"])
 
 
 class ValidationTests(unittest.TestCase):
