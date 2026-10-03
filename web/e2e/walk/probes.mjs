@@ -153,6 +153,7 @@ export function locatorRecipe(entry, state) {
     }
     return { ...role(property ? 'combobox' : 'button', accessibleName(property ? action.text : action.label, why),
       role('toolbar', 'Drafting tools')), trigger: property ? 'select' : 'click',
+    ...(effect.kind === 'disabled_with_reason' ? { unavailableName: new RegExp(`^${escapePattern(property ? action.text : action.label)}(?: \\(unavailable: .+\\))?$`) } : {}),
     ...(state === 'no-drawing' ? { availableName: property ? action.text : action.label } : {}),
     ...(action.panel || action.cluster || action.group ? { group: action.panel || action.cluster || action.group } : {}) }
   }
@@ -206,6 +207,7 @@ export function stateRecipe(entry, state) {
   const effect = entry.expected_effect[state]
   const surface = entry.kind === 'tab' ? profileSurfaces[entry.profile]
     : entry.kind === 'surface' ? entry.source_id
+      : entry.kind === 'tool' && entry.source_id.startsWith('solar-') && state === 'ready' ? 'solar'
       : entry.kind === 'action' && actionRecord(entry).panel === 'solar-panels' ? 'solar' : 'cad'
   const steps = []
   if (entry.kind === 'control') {
@@ -240,7 +242,7 @@ export function stateRecipe(entry, state) {
   if (surface === 'sheets') return { context, steps: [step('navigate', { url: '/sheets' })] }
   if (state === 'no-drawing' && entry.kind === 'action') {
     return { context, steps: [
-      step('open-failed-drawing', { url: '/app?surface=cad&drawing=missing.invalid' }),
+      step('open-failed-drawing', { url: `/app?surface=${surface}&drawing=missing.invalid` }),
       step('failed-drawing-ribbon-tab', { name: actionTab(actionRecord(entry)) }),
     ] }
   }
@@ -262,7 +264,10 @@ export function stateRecipe(entry, state) {
       }))
     } else if (action.op && context.session?.engineParsed) steps.push(step('engine-ready'))
   }
-  if (entry.kind === 'tool') steps.push(step('catalog-tool', { name: entry.source_id }))
+  if (entry.kind === 'tool') {
+    if (entry.source_id.startsWith('solar-')) steps.push(step('seed-solar-graph'))
+    steps.push(step('catalog-tool', { name: entry.source_id }))
+  }
   if (state === 'no-versioned-drawing') steps.push(step('require-versionless-drawing'))
   if (entry.kind === 'drawer') {
     const name = drawerNames[entry.source_id]
@@ -298,7 +303,7 @@ export function stateRecipe(entry, state) {
     || state.startsWith('retry-')) {
     steps.push(step('require-local-state', { state, context }))
   }
-  if (entry.kind === 'surface') steps.push(step('require-surface-context', { context }))
+  if (entry.kind === 'surface') steps.push(step('require-surface-context', { surface, context }))
   if (effect.target === 'viewer-home') steps.push(step('zoom-before-fit', {
     control: role('button', 'Zoom in', role('toolbar', 'View')),
   }))

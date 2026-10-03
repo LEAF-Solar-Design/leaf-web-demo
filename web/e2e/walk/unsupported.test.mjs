@@ -3,7 +3,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { HANDLED_SETUP_KINDS, ENGINE_SETUP_KINDS, unsupportedBeforeSetup,
   UnsupportedLocalError, setupStep, TOOL_ARM_EFFECT_KINDS, workerCatalog,
-  toolAvailabilityEvidence } from './fixtures.mjs'
+  toolAvailabilityEvidence, catalogSolarNeedsDrawing, readWalkBuildFlags, CATALOG_SOLAR_FLAG_REASON } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
 
@@ -15,7 +15,7 @@ const unavailable = new AsyncFunction('probe', 'runtime', 'reason', 'Unsupported
   body('async function unsupported(probe, runtime, reason) {', '\nasync function engineReady'))
 const runner = new AsyncFunction('probe', 'runtime', 'test', 'setupStep', 'UnsupportedLocalError',
   'unsupportedBeforeSetup', 'unsupported', 'control', 'expect', 'collectProbeUxEvidence',
-  'captureBefore', 'activate', 'assertEffect', 'workerCatalog', 'toolAvailabilityEvidence',
+  'captureBefore', 'activate', 'assertEffect', 'workerCatalog', 'toolAvailabilityEvidence', 'readWalkBuildFlags',
   body('export async function runProbe(probe, runtime) {', '\n// This reporter'))
 const evidenceFixture = new AsyncFunction('workerFacts', 'use', 'testInfo', source.slice(
   source.indexOf('walkEvidence: [async ({ workerFacts }, use, testInfo) => {')
@@ -26,7 +26,61 @@ const probeFor = (steps) => ({ featureId: 'action:unit', kind: 'action', state: 
   assertion: { assertionId: 'unit/effect', kind: 'renders' } })
 const engineReason = 'The production bundle has no mounted browser editing engine'
 
-async function run(probe, facts, { precheck = unsupportedBeforeSetup, fallbackReason, request } = {}) {
+test('catalog Solar drawing states gate on the manifest flag before setup', async () => {
+  const entries = buildFeatureMap().entries.filter((entry) => entry.kind === 'tool' && entry.source_id.startsWith('solar-'))
+  for (const entry of entries) {
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      assert.equal(catalogSolarNeedsDrawing(probe), true)
+      assert.equal(unsupportedBeforeSetup(probe, { buildFlags: {} }), CATALOG_SOLAR_FLAG_REASON)
+      assert.notEqual(unsupportedBeforeSetup(probe, { buildFlags: { VITE_SOLAR_SETTINGS_FORM: '1' } }), CATALOG_SOLAR_FLAG_REASON)
+    }
+  }
+  const probe = resolveProbe(entries.find((entry) => entry.source_id === 'solar-settings'), 'ready')
+  for (const flag of [undefined, '0', '1']) {
+    const flags = flag === undefined ? {} : { VITE_SOLAR_SETTINGS_FORM: flag }
+    let fetches = 0
+    const runtime = { workerFacts: {}, evidence: { steps: [] }, testInfo: { attach: async () => {} },
+      page: { request: { get: async (path) => {
+        fetches++
+        assert.equal(path, '/.leaf-walk-build.json')
+        return { ok: () => true, json: async () => ({ flags }) }
+      } } } }
+    await Promise.all([readWalkBuildFlags(probe, runtime), readWalkBuildFlags(probe, runtime)])
+    await readWalkBuildFlags(probe, { ...runtime, evidence: {} })
+    assert.equal(fetches, 1)
+    assert.deepEqual(runtime.workerFacts.buildFlags, flags)
+    assert.equal(runtime.evidence.result, undefined)
+    assert.equal(unsupportedBeforeSetup(probe, runtime.workerFacts), flag === '1' ? null : CATALOG_SOLAR_FLAG_REASON)
+    assert.deepEqual(runtime.evidence.buildFlags, flags)
+    assert.deepEqual(runtime.evidence.steps, [])
+    if (flag !== '1') {
+      const early = await run(probe, {}, { readBuild: true, request: runtime.page.request })
+      assert.deepEqual(early.log, [])
+      assert.deepEqual(early.result, { unsupported: true, reason: CATALOG_SOLAR_FLAG_REASON })
+      assert.deepEqual(early.runtime.evidence.result.flags, flags)
+      assert.equal(early.runtime.evidence.oracleReached, undefined)
+      assert.equal(early.runtime.evidence.cleanupCompleted, true)
+    } else {
+      const normal = await run(probe, {}, { readBuild: true, request: { get: async (path) => {
+        assert.ok(path === '/.leaf-walk-build.json' || path === '/api/capabilities')
+        return { ok: () => true, json: async () => path === '/.leaf-walk-build.json'
+          ? { flags } : { families: [] } }
+      } } })
+      assert.deepEqual(normal.log, [...probe.setup.steps.map((step) => step.kind), 'ux', 'activate', 'assert'])
+      assert.equal(normal.runtime.evidence.result.result, 'passed')
+      assert.equal(normal.runtime.evidence.oracleReached, probe.assertion.assertionId)
+    }
+  }
+  const refusal = { ...probe, assertion: { kind: 'disabled_with_reason', reason_code: 'drawing_context_required' } }
+  assert.equal(catalogSolarNeedsDrawing(refusal), false)
+  await readWalkBuildFlags(refusal, { page: {} })
+  await readWalkBuildFlags(probeFor([]), { page: {} })
+  assert.ok(source.indexOf('export async function readWalkBuildFlags') < source.indexOf('async function baselineThreeState'))
+  assert.ok(source.indexOf('await readWalkBuildFlags(probe, runtime)') < source.indexOf('for (const recipe of probe.setup.steps)', source.indexOf('export async function runProbe')))
+})
+
+async function run(probe, facts, { precheck = unsupportedBeforeSetup, fallbackReason, request, readBuild = false } = {}) {
   const log = [], attachments = []
   const testInfo = { title: 'unit', project: { name: 'desktop' }, annotations: [],
     attach: async (name, attachment) => attachments.push({ name, ...attachment }) }
@@ -43,7 +97,7 @@ async function run(probe, facts, { precheck = unsupportedBeforeSetup, fallbackRe
       () => ({}), () => ({ toBeVisible: async () => {} }),
       async () => { log.push('ux'); return [] }, async () => ({}),
       async () => { log.push('activate') }, async () => { log.push('assert') },
-      workerCatalog, toolAvailabilityEvidence)
+      workerCatalog, toolAvailabilityEvidence, readBuild ? readWalkBuildFlags : undefined)
   }, testInfo)
   return { result, runtime, log, attachments }
 }
@@ -135,6 +189,10 @@ test('setup kind sets match dispatch and all transitive engine requirements', ()
   assert.deepEqual([...HANDLED_SETUP_KINDS].sort(), cases.map((match) => match[1]).sort())
   assert.equal(Object.isFrozen(HANDLED_SETUP_KINDS), true)
   assert.equal(Object.isFrozen(ENGINE_SETUP_KINDS), true)
+  for (const kind of ['saved-version-history', 'require-versionless-drawing', 'seed-solar-graph']) {
+    assert.equal(HANDLED_SETUP_KINDS.has(kind), true)
+    assert.equal(ENGINE_SETUP_KINDS.has(kind), false)
+  }
   const declarations = [...source.slice(0, source.indexOf('export async function setupStep'))
     .matchAll(/async function (\w+)\(/g)]
   const needsEngine = new Set(['engineReady'])
@@ -148,9 +206,13 @@ test('setup kind sets match dispatch and all transitive engine requirements', ()
       }
     }
   } while (changed)
+  // Solar surface readiness checks its engine during setup; browser and CAD
+  // contexts must not acquire an unconditional engine pre-check from it.
+  assert.equal(ENGINE_SETUP_KINDS.has('require-surface-context'), false)
   const engineKinds = cases.filter((match, index) => {
     const text = dispatch.slice(match.index, cases[index + 1]?.index ?? dispatch.length)
       .replace(/await selectEntity\([^\n]*viewerOnly: true[^\n]*/g, '')
+      .replace(/if \(recipe\.surface === 'solar'[\s\S]*?\n      }/g, '')
     return [...needsEngine].some((name) => text.includes(`await ${name}(`))
       || text.includes("getByTestId('cad-edit-workbench')") || text.includes('page.workers()')
   }).map((match) => match[1])
@@ -168,12 +230,40 @@ const requestFor = (catalog) => ({ get: async (path) => {
   return { ok: () => true, json: async () => catalog }
 } })
 
-test('catalog input readiness declares a run decision before setup with availability evidence', async () => {
+test('catalog input readiness declares a run decision after drawing and graph setup with availability evidence', async () => {
   const catalog = catalogFor({ ...readyAvailability, input_ready: false,
     refusal_reasons: ['drawing_context_required', 'solar_profile_required'] })
-  const early = await run(solarProbe(), {}, { request: requestFor(catalog) })
+  const probe = solarProbe()
+  const log = [], attachments = []
+  const testInfo = { title: 'unit', project: { name: 'desktop' }, annotations: [],
+    attach: async (name, attachment) => attachments.push({ name, ...attachment }) }
+  let runtime, result
+  await evidenceFixture({ catalog: catalogFor({ ...readyAvailability, input_ready: false }) }, async (evidence) => {
+    runtime = { page: { request: { get: async (path) => {
+      assert.deepEqual(log, probe.setup.steps.map((step) => step.kind))
+      assert.equal(path, '/api/capabilities?drawing_id=unit.drawing&drawing_version=2')
+      log.push('catalog')
+      return { ok: () => true, json: async () => catalog }
+    } } }, evidence, testInfo }
+    result = await runner(probe, runtime, { step: async (_name, fn) => fn() },
+      async (_probe, current, recipe) => {
+        log.push(recipe.kind)
+        if (recipe.kind === 'open-private-drawing') current.drawingId = 'unit.drawing'
+        if (recipe.kind === 'seed-solar-graph') {
+          assert.equal(current.drawingId, 'unit.drawing')
+          current.drawingVersion = 2
+        }
+      }, UnsupportedLocalError, unsupportedBeforeSetup,
+      (probe, current, reason) => unavailable(probe, current, reason, UnsupportedLocalError),
+      () => { throw new Error('control reached before refusal') }, () => ({}),
+      async () => [], async () => ({}), async () => {}, async () => {},
+      workerCatalog, toolAvailabilityEvidence)
+  }, testInfo)
+  const early = { result, runtime, log, attachments }
   const reason = 'The isolated stack cannot run solar-correct-string: input_ready is false (drawing_context_required,solar_profile_required)'
-  assert.deepEqual(early.log, [])
+  assert.equal(probe.setup.steps.some((step) => step.kind === 'open-private-drawing'), true)
+  assert.equal(probe.setup.steps.some((step) => step.kind === 'seed-solar-graph'), true)
+  assert.deepEqual(early.log, [...probe.setup.steps.map((step) => step.kind), 'catalog'])
   assert.deepEqual(early.result, { unsupported: true, reason })
   assert.deepEqual(early.runtime.testInfo.annotations, [{ type: 'unsupported_local', description: reason }])
   assert.deepEqual(early.runtime.evidence.result, { featureId: solarEntry.id, state: 'ready',
@@ -181,7 +271,8 @@ test('catalog input readiness declares a run decision before setup with availabi
     tool: 'solar-correct-string', availability_fields_false: ['input_ready'],
     refusal_codes: ['drawing_context_required', 'solar_profile_required'] })
   assert.deepEqual(JSON.parse(early.attachments[0].body).availability_fields_false, ['input_ready'])
-  assert.equal(early.runtime.evidence.steps.length, 0)
+  assert.deepEqual(early.runtime.evidence.steps, probe.setup.steps.map((step) => ({ phase: 'setup', ...step })))
+  assert.equal(typeof early.runtime.evidence.setupCompleted.elapsedMs, 'number')
 })
 
 test('catalog availability leaves gate probes, ready tools and unknown facts on the normal path', async () => {
@@ -199,23 +290,53 @@ test('catalog availability leaves gate probes, ready tools and unknown facts on 
   }
 })
 
-test('catalog fetch is shared once per worker, including failures and concurrent callers', async () => {
+test('catalog fetch shares concurrent drawing/version callers, refreshes readiness and isolates failures', async () => {
   for (const failure of [false, true]) {
-    const facts = {}, request = { get: async () => {
-      calls++
+    const facts = {}, calls = [], request = { get: async (path) => {
+      calls.push(path)
       if (failure) throw new Error('catalog offline')
       return { ok: () => true, json: async () => catalogFor(readyAvailability) }
     } }
-    let calls = 0
-    await Promise.all([workerCatalog(facts, request), workerCatalog(facts, request)])
-    for (let index = 0; index < 2; index++) {
-      const normal = await run(solarProbe(), facts, { request })
-      assert.equal(normal.runtime.evidence.result.result, 'passed')
-      assert.equal(unsupportedBeforeSetup(solarProbe(), facts), null)
+    for (const scope of [{ drawingId: 'first.drawing', version: 1 },
+      { drawingId: 'first.drawing', version: 2 }, { drawingId: 'second.drawing', version: 2 }]) {
+      const before = calls.length
+      const answers = await Promise.all([workerCatalog(facts, request, scope), workerCatalog(facts, request, scope)])
+      assert.equal(calls.length, before + 1)
+      assert.equal(calls.at(-1), `/api/capabilities?drawing_id=${scope.drawingId}&drawing_version=${scope.version}`)
+      assert.deepEqual(answers, failure ? [undefined, undefined]
+        : [catalogFor(readyAvailability), catalogFor(readyAvailability)])
+      if (failure) {
+        assert.equal(facts.catalog, undefined)
+        assert.equal(facts.catalogError.message, 'catalog offline')
+      } else {
+        assert.equal(unsupportedBeforeSetup(solarProbe(), facts), null)
+        assert.equal(facts.catalogError, undefined)
+      }
     }
-    assert.equal(calls, 1)
-    if (failure) assert.equal(facts.catalog, undefined)
+    await workerCatalog(facts, request, { drawingId: 'first.drawing', version: 1 })
+    assert.equal(calls.length, 4)
+    if (failure) await assert.rejects(run(solarProbe(), {}, { request }), /catalog offline/)
+    else {
+      const normal = await run(solarProbe(), {}, { request })
+      assert.equal(normal.runtime.evidence.result.result, 'passed')
+    }
   }
+  const facts = {}, scope = { drawingId: 'changing.drawing', version: 'head' }
+  let inputReady = false
+  const request = { get: async () => ({ ok: () => true,
+    json: async () => catalogFor({ ...readyAvailability, input_ready: inputReady }) }) }
+  await workerCatalog(facts, request, scope)
+  assert.deepEqual(toolAvailabilityEvidence(solarProbe(), facts).availability_fields_false, ['input_ready'])
+  inputReady = true
+  await workerCatalog(facts, request, scope)
+  assert.equal(toolAvailabilityEvidence(solarProbe(), facts), null)
+  await workerCatalog(facts, { get: async (path) => {
+    assert.equal(path, '/api/capabilities?drawing_id=other.drawing&drawing_version=head')
+    return { ok: () => true, json: async () => catalogFor({ ...readyAvailability, input_ready: false }) }
+  } }, { drawingId: 'other.drawing' })
+  assert.deepEqual(toolAvailabilityEvidence(solarProbe(), facts).availability_fields_false, ['input_ready'])
+  await workerCatalog(facts, request, scope)
+  assert.equal(toolAvailabilityEvidence(solarProbe(), facts), null)
 })
 
 test('the frozen tool arm effect split follows the registry and excludes every refusal gate', () => {

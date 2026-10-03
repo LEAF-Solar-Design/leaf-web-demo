@@ -5,9 +5,116 @@ import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/acti
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON } from './fixtures.mjs'
+import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+test('scoped catalogs reevaluate each drawing and version without reusing worker readiness', async () => {
+  const requests = []
+  const facts = {}
+  const probe = { kind: 'tool', sourceId: 'solar-settings', assertion: { kind: 'opens', target: 'catalog-run-decision' } }
+  let ready = false
+  const request = { get: async (path) => {
+    requests.push(path)
+    const input_ready = path.includes('drawing_id=second') || ready
+    return { ok: () => true, json: async () => ({ families: [{ capabilities: [{ name: 'solar-settings',
+      availability: { entitled: true, engine_ready: true, implemented: true, input_ready,
+        refusal_reasons: input_ready ? [] : ['graph_seed_required'] } }] }] }) }
+  } }
+  await workerCatalog(facts, request)
+  assert.deepEqual(toolAvailabilityEvidence(probe, facts).refusal_codes, ['graph_seed_required'])
+  await workerCatalog(facts, request, { drawingId: 'first', version: 1 })
+  assert.deepEqual(toolAvailabilityEvidence(probe, facts).availability_fields_false, ['input_ready'])
+  await workerCatalog(facts, request, { drawingId: 'second', version: 2 })
+  assert.equal(toolAvailabilityEvidence(probe, facts), null)
+  await workerCatalog(facts, request, { drawingId: 'first', version: 1 })
+  assert.deepEqual(toolAvailabilityEvidence(probe, facts).availability_fields_false, ['input_ready'])
+  ready = true
+  await workerCatalog(facts, request, { drawingId: 'first', version: 2 })
+  assert.equal(toolAvailabilityEvidence(probe, facts), null)
+  assert.deepEqual(requests, ['/api/capabilities',
+    '/api/capabilities?drawing_id=first&drawing_version=1',
+    '/api/capabilities?drawing_id=second&drawing_version=2',
+    '/api/capabilities?drawing_id=first&drawing_version=1',
+    '/api/capabilities?drawing_id=first&drawing_version=2'])
+})
+
+test('Solar availability is evaluated after drawing and graph setup', () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const runner = source.slice(source.indexOf('export async function runProbe'), source.indexOf('// This reporter'))
+  assert.ok(runner.indexOf('await workerCatalog') > runner.indexOf('for (const recipe of probe.setup.steps)'))
+  for (const id of ['tool:solar-settings', 'tool:solar-autofill']) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === id), 'ready')
+    const kinds = probe.setup.steps.map((step) => step.kind)
+    assert.ok(kinds.indexOf('open-private-drawing') < kinds.indexOf('seed-solar-graph'))
+    assert.ok(kinds.indexOf('seed-solar-graph') < kinds.indexOf('catalog-tool'))
+  }
+})
+
+test('every ready Solar catalog recipe opens a standalone drawing on the Solar profile', () => {
+  const entries = map.entries.filter((entry) => entry.kind === 'tool'
+    && entry.source_id.startsWith('solar-') && entry.states.includes('ready'))
+  assert.ok(entries.length > 0)
+  for (const entry of entries) {
+    const probe = resolveProbe(entry, 'ready')
+    assert.deepEqual(probe.setup.steps[0], { kind: 'open-private-drawing', surface: 'solar', signedOut: false })
+    assert.equal(probe.setup.steps.at(-1).kind, 'catalog-tool')
+  }
+})
+
+test('the DIMENSION pick lies on the fixture dimension line and outside the other fixture geometry', () => {
+  const dxf = readFileSync(new URL('../fixtures/distinctive-panel.dxf', import.meta.url), 'utf8').trim().split(/\r?\n/)
+  const start = dxf.indexOf('DIMENSION')
+  assert.ok(start > 0)
+  const fields = new Map()
+  for (let index = start + 1; index < dxf.length && dxf[index] !== '0'; index += 2) fields.set(dxf[index], dxf[index + 1])
+  assert.equal(fields.get('5'), 'D100')
+  assert.equal(Number(fields.get('70')) & 15, 0)
+  const [x, y] = FIXTURE_PICK_POINTS.DIMENSION[0]
+  assert.equal(y, Number(fields.get('20')))
+  assert.ok(x > Number(fields.get('13')) && x < Number(fields.get('14')))
+  assert.ok(y < 190 && y < 222.5)
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  assert.match(source, /const points = FIXTURE_PICK_POINTS\[recipe.type\]/)
+})
+
+test('calibration finds exposed edge positions when the old central grid is covered', () => {
+  const original = { document: globalThis.document, innerWidth: globalThis.innerWidth, innerHeight: globalThis.innerHeight }
+  const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, right: 400, bottom: 300 }) }
+  globalThis.innerWidth = 400
+  globalThis.innerHeight = 300
+  globalThis.document = { elementFromPoint: (x) => x < 50 ? canvas : null }
+  try {
+    const samples = exposedCalibrationPoints(canvas)
+    assert.equal(samples.length, 2)
+    assert.ok(samples.every((point) => point.x < 50))
+    assert.ok(Math.abs(samples[1].x - samples[0].x) > 20)
+    assert.ok(Math.abs(samples[1].y - samples[0].y) > 20)
+    globalThis.document.elementFromPoint = () => null
+    assert.equal(exposedCalibrationPoints(canvas), null)
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('surface recipes name their own surface and only CAD applies the APS readiness gate', async () => {
+  for (const [surface, state] of [['browser', 'ready'], ['solar', 'solar-not-ready'], ['cad', 'ready']]) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === `surface:${surface}`), state)
+    const recipe = probe.setup.steps.find((step) => step.kind === 'require-surface-context')
+    assert.equal(recipe.surface, surface)
+    const runtime = { evidence: {}, testInfo: { attach: async () => {} }, page: { request: {
+      get: async (path) => {
+        assert.equal(path, '/api/health')
+        return { ok: () => true, json: async () => ({ aps_live: false }) }
+      },
+    } } }
+    if (surface === 'cad') await assert.rejects(setupStep(probe, runtime, recipe), UnsupportedLocalError)
+    else await setupStep(probe, runtime, recipe)
+  }
+})
+
 test('W1x catalog recipes retain their family panel and reseat it after state setup', () => {
   for (const [id, state, setup] of [
     ['tool:solar-panel-add', 'unsaved-engine-edits', 'create-line'],
@@ -34,19 +141,22 @@ test('Solar actions derive Solar surface and tab from their panel while Rail use
   assert.equal(rail.setup.steps.find((step) => step.kind === 'ribbon-tab').name, 'Manage')
 })
 
-test('Solar panel selection recipes declare the calibration fixture gap before setup', () => {
+test('Solar panel selection reaches setup and only the measured calibration failure is declared', () => {
   assert.equal(SOLAR_PANEL_CALIBRATION_REASON, 'The private DXF fixture has no two uncovered calibration points for solar panel placement.')
   for (const action of ACTIONS.filter((action) => action.panel === 'solar-panels')) {
     const entry = map.entries.find((entry) => entry.kind === 'action' && entry.source_id === action.id)
     for (const state of entry.states) {
       const probe = resolveProbe(entry, state)
-      const needsSelection = probe.setup.steps.some((recipe) => recipe.kind === 'select-entity' && !recipe.viewerOnly)
-      if (needsSelection) assert.equal(unsupportedBeforeSetup(probe), SOLAR_PANEL_CALIBRATION_REASON, `${entry.id}/${state}`)
-      else assert.notEqual(unsupportedBeforeSetup(probe), SOLAR_PANEL_CALIBRATION_REASON, `${entry.id}/${state}`)
+      assert.notEqual(unsupportedBeforeSetup(probe), SOLAR_PANEL_CALIBRATION_REASON, `${entry.id}/${state}`)
+      for (const recipe of probe.setup.steps) {
+        assert.equal(solarCalibrationFailure(probe, recipe, new Error('The drawing needs two uncovered calibration points')),
+          recipe.kind === 'select-entity' && !recipe.viewerOnly)
+        assert.equal(solarCalibrationFailure(probe, recipe, new Error('selection failed')), false)
+      }
     }
   }
   const move = resolveProbe(map.entries.find((entry) => entry.id === 'action:solar-panels-move'), 'ready')
-  assert.equal(unsupportedBeforeSetup(move), SOLAR_PANEL_CALIBRATION_REASON)
+  assert.equal(unsupportedBeforeSetup(move), null)
   const rectangle = resolveProbe(map.entries.find((entry) => entry.id === 'action:solar-panels-create-rectangle'), 'ready')
   assert.equal(unsupportedBeforeSetup(rectangle), null)
 })
@@ -308,6 +418,101 @@ const unsupportedStep = new AsyncFunction('probe', 'runtime', 'reason', 'Unsuppo
   functionBody('async function unsupported(probe, runtime, reason) {', '\nasync function engineReady'))
 const probeRunner = new AsyncFunction('probe', 'runtime', 'test', 'setupStep', 'UnsupportedLocalError',
   functionBody('export async function runProbe(probe, runtime) {', '\n// This reporter'))
+test('disabled reason mismatches reach the oracle while missing actions fail before it', async () => {
+  const runner = new AsyncFunction('probe', 'runtime', 'test', 'setupStep', 'UnsupportedLocalError',
+    'control', 'expect', 'collectProbeUxEvidence', 'captureBefore', 'activate', 'assertEffect',
+    functionBody('export async function runProbe(probe, runtime) {', '\n// This reporter'))
+  const probe = resolveProbe(map.entries.find((entry) => entry.id === 'action:solar-panels-array-rect'), 'no-drawing')
+  const observed = 'Panel array (unavailable: select an entity in the drawing)'
+  for (const present of [true, false]) {
+    const runtime = { page: {}, evidence: { steps: [] }, testInfo: { project: { name: 'desktop' }, annotations: [] } }
+    const locator = { name: observed }
+    const assertions = (value) => ({
+      toBeVisible: async () => assert.ok(present, 'Missing action during setup'),
+      toBeDisabled: async () => assert.equal(value, locator),
+      toHaveAccessibleName: async (pattern) => assert.match(value.name, pattern),
+      toHaveAttribute: async () => assert.fail('A reason mismatch must fail at the accessible name'),
+    })
+    const steps = []
+    await assert.rejects(runner(probe, runtime,
+      { step: async (name, callback) => { steps.push(name); return callback() } },
+      async () => {}, UnsupportedLocalError,
+      (_, recipe) => {
+        assert.equal(recipe.exact, false)
+        assert.ok(recipe.name.test(observed))
+        assert.ok(recipe.name.test('Panel array'))
+        assert.ok(!recipe.name.test('Other Panel array'))
+        return locator
+      }, assertions, async () => [], new AsyncFunction('probe', 'runtime',
+        functionBody('async function captureBefore(probe, runtime) {', '\nasync function activate')),
+      async () => assert.fail('Disabled controls cannot activate'),
+      (probe, runtime, locator, before) => assertEffect(probe, runtime, locator, before, assertions)),
+    (error) => {
+      assert.ok(error instanceof assert.AssertionError)
+      if (present) {
+        assert.match(error.message, /select an entity in the drawing/)
+        assert.match(error.message, /no drawing in the browser engine yet/)
+      } else assert.match(error.message, /Missing action during setup/)
+      return true
+    })
+    assert.equal(runtime.evidence.oracleReached, present ? probe.assertion.assertionId : undefined)
+    assert.equal(steps.includes(probe.assertion.assertionId), present)
+    assert.equal(runtime.evidence.cleanupCompleted, true)
+    assert.ok(runtime.evidence.failure)
+  }
+})
+test('failed drawing refusal mismatches preserve expected and observed text in the oracle', async () => {
+  const probe = resolveProbe(map.entries.find((entry) => entry.id === 'action:solar-panels-array-rect'), 'no-drawing')
+  const observed = 'Panel array (unavailable: select an entity in the drawing)'
+  const locator = { getAttribute: async (name) => { assert.equal(name, 'aria-label'); return observed } }
+  const runtime = { page: {}, failedDrawing: true, evidence: { failedDrawing: {}, oracleReached: probe.assertion.assertionId } }
+  const assertions = (target) => ({
+    toBeDisabled: async () => assert.equal(target, locator),
+    toHaveAccessibleName: async (pattern) => assert.match(observed, pattern),
+    toHaveAttribute: async () => assert.fail('Reason mismatch must fail before tooltip checks'),
+  })
+  await assert.rejects(assertEffect(probe, runtime, locator, {}, assertions), (error) => {
+    assert.match(error.message, /select an entity in the drawing/)
+    assert.match(error.message, /no drawing in the browser engine yet/)
+    return error instanceof assert.AssertionError
+  })
+  assert.equal(runtime.evidence.oracleReached, probe.assertion.assertionId)
+  assert.deepEqual(runtime.evidence.disabledReason, { expected: probe.locator.disabledVariants.map((variant) => variant.name), observed })
+})
+test('the runner ignores worker-global Solar refusal and fetches readiness after every setup step', async () => {
+  const runner = new AsyncFunction('probe', 'runtime', 'test', 'setupStep', 'UnsupportedLocalError',
+    'workerCatalog', 'unsupportedBeforeSetup', 'toolAvailabilityEvidence', 'unsupported',
+    functionBody('export async function runProbe(probe, runtime) {', '\n// This reporter'))
+  const calls = []
+  const probe = { featureId: 'tool:solar-autofill', sourceId: 'solar-autofill', kind: 'tool', state: 'ready',
+    setup: { steps: [{ kind: 'open-private-drawing' }, { kind: 'seed-solar-graph' }] },
+    assertion: { kind: 'opens', target: 'catalog-run-decision', assertionId: 'autofill/oracle' } }
+  const runtime = { page: { request: {} }, evidence: { steps: [] }, workerFacts: { catalog: { families: [{
+    capabilities: [{ name: 'solar-autofill', availability: { input_ready: false, refusal_reasons: ['drawing_context_required'] } }],
+  }] } }, testInfo: { annotations: [] } }
+  const result = await runner(probe, runtime, { step: async (name, callback) => { calls.push(name); return callback() } },
+    async (_, current, recipe) => {
+      if (recipe.kind === 'open-private-drawing') current.drawingId = 'own-drawing'
+      else current.drawingVersion = 2
+    }, UnsupportedLocalError,
+    async (facts, request, scope) => {
+      assert.equal(request, runtime.page.request)
+      assert.deepEqual(scope, { drawingId: 'own-drawing', version: 2 })
+      assert.notEqual(facts, runtime.workerFacts)
+      calls.push('scoped-readiness')
+      facts.catalog = { families: [{ capabilities: [{ name: 'solar-autofill', availability: {
+        entitled: true, engine_ready: true, implemented: true, input_ready: false, refusal_reasons: ['frames_required'],
+      } }] }] }
+    }, unsupportedBeforeSetup, toolAvailabilityEvidence,
+    async (probe, current, reason) => { current.evidence.result = { reason }; throw new UnsupportedLocalError(probe, reason) })
+  assert.deepEqual(calls, ['Setup: open-private-drawing', 'Setup: seed-solar-graph', 'scoped-readiness'])
+  assert.equal(result.unsupported, true)
+  assert.match(result.reason, /frames_required/)
+  assert.doesNotMatch(result.reason, /drawing_context_required/)
+  assert.deepEqual(runtime.unsupportedAvailability.refusal_codes, ['frames_required'])
+  assert.ok(runtime.evidence.setupCompleted)
+  assert.equal(runtime.evidence.cleanupCompleted, true)
+})
 const evidenceFixture = new AsyncFunction('use', 'testInfo', 'workerFacts', fixtureSource.slice(
   fixtureSource.indexOf('walkEvidence: [async ({ workerFacts }, use, testInfo) => {')
     + 'walkEvidence: [async ({ workerFacts }, use, testInfo) => {'.length,
@@ -730,7 +935,7 @@ test('every no-drawing action uses the real failed-load screen and never the ope
     const probe = resolveProbe(entry, 'no-drawing')
     assert.equal(probe.assertion.kind, 'disabled_with_reason')
     assert.deepEqual(probe.setup.steps[0], {
-      kind: 'open-failed-drawing', url: '/app?surface=cad&drawing=missing.invalid',
+      kind: 'open-failed-drawing', url: `/app?surface=${ACTIONS.find((action) => action.id === entry.source_id).panel === 'solar-panels' ? 'solar' : 'cad'}&drawing=missing.invalid`,
     })
     assert.equal(probe.setup.steps.length, 2)
     assert.equal(probe.setup.steps[1].kind, 'failed-drawing-ribbon-tab')

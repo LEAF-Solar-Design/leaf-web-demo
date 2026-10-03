@@ -10,6 +10,7 @@ import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { normalizedControlKey } from './probes.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
+import { seedParams, runBody } from '../solarGraphCommitProof.mjs'
 
 export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
@@ -72,20 +73,25 @@ export async function startPendingRun(probe, runtime, assertions = expect) {
   const tool = catalog.families.flatMap((family) => family.capabilities).find((tool) => tool.name === 'count-by-layer')
   if (!tool) await unsupported(probe, runtime, 'The local catalog has no count-by-layer read tool to establish a pending run')
   const previousTab = runtime.ribbonTab
-  await setupStep(probe, runtime, { kind: 'catalog-tool', name: tool.name })
-  runtime.cleanup.push(await holdJobRoutes(page))
-  await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('button', { name: tool.name, exact: true }).click({ timeout: 15_000 })
-  const submitted = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/run', { timeout: 15_000 })
-  // Observe a rejection even if the click itself fails first.
-  submitted.catch(() => {})
-  await page.getByRole('button', { name: `Run ${tool.name}`, exact: true }).click({ timeout: 15_000 })
-  const response = await submitted
-  expect(response.status()).toBe(202)
-  const receipt = await response.json()
-  expect(receipt.job_id).toBeTruthy()
-  await expect(page.locator('.strip-running')).toBeVisible({ timeout: 15_000 })
-  evidence.pendingRun = { tool: tool.name, jobId: receipt.job_id, status: response.status(), pendingVisible: true }
-  if (previousTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: previousTab })
+  const previousPanelName = runtime.catalogPanelName
+  try {
+    await setupStep(probe, runtime, { kind: 'catalog-tool', name: tool.name })
+    runtime.cleanup.push(await holdJobRoutes(page))
+    await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('button', { name: tool.name, exact: true }).click({ timeout: 15_000 })
+    const submitted = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/run', { timeout: 15_000 })
+    // Observe a rejection even if the click itself fails first.
+    submitted.catch(() => {})
+    await page.getByRole('button', { name: `Run ${tool.name}`, exact: true }).click({ timeout: 15_000 })
+    const response = await submitted
+    expect(response.status()).toBe(202)
+    const receipt = await response.json()
+    expect(receipt.job_id).toBeTruthy()
+    await expect(page.locator('.strip-running')).toBeVisible({ timeout: 15_000 })
+    evidence.pendingRun = { tool: tool.name, jobId: receipt.job_id, status: response.status(), pendingVisible: true }
+    if (previousTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: previousTab })
+  } finally {
+    runtime.catalogPanelName = previousPanelName
+  }
   return
 }
 
@@ -121,6 +127,7 @@ export async function previewVersion(probe, runtime, assertions = expect, worksp
   await version.click({ timeout: 15_000 })
   await expect(page.getByText(new RegExp(`Viewing v${preview}\\b.*read-only preview`))).toBeVisible()
   evidence.versionPreview = { head, preview, restoredFrom: receipt.restored_from }
+  runtime.drawingVersion = preview
   await history.getByRole('button', { name: 'Close version history', exact: true }).click({ timeout: 15_000 })
   await expect(history).toBeHidden()
   if (previousTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: previousTab })
@@ -263,12 +270,20 @@ const legendRow = (page, name) => propertiesPane(page).getByRole('button', {
   name: new RegExp('^' + name + ' [0-9][0-9,]*$'),
 })
 const ribbonLayer = (page, name) => layerButtons(page).and(page.getByRole('button', { name, exact: true }))
+export async function requireNoDrawing(page, assertions = expect) {
+  // Solar can render a starter canvas without a seated, versioned drawing.
+  const undo = page.getByRole('toolbar', { name: 'Quick access', exact: true }).getByRole('button', {
+    name: 'Undo version (unavailable: no versioned drawing)', exact: true,
+  })
+  await assertions(undo).toBeVisible()
+  await assertions(undo).toBeDisabled()
+}
 async function requireWorkspace(runtime) {
   const { page } = runtime
   await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toBeVisible()
   if (runtime.failedDrawing) {
     await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
-    await expect(canvas(page)).toHaveCount(0)
+    await requireNoDrawing(page)
   } else await expect(canvas(page)).toBeVisible()
 }
 async function setSection(page, name, expanded) {
@@ -376,27 +391,44 @@ async function createLine(probe, runtime) {
   await expect.poll(() => engineCount(page)).toBe(before + 1)
   await page.keyboard.press('Escape')
 }
+export const FIXTURE_PICK_POINTS = Object.freeze({
+  LINE: [[222, 190], [222, 470]], INSERT: [[11.5, 20]], DIMENSION: [[222, 160]],
+})
+
+export function exposedCalibrationPoints(element) {
+  const box = element.getBoundingClientRect()
+  const left = Math.max(0, box.left), top = Math.max(0, box.top)
+  const right = Math.min(innerWidth, box.right), bottom = Math.min(innerHeight, box.bottom)
+  const points = []
+  // Search the visible canvas, including narrow strips left by Solar's panels.
+  for (let y = top + 4; y < bottom - 4; y += 8) {
+    for (let x = left + 4; x < right - 4; x += 8) {
+      if (document.elementFromPoint(x, y) === element) points.push({ x, y })
+    }
+  }
+  const first = points[0]
+  const second = points.findLast((point) => first && Math.abs(point.x - first.x) > 20 && Math.abs(point.y - first.y) > 20)
+  if (!first || !second) return null
+  return [first, second]
+}
+
+export function solarCalibrationFailure(probe, recipe, error) {
+  return probe.locator?.group === 'solar-panels' && recipe.kind === 'select-entity' && !recipe.viewerOnly
+    && error.message === 'The drawing needs two uncovered calibration points'
+}
+
 async function selectEntity(probe, runtime, recipe) {
   if (!recipe.viewerOnly) await engineReady(probe, runtime)
   const { page } = runtime
   // Calibrate the flat drawing's projection from its production cursor
   // readout. Selection still uses native mouse input on the real canvas.
-  const points = recipe.type === 'LINE' ? [[222, 190], [222, 470]]
-    : recipe.type === 'INSERT' ? [[11.5, 20]] : null
+  const points = FIXTURE_PICK_POINTS[recipe.type]
   if (!points) await unsupported(probe, runtime, `The private DXF fixture has no ${recipe.type} entity to select`)
   if (recipe.editable === false && recipe.type === 'LINE') {
     await unsupported(probe, runtime, 'The engine exposes the fixture LINE as editable; a read-only LINE needs a provider fixture')
   }
-  const samples = await canvas(page).evaluate((element) => {
-    const box = element.getBoundingClientRect(), points = []
-    for (const fx of [0.3, 0.5, 0.7]) for (const fy of [0.3, 0.5, 0.7]) {
-      const point = { x: box.left + box.width * fx, y: box.top + box.height * fy }
-      if (document.elementFromPoint(point.x, point.y) === element) points.push(point)
-    }
-    const first = points[0], second = points.find((point) => first && Math.abs(point.x - first.x) > 20 && Math.abs(point.y - first.y) > 20)
-    if (!first || !second) throw new Error('The drawing needs two uncovered calibration points')
-    return [first, second]
-  })
+  const samples = await canvas(page).evaluate(exposedCalibrationPoints)
+  if (!samples) throw new Error('The drawing needs two uncovered calibration points')
   const coordinates = page.getByTestId('cockpit-status').locator('.cockpit-coord b')
   const readings = []
   for (const sample of samples) {
@@ -487,6 +519,19 @@ async function clearComposer(page) {
   await expect(bar).toHaveValue('')
   return bar
 }
+export async function readWalkBuildFlags(probe, runtime) {
+  if (!catalogSolarNeedsDrawing(probe)) return
+  const facts = runtime.workerFacts
+  facts.buildFlagsFetch ||= (async () => {
+    const response = await runtime.page.request.get('/.leaf-walk-build.json')
+    expect(response.ok(), 'Walk build manifest must be available').toBe(true)
+    const marker = await response.json()
+    facts.buildFlags = marker.flags || {}
+  })()
+  await facts.buildFlagsFetch
+  runtime.evidence.buildFlags = { ...facts.buildFlags }
+}
+
 // A page-specific init script: the ordinary page fixture remains unchanged.
 export function seedSignOutIdentity({ identity, coachKey }) {
   if (sessionStorage.getItem('leaf.walk.w1k.identity-seeded') !== '1') {
@@ -495,6 +540,7 @@ export function seedSignOutIdentity({ identity, coachKey }) {
     sessionStorage.setItem('leaf.walk.w1k.identity-seeded', '1')
   }
 }
+
 async function baselineThreeState(probe, runtime, recipe) {
   const { page } = runtime
   await requireWorkspace(runtime)
@@ -612,7 +658,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'create-line', 'hold-engine-edit', 'start-pending-run', 'require-authoring-off', 'fresh-history',
   'undo-edit', 'preview-version', 'zoom-before-fit', 'require-engine-state', 'crash-engine-worker',
   'require-surface-context', 'require-local-state',
-  'saved-version-history', 'require-versionless-drawing',
+  'saved-version-history', 'require-versionless-drawing', 'seed-solar-graph',
 ]))
 export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
   'engine-ready', 'select-entity', 'create-line', 'hold-engine-edit',
@@ -623,10 +669,13 @@ const localFixtureReason = (recipe) => `The isolated stack has no public fixture
 export const TOOL_ARM_EFFECT_KINDS = Object.freeze(new Set(['opens']))
 const AVAILABILITY_FIELDS = Object.freeze(['entitled', 'engine_ready', 'input_ready', 'implemented'])
 
-export async function workerCatalog(workerFacts, request) {
-  workerFacts.catalogFetch ||= (async () => {
+export async function workerCatalog(workerFacts, request, { drawingId, version = 'head' } = {}) {
+  const fetch = async () => {
     try {
-      const response = await request.get('/api/capabilities')
+      delete workerFacts.catalog
+      delete workerFacts.catalogError
+      const query = drawingId ? `?drawing_id=${encodeURIComponent(drawingId)}&drawing_version=${encodeURIComponent(version)}` : ''
+      const response = await request.get(`/api/capabilities${query}`)
       if (!response.ok()) throw new Error(`Catalog request failed: ${response.status()}`)
       const catalog = await response.json()
       if (!Array.isArray(catalog.families)
@@ -637,7 +686,19 @@ export async function workerCatalog(workerFacts, request) {
       workerFacts.catalog = catalog
     } catch (error) { workerFacts.catalogError = error }
     return workerFacts.catalog
-  })()
+  }
+  // Scoped readiness can change at the same head after setup or policy edits.
+  // Never cache it in the worker or reuse a different drawing's answer.
+  if (drawingId) {
+    const key = JSON.stringify([drawingId, version])
+    workerFacts.catalogInFlight ||= new Map()
+    if (!workerFacts.catalogInFlight.has(key)) {
+      const pending = fetch().finally(() => workerFacts.catalogInFlight.delete(key))
+      workerFacts.catalogInFlight.set(key, pending)
+    }
+    return workerFacts.catalogInFlight.get(key)
+  }
+  workerFacts.catalogFetch ||= fetch()
   return workerFacts.catalogFetch
 }
 
@@ -657,13 +718,19 @@ export function toolAvailabilityEvidence(probe, workerFacts = {}) {
 export const UI_UNREACHABLE_STATES = Object.freeze(new Set(['no-versioned-drawing']))
 export const VERSIONLESS_DRAWING_REASON = 'The product creates a saved root version for every private drawing and renders the ribbon only with a drawing open, so no-versioned-drawing is unreachable through the UI.'
 export const SOLAR_PANEL_CALIBRATION_REASON = 'The private DXF fixture has no two uncovered calibration points for solar panel placement.'
+export const CATALOG_SOLAR_FLAG_REASON = 'catalog drawing context requires VITE_SOLAR_SETTINGS_FORM=1; this build has it off'
+
+export function catalogSolarNeedsDrawing(probe) {
+  return probe.kind === 'tool' && probe.sourceId?.startsWith('solar-')
+    && !(probe.assertion.kind === 'disabled_with_reason'
+      && (probe.assertion.reason_code === 'drawing_context_required'
+        || probe.assertion.reason === 'Open a drawing to use this solar tool'))
+}
 
 export function unsupportedBeforeSetup(probe, workerFacts = {}) {
   if (UI_UNREACHABLE_STATES.has(probe.state)) return VERSIONLESS_DRAWING_REASON
-  if (probe.locator?.group === 'solar-panels'
-    && probe.setup.steps.some((recipe) => recipe.kind === 'select-entity' && !recipe.viewerOnly)) {
-    return SOLAR_PANEL_CALIBRATION_REASON
-  }
+  if (catalogSolarNeedsDrawing(probe) && workerFacts.buildFlags
+    && workerFacts.buildFlags.VITE_SOLAR_SETTINGS_FORM !== '1') return CATALOG_SOLAR_FLAG_REASON
   const unavailable = toolAvailabilityEvidence(probe, workerFacts)
   if (unavailable) {
     const codes = unavailable.refusal_codes.length ? ` (${unavailable.refusal_codes.join(',')})` : ''
@@ -786,11 +853,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       })
       await page.goto(recipe.url)
       const response = await sessionReply
-      expect([400, 404]).toContain(response.status())
+      assertions([400, 404]).toContain(response.status())
       evidence.failedDrawing = { drawingId: 'missing.invalid', status: response.status(), response: await response.json() }
-      await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
-      await expect(page.locator('.viewer-canvas')).toHaveCount(0)
-      await expect(canvas(page)).toHaveCount(0)
+      await assertions(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
+      await requireNoDrawing(page, assertions)
       runtime.failedDrawing = true
       return
     }
@@ -1022,18 +1088,77 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       await expect(page.getByRole('button', { name: `Run ${recipe.tool}`, exact: true })).toBeVisible()
       return
     case 'catalog-tool': {
-      const catalog = await workerCatalog(runtime.workerFacts, page.request)
-      if (!catalog) throw runtime.workerFacts.catalogError
+      const facts = runtime.drawingId ? (runtime.catalogFacts ||= {}) : runtime.workerFacts
+      const catalog = await workerCatalog(facts, page.request, { drawingId: runtime.drawingId, version: runtime.drawingVersion || 'head' })
+      if (!catalog) throw facts.catalogError
       const family = catalog.families.find((family) => family.capabilities.some((tool) => tool.name === recipe.name))
       const tool = family?.capabilities.find((tool) => tool.name === recipe.name)
       evidence.catalog = { requestedTool: recipe.name, record: tool || null,
-        catalog_sha256: runtime.workerFacts.catalog_sha256, families: catalog.families.length,
+        catalog_sha256: facts.catalog_sha256, families: catalog.families.length,
         capabilities: catalog.families.reduce((count, family) => count + family.capabilities.length, 0) }
       if (!tool) await unsupported(probe, runtime, `The isolated catalog does not provide ${recipe.name}`)
       runtime.catalogPanelName = family.label
       // Unplaced catalog families live on Manage, not the engine's Draw tab.
       const tab = toolPlacementTab(tool) || 'manage'
       await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
+      if (probe.state === 'ready' && recipe.name.startsWith('solar-') && !toolAvailabilityEvidence(probe, facts)) {
+        // The API-side catalog is not proof that the browser seated the same
+        // drawing context. Observe its own request before accepting readiness.
+        const scopedCatalog = page.waitForResponse((response) => {
+          const url = new URL(response.url())
+          return response.request().method() === 'GET' && url.pathname === '/api/capabilities'
+            && url.searchParams.get('drawing_id') === runtime.drawingId
+        }, { timeout: 15_000 })
+        scopedCatalog.catch(() => {})
+        await page.goto(`/app?drawing=${encodeURIComponent(runtime.drawingId)}&surface=solar`)
+        const response = await scopedCatalog
+        await assertions(response.ok()).toBe(true)
+        evidence.browserCatalog = { url: response.url(), drawingId: runtime.drawingId }
+        await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
+        const button = control(page, { role: 'button', name: recipe.name, panelName: family.label,
+          scope: { role: 'toolbar', name: 'Drafting tools' } })
+        await assertions(button).toBeVisible({ timeout: 15_000 })
+        await assertions(button).toBeEnabled({ timeout: 15_000 })
+      }
+      return
+    }
+    case 'seed-solar-graph': {
+      const path = `/api/drawings/${runtime.drawingId}`
+      const versions = await page.request.get(`${path}/versions`)
+      expect(versions.ok()).toBe(true)
+      const chain = await versions.json()
+      const parent = chain.versions.find((row) => Number(row.v) === Number(chain.head))
+      const toolsResponse = await page.request.get('/api/tools')
+      expect(toolsResponse.ok()).toBe(true)
+      const settings = (await toolsResponse.json()).tools.find((tool) => tool.name === 'solar-settings')
+      expect(settings).toBeTruthy()
+      const checkoutPath = `${path}/checkout`
+      const checkout = await page.request.post(checkoutPath, { data: { holder: 'drafter', ttl_s: 300 } })
+      expect(checkout.ok()).toBe(true)
+      const lease = await checkout.json()
+      expect(lease.acquired).toBe(true)
+      expect(lease.checkout_capability).toBeTruthy()
+      const release = async () => {
+        const response = await page.request.delete(checkoutPath, {
+          headers: { 'X-Checkout-Capability': lease.checkout_capability },
+        })
+        expect(response.ok()).toBe(true)
+      }
+      try {
+        const response = await page.request.post('/api/run?wait=1', {
+          headers: { 'X-Checkout-Capability': lease.checkout_capability },
+          data: runBody({ tool: 'solar-settings', drawingId: runtime.drawingId,
+            params: seedParams(parent), catalogDigest: settings.catalog_digest }), timeout: 45_000,
+        })
+        expect(response.status()).toBe(200)
+        const receipt = await response.json()
+        expect(receipt.ok).toBe(true)
+        runtime.drawingVersion = receipt.result.new_version.version
+        evidence.solarSeed = { drawingId: runtime.drawingId, parent: chain.head,
+          version: runtime.drawingVersion, graphRev: receipt.result.after_rev }
+      } finally { await release() }
+      await page.reload({ timeout: 60_000 })
+      await requireWorkspace(runtime)
       return
     }
     case 'foreign-checkout': {
@@ -1128,8 +1253,13 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       expect(response.ok()).toBe(true)
       const health = await response.json()
       evidence.health = health
-      if (recipe.context.apsLive === true && health.aps_live !== true && recipe.context.hasDrawing !== false && recipe.context.sessionActive !== false) {
+      if (recipe.surface === 'cad' && recipe.context.apsLive === true && health.aps_live !== true && recipe.context.hasDrawing !== false && recipe.context.sessionActive !== false) {
         await unsupported(probe, runtime, 'The surface ready state requires APS_LIVE; the isolated local stack reports execution paused')
+      }
+      if (recipe.surface === 'solar' && recipe.context.solarReady === true && recipe.context.sessionActive !== false) {
+        await engineReady(probe, runtime)
+        await expect(page.locator('.workspace-card')).toHaveAttribute('data-engine-document',
+          new RegExp(`^${runtime.drawingId}-v[1-9]\\d*\\.dxf$`), { timeout: 60_000 })
       }
       return
     }
@@ -1145,6 +1275,8 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
 
 async function captureBefore(probe, runtime) {
   const { page } = runtime
+  // Refusal probes do not activate the action or need its enabled-state baseline.
+  if (probe.assertion.kind === 'disabled_with_reason' && probe.kind === 'action') return {}
   const target = probe.assertion.target || ''
   if (/^properties-(drawing|layers|plan|selection)-section$/.test(target)) {
     return { expanded: await control(page, probe.locator).getAttribute('aria-expanded') === 'true' }
@@ -1315,8 +1447,10 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await expect(locator).toBeDisabled()
     if (runtime.failedDrawing) {
       const name = await locator.getAttribute('aria-label')
+      runtime.evidence.disabledReason = { expected: probe.locator.disabledVariants.map((variant) => variant.name), observed: name }
       const variant = probe.locator.disabledVariants.find((variant) => variant.name === name)
-      expect(variant, 'Rendered disabled control must expose a registry reason').toBeTruthy()
+      await expect(locator).toHaveAccessibleName(new RegExp('^(?:' + probe.locator.disabledVariants
+        .map((variant) => variant.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')$'))
       await expect(locator).toHaveAccessibleName(variant.name)
       await expect(probe.locator.trigger === 'select' ? locator.locator('xpath=ancestor::label[contains(concat(" ", normalize-space(@class), " "), " ribbon-widget ")][1]') : locator)
         .toHaveAttribute('title', new RegExp(variant.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
@@ -1576,27 +1710,53 @@ export async function runProbe(probe, runtime) {
       }
       await unsupported(probe, runtime, initialReason)
     }
-    if (probe.kind === 'tool' && typeof workerCatalog === 'function') {
-      await workerCatalog(runtime.workerFacts, page.request)
-    }
+    if (typeof readWalkBuildFlags === 'function') await readWalkBuildFlags(probe, runtime)
     // Source-extracted fake runners may omit module dependencies.
     const reason = typeof unsupportedBeforeSetup === 'function'
-      ? unsupportedBeforeSetup(probe, runtime.workerFacts) : null
+      ? unsupportedBeforeSetup(probe, { engineMounted: runtime.workerFacts.engineMounted,
+        engineUnavailableReason: runtime.workerFacts.engineUnavailableReason,
+        buildFlags: runtime.workerFacts.buildFlags }) : null
     if (reason) {
       if (typeof toolAvailabilityEvidence === 'function') {
         runtime.unsupportedAvailability = toolAvailabilityEvidence(probe, runtime.workerFacts)
+      }
+      if (runtime.evidence.buildFlags) runtime.unsupportedAvailability = {
+        ...runtime.unsupportedAvailability, flags: runtime.evidence.buildFlags,
       }
       await unsupported(probe, runtime, reason)
     }
     for (const recipe of probe.setup.steps) {
       await (runtime.runStep || test.step)(`Setup: ${recipe.kind}`, async () => {
-        await setupStep(probe, runtime, recipe)
+        try { await setupStep(probe, runtime, recipe) } catch (error) {
+          if (typeof solarCalibrationFailure === 'function' && solarCalibrationFailure(probe, recipe, error)) {
+            await unsupported(probe, runtime, SOLAR_PANEL_CALIBRATION_REASON)
+          }
+          throw error
+        }
         evidence.steps.push({ phase: 'setup', ...recipe })
       })
     }
     page = runtime.page
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
-    const targetRecipe = runtime.catalogPanelName ? { ...probe.locator, panelName: runtime.catalogPanelName } : probe.locator
+    if (probe.kind === 'tool' && typeof workerCatalog === 'function') {
+      runtime.catalogFacts ||= {}
+      await workerCatalog(runtime.catalogFacts, page.request, { drawingId: runtime.drawingId, version: runtime.drawingVersion || 'head' })
+      if (runtime.catalogFacts.catalogError) throw runtime.catalogFacts.catalogError
+      const availabilityReason = unsupportedBeforeSetup(probe, runtime.catalogFacts)
+      if (availabilityReason) {
+        runtime.unsupportedAvailability = toolAvailabilityEvidence(probe, runtime.catalogFacts)
+        await unsupported(probe, runtime, availabilityReason)
+      }
+    }
+    let targetRecipe = runtime.catalogPanelName ? { ...probe.locator, panelName: runtime.catalogPanelName } : probe.locator
+    if (probe.kind === 'action' && probe.assertion.kind === 'disabled_with_reason') {
+      // A changed refusal is an oracle verdict; only a missing action is a
+      // pre-oracle failure. Match the stable label with any refusal suffix.
+      const stableName = probe.locator.availableName || (typeof probe.locator.name === 'string'
+        ? probe.locator.name.split(' (unavailable: ')[0] : null)
+      if (probe.locator.unavailableName || stableName) targetRecipe = { ...targetRecipe, exact: false,
+        name: probe.locator.unavailableName || new RegExp('^' + stableName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?: \\(unavailable: .+\\))?$') }
+    }
     // Source-extracted fake runners may omit module dependencies.
     if (typeof discloseControlPanel === 'function') await discloseControlPanel(page, targetRecipe)
     const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe)
