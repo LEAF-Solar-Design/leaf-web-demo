@@ -1,17 +1,19 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { authHeaders, config, noteUnauthorized } from '../api.js'
+import { authHeaders, config, getDrawingIntake, noteUnauthorized } from '../api.js'
 import { createSolarLandxmlClient } from './solarLandxmlClient.js'
 import SolarLandxmlUpload from './SolarLandxmlUpload.jsx'
 import SolarCombinerIntake from './SolarCombinerIntake.jsx'
 import { createSolarCombinerIntakeClient } from './solarCombinerIntakeClient.js'
 import SolarTerrainPanel from './SolarTerrainPanel.jsx'
 import { createSolarTerrainClient } from './solarTerrainClient.js'
+import SolarTrackerRowsPanel, { TRACKER_ROWS_PANEL_REASONS } from './SolarTrackerRowsPanel.jsx'
+import { createSolarTrackerRowsClient } from './solarTrackerRowsClient.js'
 import './solarFlow.css'
 
 const FLOW_PANELS = Object.freeze({
   rooftop: Object.freeze(['combiner-intake']),
   'ground-electrical': Object.freeze([]),
-  'ground-physical': Object.freeze(['landxml', 'terrain']),
+  'ground-physical': Object.freeze(['landxml', 'terrain', 'tracker-rows']),
   'solaredge-import': Object.freeze([]),
   'pvcase-tutorial': Object.freeze([]),
 })
@@ -73,6 +75,13 @@ export default function SolarWorkspaceTools({
     },
     onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
   }), [transport])
+  const trackerRowsClient = useMemo(() => createSolarTrackerRowsClient({
+    fetchImpl: transport?.fetchImpl ?? ((...args) => fetch(...args)),
+    apiBase: config.apiBase,
+    headers: (id) => withCurrentCheckoutCapability(transport?.headers ? transport.headers(id) : { 'X-Tenant-Id': config.tenant, ...authHeaders() }, capability.current),
+    onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
+  }), [transport])
+  const readIntake = useMemo(() => transport?.readIntake ?? ((id, version) => getDrawingIntake(false, id, version)), [transport])
 
   return (
     <ToolsForScope
@@ -85,6 +94,8 @@ export default function SolarWorkspaceTools({
       client={client}
       terrainClient={terrainClient}
       combinerClient={combinerClient}
+      trackerRowsClient={trackerRowsClient}
+      readIntake={readIntake}
       drawingVersion={drawingVersion}
       onDrawingVersionChanged={onDrawingVersionChanged}
       onRunPlacement={onRunPlacement}
@@ -94,7 +105,7 @@ export default function SolarWorkspaceTools({
 }
 
 function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHeld, busy, client,
-  combinerClient, terrainClient, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement }) {
+  combinerClient, terrainClient, trackerRowsClient, readIntake, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement }) {
   const [openPanel, setOpenPanel] = useState(null)
   const [intake, setIntake] = useState(null)
   const intakeRef = useRef(null)
@@ -105,6 +116,11 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const [physicalHead, setPhysicalHead] = useState(null)
   const [terrainHeadSignal, setTerrainHeadSignal] = useState(null)
   const [landxmlPending, setLandxmlPending] = useState(false)
+  const [writers, setWriters] = useState({})
+  const writerTokens = useRef({})
+  const [trackerMounted, setTrackerMounted] = useState(false)
+  const [trackerHeadSignal, setTrackerHeadSignal] = useState(null)
+  const trackerTrigger = useRef(null)
   const landxmlRequest = useRef(null)
   const [announcement, setAnnouncement] = useState('')
   const trigger = useRef(null)
@@ -119,6 +135,34 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const hasLandxml = !!drawingId && FLOW_PANELS[flow]?.includes('landxml') === true
   const hasTerrain = !!drawingId && FLOW_PANELS[flow]?.includes('terrain') === true
   const hasCombiner = !!drawingId && projectId === null && FLOW_PANELS[flow]?.includes('combiner-intake') === true
+  const hasTrackerRows = !!drawingId && FLOW_PANELS[flow]?.includes('tracker-rows') === true
+
+  // Each kind holds the SET of its in-flight requests (the key exists only while the set is non-empty), so a
+  // second request of one kind can never release the interlock while the first is still unresolved.
+  function guardedWrite(kind, request, send, code) {
+    const held = writerTokens.current
+    const inFlight = (name) => (held[name]?.size ?? 0) > 0
+    if (!activeScope.current || (kind === 'tracker'
+      ? Object.keys(held).some(inFlight) || phase === 'refreshing' || phase === 'failed'
+      : inFlight('tracker'))) return Promise.resolve({ ok: false, code, retryable: false, status: null })
+    const token = {}
+    ;(held[kind] ??= new Set()).add(token)
+    setWriters((current) => ({ ...current, [kind]: true }))
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      request.signal?.removeEventListener('abort', release)
+      const tokens = writerTokens.current[kind]
+      if (!tokens?.delete(token) || tokens.size > 0) return
+      delete writerTokens.current[kind]
+      if (activeScope.current) setWriters((current) => ({ ...current, [kind]: false }))
+    }
+    if (kind !== 'tracker') request.signal?.addEventListener('abort', release, { once: true })
+    let result
+    try { result = send(request) } catch (error) { release(); throw error }
+    return Promise.resolve(result).then((answer) => { release(); return answer }, (error) => { release(); throw error })
+  }
 
   useLayoutEffect(() => {
     activeScope.current = true
@@ -127,6 +171,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       pendingImport.current = null
       landxmlRequest.current = null
       intakeRef.current = null
+      writerTokens.current = {}
     }
   }, [])
 
@@ -187,17 +232,20 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
 
   function runPlacement(params) {
     setNotStaged(false)
-    if (!activeScope.current || !intake || phase !== 'idle' || drawingVersion !== intake.version
+    if (!activeScope.current || writerTokens.current.tracker || !intake || phase !== 'idle' || drawingVersion !== intake.version
       || params.expected_rev !== intake.graphRev || checkoutHeld !== true || busy) return
     if (onRunPlacement?.(params) === false) setNotStaged(true)
   }
 
-  const disabledReason = busy ? 'run_in_progress' : checkoutHeld !== true ? 'checkout_required'
+  const disabledReason = writers.tracker ? 'tracker_pending' : busy ? 'run_in_progress' : checkoutHeld !== true ? 'checkout_required'
     : phase === 'refreshing' ? 'refreshing' : phase === 'failed' ? 'refresh_failed' : null
   const reason = disabledReason ?? (notStaged ? 'not_staged' : null)
-  const terrainGate = busy ? 'run_in_progress' : landxmlPending ? 'landxml_importing' : checkoutHeld !== true ? 'checkout_required' : null
+  const terrainGate = writers.tracker ? 'tracker_pending' : busy ? 'run_in_progress' : landxmlPending ? 'landxml_importing' : checkoutHeld !== true ? 'checkout_required' : null
+  const trackerBlockedReason = writers.landxml ? 'landxml_pending' : writers.terrain ? 'terrain_pending'
+    : writers.combiner ? 'combiner_pending' : phase === 'refreshing' || phase === 'failed' ? 'drawing_refresh' : null
 
   const upload = useMemo(() => (request) => {
+    if (writerTokens.current.tracker) return Promise.resolve({ ok: false, code: 'LANDXML_CLIENT_REQUEST_INVALID', retryable: false })
     const started = { drawingId, projectId }
     pendingImport.current = started
     const token = {}
@@ -211,7 +259,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     }
     let promise
     try {
-      promise = client.uploadLandxml(request)
+      promise = guardedWrite('landxml', request, client.uploadLandxml, 'LANDXML_CLIENT_REQUEST_INVALID')
     } catch (error) {
       settled()
       throw error
@@ -223,7 +271,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const scopeCombinerClient = useMemo(() => ({
     importCombinerIntake: (request) => {
       setNotStaged(false)
-      return combinerClient.importCombinerIntake(request)
+      return guardedWrite('combiner', request, combinerClient.importCombinerIntake, 'COMBINER_CLIENT_REQUEST_INVALID')
     },
   }), [combinerClient])
 
@@ -241,8 +289,11 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       }
       return result
     }),
-    runTerrainOperation: terrainClient.runTerrainOperation,
+    runTerrainOperation: (request) => guardedWrite('terrain', request, terrainClient.runTerrainOperation, 'TERRAIN_CLIENT_REQUEST_INVALID'),
   }), [terrainClient, drawingId])
+  const scopeTrackerRowsClient = useMemo(() => ({
+    createTrackerRows: (request) => guardedWrite('tracker', request, trackerRowsClient.createTrackerRows, 'TRACKER_ROWS_CLIENT_REQUEST_INVALID'),
+  }), [trackerRowsClient, phase])
 
   function onImported(value) {
     const started = pendingImport.current
@@ -251,6 +302,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     pendingImport.current = null
     setPhysicalHead(value.head)
     if (typeof value.head?.state?.artifact_id === 'string') setTerrainHeadSignal(value.head.state.artifact_id)
+    if (typeof value.head?.state?.artifact_id === 'string') setTrackerHeadSignal(value.head.state.artifact_id)
     setAnnouncement(value.created
       ? 'Terrain imported for this drawing.'
       : 'This terrain was already imported, so nothing changed.')
@@ -260,20 +312,29 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   function onTerrainChanged(result) {
     if (!activeScope.current || (result?.drawing_id !== undefined && result.drawing_id !== drawingId)) return
     setPhysicalHead(result.head)
+    if (typeof result.head?.state?.artifact_id === 'string') setTrackerHeadSignal(result.head.state.artifact_id)
     onPhysicalHeadChanged?.(result)
   }
 
-  if (!hasLandxml && !hasCombiner && !hasTerrain) return null
+  function onTrackerRowsChanged(result) {
+    if (!activeScope.current || result?.drawing_id !== drawingId) return
+    setPhysicalHead((current) => Number.isInteger(current?.index) && current.index > result.head.index ? current : result.head)
+    setTerrainHeadSignal(result.head.state.artifact_id)
+    onPhysicalHeadChanged?.(result)
+  }
+
+  if (!hasLandxml && !hasCombiner && !hasTerrain && !trackerMounted) return null
   return (
     <section className="solar-workspace-tools" aria-label="Solar workspace tools"
+      hidden={!hasLandxml && !hasCombiner && !hasTerrain && !hasTrackerRows}
       data-physical-head-index={physicalHead?.index ?? undefined}>
-      {hasLandxml && <button type="button" ref={trigger} aria-expanded={openPanel === 'landxml'} onClick={() => setOpenPanel('landxml')}>
+      {hasLandxml && <button type="button" ref={trigger} disabled={!!writers.tracker} aria-expanded={openPanel === 'landxml'} onClick={() => setOpenPanel('landxml')}>
         Import LandXML terrain
       </button>}
       {hasLandxml && openPanel === 'landxml' && (
         <div className="solar-workspace-panel" ref={panel}>
           <SolarLandxmlUpload drawingId={drawingId} projectId={projectId} upload={upload}
-            checkoutHeld={checkoutHeld} busy={busy} onImported={onImported}
+            checkoutHeld={checkoutHeld} busy={busy || !!writers.tracker} onImported={onImported}
             onClose={() => {
               pendingImport.current = null
               landxmlRequest.current = null
@@ -284,14 +345,14 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
         </div>
       )}
       {hasTerrain && <button type="button" ref={terrainTrigger} aria-expanded={openPanel === 'terrain'}
-        disabled={landxmlPending} onClick={() => setOpenPanel('terrain')}>Terrain preview</button>}
+        disabled={landxmlPending || !!writers.tracker} onClick={() => setOpenPanel('terrain')}>Terrain preview</button>}
       {hasTerrain && landxmlPending && <p data-testid="solar-terrain-reason">{TERRAIN_WORKSPACE_REASONS.landxml_importing}</p>}
       {hasTerrain && openPanel === 'terrain' && (
         <div className="solar-workspace-panel" ref={terrainPanel}>
           <h3 tabIndex={-1} ref={terrainHeading}>Terrain preview</h3>
           <SolarTerrainPanel drawingId={drawingId} projectId={projectId} client={scopeTerrainClient}
             headSignal={terrainHeadSignal} disabled={terrainGate !== null}
-            disabledReason={terrainGate === null ? undefined : TERRAIN_WORKSPACE_REASONS[terrainGate]}
+            disabledReason={terrainGate === null ? undefined : terrainGate === 'tracker_pending' ? TRACKER_ROWS_PANEL_REASONS.tracker_pending : TERRAIN_WORKSPACE_REASONS[terrainGate]}
             onPhysicalHeadChanged={onTerrainChanged} />
           <button type="button" onClick={() => {
             setOpenPanel(null)
@@ -300,12 +361,12 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
         </div>
       )}
       {hasCombiner && <button type="button" ref={combinerTrigger} aria-expanded={openPanel === 'combiner-intake'}
-        onClick={() => setOpenPanel('combiner-intake')}>Import combiner intake</button>}
+        disabled={!!writers.tracker} onClick={() => setOpenPanel('combiner-intake')}>Import combiner intake</button>}
       {hasCombiner && openPanel === 'combiner-intake' && (
         <div className="solar-workspace-panel" ref={combinerPanel}>
           <SolarCombinerIntake key={generation} drawingId={drawingId} projectId={projectId}
             client={scopeCombinerClient} onStored={onStored} onRunPlacement={runPlacement} disabled={!!disabledReason} />
-          {reason && <p data-testid="solar-combiner-reason">{COMBINER_WORKSPACE_REASONS[reason]}</p>}
+          {reason && <p data-testid="solar-combiner-reason">{reason === 'tracker_pending' ? TRACKER_ROWS_PANEL_REASONS.tracker_pending : COMBINER_WORKSPACE_REASONS[reason]}</p>}
           {phase === 'failed' && <button type="button" onClick={() => refreshDrawing(refreshValue.current)}>Refresh drawing</button>}
           <button type="button" onClick={() => {
             setOpenPanel(null)
@@ -313,6 +374,21 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
           }}>Close</button>
         </div>
       )}
+      {hasTrackerRows && <button type="button" ref={trackerTrigger} aria-expanded={openPanel === 'tracker-rows'}
+        disabled={trackerBlockedReason !== null} onClick={() => { setTrackerMounted(true); setOpenPanel('tracker-rows') }}>
+        Create tracker rows
+      </button>}
+      {hasTrackerRows && trackerBlockedReason && <p data-testid="solar-tracker-workspace-reason">{TRACKER_ROWS_PANEL_REASONS[trackerBlockedReason]}</p>}
+      {writers.tracker && <p data-testid="solar-tracker-pending-reason">{TRACKER_ROWS_PANEL_REASONS.tracker_pending}</p>}
+      {trackerMounted && <div className="solar-workspace-panel" data-flow-stage="layout"
+        hidden={openPanel !== 'tracker-rows' || !hasTrackerRows}>
+        <SolarTrackerRowsPanel drawingId={drawingId} projectId={projectId} drawingVersion={drawingVersion}
+          client={scopeTrackerRowsClient} terrainClient={scopeTerrainClient} readIntake={readIntake}
+          headSignal={trackerHeadSignal} active={openPanel === 'tracker-rows' && hasTrackerRows}
+          checkoutHeld={checkoutHeld} busy={busy} blockedReason={trackerBlockedReason}
+          onPhysicalHeadChanged={onTrackerRowsChanged}
+          onClose={() => { setOpenPanel(null); trackerTrigger.current?.focus() }} />
+      </div>}
       <p className="solar-workspace-announce" aria-live="polite" aria-atomic="true">{announcement}</p>
     </section>
   )
