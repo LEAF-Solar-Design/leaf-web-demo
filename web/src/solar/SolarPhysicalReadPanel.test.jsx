@@ -60,7 +60,7 @@ const deferred = () => { let resolve; const promise = new Promise((done) => { re
 
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 const terrainClientOf = () => ({ getTerrain: vi.fn().mockResolvedValue({ ok: true, value: terrainOf() }) })
-const props = (terrainClient, runRead, extra = {}) => ({ drawingId: 'solar', projectId: 'p', drawingVersion: 1, terrainClient, runRead, ...extra })
+const props = (terrainClient, runRead, extra = {}) => ({ drawingId: 'solar', projectId: 'p', drawingVersion: 1, terrainClient, runRead, catalogDigestOf: (name) => `sha256:${name}`, ...extra })
 const ready = async () => { await waitFor(() => expect(screen.getByRole('button', { name: 'Run' })).not.toBeDisabled()) }
 const run = () => fireEvent.click(screen.getByRole('button', { name: 'Run' }))
 const selectExport = (format = 'terrain-csv') => {
@@ -91,15 +91,54 @@ it('PC26 automatic head', async () => {
   expect(screen.getByText('Report CPU terrain shade at native frame centres in the current physical head. Uses default clearance and an automatic sample profile. Reads only. Excludes weather weighting and individual-module shading.')).toBeInTheDocument()
   expect(screen.getByText('Download one terrain or CPU terrain shade CSV from the requested physical head. Shade samples native frame centres using default clearance and automatic profiles. Excludes weather weighting and individual-module shading.')).toBeInTheDocument()
   run(); await waitResult()
-  expect(runner).toHaveBeenCalledWith('solar-physical-shade', { drawing_id: 'solar' }, 'solar', { projectId: 'p', dwgVersion: 1 })
+  expect(runner).toHaveBeenCalledWith('solar-physical-shade', { drawing_id: 'solar' }, 'solar', { projectId: 'p', dwgVersion: 1, catalogDigest: 'sha256:solar-physical-shade' })
   expect(terrain.getTerrain).toHaveBeenCalledTimes(3)
   selectExport(); runner.mockResolvedValue(readOf('solar-physical-export')); run(); await waitResult()
-  expect(runner.mock.calls[1]).toEqual(['solar-physical-export', { drawing_id: 'solar', expected_head: H, format: 'terrain-csv' }, 'solar', { projectId: 'p', dwgVersion: 1 }])
+  expect(runner.mock.calls[1]).toEqual(['solar-physical-export', { drawing_id: 'solar', expected_head: H, format: 'terrain-csv' }, 'solar', { projectId: 'p', dwgVersion: 1, catalogDigest: 'sha256:solar-physical-export' }])
   v.unmount()
   const missing = terrainClientOf()
   render(<SolarPhysicalReadPanel terrainClient={missing} runRead={runner} />)
   expect(screen.getByText('Open a drawing to view terrain previews')).toBeInTheDocument()
   expect(missing.getTerrain).not.toHaveBeenCalled()
+})
+it('PRD1 a shade run sends the catalog digest of solar-physical-shade', async () => {
+  const lookup = vi.fn((name) => name === 'solar-physical-shade' ? 'sha256:shade-row' : 'sha256:export-row')
+  const runner = vi.fn().mockResolvedValue(readOf())
+  render(<SolarPhysicalReadPanel {...props(terrainClientOf(), runner, { catalogDigestOf: lookup })} />)
+  await ready(); run(); await waitResult()
+  expect(lookup).toHaveBeenCalledWith('solar-physical-shade')
+  expect(runner.mock.calls[0][3].catalogDigest).toBe('sha256:shade-row')
+})
+it('PRD2 an export run sends the catalog digest of solar-physical-export', async () => {
+  const lookup = vi.fn((name) => name === 'solar-physical-export' ? 'sha256:export-row' : 'sha256:shade-row')
+  const runner = vi.fn().mockResolvedValue(readOf('solar-physical-export'))
+  render(<SolarPhysicalReadPanel {...props(terrainClientOf(), runner, { catalogDigestOf: lookup })} />)
+  await ready(); selectExport(); run(); await waitResult()
+  expect(lookup).toHaveBeenCalledWith('solar-physical-export')
+  expect(runner.mock.calls[0][3].catalogDigest).toBe('sha256:export-row')
+})
+it('PRD3 a tool the current catalog does not carry is refused before any request', async () => {
+  const runner = vi.fn()
+  render(<SolarPhysicalReadPanel {...props(terrainClientOf(), runner, { catalogDigestOf: () => null })} />)
+  await ready(); run()
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This read is not in the current tool catalog, so refresh the tools and run it again.'))
+  expect(screen.getByRole('region', { name: 'Physical reads' })).toHaveAttribute('data-state', 'refused')
+  expect(screen.getByRole('status')).toHaveTextContent('This read is not in the current tool catalog, so refresh the tools and run it again.')
+  expect(runner).not.toHaveBeenCalled()
+})
+it.each([
+  ['missing', undefined],
+  ['throws', () => { throw new Error('lookup failed') }],
+  ['empty', () => ''],
+  ['number', () => 42],
+])('PRD4 a lookup that is missing, throws or answers a non-string is refused before any request: %s', async (id, lookup) => {
+  const runner = vi.fn()
+  const supplied = props(terrainClientOf(), runner, { catalogDigestOf: lookup })
+  if (id === 'missing') delete supplied.catalogDigestOf
+  render(<SolarPhysicalReadPanel {...supplied} />)
+  await ready(); run()
+  await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('This read is not in the current tool catalog, so refresh the tools and run it again.'))
+  expect(runner).not.toHaveBeenCalled()
 })
 it('PC27 shade values', async () => {
   render(<SolarPhysicalReadPanel {...props(terrainClientOf(), vi.fn().mockResolvedValue(readOf()))} />)
