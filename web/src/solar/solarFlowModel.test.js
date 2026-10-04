@@ -203,15 +203,11 @@ describe('F2 workspace panel admission', () => {
     expect(Object.isFrozen(FLOW_PANELS)).toBe(true)
     for (const panels of Object.values(FLOW_PANELS)) expect(Object.isFrozen(panels)).toBe(true)
     const source = readFileSync(resolve(process.cwd(), 'src/solar/SolarWorkspaceTools.jsx'), 'utf8')
-    const literal = source.match(/const FLOW_PANELS = Object\.freeze\(\{([\s\S]{0,1024}?)\n\}\)/)
-    expect(literal).not.toBeNull()
-    const entries = [...literal[1].matchAll(/(?:[\x22\x27]([a-z-]+)[\x22\x27]|([a-z-]+)):\s*Object\.freeze\(\[([^\]]*)\]\)/g)]
-    const inventory = Object.fromEntries(entries.map((entry) => [entry[1] ?? entry[2],
-      [...entry[3].matchAll(/[\x22\x27]([a-z-]+)[\x22\x27]/g)].map((panel) => panel[1])]))
-    expect(inventory).toEqual({ ...FLOW_PANELS, 'solaredge-import': [] })
-    expect(Object.keys(inventory)).toEqual(Object.keys(FLOW_PANELS))
-    expect(Object.keys(FLOW_PANELS).filter((id) => JSON.stringify(inventory[id]) !== JSON.stringify(FLOW_PANELS[id])))
-      .toEqual(['solaredge-import'])
+    const executable = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+    expect(executable).toMatch(new RegExp('import\\s+\\{\\s*FLOW_PANELS\\s*\\}\\s+from\\s+[\\x22\\x27]\\./solarWorkspacePanels\\.js[\\x22\\x27]'))
+    expect(executable).toMatch(/FLOW_PANELS\[flow\]\?\.includes/)
+    expect(executable).not.toMatch(/(?:const|let|var)\s+FLOW_PANELS\s*=/)
+    expect(executable).not.toMatch(new RegExp('(?:rooftop|ground-electrical|ground-physical|solaredge-import|pvcase-tutorial)[\\x22\\x27]?\\s*:\\s*(?:Object\\.freeze\\s*\\(\\s*)?\\['))
   })
 
   it('F2 02 shipped stages and copy match the frozen contract', () => {
