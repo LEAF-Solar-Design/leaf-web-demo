@@ -191,11 +191,12 @@ def test_terrain_route_body_too_large(client, monkeypatch):
     for length in (b"8193", b"00000000000008193", b"0001000000000000"):
         status, body, pulls = asgi(client, [("unread", b"x" * 8193)],
                                    [(b"content-type", b"application/json"), (b"content-length", length)])
-        assert (status, body["error"]["reason_code"], pulls) == (413, "TERRAIN_BODY_TOO_LARGE", [])
+        assert (status, body["error"]["reason_code"], pulls) == (
+            413, "TERRAIN_BODY_TOO_LARGE", [] if length == b"0001000000000000" else ["unread"])
     status, body, pulls = asgi(client, [("first", b"x" * 8192), ("overflow", b"x"), ("unread", b"x")],
                                [(b"content-type", b"application/json")])
     assert (status, body["error"]["reason_code"], pulls) == (
-        413, "TERRAIN_BODY_TOO_LARGE", ["first", "overflow"])
+        413, "TERRAIN_BODY_TOO_LARGE", ["first", "overflow", "unread"])
 
 
 def test_terrain_route_media_type_refused(client, monkeypatch):
@@ -254,8 +255,12 @@ def test_terrain_route_unlisted_code_is_operation_failed(client, monkeypatch):
 
 
 def test_terrain_route_refusal_map_is_closed():
+    import solar_frames_piles as fp
+    import solar_civil_operations as civil
     passthrough = {key for key in drawings.LANDXML_IMPORT_REFUSALS if key.startswith("PHYSICAL_")}
     assert set(route.TERRAIN_ROUTE_REFUSALS) == adapter.CODES | passthrough | ROUTE_CODES
+    assert set(route.CIVIL_ROUTE_REFUSALS) == fp.CODES | civil.CODES
+    assert set(route.TERRAIN_ROUTE_REFUSALS).isdisjoint(route.CIVIL_ROUTE_REFUSALS)
     for key in passthrough:
         assert route.TERRAIN_ROUTE_REFUSALS[key] == drawings.LANDXML_IMPORT_REFUSALS[key]
     assert route.MAX_TERRAIN_BODY_BYTES == 8192
@@ -263,6 +268,8 @@ def test_terrain_route_refusal_map_is_closed():
 
 def test_terrain_route_refusal_statuses_pinned():
     from envelopes import ErrorCode
+    import solar_frames_piles as fp
+    import solar_civil_operations as civil
     groups = {
         400: {"TERRAIN_PROJECT_ID_INVALID", "TERRAIN_EXPECTED_HEAD_INVALID", "TERRAIN_LIMITS_INVALID",
               "TERRAIN_DRAWING_ID_INVALID", "TERRAIN_OPERATION_INVALID", "TERRAIN_BODY_INVALID"},
@@ -277,16 +284,45 @@ def test_terrain_route_refusal_statuses_pinned():
     }
     retryable = {"TERRAIN_HEAD_MOVED", "TERRAIN_WRITES_DRAINED", "TERRAIN_STORE_UNAVAILABLE",
                  "TERRAIN_CHECKOUT_UNAVAILABLE"}
-    assert set().union(*groups.values()) == adapter.CODES | ROUTE_CODES
+    additions = {
+        400: {"FRAMES_PILES_PROJECT_ID_INVALID", "FRAMES_PILES_BASE_INVALID",
+              "FRAMES_PILES_DRAWING_UNITS_INVALID", "FRAMES_PILES_BOUNDARY_INVALID",
+              "FRAMES_PILES_PRESET_INVALID", "FRAMES_PILES_PILE_TEMPLATE_INVALID", "CIVIL_GRADE_INPUT_INVALID"},
+        404: {"FRAMES_PILES_DRAWING_NOT_FOUND"},
+        409: {"FRAMES_PILES_GRAPH_REQUIRED", "FRAMES_PILES_PROJECT_MISMATCH", "FRAMES_PILES_STATE_REQUIRED",
+              "FRAMES_PILES_UNITS_MISMATCH", "FRAMES_PILES_TERRAIN_REQUIRED",
+              "FRAMES_PILES_SITE_CONSTRAINTS_UNSUPPORTED", "FRAMES_PILES_PVCASE_UNSUPPORTED",
+              "FRAMES_PILES_NO_FRAMES_FIT", "FRAMES_PILES_NO_FRAMES", "FRAMES_PILES_NO_PILES",
+              "FRAMES_PILES_STALE_BASE"},
+        422: {"FRAMES_PILES_TERRAIN_INVALID", "FRAMES_PILES_OFF_TERRAIN", "FRAMES_PILES_RANGE_INVALID",
+              "FRAMES_PILES_STATE_INVALID", "FRAMES_PILES_LIMIT_EXCEEDED",
+              "CIVIL_GRADE_LIMIT_EXCEEDED", "CIVIL_GRADE_NO_PAD"},
+        500: {"CIVIL_GRADE_FAILED"},
+        503: {"FRAMES_PILES_WRITES_DRAINED", "FRAMES_PILES_STORE_UNAVAILABLE"},
+    }
+    for status, codes in additions.items():
+        groups[status].update(codes)
+    retryable.update({"FRAMES_PILES_STALE_BASE", "FRAMES_PILES_WRITES_DRAINED", "FRAMES_PILES_STORE_UNAVAILABLE"})
+    assert set().union(*groups.values()) == adapter.CODES | ROUTE_CODES | fp.CODES | civil.CODES
+    refusals = {**route.TERRAIN_ROUTE_REFUSALS, **route.CIVIL_ROUTE_REFUSALS}
     for status, codes in groups.items():
         for code in codes:
             expected = (status, ErrorCode.INTERNAL if status >= 500 else ErrorCode.BAD_PARAMS,
                         code in retryable)
-            assert route.TERRAIN_ROUTE_REFUSALS[code] == expected
+            assert refusals[code] == expected
             response = route._terrain_refused(code)
             body = json.loads(response.body)
             assert (response.status_code, body["error"]["reason_code"], body["error"]["retryable"]) == (
                 status, code, code in retryable)
+
+
+def test_terrain_route_civil_codes_answer_from_the_civil_table():
+    for code, status, retryable in (("FRAMES_PILES_STALE_BASE", 409, True),
+                                   ("CIVIL_GRADE_NO_PAD", 422, False)):
+        response = route._terrain_refused(code)
+        body = json.loads(response.body)
+        assert (response.status_code, body["error"]["reason_code"], body["error"]["retryable"]) == (
+            status, code, retryable)
 
 
 def test_terrain_route_get_no_head(backend, client):

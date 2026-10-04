@@ -1271,11 +1271,23 @@ def pack_frames(boundary, preset, meters_per_unit=1.0, exclusion_polys=None, pit
     max_slope = preset.max_slope_percent
     x_min, y_min, x_max, y_max = _bbox(pts)
 
+    # A loop that runs must advance: a step at or below half the unit in the last place of the largest
+    # coordinate the loop reaches leaves `y += row_step` (or `x += fw`) unchanged, so the plugin's
+    # accumulating loop would not terminate either. A row loop that never starts returns no frames as before.
+    if y_min + fh <= y_max + 1e-9 and (
+            row_step <= math.ulp(max(abs(y_min), abs(y_max + 1e-9))) / 2.0
+            or fw <= math.ulp(max(abs(x_min), abs(x_max + 1e-9))) / 2.0):
+        raise GroundFramesError("frame_footprint_degenerate",
+                                f"frame footprint {width_m} x {height_m} m is below the drawing's coordinate "
+                                f"precision (the plugin would not terminate)")
+
     rows_est = 0 if y_max + 1e-9 - y_min - fh < 0 else math.floor((y_max + 1e-9 - y_min - fh) / row_step) + 2
     cols_est = 0 if x_max + 1e-9 - x_min - fw < 0 else math.floor((x_max + 1e-9 - x_min - fw) / fw) + 2
-    if rows_est * cols_est > MAX_CANDIDATE_CELLS:
+    # Every row the loop visits costs an iteration even when no column fits, so a row counts at least once.
+    cells_est = rows_est * max(cols_est, 1)
+    if cells_est > MAX_CANDIDATE_CELLS:
         raise GroundFramesError("candidate_cells_over_cap",
-                                f"about {rows_est * cols_est} candidate frame cells exceed {MAX_CANDIDATE_CELLS}")
+                                f"about {cells_est} candidate frame cells exceed {MAX_CANDIDATE_CELLS}")
 
     frames = []
     row_idx = 0

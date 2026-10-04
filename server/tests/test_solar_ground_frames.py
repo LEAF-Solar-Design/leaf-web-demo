@@ -1017,6 +1017,52 @@ def test_pack_refusals():
             [rectangle(1, 1)] * (gf.MAX_EXCLUSIONS + 1))
 
 
+# A packing loop that cannot advance, or that would visit an unbounded number of empty rows, is refused
+# before it starts; FramePacker.cs:87-151 would not terminate on these inputs either.
+
+def _landscape(length_m, width_m):
+    return gf.FramePreset(rows=1, columns=1, orientation="Landscape", module_length_m=length_m,
+                          module_width_m=width_m)
+
+
+def test_pack_empty_rows_count_toward_the_cell_cap():
+    # A frame wider than the 1 x 1 boundary fits no column, yet each of about 1e12 rows of 1e-12 m is an
+    # iteration; a zero column estimate must not make the cell estimate zero.
+    refusal("candidate_cells_over_cap", gf.pack_frames, rectangle(1, 1), _landscape(100.0, 1e-12))
+
+
+def test_pack_a_few_empty_rows_still_return_no_frames():
+    assert gf.pack_frames(rectangle(1, 1), _landscape(100.0, 0.01)) == []
+
+
+_Y0 = 4500000.0  # its unit in the last place is 2**-30 m
+
+
+@pytest.mark.parametrize("boundary, length_m, width_m", [
+    pytest.param([(0, 0), (1, 0), (1, 1), (0, 1)], 100.0, 1e-20, id="rows-1e-20-on-a-unit-square"),
+    pytest.param([(0, _Y0 + 0.00015), (10, _Y0 + 0.00015), (5, _Y0)], 10.0, 1e-10, id="rows-stall-no-frame-fits"),
+    pytest.param([(0, _Y0), (10, _Y0), (10, _Y0 + 0.00015), (0, _Y0 + 0.00015)], 10.0, 1e-10,
+                 id="rows-stall-on-a-rectangle"),
+    pytest.param([(_Y0 + 0.00015, 0), (_Y0 + 0.00015, 10), (_Y0, 5)], 1e-10, 10.0, id="columns-stall-no-frame-fits"),
+    pytest.param([(_Y0, 0), (_Y0 + 0.00015, 0), (_Y0 + 0.00015, 10), (_Y0, 10)], 1e-10, 10.0,
+                 id="columns-stall-on-a-rectangle"),
+])
+def test_pack_step_below_coordinate_precision_is_degenerate(boundary, length_m, width_m):
+    refusal("frame_footprint_degenerate", gf.pack_frames, boundary, _landscape(length_m, width_m))
+
+
+def test_pack_step_threshold_is_half_a_unit_in_the_last_place():
+    boundary = [(0.0, _Y0), (10.0, _Y0), (10.0, _Y0 + 16 * 2.0 ** -30), (0.0, _Y0 + 16 * 2.0 ** -30)]
+    refusal("frame_footprint_degenerate", gf.pack_frames, boundary, _landscape(10.0, 2.0 ** -31))
+    frames = gf.pack_frames(boundary, _landscape(10.0, math.nextafter(2.0 ** -31, 1.0)))
+    assert len(frames) == 3 and frames[-1]["row"] == 16
+
+
+def test_pack_a_row_loop_that_never_starts_keeps_returning_no_frames():
+    # The frame is taller than the boundary, so no row is visited and its width never matters.
+    assert gf.pack_frames(rectangle(10, 1), _landscape(1e-20, 100.0)) == []
+
+
 def test_entity_and_frame_cell_refusals():
     refusal("entities_malformed", gf.run_collision, {"not": "a list"})
     refusal("entities_malformed", gf.run_collision, [42])

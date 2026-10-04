@@ -180,7 +180,10 @@ def _read_output(tool, graph, builtin_params, sink=None, *, version_graph_sha256
         if _reads_physical_head(module):
             # The terminal proof re-reads the head the output names, so the output must name it.
             expected = None if physical_head is None else physical_head["head"]
-            if type(output) is not dict or "head" not in output or output["head"] != expected:
+            physical_output = (output.summary if type(output) is solar_artifacts.ArtifactOutput
+                               else output)
+            if (type(physical_output) is not dict or "head" not in physical_output
+                    or physical_output["head"] != expected):
                 raise GraphValidationError("READ_OUTPUT_INVALID")
     except GraphValidationError:
         raise
@@ -192,6 +195,8 @@ def _read_output(tool, graph, builtin_params, sink=None, *, version_graph_sha256
             raise GraphValidationError("READ_OUTPUT_INVALID")
         prepared = sink.prepare(output)
         output = {"summary": output.summary, "artifact": prepared.ref}
+        if _reads_physical_head(module):
+            output["head"] = copy.deepcopy(output["summary"]["head"])
     elif solar_artifacts.artifact_references(output):
         raise GraphValidationError("ARTIFACT_REFERENCE_RESERVED")
     if type(output) is not dict:

@@ -1,7 +1,7 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import SolarEdgeImportPanel from './SolarEdgeImportPanel.jsx'
+import SolarEdgeImportPanel, { SOLAREDGE_PANEL_REASONS } from './SolarEdgeImportPanel.jsx'
 import { SOLAREDGE_IMPORT_REASONS, SOLAREDGE_PDF_MAX_BYTES,
   validateSolarEdgeReport, validateSolarEdgeSource } from './solarImportClient.js'
 
@@ -41,6 +41,9 @@ function setup(overrides = {}) {
 const uploadButton = () => screen.getByRole('button', { name: 'Upload' })
 const buildButton = () => screen.getByRole('button', { name: 'Build report' })
 const acceptButton = () => screen.getByRole('button', { name: 'Accept tracking labels' })
+function f3ClickHandler(button) {
+  return button[Object.keys(button).find((key) => key.startsWith('__reactProps'))].onClick
+}
 function selectFile(file = new File(['%PDF-1.7'], 'layout.pdf', { type: 'application/pdf' })) {
   fireEvent.change(screen.getByLabelText('SolarEdge layout PDF'), { target: { files: [file] } })
   return file
@@ -60,6 +63,144 @@ async function build() {
 }
 
 describe('SolarEdgeImportPanel', () => {
+  it('SE16 accepts one report once', async () => {
+    const { props } = setup({ onAccept: vi.fn(() => undefined) })
+    await upload(); await build()
+    fireEvent.click(acceptButton())
+    expect(props.onAccept).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('status').textContent).toBe('Tracking labels sent for acceptance.')
+    fireEvent.click(acceptButton())
+    expect(props.onAccept).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('status').textContent).toBe('Tracking labels sent for acceptance.')
+    await build()
+    fireEvent.click(acceptButton())
+    expect(props.onAccept).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('status').textContent).toBe('Tracking labels sent for acceptance.')
+    props.onAccept.mockReturnValueOnce(false)
+    await build()
+    fireEvent.click(acceptButton())
+    expect(props.onAccept).toHaveBeenCalledTimes(3)
+    expect(screen.getByRole('status').textContent).toBe(SOLAREDGE_PANEL_REASONS.not_staged)
+    fireEvent.click(acceptButton())
+    expect(props.onAccept).toHaveBeenCalledTimes(4)
+    expect(screen.getByRole('status').textContent).toBe('Tracking labels sent for acceptance.')
+  })
+
+  it('F3 17 retains review and inputs when staging returns false', async () => {
+    const { props } = setup({ onAccept: vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(undefined) })
+    await upload()
+    const file = screen.getByLabelText('SolarEdge layout PDF').files[0]
+    fireEvent.change(screen.getByLabelText('Selection order'), { target: { value: 'recorded' } })
+    await build()
+    const review = screen.getByRole('region', { name: 'Report review' })
+    fireEvent.click(acceptButton())
+    expect(screen.getByRole('status').textContent).toBe(SOLAREDGE_PANEL_REASONS.not_staged)
+    expect(acceptButton().disabled).toBe(false)
+    expect(screen.getByRole('region', { name: 'Report review' })).toBe(review)
+    expect(screen.getByLabelText('SolarEdge layout PDF').files[0]).toBe(file)
+    expect(screen.getByLabelText('Alignment tolerance').value).toBe('0.5')
+    expect(screen.getByLabelText('Selection order').value).toBe('recorded')
+    fireEvent.click(acceptButton())
+    expect(props.onAccept).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('status').textContent).toBe('Tracking labels sent for acceptance.')
+  })
+
+  it('F3 18 locks acceptance while its promise is pending', async () => {
+    const held = deferred()
+    const { props } = setup({ onAccept: vi.fn(() => held.promise) })
+    await upload(); await build()
+    const accept = f3ClickHandler(acceptButton())
+    const uploadAgain = f3ClickHandler(uploadButton())
+    const reportAgain = f3ClickHandler(buildButton())
+    act(() => { accept(); accept(); uploadAgain(); reportAgain() })
+    expect(props.onAccept).toHaveBeenCalledTimes(1)
+    expect(props.client.uploadPdf).toHaveBeenCalledTimes(1)
+    expect(props.client.requestReport).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('status').textContent).toBe(SOLAREDGE_PANEL_REASONS.staging_pending)
+    for (const control of [acceptButton(), uploadButton(), buildButton(), screen.getByLabelText('Selection order')]) {
+      expect(control.disabled).toBe(true)
+    }
+    await act(async () => held.resolve(true))
+    expect(screen.getByRole('status').textContent).toBe('Tracking labels sent for acceptance.')
+  })
+
+  it('F3 19 handles rejected staging and obsolete completion', async () => {
+    const held = deferred()
+    const { props, rerender } = setup({ drawingVersion: 3,
+      onAccept: vi.fn().mockImplementationOnce(() => { throw new Error('staging') })
+        .mockRejectedValueOnce(new Error('staging')).mockReturnValueOnce(held.promise) })
+    await upload(); await build()
+    fireEvent.click(acceptButton())
+    expect(screen.getByRole('status').textContent).toBe(SOLAREDGE_PANEL_REASONS.not_staged)
+    fireEvent.click(acceptButton())
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe(SOLAREDGE_PANEL_REASONS.not_staged))
+    expect(acceptButton().disabled).toBe(false)
+    fireEvent.click(acceptButton())
+    rerender(<SolarEdgeImportPanel {...props} drawingVersion={4} />)
+    await act(async () => held.resolve(true))
+    expect(screen.getByRole('status').textContent).toBe('')
+    expect(acceptButton().disabled).toBe(true)
+    expect(screen.getByRole('region', { name: 'Report review' })).toBeTruthy()
+    const next = deferred()
+    props.onAccept.mockReturnValueOnce(next.promise)
+    await build()
+    fireEvent.click(acceptButton())
+    rerender(<SolarEdgeImportPanel {...props} drawingId="d2" drawingVersion={4} />)
+    await act(async () => next.resolve(false))
+    expect(screen.getByRole('status').textContent).toBe('')
+    expect(screen.queryByRole('region', { name: 'Report review' })).toBeNull()
+  })
+
+  it('F3 20 preserves synchronous undefined acceptance', async () => {
+    const { props } = setup({ onAccept: vi.fn(() => undefined) })
+    await upload(); await build()
+    fireEvent.click(acceptButton())
+    expect(screen.getByRole('status').textContent).toBe('Tracking labels sent for acceptance.')
+    expect(document.activeElement).toBe(acceptButton())
+    expect(props.onAccept).toHaveBeenCalledExactlyOnceWith({ expected_rev: 12, report_artifact_id: reportId })
+  })
+
+  it('F3 21 preserves report counts and matching inputs', async () => {
+    const { props } = setup()
+    await upload()
+    fireEvent.change(screen.getByLabelText('Selection order'), { target: { value: 'recorded' } })
+    await build()
+    expect(props.client.requestReport).toHaveBeenCalledWith(expect.objectContaining({ alignmentTolerance: 0.5, selectionOrder: 'recorded' }))
+    expect(within(screen.getByRole('table', { name: 'SolarEdge report counts' })).getAllByRole('row')).toHaveLength(13)
+    expect(screen.getByText('Review needed: 2 panels have no tracking label.')).toBeTruthy()
+    expect(screen.getByText('Review needed: 1 string is partial.')).toBeTruthy()
+    expect(screen.getByLabelText('Alignment tolerance').value).toBe('0.5')
+    expect(screen.getByLabelText('Selection order').value).toBe('recorded')
+  })
+
+  it('F3 22 preserves validation and refusal sentences', async () => {
+    const { props } = setup()
+    const large = new File(['%PDF'], 'large.pdf', { type: 'application/pdf' })
+    Object.defineProperty(large, 'size', { value: SOLAREDGE_PDF_MAX_BYTES + 1 })
+    selectFile(large); fireEvent.click(uploadButton())
+    expect(screen.getByRole('status').textContent).toContain(SOLAREDGE_IMPORT_REASONS.IMPORT_PDF_TOO_LARGE)
+    expect(props.client.uploadPdf).not.toHaveBeenCalled()
+    await upload()
+    tolerance('0')
+    act(() => { f3ClickHandler(buildButton())() })
+    expect(screen.getByRole('status').textContent).toBe('Enter an alignment tolerance from 0.000001 through 1000000.')
+    expect(props.client.requestReport).not.toHaveBeenCalled()
+    for (const [value, sentence] of [[report('d2'), 'This report belongs to another drawing. Build a report for this drawing.'],
+      [{ ...report(), report: { ...report().report, artifact_id: 'B'.repeat(64) } }, 'The report reference is not valid. Build the report again.']]) {
+      props.client.requestReport.mockResolvedValueOnce(success(value))
+      await build()
+      expect(screen.getByText(sentence)).toBeTruthy()
+      act(() => { f3ClickHandler(acceptButton())() })
+      expect(props.onAccept).not.toHaveBeenCalled()
+    }
+    props.client.requestReport.mockResolvedValueOnce(failure('FORBIDDEN'))
+    tolerance('0.5'); fireEvent.click(buildButton())
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain(SOLAREDGE_IMPORT_REASONS.FORBIDDEN))
+    expect(screen.getByLabelText('Alignment tolerance').value).toBe('0.5')
+    expect(screen.getByLabelText('SolarEdge layout PDF').files[0].name).toBe('layout.pdf')
+    expect(props.onAccept).not.toHaveBeenCalled()
+  })
+
   it('SE1 uploads, builds and shows all counts from a client-valid report', async () => {
     const { props } = setup()
     expect(validateSolarEdgeSource(source(), 'd1')).toEqual(source())

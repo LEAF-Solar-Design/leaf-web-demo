@@ -202,10 +202,39 @@ def load_tenant_repo_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, A
     operational log classification is unchanged — PR #474 review, P2)."""
     from _vendor.mushy_fold.registry import load_repo_registry_tools
 
+    from customization_service import load_authoritative_tenant_tools
+    authoritative = load_authoritative_tenant_tools(tenant_id)
+    if authoritative is not None:
+        return authoritative
+
     def _bad_registry(reg: Path, exc: Exception) -> None:
         print(f"[leaf-demo] bad tenant registry.json at {reg}: {exc}", file=sys.stderr)
 
-    return load_repo_registry_tools(tenant_repo_dir(tenant_id), on_error=_bad_registry)
+    tenant_root, authoritative = _verified_tenant_fallback(tenant_id)
+    if authoritative is not None:
+        return authoritative
+    return load_repo_registry_tools(tenant_root, on_error=_bad_registry)
+
+
+def _verified_tenant_fallback(tenant_id: str):
+    """An earlier absence cannot authorize raw rows from a later durable pin."""
+    from customization_service import (
+        CustomizationServiceError, effective_catalog_pin, load_authoritative_tenant_tools,
+    )
+
+    tenant_root = tenant_repo_dir(tenant_id)
+    # No resolved directory means no tenant rows can escape this fallback.
+    # In particular, a public generation projection alone must not turn the
+    # legacy empty tenant tier into a metadata-authority failure.
+    if tenant_root is not None and effective_catalog_pin(tenant_id) is not None:
+        authoritative = load_authoritative_tenant_tools(tenant_id)
+        if authoritative is None:
+            raise CustomizationServiceError(
+                "effective_catalog_unavailable", 503,
+                detail="effective authority appeared during fallback; retry catalog load",
+            )
+        return None, authoritative
+    return tenant_root, None
 
 
 # --------------------------------------------------------------------------- #
@@ -680,13 +709,17 @@ def _strict_provenance_tiers(
     )
     catalog_tools = _strict_store_tools(
         CATALOG_TOOLS_STORE, TOOL_SOURCE_CATALOG_SEED)
-    tenant_root = tenant_repo_dir(tenant_id)
-    tenant_tools = (
-        _strict_store_tools(
-            tenant_root / "registry.json", TOOL_SOURCE_TENANT_REPO)
-        if tenant_root is not None
-        else []
-    )
+    from customization_service import load_authoritative_tenant_tools
+    tenant_tools = load_authoritative_tenant_tools(tenant_id)
+    if tenant_tools is None:
+        tenant_root, tenant_tools = _verified_tenant_fallback(tenant_id)
+        if tenant_tools is None:
+            tenant_tools = (
+                _strict_store_tools(
+                    tenant_root / "registry.json", TOOL_SOURCE_TENANT_REPO)
+                if tenant_root is not None
+                else []
+            )
     write_tools = _strict_store_tools(
         WRITE_TOOLS_STORE, TOOL_SOURCE_WRITE_SEED)
     records = solar_tools.registry_records()

@@ -18,6 +18,22 @@ import {
   validateSolarArtifactRef,
 } from './solarImportClient.js'
 
+it('srr13_server_media_types', () => {
+  const artifactId = 'a'.repeat(64)
+  const base = {
+    schema: 'leaf.solar-artifact-ref.v1', artifact_id: artifactId, content_sha256: 'b'.repeat(64),
+    byte_length: 4421, source_version: 1, download: '/api/drawings/solar/artifacts/' + artifactId,
+  }
+  const xlsx = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  for (const [media_type, filename] of [
+    ['text/csv', 'a.csv'], ['application/json', 'a.json'], [xlsx, 'a.xlsx'],
+    ['application/vnd.google-earth.kml+xml', 'a.kml'], ['application/xml', 'a.xml'], ['application/pdf', 'a.pdf'],
+  ]) expect(validateSolarArtifactRef({ ...base, media_type, filename }, 'solar')).toBe(true)
+  for (const [media_type, filename] of [
+    ['text/plain', 'a.txt'], [xlsx, 'a.csv'], [xlsx, 'a..xlsx'], [xlsx, 'a'.repeat(121) + '.xlsx'],
+  ]) expect(validateSolarArtifactRef({ ...base, media_type, filename }, 'solar')).toBe(false)
+})
+
 // Fixtures captured from the real routes (planner measurement, fixtures.json and small_report.txt).
 const UPLOAD_SMALL = JSON.parse('{"degraded_mode":false,"drawing_id":"solar","error":null,"graph_sha256":"72a71ff696ea5695388cf83e66120cb3a7442a655e73c0c15b38473b50e304ad","kind":"solaredge-pdf","page_count":1,"project_id":"leaf:project:00000000-0000-4000-8000-000000000001","schema":"leaf.solar-import-source.v1","source":{"artifact_id":"949533a2c62f973034fbb40ab738ca4f3267997236b20a09e437dc07665c61fd","byte_length":191,"content_sha256":"82285a8f6ebe74ec978fd7dacb2bf52d7d5c20a9cc8945766072c12e1656111f","download":"/api/drawings/solar/artifacts/949533a2c62f973034fbb40ab738ca4f3267997236b20a09e437dc07665c61fd","filename":"solaredge-source.pdf","media_type":"application/pdf","schema":"leaf.solar-artifact-ref.v1","source_version":1},"source_version":1}')
 const UPLOAD_C14 = JSON.parse('{"degraded_mode":false,"drawing_id":"solar","error":null,"graph_sha256":"ed057934bc0b4b1a723cadece08e86e31c3c5e6733e3b4d14c1c2e2a70037342","kind":"solaredge-pdf","page_count":1,"project_id":"leaf:project:00000000-0000-4000-8000-000000000001","schema":"leaf.solar-import-source.v1","source":{"artifact_id":"4887eecc076fd8206933323059e7c05ad01c3045963935ddc504f3a7b8d89a8a","byte_length":1019229,"content_sha256":"2e8076086b8e494295e5523b3bb94325924b3196d069e62d2f517275d678a1c1","download":"/api/drawings/solar/artifacts/4887eecc076fd8206933323059e7c05ad01c3045963935ddc504f3a7b8d89a8a","filename":"solaredge-source.pdf","media_type":"application/pdf","schema":"leaf.solar-artifact-ref.v1","source_version":1},"source_version":1}')

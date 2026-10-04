@@ -86,6 +86,9 @@ class ChangeSet:
     stage_phase: str = "queued"
     stage_started_at: Optional[str] = None
     stage_finished_at: Optional[str] = None
+    request_graph_input: Optional[str] = None
+    base_catalog_change_set_id: Optional[str] = None
+    catalog_record_fields_json: Optional[str] = None
 
 
 @dataclass(frozen=True)

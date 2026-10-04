@@ -1284,3 +1284,541 @@ def test_rollback_requires_r6_and_owner_or_editor(tmp_path, monkeypatch):
         service.rollback(
             tenant="tenant-a", change_set_id="change", idempotency_key="rollback"
         )
+
+
+def _ag2b_setup(tmp_path, monkeypatch):
+    # Reuse AG2a's real Git/policy fixture without changing its acceptance rows.
+    from test_customization_async_stage import ag2a
+    store = SQLiteCustomizationStore(tmp_path / "customization.db")
+    store.initialize()
+    lane = ag2a.__wrapped__(tmp_path, store, monkeypatch)
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "all")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STORE", "sqlite")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(store.database_path))
+    monkeypatch.setenv("LEAF_EFFECTIVE_TENANTS_DIR", str(tmp_path / "effective"))
+    monkeypatch.setattr(CustomizationService, "configured", classmethod(lambda cls: lane.service))
+    lane.publishes = []
+
+    def publish(change):
+        lane.publishes.append(change.change_set_id)
+        head = customization_service._git(lane.bare, "rev-parse", "refs/heads/main")
+        assert head in {change.base_commit, change.staged_commit}
+        customization_service._git(lane.bare, "update-ref", "refs/heads/main", change.staged_commit)
+        return change.staged_commit
+
+    lane.service._harness_publish = publish
+    lane.service._harness_remove = lambda change, _digest: lane.body(change, remove=change.target_tool_name)
+    return lane
+
+
+@pytest.fixture
+def ag2b(tmp_path, monkeypatch):
+    return _ag2b_setup(tmp_path, monkeypatch)
+
+
+def _ag2b_stage(lane, key="first", *, graph="solar-w1-graph", target=None):
+    lane.row_options = {"name": key}
+    lane.request(key=key, graph=graph, target=target)
+    return lane.change(key)
+
+
+def _ag2b_approval(lane, change):
+    from customization_authority import PublishRequest, StagedChange, StaffAuthority
+    approval = lane.service._authority().issue_publish_confirmation(
+        staged_change=StagedChange(
+            change.tenant_id, change.change_set_id, change.staged_commit,
+            change.catalog_digest, change.desired_platform_release,
+            change.workspace_contract_digest, change.author_subject, True,
+        ),
+        author_binding=TenantBinding(change.tenant_id, change.author_subject, "owner", True),
+        staff_authority=StaffAuthority("auth0|independent-approver", True, True),
+    )
+    request = PublishRequest(
+        change.change_set_id, change.staged_commit, change.catalog_digest,
+        change.desired_platform_release, change.workspace_contract_digest,
+    )
+    return request, approval.confirmation_id
+
+
+def _ag2b_publish(lane, change, approval=None):
+    request, confirmation_id = approval or _ag2b_approval(lane, change)
+    lane.service.publish(
+        tenant=lane.tenant, request=request, confirmation_id=confirmation_id,
+        idempotency_key="publish-" + change.idempotency_key,
+    )
+    return lane.change(change.idempotency_key)
+
+
+def _ag2b_loaders():
+    import deps
+    return (
+        lambda: deps.load_tenant_repo_tools("tenant-a"),
+        lambda: dict(deps._strict_provenance_tiers("tenant-a"))[deps.TOOL_SOURCE_TENANT_REPO],
+    )
+
+
+def _ag2b_refuses(code, call, status=503):
+    with pytest.raises(CustomizationServiceError) as caught:
+        call()
+    assert caught.value.code == code
+    assert caught.value.status_code == status
+
+
+def _ag2b_corrupt(lane, change, snapshot):
+    with lane.store._transaction() as conn:
+        conn.execute(
+            "UPDATE customization_change_sets SET catalog_record_fields_json = ? WHERE change_set_id = ?",
+            (snapshot, change.change_set_id),
+        )
+
+
+def _ag2b_wrong_snapshot(change):
+    snapshot = json.loads(change.catalog_record_fields_json)
+    next(iter(snapshot["tools"].values()))["record_sha256"] = "0" * 64
+    return json.dumps(snapshot)
+
+
+def _ag2b_set_pin(lane, change):
+    with lane.store._transaction() as conn:
+        conn.execute(
+            "UPDATE effective_catalogs SET change_set_id = ?, catalog_commit = ?, catalog_digest = ?, "
+            "effective_platform_release = ?, workspace_contract_digest = ? WHERE tenant_id = ?",
+            (change.change_set_id, change.staged_commit, change.catalog_digest,
+             change.desired_platform_release, change.workspace_contract_digest, change.tenant_id),
+        )
+
+
+def _ag2b_remove(lane, key="remove"):
+    pin = lane.store.get_effective_catalog(tenant_id="tenant-a")
+    lane.service.stage_removal(
+        tenant=lane.tenant, tool_name="first", expected_catalog_digest=pin.catalog_digest,
+        idempotency_key=key,
+    )
+    return lane.change(key)
+
+
+def test_ag2b_three_publications(ag2b):
+    from test_customization_async_stage import _ag2a_snapshot
+    changes = [_ag2b_publish(ag2b, _ag2b_stage(ag2b, key)) for key in ("first", "second", "third")]
+    raw = ag2b.service._record_fields_rows(changes[-1], changes[-1].staged_commit)
+    assert changes[-1].catalog_record_fields_json == _ag2a_snapshot(list(raw.values()))
+    for load in _ag2b_loaders():
+        rows = load()
+        assert {row["name"] for row in rows} == {"first", "second", "third"}
+        assert all(row["graph_input"] == "solar-w1-graph" for row in rows)
+
+
+def test_ag2b_unrelated_addition(ag2b):
+    first = _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    before = _ag2b_loaders()[0]()
+    ordinary = _ag2b_publish(ag2b, _ag2b_stage(ag2b, "ordinary", graph=None))
+    assert ordinary.catalog_record_fields_json == first.catalog_record_fields_json
+    for load in _ag2b_loaders():
+        rows = {row["name"]: row for row in load()}
+        assert rows["first"] == before[0]
+        assert "graph_input" not in rows["ordinary"]
+
+
+def test_ag2b_revision_inherits_graph(ag2b):
+    from test_customization_async_stage import _ag2a_snapshot
+    first = _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    revised = _ag2b_publish(ag2b, _ag2b_stage(ag2b, "revision", graph=None, target="first"))
+    raw = ag2b.service._record_fields_rows(revised, revised.staged_commit)["first"]
+    assert raw["version"] == "1.0.1"
+    assert revised.catalog_record_fields_json == _ag2a_snapshot([raw])
+    assert revised.catalog_record_fields_json != first.catalog_record_fields_json
+    assert _ag2b_loaders()[0]()[0]["graph_input"] == "solar-w1-graph"
+
+
+def test_ag2b_removal_updates_snapshot(ag2b):
+    from test_customization_async_stage import _ag2a_snapshot
+    first = _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    removal = _ag2b_remove(ag2b)
+    assert removal.base_catalog_change_set_id == first.change_set_id
+    assert removal.catalog_record_fields_json == _ag2a_snapshot([])
+    assert ag2b.service.stage_removal(
+        tenant=ag2b.tenant, tool_name="first", expected_catalog_digest=first.catalog_digest,
+        idempotency_key="remove",
+    )["receipt"]["change_set_id"] == removal.change_set_id
+    assert ag2b.change("remove").base_catalog_change_set_id == first.change_set_id
+    _ag2b_publish(ag2b, removal)
+    for load in _ag2b_loaders():
+        assert load() == []
+
+
+def test_ag2b_rollback_restores_snapshot(ag2b):
+    import deps
+    first = _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    before = deps.catalog_tool_view(_ag2b_loaders()[0]()[0])
+    _ag2b_publish(ag2b, _ag2b_remove(ag2b))
+    ag2b.service.rollback(tenant=ag2b.tenant, change_set_id=first.change_set_id, idempotency_key="rollback")
+    assert ag2b.store.get_effective_catalog(tenant_id="tenant-a").change_set_id == first.change_set_id
+    assert ag2b.change("first").catalog_record_fields_json == first.catalog_record_fields_json
+    for load in _ag2b_loaders():
+        assert deps.catalog_tool_view(load()[0]) == before
+
+
+def test_ag2b_fresh_loader_agreement(ag2b):
+    import deps
+    first = _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    raw_before = customization_service._git_blob(ag2b.bare, f"{first.staged_commit}:registry.json")
+    ag2b.store = SQLiteCustomizationStore(ag2b.store.database_path)
+    ag2b.service = CustomizationService(ag2b.store)
+    compat, strict = (load() for load in _ag2b_loaders())
+    assert compat == strict
+    assert compat[0]["graph_input"] == "solar-w1-graph"
+    assert deps.catalog_tool_view(compat[0]) == deps.catalog_tool_view(strict[0])
+    undecorated = dict(compat[0])
+    del undecorated["graph_input"]
+    assert deps.catalog_tool_digest(undecorated) != deps.catalog_tool_digest(compat[0])
+    assert customization_service._git_blob(ag2b.bare, f"{first.staged_commit}:registry.json") == raw_before
+    assert "graph_input" not in json.loads(raw_before)["tools"][0]
+
+
+def test_ag2b_loader_retries_pin_race(ag2b, monkeypatch):
+    first = _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    second = _ag2b_publish(ag2b, _ag2b_stage(ag2b, "second"))
+    materialize = customization_service.effective_catalog_dir
+    for load in _ag2b_loaders():
+        _ag2b_set_pin(ag2b, first)
+        calls = []
+        def move(tenant):
+            root = materialize(tenant)
+            calls.append(root)
+            if len(calls) == 1:
+                _ag2b_set_pin(ag2b, second)
+            return root
+        monkeypatch.setattr(customization_service, "effective_catalog_dir", move)
+        rows = load()
+        assert len(calls) == 2
+        assert {row["name"] for row in rows} == {"first", "second"}
+        assert all(row["graph_input"] == "solar-w1-graph" for row in rows)
+
+
+def test_ag2b_loader_refuses_repeated_pin_race(ag2b, monkeypatch):
+    changes = [_ag2b_publish(ag2b, _ag2b_stage(ag2b, key)) for key in ("first", "second", "third")]
+    materialize = customization_service.effective_catalog_dir
+    for load in _ag2b_loaders():
+        _ag2b_set_pin(ag2b, changes[0])
+        calls = []
+        def move(tenant):
+            root = materialize(tenant)
+            calls.append(root)
+            _ag2b_set_pin(ag2b, changes[len(calls)])
+            return root
+        monkeypatch.setattr(customization_service, "effective_catalog_dir", move)
+        _ag2b_refuses("effective_catalog_unavailable", load)
+        assert len(calls) == 2
+
+
+def test_ag2b_projection_without_durable_row_resolves_legacy(ag2b, monkeypatch):
+    # The durable row is the authority: a projection with no row is no pin, so the
+    # loader hands resolution back to the legacy path (and its own rollout rules).
+    assert ag2b.service._record_fields_pin("tenant-a") is None
+    monkeypatch.setattr(customization_service, "effective_catalog_pin", lambda _tenant: {
+        "catalog_commit": "a" * 40, "effective_catalog_digest": "b" * 64,
+    })
+    assert customization_service.load_authoritative_tenant_tools("tenant-a") is None
+
+
+def test_ag2b_pin_vanishing_on_retry_refuses(ag2b, monkeypatch):
+    _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    materialize = customization_service.effective_catalog_dir
+    for load in _ag2b_loaders():
+        change = ag2b.change("first")
+        _ag2b_set_pin(ag2b, change)
+        calls = []
+        def vanish(tenant):
+            root = materialize(tenant)
+            calls.append(root)
+            with ag2b.store._transaction() as conn:
+                conn.execute("DELETE FROM effective_catalogs WHERE tenant_id = ?", ("tenant-a",))
+            return root
+        monkeypatch.setattr(customization_service, "effective_catalog_dir", vanish)
+        _ag2b_refuses("effective_catalog_unavailable", load)
+        assert len(calls) == 1
+        monkeypatch.setattr(customization_service, "effective_catalog_dir", materialize)
+        with ag2b.store._transaction() as conn:
+            conn.execute(
+                "INSERT INTO effective_catalogs (tenant_id, change_set_id, catalog_commit, catalog_digest, "
+                "effective_platform_release, workspace_contract_digest) VALUES (?, ?, ?, ?, ?, ?)",
+                ("tenant-a", change.change_set_id, change.staged_commit, change.catalog_digest,
+                 change.desired_platform_release, change.workspace_contract_digest),
+            )
+
+
+def _ag2b_first_pin_fallback(lane, monkeypatch, entrance, *, null_snapshot=False):
+    change = _ag2b_stage(lane)
+    projection = customization_service.effective_catalog_pin
+    calls = []
+
+    def publish_after_absence(tenant):
+        pin = projection(tenant)
+        calls.append(pin)
+        if len(calls) == 1:
+            assert pin is None
+            published = _ag2b_publish(lane, change)
+            if null_snapshot:
+                _ag2b_corrupt(lane, published, None)
+        return pin
+
+    monkeypatch.setattr(customization_service, "effective_catalog_pin", publish_after_absence)
+    load = _ag2b_loaders()[entrance]
+    if null_snapshot:
+        _ag2b_refuses("record_fields_invalid", load)
+    else:
+        rows = load()
+        assert len(rows) == 1
+        assert rows[0]["name"] == "first"
+        assert rows[0]["graph_input"] == "solar-w1-graph"
+        raw = customization_service._git_blob(lane.bare, f"{change.staged_commit}:registry.json")
+        assert "graph_input" not in json.loads(raw)["tools"][0]
+    assert len(calls) >= 2
+
+
+def test_ag2b_compat_first_pin_fallback_verifies_graph(ag2b, monkeypatch):
+    _ag2b_first_pin_fallback(ag2b, monkeypatch, 0)
+
+
+def test_ag2b_strict_first_pin_fallback_verifies_graph(ag2b, monkeypatch):
+    _ag2b_first_pin_fallback(ag2b, monkeypatch, 1)
+
+
+def test_ag2b_compat_first_pin_fallback_refuses_null_snapshot(ag2b, monkeypatch):
+    _ag2b_first_pin_fallback(ag2b, monkeypatch, 0, null_snapshot=True)
+
+
+def test_ag2b_strict_first_pin_fallback_refuses_null_snapshot(ag2b, monkeypatch):
+    _ag2b_first_pin_fallback(ag2b, monkeypatch, 1, null_snapshot=True)
+
+
+def _ag2b_durable_absence_fallback(lane, monkeypatch, entrance, *, persists=False):
+    _ag2b_publish(lane, _ag2b_stage(lane))
+    durable_pin = lane.service._record_fields_pin
+    calls = []
+
+    def absent_first_read(tenant):
+        calls.append(tenant)
+        if len(calls) == 1 or persists:
+            return None
+        return durable_pin(tenant)
+
+    monkeypatch.setattr(lane.service, "_record_fields_pin", absent_first_read)
+    load = _ag2b_loaders()[entrance]
+    if persists:
+        _ag2b_refuses("effective_catalog_unavailable", load)
+    else:
+        rows = load()
+        assert len(rows) == 1
+        assert rows[0]["name"] == "first"
+        assert rows[0]["graph_input"] == "solar-w1-graph"
+    assert len(calls) >= 2
+
+
+def test_ag2b_compat_projection_durable_absence_reverifies(ag2b, monkeypatch):
+    _ag2b_durable_absence_fallback(ag2b, monkeypatch, 0)
+
+
+def test_ag2b_strict_projection_durable_absence_reverifies(ag2b, monkeypatch):
+    _ag2b_durable_absence_fallback(ag2b, monkeypatch, 1)
+
+
+def test_ag2b_compat_fallback_refuses_persistent_durable_absence(ag2b, monkeypatch):
+    _ag2b_durable_absence_fallback(ag2b, monkeypatch, 0, persists=True)
+
+
+def test_ag2b_strict_fallback_refuses_persistent_durable_absence(ag2b, monkeypatch):
+    _ag2b_durable_absence_fallback(ag2b, monkeypatch, 1, persists=True)
+
+
+def test_ag2b_missing_snapshot_refuses_publish(ag2b):
+    change = _ag2b_stage(ag2b)
+    approval = _ag2b_approval(ag2b, change)
+    _ag2b_corrupt(ag2b, change, None)
+    _ag2b_refuses("record_fields_invalid", lambda: _ag2b_publish(ag2b, change, approval))
+    assert not ag2b.store.get_confirmation(confirmation_id=approval[1])["consumed"]
+    assert ag2b.publishes == []
+    assert ag2b.service._record_fields_pin("tenant-a") is None
+
+
+def test_ag2b_incomplete_snapshot_refuses_publish(ag2b):
+    _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    change = _ag2b_stage(ag2b, "second")
+    approval = _ag2b_approval(ag2b, change)
+    snapshot = json.loads(change.catalog_record_fields_json)
+    del snapshot["tools"]["first"]
+    _ag2b_corrupt(ag2b, change, json.dumps(snapshot))
+    before = ag2b.store.get_effective_catalog(tenant_id="tenant-a")
+    _ag2b_refuses("record_fields_invalid", lambda: _ag2b_publish(ag2b, change, approval))
+    assert not ag2b.store.get_confirmation(confirmation_id=approval[1])["consumed"]
+    assert ag2b.store.get_effective_catalog(tenant_id="tenant-a") == before
+    assert len(ag2b.publishes) == 1
+
+
+def test_ag2b_wrong_row_binding_refuses_reload(ag2b):
+    first = _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    _ag2b_corrupt(ag2b, first, _ag2b_wrong_snapshot(first))
+    for load in _ag2b_loaders():
+        _ag2b_refuses("record_fields_invalid", load)
+
+
+def test_ag2b_metadata_read_failure(ag2b, monkeypatch):
+    import sqlite3
+    _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    change = _ag2b_stage(ag2b, "second")
+    approval = _ag2b_approval(ag2b, change)
+    before = ag2b.store.get_effective_catalog(tenant_id="tenant-a")
+    def fail(**kwargs):
+        raise sqlite3.OperationalError("authority read failed")
+    monkeypatch.setattr(ag2b.store, "get_change_set", fail)
+    _ag2b_refuses("record_fields_read_failed", lambda: _ag2b_publish(ag2b, change, approval))
+    for load in _ag2b_loaders():
+        _ag2b_refuses("record_fields_read_failed", load)
+    assert ag2b.store.get_effective_catalog(tenant_id="tenant-a") == before
+    assert not ag2b.store.get_confirmation(confirmation_id=approval[1])["consumed"]
+
+
+def _ag2b_prepare(lane, change, approval):
+    request, confirmation_id = approval
+    confirmation, signature = lane.service._authority().verify_publish_confirmation(
+        tenant_id="tenant-a", request=request, confirmation_id=confirmation_id,
+    )
+    return lane.store.prepare_publish(
+        tenant_id="tenant-a", change_set_id=change.change_set_id,
+        confirmation_id=confirmation_id, confirmation_signature=signature,
+        approver_subject=confirmation.approver_subject,
+        idempotency_key="publish-" + change.idempotency_key,
+    )
+
+
+def test_ag2b_publish_callback_verifies_snapshot(ag2b):
+    change = _ag2b_stage(ag2b)
+    _ag2b_prepare(ag2b, change, _ag2b_approval(ag2b, change))
+    receipt = ag2b.service._raw_receipt(change)
+    _ag2b_corrupt(ag2b, change, _ag2b_wrong_snapshot(change))
+    _ag2b_refuses("record_fields_invalid", lambda: ag2b.service.authorize_publish_callback(
+        tenant_id="tenant-a", receipt=receipt, expected_main_sha=change.base_commit,
+    ))
+    assert ag2b.publishes == []
+
+
+def test_ag2b_publishing_recovery_verifies_snapshot(ag2b):
+    change = _ag2b_stage(ag2b)
+    approval = _ag2b_approval(ag2b, change)
+    _ag2b_prepare(ag2b, change, approval)
+    customization_service._git(ag2b.bare, "update-ref", "refs/heads/main", change.staged_commit)
+    recovered = _ag2b_publish(ag2b, change, approval)
+    assert recovered.state is ChangeState.PUBLISHED
+    second = _ag2b_stage(ag2b, "second")
+    second_approval = _ag2b_approval(ag2b, second)
+    _ag2b_prepare(ag2b, second, second_approval)
+    customization_service._git(ag2b.bare, "update-ref", "refs/heads/main", second.staged_commit)
+    _ag2b_corrupt(ag2b, second, _ag2b_wrong_snapshot(second))
+    before = ag2b.store.get_effective_catalog(tenant_id="tenant-a")
+    _ag2b_refuses("record_fields_invalid", lambda: _ag2b_publish(ag2b, second, second_approval))
+    assert len(ag2b.publishes) == 1
+    assert ag2b.change("second").state is ChangeState.PUBLISHING
+    assert ag2b.store.get_effective_catalog(tenant_id="tenant-a") == before
+
+
+def test_ag2b_published_replay_verifies_snapshot(ag2b):
+    change = _ag2b_stage(ag2b)
+    approval = _ag2b_approval(ag2b, change)
+    published = _ag2b_publish(ag2b, change, approval)
+    assert _ag2b_publish(ag2b, published, approval) == published
+    _ag2b_corrupt(ag2b, published, _ag2b_wrong_snapshot(published))
+    _ag2b_refuses("record_fields_invalid", lambda: _ag2b_publish(ag2b, published, approval))
+    assert len(ag2b.publishes) == 1
+
+
+def test_ag2b_moved_predecessor_preserves_approval(ag2b):
+    first = _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    change = _ag2b_stage(ag2b, "second")
+    approval = _ag2b_approval(ag2b, change)
+    competing = _ag2b_publish(ag2b, _ag2b_stage(ag2b, "competing"))
+    assert change.base_catalog_change_set_id == first.change_set_id
+    before = ag2b.store.get_effective_catalog(tenant_id="tenant-a")
+    _ag2b_refuses("record_fields_predecessor_mismatch", lambda: _ag2b_publish(ag2b, change, approval), 409)
+    assert not ag2b.store.get_confirmation(confirmation_id=approval[1])["consumed"]
+    assert ag2b.store.get_effective_catalog(tenant_id="tenant-a") == before
+    assert before.change_set_id == competing.change_set_id
+    assert len(ag2b.publishes) == 2
+
+
+def test_ag2b_publish_write_failure_preserves_recovery(ag2b):
+    _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    change = _ag2b_stage(ag2b, "second")
+    approval = _ag2b_approval(ag2b, change)
+    before = ag2b.store.get_effective_catalog(tenant_id="tenant-a")
+    with ag2b.store._transaction() as conn:
+        conn.execute("CREATE TRIGGER ag2b_effective_fail BEFORE UPDATE ON effective_catalogs "
+                     "BEGIN SELECT RAISE(ABORT, 'effective write failed'); END")
+    _ag2b_refuses("record_fields_write_failed", lambda: _ag2b_publish(ag2b, change, approval))
+    assert customization_service._git(ag2b.bare, "rev-parse", "refs/heads/main") == change.staged_commit
+    assert ag2b.store.get_effective_catalog(tenant_id="tenant-a") == before
+    assert ag2b.change("second").state is ChangeState.PUBLISHING
+    assert ag2b.store.get_confirmation(confirmation_id=approval[1])["consumed"]
+    with ag2b.store._transaction() as conn:
+        conn.execute("DROP TRIGGER ag2b_effective_fail")
+    assert _ag2b_publish(ag2b, change, approval).state is ChangeState.PUBLISHED
+
+
+def test_ag2b_rollback_rejects_invalid_target_snapshot(ag2b):
+    first = _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    _ag2b_publish(ag2b, _ag2b_remove(ag2b))
+    before = ag2b.store.get_effective_catalog(tenant_id="tenant-a")
+    _ag2b_corrupt(ag2b, first, _ag2b_wrong_snapshot(first))
+    _ag2b_refuses("record_fields_invalid", lambda: ag2b.service.rollback(
+        tenant=ag2b.tenant, change_set_id=first.change_set_id, idempotency_key="rollback",
+    ))
+    assert ag2b.store.get_effective_catalog(tenant_id="tenant-a") == before
+
+
+def test_ag2b_harness_wire_unchanged(tmp_path, monkeypatch):
+    from test_customization_async_stage import DESCRIPTION, active_author_turn
+    fixed_id = "11111111-1111-4111-8111-111111111111"
+    monkeypatch.setattr(customization_service, "uuid4", lambda: fixed_id)
+    wires = []
+    raws = []
+    for index, graph in enumerate(("solar-w1-graph", None)):
+        root = tmp_path / str(index)
+        root.mkdir()
+        lane = _ag2b_setup(root, monkeypatch)
+        session_id, turn_id = active_author_turn.__wrapped__(root, monkeypatch)
+        calls = []
+        def post(url, **kwargs):
+            calls.append((url, kwargs["json"]))
+            change = lane.change("fixed")
+            if url.endswith("/author/stage"):
+                body = lane.body(change, name="fixed")
+            else:
+                customization_service._git(lane.bare, "update-ref", "refs/heads/main", change.staged_commit)
+                body = {"commit": change.staged_commit}
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: body)
+        monkeypatch.setattr(requests, "post", post)
+        lane.service._harness_stage = CustomizationService._harness_stage.__get__(lane.service)
+        lane.service._harness_publish = CustomizationService._harness_publish.__get__(lane.service)
+        lane.service.stage(
+            tenant=lane.tenant, description=DESCRIPTION, mode="build", idempotency_key="fixed",
+            graph_input=graph, authority_session_id=session_id, authority_turn_id=turn_id,
+        )
+        change = lane.change("fixed")
+        _ag2b_publish(lane, change)
+        assert calls[0][1]["description"] == DESCRIPTION
+        assert calls[0][1]["changeSetId"] == fixed_id
+        assert set(calls[1][1]) == {"tenant_id", "receipt", "expectedMainSha"}
+        assert "graph_input" not in calls[0][1]
+        assert "graph_input" not in calls[1][1]["receipt"]
+        assert set(calls[1][1]["receipt"]) == {
+            "contract", "tenant_id", "change_set_id", "state", "base_commit",
+            "staged_commit", "catalog_digest", "platform_release",
+            "workspace_contract_digest", "idempotency_key",
+        }
+        wires.append((set(calls[0][1]), set(calls[1][1]["receipt"])))
+        raw = customization_service._git_blob(lane.bare, f"{change.staged_commit}:registry.json")
+        raws.append(raw)
+        assert "graph_input" not in json.loads(raw)["tools"][0]
+        manifest = customization_service._git_blob(lane.bare, f"{change.staged_commit}:tools/fixed/tool.json")
+        assert "graph_input" not in json.loads(manifest)
+    assert wires[0] == wires[1]
+    assert raws[0] == raws[1]

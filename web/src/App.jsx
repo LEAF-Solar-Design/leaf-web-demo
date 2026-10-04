@@ -4168,6 +4168,11 @@ export default function App() {
               <SolarFlowRail
                 families={catalog.families}
                 familiesDrawingId={solarFlowFamiliesDrawingId}
+                workspacePanelsByFlow={
+                  !mock && catalogRunContext?.drawingId
+                    ? SolarWorkspaceTools.workspacePanelsByFlow
+                    : undefined
+                }
                 drawingId={catalogRunContext?.drawingId ?? null}
                 openSettingsForm={ENV_SOLAR_SETTINGS_FORM && !mock && catalogRunContext?.projectId === null ? canOpenSolarSettingsForm : undefined}
                 pendingTool={solarFlowPending}

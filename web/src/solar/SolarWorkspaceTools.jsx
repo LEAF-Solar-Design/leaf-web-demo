@@ -1,21 +1,33 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { authHeaders, config, getDrawingIntake, noteUnauthorized } from '../api.js'
+import { authHeaders, config, getDrawingIntake, noteUnauthorized, runToolAsync } from '../api.js'
 import { createSolarLandxmlClient } from './solarLandxmlClient.js'
 import SolarLandxmlUpload from './SolarLandxmlUpload.jsx'
 import SolarCombinerIntake from './SolarCombinerIntake.jsx'
 import { createSolarCombinerIntakeClient } from './solarCombinerIntakeClient.js'
 import SolarTerrainPanel from './SolarTerrainPanel.jsx'
 import { createSolarTerrainClient } from './solarTerrainClient.js'
+import SolarCivilPanel from './SolarCivilPanel.jsx'
+import SolarPhysicalReadPanel from './SolarPhysicalReadPanel.jsx'
+import { createSolarCivilClient } from './solarCivilClient.js'
 import SolarTrackerRowsPanel, { TRACKER_ROWS_PANEL_REASONS } from './SolarTrackerRowsPanel.jsx'
 import { createSolarTrackerRowsClient } from './solarTrackerRowsClient.js'
+import SolarEdgeImportPanel, { SOLAREDGE_PANEL_REASONS } from './SolarEdgeImportPanel.jsx'
+import { createSolarImportClient } from './solarImportClient.js'
+import { FLOW_PANELS } from './solarWorkspacePanels.js'
 import './solarFlow.css'
 
-const FLOW_PANELS = Object.freeze({
-  rooftop: Object.freeze(['combiner-intake']),
-  'ground-electrical': Object.freeze([]),
-  'ground-physical': Object.freeze(['landxml', 'terrain', 'tracker-rows']),
-  'solaredge-import': Object.freeze([]),
-  'pvcase-tutorial': Object.freeze([]),
+export const SOLAREDGE_WORKSPACE_REASONS = Object.freeze({
+  run_in_progress: 'A run is in progress, so wait for it to finish',
+  checkout_required: 'Take the drawing checkout before importing or accepting SolarEdge tracking.',
+  refreshing: 'The drawing is refreshing, so wait before changing SolarEdge tracking.',
+  refresh_failed: 'The drawing did not finish refreshing, so refresh it before changing SolarEdge tracking.',
+  tracker_pending: 'Tracker rows are being published, so wait for the request to finish.',
+  solaredge_pending: 'A SolarEdge upload or report is in progress, so wait before publishing tracker rows.',
+  staging_unavailable: 'Tracking acceptance is not connected in this workspace. You can upload the PDF and build its report.',
+  revision_loading: 'Reading the current design revision before accepting tracking labels.',
+  revision_unavailable: 'The current design revision could not be read. Retry the revision read before accepting.',
+  revision_needed: 'Build a report to read the current design revision before accepting.',
+  report_stale: 'The drawing changed after this report was built. Build the report again before accepting.',
 })
 
 export const COMBINER_WORKSPACE_REASONS = Object.freeze({
@@ -47,9 +59,29 @@ function withCurrentCheckoutCapability(value, getCapability) {
   return copy
 }
 
+// Each guarded call gets its own fetch closure, including fetches started asynchronously
+// by the client's cancellation race. Reads keep the ordinary client transport.
+function transportTrackedClient(createClient, options, methods) {
+  const client = createClient(options)
+  const tracked = { ...client }
+  for (const method of methods) tracked[method] = (request, lifetime) => {
+    if (!lifetime) return client[method](request)
+    const scoped = createClient({ ...options, fetchImpl: (...args) => {
+      lifetime.pending += 1
+      const settled = () => { lifetime.pending -= 1; lifetime.releaseIfSettled() }
+      let result
+      try { result = options.fetchImpl(...args) } catch (error) { settled(); throw error }
+      return Promise.resolve(result).then((answer) => { settled(); return answer }, (error) => { settled(); throw error })
+    } })
+    return scoped[method](request)
+  }
+  return tracked
+}
+
 export default function SolarWorkspaceTools({
   drawingId, projectId = null, drawingVersion, flow, checkoutHeld, busy,
   getCheckoutCapability, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement, transport,
+  onStageSolarEdgeAccept,
 }) {
   const capability = useRef(getCheckoutCapability)
   capability.current = getCheckoutCapability
@@ -65,6 +97,12 @@ export default function SolarWorkspaceTools({
     headers: (id) => withCurrentCheckoutCapability(transport?.headers ? transport.headers(id) : { 'X-Tenant-Id': config.tenant, ...authHeaders() }, capability.current),
     onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
   }), [transport])
+  const civilClient = useMemo(() => transportTrackedClient(createSolarCivilClient, {
+    fetchImpl: transport?.fetchImpl ?? ((...args) => fetch(...args)),
+    apiBase: config.apiBase,
+    headers: (id) => withCurrentCheckoutCapability(transport?.headers ? transport.headers(id) : { 'X-Tenant-Id': config.tenant, ...authHeaders() }, capability.current),
+    onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
+  }, ['runCivilOperation']), [transport])
   const combinerClient = useMemo(() => createSolarCombinerIntakeClient({
     fetchImpl: transport?.fetchImpl ?? ((...args) => fetch(...args)),
     apiBase: config.apiBase,
@@ -75,13 +113,19 @@ export default function SolarWorkspaceTools({
     },
     onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
   }), [transport])
-  const trackerRowsClient = useMemo(() => createSolarTrackerRowsClient({
+  const trackerRowsClient = useMemo(() => transportTrackedClient(createSolarTrackerRowsClient, {
     fetchImpl: transport?.fetchImpl ?? ((...args) => fetch(...args)),
     apiBase: config.apiBase,
     headers: (id) => withCurrentCheckoutCapability(transport?.headers ? transport.headers(id) : { 'X-Tenant-Id': config.tenant, ...authHeaders() }, capability.current),
     onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
-  }), [transport])
+  }, ['createTrackerRows']), [transport])
   const readIntake = useMemo(() => transport?.readIntake ?? ((id, version) => getDrawingIntake(false, id, version)), [transport])
+  const importClient = useMemo(() => transportTrackedClient(createSolarImportClient, {
+    fetchImpl: transport?.fetchImpl ?? ((...args) => fetch(...args)),
+    apiBase: config.apiBase,
+    headers: (id) => withCurrentCheckoutCapability(transport?.headers ? transport.headers(id) : { 'X-Tenant-Id': config.tenant, ...authHeaders() }, capability.current),
+    onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
+  }, ['uploadPdf', 'requestReport']), [transport])
 
   return (
     <ToolsForScope
@@ -93,8 +137,13 @@ export default function SolarWorkspaceTools({
       busy={busy}
       client={client}
       terrainClient={terrainClient}
+      civilClient={civilClient}
+      runRead={transport?.runRead ?? runToolAsync}
+      save={transport?.save}
       combinerClient={combinerClient}
       trackerRowsClient={trackerRowsClient}
+      importClient={importClient}
+      onStageSolarEdgeAccept={onStageSolarEdgeAccept}
       readIntake={readIntake}
       drawingVersion={drawingVersion}
       onDrawingVersionChanged={onDrawingVersionChanged}
@@ -104,8 +153,10 @@ export default function SolarWorkspaceTools({
   )
 }
 
+Object.defineProperty(SolarWorkspaceTools, 'workspacePanelsByFlow', { value: FLOW_PANELS })
+
 function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHeld, busy, client,
-  combinerClient, terrainClient, trackerRowsClient, readIntake, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement }) {
+  combinerClient, terrainClient, civilClient, runRead, save, trackerRowsClient, importClient, onStageSolarEdgeAccept, readIntake, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement }) {
   const [openPanel, setOpenPanel] = useState(null)
   const [intake, setIntake] = useState(null)
   const intakeRef = useRef(null)
@@ -120,6 +171,14 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const writerTokens = useRef({})
   const [trackerMounted, setTrackerMounted] = useState(false)
   const [trackerHeadSignal, setTrackerHeadSignal] = useState(null)
+  const [civilHeadSignal, setCivilHeadSignal] = useState(null)
+  const [readHeadSignal, setReadHeadSignal] = useState(null)
+  const civilTrigger = useRef(null)
+  const civilHeading = useRef(null)
+  const readTrigger = useRef(null)
+  const readHeading = useRef(null)
+  const physicalCloseFocus = useRef(null)
+  const physicalReason = useRef(null)
   const trackerTrigger = useRef(null)
   const landxmlRequest = useRef(null)
   const [announcement, setAnnouncement] = useState('')
@@ -132,19 +191,101 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const combinerPanel = useRef(null)
   const activeScope = useRef(false)
   const pendingImport = useRef(null)
+  const solarEdgeTrigger = useRef(null)
+  const solarEdgeReason = useRef(null)
+  const solarEdgePanel = useRef(null)
+  const solarEdgeCloseFocus = useRef(false)
+  const revisionGeneration = useRef(0)
+  const solarLifetime = useRef(0)
+  const stagingToken = useRef(null)
+  const [stagingPending, setStagingPending] = useState(false)
+  const [revision, setRevision] = useState({ scope: drawingId, version: drawingVersion, phase: 'needed', graphRev: null })
+  const revisionRef = useRef(revision)
+  const reportBinding = useRef(null)
+  const solarCurrent = useRef(null)
+  const previousSolar = solarCurrent.current
+  if (previousSolar && previousSolar.version !== drawingVersion && reportBinding.current) {
+    reportBinding.current = { ...reportBinding.current, eligible: false, stale: true }
+  }
+  if (previousSolar && (previousSolar.version !== drawingVersion || previousSolar.flow !== flow
+    || previousSolar.open !== openPanel || previousSolar.read !== readIntake)) {
+    solarLifetime.current += 1
+    revisionGeneration.current += 1
+    stagingToken.current = null
+    revisionRef.current = null
+  }
+  solarCurrent.current = { version: drawingVersion, flow, open: openPanel, read: readIntake, busy, checkoutHeld, phase,
+    onStageSolarEdgeAccept }
+  const renderSolarLifetime = solarLifetime.current
   const hasLandxml = !!drawingId && FLOW_PANELS[flow]?.includes('landxml') === true
   const hasTerrain = !!drawingId && FLOW_PANELS[flow]?.includes('terrain') === true
   const hasCombiner = !!drawingId && projectId === null && FLOW_PANELS[flow]?.includes('combiner-intake') === true
   const hasTrackerRows = !!drawingId && FLOW_PANELS[flow]?.includes('tracker-rows') === true
+  const hasSolarEdge = !!drawingId && FLOW_PANELS[flow]?.includes('solaredge-import') === true
+  const hasCivil = !!drawingId && FLOW_PANELS[flow]?.includes('civil') === true
+  const hasPhysicalRead = !!drawingId && FLOW_PANELS[flow]?.includes('physical-read') === true
+
+  function solarGate() {
+    const current = solarCurrent.current
+    if (writerTokens.current.civil) return TRACKER_ROWS_PANEL_REASONS.terrain_pending
+    if (writerTokens.current.tracker) return SOLAREDGE_WORKSPACE_REASONS.tracker_pending
+    if (current.busy) return SOLAREDGE_WORKSPACE_REASONS.run_in_progress
+    if (current.checkoutHeld !== true) return SOLAREDGE_WORKSPACE_REASONS.checkout_required
+    if (current.phase === 'refreshing') return SOLAREDGE_WORKSPACE_REASONS.refreshing
+    if (current.phase === 'failed') return SOLAREDGE_WORKSPACE_REASONS.refresh_failed
+    if (stagingToken.current) return SOLAREDGE_PANEL_REASONS.staging_pending
+    return null
+  }
+
+  function readRevision() {
+    const captured = solarCurrent.current
+    if (!activeScope.current || captured.open !== 'solaredge-import' || captured.flow !== 'solaredge-import') return
+    const readToken = ++revisionGeneration.current
+    const isCurrent = () => activeScope.current && revisionGeneration.current === readToken
+      && solarCurrent.current.version === captured.version && solarCurrent.current.read === captured.read
+      && solarCurrent.current.open === 'solaredge-import' && solarCurrent.current.flow === captured.flow
+    const storeRevision = (next) => { revisionRef.current = next; setRevision(next) }
+    const base = { scope: drawingId, version: captured.version, graphRev: null }
+    const failed = () => { if (isCurrent()) storeRevision({ ...base, phase: 'unavailable' }) }
+    storeRevision({ ...base, phase: 'loading' })
+    if (!Number.isInteger(captured.version) || captured.version < 0) { failed(); return }
+    let result
+    try { result = captured.read(drawingId, captured.version) } catch { failed(); return }
+    Promise.resolve(result).then((value) => {
+      if (!isCurrent()) return
+      try {
+        const proto = value && Object.getPrototypeOf(value)
+        const rev = value?.intake?.solar_design_graph?.rev
+        if (!value || (proto !== Object.prototype && proto !== null) || value.version !== captured.version
+          || !Number.isInteger(rev) || rev < 0 || rev > 2147483647) { failed(); return }
+        storeRevision({ ...base, phase: 'ready', graphRev: rev })
+      } catch { failed() }
+    }, failed)
+  }
+
+  useLayoutEffect(() => {
+    setStagingPending(false)
+    if (openPanel === 'solaredge-import' && hasSolarEdge && previousSolar
+      && previousSolar.version !== drawingVersion) readRevision()
+    else if (!revisionRef.current) {
+      const next = { scope: drawingId, version: drawingVersion, phase: 'needed', graphRev: null }
+      revisionRef.current = next
+      setRevision(next)
+    }
+  }, [drawingVersion, readIntake, openPanel, hasSolarEdge])
 
   // Each kind holds the SET of its in-flight requests (the key exists only while the set is non-empty), so a
   // second request of one kind can never release the interlock while the first is still unresolved.
   function guardedWrite(kind, request, send, code) {
     const held = writerTokens.current
     const inFlight = (name) => (held[name]?.size ?? 0) > 0
-    if (!activeScope.current || (kind === 'tracker'
-      ? Object.keys(held).some(inFlight) || phase === 'refreshing' || phase === 'failed'
-      : inFlight('tracker'))) return Promise.resolve({ ok: false, code, retryable: false, status: null })
+    const current = solarCurrent.current
+    if (!activeScope.current || inFlight('civil') || (kind === 'civil'
+      ? Object.keys(held).some(inFlight) || current.busy || current.checkoutHeld !== true
+        || current.phase === 'refreshing' || current.phase === 'failed' || stagingToken.current
+      : kind === 'tracker'
+        ? Object.keys(held).some(inFlight) || current.phase === 'refreshing' || current.phase === 'failed'
+        : inFlight('tracker'))) return Promise.resolve({ ok: false, code, retryable: false, status: null })
     const token = {}
     ;(held[kind] ??= new Set()).add(token)
     setWriters((current) => ({ ...current, [kind]: true }))
@@ -158,10 +299,18 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       delete writerTokens.current[kind]
       if (activeScope.current) setWriters((current) => ({ ...current, [kind]: false }))
     }
-    if (kind !== 'tracker') request.signal?.addEventListener('abort', release, { once: true })
+    const retainsTransport = kind === 'tracker' || kind === 'solaredge' || kind === 'civil'
+    const lifetime = retainsTransport ? { pending: 0, answered: false,
+      releaseIfSettled: () => { if (lifetime.answered && lifetime.pending === 0) release() } } : undefined
+    const answered = () => {
+      if (!lifetime) { release(); return }
+      lifetime.answered = true
+      lifetime.releaseIfSettled()
+    }
+    if (!retainsTransport) request.signal?.addEventListener('abort', release, { once: true })
     let result
-    try { result = send(request) } catch (error) { release(); throw error }
-    return Promise.resolve(result).then((answer) => { release(); return answer }, (error) => { release(); throw error })
+    try { result = retainsTransport ? send(request, lifetime) : send(request) } catch (error) { answered(); throw error }
+    return Promise.resolve(result).then((answer) => { answered(); return answer }, (error) => { answered(); throw error })
   }
 
   useLayoutEffect(() => {
@@ -172,6 +321,8 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       landxmlRequest.current = null
       intakeRef.current = null
       writerTokens.current = {}
+      revisionGeneration.current += 1
+      stagingToken.current = null
     }
   }, [])
 
@@ -186,7 +337,21 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     if (openPanel === 'landxml' && hasLandxml) panel.current?.querySelector('input[type="file"]')?.focus()
     if (openPanel === 'terrain' && hasTerrain) terrainHeading.current?.focus()
     if (openPanel === 'combiner-intake' && hasCombiner) combinerPanel.current?.querySelector('input[type="file"]')?.focus()
-  }, [openPanel, hasLandxml, hasCombiner, hasTerrain])
+    if (openPanel === 'solaredge-import' && hasSolarEdge) solarEdgePanel.current?.querySelector('input[type="file"]')?.focus()
+    if (openPanel === 'civil' && hasCivil) civilHeading.current?.focus()
+    if (openPanel === 'physical-read' && hasPhysicalRead) readHeading.current?.focus()
+    if (openPanel === null && physicalCloseFocus.current) {
+      const target = physicalCloseFocus.current
+      physicalCloseFocus.current = null
+      ;(target.disabled ? physicalReason.current : target)?.focus()
+    }
+  }, [openPanel, hasLandxml, hasCombiner, hasTerrain, hasSolarEdge, hasCivil, hasPhysicalRead])
+
+  useLayoutEffect(() => {
+    if (openPanel !== null || !solarEdgeCloseFocus.current) return
+    solarEdgeCloseFocus.current = false
+    ;(solarEdgeReason.current ?? solarEdgeTrigger.current)?.focus()
+  }, [openPanel])
 
   useLayoutEffect(() => {
     if (!intake) return
@@ -232,20 +397,88 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
 
   function runPlacement(params) {
     setNotStaged(false)
-    if (!activeScope.current || writerTokens.current.tracker || !intake || phase !== 'idle' || drawingVersion !== intake.version
+    if (!activeScope.current || writerTokens.current.tracker || writerTokens.current.civil || !intake || phase !== 'idle' || drawingVersion !== intake.version
       || params.expected_rev !== intake.graphRev || checkoutHeld !== true || busy) return
     if (onRunPlacement?.(params) === false) setNotStaged(true)
   }
 
-  const disabledReason = writers.tracker ? 'tracker_pending' : busy ? 'run_in_progress' : checkoutHeld !== true ? 'checkout_required'
+  const disabledReason = writers.civil ? 'run_in_progress' : writers.tracker ? 'tracker_pending' : busy ? 'run_in_progress' : checkoutHeld !== true ? 'checkout_required'
     : phase === 'refreshing' ? 'refreshing' : phase === 'failed' ? 'refresh_failed' : null
   const reason = disabledReason ?? (notStaged ? 'not_staged' : null)
-  const terrainGate = writers.tracker ? 'tracker_pending' : busy ? 'run_in_progress' : landxmlPending ? 'landxml_importing' : checkoutHeld !== true ? 'checkout_required' : null
-  const trackerBlockedReason = writers.landxml ? 'landxml_pending' : writers.terrain ? 'terrain_pending'
-    : writers.combiner ? 'combiner_pending' : phase === 'refreshing' || phase === 'failed' ? 'drawing_refresh' : null
+  const terrainGate = writers.civil ? 'run_in_progress' : writers.tracker ? 'tracker_pending' : busy ? 'run_in_progress' : landxmlPending ? 'landxml_importing' : checkoutHeld !== true ? 'checkout_required' : null
+  const trackerBlockedReason = writers.civil ? 'terrain_pending' : writers.landxml ? 'landxml_pending' : writers.terrain ? 'terrain_pending'
+    : writers.combiner ? 'combiner_pending' : writers.solaredge ? 'solaredge_pending'
+      : phase === 'refreshing' || phase === 'failed' ? 'drawing_refresh' : null
+
+  const scopeImportClient = useMemo(() => {
+    const version = drawingVersion
+    const lifetime = solarLifetime.current
+    const send = (request, method) => {
+      const current = solarCurrent.current
+      if (!activeScope.current || current.open !== 'solaredge-import' || current.flow !== 'solaredge-import'
+        || solarLifetime.current !== lifetime
+        || current.version !== version || request.drawingId !== drawingId || request.projectId !== projectId
+        || request.signal?.aborted || solarGate()) {
+        return Promise.resolve({ ok: false, code: 'SOLAREDGE_CLIENT_REQUEST_INVALID', retryable: false, status: null })
+      }
+      if (reportBinding.current) reportBinding.current = { ...reportBinding.current, eligible: false }
+      revisionGeneration.current += 1
+      const next = { scope: drawingId, version, phase: 'needed', graphRev: null }
+      revisionRef.current = next
+      setRevision(next)
+      return guardedWrite('solaredge', request, method, 'SOLAREDGE_CLIENT_REQUEST_INVALID')
+    }
+    return { uploadPdf: (request) => send(request, importClient.uploadPdf),
+      requestReport: (request) => send(request, importClient.requestReport) }
+  }, [importClient, drawingVersion, drawingId, projectId, openPanel, flow, readIntake])
+
+  function reportReady(value) {
+    if (!activeScope.current || solarLifetime.current !== renderSolarLifetime) return
+    const reportVersion = value?.source_version
+    const known = Number.isInteger(drawingVersion) && drawingVersion >= 0
+    reportBinding.current = { value, version: known ? reportVersion : drawingVersion, eligible: known && reportVersion === drawingVersion }
+    if (!known || reportVersion === drawingVersion) readRevision()
+    else setRevision((current) => ({ ...current }))
+  }
+
+  function stageSolarEdge(params) {
+    const current = solarCurrent.current
+    const rev = revisionRef.current
+    const binding = reportBinding.current
+    if (!activeScope.current || current.open !== 'solaredge-import' || current.flow !== 'solaredge-import'
+      || solarLifetime.current !== renderSolarLifetime
+      || solarGate() || !current.onStageSolarEdgeAccept || binding?.version !== current.version
+      || binding?.eligible !== true
+      || rev?.version !== current.version || rev.phase !== 'ready' || params.expected_rev !== rev.graphRev
+      || params.report_artifact_id !== binding.value.report?.artifact_id) return false
+    const token = {}
+    stagingToken.current = token
+    let result
+    try { result = current.onStageSolarEdgeAccept(params) } catch (error) {
+      if (stagingToken.current === token) stagingToken.current = null
+      throw error
+    }
+    if (!result || typeof result.then !== 'function') {
+      if (stagingToken.current === token) stagingToken.current = null
+      return result
+    }
+    setStagingPending(true)
+    const release = () => {
+      if (activeScope.current && stagingToken.current === token) { stagingToken.current = null; setStagingPending(false) }
+    }
+    return Promise.resolve(result).then((answer) => { release(); return answer }, (error) => { release(); throw error })
+  }
+
+  const solarReason = solarGate()
+  const currentRevision = revisionRef.current?.version === drawingVersion ? revisionRef.current : null
+  const acceptSolarReason = !onStageSolarEdgeAccept ? SOLAREDGE_WORKSPACE_REASONS.staging_unavailable
+    : reportBinding.current && (reportBinding.current.stale || reportBinding.current.version !== drawingVersion) ? SOLAREDGE_WORKSPACE_REASONS.report_stale
+      : currentRevision?.phase === 'loading' ? SOLAREDGE_WORKSPACE_REASONS.revision_loading
+        : currentRevision?.phase === 'unavailable' ? SOLAREDGE_WORKSPACE_REASONS.revision_unavailable
+          : currentRevision?.phase !== 'ready' ? SOLAREDGE_WORKSPACE_REASONS.revision_needed : null
 
   const upload = useMemo(() => (request) => {
-    if (writerTokens.current.tracker) return Promise.resolve({ ok: false, code: 'LANDXML_CLIENT_REQUEST_INVALID', retryable: false })
+    if (writerTokens.current.tracker || writerTokens.current.civil) return Promise.resolve({ ok: false, code: 'LANDXML_CLIENT_REQUEST_INVALID', retryable: false })
     const started = { drawingId, projectId }
     pendingImport.current = started
     const token = {}
@@ -295,12 +528,55 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     createTrackerRows: (request) => guardedWrite('tracker', request, trackerRowsClient.createTrackerRows, 'TRACKER_ROWS_CLIENT_REQUEST_INVALID'),
   }), [trackerRowsClient, phase])
 
+  const scopeCivilClient = useMemo(() => {
+    const lifetime = solarLifetime.current
+    const isCurrent = (request) => activeScope.current && solarLifetime.current === lifetime
+      && solarCurrent.current.open === 'civil' && solarCurrent.current.flow === 'ground-physical'
+      && request.drawingId === drawingId && request.projectId === projectId && !request.signal?.aborted
+    const refused = () => Promise.resolve({ ok: false, code: 'TERRAIN_CLIENT_REQUEST_INVALID', retryable: false, status: null })
+    return {
+      getCivil: (request) => !isCurrent(request) ? refused() : civilClient.getCivil(request).then((answer) => {
+        if (isCurrent(request) && answer?.ok && answer.value?.head) observeHead(answer.value.head)
+        return answer
+      }),
+      runCivilOperation: (request) => !isCurrent(request) ? refused()
+        : guardedWrite('civil', request, civilClient.runCivilOperation, 'TERRAIN_CLIENT_REQUEST_INVALID'),
+    }
+  }, [civilClient, drawingId, projectId, openPanel, flow, drawingVersion])
+
+  function observeHead(head) {
+    if (!activeScope.current || head?.drawing_id !== drawingId || !Number.isInteger(head.index) || head.index < 0) return
+    setPhysicalHead((current) => Number.isInteger(current?.index) && current.index > head.index ? current : head)
+  }
+
+  function signalPhysicalPeers(head, origin) {
+    const signal = head?.state?.artifact_id
+    if (typeof signal !== 'string') return
+    if (origin !== 'civil') setCivilHeadSignal(signal)
+    setReadHeadSignal(signal)
+  }
+
+  function onCivilChanged(value) {
+    if (!activeScope.current || solarLifetime.current !== renderSolarLifetime || value?.drawing_id !== drawingId || !value.created) return
+    observeHead(value.head)
+    setTerrainHeadSignal(value.head.state.artifact_id)
+    setTrackerHeadSignal(value.head.state.artifact_id)
+    signalPhysicalPeers(value.head, 'civil')
+    onPhysicalHeadChanged?.(value)
+  }
+
+  const civilDisabled = busy || checkoutHeld !== true || Object.values(writers).some(Boolean)
+    || phase === 'refreshing' || phase === 'failed' || stagingPending
+  const physicalContention = Object.values(writers).some(Boolean)
+    ? TRACKER_ROWS_PANEL_REASONS.terrain_pending : civilDisabled ? 'A run is in progress, so wait for it to finish.' : null
+
   function onImported(value) {
     const started = pendingImport.current
     if (!activeScope.current || !started || started.drawingId !== drawingId
       || started.projectId !== projectId || value?.drawing_id !== drawingId) return
     pendingImport.current = null
-    setPhysicalHead(value.head)
+    observeHead(value.head)
+    signalPhysicalPeers(value.head)
     if (typeof value.head?.state?.artifact_id === 'string') setTerrainHeadSignal(value.head.state.artifact_id)
     if (typeof value.head?.state?.artifact_id === 'string') setTrackerHeadSignal(value.head.state.artifact_id)
     setAnnouncement(value.created
@@ -311,7 +587,8 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
 
   function onTerrainChanged(result) {
     if (!activeScope.current || (result?.drawing_id !== undefined && result.drawing_id !== drawingId)) return
-    setPhysicalHead(result.head)
+    observeHead(result.head)
+    signalPhysicalPeers(result.head)
     if (typeof result.head?.state?.artifact_id === 'string') setTrackerHeadSignal(result.head.state.artifact_id)
     onPhysicalHeadChanged?.(result)
   }
@@ -320,21 +597,67 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     if (!activeScope.current || result?.drawing_id !== drawingId) return
     setPhysicalHead((current) => Number.isInteger(current?.index) && current.index > result.head.index ? current : result.head)
     setTerrainHeadSignal(result.head.state.artifact_id)
+    signalPhysicalPeers(result.head)
     onPhysicalHeadChanged?.(result)
   }
 
-  if (!hasLandxml && !hasCombiner && !hasTerrain && !trackerMounted) return null
+  if (!hasLandxml && !hasCombiner && !hasTerrain && !hasSolarEdge && !trackerMounted) return null
   return (
     <section className="solar-workspace-tools" aria-label="Solar workspace tools"
-      hidden={!hasLandxml && !hasCombiner && !hasTerrain && !hasTrackerRows}
+      hidden={!hasLandxml && !hasCombiner && !hasTerrain && !hasTrackerRows && !hasSolarEdge}
       data-physical-head-index={physicalHead?.index ?? undefined}>
-      {hasLandxml && <button type="button" ref={trigger} disabled={!!writers.tracker} aria-expanded={openPanel === 'landxml'} onClick={() => setOpenPanel('landxml')}>
+      {hasCivil && <button type="button" ref={civilTrigger} aria-expanded={openPanel === 'civil'}
+        onClick={() => { if (openPanel === 'civil') civilHeading.current?.focus(); else setOpenPanel('civil') }}>Civil operations</button>}
+      {hasPhysicalRead && <button type="button" ref={readTrigger} aria-expanded={openPanel === 'physical-read'}
+        onClick={() => { if (openPanel === 'physical-read') readHeading.current?.focus(); else setOpenPanel('physical-read') }}>Physical reads</button>}
+      {(hasCivil || hasPhysicalRead) && physicalContention && <p ref={physicalReason} tabIndex={-1}>{physicalContention}</p>}
+      {hasCivil && openPanel === 'civil' && <div className="solar-workspace-panel">
+        <h3 tabIndex={-1} ref={civilHeading}>Civil operations</h3>
+        <SolarCivilPanel drawingId={drawingId} projectId={projectId} client={scopeCivilClient}
+          headSignal={civilHeadSignal} disabled={civilDisabled} onPhysicalHeadChanged={onCivilChanged} />
+        <button type="button" onClick={() => { physicalCloseFocus.current = civilTrigger.current; setOpenPanel(null) }}>Close</button>
+      </div>}
+      {hasPhysicalRead && openPanel === 'physical-read' && <div className="solar-workspace-panel">
+        <h3 tabIndex={-1} ref={readHeading}>Physical reads</h3>
+        <SolarPhysicalReadPanel drawingId={drawingId} projectId={projectId} drawingVersion={drawingVersion}
+          terrainClient={scopeTerrainClient} runRead={runRead} headSignal={readHeadSignal}
+          disabled={busy || Object.values(writers).some(Boolean) || phase === 'refreshing' || phase === 'failed'}
+          download={importClient.downloadArtifact} save={save} />
+        <button type="button" onClick={() => { physicalCloseFocus.current = readTrigger.current; setOpenPanel(null) }}>Close</button>
+      </div>}
+      {hasSolarEdge && <button type="button" ref={solarEdgeTrigger} disabled={!!solarReason}
+        aria-expanded={openPanel === 'solaredge-import'} onClick={() => {
+          if (solarGate()) return
+          if (openPanel === 'solaredge-import') solarEdgePanel.current?.querySelector('input[type="file"]')?.focus()
+          else { reportBinding.current = null; setOpenPanel('solaredge-import') }
+        }}>Import SolarEdge PDF</button>}
+      {hasSolarEdge && solarReason && <p ref={solarEdgeReason} tabIndex={-1}>{solarReason}</p>}
+      {hasSolarEdge && openPanel === 'solaredge-import' && <div className="solar-workspace-panel" ref={solarEdgePanel}>
+        <SolarEdgeImportPanel drawingId={drawingId} projectId={projectId} drawingVersion={drawingVersion}
+          graphRev={currentRevision?.phase === 'ready' ? currentRevision.graphRev : undefined}
+          client={scopeImportClient} onReportReady={reportReady} onAccept={stageSolarEdge}
+          disabled={!!solarReason || stagingPending} acceptDisabledReason={acceptSolarReason} />
+        {acceptSolarReason && <p>{acceptSolarReason}</p>}
+        {currentRevision?.phase === 'unavailable' && <button type="button" onClick={() => {
+          if (revisionRef.current?.phase !== 'loading') readRevision()
+        }}>Retry design revision</button>}
+        <button type="button" onClick={() => {
+          revisionGeneration.current += 1
+          revisionRef.current = null
+          stagingToken.current = null
+          setStagingPending(false)
+          setRevision({ scope: drawingId, version: drawingVersion, phase: 'needed', graphRev: null })
+          solarEdgeCloseFocus.current = true
+          setOpenPanel(null)
+        }}>Close</button>
+      </div>}
+      {hasLandxml && <button type="button" ref={trigger} disabled={!!writers.tracker || !!writers.civil} aria-expanded={openPanel === 'landxml'} onClick={() => setOpenPanel('landxml')}>
         Import LandXML terrain
       </button>}
       {hasLandxml && openPanel === 'landxml' && (
         <div className="solar-workspace-panel" ref={panel}>
           <SolarLandxmlUpload drawingId={drawingId} projectId={projectId} upload={upload}
-            checkoutHeld={checkoutHeld} busy={busy || !!writers.tracker} onImported={onImported}
+            checkoutHeld={checkoutHeld} busy={busy || !!writers.tracker || !!writers.civil} onImported={onImported}
             onClose={() => {
               pendingImport.current = null
               landxmlRequest.current = null
@@ -345,7 +668,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
         </div>
       )}
       {hasTerrain && <button type="button" ref={terrainTrigger} aria-expanded={openPanel === 'terrain'}
-        disabled={landxmlPending || !!writers.tracker} onClick={() => setOpenPanel('terrain')}>Terrain preview</button>}
+        disabled={landxmlPending || !!writers.tracker || !!writers.civil} onClick={() => setOpenPanel('terrain')}>Terrain preview</button>}
       {hasTerrain && landxmlPending && <p data-testid="solar-terrain-reason">{TERRAIN_WORKSPACE_REASONS.landxml_importing}</p>}
       {hasTerrain && openPanel === 'terrain' && (
         <div className="solar-workspace-panel" ref={terrainPanel}>
@@ -361,7 +684,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
         </div>
       )}
       {hasCombiner && <button type="button" ref={combinerTrigger} aria-expanded={openPanel === 'combiner-intake'}
-        disabled={!!writers.tracker} onClick={() => setOpenPanel('combiner-intake')}>Import combiner intake</button>}
+        disabled={!!writers.tracker || !!writers.civil} onClick={() => setOpenPanel('combiner-intake')}>Import combiner intake</button>}
       {hasCombiner && openPanel === 'combiner-intake' && (
         <div className="solar-workspace-panel" ref={combinerPanel}>
           <SolarCombinerIntake key={generation} drawingId={drawingId} projectId={projectId}
@@ -378,14 +701,15 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
         disabled={trackerBlockedReason !== null} onClick={() => { setTrackerMounted(true); setOpenPanel('tracker-rows') }}>
         Create tracker rows
       </button>}
-      {hasTrackerRows && trackerBlockedReason && <p data-testid="solar-tracker-workspace-reason">{TRACKER_ROWS_PANEL_REASONS[trackerBlockedReason]}</p>}
+      {hasTrackerRows && trackerBlockedReason && <p data-testid="solar-tracker-workspace-reason">{trackerBlockedReason === 'solaredge_pending'
+        ? SOLAREDGE_WORKSPACE_REASONS.solaredge_pending : TRACKER_ROWS_PANEL_REASONS[trackerBlockedReason]}</p>}
       {writers.tracker && <p data-testid="solar-tracker-pending-reason">{TRACKER_ROWS_PANEL_REASONS.tracker_pending}</p>}
-      {trackerMounted && <div className="solar-workspace-panel" data-flow-stage="layout"
-        hidden={openPanel !== 'tracker-rows' || !hasTrackerRows}>
+      {trackerMounted && <div className="solar-workspace-panel" data-flow-stage="tracker-rows"
+        hidden={openPanel !== 'tracker-rows' || !hasTrackerRows || !!writers.solaredge}>
         <SolarTrackerRowsPanel drawingId={drawingId} projectId={projectId} drawingVersion={drawingVersion}
           client={scopeTrackerRowsClient} terrainClient={scopeTerrainClient} readIntake={readIntake}
-          headSignal={trackerHeadSignal} active={openPanel === 'tracker-rows' && hasTrackerRows}
-          checkoutHeld={checkoutHeld} busy={busy} blockedReason={trackerBlockedReason}
+          headSignal={trackerHeadSignal} active={openPanel === 'tracker-rows' && hasTrackerRows && !writers.solaredge}
+          checkoutHeld={checkoutHeld} busy={busy} blockedReason={trackerBlockedReason === 'solaredge_pending' ? null : trackerBlockedReason}
           onPhysicalHeadChanged={onTrackerRowsChanged}
           onClose={() => { setOpenPanel(null); trackerTrigger.current?.focus() }} />
       </div>}

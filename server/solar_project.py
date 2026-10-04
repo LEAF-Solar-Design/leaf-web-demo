@@ -111,7 +111,8 @@ def set_installation_design(graph, design):
 
     Returns False and changes nothing when the drawing already has that design. A drawing with any
     frame cannot change design: the validator requires every frame to carry the project's design
-    (INSTALLATION_DESIGN_MISMATCH), a Ground frame must carry a tracker and a Roof frame must not
+    (INSTALLATION_DESIGN_MISMATCH), an unmarked Ground frame must carry a tracker; the explicit
+    PVcase captured-matrix variant carries neither tracker nor ground_slots. A Roof frame has no tracker
     (the frame if/then/else in the graph contract), so no frame converts. That case raises
     INSTALLATION_DESIGN_MISMATCH; callers refuse it first with their own named code. Otherwise the
     design is written, the project validity recomputed and the project-change rule run

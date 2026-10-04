@@ -570,7 +570,7 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-ground-terrain", "server tests/test_solar_ground_terrain.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain.py"), 117),
         Suite("server-solar-ground-frames", "server tests/test_solar_ground_frames.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_ground_frames.py"), 95),
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_frames.py"), 104),
         # W5 second ground batch (2026-09-23, contract G20-G22): terrain analytics (slope map,
         # survey colours, pad grading, terrain CSV byte for byte), layout (module spec, row spacing,
         # tracker and SAT layout, setbacks) and the arrays store with the PVsyst scene export. Every
@@ -617,6 +617,18 @@ def build_suites() -> List[Suite]:
         # 26 tests + 32 more parametrizations = 58 passed.
         Suite("server-solar-pvcase-solve", "server tests/test_solar_pvcase_solve.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_solve.py"), 58),
+        Suite("server-solar-pvcase-graph", "server tests/test_solar_pvcase_graph.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_graph.py"), 18),
+        Suite("server-solar-pvcase-outputs", "server tests/test_solar_pvcase_outputs.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_outputs.py"), 8),
+        Suite(
+            "server-solar-pvcase-conversion",
+            "server tests/test_solar_pvcase_conversion.py",
+            "pytest",
+            SERVER,
+            _py_pytest("tests/test_solar_pvcase_conversion.py"),
+            36,
+        ),
         Suite("server-solar-registry", "server tests/test_solar_registry.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_registry.py"), 120),
         # solar-homeruns-local: 30 cases for the builtin and the local graph commit rail.
@@ -853,10 +865,15 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_parse.py"), 19),
         Suite("server-solar-solaredge-import", "server tests/test_solar_solaredge_import.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_import.py"), 11),
+        Suite("server-solar-pvcase-sources", "server tests/test_solar_pvcase_sources.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_sources.py"), 22),
         Suite("server-solar-import-sources", "server tests/test_solar_import_sources.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_import_sources.py"), 73),
         Suite("server-solar-solaredge-report", "server tests/test_solar_solaredge_report.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_report.py"), 100),
+        # sf-w4-solaredge-flow-proof: the floor is the exact count of seven HTTP chain tests.
+        Suite("server-solar-solaredge-flow", "server tests/test_solar_solaredge_flow.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_flow.py"), 7),
         # SolarEdge accept (2026-09-30, sf-w4-solaredge-accept): a stored report's import provenance and
         # tracking associations committed to graph extra through the solaredge_report trusted input; no
         # string, inverter or Solve state. Hermetic, so the floor is the exact count. COUNTED: 111.
@@ -879,6 +896,12 @@ def build_suites() -> List[Suite]:
         # terminal proof. Reads only. Hermetic and nothing skips: the floor is the exact count, 96.
         Suite("server-solar-tool-terrain-read", "server tests/test_solar_tool_terrain_read.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_terrain_read.py"), 96),
+        Suite("server-solar-tool-physical-shade", "server tests/test_solar_tool_physical_shade.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_physical_shade.py"), 22),
+        Suite("server-solar-tool-physical-export",
+              "server tests/test_solar_tool_physical_export.py",
+              "pytest", SERVER,
+              _py_pytest("tests/test_solar_tool_physical_export.py"), 24),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
@@ -923,7 +946,14 @@ def build_suites() -> List[Suite]:
         # bounded JSON bodies, closed refusals and twin-store adapter parity.
         # Hermetic and nothing skips: the floor is the exact count, 37.
         Suite("server-solar-terrain-route", "server tests/test_solar_terrain_route.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_terrain_route.py"), 37),
+              "pytest", SERVER, _py_pytest("tests/test_solar_terrain_route.py"), 38),
+        Suite("server-solar-civil-operations", "server tests/test_solar_civil_operations.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_civil_operations.py"), 15),
+        Suite("server-solar-civil-route", "server tests/test_solar_civil_route.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_civil_route.py"), 13),
+        # The floor is the exact count of one HTTP chain test.
+        Suite("server-solar-ground-physical-admission", "server tests/test_solar_ground_physical_admission.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_physical_admission.py"), 1),
         # sf-w3-tracker-rows-route: bounded manual tracker row creation with drawing
         # checkout authorization and the closed tracker row refusal vocabulary.
         # Hermetic and nothing skips: the floor is the exact count, 40.
@@ -1052,7 +1082,7 @@ def build_suites() -> List[Suite]:
         Suite("server-w1-seed-product-path", "server tests/test_w1_seed_product_path.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_seed_product_path.py"), 12),
         Suite("server-w1-authored-reports", "server tests/test_w1_authored_reports.py", "pytest", SERVER,
-              _py_pytest("tests/test_w1_authored_reports.py"), 37),
+              _py_pytest("tests/test_w1_authored_reports.py"), 41),
         Suite("server-backbone", "server tests/test_backbone.py", "pytest", SERVER,
               _py_pytest("tests/test_backbone.py"), 15),
         Suite("server-campaigns", "server tests/test_campaigns_router.py", "pytest", SERVER,
@@ -1411,7 +1441,7 @@ def build_suites() -> List[Suite]:
         Suite("server-surface-entitlements", "server tests/test_surface_entitlements.py", "pytest", SERVER,
               _py_pytest("tests/test_surface_entitlements.py"), 9),
         Suite("server-hardening-1c", "server tests/test_hardening_1c.py", "pytest", SERVER,
-              _py_pytest("tests/test_hardening_1c.py"), 57),
+              _py_pytest("tests/test_hardening_1c.py"), 59),
         Suite("server-hardening-1f", "server test_hardening_1f.py", "pytest", SERVER,
               _py_pytest("test_hardening_1f.py"), 8),
         Suite("server-hardening-2b", "server tests/test_hardening_2b.py", "pytest", SERVER,
@@ -1976,12 +2006,15 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_customization_authority.py"), 7),
         Suite("server-customization-store", "server customization store", "pytest",
               SERVER, _py_pytest("tests/test_customization_store.py"), 11),
+        # Record 1: durable customization record-fields authority.
+        Suite("server-customization-record-fields-store", "server customization record fields store", "pytest",
+              SERVER, _py_pytest("tests/test_customization_record_fields_store.py"), 20),
         Suite("server-customization-reconcile", "server customization reconcile", "pytest",
               SERVER, _py_pytest("tests/test_customization_reconcile.py"), 8),
         Suite("server-customization-contract", "server customization contract freeze", "pytest",
               SERVER, _py_pytest("tests/test_customization_contract_freeze.py"), 8),
         Suite("server-customization-runtime", "server customization runtime", "pytest",
-              SERVER, _py_pytest("tests/test_customization_runtime.py"), 50),
+              SERVER, _py_pytest("tests/test_customization_runtime.py"), 79),
         Suite("server-customization-postgres-contract",
               "server customization PostgreSQL contract", "pytest",
               SERVER, _py_pytest("tests/test_customization_postgres_contract.py"), 11),
@@ -2016,7 +2049,7 @@ def build_suites() -> List[Suite]:
         # change set on attempt 1 with the harness's reason readable from stage
         # status). Was never registered, so none of it ran in CI.
         Suite("server-customization-async-stage", "server customization async stage", "pytest",
-              SERVER, _py_pytest("tests/test_customization_async_stage.py"), 51),
+              SERVER, _py_pytest("tests/test_customization_async_stage.py"), 82),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- operator control plane (cwd=server): each file its OWN process --- #
@@ -3316,6 +3349,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_tool_publication_policy.py"), 13),
         Suite("server-tool-record-fields", "server tests/test_tool_record_fields.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_record_fields.py"), 42),
+        # Record 1: complete catalog metadata snapshot validation.
+        Suite("server-tool-record-fields-snapshot", "server tool record fields snapshot", "pytest", SERVER,
+              _py_pytest("tests/test_tool_record_fields_snapshot.py"), 5),
         Suite("server-tool-validate-structural", "server tests/test_tool_validate_structural.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_validate_structural.py"), 52),
         Suite("server-turn-queue", "server tests/test_turn_queue.py", "pytest", SERVER,

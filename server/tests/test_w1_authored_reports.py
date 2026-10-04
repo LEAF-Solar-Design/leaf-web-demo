@@ -330,8 +330,11 @@ def test_author_request_types_graph_input():
     request = author_router.AuthorRequest(description="x", graph_input=GRAPH_INPUT)
     assert author_router._validated_record_fields(request) == {"graph_input": GRAPH_INPUT}
     for value in ("", "Solar-W1-Graph", " solar-w1-graph", "a" * 64):
-        with pytest.raises(Exception):
-            author_router.AuthorRequest(description="x", graph_input=value)
+        request = author_router.AuthorRequest(description="x", graph_input=value)
+        assert request.graph_input == value
+        with pytest.raises(ToolRecordFieldError) as excinfo:
+            author_router._validated_record_fields(request)
+        assert excinfo.value.field == "graph_input"
 
 
 def test_reads_graph_only_for_an_untrusted_declared_record():
@@ -650,7 +653,9 @@ def assert_graph_input_unsupported(response):
     assert body["error_code"] == "GRAPH_INPUT_UNSUPPORTED"
     assert body["reason_code"] == "GRAPH_INPUT_UNSUPPORTED"
     assert body["tool"] is None and body["invalid_field"] == "graph_input"
-    assert "templated path only" in body["error"]["message"]
+    assert body["error"]["message"] == (
+        "Graph-input authoring requires the templated path or controlled R5 "
+        "customization; the tool was not created.")
 
 
 def test_corr1_harness_path_refuses_graph_input(tmp_path, monkeypatch):
@@ -697,13 +702,93 @@ def test_corr1_stage_refuses_graph_input(tmp_path, monkeypatch):
     monkeypatch.setattr(author_router, "CustomizationService", Service)
     body = {"description": REPORTS["zone_schedule"]["description"], "mode": "build",
             "idempotency_key": "corr1-stage", "graph_input": GRAPH_INPUT}
-    assert_graph_input_unsupported(client.post("/api/author/stage", json=body))
-    assert staged == []
+    response = client.post("/api/author/stage", json=body)
+    assert response.status_code == 200, response.text
+    assert len(staged) == 1 and staged[0]["graph_input"] == GRAPH_INPUT
     # The same request without the field reaches the stage: the setup is live.
     del body["graph_input"]
     response = client.post("/api/author/stage", json=body)
     assert response.status_code == 200, response.text
-    assert len(staged) == 1 and "graph_input" not in staged[0]
+    assert len(staged) == 2 and "graph_input" not in staged[1]
+
+
+@pytest.fixture
+def ag2b_controlled(tmp_path, monkeypatch):
+    from test_customization_runtime import _ag2b_setup
+    from test_customization_async_stage import active_author_turn
+    local_posture(monkeypatch)
+    client = author_client(tmp_path, monkeypatch)
+    lane = _ag2b_setup(tmp_path, monkeypatch)
+    client.app.dependency_overrides[deps.require_tenant] = lambda: lane.tenant
+    session_id, turn_id = active_author_turn.__wrapped__(tmp_path, monkeypatch)
+    headers = {"X-Authority-Session-Id": session_id, "X-Authority-Turn-Id": turn_id}
+    return lane, client, headers
+
+
+def test_ag2b_author_admits_graph(ag2b_controlled):
+    lane, client, headers = ag2b_controlled
+    headers = {**headers, "Idempotency-Key": "author-graph"}
+    response = client.post("/api/author", headers=headers, json={
+        "description": "create a graph report", "mode": "build", "graph_input": GRAPH_INPUT,
+    })
+    assert response.status_code == 202, response.text
+    scoped = author_router._subject_scoped_key("author-graph", lane.tenant)
+    change = lane.change(scoped)
+    assert change.request_graph_input == GRAPH_INPUT
+    assert change.author_subject == lane.tenant.subject
+    assert change.idempotency_key == scoped and scoped != "author-graph"
+    assert response.json()["change_set_id"] == change.change_set_id
+    assert response.json()["contract"] == "leaf.customization-stage-job.v1"
+    assert change.authority_session_id == headers["X-Authority-Session-Id"]
+    assert change.authority_turn_id == headers["X-Authority-Turn-Id"]
+    assert len(lane.charges) == 1 and lane.calls == []
+    assert deps._AUTHORED == []
+
+
+def test_ag2b_stage_admits_graph(ag2b_controlled):
+    lane, client, headers = ag2b_controlled
+    response = client.post("/api/author/stage", headers=headers, json={
+        "description": "create a graph report", "mode": "build",
+        "idempotency_key": "stage-graph", "graph_input": GRAPH_INPUT,
+    })
+    assert response.status_code == 202, response.text
+    change = lane.change("stage-graph")
+    assert change.request_graph_input == GRAPH_INPUT
+    assert response.json()["change_set_id"] == change.change_set_id
+    assert response.json()["contract"] == "leaf.customization-stage-job.v1"
+    assert change.authority_session_id == headers["X-Authority-Session-Id"]
+    assert change.authority_turn_id == headers["X-Authority-Turn-Id"]
+    assert change.author_subject == lane.tenant.subject
+    assert len(lane.charges) == 1 and lane.calls == []
+
+
+def test_ag2b_author_replay_precedes_graph_validation(ag2b_controlled):
+    lane, client, headers = ag2b_controlled
+    headers = {**headers, "Idempotency-Key": "author-replay"}
+    body = {"description": "create a graph report", "mode": "build", "graph_input": GRAPH_INPUT}
+    first = client.post("/api/author", headers=headers, json=body)
+    assert first.status_code == 202, first.text
+    scoped = author_router._subject_scoped_key("author-replay", lane.tenant)
+    reserved = lane.change(scoped)
+    replay = client.post("/api/author", headers=headers, json={**body, "graph_input": "other"})
+    assert replay.status_code == 409, replay.text
+    assert replay.json()["reason_code"] == "idempotency_replay"
+    assert lane.change(scoped) == reserved
+    assert len(lane.charges) == 1 and lane.calls == []
+
+
+def test_ag2b_stage_replay_precedes_graph_validation(ag2b_controlled):
+    lane, client, headers = ag2b_controlled
+    body = {"description": "create a graph report", "mode": "build",
+            "idempotency_key": "stage-replay", "graph_input": GRAPH_INPUT}
+    first = client.post("/api/author/stage", headers=headers, json=body)
+    assert first.status_code == 202, first.text
+    reserved = lane.change("stage-replay")
+    replay = client.post("/api/author/stage", headers=headers, json={**body, "graph_input": "other"})
+    assert replay.status_code == 409, replay.text
+    assert replay.json()["reason_code"] == "idempotency_replay"
+    assert lane.change("stage-replay") == reserved
+    assert len(lane.charges) == 1 and lane.calls == []
 
 
 def test_corr1_size_check_matches_sandbox_bytes(mini, monkeypatch):

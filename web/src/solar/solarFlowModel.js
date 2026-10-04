@@ -5,6 +5,7 @@
 // most MAX_FLOW_STEPS steps, MAX_REASON_CODES codes per step, and no regex
 // runs on a string longer than MAX_REASON_CODE_LENGTH.
 import { solarView } from './solarView.js'
+import { FLOW_PANELS } from './solarWorkspacePanels.js'
 
 export const MAX_FLOW_STEPS = 64
 export const MAX_CATALOG_ROWS = 4096
@@ -18,13 +19,28 @@ function flowStage(id, label, capabilities = []) {
   return Object.freeze({ id, label, capabilities: Object.freeze(capabilities) })
 }
 
+function panelStage(id, label, panels) {
+  return Object.freeze({ id, label, kind: 'workspace-panel', panels: Object.freeze(panels), capabilities: Object.freeze([]) })
+}
+
+function panelCatalogStage(id, label, panels, capabilities) {
+  return Object.freeze({ id, label, kind: 'workspace-panel-catalog', panels: Object.freeze(panels), capabilities: Object.freeze(capabilities) })
+}
+
 function flowEntry(id, label, maturity, stages) {
   return Object.freeze({ id, label, maturity, stages: stages === null ? null : Object.freeze(stages) })
 }
 
-// A Ground Electrical tool is bound only when a server test runs it to a pinned result on a graph produced by the conversion builtin:
+// Catalog bindings require a named producer-chain server test with pinned results.
+// Panel bindings require a registered workspace implementation with integration coverage
+// and explicit host admission; registry membership alone does not establish a mount.
+// Tracking labels do not admit electrical outputs. Ground conversion evidence:
 // test_solar_ground_admission.py, test_solar_tool_trackers_to_panel_groups.py, test_solar_ground_equipment.py,
 // test_solar_tool_central_inverter_add.py, test_solar_tool_solar_feeders_ground.py.
+// SolarEdge producer-chain evidence: test_solar_solaredge_flow.py,
+// test_solaredge_flow_accept_run and test_solaredge_flow_tracking_read_run.
+// Ground Physical producer-chain evidence: test_solar_ground_physical_admission.py,
+// test_ground_physical_admission_producer_chain.
 export const SOLAR_FLOWS = Object.freeze([
   flowEntry('rooftop', 'Rooftop', 'production', null),
   flowEntry('ground-electrical', 'Ground Mount Electrical', 'production', [
@@ -47,13 +63,17 @@ export const SOLAR_FLOWS = Object.freeze([
     ]),
   ]),
   flowEntry('ground-physical', 'Ground Mount Physical', 'preview', [
-    flowStage('terrain', 'Terrain'), flowStage('layout', 'Tracker layout'),
-    flowStage('civil', 'Civil and piles'), flowStage('analysis', 'Shade and terrain analysis'),
-    flowStage('outputs', 'Exports'),
+    panelStage('terrain', 'Terrain', ['landxml', 'terrain']),
+    panelStage('layout', 'Native frame layout', ['civil']),
+    panelStage('civil', 'Grade pads and native piles', ['civil']),
+    panelCatalogStage('analysis', 'Terrain and frame shade', ['physical-read'], ['solar-physical-shade']),
+    panelCatalogStage('outputs', 'Terrain and shade CSV', ['physical-read'], ['solar-physical-export']),
   ]),
-  flowEntry('solaredge-import', 'SolarEdge PDF Import', 'production', [
-    flowStage('upload', 'Upload the SolarEdge PDF'), flowStage('inspect', 'Inspect counts and matching'),
-    flowStage('tracking', 'Accept tracking'), flowStage('outputs', 'Schedules and exports'),
+  flowEntry('solaredge-import', 'SolarEdge PDF Import', 'preview', [
+    panelStage('upload', 'Upload the SolarEdge PDF', ['solaredge-import']),
+    panelStage('inspect', 'Inspect counts and matching', ['solaredge-import']),
+    flowStage('tracking', 'Accept tracking', ['solar-solaredge-accept']),
+    flowStage('review', 'Review accepted tracking', ['solar-solaredge-tracking-read']),
   ]),
   flowEntry('pvcase-tutorial', 'PVcase Parity', 'tutorial', [
     flowStage('conversion', 'Geometry conversion'), flowStage('solve', 'Solve on the shared model'),
@@ -62,12 +82,12 @@ export const SOLAR_FLOWS = Object.freeze([
 ])
 
 export const SOLAR_FLOW_UNAVAILABLE_REASONS = Object.freeze({
-  stages_missing: 'This flow needs Solar tools this catalog does not offer yet, so it has no steps to run.',
+  stages_missing: 'Some stages in this flow are not available yet.',
   rooftop_steps_missing: 'This catalog offers no Rooftop steps for this drawing yet.',
 })
 export const SOLAR_FLOW_MATURITY_NOTES = Object.freeze({
   preview: 'Preview flow: its results are not production Solar design yet.',
-  tutorial: 'Tutorial flow: it shows the supported conversion boundaries and never runs PVcase itself.',
+  tutorial: 'Tutorial flow: conversion and solve are not available in this workspace yet.',
 })
 
 export function solarFlowId(value, flows = SOLAR_FLOWS) {
@@ -75,7 +95,7 @@ export function solarFlowId(value, flows = SOLAR_FLOWS) {
     ? value : DEFAULT_SOLAR_FLOW
 }
 
-export function solarFlowSelect(families, flowId, flows = SOLAR_FLOWS) {
+export function solarFlowSelect(families, flowId, flows = SOLAR_FLOWS, workspacePanelsByFlow = {}) {
   const id = solarFlowId(flowId, flows)
   const flow = flows.find((entry) => entry.id === id)
   let steps
@@ -96,8 +116,29 @@ export function solarFlowSelect(families, flowId, flows = SOLAR_FLOWS) {
         if (!index.has(row.name) && solarView(row).state === 'valid') index.set(row.name, row)
       }
     }
-    const stageRows = flow.stages.map((stage) => stage.capabilities.filter((name) => index.has(name)).map((name) => index.get(name)))
-    missing = flow.stages.filter((stage, position) => stageRows[position].length === 0).map((stage) => stage.label)
+    const admitted = []
+    const stageRows = flow.stages.map((stage) => {
+      if (stage.kind === undefined) {
+        const rows = stage.capabilities.filter((name) => index.has(name)).map((name) => index.get(name))
+        admitted.push(rows.length > 0)
+        return rows
+      }
+      const registered = FLOW_PANELS[id]
+      const supplied = workspacePanelsByFlow?.[id]
+      const panelsAdmitted = Array.isArray(stage.panels) && stage.panels.length > 0
+        && Array.isArray(registered) && Array.isArray(supplied)
+        && Array.from(stage.panels).every((panel) => typeof panel === 'string' && panel.length > 0
+          && registered.includes(panel) && supplied.includes(panel))
+      if (stage.kind === 'workspace-panel-catalog') {
+        const capabilitiesAdmitted = Array.isArray(stage.capabilities) && stage.capabilities.length > 0
+          && Array.from(stage.capabilities).every((name) => typeof name === 'string' && name.length > 0 && index.has(name))
+        admitted.push(panelsAdmitted && capabilitiesAdmitted)
+        return panelsAdmitted && capabilitiesAdmitted ? stage.capabilities.map((name) => index.get(name)) : []
+      }
+      admitted.push(stage.kind === 'workspace-panel' && panelsAdmitted)
+      return []
+    })
+    missing = flow.stages.filter((stage, position) => !admitted[position]).map((stage) => stage.label)
     if (missing.length > 0) {
       reasonKey = 'stages_missing'
       steps = []
@@ -109,9 +150,9 @@ export function solarFlowSelect(families, flowId, flows = SOLAR_FLOWS) {
   }
 }
 
-export function solarFlowOptions(families, flows = SOLAR_FLOWS) {
+export function solarFlowOptions(families, flows = SOLAR_FLOWS, workspacePanelsByFlow = {}) {
   return flows.map(({ id, label, maturity }) => ({
-    id, label, maturity, available: solarFlowSelect(families, id, flows).available,
+    id, label, maturity, available: solarFlowSelect(families, id, flows, workspacePanelsByFlow).available,
   }))
 }
 

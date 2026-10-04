@@ -98,11 +98,63 @@ const ROOFTOP_LIVE = [
 
 const FLOW_OPTION_LABELS = [
   'Rooftop', 'Ground Mount Electrical (unavailable)', 'Ground Mount Physical (preview, unavailable)',
-  'SolarEdge PDF Import (unavailable)', 'PVcase Parity (tutorial, unavailable)',
+  'SolarEdge PDF Import (preview, unavailable)', 'PVcase Parity (tutorial, unavailable)',
 ]
 function changeFlow(id) {
   fireEvent.change(screen.getByRole('combobox', { name: 'Solar flow' }), { target: { value: id } })
 }
+
+describe('F2 rail panel admission', () => {
+  const accept = liveRow('solar-solaredge-accept', 'imports', 4, 30, 'run_write')
+  const review = liveRow('solar-solaredge-tracking-read', 'imports', 4, 31, 'run_read')
+  const catalog = [{ family_id: 'imports', capabilities: [accept, review] }]
+  const host = { 'solaredge-import': ['solaredge-import'] }
+
+  it('F2 20 rail recomputes selection and options when host changes', () => {
+    const { rerender } = render(<SolarFlowRail families={catalog} drawingId="d1" />)
+    changeFlow('solaredge-import')
+    const option = () => screen.getByRole('combobox', { name: 'Solar flow' }).selectedOptions[0].textContent
+    expect(screen.getByTestId('solar-flow-unavailable')).toBeTruthy()
+    expect(items()).toEqual([])
+    expect(option()).toBe('SolarEdge PDF Import (preview, unavailable)')
+    rerender(<SolarFlowRail families={catalog} drawingId="d1" workspacePanelsByFlow={host} />)
+    expect(screen.queryByTestId('solar-flow-unavailable')).toBeNull()
+    expect(option()).toBe('SolarEdge PDF Import (preview)')
+    expect(items().map((item) => item.querySelector('button').id)).toEqual([accept.name, review.name].map(solarFlowStepId))
+    expect(screen.getAllByRole('button')).toHaveLength(2)
+    rerender(<SolarFlowRail families={catalog} drawingId="d1" />)
+    expect(screen.getByTestId('solar-flow-unavailable')).toBeTruthy()
+    expect(items()).toEqual([])
+    expect(screen.queryAllByRole('button')).toEqual([])
+    expect(option()).toBe('SolarEdge PDF Import (preview, unavailable)')
+  })
+
+  it('F2 21 rail presents exact boundary copy without requests', () => {
+    const fetchImpl = vi.fn()
+    vi.stubGlobal('fetch', fetchImpl)
+    try {
+      render(<SolarFlowRail families={LIVE} drawingId="d1" />)
+      for (const [id, labels, note] of [
+        ['ground-physical', ['Terrain', 'Native frame layout', 'Grade pads and native piles', 'Terrain and frame shade', 'Terrain and shade CSV'],
+          'Preview flow: its results are not production Solar design yet.'],
+        ['solaredge-import', ['Upload the SolarEdge PDF', 'Inspect counts and matching', 'Accept tracking', 'Review accepted tracking'],
+          'Preview flow: its results are not production Solar design yet.'],
+        ['pvcase-tutorial', ['Geometry conversion', 'Solve on the shared model', 'Exports'],
+          'Tutorial flow: conversion and solve are not available in this workspace yet.'],
+      ]) {
+        changeFlow(id)
+        expect(document.getElementById('solar-flow-unavailable-reason').textContent).toBe('Some stages in this flow are not available yet.')
+        expect([...screen.getByRole('list', { name: 'Unavailable stages' }).children].map((item) => item.textContent)).toEqual(labels)
+        expect(screen.getByTestId('solar-flow-maturity').textContent).toBe(note)
+        expect(items()).toEqual([])
+        expect(screen.queryAllByRole('button')).toEqual([])
+      }
+      expect(fetchImpl).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
 
 describe('Solar flow picker', () => {
   it('FL11 the selector retains default Rooftop labels and statuses', () => {
@@ -132,7 +184,7 @@ describe('Solar flow picker', () => {
     expect(screen.getByTestId('solar-flow-unavailable')).toBeTruthy()
     expect(document.getElementById('solar-flow-unavailable-reason').textContent).toBe(SOLAR_FLOW_UNAVAILABLE_REASONS.stages_missing)
     expect(screen.getByRole('combobox', { name: 'Solar flow' }).getAttribute('aria-describedby')).toBe('solar-flow-unavailable-reason')
-    const list = screen.getByRole('list', { name: 'Stages not in this catalog' })
+    const list = screen.getByRole('list', { name: 'Unavailable stages' })
     expect([...list.children].map((item) => item.textContent))
       // W20-03: matches FL4's LIVE catalog missing stages.
       .toEqual(['Tracker conversion', 'Feeders and routes'])
@@ -199,7 +251,7 @@ describe('Solar flow picker', () => {
     changeFlow('pvcase-tutorial')
     expect(screen.getByTestId('solar-flow-maturity').textContent).toBe(SOLAR_FLOW_MATURITY_NOTES.tutorial)
     changeFlow('solaredge-import')
-    expect(screen.queryByTestId('solar-flow-maturity')).toBeNull()
+    expect(screen.getByTestId('solar-flow-maturity').textContent).toBe(SOLAR_FLOW_MATURITY_NOTES.preview)
     changeFlow('rooftop')
     expect(screen.queryByTestId('solar-flow-maturity')).toBeNull()
     expect(items()).toHaveLength(9)

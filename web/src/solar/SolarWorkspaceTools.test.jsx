@@ -1,11 +1,20 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as api from '../api.js'
 import * as landxmlUpload from './SolarLandxmlUpload.jsx'
+import * as landxmlClients from './solarLandxmlClient.js'
 import * as terrainClients from './solarTerrainClient.js'
+import * as terrainPanels from './SolarTerrainPanel.jsx'
 import * as trackerClients from './solarTrackerRowsClient.js'
+import * as trackerPanels from './SolarTrackerRowsPanel.jsx'
+import * as importClients from './solarImportClient.js'
+import * as solarEdgePanels from './SolarEdgeImportPanel.jsx'
+import * as civilClients from './solarCivilClient.js'
+import * as civilPanels from './SolarCivilPanel.jsx'
+import { FLOW_PANELS } from './solarWorkspacePanels.js'
 import { TRACKER_ROWS_PANEL_REASONS as TRACKER_SENTENCES } from './SolarTrackerRowsPanel.jsx'
-import SolarWorkspaceTools, { TERRAIN_WORKSPACE_REASONS } from './SolarWorkspaceTools.jsx'
+import SolarWorkspaceTools, { TERRAIN_WORKSPACE_REASONS, SOLAREDGE_WORKSPACE_REASONS } from './SolarWorkspaceTools.jsx'
 import { COMBINER_INTAKE_REASONS } from './solarCombinerIntakeClient.js'
 
 // The route capture also used by SolarLandxmlUpload.test.jsx; the real client validates it.
@@ -13,6 +22,1031 @@ const FIRST_TEXT = `{"schema":"leaf.solar-landxml-import.v1","created":true,"dra
 const UNAUTH_TEXT = `{"ok":false,"tool":null,"version":null,"result":null,"overlay":null,"timing_ms":0,"cost":null,"error":{"error_code":"UNAUTHENTICATED","message":"missing bearer token (Authorization header)","retryable":false,"retry_class":"after_action","actor":"user","next_action":"Sign in, then repeat the request."},"degraded_mode":false}`
 const CREATED = 'Terrain imported for this drawing.'
 const EXISTING = 'This terrain was already imported, so nothing changed.'
+const F3_SOURCE_ID = 'a'.repeat(64)
+const gp5ReadHead = (artifact = gp5H, drawing = 'solar', project = 'p') => ({
+  schema: 'leaf.solar-physical-head.v1', drawing_id: drawing, project_id: project, index: artifact === gp5H ? 0 : 1, parent: artifact === gp5H ? null : gp5H,
+  state: { schema: 'leaf.solar-artifact-ref.v1', artifact_id: artifact, content_sha256: gp5D, media_type: 'application/json',
+    filename: 'physical-state.json', byte_length: 1024, source_version: 1, download: `/api/drawings/${drawing}/artifacts/${artifact}` },
+})
+const gp5ReadTerrain = (head = gp5ReadHead()) => ({
+  schema: 'leaf.solar-terrain-view-response.v1', stored: true, head,
+  terrain: { schema: 'leaf.solar-terrain-view.v1', maturity: 'preview', drawing_id: head.drawing_id, project_id: head.project_id,
+    frame: { coordinate_system: 'world', transform: 'identity', drawing_units: 'm', meters_per_unit: 1, crs: 'none',
+      elevation_datum: 'unrecorded', horizontal: 'drawing-units', elevation: 'metres' },
+    grid: { rows: 2, cols: 2, x_min: 0, x_max: 10, y_min: 0, y_max: 10, cell_x: 10, cell_y: 10, cell_x_m: 10, cell_y_m: 10,
+      elevation_min_m: 0, elevation_max_m: 0, grid_sha256: gp5D },
+    mesh_faces: 0, slope_markers: 0, previews: {
+      'terrain-mesh-render': { state: 'absent', record: null }, 'tracker-slope-violations': { state: 'absent', record: null },
+    },
+  },
+})
+const gp5ReadArtifact = (filename = 'terrain.csv', byteLength = 138) => ({
+  schema: 'leaf.solar-artifact-ref.v1', artifact_id: gp5D, content_sha256: gp5D, media_type: 'text/csv', filename,
+  byte_length: byteLength, source_version: 1, download: `/api/drawings/solar/artifacts/${gp5D}`,
+})
+const gp5ReadAnswer = (tool = 'solar-physical-shade', format = 'terrain-csv', head = gp5ReadHead(), version = 1) => ({
+  ok: true, result: {
+    schema_version: 'leaf.solar-graph-read.v1', adapter: 'local-graph-read', drawing_id: head.drawing_id, project_id: head.project_id,
+    source_version: version, drawing_changed: false, tool, job_id: 'physical-test', output_sha256: gp5D,
+    output: tool === 'solar-physical-shade' ? {
+      schema: 'leaf.solar-physical-shade.v1', maturity: 'preview', scope: 'cpu-terrain-native-frame-centres', head,
+      sample_count: 15, mean_shade: 0, datum_shift_m: 1.5,
+      units: { drawing_units: 'm', meters_per_unit: 1 },
+      settings: { mode: 'defaults', target_clearance_m: 1.5, profile_selection: 'automatic' },
+      profile: { name: 'full', angle_count: 468, ray_step_m: 1, max_ray_m: 400, estimated_samples: 2808000 },
+      surface: { rows: 21, cols: 21, cells: 441 },
+      frames: Array.from({ length: 15 }, (_, i) => ({ sample_index: i, frame_index: i, shade: 0 })), frames_omitted: 0,
+    } : {
+      head,
+      summary: { schema: 'leaf.solar-physical-export.v1', maturity: 'preview',
+        scope: format === 'terrain-csv' ? 'terrain-nodes' : 'cpu-terrain-native-frame-centres', head: gp5clone(head), format,
+        units: { drawing_units: 'm', meters_per_unit: 1 }, grid: { rows: 2, cols: 2, cells: 4 },
+        settings: null, sample_count: null, profile: null, mean_shade: null, datum_shift_m: null },
+      artifact: gp5ReadArtifact(),
+    },
+  },
+})
+const gp5Deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done }); return { promise, resolve } }
+const gp5Success = (value) => ({ ok: true, status: 200, value })
+function gp5CivilProps(extra = {}) {
+  const p = supplied({ projectId: 'p', ...extra })
+  const client = { getCivil: vi.fn(async () => gp5Success(gp5viewOf())),
+    runCivilOperation: vi.fn(async () => gp5Success(gp5resultOf())) }
+  vi.spyOn(civilClients, 'createSolarCivilClient').mockReturnValue(client)
+  return { p, client }
+}
+const gp5OpenCivil = () => fireEvent.click(screen.getByRole('button', { name: 'Civil operations' }))
+const gp5Ready = async () => { await waitFor(() => expect(screen.getByRole('button', { name: 'Run' }).disabled).toBe(false)) }
+function gp5EditCivil() {
+  fireEvent.change(screen.getByLabelText('Boundary'), { target: { value: JSON.stringify(gp5square) } })
+  fireEvent.change(screen.getByLabelText('Preset'), { target: { value: JSON.stringify(gp5preset) } })
+  fireEvent.change(screen.getByLabelText('Drawing units'), { target: { value: 'm' } })
+}
+function gp5WriterHarness({ realKind, fetchImpl } = {}) {
+  const captured = {}
+  const refusal = () => Promise.resolve({ ok: false, code: 'TERRAIN_CLIENT_REQUEST_INVALID' })
+  const clients = {
+    civil: { getCivil: vi.fn(refusal), runCivilOperation: vi.fn(refusal) },
+    terrain: { getTerrain: vi.fn(refusal), runTerrainOperation: vi.fn(refusal) },
+    tracker: { createTrackerRows: vi.fn(refusal) }, landxml: { uploadLandxml: vi.fn(refusal) },
+  }
+  if (realKind !== 'civil') vi.spyOn(civilClients, 'createSolarCivilClient').mockReturnValue(clients.civil)
+  vi.spyOn(landxmlClients, 'createSolarLandxmlClient').mockReturnValue(clients.landxml)
+  vi.spyOn(terrainClients, 'createSolarTerrainClient').mockReturnValue(clients.terrain)
+  if (realKind !== 'tracker') vi.spyOn(trackerClients, 'createSolarTrackerRowsClient').mockReturnValue(clients.tracker)
+  vi.spyOn(civilPanels, 'default').mockImplementation((props) => { captured.civil = props; return <p>Civil test control</p> })
+  vi.spyOn(terrainPanels, 'default').mockImplementation((props) => { captured.terrain = props; return <p>Terrain test control</p> })
+  vi.spyOn(trackerPanels, 'default').mockImplementation((props) => { captured.tracker = props; return <p>Tracker test control</p> })
+  vi.spyOn(landxmlUpload, 'default').mockImplementation((props) => { captured.landxml = props; return <p>LandXML test control</p> })
+  const p = supplied()
+  if (fetchImpl) p.transport.fetchImpl = fetchImpl
+  const mounted = render(<SolarWorkspaceTools {...p} />)
+  // Capture actual container wrappers before opening civil. They remain callable even when hidden.
+  open()
+  fireEvent.click(screen.getByRole('button', { name: 'Terrain preview' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Create tracker rows' }))
+  gp5OpenCivil()
+  return { captured, clients, p, mounted }
+}
+
+it('GP5-01 the host property is the original frozen five-flow registry', () => {
+  expect(SolarWorkspaceTools.workspacePanelsByFlow).toBe(FLOW_PANELS)
+  expect(Object.isFrozen(FLOW_PANELS)).toBe(true)
+  expect(Object.keys(FLOW_PANELS)).toHaveLength(5)
+  expect(FLOW_PANELS['ground-physical']).toEqual(['landxml', 'terrain', 'tracker-rows', 'civil', 'physical-read'])
+  expect(Object.getOwnPropertyDescriptor(SolarWorkspaceTools, 'workspacePanelsByFlow').writable).toBe(false)
+})
+
+it('GP5-10 civil mounting is lazy for every flow and local or project scope', async () => {
+  const { p, client } = gp5CivilProps()
+  const mounted = render(<SolarWorkspaceTools {...p} />)
+  for (const drawingId of [null, 'solar']) for (const projectId of [null, TERRAIN_PROJECT]) {
+    for (const flow of Object.keys(FLOW_PANELS)) mounted.rerender(<SolarWorkspaceTools {...p} {...{ drawingId, projectId, flow }} />)
+  }
+  expect(client.getCivil).not.toHaveBeenCalled()
+  expect(client.runCivilOperation).not.toHaveBeenCalled()
+  expect(p.transport.fetchImpl).not.toHaveBeenCalled()
+  client.getCivil.mockResolvedValue(gp5Success(gp5absent()))
+  for (const projectId of [null, TERRAIN_PROJECT]) {
+    mounted.rerender(<SolarWorkspaceTools {...p} projectId={projectId} />)
+    gp5OpenCivil(); await gp5Ready()
+    expect(client.getCivil).toHaveBeenLastCalledWith({ drawingId: 'solar', projectId, signal: expect.any(AbortSignal) })
+  }
+  expect(client.getCivil).toHaveBeenCalledTimes(2)
+  expect(client.runCivilOperation).not.toHaveBeenCalled()
+})
+
+it('GP5-11 explicit open close and A to B to A discard old civil scope', async () => {
+  const { p, client } = gp5CivilProps()
+  const mounted = render(<SolarWorkspaceTools {...p} />)
+  gp5OpenCivil(); await gp5Ready()
+  expect(client.getCivil.mock.calls[0][0]).toMatchObject({ drawingId: 'solar', projectId: 'p' })
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Civil operations' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Civil operations' }))
+  gp5OpenCivil(); await gp5Ready(); gp5EditCivil()
+  const pending = gp5Deferred(); client.runCivilOperation.mockReturnValue(pending.promise)
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  for (const projectId of ['other', 'p']) mounted.rerender(<SolarWorkspaceTools {...p} projectId={projectId} />)
+  gp5OpenCivil(); await gp5Ready()
+  await act(async () => pending.resolve(gp5Success(gp5resultOf())))
+  expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  expect(screen.queryByText('Outcome: published')).toBeNull()
+  mounted.rerender(<SolarWorkspaceTools {...p} flow="rooftop" />)
+  mounted.rerender(<SolarWorkspaceTools {...p} />)
+  expect(screen.queryByRole('region', { name: 'Civil operations' })).toBeNull()
+  expect(screen.getByRole('button', { name: 'Civil operations' }).getAttribute('aria-expanded')).toBe('false')
+})
+
+it('GP5-12 civil authentication and sanitized checkout are obtained per request', async () => {
+  let current = 'cap-one'
+  const p = supplied({ projectId: TERRAIN_PROJECT, getCheckoutCapability: () => current })
+  p.transport.headers.mockImplementation(() => ({ Authorization: `Bearer ${current}`, 'X-Tenant-Id': current,
+    'x-checkout-capability': 'stale', 'X-CHECKOUT-CAPABILITY': 'also-stale' }))
+  p.transport.fetchImpl.mockImplementation(async (url, init) => init.method === 'GET'
+    ? new Response(JSON.stringify(gp5absent()), { status: 200 })
+    : new Response(UNAUTH_TEXT, { status: 401 }))
+  render(<SolarWorkspaceTools {...p} />)
+  gp5OpenCivil(); await gp5Ready(); gp5EditCivil()
+  const first = p.transport.fetchImpl.mock.calls[0]
+  expect(first[0]).toContain(`view=civil&project_id=${encodeURIComponent(TERRAIN_PROJECT)}`)
+  expect(first[1].headers).toMatchObject({ Authorization: 'Bearer cap-one', 'X-Tenant-Id': 'cap-one', 'X-Checkout-Capability': 'cap-one' })
+  current = 'cap-two'
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  await screen.findByRole('alert')
+  const post = p.transport.fetchImpl.mock.calls.find(([, init]) => init.method === 'POST')
+  expect(JSON.parse(post[1].body)).toEqual(gp5bodyOf('frame-generate', null))
+  expect(post[0]).toContain(`project_id=${encodeURIComponent(TERRAIN_PROJECT)}`)
+  expect(post[1].headers).toMatchObject({ Authorization: 'Bearer cap-two', 'X-Tenant-Id': 'cap-two', 'X-Checkout-Capability': 'cap-two' })
+  expect(Object.keys(post[1].headers).filter((key) => key.toLowerCase() === 'x-checkout-capability')).toEqual(['X-Checkout-Capability'])
+  expect(p.transport.onResponse).toHaveBeenCalled()
+  expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+})
+
+it('GP5-13 civil and all physical writers exclude each other synchronously', async () => {
+  const { captured, clients, mounted } = gp5WriterHarness()
+  const request = { drawingId: 'solar', projectId: null, body: {} }
+  const methods = { landxml: () => captured.landxml.upload(request),
+    terrain: () => captured.terrain.client.runTerrainOperation(request),
+    tracker: () => captured.tracker.client.createTrackerRows(request) }
+  const actual = { landxml: clients.landxml.uploadLandxml, terrain: clients.terrain.runTerrainOperation,
+    tracker: clients.tracker.createTrackerRows }
+  for (const kind of ['landxml', 'terrain', 'tracker']) {
+    const pending = gp5Deferred(); actual[kind].mockReturnValueOnce(pending.promise)
+    let civil
+    act(() => { methods[kind](); civil = captured.civil.client.runCivilOperation(request) })
+    expect(await civil).toMatchObject({ ok: false, code: 'TERRAIN_CLIENT_REQUEST_INVALID' })
+    expect(clients.civil.runCivilOperation).not.toHaveBeenCalled()
+    await act(async () => pending.resolve({ ok: false }))
+  }
+  const pending = gp5Deferred(); clients.civil.runCivilOperation.mockReturnValueOnce(pending.promise)
+  let blocked
+  act(() => {
+    captured.civil.client.runCivilOperation(request)
+    blocked = Object.values(methods).map((send) => send())
+  })
+  const refusals = await Promise.all(blocked)
+  expect(refusals.every((answer) => answer.ok === false)).toBe(true)
+  expect(actual.terrain).toHaveBeenCalledTimes(1)
+  expect(actual.tracker).toHaveBeenCalledTimes(1)
+  expect(actual.landxml).toHaveBeenCalledTimes(1)
+  await act(async () => pending.resolve({ ok: false }))
+  mounted.unmount()
+})
+
+it('GP5-14 a cancelled civil UI retains its token until its promise settles', async () => {
+  const { captured, clients, mounted } = gp5WriterHarness()
+  const pending = gp5Deferred(); clients.civil.runCivilOperation.mockReturnValueOnce(pending.promise)
+  const controller = new AbortController()
+  const request = { drawingId: 'solar', projectId: null, body: {}, signal: controller.signal }
+  act(() => { captured.civil.client.runCivilOperation(request); controller.abort() })
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+  expect(await captured.terrain.client.runTerrainOperation({ ...request, signal: undefined })).toMatchObject({ ok: false })
+  expect(clients.terrain.runTerrainOperation).not.toHaveBeenCalled()
+  await act(async () => pending.resolve({ ok: false }))
+  let answer
+  await act(async () => { answer = await captured.terrain.client.runTerrainOperation({ ...request, signal: undefined }) })
+  expect(clients.terrain.runTerrainOperation).toHaveBeenCalledTimes(1)
+  expect(answer.ok).toBe(false)
+  gp5OpenCivil()
+  const older = gp5Deferred(), remaining = gp5Deferred()
+  clients.landxml.uploadLandxml.mockReturnValueOnce(older.promise).mockReturnValueOnce(remaining.promise)
+  act(() => { captured.landxml.upload({ ...request, signal: undefined }); captured.landxml.upload({ ...request, signal: undefined }) })
+  await act(async () => older.resolve({ ok: false }))
+  expect(await captured.civil.client.runCivilOperation({ ...request, signal: undefined })).toMatchObject({ ok: false, code: 'TERRAIN_CLIENT_REQUEST_INVALID' })
+  expect(clients.civil.runCivilOperation).toHaveBeenCalledTimes(1)
+  await act(async () => remaining.resolve({ ok: false }))
+  await act(async () => { await captured.civil.client.runCivilOperation({ ...request, signal: undefined }) })
+  expect(clients.civil.runCivilOperation).toHaveBeenCalledTimes(2)
+  mounted.unmount()
+})
+
+async function gp5RealAbortRetainsTransport(kind) {
+  for (const rejectTransport of [false, true]) {
+    let resolve, reject
+    const pending = new Promise((done, fail) => { resolve = done; reject = fail })
+    const fetchImpl = vi.fn(async () => new Response(UNAUTH_TEXT, { status: 401 }))
+      .mockImplementationOnce(() => pending)
+    const { captured, clients, mounted } = gp5WriterHarness({ realKind: kind, fetchImpl })
+    const controller = new AbortController()
+    const request = { drawingId: 'solar', projectId: null, signal: controller.signal,
+      ...(kind === 'civil' ? { body: gp5bodyOf('frame-generate', null) }
+        : { drawingUnits: 'm', request: trackerM1() }) }
+    let answer
+    act(() => { answer = kind === 'civil' ? captured.civil.client.runCivilOperation(request)
+      : captured.tracker.client.createTrackerRows(request) })
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+    act(() => controller.abort())
+    await act(async () => {
+      expect(await answer).toMatchObject({ ok: false,
+        code: kind === 'civil' ? 'TERRAIN_CLIENT_ABORTED' : 'TRACKER_ROWS_CLIENT_ABORTED' })
+    })
+    expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true)
+    const otherRequest = { drawingId: 'solar', projectId: null, body: {} }
+    const excluded = [
+      () => captured.terrain.client.runTerrainOperation(otherRequest),
+      () => captured.landxml.upload(otherRequest),
+      () => kind === 'civil' ? captured.tracker.client.createTrackerRows(otherRequest)
+        : captured.civil.client.runCivilOperation(otherRequest),
+    ]
+    await act(async () => {
+      for (const send of excluded) expect(await send()).toMatchObject({ ok: false })
+    })
+    expect(clients.terrain.runTerrainOperation).not.toHaveBeenCalled()
+    expect(clients.landxml.uploadLandxml).not.toHaveBeenCalled()
+    expect(kind === 'civil' ? clients.tracker.createTrackerRows : clients.civil.runCivilOperation).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      if (rejectTransport) reject(new Error('aborted transport'))
+      else resolve(new Response(UNAUTH_TEXT, { status: 401 }))
+    })
+    await act(async () => { await captured.terrain.client.runTerrainOperation(otherRequest) })
+    expect(clients.terrain.runTerrainOperation).toHaveBeenCalledTimes(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      const next = { ...request, signal: undefined }
+      const admitted = await (kind === 'civil' ? captured.civil.client.runCivilOperation(next)
+        : captured.tracker.client.createTrackerRows(next))
+      expect(admitted).toMatchObject({ ok: false, code: 'UNAUTHENTICATED', status: 401 })
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    mounted.unmount()
+    vi.restoreAllMocks()
+  }
+}
+
+it('GP5-20 real civil cancellation holds the interlock until its fetch settles', async () => {
+  await gp5RealAbortRetainsTransport('civil')
+})
+
+it('GP5-21 real tracker cancellation holds the interlock until its fetch settles', async () => {
+  await gp5RealAbortRetainsTransport('tracker')
+})
+
+it('GP5-16 physical shade and export preserve automatic head reads and authenticated downloads without mutations', async () => {
+  const p = supplied({ projectId: 'p', onRunPlacement: vi.fn() })
+  const terrain = { getTerrain: vi.fn(async () => gp5Success(gp5ReadTerrain())), runTerrainOperation: vi.fn() }
+  vi.spyOn(terrainClients, 'createSolarTerrainClient').mockReturnValue(terrain)
+  const exportAnswer = gp5ReadAnswer('solar-physical-export')
+  const artifact = exportAnswer.result.output.artifact
+  const bytes = new Uint8Array(artifact.byte_length).fill(65)
+  artifact.content_sha256 = createHash('sha256').update(bytes).digest('hex')
+  const fetchImpl = vi.fn(async () => new Response(bytes, { headers: {
+    'x-leaf-artifact-id': artifact.artifact_id, 'content-length': String(bytes.byteLength), 'content-type': 'text/csv',
+  } }))
+  const authenticated = importClients.createSolarImportClient({ fetchImpl,
+    headers: () => ({ Authorization: 'Bearer gp5', 'X-Tenant-Id': 'gp5' }),
+    sha256Hex: async (content) => createHash('sha256').update(content).digest('hex') })
+  vi.spyOn(importClients, 'createSolarImportClient').mockReturnValue(authenticated)
+  p.transport.runRead = vi.fn(async () => gp5ReadAnswer())
+  p.transport.save = vi.fn()
+  render(<SolarWorkspaceTools {...p} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Physical reads' }))
+  await gp5Ready()
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Physical reads' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  await screen.findByTestId('solar-read-result')
+  expect(p.transport.runRead).toHaveBeenLastCalledWith('solar-physical-shade', { drawing_id: 'solar' }, 'solar', { projectId: 'p', dwgVersion: 1 })
+  expect(terrain.getTerrain).toHaveBeenCalledTimes(3)
+  fireEvent.change(screen.getByLabelText('Tool'), { target: { value: 'solar-physical-export' } })
+  expect([...screen.getByLabelText('Format').options].map((option) => option.value)).toEqual(['terrain-csv', 'shade-azal-matrix', 'shade-sam', 'shade-per-panel'])
+  p.transport.runRead.mockResolvedValue(exportAnswer)
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  await screen.findByTestId('solar-read-result')
+  expect(p.transport.runRead).toHaveBeenLastCalledWith('solar-physical-export', { drawing_id: 'solar', expected_head: gp5H, format: 'terrain-csv' }, 'solar', { projectId: 'p', dwgVersion: 1 })
+  fireEvent.click(screen.getByTestId('solar-read-download'))
+  await waitFor(() => expect(p.transport.save).toHaveBeenCalledTimes(1))
+  expect(fetchImpl.mock.calls[0][1].headers).toMatchObject({ Authorization: 'Bearer gp5', 'X-Tenant-Id': 'gp5' })
+  expect(p.transport.save).toHaveBeenCalledWith(bytes, 'text/csv', artifact.filename)
+  expect(terrain.runTerrainOperation).not.toHaveBeenCalled()
+  expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+  expect(p.onRunPlacement).not.toHaveBeenCalled()
+  expect(announcement()).toBe('')
+})
+
+it('GP5-15 created civil publication updates peers once without clearing its own outcome', async () => {
+  const { p, client } = gp5CivilProps()
+  const peers = {}
+  vi.spyOn(terrainPanels, 'default').mockImplementation((props) => { peers.terrain = props; return <p>Terrain peer</p> })
+  vi.spyOn(trackerPanels, 'default').mockImplementation((props) => { peers.tracker = props; return <p>Tracker peer</p> })
+  const mounted = render(<SolarWorkspaceTools {...p} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Create tracker rows' }))
+  gp5OpenCivil(); await gp5Ready(); gp5EditCivil()
+  client.getCivil.mockResolvedValue(gp5Success(gp5viewOf(gp5headOf(gp5H2, 1, gp5H))))
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  await gp5Ready()
+  expect(screen.getByText('Outcome: published')).toBeTruthy()
+  expect(client.getCivil).toHaveBeenCalledTimes(2)
+  expect(p.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+  expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+  expect(peers.tracker.headSignal).toBe(gp5H2)
+  expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('1')
+  fireEvent.click(screen.getByRole('button', { name: 'Terrain preview' }))
+  expect(peers.terrain.headSignal).toBe(gp5H2)
+  mounted.unmount()
+})
+// Synthetic fixtures use the closed server contracts; no fixture comes from another worktree.
+const gp5H = 'a'.repeat(64)
+const gp5H2 = 'b'.repeat(64)
+const gp5D = 'd'.repeat(64)
+const gp5clone = (v) => JSON.parse(JSON.stringify(v))
+const gp5headOf = (artifact = gp5H, index = 0, parent = null, drawing = 'solar', project = 'p') => ({
+  schema: 'leaf.solar-physical-head.v1', drawing_id: drawing, project_id: project, index, parent,
+  state: { schema: 'leaf.solar-artifact-ref.v1', artifact_id: artifact, content_sha256: gp5D,
+    media_type: 'application/json', filename: 'physical-state.json', byte_length: 1024, source_version: 1,
+    download: `/api/drawings/${drawing}/artifacts/${artifact}` },
+})
+const gp5previewOf = (frames = 242, piles = 0, terrain = true) => ({
+  schema: 'leaf.solar-frames-piles-preview.v1', maturity: 'preview', frames, piles,
+  collision_markers: 0, range_markers: 0, terrain,
+})
+const gp5standingOf = (frames = 242, piles = 0, stale = 0, terrain = true) => ({
+  schema: 'leaf.solar-frames-piles-terrain-standing.v1', maturity: 'preview', grid_sha256: terrain ? gp5D : null,
+  frames: { state: frames === 0 ? 'absent' : stale ? 'stale' : 'current', checked: frames, stale },
+  piles: { state: piles === 0 ? 'absent' : 'current', checked: piles, stale: 0 },
+})
+const gp5viewOf = (head = gp5headOf(), frames = 242, piles = 0) => ({
+  schema: 'leaf.solar-civil-view-response.v1', stored: true, head, preview: gp5previewOf(frames, piles),
+  standing: gp5standingOf(frames, piles), grade_pads: 0,
+})
+const gp5absent = () => ({ schema: 'leaf.solar-civil-view-response.v1', stored: false, head: null, preview: null, standing: null, grade_pads: 0 })
+const gp5square = [[0, 0], [100, 0], [100, 100], [0, 100]]
+const gp5preset = { Name: 'Full', PileTemplateName: 'Full', Rows: 2, Columns: 1, Piling: { MinPileLengthM: 1, MaxPileLengthM: 4 } }
+const gp5template = { Name: 'Full', Stations: [{ Position: 0.5, Length: 2 }] }
+const gp5bodyOf = (operation = 'frame-generate', expected = gp5H) => ({
+  operation, expected_head: expected,
+  ...(operation === 'frame-generate' ? { boundary: gp5clone(gp5square), preset: gp5clone(gp5preset), drawing_units: 'm' } : {}),
+  ...(operation === 'piling-generate' ? { preset: gp5clone(gp5preset), pile_template: gp5clone(gp5template) } : {}),
+  ...(operation === 'pile-length-range-check' ? { preset: gp5clone(gp5preset) } : {}),
+  ...(operation === 'grade-pad' ? { boundary: gp5clone(gp5square), mode: 'Auto', value_du: null } : {}),
+})
+const gp5resultOf = (operation = 'frame-generate', outcome = 'published', base = gp5H) => ({
+  schema: operation === 'grade-pad' ? 'leaf.solar-civil-operation.v1' : 'leaf.solar-frames-piles.v1',
+  operation, maturity: 'preview', outcome, created: outcome === 'published',
+  drawing_id: 'solar', project_id: 'p', base, units: { drawing_units: 'm', meters_per_unit: 1 },
+  terrain: { present: true, sampled: ['frame-generate', 'piling-generate', 'grade-pad'].includes(operation), rows: 2, cols: 2, grid_sha256: gp5D },
+  summary: outcome === 'retry' ? null : {
+    'frame-generate': { frames_added: 242, frames_off_terrain: 0, preset_name: 'Full' },
+    'frame-collision-detect': { frames_checked: 242, collisions: 0 },
+    'piling-generate': { native_frames: 242, piles: 1936, piles_replaced: 0, grid_piles: 1936, joint_piles: 0, station_piles: 0, short_trackers: 0, template_name: 'Full' },
+    'pile-length-range-check': { total_piles: 1936, out_of_range: 0, min_m: 1, max_m: 4 },
+    'grade-pad': { pads_added: 1, grade_pads: 1, mode: 'Auto', elevation_m: 0, label: 'Pad', total_cut_m3: 0, total_fill_m3: 0, net_m3: 0 },
+  }[operation],
+  preview: gp5previewOf(242, operation === 'piling-generate' ? 1936 : 0),
+  standing: gp5standingOf(242, operation === 'piling-generate' ? 1936 : 0),
+  head: outcome === 'unchanged' ? gp5headOf(base) : gp5headOf(gp5H2, base === null ? 0 : 1, base),
+})
+const F3_REPORT_ID = 'b'.repeat(64)
+function f3Artifact(id, pdf = false) {
+  return { schema: 'leaf.solar-artifact-ref.v1', artifact_id: id,
+    media_type: pdf ? 'application/pdf' : 'application/json',
+    filename: pdf ? 'solaredge-source.pdf' : 'solaredge-report.json', byte_length: 100,
+    content_sha256: 'c'.repeat(64), source_version: 3,
+    download: `/api/drawings/solar/artifacts/${id}` }
+}
+function f3Source() {
+  return { schema: 'leaf.solar-import-source.v1', kind: 'solaredge-pdf', drawing_id: 'solar',
+    project_id: TERRAIN_PROJECT, source_version: 3, graph_sha256: 'd'.repeat(64),
+    page_count: 2, source: f3Artifact(F3_SOURCE_ID, true) }
+}
+function f3Report() {
+  return { schema: 'leaf.solar-solaredge-report-result.v1', kind: 'solaredge-report', drawing_id: 'solar',
+    project_id: TERRAIN_PROJECT, source_version: 3, graph_sha256: 'd'.repeat(64),
+    source_artifact_id: F3_SOURCE_ID, counts: {
+      pdf_matrices: 1, pdf_panels: 20, matchable_grids: 2, bridge_grids: 1, frames: 3,
+      matched_frames: 2, group_strings: 4, bridge_strings: 1, strings: 5, assigned_panels: 18,
+      unassigned_panels: 2, partial_strings: 1,
+    }, report: f3Artifact(F3_REPORT_ID) }
+}
+const f3Success = (value) => ({ ok: true, status: 200, value })
+function f3Props(overrides = {}, real = false) {
+  const p = trackerProps({ drawingVersion: 3, flow: 'solaredge-import',
+    onStageSolarEdgeAccept: vi.fn(), ...overrides })
+  p.transport.readIntake.mockImplementation(async (id, version) => ({
+    version: version === 'head' ? p.drawingVersion : version, head: p.drawingVersion,
+    intake: { solar_design_graph: { rev: 12, project: { id: p.projectId ?? TERRAIN_PROJECT,
+      units: { drawing_units: 'm', meters_per_unit: 1 } } } } }))
+  const client = { uploadPdf: vi.fn(async () => f3Success(f3Source())),
+    requestReport: vi.fn(async () => f3Success(f3Report())) }
+  if (!real) vi.spyOn(importClients, 'createSolarImportClient').mockReturnValue(client)
+  else {
+    const existing = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => url.includes('/imports/solaredge-pdf')
+      ? Promise.resolve(terrainResponse(url.includes('/report') ? f3Report() : f3Source()))
+      : existing(url, init))
+  }
+  return { p, client }
+}
+const f3Trigger = () => screen.getByRole('button', { name: 'Import SolarEdge PDF' })
+const f3File = () => screen.getByLabelText('SolarEdge layout PDF')
+const f3UploadButton = () => screen.getByRole('button', { name: 'Upload', exact: true })
+const f3BuildButton = () => screen.getByRole('button', { name: 'Build report' })
+const f3AcceptButton = () => screen.getByRole('button', { name: 'Accept tracking labels' })
+function f3Handler(button) {
+  return button[Object.keys(button).find((key) => key.startsWith('__reactProps'))].onClick
+}
+function f3Choose() {
+  const file = new File(['%PDF-1.7'], 'layout.pdf', { type: 'application/pdf' })
+  fireEvent.change(f3File(), { target: { files: [file] } })
+  return file
+}
+function f3Open() { fireEvent.click(f3Trigger()) }
+async function f3Upload() {
+  f3Choose()
+  fireEvent.click(f3UploadButton())
+  await screen.findByLabelText('Alignment tolerance')
+}
+async function f3Build() {
+  fireEvent.change(screen.getByLabelText('Alignment tolerance'), { target: { value: '0.5' } })
+  fireEvent.click(f3BuildButton())
+  await screen.findByRole('region', { name: 'Report review' })
+}
+async function f3Ready() {
+  await f3Upload(); await f3Build()
+  await waitFor(() => expect(f3AcceptButton().disabled).toBe(false))
+}
+function f3Reason(sentence) { expect(screen.getAllByText(sentence).length).toBeGreaterThan(0) }
+
+describe('F3 SolarEdge workspace integration', () => {
+  it('F3 26 closing during pending staging focuses the enabled trigger', async () => {
+    const { p } = f3Props({ onStageSolarEdgeAccept: vi.fn(() => new Promise(() => {})) })
+    render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledTimes(1)
+    const close = screen.getByRole('button', { name: 'Close' })
+    close.focus()
+    fireEvent.click(close)
+    expect(f3Trigger().disabled).toBe(false)
+    expect(document.activeElement).toBe(f3Trigger())
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('F3 27 closing during pending staging keeps focus on a reason that remains', async () => {
+    const { p } = f3Props({ onStageSolarEdgeAccept: vi.fn(() => new Promise(() => {})) })
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledTimes(1)
+    view.rerender(<SolarWorkspaceTools {...p} busy={true} />)
+    const close = screen.getByRole('button', { name: 'Close' })
+    close.focus()
+    fireEvent.click(close)
+    expect(document.activeElement).toBe(screen.getByText(SOLAREDGE_WORKSPACE_REASONS.run_in_progress))
+    expect(document.activeElement.tagName).toBe('P')
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('F3 28 a report kept across 3 to 4 to 3 stays stale', async () => {
+    const { p, client } = f3Props()
+    let panelProps
+    const Panel = solarEdgePanels.default
+    vi.spyOn(solarEdgePanels, 'default').mockImplementation((props) => {
+      panelProps = props
+      return <Panel {...props} />
+    })
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={4} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 4)
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={3} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 3)
+    expect(p.transport.readIntake).toHaveBeenCalledTimes(3)
+    expect(panelProps.onAccept({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })).toBe(false)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.report_stale)
+    expect(f3AcceptButton().disabled).toBe(true)
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+    expect(client.requestReport).toHaveBeenCalledTimes(1)
+  })
+
+  it('F3 29 a report kept across 3 to undefined to 3 stays stale', async () => {
+    const { p, client } = f3Props()
+    let panelProps
+    const Panel = solarEdgePanels.default
+    vi.spyOn(solarEdgePanels, 'default').mockImplementation((props) => {
+      panelProps = props
+      return <Panel {...props} />
+    })
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={undefined} />)
+    expect(panelProps.graphRev).toBeUndefined()
+    expect(p.transport.readIntake).toHaveBeenCalledTimes(1)
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={3} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 3)
+    expect(p.transport.readIntake).toHaveBeenCalledTimes(2)
+    expect(panelProps.onAccept({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })).toBe(false)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.report_stale)
+    expect(f3AcceptButton().disabled).toBe(true)
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+    expect(client.requestReport).toHaveBeenCalledTimes(1)
+  })
+
+  it('F3 30 a report rebuilt after the return stages once', async () => {
+    const { p, client } = f3Props()
+    let panelProps
+    const Panel = solarEdgePanels.default
+    vi.spyOn(solarEdgePanels, 'default').mockImplementation((props) => {
+      panelProps = props
+      return <Panel {...props} />
+    })
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={4} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 4)
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={3} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 3)
+    await f3Build()
+    await waitFor(() => expect(f3AcceptButton().disabled).toBe(false))
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledExactlyOnceWith({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })
+    expect(client.requestReport).toHaveBeenCalledTimes(2)
+  })
+
+  it('F3 23 binds a report for another version as stale', async () => {
+    const { p, client } = f3Props()
+    const value = f3Report()
+    value.source_version = 4
+    value.report.source_version = 4
+    client.requestReport.mockResolvedValueOnce(f3Success(value))
+    let panelProps
+    const Panel = solarEdgePanels.default
+    vi.spyOn(solarEdgePanels, 'default').mockImplementation((props) => {
+      panelProps = props
+      return <Panel {...props} />
+    })
+    render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Upload(); await f3Build()
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.report_stale)
+    expect(f3AcceptButton().disabled).toBe(true)
+    expect(p.transport.readIntake).not.toHaveBeenCalled()
+    expect(panelProps.onAccept({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })).toBe(false)
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+  })
+
+  it('F3 24 keeps the open panel when its trigger is clicked again', async () => {
+    const { p } = f3Props()
+    render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    const file = f3File().files[0]
+    const review = screen.getByRole('region', { name: 'Report review' })
+    f3Open()
+    expect(document.activeElement).toBe(f3File())
+    expect(f3File().files[0]).toBe(file)
+    expect(screen.getByRole('region', { name: 'Report review' })).toBe(review)
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledExactlyOnceWith({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })
+  })
+
+  it('F3 25 returns focus to the reason when the trigger is disabled on close', () => {
+    const { p } = f3Props()
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open()
+    view.rerender(<SolarWorkspaceTools {...p} busy={true} />)
+    expect(f3Trigger().disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(document.activeElement).toBe(screen.getByText(SOLAREDGE_WORKSPACE_REASONS.run_in_progress))
+    expect(document.activeElement.tagName).toBe('P')
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('F3 01 mounts only the registered SolarEdge flow', () => {
+    const { p } = f3Props()
+    const view = render(<SolarWorkspaceTools {...p} />)
+    for (const drawingId of [null, 'solar']) for (const projectId of [null, TERRAIN_PROJECT]) {
+      for (const flow of ['rooftop', 'ground-electrical', 'ground-physical', 'solaredge-import', 'pvcase-tutorial']) {
+        view.rerender(<SolarWorkspaceTools {...p} drawingId={drawingId} projectId={projectId} flow={flow} />)
+        expect(screen.queryAllByRole('button', { name: 'Import SolarEdge PDF' }))
+          .toHaveLength(drawingId && flow === 'solaredge-import' ? 1 : 0)
+        expect(screen.queryByRole('region', { name: 'SolarEdge PDF import' })).toBeNull()
+        if (drawingId && flow === 'solaredge-import') {
+          expect(screen.getAllByRole('region', { name: 'Solar workspace tools' })).toHaveLength(1)
+        }
+      }
+    }
+    expect(p.transport.fetchImpl).not.toHaveBeenCalled()
+    expect(p.transport.readIntake).not.toHaveBeenCalled()
+  })
+
+  it('F3 02 opens and closes without requests', () => {
+    const { p, client } = f3Props()
+    render(<SolarWorkspaceTools {...p} />)
+    f3Open()
+    expect(document.activeElement).toBe(f3File())
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.revision_needed)
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(document.activeElement).toBe(f3Trigger())
+    expect(screen.queryByRole('region', { name: 'SolarEdge PDF import' })).toBeNull()
+    expect(p.transport.fetchImpl).not.toHaveBeenCalled()
+    expect(p.transport.readIntake).not.toHaveBeenCalled()
+    expect(client.uploadPdf).not.toHaveBeenCalled()
+    expect(client.requestReport).not.toHaveBeenCalled()
+  })
+
+  it('F3 03 discloses the panel group prerequisite', () => {
+    const { p } = f3Props()
+    render(<SolarWorkspaceTools {...p} />); f3Open()
+    const prerequisite = screen.getByText('Create panel groups before matching the PDF')
+    expect(prerequisite.compareDocumentPosition(f3UploadButton()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(f3File().files).toHaveLength(0)
+    expect(p.transport.readIntake).not.toHaveBeenCalled()
+  })
+
+  it('F3 04 leaves upload and report usable without staging', async () => {
+    const { p, client } = f3Props({ onStageSolarEdgeAccept: undefined })
+    render(<SolarWorkspaceTools {...p} />); f3Open()
+    await f3Upload(); await f3Build()
+    await waitFor(() => expect(p.transport.readIntake).toHaveBeenCalledTimes(1))
+    expect(client.uploadPdf).toHaveBeenCalledTimes(1)
+    expect(client.requestReport).toHaveBeenCalledTimes(1)
+    expect(f3UploadButton().disabled).toBe(false)
+    expect(f3BuildButton().disabled).toBe(false)
+    expect(f3AcceptButton().disabled).toBe(true)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.staging_unavailable)
+  })
+
+  it('F3 05 uses fresh sanitized checkout headers', async () => {
+    let cap = 'first', bearer = 'Bearer first'
+    const { p } = f3Props({ getCheckoutCapability: () => cap }, true)
+    p.transport.headers = () => ({ 'X-Tenant-Id': 'workspace-test', Authorization: bearer,
+      'x-checkout-capability': 'stale', 'X-CHECKOUT-CAPABILITY': 'also-stale', 'X-Other': 'retained' })
+    render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Upload()
+    cap = 'second'; bearer = 'Bearer second'
+    await f3Build()
+    cap = ''; bearer = 'Bearer third'
+    fireEvent.click(f3UploadButton())
+    await waitFor(() => expect(p.transport.fetchImpl).toHaveBeenCalledTimes(3))
+    const writes = p.transport.fetchImpl.mock.calls
+    for (const [index, expected] of ['first', 'second', null].entries()) {
+      const headers = writes[index][1].headers
+      const keys = Object.keys(headers).filter((key) => key.toLowerCase() === 'x-checkout-capability')
+      expect(keys).toEqual(expected === null ? [] : ['X-Checkout-Capability'])
+      if (expected) expect(headers['X-Checkout-Capability']).toBe(expected)
+      expect(headers.Authorization).toBe(['Bearer first', 'Bearer second', 'Bearer third'][index])
+      expect(headers['X-Other']).toBe('retained')
+    }
+  })
+
+  it('F3 06 pins common gate precedence', async () => {
+    const { p, client } = f3Props()
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    const handlers = [f3Handler(f3UploadButton()), f3Handler(f3BuildButton()), f3Handler(f3AcceptButton())]
+    for (const [props, sentence] of [
+      [{ busy: true, checkoutHeld: false }, SOLAREDGE_WORKSPACE_REASONS.run_in_progress],
+      [{ busy: false, checkoutHeld: false }, SOLAREDGE_WORKSPACE_REASONS.checkout_required],
+    ]) {
+      view.rerender(<SolarWorkspaceTools {...p} {...props} />)
+      act(() => handlers.forEach((handler) => handler()))
+      f3Reason(sentence)
+    }
+    expect(client.uploadPdf).toHaveBeenCalledTimes(1)
+    expect(client.requestReport).toHaveBeenCalledTimes(1)
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+    const trackerWork = workspaceDeferred()
+    const trackerTransport = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => url.includes('/tracker-rows')
+      ? trackerWork.promise : trackerTransport(url, init))
+    view.rerender(<SolarWorkspaceTools {...p} flow="ground-physical" />)
+    await openTracker(); fillTracker(); fireEvent.click(trackerPublish())
+    await waitFor(() => expect(trackerPosts(p)).toHaveLength(1))
+    view.rerender(<SolarWorkspaceTools {...p} busy={true} checkoutHeld={false} />)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.tracker_pending)
+    act(() => handlers.forEach((handler) => handler()))
+    expect(client.uploadPdf).toHaveBeenCalledTimes(1)
+    expect(client.requestReport).toHaveBeenCalledTimes(1)
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+    await act(async () => trackerWork.resolve(terrainResponse(trackerAnswer(), 201)))
+    cleanup(); vi.restoreAllMocks()
+    const refresh = workspaceDeferred()
+    const next = f3Props({ flow: 'rooftop', drawingVersion: 1,
+      onDrawingVersionChanged: vi.fn(() => refresh.promise) })
+    const combinerView = render(<SolarWorkspaceTools {...next.p} />)
+    openCombiner(); chooseCombiner(); await importCombiner()
+    combinerView.rerender(<SolarWorkspaceTools {...next.p} flow="solaredge-import" busy={true} checkoutHeld={false} />)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.run_in_progress)
+    combinerView.rerender(<SolarWorkspaceTools {...next.p} flow="solaredge-import" checkoutHeld={false} />)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.checkout_required)
+    combinerView.rerender(<SolarWorkspaceTools {...next.p} flow="solaredge-import" />)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.refreshing)
+    await act(async () => refresh.resolve(false))
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.refresh_failed)
+    expect(f3Trigger().disabled).toBe(true)
+    expect(next.client.uploadPdf).not.toHaveBeenCalled()
+    expect(next.p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+  })
+
+  it('F3 07 blocks all SolarEdge actions behind tracker work', async () => {
+    const held = workspaceDeferred()
+    const { p, client } = f3Props()
+    let panelProps
+    let trackerProps
+    const TrackerPanel = trackerPanels.default
+    vi.spyOn(trackerPanels, 'default').mockImplementation((props) => {
+      trackerProps = props
+      return <TrackerPanel {...props} />
+    })
+    const Panel = solarEdgePanels.default
+    vi.spyOn(solarEdgePanels, 'default').mockImplementation((props) => {
+      panelProps = props
+      return <Panel {...props} />
+    })
+    const view = render(<SolarWorkspaceTools {...p} flow="ground-physical" />)
+    await openTracker(); fillTracker()
+    const real = p.transport.fetchImpl.getMockImplementation()
+    p.transport.fetchImpl.mockImplementation((url, init) => url.includes('/tracker-rows') ? held.promise : real(url, init))
+    view.rerender(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    let publication
+    act(() => {
+      publication = trackerProps.client.createTrackerRows({ drawingId: 'solar', projectId: p.projectId,
+        drawingUnits: 'm', request: trackerM1(), signal: new AbortController().signal })
+    })
+    await waitFor(() => expect(trackerPosts(p)).toHaveLength(1))
+    const capturedPanel = panelProps
+    const handlers = [f3Handler(f3UploadButton()), f3Handler(f3BuildButton()), f3Handler(f3AcceptButton())]
+    act(() => handlers.forEach((handler) => handler()))
+    await act(async () => {
+      for (const method of ['uploadPdf', 'requestReport']) {
+        expect(await capturedPanel.client[method]({ drawingId: 'solar', projectId: null,
+          file: new File(['%PDF'], 'layout.pdf'), sourceArtifactId: F3_SOURCE_ID,
+          alignmentTolerance: 0.5, selectionOrder: 'recorded', signal: new AbortController().signal }))
+          .toEqual({ ok: false, code: 'SOLAREDGE_CLIENT_REQUEST_INVALID', retryable: false, status: null })
+      }
+      expect(capturedPanel.onAccept({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })).toBe(false)
+    })
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.tracker_pending)
+    expect(f3Trigger().disabled).toBe(true)
+    expect(client.uploadPdf).toHaveBeenCalledTimes(1)
+    expect(client.requestReport).toHaveBeenCalledTimes(1)
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+    await act(async () => held.resolve(terrainResponse(trackerAnswer(), 201)))
+    await publication
+  })
+
+  it('F3 08 interlocks tracker creation behind either SolarEdge write', async () => {
+    for (const step of ['upload', 'report']) {
+      const { p, client } = f3Props({ flow: 'ground-physical' })
+      const view = render(<SolarWorkspaceTools {...p} />)
+      await openTracker(); fillTracker()
+      const publish = f3Handler(trackerPublish())
+      view.rerender(<SolarWorkspaceTools {...p} flow="solaredge-import" />); f3Open()
+      const held = workspaceDeferred()
+      if (step === 'report') {
+        await f3Upload()
+        client.requestReport.mockReturnValueOnce(held.promise)
+        fireEvent.change(screen.getByLabelText('Alignment tolerance'), { target: { value: '0.5' } })
+        fireEvent.click(f3BuildButton())
+      } else {
+        client.uploadPdf.mockReturnValueOnce(held.promise)
+        f3Choose(); fireEvent.click(f3UploadButton())
+      }
+      view.rerender(<SolarWorkspaceTools {...p} />)
+      expect(trackerTrigger().disabled).toBe(true)
+      f3Reason(SOLAREDGE_WORKSPACE_REASONS.solaredge_pending)
+      expect(trackerPanel().closest('[data-flow-stage]').hidden).toBe(true)
+      act(() => { publish({ currentTarget: null }) })
+      expect(trackerPosts(p)).toHaveLength(0)
+      await act(async () => held.resolve(f3Success(step === 'upload' ? f3Source() : f3Report())))
+      expect(trackerTrigger().disabled).toBe(false)
+      fireEvent.click(trackerTrigger())
+      await waitFor(() => expect(trackerPublish().disabled).toBe(false))
+      expect(screen.getByLabelText('Module power').value).toBe('450')
+      fireEvent.click(trackerPublish()); await trackerPublished()
+      expect(trackerPosts(p)).toHaveLength(1)
+      cleanup(); vi.restoreAllMocks()
+    }
+  })
+
+  it('F3 09 releases only the matching request token', async () => {
+    const helds = [workspaceDeferred(), workspaceDeferred()]
+    const { p, client } = f3Props()
+    client.uploadPdf.mockReturnValueOnce(helds[0].promise).mockReturnValueOnce(helds[1].promise)
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); f3Choose(); fireEvent.click(f3UploadButton())
+    act(() => { f3Handler(f3UploadButton())() })
+    expect(client.uploadPdf).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('status').textContent).toBe(solarEdgePanels.SOLAREDGE_PANEL_REASONS.request_pending)
+    const oldSignal = client.uploadPdf.mock.calls[0][0].signal
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(oldSignal.aborted).toBe(true)
+    f3Open(); f3Choose(); fireEvent.click(f3UploadButton())
+    view.rerender(<SolarWorkspaceTools {...p} flow="ground-physical" />)
+    expect(trackerTrigger().disabled).toBe(true)
+    await act(async () => helds[0].resolve(f3Success(f3Source())))
+    expect(trackerTrigger().disabled).toBe(true)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.solaredge_pending)
+    await act(async () => helds[1].resolve(f3Success(f3Source())))
+    expect(trackerTrigger().disabled).toBe(false)
+    expect(client.uploadPdf).toHaveBeenCalledTimes(2)
+  })
+
+  it('F3 10 reads the exact version after report publication', async () => {
+    const { p } = f3Props()
+    const held = workspaceDeferred()
+    p.transport.readIntake.mockReturnValueOnce(held.promise)
+    render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Upload()
+    expect(p.transport.readIntake).not.toHaveBeenCalled()
+    await f3Build()
+    expect(p.transport.readIntake).toHaveBeenCalledExactlyOnceWith('solar', 3)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.revision_loading)
+    expect(f3AcceptButton().disabled).toBe(true)
+    await act(async () => held.resolve({ version: 3, intake: { solar_design_graph: { rev: 12 } } }))
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledExactlyOnceWith({
+      expected_rev: 12, report_artifact_id: F3_REPORT_ID,
+    })
+  })
+
+  it('F3 11 rejects invalid or mismatched intake revisions', async () => {
+    const answers = [{ version: 4, intake: { solar_design_graph: { rev: 12 } } },
+      ...[undefined, -1, 1.5, 2147483648].map((rev) => ({ version: 3, intake: { solar_design_graph: { rev } } })),
+      new Error('read')]
+    for (const answer of answers) {
+      const { p } = f3Props()
+      p.transport.readIntake.mockImplementationOnce(() => answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer))
+      render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Upload(); await f3Build()
+      await screen.findByRole('button', { name: 'Retry design revision' })
+      expect(f3AcceptButton().disabled).toBe(true)
+      f3Reason(SOLAREDGE_WORKSPACE_REASONS.revision_unavailable)
+      act(() => { f3Handler(f3AcceptButton())() })
+      expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+      cleanup(); vi.restoreAllMocks()
+    }
+    for (const drawingVersion of [undefined, -1, 0.5]) {
+      const { p } = f3Props({ drawingVersion })
+      render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Upload(); await f3Build()
+      f3Reason(SOLAREDGE_WORKSPACE_REASONS.revision_unavailable)
+      expect(p.transport.readIntake).not.toHaveBeenCalled()
+      expect(f3AcceptButton().disabled).toBe(true)
+      cleanup(); vi.restoreAllMocks()
+    }
+  })
+
+  it('F3 12 ignores late intake across scope and version changes', async () => {
+    const { p } = f3Props()
+    const helds = [workspaceDeferred(), workspaceDeferred(), workspaceDeferred()]
+    p.transport.readIntake.mockReturnValueOnce(helds[0].promise)
+      .mockReturnValueOnce(helds[1].promise).mockReturnValueOnce(helds[2].promise)
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Upload(); await f3Build()
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={4} />)
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 4)
+    view.rerender(<SolarWorkspaceTools {...p} drawingId="new" projectId="new-project" drawingVersion={4} />)
+    expect(screen.queryByRole('region', { name: 'SolarEdge PDF import' })).toBeNull()
+    view.rerender(<SolarWorkspaceTools {...p} />); f3Open(); await f3Upload(); await f3Build()
+    await act(async () => {
+      helds[0].resolve({ version: 3, intake: { solar_design_graph: { rev: 100 } } })
+      helds[1].resolve({ version: 4, intake: { solar_design_graph: { rev: 200 } } })
+    })
+    expect(f3AcceptButton().disabled).toBe(true)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.revision_loading)
+    await act(async () => helds[2].resolve({ version: 3, intake: { solar_design_graph: { rev: 12 } } }))
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledExactlyOnceWith({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={5} />)
+    expect(p.transport.readIntake).toHaveBeenCalledTimes(3)
+    cleanup(); vi.restoreAllMocks()
+    const next = f3Props()
+    const oldRead = workspaceDeferred()
+    const currentRead = workspaceDeferred()
+    next.p.transport.readIntake.mockReturnValueOnce(oldRead.promise).mockReturnValueOnce(currentRead.promise)
+      .mockResolvedValue({ version: 4, intake: { solar_design_graph: { rev: 44 } } })
+    let panelProps
+    const Panel = solarEdgePanels.default
+    vi.spyOn(solarEdgePanels, 'default').mockImplementation((props) => {
+      panelProps = props
+      return <Panel {...props} />
+    })
+    const sameScope = render(<SolarWorkspaceTools {...next.p} />); f3Open(); await f3Upload(); await f3Build()
+    sameScope.rerender(<SolarWorkspaceTools {...next.p} drawingVersion={4} />)
+    expect(next.p.transport.readIntake).toHaveBeenLastCalledWith('solar', 4)
+    await act(async () => currentRead.resolve({ version: 4, intake: { solar_design_graph: { rev: 44 } } }))
+    expect(panelProps.graphRev).toBe(44)
+    await act(async () => oldRead.resolve({ version: 3, intake: { solar_design_graph: { rev: 100 } } }))
+    expect(panelProps.graphRev).toBe(44)
+    expect(f3AcceptButton().disabled).toBe(true)
+    const value = f3Report()
+    value.source_version = 4
+    value.report.source_version = 4
+    next.client.requestReport.mockResolvedValueOnce(f3Success(value))
+    await f3Build()
+    await waitFor(() => expect(f3AcceptButton().disabled).toBe(false))
+    expect(panelProps.graphRev).toBe(44)
+    fireEvent.click(f3AcceptButton())
+    expect(next.p.onStageSolarEdgeAccept).toHaveBeenCalledExactlyOnceWith({ expected_rev: 44, report_artifact_id: F3_REPORT_ID })
+  })
+
+  it('F3 13 refreshes revision and invalidates old report on version change', async () => {
+    const { p, client } = f3Props()
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    const file = f3File().files[0]
+    fireEvent.change(screen.getByLabelText('Selection order'), { target: { value: 'recorded' } })
+    const review = screen.getByRole('region', { name: 'Report review' })
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={4} />)
+    await waitFor(() => expect(p.transport.readIntake).toHaveBeenCalledTimes(2))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 4)
+    expect(screen.getByRole('region', { name: 'Report review' })).toBe(review)
+    expect(f3File().files[0]).toBe(file)
+    expect(screen.getByLabelText('Alignment tolerance').value).toBe('0.5')
+    expect(screen.getByLabelText('Selection order').value).toBe('recorded')
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.report_stale)
+    expect(f3AcceptButton().disabled).toBe(true)
+    const held = workspaceDeferred()
+    client.requestReport.mockReturnValueOnce(held.promise)
+    fireEvent.click(f3BuildButton())
+    const signal = client.requestReport.mock.calls.at(-1)[0].signal
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={5} />)
+    expect(signal.aborted).toBe(true)
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 5)
+    await act(async () => held.resolve(f3Success(f3Report())))
+    expect(screen.getByRole('region', { name: 'Report review' })).toBeTruthy()
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.report_stale)
+    expect(f3AcceptButton().disabled).toBe(true)
+    const currentReport = f3Report()
+    currentReport.source_version = 5
+    currentReport.report.source_version = 5
+    client.requestReport.mockResolvedValueOnce(f3Success(currentReport))
+    await f3Build()
+    await waitFor(() => expect(f3AcceptButton().disabled).toBe(false))
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledTimes(1)
+  })
+
+  it('F3 14 retries revision reads without repeating writes', async () => {
+    const { p, client } = f3Props()
+    p.transport.readIntake.mockRejectedValueOnce(new Error('read'))
+    render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Upload(); await f3Build()
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry design revision' }))
+    await waitFor(() => expect(f3AcceptButton().disabled).toBe(false))
+    expect(p.transport.readIntake.mock.calls).toEqual([['solar', 3], ['solar', 3]])
+    expect(client.uploadPdf).toHaveBeenCalledTimes(1)
+    expect(client.requestReport).toHaveBeenCalledTimes(1)
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+  })
+
+  it('F3 15 never refreshes drawing or physical head for artifacts', async () => {
+    const { p } = f3Props()
+    render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+    expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+    expect(screen.getByRole('region', { name: 'Report review' })).toBeTruthy()
+    fireEvent.click(f3AcceptButton())
+    expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+    expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  })
+
+  it('F3 16 preserves the guest refusal', async () => {
+    const { p } = f3Props({}, true)
+    const create = vi.spyOn(importClients, 'createSolarImportClient')
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open()
+    const guest = () => terrainResponse({ error: { error_code: 'FORBIDDEN' }, degraded_mode: false }, 403)
+    p.transport.fetchImpl.mockResolvedValueOnce(guest())
+    const file = f3Choose(); fireEvent.click(f3UploadButton())
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe(
+      'Upload failed. A guest session cannot use the SolarEdge import, so sign in to an account'))
+    expect(f3File().files[0]).toBe(file)
+    fireEvent.click(f3UploadButton())
+    await screen.findByLabelText('Alignment tolerance')
+    p.transport.fetchImpl.mockResolvedValueOnce(guest())
+    fireEvent.change(screen.getByLabelText('Selection order'), { target: { value: 'recorded' } })
+    fireEvent.change(screen.getByLabelText('Alignment tolerance'), { target: { value: '0.5' } })
+    fireEvent.click(f3BuildButton())
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe(
+      'Report failed. A guest session cannot use the SolarEdge import, so sign in to an account'))
+    expect(screen.getByLabelText('Alignment tolerance').value).toBe('0.5')
+    expect(screen.getByLabelText('Selection order').value).toBe('recorded')
+    expect(f3File().files[0]).toBe(file)
+    expect(p.transport.readIntake).not.toHaveBeenCalled()
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+    expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+    expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+    const realClient = create.mock.results[0].value
+    view.unmount()
+    for (const method of ['uploadPdf', 'requestReport']) {
+      p.transport.fetchImpl.mockResolvedValueOnce(guest())
+      const refused = await realClient[method]({ drawingId: 'solar', projectId: null, file,
+        sourceArtifactId: F3_SOURCE_ID, alignmentTolerance: 0.5, selectionOrder: 'recorded' })
+      expect(refused).toMatchObject({ ok: false, code: 'FORBIDDEN', retryable: false, status: 403 })
+    }
+  })
+})
 
 const COMBINER_VALUE = {
   schema_version: 'leaf.solar-combiner-intake-import.v1', drawing_id: 'solar',
@@ -1235,7 +2269,7 @@ describe('combiner workspace integration', () => {
       expect(!!screen.queryByRole('button', { name: 'Import LandXML terrain' })).toBe(flow === 'ground-physical')
       expect(!!screen.queryByRole('button', { name: 'Create tracker rows' })).toBe(flow === 'ground-physical')
       expect(document.querySelectorAll('section[aria-label="Solar workspace tools"]').length)
-        .toBe(['rooftop', 'ground-physical'].includes(flow) ? 1 : 0)
+          .toBe(['rooftop', 'ground-physical', 'solaredge-import'].includes(flow) ? 1 : 0)
     }
     view.rerender(<SolarWorkspaceTools {...props} projectId="project" />)
     expect(screen.queryByRole('region', { name: 'Solar workspace tools' })).toBeNull()

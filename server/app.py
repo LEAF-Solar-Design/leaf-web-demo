@@ -279,7 +279,10 @@ app.add_middleware(
     # cross-origin page (a split web/API deployment, the local proof stack)
     # only sees them when they are exposed; the client falls back to the head
     # it already holds, but the ETag round trip needs the real header.
-    expose_headers=["ETag", "X-Leaf-Version", "X-Leaf-Head", "X-Leaf-Dxf-Source"],
+    # The Solar artifact download answers its artifact id as a header the browser
+    # client checks before it keeps the bytes, so a cross-origin page refuses
+    # every artifact unless it is exposed.
+    expose_headers=["ETag", "X-Leaf-Version", "X-Leaf-Head", "X-Leaf-Dxf-Source", "X-Leaf-Artifact-Id"],
 )
 install_error_handlers(app)
 

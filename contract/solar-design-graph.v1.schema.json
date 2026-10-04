@@ -1061,6 +1061,64 @@
       ],
       "additionalProperties": true
     },
+    "pvcase_frame_source": {
+      "type": "object",
+      "properties": {
+        "source_artifact_id": {
+          "$ref": "#/$defs/hash"
+        },
+        "source_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "normalized_intake_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "schema": {
+          "const": "leaf.pvcase-g33.v1"
+        },
+        "conversion_schema": {
+          "const": "leaf.pvcase-g33-conversion.v1"
+        },
+        "group_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9999
+        },
+        "source_row_lengths": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          }
+        },
+        "source_sequences": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647
+          }
+        },
+        "source_row_angle_rad": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "source_artifact_id",
+        "source_sha256",
+        "normalized_intake_sha256",
+        "schema",
+        "conversion_schema",
+        "group_index",
+        "source_row_lengths",
+        "source_sequences",
+        "source_row_angle_rad"
+      ],
+      "additionalProperties": true
+    },
     "frame": {
       "type": "object",
       "properties": {
@@ -1161,6 +1219,9 @@
         },
         "ground_slots": {
           "$ref": "#/$defs/ground_slots"
+        },
+        "captured_matrix": {
+          "const": "pvcase-g33"
         }
       },
       "required": [
@@ -1197,14 +1258,58 @@
         ]
       },
       "then": {
-        "required": [
-          "tracker"
-        ]
+        "if": {
+          "required": [
+            "captured_matrix"
+          ]
+        },
+        "then": {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "tracker"
+                ]
+              },
+              {
+                "required": [
+                  "ground_slots"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "provenance": {
+              "required": [
+                "pvcase"
+              ],
+              "properties": {
+                "pvcase": {
+                  "$ref": "#/$defs/pvcase_frame_source"
+                }
+              }
+            }
+          }
+        },
+        "else": {
+          "required": [
+            "tracker"
+          ]
+        }
       },
       "else": {
         "not": {
-          "required": [
-            "tracker"
+          "anyOf": [
+            {
+              "required": [
+                "tracker"
+              ]
+            },
+            {
+              "required": [
+                "captured_matrix"
+              ]
+            }
           ]
         }
       }
