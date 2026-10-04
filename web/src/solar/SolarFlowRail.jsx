@@ -27,10 +27,11 @@ function runAnnouncement(item, run) {
 // drawing's, so nothing is recorded and nothing is compared.
 export default function SolarFlowRail({
   families, familiesDrawingId, drawingId = null, pendingTool = null, runs, openName = null, openSettingsForm, onOpenStep, onFlowChange,
+  workspacePanelsByFlow = {},
 }) {
   const [flowId, setFlowId] = useState(DEFAULT_SOLAR_FLOW)
-  const options = useMemo(() => solarFlowOptions(families), [families])
-  const selection = useMemo(() => solarFlowSelect(families, flowId), [families, flowId])
+  const options = useMemo(() => solarFlowOptions(families, undefined, workspacePanelsByFlow), [families, workspacePanelsByFlow])
+  const selection = useMemo(() => solarFlowSelect(families, flowId, undefined, workspacePanelsByFlow), [families, flowId, workspacePanelsByFlow])
   const steps = selection.steps
   const memory = useRef({ drawingId, everReady: Object.create(null) })
   if (memory.current.drawingId !== drawingId) memory.current = { drawingId, everReady: Object.create(null) }
@@ -124,7 +125,7 @@ export default function SolarFlowRail({
         <div className="solar-flow-unavailable" data-testid="solar-flow-unavailable">
           <p id="solar-flow-unavailable-reason" className="solar-flow-reason">{selection.reason}</p>
           {selection.missing.length > 0 && (
-            <ul className="solar-flow-missing" aria-label="Stages not in this catalog">
+            <ul className="solar-flow-missing" aria-label="Unavailable stages">
               {selection.missing.map((label) => <li key={label}>{label}</li>)}
             </ul>
           )}
