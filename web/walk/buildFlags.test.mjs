@@ -5,9 +5,9 @@ import { shippedViteFlags, productionBundleCacheKey } from './buildFlags.mjs'
 
 const dockerfile = await readFile(new URL('../../deploy/Dockerfile.web', import.meta.url), 'utf8')
 
-test('the deployed defaults enable all three shipped feature surfaces and exclude walk overrides', () => {
+test('the deployed defaults enable all five shipped feature surfaces and exclude walk overrides', () => {
   const flags = shippedViteFlags(dockerfile)
-  for (const name of ['VITE_LIFECYCLE_UI', 'VITE_IOS_SURFACE', 'VITE_CAD_EDIT']) assert.equal(flags[name], '1')
+  for (const name of ['VITE_LIFECYCLE_UI', 'VITE_IOS_SURFACE', 'VITE_CAD_EDIT', 'VITE_SOLAR_FLOW_RAIL', 'VITE_SOLAR_SETTINGS_FORM']) assert.equal(flags[name], '1')
   for (const name of Object.keys(flags)) {
     assert.ok(!['VITE_API_BASE', 'VITE_MOCK', 'VITE_TENANT_ID'].includes(name))
     assert.ok(!name.startsWith('VITE_AUTH0_'))
