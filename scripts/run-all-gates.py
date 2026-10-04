@@ -570,7 +570,7 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-ground-terrain", "server tests/test_solar_ground_terrain.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_terrain.py"), 117),
         Suite("server-solar-ground-frames", "server tests/test_solar_ground_frames.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_ground_frames.py"), 95),
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_frames.py"), 104),
         # W5 second ground batch (2026-09-23, contract G20-G22): terrain analytics (slope map,
         # survey colours, pad grading, terrain CSV byte for byte), layout (module spec, row spacing,
         # tracker and SAT layout, setbacks) and the arrays store with the PVsyst scene export. Every
