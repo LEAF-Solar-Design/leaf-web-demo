@@ -522,6 +522,45 @@ describe('the key ladder, table-driven', () => {
     expect(byId('bar:escape').when({})).toBe(LADDER_REASONS.nothingOpen)
   })
 
+  it.each(['nav', 'jobs', 'result', 'plan'])('closes the phone Studio %s drawer before lower Escape rungs', (studioDrawer) => {
+    const onCloseDrawer = vi.fn()
+    const onCloseHistory = vi.fn()
+    const onInterruptRun = vi.fn()
+    const shell = { phoneViewport: true, studioDrawer, historyOpen: true, running: true }
+    const event = { key: 'Escape', preventDefault: vi.fn() }
+    expect(ladderDecision(event, shell).rung).toBe('drawer')
+    ladderListener(shell, (state) => ({ ...state, onCloseDrawer, onCloseHistory, onInterruptRun }))(event)
+    expect(onCloseDrawer).toHaveBeenCalledTimes(1)
+    expect(onCloseHistory).not.toHaveBeenCalled()
+    expect(onInterruptRun).not.toHaveBeenCalled()
+  })
+
+  it.each(['none', null, undefined, ''])('treats Studio drawer %s as closed on phone', (studioDrawer) => {
+    expect(escapeRung({ phoneViewport: true, studioDrawer })).toBe('')
+    expect(escapeRung({ phoneViewport: true, studioDrawer, historyOpen: true })).toBe('history')
+  })
+
+  it.each(['nav', 'jobs', 'result', 'plan'])('keeps desktop Studio %s rails outside the Escape ladder', (studioDrawer) => {
+    const onCloseDrawer = vi.fn()
+    const onCloseHistory = vi.fn()
+    const shell = { phoneViewport: false, studioDrawer, historyOpen: true }
+    ladderListener(shell, (state) => ({ ...state, onCloseDrawer, onCloseHistory }))({ key: 'Escape', preventDefault: vi.fn() })
+    expect(onCloseHistory).toHaveBeenCalledTimes(1)
+    expect(onCloseDrawer).not.toHaveBeenCalled()
+    expect(escapeRung({ phoneViewport: false, studioDrawer })).toBe('')
+    expect(escapeRung({ phoneViewport: false, studioDrawer, drawer: 'details' })).toBe('drawer')
+  })
+
+  it('leaves a phone drawer open when a higher-priority owner consumes Escape', () => {
+    const event = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })
+    event.preventDefault()
+    const handlers = vi.fn()
+    const shell = { phoneViewport: true, studioDrawer: 'nav' }
+    expect(ladderDecision(event, shell)).toBeNull()
+    ladderListener(shell, handlers)(event)
+    expect(handlers).not.toHaveBeenCalled()
+  })
+
   it('fires the R rung rTarget names, and never the one ResultPanel owns', () => {
     expect(Object.keys(RETRY_RUNGS)).toEqual(['route', 'history', 'tools', 'catalog', 'refresh'])
     const seen = []
