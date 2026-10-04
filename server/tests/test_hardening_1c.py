@@ -134,6 +134,33 @@ def test_w4g2_dxf_route_headers_are_exposed_cross_origin():
         assert name in exposed
 
 
+def test_solar_artifact_id_header_exposed_cross_origin():
+    """Cross-origin pages can read the artifact id before keeping the bytes."""
+    import app as appmod  # noqa: PLC0415
+    from fastapi.middleware.cors import CORSMiddleware  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    exposed = None
+    for mw in appmod.app.user_middleware:
+        if mw.cls is CORSMiddleware:
+            exposed = mw.kwargs.get("expose_headers")
+    assert exposed is not None, "CORS middleware not wired"
+    assert "X-Leaf-Artifact-Id" in exposed
+
+    response = TestClient(appmod.app).get(
+        "/api/health", headers={"Origin": "http://localhost:5275"}
+    )
+    assert response.status_code == 200
+    response_exposed = {
+        name.strip()
+        for name in response.headers["access-control-expose-headers"].split(",")
+    }
+    for name in (
+        "X-Leaf-Artifact-Id", "ETag", "X-Leaf-Version", "X-Leaf-Head", "X-Leaf-Dxf-Source"
+    ):
+        assert name in response_exposed
+
+
 def test_f17_app_middleware_is_wired_from_the_env_helper():
     """The real FastAPI app's CORS middleware takes its allow_origins from
     app._cors_origins() (not a hardcoded ["*"]) and keeps allow_credentials False."""
