@@ -256,6 +256,10 @@
     width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: -8px 0 24px rgba(0, 0, 0, .4);
     background: var(--ck-chrome);
   }
+  /* On Solar CAD the expanded job monitor sits over the canvas's right edge (z 5); the floating drawing overview
+     (z 24) would cover its job rows, so it gives way while the monitor is open, as the view cube already does beneath
+     it. CAD reserves the monitor a grid column and moves the overview clear of it (studioShell.css), so CAD keeps it. */
+  .studio-shell .app[data-surface="solar"]:has(aside.rail:not([data-spine])) .cad-overview { display: none; }
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon {
   height: var(--ck-ribbon); box-sizing: border-box;

@@ -2061,3 +2061,39 @@ describe('Conversion surface wiring', () => {
     assert.match(details, /const env = result;/)
   })
 })
+describe('RAIL overview yields to the expanded job monitor', () => {
+  it('RAIL wiring R1 on Solar CAD the drawing overview hides while the expanded job monitor is open on desktop', () => {
+    // Comments are removed first, so a commented-out rule is absent and a brace inside a comment cannot end a block.
+    const css = readFileSync(new URL('./site/cockpit.css', import.meta.url), 'utf8').split('\r').join('')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+    const rule = '.studio-shell .app[data-surface="solar"]:has(aside.rail:not([data-spine])) .cad-overview { display: none; }'
+    const panel = '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail:not([data-spine]) {'
+    const blocks = []
+    for (let at = css.indexOf('@media (min-width: 981px) {'); at >= 0; at = css.indexOf('@media (min-width: 981px) {', at + 1)) {
+      const open = css.indexOf('{', at)
+      let depth = 1
+      let end = open + 1
+      for (; end < css.length && depth > 0; end += 1) {
+        if (css[end] === '{') depth += 1
+        else if (css[end] === '}') depth -= 1
+      }
+      assert.equal(depth, 0)
+      blocks.push(css.slice(open + 1, end - 1))
+    }
+    const owner = blocks.filter((block) => block.includes(panel))
+    assert.equal(owner.length, 1, 'exactly one desktop block owns the expanded job monitor panel')
+    assert.ok(owner[0].includes(rule), 'the overview rule sits in the same desktop block as the expanded job monitor')
+    assert.equal(css.split(rule).length - 1, 1, 'the overview rule appears exactly once')
+    // The overview sits above the expanded monitor (z 24 over z 5), which is why it must give way.
+    const overviewCss = readFileSync(new URL('./site/cadOverview.css', import.meta.url), 'utf8')
+    assert.match(overviewCss, /\.cad-overview \{[^}]*z-index: 24;/)
+    assert.match(owner[0].split(panel)[1].split('}')[0], /z-index: 5;/)
+    // CAD keeps its overview: it reserves the monitor a grid column and moves the overview clear of it, so no
+    // cockpit.css rule may hide the overview on CAD while the monitor is open.
+    assert.equal(/data-surface="cad"[^{}]*:has\(aside\.rail:not\(\[data-spine\]\)\)[^{}]*\.cad-overview/.test(css), false)
+    const shell = readFileSync(new URL('./site/studioShell.css', import.meta.url), 'utf8').split('\r').join('')
+    const cadMoves = shell.split('.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] :is(.cad-overview, .cockpit-cube-wrap, .cockpit-cube-wcs) {')
+    assert.equal(cadMoves.length, 2, 'studioShell.css moves the CAD overview clear of the reserved rail exactly once')
+    assert.match(cadMoves[1].split('}')[0], /right: calc\(var\(--ck-rail-width\) \+ 18px\);/)
+  })
+})
