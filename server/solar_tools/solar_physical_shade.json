@@ -1,0 +1,39 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-physical-shade",
+  "builtin": "builtins/solar_physical_shade.py",
+  "family": "terrain",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_PHYSICAL_SHADE_REQUEST",
+  "readiness": {"kind": "facets", "facets": []},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-physical-shade",
+    "version": "1.0.0",
+    "description": "Report CPU terrain shade at native frame centres in the current physical head. Uses default clearance and an automatic sample profile. Reads only. Excludes weather weighting and individual-module shading.",
+    "kind": "script",
+    "family_id": "terrain",
+    "engine_op": "solar_physical_shade",
+    "entry": "builtins/solar_physical_shade.py",
+    "params": {
+      "type": "object",
+      "properties": {"drawing_id": {"type": "string", "maxLength": 128}},
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["shade-sim"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 4,
+  "order": 50,
+  "scenario": "w4-physical-shade"
+}

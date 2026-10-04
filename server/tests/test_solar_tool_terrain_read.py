@@ -229,9 +229,10 @@ def test_terrain_read_registry_and_catalog(monkeypatch):
         "maturity": "preview", "engine": "server-builtin", "adapter": "local-graph-read",
         "entitlement": "run_read", "interaction": {"mode": "form"}, "ledger": ["landxml-import"]}
     assert row["params_schema"] == solar_tools.trusted_record(TOOL)["params"]
-    # The read sorts after the SolarEdge pair and is the only wave-4 tool in the terrain family.
+    # The terrain reads sort after the SolarEdge pair, with physical shade after terrain read.
     wave4 = [(entry["order"], entry["name"]) for entry in solar_tools.entries() if entry["wave"] == 4]
-    assert wave4[-1] == (40, TOOL) and len({order for order, _ in wave4}) == len(wave4)
+    assert wave4 == [(30, "solar-solaredge-accept"), (31, "solar-solaredge-tracking-read"),
+                     (40, TOOL), (50, "solar-physical-shade")]
 
 
 def test_terrain_read_readiness(graph):

@@ -58,9 +58,9 @@ CONVERTED_BASIS = "fb773c11b8a39a7e5786b4301a4a3e66cb568fb6273214f4b92c6409e09a7
 SIZED_SHA = "aa7e815c169780207578046380c915903180340502f5c0071f623205b0e07fd8"
 STRUNG_SHA = "d9fbe549a60289ec083f339992f9bd580207c0bded2197535627df5dcf9e6717"
 EQUIPPED_SHA = "9f344ba1e0746ccf22364e550e5a0ae11f5564f35fda61bfacd70c165ee83b47"
-# The digest covers the whole readiness map, so it moves when a sibling registers a tool: re-pinned on Forge
-# main 6c8ff5db plus solar-feeders: 47 entries, adding only solar-feeders: valid_settings_required.
-W1_READINESS_SHA = "019771eb0b388d9aea5a4791bd63d040b693611892fcbad005dcf84f8a189bcb"
+# The digest covers the whole readiness map, so it moves when a sibling registers a tool: re-pinned with
+# solar-physical-shade: 49 entries, adding only solar-physical-shade: None on this W1 fixture.
+W1_READINESS_SHA = "cce4cb28ddcf6affef3e52a6c0ed8e18edbcd6099bf2e8dc07783ca176909d30"
 
 
 class FixedDatetime:
