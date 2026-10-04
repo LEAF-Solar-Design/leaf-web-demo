@@ -1963,6 +1963,10 @@ jobs:
           # shared web image serves BOTH staging and production, so enabling it
           # is an all-environments decision. Rollback = set back to "0".
           VITE_CAD_EDIT: "1"
+          # solar flow flip: ON, 2026-10-04; deploy/Dockerfile.web flips with it.
+          # Rollback = set back to "0" in both blocks and the Dockerfile together.
+          VITE_SOLAR_FLOW_RAIL: "1"
+          VITE_SOLAR_SETTINGS_FORM: "1"
           LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
@@ -2824,6 +2828,10 @@ jobs:
           # shared web image serves BOTH staging and production, so enabling it
           # is an all-environments decision. Rollback = set back to "0".
           VITE_CAD_EDIT: "1"
+          # solar flow flip: ON, 2026-10-04; deploy/Dockerfile.web flips with it.
+          # Rollback = set back to "0" in both blocks and the Dockerfile together.
+          VITE_SOLAR_FLOW_RAIL: "1"
+          VITE_SOLAR_SETTINGS_FORM: "1"
           LEAF_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
