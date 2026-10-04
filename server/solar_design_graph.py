@@ -263,6 +263,8 @@ def validate_graph(graph: dict) -> dict:
     for frame in graph["frames"]:
         if frame["installation_design"] != design:
             raise GraphValidationError("INSTALLATION_DESIGN_MISMATCH")
+        # Explicit PVcase captured matrices on Ground carry no tracker. Their ordinary
+        # matrix, membership and assignment checks below still apply in full.
         tracker = frame.get("tracker")
         if tracker is None:
             continue

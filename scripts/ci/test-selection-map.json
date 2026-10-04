@@ -449,6 +449,7 @@
     "server-solar-physical-state",
     "server-solar-pile-block-mapping",
     "server-solar-probe-calcs",
+    "server-solar-pvcase-conversion",
     "server-solar-pvcase-solve",
     "server-solar-registry",
     "server-solar-rooftop-chain",

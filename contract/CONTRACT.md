@@ -346,3 +346,57 @@ Transport bounds are 16 MiB, 500,000 JSON nodes, depth 32 and at most 100,000
 items per collection. Unknown fields are subject to the same bounds. Validation
 errors expose named reasons, not input values. The contract uses the existing
 `jsonschema` dependency and performs no network access.
+
+### PVcase G33 frozen capture conversion
+
+`leaf-pvcase-g33.v1.schema.json` documents the envelope with exactly `schema`
+(`leaf.pvcase-g33.v1`) and `intake`. The existing `solar_pvcase_solve.validate_intake`
+remains the nested acceptance authority: signed int32 labels, numeric handle
+uniqueness (including code-zero cells), finite non-boolean coordinates and
+dimensions, positive dimensions, and the 500,000 total row-plus-cell budget.
+Empty and ragged rows are valid. Nonpositive `panels_per_string` is retained.
+The JSON Schema documents structure; it does not replace those cross-field checks.
+
+`solar_pvcase_conversion.validate_envelope` accepts exact bytes or a JSON object,
+rejects duplicate keys, nonfinite JSON, cycles and non-JSON values, bounds nesting
+before parsing, and returns an isolated normalized envelope. Raw bytes are limited
+to 16 MiB; input traversal uses graph node/depth ceilings and the 100,000 list bound.
+The pure `convert` kernel requires a validated empty engineering target, including
+no prior `extra.pvcase`, and matching installation and drawing units, the frozen
+unit scale, metre computation, identity WCS-to-UCS and null CRS. It preserves all
+other metadata, opaque references, revisions and existing provenance.
+
+Usable non-null, nonzero-code cells produce panels in original row-major order.
+Frames retain original row count and widest row, pad without moving occupied cells,
+and record original row lengths, sequences, angle and group index in provenance.
+Null, code-zero and padding cells are empty. Wholly unusable groups are recorded
+with original index/handle and `no-usable-panels`; no groups and no usable groups
+are distinct refusals. Centres and captured dimensions are converted without
+rounding using mm=0.001, cm=0.01, m=1.0, in=0.0254 and ft=0.3048. Angles become
+degrees. Rectangle corners remain derivable as centre plus/minus width/2 along
+the angle and height/2 perpendicular to it. Nonfinite arithmetic and dimension
+underflow refuse. No corners, elevation, tracker mechanics, sizing evidence,
+strings, inverters or active source assignments are fabricated.
+
+Identity hashes use canonical UTF-8 JSON (sorted keys, compact separators,
+unescaped Unicode, no NaN) of the normalized intake with every group/cell handle
+uppercased and leading zeros removed (zero stays `0`). Order is preserved.
+Frame/panel UUIDs use the first 16 SHA-256 bytes, formatted as UUID version 4,
+of `leaf.pvcase-g33-conversion.v1:<drawing source_hash>:<intake hash>:<kind>:<handle>`.
+Original handle spelling stays in provenance. Supplied artifact ID and exact
+envelope byte hash must be lowercase 64-digit hashes; recording their binding
+does not authenticate stored bytes. Trusted artifact resolution and publication
+belong to a later record. New entity revisions and source revisions equal the
+input graph revision, and timestamps come from project provenance.
+
+Ground frames marked `captured_matrix: "pvcase-g33"` are explicit ordinary-matrix
+captures and require PVcase frame source evidence. They forbid both `tracker`
+and `ground_slots`, including null properties. Unmarked Ground frames still
+require a tracker; Roof frames forbid the marker and tracker. Historical capture
+evidence need not equal geometry after later edits. Before materializing any
+expanded matrix, exact prospective accounting includes preserved metadata and all
+provenance, with arithmetic multiplication for repeated empty cells. Matrix,
+list, depth, node and byte refusals follow that precedence. Both the graph walk
+size accumulator and canonical byte length must fit 16 MiB; full graph validation
+is the final correctness check. All kernel refusals are payload-free `PVG_*`
+`GraphValidationError` values with fixed `<root>` paths.
