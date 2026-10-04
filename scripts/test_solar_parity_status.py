@@ -167,6 +167,8 @@ def test_shipped_ledger_is_reconciled_and_every_production_row_has_a_receipt():
     result = json.loads(proc.stdout)
     assert result["ok"] is True and result["findings"] == []
     assert result["counts"]["rows"] == 394
+    assert [result["counts"]["capabilities_" + state] for state in
+            ("reachable", "unreachable", "unverified")] == [0, 0, 0]
     ledger = json.loads(SEED_LEDGER.read_text(encoding="utf-8"))
     assert ledger["schema"] == "leaf.solar-parity-ledger.v1"
     assert ledger["registrations_expected"] == 394
@@ -183,6 +185,9 @@ def test_shipped_ledger_is_reconciled_and_every_production_row_has_a_receipt():
         result = json.loads(proc.stdout)
         assert result["ok"] is True and finding_codes(result) == [], requirement
         assert result["counts"]["duty_rows_in_scope"] > 0
+        assert [result["counts"]["capabilities_" + state] for state in
+                ("reachable", "unreachable", "unverified")] == (
+                    [6, 0, 6] if requirement == "w1" else [22, 0, 106])
 
 
 def test_valid_three_row_ledger_passes_all_production(tmp_path, capsys):
