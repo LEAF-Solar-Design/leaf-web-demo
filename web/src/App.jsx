@@ -28,7 +28,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
-import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels } from './lib/ribbonClusters.js'
+import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
@@ -3409,8 +3409,8 @@ export default function App() {
       draw: [...(ENV_CAD_EDIT ? [] : [annotation]), layers, ...(ENV_CAD_EDIT ? [] : [block]),
         ENV_CAD_EDIT ? propertiesSeat : properties, ENV_CAD_EDIT ? groupsSeat : groups,
         ENV_CAD_EDIT ? clipboardSeat : clipboardOff, ...(tabFamilies.draw || [])],
-      insert: [block, ...(tabFamilies.insert || [])],
-      annotate: [annotation, ...(tabFamilies.annotate || [])],
+      insert: [...referencePanelsForTab('insert', ENV_CAD_EDIT), ...(tabFamilies.insert || [])],
+      annotate: [...referencePanelsForTab('annotate', ENV_CAD_EDIT), ...(tabFamilies.annotate || [])],
       view: [view, version, layers, ...(ENV_CAD_EDIT ? [scriptSeat] : []), ...(tabFamilies.view || [])],
       manage: [...rail, ...families, ...(tabFamilies.manage || []), author],
     }
@@ -4239,7 +4239,7 @@ export default function App() {
                 <EngineRibbonClusters
                   importOpen={importOpen}
                   onToggleImport={() => { returnToDrawing(); setImportOpen((o) => !o) }}
-                  panels={activeRibbonTab === 'solar' ? ['solar-panels'] : activeRibbonTab === 'insert' ? ['file'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
+                  panels={activeRibbonTab === 'solar' ? ['solar-panels'] : activeRibbonTab === 'insert' ? ['file', 'block'] : activeRibbonTab === 'annotate' ? ['annotation'] : activeRibbonTab === 'draw' ? ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups'] : activeRibbonTab === 'view' ? ['script'] : []}
                 />
               )}
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)

@@ -917,6 +917,14 @@ function offTool(id, label, icon, size = 'small') {
 // parameter or a bracketed lookup reads as a computed expression there and
 // counts against its unverifiable-reason budget instead.
 
+export function referencePanelsForTab(tab, cadEdit = false) {
+  if (cadEdit) return []
+  const id = tab === 'insert' ? 'block'
+    : tab === 'annotate' ? 'annotation'
+      : null
+  return referencePanels().filter((panel) => panel.id === id)
+}
+
 /**
  * The reference's Draw-tab panels beyond Draw and Modify (which the engine
  * consumer renders): Annotation, Layers widget (built by layersCluster),
@@ -934,10 +942,7 @@ export function referencePanels() {
       ],
     },
     {
-      // W4g-7b-02c: INSERT BLOCK is real with the engine flag on (App.jsx
-      // drops this static cluster then; EngineRibbonClusters renders the
-      // Block panel itself, the annotation seat idiom). CREATE BLOCK stays
-      // the honest placeholder either way, with its own reason (W4g-7b-05c).
+      // Both commands use the live Block panel when CAD editing is enabled.
       id: 'block', label: 'Block', kind: 'group', note,
       tools: [
         offTool('draw:createBlock', 'Create Block', 'block-create', 'large'),

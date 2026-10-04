@@ -33,6 +33,7 @@ import {
   solarStringsControl,
   railCluster,
   referencePanels,
+  referencePanelsForTab,
   versionCluster,
   viewCluster,
 } from './ribbonClusters.js'
@@ -1393,6 +1394,78 @@ describe('referencePanels (the flag-off placeholders)', () => {
     const ungroup = toolsOf(groups)['groups:ungroup']
     expect([group.disabled, group.reason]).toEqual([true, REASONS.notInEngine])
     expect([ungroup.disabled, ungroup.reason]).toEqual([true, REASONS.notInEngine])
+  })
+})
+
+describe('Insert and Annotate panel routing', () => {
+  const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8').replaceAll('\r\n', '\n')
+  const expressionBetween = (start, end) => {
+    const offset = appSource.indexOf(start)
+    expect(offset).toBeGreaterThanOrEqual(0)
+    const from = offset + start.length
+    const to = appSource.indexOf(end, from)
+    expect(to).toBeGreaterThan(from)
+    return appSource.slice(from, to)
+  }
+  const completePanel = (panel) => ({
+    ...panel,
+    tools: panel.tools.map((tool) => ({ ...tool, onClick: expect.any(Function) })),
+  })
+
+  it.each([
+    ['insert', false, 'block', ['draw:createBlock', 'block:insert']],
+    ['insert', true, 'block', ['draw:createBlock', 'block:insert']],
+    ['annotate', false, 'annotation', ['annotation:text']],
+    ['annotate', true, 'annotation', ['annotation:text']],
+    ['unknown', false, null, []],
+    ['unknown', true, null, []],
+  ])('W21A1-reference-%s-%s', (tab, cadEdit, id, toolIds) => {
+    const panels = referencePanelsForTab(tab, cadEdit)
+    if (cadEdit || id === null) {
+      expect(panels).toEqual([])
+      return
+    }
+    const expected = referencePanels().find((panel) => panel.id === id)
+    expect(panels).toEqual([completePanel(expected)])
+    expect(referencePanelsForTab(tab)).toEqual([completePanel(expected)])
+    expect(panels[0].tools.map((tool) => tool.id)).toEqual(toolIds)
+    expect(panels[0].note).toBe('not in the browser engine yet')
+    for (const tool of panels[0].tools) {
+      expect(tool.disabled).toBe(true)
+      expect(tool.reason).toBe('not in the browser engine yet')
+    }
+  })
+
+  it.each([
+    ['insert', ['file', 'block']],
+    ['annotate', ['annotation']],
+    ['draw', ['draw', 'modify', 'annotation', 'block', 'clipboard', 'properties', 'groups']],
+    ['solar', ['solar-panels']],
+    ['view', ['script']],
+    ['manage', []],
+    ['model', []],
+    ['unknown', []],
+  ])('W21A1-engine-panels-%s', (tab, expected) => {
+    const expression = expressionBetween('panels={', '}')
+    const selectPanels = new Function('activeRibbonTab', `return (${expression})`)
+    expect(selectPanels(tab)).toEqual(expected)
+  })
+
+  it('W21A1-app-tab-composition', () => {
+    const importLine = appSource.split('\n').find((line) => line.startsWith('import {') && line.endsWith("from './lib/ribbonClusters.js'"))
+    expect(importLine).toContain('referencePanelsForTab')
+    expect(appSource).toContain('{ENV_CAD_EDIT && drafting && (\n                <EngineRibbonClusters')
+    for (const [tab, id] of [['insert', 'block'], ['annotate', 'annotation']]) {
+      const expression = expressionBetween(`      ${tab}: `, ',\n')
+      const compose = new Function('referencePanelsForTab', 'ENV_CAD_EDIT', 'tabFamilies', `return (${expression})`)
+      const sentinel = { id: 'catalog-sentinel', kind: 'group', tools: [] }
+      const families = { [tab]: [sentinel] }
+      const placeholder = referencePanels().find((panel) => panel.id === id)
+      expect(compose(referencePanelsForTab, false, families)).toEqual([completePanel(placeholder), sentinel])
+      expect(compose(referencePanelsForTab, true, families)).toEqual([sentinel])
+      expect(compose(referencePanelsForTab, false, families)[1]).toBe(sentinel)
+      expect(compose(referencePanelsForTab, true, families)[0]).toBe(sentinel)
+    }
   })
 })
 
