@@ -28,15 +28,18 @@
  *     mode that has not activated yet.
  */
 import { act, cleanup, render, screen } from '@testing-library/react'
+import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { noteUnauthorized } from '../api.js'
 import { bootWantsApp } from '../site/authBoot.js'
+import { searchForProductSurface } from '../site/productSurfaces.js'
 import {
   DRAWING_MODE_CONSOLE,
   DRAWING_MODE_OPERATOR,
   authTenantScope,
   classifyDemo,
+  drawingUrlAfterUpload,
   identityFromUploadReceipt,
   isScopeSwitch,
   modeDrawingId,
@@ -50,6 +53,185 @@ import {
 } from './DrawingIdentityProvider.jsx'
 
 afterEach(cleanup)
+
+describe('accepted upload URL persistence', () => {
+  let write, originalUrl, originalState
+  const account = (id) => ({ drawing_id: id, tenant_kind: 'account' })
+  const guest = (id) => ({ drawing_id: id, tenant_kind: 'guest' })
+  const address = () => window.location.pathname + window.location.search + window.location.hash
+  const mount = (url, options = {}) => {
+    const { mode = DRAWING_MODE_CONSOLE, strict = false } = options
+    const scene = Object.prototype.hasOwnProperty.call(options, 'scene') ? options.scene : 'app'
+    originalUrl = address()
+    originalState = window.history.state
+    window.history.replaceState({ marker: 'preserved' }, '', url)
+    write = vi.spyOn(window.history, 'replaceState')
+    const props = { mode, scene, search: window.location.search, publicDemo: false, liveDemo: false,
+      readLiveDrawingId: () => null, rememberDrawingId: vi.fn() }
+    const tree = (over = {}) => {
+      const provider = <DrawingIdentityProvider {...props} {...over}><ConsoleProbe /></DrawingIdentityProvider>
+      return strict ? <React.StrictMode>{provider}</React.StrictMode> : provider
+    }
+    const view = render(tree())
+    return { ...view, props, update: (over) => view.rerender(tree(over)) }
+  }
+  afterEach(() => {
+    cleanup()
+    write?.mockRestore()
+    if (originalUrl !== undefined) window.history.replaceState(originalState, '', originalUrl)
+    write = undefined
+    originalUrl = undefined
+  })
+  const rows = [
+    { id: 'URL307A-01', before: '/app?surface=browser', after: '/app?surface=browser', drawing: 'demo', origin: 'mode' },
+    { id: 'URL307A-02', before: '/app?surface=browser', after: '/app?surface=browser&drawing=U', uploads: [account('U')], drawing: 'U' },
+    { id: 'URL307A-03', before: '/app?surface=browser&drawing=U', after: '/app?surface=browser&drawing=V', uploads: [account('U'), account('V')], drawing: 'V' },
+    { id: 'URL307A-04', before: '/app?drawing=V', after: '/app?drawing=U', uploads: [account('U')], drawing: 'U' },
+    { id: 'URL307A-05', before: '/app?drawing=U&surface=browser', after: '/app?surface=browser', uploads: [guest('G')], drawing: 'G' },
+    { id: 'URL307A-06', before: '/app?surface=browser', after: '/app?surface=browser', uploads: [guest('G')], drawing: 'G', calls: 0 },
+    { id: 'URL307A-07', before: '/try', after: '/try', mode: DRAWING_MODE_OPERATOR, scene: 'tool', uploads: [account('U')], drawing: 'U', calls: 0 },
+    { id: 'URL307A-08', before: '/app?demo=1', after: '/app?demo=1', drawing: 'demo', origin: 'mode' },
+    { id: 'URL307A-09', before: '/app/leaf-platform', after: '/app/leaf-platform', scene: 'leaf-platform', uploads: [account('U')], drawing: 'U', calls: 0 },
+    { id: 'URL307A-10', before: '/app?surface=browser&note=keep#viewer', after: '/app?surface=browser&note=keep&drawing=U#viewer', uploads: [account('U')], drawing: 'U' },
+    { id: 'URL307A-15', before: '/app?surface=browser&drawing=U', after: '/app?surface=browser&drawing=U', uploads: [account('U'), account('U')], drawing: 'U', calls: 0 },
+    { id: 'URL307A-16', before: '/app?drawing=rooftop_demo', after: '/app?drawing=rooftop_demo', drawing: 'demo', source: 'rooftop_demo', origin: 'query' },
+    { id: 'URL307A-17', before: '/app?drawing=', after: '/app?drawing=', drawing: 'demo', origin: 'mode' },
+    { id: 'URL307A-18', before: '/?drawing=V&surface=browser#viewer', after: '/?drawing=U&surface=browser#viewer', uploads: [account('U')], drawing: 'U' },
+    { id: 'URL307A-19', before: '/try?drawing=V', after: '/try?drawing=U', uploads: [account('U')], drawing: 'U' },
+    { id: 'URL307A-20', before: '/app?drawing=V&drawing=W&surface=browser', after: '/app?drawing=U&surface=browser', uploads: [account('U')], drawing: 'U' },
+  ]
+  for (const row of rows) {
+    it(`${row.id} preserves the selected drawing and allowed address`, () => {
+      const h = mount(row.before, row)
+      const historyState = window.history.state
+      expect(write).not.toHaveBeenCalled()
+      if (!row.uploads) expect(shown('drawing-tenant')).toBe('null')
+      if (row.id === 'URL307A-07') expect(shown('drawing-id')).toBe('null')
+      for (const receipt of row.uploads || []) {
+        let promoted
+        act(() => { promoted = controls.setFromUpload(receipt) })
+        expect(promoted).toEqual({ drawingId: receipt.drawing_id, source: receipt.drawing_id, origin: 'upload', tenantKind: receipt.tenant_kind })
+        expect(Object.isFrozen(promoted)).toBe(true)
+      }
+      expect(address()).toBe(row.after)
+      expect(shown('drawing-id')).toBe(row.drawing)
+      expect(shown('drawing-source')).toBe(row.source || (row.drawing === 'demo' ? 'rooftop_demo' : row.drawing))
+      expect(shown('drawing-origin')).toBe(row.origin || 'upload')
+      expect(write).toHaveBeenCalledTimes(row.calls ?? (row.uploads ? 1 : 0))
+      if (write.mock.calls.length) expect(write.mock.calls[0][0]).toBe(historyState)
+      if (row.id === 'URL307A-07') expect(h.props.rememberDrawingId).toHaveBeenCalledWith('U')
+    })
+  }
+
+  it('URL307A-14 query restoration, rerender and mode reactivation never write', () => {
+    const h = mount('/app?surface=solar&drawing=U')
+    act(() => { controls.setFromUpload(account('U')); controls.setFromQuery() })
+    h.update({}); h.update({ mode: DRAWING_MODE_OPERATOR }); h.update({ mode: DRAWING_MODE_CONSOLE })
+    expect(shown('drawing-id')).toBe('U')
+    expect(shown('drawing-origin')).toBe('query')
+    expect(address()).toBe('/app?surface=solar&drawing=U')
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('URL307A-21 rejected ids leave the query identity and address alone', () => {
+    mount('/app?drawing=V')
+    for (const drawing_id of [undefined, '', null, 42]) {
+      act(() => { expect(controls.setFromUpload({ drawing_id, tenant_kind: 'account' })).toBeNull() })
+      expect(shown('drawing-id')).toBe('V')
+      expect(shown('drawing-origin')).toBe('query')
+    }
+    expect(address()).toBe('/app?drawing=V')
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('URL307A-22 the surface commit preserves the upload selection', () => {
+    mount('/app?surface=browser&drawing=U&note=keep#viewer')
+    act(() => { controls.setFromUpload(account('U')) })
+    window.history.replaceState(window.history.state, '', window.location.pathname + searchForProductSurface(window.location.search, 'solar') + window.location.hash)
+    expect(address()).toBe('/app?surface=solar&drawing=U&note=keep#viewer')
+    expect(shown('drawing-id')).toBe('U')
+    expect(shown('drawing-tenant')).toBe('account')
+  })
+
+  it('URL307A-23 unknown tenant provenance still promotes without a URL write', () => {
+    mount('/app?drawing=V')
+    for (const tenant_kind of ['enterprise', null, undefined]) {
+      act(() => { controls.setFromUpload({ drawing_id: 'U', tenant_kind }) })
+      expect(shown('drawing-id')).toBe('U')
+      expect(shown('drawing-origin')).toBe('upload')
+      expect(shown('drawing-tenant')).toBe('null')
+    }
+    expect(address()).toBe('/app?drawing=V')
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('URL307A-STRICTMODE mount and rerenders do not replay the synchronous commit', () => {
+    const h = mount('/app?surface=browser', { strict: true })
+    expect(write).not.toHaveBeenCalled()
+    act(() => { controls.setFromUpload(account('U')) })
+    expect(write).toHaveBeenCalledTimes(1)
+    h.update({}); h.update({})
+    expect(write).toHaveBeenCalledTimes(1)
+    expect(address()).toBe('/app?surface=browser&drawing=U')
+  })
+
+  it('URL307A-SURFACE-COMPOSITION both commit orders read the current address', () => {
+    mount('/app?note=keep&note=also#viewer')
+    const surface = () => window.history.replaceState(window.history.state, '', window.location.pathname + searchForProductSurface(window.location.search, 'solar') + window.location.hash)
+    act(() => { controls.setFromUpload(account('U')) }); surface()
+    expect(address()).toBe('/app?note=keep&note=also&drawing=U&surface=solar#viewer')
+    window.history.replaceState(window.history.state, '', '/app?note=keep&note=also#viewer')
+    surface(); act(() => { controls.setFromUpload(account('U')) })
+    expect(address()).toBe('/app?note=keep&note=also&surface=solar&drawing=U#viewer')
+    expect(shown('drawing-id')).toBe('U')
+  })
+
+  it('URL307A-FROZEN-SEED upload leaves query restoration and its frozen seed unchanged', () => {
+    mount('/app?drawing=V')
+    let seed, restored
+    act(() => { seed = controls.setFromQuery(); controls.setFromUpload(account('U')) })
+    expect(write).toHaveBeenCalledTimes(1)
+    act(() => { restored = controls.setFromQuery() })
+    expect(restored).toBe(seed)
+    expect(Object.isFrozen(seed)).toBe(true)
+    expect(seed).toEqual({ drawingId: 'V', source: 'V', origin: 'query' })
+    expect(shown('drawing-id')).toBe('V')
+    expect(address()).toBe('/app?drawing=U')
+    expect(write).toHaveBeenCalledTimes(1)
+  })
+
+  it('URL307A-HISTORY-THROWS a failed address commit keeps the promoted identity', () => {
+    mount('/app?drawing=V')
+    write.mockImplementation(() => { throw new Error('history unavailable') })
+    act(() => { controls.setFromUpload(account('U')) })
+    expect(shown('drawing-id')).toBe('U')
+    expect(shown('drawing-tenant')).toBe('account')
+    expect(address()).toBe('/app?drawing=V')
+  })
+
+  it('URL307A-PURE policy gates eligibility and avoids unrelated canonicalization', () => {
+    expect(drawingUrlAfterUpload()).toBeNull()
+    expect(drawingUrlAfterUpload(null)).toBeNull()
+    const policy = (over) => drawingUrlAfterUpload({ href: 'https://example.test/app?note=a%20b', mode: DRAWING_MODE_CONSOLE, scene: 'app', receipt: account('U'), promoted: true, ...over })
+    expect(policy({})).toBe('/app?note=a+b&drawing=U')
+    for (const over of [{ promoted: false }, { promoted: 1 }, { mode: DRAWING_MODE_OPERATOR }, { scene: undefined }, { scene: 'leaf-platform' }, { href: 'not a URL' }, { receipt: null }, { receipt: { drawing_id: 3, tenant_kind: 'account' } }, { receipt: { drawing_id: 'U', tenant_kind: 'enterprise' } }]) expect(policy(over)).toBeNull()
+    expect(policy({ href: 'https://example.test/app?drawing=U&note=a%20b' })).toBeNull()
+    expect(policy({ receipt: guest('G') })).toBeNull()
+    expect(policy({ href: 'https://example.test/app?drawing=V&note=a%20b&note=c&drawing=W#viewer', receipt: guest('G') })).toBe('/app?note=a+b&note=c#viewer')
+    expect(policy({ receipt: { ...account('U'), status: 'extracting' } })).toBe('/app?note=a+b&drawing=U')
+  })
+
+  it('URL307A-OMITTED-SCENE retains the provider consumer default and uses the current scene', () => {
+    const h = mount('/app?surface=browser', { scene: undefined })
+    act(() => { controls.setFromUpload(account('U')) })
+    expect(shown('drawing-id')).toBe('U')
+    expect(write).not.toHaveBeenCalled()
+    h.update({ scene: 'app' })
+    act(() => { controls.setFromUpload(account('V')) })
+    expect(address()).toBe('/app?surface=browser&drawing=V')
+    expect(write).toHaveBeenCalledTimes(1)
+  })
+})
 
 // A probe that renders the identity and exposes its mutators, so the tests
 // drive the real provider rather than its internals.
@@ -65,6 +247,7 @@ function readout(identity) {
       <span data-testid="drawing-source">{String(identity.source)}</span>
       <span data-testid="drawing-origin">{identity.origin}</span>
       <span data-testid="drawing-mode">{identity.mode}</span>
+      <span data-testid="drawing-tenant">{String(identity.tenantKind)}</span>
     </>
   )
 }
@@ -243,16 +426,19 @@ describe('the provider owns the identity for its mode', () => {
     act(() => { controls.setFromUpload({ drawing_id: 'guest-upload-1', tenant_kind: 'guest' }) })
     expect(shown('drawing-id')).toBe('guest-upload-1')
     expect(shown('drawing-origin')).toBe('upload')
+    expect(shown('drawing-tenant')).toBe('guest')
     expect(rememberDrawingId).not.toHaveBeenCalled()
 
     act(() => { controls.setFromUpload({ drawing_id: 'account-upload-1', tenant_kind: 'account' }) })
     expect(shown('drawing-id')).toBe('account-upload-1')
+    expect(shown('drawing-tenant')).toBe('account')
     expect(rememberDrawingId).toHaveBeenCalledWith('account-upload-1')
   })
 
   it('a receipt with no drawing id promotes NOTHING (the old early return)', () => {
     expect(identityFromUploadReceipt({ tenant_kind: 'account' })).toBeNull()
     expect(identityFromUploadReceipt(null)).toBeNull()
+    expect(identityFromUploadReceipt({ drawing_id: 'U' }).tenantKind).toBeNull()
     render(
       <DrawingIdentityProvider mode={DRAWING_MODE_OPERATOR} search="" publicDemo liveDemo={false}>
         <Probe />

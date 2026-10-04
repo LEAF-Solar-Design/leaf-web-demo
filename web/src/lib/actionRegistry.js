@@ -302,7 +302,8 @@ export const INTERACTIVE_TARGET_SELECTOR = 'button, a, summary, [role="button"],
  * this module performs no effect of its own.
  */
 export const ESCAPE_RUNGS = Object.freeze([
-  Object.freeze({ id: 'drawer', open: (ctx) => !!ctx.drawer, run: (ctx) => ctx.onCloseDrawer?.() }),
+  Object.freeze({ id: 'drawer', open: (ctx) => (!!ctx.drawer && ctx.drawer !== 'none')
+    || (ctx.phoneViewport === true && !!ctx.studioDrawer && ctx.studioDrawer !== 'none'), run: (ctx) => ctx.onCloseDrawer?.() }),
   Object.freeze({ id: 'history', open: (ctx) => !!ctx.historyOpen, run: (ctx) => ctx.onCloseHistory?.() }),
   Object.freeze({ id: 'start', open: (ctx) => !!ctx.startOpen, run: (ctx) => ctx.onCloseStart?.() }),
   Object.freeze({ id: 'route', open: (ctx) => !!ctx.route, run: (ctx) => ctx.onDismissRoute?.() }),

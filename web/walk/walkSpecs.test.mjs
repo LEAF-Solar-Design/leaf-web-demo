@@ -9,6 +9,7 @@ const knownProofSpecs = [
   'u4-solar-ribbon.spec.mjs',
   'unsupported-cost.spec.mjs',
   'unsupported-fast.spec.mjs',
+  'u6-drawer-escape.spec.mjs',
   'ux-evidence.spec.mjs',
   'w1o-solar-unsupported.spec.mjs',
   'w1p-states.spec.mjs',

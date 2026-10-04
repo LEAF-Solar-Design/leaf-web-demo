@@ -55,6 +55,12 @@ describe('inert sweep cast', () => {
 describe('SiteRoot wiring', () => {
   const src = readFileSync(new URL('./SiteRoot.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 
+  it('URL307A-SCENE-WIRING passes the resolved scene and preserves both console scenes', () => {
+    assert.match(src, /<DrawingIdentityProvider\s+scene=\{scene\}/)
+    assert.match(src, /mode=\{scene === 'app' \|\| scene === 'leaf-platform' \? DRAWING_MODE_CONSOLE : DRAWING_MODE_OPERATOR\}/)
+    assert.match(src, /const scene = bootApp \? 'app' : sceneForPath\(path\)/)
+  })
+
   it('gates the Escape eject on sceneAllowsMarketingEject, not a scene literal', () => {
     assert.match(src, /e\.key === 'Escape' && sceneAllowsMarketingEject\(scene\)/)
     assert.doesNotMatch(src, /e\.key === 'Escape' && scene === /)

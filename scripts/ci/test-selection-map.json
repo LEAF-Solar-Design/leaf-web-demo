@@ -468,6 +468,7 @@
     "server-solar-terrain-route",
     "server-solar-tool-color-strings",
     "server-solar-tool-pvcase-convert",
+    "server-solar-pvcase-admission",
     "server-solar-tool-combiners",
     "server-solar-tool-feeders",
     "server-solar-tool-feeders-ground",

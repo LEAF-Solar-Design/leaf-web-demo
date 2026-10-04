@@ -51,6 +51,14 @@ ARG VITE_IOS_SURFACE=1
 # check_web_container_config.mjs pin, together.
 # Commit-stable, so it stays above npm ci.
 ARG VITE_CAD_EDIT=1
+# solar flow flip: ON (1), 2026-10-04. Read as the string '1' in
+# web/src/solar/flag.js. One shared web image serves staging and production,
+# so this is the all-environments enable. Rollback = 0 here AND in
+# build-platform-images.yml's two web-build env blocks AND the
+# check_web_container_config.mjs pins, together.
+# Commit-stable, so it stays above npm ci.
+ARG VITE_SOLAR_FLOW_RAIL=1
+ARG VITE_SOLAR_SETTINGS_FORM=1
 ENV VITE_API_BASE=${VITE_API_BASE} \
     VITE_MOCK=${VITE_MOCK} \
     VITE_AUTH0_DOMAIN=${VITE_AUTH0_DOMAIN} \
@@ -58,7 +66,9 @@ ENV VITE_API_BASE=${VITE_API_BASE} \
     VITE_AUTH0_AUDIENCE=${VITE_AUTH0_AUDIENCE} \
     VITE_LIFECYCLE_UI=${VITE_LIFECYCLE_UI} \
     VITE_IOS_SURFACE=${VITE_IOS_SURFACE} \
-    VITE_CAD_EDIT=${VITE_CAD_EDIT}
+    VITE_CAD_EDIT=${VITE_CAD_EDIT} \
+    VITE_SOLAR_FLOW_RAIL=${VITE_SOLAR_FLOW_RAIL} \
+    VITE_SOLAR_SETTINGS_FORM=${VITE_SOLAR_SETTINGS_FORM}
 
 COPY web/package.json web/package-lock.json /web/
 RUN npm ci
