@@ -89,6 +89,101 @@ async function f3Ready() {
 function f3Reason(sentence) { expect(screen.getAllByText(sentence).length).toBeGreaterThan(0) }
 
 describe('F3 SolarEdge workspace integration', () => {
+  it('F3 26 closing during pending staging focuses the enabled trigger', async () => {
+    const { p } = f3Props({ onStageSolarEdgeAccept: vi.fn(() => new Promise(() => {})) })
+    render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledTimes(1)
+    const close = screen.getByRole('button', { name: 'Close' })
+    close.focus()
+    fireEvent.click(close)
+    expect(f3Trigger().disabled).toBe(false)
+    expect(document.activeElement).toBe(f3Trigger())
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('F3 27 closing during pending staging keeps focus on a reason that remains', async () => {
+    const { p } = f3Props({ onStageSolarEdgeAccept: vi.fn(() => new Promise(() => {})) })
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledTimes(1)
+    view.rerender(<SolarWorkspaceTools {...p} busy={true} />)
+    const close = screen.getByRole('button', { name: 'Close' })
+    close.focus()
+    fireEvent.click(close)
+    expect(document.activeElement).toBe(screen.getByText(SOLAREDGE_WORKSPACE_REASONS.run_in_progress))
+    expect(document.activeElement.tagName).toBe('P')
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('F3 28 a report kept across 3 to 4 to 3 stays stale', async () => {
+    const { p, client } = f3Props()
+    let panelProps
+    const Panel = solarEdgePanels.default
+    vi.spyOn(solarEdgePanels, 'default').mockImplementation((props) => {
+      panelProps = props
+      return <Panel {...props} />
+    })
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={4} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 4)
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={3} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 3)
+    expect(p.transport.readIntake).toHaveBeenCalledTimes(3)
+    expect(panelProps.onAccept({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })).toBe(false)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.report_stale)
+    expect(f3AcceptButton().disabled).toBe(true)
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+    expect(client.requestReport).toHaveBeenCalledTimes(1)
+  })
+
+  it('F3 29 a report kept across 3 to undefined to 3 stays stale', async () => {
+    const { p, client } = f3Props()
+    let panelProps
+    const Panel = solarEdgePanels.default
+    vi.spyOn(solarEdgePanels, 'default').mockImplementation((props) => {
+      panelProps = props
+      return <Panel {...props} />
+    })
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={undefined} />)
+    expect(panelProps.graphRev).toBeUndefined()
+    expect(p.transport.readIntake).toHaveBeenCalledTimes(1)
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={3} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 3)
+    expect(p.transport.readIntake).toHaveBeenCalledTimes(2)
+    expect(panelProps.onAccept({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })).toBe(false)
+    f3Reason(SOLAREDGE_WORKSPACE_REASONS.report_stale)
+    expect(f3AcceptButton().disabled).toBe(true)
+    expect(p.onStageSolarEdgeAccept).not.toHaveBeenCalled()
+    expect(client.requestReport).toHaveBeenCalledTimes(1)
+  })
+
+  it('F3 30 a report rebuilt after the return stages once', async () => {
+    const { p, client } = f3Props()
+    let panelProps
+    const Panel = solarEdgePanels.default
+    vi.spyOn(solarEdgePanels, 'default').mockImplementation((props) => {
+      panelProps = props
+      return <Panel {...props} />
+    })
+    const view = render(<SolarWorkspaceTools {...p} />); f3Open(); await f3Ready()
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={4} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 4)
+    view.rerender(<SolarWorkspaceTools {...p} drawingVersion={3} />)
+    await waitFor(() => expect(panelProps.graphRev).toBe(12))
+    expect(p.transport.readIntake).toHaveBeenLastCalledWith('solar', 3)
+    await f3Build()
+    await waitFor(() => expect(f3AcceptButton().disabled).toBe(false))
+    fireEvent.click(f3AcceptButton())
+    expect(p.onStageSolarEdgeAccept).toHaveBeenCalledExactlyOnceWith({ expected_rev: 12, report_artifact_id: F3_REPORT_ID })
+    expect(client.requestReport).toHaveBeenCalledTimes(2)
+  })
+
   it('F3 23 binds a report for another version as stale', async () => {
     const { p, client } = f3Props()
     const value = f3Report()

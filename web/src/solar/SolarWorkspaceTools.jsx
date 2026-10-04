@@ -153,6 +153,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const solarEdgeTrigger = useRef(null)
   const solarEdgeReason = useRef(null)
   const solarEdgePanel = useRef(null)
+  const solarEdgeCloseFocus = useRef(false)
   const revisionGeneration = useRef(0)
   const solarLifetime = useRef(0)
   const stagingToken = useRef(null)
@@ -162,6 +163,9 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const reportBinding = useRef(null)
   const solarCurrent = useRef(null)
   const previousSolar = solarCurrent.current
+  if (previousSolar && previousSolar.version !== drawingVersion && reportBinding.current) {
+    reportBinding.current = { ...reportBinding.current, eligible: false, stale: true }
+  }
   if (previousSolar && (previousSolar.version !== drawingVersion || previousSolar.flow !== flow
     || previousSolar.open !== openPanel || previousSolar.read !== readIntake)) {
     solarLifetime.current += 1
@@ -279,6 +283,12 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     if (openPanel === 'combiner-intake' && hasCombiner) combinerPanel.current?.querySelector('input[type="file"]')?.focus()
     if (openPanel === 'solaredge-import' && hasSolarEdge) solarEdgePanel.current?.querySelector('input[type="file"]')?.focus()
   }, [openPanel, hasLandxml, hasCombiner, hasTerrain, hasSolarEdge])
+
+  useLayoutEffect(() => {
+    if (openPanel !== null || !solarEdgeCloseFocus.current) return
+    solarEdgeCloseFocus.current = false
+    ;(solarEdgeReason.current ?? solarEdgeTrigger.current)?.focus()
+  }, [openPanel])
 
   useLayoutEffect(() => {
     if (!intake) return
@@ -399,7 +409,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const solarReason = solarGate()
   const currentRevision = revisionRef.current?.version === drawingVersion ? revisionRef.current : null
   const acceptSolarReason = !onStageSolarEdgeAccept ? SOLAREDGE_WORKSPACE_REASONS.staging_unavailable
-    : reportBinding.current && reportBinding.current.version !== drawingVersion ? SOLAREDGE_WORKSPACE_REASONS.report_stale
+    : reportBinding.current && (reportBinding.current.stale || reportBinding.current.version !== drawingVersion) ? SOLAREDGE_WORKSPACE_REASONS.report_stale
       : currentRevision?.phase === 'loading' ? SOLAREDGE_WORKSPACE_REASONS.revision_loading
         : currentRevision?.phase === 'unavailable' ? SOLAREDGE_WORKSPACE_REASONS.revision_unavailable
           : currentRevision?.phase !== 'ready' ? SOLAREDGE_WORKSPACE_REASONS.revision_needed : null
@@ -510,9 +520,8 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
           stagingToken.current = null
           setStagingPending(false)
           setRevision({ scope: drawingId, version: drawingVersion, phase: 'needed', graphRev: null })
+          solarEdgeCloseFocus.current = true
           setOpenPanel(null)
-          if (solarReason) solarEdgeReason.current?.focus()
-          else solarEdgeTrigger.current?.focus()
         }}>Close</button>
       </div>}
       {hasLandxml && <button type="button" ref={trigger} disabled={!!writers.tracker} aria-expanded={openPanel === 'landxml'} onClick={() => setOpenPanel('landxml')}>
