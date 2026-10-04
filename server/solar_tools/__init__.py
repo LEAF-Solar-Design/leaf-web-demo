@@ -8,7 +8,7 @@ from pathlib import Path
 
 SCHEMA = "leaf.solar-tool.v1"
 ADAPTER_KINDS = ("local-graph-commit", "cloud-proposal", "local-graph-read")
-TRUSTED_INPUTS = ("source_intake", "proposal_candidate", "solaredge_report", "physical_state")
+TRUSTED_INPUTS = ("source_intake", "proposal_candidate", "solaredge_report", "physical_state", "pvcase_source")
 MAX_DECLARATIONS = 256
 _DIRECTORY = Path(__file__).resolve().parent
 _KEYS = frozenset((
@@ -148,6 +148,14 @@ def _validate(row, stem, server_dir, families):
         _require(row["adapter"] == "local-graph-commit" and row["seedable"] is False
                  and row["trusted_inputs"] == ["physical_state"],
                  "physical_state requires a non-seed local graph commit and no other trusted input")
+    if "pvcase_source" in row["trusted_inputs"]:
+        adapter = {"solar-pvcase-convert": "local-graph-commit",
+                   "solar-pvcase-solve": "local-graph-commit",
+                   "solar-pvcase-export": "local-graph-read"}.get(row["name"])
+        _require(adapter is not None and row["adapter"] == adapter
+                 and row["trusted_inputs"] == ["pvcase_source"]
+                 and row["requires_persisted_graph"] is True and row["seedable"] is False,
+                 "pvcase_source requires a persisted non-seed PVcase tool and no other trusted input")
     if row["seedable"]:
         _require(row["adapter"] == "local-graph-commit", "seed must use local adapter")
     readiness = row["readiness"]
@@ -163,7 +171,8 @@ def _validate(row, stem, server_dir, families):
         _require(row["entitlement"] == "run_read", "read adapter requires run_read")
         _require(row["requires_persisted_graph"] is True, "read adapter requires a persisted graph")
         _require(readiness["kind"] in ("facets", "hook"), "read adapter requires facets or hook readiness")
-        _require(row["trusted_inputs"] == [], "read adapter takes no trusted inputs")
+        _require(row["trusted_inputs"] == [] or (row["name"] == "solar-pvcase-export"
+                 and row["trusted_inputs"] == ["pvcase_source"]), "read adapter takes no trusted inputs")
     record = row["record"]
     if row["record_store"] == "registry":
         _require(isinstance(record, dict), "registry store requires record")

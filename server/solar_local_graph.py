@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from solar_design_graph import GraphValidationError, _bounded_json
 from solar_graph_context import resolve_graph_context
 from solar_graph_seed import new_empty_graph, resolve_seed_context, validate_seed_request
 from solar_sizing_client import digest
-from solar_solve_results import publish_version
+from solar_solve_results import canonical_bytes, publish_version, version_companion
 
 ADAPTER_KIND = "local-graph-commit"
 RESULT_SCHEMA = "leaf.solar-graph-commit.v1"
@@ -95,6 +96,110 @@ def _physical_state(backend, tenant_id, drawing_id, project_id):
     return {"view": view, "document": document}
 
 
+PVCASE_TOOLS = ("solar-pvcase-convert", "solar-pvcase-solve", "solar-pvcase-export")
+
+
+def validate_pvcase_request(tool, params, *, adapter=False):
+    """Validate builtin parameters before any immutable-source lookup."""
+    code = "INVALID_PVCASE_" + tool.rsplit("-", 1)[1].upper() + "_REQUEST"
+    keys = ({"expected_rev", "source_artifact_id"} if tool == "solar-pvcase-convert"
+            else {"expected_rev"} if tool == "solar-pvcase-solve" else set())
+    try:
+        _bounded_json(params)
+        if adapter and type(params) is dict:
+            if "drawing_id" in params and (type(params["drawing_id"]) is not str
+                                           or len(params["drawing_id"]) > 128):
+                raise ValueError()
+            params = {key: value for key, value in params.items() if key != "drawing_id"}
+        if type(params) is not dict or set(params) != keys:
+            raise ValueError()
+        if "expected_rev" in keys and (type(params["expected_rev"]) is not int
+                                       or not 0 <= params["expected_rev"] <= 2147483647):
+            raise ValueError()
+        if "source_artifact_id" in keys and (
+                type(params["source_artifact_id"]) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", params["source_artifact_id"]) is None):
+            raise ValueError()
+    except (ValueError, TypeError, RecursionError, ArithmeticError):
+        raise GraphValidationError(code, "<root>") from None
+    return params.get("expected_rev")
+
+
+def pvcase_conversion_marker(graph):
+    import solar_pvcase_conversion as conversion
+    extra = graph.get("extra") if isinstance(graph, dict) else None
+    marker = extra.get("pvcase") if isinstance(extra, dict) else None
+    return (isinstance(marker, dict) and marker.get("schema") == conversion.INPUT_SCHEMA
+            and marker.get("conversion_schema") == conversion.CONVERSION_SCHEMA)
+
+
+def check_pvcase_source(graph, params, pvcase_source, *, converting=False):
+    """Verify exact-byte identity; source-version equality is deliberately not required."""
+    import solar_pvcase_sources as sources
+    if pvcase_source is None:
+        raise GraphValidationError("PVCASE_SOURCE_REQUIRED", "<root>") from None
+    try:
+        if type(pvcase_source) is not dict or set(pvcase_source) != {"meta", "content", "envelope"}:
+            raise ValueError()
+        meta, content, envelope = (pvcase_source[k] for k in ("meta", "content", "envelope"))
+        _bounded_json(envelope)
+        expected = (params["source_artifact_id"] if converting
+                    else graph["extra"]["pvcase"]["source_artifact_id"])
+        if (type(meta) is not dict or type(content) is not bytes
+                or type(expected) is not str or re.fullmatch(r"[0-9a-f]{64}", expected) is None
+                or meta["artifact_id"] != expected or meta["project_id"] != graph["project"]["id"]
+                or hashlib.sha256(content).hexdigest() != meta["content_sha256"]
+                or meta["content_sha256"] != meta["request_sha256"]
+                or digest(sources.inspect_pvcase_source(content)) != digest(envelope)
+                or (not converting and graph["extra"]["pvcase"]["source_sha256"]
+                    != meta["content_sha256"])):
+            raise ValueError()
+    except (ValueError, TypeError, LookupError, AttributeError, RecursionError, ArithmeticError):
+        raise GraphValidationError("PVG_INVALID_SOURCE", "<root>") from None
+    return pvcase_source
+
+
+def check_pvcase_result_source(graph, pvcase_source):
+    """The published graph and every imported frame must retain the resolved binding."""
+    try:
+        meta = pvcase_source["meta"]
+        records = [graph["extra"]["pvcase"]] + [f["provenance"]["pvcase"] for f in graph["frames"]]
+        if graph["project"]["id"] != meta["project_id"] or not graph["frames"] or any(
+                r["source_artifact_id"] != meta["artifact_id"]
+                or r["source_sha256"] != meta["content_sha256"] for r in records):
+            raise ValueError()
+    except (ValueError, TypeError, LookupError, AttributeError):
+        raise GraphValidationError("PVG_INVALID_SOURCE", "<root>") from None
+
+
+def _pvcase_source(backend, tenant_id, drawing_id, version, graph_sha256, params,
+                   *, tool, project_id=None):
+    import solar_pvcase_sources as sources
+    validate_pvcase_request(tool, params)
+    context = resolve_graph_context(backend, tenant_id, drawing_id, version, project_id=project_id)
+    graph = context["graph"]
+    if (context["graph_sha256"] != graph_sha256 or digest(graph) != graph_sha256
+            or graph["project"]["id"] != context["project_id"]
+            or (project_id is not None and context["project_id"] != project_id)):
+        raise GraphValidationError("PVG_INVALID_SOURCE", "<root>") from None
+    converting = tool == "solar-pvcase-convert"
+    if not converting and not pvcase_conversion_marker(graph):
+        raise GraphValidationError("PVCASE_CONVERSION_REQUIRED", "<root>") from None
+    try:
+        artifact_id = (params["source_artifact_id"] if converting
+                       else graph["extra"]["pvcase"]["source_artifact_id"])
+    except (KeyError, TypeError):
+        raise GraphValidationError("PVG_INVALID_SOURCE", "<root>") from None
+    try:
+        meta, content, envelope = sources.load_pvcase_source(
+            backend, tenant_id, drawing_id, artifact_id, project_id=context["project_id"])
+    except (sources.PvcaseSourceError, OSError, RuntimeError, ValueError, TypeError,
+            LookupError, AttributeError, ArithmeticError):
+        raise GraphValidationError("PVCASE_SOURCE_UNAVAILABLE", "<root>") from None
+    value = {"meta": meta, "content": content, "envelope": envelope}
+    return check_pvcase_source(graph, params, value, converting=converting)
+
+
 PHYSICAL_SOURCE_KEYS = frozenset({"head_index", "state_artifact_id", "state_content_sha256"})
 
 
@@ -148,7 +253,8 @@ def _physical_state_entry(backend, tenant_id, drawing_id, project_id, source):
 
 
 _TRUSTED_RESOLVERS = {"source_intake": _source_intake, "proposal_candidate": _proposal_candidate,
-                      "solaredge_report": _solaredge_report, "physical_state": _physical_state}
+                      "solaredge_report": _solaredge_report, "physical_state": _physical_state,
+                      "pvcase_source": _pvcase_source}
 
 
 def _resolve_trusted(tool, backend, tenant_id, drawing_id, version, graph_sha256, snapshot,
@@ -166,6 +272,10 @@ def _resolve_trusted(tool, backend, tenant_id, drawing_id, version, graph_sha256
                 backend, tenant_id, drawing_id, version, graph_sha256, params)
         elif name == "physical_state":
             resolved[name] = _TRUSTED_RESOLVERS[name](backend, tenant_id, drawing_id, project_id)
+        elif name == "pvcase_source":
+            resolved[name] = _TRUSTED_RESOLVERS[name](
+                backend, tenant_id, drawing_id, version, graph_sha256, params,
+                tool=tool, project_id=project_id)
         else:
             resolved[name] = _TRUSTED_RESOLVERS[name](
                 backend, tenant_id, drawing_id, version, graph_sha256)
@@ -247,6 +357,20 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
                 or parent["graph"]["rev"] != result["before_rev"]
                 or parent["graph_sha256"] != result["before_graph_sha256"]):
             raise ValueError()
+        # Publication replaces only the design graph and keeps every other key of the parent's intake, so a
+        # receipt that names another project was not produced by this request.
+        if (result["project_id"] != context["project_id"]
+                or context["project_id"] != parent["project_id"]):
+            raise ValueError()
+        # Publication writes canonical_bytes(version_companion(parent intake, before, after)), so the proof
+        # rebuilds those bytes from the stored parent and the two stored graphs and requires the stored version's
+        # digest to equal theirs (the publisher's own replay check). A stored version whose other content differs
+        # from its parent's, one the publisher would refuse (a value outside its bounds, even one carried
+        # identically in the parent), or one serialized differently is not accepted.
+        _, parent_key, _ = store.resolve_version_entry(backend, tenant_id, drawing_id, source_version)
+        expected = version_companion(json.loads(backend.get(parent_key)), parent["graph"], context["graph"])
+        if hashlib.sha256(canonical_bytes(expected)).hexdigest() != entry["sha256"]:
+            raise ValueError()
         trusted_inputs = solar_tools.get(tool)["trusted_inputs"]
         if "proposal_candidate" in trusted_inputs or proposal_candidate is not None:
             resolved_candidate = _resolve_trusted(
@@ -283,6 +407,15 @@ def graph_commit_provenance(result, params, tenant_id, job_id, tool, source_vers
                                           context["graph"]["extra"]["physical_state"])
             after = _load_builtin(tool).run(copy.deepcopy(parent["graph"]), builtin_params,
                                             physical_state=state)
+            if digest(after) != result["graph_sha256"]:
+                raise ValueError()
+        if "pvcase_source" in trusted_inputs:
+            resolved = _resolve_trusted(tool, backend, tenant_id, drawing_id, source_version,
+                                        parent["graph_sha256"], None, builtin_params,
+                                        project_id=parent["project_id"])
+            after = _load_builtin(tool).run(copy.deepcopy(parent["graph"]), builtin_params,
+                                            **copy.deepcopy(resolved))
+            check_pvcase_result_source(after, resolved["pvcase_source"])
             if digest(after) != result["graph_sha256"]:
                 raise ValueError()
         return {"execution_mode": "local_graph_commit", "adapter": ADAPTER_KIND,
@@ -366,6 +499,8 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
         raise GraphValidationError("UNKNOWN_LOCAL_GRAPH_TOOL")
     if proposal_candidate is not None and "proposal_candidate" not in solar_tools.get(tool)["trusted_inputs"]:
         raise GraphValidationError("INVALID_COMMIT_REQUEST")
+    if tool in PVCASE_TOOLS:
+        validate_pvcase_request(tool, params, adapter=True)
     _bounded_json(params)
     if type(params) is not dict:
         raise GraphValidationError(solar_tools.get(tool)["invalid_request_code"])
@@ -427,6 +562,8 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
             if (view is None or type(extra) is not dict
                     or extra.get("physical_state") != physical_state_source(view)):
                 raise GraphValidationError("PHYSICAL_STATE_UNBOUND")
+        if "pvcase_source" in resolved:
+            check_pvcase_result_source(after, resolved["pvcase_source"])
         request_sha256 = request_digest(tool, drawing_id, source_version, builtin_params,
                                        proposal_candidate=proposal_candidate)
         receipt = publish_version(

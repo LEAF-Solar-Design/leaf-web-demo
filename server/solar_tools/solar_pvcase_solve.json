@@ -1,0 +1,61 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-pvcase-solve",
+  "builtin": "builtins/solar_pvcase_solve.py",
+  "family": "stringing",
+  "adapter": "local-graph-commit",
+  "entitlement": "run_write",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_PVCASE_SOLVE_REQUEST",
+  "readiness": {
+    "kind": "hook"
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-pvcase-solve",
+    "version": "1.0.0",
+    "description": "Create unassigned strings from the current G33 design using its parity chunk length",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_pvcase_solve",
+    "entry": "builtins/solar_pvcase_solve.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "expected_rev": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      },
+      "required": [
+        "expected_rev"
+      ],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.write"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [],
+  "trusted_inputs": [
+    "pvcase_source"
+  ],
+  "maturity": "preview",
+  "wave": 4,
+  "order": 50,
+  "scenario": "w4-pvcase"
+}

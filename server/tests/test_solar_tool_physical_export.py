@@ -149,7 +149,8 @@ def test_pex_01_declaration_and_discovery(backend, graph, monkeypatch):
     assert set(read.local_graph_read_tools()) == {e["name"] for e in entries if e["adapter"] == "local-graph-read"}
     assert [(e["order"], e["name"]) for e in entries if e["wave"] == 4] == [
         (30, "solar-solaredge-accept"), (31, "solar-solaredge-tracking-read"),
-        (40, "solar-terrain-read"), (50, "solar-physical-shade"), (60, TOOL)]
+        (40, "solar-pvcase-convert"), (40, "solar-terrain-read"), (50, "solar-physical-shade"),
+        (50, "solar-pvcase-solve"), (60, TOOL), (60, "solar-pvcase-export")]
     assert availability.w1_local_commit_inputs(graph)[TOOL] == {"input_ready": True, "input_reason": None}
     monkeypatch.setattr(deps, "tenant_repo_dir", lambda tenant: None)
     monkeypatch.setattr(deps, "load_tenant_repo_tools", lambda tenant: [])

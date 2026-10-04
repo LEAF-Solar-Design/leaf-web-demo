@@ -1,0 +1,53 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-pvcase-export",
+  "builtin": "builtins/solar_pvcase_export.py",
+  "family": "stringing",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_PVCASE_EXPORT_REQUEST",
+  "readiness": {
+    "kind": "hook"
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-pvcase-export",
+    "version": "1.0.0",
+    "description": "Export current G33 string assignments with source handles and graph references",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_pvcase_export",
+    "entry": "builtins/solar_pvcase_export.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.read"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [],
+  "trusted_inputs": [
+    "pvcase_source"
+  ],
+  "maturity": "preview",
+  "wave": 4,
+  "order": 60,
+  "scenario": "w4-pvcase"
+}

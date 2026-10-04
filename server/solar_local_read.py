@@ -12,7 +12,7 @@ import solar_physical_state
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError, _bounded_json
 from solar_graph_context import resolve_graph_context
-from solar_local_graph import request_digest, stable_numbers
+from solar_local_graph import request_digest, stable_numbers, _resolve_trusted, validate_pvcase_request
 from solar_sizing_client import digest
 
 ADAPTER_KIND = "local-graph-read"
@@ -164,10 +164,12 @@ _UNSET = object()
 
 
 def _read_output(tool, graph, builtin_params, sink=None, *, version_graph_sha256=None,
-                 physical_head=_UNSET):
+                 physical_head=_UNSET, pvcase_source=None):
     try:
         module = _load_builtin(tool)
         extra = {}
+        if "pvcase_source" in solar_tools.get(tool)["trusted_inputs"]:
+            extra["pvcase_source"] = copy.deepcopy(pvcase_source)
         if _reads_version_history(module):
             extra["version_graph_sha256"] = version_graph_sha256
         if _reads_physical_head(module):
@@ -217,6 +219,8 @@ def run_local_graph_read(backend, tenant_id, tool, params, *, drawing_id, source
                          job_id, project_id=None):
     if tool not in local_graph_read_tools():
         raise GraphValidationError("UNKNOWN_LOCAL_GRAPH_READ_TOOL")
+    if "pvcase_source" in solar_tools.get(tool)["trusted_inputs"]:
+        validate_pvcase_request(tool, params, adapter=True)
     _bounded_json(params)
     if type(params) is not dict:
         raise GraphValidationError(solar_tools.get(tool)["invalid_request_code"])
@@ -237,6 +241,9 @@ def run_local_graph_read(backend, tenant_id, tool, params, *, drawing_id, source
     sink = solar_artifacts.ArtifactSink(backend, tenant_id, drawing_id, context, tool,
                                         request_sha256, False)
     output, data = _read_output(tool, context["graph"], builtin_params, sink,
+                                **_resolve_trusted(tool, backend, tenant_id, drawing_id,
+                                                   source_version, context["graph_sha256"], None,
+                                                   builtin_params, project_id=context["project_id"]),
                                 **_history_argument(tool, backend, tenant_id, drawing_id),
                                 **_physical_argument(tool, backend, tenant_id, drawing_id,
                                                      context["project_id"]))
@@ -286,6 +293,9 @@ def graph_read_provenance(result, params, tenant_id, job_id, tool, source_versio
         for reference in solar_artifacts.artifact_references(result["output"]):
             sink.verify_reference(reference)
         output, data = _read_output(tool, context["graph"], builtin_params, sink,
+                                    **_resolve_trusted(tool, backend, tenant_id, drawing_id,
+                                                       source_version, context["graph_sha256"], None,
+                                                       builtin_params, project_id=context["project_id"]),
                                     **_history_argument(tool, backend, tenant_id, drawing_id),
                                     **_physical_argument(tool, backend, tenant_id, drawing_id,
                                                          context["project_id"], result["output"],
