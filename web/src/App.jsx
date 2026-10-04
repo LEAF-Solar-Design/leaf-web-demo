@@ -2701,82 +2701,6 @@ export default function App() {
   }, [running, resultOwnsR, routeErr, historyOpen, historyErr, historyLoading,
       toolsErr, catalogErr, toolsOpen, anyFamilyOpen, mock, authRequired, refreshFail])
 
-  // Global key ladder, TABLE-DRIVEN from the action registry (slice 10a):
-  // ⌘K summons the bar; Esc closes the topmost surface (drawer > history >
-  // route/failed strip > running run > selection > open project); R retries the
-  // highest-priority visible error (outside text inputs); any OTHER bare
-  // printable keystroke falls into the prompt bar (type-to-fall-through).
-  //
-  // The ORDER and the SKIP RULES are the registry's `ladderDecision`, a pure
-  // function actionRegistry.test.js walks against the old if/else as literals,
-  // and the listener is the registry's `ladderListener`. What stays here is
-  // what only this shell can supply: the shell state and the handlers.
-  useEffect(() => {
-    // The plain shell state the decision reads, built ONCE per subscription
-    // (this effect re-runs when any of it changes), never per keystroke: a key
-    // that is not the ladder's allocates nothing here, as the pre-slice
-    // if/else chain allocated nothing.
-    const shell = {
-      startOpen,
-      drawer,
-      historyOpen,
-      route,
-      routeErr,
-      runErr,
-      running,
-      selectedHandle,
-      openProjectId,
-      rTarget,
-    }
-    // The handlers the record names, built only once a decision came back.
-    const ladderHandlers = (state) => ({
-      ...state,
-      focusBar: () => barInputRef.current?.focus(),
-      onCloseDrawer: () => setDrawer(null),
-      onCloseHistory: () => closeHistory(),
-      onCloseStart: onReturnToDrawing,
-      onDismissRoute: () => (ENV_SOLAR_FLOW_RAIL ? onDismissSolarFlowRoute() : dismissRoute()),
-      onClearErrors: () => { clearRouteError(); clearRunErr() },
-      onInterruptRun: () => {
-        // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
-        // ONE interrupt gesture (the rail keeps the job; nothing cancels
-        // server-side). Refs, not deps: elapsed ticks every 1s and must
-        // not re-subscribe this listener.
-        track('run.interrupted', {
-          ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
-          ...(interruptSnapshotRef.current.elapsedMs != null
-            ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
-        })
-        interruptRun()
-        const tool = typeof currentJob?.tool === 'string' && currentJob.tool.trim() ? currentJob.tool : 'the run'
-        showToast(result != null
-          ? { text: `Stopped waiting for the drawing to refresh after ${tool}.` }
-          : { text: mock
-          ? `Stopped waiting for ${tool}.`
-          : currentJob?.job_id
-            ? `Stopped following ${tool}. It keeps running; find it in Jobs.`
-            : `Stopped waiting for ${tool} to be accepted. If the server accepts it, it will appear in Jobs.` })
-      },
-      onClearSelection: () => setSelectedHandle(null),
-      onCloseProject: () => onCloseProject(),
-      onRetryRoute: () => onDispatch(),
-      onRetryHistory: () => loadHistory(),
-      onRetryTools: () => retryTools(),
-      onRetryCatalog: () => loadCatalog(),
-      onRetryRefresh: () => onRetryViewerRefresh(),
-      onOpenShortcuts: () => setShortcutsOpen(true),
-    })
-    // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7). The
-    // listener stamps only a branch that will handle the key: type-to-fall-
-    // through must keep normal motion, and so must an inactive retry rung.
-    const onKey = ladderListener(shell, ladderHandlers, markInstant)
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [startOpen, onReturnToDrawing, drawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
-      interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
-      closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
-      onDismissSolarFlowRoute])
-
   // Click-to-fall-through (operator rule): a click anywhere on the surface that
   // doesn't otherwise take an action activates the prompt bar. Real
   // interactions (buttons, links, fields, the viewer canvas — a click there
@@ -3037,6 +2961,86 @@ export default function App() {
     }
   }, [drafting, surfaceSlots.toolbar.profile])
   const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
+  // Global key ladder, TABLE-DRIVEN from the action registry (slice 10a):
+  // ⌘K summons the bar; Esc closes the topmost surface (drawer > history >
+  // route/failed strip > running run > selection > open project); R retries the
+  // highest-priority visible error (outside text inputs); any OTHER bare
+  // printable keystroke falls into the prompt bar (type-to-fall-through).
+  //
+  // The ORDER and the SKIP RULES are the registry's `ladderDecision`, a pure
+  // function actionRegistry.test.js walks against the old if/else as literals,
+  // and the listener is the registry's `ladderListener`. What stays here is
+  // what only this shell can supply: the shell state and the handlers.
+  useEffect(() => {
+    // The plain shell state the decision reads, built ONCE per subscription
+    // (this effect re-runs when any of it changes), never per keystroke: a key
+    // that is not the ladder's allocates nothing here, as the pre-slice
+    // if/else chain allocated nothing.
+    const shell = {
+      startOpen,
+      drawer,
+      phoneViewport,
+      studioDrawer: studioShell ? studioDrawer : 'none',
+      historyOpen,
+      route,
+      routeErr,
+      runErr,
+      running,
+      selectedHandle,
+      openProjectId,
+      rTarget,
+    }
+    // The handlers the record names, built only once a decision came back.
+    const ladderHandlers = (state) => ({
+      ...state,
+      focusBar: () => barInputRef.current?.focus(),
+      onCloseDrawer: () => {
+        if (drawer && drawer !== 'none') setDrawer(null)
+        else setStudioDrawer('none')
+      },
+      onCloseHistory: () => closeHistory(),
+      onCloseStart: onReturnToDrawing,
+      onDismissRoute: () => (ENV_SOLAR_FLOW_RAIL ? onDismissSolarFlowRoute() : dismissRoute()),
+      onClearErrors: () => { clearRouteError(); clearRunErr() },
+      onInterruptRun: () => {
+        // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
+        // ONE interrupt gesture (the rail keeps the job; nothing cancels
+        // server-side). Refs, not deps: elapsed ticks every 1s and must
+        // not re-subscribe this listener.
+        track('run.interrupted', {
+          ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
+          ...(interruptSnapshotRef.current.elapsedMs != null
+            ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
+        })
+        interruptRun()
+        const tool = typeof currentJob?.tool === 'string' && currentJob.tool.trim() ? currentJob.tool : 'the run'
+        showToast(result != null
+          ? { text: `Stopped waiting for the drawing to refresh after ${tool}.` }
+          : { text: mock
+          ? `Stopped waiting for ${tool}.`
+          : currentJob?.job_id
+            ? `Stopped following ${tool}. It keeps running; find it in Jobs.`
+            : `Stopped waiting for ${tool} to be accepted. If the server accepts it, it will appear in Jobs.` })
+      },
+      onClearSelection: () => setSelectedHandle(null),
+      onCloseProject: () => onCloseProject(),
+      onRetryRoute: () => onDispatch(),
+      onRetryHistory: () => loadHistory(),
+      onRetryTools: () => retryTools(),
+      onRetryCatalog: () => loadCatalog(),
+      onRetryRefresh: () => onRetryViewerRefresh(),
+      onOpenShortcuts: () => setShortcutsOpen(true),
+    })
+    // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7). The
+    // listener stamps only a branch that will handle the key: type-to-fall-
+    // through must keep normal motion, and so must an inactive retry rung.
+    const onKey = ladderListener(shell, ladderHandlers, markInstant)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [startOpen, onReturnToDrawing, drawer, phoneViewport, studioShell, studioDrawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
+      interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
+      closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
+      onDismissSolarFlowRoute])
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
   const projectSwitcherRef = useRef(null)
   // Each bump opens the header switcher on its inline create field.
