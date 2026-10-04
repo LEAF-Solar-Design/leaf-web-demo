@@ -4,7 +4,8 @@ The plugin's SyncFromGlobalSettings always overwrites the drawing's Installation
 Settings.Default (DrawingPropertiesJson.cs:611), so a LEAFPROFILE Swap to a preset of the other
 design changes the drawing's design. In the plugin each panel group keeps its own design, so a
 drawing may hold both; the graph may not: every frame carries the project's design
-(INSTALLATION_DESIGN_MISMATCH), a Ground frame must carry a tracker and a Roof frame must not, so no
+(INSTALLATION_DESIGN_MISMATCH), an unmarked Ground frame must carry a tracker; the explicit PVcase
+captured-matrix variant carries neither tracker nor ground_slots. A Roof frame has no tracker, so no
 frame converts. The frozen policy (server/solar_preset_sync.py): a preset whose resolved design
 equals the drawing's changes nothing; on a drawing with no frame it sets
 project.installation_design through the project-change rule (server/solar_project.py

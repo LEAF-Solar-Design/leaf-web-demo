@@ -617,6 +617,14 @@ def build_suites() -> List[Suite]:
         # 26 tests + 32 more parametrizations = 58 passed.
         Suite("server-solar-pvcase-solve", "server tests/test_solar_pvcase_solve.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_solve.py"), 58),
+        Suite(
+            "server-solar-pvcase-conversion",
+            "server tests/test_solar_pvcase_conversion.py",
+            "pytest",
+            SERVER,
+            _py_pytest("tests/test_solar_pvcase_conversion.py"),
+            36,
+        ),
         Suite("server-solar-registry", "server tests/test_solar_registry.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_registry.py"), 120),
         # solar-homeruns-local: 30 cases for the builtin and the local graph commit rail.

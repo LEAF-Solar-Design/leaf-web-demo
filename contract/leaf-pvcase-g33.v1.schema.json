@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:leaf:pvcase-g33:v1",
+  "title": "Leaf PVcase G33 capture envelope v1",
+  "description": "Structural documentation of solar_pvcase_solve.validate_intake. Python enforces numeric finiteness, boolean exclusion, numeric handle uniqueness and aggregate budgets (rows plus cells <= 500000; positive sequence sum <= 500000). Conversion admission adds bounded JSON traversal and geometry budgets.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "leaf.pvcase-g33.v1"
+    },
+    "intake": {
+      "type": "object",
+      "properties": {
+        "units": {
+          "enum": [
+            "mm",
+            "cm",
+            "m",
+            "in",
+            "ft"
+          ]
+        },
+        "panels_per_string": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "panel_groups": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/group"
+          }
+        }
+      },
+      "required": [
+        "units",
+        "panels_per_string",
+        "panel_groups"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "intake"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "cell": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{1,16}(?![\\s\\S])"
+        },
+        "inverter_id": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "string_input_number": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "code",
+        "id",
+        "inverter_id",
+        "seq",
+        "string_input_number",
+        "x",
+        "y"
+      ],
+      "additionalProperties": false
+    },
+    "group": {
+      "type": "object",
+      "properties": {
+        "handle": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{1,16}(?![\\s\\S])"
+        },
+        "installation": {
+          "enum": [
+            "Roof",
+            "Ground"
+          ]
+        },
+        "panel_size": {
+          "type": "object",
+          "properties": {
+            "height_across_row": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "width_along_row": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "required": [
+            "height_across_row",
+            "width_along_row"
+          ],
+          "additionalProperties": false
+        },
+        "row_angle_rad": {
+          "type": "number"
+        },
+        "sequences": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647
+          }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/cell"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "required": [
+        "handle",
+        "installation",
+        "panel_size",
+        "row_angle_rad",
+        "sequences",
+        "rows"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -27,8 +27,9 @@ Installation design. The plugin resolves the stored text with BranchCmdCore.SetI
 ApplyProjectPreset (:1199-1200) reads every value but "Roof" as Ground, so installation_design(text)
 is "Roof" for exactly "Roof" and "Ground" for every other string. The plugin lets a drawing hold
 panel groups of both designs (each panelGroupJson keeps its own); the graph does not: every frame
-carries the project's design (INSTALLATION_DESIGN_MISMATCH), a Ground frame must carry a tracker and
-a Roof frame must not, so no frame can be converted. The frozen policy, applied before anything is
+carries the project's design (INSTALLATION_DESIGN_MISMATCH), an unmarked Ground frame must carry a
+tracker; the explicit PVcase captured-matrix variant carries neither tracker nor ground_slots.
+A Roof frame has no tracker, so no frame can be converted. The frozen policy, applied before anything is
 written: when the preset's resolved design equals the drawing's, nothing changes; when it differs on
 a drawing with no frame, project.installation_design takes it through the project-change rule
 (solar_project.set_installation_design: sizing confirmation cleared, voc_cold reseeded, derived
