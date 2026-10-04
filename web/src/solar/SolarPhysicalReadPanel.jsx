@@ -7,6 +7,7 @@ import { PHYSICAL_READ_TOOLS, PHYSICAL_EXPORT_FORMATS, buildPhysicalRead, physic
 const MOVED = 'The terrain changed, so review the refreshed preview before running again'
 const NO_HEAD = 'No physical state has been published for this drawing.'
 const UNAVAILABLE = 'The current physical state could not be read, so publishing stays off.'
+const NOT_IN_CATALOG = 'This read is not in the current tool catalog, so refresh the tools and run it again.'
 const SHADE_DESCRIPTION = 'Report CPU terrain shade at native frame centres in the current physical head. Uses default clearance and an automatic sample profile. Reads only. Excludes weather weighting and individual-module shading.'
 const EXPORT_DESCRIPTION = 'Download one terrain or CPU terrain shade CSV from the requested physical head. Shade samples native frame centres using default clearance and automatic profiles. Excludes weather weighting and individual-module shading.'
 
@@ -14,7 +15,7 @@ export default function SolarPhysicalReadPanel(props) {
   return <ReadScope key={JSON.stringify([props.drawingId ?? null, props.projectId ?? null, props.drawingVersion ?? null])} {...props} />
 }
 
-function ReadScope({ drawingId, projectId = null, drawingVersion, terrainClient, runRead, headSignal, disabled = false, download, save }) {
+function ReadScope({ drawingId, projectId = null, drawingVersion, terrainClient, runRead, catalogDigestOf, headSignal, disabled = false, download, save }) {
   const [phase, setPhase] = useState(drawingId ? 'loading' : 'no-drawing')
   const [view, setView] = useState(null)
   const [toolName, setTool] = useState(PHYSICAL_READ_TOOLS[0])
@@ -89,9 +90,14 @@ function ReadScope({ drawingId, projectId = null, drawingVersion, terrainClient,
       if (captured === null) return
       const built = buildPhysicalRead({ toolName, drawingId, head: captured.head, format })
       if (!built.ok) { setRefusal(built.reason === 'no_head' ? NO_HEAD : physicalReadReason()); setPhase('refused'); return }
+      let catalogDigest
+      try { if (typeof catalogDigestOf === 'function') catalogDigest = catalogDigestOf(toolName) } catch { catalogDigest = null }
+      if (typeof catalogDigest !== 'string' || catalogDigest.length === 0) {
+        setRefusal(NOT_IN_CATALOG); setAnnouncement(NOT_IN_CATALOG); setPhase('refused'); return
+      }
       setPhase('pending')
       let answer
-      try { answer = await runRead(toolName, built.params, drawingId, { projectId, dwgVersion: drawingVersion }) }
+      try { answer = await runRead(toolName, built.params, drawingId, { projectId, dwgVersion: drawingVersion, catalogDigest }) }
       catch { answer = null }
       if (!current()) return
       const accepted = physicalReadData(answer, { toolName, drawingId, projectId, drawingVersion, head: captured.head, format })

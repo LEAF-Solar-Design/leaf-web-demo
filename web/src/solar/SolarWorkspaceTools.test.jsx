@@ -327,14 +327,14 @@ it('GP5-16 physical shade and export preserve automatic head reads and authentic
   expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Physical reads' }))
   fireEvent.click(screen.getByRole('button', { name: 'Run' }))
   await screen.findByTestId('solar-read-result')
-  expect(p.transport.runRead).toHaveBeenLastCalledWith('solar-physical-shade', { drawing_id: 'solar' }, 'solar', { projectId: 'p', dwgVersion: 1 })
+  expect(p.transport.runRead).toHaveBeenLastCalledWith('solar-physical-shade', { drawing_id: 'solar' }, 'solar', { projectId: 'p', dwgVersion: 1, catalogDigest: 'sha256:solar-physical-shade' })
   expect(terrain.getTerrain).toHaveBeenCalledTimes(3)
   fireEvent.change(screen.getByLabelText('Tool'), { target: { value: 'solar-physical-export' } })
   expect([...screen.getByLabelText('Format').options].map((option) => option.value)).toEqual(['terrain-csv', 'shade-azal-matrix', 'shade-sam', 'shade-per-panel'])
   p.transport.runRead.mockResolvedValue(exportAnswer)
   fireEvent.click(screen.getByRole('button', { name: 'Run' }))
   await screen.findByTestId('solar-read-result')
-  expect(p.transport.runRead).toHaveBeenLastCalledWith('solar-physical-export', { drawing_id: 'solar', expected_head: gp5H, format: 'terrain-csv' }, 'solar', { projectId: 'p', dwgVersion: 1 })
+  expect(p.transport.runRead).toHaveBeenLastCalledWith('solar-physical-export', { drawing_id: 'solar', expected_head: gp5H, format: 'terrain-csv' }, 'solar', { projectId: 'p', dwgVersion: 1, catalogDigest: 'sha256:solar-physical-export' })
   fireEvent.click(screen.getByTestId('solar-read-download'))
   await waitFor(() => expect(p.transport.save).toHaveBeenCalledTimes(1))
   expect(fetchImpl.mock.calls[0][1].headers).toMatchObject({ Authorization: 'Bearer gp5', 'X-Tenant-Id': 'gp5' })
@@ -344,6 +344,22 @@ it('GP5-16 physical shade and export preserve automatic head reads and authentic
   expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
   expect(p.onRunPlacement).not.toHaveBeenCalled()
   expect(announcement()).toBe('')
+})
+
+it('PRD5 the workspace hands the catalog digest lookup to the physical-read panel', async () => {
+  const lookup = vi.fn((name) => name === 'solar-physical-shade' ? 'sha256:workspace-shade' : 'sha256:workspace-export')
+  const p = supplied({ projectId: 'p', catalogDigestOf: lookup })
+  const terrain = { getTerrain: vi.fn(async () => gp5Success(gp5ReadTerrain())), runTerrainOperation: vi.fn() }
+  vi.spyOn(terrainClients, 'createSolarTerrainClient').mockReturnValue(terrain)
+  p.transport.runRead = vi.fn(async () => gp5ReadAnswer())
+  render(<SolarWorkspaceTools {...p} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Physical reads' }))
+  await gp5Ready()
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  await screen.findByTestId('solar-read-result')
+  expect(lookup).toHaveBeenCalledWith('solar-physical-shade')
+  expect(p.transport.runRead).toHaveBeenLastCalledWith('solar-physical-shade', { drawing_id: 'solar' }, 'solar',
+    { projectId: 'p', dwgVersion: 1, catalogDigest: 'sha256:workspace-shade' })
 })
 
 it('GP5-15 created civil publication updates peers once without clearing its own outcome', async () => {
@@ -1105,6 +1121,7 @@ function response(created = true) {
 function supplied(overrides = {}) {
   return {
     drawingId: 'solar', projectId: null, drawingVersion: 1, flow: 'ground-physical',
+    catalogDigestOf: (name) => `sha256:${name}`,
     checkoutHeld: true, busy: false, getCheckoutCapability: vi.fn(),
     onPhysicalHeadChanged: vi.fn(), onDrawingVersionChanged: vi.fn(),
     transport: {
