@@ -2042,7 +2042,7 @@ def build_suites() -> List[Suite]:
         # change set on attempt 1 with the harness's reason readable from stage
         # status). Was never registered, so none of it ran in CI.
         Suite("server-customization-async-stage", "server customization async stage", "pytest",
-              SERVER, _py_pytest("tests/test_customization_async_stage.py"), 51),
+              SERVER, _py_pytest("tests/test_customization_async_stage.py"), 82),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- operator control plane (cwd=server): each file its OWN process --- #
