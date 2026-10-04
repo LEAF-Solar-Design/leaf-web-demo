@@ -5,6 +5,8 @@ import { humanKey } from '../labels.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
+import SolarReadResult from '../solar/SolarReadResult.jsx'
+import { isSolarReadResult } from '../solar/solarReadResultModel.js'
 
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
 // key/value), overlay summary, timing + cost receipt, and a normalized error
@@ -108,6 +110,7 @@ function FileLinks({ files }) {
 function ResultBody({ result }) {
   const data = result?.result
   if (!data) return result?.overlay ? null : <p className="result-empty">Completed with no output.</p>
+  if (isSolarReadResult(data)) return <SolarReadResult data={data} />
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
   if (data.table && typeof data.table === 'object') {
     const scalars = {}
