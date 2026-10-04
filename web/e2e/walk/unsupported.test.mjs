@@ -26,32 +26,45 @@ const probeFor = (steps) => ({ featureId: 'action:unit', kind: 'action', state: 
   assertion: { assertionId: 'unit/effect', kind: 'renders' } })
 const engineReason = 'The production bundle has no mounted browser editing engine'
 
-test('catalog Solar drawing states gate on the manifest flag before setup', async () => {
+test('catalog Solar flag declarations require an effect and exact drawing-context evidence', async () => {
   const entries = buildFeatureMap().entries.filter((entry) => entry.kind === 'tool' && entry.source_id.startsWith('solar-'))
+  const drawingAvailability = { entitled: true, engine_ready: true, input_ready: false, implemented: true,
+    refusal_reasons: ['drawing_context_required'] }
+  const catalog = { families: [{ capabilities: [
+    { name: 'solar-settings', availability: drawingAvailability },
+    { name: 'solar-solve-proposal', availability: { ...drawingAvailability, input_ready: true, refusal_reasons: [] } },
+  ] }] }
   for (const entry of entries) {
     for (const state of entry.states) {
       const probe = resolveProbe(entry, state)
-      assert.equal(catalogSolarNeedsDrawing(probe), true)
-      assert.equal(unsupportedBeforeSetup(probe, { buildFlags: {} }), CATALOG_SOLAR_FLAG_REASON)
-      assert.notEqual(unsupportedBeforeSetup(probe, { buildFlags: { VITE_SOLAR_SETTINGS_FORM: '1' } }), CATALOG_SOLAR_FLAG_REASON)
+      const refusal = probe.assertion.kind === 'disabled_with_reason'
+      assert.equal(catalogSolarNeedsDrawing(probe), !refusal)
+      if (refusal) assert.equal(unsupportedBeforeSetup(probe, { catalog, buildFlags: {} }), null)
     }
   }
   const probe = resolveProbe(entries.find((entry) => entry.source_id === 'solar-settings'), 'ready')
+  const solve = resolveProbe(entries.find((entry) => entry.source_id === 'solar-solve-proposal'), 'ready')
+  assert.equal(unsupportedBeforeSetup(solve, { catalog, buildFlags: {} }), null)
+  for (const unknown of [undefined, { families: [] }, { families: [{ capabilities: [{ name: 'solar-settings' }] }] }]) {
+    assert.equal(unsupportedBeforeSetup(probe, { catalog: unknown, buildFlags: {} }), null)
+  }
   for (const flag of [undefined, '0', '1']) {
     const flags = flag === undefined ? {} : { VITE_SOLAR_SETTINGS_FORM: flag }
     let fetches = 0
     const runtime = { workerFacts: {}, evidence: { steps: [] }, testInfo: { attach: async () => {} },
       page: { request: { get: async (path) => {
         fetches++
-        assert.equal(path, '/.leaf-walk-build.json')
-        return { ok: () => true, json: async () => ({ flags }) }
+        assert.ok(path === '/.leaf-walk-build.json' || path === '/api/capabilities')
+        return { ok: () => true, json: async () => path === '/.leaf-walk-build.json' ? { flags } : catalog }
       } } } }
     await Promise.all([readWalkBuildFlags(probe, runtime), readWalkBuildFlags(probe, runtime)])
     await readWalkBuildFlags(probe, { ...runtime, evidence: {} })
-    assert.equal(fetches, 1)
+    assert.equal(fetches, 2)
     assert.deepEqual(runtime.workerFacts.buildFlags, flags)
+    assert.deepEqual(runtime.workerFacts.catalog, catalog)
     assert.equal(runtime.evidence.result, undefined)
-    assert.equal(unsupportedBeforeSetup(probe, runtime.workerFacts), flag === '1' ? null : CATALOG_SOLAR_FLAG_REASON)
+    assert.equal(unsupportedBeforeSetup(probe, runtime.workerFacts, false), flag === '1' ? null : CATALOG_SOLAR_FLAG_REASON)
+    assert.notEqual(unsupportedBeforeSetup(probe, { catalog, buildFlags: { VITE_SOLAR_SETTINGS_FORM: '1' } }), CATALOG_SOLAR_FLAG_REASON)
     assert.deepEqual(runtime.evidence.buildFlags, flags)
     assert.deepEqual(runtime.evidence.steps, [])
     if (flag !== '1') {
@@ -59,13 +72,15 @@ test('catalog Solar drawing states gate on the manifest flag before setup', asyn
       assert.deepEqual(early.log, [])
       assert.deepEqual(early.result, { unsupported: true, reason: CATALOG_SOLAR_FLAG_REASON })
       assert.deepEqual(early.runtime.evidence.result.flags, flags)
+      assert.deepEqual(early.runtime.evidence.result.refusal_codes, ['drawing_context_required'])
       assert.equal(early.runtime.evidence.oracleReached, undefined)
       assert.equal(early.runtime.evidence.cleanupCompleted, true)
     } else {
+      let catalogs = 0
       const normal = await run(probe, {}, { readBuild: true, request: { get: async (path) => {
         assert.ok(path === '/.leaf-walk-build.json' || path === '/api/capabilities')
         return { ok: () => true, json: async () => path === '/.leaf-walk-build.json'
-          ? { flags } : { families: [] } }
+          ? { flags } : ++catalogs === 1 ? catalog : { families: [] } }
       } } })
       assert.deepEqual(normal.log, [...probe.setup.steps.map((step) => step.kind), 'ux', 'activate', 'assert'])
       assert.equal(normal.runtime.evidence.result.result, 'passed')
@@ -79,7 +94,6 @@ test('catalog Solar drawing states gate on the manifest flag before setup', asyn
   assert.ok(source.indexOf('export async function readWalkBuildFlags') < source.indexOf('async function baselineThreeState'))
   assert.ok(source.indexOf('await readWalkBuildFlags(probe, runtime)') < source.indexOf('for (const recipe of probe.setup.steps)', source.indexOf('export async function runProbe')))
 })
-
 async function run(probe, facts, { precheck = unsupportedBeforeSetup, fallbackReason, request, readBuild = false } = {}) {
   const log = [], attachments = []
   const testInfo = { title: 'unit', project: { name: 'desktop' }, annotations: [],

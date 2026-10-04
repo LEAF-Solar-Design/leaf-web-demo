@@ -536,6 +536,7 @@ export async function readWalkBuildFlags(probe, runtime) {
     facts.buildFlags = marker.flags || {}
   })()
   await facts.buildFlagsFetch
+  await workerCatalog(facts, runtime.page.request)
   runtime.evidence.buildFlags = { ...facts.buildFlags }
 }
 
@@ -729,16 +730,18 @@ export const CATALOG_SOLAR_FLAG_REASON = 'catalog drawing context requires VITE_
 
 export function catalogSolarNeedsDrawing(probe) {
   return probe.kind === 'tool' && probe.sourceId?.startsWith('solar-')
-    && !(probe.assertion.kind === 'disabled_with_reason'
-      && (probe.assertion.reason_code === 'drawing_context_required'
-        || probe.assertion.reason === 'Open a drawing to use this solar tool'))
+    && probe.assertion.kind !== 'disabled_with_reason'
 }
 
-export function unsupportedBeforeSetup(probe, workerFacts = {}) {
+export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailability = true) {
   if (UI_UNREACHABLE_STATES.has(probe.state)) return VERSIONLESS_DRAWING_REASON
+  const tool = workerFacts.catalog?.families.flatMap((family) => family.capabilities)
+    .find((tool) => tool.name === probe.sourceId)
   if (catalogSolarNeedsDrawing(probe) && workerFacts.buildFlags
-    && workerFacts.buildFlags.VITE_SOLAR_SETTINGS_FORM !== '1') return CATALOG_SOLAR_FLAG_REASON
-  const unavailable = toolAvailabilityEvidence(probe, workerFacts)
+    && workerFacts.buildFlags.VITE_SOLAR_SETTINGS_FORM !== '1'
+    && Array.isArray(tool?.availability?.refusal_reasons)
+    && tool.availability.refusal_reasons.includes('drawing_context_required')) return CATALOG_SOLAR_FLAG_REASON
+  const unavailable = checkAvailability && toolAvailabilityEvidence(probe, workerFacts)
   if (unavailable) {
     const codes = unavailable.refusal_codes.length ? ` (${unavailable.refusal_codes.join(',')})` : ''
     return `The isolated stack cannot run ${unavailable.tool}: ${unavailable.availability_fields_false[0]} is false${codes}`
@@ -1719,7 +1722,7 @@ export async function runProbe(probe, runtime) {
     const reason = typeof unsupportedBeforeSetup === 'function'
       ? unsupportedBeforeSetup(probe, { engineMounted: runtime.workerFacts.engineMounted,
         engineUnavailableReason: runtime.workerFacts.engineUnavailableReason,
-        buildFlags: runtime.workerFacts.buildFlags }) : null
+        buildFlags: runtime.workerFacts.buildFlags, catalog: runtime.workerFacts.catalog }, false) : null
     if (reason) {
       if (typeof toolAvailabilityEvidence === 'function') {
         runtime.unsupportedAvailability = toolAvailabilityEvidence(probe, runtime.workerFacts)
