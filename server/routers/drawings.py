@@ -624,6 +624,64 @@ async def import_solaredge_pdf(drawing_id: str, request: Request, project_id: Op
     return JSONResponse(content=with_envelope_fields(result))
 
 
+import solar_pvcase_sources
+
+
+def _import_pvcase(tenant_id, drawing_id, data, project_id):
+    try:
+        backend = _backend(tenant_id)
+    except (RuntimeError, OSError):
+        raise solar_pvcase_sources.PvcaseSourceError("PVS_STORE_UNAVAILABLE") from None
+    return solar_pvcase_sources.import_pvcase_source(
+        backend, tenant_id, drawing_id, data, project_id=project_id)
+
+
+@router.post("/api/drawings/{drawing_id}/imports/pvcase-g33")
+async def import_pvcase_g33(drawing_id: str, request: Request, project_id: Optional[str] = None,
+                            tenant=Depends(deps.require_active_tenant)):
+    """Attach an immutable G33 source to the current graph context."""
+    def refused(reason):
+        if reason not in solar_pvcase_sources.REFUSALS:
+            reason = "PVS_SOURCE_INVALID"
+        status, code, retryable = solar_pvcase_sources.REFUSALS[reason]
+        env = err_envelope(code, reason, retryable=retryable)
+        env["error"]["reason_code"] = reason
+        return JSONResponse(status_code=status, content=env)
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id):
+        return refused("PVS_DRAWING_ID_INVALID")
+    if project_id is not None and not 1 <= len(project_id) <= 100:
+        return refused("PVS_PROJECT_ID_INVALID")
+    tier = entitlements.resolve_tier(tenant)
+    try:
+        roles, elevated = entitlements.resolve_roles(tenant)
+        if not entitlements.entitlements_for(tier, roles, elevated).get("upload", False):
+            return entitlements.entitlement_denied_response("upload", tier)
+    except entitlements.EntitlementsError:
+        return entitlements.policy_unavailable_response("upload", tier)
+    if write_loop.drawing_mutations_refusal() is not None:
+        return refused("PVS_WRITES_DRAINED")
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        return refused("PVS_MEDIA_TYPE_REFUSED")
+    length = request.headers.get("content-length", "")
+    if re.fullmatch(r"[0-9]+", length):
+        stripped = length.lstrip("0")
+        if len(stripped) > 12 or int(stripped or "0") > solar_pvcase_sources.MAX_IMPORT_G33_BYTES:
+            return refused("PVG_INPUT_BYTES_EXCEEDED")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > solar_pvcase_sources.MAX_IMPORT_G33_BYTES:
+            return refused("PVG_INPUT_BYTES_EXCEEDED")
+        body.extend(chunk)
+    try:
+        result = await run_in_threadpool(_import_pvcase, str(tenant), drawing_id, bytes(body), project_id)
+    except solar_pvcase_sources.PvcaseSourceError as exc:
+        return refused(exc.code)
+    except Exception:
+        return refused("PVS_SOURCE_INVALID")
+    return JSONResponse(content=with_envelope_fields(result))
+
+
 def _solaredge_report(tenant_id, drawing_id, body):
     try:
         backend = _backend(tenant_id)

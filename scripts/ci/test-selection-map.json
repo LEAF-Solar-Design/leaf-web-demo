@@ -451,6 +451,7 @@
     "server-solar-probe-calcs",
     "server-solar-pvcase-conversion",
     "server-solar-pvcase-solve",
+    "server-solar-pvcase-sources",
     "server-solar-registry",
     "server-solar-rooftop-chain",
     "server-solar-settings-invalidation",
