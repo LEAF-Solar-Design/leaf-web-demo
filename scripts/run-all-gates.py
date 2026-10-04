@@ -857,6 +857,9 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_import_sources.py"), 73),
         Suite("server-solar-solaredge-report", "server tests/test_solar_solaredge_report.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_report.py"), 100),
+        # sf-w4-solaredge-flow-proof: the floor is the exact count of seven HTTP chain tests.
+        Suite("server-solar-solaredge-flow", "server tests/test_solar_solaredge_flow.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_solaredge_flow.py"), 7),
         # SolarEdge accept (2026-09-30, sf-w4-solaredge-accept): a stored report's import provenance and
         # tracking associations committed to graph extra through the solaredge_report trusted input; no
         # string, inverter or Solve state. Hermetic, so the floor is the exact count. COUNTED: 111.

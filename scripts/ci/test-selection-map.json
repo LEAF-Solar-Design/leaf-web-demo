@@ -454,6 +454,7 @@
     "server-solar-solaredge-parse-deadline",
     "server-solar-solaredge-pdf",
     "server-solar-solaredge-report",
+    "server-solar-solaredge-flow",
     "server-solar-terrain",
     "server-solar-terrain-route",
     "server-solar-tool-color-strings",
