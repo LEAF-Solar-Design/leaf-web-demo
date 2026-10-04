@@ -71,6 +71,20 @@ function csuUploadProblems(source) {
 }
 describe('W20-07b combiner workspace wiring', () => {
   const appNoComments = decomment(appSource)
+  it('PRD6 App passes a catalog digest lookup built from its catalog rows to the workspace', () => {
+    const mountStart = appNoComments.indexOf('<SolarWorkspaceTools')
+    assert.ok(mountStart >= 0)
+    const mount = appNoComments.slice(mountStart, appNoComments.indexOf('/>', mountStart))
+    assert.ok(mount.includes('catalogDigestOf={catalogDigestOf}'))
+    const start = appNoComments.indexOf('const catalogDigestOf = useCallback(')
+    const end = appNoComments.indexOf('const onRunCombinerPlacement', start)
+    assert.ok(start >= 0 && end > start)
+    const body = appNoComments.slice(start, end).trim()
+    assert.ok(body.includes('tools.find((tool) => tool.name === name)'))
+    assert.ok(body.includes('createCatalogToolSnapshot(row).catalogDigest'))
+    assert.ok(body.endsWith('}, [tools])'))
+  })
+
   it('W20-07b mounts the placement callback on the existing workspace container', () => {
     const start = appNoComments.indexOf('<SolarWorkspaceTools')
     assert.ok(start >= 0)

@@ -81,7 +81,7 @@ function transportTrackedClient(createClient, options, methods) {
 export default function SolarWorkspaceTools({
   drawingId, projectId = null, drawingVersion, flow, checkoutHeld, busy,
   getCheckoutCapability, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement, transport,
-  onStageSolarEdgeAccept,
+  onStageSolarEdgeAccept, catalogDigestOf,
 }) {
   const capability = useRef(getCheckoutCapability)
   capability.current = getCheckoutCapability
@@ -139,6 +139,7 @@ export default function SolarWorkspaceTools({
       terrainClient={terrainClient}
       civilClient={civilClient}
       runRead={transport?.runRead ?? runToolAsync}
+      catalogDigestOf={catalogDigestOf}
       save={transport?.save}
       combinerClient={combinerClient}
       trackerRowsClient={trackerRowsClient}
@@ -156,7 +157,7 @@ export default function SolarWorkspaceTools({
 Object.defineProperty(SolarWorkspaceTools, 'workspacePanelsByFlow', { value: FLOW_PANELS })
 
 function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHeld, busy, client,
-  combinerClient, terrainClient, civilClient, runRead, save, trackerRowsClient, importClient, onStageSolarEdgeAccept, readIntake, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement }) {
+  combinerClient, terrainClient, civilClient, runRead, catalogDigestOf, save, trackerRowsClient, importClient, onStageSolarEdgeAccept, readIntake, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement }) {
   const [openPanel, setOpenPanel] = useState(null)
   const [intake, setIntake] = useState(null)
   const intakeRef = useRef(null)
@@ -620,7 +621,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       {hasPhysicalRead && openPanel === 'physical-read' && <div className="solar-workspace-panel">
         <h3 tabIndex={-1} ref={readHeading}>Physical reads</h3>
         <SolarPhysicalReadPanel drawingId={drawingId} projectId={projectId} drawingVersion={drawingVersion}
-          terrainClient={scopeTerrainClient} runRead={runRead} headSignal={readHeadSignal}
+          terrainClient={scopeTerrainClient} runRead={runRead} headSignal={readHeadSignal} catalogDigestOf={catalogDigestOf}
           disabled={busy || Object.values(writers).some(Boolean) || phase === 'refreshing' || phase === 'failed'}
           download={importClient.downloadArtifact} save={save} />
         <button type="button" onClick={() => { physicalCloseFocus.current = readTrigger.current; setOpenPanel(null) }}>Close</button>

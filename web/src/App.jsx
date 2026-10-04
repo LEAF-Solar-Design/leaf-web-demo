@@ -2096,6 +2096,11 @@ export default function App() {
   }, [])
 
   // A step submit arms the same confirm path as the ribbon; the rail never runs a tool itself.
+  const catalogDigestOf = useCallback((name) => {
+    const row = tools.find((tool) => tool.name === name)
+    if (!row) return null
+    try { return createCatalogToolSnapshot(row).catalogDigest } catch { return null }
+  }, [tools])
   const onRunCombinerPlacement = useCallback((params) => {
     const row = tools.find((tool) => tool.name === 'solar-combiners')
     if (!row) {
@@ -4193,6 +4198,7 @@ export default function App() {
                   onPhysicalHeadChanged={() => loadCatalog()}
                   onDrawingVersionChanged={seatCompletedVersion}
                   onRunPlacement={onRunCombinerPlacement}
+                  catalogDigestOf={catalogDigestOf}
                 />
               )}
               {solarFlowEditor && (
