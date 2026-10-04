@@ -1,0 +1,74 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-physical-export",
+  "builtin": "builtins/solar_physical_export.py",
+  "family": "terrain",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_PHYSICAL_EXPORT_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": []
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-physical-export",
+    "version": "1.0.0",
+    "description": "Download one terrain or CPU terrain shade CSV from the requested physical head. Shade samples native frame centres using default clearance and automatic profiles. Excludes weather weighting and individual-module shading.",
+    "kind": "script",
+    "family_id": "terrain",
+    "engine_op": "solar_physical_export",
+    "entry": "builtins/solar_physical_export.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "expected_head": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "terrain-csv",
+            "shade-azal-matrix",
+            "shade-sam",
+            "shade-per-panel"
+          ]
+        }
+      },
+      "required": [
+        "expected_head",
+        "format"
+      ],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.read"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "terrain-csv-export",
+    "shade-sim"
+  ],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 4,
+  "order": 60,
+  "scenario": "w4-physical-export"
+}
