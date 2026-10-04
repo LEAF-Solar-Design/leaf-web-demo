@@ -52,22 +52,23 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   }
 })
 
-test('DIMENSION Copy, Cut and Explode render refusals with clipboard and geometry unchanged', () => {
-  for (const [id, refusal] of [
-    ['action:clipboard-copy-clip', 'Copy refused: a DIMENSION of this kind cannot go on the clipboard yet.'],
-    ['action:clipboard-cut-clip', 'Cut refused: a DIMENSION of this kind cannot go on the clipboard yet.'],
-    ['action:modify-explode', 'a dimension is placed, not edited, in this round'],
+test('W21B1-map-disables-placed-actions', () => {
+  for (const [id, ready] of [
+    ['action:clipboard-copy-clip', { kind: 'toggles', target: 'browser-clipboard' }],
+    ['action:clipboard-cut-clip', { kind: 'submits', target: 'browser-clipboard-cut' }],
+    ['action:modify-explode', { kind: 'submits', target: 'engine:explode', operation: 'explode', group: 'modify' }],
   ]) {
     const entry = entryFor(id)
-    assert.ok(entry.states.includes('placed-dimension'), id)
-    assert.deepEqual(entry.expected_effect['placed-dimension'], {
-      kind: 'renders', target: 'engine-refusal', refusal,
-      clipboard: 'unchanged', geometry: 'unchanged',
-    })
-    assert.equal(ACTIONS.find((action) => featureId('action', action.id) === id)
-      .when(entry.state_contexts['placed-dimension']), '')
-    assert.notEqual(entry.expected_effect.ready.target, 'engine-refusal')
-    assert.notEqual(entry.expected_effect['placed-insert'].target, 'engine-refusal')
+    for (const [state, reason, reason_code] of [
+      ['placed-insert', 'Copy, Cut and Explode do not support INSERT block references yet', 'MODIFY_REASONS.unsupportedInsert'],
+      ['placed-dimension', 'Copy, Cut and Explode do not support DIMENSION entities yet', 'MODIFY_REASONS.unsupportedDimension'],
+    ]) {
+      assert.ok(entry.states.includes(state), id + '/' + state)
+      assert.deepEqual(entry.expected_effect[state], { kind: 'disabled_with_reason', reason_code, reason })
+      assert.equal(ACTIONS.find((action) => featureId('action', action.id) === id)
+        .when(entry.state_contexts[state]), reason)
+    }
+    assert.deepEqual(entry.expected_effect.ready, ready)
   }
 })
 
