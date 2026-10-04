@@ -1989,6 +1989,9 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_customization_authority.py"), 7),
         Suite("server-customization-store", "server customization store", "pytest",
               SERVER, _py_pytest("tests/test_customization_store.py"), 11),
+        # Record 1: durable customization record-fields authority.
+        Suite("server-customization-record-fields-store", "server customization record fields store", "pytest",
+              SERVER, _py_pytest("tests/test_customization_record_fields_store.py"), 20),
         Suite("server-customization-reconcile", "server customization reconcile", "pytest",
               SERVER, _py_pytest("tests/test_customization_reconcile.py"), 8),
         Suite("server-customization-contract", "server customization contract freeze", "pytest",
@@ -3329,6 +3332,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_tool_publication_policy.py"), 13),
         Suite("server-tool-record-fields", "server tests/test_tool_record_fields.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_record_fields.py"), 42),
+        # Record 1: complete catalog metadata snapshot validation.
+        Suite("server-tool-record-fields-snapshot", "server tool record fields snapshot", "pytest", SERVER,
+              _py_pytest("tests/test_tool_record_fields_snapshot.py"), 5),
         Suite("server-tool-validate-structural", "server tests/test_tool_validate_structural.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_validate_structural.py"), 52),
         Suite("server-turn-queue", "server tests/test_turn_queue.py", "pytest", SERVER,
