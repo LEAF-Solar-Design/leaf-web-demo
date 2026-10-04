@@ -631,6 +631,49 @@ class CustomizationService:
         except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
             raise CustomizationServiceError("record_fields_read_failed", 503) from exc
 
+    def _record_fields_pin(self, tenant_id: str):
+        try:
+            return self.store.get_effective_catalog(tenant_id=tenant_id)
+        except ChangeSetNotFoundError:
+            return None
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+            raise CustomizationServiceError("record_fields_read_failed", 503) from exc
+
+    @staticmethod
+    def _pin_identity(pin):
+        if pin is None:
+            return None
+        return (
+            pin.tenant_id, pin.change_set_id, pin.catalog_commit, pin.catalog_digest,
+            pin.effective_platform_release, pin.workspace_contract_digest,
+        )
+
+    @staticmethod
+    def _pin_matches_change(pin, change: ChangeSet) -> bool:
+        return pin is not None and CustomizationService._pin_identity(pin) == (
+            change.tenant_id, change.change_set_id, change.staged_commit,
+            change.catalog_digest, change.desired_platform_release,
+            change.workspace_contract_digest,
+        )
+
+    def _verify_record_fields_predecessor(self, change: ChangeSet) -> None:
+        if (change.request_graph_input is None
+                and change.base_catalog_change_set_id is None
+                and change.catalog_record_fields_json is None):
+            return
+        pin = self._record_fields_pin(change.tenant_id)
+        predecessor_id = change.base_catalog_change_set_id
+        if predecessor_id is not None:
+            predecessor = self._record_fields_change(change.tenant_id, predecessor_id)
+            if not self._pin_matches_change(pin, predecessor):
+                raise CustomizationServiceError("record_fields_predecessor_mismatch", 409)
+        elif pin is not None:
+            predecessor = self._record_fields_change(change.tenant_id, pin.change_set_id)
+            if (predecessor.request_graph_input is not None
+                    or predecessor.base_catalog_change_set_id is not None
+                    or predecessor.catalog_record_fields_json is not None):
+                raise CustomizationServiceError("record_fields_predecessor_mismatch", 409)
+
     @staticmethod
     def _record_fields_rows(change: ChangeSet, commit: str, digest: str | None = None) -> dict[str, Any]:
         try:
@@ -708,7 +751,10 @@ class CustomizationService:
         except RecursionError as exc:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
         except CustomizationServiceError as exc:
-            if exc.code in {"graph_input_consumer_unsupported", "graph_input_unreserved"}:
+            if exc.code in {
+                "graph_input_consumer_unsupported", "graph_input_unreserved",
+                "record_fields_predecessor_mismatch",
+            }:
                 raise CustomizationServiceError("record_fields_invalid", 503) from exc
             raise
 
@@ -969,7 +1015,9 @@ class CustomizationService:
         binding = _binding(tenant)
         if binding.role not in {"owner", "editor"}:
             raise CustomizationServiceError("tenant_role_denied", 403)
-        current = self.store.get_effective_catalog(tenant_id=tenant_id)
+        current = self._record_fields_pin(tenant_id)
+        if current is None:
+            raise ChangeSetNotFoundError("no effective catalog")
         if not hmac.compare_digest(current.catalog_digest, expected_catalog_digest):
             raise CustomizationServiceError("effective_catalog_digest_mismatch", 409)
         try:
@@ -977,6 +1025,14 @@ class CustomizationService:
                 tenant_id=tenant_id, idempotency_key=idempotency_key
             )
         except ChangeSetNotFoundError:
+            predecessor = self._record_fields_change(tenant_id, current.change_set_id)
+            if (predecessor.request_graph_input is not None
+                    or predecessor.base_catalog_change_set_id is not None
+                    or predecessor.catalog_record_fields_json is not None):
+                self._verify_catalog(tenant_id, current.catalog_commit, current.catalog_digest)
+                self._verified_record_fields(predecessor, set())
+            if not self._pin_matches_change(current, predecessor):
+                raise CustomizationServiceError("record_fields_predecessor_mismatch", 409)
             change = self.store.create_change_set(
                 tenant_id=tenant_id, idempotency_key=idempotency_key,
                 base_commit=current.catalog_commit,
@@ -984,7 +1040,16 @@ class CustomizationService:
                 workspace_contract_digest=current.workspace_contract_digest,
                 author_subject=binding.subject or "", change_set_id=str(uuid4()),
                 change_kind="revise", target_tool_name=tool_name,
+                base_catalog_change_set_id=(
+                    predecessor.change_set_id
+                    if predecessor.catalog_record_fields_json is not None else None
+                ),
             )
+        except ToolRecordFieldError as exc:
+            raise CustomizationServiceError("record_fields_invalid", 503) from exc
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+            raise CustomizationServiceError("record_fields_read_failed", 503) from exc
+        self._verify_record_fields_predecessor(change)
         self.store.bind_removal_request(
             tenant_id=tenant_id, change_set_id=change.change_set_id,
             target_tool_name=tool_name,
@@ -1018,19 +1083,24 @@ class CustomizationService:
             catalog_digest=receipt["catalog_digest"],
         )
         self._verify_bound_stage_policy(proposed, body)
-        durable = self.store.get_change_set(
-            tenant_id=tenant_id, change_set_id=change.change_set_id
-        )
+        snapshot = self._derive_catalog_record_fields(proposed, removal_target=tool_name)
+        durable = self._record_fields_change(tenant_id, change.change_set_id)
         if durable.state is ChangeState.STAGING:
-            durable = self.store.record_staged(
-                tenant_id=tenant_id, change_set_id=durable.change_set_id,
-                expected_version=durable.version,
-                idempotency_key=f"removed:{idempotency_key}",
-                staged_commit=receipt["staged_commit"],
-                catalog_digest=receipt["catalog_digest"],
-                platform_release=receipt["platform_release"],
-                workspace_contract_digest=receipt["workspace_contract_digest"],
-            )
+            try:
+                durable = self.store.record_staged(
+                    tenant_id=tenant_id, change_set_id=durable.change_set_id,
+                    expected_version=durable.version,
+                    idempotency_key=f"removed:{idempotency_key}",
+                    staged_commit=receipt["staged_commit"],
+                    catalog_digest=receipt["catalog_digest"],
+                    platform_release=receipt["platform_release"],
+                    workspace_contract_digest=receipt["workspace_contract_digest"],
+                    catalog_record_fields_json=snapshot,
+                )
+            except ToolRecordFieldError as exc:
+                raise CustomizationServiceError("record_fields_invalid", 503) from exc
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                raise CustomizationServiceError("record_fields_write_failed", 503) from exc
         changed = self._verify_bound_stage_policy(durable)
         removal = self.store.get_removal_request(
             tenant_id=tenant_id, change_set_id=durable.change_set_id
@@ -1909,22 +1979,24 @@ class CustomizationService:
             binding = _binding(tenant)
             if binding.role not in {"owner", "editor"}:
                 raise CustomizationServiceError("tenant_role_denied", 403)
-        change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=request.change_set_id)
+        change = self._record_fields_change(tenant_id, request.change_set_id)
         if (change.staged_commit, change.catalog_digest, change.desired_platform_release, change.workspace_contract_digest) != (
             request.staged_commit, request.catalog_digest, request.platform_release, request.workspace_contract_digest):
             raise CustomizationServiceError("staged_receipt_mismatch")
+        if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING, ChangeState.PUBLISHED}:
+            raise CustomizationServiceError("publish_not_available")
+        self._verify_catalog(tenant_id, request.staged_commit, request.catalog_digest)
+        self._verified_record_fields(change, set())
         if change.state is ChangeState.PUBLISHED:
-            effective = self.store.get_effective_catalog(tenant_id=tenant_id)
-            if effective.change_set_id == change.change_set_id:
+            effective = self._record_fields_pin(tenant_id)
+            if self._pin_matches_change(effective, change):
                 return {"contract": CONTRACT, "tenant_id": effective.tenant_id,
                         "change_set_id": effective.change_set_id, "catalog_commit": effective.catalog_commit,
                         "catalog_digest": effective.catalog_digest,
                         "platform_release": effective.effective_platform_release,
                         "workspace_contract_digest": effective.workspace_contract_digest}
             raise CustomizationServiceError("publish_not_available")
-        if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING}:
-            raise CustomizationServiceError("publish_not_available")
-        self._verify_catalog(tenant_id, request.staged_commit, request.catalog_digest)
+        self._verify_record_fields_predecessor(change)
         if change.state is ChangeState.PUBLISHING:
             try:
                 confirmation, signature = (
@@ -1980,9 +2052,12 @@ class CustomizationService:
             raise
         if published_commit != request.staged_commit:
             raise CustomizationServiceError("published_commit_mismatch", 502)
-        effective = self.store.publish(tenant_id=tenant_id, change_set_id=change.change_set_id,
-            expected_version=publishing.version, idempotency_key=idempotency_key,
-            approver_subject=confirmation.approver_subject)
+        try:
+            effective = self.store.publish(tenant_id=tenant_id, change_set_id=change.change_set_id,
+                expected_version=publishing.version, idempotency_key=idempotency_key,
+                approver_subject=confirmation.approver_subject)
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+            raise CustomizationServiceError("record_fields_write_failed", 503) from exc
         return {"contract": CONTRACT, "tenant_id": effective.tenant_id, "change_set_id": effective.change_set_id,
                 "catalog_commit": effective.catalog_commit, "catalog_digest": effective.catalog_digest,
                 "platform_release": effective.effective_platform_release,
@@ -2077,13 +2152,15 @@ class CustomizationService:
         change_id = receipt.get("change_set_id")
         if not isinstance(change_id, str):
             raise CustomizationServiceError("invalid_staged_receipt", 422)
-        change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=change_id)
+        change = self._record_fields_change(tenant_id, change_id)
         validated = self._validate_receipt(receipt, change)
         if change.state is not ChangeState.PUBLISHING:
             raise CustomizationServiceError("publish_not_authorized", 403)
         if expected_main_sha != change.base_commit or self._raw_receipt(change) != dict(validated):
             raise CustomizationServiceError("staged_receipt_mismatch")
         self._verify_catalog(tenant_id, change.staged_commit or "", change.catalog_digest or "")
+        self._verified_record_fields(change, set())
+        self._verify_record_fields_predecessor(change)
         return {"authorized": True, "change_set_id": change.change_set_id}
 
     @staticmethod
@@ -2176,12 +2253,19 @@ class CustomizationService:
         binding = _binding(tenant)
         if binding.role not in {"owner", "editor"}:
             raise CustomizationServiceError("tenant_role_denied", 403)
-        current = self.store.get_effective_catalog(tenant_id=tenant_id)
-        target = self.store.get_change_set(tenant_id=tenant_id, change_set_id=change_set_id)
+        current = self._record_fields_pin(tenant_id)
+        if current is None:
+            raise ChangeSetNotFoundError("no effective catalog")
+        target = self._record_fields_change(tenant_id, change_set_id)
         if target.state is not ChangeState.PUBLISHED:
             raise CustomizationServiceError("rollback_target_invalid")
-        result = self.store.restore_effective_catalog(tenant_id=tenant_id, target_change_set_id=target.change_set_id,
-            prior_change_set_id=current.change_set_id, idempotency_key=idempotency_key)
+        self._verify_catalog(tenant_id, target.staged_commit or "", target.catalog_digest or "")
+        self._verified_record_fields(target, set())
+        try:
+            result = self.store.restore_effective_catalog(tenant_id=tenant_id, target_change_set_id=target.change_set_id,
+                prior_change_set_id=current.change_set_id, idempotency_key=idempotency_key)
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+            raise CustomizationServiceError("record_fields_write_failed", 503) from exc
         return {"contract": CONTRACT, "tenant_id": result.tenant_id, "change_set_id": result.change_set_id,
                 "catalog_commit": result.catalog_commit, "catalog_digest": result.catalog_digest,
                 "platform_release": result.effective_platform_release}
@@ -2203,10 +2287,18 @@ class CustomizationService:
         if (change.request_graph_input is not None
                 or change.base_catalog_change_set_id is not None
                 or change.catalog_record_fields_json is not None):
-            tool = extra.get("tool")
-            if tool is None:
-                tool = self._staged_tool(change)
-            extra["tool"] = self._decorate_stage_tool(change, tool)
+            self._verified_record_fields(change, set())
+            try:
+                removal = self.store.get_removal_request(
+                    tenant_id=change.tenant_id, change_set_id=change.change_set_id
+                )
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                raise CustomizationServiceError("record_fields_read_failed", 503) from exc
+            if removal is None:
+                tool = extra.get("tool")
+                if tool is None:
+                    tool = self._staged_tool(change)
+                extra["tool"] = self._decorate_stage_tool(change, tool)
         body = {"receipt": self._raw_receipt(change),
                 **{k: v for k, v in extra.items() if v is not None}}
         klass = self._change_class(change, changed)
@@ -2633,6 +2725,74 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
         raise
     except (OSError, sqlite3.DatabaseError, subprocess.SubprocessError) as exc:
         raise _unavailable(f"{type(exc).__name__}: {exc}") from exc
+
+
+def load_authoritative_tenant_tools(tenant_id: str) -> list[dict[str, Any]] | None:
+    """Join one complete durable generation; None means legacy resolution.
+
+    Materialization may itself observe a newer pin. Never combine its rows with
+    the snapshot captured before it: reread full authority even on a failed attempt.
+    """
+    tenant_id = _tenant_id(tenant_id)
+    try:
+        projection = effective_catalog_pin(tenant_id)
+    except CustomizationServiceError as exc:
+        if exc.code == "effective_catalog_unavailable":
+            raise CustomizationServiceError("record_fields_read_failed", 503) from exc
+        raise
+    if projection is None:
+        return None
+    service = CustomizationService.configured()
+    for attempt in range(2):
+        pin = service._record_fields_pin(tenant_id)
+        if pin is None:
+            if attempt == 0:
+                # The durable row is the authority; the projection above only applied
+                # the rollout and path guards. No row means no authoritative pin, so
+                # resolution stays legacy (which still materializes through
+                # effective_catalog_dir and never falls back to mutable main).
+                return None
+            raise _unavailable("effective authority disappeared during catalog load")
+        failure = None
+        joined = None
+        try:
+            root = effective_catalog_dir(tenant_id)
+            change = service._record_fields_change(tenant_id, pin.change_set_id)
+            if (not service._pin_matches_change(pin, change)
+                    or change.state not in {ChangeState.PUBLISHED, ChangeState.ROLLED_BACK}):
+                raise CustomizationServiceError("record_fields_invalid", 503)
+            raw = (root / "registry.json").read_bytes() if root is not None else b""
+            if hashlib.sha256(raw).hexdigest() != pin.catalog_digest:
+                raise CustomizationServiceError("effective_catalog_digest_mismatch", 503)
+            rows = service._record_fields_rows(change, pin.catalog_commit, pin.catalog_digest)
+            if json.loads(raw).get("tools") != list(rows.values()):
+                raise CustomizationServiceError("record_fields_invalid", 503)
+            snapshot = service._verified_record_fields(change, set())
+            bindings = parse_catalog_record_fields_json(snapshot)["tools"] if snapshot is not None else {}
+            joined = [dict(row) for row in rows.values()]
+            for row in joined:
+                binding = bindings.get(row["name"])
+                if binding is not None:
+                    row["graph_input"] = binding["graph_input"]
+        except CustomizationServiceError as exc:
+            if isinstance(exc.__cause__, (sqlite3.DatabaseError, PostgresError)):
+                failure = CustomizationServiceError("record_fields_read_failed", 503)
+            else:
+                failure = exc
+        except ToolRecordFieldError as exc:
+            failure = CustomizationServiceError("record_fields_invalid", 503)
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+            failure = CustomizationServiceError("record_fields_read_failed", 503)
+        except (ValueError, TypeError, KeyError, RecursionError) as exc:
+            failure = CustomizationServiceError("record_fields_invalid", 503)
+        if service._pin_identity(service._record_fields_pin(tenant_id)) != service._pin_identity(pin):
+            if attempt == 0:
+                continue
+            raise _unavailable("effective authority changed during both catalog loads")
+        if failure is not None:
+            raise failure
+        return joined
+    raise _unavailable("effective authority unavailable during catalog load")
 
 
 def effective_catalog_pin(tenant_id: str) -> dict[str, str] | None:

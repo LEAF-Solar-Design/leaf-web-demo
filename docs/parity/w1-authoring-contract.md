@@ -97,28 +97,34 @@ committed `settings.panels_in_sequence` as the maximum when none is given.
 
 ## Which authoring paths accept the field
 
-Graph-input authoring is supported on the templated path only: `POST /api/author`
-with auth off, the protected rollout off and no `LEAF_AUTHOR_HARNESS_URL`, where the
-router itself writes and registers the record. Every other path refuses a request
-carrying `graph_input` with HTTP 422 and `error_code` `GRAPH_INPUT_UNSUPPORTED`,
-before any harness call or stage, and creates nothing:
+Graph-input authoring is supported on the templated path and controlled R5
+customization. The templated router writes the declaration on its record; R5
+stores it as durable metadata, verifies the complete snapshot before publication,
+and joins it onto the exact effective catalog when either tenant loader reads it.
+Controlled requests retain the raw value until reservation replay comparison;
+a changed replay returns 409 `idempotency_replay`, while a new malformed value
+returns 422 `BAD_PARAMS` naming `graph_input`.
 
-| Path | Why it refuses |
+| Path | Behavior |
 | --- | --- |
-| `POST /api/author` with `LEAF_AUTHOR_HARNESS_URL` set | the harness registers the record in the tenant repo from the description alone, so the field would never reach the catalog record |
-| `POST /api/author` on the protected (R5) lane | the staged record does not carry the field |
-| `POST /api/author/stage` | the staged record does not carry the field |
+| `POST /api/author` with auth off, R5 off and no harness URL | accepts the valid declaration on the templated path |
+| `POST /api/author` on the legacy direct-harness lane | refuses with 422 `GRAPH_INPUT_UNSUPPORTED`: Graph-input authoring requires the templated path or controlled R5 customization; the tool was not created. |
+| `POST /api/author` on the protected R5 lane, including with a harness URL set | admits the declaration to controlled customization with the subject-scoped header idempotency key |
+| `POST /api/author/stage` | admits the declaration to controlled customization with the body idempotency key and existing authority tuple |
 
-A request without `graph_input` behaves exactly as before on every path. Carrying the
-field through the harness record (its `/author`, `/author/stage` and
-`/author/publish` routes and the authoring loop) is a follow-up.
+A request without `graph_input`, including explicit null, omits the optional
+forwarded field. Controlled admission returns 202 for an asynchronous stage job
+and 200 for a synchronous result. The overlay changes neither raw Git registry
+bytes nor harness wire payloads or receipts. A Git update never makes bytes effective by itself.
 
 ## Staging
 
 Staging arms `LEAF_AUTHORED_EXECUTION=1` with a sandbox tier, so these tools execute
-there. Staging also sets `LEAF_AUTHOR_HARNESS_URL`, so model-authored graph reports
-cannot be registered there until the harness follow-up above lands; until then a
-staging `POST /api/author` with `"graph_input": "solar-w1-graph"` answers 422
-`GRAPH_INPUT_UNSUPPORTED`. The staging walk
+there. When protected R5 is enabled, `POST /api/author` uses controlled
+customization even with `LEAF_AUTHOR_HARNESS_URL` set, so graph reports can be
+staged and published through the verified metadata path. With auth and R5 off,
+the harness URL selects the legacy direct-harness lane, which still refuses
+graph-input authoring with 422 `GRAPH_INPUT_UNSUPPORTED`. The staging walk
 (`npm --prefix web run proof:staging -- w1-solar-authoring.spec.mjs --workers=1`,
-folded into `solar-parity-015`'s staging run) depends on that follow-up.
+folded into `solar-parity-015`'s staging run) requires controlled R5 publication
+and the authored execution sandbox posture.
