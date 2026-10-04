@@ -951,6 +951,9 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_civil_operations.py"), 15),
         Suite("server-solar-civil-route", "server tests/test_solar_civil_route.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_civil_route.py"), 13),
+        # The floor is the exact count of one HTTP chain test.
+        Suite("server-solar-ground-physical-admission", "server tests/test_solar_ground_physical_admission.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_ground_physical_admission.py"), 1),
         # sf-w3-tracker-rows-route: bounded manual tracker row creation with drawing
         # checkout authorization and the closed tracker row refusal vocabulary.
         # Hermetic and nothing skips: the floor is the exact count, 40.
