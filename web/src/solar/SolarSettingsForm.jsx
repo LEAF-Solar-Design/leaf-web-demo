@@ -103,7 +103,7 @@ function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, b
             </label>
           ))}
           <button type="button" onClick={() => setProjectDrafts((previous) => ({ ...previous, latitude: '', longitude: '' }))}>Clear coordinates</button>
-          {!effectiveZip && <p>ZIP code is blank. You can save setup, but string sizing is unavailable until you save a ZIP code.</p>}
+          {!effectiveZip && <p>ZIP code is blank. You can save setup. Cloud string sizing needs a saved ZIP code.</p>}
           {zipChanged && coordinatesUnchanged && <p>Changing the ZIP code clears saved coordinates unless you enter both coordinates again.</p>}
           {hasChanges && <p>Re-size strings after this change</p>}
           {SETTINGS_FIELDS.map(({ key, label, kind }) => {

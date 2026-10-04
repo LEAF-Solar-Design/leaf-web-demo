@@ -388,11 +388,44 @@ def _record_outcome(record):
     return response, request.module.model, request.inverter.model
 
 
+def manual_voltage():
+    return {"passes": None, "override_accepted": False, "suggested_string_length": None,
+            "per_module": None, "string_voltage": None, "max_dc_voltage": None}
+
+
+def manual_sizing_evidence(graph, tables=None):
+    length = graph["settings"]["panels_in_sequence"]
+    if type(length) is not int or not 1 <= length <= 4096:
+        raise GraphValidationError("INVALID_SIZING_REQUEST")
+    if tables is None:
+        tables = compact_slot_tables(graph)
+    sizing_targets(graph, "global", tables)
+    return {"mode": "manual-global", "basis_sha256": sizing_basis(graph, tables),
+            "panels_in_sequence": length, "records": {}}
+
+
 def require_sizing(graph, tables=None):
     """Recheck drawing-owned evidence before grouping, including after reopen. `tables` as in
     sizing_basis; the slot blocks are decoded at most once per call."""
     try:
         evidence = graph["settings"]["extra"]["string_sizing"]
+        if type(evidence) is not dict:
+            raise ValueError()
+        if evidence.get("mode") == "manual-global":
+            try:
+                expected = manual_sizing_evidence(graph, tables)
+            except GraphValidationError:
+                raise ValueError() from None
+            voltage = graph["settings"]["voc_cold"]
+            if (type(evidence) is not dict or set(evidence) != set(expected)
+                    or type(evidence["panels_in_sequence"]) is not int
+                    or type(evidence["records"]) is not dict or evidence != expected
+                    or graph["settings"]["global_string_sizing_confirmed"] is not True
+                    or type(voltage) is not dict or set(voltage) != set(manual_voltage())
+                    or voltage["override_accepted"] is not False
+                    or any(voltage[key] is not None for key in voltage if key != "override_accepted")):
+                raise ValueError()
+            return copy.deepcopy(evidence)
         if tables is None:
             tables = compact_slot_tables(graph)
         if evidence["basis_sha256"] != sizing_basis(graph, tables):

@@ -53,7 +53,7 @@ async function waitForMode(mode) {
 afterEach(cleanup);
 
 const consequence = 'Re-size strings after this change';
-const blankZip = 'ZIP code is blank. You can save setup, but string sizing is unavailable until you save a ZIP code.';
+const blankZip = 'ZIP code is blank. You can save setup. Cloud string sizing needs a saved ZIP code.';
 const clearingZip = 'Changing the ZIP code clears saved coordinates unless you enter both coordinates again.';
 const changeInput = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
 const applyButton = () => screen.getByRole('button', { name: 'Apply settings' });

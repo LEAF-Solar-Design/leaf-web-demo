@@ -77,7 +77,7 @@
     {
       "name": "solar-size-strings",
       "version": "1.0.0",
-      "description": "Confirm cloud string sizing for this drawing.",
+      "description": "Confirm a saved global string length or cloud string sizing for this drawing.",
       "kind": "script",
       "family_id": "stringing",
       "engine_op": "solar_size_strings",
@@ -99,7 +99,8 @@
           "mode": {
             "enum": [
               "global",
-              "zones"
+              "zones",
+              "manual-global"
             ]
           },
           "requests": {

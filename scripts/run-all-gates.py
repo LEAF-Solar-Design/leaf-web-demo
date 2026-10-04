@@ -648,10 +648,10 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-w1-route-consumers", "server tests/test_solar_w1_route_consumers.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_w1_route_consumers.py"), 41),
         # solar-size-strings through the local graph commit rail with a recorded String Sizer and a
-        # fake grant, so the floor is the exact count on every runner. MEASURED from the collected
-        # cases: 13 tests + 27 more parametrizations = 40 passed.
+        # fake grant, plus saved global length confirmation without cloud sizing.
+        # Measured baseline: 40 passed; eight manual cases raise the required total to 48.
         Suite("server-solar-tool-solar-size-strings", "server tests/test_solar_tool_solar_size_strings.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_size_strings.py"), 40),
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_size_strings.py"), 48),
         # W2 registration (2026-09-28, studio-finish solar-parity-010): seven W2 parity builtins
         # as registry local-graph-commit declarations. COUNTED from the collected cases:
         # 13 tests + 8 more parametrizations = 21 (the solar-string-conductors row joined TOOLS).

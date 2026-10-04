@@ -18,11 +18,55 @@ const draft = () => ({ module_name: 'Module', full_inverter_name: 'Inverter', bi
 const build = (changes = {}, graph = read(), mode = 'global') => buildSizingParams({ graph, mode, draft: { ...draft(), ...changes } })
 
 describe('solarSizingModel', () => {
+  it('W21C2-manual-saved-length', () => {
+    const source = raw()
+    source.settings.panels_in_sequence = 3
+    source.project.zip_code = ''
+    const graph = read(source)
+    const before = JSON.stringify(source)
+    expect(graph.savedLength).toBe(3)
+    expect(buildSizingParams({ graph, mode: 'manual-global' })).toEqual({ ok: true,
+      params: { expected_rev: 7, mode: 'manual-global', confirm: true } })
+    expect(JSON.stringify(source)).toBe(before)
+    expect(graph.power).toEqual({})
+  })
+
+  it('W21C2-manual-length-validation', () => {
+    for (const length of [undefined, null, true, false, '3', 0, -1, 1.5, NaN, Infinity, -Infinity, 4097]) {
+      const source = raw()
+      source.settings.panels_in_sequence = length
+      expect(buildSizingParams({ graph: read(source), mode: 'manual-global' })).toEqual({ ok: false,
+        reason: 'sizing_manual_length_required', invalid: [] })
+    }
+    for (const length of [1, 4096]) {
+      const source = raw()
+      source.settings.panels_in_sequence = length
+      expect(buildSizingParams({ graph: read(source), mode: 'manual-global' }).ok).toBe(true)
+    }
+  })
+
+  it('W21C2-manual-targets', () => {
+    const source = raw()
+    source.settings.panels_in_sequence = 3
+    source.project.zip_code = ''
+    source.electrical_zones = []
+    expect(sizingTargets(read(source), 'manual-global')).toEqual({ ok: true, targets: ['S'] })
+    source.panels = []
+    expect(buildSizingParams({ graph: read(source), mode: 'manual-global' })).toEqual({ ok: false,
+      reason: 'sizing_panels_required', invalid: [] })
+    source.frames = [{ ground_slots: { codec: 'leaf.solar-ground-slots.v1', count: 1,
+      panel_ids: 'pOJc3Wd1QD2eDCdUAGmTCA==', centres: 'A'.repeat(22) + '==', angle: 0,
+      panel: { rev: 0, provenance: {}, validity: {}, extra: {} } } }]
+    expect(buildSizingParams({ graph: read(source), mode: 'manual-global' })).toEqual({ ok: true,
+      params: { expected_rev: 7, mode: 'manual-global', confirm: true } })
+    expect(buildSizingParams({ graph: null, mode: 'manual-global' }).reason).toBe('sizing_graph_unavailable')
+  })
+
   it('keeps the reason vocabulary frozen and complete', () => {
     expect(Object.isFrozen(SOLAR_SIZING_REASONS)).toBe(true)
     expect(Object.keys(SOLAR_SIZING_REASONS)).toEqual(['sizing_graph_unavailable', 'sizing_project_scope',
       'sizing_zip_required', 'sizing_panels_required', 'sizing_zones_invalid', 'sizing_zone_models_required',
-      'sizing_zone_models_invalid', 'sizing_fields_invalid', 'sizing_too_many_targets'])
+      'sizing_zone_models_invalid', 'sizing_fields_invalid', 'sizing_too_many_targets', 'sizing_manual_length_required'])
   })
 
   it('accepts only current plain views and bounded graph revisions', () => {

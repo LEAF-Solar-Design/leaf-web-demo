@@ -142,7 +142,7 @@ def test_declaration_is_local_graph_commit():
     tools = json.loads((SERVER / "write_tools.json").read_text(encoding="utf-8"))["tools"]
     row = next(row for row in tools if row["name"] == TOOL)
     assert deps.catalog_tool_digest(row) == (
-        "sha256:48d2c171a8c9da862ae6da44987fcb8fec528e2abe1a268bcf875dc6e236233f")
+        "sha256:9d195167218f59395ed9fe168864801eca88158c6af988fb0a84f5fcc5dd1bf2")
 
 
 def test_dispatch_commits_the_sizing_evidence(graph, tmp_path, monkeypatch, granted):
@@ -395,3 +395,160 @@ def test_bundle_drawing_never_calls_the_service(drawing, graph, granted):
 def test_unbound_run_still_refuses(graph):
     with pytest.raises(RuntimeError, match="broker"):
         builtin().run(copy.deepcopy(graph), {})
+
+
+def manual_params(**changes):
+    return dict({"expected_rev": 0, "mode": "manual-global", "confirm": True}, **changes)
+
+
+@pytest.fixture
+def manual_no_cloud(monkeypatch):
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append((args, kwargs))
+        pytest.fail("Manual confirmation called cloud sizing")
+
+    monkeypatch.setattr(solar_sizing_client, "resolve_grant", forbidden)
+    monkeypatch.setattr(solar_sizing_client, "post_string_length", forbidden)
+    return calls
+
+
+def test_W21C2_manual_commit(graph, tmp_path, monkeypatch, manual_no_cloud):
+    graph["project"]["zip_code"] = ""
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    request = manual_params()
+    before_graph, before_request = copy.deepcopy(graph), copy.deepcopy(request)
+    with held(backend) as fence:
+        result = dispatch(backend, fence, request)
+    stored = resolve_graph_context(backend, TENANT_ID, "solar", 2)["graph"]
+    assert (stored["rev"], stored["parent_rev"]) == (1, 0)
+    assert result["new_version"] == {"drawing_id": "solar", "version": 2, "parent": 1}
+    assert graph == before_graph and request == before_request
+    for key in graph.keys() - {"settings", "rev", "parent_rev"}:
+        assert stored[key] == graph[key]
+    settings = stored["settings"]
+    assert settings["panels_in_sequence"] == 2
+    assert settings["global_string_sizing_confirmed"] is True
+    assert settings["voc_cold"] == {
+        "passes": None, "override_accepted": False, "suggested_string_length": None,
+        "per_module": None, "string_voltage": None, "max_dc_voltage": None}
+    evidence = {"mode": "manual-global", "basis_sha256": solar_sizing_client.sizing_basis(stored),
+                "panels_in_sequence": 2, "records": {}}
+    assert settings["extra"]["string_sizing"] == evidence
+    checked = solar_sizing_client.require_sizing(stored)
+    assert checked == evidence and checked is not settings["extra"]["string_sizing"]
+    checked["records"]["changed"] = {}
+    assert settings["extra"]["string_sizing"] == evidence
+    assert manual_no_cloud == []
+    for length in (1, 4096):
+        source = copy.deepcopy(graph)
+        source["settings"]["panels_in_sequence"] = length
+        candidate = builtin().size_strings(source, manual_params(), tenant_id=TENANT_ID, job_id="manual")
+        assert candidate["graph"]["settings"]["panels_in_sequence"] == length
+        assert candidate["records"] == {} and candidate["confirmed"] is True
+
+
+def test_W21C2_manual_route_without_grant(api, graph, manual_no_cloud):
+    response = api[0].post("/api/run?wait=1", json=body(api, TOOL, manual_params()))
+    assert response.status_code == 200, response.text
+    env = response.json()
+    assert env["ok"] is True
+    assert jobs.get_job(env["result"]["job_id"])["status"] == "complete"
+    assert store.load_manifest(api[1], TENANT_ID, "solar")["head"] == 2
+    assert manual_no_cloud == []
+
+
+def test_W21C2_manual_refusals(graph, tmp_path, monkeypatch, manual_no_cloud):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    missing = manual_params()
+    del missing["confirm"]
+    requests = [missing, manual_params(confirm=False), manual_params(confirm="true"),
+                manual_params(cancel="true")]
+    requests.extend(manual_params(**{key: value}) for key, value in
+                    (("requests", {}), ("grant_ref", "unused"), ("panels_in_sequence", 12)))
+    for request in requests:
+        assert refusal(backend, request) == "INVALID_SIZING_REQUEST"
+        assert latest(backend) == 1
+    assert refusal(backend, manual_params(expected_rev=5)) == "STALE_GRAPH_REVISION"
+    for length in (0, 4097):
+        source = copy.deepcopy(graph)
+        source["settings"]["panels_in_sequence"] = length
+        with pytest.raises(GraphValidationError) as error:
+            builtin().size_strings(source, manual_params(), tenant_id=TENANT_ID, job_id="manual")
+        assert error.value.code == "INVALID_SIZING_REQUEST"
+    assert latest(backend) == 1 and manual_no_cloud == []
+
+
+def test_W21C2_manual_cancel(graph, tmp_path, monkeypatch, manual_no_cloud):
+    before = copy.deepcopy(graph)
+    request = manual_params(cancel=True)
+    result = builtin().size_strings(graph, request, tenant_id=TENANT_ID, job_id="manual")
+    assert result == {"graph": before, "confirmed": False, "records": {}}
+    assert graph == before
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    assert refusal(backend, request) == "GRAPH_COMMIT_CANCELLED"
+    assert latest(backend) == 1 and manual_no_cloud == []
+
+
+def test_W21C2_manual_replay(graph, tmp_path, monkeypatch, manual_no_cloud):
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    with held(backend) as fence:
+        first = dispatch(backend, fence, manual_params())
+        replay = dispatch(backend, fence, manual_params())
+    assert replay["replayed"] is True
+    assert replay["new_version"] == first["new_version"]
+    assert latest(backend) == 2 and manual_no_cloud == []
+
+
+def test_W21C2_manual_evidence_tampering(graph, manual_no_cloud):
+    confirmed = builtin().run_bound(graph, manual_params(), tenant_id=TENANT_ID, job_id="manual")
+    mutations = [
+        lambda g: g["settings"]["extra"]["string_sizing"].update(basis_sha256="0" * 64),
+        lambda g: g["settings"].update(panels_in_sequence=3),
+        lambda g: g["settings"].update(global_string_sizing_confirmed=False),
+        lambda g: g["settings"].update(global_string_sizing_confirmed=1),
+        lambda g: g["settings"]["extra"]["string_sizing"].update(records={"fake": {}}),
+        lambda g: g["settings"]["extra"]["string_sizing"].update(records=[]),
+        lambda g: g["settings"]["extra"]["string_sizing"].update(extra=True),
+        lambda g: g["settings"]["extra"]["string_sizing"].pop("panels_in_sequence"),
+        lambda g: g["panels"][0].update(angle=90),
+    ]
+    for key in confirmed["settings"]["voc_cold"]:
+        mutations.append(lambda g, key=key: g["settings"]["voc_cold"].update({key: 0}))
+    for value in (True, 2.0, "2", 0, 4097):
+        mutations.append(lambda g, value=value: g["settings"]["extra"]["string_sizing"].update(
+            panels_in_sequence=value))
+    for mutate in mutations:
+        candidate = copy.deepcopy(confirmed)
+        mutate(candidate)
+        with pytest.raises(GraphValidationError) as error:
+            solar_sizing_client.require_sizing(candidate)
+        assert error.value.code == "SIZING_CONFIRMATION_REQUIRED"
+    assert manual_no_cloud == []
+
+
+def test_W21C2_settings_invalidates_manual(graph, manual_no_cloud):
+    confirmed = builtin().run_bound(graph, manual_params(), tenant_id=TENANT_ID, job_id="manual")
+    changed = solar_local_graph._load_builtin("solar-settings").run(
+        confirmed, {"expected_rev": 1, "changes": {"panels_in_sequence": 12}})
+    assert changed["settings"]["panels_in_sequence"] == 12
+    assert changed["settings"]["global_string_sizing_confirmed"] is False
+    assert "string_sizing" not in changed["settings"]["extra"]
+    with pytest.raises(GraphValidationError) as error:
+        solar_sizing_client.require_sizing(changed)
+    assert error.value.code == "SIZING_CONFIRMATION_REQUIRED"
+    assert manual_no_cloud == []
+
+
+def test_W21C2_manual_power_boundary(graph, manual_no_cloud):
+    confirmed = builtin().run_bound(graph, manual_params(), tenant_id=TENANT_ID, job_id="manual")
+    assert availability.w1_graph_readiness(confirmed)["solar-panel-groups"] == {
+        "input_ready": False, "input_reason": "module_power_required"}
+    from solar_sizing_power import frame_module_power, sizing_power_ready
+    assert sizing_power_ready(confirmed) is False
+    with pytest.raises(GraphValidationError) as error:
+        frame_module_power(confirmed, confirmed["frames"][0]["panel_refs"],
+                           confirmed["frames"][0]["electrical_zone_ref"])
+    assert error.value.code == "MODULE_POWER_REQUIRED"
+    assert manual_no_cloud == []
