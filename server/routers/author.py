@@ -77,7 +77,7 @@ class AuthorRequest(BaseModel):
     placement: Dict[str, Any] | None = None
     # The one pinned intake an authored tool may request instead of the drawing
     # intake: the tenant's own stored W1 design graph (server/solar_authored_graph.py).
-    graph_input: Literal["solar-w1-graph"] | None = None
+    graph_input: Any = None
 
 
 class StageRequest(AuthorRequest):
@@ -196,13 +196,11 @@ GRAPH_INPUT_UNSUPPORTED = "GRAPH_INPUT_UNSUPPORTED"
 def _graph_input_unsupported_response() -> JSONResponse:
     """422 for graph_input on a path that cannot persist it on the record.
 
-    Only the templated lane writes the record itself; the harness and the staged
-    lane register a record that does not carry the field, so echoing it would
-    promise a graph intake the catalog record never declares. Refused before any
-    harness call or stage, so nothing is created.
+    The legacy direct harness registers from the description alone. Controlled
+    R5 stores the declaration separately and verifies it at publication and load.
     """
-    message = ("Graph-input authoring is available on the templated path only; "
-               "the tool was not created.")
+    message = ("Graph-input authoring requires the templated path or controlled R5 "
+               "customization; the tool was not created.")
     return JSONResponse(status_code=422, content=with_envelope_fields({
         "tool": None,
         "code": None,
@@ -760,17 +758,18 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
             CustomizationServiceError("invalid_stage_authority", 422)
         )
     try:
-        _validated_record_fields(req)
+        tool_record_fields.validate_optional_fields({"icon": req.icon, "placement": req.placement})
     except ToolRecordFieldError as exc:
         return _record_fields_error(exc)
-    if req.graph_input is not None and (
-            deps.auth_live() or customization_enabled(5, str(tenant).strip())
-            or os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")):
-        # Only the templated legacy lane persists the record the router writes.
-        return _graph_input_unsupported_response()
     _emit_author_event("author.requested", tenant, {
         "mode": req.mode, "desc_len": len(req.description or "")})
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
+        try:
+            _validated_record_fields(req)
+        except ToolRecordFieldError as exc:
+            return _record_fields_error(exc)
+        if req.graph_input is not None and os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/"):
+            return _graph_input_unsupported_response()
         # The legacy path also delegates to the authoring harness when
         # LEAF_AUTHOR_HARNESS_URL is set, so it is metered by the same cap.
         over_quota = _legacy_quota_denied(tenant)
@@ -814,12 +813,15 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
             } if authority_session_id and authority_turn_id else {}),
             **({"target_tool_name": req.target_tool_name}
                if req.target_tool_name else {}),
+            **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
             return JSONResponse(status_code=202, content=result)
         return result
     # The daily authoring cap is charged inside stage(), immediately before the
     # harness call, so everything it refuses first costs nothing.
+    except ToolRecordFieldError as exc:
+        return _record_fields_error(exc)
     except author_quota.AuthorQuotaExceeded as exc:
         _emit_author_event("author.wall_hit", tenant, {"wall_kind": "daily_quota"})
         return _quota_exceeded_response(str(tenant), exc)
@@ -859,12 +861,9 @@ def stage(
             CustomizationServiceError("invalid_stage_authority", 422)
         )
     try:
-        _validated_record_fields(req)
+        tool_record_fields.validate_optional_fields({"icon": req.icon, "placement": req.placement})
     except ToolRecordFieldError as exc:
         return _record_fields_error(exc)
-    if req.graph_input is not None:
-        # The staged record does not carry the field: refuse rather than drop it.
-        return _graph_input_unsupported_response()
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
@@ -890,12 +889,15 @@ def stage(
             } if authority_session_id and authority_turn_id else {}),
             **({"target_tool_name": req.target_tool_name}
                if req.target_tool_name else {}),
+            **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
             return JSONResponse(status_code=202, content=result)
         return result
     # Same cap as /api/author: both routes reach the harness through stage(),
     # which is where the charge lives, so neither can bypass it via the other.
+    except ToolRecordFieldError as exc:
+        return _record_fields_error(exc)
     except author_quota.AuthorQuotaExceeded as exc:
         return _quota_exceeded_response(str(tenant), exc)
     except author_quota.AuthorQuotaStoreError as exc:
