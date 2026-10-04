@@ -932,7 +932,11 @@ def build_suites() -> List[Suite]:
         # bounded JSON bodies, closed refusals and twin-store adapter parity.
         # Hermetic and nothing skips: the floor is the exact count, 37.
         Suite("server-solar-terrain-route", "server tests/test_solar_terrain_route.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_terrain_route.py"), 37),
+              "pytest", SERVER, _py_pytest("tests/test_solar_terrain_route.py"), 38),
+        Suite("server-solar-civil-operations", "server tests/test_solar_civil_operations.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_civil_operations.py"), 15),
+        Suite("server-solar-civil-route", "server tests/test_solar_civil_route.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_civil_route.py"), 13),
         # sf-w3-tracker-rows-route: bounded manual tracker row creation with drawing
         # checkout authorization and the closed tracker row refusal vocabulary.
         # Hermetic and nothing skips: the floor is the exact count, 40.

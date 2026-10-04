@@ -393,6 +393,8 @@
     "server-skills-catalog",
     "server-solar-artifacts",
     "server-solar-batch2-simple",
+    "server-solar-civil-operations",
+    "server-solar-civil-route",
     "server-solar-combiner-graph",
     "server-solar-feeder-graph",
     "server-solar-feeder-units",

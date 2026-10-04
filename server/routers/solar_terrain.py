@@ -10,6 +10,8 @@ from starlette.concurrency import run_in_threadpool
 import checkout_capability
 import deps
 import entitlements
+import solar_civil_operations as civil
+import solar_frames_piles as fp
 import solar_ground_terrain_adapter as adapter
 import solar_physical_head as physical_head
 import solar_physical_state
@@ -58,12 +60,47 @@ TERRAIN_ROUTE_REFUSALS = {
     "TERRAIN_MEDIA_TYPE_REFUSED": (415, ErrorCode.BAD_PARAMS, False),
     "TERRAIN_OPERATION_FAILED": (500, ErrorCode.INTERNAL, False),
 }
+CIVIL_ROUTE_REFUSALS = {
+    "FRAMES_PILES_PROJECT_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_BASE_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_DRAWING_UNITS_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_BOUNDARY_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_PRESET_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_PILE_TEMPLATE_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "CIVIL_GRADE_INPUT_INVALID": (400, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_DRAWING_NOT_FOUND": (404, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_GRAPH_REQUIRED": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_PROJECT_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_STATE_REQUIRED": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_UNITS_MISMATCH": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_TERRAIN_REQUIRED": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_SITE_CONSTRAINTS_UNSUPPORTED": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_PVCASE_UNSUPPORTED": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_NO_FRAMES_FIT": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_NO_FRAMES": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_NO_PILES": (409, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_STALE_BASE": (409, ErrorCode.BAD_PARAMS, True),
+    "FRAMES_PILES_TERRAIN_INVALID": (422, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_OFF_TERRAIN": (422, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_RANGE_INVALID": (422, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_STATE_INVALID": (422, ErrorCode.BAD_PARAMS, False),
+    "FRAMES_PILES_LIMIT_EXCEEDED": (422, ErrorCode.BAD_PARAMS, False),
+    "CIVIL_GRADE_LIMIT_EXCEEDED": (422, ErrorCode.BAD_PARAMS, False),
+    "CIVIL_GRADE_NO_PAD": (422, ErrorCode.BAD_PARAMS, False),
+    "CIVIL_GRADE_FAILED": (500, ErrorCode.INTERNAL, False),
+    "FRAMES_PILES_WRITES_DRAINED": (503, ErrorCode.INTERNAL, True),
+    "FRAMES_PILES_STORE_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
+}
 
 
 def _terrain_refused(reason):
-    if reason not in TERRAIN_ROUTE_REFUSALS:
+    refusal = TERRAIN_ROUTE_REFUSALS.get(reason)
+    if refusal is None:
+        refusal = CIVIL_ROUTE_REFUSALS.get(reason)
+    if refusal is None:
         reason = "TERRAIN_OPERATION_FAILED"
-    status, code, retryable = TERRAIN_ROUTE_REFUSALS[reason]
+        refusal = TERRAIN_ROUTE_REFUSALS[reason]
+    status, code, retryable = refusal
     env = err_envelope(code, reason, retryable=retryable)
     env["error"]["reason_code"] = reason
     return JSONResponse(status_code=status, content=env)
@@ -102,6 +139,10 @@ def _get_terrain(tenant, drawing_id, project_id):
             "head": head, "terrain": terrain}
 
 
+def _get_civil(tenant, drawing_id, project_id):
+    return civil.load_civil(_terrain_backend(tenant), tenant, drawing_id, project_id=project_id)
+
+
 def _operate(tenant, drawing_id, project_id, body, capability):
     backend = _terrain_backend(str(tenant))
     try:
@@ -114,6 +155,8 @@ def _operate(tenant, drawing_id, project_id, body, capability):
         pass  # No manifest: the adapter answers TERRAIN_DRAWING_NOT_FOUND.
     except (ValueError, OSError):
         raise adapter.TerrainAdapterError("TERRAIN_STORE_UNAVAILABLE") from None
+    if body["operation"] in civil.OPERATIONS:
+        return civil.operate(backend, str(tenant), drawing_id, body, project_id=project_id)
     call = {"mesh": adapter.render_mesh, "slope": adapter.check_tracker_slope,
             "slope-clear": adapter.clear_tracker_slope}[body["operation"]]
     kwargs = {"project_id": project_id, "expected_head": body["expected_head"]}
@@ -133,12 +176,16 @@ def _unique_object(pairs):
 
 @router.get("/api/drawings/{drawing_id}/terrain")
 async def get_terrain(drawing_id: str, project_id: Optional[str] = None,
+                      view: Optional[str] = None,
                       tenant=Depends(deps.require_active_tenant)):
     refusal = _scope_refusal(drawing_id, project_id, tenant, "run_read")
     if refusal is not None:
         return refusal
     try:
-        result = await run_in_threadpool(_get_terrain, str(tenant), drawing_id, project_id)
+        if view == "civil":
+            result = await run_in_threadpool(_get_civil, str(tenant), drawing_id, project_id)
+        else:
+            result = await run_in_threadpool(_get_terrain, str(tenant), drawing_id, project_id)
     except solar_physical_state.PhysicalStateError as exc:
         return _terrain_refused(exc.code)
     return JSONResponse(content=with_envelope_fields(result))
@@ -157,19 +204,35 @@ async def terrain_operation(drawing_id: str, request: Request, project_id: Optio
     if media != "application/json":
         return _terrain_refused("TERRAIN_MEDIA_TYPE_REFUSED")
     length = request.headers.get("content-length", "")
+    declared_length = None
     if re.fullmatch(r"[0-9]+", length):
         stripped = length.lstrip("0")
-        if len(stripped) > 12 or int(stripped or "0") > MAX_TERRAIN_BODY_BYTES:
+        if len(stripped) > 12 or int(stripped or "0") > civil.MAX_CIVIL_BODY_BYTES:
             return _terrain_refused("TERRAIN_BODY_TOO_LARGE")
+        declared_length = int(stripped or "0")
     data = bytearray()
     async for chunk in request.stream():
-        if len(data) + len(chunk) > MAX_TERRAIN_BODY_BYTES:
+        if len(data) + len(chunk) > civil.MAX_CIVIL_BODY_BYTES:
             return _terrain_refused("TERRAIN_BODY_TOO_LARGE")
         data.extend(chunk)
     try:
         body = json.loads(bytes(data), object_pairs_hook=_unique_object)
     except (ValueError, UnicodeError, RecursionError):
+        if max(len(data), declared_length or 0) > MAX_TERRAIN_BODY_BYTES:
+            return _terrain_refused("TERRAIN_BODY_TOO_LARGE")
         return _terrain_refused("TERRAIN_BODY_INVALID")
+    operation = body.get("operation") if type(body) is dict else None
+    is_civil = type(operation) is str and operation in civil.OPERATIONS
+    if is_civil:
+        try:
+            civil.validate_body(body)
+            result = await run_in_threadpool(_operate, tenant, drawing_id, project_id, body,
+                                             x_checkout_capability)
+        except solar_physical_state.PhysicalStateError as exc:
+            return _terrain_refused(exc.code)
+        return JSONResponse(content=with_envelope_fields(result))
+    if max(len(data), declared_length or 0) > MAX_TERRAIN_BODY_BYTES:
+        return _terrain_refused("TERRAIN_BODY_TOO_LARGE")
     if type(body) is not dict or not set(body) <= {"operation", "expected_head", "limits"}:
         return _terrain_refused("TERRAIN_BODY_INVALID")
     operation = body.get("operation")
