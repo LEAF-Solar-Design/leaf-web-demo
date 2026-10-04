@@ -199,6 +199,7 @@ export default function SiteRoot() {
   // stays App's engine mount.
   return (
     <DrawingIdentityProvider
+      scene={scene}
       mode={scene === 'app' || scene === 'leaf-platform' ? DRAWING_MODE_CONSOLE : DRAWING_MODE_OPERATOR}
       search={BOOT_SEARCH}
       publicDemo={DEMO.publicDemo}

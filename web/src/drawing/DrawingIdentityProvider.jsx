@@ -50,6 +50,7 @@ import {
   authTenantScope,
   classifyDemo,
   classifyProof,
+  drawingUrlAfterUpload,
   identityFromUploadReceipt,
   isScopeSwitch,
   seedDrawingIdentity,
@@ -134,6 +135,7 @@ function useAuthPrincipalScope(readAuthToken, subscribeAuthChange) {
 
 export function DrawingIdentityProvider({
   mode = DRAWING_MODE_OPERATOR,
+  scene,
   // Every seam below is injectable so the provider is testable without a
   // location, a token or session storage — and so a host that already made
   // ONE reading of the search string (SiteRoot) can hand that reading in
@@ -215,8 +217,14 @@ export function DrawingIdentityProvider({
     if (!next) return null
     setActiveIdentity(next)
     if (receipt?.tenant_kind === 'account') rememberDrawingId(next.drawingId)
+    if (typeof window !== 'undefined') {
+      const nextUrl = drawingUrlAfterUpload({ href: window.location.href, mode, scene, receipt, promoted: true })
+      if (nextUrl !== null) {
+        try { window.history.replaceState(window.history.state, '', nextUrl) } catch { /* the in-memory drawing stands */ }
+      }
+    }
     return next
-  }, [rememberDrawingId, setActiveIdentity])
+  }, [rememberDrawingId, setActiveIdentity, mode, scene])
 
   const setFromQuery = useCallback(() => {
     setActiveIdentity(bootSeed)
@@ -260,6 +268,7 @@ export function DrawingIdentityProvider({
     drawingId: identity.drawingId,
     source: identity.source,
     origin: identity.origin,
+    tenantKind: identity.tenantKind ?? null,
     setFromUpload,
     setFromQuery,
     reset,
