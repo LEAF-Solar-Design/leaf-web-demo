@@ -2549,6 +2549,8 @@ def build_suites() -> List[Suite]:
         # 66 test functions, one parametrized over 2 comparator names = 67.
         Suite("scripts-solar-parity-status", "scripts test_solar_parity_status.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_status.py"), 69),
+        Suite("scripts-solar-parity-reachability", "scripts test_solar_parity_reachability.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_reachability.py"), 43),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract
