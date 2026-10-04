@@ -450,6 +450,8 @@
     "server-solar-pile-block-mapping",
     "server-solar-probe-calcs",
     "server-solar-pvcase-conversion",
+    "server-solar-pvcase-graph",
+    "server-solar-pvcase-outputs",
     "server-solar-pvcase-solve",
     "server-solar-pvcase-sources",
     "server-solar-registry",
