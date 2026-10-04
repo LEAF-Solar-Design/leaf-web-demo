@@ -38,7 +38,8 @@ def run(graph, params, *, source_intake=None):
     if source_intake is None:
         raise GraphValidationError("SOURCE_INTAKE_REQUIRED")
     if (not isinstance(source_intake, dict)
-            or "polylines" in source_intake and not isinstance(source_intake["polylines"], list)):
+            or "polylines" in source_intake and not isinstance(source_intake["polylines"], list)
+            or "inserts" in source_intake and not isinstance(source_intake["inserts"], list)):
         raise GraphValidationError("INVALID_SOURCE_INTAKE")
     try:
         recognised = kernel.panels_from_intake(
@@ -54,9 +55,10 @@ def run(graph, params, *, source_intake=None):
         raise GraphValidationError("PANEL_LIMIT_EXCEEDED")
 
     by_handle = {}
-    for polyline in source_intake.get("polylines", []):
-        if isinstance(polyline, Mapping) and isinstance(polyline.get("handle"), str):
-            by_handle.setdefault(polyline["handle"].upper(), []).append(polyline)
+    for kind in ("polylines", "inserts"):
+        for entity in source_intake.get(kind, []):
+            if isinstance(entity, Mapping) and isinstance(entity.get("handle"), str):
+                by_handle.setdefault(entity["handle"].upper(), []).append((kind, entity))
     panels, seen = [], set()
     for selected in recognised:
         handle = selected["handle"]
@@ -69,7 +71,12 @@ def run(graph, params, *, source_intake=None):
         if normalized in seen:
             raise GraphValidationError("AMBIGUOUS_PANEL_HANDLE")
         seen.add(normalized)
-        polyline = matches[0]
+        kind, polyline = matches[0]
+        if kind == "inserts":
+            try:
+                polyline = kernel.panel_outline_from_insert(polyline, source_intake.get("blocks"))
+            except kernel.PanelGroupKernelError:
+                raise GraphValidationError("INVALID_SOURCE_INTAKE") from None
         points = [(float(q[0]), float(q[1])) for q in polyline["pts"]]
         if (len(points) >= 4 and kernel.v_close(points[0][0], points[-1][0])
                 and kernel.v_close(points[0][1], points[-1][1])):

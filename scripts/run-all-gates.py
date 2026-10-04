@@ -641,6 +641,8 @@ def build_suites() -> List[Suite]:
         # MEASURED floor pending planner verification: 64 parametrized cases.
         Suite("server-solar-tool-panels-from-drawing", "server tests/test_solar_tool_solar_panels_from_drawing.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_panels_from_drawing.py"), 64),
+        Suite("server-w22c2-block-panels", "server tests/test_w22c2_block_panels.py",
+              "pytest", SERVER, _py_pytest("tests/test_w22c2_block_panels.py"), 24),
         Suite("server-solar-tool-solar-schedule", "server tests/test_solar_tool_solar_schedule.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_tool_solar_schedule.py"), 39),
         # sf-solar-w1-route-consumers: W1 homeruns, schedule and readiness keep feeders, trenches and
