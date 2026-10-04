@@ -879,6 +879,8 @@ def build_suites() -> List[Suite]:
         # terminal proof. Reads only. Hermetic and nothing skips: the floor is the exact count, 96.
         Suite("server-solar-tool-terrain-read", "server tests/test_solar_tool_terrain_read.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_terrain_read.py"), 96),
+        Suite("server-solar-tool-physical-shade", "server tests/test_solar_tool_physical_shade.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_physical_shade.py"), 22),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
