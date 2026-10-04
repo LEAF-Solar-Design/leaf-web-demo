@@ -23,6 +23,10 @@ function panelStage(id, label, panels) {
   return Object.freeze({ id, label, kind: 'workspace-panel', panels: Object.freeze(panels), capabilities: Object.freeze([]) })
 }
 
+function panelCatalogStage(id, label, panels, capabilities) {
+  return Object.freeze({ id, label, kind: 'workspace-panel-catalog', panels: Object.freeze(panels), capabilities: Object.freeze(capabilities) })
+}
+
 function flowEntry(id, label, maturity, stages) {
   return Object.freeze({ id, label, maturity, stages: stages === null ? null : Object.freeze(stages) })
 }
@@ -35,6 +39,8 @@ function flowEntry(id, label, maturity, stages) {
 // test_solar_tool_central_inverter_add.py, test_solar_tool_solar_feeders_ground.py.
 // SolarEdge producer-chain evidence: test_solar_solaredge_flow.py,
 // test_solaredge_flow_accept_run and test_solaredge_flow_tracking_read_run.
+// Ground Physical producer-chain evidence: test_solar_ground_physical_admission.py,
+// test_ground_physical_admission_producer_chain.
 export const SOLAR_FLOWS = Object.freeze([
   flowEntry('rooftop', 'Rooftop', 'production', null),
   flowEntry('ground-electrical', 'Ground Mount Electrical', 'production', [
@@ -57,9 +63,11 @@ export const SOLAR_FLOWS = Object.freeze([
     ]),
   ]),
   flowEntry('ground-physical', 'Ground Mount Physical', 'preview', [
-    panelStage('terrain', 'Terrain', ['landxml', 'terrain']), panelStage('layout', 'Tracker layout', ['tracker-rows']),
-    flowStage('civil', 'Civil and piles'), flowStage('analysis', 'Shade and terrain analysis'),
-    flowStage('outputs', 'Exports'),
+    panelStage('terrain', 'Terrain', ['landxml', 'terrain']),
+    panelStage('layout', 'Native frame layout', ['civil']),
+    panelStage('civil', 'Grade pads and native piles', ['civil']),
+    panelCatalogStage('analysis', 'Terrain and frame shade', ['physical-read'], ['solar-physical-shade']),
+    panelCatalogStage('outputs', 'Terrain and shade CSV', ['physical-read'], ['solar-physical-export']),
   ]),
   flowEntry('solaredge-import', 'SolarEdge PDF Import', 'preview', [
     panelStage('upload', 'Upload the SolarEdge PDF', ['solaredge-import']),
@@ -117,11 +125,17 @@ export function solarFlowSelect(families, flowId, flows = SOLAR_FLOWS, workspace
       }
       const registered = FLOW_PANELS[id]
       const supplied = workspacePanelsByFlow?.[id]
-      admitted.push(stage.kind === 'workspace-panel'
-        && Array.isArray(stage.panels) && stage.panels.length > 0
+      const panelsAdmitted = Array.isArray(stage.panels) && stage.panels.length > 0
         && Array.isArray(registered) && Array.isArray(supplied)
         && Array.from(stage.panels).every((panel) => typeof panel === 'string' && panel.length > 0
-          && registered.includes(panel) && supplied.includes(panel)))
+          && registered.includes(panel) && supplied.includes(panel))
+      if (stage.kind === 'workspace-panel-catalog') {
+        const capabilitiesAdmitted = Array.isArray(stage.capabilities) && stage.capabilities.length > 0
+          && Array.from(stage.capabilities).every((name) => typeof name === 'string' && name.length > 0 && index.has(name))
+        admitted.push(panelsAdmitted && capabilitiesAdmitted)
+        return panelsAdmitted && capabilitiesAdmitted ? stage.capabilities.map((name) => index.get(name)) : []
+      }
+      admitted.push(stage.kind === 'workspace-panel' && panelsAdmitted)
       return []
     })
     missing = flow.stages.filter((stage, position) => !admitted[position]).map((stage) => stage.label)

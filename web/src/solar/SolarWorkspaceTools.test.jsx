@@ -1,12 +1,18 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as api from '../api.js'
 import * as landxmlUpload from './SolarLandxmlUpload.jsx'
+import * as landxmlClients from './solarLandxmlClient.js'
 import * as terrainClients from './solarTerrainClient.js'
+import * as terrainPanels from './SolarTerrainPanel.jsx'
 import * as trackerClients from './solarTrackerRowsClient.js'
 import * as trackerPanels from './SolarTrackerRowsPanel.jsx'
 import * as importClients from './solarImportClient.js'
 import * as solarEdgePanels from './SolarEdgeImportPanel.jsx'
+import * as civilClients from './solarCivilClient.js'
+import * as civilPanels from './SolarCivilPanel.jsx'
+import { FLOW_PANELS } from './solarWorkspacePanels.js'
 import { TRACKER_ROWS_PANEL_REASONS as TRACKER_SENTENCES } from './SolarTrackerRowsPanel.jsx'
 import SolarWorkspaceTools, { TERRAIN_WORKSPACE_REASONS, SOLAREDGE_WORKSPACE_REASONS } from './SolarWorkspaceTools.jsx'
 import { COMBINER_INTAKE_REASONS } from './solarCombinerIntakeClient.js'
@@ -17,6 +23,401 @@ const UNAUTH_TEXT = `{"ok":false,"tool":null,"version":null,"result":null,"overl
 const CREATED = 'Terrain imported for this drawing.'
 const EXISTING = 'This terrain was already imported, so nothing changed.'
 const F3_SOURCE_ID = 'a'.repeat(64)
+const gp5ReadHead = (artifact = gp5H, drawing = 'solar', project = 'p') => ({
+  schema: 'leaf.solar-physical-head.v1', drawing_id: drawing, project_id: project, index: artifact === gp5H ? 0 : 1, parent: artifact === gp5H ? null : gp5H,
+  state: { schema: 'leaf.solar-artifact-ref.v1', artifact_id: artifact, content_sha256: gp5D, media_type: 'application/json',
+    filename: 'physical-state.json', byte_length: 1024, source_version: 1, download: `/api/drawings/${drawing}/artifacts/${artifact}` },
+})
+const gp5ReadTerrain = (head = gp5ReadHead()) => ({
+  schema: 'leaf.solar-terrain-view-response.v1', stored: true, head,
+  terrain: { schema: 'leaf.solar-terrain-view.v1', maturity: 'preview', drawing_id: head.drawing_id, project_id: head.project_id,
+    frame: { coordinate_system: 'world', transform: 'identity', drawing_units: 'm', meters_per_unit: 1, crs: 'none',
+      elevation_datum: 'unrecorded', horizontal: 'drawing-units', elevation: 'metres' },
+    grid: { rows: 2, cols: 2, x_min: 0, x_max: 10, y_min: 0, y_max: 10, cell_x: 10, cell_y: 10, cell_x_m: 10, cell_y_m: 10,
+      elevation_min_m: 0, elevation_max_m: 0, grid_sha256: gp5D },
+    mesh_faces: 0, slope_markers: 0, previews: {
+      'terrain-mesh-render': { state: 'absent', record: null }, 'tracker-slope-violations': { state: 'absent', record: null },
+    },
+  },
+})
+const gp5ReadArtifact = (filename = 'terrain.csv', byteLength = 138) => ({
+  schema: 'leaf.solar-artifact-ref.v1', artifact_id: gp5D, content_sha256: gp5D, media_type: 'text/csv', filename,
+  byte_length: byteLength, source_version: 1, download: `/api/drawings/solar/artifacts/${gp5D}`,
+})
+const gp5ReadAnswer = (tool = 'solar-physical-shade', format = 'terrain-csv', head = gp5ReadHead(), version = 1) => ({
+  ok: true, result: {
+    schema_version: 'leaf.solar-graph-read.v1', adapter: 'local-graph-read', drawing_id: head.drawing_id, project_id: head.project_id,
+    source_version: version, drawing_changed: false, tool, job_id: 'physical-test', output_sha256: gp5D,
+    output: tool === 'solar-physical-shade' ? {
+      schema: 'leaf.solar-physical-shade.v1', maturity: 'preview', scope: 'cpu-terrain-native-frame-centres', head,
+      sample_count: 15, mean_shade: 0, datum_shift_m: 1.5,
+      units: { drawing_units: 'm', meters_per_unit: 1 },
+      settings: { mode: 'defaults', target_clearance_m: 1.5, profile_selection: 'automatic' },
+      profile: { name: 'full', angle_count: 468, ray_step_m: 1, max_ray_m: 400, estimated_samples: 2808000 },
+      surface: { rows: 21, cols: 21, cells: 441 },
+      frames: Array.from({ length: 15 }, (_, i) => ({ sample_index: i, frame_index: i, shade: 0 })), frames_omitted: 0,
+    } : {
+      head,
+      summary: { schema: 'leaf.solar-physical-export.v1', maturity: 'preview',
+        scope: format === 'terrain-csv' ? 'terrain-nodes' : 'cpu-terrain-native-frame-centres', head: gp5clone(head), format,
+        units: { drawing_units: 'm', meters_per_unit: 1 }, grid: { rows: 2, cols: 2, cells: 4 },
+        settings: null, sample_count: null, profile: null, mean_shade: null, datum_shift_m: null },
+      artifact: gp5ReadArtifact(),
+    },
+  },
+})
+const gp5Deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done }); return { promise, resolve } }
+const gp5Success = (value) => ({ ok: true, status: 200, value })
+function gp5CivilProps(extra = {}) {
+  const p = supplied({ projectId: 'p', ...extra })
+  const client = { getCivil: vi.fn(async () => gp5Success(gp5viewOf())),
+    runCivilOperation: vi.fn(async () => gp5Success(gp5resultOf())) }
+  vi.spyOn(civilClients, 'createSolarCivilClient').mockReturnValue(client)
+  return { p, client }
+}
+const gp5OpenCivil = () => fireEvent.click(screen.getByRole('button', { name: 'Civil operations' }))
+const gp5Ready = async () => { await waitFor(() => expect(screen.getByRole('button', { name: 'Run' }).disabled).toBe(false)) }
+function gp5EditCivil() {
+  fireEvent.change(screen.getByLabelText('Boundary'), { target: { value: JSON.stringify(gp5square) } })
+  fireEvent.change(screen.getByLabelText('Preset'), { target: { value: JSON.stringify(gp5preset) } })
+  fireEvent.change(screen.getByLabelText('Drawing units'), { target: { value: 'm' } })
+}
+function gp5WriterHarness({ realKind, fetchImpl } = {}) {
+  const captured = {}
+  const refusal = () => Promise.resolve({ ok: false, code: 'TERRAIN_CLIENT_REQUEST_INVALID' })
+  const clients = {
+    civil: { getCivil: vi.fn(refusal), runCivilOperation: vi.fn(refusal) },
+    terrain: { getTerrain: vi.fn(refusal), runTerrainOperation: vi.fn(refusal) },
+    tracker: { createTrackerRows: vi.fn(refusal) }, landxml: { uploadLandxml: vi.fn(refusal) },
+  }
+  if (realKind !== 'civil') vi.spyOn(civilClients, 'createSolarCivilClient').mockReturnValue(clients.civil)
+  vi.spyOn(landxmlClients, 'createSolarLandxmlClient').mockReturnValue(clients.landxml)
+  vi.spyOn(terrainClients, 'createSolarTerrainClient').mockReturnValue(clients.terrain)
+  if (realKind !== 'tracker') vi.spyOn(trackerClients, 'createSolarTrackerRowsClient').mockReturnValue(clients.tracker)
+  vi.spyOn(civilPanels, 'default').mockImplementation((props) => { captured.civil = props; return <p>Civil test control</p> })
+  vi.spyOn(terrainPanels, 'default').mockImplementation((props) => { captured.terrain = props; return <p>Terrain test control</p> })
+  vi.spyOn(trackerPanels, 'default').mockImplementation((props) => { captured.tracker = props; return <p>Tracker test control</p> })
+  vi.spyOn(landxmlUpload, 'default').mockImplementation((props) => { captured.landxml = props; return <p>LandXML test control</p> })
+  const p = supplied()
+  if (fetchImpl) p.transport.fetchImpl = fetchImpl
+  const mounted = render(<SolarWorkspaceTools {...p} />)
+  // Capture actual container wrappers before opening civil. They remain callable even when hidden.
+  open()
+  fireEvent.click(screen.getByRole('button', { name: 'Terrain preview' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Create tracker rows' }))
+  gp5OpenCivil()
+  return { captured, clients, p, mounted }
+}
+
+it('GP5-01 the host property is the original frozen five-flow registry', () => {
+  expect(SolarWorkspaceTools.workspacePanelsByFlow).toBe(FLOW_PANELS)
+  expect(Object.isFrozen(FLOW_PANELS)).toBe(true)
+  expect(Object.keys(FLOW_PANELS)).toHaveLength(5)
+  expect(FLOW_PANELS['ground-physical']).toEqual(['landxml', 'terrain', 'tracker-rows', 'civil', 'physical-read'])
+  expect(Object.getOwnPropertyDescriptor(SolarWorkspaceTools, 'workspacePanelsByFlow').writable).toBe(false)
+})
+
+it('GP5-10 civil mounting is lazy for every flow and local or project scope', async () => {
+  const { p, client } = gp5CivilProps()
+  const mounted = render(<SolarWorkspaceTools {...p} />)
+  for (const drawingId of [null, 'solar']) for (const projectId of [null, TERRAIN_PROJECT]) {
+    for (const flow of Object.keys(FLOW_PANELS)) mounted.rerender(<SolarWorkspaceTools {...p} {...{ drawingId, projectId, flow }} />)
+  }
+  expect(client.getCivil).not.toHaveBeenCalled()
+  expect(client.runCivilOperation).not.toHaveBeenCalled()
+  expect(p.transport.fetchImpl).not.toHaveBeenCalled()
+  client.getCivil.mockResolvedValue(gp5Success(gp5absent()))
+  for (const projectId of [null, TERRAIN_PROJECT]) {
+    mounted.rerender(<SolarWorkspaceTools {...p} projectId={projectId} />)
+    gp5OpenCivil(); await gp5Ready()
+    expect(client.getCivil).toHaveBeenLastCalledWith({ drawingId: 'solar', projectId, signal: expect.any(AbortSignal) })
+  }
+  expect(client.getCivil).toHaveBeenCalledTimes(2)
+  expect(client.runCivilOperation).not.toHaveBeenCalled()
+})
+
+it('GP5-11 explicit open close and A to B to A discard old civil scope', async () => {
+  const { p, client } = gp5CivilProps()
+  const mounted = render(<SolarWorkspaceTools {...p} />)
+  gp5OpenCivil(); await gp5Ready()
+  expect(client.getCivil.mock.calls[0][0]).toMatchObject({ drawingId: 'solar', projectId: 'p' })
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Civil operations' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Civil operations' }))
+  gp5OpenCivil(); await gp5Ready(); gp5EditCivil()
+  const pending = gp5Deferred(); client.runCivilOperation.mockReturnValue(pending.promise)
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  for (const projectId of ['other', 'p']) mounted.rerender(<SolarWorkspaceTools {...p} projectId={projectId} />)
+  gp5OpenCivil(); await gp5Ready()
+  await act(async () => pending.resolve(gp5Success(gp5resultOf())))
+  expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  expect(screen.queryByText('Outcome: published')).toBeNull()
+  mounted.rerender(<SolarWorkspaceTools {...p} flow="rooftop" />)
+  mounted.rerender(<SolarWorkspaceTools {...p} />)
+  expect(screen.queryByRole('region', { name: 'Civil operations' })).toBeNull()
+  expect(screen.getByRole('button', { name: 'Civil operations' }).getAttribute('aria-expanded')).toBe('false')
+})
+
+it('GP5-12 civil authentication and sanitized checkout are obtained per request', async () => {
+  let current = 'cap-one'
+  const p = supplied({ projectId: TERRAIN_PROJECT, getCheckoutCapability: () => current })
+  p.transport.headers.mockImplementation(() => ({ Authorization: `Bearer ${current}`, 'X-Tenant-Id': current,
+    'x-checkout-capability': 'stale', 'X-CHECKOUT-CAPABILITY': 'also-stale' }))
+  p.transport.fetchImpl.mockImplementation(async (url, init) => init.method === 'GET'
+    ? new Response(JSON.stringify(gp5absent()), { status: 200 })
+    : new Response(UNAUTH_TEXT, { status: 401 }))
+  render(<SolarWorkspaceTools {...p} />)
+  gp5OpenCivil(); await gp5Ready(); gp5EditCivil()
+  const first = p.transport.fetchImpl.mock.calls[0]
+  expect(first[0]).toContain(`view=civil&project_id=${encodeURIComponent(TERRAIN_PROJECT)}`)
+  expect(first[1].headers).toMatchObject({ Authorization: 'Bearer cap-one', 'X-Tenant-Id': 'cap-one', 'X-Checkout-Capability': 'cap-one' })
+  current = 'cap-two'
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  await screen.findByRole('alert')
+  const post = p.transport.fetchImpl.mock.calls.find(([, init]) => init.method === 'POST')
+  expect(JSON.parse(post[1].body)).toEqual(gp5bodyOf('frame-generate', null))
+  expect(post[0]).toContain(`project_id=${encodeURIComponent(TERRAIN_PROJECT)}`)
+  expect(post[1].headers).toMatchObject({ Authorization: 'Bearer cap-two', 'X-Tenant-Id': 'cap-two', 'X-Checkout-Capability': 'cap-two' })
+  expect(Object.keys(post[1].headers).filter((key) => key.toLowerCase() === 'x-checkout-capability')).toEqual(['X-Checkout-Capability'])
+  expect(p.transport.onResponse).toHaveBeenCalled()
+  expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+})
+
+it('GP5-13 civil and all physical writers exclude each other synchronously', async () => {
+  const { captured, clients, mounted } = gp5WriterHarness()
+  const request = { drawingId: 'solar', projectId: null, body: {} }
+  const methods = { landxml: () => captured.landxml.upload(request),
+    terrain: () => captured.terrain.client.runTerrainOperation(request),
+    tracker: () => captured.tracker.client.createTrackerRows(request) }
+  const actual = { landxml: clients.landxml.uploadLandxml, terrain: clients.terrain.runTerrainOperation,
+    tracker: clients.tracker.createTrackerRows }
+  for (const kind of ['landxml', 'terrain', 'tracker']) {
+    const pending = gp5Deferred(); actual[kind].mockReturnValueOnce(pending.promise)
+    let civil
+    act(() => { methods[kind](); civil = captured.civil.client.runCivilOperation(request) })
+    expect(await civil).toMatchObject({ ok: false, code: 'TERRAIN_CLIENT_REQUEST_INVALID' })
+    expect(clients.civil.runCivilOperation).not.toHaveBeenCalled()
+    await act(async () => pending.resolve({ ok: false }))
+  }
+  const pending = gp5Deferred(); clients.civil.runCivilOperation.mockReturnValueOnce(pending.promise)
+  let blocked
+  act(() => {
+    captured.civil.client.runCivilOperation(request)
+    blocked = Object.values(methods).map((send) => send())
+  })
+  const refusals = await Promise.all(blocked)
+  expect(refusals.every((answer) => answer.ok === false)).toBe(true)
+  expect(actual.terrain).toHaveBeenCalledTimes(1)
+  expect(actual.tracker).toHaveBeenCalledTimes(1)
+  expect(actual.landxml).toHaveBeenCalledTimes(1)
+  await act(async () => pending.resolve({ ok: false }))
+  mounted.unmount()
+})
+
+it('GP5-14 a cancelled civil UI retains its token until its promise settles', async () => {
+  const { captured, clients, mounted } = gp5WriterHarness()
+  const pending = gp5Deferred(); clients.civil.runCivilOperation.mockReturnValueOnce(pending.promise)
+  const controller = new AbortController()
+  const request = { drawingId: 'solar', projectId: null, body: {}, signal: controller.signal }
+  act(() => { captured.civil.client.runCivilOperation(request); controller.abort() })
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+  expect(await captured.terrain.client.runTerrainOperation({ ...request, signal: undefined })).toMatchObject({ ok: false })
+  expect(clients.terrain.runTerrainOperation).not.toHaveBeenCalled()
+  await act(async () => pending.resolve({ ok: false }))
+  let answer
+  await act(async () => { answer = await captured.terrain.client.runTerrainOperation({ ...request, signal: undefined }) })
+  expect(clients.terrain.runTerrainOperation).toHaveBeenCalledTimes(1)
+  expect(answer.ok).toBe(false)
+  gp5OpenCivil()
+  const older = gp5Deferred(), remaining = gp5Deferred()
+  clients.landxml.uploadLandxml.mockReturnValueOnce(older.promise).mockReturnValueOnce(remaining.promise)
+  act(() => { captured.landxml.upload({ ...request, signal: undefined }); captured.landxml.upload({ ...request, signal: undefined }) })
+  await act(async () => older.resolve({ ok: false }))
+  expect(await captured.civil.client.runCivilOperation({ ...request, signal: undefined })).toMatchObject({ ok: false, code: 'TERRAIN_CLIENT_REQUEST_INVALID' })
+  expect(clients.civil.runCivilOperation).toHaveBeenCalledTimes(1)
+  await act(async () => remaining.resolve({ ok: false }))
+  await act(async () => { await captured.civil.client.runCivilOperation({ ...request, signal: undefined }) })
+  expect(clients.civil.runCivilOperation).toHaveBeenCalledTimes(2)
+  mounted.unmount()
+})
+
+async function gp5RealAbortRetainsTransport(kind) {
+  for (const rejectTransport of [false, true]) {
+    let resolve, reject
+    const pending = new Promise((done, fail) => { resolve = done; reject = fail })
+    const fetchImpl = vi.fn(async () => new Response(UNAUTH_TEXT, { status: 401 }))
+      .mockImplementationOnce(() => pending)
+    const { captured, clients, mounted } = gp5WriterHarness({ realKind: kind, fetchImpl })
+    const controller = new AbortController()
+    const request = { drawingId: 'solar', projectId: null, signal: controller.signal,
+      ...(kind === 'civil' ? { body: gp5bodyOf('frame-generate', null) }
+        : { drawingUnits: 'm', request: trackerM1() }) }
+    let answer
+    act(() => { answer = kind === 'civil' ? captured.civil.client.runCivilOperation(request)
+      : captured.tracker.client.createTrackerRows(request) })
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+    act(() => controller.abort())
+    await act(async () => {
+      expect(await answer).toMatchObject({ ok: false,
+        code: kind === 'civil' ? 'TERRAIN_CLIENT_ABORTED' : 'TRACKER_ROWS_CLIENT_ABORTED' })
+    })
+    expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true)
+    const otherRequest = { drawingId: 'solar', projectId: null, body: {} }
+    const excluded = [
+      () => captured.terrain.client.runTerrainOperation(otherRequest),
+      () => captured.landxml.upload(otherRequest),
+      () => kind === 'civil' ? captured.tracker.client.createTrackerRows(otherRequest)
+        : captured.civil.client.runCivilOperation(otherRequest),
+    ]
+    await act(async () => {
+      for (const send of excluded) expect(await send()).toMatchObject({ ok: false })
+    })
+    expect(clients.terrain.runTerrainOperation).not.toHaveBeenCalled()
+    expect(clients.landxml.uploadLandxml).not.toHaveBeenCalled()
+    expect(kind === 'civil' ? clients.tracker.createTrackerRows : clients.civil.runCivilOperation).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      if (rejectTransport) reject(new Error('aborted transport'))
+      else resolve(new Response(UNAUTH_TEXT, { status: 401 }))
+    })
+    await act(async () => { await captured.terrain.client.runTerrainOperation(otherRequest) })
+    expect(clients.terrain.runTerrainOperation).toHaveBeenCalledTimes(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      const next = { ...request, signal: undefined }
+      const admitted = await (kind === 'civil' ? captured.civil.client.runCivilOperation(next)
+        : captured.tracker.client.createTrackerRows(next))
+      expect(admitted).toMatchObject({ ok: false, code: 'UNAUTHENTICATED', status: 401 })
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    mounted.unmount()
+    vi.restoreAllMocks()
+  }
+}
+
+it('GP5-20 real civil cancellation holds the interlock until its fetch settles', async () => {
+  await gp5RealAbortRetainsTransport('civil')
+})
+
+it('GP5-21 real tracker cancellation holds the interlock until its fetch settles', async () => {
+  await gp5RealAbortRetainsTransport('tracker')
+})
+
+it('GP5-16 physical shade and export preserve automatic head reads and authenticated downloads without mutations', async () => {
+  const p = supplied({ projectId: 'p', onRunPlacement: vi.fn() })
+  const terrain = { getTerrain: vi.fn(async () => gp5Success(gp5ReadTerrain())), runTerrainOperation: vi.fn() }
+  vi.spyOn(terrainClients, 'createSolarTerrainClient').mockReturnValue(terrain)
+  const exportAnswer = gp5ReadAnswer('solar-physical-export')
+  const artifact = exportAnswer.result.output.artifact
+  const bytes = new Uint8Array(artifact.byte_length).fill(65)
+  artifact.content_sha256 = createHash('sha256').update(bytes).digest('hex')
+  const fetchImpl = vi.fn(async () => new Response(bytes, { headers: {
+    'x-leaf-artifact-id': artifact.artifact_id, 'content-length': String(bytes.byteLength), 'content-type': 'text/csv',
+  } }))
+  const authenticated = importClients.createSolarImportClient({ fetchImpl,
+    headers: () => ({ Authorization: 'Bearer gp5', 'X-Tenant-Id': 'gp5' }),
+    sha256Hex: async (content) => createHash('sha256').update(content).digest('hex') })
+  vi.spyOn(importClients, 'createSolarImportClient').mockReturnValue(authenticated)
+  p.transport.runRead = vi.fn(async () => gp5ReadAnswer())
+  p.transport.save = vi.fn()
+  render(<SolarWorkspaceTools {...p} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Physical reads' }))
+  await gp5Ready()
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Physical reads' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  await screen.findByTestId('solar-read-result')
+  expect(p.transport.runRead).toHaveBeenLastCalledWith('solar-physical-shade', { drawing_id: 'solar' }, 'solar', { projectId: 'p', dwgVersion: 1 })
+  expect(terrain.getTerrain).toHaveBeenCalledTimes(3)
+  fireEvent.change(screen.getByLabelText('Tool'), { target: { value: 'solar-physical-export' } })
+  expect([...screen.getByLabelText('Format').options].map((option) => option.value)).toEqual(['terrain-csv', 'shade-azal-matrix', 'shade-sam', 'shade-per-panel'])
+  p.transport.runRead.mockResolvedValue(exportAnswer)
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  await screen.findByTestId('solar-read-result')
+  expect(p.transport.runRead).toHaveBeenLastCalledWith('solar-physical-export', { drawing_id: 'solar', expected_head: gp5H, format: 'terrain-csv' }, 'solar', { projectId: 'p', dwgVersion: 1 })
+  fireEvent.click(screen.getByTestId('solar-read-download'))
+  await waitFor(() => expect(p.transport.save).toHaveBeenCalledTimes(1))
+  expect(fetchImpl.mock.calls[0][1].headers).toMatchObject({ Authorization: 'Bearer gp5', 'X-Tenant-Id': 'gp5' })
+  expect(p.transport.save).toHaveBeenCalledWith(bytes, 'text/csv', artifact.filename)
+  expect(terrain.runTerrainOperation).not.toHaveBeenCalled()
+  expect(p.onPhysicalHeadChanged).not.toHaveBeenCalled()
+  expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+  expect(p.onRunPlacement).not.toHaveBeenCalled()
+  expect(announcement()).toBe('')
+})
+
+it('GP5-15 created civil publication updates peers once without clearing its own outcome', async () => {
+  const { p, client } = gp5CivilProps()
+  const peers = {}
+  vi.spyOn(terrainPanels, 'default').mockImplementation((props) => { peers.terrain = props; return <p>Terrain peer</p> })
+  vi.spyOn(trackerPanels, 'default').mockImplementation((props) => { peers.tracker = props; return <p>Tracker peer</p> })
+  const mounted = render(<SolarWorkspaceTools {...p} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Create tracker rows' }))
+  gp5OpenCivil(); await gp5Ready(); gp5EditCivil()
+  client.getCivil.mockResolvedValue(gp5Success(gp5viewOf(gp5headOf(gp5H2, 1, gp5H))))
+  fireEvent.click(screen.getByRole('button', { name: 'Run' }))
+  await gp5Ready()
+  expect(screen.getByText('Outcome: published')).toBeTruthy()
+  expect(client.getCivil).toHaveBeenCalledTimes(2)
+  expect(p.onPhysicalHeadChanged).toHaveBeenCalledTimes(1)
+  expect(p.onDrawingVersionChanged).not.toHaveBeenCalled()
+  expect(peers.tracker.headSignal).toBe(gp5H2)
+  expect(screen.getByRole('region', { name: 'Solar workspace tools' }).getAttribute('data-physical-head-index')).toBe('1')
+  fireEvent.click(screen.getByRole('button', { name: 'Terrain preview' }))
+  expect(peers.terrain.headSignal).toBe(gp5H2)
+  mounted.unmount()
+})
+// Synthetic fixtures use the closed server contracts; no fixture comes from another worktree.
+const gp5H = 'a'.repeat(64)
+const gp5H2 = 'b'.repeat(64)
+const gp5D = 'd'.repeat(64)
+const gp5clone = (v) => JSON.parse(JSON.stringify(v))
+const gp5headOf = (artifact = gp5H, index = 0, parent = null, drawing = 'solar', project = 'p') => ({
+  schema: 'leaf.solar-physical-head.v1', drawing_id: drawing, project_id: project, index, parent,
+  state: { schema: 'leaf.solar-artifact-ref.v1', artifact_id: artifact, content_sha256: gp5D,
+    media_type: 'application/json', filename: 'physical-state.json', byte_length: 1024, source_version: 1,
+    download: `/api/drawings/${drawing}/artifacts/${artifact}` },
+})
+const gp5previewOf = (frames = 242, piles = 0, terrain = true) => ({
+  schema: 'leaf.solar-frames-piles-preview.v1', maturity: 'preview', frames, piles,
+  collision_markers: 0, range_markers: 0, terrain,
+})
+const gp5standingOf = (frames = 242, piles = 0, stale = 0, terrain = true) => ({
+  schema: 'leaf.solar-frames-piles-terrain-standing.v1', maturity: 'preview', grid_sha256: terrain ? gp5D : null,
+  frames: { state: frames === 0 ? 'absent' : stale ? 'stale' : 'current', checked: frames, stale },
+  piles: { state: piles === 0 ? 'absent' : 'current', checked: piles, stale: 0 },
+})
+const gp5viewOf = (head = gp5headOf(), frames = 242, piles = 0) => ({
+  schema: 'leaf.solar-civil-view-response.v1', stored: true, head, preview: gp5previewOf(frames, piles),
+  standing: gp5standingOf(frames, piles), grade_pads: 0,
+})
+const gp5absent = () => ({ schema: 'leaf.solar-civil-view-response.v1', stored: false, head: null, preview: null, standing: null, grade_pads: 0 })
+const gp5square = [[0, 0], [100, 0], [100, 100], [0, 100]]
+const gp5preset = { Name: 'Full', PileTemplateName: 'Full', Rows: 2, Columns: 1, Piling: { MinPileLengthM: 1, MaxPileLengthM: 4 } }
+const gp5template = { Name: 'Full', Stations: [{ Position: 0.5, Length: 2 }] }
+const gp5bodyOf = (operation = 'frame-generate', expected = gp5H) => ({
+  operation, expected_head: expected,
+  ...(operation === 'frame-generate' ? { boundary: gp5clone(gp5square), preset: gp5clone(gp5preset), drawing_units: 'm' } : {}),
+  ...(operation === 'piling-generate' ? { preset: gp5clone(gp5preset), pile_template: gp5clone(gp5template) } : {}),
+  ...(operation === 'pile-length-range-check' ? { preset: gp5clone(gp5preset) } : {}),
+  ...(operation === 'grade-pad' ? { boundary: gp5clone(gp5square), mode: 'Auto', value_du: null } : {}),
+})
+const gp5resultOf = (operation = 'frame-generate', outcome = 'published', base = gp5H) => ({
+  schema: operation === 'grade-pad' ? 'leaf.solar-civil-operation.v1' : 'leaf.solar-frames-piles.v1',
+  operation, maturity: 'preview', outcome, created: outcome === 'published',
+  drawing_id: 'solar', project_id: 'p', base, units: { drawing_units: 'm', meters_per_unit: 1 },
+  terrain: { present: true, sampled: ['frame-generate', 'piling-generate', 'grade-pad'].includes(operation), rows: 2, cols: 2, grid_sha256: gp5D },
+  summary: outcome === 'retry' ? null : {
+    'frame-generate': { frames_added: 242, frames_off_terrain: 0, preset_name: 'Full' },
+    'frame-collision-detect': { frames_checked: 242, collisions: 0 },
+    'piling-generate': { native_frames: 242, piles: 1936, piles_replaced: 0, grid_piles: 1936, joint_piles: 0, station_piles: 0, short_trackers: 0, template_name: 'Full' },
+    'pile-length-range-check': { total_piles: 1936, out_of_range: 0, min_m: 1, max_m: 4 },
+    'grade-pad': { pads_added: 1, grade_pads: 1, mode: 'Auto', elevation_m: 0, label: 'Pad', total_cut_m3: 0, total_fill_m3: 0, net_m3: 0 },
+  }[operation],
+  preview: gp5previewOf(242, operation === 'piling-generate' ? 1936 : 0),
+  standing: gp5standingOf(242, operation === 'piling-generate' ? 1936 : 0),
+  head: outcome === 'unchanged' ? gp5headOf(base) : gp5headOf(gp5H2, base === null ? 0 : 1, base),
+})
 const F3_REPORT_ID = 'b'.repeat(64)
 function f3Artifact(id, pdf = false) {
   return { schema: 'leaf.solar-artifact-ref.v1', artifact_id: id,

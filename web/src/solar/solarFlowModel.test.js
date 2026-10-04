@@ -179,8 +179,105 @@ const F2_SE = [{ family_id: 'imports', capabilities: [F2_A, F2_R] }]
 const F2_HSE = { 'solaredge-import': ['solaredge-import'] }
 const F2_HGP = { 'ground-physical': ['landxml', 'terrain', 'tracker-rows'] }
 const F2_S = ['Upload the SolarEdge PDF', 'Inspect counts and matching', 'Accept tracking', 'Review accepted tracking']
-const F2_G = ['Terrain', 'Tracker layout', 'Civil and piles', 'Shade and terrain analysis', 'Exports']
+const F2_G = ['Terrain', 'Native frame layout', 'Grade pads and native piles', 'Terrain and frame shade', 'Terrain and shade CSV']
 const F2_P = ['Geometry conversion', 'Solve on the shared model', 'Exports']
+const GP5_ROWS = [probeRow('solar-physical-shade'), probeRow('solar-physical-export')]
+const GP5_CATALOG = [{ capabilities: GP5_ROWS }]
+const gp5Select = (catalog = GP5_CATALOG, host = FLOW_PANELS) => solarFlowSelect(catalog, 'ground-physical', undefined, host)
+
+it('GP5-02 no host admits none of the Ground Physical stages', () => {
+  f2Refused(gp5Select(GP5_CATALOG, {}), F2_G)
+})
+
+it('GP5-03 the old host supplies only Terrain', () => {
+  f2Refused(gp5Select(GP5_CATALOG, F2_HGP), F2_G.slice(1))
+})
+
+it('GP5-04 full host without tools leaves both physical reads missing', () => {
+  f2Refused(gp5Select([]), F2_G.slice(3))
+})
+
+it('GP5-05 every physical catalog binding must be present and valid', () => {
+  for (const index of [0, 1]) {
+    f2Refused(gp5Select([{ capabilities: GP5_ROWS.filter((_, position) => position !== index) }]), [F2_G[index + 3]])
+    const invalid = GP5_ROWS.map((entry, position) => position === index ? { ...entry, solar: null } : entry)
+    f2Refused(gp5Select([{ capabilities: invalid }]), [F2_G[index + 3]])
+  }
+})
+
+it('GP5-06 panel claims must belong to the registered flow and host', () => {
+  for (const [panel, missing] of [['civil', F2_G.slice(1, 3)], ['physical-read', F2_G.slice(3)]]) {
+    const panels = FLOW_PANELS['ground-physical'].filter((name) => name !== panel)
+    f2Refused(gp5Select(GP5_CATALOG, { 'ground-physical': panels, rooftop: [panel] }), missing)
+  }
+  const stage = { id: 'a', label: 'Unknown panel', kind: 'workspace-panel-catalog', panels: ['unregistered'], capabilities: [GP5_ROWS[0].name] }
+  f2Refused(f2Isolated(stage, { 'ground-physical': ['unregistered'] }, 'ground-physical', GP5_CATALOG), ['Unknown panel'])
+})
+
+it('GP5-07 complete admission retains two original rows in binding order', () => {
+  const selected = gp5Select([{ capabilities: [{ ...GP5_ROWS[0], solar: null }, GP5_ROWS[1], ...GP5_ROWS, { ...GP5_ROWS[0] }] }])
+  expect(selected).toMatchObject({ available: true, missing: [], reason: null })
+  expect(selected.steps).toHaveLength(2)
+  selected.steps.forEach((entry, index) => expect(entry).toBe(GP5_ROWS[index]))
+  expect(solarFlowOptionLabel(solarFlowOptions(GP5_CATALOG, undefined, FLOW_PANELS)[2])).toBe('Ground Mount Physical (preview)')
+})
+
+it('GP5-08 blocked execution still satisfies catalog admission', () => {
+  const rows = GP5_ROWS.map((entry) => ({ ...entry, availability: blocked('not_current_head') }))
+  const selected = gp5Select([{ capabilities: rows }])
+  expect(selected.available).toBe(true)
+  expect(solarFlowState({ steps: selected.steps }).items.map((item) => item.status)).toEqual(['blocked', 'blocked'])
+})
+
+it('GP5-09 legacy panels ignore capabilities while combined stages require valid lists', () => {
+  expect(f2Isolated(f2Panel({ capabilities: ['missing'] }), F2_HSE, 'solaredge-import', []).steps).toEqual([])
+  expect(f2Isolated(f2Panel({ capabilities: ['missing'] }), F2_HSE, 'solaredge-import', []).available).toBe(true)
+  f2Refused(f2Isolated(f2Panel({ kind: 'unknown', capabilities: [F2_A.name] })), ['Panel stage'])
+  for (const capabilities of [undefined, [], null, 'solar-physical-shade', [''], [null], Array(1), [GP5_ROWS[0].name, 'missing']]) {
+    f2Refused(f2Isolated({ ...f2Panel(), kind: 'workspace-panel-catalog', capabilities }), ['Panel stage'])
+  }
+  for (const panels of [undefined, [], null, 'solaredge-import', [''], [null], Array(1)]) {
+    f2Refused(f2Isolated({ ...f2Panel(), kind: 'workspace-panel-catalog', panels, capabilities: [F2_A.name] }), ['Panel stage'])
+  }
+  const stage = { ...f2Panel(), kind: 'workspace-panel-catalog', capabilities: [F2_A.name, F2_R.name] }
+  const admitted = f2Isolated(stage)
+  expect(admitted).toMatchObject({ available: true, missing: [] })
+  expect(admitted.steps).toHaveLength(2)
+  expect(admitted.steps[0]).toBe(F2_A)
+  expect(admitted.steps[1]).toBe(F2_R)
+  f2Refused(f2Isolated(stage, F2_HSE, 'solaredge-import', [{ capabilities: Array(4096).fill(null) }, ...F2_SE]), ['Panel stage'])
+})
+
+it('GP5-22 a combined stage requires every capability rather than any one valid row', () => {
+  const stage = { ...f2Panel(), kind: 'workspace-panel-catalog', capabilities: [F2_A.name, F2_R.name] }
+  for (const valid of [F2_A, F2_R]) {
+    f2Refused(f2Isolated(stage, F2_HSE, 'solaredge-import', [{ capabilities: [valid] }]), ['Panel stage'])
+  }
+  const admitted = f2Isolated(stage, F2_HSE, 'solaredge-import', [{ capabilities: [F2_R, F2_A] }])
+  expect(admitted).toMatchObject({ available: true, missing: [] })
+  expect(admitted.steps).toHaveLength(2)
+  expect(admitted.steps[0]).toBe(F2_A)
+  expect(admitted.steps[1]).toBe(F2_R)
+})
+
+it('GP5-18 other flow contracts remain the same for a given host', () => {
+  expect(solarFlowSelect(LIVE, 'rooftop', undefined, FLOW_PANELS).steps.map((entry) => entry.name)).toEqual(ROOFTOP_LIVE)
+  expect(solarFlowSelect(F2_SE, 'solaredge-import', undefined, FLOW_PANELS).steps).toEqual([F2_A, F2_R])
+  expect(solarFlowSelect(GROUND_ELECTRICAL_CATALOG, 'ground-electrical', undefined, FLOW_PANELS).steps.map((entry) => entry.name)).toEqual(GROUND_ELECTRICAL_NAMES)
+  f2Refused(solarFlowSelect([...GP5_CATALOG, ...F2_SE, ...GROUND_ELECTRICAL_CATALOG], 'pvcase-tutorial', undefined, FLOW_PANELS), F2_P)
+})
+
+it('GP5-19 Ground Physical bindings name their producer-chain evidence', () => {
+  const hasEvidence = (file) => {
+    const source = readFileSync(resolve(process.cwd(), '..', 'server', 'tests', file), 'utf8')
+    const names = SOLAR_FLOWS[2].stages.flatMap((stage) => stage.capabilities)
+    return source.includes('def test_ground_physical_admission_producer_chain')
+      && ['solar-physical-shade', 'solar-physical-export'].every((name) => source.includes(name))
+      && names.length === 2 && names.every((name) => ['solar-physical-shade', 'solar-physical-export'].includes(name))
+  }
+  expect(hasEvidence('test_solar_ground_physical_admission.py')).toBe(true)
+  expect(() => hasEvidence('gp5_producer_evidence_file_does_not_exist.py')).toThrow()
+})
 const f2Select = (catalog = F2_SE, host = F2_HSE) => solarFlowSelect(catalog, 'solaredge-import', undefined, host)
 function f2Panel(overrides = {}) {
   return { id: 'panel', label: 'Panel stage', kind: 'workspace-panel', panels: ['solaredge-import'], capabilities: [], ...overrides }
@@ -197,7 +294,7 @@ describe('F2 workspace panel admission', () => {
   it('F2 01 frozen registry agrees with the untouched container', () => {
     expect(FLOW_PANELS).toEqual({
       rooftop: ['combiner-intake'], 'ground-electrical': [],
-      'ground-physical': ['landxml', 'terrain', 'tracker-rows'],
+      'ground-physical': ['landxml', 'terrain', 'tracker-rows', 'civil', 'physical-read'],
       'solaredge-import': ['solaredge-import'], 'pvcase-tutorial': [],
     })
     expect(Object.isFrozen(FLOW_PANELS)).toBe(true)
@@ -221,10 +318,10 @@ describe('F2 workspace panel admission', () => {
     ])
     expect(SOLAR_FLOWS[2].stages).toEqual([
       { id: 'terrain', label: F2_G[0], kind: 'workspace-panel', panels: ['landxml', 'terrain'], capabilities: [] },
-      { id: 'layout', label: F2_G[1], kind: 'workspace-panel', panels: ['tracker-rows'], capabilities: [] },
-      { id: 'civil', label: F2_G[2], capabilities: [] },
-      { id: 'analysis', label: F2_G[3], capabilities: [] },
-      { id: 'outputs', label: F2_G[4], capabilities: [] },
+      { id: 'layout', label: F2_G[1], kind: 'workspace-panel', panels: ['civil'], capabilities: [] },
+      { id: 'civil', label: F2_G[2], kind: 'workspace-panel', panels: ['civil'], capabilities: [] },
+      { id: 'analysis', label: F2_G[3], kind: 'workspace-panel-catalog', panels: ['physical-read'], capabilities: ['solar-physical-shade'] },
+      { id: 'outputs', label: F2_G[4], kind: 'workspace-panel-catalog', panels: ['physical-read'], capabilities: ['solar-physical-export'] },
     ])
     expect(SOLAR_FLOWS[0].stages).toBeNull()
     expect(SOLAR_FLOWS[1].stages.map(({ id, capabilities }) => [id, capabilities])).toEqual(GROUND_ELECTRICAL_STAGES)
@@ -348,7 +445,7 @@ describe('F2 workspace panel admission', () => {
 
   it('F2 17 Ground Physical credits only terrain and layout', () => {
     f2Refused(solarFlowSelect(GROUND_ELECTRICAL_CATALOG, 'ground-physical'), F2_G)
-    f2Refused(solarFlowSelect(GROUND_ELECTRICAL_CATALOG, 'ground-physical', undefined, F2_HGP), F2_G.slice(2))
+    f2Refused(solarFlowSelect(GROUND_ELECTRICAL_CATALOG, 'ground-physical', undefined, F2_HGP), F2_G.slice(1))
   })
 
   it('F2 18 legacy catalog selection and bounds stay fixed', () => {
@@ -519,8 +616,8 @@ describe('Solar flow selection', () => {
     expect(SOLAR_FLOWS.slice(1).map((flow) => flow.stages.map(({ id, label }) => [id, label]))).toEqual([
       [['conversion', 'Tracker conversion'], ['stringing', 'Sizing and stringing'], ['equipment', 'Equipment'],
         ['feeders', 'Feeders and routes'], ['calculations', 'NEC calculations'], ['outputs', 'Schedules and exports']],
-      [['terrain', 'Terrain'], ['layout', 'Tracker layout'], ['civil', 'Civil and piles'],
-        ['analysis', 'Shade and terrain analysis'], ['outputs', 'Exports']],
+      [['terrain', 'Terrain'], ['layout', 'Native frame layout'], ['civil', 'Grade pads and native piles'],
+        ['analysis', 'Terrain and frame shade'], ['outputs', 'Terrain and shade CSV']],
       [['upload', 'Upload the SolarEdge PDF'], ['inspect', 'Inspect counts and matching'],
         ['tracking', 'Accept tracking'], ['review', 'Review accepted tracking']],
       [['conversion', 'Geometry conversion'], ['solve', 'Solve on the shared model'], ['outputs', 'Exports']],
@@ -544,11 +641,12 @@ describe('Solar flow selection', () => {
       for (const stage of flow.stages) {
         expect(Object.isFrozen(stage)).toBe(true)
         expect(Object.isFrozen(stage.capabilities)).toBe(true)
-        if (stage.kind === 'workspace-panel') {
+        if (stage.kind === 'workspace-panel' || stage.kind === 'workspace-panel-catalog') {
           expect(Object.isFrozen(stage.panels)).toBe(true)
           expect(stage.panels.length).toBeGreaterThan(0)
           expect(stage.panels.length).toBeLessThanOrEqual(32)
-          expect(stage.capabilities).toEqual([])
+          if (stage.kind === 'workspace-panel') expect(stage.capabilities).toEqual([])
+          else expect(stage.capabilities.length).toBeGreaterThan(0)
         }
         expect(stage.id).toMatch(/^[a-z][a-z0-9-]{0,31}$/)
         expect(typeof stage.label).toBe('string')
@@ -573,6 +671,7 @@ describe('Solar flow selection', () => {
       'solar-nec-ampacity-correction', 'solar-nec-ac-voltage-drop',
       'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd',
       'solar-string-data', 'solar-electrical-schedules', 'solar-cable-export',
+      'solar-physical-shade', 'solar-physical-export',
       'solar-solaredge-accept', 'solar-solaredge-tracking-read',
     ])
     expect(SOLAR_FLOWS[1].stages[0].capabilities).toEqual(['solar-trackers-to-panel-groups'])
@@ -621,7 +720,7 @@ describe('Solar flow selection', () => {
 
   it('FL5 the other flows and live options explain availability and maturity', () => {
     for (const [id, missing] of [
-      ['ground-physical', ['Terrain', 'Tracker layout', 'Civil and piles', 'Shade and terrain analysis', 'Exports']],
+      ['ground-physical', F2_G],
       ['solaredge-import', ['Upload the SolarEdge PDF', 'Inspect counts and matching', 'Accept tracking', 'Review accepted tracking']],
       ['pvcase-tutorial', ['Geometry conversion', 'Solve on the shared model', 'Exports']],
     ]) expect(solarFlowSelect(LIVE, id)).toMatchObject({ available: false, steps: [], reasonKey: 'stages_missing', missing })
