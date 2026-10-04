@@ -617,6 +617,10 @@ def build_suites() -> List[Suite]:
         # 26 tests + 32 more parametrizations = 58 passed.
         Suite("server-solar-pvcase-solve", "server tests/test_solar_pvcase_solve.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_solve.py"), 58),
+        Suite("server-solar-pvcase-graph", "server tests/test_solar_pvcase_graph.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_graph.py"), 18),
+        Suite("server-solar-pvcase-outputs", "server tests/test_solar_pvcase_outputs.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_outputs.py"), 8),
         Suite(
             "server-solar-pvcase-conversion",
             "server tests/test_solar_pvcase_conversion.py",
