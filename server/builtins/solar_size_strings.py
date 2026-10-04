@@ -18,7 +18,32 @@ from solar_design_graph import GraphValidationError, _bounded_json
 from solar_sizing_power import frame_module_power, record_module_power
 
 
+def manual_size_strings(graph, params):
+    _bounded_json(params)
+    if (type(params) is not dict
+            or set(params) - {"expected_rev", "mode", "confirm", "cancel"}
+            or type(params.get("cancel", False)) is not bool
+            or type(params.get("confirm", False)) is not bool):
+        raise GraphValidationError("INVALID_SIZING_REQUEST")
+    result = cloud.checked_graph(graph, params.get("expected_rev"))
+    if params.get("cancel", False):
+        return {"graph": result, "confirmed": False, "records": {}}
+    if params.get("confirm") is not True:
+        raise GraphValidationError("INVALID_SIZING_REQUEST")
+    slots = cloud.compact_slot_tables(result)
+    evidence = cloud.manual_sizing_evidence(result, slots)
+    settings = result["settings"]
+    settings["global_string_sizing_confirmed"] = True
+    settings["extra"]["string_sizing"] = evidence
+    settings["voc_cold"] = cloud.manual_voltage()
+    result = cloud.advance(result, [settings], "solar-size-strings")
+    cloud.require_sizing(result, slots)
+    return {"graph": result, "confirmed": True, "records": {}}
+
+
 def size_strings(graph, params, *, tenant_id, job_id):
+    if type(params) is dict and params.get("mode") == "manual-global":
+        return manual_size_strings(graph, params)
     _bounded_json(params)
     if (type(params) is not dict
             or set(params) - {"expected_rev", "mode", "requests", "grant_ref", "confirm", "cancel"}

@@ -34,11 +34,12 @@ const fill = (skip = []) => Object.entries(fields).forEach(([label, value]) => {
   if (!skip.includes(label)) change(label, value)
 })
 const view = (graph, version = 3) => ({ version, intake: { solar_design_graph: graph } })
-async function mount(graph = G7(), overrides = {}) {
+async function mount(graph = G7(), overrides = {}, mode = 'global') {
   const props = { row: { name: 'solar-size-strings' }, drawingId: 'd1', drawingVersion: 3, projectId: null,
     readIntake: vi.fn(async () => view(graph)), onSubmit: vi.fn(), ...overrides }
   const result = render(<SolarSizingForm {...props} />)
   await act(async () => {})
+  if (mode !== 'manual-global') change('Scope', mode)
   return { ...result, props }
 }
 function invalid(label) {
@@ -48,6 +49,76 @@ function invalid(label) {
 }
 
 describe('SolarSizingForm', () => {
+  it('W21C2-manual-default', async () => {
+    const graph = G7()
+    graph.settings.panels_in_sequence = 3
+    graph.project.zip_code = ''
+    const { props } = await mount(graph, {}, 'manual-global')
+    expect(screen.getByLabelText('Scope').value).toBe('manual-global')
+    expect(screen.getByRole('option', { name: 'Saved global length' })).toBeTruthy()
+    expect(screen.getByText('Saved global string length: 3')).toBeTruthy()
+    expect(screen.getByText('Saved project ZIP:')).toBeTruthy()
+    expect(screen.getByText('Change the length in Solar settings.')).toBeTruthy()
+    expect(screen.getByText('Manual confirmation does not calculate voltage limits or module power.')).toBeTruthy()
+    for (const label of [...Object.keys(fields), 'Use module parameters']) {
+      expect(screen.queryByLabelText(label)).toBeNull()
+    }
+    expect(screen.queryByText('Confirmed module power is unavailable. Re-size strings.')).toBeNull()
+    expect(screen.queryByRole('textbox')).toBeNull()
+    fireEvent.click(run()); fireEvent.click(run())
+    expect(props.onSubmit).toHaveBeenCalledExactlyOnceWith(props.row, {
+      expected_rev: 7, mode: 'manual-global', confirm: true,
+    })
+  })
+
+  it('W21C2-manual-invalid-length', async () => {
+    for (const length of [undefined, null, true, '3', 0, -1, 1.5, Infinity, 4097]) {
+      const graph = G7()
+      graph.settings.panels_in_sequence = length
+      const { props } = await mount(graph, {}, 'manual-global')
+      expect(screen.getByText('Save a whole-number string length from 1 to 4096 in Solar settings.')).toBeTruthy()
+      expect(run().disabled).toBe(true)
+      fireEvent.click(run())
+      expect(props.onSubmit).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
+
+  it('W21C2-manual-lifecycle', async () => {
+    const graph = G7()
+    graph.settings.panels_in_sequence = 3
+    const updated = G7()
+    updated.rev = 8
+    updated.settings.panels_in_sequence = 12
+    const readIntake = vi.fn().mockResolvedValueOnce(view(graph)).mockResolvedValueOnce(view(updated))
+    const onClose = vi.fn()
+    const { props, rerender } = await mount(graph, { readIntake, onClose }, 'manual-global')
+    rerender(<SolarSizingForm {...props} status="pending" />)
+    expect(run().disabled).toBe(true)
+    expect(screen.getByLabelText('Scope').disabled).toBe(true)
+    expect(screen.getByText('This step is running. Confirm or wait for it to finish.')).toBeTruthy()
+    fireEvent.click(run())
+    expect(props.onSubmit).not.toHaveBeenCalled()
+    rerender(<SolarSizingForm {...props} status="failed" failureCode="STALE_GRAPH_REVISION" />)
+    expect(screen.getByRole('alert').textContent).toBe(SOLAR_SIZING_RUN_REASONS.stale)
+    const retry = screen.getByRole('button', { name: 'Retry' })
+    fireEvent.click(retry); fireEvent.click(retry)
+    expect(props.onSubmit).toHaveBeenCalledExactlyOnceWith(props.row, {
+      expected_rev: 7, mode: 'manual-global', confirm: true,
+    })
+    rerender(<SolarSizingForm {...props} status="finished" />)
+    await waitFor(() => expect(screen.getByText('Saved global string length: 12')).toBeTruthy())
+    expect(readIntake).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    fireEvent.click(run())
+    expect(props.onSubmit).toHaveBeenLastCalledWith(props.row, {
+      expected_rev: 8, mode: 'manual-global', confirm: true,
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('G1A-7 terminal job record preserves the nested cloud reason into the alert', async () => {
     const envelope = recordToEnvelope({ status: 'failed', tool: 'solar-size-strings',
       error: { reason_code: 'CLOUD_AUTH_MISSING', error_code: 'FORBIDDEN', message: '<script>hostile</script>', retryable: false } })
