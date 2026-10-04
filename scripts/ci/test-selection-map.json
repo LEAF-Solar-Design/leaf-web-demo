@@ -397,6 +397,7 @@
     "server-solar-batch2-simple",
     "server-solar-civil-operations",
     "server-solar-civil-route",
+    "server-solar-ground-physical-admission",
     "server-solar-combiner-graph",
     "server-solar-feeder-graph",
     "server-solar-feeder-units",
