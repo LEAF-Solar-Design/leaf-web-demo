@@ -136,7 +136,7 @@ def test_trackers_conversion_constants():
         TOOL, INVALID, 1_000_000, "leaf.solar-ground-conversion.v1")
     assert b.REQUEST_KEYS == frozenset({"expected_rev"})
     assert set(b.CODE_MAP) == set(conv.CODES)
-    assert solar_tools.TRUSTED_INPUTS == ("source_intake", "proposal_candidate", "solaredge_report", "physical_state")
+    assert solar_tools.TRUSTED_INPUTS == ("source_intake", "proposal_candidate", "solaredge_report", "physical_state", "pvcase_source")
     assert set(solar_local_graph._TRUSTED_RESOLVERS) == set(solar_tools.TRUSTED_INPUTS)
     assert solar_local_graph._TRUSTED_RESOLVERS["physical_state"] is solar_local_graph._physical_state
     assert solar_local_graph.PHYSICAL_SOURCE_KEYS == frozenset({"head_index", "state_artifact_id",

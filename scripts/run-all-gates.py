@@ -621,6 +621,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_graph.py"), 18),
         Suite("server-solar-pvcase-outputs", "server tests/test_solar_pvcase_outputs.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_outputs.py"), 8),
+        Suite("server-solar-tool-pvcase-convert", "server tests/test_solar_tool_pvcase_convert.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_pvcase_convert.py"), 30),
         Suite(
             "server-solar-pvcase-conversion",
             "server tests/test_solar_pvcase_conversion.py",

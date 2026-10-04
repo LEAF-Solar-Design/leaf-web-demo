@@ -1578,6 +1578,7 @@ describe('solar refusal copy', () => {
       'builtins/solar_assign_strings.py', 'builtins/solar_electrical_schedules.py',
       'builtins/solar_elevation_zones.py', 'builtins/solar_guardrails_read.py',
       'builtins/solar_panels_from_drawing.py',
+      'builtins/solar_pvcase_convert.py', 'builtins/solar_pvcase_solve.py', 'builtins/solar_pvcase_export.py',
     ]))
     const result = hookCodes(hooks, readSource)
     expect(result.badPath).toEqual([])
@@ -1589,6 +1590,7 @@ describe('solar refusal copy', () => {
       'panel_layer_filter_required', 'panels_already_present', 'rooftop_required',
       'schedules_input_unsupported', 'string_collectors_required', 'unassigned_strings_required',
       'ground_installation_required', 'ground_conversion_in_use',
+      'pvcase_empty_target_required', 'pvcase_conversion_required', 'pvcase_solve_required', 'pvcase_target_in_use',
     ]))
     expect(result.codes).toEqual(expect.arrayContaining(Object.values(DYNAMIC_HOOK_CODES).flat()))
   })
@@ -1596,23 +1598,36 @@ describe('solar refusal copy', () => {
   it('RC7 every sentence follows the map voice', () => {
     const MAP_KEYS = [
       'broker_adapter_unavailable', 'capability_availability_unavailable', 'capability_not_ready',
-      'complete_routing_required', 'degenerate_route', 'drawing_context_required', 'drawing_units_unsupported',
-      'electrical_zones_required', 'electrical_zones_unsupported', 'entitlement_policy_unavailable',
-      'entitlement_required', 'equipment_assignment_required', 'frames_required', 'graph_already_embedded',
-      'graph_seed_required', 'ground_conversion_in_use', 'ground_installation_required', 'ground_layout_invalid',
-      'ground_layout_too_large', 'ground_physical_state_required', 'ground_tracker_rows_required',
-      'ground_units_mismatch', 'guardrails_input_unsupported', 'guardrails_mixed_inverters',
-      'guardrails_project_coordinates_required', 'guardrails_sizing_ambiguous', 'guardrails_sizing_required',
-      'invalid_drawing_context', 'invalid_project_coordinates', 'invalid_project_zip', 'invalid_route_point',
-      'invalid_seed_request', 'inverter_assignment_mismatch',
-      'licensed_graph_commit_required', 'module_power_required', 'not_current_head', 'panel_layer_filter_required',
-      'panels_already_present', 'panels_required', 'persisted_graph_unavailable', 'project_name_required',
+      'complete_routing_required', 'degenerate_route', 'drawing_context_required',
+      'drawing_units_unsupported', 'electrical_zones_required', 'electrical_zones_unsupported',
+      'entitlement_policy_unavailable', 'entitlement_required', 'equipment_assignment_required',
+      'frame_membership_mismatch', 'frame_sequence_mismatch', 'frames_required',
+      'graph_already_embedded', 'graph_seed_required', 'ground_conversion_in_use',
+      'ground_installation_required', 'ground_layout_invalid', 'ground_layout_too_large',
+      'ground_physical_state_required', 'ground_tracker_rows_required', 'ground_units_mismatch',
+      'guardrails_input_unsupported', 'guardrails_mixed_inverters', 'guardrails_project_coordinates_required',
+      'guardrails_sizing_ambiguous', 'guardrails_sizing_required', 'invalid_drawing_context',
+      'invalid_project_coordinates', 'invalid_project_zip', 'invalid_pvcase_convert_request',
+      'invalid_pvcase_export_request', 'invalid_pvcase_solve_request', 'invalid_route_point',
+      'invalid_seed_request', 'inverter_assignment_mismatch', 'licensed_graph_commit_required',
+      'matrix_cell_mismatch', 'matrix_input_mismatch', 'module_power_required',
+      'not_current_head', 'panel_layer_filter_required', 'panels_already_present',
+      'panels_required', 'persisted_graph_unavailable', 'project_name_required',
       'project_units_required', 'project_zip_required', 'proposal_job_required',
-      'roof_installation_required', 'rooftop_required', 'routing_topology_required', 'schedules_input_unsupported',
-      'schedules_kernel_refused', 'schedules_mapping_failed', 'schedules_optimizers_unsupported',
-      'schedules_zone_sizing_unsupported', 'seed_project_scope_unsupported', 'sized_panel_groups_required',
-      'sizing_confirmation_required', 'solar_output_not_current', 'string_collectors_required', 'strings_required',
-      'unassigned_strings_required', 'unlisted', 'unresolved_units', 'valid_settings_required',
+      'pvcase_conversion_required', 'pvcase_empty_target_required', 'pvcase_solve_required',
+      'pvcase_source_required', 'pvcase_source_unavailable', 'pvcase_target_in_use',
+      'pvg_byte_limit', 'pvg_depth_limit', 'pvg_envelope_fields',
+      'pvg_envelope_schema', 'pvg_geometry_range', 'pvg_input_bytes_exceeded',
+      'pvg_invalid_intake', 'pvg_invalid_json', 'pvg_invalid_result',
+      'pvg_invalid_source', 'pvg_invalid_target', 'pvg_list_limit',
+      'pvg_matrix_limit', 'pvg_no_panel_groups', 'pvg_no_usable_panels',
+      'pvg_node_limit', 'pvg_target_context', 'pvg_target_not_empty',
+      'roof_installation_required', 'rooftop_required', 'routing_topology_required',
+      'schedules_input_unsupported', 'schedules_kernel_refused', 'schedules_mapping_failed',
+      'schedules_optimizers_unsupported', 'schedules_zone_sizing_unsupported', 'seed_project_scope_unsupported',
+      'sized_panel_groups_required', 'sizing_confirmation_required', 'solar_output_not_current',
+      'string_collectors_required', 'strings_required', 'unassigned_strings_required',
+      'unlisted', 'unresolved_units', 'valid_settings_required',
       'valid_strings_required',
     ]
     expect(Object.isFrozen(SOLAR_REFUSAL_REASONS)).toBe(true)

@@ -232,7 +232,9 @@ def test_terrain_read_registry_and_catalog(monkeypatch):
     # Wave 4 orders SolarEdge admission and tracking before terrain, shade and physical exports.
     wave4 = [(entry["order"], entry["name"]) for entry in solar_tools.entries() if entry["wave"] == 4]
     assert wave4 == [(30, "solar-solaredge-accept"), (31, "solar-solaredge-tracking-read"),
-                     (40, TOOL), (50, "solar-physical-shade"), (60, "solar-physical-export")]
+                     (40, "solar-pvcase-convert"), (40, TOOL),
+                     (50, "solar-physical-shade"), (50, "solar-pvcase-solve"),
+                     (60, "solar-physical-export"), (60, "solar-pvcase-export")]
 
 
 def test_terrain_read_readiness(graph):

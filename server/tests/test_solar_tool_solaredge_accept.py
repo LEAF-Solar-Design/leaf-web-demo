@@ -181,7 +181,7 @@ def test_solaredge_accept_constants():
         "SOLAREDGE_REPORT_UNAVAILABLE", "SOLAREDGE_REPORT_CORRUPT", "SOLAREDGE_REPORT_KIND_MISMATCH",
         "SOLAREDGE_REPORT_STALE", "SOLAREDGE_REPORT_INVALID", "SOLAREDGE_REPORT_AMBIGUOUS"]
     assert builtin().TOOL == TOOL
-    assert solar_tools.TRUSTED_INPUTS == ("source_intake", "proposal_candidate", "solaredge_report", "physical_state")
+    assert solar_tools.TRUSTED_INPUTS == ("source_intake", "proposal_candidate", "solaredge_report", "physical_state", "pvcase_source")
     assert set(local._TRUSTED_RESOLVERS) == set(solar_tools.TRUSTED_INPUTS)
     assert local._TRUSTED_RESOLVERS["solaredge_report"] is local._solaredge_report
 
