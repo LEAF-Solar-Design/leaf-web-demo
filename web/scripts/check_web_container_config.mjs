@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const dockerfile = readFileSync('../deploy/Dockerfile.web', 'utf8')
+const workflow = readFileSync('../.github/workflows/build-platform-images.yml', 'utf8')
 const index = readFileSync('index.html', 'utf8')
 const api = readFileSync('src/api.js', 'utf8')
 const intake = readFileSync('src/site/intakeCache.js', 'utf8')
@@ -32,6 +33,18 @@ assert.match(dockerfile, /VITE_LIFECYCLE_UI=\$\{VITE_LIFECYCLE_UI\}/)
 // The ARG is inert unless the ENV block forwards it into the vite build.
 assert.match(dockerfile, /VITE_CAD_EDIT=\$\{VITE_CAD_EDIT\}/,
   'the VITE_CAD_EDIT build ARG must reach the vite build via the ENV block')
+assert.match(dockerfile, /^ARG VITE_SOLAR_FLOW_RAIL=1$/m,
+  'the VITE_SOLAR_FLOW_RAIL build ARG must exist and enable the shipped Solar flow rail')
+assert.match(dockerfile, /^ARG VITE_SOLAR_SETTINGS_FORM=1$/m,
+  'the VITE_SOLAR_SETTINGS_FORM build ARG must exist and enable the shipped Solar settings form')
+assert.match(dockerfile, /VITE_SOLAR_FLOW_RAIL=\$\{VITE_SOLAR_FLOW_RAIL\}/,
+  'the VITE_SOLAR_FLOW_RAIL build ARG must reach the vite build via the ENV block')
+assert.match(dockerfile, /VITE_SOLAR_SETTINGS_FORM=\$\{VITE_SOLAR_SETTINGS_FORM\}/,
+  'the VITE_SOLAR_SETTINGS_FORM build ARG must reach the vite build via the ENV block')
+assert.equal((workflow.match(/VITE_SOLAR_FLOW_RAIL: "1"/g) || []).length, 2,
+  'both web-build env blocks must enable VITE_SOLAR_FLOW_RAIL')
+assert.equal((workflow.match(/VITE_SOLAR_SETTINGS_FORM: "1"/g) || []).length, 2,
+  'both web-build env blocks must enable VITE_SOLAR_SETTINGS_FORM')
 
 // W7 (docs/convergence/ACCEPTANCE.md, Version 3): the old shell and its
 // runtime rail are deleted, so the app always renders the studio shell. The
@@ -47,4 +60,4 @@ assert.doesNotMatch(index, /\/runtime.flags\.js/,
 assert.match(index, /<script type="module" src="\/src\/main\.jsx">/,
   'index.html must still load the bundle')
 
-console.log('web container config: page assets, API, Auth0 SPA values, and the absence of a shell rail are pinned')
+console.log('web container config: page assets, API, Auth0 SPA values, Solar flow flags, and the absence of a shell rail are pinned')
