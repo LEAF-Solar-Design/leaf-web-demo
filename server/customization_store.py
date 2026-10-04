@@ -19,6 +19,12 @@ from typing import Iterator, Optional
 from uuid import uuid4
 
 from customization_audit import audit_payload, event_from_row
+from tool_record_fields import (
+    ToolRecordFieldError,
+    canonicalize_catalog_record_fields,
+    parse_catalog_record_fields_json,
+    validate_graph_input,
+)
 from customization_models import (
     AuditEvent,
     ChangeSet,
@@ -57,6 +63,9 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   request_fingerprint TEXT,
   authority_session_id TEXT,
   authority_turn_id TEXT,
+  request_graph_input TEXT,
+  base_catalog_change_set_id TEXT,
+  catalog_record_fields_json TEXT,
   stage_attempt INTEGER NOT NULL DEFAULT 0,
   stage_lease_owner TEXT,
   stage_lease_expires_at INTEGER,
@@ -217,6 +226,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
                     self._migrate_publication_requests(conn)
                     self._migrate_change_bindings(conn)
                     self._migrate_stage_jobs(conn)
+                    self._migrate_record_fields(conn)
                 except Exception:
                     conn.rollback()
                     raise
@@ -332,6 +342,21 @@ class SQLiteCustomizationStore(CustomizationRepository):
             "(state, stage_next_attempt_at, stage_lease_expires_at)"
         )
 
+    @staticmethod
+    def _migrate_record_fields(conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(customization_change_sets)")
+        }
+        for name in (
+            "request_graph_input", "base_catalog_change_set_id",
+            "catalog_record_fields_json",
+        ):
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE customization_change_sets ADD COLUMN {name} TEXT"
+                )
+
     ensure_started = initialize
 
     @contextmanager
@@ -372,6 +397,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
         target_tool_name: Optional[str] = None,
         authority_session_id: Optional[str] = None,
         authority_turn_id: Optional[str] = None,
+        request_graph_input: Optional[str] = None,
+        base_catalog_change_set_id: Optional[str] = None,
     ) -> ChangeSet:
         row, _ = self._reserve_change_set(
             tenant_id=tenant_id, idempotency_key=idempotency_key,
@@ -383,11 +410,15 @@ class SQLiteCustomizationStore(CustomizationRepository):
             request_description=None, request_fingerprint=None,
             authority_session_id=authority_session_id,
             authority_turn_id=authority_turn_id,
+            request_graph_input=request_graph_input,
+            base_catalog_change_set_id=base_catalog_change_set_id,
         )
         return row
 
     def reserve_stage(
         self, *, request_description: str, request_fingerprint: str,
+        request_graph_input: Optional[str] = None,
+        base_catalog_change_set_id: Optional[str] = None,
         **kwargs: object,
     ) -> tuple[ChangeSet, bool]:
         request_description = require_bounded(
@@ -399,6 +430,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
         return self._reserve_change_set(
             request_description=request_description,
             request_fingerprint=request_fingerprint,
+            request_graph_input=request_graph_input,
+            base_catalog_change_set_id=base_catalog_change_set_id,
             **kwargs,
         )
 
@@ -418,6 +451,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
         request_fingerprint: Optional[str],
         authority_session_id: Optional[str] = None,
         authority_turn_id: Optional[str] = None,
+        request_graph_input: Optional[str] = None,
+        base_catalog_change_set_id: Optional[str] = None,
     ) -> tuple[ChangeSet, bool]:
         tenant_id = require_bounded(tenant_id, "tenant_id", 200)
         idempotency_key = require_bounded(idempotency_key, "idempotency_key", 200)
@@ -457,10 +492,23 @@ class SQLiteCustomizationStore(CustomizationRepository):
                     and row.request_description == request_description
                     and row.authority_session_id == authority_session_id
                     and row.authority_turn_id == authority_turn_id
+                    and row.request_graph_input == request_graph_input
+                    and row.base_catalog_change_set_id == base_catalog_change_set_id
                 )
                 if not same_request:
                     raise IdempotencyReplayError("idempotency key belongs to a different change-set request")
                 return row, False
+            if request_graph_input is not None:
+                validate_graph_input(request_graph_input)
+            if base_catalog_change_set_id is not None:
+                predecessor_id = require_uuid(base_catalog_change_set_id)
+                if predecessor_id == change_set_id:
+                    raise ChangeSetConflictError("a change set cannot inherit from itself")
+                predecessor = self._find_change_set(conn, tenant_id, predecessor_id)
+                if (predecessor.staged_commit != base_commit or predecessor.state not in {
+                    ChangeState.PUBLISHED, ChangeState.ROLLED_BACK,
+                }):
+                    raise ChangeSetConflictError("predecessor does not match the reserved base")
             conn.execute(
                 "INSERT INTO customization_change_sets "
                 "(change_set_id, tenant_id, idempotency_key, state, version, base_commit, "
@@ -473,9 +521,11 @@ class SQLiteCustomizationStore(CustomizationRepository):
                  authority_session_id, authority_turn_id),
             )
             conn.execute(
-                "UPDATE customization_change_sets SET change_kind = ?, target_tool_name = ? "
+                "UPDATE customization_change_sets SET change_kind = ?, target_tool_name = ?, "
+                "request_graph_input = ?, base_catalog_change_set_id = ? "
                 "WHERE change_set_id = ?",
-                (change_kind, target_tool_name, change_set_id),
+                (change_kind, target_tool_name, request_graph_input,
+                 base_catalog_change_set_id, change_set_id),
             )
             row = self._find_change_set(conn, tenant_id, change_set_id)
             self._append_audit(conn, row, None, ChangeState.CREATED, idempotency_key)
@@ -641,6 +691,14 @@ class SQLiteCustomizationStore(CustomizationRepository):
         approver_subject: Optional[str] = None,
         reason_code: Optional[str] = None,
     ) -> ChangeSet:
+        try:
+            staged_transition = ChangeState(next_state) == ChangeState.STAGED
+        except ValueError:
+            staged_transition = False
+        if staged_transition:
+            row = self.get_change_set(tenant_id=tenant_id, change_set_id=change_set_id)
+            if row.request_graph_input is not None or row.base_catalog_change_set_id is not None:
+                raise InvalidTransitionError("metadata staging requires record_staged")
         return self._transition(
             tenant_id=tenant_id,
             change_set_id=change_set_id,
@@ -665,15 +723,81 @@ class SQLiteCustomizationStore(CustomizationRepository):
         workspace_contract_digest: str,
         stage_lease_owner: Optional[str] = None,
         stage_attempt: Optional[int] = None,
+        catalog_record_fields_json: Optional[str] = None,
     ) -> ChangeSet:
-        staged_commit = require_sha(staged_commit, 40, "staged_commit")
-        catalog_digest = require_sha(catalog_digest, 64, "catalog_digest")
-        platform_release = require_bounded(platform_release, "platform_release", 200)
-        workspace_contract_digest = require_sha(
-            workspace_contract_digest, 64, "workspace_contract_digest"
-        )
+        validation_failure = None
+        try:
+            staged_commit = require_sha(staged_commit, 40, "staged_commit")
+            catalog_digest = require_sha(catalog_digest, 64, "catalog_digest")
+            platform_release = require_bounded(platform_release, "platform_release", 200)
+            workspace_contract_digest = require_sha(
+                workspace_contract_digest, 64, "workspace_contract_digest"
+            )
+        except ValueError as exc:
+            validation_failure = exc
+        if catalog_record_fields_json is None and validation_failure is not None:
+            raise validation_failure
         with self._transaction() as conn:
-            row = self._find_change_set(conn, tenant_id, change_set_id)
+            try:
+                row = self._find_change_set(conn, tenant_id, change_set_id)
+            except ChangeSetNotFoundError:
+                if validation_failure is not None:
+                    raise validation_failure
+                raise
+            metadata = (
+                row.request_graph_input is not None
+                or row.base_catalog_change_set_id is not None
+                or row.catalog_record_fields_json is not None
+                or catalog_record_fields_json is not None
+            )
+            if not metadata and validation_failure is not None:
+                raise validation_failure
+            if metadata:
+                existing_event = conn.execute(
+                    "SELECT * FROM customization_audit_events "
+                    "WHERE tenant_id = ? AND idempotency_key = ?",
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if existing_event is not None:
+                    event = event_from_row(existing_event)
+                    snapshot = None
+                    snapshot_matches = True
+                    if catalog_record_fields_json is not None:
+                        try:
+                            snapshot = canonicalize_catalog_record_fields(
+                                parse_catalog_record_fields_json(catalog_record_fields_json)
+                            )
+                        except ToolRecordFieldError:
+                            snapshot_matches = False
+                    if (event.change_set_id != row.change_set_id
+                            or event.next_state != ChangeState.STAGED
+                            or not snapshot_matches
+                            or row.catalog_record_fields_json != snapshot
+                            or event.staged_commit != staged_commit
+                            or event.catalog_digest != catalog_digest
+                            or event.platform_release != platform_release
+                            or event.workspace_contract_digest != workspace_contract_digest):
+                        raise IdempotencyReplayError("staging completion replay changed")
+                    # Lease cleanup is part of the first completion; a replay
+                    # from its worker must still name the same generation.
+                    if stage_lease_owner is not None and row.stage_attempt != stage_attempt:
+                        raise ChangeSetConflictError(
+                            "stage worker lease generation is no longer authoritative"
+                        )
+                    return row
+                if row.state != ChangeState.STAGING:
+                    raise ChangeSetConflictError("metadata staging completion is immutable")
+            if validation_failure is not None:
+                raise validation_failure
+            snapshot = None
+            if catalog_record_fields_json is not None:
+                snapshot = canonicalize_catalog_record_fields(
+                    parse_catalog_record_fields_json(catalog_record_fields_json)
+                )
+            if metadata:
+                if (row.request_graph_input is not None
+                        or row.base_catalog_change_set_id is not None) and snapshot is None:
+                    raise ChangeSetConflictError("metadata staging requires a snapshot")
             if stage_lease_owner is not None:
                 now_ms = int(time.time() * 1000)
                 if (row.stage_lease_owner != stage_lease_owner
@@ -686,6 +810,12 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 raise ChangeSetConflictError("workspace contract digest does not match the reserved change set")
             if row.desired_platform_release != platform_release:
                 raise ChangeSetConflictError("platform release does not match the reserved change set")
+            if metadata:
+                conn.execute(
+                    "UPDATE customization_change_sets SET catalog_record_fields_json = ? "
+                    "WHERE tenant_id = ? AND change_set_id = ?",
+                    (snapshot, tenant_id, change_set_id),
+                )
             self._transition_row(
                 conn, row, ChangeState.STAGED, expected_version, idempotency_key,
                 staged_commit=staged_commit, catalog_digest=catalog_digest,
@@ -1482,6 +1612,13 @@ class SQLiteCustomizationStore(CustomizationRepository):
             stage_phase=row["stage_phase"],
             stage_started_at=row["stage_started_at"],
             stage_finished_at=row["stage_finished_at"],
+            request_graph_input=row["request_graph_input"],
+            base_catalog_change_set_id=row["base_catalog_change_set_id"],
+            catalog_record_fields_json=(
+                canonicalize_catalog_record_fields(
+                    parse_catalog_record_fields_json(row["catalog_record_fields_json"])
+                ) if row["catalog_record_fields_json"] is not None else None
+            ),
         )
 
     @staticmethod

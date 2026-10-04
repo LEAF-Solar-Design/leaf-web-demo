@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafautomation.ai/contracts/customization-record-fields.v1.schema.json",
+  "$comment": "graph_input semantic values are accepted exclusively by server/tool_record_fields.py validate_graph_input; this schema bounds the string without a separate enum.",
+  "type": "object",
+  "required": ["schema", "tools"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "leaf.customization-record-fields.v1"},
+    "tools": {
+      "type": "object",
+      "maxProperties": 1024,
+      "propertyNames": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "\\S"},
+      "additionalProperties": {
+        "type": "object",
+        "required": ["version", "record_sha256", "graph_input"],
+        "additionalProperties": false,
+        "properties": {
+          "version": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S"},
+          "record_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
+          "graph_input": {"type": "string", "minLength": 1, "maxLength": 64}
+        }
+      }
+    }
+  }
+}

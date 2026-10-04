@@ -36,6 +36,7 @@ a bounded set that stops growing rather than leaking one entry per bad row.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Dict, Mapping, Optional
@@ -190,6 +191,73 @@ def validate_graph_input(value: Any) -> str:
         raise ToolRecordFieldError(
             "graph_input", f"graph_input must be exactly {GRAPH_INPUT_SOLAR_W1!r}")
     return value
+
+
+def canonicalize_catalog_record_fields(value: Mapping[str, Any]) -> str:
+    """Validate a complete authority snapshot and serialize its exact values."""
+    def fail(message: str) -> None:
+        raise ToolRecordFieldError("catalog_record_fields_json", message)
+
+    def bounded(text: Any, maximum: int, name: str) -> None:
+        if not isinstance(text, str) or not 1 <= len(text) <= maximum:
+            fail(f"{name} must be a string of 1–{maximum} characters")
+        if not text.strip():
+            fail(f"{name} must contain a non-whitespace character")
+
+    if not isinstance(value, Mapping) or set(value) != {"schema", "tools"}:
+        fail("snapshot must contain exactly schema and tools")
+    if value["schema"] != "leaf.customization-record-fields.v1":
+        fail("unsupported record-fields schema")
+    entries = value["tools"]
+    if not isinstance(entries, Mapping) or len(entries) > 1024:
+        fail("tools must be an object with at most 1024 entries")
+    tools: Dict[str, Any] = {}
+    for name, entry in entries.items():
+        bounded(name, 64, "tool name")
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "version", "record_sha256", "graph_input"
+        }:
+            fail("tool entries must contain exactly version, record_sha256 and graph_input")
+        bounded(entry["version"], 128, "version")
+        digest = entry["record_sha256"]
+        if not isinstance(digest, str) or len(digest) != 64:
+            fail("record_sha256 must contain 64 lowercase hexadecimal characters")
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail("record_sha256 must contain 64 lowercase hexadecimal characters")
+        graph = entry["graph_input"]
+        if not isinstance(graph, str) or not 1 <= len(graph) <= 64:
+            fail("graph_input must be a string of 1–64 characters")
+        validate_graph_input(graph)
+        tools[name] = dict(entry)
+    return json.dumps(
+        {"schema": value["schema"], "tools": tools}, sort_keys=True,
+        separators=(",", ":"), ensure_ascii=True, allow_nan=False,
+    )
+
+
+def parse_catalog_record_fields_json(value: str) -> Dict[str, Any]:
+    """Strictly parse authority JSON, rejecting duplicate keys and constants."""
+    def fail(message: str) -> None:
+        raise ToolRecordFieldError("catalog_record_fields_json", message)
+
+    def object_pairs(pairs: Any) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                fail("duplicate JSON object key")
+            result[key] = item
+        return result
+
+    if not isinstance(value, str):
+        fail("snapshot JSON must be text")
+    try:
+        parsed = json.loads(value, object_pairs_hook=object_pairs, parse_constant=fail)
+    except ToolRecordFieldError:
+        raise
+    except (ValueError, RecursionError) as exc:
+        raise ToolRecordFieldError("catalog_record_fields_json", "invalid snapshot JSON") from exc
+    canonicalize_catalog_record_fields(parsed)
+    return parsed
 
 
 def validate_optional_fields(source: Mapping[str, Any]) -> Dict[str, Any]:

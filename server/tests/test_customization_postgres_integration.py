@@ -575,3 +575,154 @@ def test_postgres_deployment_snapshot_is_idempotent(store) -> None:
         action="verify",
         idempotency_key="pg-deployment-verify",
     )["verified"]
+
+
+def test_r1_postgres_authority_parity(store, tmp_path, monkeypatch) -> None:
+    import copy
+    import json
+    from uuid import uuid4
+
+    from customization_models import IdempotencyReplayError, InvalidTransitionError
+    from tool_record_fields import ToolRecordFieldError, GRAPH_INPUT_SOLAR_W1
+    from test_customization_record_fields_store import S, SNAPSHOT
+
+    prefix = "r1-" + str(uuid4())
+    tenant = prefix + "-tenant"
+
+    def reservation(key, **metadata):
+        return store.reserve_stage(
+            tenant_id=tenant, idempotency_key=prefix + key, base_commit=BASE,
+            desired_platform_release="platform@sha256:abc", workspace_contract_digest=WORKSPACE,
+            author_subject="auth0|author", request_description="exact description",
+            request_fingerprint="e" * 64, **metadata)
+
+    row, created = reservation("request", request_graph_input=GRAPH_INPUT_SOLAR_W1)
+    assert created
+    events = store.audit_events(tenant_id=tenant, change_set_id=row.change_set_id)
+    assert reservation("request", request_graph_input=GRAPH_INPUT_SOLAR_W1) == (row, False)
+    for value in (None, "other"):
+        with pytest.raises(IdempotencyReplayError):
+            reservation("request", request_graph_input=value)
+    for invalid in ("other", "", 1, " " + GRAPH_INPUT_SOLAR_W1):
+        with pytest.raises(ToolRecordFieldError):
+            reservation("invalid", request_graph_input=invalid)
+    assert store.audit_events(tenant_id=tenant, change_set_id=row.change_set_id) == events
+    row = store.transition(tenant_id=tenant, change_set_id=row.change_set_id,
+                           next_state=ChangeState.STAGING, expected_version=row.version,
+                           idempotency_key=prefix + "staging")
+    receipt = dict(tenant_id=tenant, change_set_id=row.change_set_id, expected_version=row.version,
+                   idempotency_key=prefix + "completion", staged_commit=BASE, catalog_digest=DIGEST,
+                   platform_release="platform@sha256:abc", workspace_contract_digest=WORKSPACE)
+    with pytest.raises(ChangeSetConflictError):
+        store.record_staged(**receipt)
+    with pytest.raises(InvalidTransitionError):
+        store.transition(tenant_id=tenant, change_set_id=row.change_set_id,
+                         next_state=ChangeState.STAGED, expected_version=row.version,
+                         idempotency_key=prefix + "bypass")
+    before = store.get_change_set(tenant_id=tenant, change_set_id=row.change_set_id)
+    events = store.audit_events(tenant_id=tenant, change_set_id=row.change_set_id)
+    append = store._append_audit
+
+    def fail(*args, **kwargs):
+        append(*args, **kwargs)
+        raise RuntimeError("injected record-fields audit failure")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(store, "_append_audit", fail)
+        with pytest.raises(RuntimeError, match="injected record-fields"):
+            store.record_staged(**receipt, catalog_record_fields_json=S)
+    assert store.get_change_set(tenant_id=tenant, change_set_id=row.change_set_id) == before
+    assert store.audit_events(tenant_id=tenant, change_set_id=row.change_set_id) == events
+    with store._transaction() as conn:
+        conn.execute("UPDATE customization_change_sets SET stage_attempt = 2, stage_lease_owner = ?, "
+                     "stage_lease_expires_at = ? WHERE change_set_id = ?",
+                     (prefix + "worker", int(time.time() * 1000) + 60000, row.change_set_id))
+    with pytest.raises(ChangeSetConflictError):
+        store.record_staged(**receipt, catalog_record_fields_json=S,
+                            stage_lease_owner="stale-worker", stage_attempt=1)
+    staged = store.record_staged(**receipt, catalog_record_fields_json=S,
+                                 stage_lease_owner=prefix + "worker", stage_attempt=2)
+    assert staged.request_graph_input == GRAPH_INPUT_SOLAR_W1 and staged.catalog_record_fields_json == S
+    events = store.audit_events(tenant_id=tenant, change_set_id=row.change_set_id)
+    assert store.record_staged(**receipt, catalog_record_fields_json=json.dumps(SNAPSHOT, indent=2)) == staged
+    for overrides in ({"catalog_record_fields_json": None}, {"staged_commit": STAGED},
+                      {"catalog_digest": "f" * 64}, {"platform_release": "changed"}):
+        with pytest.raises(IdempotencyReplayError):
+            store.record_staged(**{**receipt, "catalog_record_fields_json": S, **overrides})
+    with pytest.raises(ChangeSetConflictError):
+        store.record_staged(**{**receipt, "idempotency_key": prefix + "later"}, catalog_record_fields_json=S)
+    assert store.audit_events(tenant_id=tenant, change_set_id=row.change_set_id) == events
+    for state in (ChangeState.AWAITING_APPROVAL, ChangeState.APPROVED, ChangeState.PUBLISHING):
+        staged = store.transition(tenant_id=tenant, change_set_id=row.change_set_id,
+                                  next_state=state, expected_version=staged.version,
+                                  idempotency_key=prefix + state.value, approver_subject="auth0|approver")
+    store.publish(tenant_id=tenant, change_set_id=row.change_set_id, expected_version=staged.version,
+                  idempotency_key=prefix + "publish")
+    child, _ = reservation("child", base_catalog_change_set_id=row.change_set_id)
+    assert child.base_catalog_change_set_id == row.change_set_id
+    assert reservation("child", base_catalog_change_set_id=row.change_set_id) == (child, False)
+    with pytest.raises(IdempotencyReplayError):
+        reservation("child")
+    for predecessor, error in (("malformed", ValueError), (str(uuid4()), ChangeSetNotFoundError),
+                               (child.change_set_id, ChangeSetConflictError)):
+        with pytest.raises(error):
+            reservation("refused-predecessor", base_catalog_change_set_id=predecessor)
+    self_id = str(uuid4())
+    with pytest.raises(ChangeSetConflictError):
+        reservation("self-predecessor", change_set_id=self_id, base_catalog_change_set_id=self_id)
+    sync_kwargs = dict(tenant_id=tenant, idempotency_key=prefix + "sync", base_commit=BASE,
+                       desired_platform_release="platform@sha256:abc", workspace_contract_digest=WORKSPACE,
+                       author_subject="auth0|author", request_graph_input=GRAPH_INPUT_SOLAR_W1,
+                       base_catalog_change_set_id=row.change_set_id)
+    sync = store.create_change_set(**sync_kwargs)
+    assert store.create_change_set(**sync_kwargs) == sync
+    with pytest.raises(IdempotencyReplayError):
+        store.create_change_set(**{**sync_kwargs, "request_graph_input": None})
+    legacy_kwargs = {**sync_kwargs, "idempotency_key": prefix + "legacy",
+                     "request_graph_input": None, "base_catalog_change_set_id": None}
+    legacy = store.create_change_set(**legacy_kwargs)
+    with pytest.raises(IdempotencyReplayError):
+        store.create_change_set(**{**legacy_kwargs, "request_graph_input": GRAPH_INPUT_SOLAR_W1})
+    legacy = stage(store, legacy, prefix + "legacy")
+    assert (legacy.request_graph_input, legacy.base_catalog_change_set_id,
+            legacy.catalog_record_fields_json) == (None, None, None)
+
+    sqlite = SQLiteCustomizationStore(tmp_path / "record-fields.db")
+    sqlite_row = sqlite.create_change_set(
+        tenant_id=prefix + "-backfill", idempotency_key=prefix + "backfill", base_commit=BASE,
+        desired_platform_release="platform@sha256:abc", workspace_contract_digest=WORKSPACE,
+        author_subject="auth0|author", request_graph_input=GRAPH_INPUT_SOLAR_W1)
+    sqlite_row = sqlite.transition(tenant_id=sqlite_row.tenant_id, change_set_id=sqlite_row.change_set_id,
+                                   next_state=ChangeState.STAGING, expected_version=sqlite_row.version,
+                                   idempotency_key=prefix + "backfill-stage")
+    sqlite_row = sqlite.record_staged(
+        **{**receipt, "tenant_id": sqlite_row.tenant_id, "change_set_id": sqlite_row.change_set_id,
+           "expected_version": sqlite_row.version, "idempotency_key": prefix + "backfill-complete"},
+        catalog_record_fields_json=S)
+    path = Path(sqlite.database_path)
+    assert authority_reconcile.reconcile(sqlite_path=path, mode="backfill")["source_incorporated"]
+    loaded = store.get_change_set(tenant_id=sqlite_row.tenant_id, change_set_id=sqlite_row.change_set_id)
+    assert all(getattr(loaded, column) == getattr(sqlite_row, column)
+               for column in authority_reconcile.TABLE_COLUMNS["customization_change_sets"])
+    before = _postgres_snapshot(platform_db())
+    assert authority_reconcile.reconcile(sqlite_path=path, mode="backfill")["source_incorporated"]
+    assert _postgres_snapshot(platform_db()) == before
+    with store._transaction() as conn:
+        conn.execute("UPDATE customization_change_sets SET request_description = ? WHERE change_set_id = ?",
+                     ("conflicting target", sqlite_row.change_set_id))
+    before = copy.deepcopy(_postgres_snapshot(platform_db()))
+    with pytest.raises(RuntimeError, match="customization authority has a conflicting row in"):
+        authority_reconcile.reconcile(sqlite_path=path, mode="backfill")
+    assert _postgres_snapshot(platform_db()) == before
+    with store._transaction() as conn:
+        conn.execute("UPDATE customization_change_sets SET catalog_record_fields_json = ? WHERE change_set_id = ?",
+                     ("invalid JSON", row.change_set_id))
+    try:
+        with pytest.raises(ToolRecordFieldError):
+            store.get_change_set(tenant_id=tenant, change_set_id=row.change_set_id)
+    finally:
+        with store._transaction() as conn:
+            conn.execute("UPDATE customization_change_sets SET catalog_record_fields_json = ? WHERE change_set_id = ?",
+                         (S, row.change_set_id))
+            conn.execute("UPDATE customization_change_sets SET request_description = NULL WHERE change_set_id = ?",
+                         (sqlite_row.change_set_id,))

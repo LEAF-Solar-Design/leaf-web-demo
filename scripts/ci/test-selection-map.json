@@ -233,6 +233,8 @@
     "server-customization-refusal-observability",
     "server-customization-runtime",
     "server-customization-store",
+    "server-customization-record-fields-store",
+    "server-tool-record-fields-snapshot",
     "server-customization-store-scaling",
     "server-da-callback",
     "server-data-lifecycle-matrix",
