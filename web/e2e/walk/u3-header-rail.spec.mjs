@@ -260,6 +260,9 @@ test('u3-header-rail phone comparison 390x844 @desktop', async ({ page }, testIn
   expect(baseline.viewport).toEqual(phoneViewport)
   expect(baseline.route).toBe(phoneRoute)
   const measurements = await phoneMeasurements(page, phoneRoute)
-  await snapshot(page, testInfo, 'phone-preserved-seats', { baseline, measurements })
-  expect(measurements).toEqual(baseline.measurements)
+  await snapshot(page, testInfo, 'phone-account-row-seats', { baseline, measurements })
+  // A3 adds a 44px account row so the quick access and ribbon tabs keep the full phone width.
+  expect(measurements.header).toEqual({ ...baseline.measurements.header, height: baseline.measurements.header.height + 44 })
+  expect(measurements.rail).toEqual(baseline.measurements.rail)
+  expect(measurements.footer).toEqual(baseline.measurements.footer)
 })

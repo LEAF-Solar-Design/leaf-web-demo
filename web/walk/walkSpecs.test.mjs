@@ -5,6 +5,7 @@ import { SWEEP_SPECS, walkTestMatch } from './walkSpecs.mjs'
 
 const knownProofSpecs = [
   'u3-header-rail.spec.mjs',
+  'u5-shell-hit-targets.spec.mjs',
   'u4-solar-ribbon.spec.mjs',
   'unsupported-cost.spec.mjs',
   'unsupported-fast.spec.mjs',

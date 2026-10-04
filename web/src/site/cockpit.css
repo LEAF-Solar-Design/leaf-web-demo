@@ -1104,24 +1104,30 @@
    row above the command bar. Only the last opened drawer gets body space. */
 @media (max-width: 600px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] {
-    --ck-top: 88px; --ck-status: 46px; --ck-drawer: 44px;
+    --ck-top: 132px; --ck-status: 46px; --ck-drawer: 44px;
     --phone-command-height: 106px;
     --ck-dock: calc(var(--phone-command-height) + var(--ck-status) + 4px);
     --ck-canvas-top: var(--cockpit-stack-top, 208px);
-    height: 100dvh; min-height: 0; grid-template-rows: 88px minmax(0, 1fr) 46px;
+    height: 100dvh; min-height: 0; grid-template-rows: 132px minmax(0, 1fr) 46px;
     max-width: 100vw; overflow: hidden;
   }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top { height: 88px; align-items: flex-start; padding: 0 6px; gap: 6px; }
+  /* A3: account controls get their own row below the two command bands. */
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top { height: 132px; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 88px 44px; align-items: stretch; padding: 0 6px; gap: 0; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top :is(.mark, .spacer) { display: none; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-band {
     display: flex; flex-direction: column; align-items: stretch; height: 88px;
-    width: auto; flex: 1 1 0; min-width: 0; gap: 0; overflow: hidden;
+    width: 100%; min-width: 0; gap: 0; overflow: hidden;
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-quick { height: 44px; flex-shrink: 0; overflow-x: auto; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-ribbon-tabs {
     height: 44px; margin-left: 0; overflow-x: auto; overflow-y: hidden; flex-shrink: 0;
   }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-ribbon-tabs [role="tab"] { min-width: 44px; padding: 0 9px; font-size: 12px; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top .who { padding-top: 10px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-ribbon-tabs [role="tab"] { height: 44px; min-width: 44px; padding: 0 9px; font-size: 12px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-quick button { width: 44px; height: 44px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top .who { grid-row: 2; min-width: 0; max-width: 100%; height: 44px; padding-top: 0; flex-wrap: nowrap; align-items: center; overflow-x: auto; overflow-y: hidden; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top .who > * { flex-shrink: 0; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-quick > *,
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-ribbon-tabs [role="tab"] { flex-shrink: 0; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .start-board-gloss { display: none; }
   /* The outer dock reserves a 44px engine prompt above the 62px input well.
      Its fixed height and status offset also anchor the headings, drawing and
@@ -1154,7 +1160,7 @@
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .center-col {
-    position: absolute; inset: 88px 0 calc(var(--ck-dock) + var(--ck-drawer));
+    position: absolute; inset: 132px 0 calc(var(--ck-dock) + var(--ck-drawer));
     display: flex; flex-direction: column; min-height: 0; overflow: hidden;
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
