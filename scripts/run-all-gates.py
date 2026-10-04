@@ -884,6 +884,10 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_terrain_read.py"), 96),
         Suite("server-solar-tool-physical-shade", "server tests/test_solar_tool_physical_shade.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_physical_shade.py"), 22),
+        Suite("server-solar-tool-physical-export",
+              "server tests/test_solar_tool_physical_export.py",
+              "pytest", SERVER,
+              _py_pytest("tests/test_solar_tool_physical_export.py"), 24),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",

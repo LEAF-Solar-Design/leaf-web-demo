@@ -505,6 +505,7 @@
     "server-solar-tool-solaredge-tracking-read",
     "server-solar-tool-terrain-read",
     "server-solar-tool-physical-shade",
+    "server-solar-tool-physical-export",
     "server-solar-tracker-rows",
     "server-solar-tracker-rows-route",
     "server-solar-w2-registration",
