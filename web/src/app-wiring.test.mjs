@@ -547,6 +547,7 @@ describe('Solar step rail wiring', () => {
     assert.equal(appSource.split('<SolarWorkspaceTools').length, 2)
     const host = appSource.slice(fence, tools)
     assert.ok(host.includes('<div className="solar-flow-host">'))
+    assert.match(host, new RegExp('workspacePanelsByFlow=\\{\\s*!mock && catalogRunContext\\?\\.drawingId\\s*\\? SolarWorkspaceTools\\.workspacePanelsByFlow\\s*: undefined\\s*\\}'))
     assert.ok(host.slice(host.indexOf('/>', host.indexOf('<SolarFlowRail'))).includes('{!mock && ('))
     const props = appSource.slice(tools, appSource.indexOf('/>', tools))
     for (const binding of [
@@ -558,6 +559,13 @@ describe('Solar step rail wiring', () => {
       'onPhysicalHeadChanged={() => loadCatalog()}',
       'onDrawingVersionChanged={seatCompletedVersion}',
     ]) assert.ok(props.includes(binding), binding)
+  })
+
+  it('GP5-17 live drawing rail receives the original guarded workspace registry', () => {
+    const rail = appSource.indexOf('<SolarFlowRail')
+    const props = appSource.slice(rail, appSource.indexOf('/>', rail))
+    assert.match(props, new RegExp('workspacePanelsByFlow=\\{\\s*!mock && catalogRunContext\\?\\.drawingId\\s*\\? SolarWorkspaceTools\\.workspacePanelsByFlow\\s*: undefined\\s*\\}'))
+    assert.equal(appSource.split('<SolarWorkspaceTools').length, 2)
   })
 
   it('W20 resets the selected flow when the rail mount predicate becomes false', () => {

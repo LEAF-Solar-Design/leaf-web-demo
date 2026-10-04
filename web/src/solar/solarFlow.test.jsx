@@ -135,7 +135,7 @@ describe('F2 rail panel admission', () => {
     try {
       render(<SolarFlowRail families={LIVE} drawingId="d1" />)
       for (const [id, labels, note] of [
-        ['ground-physical', ['Terrain', 'Tracker layout', 'Civil and piles', 'Shade and terrain analysis', 'Exports'],
+        ['ground-physical', ['Terrain', 'Native frame layout', 'Grade pads and native piles', 'Terrain and frame shade', 'Terrain and shade CSV'],
           'Preview flow: its results are not production Solar design yet.'],
         ['solaredge-import', ['Upload the SolarEdge PDF', 'Inspect counts and matching', 'Accept tracking', 'Review accepted tracking'],
           'Preview flow: its results are not production Solar design yet.'],
