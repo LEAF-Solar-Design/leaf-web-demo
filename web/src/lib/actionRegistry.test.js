@@ -733,7 +733,74 @@ describe('the engine reason ladders', () => {
     // Placed selections reach the builder's verb-specific gate.
     const geometryOps = forGroup('modify').filter((a) => a.panel !== 'properties')
     expect(geometryOps.length).toBeGreaterThan(0)
-    for (const record of geometryOps) expect(record.when(insertCtx)).toBe('')
+    for (const record of geometryOps) {
+      expect(record.when(insertCtx)).toBe(record.op === 'explode' ? MODIFY_REASONS.unsupportedInsert : '')
+    }
+  })
+
+  it('W21B1-placed-actions', () => {
+    for (const id of ['clipboard:copyClip', 'clipboard:cutClip', 'modify:explode']) {
+      for (const [type, reason] of [
+        ['INSERT', 'Copy, Cut and Explode do not support INSERT block references yet'],
+        ['DIMENSION', 'Copy, Cut and Explode do not support DIMENSION entities yet'],
+      ]) {
+        for (const editable of [false, true, undefined]) {
+          const selected = editable === undefined ? { type } : { type, editable }
+          expect(byId(id).when({ session: { engineParsed: true, selectedIds: ['one'], selected } })).toBe(reason)
+        }
+      }
+    }
+  })
+
+  it('W21B1-priority', () => {
+    for (const id of ['clipboard:copyClip', 'clipboard:cutClip', 'modify:explode']) {
+      const action = byId(id)
+      expect(action.when({ session: null })).toBe(MODIFY_REASONS.noDocument)
+      expect(action.when({ session: null, reach: { state: 'opening', sentence: 'opening the drawing' } }))
+        .toBe('opening the drawing')
+      for (const type of ['LINE', 'INSERT', 'DIMENSION']) {
+        const session = { engineParsed: true, selectedIds: ['one'], selected: { type, editable: true } }
+        for (const [patch, reason] of [
+          [{ errorKind: 'crashed', busy: true }, MODIFY_REASONS.crashed],
+          [{ engineParsed: false, busy: true }, MODIFY_REASONS.noDocument],
+          [{ busy: true }, MODIFY_REASONS.busy],
+          [{ selectedIds: ['one', 'two'] }, MODIFY_REASONS.multiSelection],
+          [{ selected: null, selectedIds: [] }, MODIFY_REASONS.noSelection],
+          [{ selected: { type: 'HATCH', editable: false } }, MODIFY_REASONS.readOnlyKind],
+        ]) expect(action.when({ session: { ...session, ...patch } })).toBe(reason)
+      }
+    }
+  })
+
+  it('W21B1-preserves-other-actions', () => {
+    for (const id of ['clipboard:copyClip', 'clipboard:cutClip', 'modify:explode']) {
+      for (const [type, editable] of [['LINE', true], ['LWPOLYLINE', true], ['MLEADER', false]]) {
+        expect(byId(id).when({ session: { engineParsed: true, selectedIds: ['one'], selected: { type, editable } } }))
+          .toBe('')
+      }
+    }
+    for (const type of ['INSERT', 'DIMENSION']) {
+      const ctx = { session: { engineParsed: true, selectedIds: ['one'], selected: { type, editable: false }, clipboard: { type: 'LINE' } } }
+      for (const id of ['modify:move', 'modify:delete', 'modify:setColor', 'clipboard:pasteClip']) {
+        expect(byId(id).when(ctx)).toBe(type === 'DIMENSION' && id === 'modify:setColor' ? PROPERTY_REASONS.readOnlyKind : '')
+      }
+    }
+  })
+
+  it('W21B1-projection-and-vocabulary', () => {
+    for (const id of ['clipboard:copyClip', 'clipboard:cutClip', 'modify:explode']) {
+      for (const [type, reason, code] of [
+        ['INSERT', 'Copy, Cut and Explode do not support INSERT block references yet', 'MODIFY_REASONS.unsupportedInsert'],
+        ['DIMENSION', 'Copy, Cut and Explode do not support DIMENSION entities yet', 'MODIFY_REASONS.unsupportedDimension'],
+      ]) {
+        const tool = ribbonTool(byId(id), { session: { engineParsed: true, selectedIds: ['one'], selected: { type, editable: false } } })
+        expect(tool.disabled).toBe(true)
+        expect(tool.reason).toBe(reason)
+        expect(KNOWN_REASON_VALUES.has(reason)).toBe(true)
+        expect(reasonCode(reason)).toBe(code)
+        expect(accessibleName(tool.label, reason)).toBe(tool.label + ' (unavailable: ' + reason + ')')
+      }
+    }
   })
 })
 

@@ -6,7 +6,6 @@ import { PRODUCT_SURFACES, productSurfaceStates } from '../src/site/productSurfa
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../src/lib/studioDrawers.js'
 import { PROMPTS } from '../src/cadedit/promptKeys.js'
-import { clipboardRecord } from '../src/cadedit/clipboard.js'
 import { isWriteTool, toolMcpSource } from '../src/lib/toolRecord.js'
 
 const readJson = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'))
@@ -416,16 +415,6 @@ function cases(config, kind) {
 function actionEffect(action, ctx, override) {
   const why = action.when(ctx)
   if (why) return disabled(why)
-  // These buttons are live for a placed DIMENSION; the store refuses after
-  // activation, before changing either the clipboard or the document.
-  if (ctx.session?.selected?.type === 'DIMENSION'
-      && ['copyClip', 'cutClip', 'explode'].includes(action.op)) {
-    const refusal = action.op === 'explode'
-      ? 'a dimension is placed, not edited, in this round'
-      : clipboardRecord(ctx.session.selected, action.op === 'cutClip' ? 'Cut' : 'Copy').refusal
-    return { kind: 'renders', target: 'engine-refusal', refusal,
-      clipboard: 'unchanged', geometry: 'unchanged' }
-  }
   if (action.id === 'bar:escape') return { kind: 'toggles', target: `escape:${escapeRung(ctx)}` }
   if (action.id === 'bar:retry') return { kind: 'submits', target: `retry:${retryRung(ctx)}` }
   if (override.effect) return override.effect
