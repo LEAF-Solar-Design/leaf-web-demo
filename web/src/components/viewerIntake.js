@@ -1,5 +1,5 @@
 import { FontLoader } from 'three/examples/jsm/loaders/FontLoader.js'
-import typeface from 'three/examples/fonts/helvetiker_regular.typeface.json'
+import typeface from 'three/examples/fonts/helvetiker_regular.typeface.json' with { type: 'json' }
 
 export const MAX_GLYPH_CHARS = 1024
 let glyphFont
