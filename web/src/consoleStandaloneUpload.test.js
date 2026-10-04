@@ -130,6 +130,61 @@ function harness(serviceOverrides = {}, initial = {}) {
 }
 
 describe('console standalone upload', () => {
+  it('URL307A-11 upload, status and intake refusals never reach promotion', async () => {
+    for (const boundary of ['upload', 'status', 'intake']) {
+      const overrides = { upload: vi.fn(async () => ({ ...receipt('U'), status: 'extracting' })) }
+      overrides[boundary] = vi.fn(async () => { throw new Error('Upload refused') })
+      const h = harness(overrides, { REQUESTED_DRAWING_ID: 'V', DRAWING_SOURCE: 'V' })
+      await tick(); h.render(); h.open()
+      await h.control().onUpload(file); h.render()
+      expect(h.setFromUpload).not.toHaveBeenCalled()
+      expect(h.input).toMatchObject({ REQUESTED_DRAWING_ID: 'V', DRAWING_SOURCE: 'V' })
+      expect(h.controller.getSnapshot().phase).toBe('failed')
+      h.dispose()
+    }
+  })
+
+  it('URL307A-12 cancellation before completion never reaches promotion', async () => {
+    const upload = deferred()
+    const h = harness({ upload: vi.fn(() => upload.promise) }, { REQUESTED_DRAWING_ID: 'V', DRAWING_SOURCE: 'V' })
+    await tick(); h.render(); h.open()
+    const run = h.control().onUpload(file)
+    h.control().onCancel(); h.render()
+    upload.resolve(receipt('U')); await run; h.render()
+    expect(h.setFromUpload).not.toHaveBeenCalled()
+    expect(h.input).toMatchObject({ REQUESTED_DRAWING_ID: 'V', DRAWING_SOURCE: 'V' })
+    h.dispose()
+  })
+
+  it('URL307A-13 a late completion under a changed selection never promotes', async () => {
+    const intake = deferred()
+    const h = harness({ upload: vi.fn(async () => receipt('U')), intake: vi.fn(() => intake.promise) },
+      { REQUESTED_DRAWING_ID: 'V', DRAWING_SOURCE: 'V' })
+    await tick(); h.render(); h.open()
+    const run = h.control().onUpload(file); await tick()
+    h.render({ REQUESTED_DRAWING_ID: 'W', DRAWING_SOURCE: 'W' }, { adapterRender: false, commit: false })
+    intake.resolve({ documentId: 'U-v1.dxf' }); await run
+    expect(h.setFromUpload).not.toHaveBeenCalled()
+    expect(h.input).toMatchObject({ REQUESTED_DRAWING_ID: 'W', DRAWING_SOURCE: 'W' })
+    h.dispose()
+  })
+
+  it('URL307A-24 successful polling and intake promote the original extracting receipt once', async () => {
+    const original = { ...receipt('U'), status: 'extracting' }
+    const intake = deferred()
+    const h = harness({ upload: vi.fn(async () => original), intake: vi.fn(() => intake.promise) },
+      { REQUESTED_DRAWING_ID: 'V', DRAWING_SOURCE: 'V' })
+    await tick(); h.render(); h.open()
+    const run = h.control().onUpload(file); await tick()
+    expect(h.services.status).toHaveBeenCalledOnce()
+    expect(h.setFromUpload).not.toHaveBeenCalled()
+    intake.resolve({ documentId: 'U-v1.dxf' }); await run; h.render()
+    expect(h.setFromUpload).toHaveBeenCalledExactlyOnceWith(original)
+    expect(h.setFromUpload.mock.calls[0][0]).toBe(original)
+    expect(h.input).toMatchObject({ REQUESTED_DRAWING_ID: 'U', DRAWING_SOURCE: 'U' })
+    h.dispose()
+  })
+
   it.each([false, true])('CSU-V1 policy permits standalone upload with signedIn=%s', async (signedIn) => {
     const policy = deferred()
     const h = harness({ policy: vi.fn(() => policy.promise) }, { signedIn })
