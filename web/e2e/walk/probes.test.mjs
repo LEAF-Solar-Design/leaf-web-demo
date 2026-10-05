@@ -933,12 +933,13 @@ test('Explode selects a known multi-segment polyline only in its ready recipe', 
   assert.equal(resolveProbe(entry, 'ready').setup.steps.find((step) => step.kind === 'select-entity').type, 'LWPOLYLINE')
   const refusal = resolveProbe(entry, 'placed-dimension')
   assert.equal(refusal.setup.steps.find((step) => step.kind === 'select-entity').type, 'DIMENSION')
-  assert.equal(refusal.assertion.target, 'engine-refusal')
+  // Since #1848 the product disables these with a reason on a placed DIMENSION.
+  assert.equal(refusal.assertion.kind, 'disabled_with_reason')
   const dxf = injectWalkEntities('0\nENDSEC\n0\nEOF')
   assert.match(dxf, /LWPOLYLINE\n5\nA200/)
   assert.deepEqual(FIXTURE_PICK_POINTS.LWPOLYLINE, [[160, 200]])
   for (const id of ['action:clipboard-copy-clip', 'action:clipboard-cut-clip']) {
-    assert.equal(resolveProbe(map.entries.find((entry) => entry.id === id), 'placed-dimension').assertion.target, 'engine-refusal')
+    assert.equal(resolveProbe(map.entries.find((entry) => entry.id === id), 'placed-dimension').assertion.kind, 'disabled_with_reason')
   }
 })
 
