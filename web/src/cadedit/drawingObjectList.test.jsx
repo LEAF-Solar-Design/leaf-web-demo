@@ -10,7 +10,7 @@ import DraftingRibbon from '../site/DraftingRibbon.jsx'
 import { DrawingObjectsProvider, useDrawingObjects } from '../site/DrawingObjectsContext.jsx'
 import { buildDrawingObjectIndex } from '../lib/drawingObjectIndex.js'
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 const line = (id) => ({ id, type: 'LINE', layer: 'Panels', editable: true,
   vertices: [[0, 0, 0], [10, 10, 0]], aci: 256, linetype: 'ByLayer', lineweight: -1 })
 const ENTITIES = [line('10'), line('11'), { ...line('12'), type: 'OTHER', editable: false }]
@@ -67,6 +67,16 @@ function mount({ entities = ENTITIES, surface = false, context = true } = {}) {
 }
 const row = (id) => document.querySelector('.drawing-object-list [data-object-id="' + id + '"]')
 const control = (id, role, name) => within(row(id)).getByRole(role, { name })
+const selectedRows = () => [...document.querySelectorAll('.drawing-object-list > li[data-selected="true"]')].map((item) => item.dataset.objectId)
+// jsdom may lack PointerEvent; React reads pointerType off whatever native event arrives.
+function pointer(node, type, { pointerType = 'touch', ...init } = {}) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: 0, clientY: 0, ...init })
+  Object.defineProperty(event, 'pointerType', { value: pointerType })
+  fireEvent(node, event)
+}
+function tap(node, init) {
+  pointer(node, 'pointerdown', init); pointer(node, 'pointerup', init); fireEvent.click(node)
+}
 function openObjects() {
   const details = screen.getByText('Objects', { selector: 'summary' }).parentElement
   details.open = true
@@ -104,39 +114,137 @@ it('shows names, paths and geometry; Focus never selects and selection never fra
   expect(h.api.setView).not.toHaveBeenCalled()
 })
 
-it('uses one native checkbox activation to toggle, including clicks through its label', () => {
+it('S7 renders no checkbox column: no checkbox input and no Add to selection control', () => {
+  mount()
+  expect(document.querySelectorAll('.drawing-object-list input[type="checkbox"]')).toHaveLength(0)
+  expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+  expect(screen.queryByText('Add to selection')).toBeNull()
+  expect(document.querySelectorAll('[data-object-action="selection"]')).toHaveLength(0)
+})
+
+it('S7 X toggles the row holding keyboard focus, never chorded, and explains a read-only row', () => {
   const h = mount(), toggle = vi.spyOn(h.engine().session.actions, 'selectToggle')
-  const checkbox = control('10', 'checkbox', 'Add to selection')
-  checkbox.focus()
-  // jsdom does not synthesize the browser's Space default action. Key events
-  // alone must not toggle; the native click following keyup toggles once.
-  fireEvent.keyDown(checkbox, { key: ' ' }); fireEvent.keyUp(checkbox, { key: ' ' })
-  expect(toggle).not.toHaveBeenCalled()
-  fireEvent.click(checkbox, { detail: 0 })
-  expect(toggle).toHaveBeenCalledTimes(1)
-  expect(toggle).toHaveBeenLastCalledWith('10')
-  expect(checkbox).toBeChecked()
-  fireEvent.click(checkbox.closest('label'), { ctrlKey: true })
-  expect(toggle).toHaveBeenCalledTimes(2)
-  expect(checkbox).not.toBeChecked()
+  const radio = control('10', 'radio', /Select only/)
+  radio.focus()
+  // A handled X is cancelled so no global shortcut or type-to-bar sees it.
+  expect(fireEvent.keyDown(radio, { key: 'x' })).toBe(false)
+  expect(h.engine().session.selectedIds).toEqual(['10'])
+  expect(selectedRows()).toEqual(['10'])
+  fireEvent.keyDown(radio, { key: 'X', shiftKey: true })
+  expect(h.engine().session.selectedIds).toEqual([])
+  fireEvent.keyDown(radio, { key: 'x' })
+  const focus = control('11', 'button', 'Focus')
+  focus.focus()
+  fireEvent.keyDown(focus, { key: 'x' })
+  expect(h.engine().session.selectedIds).toEqual(['10', '11'])
+  for (const chord of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }, { repeat: true }]) {
+    expect(fireEvent.keyDown(focus, { key: 'x', ...chord })).toBe(true)
+  }
+  expect(fireEvent.keyDown(focus, { key: 'c' })).toBe(true)
+  expect(toggle).toHaveBeenCalledTimes(4)
+  expect(h.engine().session.selectedIds).toEqual(['10', '11'])
+  fireEvent.keyDown(control('12', 'radio', /Select only/), { key: 'x' })
+  expect(h.announce).toHaveBeenLastCalledWith('This object is read-only and cannot be selected for editing.')
+  expect(h.engine().session.selectedIds).toEqual(['10', '11'])
   expect(h.api.frame).not.toHaveBeenCalled()
 })
 
-it.each(['shiftKey', 'ctrlKey', 'metaKey'])('preserves %s radio and row toggles without toggling Focus', (key) => {
+it.each(['ctrlKey', 'metaKey'])('S7 %s click adds or removes one row without replacing, and never toggles Focus', (key) => {
   const h = mount()
   fireEvent.click(control('10', 'radio', /Select only/))
   fireEvent.click(control('11', 'radio', /Select only/), { [key]: true })
   expect(h.engine().session.selectedIds).toEqual(['10', '11'])
   fireEvent.click(row('10'), { [key]: true })
   expect(h.engine().session.selectedIds).toEqual(['11'])
+  fireEvent.click(row('10'), { [key]: true })
+  expect(h.engine().session.selectedIds).toEqual(['11', '10'])
   fireEvent.click(control('10', 'button', 'Focus'), { [key]: true })
+  expect(h.engine().session.selectedIds).toEqual(['11', '10'])
+  fireEvent.click(row('12'), { [key]: true })
+  expect(h.engine().session.selectedIds).toEqual(['11', '10'])
+})
+
+it('S7 Shift click selects a range from the anchor in the shown entity order, skipping read-only rows', () => {
+  const h = mount({ entities: [line('10'), line('11'), { ...line('12'), editable: false }, line('13')] })
+  fireEvent.click(control('13', 'radio', /Select only/))
+  fireEvent.click(row('10'), { shiftKey: true })
+  expect(h.engine().session.selectedIds).toEqual(['10', '11', '13'])
+  // The anchor stays put: a second Shift click re-spans from row 13.
+  fireEvent.click(control('11', 'radio', /Select only/), { shiftKey: true })
+  expect(h.engine().session.selectedIds).toEqual(['11', '13'])
+  // Ctrl or Cmd with Shift adds the span to what is already selected.
+  fireEvent.click(control('10', 'radio', /Select only/))
+  fireEvent.click(row('11'), { shiftKey: true, metaKey: true })
+  expect(h.engine().session.selectedIds).toEqual(['10', '11'])
+  fireEvent.click(control('13', 'radio', /Select only/))
+  fireEvent.click(row('11'), { shiftKey: true, ctrlKey: true })
+  expect(h.engine().session.selectedIds).toEqual(['13', '11'])
+  // Order is the list's own session.entities order, not click order or id order.
+  h.rerender(['13', '10', '11'])
+  fireEvent.click(control('13', 'radio', /Select only/))
+  fireEvent.click(row('10'), { shiftKey: true })
+  expect(h.engine().session.selectedIds).toEqual(['13', '10'])
+  expect(h.api.frame).not.toHaveBeenCalled()
+})
+
+it('S7 Shift click with no anchor spans from the newest selected row, else selects the row alone', () => {
+  const h = mount({ entities: [line('10'), line('11'), line('13')] })
+  fireEvent.click(row('11'), { shiftKey: true })
   expect(h.engine().session.selectedIds).toEqual(['11'])
+  h.unmount()
+  const h2 = mount({ entities: [line('10'), line('11'), line('13')] })
+  act(() => h2.engine().session.actions.selectReplace(['13', '10']))
+  fireEvent.click(row('11'), { shiftKey: true })
+  expect(h2.engine().session.selectedIds).toEqual(['10', '11'])
+})
+
+it('S7 a 500 ms touch press enters selection, then taps toggle until the selection is empty', () => {
+  const h = mount()
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  pointer(row('11'), 'pointerdown')
+  act(() => { vi.advanceTimersByTime(499) })
+  expect(h.engine().session.selectedIds).toEqual([])
+  act(() => { vi.advanceTimersByTime(1) })
+  expect(h.engine().session.selectedIds).toEqual(['11'])
+  // The release that ends the press is not a second tap.
+  pointer(row('11'), 'pointerup'); fireEvent.click(row('11'))
+  expect(h.engine().session.selectedIds).toEqual(['11'])
+  tap(row('10'))
+  expect(h.engine().session.selectedIds).toEqual(['11', '10'])
+  // A tap on a row's radio toggles too, never replaces, while selecting.
+  tap(control('11', 'radio', /Select only/))
+  expect(h.engine().session.selectedIds).toEqual(['10'])
+  tap(control('10', 'button', 'Focus'))
+  expect(h.engine().session.selectedIds).toEqual(['10'])
+  tap(row('10'))
+  expect(h.engine().session.selectedIds).toEqual([])
+  // Empty again: a plain tap on a radio selects only that row.
+  tap(control('11', 'radio', /Select only/))
+  expect(h.engine().session.selectedIds).toEqual(['11'])
+  // A mouse press never starts one, a drift past the slop cancels one, and a
+  // read-only row explains itself instead of joining.
+  pointer(row('10'), 'pointerdown', { pointerType: 'mouse' })
+  act(() => { vi.advanceTimersByTime(600) })
+  pointer(row('10'), 'pointerdown')
+  pointer(row('10'), 'pointermove', { clientX: 20, clientY: 0 })
+  act(() => { vi.advanceTimersByTime(600) })
+  expect(h.engine().session.selectedIds).toEqual(['11'])
+  pointer(row('12'), 'pointerdown')
+  act(() => { vi.advanceTimersByTime(500) })
+  expect(h.announce).toHaveBeenLastCalledWith('This object is read-only and cannot be selected for editing.')
+  expect(h.engine().session.selectedIds).toEqual(['11'])
+  // A press still pending at unmount never fires.
+  const toggle = vi.spyOn(h.engine().session.actions, 'selectToggle')
+  pointer(row('10'), 'pointerdown')
+  h.unmount()
+  act(() => { vi.advanceTimersByTime(600) })
+  expect(toggle).not.toHaveBeenCalled()
 })
 
 it('keeps read-only controls focusable and explained while Focus still works', () => {
   const h = mount(), focus = control('12', 'button', 'Focus')
   expect(row('12')).toHaveTextContent('Read-only')
-  for (const role of ['radio', 'checkbox']) {
+  for (const role of ['radio']) {
     const input = within(row('12')).getByRole(role)
     input.focus()
     expect(input).toHaveFocus()
@@ -153,8 +261,8 @@ it('keeps read-only controls focusable and explained while Focus still works', (
 
 it('preserves selected identities through filtering and reorder, and keyboard focus through a reparse', () => {
   const h = mount()
-  fireEvent.click(control('10', 'checkbox', 'Add to selection'))
-  fireEvent.click(control('11', 'checkbox', 'Add to selection'))
+  fireEvent.click(row('10'), { ctrlKey: true })
+  fireEvent.click(row('11'), { metaKey: true })
   const focused = control('11', 'button', 'Focus')
   focused.focus()
   h.rerender(['12', '11', '10'])
@@ -168,7 +276,8 @@ it('preserves selected identities through filtering and reorder, and keyboard fo
   expect(control('11', 'button', 'Focus')).toBe(focused)
   expect(focused).toHaveFocus()
   expect(h.engine().session.selectedIds).toEqual(['11'])
-  expect(control('11', 'checkbox', 'Add to selection')).toBeChecked()
+  expect(row('11')).toHaveAttribute('data-selected', 'true')
+  expect(control('11', 'radio', /Select only/)).toBeChecked()
 })
 
 it('renders and selects every entity without drawing context', () => {
@@ -216,7 +325,7 @@ it('resolves adjacent u64 decimal strings and BigInts without Number rounding', 
   expect(h.objects().focusId).toBe('h:20000000000001')
   expect(control('9007199254740992', 'radio', /Select only/).value).toBe('9007199254740992')
   h.unmount()
-  const toggle = vi.fn()
+  const toggle = vi.fn(), replace = vi.fn()
   const bigintEntities = entities.map((entity) => ({ ...entity, id: BigInt(entity.id) }))
   function Publisher() {
     const objects = useDrawingObjects()
@@ -226,12 +335,14 @@ it('resolves adjacent u64 decimal strings and BigInts without Number rounding', 
   }
   render(<DrawingObjectsProvider viewerRef={{ current: h.api }}>
     <Publisher /><DrawingObjectList session={{ documentId: 'roof.dxf', entities: bigintEntities, selectedIds: [],
-      actions: { selectToggle: toggle, selectReplace: vi.fn() } }} />
+      actions: { selectToggle: toggle, selectReplace: replace } }} />
   </DrawingObjectsProvider>)
   fireEvent.click(screen.getByRole('button', { name: 'Publish' }))
   expect(row('9007199254740993')).toHaveTextContent('LINE · handle 20000000000001')
-  fireEvent.click(control('9007199254740993', 'checkbox', 'Add to selection'))
+  fireEvent.click(row('9007199254740993'), { ctrlKey: true })
   expect(toggle).toHaveBeenCalledWith(9007199254740993n)
+  fireEvent.click(row('9007199254740992'), { shiftKey: true })
+  expect(replace).toHaveBeenLastCalledWith([9007199254740992n, 9007199254740993n])
 })
 
 it('keeps all 2,345 rooftop rows and their native controls reachable', () => {
@@ -240,9 +351,10 @@ it('keeps all 2,345 rooftop rows and their native controls reachable', () => {
   const rows = document.querySelectorAll('.drawing-object-list > li')
   expect(rows).toHaveLength(2345)
   for (const item of rows) {
-    const checkbox = item.querySelector('input[type="checkbox"]'), focus = item.querySelector('button')
-    expect(checkbox.disabled).toBe(false)
-    expect(checkbox.tabIndex).toBe(0)
+    const radio = item.querySelector('input[type="radio"]'), focus = item.querySelector('button')
+    expect(item.querySelector('input[type="checkbox"]')).toBeNull()
+    expect(radio.disabled).toBe(false)
+    expect(radio.tabIndex).toBe(0)
     expect(focus.tabIndex).toBe(0)
   }
   const last = rows[2344].querySelector('button')

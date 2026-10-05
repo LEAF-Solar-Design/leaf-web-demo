@@ -1401,34 +1401,45 @@ test.describe('route matrix, rail ON', () => {
     // W4f slice A0: the canvas now shows the ENGINE document (the card is
     // stamped with its id through the viewer's applyVersion seam).
     await expect(page.locator('.workspace-card[data-engine-document="ribbon.dxf"]')).toHaveCount(1)
-    // The navigation list is reachable with Import closed. Exercise native
-    // Space activation here: fireEvent.click in jsdom cannot prove it.
+    // The navigation list is reachable with Import closed. Exercise real
+    // keyboard and modifier clicks here: jsdom events cannot prove that no
+    // global shortcut or type-to-bar route takes the X first.
     await importBtn.click()
     await expect(fileInput).not.toBeVisible()
     const objects = page.locator('[data-nav-objects]')
     await objects.locator('summary').focus()
     await page.keyboard.press('Enter')
-    const add = objects.getByRole('checkbox', { name: 'Add to selection' })
-    await expect(add).toHaveCount(2)
-    await add.nth(0).focus()
-    await page.keyboard.press('Space')
-    await expect(add.nth(0)).toBeChecked()
-    await add.nth(1).focus()
-    await page.keyboard.press('Space')
-    await expect(add.nth(0)).toBeChecked()
-    await expect(add.nth(1)).toBeChecked()
+    // S7: no checkbox column. X toggles the row holding keyboard focus and a
+    // Ctrl or Cmd click adds a row; data-selected is the row's selection.
+    const objectRows = objects.locator('.drawing-object-list > li')
+    await expect(objectRows).toHaveCount(2)
+    await expect(objects.locator('input[type="checkbox"]')).toHaveCount(0)
+    const inSelection = async (...expected) => {
+      for (const [i, on] of expected.entries()) {
+        if (on) await expect(objectRows.nth(i)).toHaveAttribute('data-selected', 'true')
+        else await expect(objectRows.nth(i)).not.toHaveAttribute('data-selected', 'true')
+      }
+    }
+    await objectRows.nth(0).getByRole('radio').focus()
+    await page.keyboard.press('x')
+    await inSelection(true, false)
+    await page.keyboard.press('x')
+    await inSelection(false, false)
+    await page.keyboard.press('x')
+    await inSelection(true, false)
+    await objectRows.nth(1).click({ modifiers: ['ControlOrMeta'], position: { x: 2, y: 2 } })
+    await inSelection(true, true)
+    await objectRows.nth(1).getByRole('radio').focus()
     await page.keyboard.press('Tab')
     await expect(objects.getByRole('button', { name: 'Focus', exact: true }).nth(1)).toBeFocused()
     await page.keyboard.press('Enter')
     await expect(page.getByTestId('drawing-navigation-live')).toContainText('Focused')
-    await expect(add.nth(0)).toBeChecked()
-    await expect(add.nth(1)).toBeChecked()
+    await inSelection(true, true)
     const north = objects.getByRole('button', { name: 'North', exact: true })
     await expect(north).not.toHaveAttribute('aria-disabled', 'true')
     await north.click()
     await expect(page.getByTestId('drawing-navigation-live')).toContainText('drawing units')
-    await expect(add.nth(0)).toBeChecked()
-    await expect(add.nth(1)).toBeChecked()
+    await inSelection(true, true)
     const originalViewport = page.viewportSize()
     const navCanvas = page.locator('.studio-ground .viewer-canvas')
     const readNavPose = () => navCanvas.evaluate((el) => el.__cadviewer.getPose())
@@ -1456,16 +1467,16 @@ test.describe('route matrix, rail ON', () => {
             return el.__cadviewer.getPose()
           })
           expect(settled.target).toEqual(after.target)
-          await expect(add.nth(0)).toBeChecked()
-          await expect(add.nth(1)).toBeChecked()
+          await inSelection(true, true)
           await expect(objects.locator('[data-focused="true"]')).toHaveCount(1)
         }
       }
     }
     await page.setViewportSize(originalViewport)
     await page.emulateMedia({ reducedMotion: 'no-preference' })
-    await add.nth(0).press('Space')
-    await add.nth(1).press('Space')
+    await objectRows.nth(0).getByRole('radio').press('x')
+    await objectRows.nth(1).getByRole('radio').press('x')
+    await inSelection(false, false)
     await objects.locator('summary').click()
     await importBtn.click()
     await page.getByRole('tab', { name: 'Draw' }).click()
