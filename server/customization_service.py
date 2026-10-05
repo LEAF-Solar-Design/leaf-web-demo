@@ -85,6 +85,83 @@ class CustomizationServiceError(RuntimeError):
         self.detail = str(detail)
 
 
+_SCHEMA_IDENTITY_MAX_DEPTH = 128
+_UNCLASSIFIABLE = object()
+
+
+def _schema_identity(value: Any, depth: int = 0) -> Any:
+    """A comparison form in which every scalar keeps its exact JSON type.
+
+    Python equality says True == 1 == 1.0, so it cannot tell a schema change
+    from no change. Fails closed: a non-string key, a non-JSON value or a
+    value nested deeper than the bound is unclassifiable and equals nothing.
+    """
+    if depth > _SCHEMA_IDENTITY_MAX_DEPTH:
+        return _UNCLASSIFIABLE
+    kind = type(value)
+    if value is None or kind is bool or kind is int or kind is str:
+        return (kind.__name__, value)
+    if kind is float:
+        return ("float", repr(value))
+    if kind is list:
+        items = [_schema_identity(item, depth + 1) for item in value]
+        if any(item is _UNCLASSIFIABLE for item in items):
+            return _UNCLASSIFIABLE
+        return ("list", tuple(items))
+    if kind is dict:
+        if any(type(key) is not str for key in value):
+            return _UNCLASSIFIABLE
+        items = [(key, _schema_identity(item, depth + 1)) for key, item in value.items()]
+        if any(item is _UNCLASSIFIABLE for _, item in items):
+            return _UNCLASSIFIABLE
+        return ("dict", tuple(sorted(items, key=lambda pair: pair[0])))
+    return _UNCLASSIFIABLE
+
+
+def _schema_equal(left: Any, right: Any) -> bool:
+    left_form = _schema_identity(left)
+    right_form = _schema_identity(right)
+    if left_form is _UNCLASSIFIABLE or right_form is _UNCLASSIFIABLE:
+        return False
+    return left_form == right_form
+
+
+def _revision_schema_change(base: Any, staged: Any) -> str:
+    """Classify only unchanged schemas and top-level property additions.
+
+    Every comparison is by exact JSON type (_schema_equal), never Python
+    equality, so a true in a schema never matches a 1.
+    """
+    if _schema_equal(base, staged):
+        return "same"
+    if (not isinstance(base, dict) or not isinstance(staged, dict)
+            or base.get("type") != "object" or staged.get("type") != "object"):
+        return "breaking"
+    if not _schema_equal({key: value for key, value in base.items() if key != "properties"},
+                         {key: value for key, value in staged.items() if key != "properties"}):
+        return "breaking"
+    base_properties = base.get("properties", {})
+    staged_properties = staged.get("properties", {})
+    if (not isinstance(base_properties, dict) or not isinstance(staged_properties, dict)
+            or any(not isinstance(key, str) for key in base_properties)
+            or any(not isinstance(key, str) for key in staged_properties)):
+        return "breaking"
+    if "required" in base:
+        required = base["required"]
+        if (not isinstance(required, list)
+                or any(not isinstance(key, str) for key in required)
+                or len(set(required)) != len(required)
+                or any(key not in base_properties for key in required)):
+            return "breaking"
+    if any(key not in staged_properties or not _schema_equal(value, staged_properties[key])
+           for key, value in base_properties.items()):
+        return "breaking"
+    added = set(staged_properties) - set(base_properties)
+    if not added or any(not isinstance(staged_properties[key], (dict, bool)) for key in added):
+        return "breaking"
+    return "additive"
+
+
 def database_path() -> Path:
     raw = os.environ.get("LEAF_CUSTOMIZATION_DB", "").strip()
     return Path(raw) if raw else DEFAULT_DB
@@ -1663,13 +1740,25 @@ class CustomizationService:
             staged_tool = staged_by_name.get(target)
             if not isinstance(base_tool, dict) or not isinstance(staged_tool, dict):
                 raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
-            for key in ("name", "entry", "kind", "engine_op", "capabilities", "params", "returns"):
+            for key in ("name", "entry", "kind", "engine_op", "capabilities"):
                 if staged_tool.get(key) != base_tool.get(key):
                     raise CustomizationServiceError("invalid_staged_catalog_revision", 422)
+            schema_changes = [
+                _revision_schema_change(base_tool.get(key), staged_tool.get(key))
+                for key in ("params", "returns")
+            ]
+            if "breaking" in schema_changes:
+                raise CustomizationServiceError("invalid_staged_catalog_revision", 422)
             base_version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(base_tool.get("version", "")))
             staged_version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(staged_tool.get("version", "")))
-            if (not base_version or not staged_version
-                    or staged_version.groups()[:2] != base_version.groups()[:2]
+            if not base_version or not staged_version:
+                raise CustomizationServiceError("invalid_staged_catalog_revision", 422)
+            if "additive" in schema_changes:
+                if (staged_version.group(1) != base_version.group(1)
+                        or staged_version.group(2) != str(int(base_version.group(2)) + 1)
+                        or staged_version.group(3) != "0"):
+                    raise CustomizationServiceError("invalid_staged_catalog_revision", 422)
+            elif (staged_version.groups()[:2] != base_version.groups()[:2]
                     or int(staged_version.group(3)) != int(base_version.group(3)) + 1):
                 raise CustomizationServiceError("invalid_staged_catalog_revision", 422)
             entry_path = base_tool.get("entry")

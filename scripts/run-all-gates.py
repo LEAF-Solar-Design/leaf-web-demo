@@ -2008,6 +2008,14 @@ def build_suites() -> List[Suite]:
                   r"Windows symlink creation can require elevated developer mode",
               )),
         # --- tenant customization control plane (one process per file) --- #
+        Suite(
+            "server-customization-revision-evolve",
+            "server customization revision evolution",
+            "pytest",
+            SERVER,
+            _py_pytest("tests/test_customization_revision_evolve.py"),
+            40,
+        ),
         Suite("server-customization-authority", "server customization authority", "pytest",
               SERVER, _py_pytest("tests/test_customization_authority.py"), 7),
         Suite("server-customization-store", "server customization store", "pytest",
