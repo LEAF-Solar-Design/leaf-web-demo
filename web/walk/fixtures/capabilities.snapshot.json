@@ -643,7 +643,7 @@
           {
             "name": "solar-size-strings",
             "version": "1.0.0",
-            "description": "Confirm cloud string sizing for this drawing.",
+            "description": "Confirm a saved global string length or cloud string sizing for this drawing.",
             "params_schema": {
               "type": "object",
               "properties": {
@@ -661,7 +661,8 @@
                 "mode": {
                   "enum": [
                     "global",
-                    "zones"
+                    "zones",
+                    "manual-global"
                   ]
                 },
                 "requests": {
@@ -687,8 +688,8 @@
             "provenance": {},
             "kind": "script",
             "engine_op": "solar_size_strings",
-            "catalog_digest": "sha256:48d2c171a8c9da862ae6da44987fcb8fec528e2abe1a268bcf875dc6e236233f",
-            "tool_manifest_sha256": "sha256:48d2c171a8c9da862ae6da44987fcb8fec528e2abe1a268bcf875dc6e236233f",
+            "catalog_digest": "sha256:9d195167218f59395ed9fe168864801eca88158c6af988fb0a84f5fcc5dd1bf2",
+            "tool_manifest_sha256": "sha256:9d195167218f59395ed9fe168864801eca88158c6af988fb0a84f5fcc5dd1bf2",
             "catalog_commit": "83dd8820a2eb7798bbcb68eaac81539ee38d659d",
             "effective_catalog_digest": "50c192c665932d1565e796ca74c5d1c560cd8d3904d06726a82266aafb98be17",
             "execution_class": "batch",

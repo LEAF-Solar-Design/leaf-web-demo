@@ -6,11 +6,13 @@
 // the engine holds while a DXF is open and the prompts have something to point
 // at. Bounded and fail-closed: a malformed entity is skipped, never thrown on;
 // a huge document is truncated at MAX_POINTS with the truncation reported.
+import { MAX_GLYPH_CHARS, textGlyphPolylines } from '../components/viewerIntake.js'
+
 export const MAX_POINTS = 200_000
 export const CIRCLE_SEGMENTS = 48
 export const ARC_STEP_DEG = 7.5
 export const MIN_ARC_POINTS = 8
-/** A TEXT's outline box is this many heights wide per character. */
+/** A TEXT's bounds/preview proxy is this many heights wide per character. */
 export const TEXT_ADVANCE = 0.6
 // W4g-4b: a POINT draws as a small bow-tie marker (honest about being a
 // marker, like PDMODE 3's cross). Its half-size is a fraction of the
@@ -238,8 +240,8 @@ export function formatMeasurement(n) {
  * two extension lines from each definition point to the dimension line and
  * DIM_EXT_PAST past it, the dimension line itself between the two feet, a
  * 45-degree tick mark at each foot (honest until the viewer draws
- * arrowhead glyphs, the same idiom as the 5d TEXT outline box), and the
- * measurement as an axis-aligned TEXT outline box centred (in X) and
+ * arrowhead glyphs), and the measurement's bounds/preview proxy as an
+ * axis-aligned TEXT outline box centred (in X) and
  * DIM_TEXT_GAP above the dimension line's midpoint. LINEAR's dimension
  * line runs along the rotation axis through the dimline point; ALIGNED's
  * runs parallel to def1-def2 through it. `dimline` is used only as A point
@@ -374,11 +376,11 @@ export function entityToPolyline(entity, markSize = POINT_MARK) {
   const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
   const verts = Array.isArray(entity.vertices) ? entity.vertices : []
   const type = String(entity.type || '')
-  // W4g-5d: a TEXT draws as its outline box until the viewer draws glyphs:
+  // W4g-5d: a TEXT's bounds and creation previews use an outline box:
   // the insertion point at the box's bottom-left, the box `height` tall and
   // TEXT_ADVANCE * height wide per character (a conventional average glyph
   // advance), rotated about the insertion point. Honest about being a box,
-  // never a fabricated glyph; the pick and the selection land on it.
+  // never a fabricated glyph. Top-level rendering uses glyph contours.
   if (type === 'TEXT') {
     const c = point(verts[0])
     const h = entity.height
@@ -548,12 +550,40 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
     }
     if (entity?.type === 'DIMENSION') {
       if (entity.dimtype === 'LINEAR' || entity.dimtype === 'ALIGNED') {
-        for (const pl of dimensionSchematic(entity)) {
-          if (points + pl.pts.length > MAX_POINTS) { truncated += 1; continue }
-          points += pl.pts.length
-          polylines.push(pl)
-        }
+        const schematic = dimensionSchematic(entity)
+        if (!schematic.length) continue
+        const [a, b] = schematic[2].pts
+        const batch = [...schematic.slice(0, 5), ...textGlyphPolylines({
+          text: formatMeasurement(entity.measurement),
+          pt: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + DIM_TEXT_GAP, a[2]],
+          height: DIM_TEXT_HEIGHT, centered: true,
+          handle: schematic[2].handle, layer: schematic[2].layer,
+        })]
+        const size = batch.reduce((sum, pl) => sum + pl.pts.length, 0)
+        if (points + size > MAX_POINTS) { truncated += 1; continue }
+        points += size
+        polylines.push(...batch)
       }
+      continue
+    }
+    if (entity?.type === 'TEXT') {
+      const pt = point(entity.vertices?.[0])
+      const rotationDeg = finite(entity.rotationDeg) ? entity.rotationDeg : 0
+      if (typeof entity.text !== 'string' || !entity.text.length || !pt || !finite(entity.height) || entity.height <= 0) continue
+      let chars = 0
+      for (const char of entity.text) {
+        chars += 1
+        if (chars > MAX_GLYPH_CHARS) break
+      }
+      if (chars > MAX_GLYPH_CHARS) { truncated += 1; continue }
+      const batch = textGlyphPolylines({ text: entity.text, pt, height: entity.height, rotationDeg,
+        handle: hexHandle(entity.id ?? entity.handle ?? ''),
+        layer: typeof entity.layer === 'string' && entity.layer ? entity.layer : '0',
+      })
+      const size = batch.reduce((sum, pl) => sum + pl.pts.length, 0)
+      if (points + size > MAX_POINTS) { truncated += 1; continue }
+      points += size
+      polylines.push(...batch)
       continue
     }
     const pl = entityToPolyline(entity, markSize)

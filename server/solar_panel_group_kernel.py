@@ -385,13 +385,82 @@ def panel_from_polyline(poly: Mapping[str, Any], installation_design: str = ROOF
     }
 
 
+def panel_outline_from_insert(insert, blocks) -> dict:
+    """Resolve one complete single-rectangle block into a fresh XY outline."""
+    def number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PanelGroupKernelError("unsupported panel block")
+        try:
+            result = float(value)
+        except (ValueError, OverflowError):
+            raise PanelGroupKernelError("unsupported panel block") from None
+        if not math.isfinite(result):
+            raise PanelGroupKernelError("unsupported panel block")
+        return result
+
+    def vector(value, size):
+        if not isinstance(value, (list, tuple)) or len(value) != size:
+            raise PanelGroupKernelError("unsupported panel block")
+        return tuple(number(c) for c in value)
+
+    def reject():
+        raise PanelGroupKernelError("unsupported panel block")
+
+    if not isinstance(insert, Mapping) or not isinstance(blocks, Mapping):
+        reject()
+    handle, name = insert.get("handle"), insert.get("name")
+    if not isinstance(handle, str) or not handle or not isinstance(name, str) or not name:
+        reject()
+    definition = blocks.get(name)
+    if (not isinstance(definition, Mapping) or definition.get("complete") is not True
+            or type(definition.get("count")) is not int or definition["count"] != 1):
+        reject()
+    children = definition.get("children")
+    if not isinstance(children, list) or len(children) != 1:
+        reject()
+    child = children[0]
+    if (not isinstance(child, Mapping) or child.get("kind") != "LWPOLYLINE"
+            or child.get("closed") is not True):
+        reject()
+    if vector(child.get("nrm"), 3) != (0, 0, 1):
+        reject()
+    number(child.get("elev"))
+    raw = child.get("pts")
+    if not isinstance(raw, list) or len(raw) not in (4, 5):
+        reject()
+    pts = [vector(p, 2) for p in raw]
+    if len(pts) == 5:
+        if not (v_close(pts[0][0], pts[-1][0]) and v_close(pts[0][1], pts[-1][1])):
+            reject()
+        pts.pop()
+    outline = {"handle": handle, "layer": insert.get("layer"), "closed": True,
+               "pts": pts}
+    if panel_from_polyline(outline) is None:
+        reject()
+    base = vector(definition.get("base"), 3)
+    scale = vector(insert.get("scale"), 3)
+    if any(c == 0 for c in scale) or vector(insert.get("nrm"), 3) != (0, 0, 1):
+        reject()
+    x, y, _, rotation = (number(insert.get(k)) for k in ("x", "y", "z", "rot"))
+    ca, sa = math.cos(rotation), math.sin(rotation)
+    transformed = []
+    for u, v in pts:
+        a, b = (u - base[0]) * scale[0], (v - base[1]) * scale[1]
+        transformed.append([x + a * ca - b * sa, y + a * sa + b * ca])
+    outline["pts"] = transformed
+    if (not all(math.isfinite(c) for p in transformed for c in p)
+            or panel_from_polyline(outline) is None):
+        reject()
+    return outline
+
+
 def panels_from_intake(
     intake: Mapping[str, Any], *, layer_contains: str = "Panel", installation_design: str = ROOF
 ) -> list[dict]:
     """Every panel the plugin's select-all would take from a Studio intake.
 
-    One panel per closed rectangular polyline whose layer contains
-    ``layer_contains``; order is the intake's. Duplicate handles fail closed.
+    One panel per rectangular polyline or complete single-rectangle block on
+    ``layer_contains``; polylines precede INSERTs. Duplicate handles fail closed.
     """
     if not isinstance(intake, Mapping):
         raise PanelGroupKernelError("intake must be a mapping")
@@ -409,6 +478,22 @@ def panels_from_intake(
         panel = panel_from_polyline(poly, installation_design)
         if panel is None:
             continue
+        key = panel["handle"].upper()
+        if key in seen:
+            raise PanelGroupKernelError(f"duplicate panel handle {panel['handle']}")
+        seen.add(key)
+        panels.append(panel)
+    inserts = intake.get("inserts", [])
+    if not isinstance(inserts, list):
+        raise PanelGroupKernelError("intake.inserts must be a list")
+    for insert in inserts:
+        if not isinstance(insert, Mapping):
+            continue
+        layer = insert.get("layer")
+        if not isinstance(layer, str) or not _layer_matches(layer, layer_contains):
+            continue
+        outline = panel_outline_from_insert(insert, intake.get("blocks"))
+        panel = panel_from_polyline(outline, installation_design)
         key = panel["handle"].upper()
         if key in seen:
             raise PanelGroupKernelError(f"duplicate panel handle {panel['handle']}")

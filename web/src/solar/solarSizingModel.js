@@ -11,6 +11,7 @@ export const SOLAR_SIZING_REASONS = Object.freeze({
   sizing_zone_models_invalid: 'Zone module and inverter model names must be at most 256 characters of valid text.',
   sizing_fields_invalid: 'Check the marked sizing fields before submitting.',
   sizing_too_many_targets: 'Size at most 4096 targets at once.',
+  sizing_manual_length_required: 'Save a whole-number string length from 1 to 4096 in Solar settings.',
 })
 
 export const MODULE_PARAMETER_KEYS = Object.freeze([
@@ -84,6 +85,7 @@ export function sizingGraph(view, drawingVersion) {
       Number.isFinite(watts) && watts > 0 && watts <= 1000000 ? watts : null]
   }) : [])
   return { ok: true, rev: graph.rev, settingsId: graph.settings.id,
+    savedLength: graph.settings.panels_in_sequence,
     zip: Array.from(pyStrip(graph.project.zip_code)).slice(0, 5).join(''),
     panels: graph.panels, slotIds, zones: graph.electrical_zones.map((zone) => ({ ...zone,
       module_model: zone.module_model ?? '', inverter_model_a: zone.inverter_model_a ?? '',
@@ -93,7 +95,7 @@ export function sizingGraph(view, drawingVersion) {
 export function sizingTargets(graph, mode) {
   if (!graph?.ok) return fail('sizing_graph_unavailable')
   if (graph.panels.length === 0 && graph.slotIds.length === 0) return fail('sizing_panels_required')
-  if (mode === 'global') return { ok: true, targets: [graph.settingsId] }
+  if (mode === 'global' || mode === 'manual-global') return { ok: true, targets: [graph.settingsId] }
   if (mode !== 'zones') return fail('sizing_fields_invalid', ['mode'])
   const panels = new Set(graph.panels.map((panel) => panel.id))
   for (const id of graph.slotIds) panels.add(id)
@@ -118,6 +120,14 @@ export function sizingTargets(graph, mode) {
 
 export function buildSizingParams({ graph, mode, draft = {} }) {
   if (!graph?.ok) return fail('sizing_graph_unavailable')
+  if (mode === 'manual-global') {
+    const targets = sizingTargets(graph, mode)
+    if (!targets.ok) return targets
+    if (!Number.isInteger(graph.savedLength) || graph.savedLength < 1 || graph.savedLength > 4096) {
+      return fail('sizing_manual_length_required')
+    }
+    return { ok: true, params: { expected_rev: graph.rev, mode: 'manual-global', confirm: true } }
+  }
   if (!graph.zip) return fail('sizing_zip_required')
   const targets = sizingTargets(graph, mode)
   if (!targets.ok) return targets

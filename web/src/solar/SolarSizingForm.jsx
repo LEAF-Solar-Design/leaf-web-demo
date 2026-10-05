@@ -7,7 +7,7 @@ export default function SolarSizingForm({
   failureCode = null, onSubmit, onClose,
 }) {
   const [loaded, setLoaded] = useState(null)
-  const [mode, setMode] = useState('global')
+  const [mode, setMode] = useState('manual-global')
   const [draft, setDraft] = useState({})
   const [refresh, setRefresh] = useState(0)
   const previousStatus = useRef(status)
@@ -62,9 +62,16 @@ export default function SolarSizingForm({
 
   return <div>
     <label>Scope<select value={mode} disabled={busy} onChange={(event) => setMode(event.target.value)}>
+      <option value="manual-global">Saved global length</option>
       <option value="global">Global</option><option value="zones">Zones</option>
     </select></label>
     {scoped && graph?.ok && <p>Saved project ZIP: {loaded.savedZip}</p>}
+    {mode === 'manual-global' && <>
+      {graph?.ok && <p>Saved global string length: {graph.savedLength}</p>}
+      <p>Change the length in Solar settings.</p>
+      <p>Manual confirmation does not calculate voltage limits or module power.</p>
+    </>}
+    {mode !== 'manual-global' && <>
     {targets?.ok && targets.targets.map((id, index) => <div key={id}>
       <p>{id}</p>
       {mode === 'zones' && <p>Module: {graph.zones[index].module_model}; Inverter: {graph.zones[index].inverter_model_a}</p>}
@@ -87,6 +94,7 @@ export default function SolarSizingForm({
     <label><input type="checkbox" checked={draft.use_module_parameters === true} disabled={busy}
       onChange={(event) => change('use_module_parameters', event.target.checked)} />Use module parameters</label>
     {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, key))}
+    </>}
     {!built.ok && <p role="status">{SOLAR_SIZING_REASONS[built.reason]}</p>}
     {busy && <p role="status">This step is running. Confirm or wait for it to finish.</p>}
     {status === 'failed' && <p role="alert">{solarSizingRunSentence(failureCode)}</p>}

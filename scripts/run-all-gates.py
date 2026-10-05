@@ -623,6 +623,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_outputs.py"), 8),
         Suite("server-solar-tool-pvcase-convert", "server tests/test_solar_tool_pvcase_convert.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_pvcase_convert.py"), 30),
+        Suite("server-solar-pvcase-admission", "server tests/test_solar_pvcase_admission.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_pvcase_admission.py"), 8),
         Suite(
             "server-solar-pvcase-conversion",
             "server tests/test_solar_pvcase_conversion.py",
@@ -639,6 +641,8 @@ def build_suites() -> List[Suite]:
         # MEASURED floor pending planner verification: 64 parametrized cases.
         Suite("server-solar-tool-panels-from-drawing", "server tests/test_solar_tool_solar_panels_from_drawing.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_panels_from_drawing.py"), 64),
+        Suite("server-w22c2-block-panels", "server tests/test_w22c2_block_panels.py",
+              "pytest", SERVER, _py_pytest("tests/test_w22c2_block_panels.py"), 24),
         Suite("server-solar-tool-solar-schedule", "server tests/test_solar_tool_solar_schedule.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_tool_solar_schedule.py"), 39),
         # sf-solar-w1-route-consumers: W1 homeruns, schedule and readiness keep feeders, trenches and
@@ -646,10 +650,10 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-w1-route-consumers", "server tests/test_solar_w1_route_consumers.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_w1_route_consumers.py"), 41),
         # solar-size-strings through the local graph commit rail with a recorded String Sizer and a
-        # fake grant, so the floor is the exact count on every runner. MEASURED from the collected
-        # cases: 13 tests + 27 more parametrizations = 40 passed.
+        # fake grant, plus saved global length confirmation without cloud sizing.
+        # Measured baseline: 40 passed; eight manual cases raise the required total to 48.
         Suite("server-solar-tool-solar-size-strings", "server tests/test_solar_tool_solar_size_strings.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_size_strings.py"), 40),
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_solar_size_strings.py"), 48),
         # W2 registration (2026-09-28, studio-finish solar-parity-010): seven W2 parity builtins
         # as registry local-graph-commit declarations. COUNTED from the collected cases:
         # 13 tests + 8 more parametrizations = 21 (the solar-string-conductors row joined TOOLS).
@@ -2545,6 +2549,8 @@ def build_suites() -> List[Suite]:
         # 66 test functions, one parametrized over 2 comparator names = 67.
         Suite("scripts-solar-parity-status", "scripts test_solar_parity_status.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_status.py"), 69),
+        Suite("scripts-solar-parity-reachability", "scripts test_solar_parity_reachability.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_reachability.py"), 43),
         # Registered per the #29 fix-then-register rule (shipped without a
         # gate entry; measured 1 passed on this tree 2026-07-23).
         # 1 -> 2 on 2026-08-07: the staging relay's convergence contract

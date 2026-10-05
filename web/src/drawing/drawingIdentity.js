@@ -178,7 +178,32 @@ export function seedDrawingIdentity({
 export function identityFromUploadReceipt(receipt) {
   const drawingId = typeof receipt?.drawing_id === 'string' ? receipt.drawing_id : ''
   if (!drawingId) return null
-  return frozenIdentity(drawingId, drawingId, IDENTITY_ORIGIN.UPLOAD)
+  const tenantKind = receipt.tenant_kind === 'account' || receipt.tenant_kind === 'guest' ? receipt.tenant_kind : null
+  return Object.freeze({ drawingId, source: drawingId, origin: IDENTITY_ORIGIN.UPLOAD, tenantKind })
+}
+
+/** The accepted app-console upload's address policy, without browser I/O. */
+export function drawingUrlAfterUpload(options = {}) {
+  try {
+    const { href, mode, scene, receipt, promoted = false } = options ?? {}
+    if (promoted !== true || mode !== DRAWING_MODE_CONSOLE || scene !== 'app') return null
+    if (typeof href !== 'string' || typeof receipt?.drawing_id !== 'string' || !receipt.drawing_id) return null
+    const kind = receipt.tenant_kind
+    if (kind !== 'account' && kind !== 'guest') return null
+    const url = new URL(href)
+    const values = url.searchParams.getAll('drawing')
+    if (kind === 'account') {
+      if (values.length === 1 && values[0] === receipt.drawing_id) return null
+      url.searchParams.set('drawing', receipt.drawing_id)
+    } else {
+      if (values.length === 0) return null
+      url.searchParams.delete('drawing')
+    }
+    const search = url.searchParams.toString()
+    return url.pathname + (search ? `?${search}` : '') + url.hash
+  } catch {
+    return null
+  }
 }
 
 /**

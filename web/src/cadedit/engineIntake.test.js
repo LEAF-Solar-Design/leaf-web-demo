@@ -7,6 +7,82 @@ import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, M
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
+describe('engine text glyphs', () => {
+  const text = { id: '26', type: 'TEXT', layer: 'Notes', vertices: [[10, 20, 0]], text: 'A', height: 2, rotationDeg: 0 }
+  const dimension = (dimtype = 'LINEAR', measurement = 3) => ({ id: '500', type: 'DIMENSION', dimtype, layer: '0',
+    def1: [0, 0], def2: [3, 4], dimline: [1.5, 6], rotationDeg: 0, measurement })
+
+  it('W21D2-text-route', () => {
+    const intake = engineIntake([text])
+    expect(intake).toMatchObject({ points: 13, truncated: 0 })
+    expect(intake.polylines.map((pl) => pl.pts.length)).toEqual([9, 4])
+    expect(intake.polylines.every((pl) => pl.handle === '1A' && pl.layer === 'Notes' && pl.strokeOnly && !pl.closed)).toBe(true)
+    expect(near(intake.polylines[0].pts[0][0], 11.788746298124384)).toBe(true)
+    const rotated = engineIntake([{ ...text, rotationDeg: 90 }])
+    expect(near(rotated.polylines[0].pts[0][0], 10)).toBe(true)
+    expect(near(rotated.polylines[0].pts[0][1], 21.788746298124384)).toBe(true)
+    expect(engineIntake([{ ...text, text: 'A'.repeat(1024) }])).toMatchObject({ points: 13312, truncated: 0 })
+    expect(engineIntake([{ ...text, text: 'A'.repeat(1025) }])).toMatchObject({ polylines: [], points: 0, truncated: 1 })
+    expect(engineIntake([{ ...text, text: '\u{1F680}' }]).points).toBe(64)
+    expect(engineIntake([{ ...text, rotationDeg: NaN, layer: '' }]).polylines[0]).toMatchObject({ layer: '0', pts: intake.polylines[0].pts })
+    for (const patch of [{ text: '' }, { text: ' ' }, { height: 0 }, { vertices: [] }, { text: 'A'.repeat(1025), height: 0 }]) {
+      expect(engineIntake([{ ...text, ...patch }])).toMatchObject({ polylines: [], points: 0, truncated: 0 })
+    }
+  })
+
+  it('W21D2-dimension-values', () => {
+    for (const [kind, value, points, first] of [
+      ['LINEAR', 3, 110, [1.668558736426456, 6.440177690029615, 0]],
+      ['ALIGNED', 5, 82, [-0.2511944718657453, 3.8949851924975323, 0]],
+    ]) {
+      const entity = dimension(kind, value)
+      const intake = engineIntake([entity])
+      expect(intake).toMatchObject({ points, truncated: 0 })
+      expect(intake.polylines).toHaveLength(6)
+      expect(intake.polylines.slice(0, 5)).toEqual(dimensionSchematic(entity).slice(0, 5))
+      expect(intake.polylines[5]).toMatchObject({ handle: '1F4', layer: '0', closed: false, strokeOnly: true })
+      for (let c = 0; c < 3; c++) expect(near(intake.polylines[5].pts[0][c], first[c])).toBe(true)
+    }
+  })
+
+  it('W21D2-preserve-helper-contracts', () => {
+    expect(entityToPolyline(text)).toEqual({ handle: '1A', layer: 'Notes', closed: true,
+      pts: [[10, 20, 0], [11.2, 20, 0], [11.2, 22, 0], [10, 22, 0]] })
+    const pieces = dimensionSchematic(dimension())
+    expect(pieces).toHaveLength(6)
+    expect(pieces.reduce((sum, pl) => sum + pl.pts.length, 0)).toBe(14)
+    expect(pieces[5]).toMatchObject({ closed: true, pts: [[1.35, 6.3, 0], [1.65, 6.3, 0], [1.65, 6.8, 0], [1.35, 6.8, 0]] })
+  })
+
+  it('W21D2-invalid-dimensions', () => {
+    const invalid = dimension('LINEAR', NaN)
+    expect(engineIntake([invalid])).toMatchObject({ polylines: dimensionSchematic(invalid).slice(0, 5), points: 10, truncated: 0 })
+    for (const entity of [dimension('OTHER'), { ...dimension(), def2: null },
+      { ...dimension(), def2: [3, 0], rotationDeg: 90 }]) {
+      expect(engineIntake([entity])).toMatchObject({ polylines: [], points: 0, truncated: 0 })
+    }
+  })
+
+  it('W21D2-atomic-budget', () => {
+    for (const [entity, size] of [[text, 13], [dimension(), 110]]) {
+      const prefix = { id: '1', type: 'LWPOLYLINE', vertices: Array.from({ length: MAX_POINTS - size + 1 }, (_, i) => [i, 0]) }
+      const capped = engineIntake([prefix, entity])
+      expect(capped).toMatchObject({ points: MAX_POINTS - size + 1, truncated: 1 })
+      expect(capped.polylines).toHaveLength(1)
+      const fits = engineIntake([{ ...prefix, vertices: prefix.vertices.slice(1) }, entity])
+      expect(fits).toMatchObject({ points: MAX_POINTS, truncated: 0 })
+      expect(fits.polylines).toHaveLength(entity.type === 'TEXT' ? 3 : 7)
+    }
+  })
+
+  it('W21D2-mixed-document', () => {
+    const intake = engineIntake([text, { id: '27', type: 'LINE', vertices: [[0, 0], [1, 0]] }, dimension()])
+    expect(intake).toMatchObject({ points: 125, truncated: 0 })
+    expect(intake.polylines).toHaveLength(9)
+    expect(intake.polylines.map((pl) => pl.handle)).toEqual(['1A', '1A', '1B', '1F4', '1F4', '1F4', '1F4', '1F4', '1F4'])
+  })
+})
+
 describe('intake bulges for the console viewer', () => {
   it('carries strokeOnly into the pick descriptor and both highlight loops', () => {
     const source = readFileSync(path.resolve(process.cwd(), 'src/components/Viewer.jsx'), 'utf8')
@@ -292,6 +368,10 @@ describe('W4g-6d: a polyline bulge draws as its arc', () => {
       const intake = engineIntake([dim])
       expect(intake.polylines).toHaveLength(6)
       expect(intake.polylines.every((p) => p.handle === '9462')).toBe(true)
+      expect(intake.points).toBe(110)
+      expect(intake.polylines[5]).toMatchObject({ closed: false, strokeOnly: true })
+      expect(intake.polylines[5].pts).toHaveLength(100)
+      expect(intake.polylines).not.toContainEqual(dimensionSchematic(dim)[5])
     })
 
     it('a malformed dimension record draws nothing, never throws', () => {

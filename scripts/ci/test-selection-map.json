@@ -106,6 +106,7 @@
     "scripts-solar-inverter-outputs-evidence",
     "scripts-solar-inverter-strings-evidence",
     "scripts-solar-parity-status",
+    "scripts-solar-parity-reachability",
     "scripts-solar-pile-block-mapping-evidence",
     "scripts-solar-probe-evidence",
     "scripts-solar-pvcase-solve-evidence",
@@ -468,6 +469,7 @@
     "server-solar-terrain-route",
     "server-solar-tool-color-strings",
     "server-solar-tool-pvcase-convert",
+    "server-solar-pvcase-admission",
     "server-solar-tool-combiners",
     "server-solar-tool-feeders",
     "server-solar-tool-feeders-ground",
@@ -640,7 +642,8 @@
     "web-version-restore-proof",
     "web-vitest",
     "web-walk-unit",
-    "web-workbench-id-contract"
+    "web-workbench-id-contract",
+    "server-w22c2-block-panels"
   ],
   "unresolved_mandatory": [],
   "mandatory_justification": "L4 web-demo mandatory table expanded against build_suites; every other declaration remains mandatory because no traced classification has been admitted. Workflow, web build and license checks also remain unconditional in ci.sh.",

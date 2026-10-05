@@ -31,7 +31,7 @@ import test_w1_local_graph_broker as broker_tests
 PINNED_BASE_DIGESTS = {
     # moved 2026-09-29: solar-settings params gained project_changes (sf-solar-project-readiness)
     "solar-settings": "sha256:a560ec3662e09efb3fefb2d7fa683cdbc55f2630abe633910b0bdd6645528559",
-    "solar-size-strings": "sha256:48d2c171a8c9da862ae6da44987fcb8fec528e2abe1a268bcf875dc6e236233f",
+    "solar-size-strings": "sha256:9d195167218f59395ed9fe168864801eca88158c6af988fb0a84f5fcc5dd1bf2",
     "solar-panel-groups": "sha256:098e6563d15837eccc55d63f81b45011fa6efc679130b27c8241fef77e47425a",
     "solar-solve-proposal": "sha256:33ca2f21d777762c0e3dd1ad6925599c1d3533aa6341dffa39167fdd5728132d",
     "solar-commit-solve": "sha256:69b70748c4383c2503ed385a63942528a09719a9df69568c1c97524ef00421fa",

@@ -116,6 +116,8 @@ export const MODIFY_REASONS = Object.freeze({
   noSelection: 'select an entity in the drawing',
   multiSelection: 'select one object: this works on a single object and more than one is selected',
   readOnlyKind: 'read-only entity kind',
+  unsupportedInsert: 'Copy, Cut and Explode do not support INSERT block references yet',
+  unsupportedDimension: 'Copy, Cut and Explode do not support DIMENSION entities yet',
 })
 
 export const PROPERTY_REASONS = Object.freeze({
@@ -132,7 +134,7 @@ export const PROPERTY_REASONS = Object.freeze({
 export const PLACED_KINDS = new Set(['INSERT', 'DIMENSION', 'MLEADER'])
 
 // W4g-5c: the clipboard's ladder. CUT and COPY answer to the Modify ladder
-// (they act on a selection); PASTE does not need a selection at all, it needs
+// and their operation-specific kind gate; PASTE needs no selection, it needs
 // a record on the clipboard, so it has its own last rung.
 export const CLIPBOARD_REASONS = Object.freeze({
   empty: 'nothing on the clipboard yet',
@@ -213,6 +215,15 @@ export function modifyReason(session, reach = null) {
   if ((session.selectedIds?.length ?? 0) > 1) return MODIFY_REASONS.multiSelection
   if (!session.selected) return MODIFY_REASONS.noSelection
   if (session.selected.editable === false && !PLACED_KINDS.has(session.selected.type)) return MODIFY_REASONS.readOnlyKind
+  return ''
+}
+
+function selectionActionReason(op, session, reach = null) {
+  const reason = modifyReason(session, reach)
+  if (reason) return reason
+  if (!['copyClip', 'cutClip', 'explode'].includes(op)) return ''
+  if (session.selected.type === 'INSERT') return MODIFY_REASONS.unsupportedInsert
+  if (session.selected.type === 'DIMENSION') return MODIFY_REASONS.unsupportedDimension
   return ''
 }
 
@@ -302,7 +313,8 @@ export const INTERACTIVE_TARGET_SELECTOR = 'button, a, summary, [role="button"],
  * this module performs no effect of its own.
  */
 export const ESCAPE_RUNGS = Object.freeze([
-  Object.freeze({ id: 'drawer', open: (ctx) => !!ctx.drawer, run: (ctx) => ctx.onCloseDrawer?.() }),
+  Object.freeze({ id: 'drawer', open: (ctx) => (!!ctx.drawer && ctx.drawer !== 'none')
+    || (ctx.phoneViewport === true && !!ctx.studioDrawer && ctx.studioDrawer !== 'none'), run: (ctx) => ctx.onCloseDrawer?.() }),
   Object.freeze({ id: 'history', open: (ctx) => !!ctx.historyOpen, run: (ctx) => ctx.onCloseHistory?.() }),
   Object.freeze({ id: 'start', open: (ctx) => !!ctx.startOpen, run: (ctx) => ctx.onCloseStart?.() }),
   Object.freeze({ id: 'route', open: (ctx) => !!ctx.route, run: (ctx) => ctx.onDismissRoute?.() }),
@@ -503,7 +515,7 @@ const engineOp = (group, op, label, display, icon, title, size, panel = group) =
       // Modify op keeps the full ladder.
       : panel === 'properties'
         ? (ctx) => propertyControlReason(ctx.session, ctx.reach)
-        : (ctx) => modifyReason(ctx.session, ctx.reach),
+        : (ctx) => selectionActionReason(op, ctx.session, ctx.reach),
   // Arming vs. running is the consumer's decision (a tool with operands opens
   // the command prompt; one without runs on click), so the record names the
   // one handler and passes the op.

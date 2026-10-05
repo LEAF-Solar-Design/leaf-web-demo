@@ -26,6 +26,7 @@ import argparse
 import importlib.util
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -610,7 +611,350 @@ def capability_findings(capability, expected_versions, files, root):
     return found, None
 
 
-def evaluate(expected, rows, receipts_dir, require, root):
+UI_FLAGS = ("VITE_CAD_EDIT", "VITE_SOLAR_FLOW_RAIL", "VITE_SOLAR_SETTINGS_FORM")
+MAX_UI_BYTES = 65536
+MAX_UI_DECLARATIONS = 256
+
+
+def _ui_text(path):
+    try:
+        with path.open("rb") as stream:
+            data = stream.read(MAX_UI_BYTES + 1)
+        if len(data) > MAX_UI_BYTES:
+            raise InputError("UI source exceeds 65536 bytes")
+        return data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InputError(f"UI source unreadable: {path.name}: {exc}") from exc
+
+
+def read_baked_flags(dockerfile_text):
+    """Interpret the supported default build configuration, never the environment."""
+    args, env = {}, {}
+    global_args, stages = {}, set()
+    before_from = True
+    active = False
+    seen = False
+    built = False
+    pending = ""
+    flag_kinds = {}
+    for physical in dockerfile_text.splitlines():
+        line = physical.strip()
+        if not line or line.startswith("#"):
+            continue
+        continued = line.endswith("\\")
+        pending += line[:-1] + " " if continued else line
+        if continued:
+            continue
+        line, pending = pending, ""
+        instruction, _, body = line.partition(" ")
+        instruction = instruction.upper()
+        if instruction == "FROM":
+            before_from = False
+            stage = re.fullmatch(r"(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", body, re.I)
+            if stage is None:
+                raise InputError("unsupported FROM instruction")
+            named = re.search(r"\bAS\s+build\s*$", body, re.I) is not None
+            if named and ("$" in stage[1] or stage[1].lower() in stages):
+                raise InputError("stage inheritance not supported")
+            if stage[2] is not None:
+                stages.add(stage[2].lower())
+            if named and seen:
+                raise InputError("duplicate build stage")
+            active = named
+            seen |= named
+            continue
+        global_arg = before_from and instruction == "ARG"
+        if not global_arg and (not active or built):
+            continue
+        if instruction == "RUN" and re.match(r"npm\s+run\s+build(?:\s|$)", body):
+            built = True
+            continue
+        if instruction not in ("ARG", "ENV"):
+            if any(flag in line for flag in UI_FLAGS):
+                raise InputError("unsupported flag instruction")
+            continue
+        if any(flag in body for flag in UI_FLAGS) and "\\" in body:
+            raise InputError("unsupported escape in flag assignment")
+        if any(flag in body for flag in UI_FLAGS) and ("'" in body or '"' in body):
+            raise InputError("unsupported quoting in flag assignment")
+        try:
+            words = shlex.split(body)
+        except ValueError as exc:
+            raise InputError("invalid build assignment") from exc
+        if instruction == "ARG":
+            if len(words) != 1:
+                raise InputError("unsupported ARG assignment")
+            key, separator, value = words[0].partition("=")
+            assignments = [(key, value if separator else global_args.get(key, ""))]
+        elif all("=" in word for word in words) and words:
+            assignments = [word.split("=", 1) for word in words]
+        else:
+            if any(flag in body for flag in UI_FLAGS):
+                raise InputError("unsupported ENV assignment")
+            continue
+        preceding = global_args if global_arg else {**args, **env}
+        assigned_flags = set()
+        for key, value in assignments:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise InputError("invalid build assignment name")
+            if key in UI_FLAGS:
+                if key in assigned_flags:
+                    raise InputError("ambiguous flag assignment")
+                assigned_flags.add(key)
+                # A flag reads only a literal or its own same-stage ARG: helper variables,
+                # ARG-built defaults and repeated assignments are refused, never interpreted.
+                if "$" in value and (instruction == "ARG" or value != "${" + key + "}"):
+                    raise InputError("unsupported flag reference")
+                if not global_arg:
+                    kinds = flag_kinds.setdefault(key, [])
+                    if instruction in kinds or (instruction == "ARG" and "ENV" in kinds):
+                        raise InputError("ambiguous flag assignment")
+                    kinds.append(instruction)
+            substituted = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+                                 lambda match: preceding.get(match[1], ""), value)
+            if key in UI_FLAGS and ("$" in substituted or re.search(r"[^A-Za-z0-9_.:/-]", substituted)):
+                raise InputError("unsupported flag value")
+            (global_args if global_arg else args if instruction == "ARG" else env)[key] = substituted
+    if pending or not seen or not built:
+        raise InputError("unsupported or missing build stage")
+    return {flag: env.get(flag) == "1" for flag in UI_FLAGS}
+
+
+def _js_tokens(text):
+    """A small lexer for literal tables, preserving strings while removing comments."""
+    pattern = re.compile(r"\s+|//[^\n]*|/\*[\s\S]*?\*/|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|[A-Za-z_$][\w$]*|\d+|[^\s]")
+    return [match[0] for match in pattern.finditer(text)
+            if not match[0].isspace() and not match[0].startswith(("//", "/*"))]
+
+
+def _js_group(tokens, start, opener, closer):
+    if start >= len(tokens) or tokens[start] != opener:
+        raise InputError("unsupported flow source syntax")
+    depth = 0
+    for index in range(start, len(tokens)):
+        if tokens[index] == opener:
+            depth += 1
+        elif tokens[index] == closer:
+            depth -= 1
+            if depth == 0:
+                return tokens[start + 1:index], index + 1
+    raise InputError("unterminated flow source group")
+
+
+def _js_literal(token):
+    if len(token) < 2 or token[0] not in ("'", '"') or token[-1] != token[0] or "\\" in token:
+        raise InputError("flow bindings require unescaped literal strings")
+    return token[1:-1]
+
+
+def _js_arguments(tokens):
+    arguments, current, stack = [], [], []
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    for token in tokens:
+        if token == "," and not stack:
+            if not current:
+                raise InputError("empty flow argument")
+            arguments.append(current)
+            current = []
+            continue
+        if token in pairs:
+            stack.append(pairs[token])
+        elif token in pairs.values():
+            if not stack or stack.pop() != token:
+                raise InputError("unbalanced flow arguments")
+        current.append(token)
+    if stack:
+        raise InputError("unbalanced flow arguments")
+    if current:
+        arguments.append(current)
+    return arguments
+
+
+def _js_strings(tokens):
+    body, end = _js_group(tokens, 0, "[", "]")
+    if end != len(tokens):
+        raise InputError("unsupported capability expression")
+    result = []
+    for argument in _js_arguments(body):
+        if len(argument) != 1:
+            raise InputError("unsupported capability expression")
+        name = _js_literal(argument[0])
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name):
+            raise InputError("invalid flow capability name")
+        result.append(name)
+    return result
+
+
+def read_flow_bindings(flow_text):
+    tokens = _js_tokens(flow_text)
+    limits = [i for i in range(len(tokens) - 2)
+              if tokens[i:i + 3] == ["const", "MAX_FLOW_STEPS", "="]]
+    if len(limits) != 1:
+        raise InputError("missing or ambiguous MAX_FLOW_STEPS declaration")
+    limit_start = limits[0]
+    if (limit_start == 0 or tokens[limit_start - 1] != "export" or
+            limit_start + 3 >= len(tokens) or
+            not re.fullmatch(r"[0-9]+", tokens[limit_start + 3]) or
+            (limit_start + 4 < len(tokens) and
+             tokens[limit_start + 4] not in (";", "export", "const", "function"))):
+        raise InputError("MAX_FLOW_STEPS must be an exported integer literal")
+    max_flow_steps = int(tokens[limit_start + 3])
+    starts = [i for i in range(len(tokens) - 2)
+              if tokens[i:i + 3] == ["const", "SOLAR_FLOWS", "="]]
+    if len(starts) != 1:
+        raise InputError("missing or ambiguous SOLAR_FLOWS declaration")
+    start = starts[0] + 3
+    if tokens[start:start + 4] != ["Object", ".", "freeze", "("]:
+        raise InputError("unsupported SOLAR_FLOWS declaration")
+    table, end = _js_group(tokens, start + 4, "[", "]")
+    if tokens[end:end + 1] != [")"]:
+        raise InputError("unsupported SOLAR_FLOWS declaration")
+    if end + 1 < len(tokens) and tokens[end + 1] not in (";", "export", "const", "function"):
+        raise InputError("unsupported SOLAR_FLOWS expression")
+    tools, rooftop = set(), False
+    for entry in _js_arguments(table):
+        if entry[:2] != ["flowEntry", "("]:
+            raise InputError("unsupported flow entry")
+        body, end = _js_group(entry, 1, "(", ")")
+        arguments = _js_arguments(body)
+        if end != len(entry) or len(arguments) != 4 or any(len(a) != 1 for a in arguments[:3]):
+            raise InputError("unsupported flow entry")
+        identifier, label, maturity = [_js_literal(a[0]) for a in arguments[:3]]
+        stages = arguments[3]
+        if stages == ["null"]:
+            if identifier != "rooftop":
+                raise InputError("unsupported null flow")
+            rooftop = True
+            continue
+        body, end = _js_group(stages, 0, "[", "]")
+        if end != len(stages):
+            raise InputError("unsupported stages expression")
+        for stage in _js_arguments(body):
+            if stage[0] not in ("flowStage", "panelStage", "panelCatalogStage"):
+                raise InputError("unsupported flow stage")
+            body, end = _js_group(stage, 1, "(", ")")
+            args = _js_arguments(body)
+            allowed = (2, 3) if stage[0] == "flowStage" else (3,) if stage[0] == "panelStage" else (4,)
+            if end != len(stage) or len(args) not in allowed or any(len(a) != 1 for a in args[:2]):
+                raise InputError("unsupported flow stage")
+            for a in args[:2]:
+                _js_literal(a[0])
+            arrays = [_js_strings(a) for a in args[2:]]
+            if stage[0] == "flowStage" and arrays:
+                tools.update(arrays[0])
+    if rooftop:
+        # Pin the complete selection function, not just a wave comparison substring.
+        expected = """function solarFlowSteps(families) {
+          const seen = new Set()
+          const picked = []
+          for (const family of Array.isArray(families) ? families : []) {
+            const rows = family && typeof family === 'object' && Array.isArray(family.capabilities) ? family.capabilities : []
+            for (const row of rows) {
+              if (!row || typeof row !== 'object' || typeof row.name !== 'string' || row.name.length === 0) continue
+              if (seen.has(row.name)) continue
+              const result = solarView(row)
+              if (result.state !== 'valid' || (result.view.wave !== 1 && row.name !== 'solar-string-conductors')) continue
+              seen.add(row.name)
+              picked.push({ row, order: row.name === 'solar-string-conductors' ? 75 : result.view.order })
+            }
+          }
+          return picked.sort(compareSteps).slice(0, MAX_FLOW_STEPS).map(({ row }) => row)
+        }"""
+        signature = ["function", "solarFlowSteps", "(", "families", ")", "{"]
+        matches = [i for i in range(len(tokens)) if tokens[i:i + 6] == signature]
+        if len(matches) != 1:
+            raise InputError("unsupported Rooftop selection rule")
+        body, end = _js_group(tokens, matches[0] + 5, "{", "}")
+        if tokens[matches[0]:end] != _js_tokens(expected):
+            raise InputError("unsupported Rooftop selection rule")
+        selects = [i for i in range(len(tokens) - 1)
+                   if tokens[i:i + 2] == ["function", "solarFlowSelect"]]
+        if len(selects) != 1:
+            raise InputError("unsupported Rooftop null branch")
+        parameters, end = _js_group(tokens, selects[0] + 2, "(", ")")
+        selection, end = _js_group(tokens, end, "{", "}")
+        branch = _js_tokens("if (flow.stages === null) { steps = solarFlowSteps(families) if (steps.length === 0) reasonKey = 'rooftop_steps_missing' }")
+        if not any(selection[i:i + len(branch)] == branch for i in range(len(selection))):
+            raise InputError("unsupported Rooftop null branch")
+    return {"tools": sorted(tools), "rooftop": rooftop, "max_flow_steps": max_flow_steps}
+
+
+def _ui_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise InputError("duplicate Solar declaration JSON key")
+        result[key] = value
+    return result
+
+
+def _ui_constant(value):
+    raise InputError("invalid Solar declaration JSON number")
+
+
+def read_ui_sources(source_root):
+    flags = read_baked_flags(_ui_text(source_root / "deploy" / "Dockerfile.web"))
+    bindings = read_flow_bindings(_ui_text(source_root / "web" / "src" / "solar" / "solarFlowModel.js"))
+    directory = source_root / "server" / "solar_tools"
+    try:
+        paths = []
+        for path in directory.glob("*.json"):
+            paths.append(path)
+            if len(paths) > MAX_UI_DECLARATIONS:
+                raise InputError("excessive Solar declarations")
+        if not directory.is_dir() or not paths:
+            raise InputError("missing or excessive Solar declarations")
+        declarations, names = [], set()
+        for path in sorted(paths):
+            try:
+                doc = json.loads(_ui_text(path), object_pairs_hook=_ui_pairs, parse_constant=_ui_constant)
+            except (ValueError, RecursionError) as exc:
+                raise InputError("invalid Solar declaration JSON") from exc
+            if not isinstance(doc, dict) or doc.get("schema") != "leaf.solar-tool.v1":
+                raise InputError("invalid Solar declaration schema")
+            name = _kebab_field(doc, "name", "Solar declaration")
+            if name in names:
+                raise InputError("duplicate Solar declaration name")
+            names.add(name)
+            ledger = _list_of_str(doc, "ledger", name)
+            if any(not KEBAB.fullmatch(capability) for capability in ledger):
+                raise InputError("invalid declaration ledger mapping")
+            for field, lower, upper in (("wave", 1, 5), ("order", 0, 9999)):
+                if type(doc.get(field)) is not int or not lower <= doc[field] <= upper:
+                    raise InputError(f"invalid declaration {field}")
+            _str_field(doc, "family", name, required=True)
+            _enum_field(doc, "entitlement", name, ("run_read", "run_write", "solve"), required=True)
+            interaction = _object_field(doc, "interaction", name)
+            _enum_field(interaction, "mode", name, ("form", "none", "pick"), required=True)
+            declarations.append({"name": name, "ledger": ledger, "wave": doc["wave"]})
+    except OSError as exc:
+        raise InputError("Solar declarations unreadable") from exc
+    if bindings["rooftop"]:
+        rooftop_tools = {doc["name"] for doc in declarations
+                         if doc["wave"] == 1 or doc["name"] == "solar-string-conductors"}
+        if len(rooftop_tools) > bindings["max_flow_steps"]:
+            raise InputError("rooftop steps exceed the browser flow limit")
+    return {"flags": flags, "bindings": bindings, "declarations": declarations}
+
+
+def capability_reachability(scoped, sources):
+    mapped = {}
+    bindings = sources["bindings"]
+    for declaration in sources["declarations"]:
+        name = declaration["name"]
+        if name in bindings["tools"] or (bindings["rooftop"] and
+                (declaration["wave"] == 1 or name == "solar-string-conductors")):
+            for capability in declaration["ledger"]:
+                mapped.setdefault(capability, set()).add(name)
+    disabled = sorted(flag for flag in UI_FLAGS if not sources["flags"][flag])
+    return [{"capability": capability,
+             "state": ("unreachable" if disabled else "reachable") if mapped.get(capability) else "unverified",
+             "tools": sorted(mapped.get(capability, [])),
+             "blocked_flags": disabled.copy() if mapped.get(capability) else []}
+            for capability in sorted(scoped)]
+
+
+def evaluate(expected, rows, receipts_dir, require, root, *, ui_sources=None):
     max_wave = scope_wave(require)
     findings = ledger_findings(expected, rows)
 
@@ -634,6 +978,13 @@ def evaluate(expected, rows, receipts_dir, require, root):
         elif divergence is not None:
             diverged.append(divergence)
 
+    reachability = capability_reachability(
+        scoped, read_ui_sources(repo_root()) if ui_sources is None else ui_sources
+    )
+    for item in reachability:
+        if item["state"] == "unreachable":
+            findings.append(finding("UI_UNREACHABLE", "disabled guided-flow flags: " +
+                                    ", ".join(item["blocked_flags"]), capability=item["capability"]))
     findings.sort(key=lambda item: (item["code"], finding_name(item)))
 
     duty_rows = [row for row in rows if has_duty(row)]
@@ -656,6 +1007,8 @@ def evaluate(expected, rows, receipts_dir, require, root):
         "capabilities_in_scope": len(scoped),
         "capabilities_passing": len(scoped) - len(failing_capabilities),
         "capabilities_diverged": len(diverged_capabilities),
+        **{"capabilities_" + state: sum(item["state"] == state for item in reachability)
+           for state in ("reachable", "unreachable", "unverified")},
     }
     return {
         "ok": not findings,
@@ -663,6 +1016,7 @@ def evaluate(expected, rows, receipts_dir, require, root):
         "counts": counts,
         "divergences": sorted(diverged, key=lambda item: item["capability"]),
         "findings": findings,
+        "reachability": reachability,
     }
 
 
@@ -684,9 +1038,9 @@ def human_report(result, ledger_path, receipts_dir):
         "by wave:  "
         + "  ".join(f"{wave}={counts['by_wave'][str(wave)]}" for wave in WAVES)
         + f"  null={counts['by_wave']['null']}",
-        f"duty rows: {counts['duty_rows_total']} total, "
+        f"receipt parity duty rows: {counts['duty_rows_total']} total, "
         f"{counts['duty_rows_in_scope']} in scope, {counts['duty_rows_passing']} passing",
-        f"capabilities in scope: {counts['capabilities_in_scope']}, "
+        f"receipt parity capabilities in scope: {counts['capabilities_in_scope']}, "
         f"{counts['capabilities_passing']} passing",
     ]
     divergences = result.get("divergences") or []
@@ -701,6 +1055,22 @@ def human_report(result, ledger_path, receipts_dir):
             header.append(f"  {item['capability']}  {item['finding']}: {item['summary']}")
         if len(divergences) > len(shown):
             header.append(f"  ... {len(divergences) - len(shown)} more")
+    reachability = result.get("reachability", [])
+    header.extend([
+        "", "Guided-flow reachability (source configuration)",
+        "  ".join(f"{state}: {counts.get('capabilities_' + state, 0)}"
+                  for state in ("reachable", "unreachable", "unverified")),
+        "Source configuration does not prove a deployed image or runtime readiness.",
+        "Capability  Receipt  Reachability",
+    ])
+    failed = {item.get("capability") for item in result["findings"] if item["code"] != "UI_UNREACHABLE"}
+    diverged = {item["capability"] for item in divergences}
+    for item in reachability[:80]:
+        capability = item["capability"]
+        receipt = "fail" if capability in failed else "declared divergence" if capability in diverged else "pass"
+        header.append(f"{capability}  {receipt}  {item['state']}")
+    if len(reachability) > 80:
+        header.append(f"  ... {len(reachability) - 80} capability rows omitted")
     header.extend(["", f"findings: {len(result['findings'])}"])
     footer = ["", "verdict: " + ("PASS" if result["ok"] else "FAIL")]
     room = MAX_REPORT_LINES - len(header) - len(footer)
