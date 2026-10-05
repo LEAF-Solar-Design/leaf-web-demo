@@ -49,3 +49,11 @@
   }
   .drawing-object-list { max-height: 32dvh; }
 }
+
+@media (pointer: coarse) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel > summary {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 12px 8px;
+  }
+}
