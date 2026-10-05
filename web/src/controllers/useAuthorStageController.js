@@ -53,29 +53,45 @@ export default function useAuthorStageController({
   const validInitialPointer = authorPointerValid(initialPointer, accountScope) ? initialPointer : null
   if (initialPointer && !validInitialPointer) clearInflightAuthor(null, storage)
   const [pointer, setPointer] = useState(validInitialPointer)
-  const [phase, setPhase] = useState(pointer?.terminal_failed ? 'failed' : pointer ? 'reconnecting' : 'idle')
-  const [progress, setProgress] = useState(pointer?.terminal_failed ? 'request failed' : pointer ? 'restoring authoring request' : null)
-  const [elapsedMs, setElapsedMs] = useState(pointer && !pointer.terminal_failed ? Math.max(0, Date.now() - pointer.created_at) : 0)
+  const [phase, setPhase] = useState(pointer?.draft_only ? 'draft' : pointer?.terminal_failed ? 'failed' : pointer ? 'reconnecting' : 'idle')
+  const [progress, setProgress] = useState(pointer?.draft_only ? null : pointer?.terminal_failed ? 'request failed' : pointer ? 'restoring authoring request' : null)
+  const [elapsedMs, setElapsedMs] = useState(pointer && !pointer.terminal_failed && !pointer.draft_only ? Math.max(0, Date.now() - pointer.created_at) : 0)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(pointer?.terminal_failed ? restoredFailure(pointer) : null)
   const sequenceRef = useRef(0)
   const resumedRef = useRef(false)
   const abortRef = useRef(null)
+  const pointerRef = useRef(pointer)
+  const runningRef = useRef(false)
+  const preparedSubmissionRef = useRef(null)
   storageRef.current = storage
 
-  const persist = useCallback((next) => {
-    saveInflightAuthor(next, storageRef.current)
+  const updatePointer = useCallback((next) => {
+    pointerRef.current = next
     setPointer(next)
     return next
   }, [])
 
+  const persist = useCallback((next) => {
+    saveInflightAuthor(next, storageRef.current)
+    updatePointer(next)
+    return next
+  }, [updatePointer])
+
   const runPointer = useCallback(async (initial, { reconnecting = false, allowSecretOnce = false } = {}) => {
     if (!initial) return null
+    if (initial.draft_only) {
+      setPhase('draft')
+      setProgress(null)
+      setResult(null)
+      return null
+    }
     let acceptedPointer = initial
     abortRef.current?.abort()
     const abortController = new AbortController()
     abortRef.current = abortController
     const sequence = ++sequenceRef.current
+    runningRef.current = true
     setResult(null)
     setError(null)
     setPhase(reconnecting ? 'reconnecting' : 'submitting')
@@ -99,7 +115,7 @@ export default function useAuthorStageController({
       if (authorityProvider && !initial.poll_url) {
         try {
           // The one-call credential override also applies to the turn start.
-          authority = (await authorityProvider(initial.description, { allowSecretOnce })) || null
+          authority = (await authorityProvider(initial.description, { allowSecretOnce, ...(initial.prior_staged ? { forceFresh: true } : {}) })) || null
           if (!authority?.sessionId || !authority?.turnId) {
             const failure = new Error(mock
               ? 'Tool building is unavailable in this signed-out demo.'
@@ -137,7 +153,7 @@ export default function useAuthorStageController({
               poll_url: accepted.poll_url,
               retry_after_ms: accepted.retry_after_ms,
             }
-            if (mock) setPointer(acceptedPointer)
+            if (mock) updatePointer(acceptedPointer)
             else persist(acceptedPointer)
           },
           onStatus: (update) => {
@@ -153,7 +169,7 @@ export default function useAuthorStageController({
         throw mismatch
       }
       const terminalPointer = { ...acceptedPointer, terminal_failed: false, terminal_staged: true, staged_result: stagedHandoff(staged) }
-      if (mock) setPointer(terminalPointer)
+      if (mock) updatePointer(terminalPointer)
       else persist(terminalPointer)
       setPhase('succeeded')
       setProgress('staged for review')
@@ -173,23 +189,36 @@ export default function useAuthorStageController({
             failed_at: acceptedPointer.failed_at || Date.now(),
             failure: boundedAuthorFailure(cause),
           }
-          if (mock) setPointer(failedPointer)
+          if (mock) updatePointer(failedPointer)
           else persist(failedPointer)
+        } else if (initial.prior_staged) {
+          const now = Date.now()
+          const prepared = {
+            idempotency_key: requestId(), description: initial.description,
+            target_tool_name: initial.target_tool_name, account_scope: accountScope,
+            created_at: now, expires_at: now + AUTHOR_POINTER_TTL_MS,
+            change_set_id: null, poll_url: null, retry_after_ms: null,
+            draft_only: true, prior_staged: initial.prior_staged,
+          }
+          if (mock) updatePointer(prepared)
+          else persist(prepared)
         } else {
           // A quota refusal or invalid response is not an accepted failed job.
           if (!mock) clearInflightAuthor(acceptedPointer.idempotency_key, storageRef.current)
-          setPointer(null)
+          updatePointer(null)
         }
-        setPhase('failed')
-        setProgress('request failed')
+        setPhase(!acceptedFailure && initial.prior_staged ? 'draft' : 'failed')
+        setProgress(!acceptedFailure && initial.prior_staged ? null : 'request failed')
       } else {
         setPhase('interrupted')
         setProgress('connection interrupted')
       }
       setError(cause instanceof Error ? cause : new Error(String(cause)))
       return null
+    } finally {
+      if (sequenceRef.current === sequence) runningRef.current = false
     }
-  }, [authorityProvider, mock, persist, stageAuthorTool])
+  }, [accountScope, authorityProvider, mock, persist, stageAuthorTool, updatePointer])
 
   const stage = useCallback((description, targetToolName = null, { allowSecretOnce = false, newAttempt = false } = {}) => {
     if (!enabled) return Promise.resolve(null)
@@ -200,8 +229,23 @@ export default function useAuthorStageController({
     // Same decision, same frozen copy, same typed throw — not a second policy.
     const guard = guardedText(description, { allowSecretOnce, credentialMountAvailable: !mock })
     if (!guard.ok) return Promise.reject(new SecretRefusedError(guard.refusal))
-    const current = readInflightAuthor(storageRef.current)
+    if (preparedSubmissionRef.current) return preparedSubmissionRef.current
+    const current = mock ? pointerRef.current : readInflightAuthor(storageRef.current)
     const validCurrent = authorPointerValid(current, accountScope)
+    if (validCurrent && current.draft_only) {
+      if ((targetToolName || null) !== (current.target_tool_name || null)) return Promise.resolve(null)
+      const next = { ...current, description }
+      delete next.draft_only
+      resumedRef.current = true
+      if (mock) updatePointer(next)
+      else persist(next)
+      const submission = runPointer(next, { allowSecretOnce })
+      const coalesced = submission.finally(() => {
+        if (preparedSubmissionRef.current === coalesced) preparedSubmissionRef.current = null
+      })
+      preparedSubmissionRef.current = coalesced
+      return coalesced
+    }
     if (validCurrent && !(current.terminal_failed && newAttempt)) {
       // A valid pointer that never got its poll_url (the first POST did not
       // land) is re-run here, and its mint runs again: the caller's live
@@ -210,7 +254,7 @@ export default function useAuthorStageController({
       // below carry no override on purpose: nobody consented on that call.
       return runPointer(current, { reconnecting: true, allowSecretOnce })
     }
-    if (current && !validCurrent) clearInflightAuthor(null, storageRef.current)
+    if (!mock && current && !validCurrent) clearInflightAuthor(null, storageRef.current)
     resumedRef.current = true
     const next = {
       idempotency_key: requestId(),
@@ -222,6 +266,7 @@ export default function useAuthorStageController({
       created_at: Date.now(),
       expires_at: Date.now() + AUTHOR_POINTER_TTL_MS,
       account_scope: accountScope,
+      ...(validCurrent && current.prior_staged ? { prior_staged: current.prior_staged } : {}),
       ...(validCurrent && current.terminal_failed && current.change_set_id && current.poll_url ? {
         prior_failure: {
           idempotency_key: current.idempotency_key,
@@ -232,17 +277,58 @@ export default function useAuthorStageController({
       } : {}),
     }
     if (!mock) persist(next)
-    else setPointer(next)
+    else updatePointer(next)
     return runPointer(next, { allowSecretOnce })
-  }, [accountScope, enabled, mock, persist, runPointer])
+  }, [accountScope, enabled, mock, persist, runPointer, updatePointer])
+
+  const reviseDraft = useCallback((expectedKey) => {
+    if (!enabled || runningRef.current) return null
+    const current = mock ? pointerRef.current : readInflightAuthor(storageRef.current)
+    const receipt = current?.staged_result?.receipt
+    if (!authorPointerValid(current, accountScope) || current.idempotency_key !== expectedKey
+      || !current.terminal_staged || !receipt || typeof receipt !== 'object' || Array.isArray(receipt)
+      || typeof receipt.change_set_id !== 'string' || !receipt.change_set_id) return null
+    sequenceRef.current += 1
+    abortRef.current?.abort()
+    resumedRef.current = true
+    const now = Date.now()
+    const next = {
+      idempotency_key: requestId(), description: current.description,
+      target_tool_name: current.target_tool_name || null, account_scope: accountScope,
+      created_at: now, expires_at: now + AUTHOR_POINTER_TTL_MS,
+      change_set_id: null, poll_url: null, retry_after_ms: null, draft_only: true,
+      prior_staged: { idempotency_key: current.idempotency_key, receipt },
+    }
+    if (mock) updatePointer(next)
+    else persist(next)
+    setResult(null); setError(null); setProgress(null); setElapsedMs(0); setPhase('draft')
+    return next
+  }, [accountScope, enabled, mock, persist, updatePointer])
+
+  const discardDraft = useCallback((expectedKey) => {
+    if (!enabled || runningRef.current) return false
+    const current = mock ? pointerRef.current : readInflightAuthor(storageRef.current)
+    const receipt = current?.staged_result?.receipt
+    const staged = current?.terminal_staged && receipt && typeof receipt === 'object' && !Array.isArray(receipt)
+      && typeof receipt.change_set_id === 'string' && !!receipt.change_set_id
+    if (!authorPointerValid(current, accountScope) || current.idempotency_key !== expectedKey
+      || !(current.draft_only || staged)) return false
+    if (!mock && !clearInflightAuthor(expectedKey, storageRef.current)) return false
+    sequenceRef.current += 1
+    abortRef.current?.abort()
+    resumedRef.current = true
+    updatePointer(null)
+    setResult(null); setError(null); setProgress(null); setElapsedMs(0); setPhase('idle')
+    return true
+  }, [accountScope, enabled, mock, updatePointer])
 
   const resume = useCallback(() => {
     if (!enabled) return Promise.resolve(null)
-    const saved = pointer || readInflightAuthor(storageRef.current)
+    const saved = pointerRef.current || (mock ? null : readInflightAuthor(storageRef.current))
     const current = authorPointerValid(saved, accountScope) ? saved : null
-    if (saved && !current) clearInflightAuthor(null, storageRef.current)
+    if (!mock && saved && !current) clearInflightAuthor(null, storageRef.current)
     return current ? runPointer(current, { reconnecting: true }) : Promise.resolve(null)
-  }, [accountScope, enabled, pointer, runPointer])
+  }, [accountScope, enabled, mock, runPointer])
 
   const checkStatus = useCallback(() => {
     if (!enabled || !pointer?.terminal_failed || !pointer.poll_url
@@ -251,9 +337,9 @@ export default function useAuthorStageController({
   }, [accountScope, enabled, pointer, runPointer])
 
   const completePublication = useCallback(() => {
-    if (pointer) clearInflightAuthor(pointer.idempotency_key, storageRef.current)
-    setPointer(null)
-  }, [pointer])
+    if (!mock && pointer) clearInflightAuthor(pointer.idempotency_key, storageRef.current)
+    updatePointer(null)
+  }, [mock, pointer, updatePointer])
 
   useEffect(() => {
     if (!enabled || mock || !pointer || resumedRef.current) return
@@ -285,6 +371,9 @@ export default function useAuthorStageController({
     result,
     error,
     active,
+    enabled,
+    draftOnly: !!pointer?.draft_only,
+    previousStagedReceipt: pointer?.prior_staged?.receipt || null,
     resumable: phase === 'interrupted' && !!pointer,
     failedRequest: pointer?.terminal_failed ? {
       idempotency_key: pointer.idempotency_key,
@@ -294,8 +383,10 @@ export default function useAuthorStageController({
       failure: pointer.failure,
     } : null,
     stage,
+    reviseDraft,
+    discardDraft,
     resume,
     checkStatus,
     completePublication,
-  }), [active, checkStatus, completePublication, elapsedMs, error, phase, pointer, progress, result, resume, stage])
+  }), [active, checkStatus, completePublication, discardDraft, elapsedMs, enabled, error, phase, pointer, progress, result, resume, reviseDraft, stage])
 }

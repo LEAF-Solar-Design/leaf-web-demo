@@ -70,6 +70,17 @@ export function readInflightAuthor(storage = browserStorage()) {
     if (pointer.failure !== undefined && !validFailure(pointer.failure)) return null
     if (pointer.terminal_failed && (!validFailure(pointer.failure) || !Number.isFinite(pointer.failed_at))) return null
     if (pointer.prior_failure !== undefined && !validPriorFailure(pointer.prior_failure)) return null
+    if (pointer.draft_only !== undefined && typeof pointer.draft_only !== 'boolean') return null
+    if (pointer.prior_staged !== undefined) {
+      const prior = pointer.prior_staged
+      if (!prior || typeof prior !== 'object' || Array.isArray(prior)
+        || Object.keys(prior).sort().join(',') !== 'idempotency_key,receipt'
+        || typeof prior.idempotency_key !== 'string' || !prior.idempotency_key
+        || !prior.receipt || typeof prior.receipt !== 'object' || Array.isArray(prior.receipt)
+        || typeof prior.receipt.change_set_id !== 'string' || !prior.receipt.change_set_id) return null
+    }
+    if (pointer.draft_only && (!pointer.prior_staged || pointer.terminal_failed || pointer.terminal_staged
+      || pointer.staged_result != null || pointer.change_set_id != null || pointer.poll_url != null)) return null
     return pointer
   } catch {
     return null
