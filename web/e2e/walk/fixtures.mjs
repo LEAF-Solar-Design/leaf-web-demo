@@ -25,7 +25,7 @@ export function injectWalkEntities(source) {
   return source.replace('0\nENDSEC\n0\nEOF', `${lines}${dimension}${polyline}0\nENDSEC\n0\nEOF`)
 }
 
-export async function holdJobRoutes(page, pattern = '**/api/jobs/**', onHold) {
+export async function holdJobRoutes(page, pattern = '**/api/jobs/**', onHold, { holdResponse = false } = {}) {
   let release
   let passing = false
   let cleanupPromise
@@ -34,11 +34,15 @@ export async function holdJobRoutes(page, pattern = '**/api/jobs/**', onHold) {
   const errors = []
   const hold = (route) => {
     const continuation = (async () => {
+      const response = holdResponse ? await route.fetch({ timeout: 15_000 }) : null
       if (!passing) {
         onHold?.(route)
         await gate
       }
-      await route.continue()
+      // Forward the upstream response unchanged; no fixture response body is manufactured.
+      if (response) {
+        try { await route.fulfill({ response }) } finally { await response.dispose() }
+      } else await route.continue()
     })()
     active.add(continuation)
     continuation.then(() => active.delete(continuation), (error) => {
@@ -840,6 +844,175 @@ export async function completeSolarReadiness(probe, runtime, locator, assertions
   runtime.evidence.solarReadiness.released = 'Ready'
 }
 
+// Faults change transport only. Successful replies always come from the private stack.
+export async function faultRouteOnce(page, pattern, onFault) {
+  let fired = false
+  let cleanupPromise
+  const active = new Set()
+  const errors = []
+  const handler = (route) => {
+    const fail = !fired
+    fired = true
+    const pending = (async () => {
+      if (fail) {
+        onFault?.(route.request())
+        await route.abort('failed')
+      } else await route.continue()
+    })()
+    active.add(pending)
+    pending.then(() => active.delete(pending), (error) => { errors.push(error); active.delete(pending) })
+    return pending
+  }
+  await page.route(pattern, handler)
+  return () => {
+    cleanupPromise ||= (async () => {
+      fired = true
+      await page.unroute(pattern, handler)
+      while (active.size) await Promise.allSettled([...active])
+      if (errors.length) throw errors[0]
+    })()
+    return cleanupPromise
+  }
+}
+
+export function drawingRequest(path, method = 'GET') {
+  return (response) => new URL(response.url()).pathname === path && response.request().method() === method
+}
+
+export async function setupVersionFault(probe, runtime, recipe, assertions = expect, setup = setupStep, history = openHistory) {
+  const { page, evidence } = runtime
+  await setup(probe, runtime, { kind: 'saved-version-history', redo: recipe.kind === 'hold-version-change' && recipe.redo }, assertions)
+  const path = `/api/drawings/${runtime.drawingId}`
+  const versions = evidence.savedVersionHistory
+  const fault = evidence.versionFault = { kind: recipe.kind, requests: [], head: versions.head }
+  if (recipe.kind === 'hold-version-change') {
+    const operation = recipe.redo ? 'redo' : 'undo'
+    fault.expected = expectedVersionHead({ sourceId: operation }, versions)
+    runtime.releaseVersionFault = await holdJobRoutes(page, `**${path}/${operation}`, (route) => fault.requests.push(route.request().url()), { holdResponse: true })
+    runtime.cleanup.push(runtime.releaseVersionFault)
+    const button = page.getByRole('toolbar', { name: 'Quick access', exact: true })
+      .getByRole('button', { name: `${recipe.redo ? 'Redo' : 'Undo'} version`, exact: true })
+    await assertions(button).toBeEnabled()
+    await button.click({ timeout: 15_000 })
+    await assertions.poll(() => fault.requests.length).toBe(1)
+    return
+  }
+  await history(probe, runtime, assertions)
+  const version = Math.min(...versions.versions.map((row) => Number(row.v)))
+  const panel = page.getByRole('dialog', { name: 'Version history', exact: true })
+  const row = panel.getByTestId(`vh-row-v${version}`)
+  await row.getByRole('button', { name: 'Restore', exact: true }).click({ timeout: 15_000 })
+  runtime.releaseVersionFault = await faultRouteOnce(page, `**${path}/intake?version=head`, (request) => fault.requests.push(request.url()))
+  runtime.cleanup.push(runtime.releaseVersionFault)
+  const committed = page.waitForResponse(drawingRequest(`${path}/versions/${version}/restore`, 'POST'), { timeout: 15_000 })
+  committed.catch(() => {})
+  await row.getByRole('button', { name: `Restore v${version}`, exact: true }).click({ timeout: 15_000 })
+  const response = await committed
+  assertions(response.ok()).toBe(true)
+  fault.receipt = await response.json()
+  fault.expected = Number(fault.receipt.head)
+  assertions(fault.expected).toBeGreaterThan(Number(versions.head))
+  await assertions.poll(() => fault.requests.length).toBe(1)
+  const lock = page.getByTestId('unreadable-head-lock')
+  await assertions(lock).toBeVisible()
+  await assertions(lock).toHaveAttribute('data-head', String(fault.expected))
+  await assertions(lock).toHaveAttribute('role', 'alert')
+  await panel.getByRole('button', { name: 'Close version history', exact: true }).click({ timeout: 15_000 })
+  await assertions(panel).toBeHidden()
+  if (runtime.ribbonTab) await setup(probe, runtime, { kind: 'ribbon-tab', name: runtime.ribbonTab }, assertions)
+}
+
+export async function finishVersionFault(runtime, assertions = expect) {
+  const { page, evidence } = runtime
+  const fault = evidence.versionFault
+  const path = `/api/drawings/${runtime.drawingId}`
+  const restore = fault.kind === 'fault-restored-head'
+  const responsePromise = page.waitForResponse(drawingRequest(restore ? `${path}/intake` : new URL(fault.requests[0]).pathname,
+    restore ? 'GET' : 'POST'), { timeout: 15_000 })
+  responsePromise.catch(() => {})
+  await runtime.releaseVersionFault()
+  if (restore) await page.getByTestId('unreadable-head-lock').getByRole('button', { name: 'Retry loading', exact: true }).click({ timeout: 15_000 })
+  const response = await responsePromise
+  assertions(response.ok()).toBe(true)
+  const seated = await response.json()
+  assertions(Number(seated.head)).toBe(fault.expected)
+  assertions(Number(seated.version)).toBe(fault.expected)
+  assertions(seated.intake).toBeTruthy()
+  await assertions(page.getByTestId('unreadable-head-lock')).toHaveCount(0)
+  if (!restore) await assertions(page.locator('.toast[role="status"]')).toContainText(
+    `${new URL(fault.requests[0]).pathname.endsWith('/undo') ? 'Reverted to' : 'Advanced to'} version ${fault.expected}`)
+  else await assertions(page.getByRole('toolbar', { name: 'Quick access', exact: true })
+    .getByRole('button', { name: 'Undo version', exact: true })).toBeEnabled()
+  if (await page.getByTestId('cad-edit-workbench').count()) {
+    await assertions(page.locator('.workspace-card')).toHaveAttribute('data-engine-document', `${runtime.drawingId}-v${fault.expected}.dxf`, { timeout: 60_000 })
+  }
+  fault.recovered = { head: seated.head, version: seated.version }
+}
+
+export async function setupHistoryFault(probe, runtime, assertions = expect, history = openHistory) {
+  const { page, evidence } = runtime
+  const path = `/api/drawings/${runtime.drawingId}/versions`
+  const fault = evidence.historyFault = { failed: [], recovery: [] }
+  runtime.releaseHistoryFault = await faultRouteOnce(page, `**${path}?*`, (request) => fault.failed.push(request.url()))
+  runtime.cleanup.push(runtime.releaseHistoryFault)
+  await history(probe, runtime, assertions)
+  await assertions(page.getByRole('dialog', { name: 'Version history', exact: true }).getByRole('alert')).toBeVisible()
+  assertions(fault.failed.length).toBe(1)
+  await runtime.releaseHistoryFault()
+  const observe = (request) => {
+    if (request.method() === 'GET' && new URL(request.url()).pathname === path) fault.recovery.push(request.url())
+  }
+  page.on('request', observe)
+  runtime.cleanup.push(async () => page.off('request', observe))
+}
+
+export async function assertHistoryRecovery(runtime, assertions = expect) {
+  const panel = runtime.page.getByRole('dialog', { name: 'Version history', exact: true })
+  await assertions(panel.getByRole('alert')).toHaveCount(0)
+  await assertions(panel.getByRole('button', { name: /^v\d+\b/ }).first()).toBeVisible()
+  assertions(runtime.evidence.historyFault.recovery.length).toBe(1)
+}
+
+export async function setupRealProject(runtime, assertions = expect) {
+  const { page, evidence } = runtime
+  const name = `Walk Escape ${Date.now()}`
+  const orgResponse = await page.request.post('/api/orgs', { data: { name }, timeout: 15_000 })
+  assertions(orgResponse.ok()).toBe(true)
+  const { org } = await orgResponse.json()
+  assertions(org.org_id).toBeTruthy()
+  const response = await page.request.post('/api/projects', { data: { name }, headers: { 'X-Org-Id': org.org_id }, timeout: 15_000 })
+  assertions(response.ok()).toBe(true)
+  const { project } = await response.json()
+  assertions(project.project_id).toBeTruthy()
+  const previousOrg = await page.evaluate((orgId) => {
+    const previous = localStorage.getItem('leaf.org_id')
+    localStorage.setItem('leaf.org_id', orgId)
+    return previous
+  }, org.org_id)
+  runtime.cleanup.push(async () => {
+    const close = page.getByRole('button', { name: 'Close workspace', exact: true })
+    if (await close.isVisible()) await close.click({ timeout: 15_000 })
+    await page.evaluate((previous) => {
+      if (previous == null) localStorage.removeItem('leaf.org_id')
+      else localStorage.setItem('leaf.org_id', previous)
+    }, previousOrg)
+  })
+  await page.reload({ timeout: 60_000 })
+  await page.getByRole('button', { name: 'Start', exact: true }).click({ timeout: 15_000 })
+  const board = page.getByRole('region', { name: 'Project workspace', exact: true })
+  await assertions(board).toBeVisible()
+  await board.getByRole('button', { name, exact: true }).click({ timeout: 15_000 })
+  await assertions(page.locator('.workspace-summary')).toContainText(name)
+  const back = page.getByRole('button', { name: 'Return to drawing', exact: true })
+  if (await back.isVisible()) await back.click({ timeout: 15_000 })
+  await assertions(board).toBeHidden()
+  await assertions(page.getByRole('dialog', { name: 'Version history', exact: true })).toBeHidden()
+  await assertions(page.locator('.strip-failed, .strip-running')).toHaveCount(0)
+  await assertions(page.getByRole('button', { name: /^Run / })).toHaveCount(0)
+  await assertions(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText('no selection')
+  evidence.escapeProject = { orgId: org.org_id, projectId: project.project_id, name }
+}
+
 export function seedSignOutIdentity({ identity, coachKey }) {
   if (sessionStorage.getItem('leaf.walk.w1k.identity-seeded') !== '1') {
     localStorage.setItem('leaf.jwt', identity.token)
@@ -965,6 +1138,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'create-line', 'hold-engine-edit', 'start-pending-run', 'require-authoring-off', 'fresh-history',
   'undo-edit', 'preview-version', 'zoom-before-fit', 'require-engine-state', 'crash-engine-worker',
   'require-surface-context', 'require-local-state',
+  'hold-version-change', 'fault-restored-head', 'fault-history',
   'saved-version-history', 'require-versionless-drawing', 'seed-solar-graph',
   'require-solar-document', 'hold-solar-projection',
 ]))
@@ -973,7 +1147,7 @@ export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
   'require-engine-state', 'crash-engine-worker',
   'require-solar-document',
 ]))
-const localFixtureReason = (recipe) => `The isolated stack has no public fixture recipe for ${recipe.state}; required context ${JSON.stringify(recipe.context)}`
+const localFixtureReason = (recipe) => recipe.reason || `The isolated stack has no public fixture recipe for ${recipe.state}; required context ${JSON.stringify(recipe.context)}`
 
 export const TOOL_ARM_EFFECT_KINDS = Object.freeze(new Set(['opens']))
 const AVAILABILITY_FIELDS = Object.freeze(['entitled', 'engine_ready', 'input_ready', 'implemented'])
@@ -1062,6 +1236,9 @@ export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailabilit
 export async function setupStep(probe, runtime, recipe, assertions = runtime.recipeAssertions || expect) {
   const { page, stack, evidence } = runtime
   switch (recipe.kind) {
+    case 'hold-version-change':
+    case 'fault-restored-head': await setupVersionFault(probe, runtime, recipe, assertions); return
+    case 'fault-history': await setupHistoryFault(probe, runtime, assertions); return
     case 'require-versionless-drawing': {
       assertions(runtime.drawingId).toBeTruthy()
       const response = await page.request.get(`/api/drawings/${runtime.drawingId}/versions`, { timeout: 15_000 })
@@ -1842,6 +2019,7 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await expect(locator).toHaveAccessibleName(new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     await expect(probe.locator.trigger === 'select' ? locator.locator('xpath=ancestor::label[contains(concat(" ", normalize-space(@class), " "), " ribbon-widget ")][1]') : locator)
       .toHaveAttribute('title', new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    if (runtime.evidence?.versionFault) await finishVersionFault(runtime, assertions)
     return
   }
   if (/^engine-mode:(ortho|osnap)$/.test(target)) {
@@ -2035,9 +2213,16 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       await expect(page.locator('aside.rail').getByText('count-by-layer', { exact: true }).first()).toBeVisible()
       runtime.evidence.pendingRun.detached = true
     }
+    else if (rung === 'project') {
+      await expect(page.locator('.workspace-summary')).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Close workspace', exact: true })).toHaveCount(0)
+      expect(runtime.evidence.escapeProject.projectId).toBeTruthy()
+      runtime.evidence.escapeProject.closed = true
+    }
     else throw new Error(`No observable Escape oracle for ${rung}`)
     return
   }
+  if (target === 'retry:history') { await assertHistoryRecovery(runtime, assertions); return }
   if (target.startsWith('viewer-')) {
     if (target === 'viewer-home') {
       // CadOverview rounds SVG coordinates to tenths of an overview unit.

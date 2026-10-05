@@ -18,6 +18,7 @@ const knownProofSpecs = [
   'w1x-recipes.spec.mjs',
   'w1z-oracles.spec.mjs',
   'w1z-states.spec.mjs',
+  'w1z-faults.spec.mjs',
   'w1y-recipes.spec.mjs',
 ]
 
