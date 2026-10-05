@@ -371,6 +371,110 @@ def _canonical_tenant_id(tenant: Any, context: Dict[str, Any]) -> str:
     return canonical if context.get("authority_mode") == "postgres_canonical" else str(tenant)
 
 
+def _is_project_read_tool(tool):
+    """Admit only explicit generic drawing reads, outside specialized adapters."""
+    caps = tool.get("capabilities")
+    return (
+        isinstance(caps, list) and bool(caps)
+        and all(cap == "drawing.read" for cap in caps)
+        and entitlements.tool_required_capability(tool) == "run_read"
+        and not write_loop.is_write_tool(tool)
+        and not tool.get("canonical_only")
+        and "solar" not in tool and "graph_input" not in tool
+        and tool.get("name") not in capability_catalog.SOLAR_CAPABILITIES
+        and capability_catalog.capability_adapter(tool.get("name")) is None
+    )
+
+
+def _resolve_project_read_context(tenant, headers, req, params):
+    """Bind a catalog read to verified identity and an exact canonical version."""
+    import solar_project_context
+
+    org_header, project_header = headers
+    binding = jobs.platform_link.resolve_caller_binding(tenant)
+    if binding is None:
+        raise jobs.platform_link.ProjectSessionForbidden()
+    org_id = uuid.UUID(str(binding.platform_tenant_id))
+    if org_header is not None and uuid.UUID(str(org_header)) != org_id:
+        raise ValueError("project context does not belong to the verified platform tenant")
+    project_id = uuid.UUID(str(project_header))
+    authority = jobs.platform_link.resolve_project_authority(org_id, project_id)
+    execution_tenant = _canonical_tenant_id(tenant, authority)
+    if execution_tenant != str(tenant):
+        raise ValueError("catalog tenant does not match the verified platform identity binding")
+    jobs.platform_link.require_project_access(tenant, project_id, write=False, binding=binding)
+    if req.dwg_version is not None:
+        raise ValueError(
+            "dwg_version applies to the legacy path; canonical runs pin by version UUID in dwg")
+    if req.expected_drawing_head is not None:
+        raise ValueError("expected_drawing_head applies only to legacy versioned drawings")
+    try:
+        version_id = uuid.UUID(req.dwg)
+    except (ValueError, AttributeError):
+        raise ValueError("a canonical drawing version UUID is required") from None
+    drawing_id = None
+    if "drawing_id" in params:
+        try:
+            drawing_id = uuid.UUID(str(params["drawing_id"]))
+        except (ValueError, AttributeError):
+            solar_project_context.refuse("INVALID_BINDING")
+    return solar_project_context.resolve_context(
+        tenant, project_id, version_id, drawing_id=drawing_id, write=False)
+
+
+def _run_project_read(tool, tenant, headers, req, params):
+    import solar_project_context
+    import tool_loader
+    from routers import project_drawings
+
+    try:
+        context = _resolve_project_read_context(tenant, headers, req, params)
+        org_id = context.binding.organization_id
+        jobs.platform_link.platform_store()
+        import leaf_platform.entitlements as platform_entitlements
+        denial, _org = platform_entitlements.stored_job_entitlement_verdict(org_id, "extract")
+        if denial is not None:
+            return denial
+    except jobs.platform_link.ProjectSessionForbidden:
+        return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                              retryable=False, status_code=403)
+    except (jobs.platform_link.ProjectAuthorityNotFound, LookupError):
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("CONTEXT_NOT_FOUND"))
+    except solar_project_context.ProjectContextError as exc:
+        if exc.reason_code == "SIP_R1_PROJECT_FORBIDDEN":
+            return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                                  retryable=False, status_code=403)
+        def refusal():
+            raise exc
+        return project_drawings._dispatch(refusal)
+    except ValueError as exc:
+        message = str(exc)
+        return error_response(ErrorCode.BAD_PARAMS, message, retryable=False,
+                              status_code=400 if "required" in message else 409)
+    except Exception:
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
+    env = tool_loader.run_tool_dynamic(
+        tool, context.intake, params, aps_live=False, da=None, tenant_id=str(org_id))
+    body = {
+        key: env[key]
+        for key in (
+            "ok", "tool", "version", "result", "overlay", "timing_ms",
+            "cost", "error", "degraded_mode", "execution_provenance",
+        )
+        if key in env
+    }
+    binding = context.binding
+    body["project_context"] = {
+        "organization_id": str(binding.organization_id),
+        "project_id": str(binding.project_id), "drawing_id": str(binding.drawing_id),
+        "input_version_id": str(binding.input_version_id),
+        "intake_sha256": context.intake_sha256,
+    }
+    status = 200 if body.get("ok") else DEFAULT_HTTP_STATUS.get(
+        (body.get("error") or {}).get("error_code"), 500)
+    return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
+
+
 def _checkout_identity(tenant_id: Any, drawing_id: str,
                        capability: Optional[str]) -> Tuple[str, Optional[int]]:
     """Exchange the presented capability for the (holder, fence) the write path
@@ -560,6 +664,9 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     # merge authored default_params under caller params
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
+
+    if isinstance(x_project_id, str) and x_project_id and _is_project_read_tool(tool):
+        return _run_project_read(tool, tenant_id, (x_org_id, x_project_id), req, params)
 
     # An authored tool that declares the W1 graph intake is pinned and anonymous
     # exactly like the trusted read kind; only the broker's execution differs.
