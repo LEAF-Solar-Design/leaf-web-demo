@@ -11,13 +11,14 @@ def test_default_artifact_is_stable_and_versions_are_hydrated(make_org):
     project = store.create_project(org.org_id, "Drawing identity project")
     first = store.create_drawing_version(org.org_id, project.project_id,
                                          oss_object="drawings/v1.dwg")
-    second = store.create_drawing_version(org.org_id, project.project_id,
-                                          oss_object="drawings/v2.dwg")
-    assert first.drawing_id == second.drawing_id
-    assert (first.seq, second.seq) == (1, 2)
+    with pytest.raises(ValueError, match="SIP_R2_PUBLICATION_REQUIRED"):
+        store.create_drawing_version(org.org_id, project.project_id,
+                                     oss_object="drawings/v2.dwg")
+    assert first.seq == 1
     hydrated = store.hydrate_project(org.org_id, project.project_id)
     assert hydrated is not None
     assert len(hydrated["drawing_artifacts"]) == 1
+    assert len(hydrated["drawing_versions"]) == 1
     assert hydrated["drawing_artifacts"][0]["drawing_id"] == str(first.drawing_id)
     assert {item["drawing_id"] for item in hydrated["drawing_versions"]} == {
         str(first.drawing_id)

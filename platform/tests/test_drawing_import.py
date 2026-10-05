@@ -461,6 +461,69 @@ def test_account_upload_receipt_imports_exact_ready_source(
         sys.path.remove(da_dir)
 
 
+def test_occupied_artifact_requires_fenced_publication(client, make_org):
+    org, project = _canonical_project(make_org, "Occupied import artifact")
+    binding = _binding(org.org_id)
+    drawing_id, *_ = _ready_upload(org.org_id, version=7)
+    path = f"/api/projects/{project.project_id}/drawing-versions/import"
+    headers = _headers(org.org_id, binding.binding_id, "first-bootstrap")
+    first = client.post(path, headers=headers, json=_body(drawing_id, version=7))
+    assert first.status_code == 201 and first.json()["drawing_version"]["seq"] == 7
+    # A later ready source version used to advance this artifact through import.
+    object_key = f"tenants/{org.org_id}/drawings/{drawing_id}/v/00000008.dwg"
+    intake_ref = object_key[:-4] + ".intake.json"
+    with cursor() as cur:
+        cur.execute("UPDATE drawing_store_versions SET version=8, object_key=%s, intake_ref=%s "
+                    "WHERE tenant_id=%s AND drawing_id=%s AND version=7",
+                    (object_key, intake_ref, str(org.org_id), drawing_id))
+        cur.execute("UPDATE drawing_upload_attempts SET marker=marker || %s "
+                    "WHERE tenant_id=%s AND drawing_id=%s",
+                    (Jsonb({"extracted_version": 8, "intake_ref": intake_ref}),
+                     str(org.org_id), drawing_id))
+    rejected = client.post(path,
+        headers=_headers(org.org_id, binding.binding_id, "new-source-version"),
+        json=_body(drawing_id, version=8))
+    assert rejected.status_code == 409
+    replay = client.post(path, headers=headers, json=_body(drawing_id, version=7))
+    assert replay.status_code == 201 and replay.json()["replayed"] is True
+    assert replay.json()["drawing_version"] == first.json()["drawing_version"]
+    assert len(store.list_drawing_versions(org.org_id, project.project_id)) == 1
+
+
+def test_deleted_import_artifact_refuses_replay(client, make_org):
+    org, project = _canonical_project(make_org, "Deleted import artifact")
+    binding = _binding(org.org_id)
+    drawing_id, *_ = _ready_upload(org.org_id)
+    path = f"/api/projects/{project.project_id}/drawing-versions/import"
+    headers = _headers(org.org_id, binding.binding_id, "deleted-artifact")
+    assert client.post(path, headers=headers, json=_body(drawing_id)).status_code == 201
+    with cursor() as cur:
+        cur.execute("UPDATE drawing_artifacts SET status='deleted' "
+                    "WHERE org_id=%s AND drawing_id=%s", (org.org_id, uuid.UUID(drawing_id)))
+    assert client.post(path, headers=headers, json=_body(drawing_id)).status_code == 404
+    assert client.post(path,
+        headers=_headers(org.org_id, binding.binding_id, "replacement-artifact"),
+        json=_body(drawing_id)).status_code == 404
+
+
+def test_deleted_import_output_retains_replay_key(client, make_org):
+    org, project = _canonical_project(make_org, "Deleted import output")
+    binding = _binding(org.org_id)
+    drawing_id, *_ = _ready_upload(org.org_id)
+    path = f"/api/projects/{project.project_id}/drawing-versions/import"
+    headers = _headers(org.org_id, binding.binding_id, "deleted-output")
+    first = client.post(path, headers=headers, json=_body(drawing_id))
+    assert first.status_code == 201
+    with cursor() as cur:
+        cur.execute("UPDATE drawing_versions SET deleted_at=clock_timestamp() "
+                    "WHERE org_id=%s AND version_id=%s",
+                    (org.org_id, uuid.UUID(first.json()["drawing_version"]["version_id"])))
+    assert client.post(path, headers=headers, json=_body(drawing_id)).status_code == 404
+    assert client.post(path,
+        headers=_headers(org.org_id, binding.binding_id, "replacement-output"),
+        json=_body(drawing_id)).status_code == 409
+
+
 def test_concurrent_exact_replay_creates_one_version(make_org):
     org, project = _canonical_project(make_org, "Drawing import concurrency")
     binding = _binding(org.org_id)

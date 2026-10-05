@@ -49,6 +49,8 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "platform-sip-r2-publication",
+    "server-sip-r2-publication",
     "server-sip-r1-context",
     "server-sip-r1-routes",
     "server-c1a-project-read",

@@ -1,10 +1,15 @@
 """Canonical drawing bindings and persistent checkout generations."""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
+
+from psycopg.types.json import Jsonb
 
 from . import db, store
 from .models import DrawingVersion
@@ -276,3 +281,122 @@ def verify_checkout(org_id, project_id, drawing_id, *, actor_binding_id, expecte
     if lease.holder_binding_id != actor_binding_id:
         refuse("CHECKOUT_DENIED")
     return lease
+
+
+PUBLICATION_SCHEMA = "leaf.project-drawing-publication.v1"
+
+
+def validate_publication_params(org_id, project_id, drawing_id, parent_id,
+                                actor_binding_id, expected_fence, request_id, intake_sha256):
+    _ids(org_id, project_id, drawing_id, parent_id, actor_binding_id)
+    _trusted_fence(expected_fence)
+    if (not isinstance(request_id, UUID) or not isinstance(intake_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", intake_sha256) is None):
+        raise ProjectContextError("SIP_R2_PUBLICATION_PARAMS_INVALID")
+
+
+def publication_intake_key(org_id, project_id, drawing_id, digest):
+    return (f"tenants/{org_id}/projects/{project_id}/drawings/{drawing_id}/"
+            f"intakes/{digest}.json")
+
+
+def _publication_proof(org_id, project_id, drawing_id, parent_id, actor, fence,
+                       request_id, digest, base_object_ref):
+    return {"schema": PUBLICATION_SCHEMA, "organization_id": str(org_id),
+            "project_id": str(project_id), "drawing_id": str(drawing_id),
+            "parent_version_id": str(parent_id), "request_id": str(request_id),
+            "actor_binding_id": str(actor), "checkout_fence": str(fence),
+            "intake": {"ref": publication_intake_key(org_id, project_id, drawing_id, digest),
+                       "sha256": digest}, "base_object_ref": base_object_ref}
+
+
+def _publication_fingerprint(proof):
+    return hashlib.sha256(json.dumps(proof, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def publish_version(org_id: UUID, project_id: UUID, drawing_id: UUID, *,
+                    expected_parent_version_id: UUID, actor_binding_id: UUID,
+                    expected_fence: int, request_id: UUID, intake_sha256: str,
+                    conn, before_new=None) -> DrawingVersion:
+    """Publish under the artifact fence; the caller owns commit and rollback."""
+    validate_publication_params(org_id, project_id, drawing_id, expected_parent_version_id,
+                                actor_binding_id, expected_fence, request_id, intake_sha256)
+    args = {"org_id": org_id, "project_id": project_id, "drawing_id": drawing_id,
+            "parent_id": expected_parent_version_id, "actor_binding_id": actor_binding_id,
+            "expected_fence": expected_fence, "key": "sip-r2:" + str(request_id)}
+    with conn.cursor() as cur:
+        _scope(cur, org_id, project_id, drawing_id, actor_binding_id=actor_binding_id)
+
+        def replay():
+            # Tombstones retain their request keys forever.
+            cur.execute(
+                "SELECT * FROM drawing_versions WHERE org_id = %(org_id)s "
+                "AND project_id = %(project_id)s AND idempotency_key = %(key)s", args)
+            row = cur.fetchone()
+            if row is None:
+                return None
+            if row["deleted_at"] is not None:
+                refuse("CONTEXT_NOT_FOUND")
+            proof = _publication_proof(org_id, project_id, drawing_id,
+                expected_parent_version_id, actor_binding_id, expected_fence,
+                request_id, intake_sha256, row["oss_object"])
+            if (row["drawing_id"] != drawing_id or row["provenance"] != proof
+                    or row["intake_ref"] != proof["intake"]["ref"]
+                    or row["import_fingerprint"] != _publication_fingerprint(proof)):
+                raise ProjectContextError("SIP_R2_IDEMPOTENCY_CONFLICT")
+            return DrawingVersion.from_row(row)
+
+        prior = replay()
+        if prior is not None:
+            return prior
+        if before_new is not None:
+            before_new()
+        cur.execute(
+            "SELECT * FROM drawing_versions WHERE org_id = %(org_id)s "
+            "AND project_id = %(project_id)s AND drawing_id = %(drawing_id)s "
+            "AND version_id = %(parent_id)s AND deleted_at IS NULL FOR SHARE", args)
+        parent = cur.fetchone()
+        if parent is None:
+            refuse("CONTEXT_NOT_FOUND")
+        verify_checkout(org_id, project_id, drawing_id, actor_binding_id=actor_binding_id,
+                        expected_fence=expected_fence, conn=conn)
+        cur.execute(
+            "SELECT version_id FROM drawing_versions WHERE org_id = %(org_id)s "
+            "AND project_id = %(project_id)s AND drawing_id = %(drawing_id)s "
+            "AND deleted_at IS NULL ORDER BY seq DESC LIMIT 1 FOR SHARE", args)
+        head = cur.fetchone()
+        if head is None:
+            refuse("CONTEXT_NOT_FOUND")
+        if head["version_id"] != expected_parent_version_id:
+            refuse("STALE_VERSION")
+        cur.execute(
+            "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM drawing_versions "
+            "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+            "AND drawing_id = %(drawing_id)s", args)
+        seq = cur.fetchone()["next_seq"]
+        proof = _publication_proof(org_id, project_id, drawing_id, expected_parent_version_id,
+            actor_binding_id, expected_fence, request_id, intake_sha256, parent["oss_object"])
+        args.update(version_id=uuid4(), seq=seq, oss_object=parent["oss_object"],
+                    intake_ref=proof["intake"]["ref"], created_by=str(actor_binding_id),
+                    provenance=Jsonb(proof), fingerprint=_publication_fingerprint(proof))
+        cur.execute(
+            "INSERT INTO drawing_versions (version_id, drawing_id, project_id, org_id, seq, "
+            "oss_object, intake_ref, created_by, provenance, idempotency_key, import_fingerprint) "
+            "SELECT %(version_id)s, %(drawing_id)s, %(project_id)s, %(org_id)s, %(seq)s, "
+            "%(oss_object)s, %(intake_ref)s, %(created_by)s, %(provenance)s, %(key)s, %(fingerprint)s "
+            "FROM project_drawing_checkouts c WHERE c.org_id = %(org_id)s "
+            "AND c.project_id = %(project_id)s AND c.drawing_id = %(drawing_id)s "
+            "AND c.holder IS NOT NULL AND c.holder_binding_id = %(actor_binding_id)s "
+            "AND c.fence = %(expected_fence)s AND c.expires_at > clock_timestamp() "
+            "ON CONFLICT (org_id, project_id, idempotency_key) "
+            "WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *", args)
+        row = cur.fetchone()
+        if row is not None:
+            return DrawingVersion.from_row(row)
+        prior = replay()
+        if prior is not None:
+            return prior
+        verify_checkout(org_id, project_id, drawing_id, actor_binding_id=actor_binding_id,
+                        expected_fence=expected_fence, conn=conn)
+        refuse("INTERNAL")

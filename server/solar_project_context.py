@@ -89,6 +89,10 @@ def _json_float(value):
 def _read_intake(binding):
     version = binding.version
     provenance = version.provenance
+    if isinstance(provenance, dict) and provenance.get("schema") == "leaf.project-drawing-publication.v1":
+        key, digest = _publication_reference(binding)
+        raw, intake = _load_intake(binding.organization_id, key, digest)
+        return VerifiedProjectContext(binding, raw, intake, digest, key)
     if (not version.intake_ref or not isinstance(provenance, dict)
             or provenance.get("schema") != "leaf.drawing-import.v1"):
         refuse("INTAKE_PROOF_REQUIRED")
@@ -113,8 +117,48 @@ def _read_intake(binding):
     if (version.intake_ref != key or proof["ref"] != key
             or version.oss_object != object_key or object_proof.get("ref") != object_key):
         refuse("INTAKE_REFERENCE_INVALID")
+    raw, intake = _load_intake(binding.organization_id, key, proof["sha256"])
+    return VerifiedProjectContext(binding, raw, intake, proof["sha256"], key)
+
+
+def _publication_reference(binding):
+    version = binding.version
+    provenance = version.provenance
+    proof = provenance.get("intake")
+    if (not version.intake_ref or not isinstance(proof, dict)
+            or not proof.get("ref") or not isinstance(proof.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", proof["sha256"]) is None):
+        refuse("INTAKE_PROOF_REQUIRED")
+    for field in ("organization_id", "project_id", "drawing_id", "parent_version_id",
+                  "request_id", "actor_binding_id"):
+        value = provenance.get(field)
+        try:
+            if not isinstance(value, str) or str(UUID(value)) != value:
+                raise ValueError("noncanonical UUID")
+        except (ValueError, TypeError, AttributeError):
+            refuse("INTAKE_REFERENCE_INVALID")
+    fence = provenance.get("checkout_fence")
+    if (not isinstance(fence, str) or re.fullmatch(r"[1-9][0-9]{0,18}", fence) is None
+            or int(fence) > 9223372036854775807):
+        refuse("INTAKE_REFERENCE_INVALID")
+    key = graph_store().publication_intake_key(
+        binding.organization_id, binding.project_id, binding.drawing_id, proof["sha256"])
+    if (provenance["organization_id"] != str(binding.organization_id)
+            or provenance["project_id"] != str(binding.project_id)
+            or provenance["drawing_id"] != str(binding.drawing_id)
+            or version.org_id != binding.organization_id
+            or version.project_id != binding.project_id or version.drawing_id != binding.drawing_id
+            or version.idempotency_key != "sip-r2:" + provenance["request_id"]
+            or "base_object_ref" not in provenance
+            or provenance["base_object_ref"] != version.oss_object
+            or version.intake_ref != key or proof["ref"] != key):
+        refuse("INTAKE_REFERENCE_INVALID")
+    return key, proof["sha256"]
+
+
+def _load_intake(org_id, key, expected_digest):
     try:
-        raw = write_loop.upload_backend_for_tenant(str(binding.organization_id)).get(key)
+        raw = write_loop.upload_backend_for_tenant(str(org_id)).get(key)
         if not isinstance(raw, bytes):
             refuse("INTAKE_UNAVAILABLE")
     except ProjectContextError:
@@ -122,7 +166,7 @@ def _read_intake(binding):
     except Exception:
         refuse("INTAKE_UNAVAILABLE")
     digest = hashlib.sha256(raw).hexdigest()
-    if digest != proof["sha256"]:
+    if digest != expected_digest:
         refuse("INTAKE_DIGEST_MISMATCH")
     try:
         intake = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_pairs,
@@ -131,7 +175,24 @@ def _read_intake(binding):
             raise ValueError("intake must be an object")
     except (UnicodeError, ValueError, RecursionError):
         refuse("INTAKE_INVALID")
-    return VerifiedProjectContext(binding, raw, intake, digest, key)
+    return raw, intake
+
+
+def publish_project_version(tenant, project_id, drawing_id, *, expected_parent_version_id,
+                            expected_fence, request_id, intake_sha256):
+    """Publish already-durable intake using the authenticated binding and admission fence."""
+    org_id, actor = _access(tenant, project_id, write=True)
+    graph_store().validate_publication_params(org_id, project_id, drawing_id,
+        expected_parent_version_id, actor, expected_fence, request_id, intake_sha256)
+    key = graph_store().publication_intake_key(org_id, project_id, drawing_id, intake_sha256)
+
+    def operation(conn):
+        return graph_store().publish_version(org_id, project_id, drawing_id,
+            expected_parent_version_id=expected_parent_version_id, actor_binding_id=actor,
+            expected_fence=expected_fence, request_id=request_id, intake_sha256=intake_sha256,
+            conn=conn, before_new=lambda: _load_intake(org_id, key, intake_sha256))
+
+    return _mutation(operation)
 
 
 def resolve_context(tenant, project_id, input_version_id, *, drawing_id=None, write=False):
