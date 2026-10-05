@@ -1,7 +1,127 @@
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import JobRail from '../components/JobRail.jsx'
 import ReceiptPanel, { deepRedact } from '../projects/ReceiptPanel.jsx'
 import ShipReceipts from '../ios/ShipReceipts.jsx'
 import '../site/projectBoard.css'
+
+export const BOARD_PANE_REASONS = Object.freeze({
+  conversationDemo: 'Conversation is unavailable in this offline demo.',
+  annotationsDemo: 'Annotations are unavailable in this offline demo.',
+  authoringDemo: 'Tool authoring is unavailable in this offline demo.',
+  signIn: 'Sign in to use this pane.',
+  project: 'Open a project to use this pane.',
+  drawing: 'Mount a drawing to view annotations.',
+  session: "Open Conversation to start this project's session.",
+  opening: 'Opening conversation.',
+  failed: 'Conversation could not be opened.',
+  loading: 'Loading annotations.',
+  empty: 'No annotations yet.',
+})
+
+export function boardPaneReason(pane, { mock, signedIn, projectId, drawingId, sessionId }) {
+  if (mock) return BOARD_PANE_REASONS[`${pane}Demo`]
+  if (!signedIn) return BOARD_PANE_REASONS.signIn
+  if (!projectId) return BOARD_PANE_REASONS.project
+  if (pane === 'annotations' && !drawingId) return BOARD_PANE_REASONS.drawing
+  if (pane === 'annotations' && !sessionId) return BOARD_PANE_REASONS.session
+  return null
+}
+
+export function deriveBoardPaneSeats({
+  mock, signedIn, sessionStatus, projectId, drawingId, sessionId,
+  boardHostsProject, projectPane, canConverse, agentMode, authorOpen,
+  conversationSource, conversationDestination, annotationSource,
+  annotationDestination, authorSource, authorDestination, authorFallback,
+}) {
+  const live = !mock && signedIn && sessionStatus === 'active'
+  const boardPaneContext = {
+    mock, signedIn: signedIn && sessionStatus === 'active',
+    projectId, drawingId, sessionId,
+  }
+  const boardConversation = boardHostsProject && projectPane === 'conversation'
+  const boardAnnotations = boardHostsProject && projectPane === 'annotations'
+  const boardAuthor = boardHostsProject && projectPane === 'authoring'
+  const conversationEligible = !boardPaneReason('conversation', boardPaneContext) && canConverse
+  const authorEligible = !boardPaneReason('authoring', boardPaneContext)
+  return {
+    boardPaneContext, boardConversation, boardAnnotations, boardAuthor,
+    conversationEligible, authorEligible,
+    annotationEnabled: Boolean(live && projectId && drawingId && sessionId),
+    conversationMounted: Boolean(live && canConverse && agentMode && sessionId),
+    authorMounted: Boolean(live && (authorOpen || (boardAuthor && authorEligible))),
+    conversationTarget: boardConversation && conversationEligible
+      ? conversationDestination : conversationSource,
+    annotationTarget: boardAnnotations ? annotationDestination : annotationSource,
+    authorTarget: boardAuthor && authorEligible
+      ? authorDestination : authorSource || authorFallback,
+  }
+}
+
+export function BoardPaneState({ pane, context, onOpenConversation, children }) {
+  const reason = boardPaneReason(pane, context)
+  if (!reason) return children
+  return <div><p>{reason}</p>{reason === BOARD_PANE_REASONS.session &&
+    <button type="button" onClick={onOpenConversation}>Open Conversation</button>}</div>
+}
+
+// The portal target and React position never change. Only its DOM placement does.
+export function PersistentSeat({ destination, children }) {
+  const [container] = useState(() => document.createElement('div'))
+  useLayoutEffect(() => {
+    if (destination && container.parentNode !== destination) destination.appendChild(container)
+    if (!destination) container.remove()
+  }, [container, destination])
+  useLayoutEffect(() => () => container.remove(), [container])
+  return createPortal(children, container)
+}
+
+export function useBoardConversation({ active, eligible, sessionId, context, attach, onOpen }) {
+  const [attempt, setAttempt] = useState(null)
+  const pending = useRef(null)
+  const current = useRef(context)
+  current.current = context
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+  const retry = () => setAttempt(null)
+  useEffect(() => {
+    if (sessionId) {
+      if (attempt) setAttempt(null)
+      return
+    }
+    if (!active || !eligible || sessionId || (attempt?.context === context)
+        || pending.current?.context === context) return
+    const request = { context }
+    pending.current = request
+    setAttempt({ context, status: 'opening' })
+    const attachment = attach()
+    onOpen()
+    attachment.then(() => {
+      if (alive.current && current.current === context) setAttempt({ context, status: 'ready' })
+    }, () => {
+      if (alive.current && current.current === context) setAttempt({ context, status: 'failed' })
+    }).finally(() => {
+      if (pending.current === request) pending.current = null
+    })
+  }, [active, eligible, sessionId, context, attach, onOpen, attempt])
+  return { status: attempt?.context === context ? attempt.status : 'opening', retry }
+}
+
+export function ConversationOpening({ status, onRetry }) {
+  return status === 'failed'
+    ? <div><p>{BOARD_PANE_REASONS.failed}</p><button type="button" onClick={onRetry}>Retry</button></div>
+    : <p>{BOARD_PANE_REASONS.opening}</p>
+}
+
+export function AnnotationPaneState({ annotations, children }) {
+  if (annotations.annotation) return children
+  if (annotations.error) return <div><p role="alert">{annotations.error}</p>
+    <button type="button" onClick={annotations.reload}>Retry</button></div>
+  return <p>{annotations.loaded ? BOARD_PANE_REASONS.empty : BOARD_PANE_REASONS.loading}</p>
+}
 
 export const PANE_NAMES = Object.freeze([
   'material', 'versions', 'conversation', 'tools', 'catalog', 'jobs', 'receipts',

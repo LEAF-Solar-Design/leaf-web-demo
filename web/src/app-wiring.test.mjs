@@ -24,6 +24,302 @@ import {
 import { slashDecision, alternativeDecision } from './controllers/catalog/catalogRouting.js'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+
+describe('project board live pane wiring', () => {
+  const tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
+  function elements(name) {
+    const found = []
+    csuWalk(tree, (node) => {
+      if (node.type === 'JSXElement' && node.openingElement.name.type === 'JSXIdentifier'
+          && node.openingElement.name.name === name) found.push(node)
+    })
+    return found
+  }
+  function expression(element, name) {
+    const attr = element.openingElement.attributes.find((item) => item.name?.name === name)
+    assert.ok(attr, `${name} must be wired`)
+    return attr.value?.expression
+  }
+  function binding(element, name, expected) {
+    const value = expression(element, name)
+    assert.equal(appSource.slice(value.start, value.end), expected)
+  }
+  const paneSource = readFileSync(
+    new URL('./workspace/ProjectWorkspacePanels.jsx', import.meta.url), 'utf8',
+  )
+  const paneTree = parseJs(paneSource, { sourceType: 'module', plugins: ['jsx'] })
+  const pureNames = ['BOARD_PANE_REASONS', 'boardPaneReason', 'deriveBoardPaneSeats']
+  const pureDeclarations = paneTree.program.body
+    .filter((node) => node.type === 'ExportNamedDeclaration' && node.declaration)
+    .map((node) => node.declaration)
+    .filter((node) => pureNames.includes(
+      node.type === 'VariableDeclaration' ? node.declarations[0].id.name : node.id?.name,
+    ))
+  function productionDerivation() {
+    assert.equal(pureDeclarations.length, 3)
+    return new Function(
+      pureDeclarations.map((node) => paneSource.slice(node.start, node.end)).join('\n')
+        + '\nreturn deriveBoardPaneSeats',
+    )()
+  }
+  function source(node) {
+    return appSource.slice(node.start, node.end)
+  }
+  function declaration(name) {
+    const found = []
+    csuWalk(tree, (node) => {
+      if (node.type !== 'VariableDeclarator') return
+      if (node.id.type === 'Identifier' && node.id.name === name) found.push(node)
+      if (node.id.type === 'ObjectPattern'
+          && node.id.properties.some((prop) => prop.value?.name === name)) found.push(node)
+    })
+    assert.equal(found.length, 1, `one live binding for ${name}`)
+    return found[0]
+  }
+  function evaluate(node, scope) {
+    return new Function(...Object.keys(scope), `return (${source(node)})`)(
+      ...Object.values(scope),
+    )
+  }
+  function bindingValue(name, scope) {
+    const node = declaration(name)
+    const value = evaluate(node.init, scope)
+    if (node.id.type === 'Identifier') return value
+    const prop = node.id.properties.find((item) => item.value?.name === name)
+    assert.equal(csuKey(prop), name)
+    return value[name]
+  }
+  function objectBindings(node) {
+    assert.equal(node.type, 'ObjectExpression')
+    return Object.fromEntries(node.properties.map((prop) => {
+      const key = csuKey(prop)
+      assert.ok(key)
+      return [key, source(prop.value)]
+    }))
+  }
+  function appSeats(patch = {}) {
+    const imported = tree.program.body.find((node) =>
+      node.type === 'ImportDeclaration'
+      && node.source.value === './workspace/ProjectWorkspacePanels.jsx')
+    assert.ok(imported?.specifiers.some((item) =>
+      item.imported?.name === 'deriveBoardPaneSeats'
+      && item.local.name === 'deriveBoardPaneSeats'))
+
+    const call = declaration('paneSeats').init
+    assert.equal(call.type, 'CallExpression')
+    assert.equal(call.callee.name, 'deriveBoardPaneSeats')
+    assert.equal(call.arguments.length, 1)
+    const identities = [
+      'boardHostsProject', 'projectPane', 'canConverse', 'agentMode', 'authorOpen',
+      'conversationSource', 'conversationDestination', 'annotationSource',
+      'annotationDestination', 'authorSource', 'authorDestination', 'authorFallback',
+    ]
+    assert.deepEqual(objectBindings(call.arguments[0]), {
+      mock: 'mock', signedIn: 'signedIn', sessionStatus: 'session.status',
+      projectId: 'openProjectId', drawingId: 'drawingState?.drawing_id',
+      sessionId: 'agentSessionId',
+      ...Object.fromEntries(identities.map((name) => [name, name])),
+    })
+    const scope = {
+      mock: false, signedIn: true, session: { status: 'active' },
+      openProjectId: 'p1', drawingState: { drawing_id: 'd1' },
+      agentSessionId: 'session-a', boardHostsProject: true,
+      projectPane: 'conversation', canConverse: true, agentMode: 'primary',
+      authorOpen: false, conversationSource: 'conversation-source',
+      conversationDestination: 'conversation-board',
+      annotationSource: 'annotation-source', annotationDestination: 'annotation-board',
+      authorSource: 'author-source', authorDestination: 'author-board',
+      authorFallback: 'author-fallback',
+      ...patch,
+      deriveBoardPaneSeats: productionDerivation(),
+    }
+    const result = evaluate(call, scope)
+    scope.paneSeats = result
+    for (const name of [
+      'boardPaneContext', 'boardConversation', 'boardAnnotations', 'boardAuthor',
+      'conversationEligible', 'authorEligible', 'annotationEnabled',
+    ]) {
+      assert.deepEqual(bindingValue(name, scope), result[name], `${name} uses the derivation`)
+    }
+    return result
+  }
+  function ownerExpression(name) {
+    const panel = elements(name)[0]
+    assert.ok(panel)
+    const found = []
+    csuWalk(tree, (node) => {
+      if (node.type === 'JSXExpressionContainer'
+          && node.start < panel.start && node.end > panel.end) found.push(node)
+    })
+    found.sort((a, b) => (a.end - a.start) - (b.end - b.start))
+    assert.ok(found[0])
+    return found[0].expression
+  }
+  function guard(name, expected) {
+    const node = ownerExpression(name)
+    assert.equal(node.type, 'LogicalExpression')
+    assert.equal(node.operator, '&&')
+    assert.equal(source(node.left), expected)
+  }
+  function slot(name) {
+    assert.equal(elements('ProjectWorkspacePanels').length, 1)
+    const slots = expression(elements('ProjectWorkspacePanels')[0], 'slots')
+    const prop = slots.properties.find((item) => csuKey(item) === name)
+    assert.ok(prop, `App supplies ${name}`)
+    return appSource.slice(prop.value.start, prop.value.end)
+  }
+  it('A2-01 wires Conversation to one shared session and persistent seat', () => {
+    assert.ok(slot('conversation').includes('setConversationDestination'))
+    assert.ok(slot('conversation').includes('ConversationOpening'))
+    assert.ok(slot('conversation').includes('EntitlementNotice required="converse"'))
+    const panels = elements('ConversePanel')
+    assert.equal(panels.length, 1)
+    for (const [name, value] of Object.entries({ sessionId: 'agentSessionId', userTurns: 'agentTurns',
+      onAttachJob: 'onAttachAgentJob', onJobLinked: 'refreshJobs', engineDirty: 'engineDirty',
+      onBeforeWriteApproval: 'closeStartForChange' })) binding(panels[0], name, value)
+    const seats = elements('PersistentSeat')
+    assert.ok(seats.some((seat) => seat.children.includes(panels[0])))
+    binding(seats.find((seat) => seat.children.includes(panels[0])),
+      'destination', 'paneSeats.conversationTarget')
+    guard('ConversePanel', 'paneSeats.conversationMounted')
+    const derived = appSeats()
+    assert.equal(derived.conversationTarget, 'conversation-board')
+    assert.equal(derived.conversationMounted, true)
+    assert.ok(appSource.includes('attach: attachAgentSession, onOpen: openAgentMode'))
+    assert.ok(appSource.includes("const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'"))
+    assert.ok(appSource.includes('if (mock || !signedIn || session.status !== \'active\') clearAgentSession()'))
+  })
+  it('A2-02 wires Annotations to the single App subscription and decision actions', () => {
+    assert.ok(slot('annotations').includes('AnnotationPaneState annotations={annotations}'))
+    assert.ok(slot('annotations').includes("setProjectPane('conversation')"))
+    const panels = elements('AnnotationDecisionCard')
+    assert.equal(panels.length, 1)
+    for (const [name, value] of Object.entries({ annotation: 'annotations.annotation', busy: 'annotations.busy',
+      error: 'annotations.error', confirmation: 'annotations.confirmation', onPreview: 'annotations.preview',
+      onAccept: 'annotations.accept', onReject: 'annotations.reject', onRetry: 'annotations.retry', onUndo: 'annotations.undo' })) {
+      binding(panels[0], name, value)
+    }
+    let owners = 0
+    csuWalk(tree, (node) => { if (node.type === 'CallExpression' && node.callee.name === 'useAnnotations') owners += 1 })
+    assert.equal(owners, 1)
+    const owner = declaration('annotations').init
+    assert.equal(owner.callee.name, 'useAnnotations')
+    assert.equal(source(owner.arguments[0]), 'agentSessionId')
+    assert.deepEqual(objectBindings(owner.arguments[1]), { enabled: 'annotationEnabled' })
+    guard('AnnotationDecisionCard',
+      'annotationEnabled && annotations.annotation && paneSeats.annotationTarget')
+    const portal = ownerExpression('AnnotationDecisionCard').right
+    assert.equal(portal.type, 'CallExpression')
+    assert.equal(portal.callee.name, 'createPortal')
+    assert.equal(source(portal.arguments[1]), 'paneSeats.annotationTarget')
+    const live = appSeats({ projectPane: 'annotations' })
+    assert.equal(live.annotationEnabled, true)
+    assert.equal(live.annotationTarget, 'annotation-board')
+    for (const patch of [
+      { mock: true }, { signedIn: false }, { session: { status: 'signed_out' } },
+    ]) {
+      assert.equal(appSeats(patch).annotationEnabled, false)
+    }
+  })
+  it('A2-03 wires Authoring to the existing stage and suppresses the rail fallback', () => {
+    assert.ok(slot('authoring').includes('setAuthorDestination'))
+    const panels = elements('AuthorPanel')
+    assert.equal(panels.length, 1)
+    for (const [name, value] of Object.entries({ onAuthor: 'onAuthor', onPublish: 'onPublishAuthor',
+      onUseAuthored: 'onUseAuthored', seed: 'authorSeed', seedSignal: 'authorSignal', seedAutoSubmit: 'tourOn',
+      targetToolName: 'authorTargetTool', onCancelRevision: 'onCancelAuthorRevision', stageActivity: 'authorStage',
+      onResumeAuthor: 'authorStage.resume', notLinked: 'claudeNotLinked', buildEntitled: 'canBuild' })) {
+      binding(panels[0], name, value)
+    }
+    const seats = elements('PersistentSeat')
+    assert.ok(seats.some((seat) => seat.children.includes(panels[0])))
+    binding(seats.find((seat) => seat.children.includes(panels[0])),
+      'destination', 'paneSeats.authorTarget')
+    const derived = appSeats({ projectPane: 'authoring' })
+    assert.equal(derived.authorTarget, 'author-board')
+    assert.equal(derived.authorMounted, true)
+    assert.equal(elements('NavRail').length, 1)
+    const override = expression(elements('NavRail')[0], 'authorContent')
+    assert.ok(appSource.slice(override.start, override.end).includes('setAuthorSource'))
+    const rail = readFileSync(new URL('./site/NavRail.jsx', import.meta.url), 'utf8')
+    assert.ok(rail.includes('authorContent !== undefined ? authorContent : <AuthorPanel'))
+    guard('AuthorPanel', 'paneSeats.authorMounted')
+    for (const patch of [
+      { mock: true }, { signedIn: false }, { session: { status: 'signed_out' } },
+    ]) {
+      assert.equal(appSeats({ projectPane: 'authoring', ...patch }).authorMounted, false)
+    }
+    let owners = 0
+    csuWalk(tree, (node) => { if (node.type === 'CallExpression' && node.callee.name === 'useAuthorStageController') owners += 1 })
+    assert.equal(owners, 1)
+  })
+
+  it('A2-26 derives the live board flag and returns seats to their sources', () => {
+    const board = appSeats()
+    assert.equal(board.boardConversation, true)
+    assert.equal(board.conversationTarget, 'conversation-board')
+    const sourceSeat = appSeats({ boardHostsProject: false })
+    assert.equal(sourceSeat.boardConversation, false)
+    assert.equal(sourceSeat.conversationTarget, 'conversation-source')
+    assert.equal(sourceSeat.conversationMounted, true)
+    const author = appSeats({
+      boardHostsProject: false, projectPane: 'authoring',
+      authorOpen: true, authorSource: null,
+    })
+    assert.equal(author.authorTarget, 'author-fallback')
+    assert.equal(author.authorMounted, true)
+  })
+
+  function slotRefs(name) {
+    assert.equal(elements('ProjectWorkspacePanels').length, 1)
+    const slots = expression(elements('ProjectWorkspacePanels')[0], 'slots')
+    const prop = slots.properties.find((item) => csuKey(item) === name)
+    assert.ok(prop, `App supplies ${name}`)
+    const refs = []
+    csuWalk(prop.value, (node) => {
+      if (node.type === 'JSXAttribute' && node.name?.name === 'ref') refs.push(source(node.value.expression))
+    })
+    return refs
+  }
+  it('A2-31 binds each board pane destination setter directly as the seat ref', () => {
+    assert.deepEqual(slotRefs('conversation'), ['setConversationDestination'])
+    assert.deepEqual(slotRefs('annotations'), ['setAnnotationDestination'])
+    assert.deepEqual(slotRefs('authoring'), ['setAuthorDestination'])
+  })
+  it('A2-32 opens the author and the rail only while Authoring is the eligible board pane', () => {
+    const effects = []
+    csuWalk(tree, (node) => {
+      if (node.type === 'CallExpression' && node.callee.name === 'useEffect'
+          && source(node.arguments[0]).includes('boardAuthor && authorEligible')) effects.push(node)
+    })
+    assert.equal(effects.length, 1)
+    assert.equal(source(effects[0].arguments[1]), '[boardAuthor, authorEligible]')
+    for (const [boardAuthor, authorEligible, opens] of [[true, true, true], [true, false, false], [false, true, false]]) {
+      const calls = []
+      evaluate(effects[0].arguments[0], {
+        boardAuthor, authorEligible,
+        setAuthorOpenState: (value) => calls.push(['author', value]),
+        setNavExpanded: (value) => calls.push(['nav', value]),
+      })()
+      assert.deepEqual(calls, opens ? [['author', true], ['nav', true]] : [])
+    }
+  })
+
+  it('A2-28 binds attachment activation to live entitlement', () => {
+    const opening = declaration('conversationOpening').init
+    assert.equal(opening.callee.name, 'useBoardConversation')
+    assert.deepEqual(objectBindings(opening.arguments[0]), {
+      active: 'boardConversation', eligible: 'conversationEligible',
+      sessionId: 'agentSessionId', context: 'conversationContext',
+      attach: 'attachAgentSession', onOpen: 'openAgentMode',
+    })
+    assert.equal(appSeats({ agentSessionId: null }).conversationEligible, true)
+    const denied = appSeats({ agentSessionId: null, canConverse: false })
+    assert.equal(denied.boardConversation, true)
+    assert.equal(denied.conversationEligible, false)
+    assert.equal(denied.conversationMounted, false)
+  })
+})
 const identitySource = readFileSync(new URL('./drawing/drawingIdentity.js', import.meta.url), 'utf8')
 const selectionStart = identitySource.indexOf('export function hasDrawingSelection(')
 const selectionEnd = identitySource.indexOf('export function isScopeSwitch(', selectionStart)

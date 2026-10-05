@@ -160,6 +160,7 @@ import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.
 import { resumeHref } from './components/ConversationList.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from './components/LiveRegion.jsx'
 import ConversePanel from './components/ConversePanel.jsx'
+import AuthorPanel from './components/AuthorPanel.jsx'
 import {
   THRESHOLDS, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
@@ -173,7 +174,7 @@ import usePlatformTrustController from './controllers/platform/usePlatformTrustC
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
 import useDrawingUploadController from './controllers/upload/useDrawingUploadController.js'
 import DrawingUploadControl from './components/DrawingUploadControl.jsx'
-import ProjectWorkspacePanels, { paneForCapability } from './workspace/ProjectWorkspacePanels.jsx'
+import ProjectWorkspacePanels, { paneForCapability, deriveBoardPaneSeats, BoardPaneState, PersistentSeat, useBoardConversation, ConversationOpening, AnnotationPaneState } from './workspace/ProjectWorkspacePanels.jsx'
 import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
@@ -622,6 +623,7 @@ export default function App() {
     sessionId: agentSessionId,
     turns: agentTurns,
     startTurn: startAgentTurn,
+    attach: attachAgentSession,
     clear: clearAgentSession,
     setProjectContext,
   } = converse
@@ -837,6 +839,13 @@ export default function App() {
   } = workspaceController
   useDrawingScopeReset(openProjectId)
   const [projectPane, setProjectPane] = useState(null)
+  const [conversationSource, setConversationSource] = useState(null)
+  const [conversationDestination, setConversationDestination] = useState(null)
+  const [annotationSource, setAnnotationSource] = useState(null)
+  const [annotationDestination, setAnnotationDestination] = useState(null)
+  const [authorSource, setAuthorSource] = useState(null)
+  const [authorDestination, setAuthorDestination] = useState(null)
+  const [authorFallback, setAuthorFallback] = useState(null)
   const [boardJob, setBoardJob] = useState(null)
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
   const boardPreviewRunRef = useRef(null)
@@ -844,10 +853,6 @@ export default function App() {
     setProjectPane(null)
     setBoardJob(null)
   }, [openProjectId])
-  const annotationEnabled = Boolean(
-    !mock && signedIn && openProjectId && drawingState?.drawing_id && agentSessionId,
-  )
-  const annotations = useAnnotations(agentSessionId, { enabled: annotationEnabled })
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
   // else the applied write-loop version, else the base intake.
   // The MOUNTED DRAWING's own name — deliberately NOT called a project. It is
@@ -2964,6 +2969,39 @@ export default function App() {
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   // The Browser board's panel slot hosts the project panels; CAD and Solar Start keep them inline because they pass no panel.
   const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'
+  const paneSeats = deriveBoardPaneSeats({
+    mock, signedIn, sessionStatus: session.status, projectId: openProjectId,
+    drawingId: drawingState?.drawing_id, sessionId: agentSessionId,
+    boardHostsProject, projectPane, canConverse, agentMode, authorOpen,
+    conversationSource, conversationDestination, annotationSource,
+    annotationDestination, authorSource, authorDestination, authorFallback,
+  })
+  const {
+    boardPaneContext, boardConversation, boardAnnotations, boardAuthor,
+    conversationEligible, authorEligible, annotationEnabled,
+  } = paneSeats
+  const annotations = useAnnotations(agentSessionId, { enabled: annotationEnabled })
+  const conversationContext = useMemo(() => ({}), [mock, signedIn, session.status, openProjectId, drawingState?.drawing_id])
+  const conversationOpening = useBoardConversation({
+    active: boardConversation, eligible: conversationEligible, sessionId: agentSessionId,
+    context: conversationContext, attach: attachAgentSession, onOpen: openAgentMode,
+  })
+  useLayoutEffect(() => {
+    if (mock || !signedIn || session.status !== 'active') clearAgentSession()
+  }, [mock, signedIn, session.status, clearAgentSession])
+  useEffect(() => {
+    if (boardConversation && conversationEligible && agentSessionId) openAgentMode()
+  }, [boardConversation, conversationEligible, agentSessionId, openAgentMode])
+  useEffect(() => {
+    if (boardAuthor && authorEligible) {
+      setAuthorOpenState(true)
+      setNavExpanded(true)
+    }
+  }, [boardAuthor, authorEligible])
+  useLayoutEffect(() => {
+    if (boardAuthor && authorDestination) authorSectionRef.current = authorDestination
+    else authorSectionRef.current = authorSource || authorFallback
+  }, [boardAuthor, authorDestination, authorSource, authorFallback])
   const effectiveGround = studioGround ? (boardVisible ? 'board' : surfaceGround(activeSurface)) : null
   const leavingGround = useLeavingGround(effectiveGround)
   // Keeps its name: ~20 sites read `studioGround && drafting`, and the App
@@ -3892,9 +3930,13 @@ export default function App() {
         openFamilies={openFamilies}
         onToggleFamily={toggleFamily}
         authorOpen={authorOpen}
-        onToggleAuthor={() => setAuthorOpen((o) => !o)}
+        onToggleAuthor={() => {
+          if (boardAuthor) { setProjectPane(null); setAuthorOpen(false) }
+          else setAuthorOpen((o) => !o)
+        }}
         onCollapse={() => setNavExpanded(false)}
         authorSectionRef={authorSectionRef}
+        authorContent={<div ref={setAuthorSource} />}
         onAuthor={onAuthor}
         onPublish={onPublishAuthor}
         onUseAuthored={onUseAuthored}
@@ -4039,7 +4081,18 @@ export default function App() {
                 onBack={() => setProjectPane(null)}
                 receipts={workspace?.receipts}
                 shipReceipts={workspace?.ship_receipts}
-                slots={{ catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul> }}
+                slots={{
+                  catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul>,
+                  conversation: <BoardPaneState pane="conversation" context={boardPaneContext}>
+                    {!canConverse ? <EntitlementNotice required="converse" tier={entTier} />
+                      : agentSessionId ? <div ref={setConversationDestination} />
+                        : <ConversationOpening status={conversationOpening.status} onRetry={conversationOpening.retry} />}
+                  </BoardPaneState>,
+                  annotations: <BoardPaneState pane="annotations" context={boardPaneContext} onOpenConversation={() => setProjectPane('conversation')}>
+                    <AnnotationPaneState annotations={annotations}><div ref={setAnnotationDestination} /></AnnotationPaneState>
+                  </BoardPaneState>,
+                  authoring: <BoardPaneState pane="authoring" context={boardPaneContext}><div ref={setAuthorDestination} /></BoardPaneState>,
+                }}
                 onOpenVersion={(version) => selectCanonicalVersion(version.version_id)}
                 onSelectJob={setBoardJob}
                 currentJob={boardJob}
@@ -4767,7 +4820,8 @@ export default function App() {
           />
         )}
 
-        {annotationEnabled && annotations.annotation && (
+        <div ref={setAnnotationSource} />
+        {annotationEnabled && annotations.annotation && paneSeats.annotationTarget && createPortal(
           <AnnotationDecisionCard
             annotation={annotations.annotation}
             busy={annotations.busy}
@@ -4778,20 +4832,45 @@ export default function App() {
             onReject={annotations.reject}
             onRetry={annotations.retry}
             onUndo={annotations.undo}
-          />
+          />,
+          paneSeats.annotationTarget,
         )}
 
-        {!mock && agentMode && agentSessionId && (
+        <div ref={setConversationSource} />
+        {paneSeats.conversationMounted && (
+          <PersistentSeat destination={paneSeats.conversationTarget}>
           <ConversePanel
             sessionId={agentSessionId}
             userTurns={agentTurns}
-            onDismiss={clearAgentMode}
+            onDismiss={() => { clearAgentMode(); if (boardConversation) setProjectPane(null) }}
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
             onBeforeWriteApproval={closeStartForChange}
             engineDirty={engineDirty}
           />
+          </PersistentSeat>
+        )}
+
+        <div ref={setAuthorFallback} />
+        {paneSeats.authorMounted && (
+          <PersistentSeat destination={paneSeats.authorTarget}>
+            <AuthorPanel
+              onAuthor={onAuthor}
+              onPublish={onPublishAuthor}
+              onUseAuthored={onUseAuthored}
+              seed={authorSeed}
+              seedSignal={authorSignal}
+              seedAutoSubmit={tourOn}
+              targetToolName={authorTargetTool}
+              onCancelRevision={onCancelAuthorRevision}
+              stageActivity={authorStage}
+              onResumeAuthor={authorStage.resume}
+              notLinked={claudeNotLinked}
+              onLinkClaude={() => setClaudeOpen(true)}
+              buildEntitled={canBuild}
+            />
+          </PersistentSeat>
         )}
 
         {/* Studio drafting surfaces host it in the dock (see the dock's Plan

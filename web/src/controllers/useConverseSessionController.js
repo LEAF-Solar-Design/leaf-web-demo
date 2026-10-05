@@ -28,11 +28,17 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
   const sessionRef = useRef(null)
   const drawingRef = useRef(drawingId)
   const projectRef = useRef(null)
+  const generationRef = useRef(0)
+  const attachmentRef = useRef(null)
+
+  useEffect(() => () => { generationRef.current += 1 }, [])
 
   useEffect(() => {
     const previousDrawingId = drawingRef.current
     drawingRef.current = drawingId
     if (previousDrawingId === drawingId) return
+    generationRef.current += 1
+    attachmentRef.current = null
     resetSession(previousDrawingId)
     sessionRef.current = null
     setSessionId(null)
@@ -44,6 +50,8 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
   const setProjectContext = useCallback((projectId) => {
     const nextProjectId = projectId || null
     if (projectRef.current === nextProjectId) return
+    generationRef.current += 1
+    attachmentRef.current = null
     projectRef.current = nextProjectId
     sessionRef.current = null
     setSessionId(null)
@@ -52,23 +60,39 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
     setRequestStatus(null)
   }, [])
 
-  const attach = useCallback(async () => {
+  const attach = useCallback(() => {
+    if (sessionRef.current) return Promise.resolve(sessionRef.current)
+    if (attachmentRef.current) return attachmentRef.current
+    const generation = generationRef.current
     const requestedDrawingId = drawingId
     const requestedProjectId = projectRef.current
-    const next = await ensureSession(drawingId, requestedProjectId)
-    if (drawingRef.current !== requestedDrawingId || projectRef.current !== requestedProjectId) {
-      throw new Error('Project or drawing changed while starting the conversation')
+    const assertCurrent = () => {
+      if (generationRef.current !== generation || drawingRef.current !== requestedDrawingId || projectRef.current !== requestedProjectId) {
+        throw new Error('Project or drawing changed while starting the conversation')
+      }
     }
-    sessionRef.current = next.session_id
-    setSessionId(next.session_id)
-    if (next.active_requests && typeof next.active_requests === 'object') {
-      setActiveRequests(projectActivityProjection(next.active_requests))
-    }
-    setRequestStatus(next.status || null)
-    return next.session_id
+    const pending = Promise.resolve().then(() => {
+      assertCurrent()
+      return ensureSession(requestedDrawingId, requestedProjectId)
+    }).then((next) => {
+      assertCurrent()
+      sessionRef.current = next.session_id
+      setSessionId(next.session_id)
+      if (next.active_requests && typeof next.active_requests === 'object') {
+        setActiveRequests(projectActivityProjection(next.active_requests))
+      }
+      setRequestStatus(next.status || null)
+      return next.session_id
+    }).finally(() => {
+      if (attachmentRef.current === pending) attachmentRef.current = null
+    })
+    attachmentRef.current = pending
+    return pending
   }, [drawingId])
 
   const clear = useCallback(() => {
+    generationRef.current += 1
+    attachmentRef.current = null
     sessionRef.current = null
     setSessionId(null)
     setTurns([])
@@ -141,6 +165,7 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
     activeRequests,
     requestStatus,
     startTurn,
+    attach,
     clear,
     resetCached,
     setProjectContext,
