@@ -44,7 +44,8 @@ it('SolarToolForm renders only the visible keys', () => {
   for (const label of ['Expected rev', 'Cancel', 'Changes', 'Initialize']) {
     expect(screen.getByLabelText(label)).toBeTruthy()
   }
-  expect(container.querySelectorAll('input')).toHaveLength(4)
+  expect(container.querySelectorAll('input')).toHaveLength(3)
+  expect(container.querySelectorAll('select')).toHaveLength(1)
   expect(screen.queryByLabelText('Drawing id')).toBeNull()
   expect(screen.getByRole('button', { name: 'Review & run' }).disabled).toBe(false)
 })
@@ -159,8 +160,8 @@ it('TF3 an intake of another version, a malformed intake or a failed read prefil
       onSubmit={onSubmit} onClose={vi.fn()} />)
     await waitFor(() => expect(readIntake).toHaveBeenCalledTimes(1))
     await act(async () => { await new Promise((done) => setTimeout(done, 0)) })
-    // SchemaForm draws an absent integer as 0 but submits nothing for it (the base behaviour).
-    expect(screen.getByLabelText('Expected rev').value, `answer ${index}`).toBe('0')
+    // An absent revision is shown as empty and submitted without a key.
+    expect(screen.getByLabelText('Expected rev').value, `answer ${index}`).toBe('')
     fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
     expect(onSubmit, `answer ${index}`).toHaveBeenCalledWith(conversionTool, {})
     view.unmount()
@@ -214,7 +215,7 @@ it('TF7 a new version clears the automatic revision and waits for its own read',
   const run = screen.getByRole('button', { name: 'Review & run' })
   expect(run.disabled).toBe(true)
   expect(run.title).toBe("Reading this drawing's design revision.")
-  expect(screen.getByLabelText('Expected rev').value).toBe('0')
+  expect(screen.getByLabelText('Expected rev').value).toBe('')
   fireEvent.click(run)
   expect(props.onSubmit).not.toHaveBeenCalled()
   await act(async () => { pending.resolve(intakeAt(4, 8)) })
@@ -234,7 +235,7 @@ it('TF8 a failed or graphless new read leaves the schema default instead of the 
     await waitFor(() => expect(screen.getByLabelText('Expected rev').value).toBe('7'))
     view.rerender(<SolarToolForm {...props} drawingVersion={4} />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Review & run' }).disabled).toBe(false))
-    expect(screen.getByLabelText('Expected rev').value).toBe('0')
+    expect(screen.getByLabelText('Expected rev').value).toBe('')
     fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
     expect(props.onSubmit).toHaveBeenCalledWith(conversionTool, {})
     view.unmount()
@@ -276,17 +277,93 @@ it('TF11 a changed drawing or tool clears the automatic revision to the current 
     const view = render(<SolarToolForm {...props} tool={conversionTool} drawingId="d1" />)
     await waitFor(() => expect(screen.getByLabelText('Expected rev').value).toBe('7'))
     view.rerender(<SolarToolForm {...props} tool={changeTool ? nextTool : conversionTool} drawingId={changeTool ? 'd1' : 'd2'} />)
-    expect(screen.getByLabelText('Expected rev').value).toBe(changeTool ? '2' : '0')
+    expect(screen.getByLabelText('Expected rev').value).toBe(changeTool ? '2' : '')
     expect(screen.getByRole('button', { name: 'Review & run' }).disabled).toBe(true)
     await act(async () => { pending.resolve(null) })
     expect(screen.getByRole('button', { name: 'Review & run' }).disabled).toBe(false)
-    expect(screen.getByLabelText('Expected rev').value).toBe(changeTool ? '2' : '0')
+    expect(screen.getByLabelText('Expected rev').value).toBe(changeTool ? '2' : '')
     view.unmount()
   }
 })
 
 const presetRevisionField = () => screen.getByLabelText('Graph revision')
+
+it('FORM21 invalid Solar JSON blocks submit and close until corrected', () => {
+  const onSubmit = vi.fn(), onClose = vi.fn()
+  render(<SolarToolForm tool={tool} onSubmit={onSubmit} onClose={onClose} />)
+  fireEvent.change(screen.getByLabelText('Changes'), { target: { value: '{' } })
+  const run = screen.getByRole('button', { name: 'Review & run' })
+  expect(run.disabled).toBe(true); fireEvent.click(run)
+  expect(onSubmit).not.toHaveBeenCalled(); expect(onClose).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('Changes'), { target: { value: '{"tilt":20}' } })
+  expect(run.disabled).toBe(false); fireEvent.click(run)
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(tool, { expected_rev: 1, cancel: false, changes: { tilt: 20 }, initialize: null })
+  expect(onClose).toHaveBeenCalledTimes(1)
+})
+
+it('FORM23a clearing the Solar tool revision counts as a touch before intake', async () => {
+  const pending = deferred(), onSubmit = vi.fn()
+  const readIntake = vi.fn(() => pending.promise)
+  render(<SolarToolForm tool={conversionTool} readIntake={readIntake} drawingId="d1" drawingVersion={3}
+    onSubmit={onSubmit} onClose={vi.fn()} />)
+  await waitFor(() => expect(readIntake).toHaveBeenCalledTimes(1))
+  fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '5' } })
+  fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '' } })
+  await act(async () => { pending.resolve(intakeAt(3, 7)) })
+  expect(screen.getByLabelText('Expected rev').value).toBe('')
+  fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
+  expect(onSubmit).toHaveBeenCalledWith(conversionTool, {})
+})
+it('FORM29 a change to another Solar field leaves the revision automatic', async () => {
+  const pending = deferred(), onSubmit = vi.fn()
+  const noteTool = { ...conversionTool, params: { ...conversionTool.params,
+    properties: { ...conversionTool.params.properties, note: { type: 'string' } } } }
+  render(<SolarToolForm tool={noteTool} readIntake={vi.fn(() => pending.promise)} drawingId="d1" drawingVersion={3}
+    onSubmit={onSubmit} onClose={vi.fn()} />)
+  fireEvent.change(screen.getByLabelText('Note'), { target: { value: 'east' } })
+  await act(async () => { pending.resolve(intakeAt(3, 7)) })
+  expect(screen.getByLabelText('Expected rev').value).toBe('7')
+  fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
+  expect(onSubmit).toHaveBeenCalledWith(noteTool, { expected_rev: 7, note: 'east' })
+})
 const presetRun = () => screen.getByRole('button', { name: 'Review & run' })
+const STALE = (label) => `${label} has a value this tool no longer accepts. Choose or enter a new one.`
+
+it('FORM32 a nullable boolean default submits and closes the Solar form', () => {
+  const nullableTool = { ...tool, params: { properties: { x: { type: ['boolean', 'null'], default: null } } } }
+  const onSubmit = vi.fn(), onClose = vi.fn()
+  render(<SolarToolForm tool={nullableTool} onSubmit={onSubmit} onClose={onClose} />)
+  const input = screen.getByLabelText('X')
+  expect(input.getAttribute('aria-invalid')).toBe('false')
+  expect(input.validationMessage).toBe('')
+  expect(screen.queryByText(STALE('X'))).toBeNull()
+  const run = screen.getByRole('button', { name: 'Review & run' })
+  expect(run.disabled).toBe(false)
+  fireEvent.click(run)
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(nullableTool, { x: null })
+  expect(onClose).toHaveBeenCalledTimes(1)
+})
+
+it('FORM43 a nullable sibling keeps revision intake automatic after another field edit', async () => {
+  const pending = deferred(), onSubmit = vi.fn()
+  const noteTool = { ...conversionTool, params: { ...conversionTool.params,
+    properties: { ...conversionTool.params.properties, note: { type: 'string' },
+      x: { type: ['boolean', 'null'], default: null } } } }
+  render(<SolarToolForm tool={noteTool} readIntake={vi.fn(() => pending.promise)} drawingId="d1" drawingVersion={3}
+    onSubmit={onSubmit} onClose={vi.fn()} />)
+  fireEvent.change(screen.getByLabelText('Note'), { target: { value: 'east' } })
+  await act(async () => { pending.resolve(intakeAt(3, 7)) })
+  expect(screen.getByLabelText('Expected rev').value).toBe('7')
+  const input = screen.getByLabelText('X')
+  expect(input.getAttribute('aria-invalid')).toBe('false')
+  expect(input.validationMessage).toBe('')
+  expect(screen.queryByText(STALE('X'))).toBeNull()
+  const run = screen.getByRole('button', { name: 'Review & run' })
+  expect(run.disabled).toBe(false)
+  fireEvent.click(run)
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(noteTool, { expected_rev: 7, note: 'east', x: null })
+})
+
 function openPresetRead(props = {}) {
   const bound = { tool: presetTool, drawingId: 'd1', drawingVersion: 3, onSubmit: vi.fn(), onClose: vi.fn(), ...props }
   return { ...render(<SolarToolForm {...bound} />), props: bound }

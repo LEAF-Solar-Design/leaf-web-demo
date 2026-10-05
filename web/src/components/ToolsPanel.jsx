@@ -28,6 +28,7 @@ function provenanceLine(t) {
 export default function ToolsPanel({ tools, error, running, selectedTool, onRequestRun, onOpenTool, onReviseTool, onCatalogChanged, onRetry, retryKey, subtitle, writeLocked, writeLockNote = null, writeEntitled = true, runDisabled = false, runDisabledNote = null }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
+  const [validByTool, setValidByTool] = useState({})
 
   return (
     <div className="tools-inner">
@@ -57,6 +58,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                 onClick={() => {
                   const next = open ? null : t.name
                   setOpenName(next)
+                  if (next) setValidByTool((s) => ({ ...s, [next]: true }))
                   onOpenTool?.(next ? t : null)
                 }}
               >
@@ -84,14 +86,15 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                     schema={t.params}
                     values={params}
                     onChange={(v) => setParamsByTool((s) => ({ ...s, [t.name]: v }))}
+                    onValidityChange={(valid) => setValidByTool((s) => s[t.name] === valid ? s : ({ ...s, [t.name]: valid }))}
                   />
                   {/* catalog runs are the secondary path: a quiet accent chip,
                       never a second haloed primary in the pane */}
                   <button
                     className="chip-act tool-run"
-                    disabled={running || locked || entBlocked || runDisabled}
+                    disabled={running || locked || entBlocked || runDisabled || validByTool[t.name] === false}
                     title={runDisabled ? runDisabledNote || undefined : undefined}
-                    onClick={() => onRequestRun(t, params)}
+                    onClick={() => { if (!running && !locked && !entBlocked && !runDisabled && validByTool[t.name] !== false) onRequestRun(t, params) }}
                   >
                     {isRunningThis ? 'Running on Leaf…' : 'Review & run'}
                   </button>

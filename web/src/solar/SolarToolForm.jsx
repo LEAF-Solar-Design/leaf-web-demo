@@ -68,6 +68,7 @@ function GenericSolarToolForm({ tool, onSubmit, onClose, readIntake, drawingId, 
     properties: Object.fromEntries(solarFormKeys(tool, view).map((key) => [key, tool.params.properties[key]])),
   }
   const [values, setValues] = useState(() => defaultsOf(schema))
+  const [formValid, setFormValid] = useState(true)
   const revTouched = useRef(false)
   const revAutomatic = useRef(false)
   const revisionKey = useRef({ tool, drawingId, drawingVersion })
@@ -112,8 +113,8 @@ function GenericSolarToolForm({ tool, onSubmit, onClose, readIntake, drawingId, 
     return () => { current = false }
   }, [tool, takesRev, readIntake, drawingId, drawingVersion])
 
-  function change(next) {
-    if (ownsKey(next, 'expected_rev') && next.expected_rev !== values.expected_rev) {
+  function change(next, { changedKey } = {}) {
+    if (changedKey === 'expected_rev') {
       revTouched.current = true
       revAutomatic.current = false
     }
@@ -133,10 +134,10 @@ function GenericSolarToolForm({ tool, onSubmit, onClose, readIntake, drawingId, 
       }}
     >
       <h3>{text}</h3>
-      <SchemaForm schema={schema} values={values} onChange={change} />
-      <button type="button" className="chip-act" disabled={reading}
+      <SchemaForm schema={schema} values={values} onChange={change} onValidityChange={setFormValid} />
+      <button type="button" className="chip-act" disabled={reading || !formValid}
         title={reading ? "Reading this drawing's design revision." : undefined}
-        onClick={() => { onSubmit(tool, values); onClose() }}>
+        onClick={() => { if (!reading && formValid) { onSubmit(tool, values); onClose() } }}>
         Review & run
       </button>
       <button type="button" className="chip-act" onClick={onClose}>Cancel</button>
