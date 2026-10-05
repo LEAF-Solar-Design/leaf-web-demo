@@ -4245,7 +4245,12 @@ export default function App() {
               before the ground attaches); tools are the ACTIVE SURFACE's fold, wired through
               the same run-decision path as the rail (source 'ribbon'). */}
           {studioShell && surfaceSlots.toolbar.ribbon && studioRibbonHost && createPortal(
-            <DraftingRibbon clusters={ribbonClusters} tab={activeRibbonTab}>
+            <DraftingRibbon
+              clusters={ribbonClusters}
+              tab={activeRibbonTab}
+              catalogError={navSpine || (phoneViewport && studioDrawer !== 'nav') ? catalogErr : null}
+              onRetryCatalog={loadCatalog}
+            >
               {/* The engine's own panels (File, Draw, Modify) read the ONE
                   session through context; ENV_CAD_EDIT first so a flag-off
                   build folds them away with the provider. Always mounted so
