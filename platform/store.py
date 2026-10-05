@@ -1413,6 +1413,31 @@ def get_project(org_id: uuid.UUID, project_id: uuid.UUID) -> Optional[Project]:
         return Project.from_row(row) if row else None
 
 
+def get_drawing_version(
+    org_id: uuid.UUID, project_id: uuid.UUID, version_id: uuid.UUID, *, conn=None,
+) -> Optional[DrawingVersion]:
+    """Read an exact live canonical version, optionally in a caller transaction."""
+    def read(cur):
+        cur.execute(
+            "SELECT v.* FROM drawing_versions v "
+            "JOIN live_projects p ON p.org_id = v.org_id AND p.project_id = v.project_id "
+            "JOIN drawing_artifacts a ON a.org_id = v.org_id "
+            "AND a.project_id = v.project_id AND a.drawing_id = v.drawing_id "
+            "WHERE v.org_id = %(org_id)s AND v.project_id = %(project_id)s "
+            "AND v.version_id = %(version_id)s AND v.deleted_at IS NULL "
+            "AND a.status = 'active'",
+            {"org_id": org_id, "project_id": project_id, "version_id": version_id},
+        )
+        row = cur.fetchone()
+        return DrawingVersion.from_row(row) if row else None
+
+    if conn is not None:
+        with conn.cursor() as cur:
+            return read(cur)
+    with cursor() as cur:
+        return read(cur)
+
+
 def list_drawing_versions(org_id: uuid.UUID, project_id: uuid.UUID) -> List[DrawingVersion]:
     with cursor() as cur:
         cur.execute(
