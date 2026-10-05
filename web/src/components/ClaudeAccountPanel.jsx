@@ -2,23 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import './popovers.css'
 import useExit from '../useExit.js'
-
-function fmtWhen(iso) {
-  if (!iso) return null
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return String(iso)
-  const mins = Math.round((Date.now() - d.getTime()) / 60000)
-  if (mins >= 0 && mins < 60) return `${mins} m`
-  if (mins >= 0 && mins < 1440) return `${Math.round(mins / 60)} h`
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-function fmtAbs(iso) {
-  if (!iso) return undefined
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return String(iso)
-  return d.toLocaleString()
-}
+import { absoluteWithZone, relativeTime } from '../lib/railTime.js'
+import useRelativeNow from '../lib/useRelativeNow.js'
 
 function detectKind(token) {
   if (/^sk-ant-api/i.test((token || '').trim())) return 'api_key'
@@ -37,6 +22,7 @@ export default function ClaudeAccountPanel({
   onLink,
   onUnlink,
 }) {
+  const now = useRelativeNow()
   const [token, setToken] = useState('')
   const [kind, setKind] = useState('oauth')
   const [plan, setPlan] = useState(null)
@@ -152,8 +138,8 @@ export default function ClaudeAccountPanel({
                       </div>
                       <div className="ca-account-meta">
                         {typeof account.usage_tokens === 'number' && <span>{account.usage_tokens.toLocaleString()} routed tokens</span>}
-                        {account.cooldown_until && <span>cooldown until {fmtWhen(account.cooldown_until)}</span>}
-                        {account.linked_at && <span title={fmtAbs(account.linked_at)}>mounted {fmtWhen(account.linked_at)}</span>}
+                        {account.cooldown_until && <span title={absoluteWithZone(Date.parse(account.cooldown_until))}>cooldown until {relativeTime(Date.parse(account.cooldown_until), now)}</span>}
+                        {account.linked_at && <span title={absoluteWithZone(Date.parse(account.linked_at))}>mounted {relativeTime(Date.parse(account.linked_at), now)}</span>}
                       </div>
                       <div className="ca-account-actions">
                         {confirmRemove !== key ? (
