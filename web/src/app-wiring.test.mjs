@@ -270,6 +270,34 @@ describe('project board live pane wiring', () => {
     assert.equal(author.authorMounted, true)
   })
 
+  it('A2-34 the rail author seat mounts for a signed-out or demo session', () => {
+    for (const patch of [
+      { authorOpen: true, signedIn: false },
+      { authorOpen: true, mock: true },
+      { authorOpen: true, session: { status: 'signed_out' } },
+    ]) {
+      const author = appSeats({ boardHostsProject: false, projectPane: null, ...patch })
+      assert.equal(author.authorMounted, true)
+      assert.equal(author.authorTarget, 'author-source')
+    }
+  })
+
+  it('A2-35 a collapsed rail unmounts a signed-out author form and keeps a live one seated', () => {
+    for (const patch of [
+      { signedIn: false }, { mock: true }, { session: { status: 'signed_out' } },
+    ]) {
+      const author = appSeats({
+        boardHostsProject: false, projectPane: null, authorOpen: true, authorSource: null, ...patch,
+      })
+      assert.equal(author.authorMounted, false)
+    }
+    const author = appSeats({
+      boardHostsProject: false, projectPane: null, authorOpen: true, authorSource: null,
+    })
+    assert.equal(author.authorMounted, true)
+    assert.equal(author.authorTarget, 'author-fallback')
+  })
+
   function slotRefs(name) {
     assert.equal(elements('ProjectWorkspacePanels').length, 1)
     const slots = expression(elements('ProjectWorkspacePanels')[0], 'slots')

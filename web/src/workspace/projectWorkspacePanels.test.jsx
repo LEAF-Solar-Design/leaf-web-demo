@@ -561,6 +561,57 @@ it('A2-28 preserves conversation entitlement and author build gates', async () =
   expect(onAuthor).not.toHaveBeenCalled()
 })
 
+it.each([
+  { ...liveContext, signedIn: false, sessionStatus: 'required' },
+  { ...liveContext, mock: true, signedIn: false },
+])("A2-33 the rail's author form mounts while its section is open, signed in or not", (context) => {
+  const onAuthor = vi.fn()
+  render(<PaneFixture board={false} pane="authoring" context={context} onAuthor={onAuthor} />)
+  expect(screen.getByLabelText('What should the tool do?')).toBeInTheDocument()
+  expect(onAuthor).not.toHaveBeenCalled()
+})
+
+it.each([
+  { mock: false, signedIn: false, sessionStatus: 'required' },
+  { mock: true, signedIn: false, sessionStatus: 'active' },
+  { mock: false, signedIn: true, sessionStatus: 'signed_out' },
+])('A2-35 a non-live open author section mounts only at its rail source: %j', (context) => {
+  const seats = (authorSource) => deriveBoardPaneSeats({
+    ...context, boardHostsProject: false, projectPane: null, authorOpen: true,
+    authorDestination: 'board', authorFallback: 'fb', canConverse: true,
+    agentMode: 'primary', projectId: 'p1', drawingId: 'd1', sessionId: 's1', authorSource,
+  })
+  expect(seats(null).authorMounted).toBe(false)
+  const author = seats('src')
+  expect(author.authorMounted).toBe(true)
+  expect(author.authorTarget).toBe('src')
+})
+
+it.each([
+  { mock: false, signedIn: true, sessionStatus: 'active' },
+])('A2-35 a live open author section keeps its fallback seat with a collapsed rail: %j', (context) => {
+  const author = deriveBoardPaneSeats({
+    ...context, boardHostsProject: false, projectPane: null, authorOpen: true,
+    authorDestination: 'board', authorFallback: 'fb', canConverse: true,
+    agentMode: 'primary', projectId: 'p1', drawingId: 'd1', sessionId: 's1', authorSource: null,
+  })
+  expect(author.authorMounted).toBe(true)
+  expect(author.authorTarget).toBe('fb')
+})
+
+it.each([
+  { mock: false, signedIn: false, sessionStatus: 'required' },
+  { mock: true, signedIn: false, sessionStatus: 'active' },
+  { mock: false, signedIn: true, sessionStatus: 'signed_out' },
+])('A2-35 a closed non-live author section stays unmounted even with a rail source: %j', (context) => {
+  const author = deriveBoardPaneSeats({
+    ...context, boardHostsProject: false, projectPane: null, authorOpen: false,
+    authorDestination: 'board', authorFallback: 'fb', canConverse: true,
+    agentMode: 'primary', projectId: 'p1', drawingId: 'd1', sessionId: 's1', authorSource: 'src',
+  })
+  expect(author.authorMounted).toBe(false)
+})
+
 it('author content override distinguishes empty from omitted content', () => {
   const view = render(<NavRail activeSurface="browser" authorOpen authorContent={null} />)
   expect(screen.queryByLabelText('What should the tool do?')).toBeNull()

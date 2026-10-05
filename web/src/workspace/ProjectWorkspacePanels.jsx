@@ -49,7 +49,10 @@ export function deriveBoardPaneSeats({
     conversationEligible, authorEligible,
     annotationEnabled: Boolean(live && projectId && drawingId && sessionId),
     conversationMounted: Boolean(live && canConverse && agentMode && sessionId),
-    authorMounted: Boolean(live && (authorOpen || (boardAuthor && authorEligible))),
+    // A signed-out or demo console mounts the form only where the rail renders its open section (authorSource), as
+    // before #1874; a live session keeps the persistent seat, so a collapsed rail moves it to the fallback. The board
+    // pane is gated by its own eligibility, which already requires a live signed-in session.
+    authorMounted: Boolean((authorOpen && (live || authorSource)) || (boardAuthor && authorEligible)),
     conversationTarget: boardConversation && conversationEligible
       ? conversationDestination : conversationSource,
     annotationTarget: boardAnnotations ? annotationDestination : annotationSource,
