@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './panels.css'
 import useExit from '../useExit.js'
 import { EMPTY_WORKSPACE_PROJECT, formatProjectsUnavailable } from '../site/workspaceProjectState.js'
+import { addRecentProject, readProjectPrincipal, readRecentProjects, togglePinnedProject, writeRecentProjects } from '../lib/recentProjects.js'
 
 // The header PROJECT chip, made real: a calm switcher over the canonical
 // org-scoped Project entity (platform/api.py). LIVE only — in mock mode it is a
@@ -27,7 +28,7 @@ export default function ProjectSwitcher({
   mock, projectName, orgId, projects = [], openProjectId,
   bootstrapState, projectsLoaded = false, orgDraftError, projectDraftError, orgConflict,
   unavailable, loading, orgBusy, projectBusy, workspaceProject = null,
-  createRequest = 0,
+  createRequest = 0, storage, principalId = readProjectPrincipal(storage),
   onCreateOrg, onCreateProject, onOpenProject, onLoadProjects,
 }) {
   const [open, setOpen] = useState(false)
@@ -46,6 +47,45 @@ export default function ProjectSwitcher({
   const onProjectCreated = () => setProjectDraft('')
   const [submitError, setSubmitError] = useState(null)
   const submitting = useRef(false)
+  const storedHistory = useMemo(() => readRecentProjects(principalId, storage), [principalId, storage])
+  const [historyState, setHistoryState] = useState(() => ({ principalId, value: storedHistory }))
+  const history = historyState.principalId === principalId ? historyState.value : storedHistory
+  const groups = useMemo(() => {
+    const byId = new Map(projects.map((project) => [project.project_id || project.id, project]))
+    const resolve = (ids) => ids.map((id) => byId.get(id)).filter(Boolean)
+    return [
+      { name: 'Pinned', projects: principalId ? resolve(history.pinned) : [] },
+      { name: 'Recent', projects: principalId ? resolve(history.recent) : [] },
+      { name: 'Projects', projects },
+    ]
+  }, [projects, history, principalId])
+  const menuProjects = useMemo(() => groups.flatMap((group) => group.projects), [groups])
+  const currentOpen = !mock && bound && !unavailable && projects.some((project) => (project.project_id || project.id) === openProjectId)
+
+  useEffect(() => {
+    setHistoryState({ principalId, value: storedHistory })
+  }, [principalId, storedHistory])
+
+  // Also remember projects opened by creation or another workspace control.
+  useEffect(() => {
+    if (!principalId || !currentOpen) return
+    setHistoryState((previous) => {
+      const value = addRecentProject(previous.principalId === principalId ? previous.value : storedHistory, openProjectId)
+      writeRecentProjects(principalId, value, storage)
+      return { principalId, value }
+    })
+  }, [principalId, currentOpen, openProjectId, storedHistory, storage])
+
+  const remember = (value) => {
+    if (!principalId) return
+    writeRecentProjects(principalId, value, storage)
+    setHistoryState({ principalId, value })
+  }
+  const pick = (pid) => {
+    onOpenProject(pid)
+    remember(addRecentProject(history, pid))
+    setOpen(false)
+  }
 
   const submit = async (kind, name) => {
     if (!name.trim() || orgBusy || projectBusy || submitting.current) return
@@ -76,9 +116,9 @@ export default function ProjectSwitcher({
   // On open, start the highlight on the currently open project.
   useEffect(() => {
     if (!open) return
-    const idx = (projects || []).findIndex((p) => (p.project_id || p.id) === openProjectId)
+    const idx = menuProjects.findIndex((p) => (p.project_id || p.id) === openProjectId)
     setHi(idx >= 0 ? idx : 0)
-  }, [open, projects, openProjectId])
+  }, [open, menuProjects, openProjectId])
 
   useEffect(() => {
     if (!open) return
@@ -93,20 +133,20 @@ export default function ProjectSwitcher({
         return
       }
       if (e.target?.closest?.('button') && e.key === 'Enter') return
-      const n = (projects || []).length
+      const n = menuProjects.length
       if (unavailable || !bound || n === 0) return
       if (e.key === 'ArrowDown') { e.preventDefault(); setHi((h) => (h + 1) % n) }
       else if (e.key === 'ArrowUp') { e.preventDefault(); setHi((h) => (h - 1 + n) % n) }
       else if (e.key === 'Enter') {
         e.preventDefault()
-        const p = projects[hi]
-        if (p) { onOpenProject(p.project_id || p.id); setOpen(false) }
+        const p = menuProjects[hi]
+        if (p) pick(p.project_id || p.id)
       }
     }
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('mousedown', onDoc); document.removeEventListener('keydown', onKey) }
-  }, [open, projects, hi, bound, unavailable, openProjectId, onOpenProject])
+  }, [open, menuProjects, hi, bound, unavailable, openProjectId, onOpenProject, history, principalId, storage])
 
   // The chip reads the shared derivation and NOTHING else. sol-critic finding
   // 1: that pre-F-9 name fallback survived here as a
@@ -133,8 +173,36 @@ export default function ProjectSwitcher({
     )
   }
 
-  const pick = (pid) => { onOpenProject(pid); setOpen(false) }
   const count = (projects || []).length
+  const projectRow = (p, i) => {
+    const pid = p.project_id || p.id
+    const isOpen = pid === openProjectId
+    const isHi = i === hi
+    const pinned = history.pinned.includes(pid)
+    return (
+      <li key={pid} style={principalId ? { display: 'flex', alignItems: 'center' } : undefined}>
+        <button
+          className={`resolver-row ${isHi ? 'active' : ''}`}
+          style={principalId ? { flex: 1, minWidth: 0 } : undefined}
+          onClick={() => pick(pid)}
+          onMouseEnter={() => setHi(i)}
+          role="menuitem"
+        >
+          <span className="lbar" aria-hidden="true" />
+          <span className="label">{p.name}</span>
+          {isOpen && <span className="proj-mark">Open</span>}
+          {isHi && <span className="key hot">Enter</span>}
+        </button>
+        {principalId && (
+          <button type="button" className="chip-act" style={{ flexShrink: 0 }} role="menuitemcheckbox" aria-checked={pinned}
+            aria-label={`${pinned ? 'Unpin' : 'Pin'} ${p.name}`}
+            onClick={() => remember(togglePinnedProject(history, pid))}>
+            {pinned ? 'Unpin' : 'Pin'}
+          </button>
+        )}
+      </li>
+    )
+  }
 
   return (
     <span className="proj-switch" ref={rootRef}>
@@ -191,31 +259,22 @@ export default function ProjectSwitcher({
                   <div className="skeleton-row" />
                 </div>
               ) : (
-                <ul className="proj-list">
-                  {projects.map((p, i) => {
-                    const pid = p.project_id || p.id
-                    const isOpen = pid === openProjectId
-                    const isHi = i === hi
-                    return (
-                      <li key={pid}>
-                        <button
-                          className={`resolver-row ${isHi ? 'active' : ''}`}
-                          onClick={() => pick(pid)}
-                          onMouseEnter={() => setHi(i)}
-                          role="menuitem"
-                        >
-                          <span className="lbar" aria-hidden="true" />
-                          <span className="label">{p.name}</span>
-                          {isOpen && <span className="proj-mark">Open</span>}
-                          {isHi && <span className="key hot">Enter</span>}
-                        </button>
-                      </li>
-                    )
-                  })}
+                <>
+                  {groups.slice(0, 2).map((group, groupIndex) => group.projects.length > 0 && (
+                    <div key={group.name} role="group" aria-label={group.name}>
+                      <div className="resolver-header">{group.name}</div>
+                      <ul className="proj-list">
+                        {group.projects.map((p, i) => projectRow(p, i + (groupIndex === 1 ? groups[0].projects.length : 0)))}
+                      </ul>
+                    </div>
+                  ))}
+                <ul className="proj-list" role="group" aria-label="All projects">
+                  {projects.map((p, i) => projectRow(p, i + groups[0].projects.length + groups[1].projects.length))}
                   {projects.length === 0 && !loading && (!hasBootstrapState || projectsLoaded) && (
                     <li className="proj-note-li">No projects yet.</li>
                   )}
                 </ul>
+                </>
               )}
               <form className="proj-create" onSubmit={(event) => {
                 event.preventDefault()
