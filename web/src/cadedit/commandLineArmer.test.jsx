@@ -2,9 +2,11 @@
 // window event, arms the same prompt a ribbon click arms; ERASE runs on a live
 // selection and does nothing without one; anything malformed is ignored.
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { byId } from '../lib/actionRegistry.js'
+import { byId, CLIPBOARD_REASONS, DRAW_REASONS, MODIFY_REASONS, REASONS, REPEAT_REASONS } from '../lib/actionRegistry.js'
+import RoutePanel from '../components/RoutePanel.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from '../lib/commandWords.js'
 
 import CadEditSurface from './CadEditSurface.jsx'
@@ -34,7 +36,7 @@ function fileOf(name = 'one.dxf') {
 }
 
 let workers
-function mount(picker = null) {
+function mount(picker = null, { strict = false, onBeforeArm = null, saveTarget = null } = {}) {
   workers = []
   const handle = {}
   function Probe() {
@@ -42,17 +44,19 @@ function mount(picker = null) {
     return null
   }
   const createWorker = vi.fn(() => { const w = new ScriptedWorker(); workers.push(w); return w })
-  render(
-    <EngineSessionProvider createWorker={createWorker}>
+  const tree = (ribbon = true, armer = true) => (
+    <EngineSessionProvider createWorker={createWorker} onBeforeArm={onBeforeArm} saveTarget={saveTarget}>
       <Probe />
       <DraftingRibbon clusters={[]}>
-        <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />
-        <CommandLineArmer />
+        {ribbon && <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />}
+        {armer && <CommandLineArmer />}
       </DraftingRibbon>
       {picker && <CanvasPointPicker {...picker} />}
       <CadEditSurface enabled />
-    </EngineSessionProvider>,
+    </EngineSessionProvider>
   )
+  handle.view = render(tree(), strict ? { wrapper: StrictMode } : undefined)
+  handle.rerender = (ribbon = true, armer = true) => handle.view.rerender(tree(ribbon, armer))
   return handle
 }
 
@@ -63,7 +67,7 @@ async function openAndLoad(entities = [LINE]) {
     await Promise.resolve()
   })
   await waitFor(() => expect(workers.length).toBeGreaterThan(0))
-  workers[0].emit({ type: 'documentLoaded', documentId: 'one.dxf', entities, entityCount: entities.length, unsupported: [] })
+  workers.at(-1).emit({ type: 'documentLoaded', documentId: 'one.dxf', entities, entityCount: entities.length, unsupported: [] })
 }
 
 const command = (detail) => act(() => { window.dispatchEvent(new CustomEvent(COCKPIT_COMMAND_EVENT, { detail })) })
@@ -77,6 +81,647 @@ const point = (text) => {
 beforeEach(() => {
   globalThis.URL.createObjectURL = vi.fn(() => 'blob:cad-edit-test')
   globalThis.URL.revokeObjectURL = vi.fn()
+})
+
+const B2_KEYS = [
+  { key: 'Delete' },
+  ...['ctrlKey', 'metaKey'].flatMap((modifier) => [
+    ...['z', 'y', 'c', 'x', 'v'].map((key) => ({ key, [modifier]: true })),
+    { key: 'z', [modifier]: true, shiftKey: true },
+  ]),
+  { key: 'Enter' }, { key: ' ' },
+]
+const b2Key = (spec, target = window) => {
+  const event = new KeyboardEvent('keydown', { ...spec, bubbles: true, cancelable: true })
+  act(() => target.dispatchEvent(event))
+  return event
+}
+const bodyFocus = () => act(() => {
+  document.activeElement?.blur?.()
+  expect(document.activeElement).toBe(document.body)
+})
+const edits = () => workers.at(-1).posted.filter((message) => message.type === 'applyEdit')
+const loaded = (entities = [LINE], documentId = 'one.dxf') => workers.at(-1).emit({
+  type: 'documentLoaded', documentId, entities, entityCount: entities.length, unsupported: [],
+})
+const applied = (op = 'delete', entities = []) => workers.at(-1).emit({
+  type: 'editApplied', op, ok: true, entities, entityCount: entities.length,
+  bytes: new Uint8Array([48, 10]), byteLength: 2,
+})
+async function b2Studio(entities = [LINE], options = {}) {
+  const studio = mount(null, options)
+  await openAndLoad(entities)
+  const dom = render(<div className="app" data-drawer="none">
+    <div data-testid="b2-canvas" data-engine-document="one.dxf" />
+    <input data-testid="command-bar" aria-label="Command bar" role="combobox" defaultValue="" />
+  </div>)
+  studio.dom = dom
+  studio.canvas = screen.getByTestId('b2-canvas')
+  studio.bar = screen.getByTestId('command-bar')
+  bodyFocus()
+  return studio
+}
+function selectLine(studio) {
+  act(() => studio.context.session.actions.select('e1'))
+  bodyFocus()
+}
+function rememberLine(studio) {
+  act(() => studio.context.setArmed({ group: 'draw', op: 'createLine', from: [12, 34] }, { rearm: true }))
+  act(() => studio.context.setArmed(null))
+  bodyFocus()
+}
+async function reloadDrawing(studio, name) {
+  await act(async () => { await studio.context.session.actions.open(fileOf(name)) })
+  loaded([LINE], name)
+  studio.canvas.dataset.engineDocument = name
+  bodyFocus()
+}
+function assertUnchanged(studio, specs = B2_KEYS, target = window) {
+  const before = [...workers.at(-1).posted]
+  const clipboard = studio.context.session.clipboard
+  const armed = studio.context.armed
+  const history = [studio.context.session.undoDepth, studio.context.session.redoDepth]
+  for (const spec of specs) expect(b2Key(spec, target).defaultPrevented).toBe(false)
+  expect(workers.at(-1).posted).toEqual(before)
+  expect(studio.context.session.clipboard).toBe(clipboard)
+  expect(studio.context.armed).toBe(armed)
+  expect([studio.context.session.undoDepth, studio.context.session.redoDepth]).toEqual(history)
+}
+
+describe('canvas drafting shortcuts', () => {
+  it('B2-01 Delete dispatches the registry erase once to the worker', async () => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    expect(b2Key({ key: 'Delete' }).defaultPrevented).toBe(true)
+    expect(edits()).toEqual([{ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } }])
+    expect(studio.context.session.busy).toBe(true)
+  })
+
+  it.each(['ctrlKey', 'metaKey'])('B2-02 %s undo reaches the engine snapshot stack for dirty and clean drawings', async (modifier) => {
+    const save = vi.fn(async () => ({ new_version: { version: 2, parent: 1 }, head: 2 }))
+    const studio = await b2Studio([LINE], { saveTarget: { drawingId: 'drawing', headVersion: 1, save } })
+    selectLine(studio)
+    b2Key({ key: 'Delete' })
+    applied()
+    expect(studio.context.session.dirty).toBe(true)
+    expect(studio.context.session.undoDepth).toBe(1)
+    const before = workers.at(-1).posted.length
+    b2Key({ key: 'z', [modifier]: true })
+    expect(workers.at(-1).posted.slice(before)).toMatchObject([{ type: 'loadDocument', documentId: 'one.dxf' }])
+    expect(studio.context.session.redoDepth).toBe(1)
+    loaded()
+    expect(studio.context.session.dirty).toBe(false)
+    selectLine(studio)
+    b2Key({ key: 'Delete' })
+    applied()
+    await act(async () => { await studio.context.session.actions.save() })
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(studio.context.session.dirty).toBe(false)
+    expect(studio.context.session.undoDepth).toBe(1)
+    bodyFocus()
+    b2Key({ key: 'z', [modifier]: true })
+    expect(workers.at(-1).posted.at(-1).type).toBe('loadDocument')
+    expect(edits()).toHaveLength(2)
+  })
+
+  it.each(['ctrlKey', 'metaKey'])('B2-03 %s redo aliases each load exactly one engine snapshot', async (modifier) => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    b2Key({ key: 'Delete' })
+    applied()
+    for (const alias of [{ key: 'y' }, { key: 'z', shiftKey: true }]) {
+      b2Key({ key: 'z', [modifier]: true })
+      loaded()
+      const before = workers.at(-1).posted.length
+      b2Key({ ...alias, [modifier]: true })
+      expect(workers.at(-1).posted.slice(before)).toMatchObject([{ type: 'loadDocument', documentId: 'one.dxf' }])
+      loaded([])
+    }
+    expect(edits()).toHaveLength(1)
+    expect(studio.context.session.redoDepth).toBe(0)
+  })
+
+  it.each(['ctrlKey', 'metaKey'])('B2-04 %s Copy uses the session clipboard without geometry copy or history', async (modifier) => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    const before = [...workers.at(-1).posted]
+    b2Key({ key: 'c', [modifier]: true })
+    expect(studio.context.session.clipboard).not.toBeNull()
+    expect(studio.context.session.entities).toContainEqual(expect.objectContaining({ id: 'e1' }))
+    expect(workers.at(-1).posted).toEqual(before)
+    expect(studio.context.session.undoDepth).toBe(0)
+    expect(studio.context.session.dirty).toBe(false)
+  })
+
+  it.each(['ctrlKey', 'metaKey'])('B2-05 %s Cut captures geometry before posting one delete', async (modifier) => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    b2Key({ key: 'x', [modifier]: true })
+    const clipboard = studio.context.session.clipboard
+    expect(clipboard).not.toBeNull()
+    expect(edits()).toEqual([{ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } }])
+    applied()
+    expect(studio.context.session.entities).toEqual([])
+    expect(studio.context.session.clipboard).toBe(clipboard)
+    expect(studio.context.session.undoDepth).toBe(1)
+  })
+
+  it.each(['ctrlKey', 'metaKey'])('B2-06 %s Paste arms a point prompt and Run posts one paste', async (modifier) => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    b2Key({ key: 'c', [modifier]: true })
+    act(() => studio.context.session.actions.selectClear())
+    b2Key({ key: 'v', [modifier]: true })
+    expect(studio.context.armed).toEqual({ group: 'clipboard', op: 'pasteClip' })
+    expect(edits()).toHaveLength(0)
+    point('10,20')
+    fireEvent.click(screen.getByTestId('cockpit-prompt-run'))
+    expect(edits()).toHaveLength(1)
+    expect(edits()[0]).toMatchObject({ type: 'applyEdit', op: 'createLine', payload: { x1: 10, y1: 20, x2: 11, y2: 21 } })
+    workers.at(-1).emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2' }], entityCount: 2, bytes: new Uint8Array([48, 10]), byteLength: 2 })
+    expect(studio.context.session.undoDepth).toBe(1)
+  })
+
+  it('B2-07 Enter rearms the accepted LINE without a chain point or immediate edit', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    expect(studio.context.lastArmedCommand).toEqual({ group: 'draw', op: 'createLine' })
+    studio.rerender(false)
+    studio.rerender(true)
+    bodyFocus()
+    expect(b2Key({ key: 'Enter' }).defaultPrevented).toBe(true)
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine' })
+    expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify first point:')
+    expect(edits()).toHaveLength(0)
+  })
+
+  it('B2-08 Space repeats without page scroll or an immediate edit', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    expect(b2Key({ key: ' ' }).defaultPrevented).toBe(true)
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine' })
+    expect(edits()).toHaveLength(0)
+  })
+
+  it.each([
+    ['B2-09', 'INSERT', MODIFY_REASONS.unsupportedInsert],
+    ['B2-10', 'DIMENSION', MODIFY_REASONS.unsupportedDimension],
+  ])('%s Copy and Cut announce the exact placed entity registry reason', async (id, type, reason) => {
+    const studio = await b2Studio([{ ...LINE, type, editable: false }])
+    selectLine(studio)
+    for (const modifier of ['ctrlKey', 'metaKey']) {
+      for (const key of ['c', 'x']) {
+        expect(b2Key({ key, [modifier]: true }).defaultPrevented).toBe(true)
+        expect(screen.getByRole('status').textContent).toBe(reason)
+        expect(studio.context.session.clipboard).toBeNull()
+        expect(edits()).toHaveLength(0)
+      }
+    }
+  })
+
+  it.each([
+    ['B2-11', ['e1', 'e2'], MODIFY_REASONS.multiSelection],
+    ['B2-12', [], MODIFY_REASONS.noSelection],
+  ])('%s erase and clipboard shortcuts retain the ribbon selection gate', async (id, selection, reason) => {
+    const studio = await b2Studio([LINE, { ...LINE, id: 'e2' }])
+    act(() => studio.context.session.actions.selectReplace(selection))
+    for (const spec of B2_KEYS.filter(({ key }) => ['Delete', 'c', 'x'].includes(key))) {
+      expect(b2Key(spec).defaultPrevented).toBe(true)
+      expect(screen.getByRole('status').textContent).toBe(reason)
+    }
+    expect(edits()).toHaveLength(0)
+    expect(studio.context.session.clipboard).toBeNull()
+  })
+
+  it('B2-13 Paste with an empty clipboard announces its registry reason', async () => {
+    const studio = await b2Studio()
+    for (const modifier of ['ctrlKey', 'metaKey']) {
+      b2Key({ key: 'v', [modifier]: true })
+      expect(screen.getByRole('status').textContent).toBe(CLIPBOARD_REASONS.empty)
+    }
+    expect(studio.context.armed).toBeNull()
+    expect(edits()).toHaveLength(0)
+  })
+
+  it('B2-14 empty engine history announces the matching reason for every alias', async () => {
+    await b2Studio()
+    const before = [...workers.at(-1).posted]
+    for (const modifier of ['ctrlKey', 'metaKey']) {
+      for (const spec of [{ key: 'z' }, { key: 'y' }, { key: 'z', shiftKey: true }]) {
+        b2Key({ ...spec, [modifier]: true })
+        expect(screen.getByRole('status').textContent).toBe(spec.key === 'z' && !spec.shiftKey ? REASONS.nothingToUndo : REASONS.nothingToRedo)
+      }
+    }
+    expect(workers.at(-1).posted).toEqual(before)
+  })
+
+  it('B2-15 busy blocks every engine shortcut before clipboard or history changes', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    selectLine(studio)
+    b2Key({ key: 'c', ctrlKey: true })
+    b2Key({ key: 'Delete' })
+    const before = [...workers.at(-1).posted]
+    const clipboard = studio.context.session.clipboard
+    for (const spec of B2_KEYS) {
+      expect(b2Key(spec).defaultPrevented).toBe(true)
+      expect(screen.getByRole('status').textContent).toBe(DRAW_REASONS.busy)
+    }
+    expect(workers.at(-1).posted).toEqual(before)
+    expect(studio.context.session.clipboard).toBe(clipboard)
+    expect(studio.context.armed).toBeNull()
+  })
+
+  it.each(['text', 'search', 'number', 'range', 'checkbox', 'radio', 'file', 'password', 'email', 'date', 'color', 'button', 'submit', 'reset', 'url', 'tel', 'time', 'datetime-local', 'month', 'week', 'hidden', 'image'])('B2-16 every shortcut yields to input type %s and the empty command bar', async (type) => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    selectLine(studio)
+    b2Key({ key: 'c', ctrlKey: true })
+    const input = document.createElement('input')
+    input.type = type
+    studio.canvas.append(input)
+    act(() => input.focus())
+    assertUnchanged(studio, B2_KEYS, input)
+    if (document.activeElement === input) assertUnchanged(studio)
+    act(() => studio.bar.focus())
+    assertUnchanged(studio, B2_KEYS, studio.bar)
+    assertUnchanged(studio)
+  })
+
+  it('B2-17 textarea keeps text selection clipboard and history defaults', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    selectLine(studio)
+    b2Key({ key: 'c', ctrlKey: true })
+    const textarea = document.createElement('textarea')
+    textarea.value = 'selected text'
+    studio.canvas.append(textarea)
+    act(() => { textarea.focus(); textarea.select() })
+    assertUnchanged(studio, B2_KEYS, textarea)
+    assertUnchanged(studio)
+    expect(textarea.selectionStart).toBe(0)
+    expect(textarea.selectionEnd).toBe(textarea.value.length)
+  })
+
+  it('B2-18 select retains its native keys', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    selectLine(studio)
+    b2Key({ key: 'c', metaKey: true })
+    const select = document.createElement('select')
+    studio.canvas.append(select)
+    act(() => select.focus())
+    assertUnchanged(studio, B2_KEYS, select)
+    assertUnchanged(studio)
+  })
+
+  it('B2-19 descendants of editors exclude both event and active focus', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    selectLine(studio)
+    b2Key({ key: 'c', ctrlKey: true })
+    for (const kind of ['contenteditable', 'textbox', 'searchbox', 'combobox', 'spinbutton']) {
+      const owner = document.createElement('div')
+      if (kind === 'contenteditable') owner.setAttribute('contenteditable', 'true')
+      else owner.setAttribute('role', kind)
+      const child = document.createElement('span')
+      child.tabIndex = 0
+      owner.append(child)
+      studio.canvas.append(owner)
+      act(() => child.focus())
+      assertUnchanged(studio, B2_KEYS, child)
+      assertUnchanged(studio)
+      owner.remove()
+    }
+    const editor = document.createElement('div')
+    editor.tabIndex = 0
+    Object.defineProperty(editor, 'isContentEditable', { value: true })
+    studio.canvas.append(editor)
+    expect(editor.hasAttribute('contenteditable')).toBe(false)
+    act(() => editor.focus())
+    expect(document.activeElement).toBe(editor)
+    assertUnchanged(studio, B2_KEYS, editor)
+    assertUnchanged(studio)
+  })
+
+  it('B2-20 visible owners and the phone drawer block keys while focus stays outside', async () => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    for (const markup of ['<div role="dialog"></div>', '<div aria-modal="true"></div>', '<div class="drawer-layer"></div>', '<div data-escape-owner></div>', '<dialog open></dialog>', '<div class="resolver" role="listbox"></div>']) {
+      const parent = document.createElement('div')
+      parent.innerHTML = markup
+      studio.canvas.append(parent)
+      assertUnchanged(studio)
+      parent.hidden = true
+      expect(b2Key({ key: 'c', ctrlKey: true }).defaultPrevented).toBe(true)
+      parent.remove()
+    }
+    const app = studio.canvas.closest('.app')
+    app.dataset.drawer = 'nav'
+    const opener = document.createElement('button')
+    app.append(opener)
+    act(() => opener.focus())
+    assertUnchanged(studio)
+    app.dataset.drawer = 'none'
+    bodyFocus()
+    for (const attribute of ['hidden', 'inert', 'aria-hidden']) {
+      const parent = document.createElement('div')
+      parent.setAttribute(attribute, attribute === 'aria-hidden' ? 'true' : '')
+      parent.innerHTML = '<div role="dialog"></div>'
+      app.append(parent)
+      expect(b2Key({ key: 'c', metaKey: true }).defaultPrevented).toBe(true)
+      parent.remove()
+    }
+    for (const style of ['display: none', 'visibility: hidden']) {
+      const parent = document.createElement('div')
+      parent.setAttribute('style', style)
+      parent.innerHTML = '<div data-escape-owner></div>'
+      app.append(parent)
+      expect(b2Key({ key: 'c', ctrlKey: true }).defaultPrevented).toBe(true)
+      parent.remove()
+    }
+    const closed = document.createElement('dialog')
+    app.append(closed)
+    expect(b2Key({ key: 'c', ctrlKey: true }).defaultPrevented).toBe(true)
+    expect(edits()).toHaveLength(0)
+  })
+
+  it('B2-21 Alt yields every binding without dispatch or prevented defaults', async () => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    assertUnchanged(studio, B2_KEYS.map((spec) => ({ ...spec, altKey: true })))
+  })
+
+  it('B2-22 held Delete never dispatches a second erase after busy clears', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    selectLine(studio)
+    const held = [
+      { key: 'Delete', repeat: true },
+      ...['ctrlKey', 'metaKey'].flatMap((modifier) => ['z', 'x'].map((key) => ({ key, [modifier]: true, repeat: true }))),
+      { key: 'Enter', repeat: true },
+    ]
+    b2Key({ key: 'Delete' })
+    assertUnchanged(studio, held)
+    applied('delete', [LINE])
+    selectLine(studio)
+    expect(studio.context.session.busy).toBe(false)
+    expect(studio.context.session.undoDepth).toBe(1)
+    expect(studio.context.lastArmedCommand).toEqual({ group: 'draw', op: 'createLine' })
+    assertUnchanged(studio, held)
+    expect(edits()).toHaveLength(1)
+  })
+
+  it('B2-23 hidden mismatched closed crashed and unmounted documents produce no shortcut effect', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    selectLine(studio)
+    for (const attribute of ['hidden', 'inert', 'aria-hidden']) {
+      const parent = studio.canvas.parentElement
+      parent.setAttribute(attribute, attribute === 'aria-hidden' ? 'true' : '')
+      assertUnchanged(studio)
+      parent.removeAttribute(attribute)
+    }
+    for (const style of ['display: none', 'visibility: hidden']) {
+      studio.canvas.parentElement.setAttribute('style', style)
+      assertUnchanged(studio)
+      studio.canvas.parentElement.removeAttribute('style')
+    }
+    studio.canvas.dataset.engineDocument = 'another.dxf'
+    assertUnchanged(studio)
+    studio.canvas.dataset.engineDocument = 'one.dxf'
+    const remove = vi.spyOn(window, 'removeEventListener')
+    act(() => workers.at(-1).listeners.get('error')?.({ message: 'worker stopped', preventDefault() {} }))
+    expect(studio.context.session.errorKind).toBe('crashed')
+    expect(studio.context.lastArmedCommand).toBeNull()
+    expect(remove.mock.calls.some(([type]) => type === 'keydown')).toBe(true)
+    assertUnchanged(studio)
+    act(() => studio.context.session.actions.reset())
+    assertUnchanged(studio)
+    studio.view.unmount()
+    for (const spec of B2_KEYS) expect(b2Key(spec).defaultPrevented).toBe(false)
+  })
+
+  it('B2-24 nonempty command text or a live arm retains the current prompt and inputs', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    studio.bar.value = ' LINE '
+    assertUnchanged(studio, [{ key: 'Enter' }, { key: ' ' }])
+    studio.bar.value = ''
+    act(() => studio.context.setArmed({ group: 'draw', op: 'createCircle' }))
+    act(() => studio.context.setInput('r', '7'))
+    bodyFocus()
+    assertUnchanged(studio, [{ key: 'Enter' }, { key: ' ' }])
+    expect(studio.context.inputs.r).toBe('7')
+  })
+
+  it('B2-25 no accepted prompted command gives the frozen bounded repeat reason', async () => {
+    let permit = false
+    const studio = await b2Studio([LINE], { onBeforeArm: () => permit })
+    act(() => studio.context.setArmed({ group: 'draw', op: 'createLine' }))
+    permit = true
+    act(() => studio.context.setArmed({ group: 'draw', op: 'madeUp' }))
+    act(() => studio.context.setArmed(null))
+    selectLine(studio)
+    b2Key({ key: 'c', ctrlKey: true })
+    bodyFocus()
+    for (const key of ['Enter', ' ']) {
+      expect(b2Key({ key }).defaultPrevented).toBe(true)
+      expect(screen.getByRole('status').textContent).toBe(REPEAT_REASONS.empty)
+    }
+    expect(studio.context.lastArmedCommand).toBeNull()
+    expect(studio.context.armed).toBeNull()
+    expect(edits()).toHaveLength(0)
+  })
+
+  it('B2-26 prompt focus after ribbon click and first point excludes synthetic window keys', async () => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    fireEvent.click(document.querySelector('[data-tool="draw:createLine"]'))
+    const first = screen.getByLabelText('ribbon x')
+    expect(document.activeElement).toBe(first)
+    assertUnchanged(studio, B2_KEYS.filter(({ key }) => ['Delete', 'c', 'x', 'z'].includes(key)))
+    point('0,0')
+    act(() => window.dispatchEvent(new CustomEvent('cockpit:focus-step', { detail: {} })))
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x2'))
+    assertUnchanged(studio, B2_KEYS.filter(({ key }) => ['Delete', 'c', 'x', 'z'].includes(key)))
+    expect(document.activeElement).toBe(screen.getByLabelText('ribbon x2'))
+  })
+
+  it('B2-27 activation controls keep Enter and Space and Run performs only its existing edit', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    for (const markup of ['<button>Activate</button>', '<a href="#">Link</a>', '<details><summary>More</summary></details>', '<div role="tab" tabindex="0">Tab</div>', '<div role="option" tabindex="0">Option</div>', '<div role="menuitem" tabindex="0">Item</div>']) {
+      const parent = document.createElement('div')
+      parent.innerHTML = markup
+      studio.canvas.append(parent)
+      const control = parent.querySelector('summary') || parent.firstElementChild
+      act(() => control.focus())
+      expect(document.activeElement).toBe(control)
+      assertUnchanged(studio, [{ key: 'Enter' }, { key: ' ' }], control)
+      assertUnchanged(studio, [{ key: 'Enter' }, { key: ' ' }])
+      parent.remove()
+    }
+    const ribbonButton = document.querySelector('[data-tool="draw:createLine"]')
+    act(() => ribbonButton.focus())
+    expect(document.activeElement).toBe(ribbonButton)
+    assertUnchanged(studio, [{ key: 'Enter' }, { key: ' ' }], ribbonButton)
+    assertUnchanged(studio, [{ key: 'Enter' }, { key: ' ' }])
+    command(parseDrawingCommand('CIRCLE'))
+    const cancel = screen.getByRole('button', { name: 'Cancel', exact: true })
+    act(() => cancel.focus())
+    expect(document.activeElement).toBe(cancel)
+    for (const key of ['Enter', ' ']) expect(b2Key({ key }, cancel).defaultPrevented).toBe(false)
+    fireEvent.click(cancel)
+    expect(studio.context.armed).toBeNull()
+    expect(edits()).toHaveLength(0)
+    command(parseDrawingCommand('CIRCLE'))
+    point('0,0')
+    point('5')
+    const run = screen.getByTestId('cockpit-prompt-run')
+    act(() => run.focus())
+    expect(document.activeElement).toBe(run)
+    for (const key of ['Enter', ' ']) expect(b2Key({ key }, run).defaultPrevented).toBe(false)
+    expect(edits()).toHaveLength(0)
+    fireEvent.click(run)
+    expect(edits()).toHaveLength(1)
+    expect(edits()[0].op).toBe('createCircle')
+  })
+
+  it('B2-28 repeat rechecks the remembered command against the current selection', async () => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    act(() => studio.context.setArmed({ group: 'modify', op: 'move' }))
+    act(() => { studio.context.setArmed(null); studio.context.session.actions.selectClear() })
+    bodyFocus()
+    for (const key of ['Enter', ' ']) {
+      b2Key({ key })
+      expect(screen.getByRole('status').textContent).toBe(MODIFY_REASONS.noSelection)
+      expect(studio.context.armed).toBeNull()
+    }
+    expect(edits()).toHaveLength(0)
+  })
+
+  it('B2-29 replacement and reload discard the old remembered command', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    await reloadDrawing(studio, 'two.dxf')
+    expect(studio.context.lastArmedCommand).toBeNull()
+    b2Key({ key: 'Enter' })
+    expect(screen.getByRole('status').textContent).toBe(REPEAT_REASONS.empty)
+    rememberLine(studio)
+    await reloadDrawing(studio, 'two.dxf')
+    expect(studio.context.lastArmedCommand).toBeNull()
+    b2Key({ key: ' ' })
+    expect(screen.getByRole('status').textContent).toBe(REPEAT_REASONS.empty)
+    expect(edits()).toHaveLength(0)
+  })
+
+  it('B2-30 StrictMode rerenders and ribbon remounts retain one balanced key subscription', async () => {
+    const add = vi.spyOn(window, 'addEventListener')
+    const remove = vi.spyOn(window, 'removeEventListener')
+    const studio = await b2Studio([LINE], { strict: true })
+    const keyAdds = () => add.mock.calls.filter(([type, , capture]) => type === 'keydown' && !capture)
+    const keyRemoves = () => remove.mock.calls.filter(([type, , capture]) => type === 'keydown' && !capture)
+    const liveKeys = () => keyAdds().length - keyRemoves().length
+    const subscribed = keyAdds().length
+    expect(liveKeys()).toBe(1)
+    selectLine(studio)
+    for (let i = 0; i < 3; i += 1) {
+      act(() => studio.context.setInput('layer', String(i)))
+      studio.rerender(false)
+      expect(liveKeys()).toBe(1)
+      studio.rerender(true)
+      expect(liveKeys()).toBe(1)
+    }
+    expect(keyAdds()).toHaveLength(subscribed)
+    bodyFocus()
+    b2Key({ key: 'Delete' })
+    expect(edits()).toHaveLength(1)
+    studio.view.unmount()
+    expect(liveKeys()).toBe(0)
+    for (const [, listener] of keyAdds()) {
+      expect(remove.mock.calls.some(([type, removed, capture]) => type === 'keydown' && removed === listener && !capture)).toBe(true)
+    }
+  })
+
+  it('B2-35 visible menus own shortcuts with focus inside or outside and hidden menus yield', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    selectLine(studio)
+    const actions = studio.context.session.actions
+    const spies = ['applyEdit', 'undo', 'redo', 'copyToClipboard', 'pasteFromClipboard']
+      .map((name) => vi.spyOn(actions, name))
+    spies.push(vi.spyOn(studio.context, 'setArmed'))
+    const menu = document.createElement('div')
+    menu.setAttribute('role', 'menu')
+    menu.tabIndex = 0
+    studio.canvas.append(menu)
+    const specs = [{ key: 'Delete' }, { key: 'x', ctrlKey: true }, { key: 'x', metaKey: true }, { key: 'Enter' }]
+    for (const inside of [true, false]) {
+      if (inside) {
+        act(() => menu.focus())
+        expect(document.activeElement).toBe(menu)
+      } else bodyFocus()
+      assertUnchanged(studio, specs, inside ? menu : document.body)
+      assertUnchanged(studio, specs)
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+    }
+    menu.hidden = true
+    bodyFocus()
+    expect(b2Key({ key: 'Delete' }).defaultPrevented).toBe(true)
+    expect(spies[0]).toHaveBeenCalledTimes(1)
+    expect(edits()).toEqual([{ type: 'applyEdit', op: 'delete', payload: { entityId: 'e1' } }])
+  })
+
+  it('B2-31 real route decision owns Enter while repeat yields and Delete still works', async () => {
+    const studio = await b2Studio()
+    rememberLine(studio)
+    const onOpenAuthor = vi.fn()
+    const route = render(<RoutePanel route={{ lane: 'build', confidence: 1 }} tools={[]} onOpenAuthor={onOpenAuthor} />)
+    vi.spyOn(performance, 'now').mockReturnValue(Number.MAX_SAFE_INTEGER)
+    b2Key({ key: 'Enter' })
+    expect(onOpenAuthor).toHaveBeenCalledTimes(1)
+    expect(studio.context.armed).toBeNull()
+    expect(b2Key({ key: ' ' }).defaultPrevented).toBe(false)
+    selectLine(studio)
+    b2Key({ key: 'Delete' })
+    expect(edits()).toHaveLength(1)
+    route.unmount()
+  })
+
+  it('B2-32 prevented composing and composing keycode events yield all shortcuts', async () => {
+    const studio = await b2Studio()
+    selectLine(studio)
+    assertUnchanged(studio, B2_KEYS.map((spec) => ({ ...spec, isComposing: true })))
+    assertUnchanged(studio, B2_KEYS.map((spec) => ({ ...spec, keyCode: 229 })))
+    const before = [...workers.at(-1).posted]
+    for (const spec of B2_KEYS) {
+      const event = new KeyboardEvent('keydown', { ...spec, cancelable: true })
+      event.preventDefault()
+      act(() => window.dispatchEvent(event))
+    }
+    expect(workers.at(-1).posted).toEqual(before)
+    expect(studio.context.session.clipboard).toBeNull()
+  })
+
+  it('B2-33 Escape F3 F8 Mod+K and Ctrl+J remain outside the engine bindings', async () => {
+    const studio = await b2Studio()
+    assertUnchanged(studio, [
+      { key: 'Escape' }, { key: 'F3' }, { key: 'F8' },
+      { key: 'k', ctrlKey: true }, { key: 'k', metaKey: true }, { key: 'j', ctrlKey: true },
+    ])
+    command(parseDrawingCommand('LINE'))
+    act(() => screen.getByLabelText('ribbon x').focus())
+    b2Key({ key: 'Escape' }, screen.getByLabelText('ribbon x'))
+    expect(studio.context.armed).toBeNull()
+    command(parseDrawingCommand('LINE'))
+    bodyFocus()
+    b2Key({ key: 'Escape' })
+    expect(studio.context.armed).toBeNull()
+    expect(studio.context.lastArmedCommand).toEqual({ group: 'draw', op: 'createLine' })
+    expect(edits()).toHaveLength(0)
+  })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 

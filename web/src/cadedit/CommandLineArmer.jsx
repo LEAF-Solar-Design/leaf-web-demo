@@ -16,12 +16,13 @@
  */
 import { useEffect, useRef, useState } from 'react'
 
-import { DEFERRED_REASONS } from '../lib/actionRegistry.js'
+import { DEFERRED_REASONS, byId, engineShortcutDecision } from '../lib/actionRegistry.js'
 import { COCKPIT_COMMAND_EVENT } from '../lib/commandWords.js'
 
 import { PROMPTS, modifyReason, historyStepReason } from './EngineRibbonClusters.jsx'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { readNumber } from './engineSession.js'
+import { SESSION_ERROR } from './engineSessionErrors.js'
 import { isPointStep, resolvePromptInputs } from './promptInputs.js'
 import { isPointExpression, pointExpressionRefusal, resolvePointExpression } from './pointExpression.js'
 
@@ -48,8 +49,22 @@ export function acceptsCommand(detail) {
   return Object.prototype.hasOwnProperty.call(PROMPTS, op) || RUN_ON_ARRIVAL.has(op)
 }
 
+function visibleElement(element) {
+  for (let node = element; node; node = node.parentElement) {
+    if (node.hidden || node.hasAttribute('inert') || node.getAttribute('aria-hidden') === 'true') return false
+    if (node.tagName === 'DIALOG' && !node.open) return false
+    const style = window.getComputedStyle(node)
+    if (style.display === 'none' || style.visibility === 'hidden') return false
+  }
+  return true
+}
+
+function visibleMatch(selector) {
+  return [...document.querySelectorAll(selector)].some(visibleElement)
+}
+
 export default function CommandLineArmer() {
-  const { session, inputs, setInput, armed, setArmed, refuse } = useEngineSessionContext()
+  const { session, inputs, setInput, armed, setArmed, refuse, reach, lastArmedCommand } = useEngineSessionContext()
   const [cursor, setCursor] = useState({ armed: null, index: 0 })
   const [runRequest, setRunRequest] = useState(null)
   const [focusRequest, setFocusRequest] = useState(0)
@@ -62,7 +77,39 @@ export default function CommandLineArmer() {
   const step = prompt?.steps[index]
   const ask = prompt ? `${prompt.verb}  ${step?.ask || 'Press Run to finish.'}` : ''
   const live = useRef(null)
-  live.current = { armed, prompt, index, step, inputs, session }
+  live.current = { armed, prompt, index, step, inputs, session, setArmed, refuse, reach, lastArmedCommand }
+  const showing = session.engineParsed && session.errorKind !== SESSION_ERROR.CRASHED
+  useEffect(() => {
+    if (!showing) return undefined
+    const onKey = (event) => {
+      const current = live.current
+      const commandBar = document.querySelector('[data-testid="command-bar"], [aria-label="Command bar"][role="combobox"]')
+      const canvasShown = [...document.querySelectorAll('[data-engine-document]')]
+        .some((element) => element.dataset.engineDocument === current.session.documentId && visibleElement(element))
+      const phoneDrawer = document.querySelector('.app[data-drawer]')?.getAttribute('data-drawer')
+      const ctx = {
+        ...current, activeElement: document.activeElement, canvasShown,
+        commandLineEmpty: !!commandBar && typeof commandBar.value === 'string' && commandBar.value.trim() === '',
+        ownerOpen: (phoneDrawer !== undefined && phoneDrawer !== null && phoneDrawer !== 'none')
+          || visibleMatch('[role="dialog"], [aria-modal="true"], dialog, .drawer-layer, [data-escape-owner], .resolver[role="listbox"], [role="menu"], [data-command-menu], [data-keyboard-owner]'),
+        decisionOpen: visibleMatch('.strip-decision'),
+        onActivate: (group, op) => {
+          if (op === 'copyClip' || op === 'cutClip') current.session.actions.copyToClipboard(op === 'cutClip')
+          else if (RUN_ON_ARRIVAL.has(op)) current.session.actions.applyEdit(op, current.inputs)
+          else current.setArmed({ group, op }, { rearm: true })
+        },
+      }
+      const id = engineShortcutDecision(event, ctx)
+      if (!id) return
+      const action = byId(id)
+      const reason = action.when(ctx)
+      event.preventDefault()
+      if (reason) current.refuse(reason)
+      else action.run(ctx)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showing])
   useEffect(() => {
     if (!focusRequest) return
     const current = live.current
