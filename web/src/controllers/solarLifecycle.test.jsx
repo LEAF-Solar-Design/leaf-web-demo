@@ -507,7 +507,7 @@ describe('wiring pins', () => {
     const body = app.slice(start, app.indexOf('}, [', start))
     expect(body.includes('if (mock) return')).toBe(true)
     expect(body.includes('getTools(false)')).toBe(true)
-    expect(body.includes('onRequestCatalogRun(tool, pending.params)')).toBe(true)
+    expect(body.includes("onRequestCatalogRun(tool, pending.params, null, 'catalog', { complete: true })")).toBe(true)
     expect(body.includes('is no longer in your catalog. Your saved inputs were discarded.')).toBe(true)
     expect(body.includes('onRun(')).toBe(false)
   })
