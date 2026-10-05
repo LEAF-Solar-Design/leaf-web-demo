@@ -487,10 +487,25 @@ test('failed drawing setup accepts an empty canvas and requires the product no-d
 })
 
 test('ready Solar catalog setup requires the browser drawing query and exact enabled tool', async () => {
-  for (const name of ['solar-settings', 'solar-string-data']) {
+  for (const [name, familyId, placement, surface, tab] of [
+    ['solar-settings', 'stringing', undefined, 'solar', 'Manage'],
+    ['solar-string-data', 'stringing', undefined, 'solar', 'Manage'],
+    ['solar-settings', 'solar-unit', undefined, 'solar', 'Solar'],
+    ['solar-settings', 'solar-unit', undefined, 'cad', 'Manage'],
+    ['solar-settings', 'solar-unit', undefined, null, 'Manage'],
+    ['solar-settings', 'solar-unit', { tab: 'view' }, 'solar', 'View'],
+    ['solar-settings', 'solar-unit', { tab: 'view' }, 'cad', 'View'],
+  ]) {
     const events = []
     const button = { visible: true, enabled: true }
     const page = {
+      locator: (selector) => {
+        assert.equal(selector, '.app')
+        return { first: () => ({ getAttribute: async (name) => {
+          assert.equal(name, 'data-surface')
+          return surface
+        } }) }
+      },
       waitForResponse: async (predicate, options) => {
         assert.equal(options.timeout, 15_000)
         const response = (query) => ({ url: () => `http://walk/api/capabilities${query}`,
@@ -505,9 +520,10 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
         assert.equal(url, '/app?drawing=private&surface=solar')
         events.push('private drawing')
       },
-      request: { get: async (path) => {
+      request: { get: async (path, options) => {
+        assert.equal(options.timeout, 15_000)
         assert.equal(path, '/api/capabilities?drawing_id=private&drawing_version=2')
-        return { ok: () => true, json: async () => ({ families: [{ label: 'Stringing', capabilities: [{ name,
+        return { ok: () => true, json: async () => ({ families: [{ family_id: familyId, label: 'Stringing', capabilities: [{ name, placement,
           availability: { entitled: true, engine_ready: true, input_ready: true, implemented: true } }] }] }) }
       } },
       getByRole: (role, options) => {
@@ -538,7 +554,8 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
     const probe = { kind: 'tool', sourceId: name, state: 'ready', assertion: { kind: 'opens', target: 'catalog-run-decision' } }
     const runtime = { page, drawingId: 'private', drawingVersion: 2, evidence: {}, recipeAssertions: assertions }
     await setupStep(probe, runtime, { kind: 'catalog-tool', name })
-    assert.deepEqual(events, ['Manage', 'browser catalog', 'private drawing', 'Manage', 'exact tool', 'visible', 'enabled'])
+    assert.deepEqual(events, [tab, 'browser catalog', 'private drawing', tab, 'exact tool', 'visible', 'enabled'])
+    assert.equal(runtime.ribbonTab, tab)
     assert.equal(runtime.evidence.browserCatalog.drawingId, 'private')
     button.enabled = false
     await assert.rejects(setupStep(probe, runtime, { kind: 'catalog-tool', name }), assert.AssertionError)
@@ -548,6 +565,56 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
     button.visible = true
     page.waitForResponse = async () => { throw new Error('No browser drawing query') }
     await assert.rejects(setupStep(probe, runtime, { kind: 'catalog-tool', name }), /No browser drawing query/)
+  }
+})
+
+test('catalog tools choose their first tab from the active surface without a readiness reload', async () => {
+  for (const name of ['solar-unit-sync', 'solar-nec-conduit-fill']) {
+    for (const [surface, familyId, placement, tab] of [
+      ['solar', 'solar-unit', undefined, 'Solar'],
+      ['solar', 'stringing', undefined, 'Manage'],
+      ['cad', 'solar-unit', undefined, 'Manage'],
+      [null, 'solar-unit', undefined, 'Manage'],
+      ['solar', 'solar-unit', { tab: 'view' }, 'View'],
+      ['cad', 'solar-unit', { tab: 'view' }, 'View'],
+    ]) {
+      const tabs = []
+      const page = {
+        locator: (selector) => {
+          assert.equal(selector, '.app')
+          return { first: () => ({ getAttribute: async (attribute) => {
+            assert.equal(attribute, 'data-surface')
+            return surface
+          } }) }
+        },
+        request: { get: async (path, options) => {
+          assert.equal(path, '/api/capabilities?drawing_id=private&drawing_version=head')
+          assert.equal(options.timeout, 15_000)
+          return { ok: () => true, json: async () => ({ families: [
+            { family_id: familyId, label: 'Tools', capabilities: [{ name, placement }] },
+          ] }) }
+        } },
+        getByRole: (role, options) => {
+          if (role === 'tablist') {
+            assert.equal(options.name, 'Ribbon')
+            return { getByRole: (role, options) => {
+              assert.equal(role, 'tab')
+              return { click: async () => tabs.push(options.name) }
+            } }
+          }
+          assert.equal(role, 'button')
+          assert.equal(options.name, 'More panels')
+          return { isVisible: async () => false }
+        },
+        goto: () => assert.fail('this tool must keep the seated workspace'),
+        waitForResponse: () => assert.fail('this tool does not require a browser catalog reload'),
+      }
+      const runtime = { page, drawingId: 'private', evidence: {} }
+      await setupStep({ kind: 'tool', sourceId: name, state: 'ready' }, runtime, { kind: 'catalog-tool', name })
+      assert.deepEqual(tabs, [tab])
+      assert.equal(runtime.ribbonTab, tab)
+      assert.equal(runtime.evidence.browserCatalog, undefined)
+    }
   }
 })
 
@@ -862,6 +929,7 @@ test('available solve proposal does not wait on the settings-form browser catalo
   for (const name of ['solar-settings', 'solar-string-data', 'solar-autofill']) assert.equal(solarBrowserCatalogRequired(name), true)
   const record = { name: 'solar-solve-proposal', availability: { entitled: true, engine_ready: true, input_ready: true, implemented: true } }
   const runtime = { drawingId: 'private', evidence: {}, page: {
+    locator: () => ({ first: () => ({ getAttribute: async () => null }) }),
     waitForResponse: () => assert.fail('available solve must not require the flag-gated browser fetch'),
     goto: () => assert.fail('available solve must keep the already seated workspace'),
     request: { get: async () => ({ ok: () => true, json: async () => ({ families: [{ label: 'Solar', capabilities: [record] }] }) }) },
@@ -1047,16 +1115,20 @@ test('copy verifies a paste at the known base and detects corrupt copied or unto
 
 test('Explode checks exact segment geometry and preserves every other entity', async () => {
   const source = { id: String(0xA200), type: 'LWPOLYLINE', layer: 'Walk', vertices: [[111, 200, 0], [222, 200, 0], [222, 210, 0]] }
-  const other = { id: '1', type: 'LINE', vertices: [[0, 0, 0], [10, 0, 0]] }
+  const other = { id: '1', index: 1, type: 'LINE', layer: 'Walk', vertices: [[0, 0, 0], [10, 0, 0]] }
   const before = { count: 2, geometry: { entities: [other, source] } }
   const parts = [
     { id: '2', type: 'LINE', layer: 'Walk', vertices: [[111, 200, 0], [222, 200, 0]] },
     { id: '3', type: 'LINE', layer: 'Walk', vertices: [[222, 200, 0], [222, 210, 0]] },
   ]
-  for (const fault of [null, 'segments', 'untouched', 'source-retained']) {
+  for (const fault of [null, 'segments', 'untouched', 'id', 'type', 'layer', 'source-retained']) {
     const entities = structuredClone([other, ...parts])
+    entities[0].index = 0
     if (fault === 'segments') entities[2].vertices[1][1]++
     if (fault === 'untouched') entities[0].vertices[0][0]++
+    if (fault === 'id') entities[0].id = 'changed'
+    if (fault === 'type') entities[0].type = 'LWPOLYLINE'
+    if (fault === 'layer') entities[0].layer = 'changed'
     if (fault === 'source-retained') entities[1] = source
     const runtime = { page: { getByTestId: () => ({ innerText: async () => '3' }), evaluate: async () => ({ entities }) } }
     const check = () => assertEffect({ assertion: { target: 'engine:explode' } }, runtime, {}, before, oracleAssertions)
