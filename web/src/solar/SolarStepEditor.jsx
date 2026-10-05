@@ -28,6 +28,7 @@ export default function SolarStepEditor({
   }
   const retainedValues = retained !== null && typeof retained === 'object' && !Array.isArray(retained) ? retained : {}
   const [values, setValues] = useState(() => ({ ...defaultsOf(schema), ...retainedValues }))
+  const [formValid, setFormValid] = useState(true)
   const revTouched = useRef(ownsKey(retainedValues, 'expected_rev'))
   const text = row.label || row.name
   const pending = status === 'pending'
@@ -49,8 +50,8 @@ export default function SolarStepEditor({
     return () => { current = false }
   }, [row, drawingId, drawingVersion, readIntake])
 
-  function change(next) {
-    if (ownsKey(next, 'expected_rev') && next.expected_rev !== values.expected_rev) revTouched.current = true
+  function change(next, { changedKey } = {}) {
+    if (changedKey === 'expected_rev') revTouched.current = true
     setValues(next)
   }
 
@@ -84,18 +85,18 @@ export default function SolarStepEditor({
         <SolarStringComposer row={row} drawingId={drawingId} drawingVersion={drawingVersion} projectId={projectId}
           readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} onClose={close} />
       ) : <>
-      <SchemaForm schema={schema} values={values} onChange={change} />
+      <SchemaForm schema={schema} values={values} onChange={change} onValidityChange={setFormValid} />
       {pending && <p role="status" className="solar-step-note">This step is running. Confirm or wait for it to finish.</p>}
       {status === 'failed' && (
         <p role="alert" className="solar-step-note">
           {failureCode ? `This run failed: ${failureCode}. Your inputs are kept.` : 'This run failed. Your inputs are kept.'}
         </p>
       )}
-      <button type="button" className="chip-act" disabled={pending} onClick={() => onSubmit(row, values)}>
+      <button type="button" className="chip-act" disabled={pending || !formValid} onClick={() => { if (!pending && formValid) onSubmit(row, values) }}>
         Review & run
       </button>
       {status === 'failed' && (
-        <button type="button" className="chip-act" onClick={() => onSubmit(row, values)}>Retry</button>
+        <button type="button" className="chip-act" disabled={pending || !formValid} onClick={() => { if (!pending && formValid) onSubmit(row, values) }}>Retry</button>
       )}
       </>}
       {![STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(row.name) && <button type="button" className="chip-act" onClick={close}>Cancel</button>}
