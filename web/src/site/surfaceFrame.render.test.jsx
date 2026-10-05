@@ -738,6 +738,28 @@ describe.skipIf(CAPTURE)('SurfaceFrame, the builds feed', () => {
     </SurfaceFrame>,
   )
 
+  it('passes failed-job Retry and refetch loading through to the rail in both scenes', () => {
+    const job = { job_id: 'job-retry', tool: 'count-by-layer', status: 'failed', created_at: 1725400000 }
+    for (const scene of ['console', 'stage']) {
+      const onRetryJob = vi.fn()
+      const onSelectJob = vi.fn()
+      const { container, unmount } = render(
+        <SurfaceFrame scene={scene} activeSurface="browser" states={STATES}
+          jobRail={{ ...JOBS, jobs: [job], onSelectJob, onRetryJob, loading: true }}>
+          <SurfaceFrame.JobRail />
+        </SurfaceFrame>,
+      )
+      const retry = container.querySelector('.rail [data-action="retry"]')
+      expect(retry?.textContent).toBe('Retry')
+      fireEvent.click(retry)
+      expect(onRetryJob).toHaveBeenCalledTimes(1)
+      expect(onRetryJob.mock.calls[0][0]).toBe(job)
+      expect(onSelectJob).not.toHaveBeenCalled()
+      expect(getComputedStyle(container.querySelector('.rail-ledger')).opacity).toBe('0.6')
+      unmount()
+    }
+  })
+
   it('E01 row14 a stale buildFeed renders its sentence inside the frame and leaves the badge count alone', () => {
     const plain = mount({ ...JOBS, builds: BUILDS })
     const badge = plain.container.querySelector('[data-testid="builds-badge"]')?.textContent

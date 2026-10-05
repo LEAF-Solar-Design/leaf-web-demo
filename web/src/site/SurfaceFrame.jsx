@@ -411,6 +411,8 @@ function JobRail() {
       inflight={rail.inflight}
       reattaching={rail.reattaching}
       onSelectJob={rail.onSelectJob}
+      onRetryJob={rail.onRetryJob}
+      loading={rail.loading}
       builds={rail.builds}
       buildFeed={rail.buildFeed}
       staleResults={rail.staleResults}
