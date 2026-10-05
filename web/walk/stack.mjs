@@ -196,6 +196,30 @@ async function acquireLease(cap, slot) {
   throw new QueuedError(`All ${cap} local stack slots are occupied`)
 }
 
+async function allocateLeasePorts(lease, cap) {
+  const path = join(dirname(lease.path), `leaf-walk-local-slot-${lease.index}.gen`)
+  let generation = 0
+  try {
+    const raw = (await readFile(path, 'utf8')).trim()
+    const value = Number(raw)
+    if (/^\d+$/.test(raw) && Number.isSafeInteger(value) && value < Number.MAX_SAFE_INTEGER) generation = value
+  } catch { /* Unreadable generation starts at zero while the lease is held. */ }
+  // Fresh block per acquisition because start-leaf's strict bind rejects TIME_WAIT.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const block = lease.index + cap * (generation % Math.floor(475 / cap))
+    generation++
+    await writeFile(path, `${generation}\n`, { mode: 0o600 })
+    let ports
+    try { ports = await allocatePorts(block) } catch (error) {
+      if (!/ port \d+ is unavailable:/.test(error.message) || attempt === 7) throw error
+      continue
+    }
+    const owner = JSON.parse(await readFile(lease.path, 'utf8'))
+    await writeFile(lease.path, JSON.stringify({ ...owner, block }))
+    return { block, ports }
+  }
+}
+
 function releaseLeaseSync(lease) {
   if (!lease) return
   try { if (JSON.parse(readFileSync(lease.path, 'utf8')).token === lease.token) rmSync(lease.path) } catch (error) {
@@ -393,7 +417,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
   running.add(state)
   try {
     state.lease = await acquireLease(cap, slot)
-    state.ports = await allocatePorts(state.lease.index)
+    Object.assign(state, await allocateLeasePorts(state.lease, cap))
     // Fail closed if a repo-local dotenv could silently reconnect to host data.
     if (!databaseURL && !postgres && existsSync(join(repo, 'platform', '.env.local'))) {
       const local = await readFile(join(repo, 'platform', '.env.local'), 'utf8')
