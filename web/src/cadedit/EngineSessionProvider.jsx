@@ -39,9 +39,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
+import { byId } from '../lib/actionRegistry.js'
 
 import useEngineSession, { SESSION_ERROR } from './engineSession.js'
-import { promptKeys } from './promptKeys.js'
+import { PROMPTS, promptKeys } from './promptKeys.js'
 
 const EngineSessionContext = createContext(null)
 const DRAWING_EDIT_ACTIONS = Object.freeze(new Set(['create', 'applyEdit', 'pasteFromClipboard', 'undo', 'redo']))
@@ -169,7 +170,7 @@ export default function EngineSessionProvider({
     drawingId: identity?.drawingId ?? null,
   })
 
-  const [{ inputs, armed }, setEditState] = useState({ inputs: DEFAULT_EDIT_INPUTS, armed: null })
+  const [{ inputs, armed, lastArmedCommand }, setEditState] = useState({ inputs: DEFAULT_EDIT_INPUTS, armed: null, lastArmedCommand: null })
   const [highlightedGroup, setHighlightedGroup] = useState(null)
   const currentGroup = highlightedGroup?.document === session.documentLoadIdentity && session.engineParsed
     ? (session.entities.groups || []).find((item) => item.name.toUpperCase() === highlightedGroup.name)
@@ -231,7 +232,10 @@ export default function EngineSessionProvider({
       }
       if (resetGesture && op === 'group') nextInputs = Object.freeze({ ...nextInputs, members: '', groupName: '', membersDone: '' })
       if (resetGesture && op === 'createBlock') nextInputs = Object.freeze({ ...nextInputs, members: '', membersDone: '', name: '', x: '', y: '' })
-      return { inputs: nextInputs, armed: Object.freeze(from ? { group, op, from } : { group, op }) }
+      const action = byId(`${group}:${op}`)
+      const remembered = PROMPTS[op] && action?.group === group && action.op === op
+        ? Object.freeze({ group, op }) : current.lastArmedCommand
+      return { inputs: nextInputs, armed: Object.freeze(from ? { group, op, from } : { group, op }), lastArmedCommand: remembered }
     })
   }, [setArmedState])
   // No parsed document (closed, or the worker died): nothing to prompt for,
@@ -240,8 +244,12 @@ export default function EngineSessionProvider({
   // the signal): opening a file cancels the running command, as in the
   // reference.
   const documentGone = !session.engineParsed || session.errorKind === SESSION_ERROR.CRASHED
-  useEffect(() => { if (documentGone) setArmedState(null) }, [documentGone, setArmedState])
-  useEffect(() => { setArmedState(null) }, [session.documentId, setArmedState])
+  const clearDocumentCommand = useCallback(() => {
+    setEditState((current) => !current.armed && !current.lastArmedCommand ? current
+      : { ...current, armed: null, lastArmedCommand: null })
+  }, [])
+  useEffect(() => { if (documentGone) clearDocumentCommand() }, [documentGone, clearDocumentCommand])
+  useEffect(() => { clearDocumentCommand() }, [session.documentId, session.documentLoadIdentity, clearDocumentCommand])
 
   // W4f-4: the drafting mode a pick obeys. ORTHO constrains a picked point
   // (and the rubber band) to the axis of the larger delta from the last
@@ -362,10 +370,10 @@ export default function EngineSessionProvider({
   const sessionForConsumers = useMemo(() => ({ ...session, actions, ...(refusal ? { status: refusal } : {}) }), [session, actions, refusal])
   const value = useMemo(
     () => ({
-      session: sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap,
+      session: sessionForConsumers, inputs, setInput, canSave, armed, setArmed, lastArmedCommand, ortho, setOrtho, osnap, setOsnap,
       reach, setReach, refuse, highlightedIds, selectGroup, pending, setPending,
     }),
-    [sessionForConsumers, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, setReach, refuse, highlightedIds, selectGroup, pending, setPending],
+    [sessionForConsumers, inputs, setInput, canSave, armed, setArmed, lastArmedCommand, ortho, setOrtho, osnap, setOsnap, reach, setReach, refuse, highlightedIds, selectGroup, pending, setPending],
   )
   return <EngineSessionContext.Provider value={value}>{children}</EngineSessionContext.Provider>
 }

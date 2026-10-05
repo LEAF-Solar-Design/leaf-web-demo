@@ -140,6 +140,10 @@ export const CLIPBOARD_REASONS = Object.freeze({
   empty: 'nothing on the clipboard yet',
 })
 
+export const REPEAT_REASONS = Object.freeze({
+  empty: 'No drawing command to repeat yet.',
+})
+
 // W4g-7b-05c: the four reference controls this crate defers, each with its
 // own specific sentence rather than the generic "not in the browser engine
 // yet" every other placeholder carries. Frozen once here so the flag-off
@@ -173,7 +177,7 @@ let reasonCodes
 export function reasonCode(sentence) {
   if (!reasonCodes) {
     reasonCodes = new Map()
-    for (const [name, reasons] of Object.entries({ REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, CLIPBOARD_REASONS, DEFERRED_REASONS, LADDER_REASONS })) {
+    for (const [name, reasons] of Object.entries({ REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, CLIPBOARD_REASONS, DEFERRED_REASONS, LADDER_REASONS, REPEAT_REASONS })) {
       for (const [key, value] of Object.entries(reasons)) {
         if (!reasonCodes.has(value)) reasonCodes.set(value, `${name}.${key}`)
       }
@@ -190,6 +194,7 @@ export const KNOWN_REASON_VALUES = Object.freeze(new Set([
   ...Object.values(PROPERTY_REASONS),
   ...Object.values(CLIPBOARD_REASONS),
   ...Object.values(LADDER_REASONS),
+  ...Object.values(REPEAT_REASONS),
 ]))
 
 // --- reason ladders --------------------------------------------------------
@@ -265,6 +270,63 @@ export function clipboardReason(session, reach = null) {
   if (document) return document
   if (!session?.clipboard) return CLIPBOARD_REASONS.empty
   return ''
+}
+
+export function historyStepReason(session, kind) {
+  const reason = drawReason(session)
+  if (reason) return reason
+  return session[kind === 'undo' ? 'undoDepth' : 'redoDepth'] ? ''
+    : kind === 'undo' ? REASONS.nothingToUndo : REASONS.nothingToRedo
+}
+
+export function repeatReason(ctx = {}) {
+  const reason = drawReason(ctx.session, ctx.reach)
+  if (reason) return reason
+  const last = ctx.lastArmedCommand
+  const action = last && byId(`${last.group}:${last.op}`)
+  return action ? action.when(ctx) : REPEAT_REASONS.empty
+}
+
+export const ENGINE_SHORTCUTS = Object.freeze({
+  'modify:delete': 'Delete',
+  'engine:undo': 'Mod+Z',
+  'engine:redo': 'Mod+Y / Mod+Shift+Z',
+  'clipboard:copyClip': 'Mod+C',
+  'clipboard:cutClip': 'Mod+X',
+  'clipboard:pasteClip': 'Mod+V',
+  'engine:repeat': 'Enter / Space',
+})
+
+export const ENGINE_EDITOR_SELECTOR = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="searchbox"], [role="combobox"], [role="spinbutton"]'
+const ENGINE_ACTIVATION_SELECTOR = 'button, a, summary, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"]'
+
+function editorTarget(target) {
+  for (let element = target; element; element = element.parentElement) {
+    if (element.isContentEditable || element.matches?.(ENGINE_EDITOR_SELECTOR)) return true
+  }
+  return false
+}
+
+/** Pure shortcut decision; the consumer supplies freshly read DOM ownership. */
+export function engineShortcutDecision(event, ctx = {}) {
+  if (!event || event.defaultPrevented || event.isComposing || event.keyCode === 229
+      || event.repeat || event.altKey || (event.ctrlKey && event.metaKey) || !ctx.canvasShown || ctx.ownerOpen
+      || !ctx.session?.engineParsed || ctx.session.errorKind === SESSION_ERROR.CRASHED
+      || editorTarget(event.target) || editorTarget(ctx.activeElement)) return null
+  const mod = event.ctrlKey || event.metaKey
+  const key = event.key?.toLowerCase()
+  if (mod) {
+    if (key === 'z') return event.shiftKey ? 'engine:redo' : 'engine:undo'
+    if (event.shiftKey) return null
+    return ({ y: 'engine:redo', c: 'clipboard:copyClip', x: 'clipboard:cutClip', v: 'clipboard:pasteClip' })[key] || null
+  }
+  if (event.shiftKey) return null
+  if (key === 'delete') return 'modify:delete'
+  if (key !== 'enter' && key !== ' ' && key !== 'spacebar') return null
+  if (ctx.armed || !ctx.commandLineEmpty || ctx.decisionOpen
+      || event.target?.closest?.(ENGINE_ACTIVATION_SELECTOR)
+      || ctx.activeElement?.closest?.(ENGINE_ACTIVATION_SELECTOR)) return null
+  return 'engine:repeat'
 }
 
 /**
@@ -499,7 +561,7 @@ const engineOp = (group, op, label, display, icon, title, size, panel = group) =
   size,
   write: true,
   gated: true,
-  kbd: null,
+  kbd: ENGINE_SHORTCUTS[`${group}:${op}`] || null,
   title: text(title),
   // W4g-1b: the reach state rides the context so a button's reason says
   // what the panel note says while the console's drawing is opening.
@@ -520,11 +582,33 @@ const engineOp = (group, op, label, display, icon, title, size, panel = group) =
   // the command prompt; one without runs on click), so the record names the
   // one handler and passes the op.
   run: (ctx) => ctx.onActivate?.(group, op),
-  triggers: BUTTON_TRIGGERS,
+  triggers: ENGINE_SHORTCUTS[`${group}:${op}`] ? { ...BUTTON_TRIGGERS, keyboard: 'kbd' } : BUTTON_TRIGGERS,
   surface: 'engine',
 })
 
+const engineHistory = (kind) => ({
+  id: `engine:${kind}`, group: 'engine', op: kind, panel: 'engine',
+  label: kind === 'undo' ? 'Undo edit' : 'Redo edit',
+  text: kind === 'undo' ? 'Undo edit' : 'Redo edit', icon: kind, size: 'small',
+  gated: true, kbd: ENGINE_SHORTCUTS[`engine:${kind}`],
+  title: (ctx) => kind === 'undo'
+    ? `Undo the last engine edit${ctx.session?.undoDepth ? ` (${ctx.session.undoDepth} to undo)` : ''}`
+    : `Redo the undone engine edit${ctx.session?.redoDepth ? ` (${ctx.session.redoDepth} to redo)` : ''}`,
+  when: (ctx) => historyStepReason(ctx.session, kind),
+  run: (ctx) => ctx.session?.actions[kind](),
+  triggers: { ...BUTTON_TRIGGERS, keyboard: 'kbd' }, surface: 'engine',
+})
+
 const ACTION_LIST = [
+  engineHistory('undo'),
+  engineHistory('redo'),
+  {
+    id: 'engine:repeat', label: 'Repeat drawing command', text: 'Repeat', icon: 'redo', size: 'small',
+    gated: true, kbd: ENGINE_SHORTCUTS['engine:repeat'], title: text('Repeat the last accepted drawing command'),
+    when: repeatReason,
+    run: (ctx) => ctx.setArmed?.({ group: ctx.lastArmedCommand.group, op: ctx.lastArmedCommand.op }, { rearm: true }),
+    triggers: KEY_TRIGGERS, surface: 'engine',
+  },
   engineOp('groups', 'group', 'group', 'Group', 'group', 'Create a named group of objects', 'large'),
   engineOp('groups', 'ungroup', 'ungroup', 'Ungroup', 'ungroup', 'Remove a named group, keeping its objects', 'large'),
   // View: fit / zoom / the Properties pane toggle (ribbonClusters.viewCluster).
