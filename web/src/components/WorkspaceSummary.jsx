@@ -11,6 +11,7 @@
 // status vocabulary is the platform's own (queued|running|succeeded|failed|
 // cancelled). Close = the Esc cap (never a ✕ glyph).
 import { fmtWhen } from './JobRail.jsx'
+import EscCap from './EscCap.jsx'
 import ArloProjectJob from './ArloProjectJob.jsx'
 
 const JOB_STATE = {
@@ -40,7 +41,7 @@ export default function WorkspaceSummary({
           {loading && <span className="dim"> · refreshing</span>}
         </div>
         {onClose && (
-          <button className="key hot" onClick={onClose} aria-label="Close workspace">Esc</button>
+          <EscCap onClick={onClose} label="Close workspace" />
         )}
       </div>
 

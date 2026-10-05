@@ -33,7 +33,7 @@ describe('ShortcutSheet', () => {
   it('Close button, Escape and an outside click all call onClose', () => {
     const onCloseButton = vi.fn()
     const { unmount } = render(<ShortcutSheet open onClose={onCloseButton} />)
-    fireEvent.click(screen.getByText('Close'))
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
     expect(onCloseButton).toHaveBeenCalledTimes(1)
     unmount()
 

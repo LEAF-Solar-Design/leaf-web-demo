@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import EscCap from './EscCap.jsx'
 import './popovers.css'
 import useExit from '../useExit.js'
 
@@ -153,7 +154,7 @@ export default function LinkServiceDrawer({
         <div className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Linked services">
           <div className="ca-head">
             <span>Link a service</span>
-            <button className="key hot" onClick={() => onToggle(false)} aria-label="Close linked services panel">Esc</button>
+            <EscCap onClick={() => onToggle(false)} label="Close linked services panel" />
           </div>
 
           <div className="ca-linked">

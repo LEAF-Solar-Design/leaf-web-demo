@@ -6,6 +6,7 @@
 // The diagnostics block sanctions a second control for support near the top band.
 
 import { useEffect, useRef, useState } from 'react'
+import EscCap from './EscCap.jsx'
 import useExit from '../useExit.js'
 
 export default function DetailsDrawer({ data, onClose }) {
@@ -80,9 +81,7 @@ export default function DetailsDrawer({ data, onClose }) {
       <aside ref={drawerRef} className={`drawer ${exiting ? 'exit' : 'enter'}`} role="dialog" aria-modal="true" aria-label={title} onKeyDown={ownKeyboard}>
         <div className="drawer-head">
           <span className="drawer-title">{title}</span>
-          <button ref={closeRef} type="button" className="key hot" onClick={onClose} aria-label="Close details">
-            Esc
-          </button>
+          <EscCap ref={closeRef} type="button" onClick={onClose} label="Close details" />
         </div>
         <div className="drawer-body">
           {rows.map((r, i) => (

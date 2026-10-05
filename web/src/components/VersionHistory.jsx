@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import EscCap from './EscCap.jsx'
 import { config, getDrawingVersions, restoreDrawingVersion } from '../api.js'
 import VersionList, { VersionPreviewStrip } from './VersionList.jsx'
 import './popovers.css'
@@ -129,7 +130,7 @@ export default function VersionHistory({
     <div className={`drawer drawer-fixed${exiting ? ' exit' : ''}`} role="dialog" aria-label="Version history" data-escape-owner>
       <div className="drawer-head">
         <span className="drawer-title">Version history{effective ? ` · ${rows.length}` : ''}</span>
-        <button className="key hot" onClick={onClose} aria-label="Close version history">Esc</button>
+        <EscCap onClick={onClose} label="Close version history" />
       </div>
 
       <div className="drawer-body">
