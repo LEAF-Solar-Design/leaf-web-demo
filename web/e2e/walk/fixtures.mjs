@@ -716,6 +716,45 @@ export function solarBrowserCatalogRequired(name) {
   return ['solar-settings', 'solar-string-data', 'solar-autofill'].includes(name)
 }
 
+export async function readEngineModes(page) {
+  // Ask the real bridge for its provider values; never publish synthetic modes.
+  return page.evaluate(() => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      window.removeEventListener('cockpit:modes', receive)
+      reject(new Error('The engine mode bridge did not answer within 5 seconds'))
+    }, 5_000)
+    function receive({ detail }) {
+      if (detail?.live !== true || typeof detail.ortho !== 'boolean' || typeof detail.osnap !== 'boolean') return
+      clearTimeout(timer)
+      window.removeEventListener('cockpit:modes', receive)
+      resolve({ live: true, ortho: detail.ortho, osnap: detail.osnap })
+    }
+    window.addEventListener('cockpit:modes', receive)
+    window.dispatchEvent(new CustomEvent('cockpit:modes-request'))
+  }))
+}
+
+export async function assertEngineMode(probe, runtime, locator, assertions = expect) {
+  const { page } = runtime
+  const mode = probe.assertion.target.split(':')[1]
+  const value = probe.assertion.value
+  const other = mode === 'ortho' ? 'osnap' : 'ortho'
+  await assertions(locator).toHaveAttribute('aria-pressed', String(value))
+  const expected = { ...runtime.initialEngineModes, [mode]: value }
+  await assertions.poll(() => readEngineModes(page)).toEqual(expected)
+  assertions(expected[other]).toBe(runtime.initialEngineModes[other])
+  if (!runtime.failedDrawing) {
+    // Ribbon panels remount while the provider keeps the chosen drafting mode.
+    const tabs = page.getByRole('tablist', { name: 'Ribbon', exact: true })
+    await tabs.getByRole('tab', { name: 'View', exact: true }).click({ timeout: 15_000 })
+    await tabs.getByRole('tab', { name: 'Draw', exact: true }).click({ timeout: 15_000 })
+  }
+  const persisted = await readEngineModes(page)
+  runtime.evidence.engineMode = { mode, expected, observed: persisted }
+  assertions(persisted).toEqual(expected)
+  await assertions(locator).toHaveAttribute('aria-pressed', String(value))
+}
+
 // A page-specific init script: the ordinary page fixture remains unchanged.
 export function seedSignOutIdentity({ identity, coachKey }) {
   if (sessionStorage.getItem('leaf.walk.w1k.identity-seeded') !== '1') {
@@ -833,7 +872,7 @@ async function baselineThreeState(probe, runtime, recipe) {
 export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'fresh-sign-out-page', 'baseline-three-state', 'prepare-engine-transport', 'hold-engine-boot',
   'navigate', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
-  'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'fullscreen-state',
+  'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'engine-mode-state', 'fullscreen-state',
   'empty-view-history', 'previous-view-history', 'whole-drawing-view', 'engine-ready',
   'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
   'properties-state', 'properties-section-state', 'properties-close-state', 'layer-visible-state',
@@ -1102,6 +1141,16 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
          if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') await more.click({ timeout: 15_000 }) }
       runtime.ribbonTab = recipe.name
       return
+    case 'engine-mode-state': {
+      const button = control(page, recipe.control)
+      await assertions(button).toBeEnabled()
+      await assertions(button).toHaveAttribute('aria-pressed', /^(true|false)$/)
+      if ((await button.getAttribute('aria-pressed') === 'true') !== recipe.pressed) await button.click({ timeout: 15_000 })
+      await assertions(button).toHaveAttribute('aria-pressed', String(recipe.pressed))
+      await assertions.poll(async () => (await readEngineModes(page))[recipe.mode]).toBe(recipe.pressed)
+      runtime.initialEngineModes = await readEngineModes(page)
+      return
+    }
     case 'control-pressed-state': {
       const button = control(page, recipe.control)
       await expect(button).toHaveAttribute('aria-pressed', /^(true|false)$/)
@@ -1666,6 +1715,10 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await expect(locator).toHaveAccessibleName(new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
     await expect(probe.locator.trigger === 'select' ? locator.locator('xpath=ancestor::label[contains(concat(" ", normalize-space(@class), " "), " ribbon-widget ")][1]') : locator)
       .toHaveAttribute('title', new RegExp(effect.reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    return
+  }
+  if (/^engine-mode:(ortho|osnap)$/.test(target)) {
+    await assertEngineMode(probe, runtime, locator, assertions)
     return
   }
   if (target === 'drafting-grid') {

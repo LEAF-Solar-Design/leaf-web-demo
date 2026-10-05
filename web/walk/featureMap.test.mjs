@@ -21,7 +21,7 @@ const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
 test('reachable map states and phone-only drawers remove exactly thirty-four triples', () => {
   const triples = (featureMap) => featureMap.entries.flatMap((entry) => entry.states.flatMap((state) =>
-    entry.viewports.map((viewport) => `${entry.id}/${state}/${viewport}`))).sort()
+    (entry.state_viewports?.[state] || entry.viewports).map((viewport) => `${entry.id}/${state}/${viewport}`))).sort()
   for (const entry of map.entries) {
     for (const state of ['read-only-entity', 'no-versioned-drawing']) {
       assert.ok(!entry.states.includes(state), entry.id + '/' + state)
@@ -347,28 +347,29 @@ test('thirty-nine exact control declarations participate in independent complete
 })
 
 test('malformed control declarations, duplicate ids and missing contracts fail closed', () => {
+  const control = (config, id) => config.controls.find((row) => row.id === id)
   for (const mutate of [
     (config) => { config.controls = null },
-    (config) => { config.controls.push(clone(config.controls[0])) },
-    (config) => { config.controls[0] = null },
-    (config) => { config.controls[0].selector = 'button' },
-    (config) => { config.controls[0].id = 'control:*' },
-    (config) => { config.controls[0].source_id = 'Grid Display' },
-    (config) => { delete config.controls[0].expected_effect },
-    (config) => { config.controls[0].expected_effect.extra = { kind: 'toggles', target: 'drafting-grid' } },
-    (config) => { delete config.controls[0].state_contexts.on },
-    (config) => { config.controls[0].state_contexts.on = {} },
-    (config) => { config.controls[0].state_contexts.on.selector = 'button' },
-    (config) => { config.controls[0].state_contexts.on.pressed = 'true' },
-    (config) => { config.controls[0].expected_effect.on.value = true },
-    (config) => { delete config.controls[1].state_contexts.unavailable.tooltip },
-    (config) => { config.controls[1].state_contexts.unavailable.name = 'Object snap' },
-    (config) => { config.controls[0].sources = ['../outside.js'] },
-    (config) => { config.controls[0].certify = 'unknown' },
-    (config) => { config.controls[1].expected_effect.unavailable.reason = '' },
-    (config) => { delete config.controls[1].expected_effect.unavailable.reason_code },
-    (config) => { config.controls[1].expected_effect.unavailable.reason_code = 'made-up-code' },
-    (config) => { config.controls[0].expected_effect.on.unrecognized = true },
+    (config) => { config.controls.push(clone(control(config, 'control:grid-display'))) },
+    (config) => { const row = control(config, 'control:grid-display'); config.controls = config.controls.map((entry) => entry === row ? null : entry) },
+    (config) => { control(config, 'control:grid-display').selector = 'button' },
+    (config) => { control(config, 'control:grid-display').id = 'control:*' },
+    (config) => { control(config, 'control:grid-display').source_id = 'Grid Display' },
+    (config) => { delete control(config, 'control:grid-display').expected_effect },
+    (config) => { control(config, 'control:grid-display').expected_effect.extra = { kind: 'toggles', target: 'drafting-grid' } },
+    (config) => { delete control(config, 'control:grid-display').state_contexts.on },
+    (config) => { control(config, 'control:grid-display').state_contexts.on = {} },
+    (config) => { control(config, 'control:grid-display').state_contexts.on.selector = 'button' },
+    (config) => { control(config, 'control:grid-display').state_contexts.on.pressed = 'true' },
+    (config) => { control(config, 'control:grid-display').expected_effect.on.value = true },
+    (config) => { delete control(config, 'control:polar-tracking').state_contexts.unavailable.tooltip },
+    (config) => { control(config, 'control:polar-tracking').state_contexts.unavailable.name = 'Polar tracking' },
+    (config) => { control(config, 'control:grid-display').sources = ['../outside.js'] },
+    (config) => { control(config, 'control:grid-display').certify = 'unknown' },
+    (config) => { control(config, 'control:snap-mode').expected_effect.unavailable.reason = '' },
+    (config) => { delete control(config, 'control:snap-mode').expected_effect.unavailable.reason_code },
+    (config) => { control(config, 'control:snap-mode').expected_effect.unavailable.reason_code = 'made-up-code' },
+    (config) => { control(config, 'control:grid-display').expected_effect.on.unrecognized = true },
     (config) => { config.control = [] },
     (config) => { config.overrides['control:unknown'] = { title: 'Unknown' } },
   ]) {
@@ -412,8 +413,18 @@ test('new control scopes, normalized names and initial toggle states fail closed
   mutateControl('job-monitor-expand', (row) => { row.state_contexts.ready.toolbar = 'View' })
 })
 
-test('default build keeps engine drafting modes unavailable and viewer controls executable', () => {
-  for (const id of ['object-snap', 'ortho-mode', 'polar-tracking', 'snap-mode']) {
+test('engine drafting modes toggle provider states and placeholders remain unavailable', () => {
+  for (const [id, mode] of [['object-snap', 'osnap'], ['ortho-mode', 'ortho']]) {
+    const entry = entryFor('control:' + id)
+    assert.deepEqual(entry.states, ['failed-load', 'off', 'on'])
+    for (const state of entry.states) {
+      assert.equal(entry.state_contexts[state].name, entry.title)
+      assert.equal(entry.expected_effect[state].target, 'engine-mode:' + mode)
+      assert.equal(entry.expected_effect[state].kind, 'toggles')
+      assert.equal(entry.expected_effect[state].value, !entry.state_contexts[state].pressed)
+    }
+  }
+  for (const id of ['polar-tracking', 'snap-mode']) {
     const entry = entryFor('control:' + id)
     for (const effect of Object.values(entry.expected_effect)) {
       assert.equal(effect.kind, 'disabled_with_reason')
@@ -609,12 +620,34 @@ test('surface status changes and unavailable tabs are behavior coverage', () => 
   for (const profile of ['drafting', 'solar']) {
     const model = entryFor(`tab:${profile}:model`)
     assert.equal(model.expected_effect.unavailable.kind, 'disabled_with_reason')
-    assert.equal(model.certify, 'unsupported_local')
+    assert.equal(model.certify, 'local')
     assert.equal(model.certify_reason, PROFILE_RIBBON_TABS[profile].find((tab) => tab.id === 'model').reason)
   }
   for (const drawer of STUDIO_DRAWERS) {
     assert.ok(entryFor(featureId('drawer', drawer)).viewports.includes('phone'))
   }
+})
+
+
+test('state viewports remove desktop overlay cases while preserving phone and other states', () => {
+  const escape = entryFor('action:bar-escape')
+  assert.deepEqual(escape.state_viewports, { 'drawer-open': ['phone'] })
+  assert.deepEqual(escape.viewports, ['desktop'])
+  assert.deepEqual(entryFor('drawer:none').viewports, ['phone'])
+  for (const state of ['drawer-open', 'drawers-closed']) assert.ok(entryFor('drawer:none').states.includes(state))
+  for (const state_viewports of [null, [], { absent: ['phone'] }, { ready: [] },
+    { ready: ['tablet'] }, { ready: ['phone', 'phone'] }]) {
+    const config = clone(overrides)
+    config.overrides['action:bar-escape'].state_viewports = state_viewports
+    assert.throws(() => buildFeatureMap({ overrides: config }), /invalid state_viewports/)
+  }
+  const config = clone(overrides)
+  config.overrides['action:fit'].state_viewports = { ready: ['phone'] }
+  const fit = buildFeatureMap({ overrides: config }).entries.find((entry) => entry.id === 'action:fit')
+  assert.deepEqual(fit.viewports, ['desktop'])
+  assert.deepEqual(fit.state_viewports.ready, ['phone'])
+  const consumer = readFileSync(new URL('../e2e/walk/features.spec.mjs', import.meta.url), 'utf8')
+  assert.ok(consumer.includes('entry.state_viewports?.[state] || entry.viewports'))
 })
 
 test('catalog snapshot preserves the isolated catalog and expands every tool with its version', () => {

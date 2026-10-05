@@ -49,33 +49,43 @@
         "web/src/site/DrawingCockpit.jsx"
       ],
       "states": [
-        "unavailable",
+        "off",
+        "on",
         "failed-load"
       ],
       "state_contexts": {
-        "unavailable": {
+        "off": {
           "toolbar": "Drafting settings",
-          "name": "Object snap (unavailable: not in the browser viewer yet)",
-          "tooltip": "Object snap: locks the cursor onto existing geometry, like endpoints and midpoints. Not in the browser viewer yet.",
-          "failedLoad": false
+          "name": "Object snap",
+          "pressed": false
+        },
+        "on": {
+          "toolbar": "Drafting settings",
+          "name": "Object snap",
+          "pressed": true
         },
         "failed-load": {
           "toolbar": "Drafting settings",
-          "name": "Object snap (unavailable: not in the browser viewer yet)",
-          "tooltip": "Object snap: locks the cursor onto existing geometry, like endpoints and midpoints. Not in the browser viewer yet.",
+          "name": "Object snap",
+          "pressed": true,
           "failedLoad": true
         }
       },
       "expected_effect": {
-        "unavailable": {
-          "kind": "disabled_with_reason",
-          "reason": "not in the browser viewer yet",
-          "reason_code": "control:object-snap:unavailable"
+        "off": {
+          "kind": "toggles",
+          "target": "engine-mode:osnap",
+          "value": true
+        },
+        "on": {
+          "kind": "toggles",
+          "target": "engine-mode:osnap",
+          "value": false
         },
         "failed-load": {
-          "kind": "disabled_with_reason",
-          "reason": "not in the browser viewer yet",
-          "reason_code": "control:object-snap:unavailable"
+          "kind": "toggles",
+          "target": "engine-mode:osnap",
+          "value": false
         }
       },
       "viewports": [
@@ -91,33 +101,43 @@
         "web/src/site/DrawingCockpit.jsx"
       ],
       "states": [
-        "unavailable",
+        "off",
+        "on",
         "failed-load"
       ],
       "state_contexts": {
-        "unavailable": {
+        "off": {
           "toolbar": "Drafting settings",
-          "name": "Ortho mode (unavailable: not in the browser viewer yet)",
-          "tooltip": "Ortho mode: locks drawing to horizontal and vertical. Not in the browser viewer yet.",
-          "failedLoad": false
+          "name": "Ortho mode",
+          "pressed": false
+        },
+        "on": {
+          "toolbar": "Drafting settings",
+          "name": "Ortho mode",
+          "pressed": true
         },
         "failed-load": {
           "toolbar": "Drafting settings",
-          "name": "Ortho mode (unavailable: not in the browser viewer yet)",
-          "tooltip": "Ortho mode: locks drawing to horizontal and vertical. Not in the browser viewer yet.",
+          "name": "Ortho mode",
+          "pressed": false,
           "failedLoad": true
         }
       },
       "expected_effect": {
-        "unavailable": {
-          "kind": "disabled_with_reason",
-          "reason": "not in the browser viewer yet",
-          "reason_code": "control:ortho-mode:unavailable"
+        "off": {
+          "kind": "toggles",
+          "target": "engine-mode:ortho",
+          "value": true
+        },
+        "on": {
+          "kind": "toggles",
+          "target": "engine-mode:ortho",
+          "value": false
         },
         "failed-load": {
-          "kind": "disabled_with_reason",
-          "reason": "not in the browser viewer yet",
-          "reason_code": "control:ortho-mode:unavailable"
+          "kind": "toggles",
+          "target": "engine-mode:ortho",
+          "value": true
         }
       },
       "viewports": [
@@ -1684,7 +1704,7 @@
     "action:slash-help": {"effect": {"kind": "opens", "target": "command-menu"}},
     "action:slash-mcp": {"effect": {"kind": "opens", "target": "mounted-mcp-servers"}},
     "action:bar-focus": {"effect": {"kind": "opens", "target": "command-bar-focus"}},
-    "action:bar-escape": {"effect": {"kind": "toggles", "target": "topmost-surface"}},
+    "action:bar-escape": {"state_viewports": {"drawer-open": ["phone"]}, "effect": {"kind": "toggles", "target": "topmost-surface"}},
     "action:bar-retry": {"effect": {"kind": "submits", "target": "failed-step"}},
     "action:bar-shortcuts": {"effect": {"kind": "opens", "target": "keyboard-shortcut-sheet"}},
     "action:modify-set-color": {"effect": {"kind": "opens", "target": "pending-property-change"}},
@@ -1696,8 +1716,10 @@
     "drawer:jobs": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
     "drawer:result": {"viewports": ["phone"], "sources": ["web/src/App.jsx"]},
     "drawer:plan": {"viewports": ["phone"], "sources": ["web/src/App.jsx"]},
-    "drawer:none": {"viewports": ["desktop", "phone"], "sources": ["web/src/App.jsx"]},
+    "drawer:none": {"viewports": ["phone"], "sources": ["web/src/App.jsx"]},
     "surface:ios": {"certify": "staging", "certify_reason": "Mounted Apple readiness is provided by the staging ship lane; the local stack cannot certify that provider."},
+    "tab:drafting:model": {"certify": "local", "certify_reason": "3D modelling is not in this engine yet"},
+    "tab:solar:model": {"certify": "local", "certify_reason": "3D modelling is not in this engine yet"},
     "tab:ship:ship": {"certify": "staging", "certify_reason": "The ship profile requires mounted Apple readiness on staging."}
   },
   "exemptions": []

@@ -98,7 +98,7 @@ export function validateOverrides(config, knownIds) {
   for (const [id, override] of Object.entries(config.overrides)) {
     exactId(id, 'override')
     if (!override || typeof override !== 'object' || Array.isArray(override)) throw new Error(`featureMap: invalid override ${id}`)
-    const allowed = new Set(['title', 'effect', 'sources', 'viewports', 'certify', 'certify_reason', 'exclude_states', 'reason'])
+    const allowed = new Set(['title', 'effect', 'sources', 'viewports', 'state_viewports', 'certify', 'certify_reason', 'exclude_states', 'reason'])
     for (const key of Object.keys(override)) {
       if (!allowed.has(key)) throw new Error(`featureMap: unknown override field ${id}.${key}`)
     }
@@ -381,7 +381,7 @@ function validateControls(controls) {
         throw new Error('featureMap: control scope or initial effect mismatch ' + record.id + '/' + state)
       }
       if (effect.kind === 'toggles') {
-        const initial = effect.target === 'drafting-grid' ? context.pressed
+        const initial = effect.target === 'drafting-grid' || /^engine-mode:(ortho|osnap)$/.test(effect.target) ? context.pressed
           : effect.target === 'document-fullscreen' ? context.fullscreen
             : /^properties-(drawing|layers|plan|selection)-section$/.test(effect.target)
               || effect.target === 'drawing-overview-expanded' ? context.expanded
@@ -528,6 +528,7 @@ function buildEntry(item, config, snapshot, registries) {
   entry.sources = [...new Set([...entry.sources, ...(override.sources || [])])].sort(compare)
   if (Object.keys(override).length || ['action', 'surface', 'tool'].includes(kind)) entry.sources.push('web/walk/features.overrides.json')
   if (override.viewports) entry.viewports = override.viewports
+  if (override.state_viewports !== undefined) entry.state_viewports = structuredClone(override.state_viewports)
   if (override.certify) entry.certify = override.certify
   if (override.certify_reason !== undefined) entry.certify_reason = override.certify_reason
   if (kind === 'tab' && record.reason && entry.certify === 'both') {
@@ -555,6 +556,14 @@ export function validateFeatureMap(map) {
     }
     if (!Array.isArray(entry.viewports) || !entry.viewports.length
         || entry.viewports.some((value) => !['desktop', 'phone'].includes(value))) throw new Error(`featureMap: invalid viewports for ${entry.id}`)
+    if (entry.state_viewports !== undefined) {
+      if (!entry.state_viewports || typeof entry.state_viewports !== 'object' || Array.isArray(entry.state_viewports)
+          || Object.entries(entry.state_viewports).some(([state, viewports]) => !entry.states.includes(state)
+            || !Array.isArray(viewports) || !viewports.length || new Set(viewports).size !== viewports.length
+            || viewports.some((viewport) => !['desktop', 'phone'].includes(viewport)))) {
+        throw new Error(`featureMap: invalid state_viewports for ${entry.id}`)
+      }
+    }
     if (!entry.expected_effect || typeof entry.expected_effect !== 'object' || Array.isArray(entry.expected_effect)
         || Object.keys(entry.expected_effect).length !== entry.states.length) throw new Error(`featureMap: ${entry.id} effect/state mismatch`)
     for (const state of entry.states) {
