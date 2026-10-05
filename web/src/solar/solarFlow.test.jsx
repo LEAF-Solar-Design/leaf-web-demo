@@ -398,6 +398,92 @@ describe('SolarFlowRail', () => {
 })
 
 describe('SolarStepEditor', () => {
+  it('FORM33 a nullable boolean retained value permits review and Retry', () => {
+    const step = { ...row('solar-homeruns', 80, 'Homeruns', READY),
+      params: { properties: { x: { type: ['boolean', 'null'], default: null } } } }
+    const onSubmit = vi.fn(), onClose = vi.fn()
+    render(<SolarStepEditor row={step} retained={{ x: null }} status="failed" onSubmit={onSubmit} onClose={onClose} />)
+    const input = screen.getByLabelText('X')
+    expect(input.getAttribute('aria-invalid')).toBe('false')
+    expect(input.validationMessage).toBe('')
+    expect(screen.queryByText('X has a value this tool no longer accepts. Choose or enter a new one.')).toBeNull()
+    expect(screen.getByRole('alert').textContent).toBe('This run failed. Your inputs are kept.')
+    for (const name of ['Review & run', 'Retry']) {
+      const button = screen.getByRole('button', { name })
+      expect(button.disabled).toBe(false)
+      fireEvent.click(button)
+    }
+    expect(onSubmit.mock.calls).toEqual([[step, { x: null }], [step, { x: null }]])
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('FORM44 a nullable sibling keeps step revision intake automatic after another field edit', async () => {
+    const original = row('solar-homeruns', 80, 'Homeruns', READY)
+    const step = { ...original, params: { ...original.params, properties: { ...original.params.properties,
+      x: { type: ['boolean', 'null'], default: null } } } }
+    let resolve
+    const readIntake = vi.fn(() => new Promise((done) => { resolve = done }))
+    const onSubmit = vi.fn()
+    render(<SolarStepEditor row={step} drawingId="d1" drawingVersion={3} readIntake={readIntake}
+      onSubmit={onSubmit} onClose={vi.fn()} />)
+    await waitFor(() => expect(readIntake).toHaveBeenCalledTimes(1))
+    fireEvent.change(screen.getByLabelText('Note'), { target: { value: 'b' } })
+    await act(async () => { resolve({ version: 3, intake: { solar_design_graph: { rev: 7 } } }) })
+    expect(screen.getByLabelText('Expected rev').value).toBe('7')
+    const input = screen.getByLabelText('X')
+    expect(input.getAttribute('aria-invalid')).toBe('false')
+    expect(input.validationMessage).toBe('')
+    expect(screen.queryByText('X has a value this tool no longer accepts. Choose or enter a new one.')).toBeNull()
+    const run = screen.getByRole('button', { name: 'Review & run' })
+    expect(run.disabled).toBe(false)
+    fireEvent.click(run)
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(step, { expected_rev: 7, note: 'b', x: null })
+  })
+
+  it('FORM22 invalid step JSON blocks both review and Retry', () => {
+    const step = { ...row('solar-homeruns', 80, 'Homeruns', READY),
+      params: { properties: { changes: { type: 'object', default: {} } } } }
+    const onSubmit = vi.fn()
+    render(<SolarStepEditor row={step} status="failed" onSubmit={onSubmit} onClose={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText('Changes'), { target: { value: '{' } })
+    for (const name of ['Review & run', 'Retry']) {
+      const button = screen.getByRole('button', { name })
+      expect(button.disabled).toBe(true); fireEvent.click(button)
+    }
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('FORM23b clearing a step revision counts as a touch before intake', async () => {
+    const step = row('solar-homeruns', 80, 'Homeruns', READY)
+    let resolve
+    const readIntake = vi.fn(() => new Promise((done) => { resolve = done }))
+    const onSubmit = vi.fn()
+    render(<SolarStepEditor row={step} drawingId="d1" drawingVersion={3} readIntake={readIntake}
+      onSubmit={onSubmit} onClose={vi.fn()} />)
+    await waitFor(() => expect(readIntake).toHaveBeenCalledTimes(1))
+    fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '5' } })
+    fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '' } })
+    await act(async () => { resolve({ version: 3, intake: { solar_design_graph: { rev: 7 } } }) })
+    expect(screen.getByLabelText('Expected rev').value).toBe('')
+    fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
+    expect(onSubmit).toHaveBeenCalledWith(step, { note: 'a' })
+  })
+
+  it('FORM30 a change to another step field leaves the revision automatic', async () => {
+    const step = row('solar-homeruns', 80, 'Homeruns', READY)
+    let resolve
+    const readIntake = vi.fn(() => new Promise((done) => { resolve = done }))
+    const onSubmit = vi.fn()
+    render(<SolarStepEditor row={step} drawingId="d1" drawingVersion={3} readIntake={readIntake}
+      onSubmit={onSubmit} onClose={vi.fn()} />)
+    await waitFor(() => expect(readIntake).toHaveBeenCalledTimes(1))
+    fireEvent.change(screen.getByLabelText('Note'), { target: { value: 'b' } })
+    await act(async () => { resolve({ version: 3, intake: { solar_design_graph: { rev: 7 } } }) })
+    expect(screen.getByLabelText('Expected rev').value).toBe('7')
+    fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
+    expect(onSubmit).toHaveBeenCalledWith(step, { expected_rev: 7, note: 'b' })
+  })
+
   const stringEnvelope = (graph = ground) => ({ intake: { solar_design_graph: structuredClone(graph) },
     version: 7, head: 7, latest: 7 })
   const stringTools = [STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL]

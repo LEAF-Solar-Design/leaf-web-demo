@@ -61,12 +61,12 @@ test('catalog form emits structured, nullable numeric, boolean, and scalar JSON 
   const card = page.locator('.tool-card').filter({ hasText: TYPED_TOOL.name })
   await card.getByRole('button', { name: new RegExp(TYPED_TOOL.name) }).click()
 
-  await expect(card.getByLabel('Spheres')).toHaveValue('[]')
+  await expect(card.getByLabel('Spheres')).toHaveValue('')
   await card.getByLabel('Spheres').fill('[{"center":[0,0,0],"radius":10}]')
   await card.getByLabel('Sphere options').fill('{"segments":24}')
   await card.getByLabel('Marker size').fill('2.5')
   await card.getByLabel('Nullable size').fill('')
-  await card.getByLabel('Dry run').check()
+  await card.getByLabel('Dry run').selectOption('1')
   await card.getByLabel('Count').fill('4')
   await card.getByLabel('Source layer').fill('Roofs')
   await card.getByRole('button', { name: 'Review & run' }).click()
@@ -77,7 +77,6 @@ test('catalog form emits structured, nullable numeric, boolean, and scalar JSON 
     spheres: [{ center: [0, 0, 0], radius: 10 }],
     sphere_options: { segments: 24 },
     marker_size: 2.5,
-    nullable_size: null,
     dry_run: true,
     count: 4,
     source_layer: 'Roofs',

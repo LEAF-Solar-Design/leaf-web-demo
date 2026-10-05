@@ -808,8 +808,11 @@ test('G6 ground NEC outputs and downloads through the browser', async ({ page },
       const control = editor.getByLabel(label.charAt(0).toUpperCase() + label.slice(1), { exact: true })
       if (typeof value === 'boolean') {
         await reachable(control)
-        await control.setChecked(value)
-        await expect(control).toBeChecked()
+        await control.selectOption(value ? '1' : '0')
+        await expect(control).toHaveValue(value ? '1' : '0')
+      } else if (await control.evaluate((element) => element.tagName === 'SELECT')) {
+        await reachable(control)
+        await control.selectOption({ label: typeof value === 'string' ? value : JSON.stringify(value) })
       } else await fill(control, Array.isArray(value) ? JSON.stringify(value) : value)
     }
     await expect(editor.getByLabel('Expected rev', { exact: true })).toHaveCount(0)
