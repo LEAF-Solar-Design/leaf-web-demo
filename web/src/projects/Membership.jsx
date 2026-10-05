@@ -171,8 +171,11 @@ export default function Membership({
         <form className="membership-invite" onSubmit={submitInvite}>
           <label>
             Search organization members
+            {/* Autocomplete is off because this search concerns another member's data. */}
             <input
               type="search"
+              autoComplete="off"
+              enterKeyHint="search"
               value={search}
               onChange={(event) => { setSearch(event.target.value); setInviteBinding('') }}
               disabled={inviting}
@@ -222,8 +225,11 @@ export default function Membership({
               {id === viewerId && <span className="membership-self"> (you)</span>}
               {canLabel && (
                 <>
+                  {/* Autocomplete is off because a display name may be another member's data. */}
                   <input
                     aria-label={`Display name for ${label}`}
+                    autoComplete="off"
+                    enterKeyHint="done"
                     value={labelDrafts[id] ?? label}
                     onChange={(event) => setLabelDrafts((prev) => ({ ...prev, [id]: event.target.value }))}
                     disabled={pendingLabelIds.has(id)}
