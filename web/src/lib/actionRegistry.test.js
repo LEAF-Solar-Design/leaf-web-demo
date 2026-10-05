@@ -33,12 +33,16 @@ import {
   MAX_ID_CHARS,
   MAX_LABEL_CHARS,
   REASONS,
+  REPEAT_REASONS,
+  ENGINE_SHORTCUTS,
   RETRY_RUNGS,
   SURFACES,
   accessibleName,
   reasonCode,
   byId,
   drawReason,
+  engineShortcutDecision,
+  historyStepReason,
   escapeRung,
   forCluster,
   forGroup,
@@ -59,7 +63,7 @@ import {
 // --- 1: the registry holds up ---------------------------------------------
 
 describe('stable local reason codes', () => {
-  const maps = { REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, CLIPBOARD_REASONS, DEFERRED_REASONS, LADDER_REASONS }
+  const maps = { REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, CLIPBOARD_REASONS, DEFERRED_REASONS, LADDER_REASONS, REPEAT_REASONS }
   it('resolves every known sentence back through its map and key', () => {
     for (const sentence of KNOWN_REASON_VALUES) {
       const code = reasonCode(sentence)
@@ -223,8 +227,8 @@ describe('honest triggers', () => {
     }
   })
 
-  it('advertises a cap for exactly the four keys bound today, and invents none', () => {
-    expect(keyboardTable()).toEqual([
+  it('B2-34 advertises exactly the four shell and seven engine shortcut rows', () => {
+    expect(keyboardTable().filter((row) => row.surface === 'bar')).toEqual([
       { id: 'bar:focus', label: 'Command bar', kbd: 'Mod+K', surface: 'bar' },
       { id: 'bar:escape', label: 'Close the topmost surface', kbd: 'Escape', surface: 'bar' },
       { id: 'bar:retry', label: 'Retry the failed step', kbd: 'R', surface: 'bar' },
@@ -232,10 +236,11 @@ describe('honest triggers', () => {
       // rather than hand-typed a second place.
       { id: 'bar:shortcuts', label: 'Keyboard shortcuts', kbd: 'Shift+?', surface: 'bar' },
     ])
-    // Slice 10b assigns the rest with the design session. Until then every
-    // ribbon, engine and picker record records the absence honestly.
+    const byActionId = ([a], [b]) => a.localeCompare(b)
+    expect(keyboardTable().filter((row) => row.surface === 'engine').map(({ id, kbd }) => [id, kbd]).sort(byActionId))
+      .toEqual(Object.entries(ENGINE_SHORTCUTS).sort(byActionId))
     for (const action of ACTIONS) {
-      if (action.surface !== 'bar') expect(action.kbd).toBeNull()
+      if (action.surface !== 'bar') expect(action.kbd).toBe(ENGINE_SHORTCUTS[action.id] || null)
     }
   })
 
@@ -345,7 +350,9 @@ describe('honest triggers', () => {
 
 /** A ctx whose every handler records that it was the one the record named. */
 function handlerProbe(seen) {
-  return new Proxy({ session: null, rTarget: 'route', drawer: 'tools' }, {
+  return new Proxy({ session: { actions: {
+    undo: () => seen.push(['engine:undo']), redo: () => seen.push(['engine:redo']),
+  } }, rTarget: 'route', drawer: 'tools' }, {
     get(target, key) {
       if (key in target) return target[key]
       if (typeof key !== 'string') return undefined
@@ -831,5 +838,83 @@ describe('DEFERRED_REASONS', () => {
     expect(DEFERRED_REASONS).toEqual({
       leader: "unavailable; a leader's annotation is an association the contract does not carry yet",
     })
+  })
+})
+
+describe('engine shortcut records', () => {
+  const eligible = {
+    canvasShown: true, commandLineEmpty: true,
+    session: { engineParsed: true, selected: { type: 'LINE', editable: true }, undoDepth: 1, redoDepth: 1 },
+  }
+  const bindings = [
+    [{ key: 'Delete' }, 'modify:delete'],
+    [{ key: 'z', ctrlKey: true }, 'engine:undo'],
+    [{ key: 'y', ctrlKey: true }, 'engine:redo'],
+    [{ key: 'z', ctrlKey: true, shiftKey: true }, 'engine:redo'],
+    [{ key: 'c', ctrlKey: true }, 'clipboard:copyClip'],
+    [{ key: 'x', ctrlKey: true }, 'clipboard:cutClip'],
+    [{ key: 'v', ctrlKey: true }, 'clipboard:pasteClip'],
+    [{ key: 'Enter' }, 'engine:repeat'],
+    [{ key: ' ' }, 'engine:repeat'],
+  ]
+  it('B2-34 every advertised engine chord and alias reaches its declared record', () => {
+    const reached = new Set()
+    for (const [event, id] of bindings) {
+      expect(engineShortcutDecision(event, eligible)).toBe(id)
+      if (event.ctrlKey) expect(engineShortcutDecision({ ...event, ctrlKey: false, metaKey: true }, eligible)).toBe(id)
+      expect(byId(id).triggers.keyboard).toBe('kbd')
+      reached.add(id)
+    }
+    expect([...reached].sort()).toEqual(Object.keys(ENGINE_SHORTCUTS).sort())
+    for (const event of [{ key: 'Backspace' }, { key: 'Delete', shiftKey: true }, { key: 'c' }, { key: 'F8' }]) {
+      expect(engineShortcutDecision(event, eligible)).toBeNull()
+    }
+  })
+  it('B2-02 engine undo uses history depth regardless of dirty or server version gates', () => {
+    for (const dirty of [true, false]) {
+      const ctx = { session: { ...eligible.session, dirty }, hasVersions: false, versionBusy: true }
+      expect(byId('engine:undo').when(ctx)).toBe('')
+      expect(byId('undo').when(ctx)).toBe(REASONS.noVersions)
+    }
+    expect(historyStepReason({ engineParsed: true }, 'undo')).toBe(REASONS.nothingToUndo)
+  })
+  it('B2-03 redo aliases share the engine record and preserve version cluster identity', () => {
+    for (const modifier of ['ctrlKey', 'metaKey']) {
+      expect(engineShortcutDecision({ key: 'Y', [modifier]: true }, eligible)).toBe('engine:redo')
+      expect(engineShortcutDecision({ key: 'Z', [modifier]: true, shiftKey: true }, eligible)).toBe('engine:redo')
+    }
+    expect(forCluster('version').map((action) => action.id)).toEqual(['undo', 'redo', 'history'])
+    expect(byId('engine:redo').when({ session: { engineParsed: true } })).toBe(REASONS.nothingToRedo)
+  })
+  it.each([
+    ['B2-09', 'INSERT', MODIFY_REASONS.unsupportedInsert],
+    ['B2-10', 'DIMENSION', MODIFY_REASONS.unsupportedDimension],
+  ])('%s clipboard keyboard and ribbon gates give the same placed entity reason', (id, type, reason) => {
+    const ctx = { session: { ...eligible.session, selected: { type, editable: false } } }
+    for (const actionId of ['clipboard:copyClip', 'clipboard:cutClip']) {
+      const action = byId(actionId)
+      expect(action.when(ctx)).toBe(reason)
+      expect(ribbonTool(action, ctx).reason).toBe(reason)
+    }
+  })
+  it('B2-21 Alt excludes every engine binding and alias for both Mod variants', () => {
+    for (const [event] of bindings) {
+      expect(engineShortcutDecision({ ...event, altKey: true }, eligible)).toBeNull()
+      if (event.ctrlKey) expect(engineShortcutDecision({ ...event, ctrlKey: false, metaKey: true, altKey: true }, eligible)).toBeNull()
+    }
+  })
+  it('B2-36 Ctrl and Cmd together yield while either modifier alone resolves each action', () => {
+    for (const [event, id] of [
+      [{ key: 'x' }, 'clipboard:cutClip'],
+      [{ key: 'c' }, 'clipboard:copyClip'],
+      [{ key: 'v' }, 'clipboard:pasteClip'],
+      [{ key: 'z' }, 'engine:undo'],
+      [{ key: 'z', shiftKey: true }, 'engine:redo'],
+    ]) {
+      expect(engineShortcutDecision({ ...event, ctrlKey: true, metaKey: true }, eligible)).toBeNull()
+      for (const modifier of ['ctrlKey', 'metaKey']) {
+        expect(engineShortcutDecision({ ...event, [modifier]: true }, eligible)).toBe(id)
+      }
+    }
   })
 })

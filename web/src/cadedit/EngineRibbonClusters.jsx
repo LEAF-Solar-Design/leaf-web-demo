@@ -35,7 +35,7 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
+import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, byId, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
 
 import { ACI_NAMES, LINEWEIGHT_VALUES, SESSION_ERROR, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
 import { PENDING_INPUT_KEY, PENDING_WORD, useEngineSessionContext } from './EngineSessionProvider.jsx'
@@ -104,13 +104,7 @@ function hasVisibleEscOwner() {
 // frozen objects and the same pure functions it always did. SAVE_REASONS stays
 // here — the File panel's save is not an action record (see the registry's
 // header for what is deliberately absent).
-export { DRAW_REASONS, MODIFY_REASONS, drawReason, modifyReason } from '../lib/actionRegistry.js'
-
-export function historyStepReason(session, kind) {
-  if (!session.engineParsed) return MODIFY_REASONS.noDocument
-  if (session.busy) return MODIFY_REASONS.busy
-  return session[kind === 'undo' ? 'undoDepth' : 'redoDepth'] ? '' : `nothing to ${kind}`
-}
+export { DRAW_REASONS, MODIFY_REASONS, drawReason, modifyReason, historyStepReason } from '../lib/actionRegistry.js'
 
 export const SAVE_REASONS = Object.freeze({
   noDocument: 'no drawing in the browser engine yet',
@@ -415,7 +409,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     const onWindowKeyDown = (event) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return
       const target = event.target
-      if (promptRef.current?.contains(target)) return
+      if (target instanceof Node && promptRef.current?.contains(target)) return
       // S1: while a property change is staged, an Esc in the Properties
       // cluster or its strip cancels that change, not the armed command.
       if (pendingRef.current && target instanceof Element && target.closest(PENDING_ESC_SCOPE)) return
@@ -755,19 +749,13 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // distinct from the console's version undo on the View tab), each disabled
   // with its reason when there is nothing to step to. They ride the File
   // panel inline and the top band as quick-access buttons, like Open/Save.
-  const undoReason = historyStepReason(session, 'undo')
-  const redoReason = historyStepReason(session, 'redo')
+  const undoTool = ribbonTool(byId('engine:undo'), { session }, { id: 'undo-edit' })
+  const redoTool = ribbonTool(byId('engine:redo'), { session }, { id: 'redo-edit' })
+  const undoReason = undoTool.reason
+  const redoReason = redoTool.reason
   fileTools.push(
-    {
-      id: 'undo-edit', label: 'Undo edit', text: 'Undo edit', icon: 'undo', size: 'small',
-      title: `Undo the last engine edit${session.undoDepth ? ` (${session.undoDepth} to undo)` : ''}`,
-      disabled: !!undoReason, reason: undoReason, onClick: () => { session.actions.undo() },
-    },
-    {
-      id: 'redo-edit', label: 'Redo edit', text: 'Redo edit', icon: 'redo', size: 'small',
-      title: `Redo the undone engine edit${session.redoDepth ? ` (${session.redoDepth} to redo)` : ''}`,
-      disabled: !!redoReason, reason: redoReason, onClick: () => { session.actions.redo() },
-    },
+    { ...undoTool, disabled: !!undoReason, reason: undoReason },
+    { ...redoTool, disabled: !!redoReason, reason: redoReason },
   )
   // The same commands as quick-access buttons in the top band (data-tool
   // "quick-<id>", the band's locator contract).
