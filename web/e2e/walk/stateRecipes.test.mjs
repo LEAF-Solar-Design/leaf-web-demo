@@ -2,8 +2,41 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
-  setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
+  assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
   captureEngineRefusal, assertEngineRefusal, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
+
+
+test('engine mode oracle checks provider publication, persistence and the other mode', async () => {
+  for (const mode of ['ortho', 'osnap']) {
+    const initial = { live: true, ortho: false, osnap: true }
+    const expected = { ...initial, [mode]: !initial[mode] }
+    const tabs = []
+    const locator = { pressed: String(expected[mode]) }
+    const runtime = { initialEngineModes: initial, evidence: {}, page: {
+      evaluate: async () => ({ ...expected }),
+      getByRole: (role, options) => {
+        assert.equal(role, 'tablist')
+        assert.equal(options.name, 'Ribbon')
+        return { getByRole: (role, options) => ({ click: async () => tabs.push(options.name) }) }
+      },
+    } }
+    const assertions = (value) => ({
+      toBe: (other) => assert.equal(value, other),
+      toEqual: (other) => assert.deepEqual(value, other),
+      toHaveAttribute: async (name, other) => {
+        assert.equal(name, 'aria-pressed')
+        assert.equal(value.pressed, other)
+      },
+    })
+    assertions.poll = (callback) => ({ toEqual: async (other) => assert.deepEqual(await callback(), other) })
+    const probe = { assertion: { target: 'engine-mode:' + mode, value: expected[mode] } }
+    await assertEngineMode(probe, runtime, locator, assertions)
+    assert.deepEqual(tabs, ['View', 'Draw'])
+    assert.deepEqual(runtime.evidence.engineMode, { mode, expected, observed: expected })
+    runtime.page.evaluate = async () => ({ ...expected, [mode]: initial[mode] })
+    await assert.rejects(assertEngineMode(probe, runtime, locator, assertions), /Expected values/)
+  }
+})
 
 // Exercise the real runner seams without booting the worker-stack fixture.
 const expect = (value) => ({

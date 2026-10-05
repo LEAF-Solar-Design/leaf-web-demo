@@ -1059,6 +1059,28 @@ test('control recipes use exact named toolbars and default-build unavailable nam
   }
 })
 
+test('engine drafting modes establish real pressed states and model tabs remain refusal probes', () => {
+  for (const id of ['object-snap', 'ortho-mode']) {
+    const entry = map.entries.find((row) => row.id === 'control:' + id)
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      const setup = probe.setup.steps.at(-1)
+      assert.equal(setup.kind, 'engine-mode-state')
+      assert.equal(setup.mode, id === 'object-snap' ? 'osnap' : 'ortho')
+      assert.equal(setup.pressed, entry.state_contexts[state].pressed)
+      assert.deepEqual(setup.control, probe.locator)
+      assert.equal(probe.assertion.value, !setup.pressed)
+      assert.equal(probe.certification, null)
+    }
+  }
+  for (const profile of ['drafting', 'solar']) {
+    const probe = resolveProbe(map.entries.find((row) => row.id === 'tab:' + profile + ':model'), 'unavailable')
+    assert.equal(probe.certification, null)
+    assert.equal(probe.assertion.kind, 'disabled_with_reason')
+    assert.equal(probe.assertion.reason, '3D modelling is not in this engine yet')
+  }
+})
+
 test('grid and fullscreen establish opposite starting states through their real scoped controls', () => {
   for (const [id, states, stepKind, field, target] of [
     ['control:grid-display', ['off', 'on'], 'control-pressed-state', 'pressed', 'drafting-grid'],

@@ -223,6 +223,9 @@ export function stateRecipe(entry, state) {
     if (["control:scope-add","control:demo-return","control:claude-accounts","control:drawing-close-start","control:notification-collapse","control:session-details","control:version-history","control:linked-services","control:project-board","control:prompt-run","control:prompt-scope","control:sign-out","control:start-board","control:take-edit-lock","control:cost-panel","control:command-bar","control:find-drawing"].includes(entry.id)) {
       steps.push(step('baseline-three-state', { sourceId: entry.source_id, target: effect.target, control: locator, expanded: context.expanded }))
     }
+    if (/^engine-mode:(ortho|osnap)$/.test(effect.target)) steps.push(step('engine-mode-state', {
+      control: locator, mode: effect.target.split(':')[1], pressed: context.pressed,
+    }))
     if (effect.target === 'drafting-grid') steps.push(step('control-pressed-state', { control: locator, pressed: context.pressed }))
     if (effect.target === 'document-fullscreen') steps.push(step('fullscreen-state', { control: locator, fullscreen: context.fullscreen }))
     if (entry.source_id === 'view-back') steps.push(step(state === 'empty-history' ? 'empty-view-history' : 'previous-view-history'))

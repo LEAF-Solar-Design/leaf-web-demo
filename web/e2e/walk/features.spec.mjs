@@ -9,7 +9,7 @@ const smoke = new Set(['action:fit', 'surface:sheets', 'drawer:nav', 'tab:drafti
 for (const entry of buildFeatureMap().entries) {
   for (const state of entry.states) {
     const probe = resolveProbe(entry, state)
-    for (const viewport of entry.viewports) {
+    for (const viewport of entry.state_viewports?.[state] || entry.viewports) {
       const title = `${entry.id} [${state}] @${viewport}`
       const options = { tag: smoke.has(entry.id) ? ['@smoke'] : [] }
       if (probe.certification) {
