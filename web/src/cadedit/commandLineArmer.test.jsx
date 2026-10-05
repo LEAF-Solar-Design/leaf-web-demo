@@ -27,6 +27,83 @@ class ScriptedWorker {
 
 const LINE = { id: 'e1', type: 'LINE', layer: 'Panels', vertices: [[0, 0], [1, 1]] }
 
+it('MS17 routes', async () => {
+  const common = { layer: '0', editable: true, aci: 256, linetype: 'ByLayer', lineweight: -1 }
+  const D = [
+    { ...common, id: '16', type: 'LINE', vertices: [[0, 0, 0], [10, 0, 0]] },
+    { ...common, id: '17', type: 'LINE', vertices: [[0, 10, 0], [10, 10, 0]] },
+    { ...common, id: '18', type: 'LINE', vertices: [[20, 0, 0], [20, 10, 0]] },
+    { ...common, id: '19', type: 'CIRCLE', vertices: [[30, 10, 0]], radius: 5 },
+  ]
+  D.linetypes = ['ByLayer', 'ByBlock', 'Continuous', 'DASHED']
+  const S = ['16', '19']
+  const expected = (op, p) => ({ type: 'applyEdit', op: 'batch', payload: { verb: op, steps: S.map((entityId) => ({ op, payload: { entityId, ...p } })) } })
+  for (const route of ['ribbon erase', 'typed erase', 'canvas delete', 'ribbon move', 'typed move', 'picked move']) {
+    let studio
+    let ground
+    if (route === 'picked move') {
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { cb(); return 0 })
+      ground = document.createElement('div')
+      const viewer = { unproject: (x, y) => ({ x, y }), setRubberBand: vi.fn() }
+      studio = mount({ ground, viewerRef: { current: viewer } })
+      await openAndLoad(D)
+      act(() => { studio.context.setOsnap(false); studio.context.setOrtho(false) })
+    } else studio = await b2Studio(D)
+    act(() => studio.context.session.actions.selectReplace(S))
+    bodyFocus()
+    if (route === 'canvas delete') {
+      // Text fields and keyboard owners retain the Delete key.
+      act(() => studio.bar.focus())
+      expect(b2Key({ key: 'Delete' }, studio.bar).defaultPrevented).toBe(false)
+      expect(edits()).toEqual([])
+      const owner = document.createElement('div')
+      owner.setAttribute('data-keyboard-owner', '')
+      document.body.append(owner)
+      bodyFocus()
+      expect(b2Key({ key: 'Delete' }).defaultPrevented).toBe(false)
+      expect(edits()).toEqual([])
+      owner.remove()
+      studio.canvas.tabIndex = 0
+      act(() => studio.canvas.focus())
+      expect(b2Key({ key: 'Delete' }, studio.canvas).defaultPrevented).toBe(true)
+    } else if (route === 'ribbon erase') {
+      const button = document.querySelector('[data-tool="modify:delete"]')
+      expect(button).not.toBeDisabled()
+      fireEvent.click(button)
+    } else if (route === 'typed erase') command(parseDrawingCommand('ERASE'))
+    else {
+      if (route === 'ribbon move') {
+        const button = document.querySelector('[data-tool="modify:move"]')
+        expect(button).not.toBeDisabled()
+        fireEvent.click(button)
+      } else command(parseDrawingCommand('MOVE'))
+      if (route === 'picked move') {
+        // MOVE picks a base, then a displacement; the picker publishes cockpit:picked.
+        for (const [x, y] of [[0, 0], [2, 3]]) act(() => {
+          ground.dispatchEvent(new MouseEvent('pointerdown', { clientX: x, clientY: y, button: 0 }))
+          ground.dispatchEvent(new MouseEvent('pointerup', { clientX: x, clientY: y, button: 0 }))
+        })
+        expect(screen.getByLabelText('ribbon dx').value).toBe('2')
+        expect(screen.getByLabelText('ribbon dy').value).toBe('3')
+      } else expect(point('2,3')).toBe(true)
+      expect(screen.getByTestId('cockpit-prompt-run')).not.toBeDisabled()
+      fireEvent.click(screen.getByTestId('cockpit-prompt-run'))
+    }
+    const move = route.endsWith('move')
+    expect(edits()).toEqual([expected(move ? 'move' : 'delete', move ? { dx: 2, dy: 3 } : {})])
+    cleanup()
+  }
+})
+
+it('B2-11 Delete posts one set batch while clipboard shortcuts still refuse', async () => {
+  const studio = await b2Studio([LINE, { ...LINE, id: 'e2' }])
+  act(() => studio.context.session.actions.selectReplace(['e1', 'e2']))
+  bodyFocus()
+  expect(b2Key({ key: 'Delete' }).defaultPrevented).toBe(true)
+  expect(edits()).toEqual([{ type: 'applyEdit', op: 'batch', payload: { verb: 'delete', steps: ['e1', 'e2'].map(entityId => ({ op: 'delete', payload: { entityId } })) } }])
+})
+
+
 function fileOf(name = 'one.dxf') {
   const bytes = new TextEncoder().encode('0\nEOF\n')
   const file = new File([bytes], name, { type: 'application/dxf' })
@@ -285,7 +362,7 @@ describe('canvas drafting shortcuts', () => {
   ])('%s erase and clipboard shortcuts retain the ribbon selection gate', async (id, selection, reason) => {
     const studio = await b2Studio([LINE, { ...LINE, id: 'e2' }])
     act(() => studio.context.session.actions.selectReplace(selection))
-    for (const spec of B2_KEYS.filter(({ key }) => ['Delete', 'c', 'x'].includes(key))) {
+    for (const spec of B2_KEYS.filter(({ key }) => (selection.length > 1 ? ['c', 'x'] : ['Delete', 'c', 'x']).includes(key))) {
       expect(b2Key(spec).defaultPrevented).toBe(true)
       expect(screen.getByRole('status').textContent).toBe(reason)
     }

@@ -67,6 +67,7 @@
 // this module cannot import it (that file is a React hook module and this one
 // is React-free), so engineSessionErrors.js holds the constant both read.
 import { SESSION_ERROR } from '../cadedit/engineSessionErrors.js'
+import { SELECTION_EDIT_OPS, MAX_SELECTION_EDIT_ENTITIES } from '../cadedit/selection.js'
 
 // The ribbon's reason vocabulary. Lived in ribbonClusters.js until this slice;
 // it moved here because `when` is the registry's half of the honesty contract
@@ -115,6 +116,12 @@ export const MODIFY_REASONS = Object.freeze({
   busy: 'engine busy: wait for the current edit',
   noSelection: 'select an entity in the drawing',
   multiSelection: 'select one object: this works on a single object and more than one is selected',
+  selectionLimit: 'Edit refused: select at most 256 objects.',
+  invalidSelection: 'Edit refused: every selected object must have a valid entity id.',
+  missingSelection: 'Edit refused: a selected object is no longer in the document.',
+  placedInsert: 'an INSERT is placed, not edited, in this round',
+  placedDimension: 'a dimension is placed, not edited, in this round',
+  placedMleader: 'a mleader is placed, not edited, in this round',
   readOnlyKind: 'read-only entity kind',
   unsupportedInsert: 'Copy, Cut and Explode do not support INSERT block references yet',
   unsupportedDimension: 'Copy, Cut and Explode do not support DIMENSION entities yet',
@@ -223,8 +230,28 @@ export function modifyReason(session, reach = null) {
   return ''
 }
 
+export function modifyOpReason(op, session, reach = null) {
+  if (!SELECTION_EDIT_OPS.includes(op) || (session?.selectedIds?.length ?? 0) <= 1) return modifyReason(session, reach)
+  const document = drawReason(session, reach)
+  if (document) return document
+  if (session.selectedIds.some((id) => typeof id !== 'string' || !id.trim())) return MODIFY_REASONS.invalidSelection
+  const ids = [...new Set(session.selectedIds)]
+  if (ids.length > MAX_SELECTION_EDIT_ENTITIES) return MODIFY_REASONS.selectionLimit
+  const members = ids.map((id) => session.entities?.find((entity) => entity.id === id))
+  if (members.some((entity) => !entity)) return MODIFY_REASONS.missingSelection
+  for (const entity of members) {
+    if (op !== 'delete') {
+      if (entity.type === 'INSERT') return MODIFY_REASONS.placedInsert
+      if (entity.type === 'DIMENSION') return MODIFY_REASONS.placedDimension
+      if (entity.type === 'MLEADER') return MODIFY_REASONS.placedMleader
+    }
+    if (entity.editable === false && !PLACED_KINDS.has(entity.type)) return MODIFY_REASONS.readOnlyKind
+  }
+  return ''
+}
+
 function selectionActionReason(op, session, reach = null) {
-  const reason = modifyReason(session, reach)
+  const reason = modifyOpReason(op, session, reach)
   if (reason) return reason
   if (!['copyClip', 'cutClip', 'explode'].includes(op)) return ''
   if (session.selected.type === 'INSERT') return MODIFY_REASONS.unsupportedInsert

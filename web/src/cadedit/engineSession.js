@@ -43,7 +43,7 @@ import { offsetEntity } from './offset.js'
 import { MAX_BATCH_STEPS, MAX_COORD, MAX_INTERSECT_POINTS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
 import { clipboardRecord, describeRecord, pasteOp } from './clipboard.js'
 import { diffPlan } from './mutationDiff.js'
-import { NO_IDS, withSelection, surviveSelectionIds, addId, toggleId, replaceIds, multiSelectionRefusal } from './selection.js'
+import { NO_IDS, withSelection, surviveSelectionIds, addId, toggleId, replaceIds, multiSelectionRefusal, SELECTION_EDIT_OPS, MAX_SELECTION_EDIT_ENTITIES } from './selection.js'
 
 // Mirrors the worker's own bound. Checked against File.size BEFORE any read.
 export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
@@ -1022,6 +1022,34 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
  *        A CHANGE resets the session: no engine state from one document may
  *        survive into another.
  */
+export function buildSelectionEditPayload(op, ids, inputs, entities) {
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !id.trim())) {
+    return { refusal: 'Edit refused: every selected object must have a valid entity id.' }
+  }
+  const distinct = [...new Set(ids)]
+  if (distinct.length > MAX_SELECTION_EDIT_ENTITIES) return { refusal: 'Edit refused: select at most 256 objects.' }
+  if (!SELECTION_EDIT_OPS.includes(op)) return { refusal: multiSelectionRefusal(op, distinct.length) }
+  const members = distinct.map((id) => (entities || []).find((entity) => entity.id === id))
+  if (members.some((entity) => !entity)) return { refusal: 'Edit refused: a selected object is no longer in the document.' }
+  for (const entity of members) {
+    if (op !== 'delete') {
+      if (entity.type === 'INSERT') return { refusal: 'an INSERT is placed, not edited, in this round' }
+      if (entity.type === 'DIMENSION') return { refusal: 'a dimension is placed, not edited, in this round' }
+      if (entity.type === 'MLEADER') return { refusal: 'a mleader is placed, not edited, in this round' }
+    }
+    if (entity.editable === false && !(op === 'delete' && ['INSERT', 'DIMENSION', 'MLEADER'].includes(entity.type))) {
+      return { refusal: 'read-only entity kind' }
+    }
+  }
+  const steps = []
+  for (const entityId of distinct) {
+    const built = buildEditPayload(op, entityId, inputs, entities?.linetypes, entities)
+    if (built.refusal) return built
+    steps.push({ op, payload: built.payload })
+  }
+  return { payload: { verb: op, steps } }
+}
+
 export default function useEngineSession({
   createWorker,
   saveTarget = null,
@@ -1057,6 +1085,7 @@ export default function useEngineSession({
   // step read under the verb's name rather than `batch`.
   const batchVerbRef = useRef(null)
   const batchNoteRef = useRef('')
+  const selectionEditRef = useRef(null)
   // W4f slice F: the undo machinery. `current` is the bytes the engine holds
   // right now (the opened file, then each applied edit's written bytes);
   // `undo`/`redo` hold {bytes, op}; `reload` names an undo/redo re-load in
@@ -1064,6 +1093,9 @@ export default function useEngineSession({
   // forward, not as a fresh open.
   const historyRef = useRef({ original: null, current: null, undo: [], redo: [], reload: null })
   const clearHistory = () => {
+    selectionEditRef.current = null
+    batchVerbRef.current = null
+    batchNoteRef.current = ''
     historyRef.current = { original: null, current: null, undo: [], redo: [], reload: null }
   }
 
@@ -1180,6 +1212,8 @@ export default function useEngineSession({
         return
       }
       if (message.type === 'editApplied') {
+        const selectionEdit = message.op === 'batch' ? selectionEditRef.current : null
+        selectionEditRef.current = null
         // W4g-6: a batch answers as `batch`; the verb that posted it is the
         // name the drafter sees (and the undo stack keeps).
         const label = message.op === 'batch' ? (batchVerbRef.current || 'batch') : message.op
@@ -1229,7 +1263,11 @@ export default function useEngineSession({
           entityCount: message.entityCount ?? 0,
           savedBytes: message.bytes ?? null,
           blockBasePatched: message.blockBasePatched ?? false,
-          ...withSelection(createdId ? [createdId] : surviveSelectionIds(current.selectedIds, entities)),
+          ...withSelection(selectionEdit
+            ? selectionEdit.op === 'delete' ? []
+              : selectionEdit.selectCreated ? (message.createdIds || []).map(String)
+                : surviveSelectionIds(selectionEdit.ids, entities)
+            : createdId ? [createdId] : surviveSelectionIds(current.selectedIds, entities)),
           undoDepth: history.undo.length,
           redoDepth: history.redo.length,
           engineParsed: true,
@@ -1434,6 +1472,26 @@ export default function useEngineSession({
         return
       }
     }
+    if (!explicit && SELECTION_EDIT_OPS.includes(op) && sessionRef.current.selectedIds.length > 1) {
+      if (!boundaryRef.current || !sessionRef.current.engineParsed || sessionRef.current.busy || selectionEditRef.current) return
+      if (savingRef.current) { patch({ status: 'a save is in flight; wait for its receipt' }); return null }
+      const { payload, refusal } = buildSelectionEditPayload(op, sessionRef.current.selectedIds, inputs, sessionRef.current.entities)
+      if (refusal) { patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal }); return }
+      selectionEditRef.current = {
+        op, ids: payload.steps.map((step) => step.payload.entityId),
+        selectCreated: op === 'copy' || (op === 'mirror' && payload.steps[0].payload.keep),
+      }
+      batchVerbRef.current = op
+      batchNoteRef.current = ''
+      patch({ busy: true, errorKind: null })
+      if (!boundaryRef.current.post({ type: 'applyEdit', op: 'batch', payload })) {
+        selectionEditRef.current = null
+        batchVerbRef.current = null
+        patch({ busy: false, errorKind: SESSION_ERROR.TRANSPORT, status: `Edit refused (${op}): the boundary rejected the message.` })
+      }
+      return
+    }
+    if (selectionEditRef.current) return
     if (!explicit && op !== 'ungroup' && sessionRef.current.selectedIds.length > 1) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: multiSelectionRefusal(op, sessionRef.current.selectedIds.length) })
       return
