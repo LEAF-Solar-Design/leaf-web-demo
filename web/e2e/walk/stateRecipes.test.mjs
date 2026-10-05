@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
-import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure } from './fixtures.mjs'
+import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
+  setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
+  captureEngineRefusal, assertEngineRefusal, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
 
 // Exercise the real runner seams without booting the worker-stack fixture.
 const expect = (value) => ({
@@ -372,16 +374,262 @@ test('submission setup failure still drains routes through runProbe finally', as
 })
 
 test('running Escape requires the detach message and removal of the running strip', async () => {
-  const runtime = { evidence: { pendingRun: {} }, page: {
-    getByText: (text, options) => {
+  const runtime = { evidence: { pendingRun: { jobId: 'pending-id' } }, testInfo: { project: { name: 'desktop' } }, page: {
+    request: { get: async () => ({ ok: () => true, json: async () => ({ jobs: [{ job_id: 'pending-id' }] }) }) },
+    getByRole: () => ({ isVisible: async () => false, visible: true }),
+    locator: (selector) => {
+      if (selector === '.strip-running') return { countValue: 0 }
+      if (selector === 'aside.rail .rail-ledger') return { countValue: 1 }
+      if (selector === 'aside.rail') return { getByText: () => ({ first: () => ({ visible: true }) }) }
+      assert.equal(selector, '.toast[role="status"]')
+      return { getByText: (text, options) => {
       assert.equal(text, 'Stopped following count-by-layer. It keeps running; find it in Jobs.')
       assert.equal(options.exact, true)
       return { visible: true }
+      } }
     },
-    locator: (selector) => { assert.equal(selector, '.strip-running'); return { countValue: 0 } },
   } }
   await assertEffect({ assertion: { target: 'escape:running' } }, runtime, {}, {}, expect)
   assert.equal(runtime.evidence.pendingRun.detached, true)
+  const getJobs = runtime.page.request.get
+  runtime.page.request.get = async () => ({ ok: () => true, json: async () => ({ jobs: [] }) })
+  await assert.rejects(assertEffect({ assertion: { target: 'escape:running' } }, runtime, {}, {}, expect))
+  runtime.page.request.get = getJobs
   runtime.page.locator = () => ({ countValue: 1 })
   await assert.rejects(assertEffect({ assertion: { target: 'escape:running' } }, runtime, {}, {}, expect))
+})
+
+const oracleAssertions = (value) => ({ ...expect(value),
+  toEqual: (expected) => assert.deepEqual(value, expected),
+  toBeEnabled: async () => assert.equal(value.disabled, false),
+  toHaveValue: async (expected) => assert.equal(await value.inputValue(), expected),
+  toHaveText: async (expected) => assert.equal(await value.innerText(), expected),
+  toContainText: async (expected) => assert.ok(value.text.includes(expected)),
+  toHaveAccessibleName: async (expected) => assert.equal(value.name, expected),
+})
+oracleAssertions.poll = (read) => ({ toBe: async (expected) => assert.equal(await read(), expected) })
+
+test('Jobs desktop setup expands and collapses the rail without querying phone panels', async () => {
+  let open = false
+  const page = { getByRole: (role, options) => {
+    assert.equal(role, 'button')
+    const collapse = options.name === 'Collapse the job monitor to a spine'
+    if (!collapse) assert.ok(options.name.test('Expand the job monitor (2 live)'))
+    return { isVisible: async () => collapse === open, get visible() { return collapse === open }, click: async () => { open = !open } }
+  }, locator: (selector) => {
+    assert.equal(selector, 'aside.rail .rail-ledger')
+    return { get countValue() { return open ? 1 : 0 } }
+  } }
+  for (const desired of [false, true, true, false, false]) {
+    await setJobRail(page, desired, false, expect)
+    assert.equal(open, desired)
+  }
+})
+
+test('available solve proposal does not wait on the settings-form browser catalog', async () => {
+  assert.equal(solarBrowserCatalogRequired('solar-solve-proposal'), false)
+  for (const name of ['solar-settings', 'solar-string-data', 'solar-autofill']) assert.equal(solarBrowserCatalogRequired(name), true)
+  const record = { name: 'solar-solve-proposal', availability: { entitled: true, engine_ready: true, input_ready: true, implemented: true } }
+  const runtime = { drawingId: 'private', evidence: {}, page: {
+    waitForResponse: () => assert.fail('available solve must not require the flag-gated browser fetch'),
+    goto: () => assert.fail('available solve must keep the already seated workspace'),
+    request: { get: async () => ({ ok: () => true, json: async () => ({ families: [{ label: 'Solar', capabilities: [record] }] }) }) },
+    getByRole: (role) => {
+      if (role === 'tablist') return { getByRole: () => ({ click: async () => {} }) }
+      return { isVisible: async () => false }
+    },
+  } }
+  await setupStep({ kind: 'tool', sourceId: record.name, state: 'ready', assertion: { kind: 'opens', target: 'catalog-run-decision' } },
+    runtime, { kind: 'catalog-tool', name: record.name }, oracleAssertions)
+  assert.deepEqual(runtime.evidence.catalog.record, record)
+  const button = { visible: true }
+  runtime.page.getByRole = () => button
+  runtime.evidence.responses = []
+  runtime.catalogRunRequests = []
+  await assertEffect({ sourceId: record.name, assertion: { target: 'catalog-run-decision', tool: record.name } }, runtime, {}, {}, oracleAssertions)
+  runtime.catalogRunRequests.push('/api/run')
+  await assert.rejects(assertEffect({ sourceId: record.name, assertion: { target: 'catalog-run-decision', tool: record.name } }, runtime, {}, {}, oracleAssertions))
+  runtime.catalogRunRequests = []
+  runtime.evidence.responses.push({ method: 'POST', url: 'http://localhost/api/run' })
+  await assert.rejects(assertEffect({ sourceId: record.name, assertion: { target: 'catalog-run-decision', tool: record.name } }, runtime, {}, {}, oracleAssertions))
+})
+
+test('no-rung keyboard actions preserve the workspace, refuse dispatch and leave entry enabled', async () => {
+  for (const [featureId, key] of [['action:bar-escape', 'Escape'], ['action:bar-retry', 'r']]) {
+    let value = ''
+    let state = { url: '/private', selection: [], surfaces: [] }
+    let requestObserver
+    const input = { disabled: false, inputValue: async () => value, fill: async (text) => { value = text } }
+    const page = {
+      on: (_, callback) => { requestObserver = callback }, off: () => {},
+      evaluate: async (callback) => callback.toString().includes('requestAnimationFrame') ? undefined : structuredClone(state),
+      getByRole: (role) => role === 'combobox' ? input : { getByRole: () => ({ first: () => ({ focus: async () => {} }) }) },
+      keyboard: { press: async (pressed) => assert.equal(pressed, key) },
+    }
+    const probe = { featureId, kind: 'action', state: 'ready', locator: { trigger: 'keyboard', key }, assertion: { kind: 'disabled_with_reason' } }
+    assert.equal(barNoRung(probe), true)
+    assert.equal(barNoRung({ ...probe, state: 'job-running' }), false)
+    const runtime = { page, evidence: {}, cleanup: [] }
+    const before = await captureBarNoRung(runtime)
+    await assertBarNoRung(probe, runtime, input, before, oracleAssertions)
+    assert.equal(value, '')
+    requestObserver({ method: () => 'POST', url: () => 'http://walk/api/run' })
+    await assert.rejects(assertBarNoRung(probe, runtime, input, before, oracleAssertions))
+    runtime.noRungDispatches = []
+    state.selection = ['changed']
+    await assert.rejects(assertBarNoRung(probe, runtime, input, before, oracleAssertions))
+    state = before.state
+    input.disabled = true
+    await assert.rejects(assertBarNoRung(probe, runtime, input, before, oracleAssertions))
+  }
+})
+
+test('geometry observer copies complete real replies and forwards worker traffic unchanged', () => {
+  const original = globalThis.Worker
+  const calls = []
+  let listener
+  globalThis.Worker = class {
+    addEventListener(type, callback) { assert.equal(type, 'message'); listener = callback }
+    postMessage(...args) { calls.push(args); return 'forwarded' }
+  }
+  try {
+    installGeometryObserver()
+    const worker = new Worker('/engine/worker-browser.js', { type: 'module' })
+    const message = { type: 'edit', op: 'explode' }
+    const transfer = []
+    assert.equal(worker.postMessage(message, transfer), 'forwarded')
+    assert.equal(calls[0][0], message)
+    assert.equal(calls[0][1], transfer)
+    const entities = [{ id: '1', type: 'LINE', vertices: [[0, 0], [10, 0]] }]
+    listener({ data: { type: 'documentLoaded', documentId: 'head.dxf', entities } })
+    entities[0].vertices[0][0] = 99
+    assert.equal(globalThis.__walkGeometry.geometry.entities[0].vertices[0][0], 0)
+    assert.deepEqual(globalThis.__walkGeometry.dispatches, [{ type: 'edit', op: 'explode' }])
+    listener({ data: { type: 'error', entities: [] } })
+    assert.equal(globalThis.__walkGeometry.geometry.documentId, 'head.dxf')
+  } finally { globalThis.Worker = original; delete globalThis.__walkGeometry }
+})
+
+function refusalRuntime() {
+  const state = { geometry: { documentId: 'private-v1.dxf', entities: [{ id: '1', type: 'DIMENSION', vertices: [[0, 0]] }] },
+    selection: 'DIMENSION #1', history: [{ name: 'Undo edit (unavailable: nothing to undo)', disabled: true }],
+    clipboard: { name: 'paste (unavailable: nothing on the clipboard yet)', title: 'empty', disabled: true },
+    versions: { head: 1, versions: [{ v: 1 }] }, dispatches: [], status: 'expected refusal' }
+  const node = { innerText: async () => state.selection, getByRole: () => ({ innerText: async () => state.status }) }
+  const runtime = { drawingId: 'private', evidence: {}, page: {
+    evaluate: async (callback) => structuredClone(callback.toString().includes('dispatches') ? state.dispatches : state.geometry),
+    getByTestId: () => node,
+    getByRole: (role) => ({ getByRole: () => role === 'toolbar'
+      ? { evaluateAll: async () => structuredClone(state.history) }
+      : { evaluate: async () => structuredClone(state.clipboard) } }),
+    request: { get: async () => ({ ok: () => true, json: async () => structuredClone(state.versions) }) },
+  } }
+  return { runtime, state }
+}
+
+test('engine refusal requires exact text and preserves geometry, selection, history, clipboard and dispatch', async () => {
+  for (const field of ['status', 'geometry', 'selection', 'history', 'clipboard', 'versions', 'dispatches']) {
+    const { runtime, state } = refusalRuntime()
+    const before = await captureEngineRefusal(runtime)
+    const probe = { assertion: { refusal: 'expected refusal' } }
+    await assertEngineRefusal(probe, runtime, before, oracleAssertions)
+    if (field === 'status' || field === 'selection') state[field] = 'unexpected'
+    else if (field === 'geometry') state.geometry.entities[0].vertices[0][0] = 100
+    else if (field === 'history') state.history[0].disabled = false
+    else if (field === 'clipboard') state.clipboard.name += 'changed'
+    else if (field === 'versions') state.versions.head = 2
+    else state.dispatches.push({ type: 'edit' })
+    await assert.rejects(assertEngineRefusal(probe, runtime, before, oracleAssertions))
+  }
+})
+
+test('version navigation requires the adjacent server head and seated identity even with unchanged geometry', async () => {
+  const versions = { head: 4, versions: [{ v: 9 }, { v: 1 }, { v: 4 }] }
+  assert.equal(expectedVersionHead({ sourceId: 'undo' }, versions), 1)
+  assert.equal(expectedVersionHead({ sourceId: 'redo' }, versions), 9)
+  assert.throws(() => expectedVersionHead({ sourceId: 'redo' }, { head: 9, versions: versions.versions }), /No redo/)
+  const before = { versions, count: 1, geometry: { entities: [{ id: '1', type: 'LINE', vertices: [[0, 0], [10, 0]] }] } }
+  for (const sourceId of ['undo', 'redo']) {
+    const head = sourceId === 'undo' ? 1 : 9
+    let seated = head
+    let observedHead = head
+    let entities = structuredClone(before.geometry.entities)
+    const runtime = { drawingId: 'private', evidence: {}, page: {
+      request: { get: async () => ({ ok: () => true, json: async () => ({ head: observedHead }) }) },
+      locator: () => ({ get text() { return `private-v${seated}.dxf` } }),
+      getByTestId: () => ({ innerText: async () => '1' }),
+      evaluate: async () => ({ documentId: `private-v${seated}.dxf`, entities }),
+    } }
+    await assertVersionTransition({ sourceId }, runtime, before, oracleAssertions)
+    seated = 4
+    await assert.rejects(assertVersionTransition({ sourceId }, runtime, before, oracleAssertions))
+    seated = head; observedHead = 4
+    await assert.rejects(assertVersionTransition({ sourceId }, runtime, before, oracleAssertions))
+    observedHead = head; entities = [{ id: '1', type: 'LINE', vertices: [[0, 0], [99, 0]] }]
+    await assert.rejects(assertVersionTransition({ sourceId }, runtime, before, oracleAssertions))
+  }
+})
+
+test('zoom-out baseline zooms past saturation and refuses a viewport that never becomes measurable', async () => {
+  let width = 6576
+  let clicks = 0
+  let stuck = false
+  const page = { getByRole: (role) => role === 'button'
+    ? { locator: () => ({ evaluate: async () => ({ width: 100, height: 100 }) }) }
+    : { getByRole: () => ({ click: async () => { clicks++; if (!stuck) width /= 2 } }) } }
+  const bounds = async () => ({ x: 0, y: 0, width, height: width })
+  const baseline = await establishZoomBaseline(page, bounds)
+  assert.ok(clicks > 1)
+  assert.ok(baseline.viewport.width < 40)
+  assert.equal(baseline.unsaturated, true)
+  width = 6576; clicks = 0; stuck = true
+  await assert.rejects(establishZoomBaseline(page, bounds), /unsaturated/)
+  assert.equal(clicks, 30)
+})
+
+test('copy verifies a paste at the known base and detects corrupt copied or untouched geometry', async () => {
+  for (const fault of [null, 'copy', 'untouched']) {
+    const original = { id: '1', type: 'LINE', layer: 'Walk', vertices: [[111, 190, 0], [333, 190, 0]] }
+    const before = { count: 1, geometry: { documentId: 'private-v1.dxf', entities: [original] } }
+    let geometry = structuredClone(before.geometry)
+    let count = 1
+    const page = {
+      evaluate: async () => structuredClone(geometry),
+      getByRole: () => ({ getByRole: () => ({ click: async () => {} }) }),
+      getByLabel: (_, options) => ({ fill: async (value) => { assert.equal(options.exact, true); assert.equal(value, '400,100') } }),
+      getByTestId: (id) => id === 'cockpit-prompt' ? { name: 'PASTE command' }
+        : id === 'cad-edit-entity-count' ? { innerText: async () => String(count) }
+          : { click: async () => {
+            count = 2
+            geometry.entities.push({ id: '2', type: 'LINE', layer: 'Walk', vertices: [[400, 100, 0], [fault === 'copy' ? 623 : 622, 100, 0]] })
+            if (fault === 'untouched') geometry.entities[0].vertices[0][0]++
+          } },
+    }
+    const runtime = { page, evidence: {} }
+    if (fault) await assert.rejects(assertCopiedGeometry({}, runtime, before, oracleAssertions))
+    else {
+      await assertCopiedGeometry({}, runtime, before, oracleAssertions)
+      assert.deepEqual(runtime.evidence.clipboardPaste.base, [400, 100])
+    }
+  }
+})
+
+test('Explode checks exact segment geometry and preserves every other entity', async () => {
+  const source = { id: String(0xA200), type: 'LWPOLYLINE', layer: 'Walk', vertices: [[111, 200, 0], [222, 200, 0], [222, 210, 0]] }
+  const other = { id: '1', type: 'LINE', vertices: [[0, 0, 0], [10, 0, 0]] }
+  const before = { count: 2, geometry: { entities: [other, source] } }
+  const parts = [
+    { id: '2', type: 'LINE', layer: 'Walk', vertices: [[111, 200, 0], [222, 200, 0]] },
+    { id: '3', type: 'LINE', layer: 'Walk', vertices: [[222, 200, 0], [222, 210, 0]] },
+  ]
+  for (const fault of [null, 'segments', 'untouched', 'source-retained']) {
+    const entities = structuredClone([other, ...parts])
+    if (fault === 'segments') entities[2].vertices[1][1]++
+    if (fault === 'untouched') entities[0].vertices[0][0]++
+    if (fault === 'source-retained') entities[1] = source
+    const runtime = { page: { getByTestId: () => ({ innerText: async () => '3' }), evaluate: async () => ({ entities }) } }
+    const check = () => assertEffect({ assertion: { target: 'engine:explode' } }, runtime, {}, before, oracleAssertions)
+    if (fault) await assert.rejects(check())
+    else await check()
+  }
 })

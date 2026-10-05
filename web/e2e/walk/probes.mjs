@@ -177,6 +177,10 @@ export function locatorRecipe(entry, state) {
       ...role('button', state === 'open' ? 'Collapse the tool rail to a spine' : 'Tool rail'), trigger: 'click',
       phone: { ...role('button', 'Tool rail'), trigger: 'click' },
     }
+    if (entry.source_id === 'jobs') return {
+      ...role('button', state === 'open' ? 'Collapse the job monitor to a spine' : /^Expand the job monitor \([0-9]+ live\)$/), trigger: 'click',
+      phone: { ...role('button', 'Jobs', role('group', 'Workspace panels')), trigger: 'click' },
+    }
     return { ...role('button', drawerNames[entry.source_id], role('group', 'Workspace panels')),
       trigger: entry.source_id === 'none' ? 'keyboard' : 'click', key: 'Escape' }
   }
@@ -259,7 +263,7 @@ export function stateRecipe(entry, state) {
       const needsClipboard = action.op === 'pasteClip' && context.session?.clipboard && context.session?.engineParsed
       if (needsClipboard) steps.push(step('select-entity', { type: 'LINE', editable: true }), step('copy-selection'), step('clear-selection'))
       if (context.session?.engineParsed && context.session?.selected) steps.push(step('select-entity', {
-        type: context.session.selected.type, editable: context.session.selected.editable,
+        type: action.op === 'explode' && state === 'ready' ? 'LWPOLYLINE' : context.session.selected.type, editable: context.session.selected.editable,
         multiple: context.session.selectedIds?.length > 1,
       }))
     } else if (action.op && context.session?.engineParsed) steps.push(step('engine-ready'))
@@ -271,7 +275,7 @@ export function stateRecipe(entry, state) {
   if (state === 'no-versioned-drawing') steps.push(step('require-versionless-drawing'))
   if (entry.kind === 'drawer') {
     const name = drawerNames[entry.source_id]
-    steps.push(step(entry.source_id === 'nav' ? 'tool-rail-state' : 'drawer-state', {
+    steps.push(step(entry.source_id === 'nav' ? 'tool-rail-state' : entry.source_id === 'jobs' ? 'job-rail-state' : 'drawer-state', {
       name, open: state === 'open' || state === 'drawer-open',
     }))
   }
@@ -307,6 +311,7 @@ export function stateRecipe(entry, state) {
   if (effect.target === 'viewer-home') steps.push(step('zoom-before-fit', {
     control: role('button', 'Zoom in', role('toolbar', 'View')),
   }))
+  if (effect.target === 'viewer-zoom-out') steps.push(step('zoom-inside-extents'))
   // LINE commands and policy reloads can close overflow or change the tab.
   if (entry.kind === 'tool') steps.push(step('catalog-tool', { name: entry.source_id }))
   return { context, steps }
