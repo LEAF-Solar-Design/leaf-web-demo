@@ -1,6 +1,8 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
 
 const identity = (value) => value
+const alwaysCurrent = () => true
 
 function visibleLayerMap(intake) {
   const visible = {}
@@ -37,6 +39,14 @@ export default function useDrawingVersionController({
   initialIntake = null,
   initialDrawingState = null,
 } = {}) {
+  const drawingIdentity = useDrawingIdentityOptional()
+  const scopeToken = drawingIdentity?.scopeToken
+  const isScopeCurrent = drawingIdentity?.isScopeCurrent ?? alwaysCurrent
+  const operationGenerationRef = useRef(0)
+  const operationCurrent = useCallback(() => {
+    const generation = operationGenerationRef.current
+    return () => generation === operationGenerationRef.current && isScopeCurrent()
+  }, [isScopeCurrent])
   const [intake, setIntake] = useState(initialIntake)
   const [versionIntake, setVersionIntake] = useState(null)
   const [visibleLayers, setVisibleLayers] = useState(() => visibleLayerMap(initialIntake))
@@ -116,6 +126,7 @@ export default function useDrawingVersionController({
   }, [])
 
   const reset = useCallback(() => {
+    operationGenerationRef.current += 1
     setIntake(null)
     setVersionIntake(null)
     setVisibleLayers({})
@@ -135,6 +146,13 @@ export default function useDrawingVersionController({
     restoreGenerationRef.current += 1 // abandon any in-flight restore completion
     onResetSelection?.({ source: 'reset' })
   }, [onResetSelection])
+
+  const previousScopeTokenRef = useRef(scopeToken)
+  useLayoutEffect(() => {
+    if (Object.is(previousScopeTokenRef.current, scopeToken)) return
+    previousScopeTokenRef.current = scopeToken
+    reset()
+  }, [scopeToken, reset])
 
   const seatIntake = useCallback((nextIntake, options = {}) => {
     setIntake(nextIntake)
@@ -160,6 +178,8 @@ export default function useDrawingVersionController({
   }, [onApplyIntake, onResetSelection, resetPreview])
 
   const seatVersion = useCallback((view, options = {}) => {
+    const current = operationCurrent()
+    if (!current()) return null
     if (!view?.intake) throw new Error('A drawing version must include an intake.')
 
     const nextDrawingState = drawingStateFrom(view, options.drawingId, drawingState)
@@ -176,19 +196,23 @@ export default function useDrawingVersionController({
     restoreGenerationRef.current += 1
     resetPreview()
     onResetSelection?.({ source: options.source || 'version' })
+    if (!current()) return null
     onApplyIntake?.(view.intake, {
       source: options.source || 'version',
       drawingState: nextDrawingState,
     })
+    if (!current()) return null
     onVersionEvent?.({
       event: options.event || null,
       view,
       drawingState: nextDrawingState,
     })
-    return view
-  }, [drawingState, onApplyIntake, onResetSelection, onVersionEvent, releaseLockIfSeated, resetPreview])
+    return current() ? view : null
+  }, [operationCurrent, drawingState, onApplyIntake, onResetSelection, onVersionEvent, releaseLockIfSeated, resetPreview])
 
   const runVersionMutation = useCallback(async (operation, adapter, event, context) => {
+    const current = operationCurrent()
+    if (!current()) return null
     const drawingId = drawingState?.drawing_id
     if (drawingId == null || versionBusy || mutationsBlocked || typeof adapter !== 'function') return null
 
@@ -197,15 +221,16 @@ export default function useDrawingVersionController({
     setOverlayStale(true)
     try {
       const view = await adapter(drawingId, context)
-      seatVersion(view, { drawingId, source: operation, event })
-      return view
+      if (!current()) return null
+      return seatVersion(view, { drawingId, source: operation, event })
     } catch (error) {
+      if (!current()) return null
       reportError(error, operation)
       return null
     } finally {
-      setVersionBusy(false)
+      if (current()) setVersionBusy(false)
     }
-  }, [drawingState, mutationsBlocked, reportError, seatVersion, versionBusy])
+  }, [operationCurrent, drawingState, mutationsBlocked, reportError, seatVersion, versionBusy])
 
   const undo = useCallback(
     (context) => runVersionMutation('undo', undoVersion, 'undo', context),
@@ -218,6 +243,8 @@ export default function useDrawingVersionController({
   )
 
   const loadHistory = useCallback(async () => {
+    const current = operationCurrent()
+    if (!current()) return null
     const drawingId = drawingState?.drawing_id
     if (drawingId == null || typeof loadVersions !== 'function') return null
 
@@ -228,17 +255,19 @@ export default function useDrawingVersionController({
       // adapter forwards the flag to ?include_deltas=1 (server-side cost:
       // every version payload is loaded, so nothing else requests it).
       const nextHistory = await loadVersions(drawingId, { includeDeltas: true })
+      if (!current()) return null
       setHistory(nextHistory)
       return nextHistory
     } catch (error) {
+      if (!current()) return null
       setHistoryError(formatError(error))
       setHistory(null)
       onError?.(error, { operation: 'history' })
       return null
     } finally {
-      setHistoryLoading(false)
+      if (current()) setHistoryLoading(false)
     }
-  }, [drawingState, formatError, loadVersions, onError])
+  }, [operationCurrent, drawingState, formatError, loadVersions, onError])
 
   const toggleHistory = useCallback(async () => {
     if (historyOpen) {
@@ -254,6 +283,8 @@ export default function useDrawingVersionController({
   }, [])
 
   const previewVersion = useCallback(async (version) => {
+    const current = operationCurrent()
+    if (!current()) return null
     const drawingId = drawingState?.drawing_id
     if (drawingId == null) return null
 
@@ -266,10 +297,13 @@ export default function useDrawingVersionController({
       const view = isHead
         ? await adapter(drawingId)
         : await adapter(drawingId, version)
+      if (!current()) return null
       if (!view?.intake) throw new Error('A drawing preview must include an intake.')
 
       onApplyIntake?.(view.intake, { source: isHead ? 'head' : 'preview', version })
+      if (!current()) return null
       onResetSelection?.({ source: isHead ? 'head' : 'preview', version })
+      if (!current()) return null
       if (isHead) {
         setVersionIntake(view.intake)
         setDrawingState((previous) => drawingStateFrom(view, drawingId, previous))
@@ -285,11 +319,12 @@ export default function useDrawingVersionController({
       }
       return view
     } catch (error) {
+      if (!current()) return null
       setHistoryError(formatError(error))
       onError?.(error, { operation: 'preview', version })
       return null
     }
-  }, [drawingState, formatError, loadHead, loadVersion, onApplyIntake, onError, onResetSelection, releaseLockIfSeated])
+  }, [operationCurrent, drawingState, formatError, loadHead, loadVersion, onApplyIntake, onError, onResetSelection, releaseLockIfSeated])
 
   const backToHead = useCallback(() => {
     if (drawingState?.head == null) return null
@@ -302,17 +337,20 @@ export default function useDrawingVersionController({
   // drawing. seatVersion also closes the history drawer (resetPreview), which
   // is the intended landing: the user restored, show them the result.
   const refreshHead = useCallback(async () => {
+    const current = operationCurrent()
+    if (!current()) return null
     const drawingId = drawingState?.drawing_id
     if (drawingId == null || typeof loadHead !== 'function') return null
     try {
       const view = await loadHead(drawingId)
-      seatVersion(view, { drawingId, source: 'restore' })
-      return view
+      if (!current()) return null
+      return seatVersion(view, { drawingId, source: 'restore' })
     } catch (error) {
+      if (!current()) return null
       reportError(error, 'restore-refresh')
       return null
     }
-  }, [drawingState, loadHead, reportError, seatVersion])
+  }, [operationCurrent, drawingState, loadHead, reportError, seatVersion])
 
   // Generation token for the ASYNC restore completion (round-4 finding): the
   // awaited head read can resolve after another actor already settled the
@@ -347,6 +385,8 @@ export default function useDrawingVersionController({
   }, [drawingState])
 
   const recordRestore = useCallback(async (result) => {
+    const current = operationCurrent()
+    if (!current()) return null
     const drawingId = result?.drawing_id ?? drawingState?.drawing_id
     if (drawingId == null || result?.head == null) return null
     const generation = restoreGenerationRef.current + 1
@@ -396,6 +436,7 @@ export default function useDrawingVersionController({
     }
     try {
       const view = await loadHead(drawingId)
+      if (!current()) return null
       if (restoreGenerationRef.current !== generation) {
         // Superseded while awaiting (newer restore, drawing switch, reset):
         // this completion must not seat old context over the new one.
@@ -423,9 +464,9 @@ export default function useDrawingVersionController({
       }
       // seatVersion clears unreadableHead itself — the lock lifts only once
       // the NEW head's intake is actually seated in the viewer.
-      seatVersion(view, { drawingId, source: 'restore' })
-      return view
+      return seatVersion(view, { drawingId, source: 'restore' })
     } catch (error) {
+      if (!current()) return null
       if (restoreGenerationRef.current !== generation) return null
       // The server head moved but we could not read it: the stale viewer
       // must NOT become eligible to mutate the newer head. Re-arm ONLY if
@@ -445,45 +486,54 @@ export default function useDrawingVersionController({
       reportError(error, 'restore-refresh')
       return null
     }
-  }, [drawingState, loadHead, reportError, seatVersion])
+  }, [operationCurrent, drawingState, loadHead, reportError, seatVersion])
 
   const retryUnreadableHead = useCallback(async () => {
+    const current = operationCurrent()
+    if (!current()) return null
     const drawingId = unreadableHead?.drawing_id
     if (drawingId == null || refreshing || typeof loadHead !== 'function') return null
     setRefreshing(true)
     try {
       const view = await loadHead(drawingId)
-      seatVersion(view, { drawingId, source: 'restore-repair' })
-      return view
+      if (!current()) return null
+      return seatVersion(view, { drawingId, source: 'restore-repair' })
     } catch (error) {
+      if (!current()) return null
       onError?.(error, { operation: 'restore-repair' })
       return null
     } finally {
-      setRefreshing(false)
+      if (current()) setRefreshing(false)
     }
-  }, [loadHead, onError, refreshing, seatVersion, unreadableHead])
+  }, [operationCurrent, loadHead, onError, refreshing, seatVersion, unreadableHead])
 
   const markRefreshFailure = useCallback((failure) => {
+    if (!isScopeCurrent()) return
     setRefreshFailure(failure || null)
-  }, [])
+  }, [isScopeCurrent])
 
   const retryRefresh = useCallback(async () => {
+    const current = operationCurrent()
+    if (!current()) return null
     const drawingId = refreshFailure?.drawing_id ?? refreshFailure?.drawingId
     if (drawingId == null || refreshing || typeof loadHead !== 'function') return null
 
     setRefreshing(true)
     try {
       const view = await loadHead(drawingId)
+      if (!current()) return null
       seatVersion(view, { drawingId, source: 'refresh' })
+      if (!current()) return null
       setRefreshFailure(null)
       return view
     } catch (error) {
+      if (!current()) return null
       onError?.(error, { operation: 'refresh' })
       return null
     } finally {
-      setRefreshing(false)
+      if (current()) setRefreshing(false)
     }
-  }, [loadHead, onError, refreshFailure, refreshing, seatVersion])
+  }, [operationCurrent, loadHead, onError, refreshFailure, refreshing, seatVersion])
 
   const actions = useMemo(() => ({
     reset,

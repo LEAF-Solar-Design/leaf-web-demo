@@ -33,6 +33,8 @@
  * narrowing it here would silently change which deep links work.
  */
 import { storeDrawingIdForSource } from '../controllers/checkout/createCheckoutController.js'
+import { bootWantsApp } from '../site/authBoot.js'
+import { sceneForPath } from '../site/routeScene.js'
 
 export const DRAWING_MODE_CONSOLE = 'console'
 export const DRAWING_MODE_OPERATOR = 'operator'
@@ -206,12 +208,28 @@ export function drawingUrlAfterUpload(options = {}) {
   }
 }
 
-/**
- * Scope-reset predicate (ACCEPTANCE "Scope-reset contract"). A SWITCH is a
- * move away from a project that was already open — opening the first project
- * of a session is not one, and must not clear a drawing the user just
- * uploaded into it. Closing a project (id -> null) IS a scope exit.
- */
+/** The app-console reset's address policy, without browser I/O. */
+export function drawingUrlAfterReset(options = {}) {
+  try {
+    const { href, mode, scene } = options ?? {}
+    if (mode !== DRAWING_MODE_CONSOLE || scene !== 'app' || typeof href !== 'string') return null
+    const url = new URL(href)
+    if (!url.searchParams.has('drawing')) return null
+    url.searchParams.delete('drawing')
+    const search = url.searchParams.toString()
+    if (!bootWantsApp(search, url.pathname) && sceneForPath(url.pathname) !== 'app') url.pathname = '/app'
+    return url.pathname + (search ? `?${search}` : '') + url.hash
+  } catch {
+    return null
+  }
+}
+
+export function hasDrawingSelection({ drawingId, source } = {}) {
+  return typeof drawingId === 'string' && drawingId.length > 0
+    && typeof source === 'string' && source.length > 0
+}
+
+/** Only moving away from an already-open project is a scope exit. */
 export function isScopeSwitch(previousProjectId, nextProjectId) {
   const previous = previousProjectId || null
   const next = nextProjectId || null

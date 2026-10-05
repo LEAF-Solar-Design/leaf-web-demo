@@ -182,7 +182,8 @@ import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
 import useCheckoutController from './controllers/checkout/useCheckoutController.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
-import { useDrawingIdentity } from './drawing/DrawingIdentityProvider.jsx'
+import { useDrawingIdentity, useDrawingScopeReset } from './drawing/DrawingIdentityProvider.jsx'
+import { hasDrawingSelection } from './drawing/drawingIdentity.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
 // canvas (--cv-bg #0f0f11) — same hue spacing as the retired light-paper set so
@@ -382,7 +383,7 @@ export default function App() {
   // this change moves ownership and nothing else. The console keeps its
   // module-const behavior — the seed is frozen at mount and nothing in this
   // shell promotes an upload only through the standalone adapter below.
-  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, setFromUpload } = useDrawingIdentity()
+  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, setFromUpload, isScopeCurrent } = useDrawingIdentity()
   const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
   requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
   // W3 one-shell: the studio ground node, which the Viewer portals into.
@@ -834,6 +835,7 @@ export default function App() {
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  useDrawingScopeReset(openProjectId)
   const [projectPane, setProjectPane] = useState(null)
   const [boardJob, setBoardJob] = useState(null)
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
@@ -1130,9 +1132,16 @@ export default function App() {
   useEffect(() => {
     let alive = true
     const loadDrawingId = REQUESTED_DRAWING_ID
-    const current = () => alive && loadDrawingId === requestedDrawingIdRef.current
+    const current = () => alive
+      && loadDrawingId === requestedDrawingIdRef.current
+      && isScopeCurrent()
     if (!current()) return undefined
-    resetDrawing(); setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' }); setLoadErr(null)
+    resetDrawing(); setLoadErr(null)
+    if (!hasDrawingSelection({ drawingId: loadDrawingId, source: DRAWING_SOURCE })) {
+      setDrawingLoad({ drawingId: null, state: 'idle' })
+      return () => { alive = false }
+    }
+    setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' })
     resetCatalogTransient()
     clearToast(); setDrawer(null); setTenant(null)
     setTier(null); setOrg(null)
@@ -1209,7 +1218,7 @@ export default function App() {
     // is what re-runs getSession after a post-callback 401 instead of stranding
     // this page holding a valid token behind a signed-out surface. Identical
     // wiring to ToolCast's session effect.
-  }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, resetCatalogTransient, resetDrawing, seatIntake,
+  }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
       sessionActions, session.recoveries])
 
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
@@ -1615,6 +1624,10 @@ export default function App() {
   }, [seatDrawingVersion, showToast, viewViewer])
 
   const seatCompletedVersion = useCallback(async (newVersion, envelope, options) => {
+    const scopeCurrent = isScopeCurrent
+    const current = () => scopeCurrent()
+      && (typeof options?.isCurrent !== 'function' || options.isCurrent())
+    if (!current()) return false
     let version = newVersion?.version
     if (mock) {
       try {
@@ -1622,28 +1635,30 @@ export default function App() {
         const commit = mockVersions.applyDelete(envelope?.result?.removed)
         version = commit.version
       } catch {
+        if (!current()) return false
         if (options?.announce !== false) showToast({ text: `Version ${version} created` })
         markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
         return false
       }
     }
     if (envelope?.result?.new_version_readable === false) {
+      if (!current()) return false
       recordCommittedUnreadableHead(newVersion)
       if (options?.announce !== false) showToast({ text: `Version ${version} created` })
       return false
     }
     try {
       const view = await getDrawingIntake(mock, newVersion.drawing_id, 'head')
-      if (typeof options?.isCurrent === 'function' && !options.isCurrent()) return false
+      if (!current()) return false
       seatVersion(view, newVersion.drawing_id, options?.announce === false ? null : `Version ${version} created`)
       return true
     } catch {
-      if (typeof options?.isCurrent === 'function' && !options.isCurrent()) return false
+      if (!current()) return false
       if (options?.announce !== false) showToast({ text: `Version ${version} created` })
       markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
       return false
     }
-  }, [intake, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast])
+  }, [intake, isScopeCurrent, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast])
   completedVersionRef.current = seatCompletedVersion
 
   // P2 wave C-2: engagement depth (real CAD work). ONE event for the four
