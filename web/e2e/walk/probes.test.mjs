@@ -2,12 +2,104 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
-import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH } from './probes.mjs'
+import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+test('C2 Objects uses the native disclosure summary for every state', () => {
+  const entry = map.entries.find((entry) => entry.id === 'control:objects')
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    assert.deepEqual(probe.locator, { role: 'group', name: entry.state_contexts[state].name, exact: true,
+      css: 'details.drawing-objects-panel > summary',
+      trigger: 'click', tooltip: entry.state_contexts[state].tooltip,
+      description: entry.state_contexts[state].description })
+    assert.deepEqual(probe.setup.steps.at(-1).control, probe.locator)
+    assert.equal(probe.assertion.target, 'drawing-objects-expanded')
+  }
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  assert.match(source, /return recipe\.selector \? target\.locator\(recipe\.selector\) : target/)
+})
+
+test('control resolves CSS recipes directly and preserves role recipes', () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const implementation = source.slice(source.indexOf('const control ='), source.indexOf('export async function discloseControlPanel'))
+  const control = new Function('groupNames', `${implementation}; return control`)({ draw: 'Draw' })
+  const calls = []
+  const target = {}
+  const scope = {
+    locator: (css) => { calls.push(['css', css]); return target },
+    getByRole: (role, options) => { calls.push(['role', role, options]); return scope },
+  }
+  const page = {
+    locator: (css) => { calls.push(['page-css', css]); return target },
+    getByRole: (role, options) => { calls.push(['page-role', role, options]); return scope },
+  }
+  const css = 'details.drawing-objects-panel > summary'
+  assert.equal(control(page, { css }), target)
+  assert.deepEqual(calls.splice(0), [['page-css', css]])
+  assert.equal(control(page, { css, scope: { role: 'region', name: 'Drawing' } }), target)
+  assert.deepEqual(calls.splice(0), [
+    ['page-role', 'region', { name: 'Drawing', exact: true }], ['css', css],
+  ])
+  for (const css of [undefined, '', null, 42]) {
+    assert.equal(control(page, { css, role: 'button', name: 'Line', group: 'draw',
+      scope: { role: 'toolbar', name: 'Drafting tools' }, selector: 'span', exact: false }), target)
+    assert.deepEqual(calls.splice(0), [
+      ['page-role', 'toolbar', { name: 'Drafting tools', exact: true }],
+      ['role', 'group', { name: 'Draw', exact: true }],
+      ['role', 'button', { name: 'Line', exact: false }], ['css', 'span'],
+    ])
+  }
+  assert.equal(control(page, { role: 'button', name: 'Line' }), scope)
+  assert.deepEqual(calls, [['page-role', 'button', { name: 'Line', exact: true }]])
+})
+
+test('C2 resolves all 41 census rows to real setup and effect recipes', () => {
+  let rows = 0
+  for (const id of CENSUS_RECIPE_CONTROLS) {
+    const entry = map.entries.find((entry) => entry.id === id)
+    for (const state of entry.states) {
+      rows++
+      const probe = resolveProbe(entry, state)
+      const kinds = probe.setup.steps.map((recipe) => recipe.kind)
+      assert.equal(probe.certification, null, `${id}/${state}`)
+      assert.equal(unsupportedBeforeSetup(probe), null, `${id}/${state}`)
+      assert.equal(probe.assertion.assertionId, `${id}/${state}/${entry.expected_effect[state].kind}`)
+      assert.equal(kinds.includes('require-local-state'), false)
+      assert.equal(kinds.includes('open-failed-drawing'), state === 'failed-load' || state === 'no-document')
+      assert.equal(kinds.includes('prepare-engine-transport'), state === 'engine-busy' || state === 'running')
+      if (probe.assertion.kind === 'toggles') {
+        assert.deepEqual(probe.setup.steps.at(-1), { kind: 'census-disclosure', control: probe.locator,
+          target: probe.assertion.target, expanded: !probe.assertion.value })
+      }
+      if (['ribbon-script', 'choose-script', 'run-script'].includes(entry.source_id)) {
+        assert.ok(probe.setup.steps.some((recipe) => recipe.kind === 'ribbon-tab' && recipe.name === 'View'))
+        const recipe = probe.setup.steps.at(-1)
+        assert.equal(recipe.kind, 'census-script')
+        assert.equal(recipe.running, state === 'running')
+        assert.equal(recipe.text, state === 'running' || entry.source_id === 'run-script' && state !== 'empty-script' ? 'line 0,0 10,10' : '')
+      }
+      if (state === 'engine-busy') assert.ok(kinds.includes('hold-engine-edit'))
+      if (state === 'engine-crashed') assert.ok(kinds.includes('crash-engine-worker'))
+      if (state.startsWith('nothing-')) assert.ok(kinds.includes('fresh-history'))
+      if (state === 'no-target') assert.deepEqual(kinds, ['census-download-only', 'engine-ready', 'create-line'])
+      if (id === 'control:redo-edit' && state === 'ready') assert.deepEqual(kinds.slice(-2), ['create-line', 'undo-edit'])
+      if (id === 'control:undo-edit' && state === 'ready') assert.equal(kinds.at(-1), 'create-line')
+      if (id === 'control:save-version' && state === 'engine-busy') assert.ok(kinds.indexOf('create-line') < kinds.indexOf('hold-engine-edit'))
+    }
+  }
+  assert.equal(rows, 41)
+  const source = readFileSync(new URL('./w1z-census.spec.mjs', import.meta.url), 'utf8')
+  assert.match(source, /process\.env\.LEAF_WALK_PROOF === '1'/)
+  assert.match(source, /for \(const featureId of CENSUS_RECIPE_CONTROLS\)/)
+  assert.match(source, /for \(const state of entry\.states\)/)
+  assert.match(source, /expect\(result\?\.unsupported, result\?\.reason\)\.not\.toBe\(true\)/)
+  assert.match(source, /expect\(walkEvidence\.cleanupCompleted\)\.toBe\(true\)/)
+})
+
 test('C1 reachable faults replace only their matching unsupported declarations', () => {
   for (const [id, state, kind, redo] of [
     ['history', 'version-changing', 'hold-version-change', false],

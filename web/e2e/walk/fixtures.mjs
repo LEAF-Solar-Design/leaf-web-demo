@@ -243,12 +243,14 @@ const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', pro
       annotation: 'Annotation', block: 'Block', groups: 'Groups', 'solar-panels': 'Panel placement',
       view: 'View', version: 'Version', author: 'Author', rail: 'Rail' }
 const control = (page, recipe) => {
+  if (typeof recipe.css === 'string' && recipe.css.length > 0) return (recipe.scope ? control(page, recipe.scope) : page).locator(recipe.css)
   let scope = recipe.scope ? control(page, recipe.scope) : page
   if (recipe.panelName) scope = scope.getByRole('group', { name: recipe.panelName, exact: true })
   if (recipe.group && recipe.role !== 'combobox') {
     scope = scope.getByRole('group', { name: groupNames[recipe.group], exact: true })
   }
-  return scope.getByRole(recipe.role, { name: recipe.name, exact: recipe.exact !== false })
+  const target = scope.getByRole(recipe.role, { name: recipe.name, exact: recipe.exact !== false })
+  return recipe.selector ? target.locator(recipe.selector) : target
 }
 
 export async function discloseControlPanel(page, recipe) {
@@ -1019,6 +1021,186 @@ export async function setupRealProject(runtime, assertions = expect) {
   evidence.escapeProject = { orgId: org.org_id, projectId: project.project_id, name }
 }
 
+export const CENSUS_DISCLOSURES = Object.freeze({
+  'dxf-import-expanded': { body: '#cockpit-import-pane', attribute: 'data-import-open' },
+  'ribbon-overflow-expanded': { body: '#drafting-ribbon', attribute: 'data-overflow-open' },
+  'drawing-objects-expanded': { body: 'details.drawing-objects-panel', native: true },
+})
+
+export async function censusDisclosureState(page, target, assertions = expect) {
+  const spec = CENSUS_DISCLOSURES[target]
+  assertions(spec).toBeTruthy()
+  const body = page.locator(spec.body)
+  await assertions(body).toHaveCount(1)
+  return spec.native ? body.evaluate((element) => element.open)
+    : await body.getAttribute(spec.attribute) === 'true'
+}
+
+export async function setupCensusDisclosure(runtime, recipe, assertions = expect) {
+  const { page } = runtime
+  if (recipe.target === 'ribbon-overflow-expanded') {
+    const original = page.viewportSize()
+    runtime.cleanup.push(async () => { if (original) await page.setViewportSize(original) })
+    await page.setViewportSize({ width: 900, height: original?.height || 900 })
+  }
+  const button = control(page, recipe.control)
+  await assertions(button).toBeVisible()
+  const set = async (expanded) => {
+    if (await censusDisclosureState(page, recipe.target, assertions) !== expanded) await button.click({ timeout: 15_000 })
+    if (!CENSUS_DISCLOSURES[recipe.target].native) await assertions(button).toHaveAttribute('aria-expanded', String(expanded))
+    await assertions.poll(() => censusDisclosureState(page, recipe.target, assertions)).toBe(expanded)
+  }
+  runtime.cleanup.push(async () => { await set(false); runtime.evidence.censusDisclosure.cleaned = true })
+  runtime.evidence.censusDisclosure = { target: recipe.target, initial: recipe.expanded }
+  await set(recipe.expanded)
+}
+
+export async function setupCensusDownloadOnly(runtime, assertions = expect) {
+  const ordinary = runtime.page
+  const storage = await ordinary.context().storageState()
+  const items = storage.origins.flatMap((origin) => origin.localStorage)
+  const identity = { token: items.find((item) => item.name === 'leaf.jwt')?.value ?? null,
+    coach: items.find((item) => item.name === COACH_STORAGE_KEY)?.value ?? null }
+  const fresh = await ordinary.context().newPage()
+  runtime.page = fresh
+  runtime.cleanup.push(async () => {
+    await fresh.evaluate(({ token, coach, coachKey }) => {
+      if (token === null) localStorage.removeItem('leaf.jwt')
+      else localStorage.setItem('leaf.jwt', token)
+      if (coach === null) localStorage.removeItem(coachKey)
+      else localStorage.setItem(coachKey, coach)
+    }, { ...identity, coachKey: COACH_STORAGE_KEY })
+    await fresh.close()
+    runtime.page = ordinary
+    runtime.evidence.censusDownloadOnly.cleaned = true
+  })
+  runtime.evidence.censusDownloadOnly = { route: '/app?demo=1&surface=cad' }
+  await fresh.addInitScript((coachKey) => {
+    localStorage.removeItem('leaf.jwt')
+    localStorage.setItem(coachKey, '1')
+  }, COACH_STORAGE_KEY)
+  await fresh.goto('/app?demo=1&surface=cad')
+  await assertions(fresh.getByRole('complementary', { name: 'Properties', exact: true })
+    .getByRole('definition').filter({ hasText: /^rooftop_demo\.dwg$/ })).toBeVisible()
+}
+
+export async function releaseCensusEngineTransport(page) {
+  await page.evaluate(() => {
+    const transport = globalThis.__walkEngineTransport
+    if (!transport) throw new Error('Census running recipe requires the prepared engine transport')
+    transport.hold = false
+    for (const deliver of transport.pending.splice(0)) deliver()
+  })
+}
+
+export async function setupCensusScript(runtime, recipe, assertions = expect) {
+  const { page } = runtime
+  const input = page.getByRole('textbox', { name: 'ribbon script', exact: true })
+  const status = page.getByTestId('cockpit-script-status')
+  await assertions(input).toBeVisible()
+  await input.fill(recipe.text)
+  runtime.evidence.censusScript = { text: recipe.text, running: recipe.running }
+  runtime.cleanup.push(async () => {
+    if (recipe.running) {
+      await releaseCensusEngineTransport(page)
+      await assertions(status).toHaveAttribute('data-phase', 'done')
+      await assertions(status).toHaveText('Script ran 1 command.')
+    }
+    await assertions(input).toBeEnabled()
+    await input.fill('')
+    await assertions(input).toHaveValue('')
+    runtime.evidence.censusScript.cleaned = true
+  })
+  if (recipe.running) {
+    await page.evaluate(() => { globalThis.__walkEngineTransport.hold = true })
+    await page.getByRole('button', { name: 'Run script', exact: true }).click({ timeout: 15_000 })
+    await assertions.poll(() => page.evaluate(() => globalThis.__walkEngineTransport.pending.length)).toBeGreaterThan(0)
+    await assertions(status).toHaveAttribute('data-phase', 'running')
+    await assertions(input).toBeDisabled()
+  }
+}
+
+export async function captureCensusEffect(probe, runtime, assertions = expect) {
+  const { page } = runtime
+  const target = probe.assertion.target
+  // In particular, Redo setup must finish its real Undo before counting.
+  await assertions(control(page, probe.locator)).toBeEnabled()
+  const before = { count: await engineCount(page) }
+  if (target === 'engine-save-version') {
+    const response = await page.request.get(`/api/drawings/${runtime.drawingId}/versions`, { timeout: 15_000 })
+    assertions(response.ok()).toBe(true)
+    before.versions = await response.json()
+    runtime.censusSaveResponse = page.waitForResponse((reply) => reply.request().method() === 'POST'
+      && new URL(reply.url()).pathname.startsWith(`/api/drawings/${runtime.drawingId}/versions/`), { timeout: 60_000 })
+    runtime.censusSaveResponse.catch(() => {})
+  }
+  return before
+}
+
+export async function activateCensusFileChooser(runtime, locator) {
+  const chooser = runtime.page.waitForEvent('filechooser', { timeout: 15_000 })
+  chooser.catch(() => {})
+  await locator.click({ timeout: 15_000 })
+  runtime.censusFileChooser = await chooser
+  runtime.evidence.censusFilePicker = { opened: true }
+  runtime.cleanup.push(async () => {
+    delete runtime.censusFileChooser
+    runtime.evidence.censusFilePicker.cleaned = true
+  })
+}
+
+export async function assertCensusEffect(probe, runtime, locator, before, assertions = expect) {
+  const { page } = runtime
+  const target = probe.assertion.target
+  if (CENSUS_DISCLOSURES[target]) {
+    if (!CENSUS_DISCLOSURES[target].native) await assertions(locator).toHaveAttribute('aria-expanded', String(probe.assertion.value))
+    await assertions.poll(() => censusDisclosureState(page, target, assertions)).toBe(probe.assertion.value)
+    if (target === 'dxf-import-expanded') await assertions(page.getByLabel('DXF file', { exact: true }))
+      [probe.assertion.value ? 'toBeVisible' : 'toBeHidden']()
+    if (target === 'drawing-objects-expanded') await assertions(page.locator('.drawing-objects-content'))
+      .toHaveCount(probe.assertion.value ? 1 : 0)
+    return
+  }
+  if (target === 'ribbon-script-text') { await assertions(locator).toHaveValue(probe.locator.inputValue); return }
+  if (target === 'script-file-picker') {
+    assertions(runtime.censusFileChooser).toBeTruthy()
+    assertions(await runtime.censusFileChooser.element().getAttribute('aria-label')).toBe('Script file')
+    assertions(await runtime.censusFileChooser.element().getAttribute('accept')).toBe('.scr,.txt')
+    assertions(runtime.censusFileChooser.isMultiple()).toBe(false)
+    return
+  }
+  if (target === 'script-run') {
+    await assertions(page.getByTestId('cockpit-script-status')).toHaveAttribute('data-phase', 'done')
+    await assertions(page.getByTestId('cockpit-script-status')).toHaveText('Script ran 1 command.')
+  }
+  if (target === 'script-run' || target === 'engine-undo-edit' || target === 'engine-redo-edit') {
+    await assertions.poll(() => engineCount(page)).toBe(before.count + (target === 'engine-undo-edit' ? -1 : 1))
+    await assertions(page.getByRole('toolbar', { name: 'Quick access', exact: true })
+      .getByRole('button', { name: target === 'engine-undo-edit' ? 'Redo edit' : 'Undo edit', exact: true })).toBeEnabled()
+    runtime.evidence.censusEdit = { before: before.count, after: await engineCount(page), target }
+    return
+  }
+  if (target === 'engine-save-version') {
+    const response = await runtime.censusSaveResponse
+    assertions(response.ok()).toBe(true)
+    const receipt = await response.json()
+    assertions(receipt.new_version?.version).toBeGreaterThan(before.versions.head)
+    let chain
+    await assertions.poll(async () => {
+      const reply = await page.request.get(`/api/drawings/${runtime.drawingId}/versions`, { timeout: 15_000 })
+      assertions(reply.ok()).toBe(true)
+      chain = await reply.json()
+      return chain.head
+    }).toBe(receipt.new_version.version)
+    assertions(chain.versions.length).toBe(before.versions.versions.length + 1)
+    await assertions(page.getByTestId('cad-edit-workbench').getByRole('status', { includeHidden: true })).toContainText(`Saved as version ${chain.head}`)
+    await assertions.poll(() => engineCount(page)).toBe(before.count)
+    runtime.evidence.censusSave = { receipt, before: before.versions, after: chain }
+    return
+  }
+  throw new Error(`Unknown census effect: ${target}`)
+}
+
 export function seedSignOutIdentity({ identity, coachKey }) {
   if (sessionStorage.getItem('leaf.walk.w1k.identity-seeded') !== '1') {
     localStorage.setItem('leaf.jwt', identity.token)
@@ -1133,6 +1315,7 @@ async function baselineThreeState(probe, runtime, recipe) {
 }
 
 export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
+  'census-disclosure', 'census-script', 'census-download-only',
   'fresh-sign-out-page', 'baseline-three-state', 'prepare-engine-transport', 'hold-engine-boot',
   'navigate', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
   'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'engine-mode-state', 'fullscreen-state',
@@ -1242,6 +1425,9 @@ export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailabilit
 export async function setupStep(probe, runtime, recipe, assertions = runtime.recipeAssertions || expect) {
   const { page, stack, evidence } = runtime
   switch (recipe.kind) {
+    case 'census-disclosure': await setupCensusDisclosure(runtime, recipe, assertions); return
+    case 'census-script': await setupCensusScript(runtime, recipe, assertions); return
+    case 'census-download-only': await setupCensusDownloadOnly(runtime, assertions); return
     case 'hold-version-change':
     case 'fault-restored-head': await setupVersionFault(probe, runtime, recipe, assertions); return
     case 'fault-history': await setupHistoryFault(probe, runtime, assertions); return
@@ -1826,6 +2012,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
 
 async function captureBefore(probe, runtime) {
   const { page } = runtime
+  if (['engine-save-version', 'engine-undo-edit', 'engine-redo-edit', 'script-run'].includes(probe.assertion.target)) return captureCensusEffect(probe, runtime)
   if (typeof barNoRung === 'function' && barNoRung(probe)) {
     if (await page.getByTestId('cad-edit-workbench').count()) await engineReady(probe, runtime)
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
@@ -1874,6 +2061,10 @@ async function captureBefore(probe, runtime) {
 async function activate(probe, runtime, locator) {
   const { page } = runtime
   const recipe = probe.locator
+  if (probe.assertion.target === 'script-file-picker') {
+    await activateCensusFileChooser(runtime, locator)
+    return
+  }
   if (probe.assertion.target === 'signed-out-session') {
     await Promise.all([page.waitForEvent('domcontentloaded'), locator.click()])
     return
@@ -1915,6 +2106,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (typeof CENSUS_DISCLOSURES !== 'undefined' && CENSUS_DISCLOSURES[target] || ['engine-save-version', 'engine-undo-edit', 'engine-redo-edit',
+    'ribbon-script-text', 'script-file-picker', 'script-run'].includes(target)) {
+    await assertCensusEffect(probe, runtime, locator, before, assertions)
+    return
+  }
   if (typeof barNoRung === 'function' && barNoRung(probe)) { await assertBarNoRung(probe, runtime, locator, before, assertions); return }
   if (target === 'engine-refusal') { await assertEngineRefusal(probe, runtime, before, assertions); return }
   if (probe.kind === 'control' && baselineThreePanels[target]) {
@@ -1995,7 +2191,7 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     if (probe.kind === 'control') {
       await expect(locator).toBeDisabled()
       await expect(locator).toHaveAccessibleName(probe.locator.name)
-      await expect(locator).toHaveAttribute('title', probe.locator.tooltip)
+      if (probe.locator.tooltip !== undefined) await expect(locator).toHaveAttribute('title', probe.locator.tooltip)
       if (probe.locator.description) {
         await expect(locator).toHaveAttribute('aria-disabled', 'true')
         await expect(locator).toHaveAccessibleDescription(probe.locator.description)

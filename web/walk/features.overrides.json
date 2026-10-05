@@ -1686,8 +1686,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     },
     {
       "id": "control:save-version",
@@ -1772,8 +1771,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     },
     {
       "id": "control:undo-edit",
@@ -1847,8 +1845,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     },
     {
       "id": "control:redo-edit",
@@ -1922,8 +1919,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     },
     {
       "id": "control:more-panels",
@@ -1975,8 +1971,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     },
     {
       "id": "control:open-dxf-browser",
@@ -2028,8 +2023,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     },
     {
       "id": "control:objects",
@@ -2082,8 +2076,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     }
     ,
     {
@@ -2145,8 +2138,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     },
     {
       "id": "control:choose-script",
@@ -2201,8 +2193,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     },
     {
       "id": "control:run-script",
@@ -2312,8 +2303,7 @@
       "viewports": [
         "desktop"
       ],
-      "certify": "unsupported_local",
-      "certify_reason": "needs a walk recipe (wave C)"
+      "certify": "both"
     }
   ],
   "state_cases": {

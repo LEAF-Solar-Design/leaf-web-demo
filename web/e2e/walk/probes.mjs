@@ -16,6 +16,11 @@ const step = (kind, properties = {}) => ({ kind, ...properties })
 const role = (name, accessible, scope) => ({ role: name, name: accessible, exact: true, ...(scope ? { scope } : {}) })
 const escapePattern = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+export const CENSUS_RECIPE_CONTROLS = Object.freeze([
+  'open-dxf', 'save-version', 'undo-edit', 'redo-edit', 'more-panels',
+  'open-dxf-browser', 'objects', 'ribbon-script', 'choose-script', 'run-script',
+].map((id) => `control:${id}`))
+
 // Independent presence obligations: retiring a baseline must not bless a control that disappeared.
 export const CONTROL_CENSUS_BATCH = Object.freeze([
   { feature_id: 'control:grid-display', scope: 'toolbar:"Drafting settings"', role: 'button', name: 'Grid display',
@@ -115,6 +120,10 @@ export function locatorRecipe(entry, state) {
   const effect = entry.expected_effect[state]
   if (entry.kind === 'control') {
     const context = entry.state_contexts[state]
+    if (entry.id === 'control:objects') return {
+      ...role('group', context.name), css: 'details.drawing-objects-panel > summary', trigger: 'click',
+      tooltip: context.tooltip, description: context.description,
+    }
     return { ...role(context.role || 'button', controlName(context), controlScope(context)), trigger: context.interaction || 'click',
       ...(context.inputValue !== undefined ? { inputValue: context.inputValue } : {}),
       ...(context.namePolicy === 'count' ? { normalizedName: context.name } : {}),
@@ -218,6 +227,35 @@ export function stateRecipe(entry, state) {
       : entry.kind === 'action' && actionRecord(entry).panel === 'solar-panels' ? 'solar' : 'cad'
   const steps = []
   if (entry.kind === 'control') {
+    if (CENSUS_RECIPE_CONTROLS.includes(entry.id)) {
+      const script = ['ribbon-script', 'choose-script', 'run-script'].includes(entry.source_id)
+      if (state === 'engine-busy' || state === 'running') steps.push(step('prepare-engine-transport'))
+      steps.push(state === 'no-target' ? step('census-download-only')
+        : context.failedLoad || state === 'no-document'
+          ? step('open-failed-drawing', { url: '/app?surface=cad&drawing=missing.invalid' })
+          : step('open-private-drawing', { surface: 'cad' }))
+      const locator = locatorRecipe(entry, state)
+      if (effect.kind === 'toggles') {
+        steps.push(step('census-disclosure', { control: locator, target: effect.target, expanded: context.expanded }))
+      } else if (script) {
+        // View owns the Script seat, including when no drawing is loaded.
+        steps.push(step('ribbon-tab', { name: 'View' }))
+        if (!context.failedLoad && state !== 'no-document') steps.push(step('engine-ready'))
+        if (state === 'engine-busy') steps.push(step('hold-engine-edit'), step('ribbon-tab', { name: 'View' }))
+        if (state === 'engine-crashed') steps.push(step('crash-engine-worker'))
+        steps.push(step('census-script', { running: state === 'running',
+          text: entry.source_id === 'run-script' && state !== 'empty-script' || state === 'running' ? 'line 0,0 10,10' : '' }))
+      } else if (!context.failedLoad && state !== 'no-document') {
+        steps.push(step('engine-ready'))
+        if (state === 'ready' || state === 'no-target' || entry.source_id === 'save-version' && state === 'engine-busy') {
+          steps.push(step('create-line'))
+        }
+        if (entry.source_id === 'redo-edit' && state === 'ready') steps.push(step('undo-edit'))
+        if (state === 'nothing-to-undo' || state === 'nothing-to-redo' || state === 'nothing-edited') steps.push(step('fresh-history'))
+        if (state === 'engine-busy') steps.push(step('hold-engine-edit'))
+      }
+      return { context, steps }
+    }
     if (effect.target === 'signed-out-session') steps.push(step('fresh-sign-out-page'))
     steps.push(context.failedLoad
       ? step('open-failed-drawing', { url: '/app?surface=cad&drawing=missing.invalid' })

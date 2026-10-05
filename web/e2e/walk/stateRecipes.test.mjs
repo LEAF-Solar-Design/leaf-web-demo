@@ -9,6 +9,223 @@ import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
 import { faultRouteOnce, drawingRequest, setupVersionFault, finishVersionFault,
   setupHistoryFault, assertHistoryRecovery, setupRealProject } from './fixtures.mjs'
+import { CENSUS_DISCLOSURES, censusDisclosureState, setupCensusDisclosure, setupCensusScript,
+  setupCensusDownloadOnly, activateCensusFileChooser, captureCensusEffect, assertCensusEffect } from './fixtures.mjs'
+
+const censusAssertions = (value) => ({
+  toBe: (expected) => assert.equal(value, expected),
+  toBeTruthy: () => assert.ok(value),
+  toBeGreaterThan: (expected) => assert.ok(value > expected),
+  toBeVisible: async () => assert.equal(value.visible, true),
+  toBeHidden: async () => assert.equal(value.visible, false),
+  toBeDisabled: async () => assert.equal(value.disabled, true),
+  toBeEnabled: async () => assert.equal(value.disabled, false),
+  toHaveCount: async (expected) => assert.equal(value.countValue ?? 1, expected),
+  toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+  toHaveValue: async (expected) => assert.equal(value.text, expected),
+  toHaveText: async (expected) => assert.equal(value.text, expected),
+  toContainText: async (expected) => assert.ok(value.text.includes(expected)),
+})
+censusAssertions.poll = (callback) => ({
+  toBe: async (expected) => assert.equal(await callback(), expected),
+  toBeGreaterThan: async (expected) => assert.ok(await callback() > expected),
+})
+
+test('C2 disclosures click into each initial state, reject a wrong effect and close before restoring viewport', async () => {
+  for (const target of Object.keys(CENSUS_DISCLOSURES)) {
+    for (const expanded of [false, true]) {
+      let open = false
+      const events = []
+      const body = { getAttribute: async () => open ? 'true' : null,
+        evaluate: async (read) => read({ open }) }
+      const button = { visible: true, getAttribute: async () => String(open),
+        click: async (options) => { assert.equal(options.timeout, 15_000); open = !open; events.push('click') } }
+      const page = { locator: (selector) => {
+        assert.ok([CENSUS_DISCLOSURES[target].body, '.drawing-objects-content'].includes(selector))
+        return selector === '.drawing-objects-content' ? { countValue: open ? 1 : 0 } : body
+      }, getByRole: () => button, viewportSize: () => ({ width: 1440, height: 900 }),
+      setViewportSize: async (size) => events.push(size.width) }
+      const runtime = { page, cleanup: [], evidence: {} }
+      await setupCensusDisclosure(runtime, { target, expanded, control: { role: 'button', name: 'Objects' } }, censusAssertions)
+      assert.equal(await censusDisclosureState(page, target, censusAssertions), expanded)
+      const probe = { assertion: { target, value: !expanded } }
+      await assert.rejects(assertCensusEffect(probe, runtime, button, {}, censusAssertions), assert.AssertionError)
+      await button.click({ timeout: 15_000 })
+      // Import's input visibility follows the real pane posture.
+      page.getByLabel = () => ({ visible: open })
+      await assertCensusEffect(probe, runtime, button, {}, censusAssertions)
+      for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+      assert.equal(open, false)
+      assert.equal(runtime.evidence.censusDisclosure.cleaned, true)
+      if (target === 'ribbon-overflow-expanded') assert.equal(events.at(-1), 1440)
+    }
+  }
+})
+
+test('C2 script setup holds genuine replies only for running and drains them before clearing text', async () => {
+  for (const running of [false, true]) {
+    const events = []
+    const input = { visible: true, disabled: false, text: '', fill: async (text) => { input.text = text; events.push(['text', text]) } }
+    const status = { phase: 'idle', text: '', getAttribute: async () => status.phase }
+    const transport = { hold: false, pending: [] }
+    const page = {
+      getByRole: (role) => role === 'textbox' ? input : { click: async () => {
+        assert.equal(input.text, 'line 0,0 10,10')
+        assert.equal(transport.hold, true)
+        status.phase = 'running'; input.disabled = true
+        transport.pending.push(() => { events.push('delivered'); input.disabled = false; status.phase = 'done'; status.text = 'Script ran 1 command.' })
+      } },
+      getByTestId: () => status,
+      evaluate: async (read) => {
+        globalThis.__walkEngineTransport = transport
+        try { return read() } finally { delete globalThis.__walkEngineTransport }
+      },
+    }
+    const runtime = { page, cleanup: [], evidence: {} }
+    await setupCensusScript(runtime, { text: 'line 0,0 10,10', running }, censusAssertions)
+    assert.equal(input.disabled, running)
+    if (!running) await assertCensusEffect({ assertion: { target: 'ribbon-script-text' }, locator: { inputValue: input.text } }, runtime, input, {}, censusAssertions)
+    await runtime.cleanup[0]()
+    assert.equal(transport.hold, false)
+    assert.equal(transport.pending.length, 0)
+    assert.equal(input.text, '')
+    assert.equal(runtime.evidence.censusScript.cleaned, true)
+    if (running) assert.ok(events.indexOf('delivered') < events.findLastIndex((event) => Array.isArray(event) && event[1] === ''))
+  }
+})
+
+test('C2 file picker registers before clicking, observes the chooser identity and clears its reference', async () => {
+  const events = []
+  const chooser = { element: () => ({ getAttribute: async (name) => name === 'accept' ? '.scr,.txt' : 'Script file' }), isMultiple: () => false }
+  const runtime = { cleanup: [], evidence: {}, page: { waitForEvent: async (name, options) => {
+    assert.equal(name, 'filechooser'); assert.equal(options.timeout, 15_000); events.push('listen'); return chooser
+  } } }
+  await activateCensusFileChooser(runtime, { click: async () => events.push('click') })
+  assert.deepEqual(events, ['listen', 'click'])
+  await assertCensusEffect({ assertion: { target: 'script-file-picker' } }, runtime, {}, {}, censusAssertions)
+  chooser.isMultiple = () => true
+  await assert.rejects(assertCensusEffect({ assertion: { target: 'script-file-picker' } }, runtime, {}, {}, censusAssertions), assert.AssertionError)
+  await runtime.cleanup[0]()
+  assert.equal(runtime.censusFileChooser, undefined)
+  assert.equal(runtime.evidence.censusFilePicker.cleaned, true)
+})
+
+test('C2 busy recipes reuse worker transport cleanup that releases every queued real reply', async () => {
+  const originalWorker = globalThis.Worker
+  const originalTransport = globalThis.__walkEngineTransport
+  let listener
+  const events = []
+  globalThis.Worker = class {
+    addEventListener(_type, callback) { listener = callback }
+    removeEventListener(_type, callback) { assert.equal(callback, listener); events.push('removed') }
+  }
+  try {
+    const runtime = { page: { addInitScript: async (install) => install(), evaluate: async (read) => read() }, cleanup: [], evidence: {} }
+    await setupStep({}, runtime, { kind: 'prepare-engine-transport' }, censusAssertions)
+    const worker = new globalThis.Worker('/engine/worker-browser.js')
+    const delivered = (event) => events.push(event.data)
+    worker.addEventListener('message', delivered)
+    globalThis.__walkEngineTransport.hold = true
+    listener({ data: 'actual worker reply' })
+    assert.deepEqual(events, [])
+    assert.equal(globalThis.__walkEngineTransport.pending.length, 1)
+    await runtime.cleanup[0]()
+    await runtime.cleanup[0]()
+    assert.equal(globalThis.__walkEngineTransport.hold, false)
+    assert.equal(globalThis.__walkEngineTransport.pending.length, 0)
+    worker.removeEventListener('message', delivered)
+    assert.deepEqual(events, ['actual worker reply', 'removed'])
+  } finally {
+    globalThis.Worker = originalWorker
+    globalThis.__walkEngineTransport = originalTransport
+  }
+})
+
+test('C2 download-only page uses the public demo and restores identity before closing', async () => {
+  const events = []
+  const originalStorage = globalThis.localStorage
+  const storage = new Map([['leaf.jwt', 'original']])
+  globalThis.localStorage = { getItem: (key) => storage.get(key) ?? null,
+    setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) }
+  try {
+    const fact = { visible: true }
+    fact.getByRole = () => fact; fact.filter = () => fact
+    const fresh = { addInitScript: async (script, arg) => script(arg), goto: async (url) => {
+      assert.equal(storage.has('leaf.jwt'), false); events.push(url)
+    }, getByRole: () => fact, evaluate: async (script, arg) => script(arg),
+    close: async () => {
+      assert.equal(storage.get('leaf.jwt'), 'original')
+      assert.equal(storage.has('leaf.coach.dismissed.v1'), false)
+      events.push('closed')
+    } }
+    const ordinary = { context: () => ({ newPage: async () => fresh,
+      storageState: async () => ({ origins: [{ localStorage: [{ name: 'leaf.jwt', value: 'original' }] }] }) }) }
+    const runtime = { page: ordinary, cleanup: [], evidence: {} }
+    await setupCensusDownloadOnly(runtime, censusAssertions)
+    assert.equal(runtime.page, fresh)
+    await runtime.cleanup[0]()
+    assert.equal(runtime.page, ordinary)
+    assert.equal(runtime.evidence.censusDownloadOnly.cleaned, true)
+    assert.deepEqual(events, ['/app?demo=1&surface=cad', 'closed'])
+  } finally { globalThis.localStorage = originalStorage }
+})
+
+test('C2 edit and script oracles require the exact count delta, completion and opposite history step', async () => {
+  for (const target of ['engine-undo-edit', 'engine-redo-edit', 'script-run']) {
+    const after = target === 'engine-undo-edit' ? 4 : 6
+    const count = { innerText: async () => String(after) }
+    const status = { text: 'Script ran 1 command.', getAttribute: async () => 'done' }
+    const history = { disabled: false }
+    const page = { getByTestId: (id) => id === 'cad-edit-entity-count' ? count : status,
+      getByRole: () => ({ getByRole: (_role, options) => {
+        assert.equal(options.name, target === 'engine-undo-edit' ? 'Redo edit' : 'Undo edit'); return history
+      } }) }
+    const runtime = { page, evidence: {} }
+    const probe = { assertion: { target } }
+    await assertCensusEffect(probe, runtime, {}, { count: 5 }, censusAssertions)
+    assert.equal(runtime.evidence.censusEdit.after, after)
+    await assert.rejects(assertCensusEffect(probe, runtime, {}, { count: 15 }, censusAssertions), assert.AssertionError)
+    history.disabled = true
+    await assert.rejects(assertCensusEffect(probe, runtime, {}, { count: 5 }, censusAssertions), assert.AssertionError)
+    if (target === 'script-run') {
+      history.disabled = false; status.text = 'Script stopped.'
+      await assert.rejects(assertCensusEffect(probe, runtime, {}, { count: 5 }, censusAssertions), assert.AssertionError)
+    }
+  }
+})
+
+test('C2 save captures the private chain and requires a successful receipt and exactly one persisted version', async () => {
+  let chain = { head: 1, versions: [{ v: 1 }] }
+  let receipt = { new_version: { version: 2 } }
+  let ok = true
+  const count = { innerText: async () => '5' }
+  const status = { text: 'Saved as version 2' }
+  const page = { request: { get: async (path, options) => {
+    assert.equal(path, '/api/drawings/private/versions'); assert.equal(options.timeout, 15_000)
+    return { ok: () => true, json: async () => chain }
+  } }, getByRole: () => ({ disabled: false }),
+  getByTestId: (id) => id === 'cad-edit-entity-count' ? count : { getByRole: () => status },
+  waitForResponse: async (match, options) => {
+    assert.equal(options.timeout, 60_000)
+    const reply = (method, path) => ({ request: () => ({ method: () => method }), url: () => `http://walk${path}` })
+    assert.equal(match(reply('POST', '/api/drawings/private/versions/plan')), true)
+    assert.equal(match(reply('GET', '/api/drawings/private/versions/plan')), false)
+    assert.equal(match(reply('POST', '/api/drawings/other/versions/plan')), false)
+    return { ok: () => ok, json: async () => receipt }
+  } }
+  const runtime = { page, drawingId: 'private', evidence: {} }
+  const probe = { locator: { role: 'button', name: 'Save version' }, assertion: { target: 'engine-save-version' } }
+  const before = await captureCensusEffect(probe, runtime, censusAssertions)
+  assert.equal(before.versions.head, 1)
+  chain = { head: 2, versions: [{ v: 1 }, { v: 2 }] }
+  await assertCensusEffect(probe, runtime, {}, before, censusAssertions)
+  ok = false
+  await assert.rejects(assertCensusEffect(probe, runtime, {}, before, censusAssertions), assert.AssertionError)
+  ok = true; receipt = { new_version: { version: 1 } }
+  await assert.rejects(assertCensusEffect(probe, runtime, {}, before, censusAssertions), assert.AssertionError)
+  receipt = { new_version: { version: 2 } }; chain.versions.push({ v: 3 })
+  await assert.rejects(assertCensusEffect(probe, runtime, {}, before, censusAssertions), assert.AssertionError)
+})
 
 test('one-shot route fault passes subsequent traffic and removes only its handler once', async () => {
   for (const failAbort of [false, true]) {
