@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
-import { ACTIONS, ESCAPE_RUNGS, RETRY_RUNGS, reasonCode, REASONS, DRAW_REASONS, MODIFY_REASONS } from '../src/lib/actionRegistry.js'
+import { ACTIONS, ESCAPE_RUNGS, RETRY_RUNGS, reasonCode, REASONS, DRAW_REASONS, MODIFY_REASONS, REPEAT_REASONS } from '../src/lib/actionRegistry.js'
 import { PRODUCT_SURFACES } from '../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../src/lib/studioDrawers.js'
@@ -134,14 +134,54 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   previous.state_cases.action.patches['no-versioned-drawing'] = { hasVersions: false }
   for (const id of ['drawer:plan', 'drawer:result']) previous.overrides[id].viewports = ['desktop', 'phone']
   const previousTriples = triples(buildFeatureMap({ overrides: previous }))
-  assert.equal(previousTriples.length, 793)
-  assert.equal(triples(map).length, 759)
+  // 21-B2 added engine:undo, engine:redo and engine:repeat plus the engine-nothing-to-undo, engine-nothing-to-redo and no-command-to-repeat patches (793 -> 811, 759 -> 777).
+  assert.equal(previousTriples.length, 811)
+  assert.equal(triples(map).length, 777)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
   // Removing an unreachable setup must not remove the registry's actual gate.
   for (const id of ['history', 'redo', 'undo']) {
     assert.equal(ACTIONS.find((action) => action.id === id).when({ hasVersions: false }), REASONS.noVersions)
+  }
+})
+
+test('W21B2-map-engine-actions', () => {
+  const engineActions = ['engine:undo', 'engine:redo', 'engine:repeat']
+  for (const operation of ['undo', 'redo']) {
+    assert.deepEqual(entryFor(featureId('action', `engine:${operation}`)).expected_effect.ready, {
+      kind: 'submits', target: `engine:${operation}`, operation, group: 'engine',
+    })
+  }
+  assert.deepEqual(entryFor('action:engine-repeat').expected_effect.ready, {
+    kind: 'opens', target: 'cockpit-prompt',
+  })
+  for (const id of engineActions) {
+    const entry = entryFor(featureId('action', id))
+    assert.equal(ACTIONS.find((action) => action.id === id).when(entry.state_contexts.ready), '')
+  }
+  for (const [state, disabledId, reason] of [
+    ['engine-nothing-to-undo', 'engine:undo', REASONS.nothingToUndo],
+    ['engine-nothing-to-redo', 'engine:redo', REASONS.nothingToRedo],
+    ['no-command-to-repeat', 'engine:repeat', REPEAT_REASONS.empty],
+  ]) {
+    for (const id of engineActions) {
+      const entry = entryFor(featureId('action', id))
+      const action = ACTIONS.find((candidate) => candidate.id === id)
+      if (id === disabledId) {
+        assert.ok(entry.states.includes(state), id + '/' + state)
+        assert.deepEqual(entry.expected_effect[state], {
+          kind: 'disabled_with_reason', reason_code: reasonCode(reason), reason,
+        })
+        assert.equal(action.when(entry.state_contexts[state]), reason)
+        for (const otherId of engineActions.filter((candidate) => candidate !== id)) {
+          assert.equal(ACTIONS.find((candidate) => candidate.id === otherId).when(entry.state_contexts[state]), '')
+        }
+      } else {
+        assert.ok(!entry.states.includes(state), id + '/' + state)
+        assert.equal(entry.expected_effect[state], undefined)
+      }
+    }
   }
 })
 

@@ -2321,7 +2321,8 @@
       "baseline": {
         "hasDrawing": true, "hasVersions": true, "canUndo": true, "canRedo": true,
         "entitled": true, "available": true,
-        "session": {"engineParsed": true, "selected": {"editable": true, "type": "LINE"}, "selectedIds": ["one"], "clipboard": {"type": "LINE"}}
+        "session": {"engineParsed": true, "selected": {"editable": true, "type": "LINE"}, "selectedIds": ["one"], "clipboard": {"type": "LINE"}, "undoDepth": 1, "redoDepth": 1},
+        "lastArmedCommand": {"group": "draw", "op": "createLine"}
       },
       "patches": {
         "no-drawing": {"hasDrawing": false, "hasVersions": false, "session": null},
@@ -2331,6 +2332,9 @@
         "mutations-blocked": {"mutationsBlocked": true},
         "nothing-to-undo": {"canUndo": false},
         "nothing-to-redo": {"canRedo": false},
+        "engine-nothing-to-undo": {"session": {"undoDepth": 0}},
+        "engine-nothing-to-redo": {"session": {"redoDepth": 0}},
+        "no-command-to-repeat": {"lastArmedCommand": null},
         "unentitled": {"entitled": false},
         "authoring-off": {"available": false},
         "engine-not-parsed": {"session": {"engineParsed": false}},
@@ -2374,6 +2378,7 @@
     }
   },
   "overrides": {
+    "action:engine-repeat": {"effect": {"kind": "opens", "target": "cockpit-prompt"}, "sources": ["web/src/cadedit/CommandLineArmer.jsx"]},
     "action:fit": {"effect": {"kind": "renders", "target": "viewer-home"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-in": {"effect": {"kind": "renders", "target": "viewer-zoom-in"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-out": {"effect": {"kind": "renders", "target": "viewer-zoom-out"}, "sources": ["web/src/lib/ribbonClusters.js"]},
