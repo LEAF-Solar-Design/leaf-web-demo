@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import ToolHistory from './ToolHistory.jsx'
 import { isWriteTool } from '../lib/toolRecord.js'
 import SchemaForm, { defaultsOf, sentence } from './SchemaForm.jsx'
 import './panels.css'
@@ -24,7 +25,7 @@ function provenanceLine(t) {
 
 // `retryKey` (App's R ladder): the R keycap renders only while this row is the
 // ladder's active rung — a shown cap is never inert, never double-firing.
-export default function ToolsPanel({ tools, error, running, selectedTool, onRequestRun, onOpenTool, onReviseTool, onRetry, retryKey, subtitle, writeLocked, writeLockNote = null, writeEntitled = true, runDisabled = false, runDisabledNote = null }) {
+export default function ToolsPanel({ tools, error, running, selectedTool, onRequestRun, onOpenTool, onReviseTool, onCatalogChanged, onRetry, retryKey, subtitle, writeLocked, writeLockNote = null, writeEntitled = true, runDisabled = false, runDisabledNote = null }) {
   const [openName, setOpenName] = useState(null)
   const [paramsByTool, setParamsByTool] = useState({})
 
@@ -105,6 +106,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                       Revise
                     </button>
                   )}
+                  {onReviseTool && <ToolHistory tool={t} onCatalogChanged={onCatalogChanged} />}
                   {/* runDisabled (no drawing open yet) is the more fundamental
                       gate, so it wins over the write-entitlement notes below —
                       those describe why a *tool* can't run, this describes why
