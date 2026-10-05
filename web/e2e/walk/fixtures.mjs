@@ -1257,6 +1257,22 @@ export async function assertSolarStepEditor(probe, runtime, locator, before, ass
   runtime.evidence.solarStepEditor = { tool, reviewed: true, cancelled: true, runRequests: [...before.runRequests] }
 }
 
+export async function recoverFailedCatalog(page, runtime, assertions = expect) {
+  if (runtime.catalogRecoveryAttempted) return
+  const status = page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+    .getByRole('status').filter({ hasText: /^Couldn't load tools:/ })
+  if (!await status.isVisible()) return
+  runtime.catalogRecoveryAttempted = true
+  const reason = await status.innerText()
+  const response = page.waitForResponse((reply) => reply.request().method() === 'GET'
+    && new URL(reply.url()).pathname === '/api/capabilities' && reply.ok(), { timeout: 15_000 })
+  response.catch(() => {})
+  await status.getByRole('button', { name: 'Retry', exact: true }).click({ timeout: 15_000 })
+  runtime.evidence.catalogRecovery = { reason, retried: true }
+  await response
+  await assertions(status).toBeHidden({ timeout: 15_000 })
+}
+
 export function seedSignOutIdentity({ identity, coachKey }) {
   if (sessionStorage.getItem('leaf.walk.w1k.identity-seeded') !== '1') {
     localStorage.setItem('leaf.jwt', identity.token)
@@ -1865,6 +1881,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         && await page.locator('.app').first().getAttribute('data-surface') === 'solar'
         ? 'Solar' : placementTab || 'manage'
       await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
+      if (typeof recoverFailedCatalog === 'function') await recoverFailedCatalog(page, runtime, assertions)
       if (probe.state === 'ready' && solarBrowserCatalogRequired(recipe.name) && !toolAvailabilityEvidence(probe, facts)) {
         // The API-side catalog is not proof that the browser seated the same
         // drawing context. Observe its own request before accepting readiness.
@@ -2676,6 +2693,7 @@ export async function runProbe(probe, runtime) {
       evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
       return
     }
+    if (probe.kind === 'tool' && typeof recoverFailedCatalog === 'function') await recoverFailedCatalog(page, runtime)
     await expect(locator).toBeVisible()
     if (probe.kind === 'control') {
       await expect(locator).toHaveCount(1)
