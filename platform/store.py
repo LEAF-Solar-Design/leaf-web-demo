@@ -1025,12 +1025,19 @@ def create_drawing_artifact(org_id: uuid.UUID, project_id: uuid.UUID,
         return DrawingArtifact.from_row(row)
 
 
+class DrawingPublicationRequired(ValueError):
+    reason_code = "SIP_R2_PUBLICATION_REQUIRED"
+
+    def __init__(self):
+        super().__init__(self.reason_code)
+
+
 def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
                            drawing_id: Optional[uuid.UUID] = None,
                            oss_object: Optional[str] = None,
                            intake_ref: Optional[str] = None,
                            created_by: Optional[str] = None) -> DrawingVersion:
-    """Append the next monotonic version to a project's chain (single-writer)."""
+    """Bootstrap an empty artifact; successors require fenced publication."""
     with connection() as conn:
         with conn.cursor() as cur:
             # Liveness is asserted ONCE, up front, for every branch below.
@@ -1063,21 +1070,25 @@ def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
                         "(drawing_id, project_id, org_id, name) "
                         "SELECT %(drawing_id)s, project_id, org_id, 'Primary drawing' "
                         "FROM live_projects WHERE project_id = %(project_id)s "
-                        "AND org_id = %(org_id)s RETURNING drawing_id",
+                        "AND org_id = %(org_id)s ON CONFLICT (project_id, name) DO NOTHING",
                         {"drawing_id": drawing_id, "project_id": project_id, "org_id": org_id},
                     )
-                    if cur.fetchone() is None:
-                        raise _project_absence(cur, org_id, project_id)
+                    cur.execute(
+                        "SELECT drawing_id FROM drawing_artifacts WHERE org_id = %(org_id)s "
+                        "AND project_id = %(project_id)s AND name = 'Primary drawing'",
+                        {"org_id": org_id, "project_id": project_id},
+                    )
+                    drawing_id = cur.fetchone()["drawing_id"]
                 else:
                     drawing_id = artifact["drawing_id"]
-            else:
-                cur.execute(
-                    "SELECT drawing_id FROM drawing_artifacts WHERE drawing_id = %(drawing_id)s "
-                    "AND project_id = %(project_id)s AND org_id = %(org_id)s AND status = 'active'",
-                    {"drawing_id": drawing_id, "project_id": project_id, "org_id": org_id},
-                )
-                if cur.fetchone() is None:
-                    raise ValueError("drawing artifact not found")
+            cur.execute(
+                "SELECT drawing_id FROM drawing_artifacts WHERE drawing_id = %(drawing_id)s "
+                "AND project_id = %(project_id)s AND org_id = %(org_id)s "
+                "AND status = 'active' FOR UPDATE",
+                {"drawing_id": drawing_id, "project_id": project_id, "org_id": org_id},
+            )
+            if cur.fetchone() is None:
+                raise ValueError("drawing artifact not found")
             # next seq, scoped to the owning org (guards against cross-org project_id)
             cur.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM drawing_versions "
@@ -1086,6 +1097,8 @@ def create_drawing_version(org_id: uuid.UUID, project_id: uuid.UUID, *,
                 {"drawing_id": drawing_id, "project_id": project_id, "org_id": org_id},
             )
             next_seq = cur.fetchone()["next_seq"]
+            if next_seq != 1:
+                raise DrawingPublicationRequired()
             cur.execute(
                 "INSERT INTO drawing_versions "
                 "(version_id, drawing_id, project_id, org_id, seq, oss_object, intake_ref, created_by) "
@@ -1192,11 +1205,21 @@ def import_ready_account_upload(
             cur.execute(
                 f"SELECT {columns}, import_fingerprint FROM drawing_versions "
                 "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
-                "AND idempotency_key = %(key)s AND deleted_at IS NULL",
+                "AND idempotency_key = %(key)s",
                 {"org_id": org_id, "project_id": project_id, "key": key},
             )
             replay = cur.fetchone()
             if replay is not None:
+                cur.execute(
+                    "SELECT drawing_id FROM drawing_artifacts WHERE org_id = %(org_id)s "
+                    "AND project_id = %(project_id)s AND drawing_id = %(drawing_id)s "
+                    "AND status = 'active' FOR UPDATE",
+                    {"org_id": org_id, "project_id": project_id,
+                     "drawing_id": replay["drawing_id"]},
+                )
+                if cur.fetchone() is None or replay["deleted_at"] is not None:
+                    raise DrawingImportUnavailable(
+                        "project or source account upload is unavailable")
                 if replay["import_fingerprint"] != fingerprint:
                     raise DrawingImportConflict(
                         "idempotency key already exists with different drawing import input")
@@ -1293,13 +1316,22 @@ def import_ready_account_upload(
             )
             cur.execute(
                 "SELECT drawing_id, project_id, name FROM drawing_artifacts "
-                "WHERE org_id = %(org_id)s AND drawing_id = %(drawing_id)s FOR UPDATE",
+                "WHERE org_id = %(org_id)s AND drawing_id = %(drawing_id)s "
+                "AND status = 'active' FOR UPDATE",
                 {"org_id": org_id, "drawing_id": canonical_drawing_id},
             )
             artifact = cur.fetchone()
             if artifact is None or artifact["project_id"] != project_id or artifact["name"] != name:
                 raise DrawingImportUnavailable(
                     "project or source account upload is unavailable")
+
+            cur.execute(
+                "SELECT 1 FROM drawing_versions WHERE org_id = %(org_id)s "
+                "AND project_id = %(project_id)s AND drawing_id = %(drawing_id)s LIMIT 1",
+                {"org_id": org_id, "project_id": project_id, "drawing_id": canonical_drawing_id},
+            )
+            if cur.fetchone() is not None:
+                raise DrawingImportConflict("SIP_R2_PUBLICATION_REQUIRED")
 
             try:
                 cur.execute(

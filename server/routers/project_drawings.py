@@ -19,16 +19,19 @@ _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:drawing-versions/[^/]+/context|drawings/[^/]+/checkout)/?$")
 _FAILURES = {
-    "INVALID_BINDING": (400, False), "CONTEXT_NOT_FOUND": (404, False),
-    "PROJECT_FORBIDDEN": (403, False), "CANONICAL_AUTHORITY_REQUIRED": (409, False),
-    "INTAKE_PROOF_REQUIRED": (409, False), "INTAKE_REFERENCE_INVALID": (500, False),
-    "INTAKE_DIGEST_MISMATCH": (500, False), "INTAKE_INVALID": (500, False),
-    "INTAKE_UNAVAILABLE": (503, True), "STORE_UNAVAILABLE": (503, True),
-    "CHECKOUT_PARAMS_INVALID": (400, False), "CHECKOUT_CONFLICT": (409, True),
-    "CHECKOUT_REQUIRED": (409, False), "CHECKOUT_EXPIRED": (409, False),
-    "CHECKOUT_DENIED": (403, False), "CHECKOUT_STALE": (409, False),
-    "CHECKOUT_UNAVAILABLE": (503, True), "FENCE_EXHAUSTED": (409, False),
-    "WRITES_DRAINED": (503, True), "STALE_VERSION": (409, False), "INTERNAL": (500, False),
+    "SIP_R1_INVALID_BINDING": (400, False), "SIP_R1_CONTEXT_NOT_FOUND": (404, False),
+    "SIP_R1_PROJECT_FORBIDDEN": (403, False), "SIP_R1_CANONICAL_AUTHORITY_REQUIRED": (409, False),
+    "SIP_R1_INTAKE_PROOF_REQUIRED": (409, False), "SIP_R1_INTAKE_REFERENCE_INVALID": (500, False),
+    "SIP_R1_INTAKE_DIGEST_MISMATCH": (500, False), "SIP_R1_INTAKE_INVALID": (500, False),
+    "SIP_R1_INTAKE_UNAVAILABLE": (503, True), "SIP_R1_STORE_UNAVAILABLE": (503, True),
+    "SIP_R1_CHECKOUT_PARAMS_INVALID": (400, False), "SIP_R1_CHECKOUT_CONFLICT": (409, True),
+    "SIP_R1_CHECKOUT_REQUIRED": (409, False), "SIP_R1_CHECKOUT_EXPIRED": (409, False),
+    "SIP_R1_CHECKOUT_DENIED": (403, False), "SIP_R1_CHECKOUT_STALE": (409, False),
+    "SIP_R1_CHECKOUT_UNAVAILABLE": (503, True), "SIP_R1_FENCE_EXHAUSTED": (409, False),
+    "SIP_R1_WRITES_DRAINED": (503, True), "SIP_R1_STALE_VERSION": (409, False), "SIP_R1_INTERNAL": (500, False),
+    "SIP_R2_PUBLICATION_PARAMS_INVALID": (400, False),
+    "SIP_R2_IDEMPOTENCY_CONFLICT": (409, False),
+    "SIP_R2_PUBLICATION_REQUIRED": (409, False),
 }
 
 
@@ -74,15 +77,14 @@ def _dispatch(operation):
         return JSONResponse(content=with_envelope_fields(operation()), headers=_NO_STORE)
     except service.ProjectContextError as exc:
         reason = exc.reason_code
-        suffix = reason.removeprefix("SIP_R1_")
-        if suffix not in _FAILURES:
-            reason, suffix = "SIP_R1_INTERNAL", "INTERNAL"
-        status, retry = _FAILURES[suffix]
+        if reason not in _FAILURES:
+            reason = "SIP_R1_INTERNAL"
+        status, retry = _FAILURES[reason]
         code = ErrorCode.FORBIDDEN if status == 403 else (
             ErrorCode.INTERNAL if status >= 500 else ErrorCode.BAD_PARAMS)
         body = err_envelope(code, "Project drawing operation unavailable.", retry)
         body["error"]["reason_code"] = reason
-        if suffix == "CHECKOUT_CONFLICT":
+        if reason == "SIP_R1_CHECKOUT_CONFLICT":
             body.update(acquired=False, locked_by=exc.checkout.holder if exc.checkout else None,
                         checkout=service.public_checkout(exc.checkout))
         return JSONResponse(content=body, status_code=status, headers=_NO_STORE)

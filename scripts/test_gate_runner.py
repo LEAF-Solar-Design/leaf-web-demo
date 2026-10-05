@@ -46,6 +46,26 @@ def _load_runner():
     return mod
 
 
+def test_sip_r2_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suite_id, folder, floor, gated in (
+        ("platform-sip-r2-publication", "platform", 17, True),
+        ("server-sip-r2-publication", "server", 8, False),
+    ):
+        suite = suites[suite_id]
+        assert suite.cwd == REPO / folder
+        assert suite.argv == runner._py_pytest("tests/test_sip_r2_publication.py")
+        assert suite.kind == "pytest" and suite.expected == floor
+        assert suite.db_gated is gated
+        assert suite.allowed_skip_reasons == ()
+        assert suite.database_skip_reasons == (
+            (r"PostgreSQL integration test requires DATABASE_URL",) if gated else ())
+        assert suite_id in selection["mandatory_suite_ids"]
+    assert selection["selection_enabled"] is False
+
+
 def test_sip_r1_gate_registration():
     runner = _load_runner()
     suites = {suite.id: suite for suite in runner.build_suites()}
