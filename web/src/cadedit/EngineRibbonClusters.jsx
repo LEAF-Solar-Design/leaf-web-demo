@@ -35,9 +35,9 @@ import { createPortal } from 'react-dom'
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, byId, clipboardReason, drawReason, forGroup, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
+import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, byId, clipboardReason, drawReason, forGroup, modifyOpReason, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
 
-import { ACI_NAMES, LINEWEIGHT_VALUES, SESSION_ERROR, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, formatLineweight, readNumber } from './engineSession.js'
+import { ACI_NAMES, LINEWEIGHT_VALUES, SESSION_ERROR, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, buildSelectionEditPayload, formatLineweight, readNumber } from './engineSession.js'
 import { PENDING_INPUT_KEY, PENDING_WORD, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { PROMPTS, humanizeRefusal } from './promptKeys.js'
 import { isPointExpression } from './pointExpression.js'
@@ -176,7 +176,10 @@ const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') =>
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
   const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, selectGroup, refuse, pending = null, setPending } = useEngineSessionContext()
-  const modify = modifyReason(session, reach)
+  // The Modify panel's note is the reason every tool in it shares. With several
+  // objects selected only the document rungs are shared: each tool states its own
+  // multi-selection rule (modifyOpReason), so the panel never says "select one".
+  const modify = (session?.selectedIds?.length ?? 0) > 1 ? drawReason(session, reach) : modifyReason(session, reach)
   // W4g-7b-03c-f: the Properties panel's own ladder, which waives the
   // INSERT-reference rung `modify` still refuses (a property is not
   // geometry; see actionRegistry.js's propertyReason).
@@ -235,7 +238,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const promptReason = armedGroup === 'draw' || armedGroup === 'groups'
     ? draw
     : armedGroup === 'modify'
-      ? (PROPERTY_OPS.has(armedOp) ? property : modify)
+      ? (PROPERTY_OPS.has(armedOp) ? property : modifyOpReason(armedOp, session, reach))
       : armedGroup === 'clipboard' ? clipboardReason(session, reach) : ''
   const promptOff = !!promptReason
   const fieldsOff = promptOff && promptReason !== MODIFY_REASONS.noSelection
@@ -265,7 +268,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const liveRefusal = prompt && !promptReason && !waitingStep && !gatheringMembers
     ? (expressionRefusal || (armedGroup === 'draw'
       ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles, session, session.entities.mlstyles)
-      : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')
+      : session.selectedIds?.length > 1
+        ? buildSelectionEditPayload(armedOp, session.selectedIds, effective, session.entities)
+        : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')
     : ''
   const runOff = promptOff || !!liveRefusal || (!!waitingStep && !gatheringMembers)
   const runReason = humanizeRefusal(promptReason || liveRefusal, prompt)

@@ -301,7 +301,7 @@ const SCRIPT = [
   'out.setArc = summary(await handleMessage({ type: "applyEdit", op: "setArc", payload: { entityId: out.circle.createdId, cx: 0, cy: 0, radius: 5, startDeg: 90, endDeg: 180 } }, engine))',
   // The bounds and the nesting refusal.
   'out.empty = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "trim", steps: [] } }, engine))',
-  'out.tooMany = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "trim", steps: Array.from({ length: 5 }, () => ({ op: "setLayer", payload: { entityId: h, layer: "A" } })) } }, engine))',
+  'out.tooMany = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "trim", steps: Array.from({ length: 257 }, () => ({ op: "setLayer", payload: { entityId: h, layer: "A" } })) } }, engine))',
   'out.nested = summary(await handleMessage({ type: "applyEdit", op: "batch", payload: { verb: "trim", steps: [{ op: "batch", payload: { steps: [] } }] } }, engine))',
   // A refused single create keeps the document held: the next edit still lands.
   'out.badCreate = summary(await handleMessage({ type: "applyEdit", op: "createLine", payload: { x1: 1, y1: 1, x2: 1, y2: 1, layer: "A" } }, engine))',
@@ -393,7 +393,44 @@ const SCRIPT = [
   'process.stdout.write(JSON.stringify({ ids, out }))',
 ].join('\n')
 
+async function realSelectionBatch(n) {
+  const worker = realWorkerTransport()
+  const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
+  const records = Array.from({ length: n }, (_, i) => [
+    '0', 'LINE', '5', (16 + i).toString(16), '8', '0',
+    '10', String(i), '20', '0', '11', String(i), '21', '1',
+  ].join('\n')).join('\n')
+  const b0 = new TextEncoder().encode('0\nSECTION\n2\nENTITIES\n' + records + '\n0\nENDSEC\n0\nEOF\n')
+  await act(async () => { result.current.actions.openBytes(b0, 'set.dxf') })
+  const ids = result.current.entities.map((entity) => entity.id)
+  expect(ids).toHaveLength(n)
+  act(() => result.current.actions.selectReplace(ids))
+  const before = worker.posted.length
+  await act(async () => { result.current.actions.applyEdit('move', { dx: '2', dy: '3' }) })
+  expect(worker.posted.slice(before)).toEqual([{
+    type: 'applyEdit', op: 'batch', payload: { verb: 'move', steps: ids.map((entityId) => ({ op: 'move', payload: { entityId, dx: 2, dy: 3 } })) },
+  }])
+  expect(result.current.errorKind).toBeNull()
+  expect(result.current.selectedIds).toEqual(ids)
+  expect(result.current.selectedId).toBe('')
+  expect(result.current.undoDepth).toBe(1)
+  expect(result.current.redoDepth).toBe(0)
+  expect(worker.writes.filter((entry) => entry.op === 'batch')).toEqual([{ type: 'applyEdit', op: 'batch', count: 2 }])
+  for (let i = 0; i < n; i += 1) {
+    expect(result.current.entities[i]).toMatchObject({ id: ids[i], vertices: [[i + 2, 3, 0], [i + 2, 4, 0]] })
+  }
+  await act(async () => { result.current.actions.undo() })
+  expect(worker.posted.at(-1).type).toBe('loadDocument')
+  expect(worker.posted.at(-1).bytes).toEqual(b0)
+}
+
 describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
+  it('CCP02 real five-step batch', { timeout: 90_000 }, async () => {
+    await realSelectionBatch(5)
+  })
+  it('CCP02 real 256-step batch', { timeout: 90_000 }, async () => {
+    await realSelectionBatch(256)
+  })
   it('applies several steps in one turn, refuses atomically, bounds the count, and keeps the document on a refused create', { timeout: 90_000 }, () => {
     const raw = execFileSync(process.execPath, ['--input-type=module', '-e', SCRIPT, WORKER_PATH, path.join(PKG_DIR, GLUE), DXF], {
       encoding: 'utf8',

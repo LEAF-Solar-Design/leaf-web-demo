@@ -3056,7 +3056,7 @@ def build_suites() -> List[Suite]:
                   # rows: eight tests) require the rebuilt engine;
                   # numbers on PRs #1036, #1107 and #1140; W4g-7c-2d adds the
                   # handle-retention row (nine tests).
-                  ("src/cad/engineBatchAtomic.test.js", 10),
+                  ("src/cad/engineBatchAtomic.test.js", 12),
               )),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
