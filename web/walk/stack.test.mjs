@@ -112,6 +112,55 @@ function openSSE(url, headers = {}) {
   return { first, get ended() { return ended }, stop() { clearTimeout(timer); incoming?.destroy(); outgoing.destroy() } }
 }
 
+test('stack ports follow machine lease indices across distinct and reused worker slots', async () => {
+  const source = await readFile(new URL('./stack.mjs', import.meta.url), 'utf8')
+  const leases = source.slice(source.indexOf('async function acquireLease'), source.indexOf('async function privateEnvironment'))
+  const allocation = source.slice(source.indexOf('export async function allocatePorts'), source.indexOf('function commandArgs'))
+    .replace('export async function', 'async function')
+  const launch = source.slice(source.indexOf('    state.lease = await acquireLease'), source.indexOf('    // Fail closed if a repo-local dotenv'))
+  const locks = new Map()
+  const open = async (path, mode) => {
+    assert.equal(mode, 'wx')
+    if (locks.has(path)) throw Object.assign(new Error('occupied'), { code: 'EEXIST' })
+    locks.set(path, '')
+    return { writeFile: async (body) => locks.set(path, body), close: async () => {} }
+  }
+  const createServer = () => ({
+    once: () => {}, listen: (options, ready) => ready(), close: (done) => done(),
+  })
+  const harness = new Function('tmpdir', 'join', 'randomUUID', 'open', 'readFile', 'rm', 'pidAlive',
+    'QueuedError', 'readFileSync', 'rmSync', 'createServer', 'roles',
+    `${leases}\n${allocation}\nreturn {
+      claim: async (slot) => { const state = {}; const cap = 2; ${launch} return state },
+      release: (state) => releaseLeaseSync(state.lease),
+    }`)(() => 'private-test-leases', join, randomUUID, open,
+    async (path) => locks.get(path), async (path) => locks.delete(path), () => true,
+    QueuedError, (path) => locks.get(path), (path) => locks.delete(path), createServer,
+    ['app', 'broker', 'harness', 'web', 'proxy'])
+  const first = await harness.claim(12)
+  const second = await harness.claim(13)
+  try {
+    assert.equal(first.lease.index, 0)
+    assert.equal(second.lease.index, 1)
+    assert.equal(JSON.parse(locks.get(first.lease.path)).slot, 12)
+    assert.equal(JSON.parse(locks.get(second.lease.path)).slot, 13)
+    assert.deepEqual(first.ports, { app: 18010, broker: 18020, harness: 18030, web: 18040, proxy: 18000 })
+    assert.deepEqual(second.ports, { app: 18110, broker: 18120, harness: 18130, web: 18140, proxy: 18100 })
+    assert.ok(Object.values(first.ports).every((port) => !Object.values(second.ports).includes(port)))
+    harness.release(first)
+    const reused = await harness.claim(12)
+    try {
+      assert.equal(reused.lease.index, 0)
+      assert.notEqual(reused.lease.token, first.lease.token)
+      assert.deepEqual(reused.ports, first.ports)
+    } finally { harness.release(reused) }
+  } finally {
+    harness.release(first)
+    harness.release(second)
+  }
+  assert.equal(locks.size, 0)
+})
+
 test('teardown timeout names the unclosed launcher, surviving PID and listening port', async () => {
   const state = {
     child: { pid: 101 }, closed: false, pids: new Set([101, 202, 303]),

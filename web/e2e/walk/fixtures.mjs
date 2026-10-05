@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
+import { familiesForSurface } from '../../src/lib/surfaceRails.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
 import { normalizedControlKey } from './probes.mjs'
@@ -455,6 +456,11 @@ async function selectEntity(probe, runtime, recipe) {
   if (!points) await unsupported(probe, runtime, `The private DXF fixture has no ${recipe.type} entity to select`)
   if (recipe.editable === false && recipe.type === 'LINE') {
     await unsupported(probe, runtime, 'The engine exposes the fixture LINE as editable; a read-only LINE needs a provider fixture')
+  }
+  const more = page.getByRole('button', { name: 'More panels', exact: true })
+  if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'true') {
+    await more.click({ timeout: 15_000 })
+    await expect(more).toHaveAttribute('aria-expanded', 'false')
   }
   const samples = await canvas(page).evaluate(exposedCalibrationPoints)
   if (!samples) throw new Error('The drawing needs two uncovered calibration points')
@@ -1610,8 +1616,12 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         capabilities: catalog.families.reduce((count, family) => count + family.capabilities.length, 0) }
       if (!tool) await unsupported(probe, runtime, `The isolated catalog does not provide ${recipe.name}`)
       runtime.catalogPanelName = family.label
-      // Unplaced catalog families live on Manage, not the engine's Draw tab.
-      const tab = toolPlacementTab(tool) || 'manage'
+      // Solar seats unplaced families outside its Manage fold on the Solar tab.
+      const placementTab = toolPlacementTab(tool)
+      const tab = !placementTab && typeof family.family_id === 'string'
+        && !familiesForSurface(catalog.families, 'solar').some((row) => row.family_id === family.family_id)
+        && await page.locator('.app').first().getAttribute('data-surface') === 'solar'
+        ? 'Solar' : placementTab || 'manage'
       await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
       if (probe.state === 'ready' && solarBrowserCatalogRequired(recipe.name) && !toolAvailabilityEvidence(probe, facts)) {
         // The API-side catalog is not proof that the browser seated the same
@@ -2288,7 +2298,8 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     expect(source?.type).toBe('LWPOLYLINE')
     expect(after.entities.some((entity) => String(entity.id) === String(source.id))).toBe(false)
     const preserved = before.geometry.entities.filter((entity) => entity !== source)
-    expect(after.entities.filter((entity) => preserved.some((old) => String(old.id) === String(entity.id)))).toEqual(preserved)
+    expect(after.entities.filter((entity) => preserved.some((old) => String(old.id) === String(entity.id)))
+      .map(({ index, ...entity }) => entity)).toEqual(preserved.map(({ index, ...entity }) => entity))
     const segments = after.entities.filter((entity) => !before.geometry.entities.some((old) => String(old.id) === String(entity.id)))
     expect(segments.map((entity) => ({ type: entity.type, layer: entity.layer, vertices: entity.vertices.map((point) => point.slice(0, 2)) }))).toEqual([
       { type: 'LINE', layer: 'Walk', vertices: [[111, 200], [222, 200]] },

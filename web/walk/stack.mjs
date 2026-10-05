@@ -182,7 +182,7 @@ async function acquireLease(cap, slot) {
         file = await open(path, 'wx', 0o600)
         await file.writeFile(JSON.stringify({ pid: process.pid, token, slot }))
         await file.close()
-        return { path, token }
+        return { path, token, index }
       } catch (error) {
         if (file) { await file.close().catch(() => {}); await rm(path, { force: true }); throw error }
         if (error.code !== 'EEXIST') throw error
@@ -393,7 +393,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
   running.add(state)
   try {
     state.lease = await acquireLease(cap, slot)
-    state.ports = await allocatePorts(slot)
+    state.ports = await allocatePorts(state.lease.index)
     // Fail closed if a repo-local dotenv could silently reconnect to host data.
     if (!databaseURL && !postgres && existsSync(join(repo, 'platform', '.env.local'))) {
       const local = await readFile(join(repo, 'platform', '.env.local'), 'utf8')

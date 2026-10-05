@@ -148,6 +148,40 @@ test('the DIMENSION pick lies on the fixture dimension line and outside the othe
   assert.match(source, /const points = FIXTURE_PICK_POINTS\[recipe.type\]/)
 })
 
+test('selection closes expanded overflow before calibration and leaves collapsed or absent overflow alone', async () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const selection = source.slice(source.indexOf('async function selectEntity'), source.indexOf('async function setDrawer'))
+  const assertions = (value) => ({ toHaveAttribute: async (key, expected) => {
+    assert.equal(await value.getAttribute(key), expected)
+  } })
+  const select = new Function('expect', 'FIXTURE_PICK_POINTS', 'canvas', 'exposedCalibrationPoints',
+    `${selection}; return selectEntity`)(assertions, FIXTURE_PICK_POINTS, (page) => page.drawing, exposedCalibrationPoints)
+  for (const initial of ['true', 'false', null]) {
+    let expanded = initial
+    const events = []
+    const more = {
+      isVisible: async () => initial !== null,
+      getAttribute: async (key) => { assert.equal(key, 'aria-expanded'); return expanded },
+      click: async (options) => { assert.equal(options.timeout, 15_000); events.push('collapse'); expanded = 'false' },
+    }
+    const page = {
+      getByRole: (role, options) => {
+        assert.equal(role, 'button')
+        assert.deepEqual(options, { name: 'More panels', exact: true })
+        return more
+      },
+      drawing: { evaluate: async (callback) => {
+        assert.equal(callback, exposedCalibrationPoints)
+        assert.notEqual(expanded, 'true', 'overflow must be closed before sampling')
+        events.push('sample')
+        return null
+      } },
+    }
+    await assert.rejects(select({}, { page }, { type: 'LINE', viewerOnly: true }), /two uncovered calibration points/)
+    assert.deepEqual(events, initial === 'true' ? ['collapse', 'sample'] : ['sample'])
+  }
+})
+
 test('calibration finds exposed edge positions when the old central grid is covered', () => {
   const original = { document: globalThis.document, innerWidth: globalThis.innerWidth, innerHeight: globalThis.innerHeight }
   const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, right: 400, bottom: 300 }) }
@@ -431,6 +465,7 @@ test('catalog-tool evidence stays compact and hashes the catalog once per worker
   Object.defineProperty(catalog, 'toJSON', { value() { serializations++; return { families: this.families } } })
   const tabs = []
   const page = {
+    locator: () => ({ first: () => ({ getAttribute: async () => null }) }),
     request: { get: async (path) => {
       assert.equal(path, '/api/capabilities')
       requests++
