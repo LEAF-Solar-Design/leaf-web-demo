@@ -4,6 +4,196 @@ import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
   captureEngineRefusal, assertEngineRefusal, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
+import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError } from './fixtures.mjs'
+import { buildFeatureMap } from '../../walk/featureMap.mjs'
+import { resolveProbe } from './probes.mjs'
+
+test('Solar no-saved-drawing chooses outline and selection oracles only after verified starter projection', () => {
+  const map = buildFeatureMap()
+  for (const op of ['create-rectangle', 'array-rect', 'move', 'rotate']) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === `action:solar-panels-${op}`), 'no-drawing')
+    assert.equal(probe.setup.steps.at(-1).kind, 'require-solar-document')
+    assert.equal(solarDocumentProbe(probe, { documentId: '' }), probe)
+    const document = { documentId: 'solar-starter.dxf', count: 8, selection: 'no selection' }
+    const seated = solarDocumentProbe(probe, document)
+    assert.equal(seated.assertion.assertionId, probe.assertion.assertionId)
+    assert.equal(probe.assertion.kind, 'disabled_with_reason')
+    if (op === 'create-rectangle') {
+      assert.equal(seated.assertion.kind, 'opens')
+      assert.equal(seated.assertion.target, 'cockpit-prompt')
+      assert.equal(seated.locator.name, 'Panel outline')
+      assert.ok(seated.assertion.verb)
+    } else {
+      assert.equal(seated.assertion.reason, 'select an entity in the drawing')
+      assert.equal(seated.locator.disabledVariants[0].reason, seated.assertion.reason)
+    }
+    for (const invalid of [{ documentId: 'foreign.dxf' }, { count: 0 }, { selection: 'sel A1' }]) {
+      assert.throws(() => solarDocumentProbe(probe, { ...document, ...invalid }), /parsed starter/)
+    }
+  }
+  const other = { kind: 'surface' }
+  assert.equal(solarDocumentProbe(other, {}), other)
+})
+
+test('Author ready preflight records real policy and stack configuration, refusing only stage-off readiness', async () => {
+  for (const available of [false, true]) {
+    const runtime = { evidence: {}, stack: { env: { LEAF_CUSTOMIZATION_R5_MODE: 'off' } },
+      testInfo: { attach: async () => {} }, page: { request: { get: async (path, options) => {
+        assert.equal(path, '/api/entitlements')
+        assert.equal(options.timeout, 15_000)
+        return { ok: () => true, status: () => 200, json: async () => ({ availability: { author_stage: available } }) }
+      } } } }
+    const assertions = (value) => ({ toBe: (expected) => assert.equal(value, expected) })
+    const probe = { featureId: 'action:author-tool', state: 'ready' }
+    if (available) await authorAvailability(probe, runtime, assertions)
+    else await assert.rejects(authorAvailability(probe, runtime, assertions), (error) => {
+      assert.ok(error instanceof UnsupportedLocalError)
+      assert.match(error.reason, /LEAF_CUSTOMIZATION_R5_MODE=off/)
+      return true
+    })
+    assert.equal(runtime.evidence.authorAvailability.policy.availability.author_stage, available)
+    assert.equal(runtime.evidence.authorAvailability.configuration.LEAF_CUSTOMIZATION_R5_MODE, 'off')
+  }
+  for (const probe of [{ featureId: 'action:author-tool', state: 'unentitled' }, { featureId: 'action:fit', state: 'ready' }]) {
+    await authorAvailability(probe, { page: { request: { get: () => assert.fail('unrelated preflight') } } })
+  }
+})
+
+test('policy diagnostics distinguish absent groups, collapsed overflow and visible disclosure', async () => {
+  for (const [rendered, visible, disclosure] of [[0, false, null], [1, false, 'false'], [1, true, 'true']]) {
+    const page = { getByRole: () => ({ getByRole: (role, options) => {
+      if (role === 'group') {
+        assert.equal(options.name, 'Author')
+        assert.equal(options.includeHidden, true)
+        return { count: async () => rendered, isVisible: async () => visible }
+      }
+      return { count: async () => disclosure === null ? 0 : 1, getAttribute: async () => disclosure }
+    } }) }
+    assert.deepEqual(await disclosureEvidence(page, 'Author'), { group: 'Author', rendered, visible, disclosure })
+  }
+})
+
+test('empty surface oracles assert actual host contracts without Studio landmarks', async () => {
+  for (const [state, role, name] of [['signed-out', 'heading', 'You are not signed in'],
+    ['no-drawing', 'text', 'No drawing yet. Upload a DWG or DXF to begin.']]) {
+    const node = { visible: true }
+    const runtime = { evidence: {}, page: {
+      getByRole: (actualRole, options) => { assert.equal(actualRole, role); assert.equal(options.name, name); return node },
+      getByText: (text) => { assert.equal(role, 'text'); assert.equal(text, name); return node },
+    } }
+    await assertEffect({ state, assertion: { target: 'surface:solar' } }, runtime, null, {},
+      (value) => ({ toBeVisible: async () => assert.equal(value.visible, true) }))
+    assert.deepEqual(runtime.evidence.surfaceHost, { host: '/try', contract: state === 'signed-out' ? 'signed-out' : 'empty' })
+  }
+})
+
+test('Solar projection hold observes real requests and releases each route once', async () => {
+  let handler
+  let continued = 0
+  let unroutes = 0
+  const runtime = { cleanup: [], evidence: {}, page: {
+    route: async (pattern, callback) => { assert.equal(pattern, '**/api/drawings/*/dxf?*'); handler = callback },
+    unroute: async (pattern, callback) => { assert.equal(callback, handler); unroutes++ },
+  } }
+  await setupStep({}, runtime, { kind: 'hold-solar-projection' })
+  const url = 'http://walk/api/drawings/private/dxf?version=head'
+  const pending = handler({ request: () => ({ url: () => url }), continue: async () => { continued++ } })
+  await Promise.resolve()
+  assert.equal(continued, 0)
+  assert.deepEqual(runtime.evidence.solarProjectionRequests, [url])
+  await runtime.releaseSolarProjection()
+  await pending
+  await runtime.cleanup[0]()
+  assert.equal(continued, 1)
+  assert.equal(unroutes, 1)
+})
+
+test('Solar pending setup requires a held projection, Beta badge and absent projected document', async () => {
+  const badge = { attribute: 'beta' }, tab = { text: 'Solar CAD Beta', locator: () => badge }, card = { attribute: null }
+  const assertions = (value) => ({
+    toHaveAttribute: async (name, expected) => assert.equal(value.attribute, expected),
+    toContainText: async (expected) => assert.ok(value.text.includes(expected)),
+    not: { toHaveAttribute: async () => assert.equal(value.attribute, null) },
+  })
+  assertions.poll = (callback) => ({ toBeGreaterThan: async (expected) => assert.ok(await callback() > expected) })
+  const runtime = { releaseSolarProjection: async () => {}, evidence: { solarProjectionRequests: ['held.dxf'] }, page: {
+    request: { get: async (path, options) => {
+      assert.equal(path, '/api/health'); assert.equal(options.timeout, 15_000)
+      return { ok: () => true, json: async () => ({ aps_live: false }) }
+    } },
+    getByRole: () => ({ getByRole: () => tab }), locator: () => card,
+  } }
+  const recipe = { kind: 'require-surface-context', surface: 'solar', context: { solarReady: false } }
+  await setupStep({}, runtime, recipe, assertions)
+  assert.equal(runtime.evidence.solarReadiness.pending, 'Beta')
+  runtime.evidence.solarProjectionRequests = []
+  await assert.rejects(setupStep({}, runtime, recipe, assertions), assert.AssertionError)
+  runtime.evidence.solarProjectionRequests = ['held.dxf']
+  badge.attribute = 'available'
+  await assert.rejects(setupStep({}, runtime, recipe, assertions), assert.AssertionError)
+  badge.attribute = 'beta'; card.attribute = 'already-projected.dxf'
+  await assert.rejects(setupStep({}, runtime, recipe, assertions), assert.AssertionError)
+})
+
+test('phone Rail availability records absent product groups without relabeling a drawer control', async () => {
+  for (const rendered of [0, 1]) {
+    const runtime = { evidence: {}, testInfo: { project: { name: 'phone' }, attach: async () => {} }, page: {
+      getByRole: () => ({ getByRole: (role, options) => role === 'group'
+        ? { count: async () => rendered, isVisible: async () => !!rendered }
+        : { count: async () => 1, getAttribute: async () => 'true' } }),
+    } }
+    const probe = { featureId: 'action:rail-expand', state: 'ready' }
+    if (rendered) await phoneRailAvailability(probe, runtime)
+    else await assert.rejects(phoneRailAvailability(probe, runtime), (error) => {
+      assert.ok(error instanceof UnsupportedLocalError)
+      assert.match(error.reason, /wideViewport/)
+      return true
+    })
+    assert.equal(runtime.evidence.phoneRail.rendered, rendered)
+    assert.equal(runtime.evidence.phoneRail.disclosure, 'true')
+  }
+  await phoneRailAvailability({ featureId: 'action:fit' }, {})
+  await phoneRailAvailability({ featureId: 'action:rail-expand' }, { testInfo: { project: { name: 'desktop' } } })
+})
+
+test('Solar readiness releases transport before requiring the real head projection and Ready badge', async () => {
+  const events = []
+  const card = { attribute: 'private-v2.dxf' }, badge = { attribute: 'available' }
+  const locator = { text: 'Solar CAD Ready', locator: () => badge }
+  const runtime = { drawingId: 'private', evidence: { solarReadiness: { pending: 'Beta' } },
+    releaseSolarProjection: async () => events.push('release'), page: { locator: () => card } }
+  const assertions = (value) => ({
+    toHaveAttribute: async (name, expected) => {
+      if (expected instanceof RegExp) assert.match(value.attribute, expected)
+      else assert.equal(value.attribute, expected)
+    },
+    toContainText: async (expected) => assert.ok(value.text.includes(expected)),
+  })
+  const workspace = async () => { assert.deepEqual(events, ['release']); events.push('projected') }
+  await completeSolarReadiness({}, runtime, locator, assertions, workspace)
+  assert.deepEqual(events, ['release', 'projected'])
+  assert.deepEqual(runtime.evidence.solarReadiness, { pending: 'Beta', released: 'Ready' })
+  events.length = 0; card.attribute = 'solar-starter.dxf'
+  await assert.rejects(completeSolarReadiness({}, runtime, locator, assertions, workspace), assert.AssertionError)
+  events.length = 0; card.attribute = 'private-v2.dxf'; badge.attribute = 'beta'
+  await assert.rejects(completeSolarReadiness({}, runtime, locator, assertions, workspace), assert.AssertionError)
+  await completeSolarReadiness({}, {}, null, assertions, () => assert.fail('ordinary surface must not release'))
+})
+
+test('phone Properties oracle follows Plan drawer state for both toggle directions', async () => {
+  for (const visible of [false, true]) {
+    const runtime = { evidence: {}, testInfo: { project: { name: 'phone' } }, page: {
+      getByRole: (role, options) => {
+        assert.equal(role, 'group'); assert.equal(options.name, 'Workspace panels')
+        return { getByRole: (role, options) => { assert.equal(options.name, 'Plan'); return { expanded: String(!visible) } } }
+      },
+    } }
+    await assertEffect({ assertion: { target: 'properties-pane' } }, runtime, null, { visible }, (value) => ({
+      toHaveAttribute: async (name, expected) => assert.equal(value.expanded, expected),
+    }))
+    assert.deepEqual(runtime.evidence.phoneProperties, { host: 'Plan', before: visible, after: !visible })
+  }
+})
 
 
 test('engine mode oracle checks provider publication, persistence and the other mode', async () => {
