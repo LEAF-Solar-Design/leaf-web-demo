@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useState } from 'react'
+import { relativeTime } from '../lib/railTime.js'
 
 vi.mock('../engineChanges.js', async (importOriginal) => ({
   ...await importOriginal(),
@@ -100,7 +101,7 @@ describe('engine changes list and detail', () => {
     expect(within(rows[0]).getByText('Accepted')).toBeTruthy()
     expect(within(rows[1]).getByText('Live')).toBeTruthy()
     expect(within(rows[0]).getByText('selection')).toBeTruthy()
-    expect(rows[0].querySelector('time').textContent).toMatch(/ago|Just now/)
+    expect(rows[0].querySelector('time').textContent).toBe(relativeTime(Date.parse(card.created_at)))
     expect(screen.getAllByLabelText('Unread')).toHaveLength(2)
   })
   it('shows the empty and reserved loading states', () => {

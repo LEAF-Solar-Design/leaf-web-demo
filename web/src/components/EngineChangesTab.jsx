@@ -1,4 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { absoluteWithZone, relativeTime } from '../lib/railTime.js'
+import useRelativeNow from '../lib/useRelativeNow.js'
 import {
   engineChangeDiscussText,
   getEngineChange,
@@ -10,16 +12,6 @@ import {
 const STATES = { accepted: 'Accepted', landed: 'Landed', live: 'Live', reverted: 'Reverted', held: 'Held' }
 const text = (value) => typeof value === 'string' || typeof value === 'number' ? String(value) : ''
 const actor = (value) => text(value) || text(value?.display_name) || text(value?.subject) || 'Unknown'
-
-function relativeTime(value) {
-  const elapsed = Date.now() - Date.parse(value)
-  if (!Number.isFinite(elapsed)) return 'Time unavailable'
-  const minutes = Math.max(0, Math.floor(elapsed / 60_000))
-  if (minutes < 1) return 'Just now'
-  if (minutes < 60) return `${minutes} min ago`
-  const hours = Math.floor(minutes / 60)
-  return hours < 24 ? `${hours} hr ago` : `${Math.floor(hours / 24)} days ago`
-}
 
 function Reference({ value }) {
   const label = text(value)
@@ -48,6 +40,7 @@ export default function EngineChangesTab({
   onDiscuss,
   discussDisabledReason = '',
 }) {
+  const now = useRelativeNow()
   const [selected, setSelected] = useState(null)
   const discussReasonId = useId()
   const selectedRef = useRef(null)
@@ -263,7 +256,7 @@ export default function EngineChangesTab({
                 <span className="engine-changes-row-title">{text(card.title)}</span>
                 <span className="engine-changes-state">{STATES[card.state] || 'Unknown'}</span>
                 <span className="dim">{text(card.feature_id)}</span>
-                <time className="dim" dateTime={text(card.created_at)}>{relativeTime(card.created_at)}</time>
+                <time className="dim" dateTime={text(card.created_at)} title={absoluteWithZone(Date.parse(card.created_at))}>{relativeTime(Date.parse(card.created_at), now)}</time>
                 {card.unread && <span className="engine-changes-unread" role="img" aria-label="Unread" />}
               </button>
             </li>
