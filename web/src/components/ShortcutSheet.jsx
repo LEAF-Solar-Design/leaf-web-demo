@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import EscCap from './EscCap.jsx'
 import { keyboardTable } from '../lib/actionRegistry.js'
 
 // Slice 10b: the shortcut sheet. GENERATED straight from the action
@@ -34,7 +35,7 @@ export default function ShortcutSheet({ open, onClose }) {
     <div className="resolver shortcut-sheet" role="dialog" aria-label="Keyboard shortcuts" ref={rootRef}>
       <div className="resolver-header">
         Keyboard shortcuts
-        <button type="button" className="chip-neutral" onClick={onClose}>Close</button>
+        <EscCap type="button" onClick={onClose} label="Close" />
       </div>
       {rows.map((row) => (
         <div className="resolver-row" key={row.id} data-testid="shortcut-row">

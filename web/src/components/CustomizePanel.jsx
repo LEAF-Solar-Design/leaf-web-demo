@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import EscCap from './EscCap.jsx'
 import { getPlatformChange, landPlatformChange, mergePlatformChange, proposePlatformChange } from '../api.js'
 import './popovers.css'
 
@@ -247,7 +248,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
         <span className="ops-badge">Admin</span>
         <span className="drawer-title">Platform · self-edit</span>
         {onDismiss && (
-          <button ref={closeRef} className="key hot" onClick={onDismiss} aria-label="Hide drawer">Esc</button>
+          <EscCap ref={closeRef} onClick={onDismiss} label="Hide drawer" />
         )}
       </div>
 

@@ -49,6 +49,7 @@
 // client shares — and mounts ChangeCapsule.jsx over the resulting annotation
 // (useAnnotations.js, scoped to this same entity conversation).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import EscCap from './EscCap.jsx'
 import * as RadixContextMenu from '@radix-ui/react-context-menu'
 
 import { accessibleName, byId, forCluster, forGroup } from '../lib/actionRegistry.js'
@@ -379,7 +380,7 @@ function ScopedAskPanel({ identity, drawingId, x, y, resolveScopedIntakes, onClo
         <button type="submit" disabled={sending || !text.trim()} data-testid="ask-claude-send">
           {sending ? 'Sending…' : 'Send'}
         </button>
-        <button type="button" onClick={onClose} data-testid="ask-claude-close">Close</button>
+        <EscCap type="button" onClick={onClose} data-testid="ask-claude-close" label="Close" />
       </form>
       {refusal && (
         <div className="ask-claude-secret-notice" role="alert" data-testid="ask-claude-secret-notice">

@@ -11,6 +11,7 @@
  * timeout bound, and turning the resolved artifact into a real download.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import EscCap from '../components/EscCap.jsx'
 
 // Own timeout class (mirrors fetchBudget.js's FetchTimeoutError) so a caller
 // can tell "the export hung past its bound" apart from any other rejection.
@@ -120,7 +121,7 @@ export default function ExportDialog({
       <div className="export-dialog-head">
         <span className="export-dialog-title">{title}</span>
         {onDismiss && (
-          <button type="button" className="chip-neutral" onClick={onDismiss}>Close</button>
+          <EscCap type="button" onClick={onDismiss} label="Close" />
         )}
       </div>
 

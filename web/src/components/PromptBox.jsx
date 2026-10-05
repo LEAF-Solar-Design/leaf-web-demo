@@ -24,6 +24,7 @@
 // (never a silent ignore).
 
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import EscCap from './EscCap.jsx'
 import useExit from '../useExit.js'
 import { digest, trackUsage } from '../telemetry.js'
 import { byId } from '../lib/actionRegistry.js'
@@ -734,7 +735,7 @@ export default function PromptBox({
         )}
         {mcpOpen && (
           <div className="resolver mcp-panel" role="status" aria-label="Mounted MCP servers">
-            <div className="resolver-header">Mounted MCP servers <button type="button" className="chip-neutral" onClick={() => setMcpOpen(false)}>Close</button></div>
+            <div className="resolver-header">Mounted MCP servers <EscCap type="button" onClick={() => setMcpOpen(false)} label="Close" /></div>
             {mcpServers.length > 0 ? mcpServers.map((server) => (
               <div className="resolver-row" key={server.name}>
                 <span className="lbar" aria-hidden="true" />

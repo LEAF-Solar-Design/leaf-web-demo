@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import EscCap from './EscCap.jsx'
 import { getAccountControls, getOpsUsage, setTenantDisabled, updateAccountControls } from '../api.js'
 import { formatUsageCount, formatUsageUsd, normalizeOpsUsage } from './opsUsage.js'
 import './popovers.css'
@@ -175,7 +176,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
         <span className="ops-badge">Internal</span>
         <span className="drawer-title">Ops · tenants</span>
         {onDismiss && (
-          <button ref={closeRef} className="key hot" onClick={onDismiss} aria-label="Hide drawer">Esc</button>
+          <EscCap ref={closeRef} onClick={onDismiss} label="Hide drawer" />
         )}
       </div>
 

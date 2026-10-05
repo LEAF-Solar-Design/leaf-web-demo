@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import EscCap from './EscCap.jsx'
 import './popovers.css'
 import useExit from '../useExit.js'
 
@@ -125,7 +126,7 @@ export default function ClaudeAccountPanel({
         <div className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Claude accounts">
           <div className="ca-head">
             <span>Claude mounts</span>
-            <button className="key hot" onClick={() => onToggle(false)} aria-label="Close Claude account panel">Esc</button>
+            <EscCap onClick={() => onToggle(false)} label="Close Claude account panel" />
           </div>
 
           {!loading && !known && (
