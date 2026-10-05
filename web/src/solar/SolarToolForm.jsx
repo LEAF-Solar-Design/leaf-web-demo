@@ -4,6 +4,7 @@ import { solarFormKeys, solarView } from './solarView.js'
 import { solarFlowPrefill } from './solarFlowModel.js'
 import SolarPresetForm from './SolarPresetForm.jsx'
 import { PRESET_TOOL } from './solarPresetModel.js'
+import returnToolFocus from './returnToolFocus.js'
 
 export default function SolarToolForm({ tool, onSubmit, onClose, presetListing, presetRevision, readIntake, drawingId = null, drawingVersion = null }) {
   if (tool?.name === PRESET_TOOL) {
@@ -121,6 +122,11 @@ function GenericSolarToolForm({ tool, onSubmit, onClose, readIntake, drawingId, 
     setValues(next)
   }
 
+  function cancel() {
+    onClose()
+    returnToolFocus(tool.name)
+  }
+
   return (
     <section
       id="solar-tool-form"
@@ -129,7 +135,7 @@ function GenericSolarToolForm({ tool, onSubmit, onClose, readIntake, drawingId, 
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
           event.stopPropagation()
-          onClose()
+          cancel()
         }
       }}
     >
@@ -140,7 +146,7 @@ function GenericSolarToolForm({ tool, onSubmit, onClose, readIntake, drawingId, 
         onClick={() => { if (!reading && formValid) { onSubmit(tool, values); onClose() } }}>
         Review & run
       </button>
-      <button type="button" className="chip-act" onClick={onClose}>Cancel</button>
+      <button type="button" className="chip-act" onClick={cancel}>Cancel</button>
     </section>
   )
 }
