@@ -2298,7 +2298,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_native_release_producer.py"), 32),
         # Proves labelled sizing replay isolation; opens loopback sockets and short-lived child Pythons only.
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 33),
+              SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for

@@ -1,0 +1,67 @@
+{
+  "schema": "leaf.synthetic-rooftop-solve-fixtures.v1",
+  "label": "SYNTHETIC, TEST ONLY: Rooftop solve replay with fixture-derived panel IDs, not live solving.",
+  "package": {
+    "path": "scripts/fixtures/rooftop_solve_replay.json",
+    "bytes": 366852,
+    "sha256": "53ed4b7b1f8d5c22c9a5e991d0eafd100e6fb598fe702114b091d3f7d66c4618"
+  },
+  "fixtures": [
+    {
+      "id": "rooftop-piece-12",
+      "request_bytes": 21300,
+      "request_wire_sha256": "7be3421b5834ca07ad32ad340d403ad628649cd3d490d532946503d035a515bb",
+      "response_bytes": 23162,
+      "response_wire_sha256": "9e30176bcfb9d8cbf127ccbdbb3dff6ba5d737d3db394e5c6df517c5b24b0110",
+      "response_encoding": "canonical-json"
+    },
+    {
+      "id": "rooftop-piece-13",
+      "request_bytes": 20141,
+      "request_wire_sha256": "495a015e052494930c929e69bf2dd04523a65ea74dd9cfc661b6c9b0a4f3ecab",
+      "response_bytes": 21959,
+      "response_wire_sha256": "673f016c46ead20fe15cdd4c04773e75d04d2dab52e0d668165f0a1035ee1cd0",
+      "response_encoding": "canonical-json"
+    },
+    {
+      "id": "rooftop-piece-16",
+      "request_bytes": 18152,
+      "request_wire_sha256": "b7b3139ac495d8b50a986e196b54cda65c3856c6ae1080480b864e10c9af741d",
+      "response_bytes": 19915,
+      "response_wire_sha256": "09009716285ee7304e5dca54b68606c149eb508b86fabf7a6c41d7e51103e50f",
+      "response_encoding": "canonical-json"
+    },
+    {
+      "id": "rooftop-piece-19",
+      "request_bytes": 22296,
+      "request_wire_sha256": "edcc9f287a3456f3585b8dddcf0e9bb14df9e20ca62c5b6aa6f39c3367b4c1fd",
+      "response_bytes": 24408,
+      "response_wire_sha256": "0501d452148aa892adad922ae576c02c8375f445932023e38766a41956594c2d",
+      "response_encoding": "canonical-json"
+    },
+    {
+      "id": "rooftop-piece-20",
+      "request_bytes": 30096,
+      "request_wire_sha256": "5f43f72c977fbc48ad8db34b9b57b7f0c2c56962d6dc67eaae0adea3073f5c18",
+      "response_bytes": 32228,
+      "response_wire_sha256": "80f45979bd6da379adadbe72960f20470ecc744ae07b1400bf0ee852dbab865f",
+      "response_encoding": "canonical-json"
+    },
+    {
+      "id": "rooftop-piece-21",
+      "request_bytes": 35306,
+      "request_wire_sha256": "27747c602e70236fae1d38f1a6fa4279d84ae810dffb95cfb123e59f76f48bdd",
+      "response_bytes": 37384,
+      "response_wire_sha256": "6d59868565dd397b3b455e555a15d3b38307d02a475b0a70a1d75ad647a78c7a",
+      "response_encoding": "canonical-json"
+    },
+    {
+      "id": "rooftop-piece-22",
+      "request_bytes": 28622,
+      "request_wire_sha256": "bf739a8eb93c699d1ed3f04bb95283ae12de573a241bd0af1f19257af1293c27",
+      "response_bytes": 31093,
+      "response_wire_sha256": "2e21188a3a85864125516d54a576ea200d9fee5ac65f8aa958117778d022e0c4",
+      "response_encoding": "canonical-json"
+    }
+  ]
+}
