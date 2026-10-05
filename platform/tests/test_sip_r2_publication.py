@@ -127,7 +127,7 @@ def test_sip_r2_stale_parent(scope):
     acquire(scope)
     publish(scope)
     refused("SIP_R1_STALE_VERSION", lambda: publish(scope, request_id=uuid4()))
-    refused("SIP_R1_CONTEXT_NOT_FOUND", lambda: publish(scope, expected_parent_version_id=uuid4()))
+    refused("SIP_R1_CONTEXT_NOT_FOUND", lambda: publish(scope, expected_parent_version_id=uuid4(), request_id=uuid4()))
     assert count(scope) == 2
 
 
