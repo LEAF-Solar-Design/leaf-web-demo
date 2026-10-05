@@ -160,6 +160,9 @@ export function locatorRecipe(entry, state) {
   if (entry.kind === 'surface') {
     const record = PRODUCT_SURFACES.find((surface) => surface.id === entry.source_id)
     if (!record) throw new Error(`No surface registry record for ${entry.id}`)
+    if (['signed-out', 'no-drawing'].includes(state)) return {
+      ...role('main', 'Leaf operator workspace'), trigger: 'navigate', url: `/try?surface=${record.id}`,
+    }
     // Sheets declares no studio tab. Its accessible page landmark is the
     // locator; the setup recipe follows the public /sheets route.
     return record.contract.chrome.tab ? { ...role('tab', record.label, role('tablist', 'Workspace profile')), trigger: 'click' }
@@ -251,10 +254,12 @@ export function stateRecipe(entry, state) {
     return { context, steps: [
       step('open-failed-drawing', { url: `/app?surface=${surface}&drawing=missing.invalid` }),
       step('failed-drawing-ribbon-tab', { name: actionTab(actionRecord(entry)) }),
+      ...(surface === 'solar' ? [step('require-solar-document')] : []),
     ] }
   }
   if (state === 'engine-busy') steps.push(step('prepare-engine-transport'))
   if (state === 'engine-not-parsed') steps.push(step('hold-engine-boot'))
+  if (state === 'solar-not-ready') steps.push(step('hold-solar-projection'))
   const empty = ['no-drawing', 'signed-out'].includes(state)
   steps.push(step(empty ? 'open-empty-workspace' : 'open-private-drawing', { surface, signedOut: state === 'signed-out' }))
   if (entry.kind === 'action') {

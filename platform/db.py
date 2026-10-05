@@ -50,6 +50,10 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "project_drawing_checkouts": {
+        "org_id", "project_id", "drawing_id", "holder", "holder_binding_id",
+        "acquired_at", "expires_at", "fence", "updated_at",
+    },
     "engine_change_cards": {
         "card_id", "operation_id", "created_at", "updated_at", "state",
         "incident_fingerprint", "feature_id", "title", "summary", "change",
@@ -672,6 +676,25 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "project_drawing_checkouts_pkey": _catalog_contract(
+        "project_drawing_checkouts", "PRIMARY KEY (org_id, project_id, drawing_id)"),
+    "project_drawing_checkouts_artifact_fk": _catalog_contract(
+        "project_drawing_checkouts", "FOREIGN KEY (drawing_id, project_id, org_id)",
+        "REFERENCES drawing_artifacts(drawing_id, project_id, org_id)", "ON DELETE CASCADE"),
+    "project_drawing_checkouts_binding_fk": _catalog_contract(
+        "project_drawing_checkouts", "FOREIGN KEY (org_id, holder_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_drawing_checkouts_fence_check": _catalog_contract(
+        "project_drawing_checkouts", "CHECK", "fence >= 0"),
+    "project_drawing_checkouts_holder_check": _catalog_contract(
+        "project_drawing_checkouts", "holder IS NULL", "char_length(btrim(holder)) >= 1",
+        "char_length(btrim(holder)) <= 200", "holder <> 'anonymous:unnamed-writer'"),
+    "project_drawing_checkouts_state_check": _catalog_contract(
+        "project_drawing_checkouts", "holder IS NULL", "holder_binding_id IS NULL",
+        "acquired_at IS NULL", "expires_at IS NULL", "holder IS NOT NULL",
+        "holder_binding_id IS NOT NULL", "acquired_at IS NOT NULL", "expires_at IS NOT NULL",
+        "isfinite(acquired_at)", "isfinite(expires_at)", "expires_at > acquired_at",
+        "expires_at <= (acquired_at + '24:00:00'::interval)", "fence > 0"),
     "engine_change_cards_pkey": _catalog_contract(
         "engine_change_cards", "PRIMARY KEY (card_id)"),
     "engine_change_cards_operation_id_key": _catalog_contract(
@@ -850,6 +873,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "project_drawing_checkouts_guard": _catalog_contract(
+        "project_drawing_checkouts", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION guard_project_drawing_checkout()"),
     "engine_change_cards_guard": _catalog_contract(
         "engine_change_cards", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION guard_engine_change_card()"),

@@ -49,6 +49,9 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "server-sip-r1-context",
+    "server-sip-r1-routes",
+    "platform-sip-r1-checkout",
     "auth0-action-drift-check",
     "build-platform-images-workflow",
     "da-client-credentials",
@@ -643,7 +646,8 @@
     "web-vitest",
     "web-walk-unit",
     "web-workbench-id-contract",
-    "server-w22c2-block-panels"
+    "server-w22c2-block-panels",
+    "server-customization-revision-evolve"
   ],
   "unresolved_mandatory": [],
   "mandatory_justification": "L4 web-demo mandatory table expanded against build_suites; every other declaration remains mandatory because no traced classification has been admitted. Workflow, web build and license checks also remain unconditional in ci.sh.",

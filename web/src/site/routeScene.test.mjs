@@ -5,6 +5,14 @@ import { describe, it } from 'node:test'
 import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './routeScene.js'
 
 describe('site route scenes', () => {
+  it('retains application paths after drawing selection is removed', () => {
+    for (const path of ['/app', '/app/project', '/ty', '/ty/project']) {
+      assert.equal(sceneForPath(path), 'app')
+    }
+    assert.equal(sceneForPath('/'), 'site')
+    assert.equal(sceneForPath('/try'), 'tool')
+    assert.equal(sceneForPath('/app/leaf-platform'), 'leaf-platform')
+  })
   it('reserves only the exact palette path for the host bridge', () => {
     assert.equal(sceneForPath('/app/leaf-platform'), 'leaf-platform')
     assert.equal(sceneForPath('/app/leaf-platform/'), 'leaf-platform')

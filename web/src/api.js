@@ -1801,6 +1801,55 @@ export async function stageAuthorTool(mock, description, targetToolName = null, 
 
 // Request publication or resume an existing request. The server owns approval
 // policy, durable continuation, and the exact receipt used for publication.
+async function toolManagementPost(mock, path, payload) {
+  if (mock === true) throw new Error('Tool management is unavailable in demo mode.')
+  const res = await apiFetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+    body: JSON.stringify(payload),
+  }, path)
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw customizationError('POST', path, res.status, body)
+  return body
+}
+
+const managementString = (value) => typeof value === 'string' && value.trim().length > 0
+
+export async function getToolRemovalAuthority(mock, toolName) {
+  const body = await toolManagementPost(mock, '/api/author/removals/authority', { tool_name: toolName })
+  const digest = body?.effective_catalog_digest
+  if (body?.contract !== 'leaf.customization-removal-authority.v1' || body?.tool_name !== toolName
+    || typeof digest !== 'string' || digest.length !== 64 || /[^a-f0-9]/.test(digest)
+    || body?.target_row_count !== 1 || body?.target_provenance !== 'tenant_repo'
+    || body?.removal_authorized !== true) {
+    throw new Error('The tool removal authority could not be verified.')
+  }
+  return body
+}
+
+export async function stageToolRemoval(mock, { toolName, catalogDigest, idempotencyKey }) {
+  const body = await toolManagementPost(mock, '/api/author/removals', {
+    tool_name: toolName, expected_catalog_digest: catalogDigest, idempotency_key: idempotencyKey,
+  })
+  if (body?.receipt?.state !== 'staged' || !managementString(body?.receipt?.change_set_id)
+    || !managementString(body?.predecessor_change_set_id)
+    || body.predecessor_change_set_id === body.receipt.change_set_id) {
+    throw new Error('The tool removal receipt could not be verified.')
+  }
+  return body
+}
+
+export async function restoreToolCatalog(mock, { changeSetId, idempotencyKey }) {
+  const body = await toolManagementPost(mock, '/api/author/rollback', {
+    change_set_id: changeSetId, idempotency_key: idempotencyKey,
+  })
+  if (body?.change_set_id !== changeSetId || !managementString(body?.catalog_commit)
+    || !managementString(body?.catalog_digest)) {
+    throw new Error('The catalog restore receipt could not be verified.')
+  }
+  return body
+}
+
 export async function publishStagedAuthor(mock, staged) {
   if (!staged || !staged.receipt) throw new Error('A staged tool is required before publishing.')
   if (mock) {

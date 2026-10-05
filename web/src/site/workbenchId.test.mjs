@@ -5,9 +5,10 @@ import {
   WORKBENCH_ID_KEY,
   liveDrawingId,
   rememberLiveDrawingId,
+  forgetLiveDrawingId,
 } from './workbenchId.js'
 
-function scopeWith(initial, { throwOnGet = false, throwOnSet = false } = {}) {
+function scopeWith(initial, { throwOnGet = false, throwOnSet = false, throwOnRemove = false } = {}) {
   const store = new Map(Object.entries(initial ?? {}))
   return {
     crypto: { randomUUID: () => '00000000-1111-2222-3333-444444444444' },
@@ -22,12 +23,25 @@ function scopeWith(initial, { throwOnGet = false, throwOnSet = false } = {}) {
         if (throwOnSet) throw new Error('quota exceeded')
         store.set(key, value)
       },
+      removeItem(key) {
+        if (throwOnRemove) throw new Error('storage disabled')
+        store.delete(key)
+      },
     },
     _store: store,
   }
 }
 
 describe('live workbench drawing id', () => {
+  it('forgets only the drawing slot and reports unavailable removal', () => {
+    const scope = scopeWith({ [WORKBENCH_ID_KEY]: 'u-upload', other: 'kept' })
+    assert.equal(forgetLiveDrawingId(scope), true)
+    assert.equal(liveDrawingId(scope), null)
+    assert.equal(scope._store.get('other'), 'kept')
+    assert.equal(forgetLiveDrawingId(scope), true)
+    assert.equal(forgetLiveDrawingId({}), false)
+    assert.equal(forgetLiveDrawingId(scopeWith({}, { throwOnRemove: true })), false)
+  })
   it('uses a seeded acceptance id exactly as given', () => {
     // The exact shape the protected staging acceptance driver seeds.
     const seeded = 'acceptance-authored-accept-20260101-r1-a'

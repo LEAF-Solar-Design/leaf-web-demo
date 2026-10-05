@@ -73,6 +73,12 @@ export function GeometryRows({ geometry }) {
   )
 }
 
+// The drawing's display name, as the document tab and footer show it; the
+// engine document id is only a fallback when no drawing is shown.
+export function drawingPropertyName(displayName, documentId) {
+  return displayName || documentId || ''
+}
+
 // The document's own facts (W4e round 2): the reference's pane is dense
 // label | field rows from top to bottom, and ours read as an unfinished panel
 // while nothing was selected. Client-derived truth only: the counts the

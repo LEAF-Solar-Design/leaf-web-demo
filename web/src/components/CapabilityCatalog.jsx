@@ -1,4 +1,5 @@
 import ToolsPanel from './ToolsPanel.jsx'
+import { ToolHistoryProvider } from './ToolHistory.jsx'
 
 export default function CapabilityCatalog({
   catalog,
@@ -14,6 +15,7 @@ export default function CapabilityCatalog({
   onRequestRun,
   onOpenTool,
   onReviseTool,
+  onCatalogChanged,
   writeLocked,
   writeLockNote = null,
   writeEntitled,
@@ -27,6 +29,7 @@ export default function CapabilityCatalog({
   )
 
   return (
+    <ToolHistoryProvider enabled={catalog?.source === 'endpoint' || catalog?.source === 'flat-fallback'}>
     <div className="capability-catalog">
       <div className="catalog-summary">
         {families.length} {families.length === 1 ? 'family' : 'families'} · {capabilityCount} capabilities
@@ -41,6 +44,7 @@ export default function CapabilityCatalog({
           <p className="panel-sub">Showing the flat registered tool list.</p>
           <ToolsPanel
             tools={tools}
+            onCatalogChanged={onCatalogChanged}
             error={toolsError}
             onRetry={onRetryTools}
             running={running}
@@ -85,6 +89,7 @@ export default function CapabilityCatalog({
               <div className="section-body">
                 <ToolsPanel
                   tools={family.capabilities || []}
+                  onCatalogChanged={onCatalogChanged}
                   subtitle={family.description}
                   error={toolsError}
                   onRetry={onRetryTools}
@@ -107,5 +112,6 @@ export default function CapabilityCatalog({
         )
       })}
     </div>
+    </ToolHistoryProvider>
   )
 }
