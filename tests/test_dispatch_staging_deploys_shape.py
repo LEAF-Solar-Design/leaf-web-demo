@@ -123,6 +123,51 @@ def test_relay_group_predicate_is_the_dispatch_job_gate_verbatim():
     assert wf["concurrency"]["group"] == EXPECTED_GROUP
 
 
+def check_terminal_receipt_uses_frozen_contract(text: str) -> None:
+    """Later contract drift cannot veto receipts for terminal child results."""
+    steps = _load(text)["jobs"]["dispatch"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "deploy")
+    watch_loop = (
+        'for SERVICE in $SERVICES; do\n'
+        '  watch_service "$SERVICE"\n'
+        'done\n'
+    )
+    assert script.count(watch_loop) == 1, "terminal child-result loop must be explicit"
+    before_receipt, receipt = script.split(watch_loop)
+    # Keep the live contract guard immediately before digest-aware dispatch.
+    assert (
+        'if [ "$SUPPLY_SCHEMA" = "leaf.staging-supply-set.v3" ]; then\n'
+        '    require_contract_still_latest\n'
+        '    dispatch_args+=('
+    ) in before_receipt
+    assert "require_contract_still_latest" not in receipt, (
+        "contract drift after terminal child results cannot veto receipt generation"
+    )
+    assert 'schema: "leaf.staging-converged.v2"' in receipt
+    assert "surface-results/web.json surface-results/app.json > staging-converged.json" in receipt
+    assert 'echo "converged=true" >> "$GITHUB_OUTPUT"' in receipt
+
+
+def test_terminal_receipt_survives_contract_drift_after_child_success():
+    check_terminal_receipt_uses_frozen_contract(_relay_text())
+
+
+@pytest.mark.parametrize("regression", ["post-success-check", "missing-dispatch-check"])
+def test_terminal_receipt_contract_boundary_regressions_are_caught(regression):
+    if regression == "post-success-check":
+        mutant = _mutate(
+            "            # settled child deployments. Contract freshness gates dispatch,\n"
+            "            # not publication of the frozen results already verified above.\n",
+            "            # settled child deployments. Contract freshness gates dispatch,\n"
+            "            # not publication of the frozen results already verified above.\n"
+            "            require_contract_still_latest\n",
+        )
+    else:
+        mutant = _mutate("              require_contract_still_latest\n", "")
+    with pytest.raises(AssertionError):
+        check_terminal_receipt_uses_frozen_contract(mutant)
+
+
 def test_relay_fleet_executor_is_gated_and_isolated():
     wf = _load(_relay_text())
     job = wf["jobs"]["dispatch"]
