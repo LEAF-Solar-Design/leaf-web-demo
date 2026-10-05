@@ -3492,7 +3492,8 @@ export default function App() {
     const inserts = Array.isArray(drawingIntake.inserts) ? drawingIntake.inserts.length : 0
     const faces = Array.isArray(drawingIntake.faces3d) ? drawingIntake.faces3d.length : 0
     return {
-      name: drawingPropertyName(shown && drawingName ? `${projectName}.dwg` : '', activeIntake?.documentId),
+      // Same gate and value as the document tab and the footer.
+      name: drawingPropertyName(shown ? `${projectName}.dwg` : '', activeIntake?.documentId),
       entities: polylines + inserts + faces,
       polylines,
       inserts,
