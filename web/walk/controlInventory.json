@@ -507,6 +507,151 @@
         "desktop"
       ]
     }
+    ,
+    {
+      "feature_id": "control:open-dxf",
+      "scope": "toolbar:\"Quick access\"",
+      "role": "button",
+      "name": "Open DXF",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:save-version",
+      "scope": "toolbar:\"Quick access\"",
+      "role": "button",
+      "name": "Save version",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:undo-edit",
+      "scope": "toolbar:\"Quick access\"",
+      "role": "button",
+      "name": "Undo edit",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:redo-edit",
+      "scope": "toolbar:\"Quick access\"",
+      "role": "button",
+      "name": "Redo edit",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:more-panels",
+      "scope": "toolbar:\"Drafting tools\"",
+      "role": "button",
+      "name": "More panels",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:open-dxf-browser",
+      "scope": "document",
+      "role": "button",
+      "name": "Open a DXF in the browser engine",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:objects",
+      "scope": "document",
+      "role": "button",
+      "name": "Objects",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:objects",
+      "scope": "document",
+      "role": "text",
+      "name": "Objects",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    }
+    ,
+    {
+      "feature_id": "control:ribbon-script",
+      "scope": "toolbar:\"Drafting tools\" > group:\"Script\"",
+      "role": "textbox",
+      "name": "ribbon script",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:choose-script",
+      "scope": "toolbar:\"Drafting tools\" > group:\"Script\"",
+      "role": "button",
+      "name": "Choose script",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    },
+    {
+      "feature_id": "control:run-script",
+      "scope": "toolbar:\"Drafting tools\" > group:\"Script\"",
+      "role": "button",
+      "name": "Run script",
+      "states": [
+        "ready",
+        "failed-load"
+      ],
+      "viewports": [
+        "desktop"
+      ]
+    }
   ],
   "baseline_unmapped": [
     {

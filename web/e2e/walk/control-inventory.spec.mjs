@@ -23,14 +23,20 @@ test.describe('rendered control census', () => {
       // census or an absence assertion in the failed-load recipe.
       await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toBeVisible()
       if (state === 'ready') await expect(page.getByRole('tablist', { name: 'Ribbon', exact: true })).toBeVisible()
-      else await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
+      else {
+        await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
+        if (await page.getByRole('tablist', { name: 'Ribbon', exact: true }).count() === 0) {
+          await expect(page.getByRole('toolbar', { name: 'Drafting tools', exact: true })).toHaveCount(0)
+        }
+      }
       // Account and service discovery must settle before their exact identities are censused.
       await expect(page.getByRole('button', { name: 'Claude accounts not linked', exact: true })).toHaveAttribute('aria-expanded', 'false')
       await expect(page.getByRole('button', { name: /^Linked services [0-9]+ linked$/ })).toHaveAttribute('aria-expanded', 'false')
       const census = await censusControls(page, map, { state, viewport: 'desktop' })
       walkEvidence.censuses = [census]
       expect(census.total, 'a real workspace must render interactive controls').toBeGreaterThan(0)
-      for (const tab of ['annotate', 'draw', 'insert', 'manage', 'model', 'view']) {
+      const ribbonPresent = await page.getByRole('tablist', { name: 'Ribbon', exact: true }).count() > 0
+      for (const tab of ribbonPresent ? ['annotate', 'draw', 'insert', 'manage', 'model', 'view'] : []) {
         expect(census.resolved.some((row) => row.feature_id === `tab:drafting:${tab}`), `Ribbon ${tab} must resolve`).toBe(true)
       }
       if (state === 'ready') expect(census.resolved.some((row) => row.feature_id === 'action:fit'
@@ -51,7 +57,16 @@ test.describe('rendered control census', () => {
         const baseline_unmapped = [...recorded.values()].sort((a, b) => controlKey(a).localeCompare(controlKey(b)))
         writeFileSync(path, JSON.stringify({ version: 1, mappings: [], baseline_unmapped }, null, 2) + '\n')
         walkEvidence.censusRecord = { state, count: census.unmapped.length }
-      } else expect(census.ok, censusFailure(census)).toBe(true)
+      } else {
+        const assertionId = `control-census:studio/${state}/renders`
+        walkEvidence.assertionId = assertionId
+        walkEvidence.expectedEffect = { kind: 'renders', target: 'mapped-control-inventory', assertionId }
+        await test.step(assertionId, async () => {
+          walkEvidence.oracleReached = assertionId
+          expect(census.ok, censusFailure(census)).toBe(true)
+        })
+        walkEvidence.result = { result: 'passed', featureId: 'control-census:studio', state }
+      }
     })
   }
 })

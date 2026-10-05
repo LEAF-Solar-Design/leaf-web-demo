@@ -334,7 +334,7 @@ function validateControls(controls) {
           || (context.toolbar !== undefined && !nonempty(context.toolbar))
           || (context.complementary !== undefined && context.complementary !== 'Properties')
           || (context.document !== undefined && context.document !== true)
-          || (context.group !== undefined && (context.toolbar !== 'Drafting tools' || context.group !== 'Layers'))
+          || (context.group !== undefined && (context.toolbar !== 'Drafting tools' || !['Layers', 'Script'].includes(context.group)))
           || !nonempty(context.name)
           || Object.keys(context).some((key) => !contextFields.includes(key))
           || ['failedLoad', 'pressed', 'fullscreen', 'expanded', 'visible'].some((key) => context[key] !== undefined && typeof context[key] !== 'boolean')
@@ -354,12 +354,24 @@ function validateControls(controls) {
             || context.namePolicy !== (record.source_id === 'linked-services' ? 'count' : undefined)) {
           throw new Error('featureMap: invalid baseline-three control contract ' + record.id + '/' + state)
         }
+      } else if (['ribbon-script', 'choose-script', 'run-script'].includes(record.source_id)) {
+        const input = record.source_id === 'ribbon-script'
+        if (context.toolbar !== 'Drafting tools' || context.group !== 'Script'
+            || (context.role || 'button') !== (input ? 'textbox' : 'button')
+            || (context.interaction || 'click') !== (input ? 'type' : 'click')
+            || context.inputValue !== (input ? 'line 0,0 10,10' : undefined)
+            || context.failedLoad !== (state === 'failed-load')) {
+          throw new Error('featureMap: invalid Script control contract ' + record.id + '/' + state)
+        }
       } else if (['role', 'interaction', 'inputValue'].some((field) => context[field] !== undefined)
           || context.name === 'Linked services {n} linked') {
         throw new Error('featureMap: unsupported control interaction ' + record.id + '/' + state)
       }
       if (effect.kind === 'disabled_with_reason') {
-        if (!nonempty(context.tooltip) || (context.description !== undefined
+        const scriptLock = ['ribbon-script', 'choose-script'].includes(record.source_id) && state === 'running'
+        if (scriptLock ? effect.reason !== 'a script is running' || context.name !== record.title
+          || context.tooltip !== (record.source_id === 'choose-script' ? 'A script is running; wait before choosing another script.' : undefined)
+          : !nonempty(context.tooltip) || (context.description !== undefined
           ? context.description !== effect.reason || context.name !== record.title
           : context.name !== record.title + ' (unavailable: ' + effect.reason + ')')) {
           throw new Error('featureMap: control disabled evidence mismatch ' + record.id + '/' + state)
@@ -384,7 +396,7 @@ function validateControls(controls) {
         const initial = effect.target === 'drafting-grid' || /^engine-mode:(ortho|osnap)$/.test(effect.target) ? context.pressed
           : effect.target === 'document-fullscreen' ? context.fullscreen
             : /^properties-(drawing|layers|plan|selection)-section$/.test(effect.target)
-              || effect.target === 'drawing-overview-expanded' ? context.expanded
+              || ['drawing-overview-expanded', 'dxf-import-expanded', 'ribbon-overflow-expanded', 'drawing-objects-expanded'].includes(effect.target) ? context.expanded
               : /^layer-(panels|walk)-visible$/.test(effect.target) ? context.visible : undefined
         if (typeof initial !== 'boolean' || typeof effect.value !== 'boolean' || effect.value === initial) {
           throw new Error('featureMap: control toggle needs opposite setup and effect states ' + record.id + '/' + state)
