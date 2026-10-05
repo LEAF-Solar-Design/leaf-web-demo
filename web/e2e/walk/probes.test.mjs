@@ -913,6 +913,43 @@ test('nav uses the visible desktop rail disclosure and its phone toggle', () => 
   }
 })
 
+test('Jobs uses desktop spine controls and preserves the phone drawer locator', () => {
+  const entry = map.entries.find((entry) => entry.id === 'drawer:jobs')
+  for (const state of ['closed', 'open']) {
+    const probe = resolveProbe(entry, state)
+    if (state === 'closed') {
+      assert.match('Expand the job monitor (12 live)', probe.locator.name)
+      assert.doesNotMatch('Expand the job monitor (unknown live)', probe.locator.name)
+    } else assert.equal(probe.locator.name, 'Collapse the job monitor to a spine')
+    assert.equal(probe.locator.scope, undefined)
+    assert.equal(probe.locator.phone.name, 'Jobs')
+    assert.equal(probe.locator.phone.scope.name, 'Workspace panels')
+    assert.deepEqual(probe.setup.steps.at(-1), { kind: 'job-rail-state', name: 'Jobs', open: state === 'open' })
+  }
+})
+
+test('Explode selects a known multi-segment polyline only in its ready recipe', () => {
+  const entry = map.entries.find((entry) => entry.id === 'action:modify-explode')
+  assert.equal(resolveProbe(entry, 'ready').setup.steps.find((step) => step.kind === 'select-entity').type, 'LWPOLYLINE')
+  const refusal = resolveProbe(entry, 'placed-dimension')
+  assert.equal(refusal.setup.steps.find((step) => step.kind === 'select-entity').type, 'DIMENSION')
+  // Since #1848 the product disables these with a reason on a placed DIMENSION.
+  assert.equal(refusal.assertion.kind, 'disabled_with_reason')
+  const dxf = injectWalkEntities('0\nENDSEC\n0\nEOF')
+  assert.match(dxf, /LWPOLYLINE\n5\nA200/)
+  assert.deepEqual(FIXTURE_PICK_POINTS.LWPOLYLINE, [[160, 200]])
+  for (const id of ['action:clipboard-copy-clip', 'action:clipboard-cut-clip']) {
+    assert.equal(resolveProbe(map.entries.find((entry) => entry.id === id), 'placed-dimension').assertion.kind, 'disabled_with_reason')
+  }
+})
+
+test('zoom-out establishes an unclipped baseline without changing the Fit recipe', () => {
+  const probe = resolveProbe(map.entries.find((entry) => entry.id === 'action:zoom-out'), 'ready')
+  assert.equal(probe.setup.steps.at(-1).kind, 'zoom-inside-extents')
+  const fit = resolveProbe(map.entries.find((entry) => entry.id === 'action:fit'), 'ready')
+  assert.equal(fit.setup.steps.at(-1).kind, 'zoom-before-fit')
+})
+
 test('the feature map includes Fit no-drawing and keeps Fit ready', () => {
   const entry = map.entries.find((entry) => entry.id === 'action:fit')
   assert.ok(entry)

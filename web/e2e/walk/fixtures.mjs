@@ -20,7 +20,8 @@ export function injectWalkEntities(source) {
   // Walk selection targets stay outside the panel polygon in the pinned corpus fixture.
   const lines = [190, 470].map((y, index) => `0\nLINE\n5\nA10${index}\n8\nWalk\n10\n111\n20\n${y}\n11\n333\n21\n${y}\n`).join('')
   const dimension = '0\nDIMENSION\n5\nD100\n8\nWalk\n100\nAcDbEntity\n100\nAcDbDimension\n70\n32\n3\nStandard\n10\n333\n20\n160\n30\n0\n11\n222\n21\n160\n31\n0\n100\nAcDbAlignedDimension\n13\n111\n23\n175\n33\n0\n14\n333\n24\n175\n34\n0\n100\nAcDbRotatedDimension\n50\n0\n'
-  return source.replace('0\nENDSEC\n0\nEOF', `${lines}${dimension}0\nENDSEC\n0\nEOF`)
+  const polyline = '0\nLWPOLYLINE\n5\nA200\n8\nWalk\n100\nAcDbEntity\n100\nAcDbPolyline\n90\n3\n70\n0\n10\n111\n20\n200\n10\n222\n20\n200\n10\n222\n20\n210\n'
+  return source.replace('0\nENDSEC\n0\nEOF', `${lines}${dimension}${polyline}0\nENDSEC\n0\nEOF`)
 }
 
 export async function holdJobRoutes(page, pattern = '**/api/jobs/**') {
@@ -268,6 +269,19 @@ async function viewportBounds(page) {
 }
 const viewButton = (page, name) => page.getByRole('toolbar', { name: 'View', exact: true })
   .getByRole('button', { name, exact: true })
+export async function establishZoomBaseline(page, bounds = viewportBounds) {
+  await bounds(page)
+  const outline = page.getByRole('button', { name: 'Drawing overview', exact: true }).locator('.cad-overview-outline')
+  const map = await outline.evaluate((element) => ({ width: Number(element.getAttribute('width')), height: Number(element.getAttribute('height')) }))
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const viewport = await bounds(page)
+    if (viewport.width > 0 && viewport.height > 0 && viewport.width < map.width * 0.4 && viewport.height < map.height * 0.4) {
+      return { map, viewport, unsaturated: true }
+    }
+    await viewButton(page, 'Zoom in').click()
+  }
+  throw new Error('Zoom-out setup could not establish an unsaturated overview viewport')
+}
 const layerButtons = (page) => page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
   .getByRole('group', { name: 'Layers', exact: true }).getByRole('button')
 const propertiesPane = (page) => page.getByRole('complementary', { name: 'Properties', exact: true })
@@ -399,7 +413,7 @@ async function createLine(probe, runtime) {
   await page.keyboard.press('Escape')
 }
 export const FIXTURE_PICK_POINTS = Object.freeze({
-  LINE: [[222, 190], [222, 470]], INSERT: [[11.5, 20]], DIMENSION: [[222, 160]],
+  LINE: [[222, 190], [222, 470]], INSERT: [[11.5, 20]], DIMENSION: [[222, 160]], LWPOLYLINE: [[160, 200]],
 })
 
 export function exposedCalibrationPoints(element) {
@@ -473,6 +487,14 @@ async function setDrawer(page, name, open) {
   if ((await button.getAttribute('aria-expanded') === 'true') !== open) await button.click()
   await expect(button).toHaveAttribute('aria-expanded', String(open))
 }
+export async function setJobRail(page, open, phone = false, assertions = expect) {
+  if (phone) { await setDrawer(page, 'Jobs', open); return }
+  const expand = page.getByRole('button', { name: /^Expand the job monitor \([0-9]+ live\)$/ })
+  const collapse = page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })
+  if (open ? await expand.isVisible() : await collapse.isVisible()) await (open ? expand : collapse).click()
+  await assertions(open ? collapse : expand).toBeVisible()
+  await assertions(page.locator('aside.rail .rail-ledger')).toHaveCount(open ? 1 : 0)
+}
 async function setToolRail(page, open, phone) {
   const expand = page.getByRole('button', { name: 'Tool rail', exact: true })
   const collapse = page.getByRole('button', { name: 'Collapse the tool rail to a spine', exact: true })
@@ -538,6 +560,160 @@ export async function readWalkBuildFlags(probe, runtime) {
   await facts.buildFlagsFetch
   await workerCatalog(facts, runtime.page.request)
   runtime.evidence.buildFlags = { ...facts.buildFlags }
+}
+
+// A passive tap: native worker input and delivery are forwarded unchanged.
+// Full reparsed entity records avoid accepting a count-only geometry oracle.
+export function installGeometryObserver() {
+  const NativeWorker = globalThis.Worker
+  const observations = { geometry: null, dispatches: [] }
+  globalThis.__walkGeometry = observations
+  globalThis.Worker = class extends NativeWorker {
+    constructor(url, options) {
+      super(url, options)
+      this.walkGeometryEngine = String(url).includes('worker-browser')
+      if (this.walkGeometryEngine) super.addEventListener('message', ({ data }) => {
+        if (['documentLoaded', 'editApplied'].includes(data?.type) && Array.isArray(data.entities)) {
+          observations.geometry = structuredClone({ documentId: data.documentId, entities: data.entities,
+            blocks: data.blocks, groups: data.groups, linetypes: data.linetypes, dimstyles: data.dimstyles })
+        }
+      })
+    }
+    postMessage(message, ...rest) {
+      if (this.walkGeometryEngine) observations.dispatches.push({ type: message?.type, op: message?.op })
+      return super.postMessage(message, ...rest)
+    }
+  }
+}
+
+export async function observedGeometry(page) {
+  const geometry = await page.evaluate(() => globalThis.__walkGeometry?.geometry)
+  expect(geometry?.entities?.length, 'a real engine parse must precede geometry assertions').toBeGreaterThan(0)
+  return geometry
+}
+
+const pasteButton = (page) => page.getByRole('group', { name: 'Clipboard', exact: true, includeHidden: true })
+  .getByRole('button', { name: /^paste(?: \(unavailable: .+\))?$/, includeHidden: true })
+
+export async function captureEngineRefusal(runtime) {
+  const { page } = runtime
+  const geometry = await observedGeometry(page)
+  const selection = await page.getByTestId('dock-properties').innerText()
+  const history = await page.getByRole('toolbar', { name: 'Quick access', exact: true }).getByRole('button', {
+    name: /^(?:Undo|Redo) edit(?: \(unavailable: .+\))?$/,
+  }).evaluateAll((buttons) => buttons.map((button) => ({ name: button.getAttribute('aria-label'),
+    title: button.getAttribute('title'), disabled: button.disabled })))
+  const clipboard = await pasteButton(page).evaluate((button) => ({ name: button.getAttribute('aria-label'),
+    title: button.getAttribute('title'), disabled: button.disabled }))
+  // Fresh isolated uploads start with an empty clipboard. Its disabled Paste
+  // refusal is the observable, exact null-record signal before and after.
+  expect(clipboard.disabled, 'refusal baseline needs an empty clipboard').toBe(true)
+  expect(clipboard.name).toContain('nothing on the clipboard yet')
+  const response = await page.request.get(`/api/drawings/${runtime.drawingId}/versions`)
+  expect(response.ok()).toBe(true)
+  return { geometry, selection, history, clipboard, versions: await response.json(),
+    dispatches: await page.evaluate(() => globalThis.__walkGeometry.dispatches) }
+}
+
+export async function assertEngineRefusal(probe, runtime, before, assertions = expect) {
+  const status = runtime.page.getByTestId('cad-edit-workbench').getByRole('status')
+  await assertions(status).toHaveText(probe.assertion.refusal)
+  const after = await captureEngineRefusal(runtime)
+  runtime.evidence.engineRefusal = { expected: probe.assertion.refusal, observed: await status.innerText(), before, after }
+  assertions(after).toEqual(before)
+}
+
+export function barNoRung(probe) {
+  return probe.kind === 'action' && probe.locator?.trigger === 'keyboard'
+    && probe.assertion.kind === 'disabled_with_reason' && probe.state === 'ready'
+    && ['action:bar-escape', 'action:bar-retry'].includes(probe.featureId)
+}
+
+async function barState(page) {
+  return page.evaluate(() => {
+    const visible = (selector) => [...document.querySelectorAll(selector)].filter((element) => element.getClientRects().length)
+      .map((element) => element.textContent.trim())
+    return { url: location.href, selection: visible('.cockpit-sel'), drawing: visible('.cad-edit-workbench-doc'),
+      surfaces: visible('.strip-running, .strip-failed, .cockpit-prompt, [role="dialog"], [role="listbox"]'),
+      viewport: [...document.querySelectorAll('[data-overview-viewport]')].map((element) => ['x', 'y', 'width', 'height'].map((key) => element.getAttribute(key))),
+      tabs: [...document.querySelectorAll('[role="tab"]')].map((element) => [element.textContent.trim(), element.getAttribute('aria-selected')]),
+      disclosure: [...document.querySelectorAll('[aria-expanded]')].map((element) => [element.getAttribute('aria-label'), element.getAttribute('aria-expanded')]) }
+  })
+}
+
+export async function captureBarNoRung(runtime) {
+  runtime.noRungDispatches = []
+  const observe = (request) => {
+    const path = new URL(request.url()).pathname
+    if (/\/api\/(?:run|route|capabilities|catalog|tools|session)(?:\/|$)/.test(path)
+      || (request.method() !== 'GET' && path.startsWith('/api/'))) runtime.noRungDispatches.push({ method: request.method(), path })
+  }
+  runtime.page.on('request', observe)
+  runtime.cleanup.push(async () => runtime.page.off('request', observe))
+  return { state: await barState(runtime.page), value: await runtime.page.getByRole('combobox', { name: 'Command bar', exact: true }).inputValue(),
+    engineDispatches: await runtime.page.evaluate(() => globalThis.__walkGeometry?.dispatches || []) }
+}
+
+export async function assertBarNoRung(probe, runtime, locator, before, assertions = expect) {
+  await assertions(locator).toBeEnabled()
+  await activate(probe, runtime, locator)
+  await runtime.page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  const after = await barState(runtime.page)
+  runtime.evidence.noRung = { expected: before.state, observed: after, dispatches: runtime.noRungDispatches }
+  assertions(after).toEqual(before.state)
+  assertions(runtime.noRungDispatches).toEqual([])
+  assertions(await runtime.page.evaluate(() => globalThis.__walkGeometry?.dispatches || [])).toEqual(before.engineDispatches)
+  await assertions(locator).toHaveValue(before.value)
+  await locator.fill('walk text entry remains usable')
+  await assertions(locator).toHaveValue('walk text entry remains usable')
+  await locator.fill(before.value)
+}
+
+export async function assertCopiedGeometry(probe, runtime, before, assertions = expect) {
+  assertions(await observedGeometry(runtime.page)).toEqual(before.geometry)
+  const { page } = runtime
+  await pasteButton(page).click()
+  await assertions(page.getByTestId('cockpit-prompt')).toHaveAccessibleName('PASTE command')
+  await page.getByLabel('ribbon x', { exact: true }).fill('400,100')
+  await page.getByTestId('cockpit-prompt-run').click()
+  await assertions.poll(() => engineCount(page)).toBe(before.count + 1)
+  const after = await observedGeometry(page)
+  const added = after.entities.filter((entity) => !before.geometry.entities.some((old) => String(old.id) === String(entity.id)))
+  assertions(added.map((entity) => ({ type: entity.type, layer: entity.layer, vertices: entity.vertices.map((point) => point.slice(0, 2)) }))).toEqual([
+    { type: 'LINE', layer: 'Walk', vertices: [[400, 100], [622, 100]] },
+  ])
+  assertions(after.entities.filter((entity) => before.geometry.entities.some((old) => String(old.id) === String(entity.id)))).toEqual(before.geometry.entities)
+  runtime.evidence.clipboardPaste = { base: [400, 100], added }
+}
+
+export function expectedVersionHead(probe, versions) {
+  const head = Number(versions.head)
+  const candidates = versions.versions.map((row) => Number(row.v)).filter((v) => probe.sourceId === 'undo' ? v < head : v > head)
+  if (!candidates.length) throw new Error(`No ${probe.sourceId} head exists in the captured version chain`)
+  return probe.sourceId === 'undo' ? Math.max(...candidates) : Math.min(...candidates)
+}
+
+export async function assertVersionTransition(probe, runtime, before, assertions = expect) {
+  const expected = expectedVersionHead(probe, before.versions)
+  let observed
+  await assertions.poll(async () => {
+    const response = await runtime.page.request.get(`/api/drawings/${runtime.drawingId}/versions`)
+    assertions(response.ok()).toBe(true)
+    observed = await response.json()
+    return Number(observed.head)
+  }).toBe(expected)
+  await assertions(runtime.page.locator('.cad-edit-workbench-doc')).toContainText(`${runtime.drawingId}-v${expected}.dxf`)
+  await assertions.poll(async () => (await observedGeometry(runtime.page)).documentId).toBe(`${runtime.drawingId}-v${expected}.dxf`)
+  const after = await observedGeometry(runtime.page)
+  assertions(after.entities).toEqual(before.geometry.entities)
+  assertions(await engineCount(runtime.page)).toBe(before.count)
+  runtime.evidence.versionTransition = { expected, observed: observed.head, documentId: after.documentId }
+}
+
+export function solarBrowserCatalogRequired(name) {
+  // These catalog records need the settings-form drawing-context fetch.
+  // Solve proposal is available without that flag and arms a run decision.
+  return ['solar-settings', 'solar-string-data', 'solar-autofill'].includes(name)
 }
 
 // A page-specific init script: the ordinary page fixture remains unchanged.
@@ -659,7 +835,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'navigate', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
   'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'fullscreen-state',
   'empty-view-history', 'previous-view-history', 'whole-drawing-view', 'engine-ready',
-  'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state',
+  'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
   'properties-state', 'properties-section-state', 'properties-close-state', 'layer-visible-state',
   'job-monitor-collapsed', 'overview-expanded-state', 'overview-pan-state', 'open-start',
   'open-history', 'slash-menu', 'open-route', 'catalog-tool', 'foreign-checkout', 'private-policy',
@@ -732,7 +908,6 @@ export function catalogSolarNeedsDrawing(probe) {
   return probe.kind === 'tool' && probe.sourceId?.startsWith('solar-')
     && probe.assertion.kind !== 'disabled_with_reason'
 }
-
 export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailability = true) {
   if (UI_UNREACHABLE_STATES.has(probe.state)) return VERSIONLESS_DRAWING_REASON
   const tool = workerFacts.catalog?.families.flatMap((family) => family.capabilities)
@@ -893,16 +1068,19 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       if (selected?.type !== 'INSERT') {
         source = injectWalkEntities(source)
       }
+      // Explicit bounds: these setup reads must not inherit the 15 s actionTimeout on a loaded host.
       const uploaded = await page.request.post('/api/drawings/upload', {
         multipart: { file: { name: 'walk.dxf', mimeType: 'application/dxf', buffer: Buffer.from(source) } },
+        timeout: 60_000,
       })
       expect(uploaded.status()).toBe(202)
       const receipt = await uploaded.json()
       expect(receipt.drawing_id).toBeTruthy()
       runtime.drawingId = receipt.drawing_id
       await expect.poll(async () => {
-        const response = await page.request.get(`/api/drawings/${receipt.drawing_id}/upload-status`)
-        expect(response.ok()).toBe(true)
+        const response = await page.request.get(`/api/drawings/${receipt.drawing_id}/upload-status`, { timeout: 30_000 })
+        // A transient non-OK read is still pending; only a 'failed' status fails the setup.
+        if (!response.ok()) return `http-${response.status()}`
         const status = await response.json()
         expect(status.status, JSON.stringify(status)).not.toBe('failed')
         return status.status
@@ -990,6 +1168,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         .getByRole('button', { name: ACTIONS.find((action) => action.op === 'copyClip').label, exact: true }).click()
       return
     case 'drawer-state': await setDrawer(page, recipe.name, recipe.open); return
+    case 'job-rail-state': await setJobRail(page, recipe.open, runtime.testInfo.project.name === 'phone', assertions); return
     case 'tool-rail-state': await setToolRail(page, recipe.open, runtime.testInfo.project.name === 'phone'); return
     case 'properties-state': {
       const dock = page.getByRole('complementary', { name: 'Properties', exact: true })
@@ -1108,7 +1287,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       // Unplaced catalog families live on Manage, not the engine's Draw tab.
       const tab = toolPlacementTab(tool) || 'manage'
       await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
-      if (probe.state === 'ready' && recipe.name.startsWith('solar-') && !toolAvailabilityEvidence(probe, facts)) {
+      if (probe.state === 'ready' && solarBrowserCatalogRequired(recipe.name) && !toolAvailabilityEvidence(probe, facts)) {
         // The API-side catalog is not proof that the browser seated the same
         // drawing context. Observe its own request before accepting readiness.
         const scopedCatalog = page.waitForResponse((response) => {
@@ -1244,6 +1423,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       evidence.fitViewport = { home: runtime.homeViewport, zoomed: await viewportBounds(page) }
       return
     }
+    case 'zoom-inside-extents': {
+      evidence.zoomBaseline = await establishZoomBaseline(page)
+      return
+    }
     case 'require-engine-state':
       if (!await page.getByTestId('cad-edit-workbench').count()) await unsupported(probe, runtime, 'No browser editing engine is mounted to test its boot state')
       if (await page.getByTestId('cad-edit-entity-count').count()) await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('0')
@@ -1282,9 +1465,16 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
 
 async function captureBefore(probe, runtime) {
   const { page } = runtime
+  if (typeof barNoRung === 'function' && barNoRung(probe)) {
+    if (await page.getByTestId('cad-edit-workbench').count()) await engineReady(probe, runtime)
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    return captureBarNoRung(runtime)
+  }
   // Refusal probes do not activate the action or need its enabled-state baseline.
   if (probe.assertion.kind === 'disabled_with_reason' && probe.kind === 'action') return {}
   const target = probe.assertion.target || ''
+  if (target === 'engine-refusal') return captureEngineRefusal(runtime)
+  if (target === 'browser-clipboard' || target === 'engine:explode') return { count: await engineCount(page), geometry: await observedGeometry(page) }
   if (/^properties-(drawing|layers|plan|selection)-section$/.test(target)) {
     return { expanded: await control(page, probe.locator).getAttribute('aria-expanded') === 'true' }
   }
@@ -1309,7 +1499,11 @@ async function captureBefore(probe, runtime) {
   if (target.startsWith('drawing-version-')) {
     const response = await page.request.get(`/api/drawings/${runtime.drawingId}/versions`)
     expect(response.ok()).toBe(true)
-    return { versions: await response.json(), count: await engineCount(page).catch(() => null) }
+    await engineReady(probe, runtime)
+    const versions = await response.json()
+    await expect(page.locator('.cad-edit-workbench-doc')).toContainText(`${runtime.drawingId}-v${versions.head}.dxf`)
+    await expect.poll(async () => (await observedGeometry(page)).documentId).toBe(`${runtime.drawingId}-v${versions.head}.dxf`)
+    return { versions, count: await engineCount(page), geometry: await observedGeometry(page) }
   }
   return {}
 }
@@ -1358,6 +1552,8 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (typeof barNoRung === 'function' && barNoRung(probe)) { await assertBarNoRung(probe, runtime, locator, before, assertions); return }
+  if (target === 'engine-refusal') { await assertEngineRefusal(probe, runtime, before, assertions); return }
   if (probe.kind === 'control' && baselineThreePanels[target]) {
     const spec = baselineThreePanels[target]
     const panel = namedPanel(page, spec)
@@ -1578,8 +1774,18 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   if (target === 'keyboard-shortcut-sheet') { await expect(page.getByRole('dialog', { name: 'Keyboard shortcuts', exact: true })).toBeVisible(); return }
   if (target === 'pending-property-change') { await expect(page.getByTestId('property-apply-strip')).toBeVisible(); return }
   if (target === 'catalog-run-decision') {
+    if (probe.sourceId === 'solar-solve-proposal') {
+      const record = runtime.evidence.catalog?.record
+      expect(record?.name).toBe(probe.sourceId)
+      expect(Object.fromEntries(AVAILABILITY_FIELDS.map((field) => [field, record?.availability?.[field]]))).toEqual({
+        entitled: true, engine_ready: true, input_ready: true, implemented: true,
+      })
+    }
     await expect(page.getByRole('button', { name: `Run ${effect.tool}`, exact: true })).toBeVisible()
-    expect(runtime.evidence.responses.filter((response) => response.method === 'POST' && new URL(response.url).pathname === '/api/run')).toHaveLength(0)
+    if (probe.sourceId === 'solar-solve-proposal') {
+      expect(runtime.catalogRunRequests || []).toEqual([])
+      expect(runtime.evidence.responses.filter((response) => response.method === 'POST' && new URL(response.url).pathname === '/api/run').length).toBe(0)
+    }
     return
   }
   if (target === 'author-panel') { await expect(page.getByRole('textbox', { name: /describe|build|tool/i }).first()).toBeVisible(); return }
@@ -1599,6 +1805,12 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target.startsWith('drawer:')) {
+    if (target === 'drawer:jobs' && runtime.testInfo.project.name !== 'phone') {
+      const open = effect.value !== 'none'
+      await expect(page.getByRole('button', { name: open ? 'Collapse the job monitor to a spine' : /^Expand the job monitor \([0-9]+ live\)$/ })).toBeVisible()
+      await expect(page.locator('aside.rail .rail-ledger')).toHaveCount(open ? 1 : 0)
+      return
+    }
     if (target === 'drawer:nav') {
       const open = effect.value !== 'none'
       await expect(page.locator('aside.nav'))[open ? 'toBeVisible' : 'toBeHidden']()
@@ -1626,8 +1838,15 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     else if (rung === 'route') await expect(page.getByRole('button', { name: /^Run / })).toHaveCount(0)
     else if (rung === 'selection') await expect(page.getByTestId('dock-properties')).toHaveCount(0)
     else if (rung === 'running') {
-      await expect(page.getByText('Stopped following count-by-layer. It keeps running; find it in Jobs.', { exact: true })).toBeVisible()
+      await expect(page.locator('.toast[role="status"]').getByText('Stopped following count-by-layer. It keeps running; find it in Jobs.', { exact: true })).toBeVisible()
       await expect(page.locator('.strip-running')).toHaveCount(0)
+      const reply = await page.request.get('/api/jobs')
+      expect(reply.ok()).toBe(true)
+      const body = await reply.json()
+      const jobs = Array.isArray(body) ? body : body.jobs
+      expect(jobs.some((job) => job.job_id === runtime.evidence.pendingRun.jobId)).toBe(true)
+      await setJobRail(page, true, runtime.testInfo.project.name === 'phone', assertions)
+      await expect(page.locator('aside.rail').getByText('count-by-layer', { exact: true }).first()).toBeVisible()
       runtime.evidence.pendingRun.detached = true
     }
     else throw new Error(`No observable Escape oracle for ${rung}`)
@@ -1669,21 +1888,30 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target === 'browser-clipboard') {
+    await discloseControlPanel(page, { group: 'clipboard' })
     await expect(page.getByRole('group', { name: 'Clipboard', exact: true }).getByRole('button', {
       name: ACTIONS.find((action) => action.op === 'pasteClip').label, exact: true,
     })).toBeEnabled()
+    await assertCopiedGeometry(probe, runtime, before, assertions)
     return
   }
   if (target.startsWith('drawing-version-')) {
-    if (before.count !== null) {
-      await expect.poll(() => engineCount(page)).not.toBe(before.count)
-    } else {
-      await expect.poll(async () => {
-        const response = await page.request.get(`/api/drawings/${runtime.drawingId}/versions`)
-        expect(response.ok()).toBe(true)
-        return (await response.json()).head
-      }).not.toBe(before.versions.head)
-    }
+    await assertVersionTransition(probe, runtime, before, assertions)
+    return
+  }
+  if (target === 'engine:explode') {
+    await expect.poll(() => engineCount(page)).toBe(before.count + 1)
+    const after = await observedGeometry(page)
+    const source = before.geometry.entities.find((entity) => String(entity.id) === String(0xA200))
+    expect(source?.type).toBe('LWPOLYLINE')
+    expect(after.entities.some((entity) => String(entity.id) === String(source.id))).toBe(false)
+    const preserved = before.geometry.entities.filter((entity) => entity !== source)
+    expect(after.entities.filter((entity) => preserved.some((old) => String(old.id) === String(entity.id)))).toEqual(preserved)
+    const segments = after.entities.filter((entity) => !before.geometry.entities.some((old) => String(old.id) === String(entity.id)))
+    expect(segments.map((entity) => ({ type: entity.type, layer: entity.layer, vertices: entity.vertices.map((point) => point.slice(0, 2)) }))).toEqual([
+      { type: 'LINE', layer: 'Walk', vertices: [[111, 200], [222, 200]] },
+      { type: 'LINE', layer: 'Walk', vertices: [[222, 200], [222, 210]] },
+    ])
     return
   }
   if (target.startsWith('engine:') || target === 'browser-clipboard-cut') {
@@ -1732,6 +1960,8 @@ export async function runProbe(probe, runtime) {
       }
       await unsupported(probe, runtime, reason)
     }
+    if (typeof installGeometryObserver === 'function' && (barNoRung(probe) || ['engine-refusal', 'engine:explode', 'browser-clipboard'].includes(probe.assertion.target)
+      || probe.assertion.target?.startsWith('drawing-version-'))) await page.addInitScript(installGeometryObserver)
     for (const recipe of probe.setup.steps) {
       await (runtime.runStep || test.step)(`Setup: ${recipe.kind}`, async () => {
         try { await setupStep(probe, runtime, recipe) } catch (error) {
@@ -1803,6 +2033,15 @@ export async function runProbe(probe, runtime) {
       }
     }
     const before = await captureBefore(probe, runtime)
+    if (probe.kind === 'tool' && probe.sourceId === 'solar-solve-proposal' && probe.state === 'ready'
+      && probe.assertion.target === 'catalog-run-decision') {
+      runtime.catalogRunRequests = []
+      const observe = (request) => {
+        if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/run') runtime.catalogRunRequests.push(request.url())
+      }
+      page.on('request', observe)
+      runtime.cleanup.push(async () => page.off('request', observe))
+    }
     if (probe.assertion.kind !== 'disabled_with_reason') {
       await test.step(`Activate ${probe.featureId}`, () => activate(probe, runtime, locator))
     }
