@@ -7,10 +7,11 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import ProjectSwitcher from './ProjectSwitcher.jsx'
 import { createWorkspaceController } from '../controllers/workspace/createWorkspaceController.js'
 import { deriveWorkspaceProjectState, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
+import { readProjectPrincipal, readRecentProjects, writeRecentProjects } from '../lib/recentProjects.js'
 
 afterEach(cleanup)
 
@@ -249,5 +250,128 @@ describe('F-9: the header chip never renames a drawing a project', () => {
     expect(src).not.toContain('currentName ||')
     expect(src).not.toContain('currentName,')
     expect(src).not.toContain('{currentName}')
+  })
+})
+
+describe('recent and pinned projects', () => {
+  const projects = [{ project_id: 'p1', name: 'Maple' }, { id: 'p2', name: 'Oak' }, { id: 'p3', name: 'Birch' }]
+  const storageForTest = () => {
+    const values = new Map()
+    return { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) }
+  }
+  const names = (group) => within(group).getAllByRole('menuitem').map((row) => row.querySelector('.label').textContent)
+
+  it('shows Pinned and Recent above all projects in the same menu, resolving current names and dropping stale ids', () => {
+    const storage = storageForTest()
+    writeRecentProjects('alice', { pinned: ['p2', 'removed'], recent: ['p3', 'removed', 'p1'] }, storage)
+    render(<ProjectSwitcher orgId="o1" principalId="alice" storage={storage} projects={projects} />)
+    fireEvent.click(chip())
+    const menu = screen.getByRole('menu')
+    const groups = within(menu).getAllByRole('group')
+    expect(groups.map((group) => group.getAttribute('aria-label'))).toEqual(['Pinned', 'Recent', 'All projects'])
+    expect(names(groups[0])).toEqual(['Oak'])
+    expect(names(groups[1])).toEqual(['Birch', 'Maple'])
+    expect(names(groups[2])).toEqual(['Maple', 'Oak', 'Birch'])
+    expect(within(menu).queryByText('removed')).toBeNull()
+  })
+
+  it('pins and unpins without opening a project or closing the menu, persisting across mounts', () => {
+    const storage = storageForTest()
+    const onOpenProject = vi.fn()
+    const props = { orgId: 'o1', principalId: 'alice', storage, projects, onOpenProject }
+    const view = render(<ProjectSwitcher {...props} />)
+    fireEvent.click(chip())
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'Pin Oak' }))
+    expect(onOpenProject).not.toHaveBeenCalled()
+    expect(chip().getAttribute('aria-expanded')).toBe('true')
+    expect(readRecentProjects('alice', storage)).toEqual({ recent: [], pinned: ['p2'] })
+    view.unmount()
+    render(<ProjectSwitcher {...props} />)
+    fireEvent.click(chip())
+    const pinned = screen.getByRole('group', { name: 'Pinned' })
+    const unpin = within(pinned).getByRole('menuitemcheckbox', { name: 'Unpin Oak' })
+    expect(unpin.getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(unpin)
+    expect(screen.queryByRole('group', { name: 'Pinned' })).toBeNull()
+    expect(readRecentProjects('alice', storage).pinned).toEqual([])
+    expect(onOpenProject).not.toHaveBeenCalled()
+  })
+
+  it('remembers mouse and keyboard opens and navigates through the displayed group order', () => {
+    const storage = storageForTest()
+    const onOpenProject = vi.fn()
+    render(<ProjectSwitcher orgId="o1" principalId="alice" storage={storage} projects={projects} onOpenProject={onOpenProject} />)
+    fireEvent.click(chip())
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Oak' }))
+    expect(onOpenProject).toHaveBeenLastCalledWith('p2')
+    expect(readRecentProjects('alice', storage).recent).toEqual(['p2'])
+    expect(chip().getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(chip())
+    expect(names(screen.getByRole('group', { name: 'Recent' }))).toEqual(['Oak'])
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    fireEvent.keyDown(document, { key: 'Enter' })
+    expect(onOpenProject).toHaveBeenLastCalledWith('p1')
+    expect(onOpenProject).toHaveBeenCalledTimes(2)
+    expect(readRecentProjects('alice', storage).recent).toEqual(['p1', 'p2'])
+    expect(chip().getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('records externally opened projects and isolates a principal switch even within the same org', () => {
+    const storage = storageForTest()
+    writeRecentProjects('alice', { pinned: ['p1'], recent: [] }, storage)
+    const props = { orgId: 'shared-org', storage, projects }
+    const { rerender } = render(<ProjectSwitcher {...props} principalId="alice" openProjectId="p1" />)
+    rerender(<ProjectSwitcher {...props} principalId="alice" openProjectId="p2" />)
+    expect(readRecentProjects('alice', storage).recent).toEqual(['p2', 'p1'])
+    fireEvent.click(chip())
+    expect(names(screen.getByRole('group', { name: 'Pinned' }))).toEqual(['Maple'])
+    rerender(<ProjectSwitcher {...props} principalId="bob" />)
+    expect(screen.queryByRole('group', { name: 'Pinned' })).toBeNull()
+    expect(screen.queryByRole('group', { name: 'Recent' })).toBeNull()
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'Pin Birch' }))
+    expect(readRecentProjects('bob', storage)).toEqual({ recent: [], pinned: ['p3'] })
+    expect(readRecentProjects('alice', storage).pinned).toEqual(['p1'])
+    rerender(<ProjectSwitcher {...props} principalId="alice" />)
+    expect(names(screen.getByRole('group', { name: 'Pinned' }))).toEqual(['Maple'])
+    expect(names(screen.getByRole('group', { name: 'Recent' }))).toEqual(['Oak', 'Maple'])
+  })
+
+  it('uses the mounted caller bearer without requiring a principal prop, and avoids anonymous persistence', () => {
+    const storage = storageForTest()
+    storage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ iss: 'issuer', sub: 'alice' }))}.signature`)
+    const principal = readProjectPrincipal(storage)
+    writeRecentProjects(principal, { pinned: ['p2'], recent: [] }, storage)
+    const { rerender } = render(<ProjectSwitcher orgId="o1" storage={storage} projects={projects} />)
+    fireEvent.click(chip())
+    expect(names(screen.getByRole('group', { name: 'Pinned' }))).toEqual(['Oak'])
+    storage.setItem('leaf.jwt', '')
+    rerender(<ProjectSwitcher orgId="o1" storage={storage} projects={projects} />)
+    expect(screen.queryByRole('group', { name: 'Pinned' })).toBeNull()
+    expect(screen.queryByRole('menuitemcheckbox')).toBeNull()
+    expect(names(screen.getByRole('group', { name: 'All projects' }))).toEqual(['Maple', 'Oak', 'Birch'])
+  })
+
+  it('keeps pinning and opening usable when storage throws, retaining this mount preferences', () => {
+    const storage = { getItem: () => { throw new Error('locked') }, setItem: () => { throw new Error('full') } }
+    const onOpenProject = vi.fn()
+    render(<ProjectSwitcher orgId="o1" principalId="alice" storage={storage} projects={projects} onOpenProject={onOpenProject} />)
+    fireEvent.click(chip())
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: 'Pin Oak' }))
+    const pinned = screen.getByRole('group', { name: 'Pinned' })
+    expect(names(pinned)).toEqual(['Oak'])
+    fireEvent.click(within(pinned).getByRole('menuitem', { name: /^Oak\b/ }))
+    expect(onOpenProject).toHaveBeenCalledExactlyOnceWith('p2')
+    fireEvent.click(chip())
+    expect(names(screen.getByRole('group', { name: 'Recent' }))).toEqual(['Oak'])
+    expect(names(screen.getByRole('group', { name: 'Pinned' }))).toEqual(['Oak'])
+  })
+
+  it('keeps the mock chip static even with saved preferences and an open project', () => {
+    const storage = storageForTest()
+    writeRecentProjects('alice', { pinned: ['p2'], recent: [] }, storage)
+    render(<ProjectSwitcher mock principalId="alice" storage={storage} projects={projects} openProjectId="p1" />)
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(screen.queryByRole('button')).toBeNull()
+    expect(readRecentProjects('alice', storage)).toEqual({ recent: [], pinned: ['p2'] })
   })
 })

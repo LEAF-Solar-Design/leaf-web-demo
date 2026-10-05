@@ -1,0 +1,13 @@
+{
+  "schema": "leaf.perf-budgets.v1",
+  "covers": ["A25"],
+  "enforce_env": "LEAF_PERF_ENFORCE",
+  "budgets": {
+    "command_bar_inp_p75_ms": 200,
+    "canvas_frame_p95_ms": 16.6
+  },
+  "minimum_samples": {
+    "input_events": 20,
+    "frames": 60
+  }
+}

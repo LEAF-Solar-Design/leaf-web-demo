@@ -19,7 +19,8 @@
 //   one of them to a new depth and a new order, which is a DOM rewrite, not a
 //   refactor, and the one-shell byte-identity rows would be right to fail it.
 //
-// So SurfaceFrame contributes NO DOM of its own. It is a provider that each
+// Online, SurfaceFrame contributes NO DOM of its own. S6 adds one condition
+// banner while offline, docked below the scene's header. It is a provider that each
 // scene mounts ONCE around its whole tree, carrying the normalized prop
 // contract, plus a set of SLOTS the scene mounts where that element already
 // stands. The gates move; the elements do not. What this buys is exactly what
@@ -33,6 +34,7 @@
 // ---------------------------------------------------------------------------
 import { createContext, lazy, Suspense, useContext } from 'react'
 
+import ConnectionBanner from '../components/ConnectionBanner.jsx'
 import ConversationListComponent from '../components/ConversationList.jsx'
 import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobInboxComponent from '../components/JobInbox.jsx'
@@ -96,8 +98,9 @@ function useSlot() {
 
 /**
  * SurfaceFrame — mounted ONCE per scene, wrapping that scene's whole tree.
- * Renders a context provider and its children: no element, no wrapper div, no
- * fragment boundary that React can observe in the DOM.
+ * Online, renders a context provider and its children: no element, no wrapper
+ * div, no fragment boundary that React can observe in the DOM. Offline adds
+ * one self-clearing connection banner below the shell header.
  *
  * Prop contract (slice 4a spec §4a). Each scene aliases its local names at
  * this call boundary — ToolCast's `platformSession` -> `session`,
@@ -255,7 +258,15 @@ export default function SurfaceFrame({
     onSignOut,
     contextMenuCtx,
   }
-  return <SurfaceFrameContext.Provider value={value}>{children}</SurfaceFrameContext.Provider>
+  return (
+    <SurfaceFrameContext.Provider value={value}>
+      {children}
+      <ConnectionBanner
+        headerSelector={isConsole(value) ? '.app > header.top' : '.stage-root .tc-product-nav'}
+        cast={isConsole(value) ? undefined : 'tool'}
+      />
+    </SurfaceFrameContext.Provider>
+  )
 }
 
 // --- slots -----------------------------------------------------------------
