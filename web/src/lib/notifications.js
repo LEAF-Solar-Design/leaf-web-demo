@@ -64,23 +64,29 @@ export function createNotificationBus(capacity = RING_CAPACITY) {
       return listeners.size
     },
     /**
-     * Mints one notice. It is kept in the ring (until it ages out past
-     * `capacity`, oldest first) for the inbox, and becomes the visible toast
+     * Mints one notice, or updates the visible notice with a matching key in
+     * place, preserving its id and ring position. It is kept in the ring for
+     * the inbox until it ages out past `capacity`, and becomes the visible toast
      * — newest replaces, exactly as both pre-slice showToast closures did.
      * `kind` defaults to 'info' since none of the 24 existing call sites pass
      * one today; it exists so a future caller (or JobInbox's own rendering)
      * can distinguish a plain notice from a success/error/warning one.
      */
-    push({ text, kind = 'info', action = null } = {}) {
-      seq += 1
+    push({ text, kind = 'info', action = null, key = null } = {}) {
+      const visible = ring.find((n) => n.id === visibleId)
+      const replacing = key != null && visible?.key === key
+      if (!replacing) seq += 1
       const notice = {
-        id: seq,
+        id: replacing ? visible.id : seq,
         kind,
         text,
         action: action && typeof action.onClick === 'function' ? action : null,
         time: Date.now(),
+        key,
       }
-      ring = [notice, ...ring].slice(0, capacity)
+      ring = replacing
+        ? ring.map((n) => n.id === visibleId ? notice : n)
+        : [notice, ...ring].slice(0, capacity)
       visibleId = notice.id
       publish()
       return notice.id

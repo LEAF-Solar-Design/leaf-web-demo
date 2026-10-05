@@ -1885,6 +1885,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_sip_r1_context.py"), 22),
         Suite("server-sip-r1-routes", "server project drawing checkout routes", "pytest",
               SERVER, _py_pytest("tests/test_sip_r1_routes.py"), 18),
+        Suite("server-c1a-project-read", "server tests/test_project_scoped_read_tool.py", "pytest", SERVER, _py_pytest("tests/test_project_scoped_read_tool.py"), 49),
         Suite("platform-sip-r1-checkout", "platform canonical drawing checkouts", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r1_checkout.py"), 12,
               db_gated=True, allowed_skip_reasons=(r"platform DB unreachable(?:: .+)?",)),

@@ -208,7 +208,7 @@ export function RibbonCluster({ id, label, kind = 'group', note = null, extra = 
   )
 }
 
-export default function DraftingRibbon({ clusters = [], tab = 'draw', children = null, visiblePanelCount = null }) {
+export default function DraftingRibbon({ clusters = [], tab = 'draw', children = null, visiblePanelCount = null, catalogError = null, onRetryCatalog = null }) {
   const list = Array.isArray(clusters) ? clusters : []
   const ref = useRef(null)
   const panelsRef = useRef(null)
@@ -250,7 +250,9 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
       const groups = [...panels.querySelectorAll('.ribbon-cluster')]
       groups.forEach((group) => { group.hidden = false })
       more.hidden = false
-      const available = ribbon.clientWidth - 4
+      // Keep catalog recovery on the band, including when tool panels overflow.
+      const statusWidth = ribbon.querySelector('.ribbon-catalog-error')?.getBoundingClientRect().width || 0
+      const available = ribbon.clientWidth - 4 - statusWidth
       const widths = groups.map((group) => group.getBoundingClientRect().width)
       const total = widths.reduce((sum, width) => sum + width, 0)
       const needsOverflow = visiblePanelCount !== null
@@ -281,7 +283,7 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
         else delete control.focus
       })
     }
-  }, [clusters, children, tab, visiblePanelCount, open])
+  }, [clusters, children, tab, visiblePanelCount, open, catalogError])
   useLayoutEffect(() => {
     if (!open) return
     panelsRef.current?.querySelectorAll('.ribbon-cluster').forEach((group) => { group.hidden = false })
@@ -311,6 +313,12 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
         if (open && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
       }}
     >
+      {catalogError && (
+        <div className="ribbon-catalog-error" role="status">
+          <span>Couldn't load tools: {catalogError}</span>
+          <button type="button" className="chip-act" onClick={onRetryCatalog}>Retry</button>
+        </div>
+      )}
       <div
         id="drafting-ribbon-panels"
         className="ribbon-panels"
@@ -327,7 +335,7 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
         }}
       >
       {children}
-      {list.length === 0 && !children && (
+      {list.length === 0 && !children && !catalogError && (
         // Honest empty: a sentence, never a fabricated cluster.
         <span className="ribbon-empty">No tools for this surface yet.</span>
       )}

@@ -34,6 +34,36 @@ const FAMS = [
 ]
 
 describe('DraftingRibbon', () => {
+  it('shows the catalog failure and retries from the band, then clears on recovery', () => {
+    const onRetryCatalog = vi.fn()
+    const { rerender } = render(<DraftingRibbon clusters={[]} catalogError="Network request failed" onRetryCatalog={onRetryCatalog} />)
+    const status = screen.getByRole('status')
+    expect(status.textContent).toContain("Couldn't load tools: Network request failed")
+    expect(screen.queryByText('No tools for this surface yet.')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry', exact: true }))
+    expect(onRetryCatalog).toHaveBeenCalledTimes(1)
+    rerender(<DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {} })} onRetryCatalog={onRetryCatalog} />)
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry', exact: true })).toBeNull()
+    expect(screen.getByRole('button', { name: 'count-by-layer' })).toBeTruthy()
+  })
+
+  it('keeps catalog recovery outside the overflow panel host', () => {
+    render(<DraftingRibbon clusters={profileRibbonTabs('solar')[1].clusters} tab="solar" visiblePanelCount={0} catalogError="Network request failed" onRetryCatalog={() => {}} />)
+    const status = screen.getByRole('status')
+    expect(status.parentElement).toBe(screen.getByRole('toolbar', { name: 'Drafting tools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'More panels' }))
+    expect(status.parentElement).toBe(screen.getByRole('toolbar', { name: 'Drafting tools' }))
+    expect(status.querySelector('button').textContent).toBe('Retry')
+  })
+
+  it('does not report a failure for a genuinely empty catalog', () => {
+    render(<DraftingRibbon clusters={[]} />)
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry', exact: true })).toBeNull()
+    expect(screen.getByText('No tools for this surface yet.')).toBeTruthy()
+  })
+
   it('C-05 row9 exposes data-state only for a string tool state', () => {
     render(<>
       <RibbonTool tool={{ id: 'ship:readiness', label: 'Apple readiness: ready', state: 'ready' }} />

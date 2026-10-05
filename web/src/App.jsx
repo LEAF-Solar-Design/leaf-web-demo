@@ -1731,10 +1731,10 @@ export default function App() {
   const catalogRunContextRef = useRef(catalogRunContext)
   catalogRunContextRef.current = catalogRunContext
 
-  const prepareRunParams = useCallback((tool, params) => {
+  const prepareRunParams = useCallback((tool, params, options) => {
     const isWrite = (tool.capabilities || []).includes('drawing.write')
     const overlays = admittedOverlays(tool?.params, catalogRunOverlays({ enabled: ENV_SOLAR_SETTINGS_FORM, toolName: tool?.name, selectedHandle, isWrite }))
-    return prepareCatalogRunParams(tool, params, catalogRunContextRef.current, overlays)
+    return prepareCatalogRunParams(tool, params, catalogRunContextRef.current, overlays, options)
   }, [selectedHandle])
 
   const confirmEmitRef = useRef(null) // P2: run.confirm_shown de-dupe (tour double-arm)
@@ -1793,7 +1793,7 @@ export default function App() {
       setRunErr(`${catalogTool.name} not run: ${REASONS.unsavedEngineEdits}.`)
       return
     }
-    const prepared = prepareRunParams(catalogTool, decision.params)
+    const prepared = prepareRunParams(catalogTool, decision.params, { complete: decision.paramsComplete === true })
     const staged = stageRunIntent(runIntentStateRef.current, {
       intentId: `${runIntentSessionRef.current}:${++runIntentSeqRef.current}`,
       toolName: catalogTool.name,
@@ -1834,10 +1834,11 @@ export default function App() {
   }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty])
   catalogUiRef.current = { armDecision, startAgentTurn, running }
 
-  const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog') => {
+  const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog', { complete = false } = {}) => {
     if (!tool) return
     return commitCatalogDecision({
       lane: 'run', tool: tool.name, params, confidence: 1,
+      paramsComplete: complete === true,
       rationale: rationale || 'Catalog selection. Confirm the exact tool and parameters before it runs.',
       alternatives: [],
       source, // P2: run.confirm_shown attribution (catalog by default, tour from the tour beat)
@@ -2095,7 +2096,7 @@ export default function App() {
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
     const last = lastRunRef.current
-    if (last) onRequestCatalogRun(last.tool, last.params)
+    if (last) onRequestCatalogRun(last.tool, last.params, null, 'catalog', { complete: true })
   }, [onRequestCatalogRun])
 
   // Guided Solar step rail: Solar settings opens its typed form; every other step opens the step editor.
@@ -2122,7 +2123,7 @@ export default function App() {
       setRunErr('Combiner placement is not in this catalog.')
       return false
     }
-    return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon')?.runIntent?.intentId)
+    return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })?.runIntent?.intentId)
   }, [onRequestCatalogRun, tools])
 
   const onSubmitSolarFlowStep = useCallback((row, params) => {
@@ -2130,7 +2131,7 @@ export default function App() {
     const retained = solarFlowRetainedRef.current
     if (!retained.has(row.name) && retained.size >= MAX_FLOW_STEPS) retained.delete(retained.keys().next().value)
     retained.set(row.name, { drawingId, values: params })
-    const armed = onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon')
+    const armed = onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })
     const intentId = armed?.runIntent?.intentId
     if (!intentId) return
     solarFlowRunRef.current = { intentId, tool: row.name, drawingId }
@@ -2177,7 +2178,7 @@ export default function App() {
     }
     if (!prepared) return
     const { pending, tool } = prepared
-    if (tool) onRequestCatalogRun(tool, pending.params)
+    if (tool) onRequestCatalogRun(tool, pending.params, null, 'catalog', { complete: true })
     else setRunErr(`${pending.tool} is no longer in your catalog. Your saved inputs were discarded.`)
   }, [mock, onRequestCatalogRun, preparePendingRun, setRunErr])
 
@@ -3883,7 +3884,7 @@ export default function App() {
         writeEntitled={canRunWrite}
         running={running || !!previewing}
         selectedTool={selectedTool}
-        onRequestRun={onRequestCatalogRun}
+        onRequestRun={(tool, params) => onRequestCatalogRun(tool, params, null, 'catalog', { complete: true })}
         onOpenTool={setOpenTool}
         onReviseTool={onReviseAuthoredTool}
         toolsOpen={toolsOpen}
@@ -4149,7 +4150,7 @@ export default function App() {
                   checkoutHeld={heldByUs}
                   busy={!!running}
                   onSubmit={(params) => {
-                    const armed = onRequestCatalogRun(solarFormTool, params, RIBBON_RATIONALE, 'ribbon')
+                    const armed = onRequestCatalogRun(solarFormTool, params, RIBBON_RATIONALE, 'ribbon', { complete: true })
                     settingsRunRef.current = armed?.runIntent?.intentId ? {
                       intentId: armed.runIntent.intentId,
                       drawingId: catalogRunContext.drawingId,
@@ -4174,7 +4175,7 @@ export default function App() {
                 drawingVersion={catalogRunContext?.drawingVersion ?? null}
                 projectId={catalogRunContext?.projectId ?? null}
                 readIntake={SOLAR_SETTINGS_LOADERS.readIntake}
-                onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon')}
+                onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon', { complete: true })}
                 onClose={() => setSolarFormTool(null)}
               />
             ) : <SolarToolForm
@@ -4183,7 +4184,7 @@ export default function App() {
               readIntake={SOLAR_SETTINGS_LOADERS?.readIntake}
               drawingId={catalogRunContext?.drawingId ?? null}
               drawingVersion={catalogRunContext?.drawingVersion ?? null}
-              onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon')}
+              onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon', { complete: true })}
               onClose={() => setSolarFormTool(null)}
             />
             )
@@ -4245,7 +4246,12 @@ export default function App() {
               before the ground attaches); tools are the ACTIVE SURFACE's fold, wired through
               the same run-decision path as the rail (source 'ribbon'). */}
           {studioShell && surfaceSlots.toolbar.ribbon && studioRibbonHost && createPortal(
-            <DraftingRibbon clusters={ribbonClusters} tab={activeRibbonTab}>
+            <DraftingRibbon
+              clusters={ribbonClusters}
+              tab={activeRibbonTab}
+              catalogError={navSpine || (phoneViewport && studioDrawer !== 'nav') ? catalogErr : null}
+              onRetryCatalog={loadCatalog}
+            >
               {/* The engine's own panels (File, Draw, Modify) read the ONE
                   session through context; ENV_CAD_EDIT first so a flag-off
                   build folds them away with the provider. Always mounted so

@@ -203,6 +203,15 @@
   overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon::-webkit-scrollbar { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-catalog-error {
+  display: flex; align-items: center; gap: 8px; align-self: center; flex: 0 0 auto;
+  width: max-content; max-width: min(420px, calc(100% - 110px)); box-sizing: border-box;
+  padding: 4px 8px; color: var(--ck-ink); font: 400 12px/1.4 var(--ck-font);
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-catalog-error > span {
+  min-width: 0; overflow-wrap: anywhere; max-height: 72px; overflow: auto;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-catalog-error .chip-act { flex: 0 0 auto; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon::before {
   background: var(--ck-glass-band); backdrop-filter: var(--ck-glass-blur);
 }

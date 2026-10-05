@@ -10,6 +10,7 @@ const knownProofSpecs = [
   'unsupported-cost.spec.mjs',
   'unsupported-fast.spec.mjs',
   'u6-drawer-escape.spec.mjs',
+  'u7-catalog-error.spec.mjs',
   'ux-evidence.spec.mjs',
   'w1o-solar-unsupported.spec.mjs',
   'w1z-map.spec.mjs',

@@ -17,6 +17,11 @@ import { describe, it } from 'node:test'
 
 import esbuild from 'esbuild'
 import { parse as parseJs } from '@babel/parser'
+import {
+  prepareCatalogRunParams, createRunIntentState, createCatalogToolSnapshot,
+  stageRunIntent, confirmRunIntent, dismissRunIntent,
+} from './runIntent.js'
+import { slashDecision, alternativeDecision } from './controllers/catalog/catalogRouting.js'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 const identitySource = readFileSync(new URL('./drawing/drawingIdentity.js', import.meta.url), 'utf8')
@@ -73,6 +78,229 @@ function csuUploadProblems(source) {
   }
   return problems
 }
+
+const formBToolCastSource = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
+const formBContext = { tenantId: 't1', drawingId: 'd1', drawingVersion: 3 }
+const formBTool = {
+  name: 'f', capabilities: [],
+  params: { type: 'object', properties: { nullable_size: { type: ['number', 'null'], default: 3 } } },
+}
+function formBAst(source) {
+  return parseJs(source, { sourceType: 'module', plugins: ['jsx'] })
+}
+function formBHookNode(source, name) {
+  const found = []
+  csuWalk(formBAst(source), (node) => {
+    if (node.type === 'VariableDeclarator' && node.id.name === name
+      && node.init?.callee?.name === 'useCallback') found.push(node.init.arguments[0])
+  })
+  assert.equal(found.length, 1, `one live ${name} callback`)
+  return found[0]
+}
+function formBEvaluate(source, node, env) {
+  return new Function(...Object.keys(env), `return (${source.slice(node.start, node.end)})`)(...Object.values(env))
+}
+function formBHook(source, name, env) {
+  return formBEvaluate(source, formBHookNode(source, name), env)
+}
+function formBProp(source, component, prop, env) {
+  const found = []
+  csuWalk(formBAst(source), (node) => {
+    if (node.type !== 'JSXOpeningElement' || node.name.name !== component) return
+    const attr = node.attributes.find((item) => item.name?.name === prop)
+    if (attr?.value?.expression?.type === 'ArrowFunctionExpression') found.push(attr.value.expression)
+  })
+  assert.equal(found.length, 1, `one ${component}.${prop}`)
+  return formBEvaluate(source, found[0], env)
+}
+function formBHarness(shell) {
+  const source = shell === 'App' ? appSource : formBToolCastSource
+  const preparationCalls = []
+  const requestCalls = []
+  const decisions = []
+  const stagedIntents = []
+  const runIntentStateRef = { current: createRunIntentState('form-b') }
+  const tools = [formBTool, { ...formBTool, name: 'solar-combiners' }]
+  const env = {
+    tools, mock: false, session: { status: 'active' }, canOperate: true,
+    running: false, previewing: false, busy: false, jobRunning: false,
+    writeLocked: false, canRunWrite: true, engineDirty: false,
+    catalogRunContext: formBContext, catalogRunContextRef: { current: formBContext },
+    runIntentStateRef, runIntentSessionRef: { current: 'form-b' }, runIntentSeqRef: { current: 0 },
+    confirmEmitRef: { current: null }, tourDispatchRef: { current: false },
+    checkout: { lockedByOther: null }, drawing: { mutationsBlocked: false }, previewLocked: false,
+    isWriteTool: (tool) => (tool.capabilities || []).includes('drawing.write'),
+    selectedHandle: null, ENV_SOLAR_SETTINGS_FORM: true,
+    catalogRunOverlays: () => ({}), admittedOverlays: (_schema, overlays) => overlays,
+    prepareCatalogRunParams: (...args) => {
+      preparationCalls.push(args)
+      return prepareCatalogRunParams(...args)
+    },
+    createCatalogToolSnapshot, dismissRunIntent,
+    stageRunIntent: (...args) => {
+      const staged = stageRunIntent(...args)
+      stagedIntents.push(staged.intent)
+      return staged
+    },
+    mintCorrelationId: () => String(stagedIntents.length + 1),
+    track: () => {}, setRunErr: (message) => assert.fail(message),
+    setError: (message) => assert.fail(message),
+    setSelectedCatalogTool: () => {}, setLeftView: () => {},
+  }
+  if (shell === 'App') env.prepareRunParams = formBHook(source, 'prepareRunParams', env)
+  const arm = formBHook(source, shell === 'App' ? 'armDecision' : 'armCatalogDecision', env)
+  let lastArmed
+  const commit = (decision) => {
+    decisions.push(decision)
+    lastArmed = arm(decision)
+    return lastArmed
+  }
+  env.commitCatalogDecision = commit
+  env.catalog = { actions: { commitDecision: commit } }
+  const request = formBHook(source, shell === 'App' ? 'onRequestCatalogRun' : 'requestCatalogRun', env)
+  const requestSpy = (...args) => {
+    requestCalls.push(args)
+    return request(...args)
+  }
+  env.onRequestCatalogRun = requestSpy
+  env.requestCatalogRun = requestSpy
+  return { source, env, tools, arm, request: requestSpy, preparationCalls, requestCalls,
+    decisions, stagedIntents, get lastArmed() { return lastArmed } }
+}
+function formBAssertComplete(h, optionIndex) {
+  assert.deepEqual(h.requestCalls.at(-1)[optionIndex], { complete: true })
+  assert.equal(h.decisions.at(-1).paramsComplete, true)
+  assert.deepEqual(h.preparationCalls.at(-1)[4], { complete: true })
+  assert.deepEqual(h.lastArmed.params, {})
+  assert.deepEqual(h.lastArmed.runIntent.params, {})
+  assert.equal('paramsComplete' in h.lastArmed.runIntent, false)
+  assert.equal('paramsComplete' in h.lastArmed.runIntent.params, false)
+}
+
+describe('complete submission provenance', () => {
+  it('FORMB10 App form provenance reaches preparation', () => {
+    for (const component of ['NavRail', 'SolarSettingsForm', 'SolarStepEditor', 'SolarToolForm']) {
+      const h = formBHarness('App')
+      Object.assign(h.env, {
+        solarFormTool: formBTool, RIBBON_RATIONALE: 'Ribbon',
+        settingsRunRef: { current: null }, setSettingsRunResult: () => {},
+      })
+      const prop = component === 'NavRail' ? 'onRequestRun' : 'onSubmit'
+      const submit = formBProp(appSource, component, prop, h.env)
+      if (component === 'SolarSettingsForm') submit({})
+      else submit(formBTool, {})
+      formBAssertComplete(h, 4)
+    }
+    for (const name of ['onSubmitSolarFlowStep', 'onRunCombinerPlacement']) {
+      const h = formBHarness('App')
+      Object.assign(h.env, {
+        RIBBON_RATIONALE: 'Ribbon', MAX_FLOW_STEPS: 20,
+        solarFlowRetainedRef: { current: new Map() }, solarFlowRunRef: { current: null },
+        setSolarFlowPending: () => {},
+      })
+      const submit = formBHook(appSource, name, h.env)
+      if (name === 'onRunCombinerPlacement') assert.equal(submit({}), true)
+      else submit(formBTool, {})
+      formBAssertComplete(h, 4)
+    }
+  })
+
+  it('FORMB11 ToolCast form provenance reaches preparation', () => {
+    const h = formBHarness('ToolCast')
+    formBProp(h.source, 'CapabilityCatalog', 'onRequestRun', h.env)(formBTool, {})
+    formBAssertComplete(h, 2)
+  })
+
+  it('FORMB12 partial entry points remain partial', async () => {
+    const scheduledScrolls = []
+    for (const shell of ['App', 'ToolCast']) {
+      const h = formBHarness(shell)
+      const assertPartial = (armed) => {
+        assert.deepEqual(armed.params, { nullable_size: 3 })
+        assert.deepEqual(h.preparationCalls.at(-1)[4], { complete: false })
+      }
+      // Controller commits for router, slash, and alternative selections share the live arm.
+      for (const decision of [
+        { lane: 'run', tool: formBTool.name, params: {}, source: 'prompt' },
+        slashDecision('/f', h.tools).decision,
+        alternativeDecision({ alternatives: [] }, 'f'),
+      ]) {
+        assert.equal(decision.paramsComplete, undefined)
+        assertPartial(h.arm(decision))
+      }
+      // Nonempty submitted values alone cannot imply completeness either.
+      assertPartial(h.arm({ lane: 'run', tool: 'f', params: {}, source: 'catalog' }))
+      if (shell === 'App') {
+        // Execute the actual ribbon and tour call expressions, whose params are partial.
+        for (const origin of ['ribbon', 'tour']) {
+          const calls = []
+          csuWalk(formBAst(appSource), (node) => {
+            if (node.type !== 'CallExpression' || node.callee.name !== 'onRequestCatalogRun') return
+            if (node.arguments[3]?.value !== origin || node.arguments.length !== 4) return
+            if (origin === 'ribbon' && node.arguments[1]?.type !== 'NullLiteral') return
+            calls.push(node)
+          })
+          assert.equal(calls.length, 1, `one partial ${origin} entry`)
+          formBEvaluate(appSource, calls[0], {
+            ...h.env, tool: formBTool, toolObj: formBTool,
+            r: { params: {} }, RIBBON_RATIONALE: 'Ribbon',
+          })
+          assertPartial(h.lastArmed)
+          assert.equal(h.decisions.at(-1).paramsComplete, false)
+        }
+      } else {
+        h.request(formBTool, null)
+        assertPartial(h.lastArmed)
+        assert.equal(h.decisions.at(-1).paramsComplete, false)
+      }
+      // Execute author-after-publish using a resolved catalog row, keeping admission gates live.
+      Object.assign(h.env, {
+        sessionReady: true, loadCatalogTools: async () => h.tools,
+        resolvePublishedCatalogTool: (_published, rows) => rows.find((row) => row.name === 'f'),
+        setLastAuthoredTool: () => {}, showToast: (message) => assert.fail(JSON.stringify(message)),
+        // App's onUseAuthored schedules a scroll through setTimeout and document; node:test has no document,
+        // so the stub records the call instead of leaking a timer past the row.
+        setTimeout: (callback) => { scheduledScrolls.push(callback); return 0 },
+      })
+      h.env.catalog.actions.loadTools = async () => h.tools
+      await formBHook(h.source, shell === 'App' ? 'onUseAuthored' : 'useAuthoredTool', h.env)(formBTool)
+      assert.equal(h.decisions.at(-1).paramsComplete, undefined)
+      assertPartial(h.lastArmed)
+    }
+  })
+
+  it('FORMB13 retry and resume preserve omission', async () => {
+    for (const path of ['app-retry', 'app-resume', 'toolcast-retry']) {
+      const h = formBHarness(path === 'toolcast-retry' ? 'ToolCast' : 'App')
+      const previous = h.arm({ lane: 'run', tool: 'f', params: {}, paramsComplete: true })
+      const execute = () => assert.fail('recovery must stage a fresh intent for confirmation')
+      Object.assign(h.env, {
+        lastRunRef: { current: { tool: formBTool, params: previous.params } },
+        lastConfirmedRunRef: { current: { tool: formBTool, params: previous.params } },
+        preparePendingRun: async (load) => ({
+          tool: (await load()).find((tool) => tool.name === 'f'),
+          pending: { params: previous.params },
+        }),
+        getTools: async () => h.tools,
+        onRun: execute, runCatalogTool: execute, runTool: execute, runToolAsync: execute,
+      })
+      const name = path === 'app-retry' ? 'onRetry'
+        : path === 'app-resume' ? 'onResumePendingRun' : 'retryCatalogRun'
+      await formBHook(h.source, name, h.env)()
+      formBAssertComplete(h, path === 'toolcast-retry' ? 2 : 4)
+      const next = h.lastArmed.runIntent
+      assert.notEqual(next.intentId, previous.runIntent.intentId)
+      assert.equal(h.env.runIntentStateRef.current.pending, next)
+      assert.deepEqual(h.env.runIntentStateRef.current.consumedIds, [])
+      // The former confirm card cannot authorize the newly staged recovery request.
+      assert.equal(confirmRunIntent(h.env.runIntentStateRef.current, previous.runIntent).code, 'changed_intent')
+      const confirmed = confirmRunIntent(h.env.runIntentStateRef.current, next)
+      assert.equal(confirmed.ok, true)
+      assert.deepEqual(confirmed.execution.params, {})
+    }
+  })
+})
+
 describe('W20-07b combiner workspace wiring', () => {
   const appNoComments = decomment(appSource)
   it('PRD6 App passes a catalog digest lookup built from its catalog rows to the workspace', () => {
@@ -106,7 +334,7 @@ describe('W20-07b combiner workspace wiring', () => {
     const absent = body.indexOf('if (!row)')
     const message = body.indexOf("setRunErr('Combiner placement is not in this catalog.')")
     const refusal = body.indexOf('return false', absent)
-    const stage = body.indexOf("return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon')?.runIntent?.intentId)")
+    const stage = body.indexOf("return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })?.runIntent?.intentId)")
     assert.ok(absent >= 0 && message > absent && refusal > message && stage > refusal)
     assert.ok(body.includes('[onRequestCatalogRun, tools]'))
     assert.equal(body.includes('onSubmitSolarFlowStep('), false)
@@ -275,7 +503,7 @@ describe('Conductor form wiring', () => {
     assert.match(branch, /React.createElement\(\s*SolarStepEditor/)
     assert.match(branch, /readIntake: SOLAR_SETTINGS_LOADERS.readIntake/)
     assert.match(branch, /drawingVersion: catalogRunContext\?\.drawingVersion/)
-    assert.match(branch, /onSubmit: \(tool, params\) => onRequestCatalogRun\(tool, params, RIBBON_RATIONALE, "ribbon"\)/)
+    assert.match(branch, /onSubmit: \(tool, params\) => onRequestCatalogRun\(tool, params, RIBBON_RATIONALE, "ribbon", \{ complete: true \}\)/)
   })
 
   it('CF15 the ribbon conductor choice mounts the step editor with live context and loaders', () => {
@@ -289,7 +517,7 @@ describe('Conductor form wiring', () => {
     assert.match(host, /drawingVersion: catalogRunContext\?\.drawingVersion/)
     assert.match(host, /projectId: catalogRunContext\?\.projectId/)
     assert.match(host, /readIntake: SOLAR_SETTINGS_LOADERS.readIntake/)
-    assert.match(host, /onSubmit: \(tool, params\) => onRequestCatalogRun\(tool, params, RIBBON_RATIONALE, "ribbon"\)/)
+    assert.match(host, /onSubmit: \(tool, params\) => onRequestCatalogRun\(tool, params, RIBBON_RATIONALE, "ribbon", \{ complete: true \}\)/)
     assert.match(host, /onClose: \(\) => setSolarFormTool\(null\)/)
   })
 
@@ -371,7 +599,7 @@ describe('Solar settings form wiring', () => {
       assert.deepEqual(settingsRunRef.current, expected)
       assert.deepEqual(resultCalls, [null])
       assert.equal(requestCalls.length, 1)
-      assert.equal(requestCalls[0].length, 4)
+      assert.equal(requestCalls[0].length, 5)
       assert.equal(requestCalls[0][0], solarFormTool)
       assert.equal(requestCalls[0][1], params)
       assert.equal(requestCalls[0][2], rationale)
@@ -452,7 +680,7 @@ describe('solar-ui-rail wiring', () => {
 
   it('commits the form through the catalog run path', () => {
     const form = appSource.slice(appSource.indexOf('<SolarToolForm'), appSource.indexOf('{/* W4c-V1: the drafting ribbon'))
-    assert.ok(form.includes("onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon')}"))
+    assert.ok(form.includes("onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon', { complete: true })}"))
     assert.ok(form.includes('onClose={() => setSolarFormTool(null)}'))
     assert.ok(appSource.includes('const [solarFormTool, setSolarFormTool] = useState(null)'))
   })
@@ -488,7 +716,7 @@ describe('Solar step rail wiring', () => {
     const end = appSource.indexOf('}, [onRequestCatalogRun])', start)
     assert.ok(start >= 0 && end > start)
     const body = appSource.slice(start, end)
-    assert.ok(body.includes("onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon')"))
+    assert.ok(body.includes("onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })"))
     assert.ok(!/\brunTool(Async)?\(/.test(body))
   })
 

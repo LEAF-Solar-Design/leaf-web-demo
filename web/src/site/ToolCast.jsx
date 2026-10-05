@@ -945,7 +945,7 @@ export default function ToolCast({
       return undefined
     }
     const id = mintCorrelationId()
-    const effectiveParams = prepareCatalogRunParams(tool, decision.params, context)
+    const effectiveParams = prepareCatalogRunParams(tool, decision.params, context, {}, { complete: decision.paramsComplete === true })
     const staged = stageRunIntent(runIntentStateRef.current, {
       intentId: `try-intent-${id}`,
       toolName: tool.name,
@@ -959,7 +959,7 @@ export default function ToolCast({
   }, [catalogRunContext, checkout.lockedByOther, drawing.mutationsBlocked, drawing.previewing, previewLocked, tools, writeLocked])
   catalogDecisionRef.current = armCatalogDecision
 
-  const requestCatalogRun = useCallback((tool, params) => {
+  const requestCatalogRun = useCallback((tool, params, { complete = false } = {}) => {
     if (!canOperate) return
     setSelectedCatalogTool(tool)
     setLeftView('catalog')
@@ -967,6 +967,7 @@ export default function ToolCast({
       lane: 'run',
       tool: tool.name,
       params,
+      paramsComplete: complete === true,
       confidence: 1,
       rationale: 'Catalog selection. Confirm the exact tool and parameters before it runs.',
       alternatives: [],
@@ -1107,7 +1108,7 @@ export default function ToolCast({
   const retryCatalogRun = useCallback(() => {
     const last = lastConfirmedRunRef.current
     if (!last || busy || jobRunning) return
-    requestCatalogRun(last.tool, { ...last.params })
+    requestCatalogRun(last.tool, { ...last.params }, { complete: true })
   }, [busy, jobRunning, requestCatalogRun])
 
   const openWorkspaceProject = useCallback(async (projectId) => {
@@ -1957,7 +1958,7 @@ export default function ToolCast({
               toolsError={toolsError}
               running={busy || jobRunning}
               selectedTool={selectedCatalogTool}
-              onRequestRun={requestCatalogRun}
+              onRequestRun={(tool, params) => requestCatalogRun(tool, params, { complete: true })}
               onOpenTool={setSelectedCatalogTool}
               onReviseTool={reviseAuthoredTool}
               onRetryTools={catalog.actions.retryTools}

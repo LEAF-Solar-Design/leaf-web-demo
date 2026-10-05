@@ -41,10 +41,12 @@ export function normalizeRunParams(params) {
   return freeze(normalize(params || {}))
 }
 
-export function prepareCatalogRunParams(tool, params, context, overlays = {}) {
+export function prepareCatalogRunParams(tool, params, context, overlays = {}, { complete = false } = {}) {
   const prepared = {}
-  for (const [key, property] of Object.entries(tool?.params?.properties || {})) {
-    if (property?.default !== undefined) prepared[key] = property.default
+  if (complete !== true) {
+    for (const [key, property] of Object.entries(tool?.params?.properties || {})) {
+      if (property?.default !== undefined) prepared[key] = property.default
+    }
   }
   Object.assign(prepared, params || {}, overlays || {})
   if ((tool?.capabilities || []).includes('drawing.write')) {
