@@ -145,6 +145,33 @@ function CustomizeChipBody({ payload }) {
 
 const shortId = (s) => String(s || '').slice(0, 8)
 
+// One agent tool step = one ledger row: a dot AND a word for its state (the
+// dot's colour alone is invisible to a screen reader and to a colour-blind
+// reader), then the verb (the tool, humanized) and its object (args_summary).
+function stepState(chip) {
+  if (chip.ok === null) return { word: 'Running', dot: 'dot live pulse', state: 'running' }
+  return chip.ok
+    ? { word: 'Done', dot: 'dot', state: 'done' }
+    : { word: 'Failed', dot: 'dot red', state: 'failed' }
+}
+const stepVerb = (tool) => String(tool || 'tool').replace(/[_-]+/g, ' ').trim() || 'tool'
+
+// A machine summary is marked by the PAYLOAD, never guessed from its prose:
+// `written_by: "claude"` or `machine_summary: true`. Anything else is unmarked
+// and renders exactly as before.
+function writtenByOf(data) {
+  if (data?.machine_summary === true) return 'Claude'
+  const by = typeof data?.written_by === 'string' ? data.written_by.trim().toLowerCase() : ''
+  return by === 'claude' ? 'Claude' : null
+}
+function WrittenByChip({ by }) {
+  return by ? <span className="dim converse-written-by" data-testid="converse-written-by">Written by {by}</span> : null
+}
+
+// The log's bottom lock: within this many pixels of the end, new events keep
+// the reader pinned; beyond it they are reading history and get the chip.
+const NEAR_BOTTOM_PX = 48
+
 // Per-turn spend tick (turn_usage event): cost_tokens is the metered number;
 // total_cost_usd is optional and always an estimate (no balance API exists).
 function fmtUsage(u) {
@@ -374,14 +401,44 @@ export default function ConversePanel({
   // scrolled up to re-read mid-stream is the classic streaming-UI defect
   // (W0 craft #21); the ref tracks proximity from their own scrolls.
   const nearBottomRef = useRef(true)
+  // Mirrors !nearBottomRef as state so the "Jump to latest" chip renders only
+  // while the reader is scrolled away (React bails out on an unchanged value,
+  // so a scroll storm re-renders only when the lock actually flips).
+  const [awayFromLatest, setAwayFromLatest] = useState(false)
   const onLogScroll = () => {
     const el = logRef.current
-    if (el) nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+    if (!el) return
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX
+    nearBottomRef.current = near
+    setAwayFromLatest(!near)
+  }
+  const jumpToLatest = () => {
+    const el = logRef.current
+    if (el) el.scrollTop = el.scrollHeight
+    nearBottomRef.current = true
+    setAwayFromLatest(false)
   }
   useEffect(() => {
     const el = logRef.current
     if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight
   }, [events])
+  // The chip's End keycap is live, and only while the chip is shown. It
+  // defers to anything nearer that handled the key (the tab strip's roving
+  // End) and never steals End from a text field or from outside this panel.
+  const cardRef = useRef(null)
+  useEffect(() => {
+    if (assistantTab !== 'conversation' || !awayFromLatest) return undefined
+    const onEnd = (e) => {
+      if (e.key !== 'End' || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
+      const target = e.target
+      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ''))) return
+      if (target !== document.body && !cardRef.current?.contains(target)) return
+      e.preventDefault()
+      jumpToLatest()
+    }
+    document.addEventListener('keydown', onEnd)
+    return () => document.removeEventListener('keydown', onEnd)
+  }, [assistantTab, awayFromLatest]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fold the raw §3 envelopes into renderable turns. Feed items preserve the
   // interleaving (text · tool chips · job links · confirm cards) exactly as
@@ -429,8 +486,11 @@ export default function ConversePanel({
         quota = false; quotaRetry = null; grant = false // a fresh turn clears the paused banners
       } else if (type === 'text_delta') {
         const last = t.feed[t.feed.length - 1]
-        if (last && last.kind === 'text') last.text += data.text || ''
-        else t.feed.push({ kind: 'text', text: data.text || '' })
+        // A marked machine summary is its own block, so its chip attributes
+        // exactly the marked text; unmarked deltas merge exactly as before.
+        const writtenBy = writtenByOf(data)
+        if (last && last.kind === 'text' && (last.writtenBy || null) === writtenBy) last.text += data.text || ''
+        else t.feed.push({ kind: 'text', text: data.text || '', writtenBy })
       } else if (type === 'tool_call') {
         // `args` is OPTIONAL on the wire: when the backend sends it the chip
         // becomes expandable, otherwise the chip is exactly what it is today.
@@ -440,8 +500,9 @@ export default function ConversePanel({
       } else if (type === 'tool_result') {
         // Pair with the earliest still-open call for the same tool.
         const open = t.openCalls.find((c) => c.tool === data.tool && c.ok === null)
-        if (open) { open.ok = data.ok !== false; open.result = data.summary || ''; open.fullResult = data.result }
-        else t.feed.push({ kind: 'tool', chip: { tool: data.tool, summary: '', ok: data.ok !== false, result: data.summary || '', fullResult: data.result } })
+        const writtenBy = writtenByOf(data)
+        if (open) { open.ok = data.ok !== false; open.result = data.summary || ''; open.fullResult = data.result; open.writtenBy = writtenBy }
+        else t.feed.push({ kind: 'tool', chip: { tool: data.tool, summary: '', ok: data.ok !== false, result: data.summary || '', fullResult: data.result, writtenBy } })
       } else if (type === 'job_linked') {
         t.feed.push({ kind: 'job', jobId: data.job_id, tool: data.tool || null })
       } else if (type === 'proposed_run') {
@@ -798,7 +859,13 @@ export default function ConversePanel({
       // Assistant prose renders through the element-only markdown path
       // (Markdown.jsx / markdown.js): fenced code, lists and links become
       // real elements, and anything HTML-shaped stays literal text.
-      return item.text ? <div key={i} className="converse-msg assistant"><Markdown text={item.text} /></div> : null
+      if (!item.text) return null
+      return (
+        <div key={i} className="converse-msg assistant">
+          <Markdown text={item.text} />
+          <WrittenByChip by={item.writtenBy} />
+        </div>
+      )
     }
     if (item.kind === 'tool') {
       const c = item.chip
@@ -809,9 +876,16 @@ export default function ConversePanel({
       const expandable = detail !== undefined && detail !== null
       const key = `${i}:${c.tool}`
       const open = !!expandedTools[key]
+      const st = stepState(c)
+      const verb = stepVerb(c.tool)
+      // The object is what the call acted on (args_summary); the result, once
+      // it lands, follows it rather than replacing it.
+      const object = c.summary
+      const outcome = c.result && c.result !== c.summary ? c.result : ''
       return (
-        <span key={i} className="converse-tool-chip">
-          <span className={c.ok === null ? 'dot live pulse' : (c.ok ? 'dot' : 'dot red')} aria-hidden="true" />
+        <span key={i} className="converse-tool-chip converse-step" data-state={st.state} title={c.tool || undefined}>
+          <span className={st.dot} aria-hidden="true" />
+          <span className="converse-step-state">{st.word}</span>
           {expandable ? (
             <button
               type="button"
@@ -819,7 +893,8 @@ export default function ConversePanel({
               aria-expanded={open}
               onClick={() => setExpandedTools((prev) => ({ ...prev, [key]: !prev[key] }))}
             >
-              <span className="route-tool">{c.tool}</span>
+              <span className="route-tool converse-step-verb">{verb}</span>
+              {object && <span className="dim converse-step-object"> {object}</span>}
               {/* the disclosure names what it opens (W0 craft #22): an
                   unlabeled glyph is an affordance nobody finds */}
               <span className="dim">
@@ -829,9 +904,13 @@ export default function ConversePanel({
               </span>
             </button>
           ) : (
-            <span className="route-tool">{c.tool}</span>
+            <>
+              <span className="route-tool converse-step-verb">{verb}</span>
+              {object && <span className="dim converse-step-object"> {object}</span>}
+            </>
           )}
-          {(c.result || c.summary) && <span className="dim"> · {c.result || c.summary}</span>}
+          {outcome && <span className="dim"> · {outcome}</span>}
+          <WrittenByChip by={c.writtenBy} />
           {open && (
             <span className="converse-tool-detail">
               {c.args !== undefined && c.args !== null && (
@@ -971,6 +1050,15 @@ export default function ConversePanel({
     return null
   }
 
+  // The active turn is between visible steps: nothing yet, or its last item is
+  // a settled step or a job link. Any other tail (streaming prose, a running
+  // step, a card waiting on the user) already shows what is happening.
+  const reasoningPending = (t) => {
+    if (t.turnId !== model.activeTurnId) return false
+    const last = t.feed[t.feed.length - 1]
+    return !last || last.kind === 'job' || (last.kind === 'tool' && last.chip.ok !== null)
+  }
+
   const conversation = (
     <>
       {showQuota && (
@@ -1034,6 +1122,15 @@ export default function ConversePanel({
               <div className="converse-note"><span className="dim">{t.imageDescriptors.length} image attachment{t.imageDescriptors.length === 1 ? '' : 's'} sent. Preview is unavailable after reload.</span></div>
             )}
             {t.feed.map(renderFeedItem)}
+            {reasoningPending(t) && (
+              // Reasoning between steps collapses to one pulse plus a verb;
+              // a running step carries its own pulse and streaming prose is
+              // its own evidence, so neither shows this row.
+              <div className="converse-note converse-reasoning" data-testid="converse-reasoning">
+                <span className="dot live pulse" aria-hidden="true" />
+                <span className="dim">thinking…</span>
+              </div>
+            )}
             {(t.usage || (t.stopReason && STOP_NOTES[t.stopReason])) && (
               <div className="converse-turnfoot">
                 {t.stopReason && STOP_NOTES[t.stopReason] && (
@@ -1063,6 +1160,16 @@ export default function ConversePanel({
           </div>
         ))}
       </LiveRegion>
+
+      {awayFromLatest && (
+        // Outside the log on purpose: the chip is a control, not transcript,
+        // so it is never announced as a new message.
+        <div className="converse-note converse-jump" style={{ justifyContent: 'flex-end' }}>
+          <button type="button" className="chip-neutral" onClick={jumpToLatest} title="Scroll to the newest message (End)">
+            Jump to latest <kbd className="key">End</kbd>
+          </button>
+        </div>
+      )}
 
       {secretNotice && (
         <div className="converse-secret-notice" role="alert" data-testid="converse-secret-notice">
@@ -1146,7 +1253,7 @@ export default function ConversePanel({
 
   const unreadCount = engineChangesResult?.unread_count || 0
   return (
-    <div className={engineChangesAccess ? 'converse-card enter engine-changes-assistant' : 'converse-card enter'} style={{ '--rank': 3 }}>
+    <div ref={cardRef} className={engineChangesAccess ? 'converse-card enter engine-changes-assistant' : 'converse-card enter'} style={{ '--rank': 3 }}>
       <div className="converse-head">
         <span className={model.active || busy ? 'dot live pulse' : 'dot'} aria-hidden="true" />
         <span className="converse-title">Assistant</span>
