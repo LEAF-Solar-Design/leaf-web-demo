@@ -217,7 +217,7 @@ a { color: var(--primary); }
   display: grid;
   grid-template-columns: 300px 1fr 300px;
   grid-template-rows: auto 1fr auto;
-  height: 100vh;
+  height: 100dvh;
   min-height: 0;
 }
 
@@ -430,7 +430,7 @@ h1.home-q em {
   cursor: pointer;
   margin-left: 10px;
 }
-.dispatch-btn:hover:not(:disabled) { background: var(--primary-hover); }
+@media (hover: hover) and (pointer: fine) { .dispatch-btn:hover:not(:disabled) { background: var(--primary-hover); } }
 .dispatch-btn:disabled { opacity: .5; cursor: not-allowed; }
 /* inline hint (H3): --muted-2 is only ~4.5:1 on its lightest ground, so any
    opacity fade below 1 drops it under WCAG AA (axe color-contrast, PR #794) */
@@ -488,7 +488,7 @@ h1.home-q em {
   background: var(--bar-well); border: 0; border-radius: 4px;
   padding: 7px 10px; cursor: pointer; color: var(--foreground);
 }
-.route-alt:hover { background: var(--bar-chip); }
+@media (hover: hover) and (pointer: fine) { .route-alt:hover { background: var(--bar-chip); } }
 .route-alt .an { font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
 .route-alt .ad { font-size: 11.5px; color: var(--muted); }
 
@@ -560,7 +560,7 @@ h1.home-q em {
 }
 .legend-title { color: var(--cv-dim); margin-bottom: 8px; }
 .legend-row { display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: none; color: var(--cv-text); padding: 4px 2px; cursor: pointer; font-size: 12px; border-radius: 4px; }
-.legend-row:hover:not(:disabled) { background: rgba(255, 255, 255, .06); }
+@media (hover: hover) and (pointer: fine) { .legend-row:hover:not(:disabled) { background: rgba(255, 255, 255, .06); } }
 .legend-row.off .legend-name { color: var(--cv-dim); text-decoration: line-through; }
 .legend-row.empty { opacity: .5; cursor: default; }
 .swatch { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; }
@@ -576,7 +576,8 @@ h1.home-q em {
 }
 .selection-readout.empty { color: var(--cv-dim); }
 .sel-hint { font-size: 12px; color: var(--cv-dim); opacity: .5; transition: opacity 180ms ease; }
-.sel-hint:hover, .selection-readout:hover .sel-hint, .selection-readout:focus-within .sel-hint { opacity: 1; }
+.selection-readout:focus-within .sel-hint { opacity: 1; }
+@media (hover: hover) and (pointer: fine) { .sel-hint:hover, .selection-readout:hover .sel-hint { opacity: 1; } }
 .sel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
 .sel-kind { font-size: 12px; font-weight: 600; letter-spacing: .2px; color: var(--cv-text); }
 /* plain action on the dark glass = quiet well-accent chip */
@@ -584,7 +585,7 @@ h1.home-q em {
   background: var(--well-accent-tint); border: none; border-radius: 4px;
   padding: 2px 8px; font: inherit; font-size: 11.5px; color: var(--well-accent); cursor: pointer;
 }
-.sel-clear:hover { background: rgba(56, 194, 116, .22); }
+@media (hover: hover) and (pointer: fine) { .sel-clear:hover { background: rgba(56, 194, 116, .22); } }
 .sel-fields { margin: 0; display: flex; flex-direction: column; gap: 5px; }
 .sel-field { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .sel-field dt { font-size: 11px; color: var(--cv-dim); margin: 0; }
@@ -741,7 +742,7 @@ aside.rail {
   padding: 3px 10px; border-radius: 4px; cursor: pointer;
   margin-left: auto;
 }
-.reattach button:hover { background: var(--primary-hover); }
+@media (hover: hover) and (pointer: fine) { .reattach button:hover { background: var(--primary-hover); } }
 /* jobs as light ledger rows on hairlines (22g) — the dot carries state; the
    2px accent left bar is reserved for the current/selected row only */
 .job {
@@ -750,7 +751,7 @@ aside.rail {
   width: 100%; text-align: left; color: inherit; cursor: default; display: block;
 }
 button.job { cursor: pointer; font: inherit; }
-button.job:hover { background: var(--hover-tint); }
+@media (hover: hover) and (pointer: fine) { button.job:hover { background: var(--hover-tint); } }
 .job.current { box-shadow: inset 2px 0 0 var(--primary); background: var(--accent-tint); }
 .job .h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 4px; }
 .job .h b { font-weight: 600; color: var(--foreground); font-family: var(--font-mono); font-size: 12px; }
@@ -796,6 +797,8 @@ footer.foot-bar {
   flex-wrap: wrap;
   font-variant-numeric: tabular-nums;
   min-height: 30px;
+  /* viewport-fit=cover: the title block clears the home indicator */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 /* inline-flex drops whitespace-only text nodes between inline children, so a
    6px gap stands in for the word space (and doubles as the dot gap) */
@@ -819,7 +822,7 @@ footer .warn-txt { color: var(--status-warning); }
 .tool-card { border: 1px solid var(--border); border-radius: 4px; background: var(--card); overflow: hidden; }
 .tool-card.open { box-shadow: inset 2px 0 0 var(--primary); } /* open = SL1 2px accent left bar, never a full accent border */
 .tool-head { width: 100%; text-align: left; background: none; border: none; color: inherit; padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 5px; }
-.tool-head:hover { background: var(--hover-tint); }
+@media (hover: hover) and (pointer: fine) { .tool-head:hover { background: var(--hover-tint); } }
 .tool-head-main { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
 .tool-name { font-family: var(--font-mono); font-weight: 600; font-size: 12px; color: var(--foreground); } /* slug = mono */
 .tool-desc { font-size: 12px; color: var(--muted); line-height: 1.35; }
@@ -859,21 +862,21 @@ footer .warn-txt { color: var(--status-warning); }
   font-family: var(--sans); background: var(--accent-tint); color: var(--primary);
   border: 0; border-radius: 4px; padding: 3px 9px; font-size: 12px; font-weight: 500; cursor: pointer;
 }
-.btn:hover:not(:disabled) { color: var(--primary-hover); background: var(--accent-tint-hover); }
+@media (hover: hover) and (pointer: fine) { .btn:hover:not(:disabled) { color: var(--primary-hover); background: var(--accent-tint-hover); } }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn.primary {
   background: var(--primary); color: var(--on-accent); font-weight: 600;
   padding: 6px 12px;
   box-shadow: 0 1px 2px rgba(25, 29, 26, .2);
 }
-.btn.primary:hover:not(:disabled) { background: var(--primary-hover); color: var(--on-accent); }
+@media (hover: hover) and (pointer: fine) { .btn.primary:hover:not(:disabled) { background: var(--primary-hover); color: var(--on-accent); } }
 /* F1: while a sibling field has focus the primary stays quiet */
 .author-panel:focus-within .btn.primary, .claude-pop:focus-within .btn.primary { box-shadow: none; }
 /* ghost repointed at the filled accent construction (unfilled text buttons retired) */
 .btn.ghost { background: var(--accent-tint); color: var(--primary); }
-.btn.ghost:hover:not(:disabled) { background: var(--accent-tint-hover); color: var(--primary-hover); }
+@media (hover: hover) and (pointer: fine) { .btn.ghost:hover:not(:disabled) { background: var(--accent-tint-hover); color: var(--primary-hover); } }
 .btn.neutral { background: var(--bar-chip); color: var(--muted); }
-.btn.neutral:hover:not(:disabled) { background: var(--border); color: var(--foreground); }
+@media (hover: hover) and (pointer: fine) { .btn.neutral:hover:not(:disabled) { background: var(--border); color: var(--foreground); } }
 
 .author-panel textarea { width: 100%; resize: vertical; }
 .examples { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
@@ -882,7 +885,7 @@ footer .warn-txt { color: var(--status-warning); }
   font-size: 11.5px; background: var(--accent-tint); border: 0; color: var(--primary);
   border-radius: 4px; padding: 3px 9px; cursor: pointer;
 }
-.chip:hover { background: var(--accent-tint-hover); }
+@media (hover: hover) and (pointer: fine) { .chip:hover { background: var(--accent-tint-hover); } }
 .authored { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
 .authored-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .authored-desc { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
@@ -911,7 +914,7 @@ footer .warn-txt { color: var(--status-warning); }
 }
 .inline-error::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--status-danger); flex: 0 0 auto; }
 .btn.retry { padding: 3px 10px; font-size: 12px; background: var(--accent-tint); color: var(--primary); }
-.btn.retry:hover:not(:disabled) { background: var(--accent-tint-hover); color: var(--primary); }
+@media (hover: hover) and (pointer: fine) { .btn.retry:hover:not(:disabled) { background: var(--accent-tint-hover); color: var(--primary); } }
 
 /* scrollbars */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -926,7 +929,7 @@ footer .warn-txt { color: var(--status-warning); }
   .app {
     grid-template-columns: 1fr;
     grid-template-rows: auto auto auto auto auto;
-    /* Release the desktop 100vh trap (:116). Once the 3-column grid collapses to
+    /* Release the desktop 100dvh trap (:116). Once the 3-column grid collapses to
        a single stacked column, a viewport-locked height squeezes the workspace
        row down to a few hundred px — the rooftop canvas then lays out BELOW the
        inner scrollport's fold and a phone viewer never sees the drawing at all.
@@ -934,7 +937,7 @@ footer .warn-txt { color: var(--status-warning); }
        full-bleed when content is short. The command bar stays reachable because
        structural.css pins .bar-dock to the viewport at this same breakpoint. */
     height: auto;
-    min-height: 100vh;
+    min-height: 100dvh;
   }
   /* grid items default to min-width:auto (never shrinking below their
      content's min-content size) — a single wide child would otherwise force
@@ -954,9 +957,9 @@ footer .warn-txt { color: var(--status-warning); }
      equal-specificity tie — media queries add no specificity. */
   .bar-dock {
     position: fixed;
-    left: 8px;
-    right: 8px;
-    bottom: 64px; /* clears footer.foot-bar (~55px) when scrolled to the end */
+    left: calc(8px + env(safe-area-inset-left, 0px));
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    bottom: calc(64px + env(safe-area-inset-bottom, 0px)); /* clears footer.foot-bar (~55px) when scrolled to the end */
     max-width: none;
   }
 }
@@ -984,7 +987,7 @@ footer .warn-txt { color: var(--status-warning); }
   /* header / footer already wrap (flex-wrap set elsewhere) — tighten the gap
      and edge padding so a wrapped row can't itself force horizontal scroll. */
   header.top { gap: 8px; padding: 8px 10px; }
-  footer.foot-bar { gap: 0; padding: 0 10px; }
+  footer.foot-bar { gap: 0; padding: 0 10px env(safe-area-inset-bottom, 0px); }
 
   /* tables / code blocks: table auto-layout can force column widths past a
      100% box (a well-known CSS quirk — width:100% doesn't cap min-content
@@ -1004,13 +1007,18 @@ footer .warn-txt { color: var(--status-warning); }
      maximum-scale hack in index.html, so pinch-zoom stays available. */
   .bar-input input, .bar-input .bar-field { font-size: 16px; }
 }
-/* reduced motion: complete immediately, never cancel a filled animation (M1) */
+/* reduced motion: complete immediately, never cancel a filled animation (M1).
+   Motion standard section 8 at the root (A4, fork C1 keeps the freeze): one
+   rule over every element AND both pseudo-elements, and a looping animation
+   runs once so it lands on its end state instead of spinning at 0s. */
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *, *::before, *::after {
     animation-duration: 0s !important;
     animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0s !important;
     transition-delay: 0s !important;
+    scroll-behavior: auto !important;
   }
   /* W0 craft #8: with the pulse frozen, a LIVE dot was byte-identical to a
      COMPLETE dot - same information, static form: a ring marks "running" */
@@ -1018,6 +1026,60 @@ footer .warn-txt { color: var(--status-warning); }
   .authoring::before, .loading::before {
     box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--primary) 45%, transparent);
   }
+}
+
+/* A3 OS modes are variants: each block remaps onto EXISTING stronger tokens,
+   so no new colour enters the vocabulary. Declared on body, never on the root
+   block, so the paper token contract check_token_repin.mjs reads stays
+   byte-identical. Only tokens every dark subtree re-pins (or that are dark
+   grounds already) are remapped: body resolves var() against paper values. */
+@media (prefers-contrast: more) {
+  body {
+    --muted: var(--foreground);
+    --muted-2: var(--foreground);
+    --hairline: var(--rule-strong);
+    --hover-tint: var(--hover-tint-strong);
+    --accent-tint: var(--accent-tint-hover);
+    --well-dim: var(--well-text);
+    --well-faint: var(--well-text);
+    --cv-dim: var(--cv-text);
+  }
+}
+@media (forced-colors: active) {
+  body {
+    --muted: var(--foreground);
+    --muted-2: var(--foreground);
+    --hairline: var(--rule-strong);
+    --well-dim: var(--well-text);
+    --well-faint: var(--well-text);
+    --cv-dim: var(--cv-text);
+  }
+  /* forced colours erase box-shadow, which is every focus ring here, and the
+     rings pair it with outline: none: draw the ring as an outline in the
+     system highlight instead, over any rule that suppresses it */
+  :focus-visible { outline: 2px solid Highlight !important; outline-offset: 2px; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  body {
+    --cv-panel-glass: var(--cv-panel);
+  }
+  .legend, .selection-readout { backdrop-filter: none; }
+}
+
+/* A21 touch and press (fork F-a21-press-feedback): controls take no 300 ms
+   double-tap wait and no grey tap flash, and a press answers at once with
+   the .985 scale tier. The individual `scale` property composes with the
+   enter animation that owns `transform`. The drawing canvas and sliders are
+   exempt: they own their own gestures. The touch rule sits in :where() at
+   zero specificity, so any surface that declares its own touch-action (the
+   board's pan surface, a drag handle) keeps it. */
+:where(:is(button, [role="button"], [role="tab"], [role="menuitem"], a, summary, select, label, input):not(canvas, input[type="range"], [role="slider"])) {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+:is(button, [role="button"], [role="tab"], [role="menuitem"], summary):active:not(:disabled):not([aria-disabled="true"]):not(canvas, input[type="range"], [role="slider"]) {
+  scale: .985;
+  transition: scale 120ms ease;
 }
 
 /* ---------------- UI wave 1: identity chip · spend chip · quota · history ---------------- */
@@ -1062,7 +1124,7 @@ footer .warn-txt { color: var(--status-warning); }
   padding: 2px 2px 8px; border-bottom: 1px solid var(--border);
 }
 .vh-x { font-size: 11px; color: var(--muted); background: var(--bar-chip); border: 0; border-radius: 4px; cursor: pointer; padding: 1px 7px; }
-.vh-x:hover { color: var(--foreground); }
+@media (hover: hover) and (pointer: fine) { .vh-x:hover { color: var(--foreground); } }
 .vh-previewing {
   display: flex; align-items: center; gap: 8px; justify-content: space-between;
   margin: 8px 0; padding: 6px 8px; border-radius: 4px;
@@ -1079,7 +1141,7 @@ footer .warn-txt { color: var(--status-warning); }
   background: none; border: 0;
   border-radius: 4px; padding: 7px 9px;
 }
-.vh-row:hover { background: var(--hover-tint); }
+@media (hover: hover) and (pointer: fine) { .vh-row:hover { background: var(--hover-tint); } }
 .vh-row.active { background: var(--accent-tint); box-shadow: inset 2px 0 0 var(--primary); }
 .vh-row-top { display: flex; align-items: center; gap: 8px; }
 .vh-v { font-family: var(--font-mono); font-weight: 600; color: var(--foreground); font-size: 12px; }
@@ -1111,7 +1173,7 @@ footer .warn-txt { color: var(--status-warning); }
   font-size: 10.5px;
   color: var(--muted-2); background: var(--bar-chip); border: 0; border-radius: 4px; padding: 0 6px;
 }
-.proj-chip:hover .proj-caret { color: var(--muted); }
+@media (hover: hover) and (pointer: fine) { .proj-chip:hover .proj-caret { color: var(--muted); } }
 .proj-menu {
   position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
   width: 280px; background: var(--card); border: 1px solid var(--border); border-radius: 6px;
@@ -1127,7 +1189,7 @@ footer .warn-txt { color: var(--status-warning); }
   background: none; border: 0; border-radius: 4px; padding: 7px 9px;
   font-size: 12.5px; color: var(--foreground);
 }
-.proj-row:hover { background: var(--hover-tint); }
+@media (hover: hover) and (pointer: fine) { .proj-row:hover { background: var(--hover-tint); } }
 .proj-row.active { background: var(--accent-tint); box-shadow: inset 2px 0 0 var(--primary); }
 .proj-row-name { font-weight: 500; }
 /* 'open' marker: green dot + word — never a pill */
@@ -1184,7 +1246,7 @@ footer .warn-txt { color: var(--status-warning); }
 }
 .ops-title { font-size: 12px; color: var(--foreground); }
 .ops-x { font-size: 11px; color: var(--muted); background: var(--bar-chip); border: 0; border-radius: 4px; cursor: pointer; padding: 1px 7px; }
-.ops-x:hover { color: var(--foreground); }
+@media (hover: hover) and (pointer: fine) { .ops-x:hover { color: var(--foreground); } }
 .ops-head .ops-x:first-of-type { margin-left: auto; }
 .ops-head .ops-x + .ops-x { margin-left: 8px; }
 .ops-note { font-size: 11.5px; color: var(--muted-2); padding: 8px 2px; line-height: 1.5; }
@@ -1198,7 +1260,7 @@ footer .warn-txt { color: var(--status-warning); }
   grid-template-columns: var(--project-tools-width) minmax(0, 1fr) var(--project-activity-width);
   grid-template-rows: auto 1fr auto;
   height: auto;
-  min-height: 100vh;
+  min-height: 100dvh;
   background: var(--background);
 }
 .app[data-project-workspace="results"][data-project-tools="open"] { --project-tools-width: 280px; }
@@ -1282,7 +1344,7 @@ footer .warn-txt { color: var(--status-warning); }
 .ops-table th { text-align: left; font-family: var(--font-mono); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--muted-2); border-bottom: 1px solid var(--rule-strong); padding: 4px 8px; }
 .ops-table th.num, .ops-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .ops-table td { height: 32px; padding: 0 8px; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
-.ops-table tbody tr:hover { background: var(--hover-tint); }
+@media (hover: hover) and (pointer: fine) { .ops-table tbody tr:hover { background: var(--hover-tint); } }
 .ops-tid { font-family: var(--font-mono); font-size: 11px; color: var(--foreground); word-break: break-all; }
 .ops-row-off .ops-tid { color: var(--muted-2); }
 .ops-act-cell { text-align: right; white-space: nowrap; }
@@ -1292,7 +1354,7 @@ footer .warn-txt { color: var(--status-warning); }
    the destroying act (affirmative = FILLED danger chip) */
 .ops-confirm-q { font-size: 11px; color: var(--foreground); }
 .ops-yes { color: #fff; background: var(--status-danger); }
-.ops-yes:hover:not(:disabled) { color: #fff; background: var(--status-danger); filter: brightness(1.08); }
+@media (hover: hover) and (pointer: fine) { .ops-yes:hover:not(:disabled) { color: #fff; background: var(--status-danger); filter: brightness(1.08); } }
 .ops-foot { font-size: 10.5px; color: var(--muted-2); margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
 
 /* --- item 3: single-writer checkout status — dot + word, never a pill.
@@ -1356,7 +1418,7 @@ footer .warn-txt { color: var(--status-warning); }
 .ca-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; border: 1.5px solid var(--muted-2); background: transparent; }
 .ca-state.on { color: var(--primary); }
 .ca-state.on::before { border: 0; background: var(--primary); }
-.claude-trigger:hover .ca-state, .link-svc-trigger:hover .ca-state { filter: brightness(1.15); }
+@media (hover: hover) and (pointer: fine) { .claude-trigger:hover .ca-state, .link-svc-trigger:hover .ca-state { filter: brightness(1.15); } }
 
 /* popover — paper card, right-anchored (trigger sits at header right) */
 .claude-pop {
@@ -1370,7 +1432,7 @@ footer .warn-txt { color: var(--status-warning); }
   color: var(--muted-2); padding-bottom: 8px; border-bottom: 1px solid var(--border);
 }
 .ca-x { font-size: 11px; color: var(--muted); background: var(--bar-chip); border: 0; border-radius: 4px; cursor: pointer; padding: 1px 7px; }
-.ca-x:hover { color: var(--foreground); }
+@media (hover: hover) and (pointer: fine) { .ca-x:hover { color: var(--foreground); } }
 .ca-setup, .ca-linked { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
 .ca-copy { font-size: 12.5px; color: var(--muted); line-height: 1.5; margin: 0; }
 .ca-copy b { color: var(--foreground); }
@@ -1392,7 +1454,7 @@ footer .warn-txt { color: var(--status-warning); }
 .ca-confirm-q { font-size: 11.5px; color: var(--foreground); }
 /* affirmative of the D1 pair = FILLED danger chip */
 .ca-yes { color: #fff; background: var(--status-danger); }
-.ca-yes:hover:not(:disabled) { color: #fff; background: var(--status-danger); filter: brightness(1.08); }
+@media (hover: hover) and (pointer: fine) { .ca-yes:hover:not(:disabled) { color: #fff; background: var(--status-danger); filter: brightness(1.08); } }
 
 /* authoring gate — calm nudge in AuthorPanel; never red, template path stays live */
 .author-gate {
@@ -1593,13 +1655,13 @@ footer .warn-txt { color: var(--status-warning); }
   background: var(--accent-tint); border: 0; border-radius: 4px;
   padding: 3px 9px; cursor: pointer;
 }
-.chip-act:hover { background: var(--accent-tint-hover); }
+@media (hover: hover) and (pointer: fine) { .chip-act:hover { background: var(--accent-tint-hover); } }
 .chip-neutral {
   font: 500 12px var(--sans); color: var(--muted);
   background: var(--hover-tint); border: 0; border-radius: 4px;
   padding: 3px 9px; cursor: pointer;
 }
-.chip-neutral:hover { background: var(--hover-tint-strong); }
+@media (hover: hover) and (pointer: fine) { .chip-neutral:hover { background: var(--hover-tint-strong); } }
 .chip-danger {
   font: 500 12px var(--sans); color: var(--status-danger);
   background: var(--danger-tint); border: 0; border-radius: 4px;
@@ -1618,7 +1680,7 @@ footer .warn-txt { color: var(--status-warning); }
   box-shadow: 0 1px 2px rgba(25, 29, 26, .2);
   font: 500 12.5px var(--sans); padding: 7px 14px;
 }
-.primary:hover { background: var(--primary-hover); }
+@media (hover: hover) and (pointer: fine) { .primary:hover { background: var(--primary-hover); } }
 
 /* ---------------- SB3 command bar: the INK WELL ----------------
    The one deliberately dark chrome surface: the command line, floating over
@@ -1658,7 +1720,7 @@ footer .warn-txt { color: var(--status-warning); }
   justify-content: center; font-size: 13px; color: var(--well-dim);
   background: var(--well-chip); border: 0; border-radius: 4px; cursor: pointer;
 }
-.bar-add:hover { color: var(--well-text); }
+@media (hover: hover) and (pointer: fine) { .bar-add:hover { color: var(--well-text); } }
 .bar-scope {
   font-family: var(--font-mono); font-size: 10.5px; color: var(--well-dim); background: var(--well-chip);
   border: 0; border-radius: 4px; padding: 3px 10px; cursor: pointer;
@@ -1673,7 +1735,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .bar .bar-input .key, .bar .bar-controls .key { background: var(--well-chip); color: var(--well-dim); }
 .bar .bar-input .key.hot, .bar .bar-controls .key.hot { background: var(--well-accent-tint); color: var(--well-accent); }
 .bar .bar-controls .chip-act { background: var(--well-accent); color: #08140d; font-weight: 600; }
-.bar .bar-controls .chip-act:hover:not(:disabled) { background: #46d182; }
+@media (hover: hover) and (pointer: fine) { .bar .bar-controls .chip-act:hover:not(:disabled) { background: #46d182; } }
 .bar .bar-controls .chip-act:disabled { background: var(--well-chip); color: var(--well-dim); }
 /* Credential refusal (slice 8a) — a danger-toned row INSIDE the well, so the
    refusal sits where the text it refused is, not above the sheet like a job
@@ -1690,11 +1752,11 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .bar .bar-secret-notice .strip-sentence { flex: 1; }
 .bar .bar-secret-notice .dim { color: var(--well-dim); font-variant-numeric: tabular-nums; }
 .bar .bar-secret-notice .chip-neutral { background: var(--well-chip); color: var(--well-dim); }
-.bar .bar-secret-notice .chip-neutral:hover { color: var(--well-text); background: var(--well-chip); }
+@media (hover: hover) and (pointer: fine) { .bar .bar-secret-notice .chip-neutral:hover { color: var(--well-text); background: var(--well-chip); } }
 .bar .converse-note { color: var(--well-dim); }
 .bar .converse-note .dim { color: var(--well-dim); }
 .bar .converse-note .chip-neutral { background: var(--well-chip); color: var(--well-dim); }
-.bar .converse-note .chip-neutral:hover { color: var(--well-text); background: var(--well-chip); }
+@media (hover: hover) and (pointer: fine) { .bar .converse-note .chip-neutral:hover { color: var(--well-text); background: var(--well-chip); } }
 /* focus - the bar's standing exception to the halo rule: no drop halo */
 .bar:focus-within {
   border-color: rgba(56, 194, 116, .7);
@@ -1747,7 +1809,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   width: 100%; text-align: left; background: none; color: inherit;
   border-left: 0; border-right: 0; border-bottom: 0;
 }
-.resolver-row:hover { background: var(--hover-tint); }
+@media (hover: hover) and (pointer: fine) { .resolver-row:hover { background: var(--hover-tint); } }
 .resolver-row.active { background: var(--accent-tint); }
 .resolver-row .lbar { width: 2px; align-self: stretch; background: transparent; flex: none; }
 .resolver-row.active .lbar { background: var(--primary); border-radius: 1px; }
@@ -1766,7 +1828,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   /* centered via inset+margin, NOT translateX: the m1 enter animation owns
      `transform` and was stomping a translateX(-50%) into off-center */
   position: absolute; left: 0; right: 0; margin: 0 auto; width: fit-content;
-  bottom: 132px; z-index: 80; /* clears the floating bar island */
+  bottom: calc(132px + env(safe-area-inset-bottom, 0px)); z-index: 80; /* clears the floating bar island and the home indicator */
   display: flex; align-items: center; gap: 9px;
   font: 500 12px var(--sans); color: var(--muted);
   background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 7px 13px;
@@ -1775,7 +1837,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 }
 .toast::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); flex: none; }
 .toast .action { color: var(--muted-2); cursor: pointer; background: none; border: 0; font: inherit; padding: 0; }
-.toast .action:hover { color: var(--muted); }
+@media (hover: hover) and (pointer: fine) { .toast .action:hover { color: var(--muted); } }
 
 /* ---------------- DT2 right drawer ---------------- */
 /* Visual construction; POSITIONING is owned by the structural lane -
@@ -1825,7 +1887,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   display: grid; grid-template-columns: 80px 1fr 130px 160px; gap: 14px;
   align-items: center; height: 32px; padding: 0 12px; border-top: 1px solid var(--hairline);
 }
-.ledger-row:hover { background: var(--hover-tint); }
+@media (hover: hover) and (pointer: fine) { .ledger-row:hover { background: var(--hover-tint); } }
 .ledger-time { font: 400 11px var(--font-mono); color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .ledger-event { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--muted); min-width: 0; }
 .ledger-ref { font: 400 11px var(--font-mono); color: var(--muted-2); text-align: right; }
@@ -2040,7 +2102,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .engine-changes-status { min-height: 22px; color: var(--muted-2); }
 .engine-changes-list { list-style: none; padding: 0; margin: 0; max-width: 640px; }
 .engine-changes-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; min-height: 54px; padding: 10px 6px; border: 0; border-bottom: 1px solid var(--border); background: var(--card); color: var(--foreground); text-align: left; font: inherit; cursor: pointer; }
-.engine-changes-row:hover { background: var(--accent-tint); }
+@media (hover: hover) and (pointer: fine) { .engine-changes-row:hover { background: var(--accent-tint); } }
 .engine-changes-row-title { flex: 1 1 100%; font-weight: 600; }
 .engine-changes-state { padding: 2px 6px; border-radius: 4px; background: var(--bar-chip); font-size: 11.5px; color: var(--muted); }
 .engine-changes-unread { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--primary); }
@@ -2159,9 +2221,9 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 @media (max-width: 980px) {
   .bar-dock {
     position: fixed;
-    left: 8px;
-    right: 8px;
-    bottom: 64px; /* clears footer.foot-bar (~55px) at the end of the scroll */
+    left: calc(8px + env(safe-area-inset-left, 0px));
+    right: calc(8px + env(safe-area-inset-right, 0px));
+    bottom: calc(64px + env(safe-area-inset-bottom, 0px)); /* clears footer.foot-bar (~55px) at the end of the scroll */
     max-width: none;
   }
 }
@@ -2209,7 +2271,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   background: transparent; color: var(--muted); cursor: pointer;
   font: inherit; text-align: left;
 }
-.app .tc-product-tabs [role="tab"]:hover { color: var(--foreground); background: var(--hover-tint); }
+@media (hover: hover) and (pointer: fine) { .app .tc-product-tabs [role="tab"]:hover { color: var(--foreground); background: var(--hover-tint); } }
 .app .tc-product-tabs [role="tab"][aria-selected="true"] {
   border-color: var(--border); color: var(--foreground); background: var(--card);
   margin-bottom: -1px; padding-bottom: 9px;
