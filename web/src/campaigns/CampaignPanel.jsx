@@ -1,6 +1,7 @@
 import { useEffect, useId, useImperativeHandle, useRef, useState } from 'react'
 import useCampaigns, { releaseSource } from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
+import { useLoadingPhase } from '../lib/loadingTiming.js'
 import './campaigns.css'
 
 const conflictMessage = 'This question already has a different recorded answer. Reload to see it.'
@@ -131,9 +132,11 @@ function SubmitForm({ campaign, projectId, navigationRef, onBusyChange }) {
     </div>}
     {mode === 'finish' && <label>Release deadline (optional)<input type="datetime-local" value={deadline} disabled={busy}
       onChange={event => setDeadline(event.target.value)} /></label>}
-    <label>Title<input ref={titleInput} value={title} maxLength={200} aria-invalid={field === 'title'} onChange={event => setTitle(event.target.value)} /></label>
+    {/* Autocomplete is off because titles are free text for each campaign. */}
+    <label>Title<input ref={titleInput} autoComplete="off" enterKeyHint="next" value={title} maxLength={200} aria-invalid={field === 'title'} onChange={event => setTitle(event.target.value)} /></label>
     {field === 'title' && <Alert error={action.error} />}
-    <label>Prompt<textarea value={prompt} maxLength={mode === 'finish' ? 2000 : 32768} aria-invalid={field === 'prompt'} onChange={event => setPrompt(event.target.value)} /></label>
+    {/* Autocomplete is off because prompts are free text for each campaign. */}
+    <label>Prompt<textarea autoComplete="off" enterKeyHint="enter" value={prompt} maxLength={mode === 'finish' ? 2000 : 32768} aria-invalid={field === 'prompt'} onChange={event => setPrompt(event.target.value)} /></label>
     <span className="dim" aria-live="polite">{(mode === 'finish' ? 2000 : 32768) - prompt.length} characters remaining</span>
     {field === 'prompt' && <Alert error={action.error} />}
     <button type="submit" className="btn primary" disabled={busy || (mode === 'finish' && !!input.file && !input.ready)} aria-busy={busy}>{mode === 'finish' ? 'Request release' : 'Submit campaign'}</button>
@@ -538,6 +541,7 @@ function EnrollmentPanel({ campaign }) {
 
 function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvider }) {
   const campaign = useCampaigns(projectId, { enabled: true, authorityProvider })
+  const loadingPhase = useLoadingPhase(campaign.status === 'loading')
   const formNavigation = useRef(null)
   const [formBusy, setFormBusy] = useState(false)
   const selected = campaign.selected
@@ -550,7 +554,7 @@ function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvid
       {(!selected || hasRelease) && <button type="button" className="btn primary" disabled={formBusy || !!campaign.pending.submit}
         onClick={() => formNavigation.current?.finish()}>Finish this project</button>}
     </div>
-    {campaign.status === 'loading' && <div role="status" aria-label="Loading campaigns">
+    {['shown', 'long'].includes(loadingPhase) && <div role="status" aria-label="Loading campaigns">
       <div className="skeleton-stack" aria-hidden="true"><div className="skeleton-row" /><div className="skeleton-row" /></div>
     </div>}
     {selected && <div className="panel-sub campaign-status" data-state={selected.status}>
