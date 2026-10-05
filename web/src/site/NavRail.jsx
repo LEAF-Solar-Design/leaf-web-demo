@@ -29,6 +29,7 @@
 // ---------------------------------------------------------------------------
 import AuthorPanel from '../components/AuthorPanel.jsx'
 import ToolsPanel from '../components/ToolsPanel.jsx'
+import { ToolHistoryProvider } from '../components/ToolHistory.jsx'
 
 import { surfaceContract } from './productSurfaces.js'
 
@@ -69,6 +70,7 @@ export default function NavRail({
   onRequestRun = null,
   onOpenTool = null,
   onReviseTool = null,
+  onCatalogChanged = null,
   toolsOpen = false,
   onToggleTools = null,
   openFamilies = null,
@@ -97,6 +99,8 @@ export default function NavRail({
   const cockpit = !!studio && surfaceContract(activeSurface).chrome.cockpit
   const families = openFamilies || {}
   return (
+    <ToolHistoryProvider enabled={catalogSource === 'endpoint' || catalogSource === 'flat-fallback'}>
+    {(controls) => (
     <aside className="nav" data-spine={navSpine ? 'hidden' : undefined} aria-hidden={navSpine || undefined}>
       {/* W4c-V1 spine, re-seated in W4d Slice D: on drafting surfaces under
           the studio the rail HIDES behind the band (the reference cockpit
@@ -133,6 +137,7 @@ export default function NavRail({
           <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={onToggleTools}>
             <ToolsPanel
               tools={tools}
+              onCatalogChanged={onCatalogChanged}
               writeLocked={writeLocked}
               writeEntitled={writeEntitled}
               error={toolsErr}
@@ -167,6 +172,7 @@ export default function NavRail({
         >
           <ToolsPanel
             tools={fam.capabilities}
+            onCatalogChanged={onCatalogChanged}
             writeLocked={writeLocked}
             writeEntitled={writeEntitled}
             subtitle={fam.description}
@@ -206,8 +212,11 @@ export default function NavRail({
           buildEntitled={buildEntitled}
         />
       </Section>
+      {controls}
       </>
       )}
     </aside>
+    )}
+    </ToolHistoryProvider>
   )
 }
