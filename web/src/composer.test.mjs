@@ -808,7 +808,9 @@ describe('a dropped refusal is still a leak (round 4)', () => {
   it('the authority mint forwards allowSecretOnce, both shells', () => {
     const authSource = bare(readStripped('controllers/useAuthorStageController.js'))
     assert.ok(
-      authSource.includes('authorityProvider(initial.description,{allowSecretOnce})'),
+      // The revise path (C3) adds forceFresh for a prior staged draft; the
+      // allowSecretOnce forward this row pins must survive beside it.
+      /authorityProvider\(initial\.description,\{allowSecretOnce(?:,\.\.\.initial\.prior_staged\?\{forceFresh:true\}:\{\})?\}\)/.test(authSource),
       'useAuthorStageController must forward allowSecretOnce into the authority mint',
     )
     for (const file of ['App.jsx', 'site/ToolCast.jsx']) {

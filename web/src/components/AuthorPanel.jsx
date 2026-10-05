@@ -237,6 +237,8 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const [authored, setAuthored] = useState(null)
   const [publishing, setPublishing] = useState(false)
   const [publishErr, setPublishErr] = useState(null)
+  const [draftMessage, setDraftMessage] = useState(null)
+  const focusDraftRef = useRef(false)
   // The credential refusal the TRANSPORT raised (api.stageAuthorTool /
   // api.authorTool, and the author pointer's storage boundary), held only to
   // render it: {id, reason, masked, overridable} or null. This panel evaluates
@@ -261,8 +263,17 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
     if (stageActivity?.result) {
       setAuthored(stageActivity.result)
       setErr(null)
+    } else if (stageActivity?.draftOnly) {
+      setAuthored(null)
     }
-  }, [stageActivity?.result])
+  }, [stageActivity?.result, stageActivity?.draftOnly])
+
+  useEffect(() => {
+    if (focusDraftRef.current) {
+      focusDraftRef.current = false
+      descRef.current?.focus()
+    }
+  }, [stageActivity?.pointer?.idempotency_key, draftMessage])
 
   useEffect(() => {
     const e = stageActivity?.error
@@ -279,10 +290,10 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   }, [stageActivity?.error, stageActivity?.resumable, stageActivity?.failedRequest])
 
   useEffect(() => {
-    if (stageActivity?.failedRequest && stageActivity.pointer?.description) {
+    if ((stageActivity?.failedRequest || stageActivity?.draftOnly) && stageActivity.pointer?.description) {
       setDesc((current) => current || stageActivity.pointer.description)
     }
-  }, [stageActivity?.failedRequest?.idempotency_key, stageActivity?.pointer?.description])
+  }, [stageActivity?.failedRequest?.idempotency_key, stageActivity?.draftOnly, stageActivity?.pointer?.description])
 
   // Prefill from a build-lane route (only when the signal changes, so manual
   // edits are never clobbered by a re-render).
@@ -293,7 +304,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
         setDesc(seed)
         // Tour beat: the differentiator claim is "Leaf writes the tool", so on a
         // guided run the seed authors immediately instead of leaving a prefilled box.
-        if (seedAutoSubmit) submit(seed)
+        if (seedAutoSubmit && !stageActivity?.pointer && !stageActivity?.draftOnly) submit(seed)
       }
     }
   }, [seed, seedSignal])
@@ -316,6 +327,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   async function submit(override, { allowSecretOnce = false, newAttempt = false } = {}) {
     const d = (typeof override === 'string' ? override : desc).trim()
     if (!d || !buildEntitled) return
+    setDraftMessage(null)
     setBusy(true); setErr(null); setPublishErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setQuotaGate(null); setAuthored(null); setSecretNotice(null)
     try {
       const res = await onAuthor(d, targetToolName, { allowSecretOnce, ...(newAttempt ? { newAttempt: true } : {}) })
@@ -373,6 +385,23 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
     }
   }
 
+  function reviseDraft() {
+    if (busyNow || publishing) return
+    const prepared = stageActivity?.reviseDraft(stageActivity.pointer.idempotency_key)
+    if (!prepared) return
+    setDesc(prepared.description)
+    setAuthored(null); setPublishErr(null); setErr(null); setSecretNotice(null)
+    focusDraftRef.current = true
+    setDraftMessage('Revise the description, then generate a new draft.')
+  }
+
+  function discardDraft() {
+    if (busyNow || publishing || !stageActivity?.discardDraft(stageActivity.pointer.idempotency_key)) return
+    setDesc(''); setAuthored(null); setPublishErr(null); setErr(null); setSecretNotice(null)
+    focusDraftRef.current = true
+    setDraftMessage('Draft discarded.')
+  }
+
   // X1 mnemonic: R retries a failed Generate (never while typing in a field).
   useEffect(() => {
     if (!err || err.reasonCode === 'signed-out-demo' || busy || stageActivity?.failedRequest) return
@@ -395,14 +424,29 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const publicationStatus = authored?.publication_status || null
   const publicationPending = publicationStatus === 'awaiting_approval'
   const publicationDenied = publicationStatus === 'denied'
+  const publicationCode = String(publishErr?.body?.reason_code || publishErr?.body?.error?.code || publishErr?.body?.error?.message || publishErr?.message || '').toLowerCase()
+  const approvalPendingError = /independent_approval_pending|approval.pending/.test(publicationCode)
+  const recoveryOutcome = !publicationPending && !approvalPendingError && !authored?.published
+    && (publicationDenied || publishErr?.status === 409 || publishErr?.status === 410)
+  const canRecover = recoveryOutcome && stageActivity?.pointer?.terminal_staged
+    && stageActivity?.pointer?.staged_result?.receipt && stageActivity?.enabled !== false
+    && typeof stageActivity?.reviseDraft === 'function' && typeof stageActivity?.discardDraft === 'function'
   const busyNow = busy || !!stageActivity?.active
-  const authorLocked = busyNow || publishing || (!!stageActivity?.pointer && !stageActivity?.failedRequest)
+  const authorLocked = busyNow || publishing || (!!stageActivity?.pointer && !stageActivity?.failedRequest && !stageActivity?.draftOnly)
   const shownElapsedMs = stageActivity?.active ? stageActivity.elapsedMs : elapsedMs
   const shownSecs = Math.floor(shownElapsedMs / 1000)
 
   return (
     <div className="author-panel author-inner">
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf stages it for review before publication.</p>
+      {draftMessage && <div role="status">{draftMessage}</div>}
+      {stageActivity?.previousStagedReceipt && (
+        <div className="customization-state" role="status">
+          <span>Previous staged receipt</span>
+          <code>{stageActivity.previousStagedReceipt.change_set_id}</code>
+          {stageActivity.previousStagedReceipt.state && <span>{stageActivity.previousStagedReceipt.state}</span>}
+        </div>
+      )}
       {targetToolName && (
         <div className="customization-state" role="status">
           <span className="dot square" aria-hidden="true" />
@@ -411,7 +455,8 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
             <input id="author-target" value={targetToolName} readOnly />
             <p>The target is locked, so this repair updates that tool instead of creating another.</p>
           </div>
-          <button type="button" className="chip-act" onClick={onCancelRevision} disabled={authorLocked}>Cancel revision</button>
+          <button type="button" className="chip-act" onClick={onCancelRevision} disabled={authorLocked || !!stageActivity?.pointer}
+            title={stageActivity?.pointer ? 'Finish or discard the current request before cancelling the revision.' : undefined}>Cancel revision</button>
         </div>
       )}
       {(!buildEntitled || buildGate)
@@ -547,11 +592,14 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
             <div className="customization-detail"><span>Server diff</span><pre>{typeof (authored.diff_summary || authored.diff) === 'string' ? (authored.diff_summary || authored.diff) : JSON.stringify(authored.diff_summary || authored.diff, null, 2)}</pre></div>
           )}
           <pre className="code"><code>{authored.code}</code></pre>
-          {!authored.published ? (
-            <button className="chip-act" onClick={publicationDenied ? submit : publish} disabled={publishing || busyNow}>
-              {publicationDenied
-                ? (busyNow ? 'Authoring…' : 'Stage again')
-                : publishing
+          {!authored.published ? canRecover ? (
+            <>
+              <button type="button" className="chip-act" onClick={reviseDraft} disabled={publishing || busyNow}>Revise</button>
+              <button type="button" className="chip-act" onClick={discardDraft} disabled={publishing || busyNow}>Discard draft</button>
+            </>
+          ) : !recoveryOutcome && (
+            <button className="chip-act" onClick={publish} disabled={publishing || busyNow}>
+              {publishing
                   ? (publicationPending ? 'Checking…' : 'Publishing…')
                   : publicationPending
                     ? 'Check approval & resume'

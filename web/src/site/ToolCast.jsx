@@ -709,9 +709,9 @@ export default function ToolCast({
   // Wide margin under the server's TURN_MAX_S default of 300s.
   const AUTHOR_AUTHORITY_TTL_MS = 120_000
   const authorAuthorityRef = useRef(null) // { sessionId, turnId, mintedAt }
-  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false } = {}) => {
+  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, forceFresh = false } = {}) => {
     const cached = authorAuthorityRef.current
-    if (cached && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
+    if (!forceFresh && cached && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
       return { sessionId: cached.sessionId, turnId: cached.turnId }
     }
     try {
