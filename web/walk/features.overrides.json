@@ -1633,6 +1633,688 @@
       ],
       "certify": "both"
     }
+    ,
+    {
+      "id": "control:open-dxf",
+      "source_id": "open-dxf",
+      "title": "Open DXF",
+      "sources": [
+        "web/src/App.jsx",
+        "web/src/cadedit/EngineRibbonClusters.jsx",
+        "web/src/site/CockpitTopBand.jsx"
+      ],
+      "states": [
+        "closed",
+        "open",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "closed": {
+          "toolbar": "Quick access",
+          "name": "Open DXF",
+          "expanded": false
+        },
+        "open": {
+          "toolbar": "Quick access",
+          "name": "Open DXF",
+          "expanded": true
+        },
+        "failed-load": {
+          "toolbar": "Quick access",
+          "name": "Open DXF",
+          "expanded": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "closed": {
+          "kind": "toggles",
+          "target": "dxf-import-expanded",
+          "value": true
+        },
+        "open": {
+          "kind": "toggles",
+          "target": "dxf-import-expanded",
+          "value": false
+        },
+        "failed-load": {
+          "kind": "toggles",
+          "target": "dxf-import-expanded",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    },
+    {
+      "id": "control:save-version",
+      "source_id": "save-version",
+      "title": "Save version",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx",
+        "web/src/cadedit/engineSession.js",
+        "web/src/site/CockpitTopBand.jsx"
+      ],
+      "states": [
+        "ready",
+        "no-document",
+        "nothing-edited",
+        "no-target",
+        "engine-busy",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "toolbar": "Quick access",
+          "name": "Save version"
+        },
+        "no-document": {
+          "toolbar": "Quick access",
+          "name": "Save version (unavailable: no drawing in the browser engine yet)",
+          "tooltip": "Save version: no drawing in the browser engine yet"
+        },
+        "nothing-edited": {
+          "toolbar": "Quick access",
+          "name": "Save version (unavailable: edit something first)",
+          "tooltip": "Save version: edit something first"
+        },
+        "no-target": {
+          "toolbar": "Quick access",
+          "name": "Save version (unavailable: download-only here: no project target)",
+          "tooltip": "Save version: download-only here: no project target"
+        },
+        "engine-busy": {
+          "toolbar": "Quick access",
+          "name": "Save version (unavailable: engine busy: wait for the current edit)",
+          "tooltip": "Save version: engine busy: wait for the current edit"
+        },
+        "failed-load": {
+          "toolbar": "Quick access",
+          "name": "Save version (unavailable: no drawing in the browser engine yet)",
+          "tooltip": "Save version: no drawing in the browser engine yet",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "submits",
+          "target": "engine-save-version"
+        },
+        "no-document": {
+          "kind": "disabled_with_reason",
+          "reason": "no drawing in the browser engine yet",
+          "reason_code": "control:save-version:unavailable"
+        },
+        "nothing-edited": {
+          "kind": "disabled_with_reason",
+          "reason": "edit something first",
+          "reason_code": "control:save-version:unavailable"
+        },
+        "no-target": {
+          "kind": "disabled_with_reason",
+          "reason": "download-only here: no project target",
+          "reason_code": "control:save-version:unavailable"
+        },
+        "engine-busy": {
+          "kind": "disabled_with_reason",
+          "reason": "engine busy: wait for the current edit",
+          "reason_code": "control:save-version:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "no drawing in the browser engine yet",
+          "reason_code": "control:save-version:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    },
+    {
+      "id": "control:undo-edit",
+      "source_id": "undo-edit",
+      "title": "Undo edit",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx",
+        "web/src/cadedit/engineSession.js",
+        "web/src/site/CockpitTopBand.jsx"
+      ],
+      "states": [
+        "ready",
+        "no-document",
+        "nothing-to-undo",
+        "engine-busy",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "toolbar": "Quick access",
+          "name": "Undo edit"
+        },
+        "no-document": {
+          "toolbar": "Quick access",
+          "name": "Undo edit (unavailable: no drawing in the browser engine yet)",
+          "tooltip": "Undo edit: no drawing in the browser engine yet"
+        },
+        "nothing-to-undo": {
+          "toolbar": "Quick access",
+          "name": "Undo edit (unavailable: nothing to undo)",
+          "tooltip": "Undo edit: nothing to undo"
+        },
+        "engine-busy": {
+          "toolbar": "Quick access",
+          "name": "Undo edit (unavailable: engine busy: wait for the current edit)",
+          "tooltip": "Undo edit: engine busy: wait for the current edit"
+        },
+        "failed-load": {
+          "toolbar": "Quick access",
+          "name": "Undo edit (unavailable: no drawing in the browser engine yet)",
+          "tooltip": "Undo edit: no drawing in the browser engine yet",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "submits",
+          "target": "engine-undo-edit"
+        },
+        "no-document": {
+          "kind": "disabled_with_reason",
+          "reason": "no drawing in the browser engine yet",
+          "reason_code": "control:undo-edit:unavailable"
+        },
+        "nothing-to-undo": {
+          "kind": "disabled_with_reason",
+          "reason": "nothing to undo",
+          "reason_code": "control:undo-edit:unavailable"
+        },
+        "engine-busy": {
+          "kind": "disabled_with_reason",
+          "reason": "engine busy: wait for the current edit",
+          "reason_code": "control:undo-edit:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "no drawing in the browser engine yet",
+          "reason_code": "control:undo-edit:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    },
+    {
+      "id": "control:redo-edit",
+      "source_id": "redo-edit",
+      "title": "Redo edit",
+      "sources": [
+        "web/src/cadedit/EngineRibbonClusters.jsx",
+        "web/src/cadedit/engineSession.js",
+        "web/src/site/CockpitTopBand.jsx"
+      ],
+      "states": [
+        "ready",
+        "no-document",
+        "nothing-to-redo",
+        "engine-busy",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "toolbar": "Quick access",
+          "name": "Redo edit"
+        },
+        "no-document": {
+          "toolbar": "Quick access",
+          "name": "Redo edit (unavailable: no drawing in the browser engine yet)",
+          "tooltip": "Redo edit: no drawing in the browser engine yet"
+        },
+        "nothing-to-redo": {
+          "toolbar": "Quick access",
+          "name": "Redo edit (unavailable: nothing to redo)",
+          "tooltip": "Redo edit: nothing to redo"
+        },
+        "engine-busy": {
+          "toolbar": "Quick access",
+          "name": "Redo edit (unavailable: engine busy: wait for the current edit)",
+          "tooltip": "Redo edit: engine busy: wait for the current edit"
+        },
+        "failed-load": {
+          "toolbar": "Quick access",
+          "name": "Redo edit (unavailable: no drawing in the browser engine yet)",
+          "tooltip": "Redo edit: no drawing in the browser engine yet",
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "submits",
+          "target": "engine-redo-edit"
+        },
+        "no-document": {
+          "kind": "disabled_with_reason",
+          "reason": "no drawing in the browser engine yet",
+          "reason_code": "control:redo-edit:unavailable"
+        },
+        "nothing-to-redo": {
+          "kind": "disabled_with_reason",
+          "reason": "nothing to redo",
+          "reason_code": "control:redo-edit:unavailable"
+        },
+        "engine-busy": {
+          "kind": "disabled_with_reason",
+          "reason": "engine busy: wait for the current edit",
+          "reason_code": "control:redo-edit:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "no drawing in the browser engine yet",
+          "reason_code": "control:redo-edit:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    },
+    {
+      "id": "control:more-panels",
+      "source_id": "more-panels",
+      "title": "More panels",
+      "sources": [
+        "web/src/site/DraftingRibbon.jsx"
+      ],
+      "states": [
+        "closed",
+        "open",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "closed": {
+          "toolbar": "Drafting tools",
+          "name": "More panels",
+          "expanded": false
+        },
+        "open": {
+          "toolbar": "Drafting tools",
+          "name": "More panels",
+          "expanded": true
+        },
+        "failed-load": {
+          "toolbar": "Drafting tools",
+          "name": "More panels",
+          "expanded": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "closed": {
+          "kind": "toggles",
+          "target": "ribbon-overflow-expanded",
+          "value": true
+        },
+        "open": {
+          "kind": "toggles",
+          "target": "ribbon-overflow-expanded",
+          "value": false
+        },
+        "failed-load": {
+          "kind": "toggles",
+          "target": "ribbon-overflow-expanded",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    },
+    {
+      "id": "control:open-dxf-browser",
+      "source_id": "open-dxf-browser",
+      "title": "Open a DXF in the browser engine",
+      "sources": [
+        "web/src/App.jsx"
+      ],
+      "states": [
+        "closed",
+        "open",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "closed": {
+          "document": true,
+          "name": "Open a DXF in the browser engine",
+          "expanded": false
+        },
+        "open": {
+          "document": true,
+          "name": "Open a DXF in the browser engine",
+          "expanded": true
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Open a DXF in the browser engine",
+          "expanded": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "closed": {
+          "kind": "toggles",
+          "target": "dxf-import-expanded",
+          "value": true
+        },
+        "open": {
+          "kind": "toggles",
+          "target": "dxf-import-expanded",
+          "value": false
+        },
+        "failed-load": {
+          "kind": "toggles",
+          "target": "dxf-import-expanded",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    },
+    {
+      "id": "control:objects",
+      "source_id": "objects",
+      "title": "Objects",
+      "sources": [
+        "web/src/cadedit/CadEditSurface.jsx",
+        "web/src/cadedit/DrawingObjectList.jsx"
+      ],
+      "states": [
+        "closed",
+        "open",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "closed": {
+          "document": true,
+          "name": "Objects",
+          "expanded": false
+        },
+        "open": {
+          "document": true,
+          "name": "Objects",
+          "expanded": true
+        },
+        "failed-load": {
+          "document": true,
+          "name": "Objects",
+          "expanded": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "closed": {
+          "kind": "toggles",
+          "target": "drawing-objects-expanded",
+          "value": true
+        },
+        "open": {
+          "kind": "toggles",
+          "target": "drawing-objects-expanded",
+          "value": false
+        },
+        "failed-load": {
+          "kind": "toggles",
+          "target": "drawing-objects-expanded",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    }
+    ,
+    {
+      "id": "control:ribbon-script",
+      "source_id": "ribbon-script",
+      "title": "ribbon script",
+      "sources": [
+        "web/src/cadedit/ScriptPanel.jsx"
+      ],
+      "states": [
+        "ready",
+        "running",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "ribbon script",
+          "failedLoad": false,
+          "role": "textbox",
+          "interaction": "type",
+          "inputValue": "line 0,0 10,10"
+        },
+        "running": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "ribbon script",
+          "failedLoad": false,
+          "role": "textbox",
+          "interaction": "type",
+          "inputValue": "line 0,0 10,10"
+        },
+        "failed-load": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "ribbon script",
+          "failedLoad": true,
+          "role": "textbox",
+          "interaction": "type",
+          "inputValue": "line 0,0 10,10"
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "renders",
+          "target": "ribbon-script-text"
+        },
+        "running": {
+          "kind": "disabled_with_reason",
+          "reason": "a script is running",
+          "reason_code": "control:ribbon-script:unavailable"
+        },
+        "failed-load": {
+          "kind": "renders",
+          "target": "ribbon-script-text"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    },
+    {
+      "id": "control:choose-script",
+      "source_id": "choose-script",
+      "title": "Choose script",
+      "sources": [
+        "web/src/cadedit/ScriptPanel.jsx"
+      ],
+      "states": [
+        "ready",
+        "running",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Choose script",
+          "failedLoad": false,
+          "tooltip": "Choose a .scr or .txt script file."
+        },
+        "running": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Choose script",
+          "failedLoad": false,
+          "tooltip": "A script is running; wait before choosing another script."
+        },
+        "failed-load": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Choose script",
+          "failedLoad": true,
+          "tooltip": "Choose a .scr or .txt script file."
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "opens",
+          "target": "script-file-picker"
+        },
+        "running": {
+          "kind": "disabled_with_reason",
+          "reason": "a script is running",
+          "reason_code": "control:choose-script:unavailable"
+        },
+        "failed-load": {
+          "kind": "opens",
+          "target": "script-file-picker"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    },
+    {
+      "id": "control:run-script",
+      "source_id": "run-script",
+      "title": "Run script",
+      "sources": [
+        "web/src/cadedit/ScriptPanel.jsx",
+        "web/src/cadedit/script.js",
+        "web/src/lib/actionRegistry.js"
+      ],
+      "states": [
+        "ready",
+        "empty-script",
+        "no-document",
+        "engine-busy",
+        "engine-crashed",
+        "running",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "ready": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Run script",
+          "failedLoad": false,
+          "tooltip": "Run the script, one command per line"
+        },
+        "empty-script": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Run script (unavailable: enter or choose a script)",
+          "failedLoad": false,
+          "tooltip": "enter or choose a script"
+        },
+        "no-document": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Run script (unavailable: no drawing in the browser engine yet)",
+          "failedLoad": false,
+          "tooltip": "no drawing in the browser engine yet"
+        },
+        "engine-busy": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Run script (unavailable: engine busy: wait for the current edit)",
+          "failedLoad": false,
+          "tooltip": "engine busy: wait for the current edit"
+        },
+        "engine-crashed": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Run script (unavailable: engine stopped: open a drawing again)",
+          "failedLoad": false,
+          "tooltip": "engine stopped: open a drawing again"
+        },
+        "running": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Run script (unavailable: a script is running)",
+          "failedLoad": false,
+          "tooltip": "a script is running"
+        },
+        "failed-load": {
+          "toolbar": "Drafting tools",
+          "group": "Script",
+          "name": "Run script (unavailable: no drawing in the browser engine yet)",
+          "failedLoad": true,
+          "tooltip": "no drawing in the browser engine yet"
+        }
+      },
+      "expected_effect": {
+        "ready": {
+          "kind": "submits",
+          "target": "script-run"
+        },
+        "empty-script": {
+          "kind": "disabled_with_reason",
+          "reason": "enter or choose a script",
+          "reason_code": "control:run-script:unavailable"
+        },
+        "no-document": {
+          "kind": "disabled_with_reason",
+          "reason": "no drawing in the browser engine yet",
+          "reason_code": "control:run-script:unavailable"
+        },
+        "engine-busy": {
+          "kind": "disabled_with_reason",
+          "reason": "engine busy: wait for the current edit",
+          "reason_code": "control:run-script:unavailable"
+        },
+        "engine-crashed": {
+          "kind": "disabled_with_reason",
+          "reason": "engine stopped: open a drawing again",
+          "reason_code": "control:run-script:unavailable"
+        },
+        "running": {
+          "kind": "disabled_with_reason",
+          "reason": "a script is running",
+          "reason_code": "control:run-script:unavailable"
+        },
+        "failed-load": {
+          "kind": "disabled_with_reason",
+          "reason": "no drawing in the browser engine yet",
+          "reason_code": "control:run-script:unavailable"
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "unsupported_local",
+      "certify_reason": "needs a walk recipe (wave C)"
+    }
   ],
   "state_cases": {
     "action": {
