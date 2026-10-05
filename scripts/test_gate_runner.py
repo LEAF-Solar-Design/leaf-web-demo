@@ -52,7 +52,7 @@ def test_sip_r2_gate_registration():
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     for suite_id, folder, floor, gated in (
         ("platform-sip-r2-publication", "platform", 17, True),
-        ("server-sip-r2-publication", "server", 8, False),
+        ("server-sip-r2-publication", "server", 10, False),
     ):
         suite = suites[suite_id]
         assert suite.cwd == REPO / folder
