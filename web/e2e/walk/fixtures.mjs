@@ -1201,6 +1201,62 @@ export async function assertCensusEffect(probe, runtime, locator, before, assert
   throw new Error(`Unknown census effect: ${target}`)
 }
 
+export function observeSolarEditorRequests(runtime) {
+  const runRequests = []
+  const observe = (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/run') runRequests.push(request.url())
+  }
+  runtime.page.on('request', observe)
+  runtime.cleanup.push(() => runtime.page.off('request', observe))
+  return { runRequests }
+}
+
+export async function assertSolarStepEditor(probe, runtime, locator, before, assertions = expect) {
+  const { page } = runtime
+  const tool = probe.assertion.tool
+  const label = runtime.evidence.catalog?.record?.label || tool
+  const region = page.getByRole('region', { name: `${label} parameters`, exact: true })
+  await assertions(region).toBeVisible()
+  // Supply only the proof's form inputs through the same controls an operator uses.
+  for (const name of ['Expected rev', 'Graph revision']) {
+    const field = region.getByLabel(name, { exact: true })
+    if (await field.count() && await field.inputValue() === '') await field.fill('0')
+  }
+  const unit = region.getByLabel('Distance unit', { exact: true })
+  if (await unit.count()) await unit.selectOption({ label: 'Meters' })
+  if (tool === 'solar-design-presets') {
+    for (const name of ['Subcommand', 'Action']) {
+      const field = region.getByLabel(name, { exact: true })
+      if (await field.count()) await field.selectOption({ label: 'Create' })
+    }
+    for (const name of ['Preset name', 'Name']) {
+      const field = region.getByLabel(name, { exact: true })
+      if (await field.count()) await field.fill('Walk proof preset')
+    }
+  }
+  const review = region.getByRole('button', { name: 'Review & run', exact: true })
+  await assertions(review).toBeEnabled()
+  await review.click()
+  const decision = page.getByRole('button', { name: `Run ${tool}`, exact: true })
+  await assertions(decision).toBeVisible()
+  // Move Escape outside the editor, whose own Escape closes the editor first.
+  await decision.focus()
+  await page.keyboard.press('Escape')
+  await assertions(decision).toBeHidden()
+  // SolarToolForm closes on review; SolarStepEditor retains its inputs.
+  if (!await region.isVisible()) {
+    await discloseControlPanel(page, probe.locator)
+    await locator.click()
+  }
+  await assertions(region).toBeVisible()
+  await region.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await assertions(region).toBeHidden()
+  if (await locator.isVisible()) await assertions(locator).toBeFocused()
+  else await assertions(page.locator('button[aria-controls="drafting-ribbon-panels"]')).toBeFocused()
+  assertions(before.runRequests).toEqual([])
+  runtime.evidence.solarStepEditor = { tool, reviewed: true, cancelled: true, runRequests: [...before.runRequests] }
+}
+
 export function seedSignOutIdentity({ identity, coachKey }) {
   if (sessionStorage.getItem('leaf.walk.w1k.identity-seeded') !== '1') {
     localStorage.setItem('leaf.jwt', identity.token)
@@ -2012,6 +2068,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
 
 async function captureBefore(probe, runtime) {
   const { page } = runtime
+  if (probe.assertion.target === 'solar-step-editor') return observeSolarEditorRequests(runtime)
   if (['engine-save-version', 'engine-undo-edit', 'engine-redo-edit', 'script-run'].includes(probe.assertion.target)) return captureCensusEffect(probe, runtime)
   if (typeof barNoRung === 'function' && barNoRung(probe)) {
     if (await page.getByTestId('cad-edit-workbench').count()) await engineReady(probe, runtime)
@@ -2106,6 +2163,10 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (target === 'solar-step-editor') {
+    await assertSolarStepEditor(probe, runtime, locator, before, assertions)
+    return
+  }
   if (typeof CENSUS_DISCLOSURES !== 'undefined' && CENSUS_DISCLOSURES[target] || ['engine-save-version', 'engine-undo-edit', 'engine-redo-edit',
     'ribbon-script-text', 'script-file-picker', 'script-run'].includes(target)) {
     await assertCensusEffect(probe, runtime, locator, before, assertions)

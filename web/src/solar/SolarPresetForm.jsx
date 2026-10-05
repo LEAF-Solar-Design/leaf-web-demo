@@ -4,6 +4,7 @@ import {
   fieldMessage, buildPresetParams, SOLAR_PRESET_REASONS, SOLAR_PRESET_NOTES,
 } from './solarPresetModel.js'
 import './solarPresetForm.css'
+import returnToolFocus from './returnToolFocus.js'
 
 export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revision, autoRevision = null, reading = false }) {
   const spec = presetFormSpec(tool?.params)
@@ -55,19 +56,24 @@ export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revi
     setDrafts((previous) => ({ ...previous, [key]: value }))
   }
 
+  function cancel() {
+    onClose()
+    returnToolFocus(tool.name)
+  }
+
   return (
     <section id="solar-tool-form" className="solar-tool-form tool-body solar-preset-form"
       aria-label={`${text} parameters`} data-testid="solar-preset-form"
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
           event.stopPropagation()
-          onClose()
+          cancel()
         }
       }}>
       <h3>{text}</h3>
       {!spec.ok ? <>
         <p role="status" data-testid="solar-preset-reason">{SOLAR_PRESET_REASONS['preset_declaration_unsupported']}</p>
-        <button type="button" className="chip-act" onClick={onClose}>Cancel</button>
+        <button type="button" className="chip-act" onClick={cancel}>Cancel</button>
       </> : <>
         {view && !view.ok && <p role="status" data-testid="solar-preset-listing">{SOLAR_PRESET_REASONS['listing_unreadable']}</p>}
         {view?.ok && <section aria-label="Presets on this drawing" data-testid="solar-preset-list">
@@ -138,7 +144,7 @@ export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revi
           {!result.ok && <p role="status" data-testid="solar-preset-reason">{SOLAR_PRESET_REASONS[result.reason]}</p>}
           <button type="submit" className="chip-act" disabled={reading || !result.ok}
             title={reading ? "Reading this drawing's design revision." : undefined}>Review & run</button>
-          <button type="button" className="chip-act" onClick={onClose}>Cancel</button>
+          <button type="button" className="chip-act" onClick={cancel}>Cancel</button>
         </form>
       </>}
     </section>
