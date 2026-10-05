@@ -28,7 +28,7 @@
  * rows are boot decisions; this keeps them that way.
  *
  * SCOPE RESET has two halves, both binding:
- *   * PROJECT (useDrawingScopeReset) — resets the ACTIVE mode's identity. A
+ *   * PROJECT (useDrawingScopeReset) resets the ACTIVE identity and boot seed. A
  *     project switch happens inside one tenant; the other mode's identity is
  *     still that tenant's.
  *   * TENANT (owned here, not by a consumer that could forget to mount it) —
@@ -36,11 +36,11 @@
  *     activates after the switch cannot resurrect the previous tenant's
  *     drawing out of `?drawing=` or session storage.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { subscribeUnauthorized } from '../api.js'
-import { isSignedIn, subscribeTokenStored } from '../auth.js'
-import { liveDrawingId, rememberLiveDrawingId } from '../site/workbenchId.js'
+import { isSignedIn, subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
+import { forgetLiveDrawingId, liveDrawingId, rememberLiveDrawingId } from '../site/workbenchId.js'
 
 import {
   DRAWING_MODE_CONSOLE,
@@ -51,6 +51,7 @@ import {
   classifyDemo,
   classifyProof,
   drawingUrlAfterUpload,
+  drawingUrlAfterReset,
   identityFromUploadReceipt,
   isScopeSwitch,
   seedDrawingIdentity,
@@ -119,18 +120,23 @@ function seedForMode(inputs, targetMode) {
 }
 
 /**
- * The principal, as state, kept in step with every channel above. Re-synced
+ * The principal ref invalidates scopes in the notification turn. Re-synced
  * once on subscribe so a change that lands between the initial read and the
  * subscription cannot hide.
  */
-function useAuthPrincipalScope(readAuthToken, subscribeAuthChange) {
-  const [principal, setPrincipal] = useState(() => authTenantScope(readAuthToken()))
+function useAuthPrincipalScope(readAuthToken, subscribeAuthChange, resetAll) {
+  const principalRef = useRef(authTenantScope(readAuthToken()))
   useEffect(() => {
-    const sync = () => setPrincipal(authTenantScope(readAuthToken()))
+    const sync = () => {
+      const previous = principalRef.current
+      const next = authTenantScope(readAuthToken())
+      principalRef.current = next
+      if (isScopeSwitch(previous, next)) resetAll()
+    }
+    const unsubscribe = subscribeAuthChange(sync)
     sync()
-    return subscribeAuthChange(sync)
-  }, [readAuthToken, subscribeAuthChange])
-  return principal
+    return unsubscribe
+  }, [readAuthToken, subscribeAuthChange, resetAll])
 }
 
 export function DrawingIdentityProvider({
@@ -146,6 +152,7 @@ export function DrawingIdentityProvider({
   proofMode,
   readLiveDrawingId = liveDrawingId,
   rememberDrawingId = rememberLiveDrawingId,
+  forgetDrawingId = forgetLiveDrawingId,
   readAuthToken = readStoredAuthToken,
   subscribeAuthChange = subscribeAuthPrincipalChange,
   children,
@@ -176,8 +183,12 @@ export function DrawingIdentityProvider({
   // every render — a lazy fill below must not hand the tree a new object each
   // pass, and StrictMode's double render must converge on one value.
   const seedCacheRef = useRef(null)
+  const voidedModesRef = useRef(new Set())
+  const tenantVoidedRef = useRef(false)
+  const scopeTokensRef = useRef(new Map())
   if (!seedCacheRef.current) seedCacheRef.current = new Map()
   const seedFor = (targetMode) => {
+    if (tenantVoidedRef.current || voidedModesRef.current.has(targetMode)) return RESET_DRAWING_IDENTITY
     const cache = seedCacheRef.current
     if (!cache.has(targetMode)) cache.set(targetMode, seedForMode(seedInputsRef.current, targetMode))
     return cache.get(targetMode)
@@ -186,10 +197,12 @@ export function DrawingIdentityProvider({
   // Voided by a TENANT switch: after one, no mode may seed from boot inputs
   // that belong to the previous tenant. It never un-voids — the boot
   // provenance of this page load is spent.
-  const [scopeVoided, setScopeVoided] = useState(false)
   const [identities, setIdentities] = useState(() => Object.freeze({ [mode]: seedFor(mode) }))
 
-  const bootSeed = scopeVoided ? RESET_DRAWING_IDENTITY : seedFor(mode)
+  const bootSeed = seedFor(mode)
+  if (!scopeTokensRef.current.has(mode)) scopeTokensRef.current.set(mode, {})
+  const scopeToken = scopeTokensRef.current.get(mode)
+  const isScopeCurrent = useCallback(() => scopeTokensRef.current.get(mode) === scopeToken, [mode, scopeToken])
 
   // A mode this provider has not served yet seeds NOW, from the boot inputs —
   // never from whichever mode happened to mount first. Render-phase set on
@@ -213,6 +226,7 @@ export function DrawingIdentityProvider({
   // a receipt with no drawing id promotes nothing, and only an ACCOUNT tenant
   // earns a remembered id (a guest drawing must not outlive its session).
   const setFromUpload = useCallback((receipt) => {
+    if (!isScopeCurrent()) return null
     const next = identityFromUploadReceipt(receipt)
     if (!next) return null
     setActiveIdentity(next)
@@ -224,44 +238,48 @@ export function DrawingIdentityProvider({
       }
     }
     return next
-  }, [rememberDrawingId, setActiveIdentity, mode, scene])
+  }, [rememberDrawingId, setActiveIdentity, mode, scene, isScopeCurrent])
 
   const setFromQuery = useCallback(() => {
+    if (!isScopeCurrent()) return null
     setActiveIdentity(bootSeed)
     return bootSeed
-  }, [bootSeed, setActiveIdentity])
+  }, [bootSeed, setActiveIdentity, isScopeCurrent])
+
+  const forgetSelection = useCallback(() => {
+    try { forgetDrawingId() } catch { /* mounted invalidation still stands */ }
+    if (typeof window !== 'undefined') {
+      const nextUrl = drawingUrlAfterReset({ href: window.location.href, mode, scene })
+      if (nextUrl !== null) {
+        try { window.history.replaceState(window.history.state, '', nextUrl) } catch { /* mounted invalidation still stands */ }
+      }
+    }
+  }, [forgetDrawingId, mode, scene])
 
   const reset = useCallback(() => {
-    setActiveIdentity(RESET_DRAWING_IDENTITY)
-  }, [setActiveIdentity])
+    scopeTokensRef.current.set(mode, {})
+    voidedModesRef.current.add(mode)
+    forgetSelection()
+    setIdentities((current) => Object.freeze({ ...current, [mode]: RESET_DRAWING_IDENTITY }))
+  }, [mode, forgetSelection])
 
   // The tenant half: EVERY mode, plus the boot seeds behind the modes that
   // have not activated yet.
   const resetAll = useCallback(() => {
-    setScopeVoided(true)
+    scopeTokensRef.current.clear()
+    tenantVoidedRef.current = true
+    forgetSelection()
     setIdentities((current) => {
       const next = {}
       for (const key of Object.keys(current)) next[key] = RESET_DRAWING_IDENTITY
       return Object.freeze(next)
     })
-  }, [])
+  }, [forgetSelection])
 
   // Owned HERE rather than by a consumer, so the tenant clause cannot be left
   // un-mounted the way the project clause could be.
-  const principal = useAuthPrincipalScope(readAuthToken, subscribeAuthChange)
-  const previousPrincipalRef = useRef(undefined)
-  useEffect(() => {
-    const previous = previousPrincipalRef.current
-    const next = principal || null
-    previousPrincipalRef.current = next
-    // The first observation is this session learning who it is, not a switch;
-    // signing IN (null -> a principal) adopts what the guest built, which is
-    // the product behaviour the adoption path already depends on. Signing OUT
-    // and swapping principals are both switches.
-    if (previous === undefined) return
-    if (!isScopeSwitch(previous, next)) return
-    resetAll()
-  }, [principal, resetAll])
+  useAuthPrincipalScope(readAuthToken, subscribeAuthChange, resetAll)
+  useLayoutEffect(() => subscribeBeforeLogout(resetAll), [resetAll])
 
   const value = useMemo(() => ({
     mode,
@@ -273,7 +291,9 @@ export function DrawingIdentityProvider({
     setFromQuery,
     reset,
     resetAll,
-  }), [identity, mode, reset, resetAll, setFromQuery, setFromUpload])
+    scopeToken,
+    isScopeCurrent,
+  }), [identity, mode, reset, resetAll, setFromQuery, setFromUpload, scopeToken, isScopeCurrent])
 
   return (
     <DrawingIdentityContext.Provider value={value}>
@@ -314,7 +334,7 @@ export function useDrawingScopeReset(projectId) {
   const identity = useDrawingIdentityOptional()
   const reset = identity?.reset
   const previousRef = useRef(undefined)
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previous = previousRef.current
     const next = projectId || null
     previousRef.current = next

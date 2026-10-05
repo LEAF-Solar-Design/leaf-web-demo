@@ -20,6 +20,51 @@ _SPEC.loader.exec_module(db)
 _THIS_FILE = "platform/tests/test_db_readiness_static.py"
 
 
+def test_sip_r1_schema_contract_complete():
+    assert db._REQUIRED_COLUMNS["project_drawing_checkouts"] == {
+        "org_id", "project_id", "drawing_id", "holder", "holder_binding_id",
+        "acquired_at", "expires_at", "fence", "updated_at",
+    }
+    expected = {"project_drawing_checkouts_" + suffix for suffix in (
+        "pkey", "artifact_fk", "binding_fk", "fence_check", "holder_check", "state_check")}
+    catalog = db.required_catalog_for_selected_authorities({})
+    assert expected <= set(catalog["constraints"])
+    assert all(catalog["constraints"][name]["relation"] == "project_drawing_checkouts"
+               for name in expected)
+    assert catalog["triggers"]["project_drawing_checkouts_guard"] == db._catalog_contract(
+        "project_drawing_checkouts", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION guard_project_drawing_checkout()")
+    sql = (db._PKG_DIR / "migrations/0073_project_drawing_checkouts.sql").read_text(encoding="utf-8")
+    assert expected == set(re.findall(r"CONSTRAINT (project_drawing_checkouts_\w+)", sql))
+    assert "anonymous:unnamed-writer" in sql
+
+
+def test_sip_r1_migration_registration_complete():
+    root = db._PKG_DIR.parent
+    inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
+    ids = [f"{n:04d}" for n in range(1, 74)]
+    assert inventory["scope"]["migration_ids"] == ids
+    assert db.migration_manifest()[-1]["name"] == "0073_project_drawing_checkouts.sql"
+    ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
+    assert "project_drawing_checkouts" in ledger["postgres_tables"]
+    for name in ("test_conversation_model.py", "test_template_store.py",
+                 "test_postgres_authority_inventory_contract.py"):
+        source = (root / "server/tests" / name).read_text(encoding="utf-8")
+        assert "range(1, 74)" in source
+        assert "range(1, 73)" not in source
+
+
+def test_sip_r1_expand_only_migration():
+    path = db._PKG_DIR.parent / "scripts/migration_expand_contract_gate.py"
+    spec = importlib.util.spec_from_file_location("sip_r1_expand_contract", path)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    assert checker.GRANDFATHERED == frozenset(range(1, 23))
+    assert (db._PKG_DIR / "migrations/0073_project_drawing_checkouts.sql").is_file()
+    violations = checker.check_migrations(db._PKG_DIR / "migrations")
+    assert not any("0073" in violation for violation in violations), violations
+
+
 def _assert_closed_world_pin(actual, expected, remediation):
     """Fail a hand-pinned "tail of main" check by naming the exact call site.
 
@@ -119,12 +164,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0072_customization_record_fields.sql",
+        manifest_names[-1], "0073_project_drawing_checkouts.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0072",
+        inventory["scope"]["migration_ids"][-1], "0073",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )

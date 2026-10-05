@@ -268,7 +268,7 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
       && Number.isFinite(Date.parse(receipt.started_at))) receipt.completed_at = new Date(Date.parse(receipt.started_at) + playwrightReport.stats.duration).toISOString()
   }
   const triples = new Map()
-  for (const entry of featureMap.entries) for (const state of entry.states) for (const viewport of entry.viewports) {
+  for (const entry of featureMap.entries) for (const state of entry.states) for (const viewport of entry.state_viewports?.[state] || entry.viewports) {
     const triple = { feature_id: entry.id, state, viewport }
     const key = JSON.stringify([entry.id, state, viewport])
     if (triples.has(key)) throw new Error('Duplicate feature-map triple')

@@ -19,6 +19,10 @@ import esbuild from 'esbuild'
 import { parse as parseJs } from '@babel/parser'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const identitySource = readFileSync(new URL('./drawing/drawingIdentity.js', import.meta.url), 'utf8')
+const selectionStart = identitySource.indexOf('export function hasDrawingSelection(')
+const selectionEnd = identitySource.indexOf('export function isScopeSwitch(', selectionStart)
+const hasDrawingSelection = new Function('return ' + identitySource.slice(selectionStart, selectionEnd).replace('export ', ''))()
 const CSU_UPLOAD_READS = ['mock', 'openProjectId', 'signedIn', 'standalonePolicyReady']
 function csuWalk(node, visit, parent = null) {
   if (!node || typeof node.type !== 'string') return
@@ -115,7 +119,18 @@ describe('W20-07b combiner workspace wiring', () => {
     const body = appNoComments.slice(start, end)
     assert.ok(body.includes('async (newVersion, envelope, options)'))
     const read = body.indexOf("await getDrawingIntake(mock, newVersion.drawing_id, 'head')")
-    const guard = "if (typeof options?.isCurrent === 'function' && !options.isCurrent()) return false"
+    assert.ok(body.includes('const scopeCurrent = isScopeCurrent'))
+    assert.match(body, /const current = \(\) => scopeCurrent\(\)\s+&& \(typeof options\?\.isCurrent !== 'function' \|\| options\.isCurrent\(\)\)/)
+    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast]'))
+    const guard = 'if (!current()) return false'
+    const entryGuard = body.indexOf(guard)
+    assert.ok(entryGuard > body.indexOf('const current =') && entryGuard < body.indexOf('let version ='))
+    const mockCatch = body.indexOf('catch')
+    const mockGuard = body.indexOf(guard, mockCatch)
+    assert.ok(mockCatch >= 0 && mockGuard > mockCatch && mockGuard < body.indexOf('showToast(', mockCatch))
+    const unreadable = body.indexOf('if (envelope?.result?.new_version_readable === false)')
+    const unreadableGuard = body.indexOf(guard, unreadable)
+    assert.ok(unreadable >= 0 && unreadableGuard > unreadable && unreadableGuard < body.indexOf('recordCommittedUnreadableHead(', unreadable))
     const successGuard = body.indexOf(guard, read)
     const seat = body.indexOf('seatVersion(', read)
     const accepted = body.indexOf('return true', seat)
@@ -1041,7 +1056,9 @@ describe('Solar rooftop starter', () => {
   })
   it('row16 drawingLoad distinguishes pending, seated, absent and failed session loads', () => {
     assert.ok(appSource.includes("useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })"))
-    assert.ok(appSource.includes("resetDrawing(); setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' })"))
+    assert.ok(appSource.includes('resetDrawing(); setLoadErr(null)'))
+    assert.match(appSource, /if \(!hasDrawingSelection\([\s\S]*?setDrawingLoad\(\{ drawingId: null, state: 'idle' \}\)[\s\S]*?return \(\) => \{ alive = false \}/)
+    assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' })"))
     assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: d != null ? 'seated' : 'absent' })"))
     assert.ok(appSource.includes("setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed', failure: classifyDrawingLoadFailure(e) })"))
   })
@@ -1057,7 +1074,7 @@ describe('Solar rooftop starter', () => {
   })
   it('row19 pins drawing identity and drops superseded loader replies before cleanup', async () => {
     assert.ok(appSource.includes('requestedDrawingIdRef.current = REQUESTED_DRAWING_ID'))
-    assert.ok(appSource.includes('alive && loadDrawingId === requestedDrawingIdRef.current'))
+    assert.match(appSource, /alive\s*&& loadDrawingId === requestedDrawingIdRef.current\s*&& isScopeCurrent\(\)/)
     assert.match(appSource, /\[mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE,/)
     assert.equal(appSource.split("drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent'").length - 1, 2)
     assert.ok(appSource.includes("drawingSeated={drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'seated'}"))
@@ -1072,6 +1089,7 @@ describe('Solar rooftop starter', () => {
       const noop = () => {}
       const context = {
         REQUESTED_DRAWING_ID: 'A', DRAWING_SOURCE: 'A', requestedDrawingIdRef,
+        isScopeCurrent: () => true, hasDrawingSelection,
         mock: false, isEditFixture: false, resetDrawing: noop,
         setDrawingLoad: (value) => loads.push(value), setLoadErr: noop,
         resetCatalogTransient: noop, clearToast: noop, setDrawer: noop,

@@ -60,6 +60,12 @@ export const authConfigured = !!(DOMAIN && CLIENT_ID && AUDIENCE)
 // stranding the page in `required` until a manual reload (2026-08-17 defect #6).
 // Edge-triggered: one notification per stored token, no polling, no timer.
 const tokenStoredListeners = new Set()
+const beforeLogoutListeners = new Set()
+
+export function subscribeBeforeLogout(listener) {
+  beforeLogoutListeners.add(listener)
+  return () => beforeLogoutListeners.delete(listener)
+}
 
 export function subscribeTokenStored(listener) {
   tokenStoredListeners.add(listener)
@@ -168,6 +174,9 @@ export function isSignedIn() {
 // Clear the local token and (best-effort) end the Auth0 session, returning to
 // the app origin -- which comes back up in the calm signed-out gate.
 export async function logout() {
+  for (const listener of beforeLogoutListeners) {
+    try { listener() } catch { /* an observer cannot prevent sign-out */ }
+  }
   try {
     localStorage.removeItem(JWT_KEY)
     localStorage.removeItem(INFLIGHT_AUTHOR_KEY)

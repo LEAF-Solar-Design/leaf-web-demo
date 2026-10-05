@@ -130,6 +130,20 @@ function harness(serviceOverrides = {}, initial = {}) {
 }
 
 describe('console standalone upload', () => {
+  it('URL307B-28 standalone upload rejects a selection cleared to null', async () => {
+    const intake = deferred()
+    const h = harness({ upload: vi.fn(async () => receipt('u-upload')), intake: vi.fn(() => intake.promise) },
+      { REQUESTED_DRAWING_ID: 'v-upload', DRAWING_SOURCE: 'v-upload' })
+    await tick(); h.render(); h.open()
+    const run = h.control().onUpload(file); await tick()
+    const oldReady = h.readyCallback()
+    h.render({ REQUESTED_DRAWING_ID: null, DRAWING_SOURCE: null }, { adapterRender: false, commit: false })
+    oldReady({ receipt: receipt('u-upload'), intake: { documentId: 'u-upload-v1.dxf' } })
+    intake.resolve({ documentId: 'u-upload-v1.dxf' }); await run
+    expect(h.setFromUpload).not.toHaveBeenCalled()
+    expect(h.input).toMatchObject({ REQUESTED_DRAWING_ID: null, DRAWING_SOURCE: null })
+    h.dispose()
+  })
   it('URL307A-11 upload, status and intake refusals never reach promotion', async () => {
     for (const boundary of ['upload', 'status', 'intake']) {
       const overrides = { upload: vi.fn(async () => ({ ...receipt('U'), status: 'extracting' })) }

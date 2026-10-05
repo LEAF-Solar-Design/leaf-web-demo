@@ -6,9 +6,40 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import PropertiesDock, { GeometryRows } from './PropertiesDock.jsx'
+import PropertiesDock, { GeometryRows, drawingPropertyName } from './PropertiesDock.jsx'
+import { StatusTabs } from './DrawingCockpit.jsx'
 
 afterEach(cleanup)
+
+describe('Drawing name', () => {
+  it.each([
+    ['sample', 'rooftop_demo.dwg', 'demo-v1.dxf'],
+    ['uploaded drawing', 'private_roof.dwg', 'bc0e36e8-f107-4954-8d68-5882409b031f'],
+  ])('shows the %s display name used by the document tab', (_, displayName, documentId) => {
+    render(<>
+      <StatusTabs name={displayName} />
+      <PropertiesDock drawing={{ name: drawingPropertyName(displayName, documentId) }} />
+    </>)
+    const name = screen.getByText('Name').nextSibling
+    const tab = screen.getByTestId('cockpit-status-tabs').querySelector('.foot-doc-tab')
+    expect(name.textContent).toBe(displayName)
+    expect(name.textContent).toBe(tab.textContent)
+    expect(name.title).toBe(displayName)
+    expect(screen.queryByText(documentId)).toBeNull()
+  })
+
+  it('falls back to the intake document id when no drawing display name is available', () => {
+    render(<>
+      <StatusTabs name="" />
+      <PropertiesDock drawing={{ name: drawingPropertyName('', 'demo-v1.dxf') }} />
+    </>)
+    const name = screen.getByText('Name').nextSibling
+    expect(name.textContent).toBe('demo-v1.dxf')
+    expect(name.title).toBe('demo-v1.dxf')
+    expect(screen.getByTestId('cockpit-status-tabs').querySelector('.foot-doc-tab')).toBeNull()
+    expect(drawingPropertyName('', undefined)).toBe('')
+  })
+})
 
 describe('PropertiesDock', () => {
   it('hosts the passed layer and selection elements inside labelled sections', () => {

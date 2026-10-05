@@ -19,8 +19,101 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
+test('B2 names all seven engine and disclosure controls without certifying missing recipes', () => {
+  const expected = [
+    ['open-dxf', 'Open DXF', 'toggles', 'dxf-import-expanded', 'closed'],
+    ['save-version', 'Save version', 'submits', 'engine-save-version', 'ready'],
+    ['undo-edit', 'Undo edit', 'submits', 'engine-undo-edit', 'ready'],
+    ['redo-edit', 'Redo edit', 'submits', 'engine-redo-edit', 'ready'],
+    ['more-panels', 'More panels', 'toggles', 'ribbon-overflow-expanded', 'closed'],
+    ['open-dxf-browser', 'Open a DXF in the browser engine', 'toggles', 'dxf-import-expanded', 'closed'],
+    ['objects', 'Objects', 'toggles', 'drawing-objects-expanded', 'closed'],
+  ]
+  assert.deepEqual(overrides.controls.slice(39, 46).map((row) => row.id), expected.map(([id]) => `control:${id}`))
+  for (const [id, title, kind, target, state] of expected) {
+    const entry = entryFor(`control:${id}`)
+    assert.equal(entry.title, title)
+    assert.equal(entry.certify, 'unsupported_local')
+    assert.equal(entry.certify_reason, 'needs a walk recipe (wave C)')
+    assert.equal(entry.expected_effect[state].kind, kind)
+    assert.equal(entry.expected_effect[state].target, target)
+    assert.equal(entry.state_contexts['failed-load'].failedLoad, true)
+    assert.throws(() => checkCompleteness({ ...map, entries: map.entries.filter((row) => row.id !== entry.id) }), /completeness failed/)
+    if (kind === 'toggles') {
+      assert.equal(entry.state_contexts.closed.expanded, false)
+      assert.equal(entry.expected_effect.closed.value, true)
+      assert.equal(entry.state_contexts.open.expanded, true)
+      assert.equal(entry.expected_effect.open.value, false)
+      const invalid = clone(overrides)
+      invalid.controls.find((row) => row.id === entry.id).expected_effect.closed.value = false
+      assert.throws(() => buildFeatureMap({ overrides: invalid }), /opposite setup and effect/)
+    } else {
+      assert.equal(entry.expected_effect['failed-load'].kind, 'disabled_with_reason')
+      assert.equal(entry.expected_effect['failed-load'].reason, MODIFY_REASONS.noDocument)
+      assert.equal(entry.expected_effect['engine-busy'].reason, MODIFY_REASONS.busy)
+      assert.equal(entry.expected_effect['no-document'].reason_code, `${entry.id}:unavailable`)
+    }
+  }
+  assert.equal(entryFor('control:save-version').expected_effect['nothing-edited'].reason, 'edit something first')
+  assert.equal(entryFor('control:save-version').expected_effect['no-target'].reason, 'download-only here: no project target')
+  assert.equal(entryFor('control:undo-edit').expected_effect['nothing-to-undo'].reason, 'nothing to undo')
+  assert.equal(entryFor('control:redo-edit').expected_effect['nothing-to-redo'].reason, 'nothing to redo')
+})
+
+test('Script controls name scoped effects, native running locks and the Run refusal ladder', () => {
+  const expected = [
+    ['ribbon-script', 'ribbon script', 'renders', 'ribbon-script-text'],
+    ['choose-script', 'Choose script', 'opens', 'script-file-picker'],
+    ['run-script', 'Run script', 'submits', 'script-run'],
+  ]
+  assert.deepEqual(overrides.controls.slice(46).map((row) => row.id), expected.map(([id]) => `control:${id}`))
+  for (const [id, title, kind, target] of expected) {
+    const entry = entryFor(`control:${id}`)
+    assert.equal(entry.title, title)
+    assert.equal(entry.certify, 'unsupported_local')
+    assert.equal(entry.certify_reason, 'needs a walk recipe (wave C)')
+    assert.ok(entry.sources.includes('web/src/cadedit/ScriptPanel.jsx'))
+    assert.deepEqual(entry.expected_effect.ready, { kind, target })
+    assert.equal(entry.expected_effect.running.reason, 'a script is running')
+    assert.equal(entry.expected_effect.running.reason_code, `${entry.id}:unavailable`)
+    for (const state of entry.states) {
+      assert.equal(entry.state_contexts[state].toolbar, 'Drafting tools')
+      assert.equal(entry.state_contexts[state].group, 'Script')
+      assert.equal(entry.state_contexts[state].failedLoad, state === 'failed-load')
+    }
+    if (id !== 'run-script') assert.deepEqual(entry.expected_effect['failed-load'], { kind, target })
+    const wrongScope = clone(overrides)
+    wrongScope.controls.find((row) => row.id === entry.id).state_contexts.ready.group = 'Layers'
+    assert.throws(() => buildFeatureMap({ overrides: wrongScope }), /invalid Script control contract/)
+    assert.throws(() => checkCompleteness({ ...map, entries: map.entries.filter((row) => row.id !== entry.id) }), /completeness failed/)
+  }
+  const input = entryFor('control:ribbon-script')
+  assert.equal(input.state_contexts.ready.role, 'textbox')
+  assert.equal(input.state_contexts.ready.interaction, 'type')
+  assert.equal(input.state_contexts.ready.inputValue, 'line 0,0 10,10')
+  assert.equal(input.state_contexts.running.name, 'ribbon script')
+  assert.equal(entryFor('control:choose-script').state_contexts.running.tooltip,
+    'A script is running; wait before choosing another script.')
+  const run = entryFor('control:run-script')
+  assert.deepEqual(run.states, ['empty-script', 'engine-busy', 'engine-crashed', 'failed-load', 'no-document', 'ready', 'running'])
+  for (const [state, reason] of [
+    ['empty-script', 'enter or choose a script'],
+    ['no-document', DRAW_REASONS.noDocument], ['failed-load', DRAW_REASONS.noDocument],
+    ['engine-busy', DRAW_REASONS.busy], ['engine-crashed', DRAW_REASONS.crashed],
+    ['running', 'a script is running'],
+  ]) {
+    assert.deepEqual(run.expected_effect[state], { kind: 'disabled_with_reason', reason,
+      reason_code: 'control:run-script:unavailable' })
+    assert.equal(run.state_contexts[state].name, `Run script (unavailable: ${reason})`)
+    assert.equal(run.state_contexts[state].tooltip, reason)
+  }
+  const invalid = clone(overrides)
+  invalid.controls.find((row) => row.id === run.id).state_contexts['failed-load'].name = 'Run script'
+  assert.throws(() => buildFeatureMap({ overrides: invalid }), /disabled evidence mismatch/)
+})
+
 test('reachable map states and phone-only drawers remove exactly thirty-four triples', () => {
-  const triples = (featureMap) => featureMap.entries.flatMap((entry) => entry.states.flatMap((state) =>
+  const triples = (featureMap) => featureMap.entries.filter((entry) => entry.certify_reason !== 'needs a walk recipe (wave C)').flatMap((entry) => entry.states.flatMap((state) =>
     (entry.state_viewports?.[state] || entry.viewports).map((viewport) => `${entry.id}/${state}/${viewport}`))).sort()
   for (const entry of map.entries) {
     for (const state of ['read-only-entity', 'no-versioned-drawing']) {
@@ -241,7 +334,7 @@ test('batch three declares exactly seventeen default-build semantic controls wit
   ]
 ]
   assert.equal(expected.length, 17)
-  assert.deepEqual(overrides.controls.slice(22).map((row) => row.id), expected.map(([id]) => 'control:' + id))
+  assert.deepEqual(overrides.controls.slice(22, 39).map((row) => row.id), expected.map(([id]) => 'control:' + id))
   for (const [id, title, kind, target, states] of expected) {
     const row = entryFor('control:' + id)
     assert.equal(row.title, title)
@@ -320,13 +413,16 @@ test('completeness rejects every omitted row, including tools and the none drawe
   assert.throws(() => checkCompleteness({ ...map, entries: [...map.entries, map.entries[0]] }), /duplicate/)
 })
 
-test('thirty-nine exact control declarations participate in independent completeness', () => {
+test('forty-nine exact control declarations participate in independent completeness', () => {
   const expected = ['fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
     'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up',
     'properties-close', 'properties-drawing', 'properties-layers', 'properties-panels', 'properties-plan',
     'properties-selection', 'properties-walk', 'layer-panels', 'layer-walk', 'job-monitor-expand',
     'drawing-overview', 'drawing-overview-collapse',
-    'scope-add', 'demo-return', 'claude-accounts', 'drawing-close-start', 'notification-collapse', 'session-details', 'version-history', 'linked-services', 'project-board', 'prompt-run', 'prompt-scope', 'sign-out', 'start-board', 'take-edit-lock', 'cost-panel', 'command-bar', 'find-drawing'].map((id) => 'control:' + id).sort()
+    'scope-add', 'demo-return', 'claude-accounts', 'drawing-close-start', 'notification-collapse', 'session-details', 'version-history', 'linked-services', 'project-board', 'prompt-run', 'prompt-scope', 'sign-out', 'start-board', 'take-edit-lock', 'cost-panel', 'command-bar', 'find-drawing',
+    'open-dxf', 'save-version', 'undo-edit', 'redo-edit', 'more-panels', 'open-dxf-browser', 'objects',
+    'ribbon-script', 'choose-script', 'run-script'].map((id) => 'control:' + id).sort()
+  assert.equal(expected.length, 49)
   assert.deepEqual(map.entries.filter((row) => row.kind === 'control').map((row) => row.id), expected)
   for (const declaration of overrides.controls) {
     const entry = entryFor(declaration.id)
@@ -339,7 +435,7 @@ test('thirty-nine exact control declarations participate in independent complete
       assert.equal(declaration.certify_reason, undefined)
       assert.equal(entry.certify_reason, undefined)
     }
-    assert.equal(entry.certify, 'both')
+    assert.equal(entry.certify, declaration.certify)
     assert.deepEqual(entry.viewports, ['desktop'])
     const reference = overrides.controls.filter((row) => row.id !== declaration.id)
     assert.throws(() => checkCompleteness(map, DEFAULT_REGISTRIES, snapshot, reference), /unexpected/)

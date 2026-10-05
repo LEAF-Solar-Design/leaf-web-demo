@@ -12,6 +12,15 @@ import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
 
 const CALLBACK = '?code=abc&state=xyz'
 
+it('removing drawing leaves only the remaining boot overrides', () => {
+  expect(bootWantsApp('?drawing=&surface=solar', '/')).toBe(true)
+  expect(bootWantsApp('?surface=solar', '/')).toBe(false)
+  expect(bootWantsApp('', '/try')).toBe(false)
+  expect(bootWantsApp('?dev=1', '/try')).toBe(true)
+  expect(bootWantsApp('?demo=1', '/try')).toBe(true)
+  expect(bootWantsApp('?ops=1', '/')).toBe(true)
+})
+
 describe('auth callback deferral', () => {
   it('defers on the origin landing the SPA actually redirects to', () => {
     expect(shouldDeferForAuthCallback(CALLBACK)).toBe(true)
