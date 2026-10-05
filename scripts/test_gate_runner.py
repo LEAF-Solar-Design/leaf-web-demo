@@ -46,6 +46,31 @@ def _load_runner():
     return mod
 
 
+def test_sip_r1_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    rows = (
+        ("server-sip-r1-context", REPO / "server", "tests/test_sip_r1_context.py", 22, False),
+        ("server-sip-r1-routes", REPO / "server", "tests/test_sip_r1_routes.py", 18, False),
+        ("platform-sip-r1-checkout", REPO / "platform", "tests/test_sip_r1_checkout.py", 12, True),
+    )
+    for suite_id, cwd, target, floor, gated in rows:
+        suite = suites[suite_id]
+        assert suite.cwd == cwd
+        assert suite.argv == runner._py_pytest(target)
+        assert suite.kind == "pytest" and suite.expected == floor
+        assert suite.db_gated is gated
+        assert suite_id in selection["mandatory_suite_ids"]
+        assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
+    assert suites["platform-static"].expected == 211
+    assert suites["platform"].expected == 271
+    assert suites["gate-runner-selftest"].expected == 94
+    assert suites["server-postgres-authority-inventory"].expected == 9
+    assert suites["migration-expand-contract"].expected == 12
+    assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
 @pytest.mark.parametrize("text, expected", [
     ("Bearer abc123", "[redacted]"),
     ("Basic dXNlcjpwYXNz", "[redacted]"),
@@ -268,7 +293,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # history), and only alongside a re-measured run-all-gates.py floor.
     # Added test_binding_grant_static.py (6 tests) and
     # test_binding_grant_issuance_static.py (20 tests) on 2026-09-28: 182 -> 208.
-    assert static.expected == 208
+    assert static.expected == 211
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv

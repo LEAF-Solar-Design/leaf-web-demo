@@ -371,6 +371,29 @@ def validate_postgres_startup() -> Optional[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # entry points (all no-op-safe; called from server/jobs.py)
 # --------------------------------------------------------------------------- #
+class ProjectAuthorityNotFound(ValueError):
+    """The canonical project scope is unavailable."""
+
+
+class ProjectAuthorityRequired(ValueError):
+    """The project is owned by a different authority."""
+
+
+def resolve_project_authority(org_id: uuid.UUID, project_id: uuid.UUID) -> Dict[str, Any]:
+    """Resolve stored authority without imposing write authentication on reads."""
+    store, _db, _platform_deps = _load_platform()
+    project = store.get_project(org_id, project_id)
+    if project is None or getattr(project, "status", None) == "deleted":
+        raise ProjectAuthorityNotFound(
+            "project context was not found for the verified platform tenant")
+    authority_mode = store.get_authority_mode(org_id, project_id)
+    if authority_mode != "postgres_canonical":
+        raise ProjectAuthorityRequired(
+            f"{authority_mode} project-scoped Marathon dispatch is locked; select "
+            "postgres_canonical only after the durable worker is available")
+    return {"org_id": org_id, "project_id": project_id, "authority_mode": authority_mode}
+
+
 def resolve_submission_context(org_id: Optional[str], project_id: Optional[str],
                                authorization: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Resolve project ownership and authority through the canonical boundary."""
@@ -391,15 +414,7 @@ def resolve_submission_context(org_id: Optional[str], project_id: Optional[str],
             raise ValueError("X-Org-Id is required for a project-scoped run")
         resolved_org = uuid.UUID(str(org_id))
     resolved_project = uuid.UUID(str(project_id))
-    if store.get_project(resolved_org, resolved_project) is None:
-        raise ValueError("project context was not found for the verified platform tenant")
-    authority_mode = store.get_authority_mode(resolved_org, resolved_project)
-    if authority_mode != "postgres_canonical":
-        raise ValueError(
-            f"{authority_mode} project-scoped Marathon dispatch is locked; select "
-            "postgres_canonical only after the durable worker is available")
-    return {"org_id": resolved_org, "project_id": resolved_project,
-            "authority_mode": authority_mode}
+    return resolve_project_authority(resolved_org, resolved_project)
 
 
 def _canonical_jobs_module():
