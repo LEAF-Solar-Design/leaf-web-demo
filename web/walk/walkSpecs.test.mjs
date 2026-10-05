@@ -23,6 +23,7 @@ const knownProofSpecs = [
   'w1z-harness.spec.mjs',
   'w1z-census.spec.mjs',
   'w1z-solar-forms.spec.mjs',
+  'w1z-catalog-recovery.spec.mjs',
   'w1y-recipes.spec.mjs',
 ]
 

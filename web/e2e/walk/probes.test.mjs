@@ -654,6 +654,7 @@ test('catalog-tool evidence stays compact and hashes the catalog once per worker
           return { click: async () => { tabs.push(options.name) } }
         } }
       }
+      if (role === 'toolbar') return { getByRole: () => ({ filter: () => ({ isVisible: async () => false }) }) }
       assert.equal(role, 'button')
       assert.equal(options.name, 'More panels')
       return { isVisible: async () => false }

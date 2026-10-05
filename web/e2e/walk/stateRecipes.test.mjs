@@ -4,7 +4,7 @@ import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
   captureEngineRefusal, assertEngineRefusal, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
-import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError } from './fixtures.mjs'
+import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
 import { faultRouteOnce, drawingRequest, setupVersionFault, finishVersionFault,
@@ -25,6 +25,70 @@ const censusAssertions = (value) => ({
   toHaveValue: async (expected) => assert.equal(value.text, expected),
   toHaveText: async (expected) => assert.equal(value.text, expected),
   toContainText: async (expected) => assert.ok(value.text.includes(expected)),
+})
+
+test('failed catalog recovery listens before Retry, awaits its reply and retries only once', async () => {
+  const events = []
+  let visible = true, resolveResponse
+  const reason = "Couldn't load tools: startup timed out Retry"
+  const status = {
+    filter: (options) => { assert.match(reason, options.hasText); return status },
+    isVisible: async () => visible,
+    innerText: async () => reason,
+    getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Retry', exact: true })
+      return { click: async (options) => { assert.equal(options.timeout, 15_000); events.push('click') } }
+    },
+  }
+  const page = {
+    getByRole: (role, options) => {
+      assert.equal(role, 'toolbar')
+      assert.deepEqual(options, { name: 'Drafting tools', exact: true })
+      return { getByRole: (role) => { assert.equal(role, 'status'); return status } }
+    },
+    waitForResponse: (predicate, options) => {
+      assert.equal(options.timeout, 15_000)
+      const reply = (method, path, ok) => ({ request: () => ({ method: () => method }),
+        url: () => `http://walk${path}`, ok: () => ok })
+      assert.equal(predicate(reply('GET', '/api/capabilities?drawing_id=private', true)), true)
+      assert.equal(predicate(reply('POST', '/api/capabilities', true)), false)
+      assert.equal(predicate(reply('GET', '/api/capabilities', false)), false)
+      assert.equal(predicate(reply('GET', '/api/tools', true)), false)
+      events.push('listen')
+      return new Promise((resolve) => { resolveResponse = () => { events.push('response'); resolve() } })
+    },
+  }
+  const assertions = (value) => ({ toBeHidden: async (options) => {
+    assert.equal(value, status); assert.equal(options.timeout, 15_000)
+    assert.equal(visible, false); events.push('hidden')
+  } })
+  const runtime = { evidence: {} }
+  const recovery = recoverFailedCatalog(page, runtime, assertions)
+  // Let the visibility, reason and click awaits settle while the reply remains pending.
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(events, ['listen', 'click'])
+  await recoverFailedCatalog(page, runtime, assertions)
+  assert.deepEqual(events, ['listen', 'click'])
+  visible = false
+  resolveResponse()
+  await recovery
+  assert.deepEqual(events, ['listen', 'click', 'response', 'hidden'])
+  assert.deepEqual(runtime.evidence.catalogRecovery, { reason, retried: true })
+  visible = true
+  await recoverFailedCatalog(page, runtime, assertions)
+  assert.deepEqual(events, ['listen', 'click', 'response', 'hidden'])
+})
+
+test('catalog recovery leaves a page without a visible failure untouched', async () => {
+  const runtime = { evidence: {} }
+  const page = { getByRole: () => ({ getByRole: () => ({ filter: () => ({
+    isVisible: async () => false,
+    getByRole: () => assert.fail('no Retry without a visible failure'),
+  }) }) }), waitForResponse: () => assert.fail('no response wait without a failure') }
+  await recoverFailedCatalog(page, runtime)
+  assert.deepEqual(runtime.evidence, {})
+  assert.equal(runtime.catalogRecoveryAttempted, undefined)
 })
 censusAssertions.poll = (callback) => ({
   toBe: async (expected) => assert.equal(await callback(), expected),
@@ -752,6 +816,7 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
         assert.equal(role, 'toolbar')
         assert.equal(options.name, 'Drafting tools')
         return { getByRole: (role, options) => {
+          if (role === 'status') return { filter: () => ({ isVisible: async () => false }) }
           assert.equal(role, 'group')
           assert.equal(options.name, 'Stringing')
           return { getByRole: (role, options) => {
@@ -819,6 +884,7 @@ test('catalog tools choose their first tab from the active surface without a rea
               return { click: async () => tabs.push(options.name) }
             } }
           }
+          if (role === 'toolbar') return { getByRole: () => ({ filter: () => ({ isVisible: async () => false }) }) }
           assert.equal(role, 'button')
           assert.equal(options.name, 'More panels')
           return { isVisible: async () => false }
@@ -843,6 +909,7 @@ function fakePage() {
     const name = options.name
     return {
       getByRole: locator,
+      filter: () => ({ isVisible: async () => false }),
       get visible() {
         if (role === 'dialog') return historyOpen
         if (name === 'More panels') return false
@@ -1152,6 +1219,7 @@ test('available solve proposal does not wait on the settings-form browser catalo
     request: { get: async () => ({ ok: () => true, json: async () => ({ families: [{ label: 'Solar', capabilities: [record] }] }) }) },
     getByRole: (role) => {
       if (role === 'tablist') return { getByRole: () => ({ click: async () => {} }) }
+      if (role === 'toolbar') return { getByRole: () => ({ filter: () => ({ isVisible: async () => false }) }) }
       return { isVisible: async () => false }
     },
   } }
