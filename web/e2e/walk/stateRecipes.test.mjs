@@ -7,6 +7,214 @@ import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, 
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
+import { faultRouteOnce, drawingRequest, setupVersionFault, finishVersionFault,
+  setupHistoryFault, assertHistoryRecovery, setupRealProject } from './fixtures.mjs'
+
+test('one-shot route fault passes subsequent traffic and removes only its handler once', async () => {
+  for (const failAbort of [false, true]) {
+    let handler
+    const calls = []
+    const page = {
+      route: async (pattern, callback) => { calls.push(pattern); handler = callback },
+      unroute: async (pattern, callback) => { assert.equal(callback, handler); calls.push('unroute') },
+    }
+    const remove = await faultRouteOnce(page, '**/versions?*', () => calls.push('fault'))
+    const route = {
+      request: () => ({ url: () => 'http://walk/versions?include_deltas=1' }),
+      abort: async (code) => { calls.push(code); if (failAbort) throw new Error('abort failed') },
+      continue: async () => calls.push('continue'),
+    }
+    if (failAbort) await assert.rejects(handler(route), /abort failed/)
+    else await handler(route)
+    await handler(route)
+    if (failAbort) {
+      await assert.rejects(remove(), /abort failed/)
+      await assert.rejects(remove(), /abort failed/)
+    } else await Promise.all([remove(), remove()])
+    assert.deepEqual(calls, ['**/versions?*', 'fault', 'failed', 'continue', 'unroute'])
+  }
+})
+
+const faultAssertions = (value) => ({
+  toBe: (expected) => assert.equal(value, expected),
+  toBeTruthy: () => assert.ok(value),
+  toBeGreaterThan: (expected) => assert.ok(value > expected),
+  toBeEnabled: async () => assert.equal(value.disabled, false),
+  toBeVisible: async () => assert.equal(value.visible, true),
+  toBeHidden: async () => assert.equal(value.visible, false),
+  toHaveCount: async (expected) => assert.equal(value.countValue, expected),
+  toHaveAttribute: async (key, expected) => assert.equal(value.attributes[key], expected),
+  toContainText: async (expected) => assert.ok(value.text.includes(expected)),
+})
+faultAssertions.poll = (callback) => ({ toBe: async (expected) => assert.equal(await callback(), expected) })
+
+test('drawing response matcher requires exact path and method', () => {
+  const match = drawingRequest('/api/drawings/private/undo', 'POST')
+  const response = (path, method) => ({ url: () => `http://walk${path}`, request: () => ({ method: () => method }) })
+  assert.equal(match(response('/api/drawings/private/undo', 'POST')), true)
+  assert.equal(match(response('/api/drawings/private/undo', 'GET')), false)
+  assert.equal(match(response('/api/drawings/other/undo', 'POST')), false)
+})
+
+test('version-change setup starts genuine undo and redo and cleanup forwards the held upstream response', async () => {
+  for (const redo of [false, true]) {
+    let handler
+    let pending
+    const events = []
+    const operation = redo ? 'redo' : 'undo'
+    const response = { dispose: async () => events.push('disposed') }
+    const button = { disabled: false, click: async (options) => {
+      assert.equal(options.timeout, 15_000)
+      pending = handler({ request: () => ({ url: () => `http://walk/api/drawings/private/${operation}` }),
+        fetch: async (options) => { assert.equal(options.timeout, 15_000); events.push('fetched'); return response },
+        fulfill: async (options) => { assert.equal(options.response, response); events.push('forwarded') },
+        continue: async () => assert.fail('mutation must reach the server before its response is held') })
+    } }
+    const runtime = { drawingId: 'private', cleanup: [], evidence: {}, page: {
+      route: async (pattern, callback) => { assert.equal(pattern, `**/api/drawings/private/${operation}`); handler = callback },
+      unroute: async (pattern, callback) => { assert.equal(callback, handler); events.push('unroute') },
+      getByRole: () => ({ getByRole: (role, options) => {
+        assert.equal(options.name, `${redo ? 'Redo' : 'Undo'} version`); return button
+      } }),
+    } }
+    const setup = async (probe, actual, recipe) => {
+      assert.equal(actual, runtime)
+      assert.deepEqual(recipe, { kind: 'saved-version-history', redo })
+      events.push('seed')
+      runtime.evidence.savedVersionHistory = { head: redo ? 1 : 2, latest: 2, versions: [{ v: 1 }, { v: 2 }] }
+    }
+    await setupVersionFault({}, runtime, { kind: 'hold-version-change', redo }, faultAssertions, setup)
+    assert.deepEqual(events, ['seed', 'fetched'])
+    assert.equal(runtime.evidence.versionFault.expected, redo ? 2 : 1)
+    assert.equal(runtime.cleanup.length, 1)
+    await runtime.cleanup[0]()
+    await pending
+    await runtime.releaseVersionFault()
+    assert.deepEqual(events, ['seed', 'fetched', 'forwarded', 'disposed', 'unroute'])
+  }
+})
+
+test('restore fault commits through History, then closes History while the head lock remains', async () => {
+  let handler
+  const events = []
+  const lock = { visible: true, attributes: { 'data-head': '3', role: 'alert' } }
+  const response = { ok: () => true, json: async () => ({ head: 3, restored_from: 1 }) }
+  const panel = { visible: true, getByTestId: (id) => {
+    assert.equal(id, 'vh-row-v1')
+    return { getByRole: (role, options) => ({ click: async () => {
+      events.push(options.name)
+      if (options.name === 'Restore v1') await handler({
+        request: () => ({ url: () => 'http://walk/api/drawings/private/intake?version=head' }),
+        abort: async () => events.push('abort'),
+      })
+    } }) }
+  }, getByRole: () => ({ click: async () => { panel.visible = false; events.push('close') } }) }
+  const runtime = { drawingId: 'private', cleanup: [], evidence: {}, page: {
+    route: async (pattern, callback) => { assert.equal(pattern, '**/api/drawings/private/intake?version=head'); handler = callback },
+    unroute: async () => events.push('unroute'),
+    getByRole: () => panel, getByTestId: () => lock,
+    waitForResponse: async (predicate, options) => {
+      assert.equal(options.timeout, 15_000)
+      assert.equal(predicate({ url: () => 'http://walk/api/drawings/private/versions/1/restore', request: () => ({ method: () => 'POST' }) }), true)
+      return response
+    },
+  } }
+  const setup = async () => { runtime.evidence.savedVersionHistory = { head: 2, latest: 2, versions: [{ v: 1 }, { v: 2 }] } }
+  await setupVersionFault({}, runtime, { kind: 'fault-restored-head' }, faultAssertions, setup, async () => events.push('history'))
+  assert.deepEqual(events, ['history', 'Restore', 'Restore v1', 'abort', 'close'])
+  assert.equal(lock.visible, true)
+  assert.equal(runtime.evidence.versionFault.expected, 3)
+  await runtime.cleanup[0]()
+  await runtime.cleanup[0]()
+  assert.equal(events.filter((event) => event === 'unroute').length, 1)
+})
+
+test('version fault recovery removes the fault before fetching and rejects an unseated head', async () => {
+  for (const kind of ['hold-version-change', 'fault-restored-head']) {
+    for (const wrongVersion of [false, true]) {
+      const events = []
+      const fault = { kind, expected: 3, requests: ['http://walk/api/drawings/private/redo'] }
+      const lock = { countValue: 0, getByRole: () => ({ click: async () => events.push('retry') }) }
+      const runtime = { drawingId: 'private', evidence: { versionFault: fault },
+        releaseVersionFault: async () => events.push('release'), page: {
+          waitForResponse: async () => ({ ok: () => true, json: async () => ({ head: 3, version: wrongVersion ? 2 : 3, intake: {} }) }),
+          getByTestId: (id) => id === 'unreadable-head-lock' ? lock : { count: async () => 0 },
+          getByRole: () => ({ getByRole: () => ({ disabled: false }) }),
+          locator: () => ({ text: 'Advanced to version 3' }),
+        },
+      }
+      if (wrongVersion) await assert.rejects(finishVersionFault(runtime, faultAssertions), assert.AssertionError)
+      else {
+        await finishVersionFault(runtime, faultAssertions)
+        assert.deepEqual(fault.recovered, { head: 3, version: 3 })
+      }
+      assert.deepEqual(events, kind === 'fault-restored-head' ? ['release', 'retry'] : ['release'])
+    }
+  }
+})
+
+test('History fault is removed before R and its oracle rejects duplicate recovery requests', async () => {
+  let handler
+  let observe
+  let removals = 0
+  let off = 0
+  const node = { visible: true, countValue: 0, first() { return this } }
+  const runtime = { drawingId: 'private', cleanup: [], evidence: {}, page: {
+    route: async (pattern, callback) => { assert.equal(pattern, '**/api/drawings/private/versions?*'); handler = callback },
+    unroute: async () => { removals++ },
+    getByRole: () => ({ getByRole: () => node }),
+    on: (event, callback) => { assert.equal(removals, 1); observe = callback },
+    off: (event, callback) => { assert.equal(callback, observe); off++ },
+  } }
+  const history = async () => handler({ request: () => ({ url: () => 'http://walk/api/drawings/private/versions?include_deltas=1' }), abort: async () => {} })
+  await setupHistoryFault({}, runtime, faultAssertions, history)
+  assert.equal(runtime.evidence.historyFault.failed.length, 1)
+  observe({ method: () => 'GET', url: () => 'http://walk/api/drawings/other/versions' })
+  observe({ method: () => 'GET', url: () => 'http://walk/api/drawings/private/versions?include_deltas=1' })
+  await assertHistoryRecovery(runtime, faultAssertions)
+  observe({ method: () => 'GET', url: () => 'http://walk/api/drawings/private/versions?include_deltas=1' })
+  await assert.rejects(assertHistoryRecovery(runtime, faultAssertions), assert.AssertionError)
+  for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+  assert.equal(removals, 1)
+  assert.equal(off, 1)
+})
+
+test('project Escape setup uses bounded org/project API calls and restores persisted org in cleanup', async () => {
+  const events = []
+  const board = { visible: true, getByRole: () => ({ click: async () => events.push('open-project') }) }
+  const runtime = { cleanup: [], evidence: {}, page: {
+    request: { post: async (path, options) => {
+      assert.equal(options.timeout, 15_000)
+      events.push(path)
+      if (path === '/api/projects') assert.deepEqual(options.headers, { 'X-Org-Id': 'org' })
+      return { ok: () => true, json: async () => path === '/api/orgs' ? { org: { org_id: 'org' } } : { project: { project_id: 'project' } } }
+    } },
+    evaluate: async (callback, value) => { events.push(['storage', value]); return 'previous-org' },
+    reload: async (options) => { assert.equal(options.timeout, 60_000); events.push('reload') },
+    getByRole: (role, options) => {
+      if (role === 'region') return board
+      if (role === 'dialog') return { visible: false }
+      if (options.name instanceof RegExp) return { countValue: 0 }
+      return { isVisible: async () => true, click: async () => {
+        events.push(options.name)
+        if (options.name === 'Return to drawing') board.visible = false
+      } }
+    },
+    getByTestId: () => ({ locator: () => ({ text: 'no selection' }) }),
+  } }
+  // Keep the product name stable across the API and summary observation.
+  let name
+  const post = runtime.page.request.post
+  runtime.page.request.post = async (path, options) => { name = options.data.name; return post(path, options) }
+  runtime.page.locator = (selector) => selector === '.workspace-summary' ? { get text() { return name } } : { countValue: 0 }
+  const assertions = (value) => ({ ...faultAssertions(value), toHaveText: async (expected) => assert.equal(value.text, expected) })
+  await setupRealProject(runtime, assertions)
+  assert.equal(runtime.evidence.escapeProject.projectId, 'project')
+  assert.deepEqual(events.slice(0, 4), ['/api/orgs', '/api/projects', ['storage', 'org'], 'reload'])
+  assert.ok(events.includes('open-project'))
+  await runtime.cleanup[0]()
+  assert.deepEqual(events.slice(-2), ['Close workspace', ['storage', 'previous-org']])
+})
 
 test('Solar no-saved-drawing chooses outline and selection oracles only after verified starter projection', () => {
   const map = buildFeatureMap()

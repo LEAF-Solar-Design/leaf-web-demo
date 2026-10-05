@@ -8,6 +8,60 @@ import { createHash } from 'node:crypto'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+test('C1 reachable faults replace only their matching unsupported declarations', () => {
+  for (const [id, state, kind, redo] of [
+    ['history', 'version-changing', 'hold-version-change', false],
+    ['undo', 'version-changing', 'hold-version-change', false],
+    ['redo', 'version-changing', 'hold-version-change', true],
+    ['undo', 'mutations-blocked', 'fault-restored-head', false],
+    ['redo', 'mutations-blocked', 'fault-restored-head', true],
+    ['bar-retry', 'retry-history', 'fault-history', false],
+  ]) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === `action:${id}`), state)
+    assert.deepEqual(probe.setup.steps.at(-1), { kind, redo })
+    assert.ok(probe.setup.steps.every((step) => step.kind !== 'require-local-state'))
+    assert.equal(unsupportedBeforeSetup(probe), null)
+    assert.equal(probe.setup.steps.some((step) => step.kind === 'foreign-checkout'), false)
+  }
+  for (const [id, state] of [
+    ['bar-retry', 'retry-tools'], ['bar-retry', 'retry-catalog'],
+    ['bar-retry', 'retry-refresh'], ['bar-retry', 'result-owns-retry'],
+  ]) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === `action:${id}`), state)
+    assert.equal(probe.setup.steps.at(-1).kind, 'require-local-state')
+    assert.match(unsupportedBeforeSetup(probe), /no public fixture recipe/)
+  }
+})
+test('project-open declares the isolated stack platform router limitation', async () => {
+  const reason = 'the isolated walk stack runs without Postgres, so the platform router (/api/orgs, /api/projects) is not mounted; project-open needs a platform-enabled stack'
+  const probe = resolveProbe(map.entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open')
+  const recipe = probe.setup.steps.at(-1)
+  assert.equal(recipe.kind, 'require-local-state')
+  assert.equal(recipe.reason, reason)
+  assert.equal(unsupportedBeforeSetup(probe), reason)
+  assert.ok(probe.setup.steps.every((step) => step.kind !== 'open-real-project'))
+  const evidence = {}
+  await assert.rejects(setupStep(probe, {
+    page: {}, evidence, testInfo: { attach: async () => {} },
+  }, recipe), (error) => error instanceof UnsupportedLocalError && error.reason === reason)
+  assert.equal(evidence.result.reason, reason)
+})
+
+test('route-error probes declare the real nlPrompt fallback limitation', async () => {
+  const reason = 'route errors are absorbed into local suggestions by api.js nlPrompt (transport failures and non-401 HTTP errors); routeErr is not reachable through a real fault'
+  for (const [id, state] of [['bar-escape', 'errors-present'], ['bar-retry', 'retry-route']]) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === `action:${id}`), state)
+    const recipe = probe.setup.steps.at(-1)
+    assert.equal(recipe.kind, 'require-local-state')
+    assert.equal(recipe.reason, reason)
+    assert.equal(unsupportedBeforeSetup(probe), reason)
+    const evidence = {}
+    await assert.rejects(setupStep(probe, {
+      page: {}, evidence, testInfo: { attach: async () => {} },
+    }, recipe), (error) => error instanceof UnsupportedLocalError && error.reason === reason)
+    assert.equal(evidence.result.reason, reason)
+  }
+})
 test('B1 empty surface hosts use /try while Studio readiness holds its projection before upload', () => {
   for (const [id, state] of [['browser', 'signed-out'], ['solar', 'no-drawing']]) {
     const probe = resolveProbe(map.entries.find((entry) => entry.id === `surface:${id}`), state)

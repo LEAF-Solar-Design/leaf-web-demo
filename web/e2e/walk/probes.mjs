@@ -310,10 +310,22 @@ export function stateRecipe(entry, state) {
   if (state === 'engine-crashed') steps.push(step('crash-engine-worker'))
   if (state === 'job-running') steps.push(step('start-pending-run'))
   if (state === 'authoring-off') steps.push(step('require-authoring-off'))
-  if (['version-changing', 'mutations-blocked',
+  const faultKind = entry.kind === 'action' && (
+    ['history', 'undo', 'redo'].includes(entry.source_id) && state === 'version-changing' ? 'hold-version-change'
+      : ['undo', 'redo'].includes(entry.source_id) && state === 'mutations-blocked' ? 'fault-restored-head'
+        : entry.source_id === 'bar:retry' && state === 'retry-history' ? 'fault-history' : null)
+  if (faultKind) steps.push(step(faultKind, { redo: entry.source_id === 'redo' }))
+  else if (['version-changing', 'mutations-blocked',
     'read-only-entity', 'project-open', 'errors-present', 'result-owns-retry'].includes(state)
     || state.startsWith('retry-')) {
-    steps.push(step('require-local-state', { state, context }))
+    const routeError = entry.kind === 'action' && (
+      entry.source_id === 'bar:escape' && state === 'errors-present'
+      || entry.source_id === 'bar:retry' && state === 'retry-route')
+    steps.push(step('require-local-state', { state, context, ...(routeError ? {
+      reason: 'route errors are absorbed into local suggestions by api.js nlPrompt (transport failures and non-401 HTTP errors); routeErr is not reachable through a real fault',
+    } : entry.kind === 'action' && entry.source_id === 'bar:escape' && state === 'project-open' ? {
+      reason: 'the isolated walk stack runs without Postgres, so the platform router (/api/orgs, /api/projects) is not mounted; project-open needs a platform-enabled stack',
+    } : {}) }))
   }
   if (entry.kind === 'surface') steps.push(step('require-surface-context', { surface, context }))
   if (effect.target === 'viewer-home') steps.push(step('zoom-before-fit', {
