@@ -9,6 +9,99 @@ import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, locatorRecipe, normali
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/control-census.${name}.json`, import.meta.url), 'utf8'))
 const resolve = (data, context) => resolveCensus(data.controls, data.derivedMappings, data.map, data.inventory, context)
+
+test('B2 adds seven button mappings and the Objects text label and preserves the Retry baseline', () => {
+  const map = buildFeatureMap()
+  const inventory = readControlInventory(map)
+  const expected = [
+    ['open-dxf', 'toolbar:"Quick access"', 'Open DXF'],
+    ['save-version', 'toolbar:"Quick access"', 'Save version'],
+    ['undo-edit', 'toolbar:"Quick access"', 'Undo edit'],
+    ['redo-edit', 'toolbar:"Quick access"', 'Redo edit'],
+    ['more-panels', 'toolbar:"Drafting tools"', 'More panels'],
+    ['open-dxf-browser', 'document', 'Open a DXF in the browser engine'],
+    ['objects', 'document', 'Objects'],
+  ].map(([id, scope, name]) => ({ feature_id: `control:${id}`, scope, name, role: 'button',
+    states: ['ready', 'failed-load'], viewports: ['desktop'] }))
+  assert.deepEqual(inventory.mappings.slice(40, 48), [...expected, {
+    feature_id: 'control:objects', scope: 'document', role: 'text', name: 'Objects',
+    states: ['ready', 'failed-load'], viewports: ['desktop'],
+  }])
+  assert.deepEqual(inventory.baseline_unmapped.map((row) => row.name), ['Retry'])
+  for (const state of ['ready', 'failed-load']) {
+    const observed = expected.map((row, index) => ({ ...row, index, visible: true,
+      name: row.name + (['save-version', 'undo-edit', 'redo-edit'].some((id) => row.feature_id === `control:${id}`)
+        ? ' (unavailable: no drawing in the browser engine yet)' : '') }))
+    const exact = { ...inventory, baseline_unmapped: [] }
+    const result = resolveCensus(observed, [], map, exact, { state })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.resolved.map((row) => row.feature_id), expected.map((row) => row.feature_id))
+    for (let index = 0; index < observed.length; index++) {
+      const wrong = structuredClone(observed)
+      wrong[index].scope = 'toolbar:"Unrelated"'
+      const rejected = resolveCensus(wrong, [], map, exact, { state })
+      assert.equal(rejected.ok, false)
+      assert.deepEqual(rejected.unmapped.map((row) => row.index), [index])
+    }
+    assert.equal(resolveCensus([...observed, { index: 99, role: 'button', scope: 'document',
+      name: 'Unreviewed new control', visible: true }], [], map, exact, { state }).ok, false)
+  }
+})
+test('Script census maps exactly the reviewed scope, roles and names in both load states', () => {
+  const map = buildFeatureMap()
+  const inventory = { ...readControlInventory(map), baseline_unmapped: [] }
+  const scope = 'toolbar:"Drafting tools" > group:"Script"'
+  const expected = [
+    { feature_id: 'control:ribbon-script', scope, role: 'textbox', name: 'ribbon script' },
+    { feature_id: 'control:choose-script', scope, role: 'button', name: 'Choose script' },
+    { feature_id: 'control:run-script', scope, role: 'button', name: 'Run script' },
+  ]
+  assert.deepEqual(inventory.mappings.slice(48), expected.map((row) => ({ ...row,
+    states: ['ready', 'failed-load'], viewports: ['desktop'] })))
+  for (const state of ['ready', 'failed-load']) {
+    const controls = expected.map((row, index) => ({ ...row, index, visible: true,
+      name: state === 'failed-load' && row.feature_id === 'control:run-script'
+        ? 'Run script (unavailable: no drawing in the browser engine yet)' : row.name }))
+    const result = resolveCensus(controls, [], map, inventory, { state })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.resolved.map((row) => row.feature_id), expected.map((row) => row.feature_id))
+    if (state === 'failed-load') assert.equal(result.resolved[2].disabled_reason, 'no drawing in the browser engine yet')
+    for (const control of controls) for (const patch of [
+      { scope: 'toolbar:"Drafting tools" > group:"Layers"' },
+      { role: 'link' }, { name: 'Unreviewed script control' },
+    ]) {
+      const rejected = resolveCensus([{ ...control, ...patch }], [], map, inventory, { state })
+      assert.equal(rejected.ok, false)
+      assert.equal(rejected.unmapped.length, 1)
+    }
+    assert.equal(resolveCensus(controls, [], map, inventory, { state, viewport: 'phone' }).ok, false)
+  }
+})
+
+test('Objects static header text resolves explicitly without covering unrelated text', () => {
+  const map = buildFeatureMap()
+  const inventory = { ...readControlInventory(map), baseline_unmapped: [] }
+  const label = { index: 0, scope: 'document', role: 'text', name: 'Objects', visible: true }
+  const button = { ...label, index: 1, role: 'button' }
+  for (const state of ['ready', 'failed-load']) {
+    const result = resolveCensus([label, button], [], map, inventory, { state, viewport: 'desktop' })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.resolved.map((row) => [row.role, row.feature_id]),
+      [['text', 'control:objects'], ['button', 'control:objects']])
+  }
+  for (const wrong of [
+    { ...label, scope: 'toolbar:"Unrelated"' },
+    { ...label, name: 'Unreviewed text label' },
+    { ...label, role: 'link' },
+  ]) {
+    const rejected = resolveCensus([wrong], [], map, inventory)
+    assert.equal(rejected.ok, false)
+    assert.equal(rejected.unmapped.length, 1)
+  }
+  for (const context of [{ state: 'ready', viewport: 'phone' }, { state: 'failed-load', viewport: 'phone' }]) {
+    assert.equal(resolveCensus([label], [], map, inventory, context).ok, false)
+  }
+})
 test('batch three retires exactly seventeen baseline keys and retains the precise Retry gap', () => {
   const map = buildFeatureMap()
   const inventory = readControlInventory(map)
@@ -462,7 +555,7 @@ test('batch three retires exactly seventeen baseline keys and retains the precis
 ]
   assert.equal(previous.length, 18)
   assert.equal(additions.length, 17)
-  assert.deepEqual(inventory.mappings.slice(-17), additions)
+  assert.deepEqual(inventory.mappings.slice(23, 40), additions)
   assert.deepEqual(CONTROL_CENSUS_BATCH.slice(-17), additions)
   assert.deepEqual(inventory.baseline_unmapped, [{"scope":"document","role":"button","name":"Retry","reason":"Retry remains unmapped: the failed-load recipe uses a permanent missing drawing; bare Retry has multiple owners, and no checked public recovery recipe establishes a semantic successful retry for the observed owner.","states":["failed-load"],"viewports":["desktop"]}])
   assert.deepEqual(previous.filter((row) => !inventory.baseline_unmapped.some((other) => controlKey(other) === controlKey(row)))
@@ -486,7 +579,7 @@ test('batch three count changes preserve raw linked-service names and reject dup
       const result = resolveCensus(rows, [], map, inventory, { state })
       assert.equal(requireControlCensusBatch(result, { state }), true)
       assert.equal(result.resolved.find((row) => row.feature_id === 'control:linked-services').raw_name, 'Linked services ' + count + ' linked')
-      for (const row of rows.filter((row) => inventory.mappings.slice(-17).some((mapped) => mapped.feature_id === row.feature_id))) {
+      for (const row of rows.filter((row) => inventory.mappings.slice(23, 40).some((mapped) => mapped.feature_id === row.feature_id))) {
         const duplicate = resolveCensus([...rows, { ...row, index: rows.length }], [], map, inventory, { state })
         assert.throws(() => requireControlCensusBatch(duplicate, { state }), /missing or misresolved/)
       }
@@ -710,7 +803,7 @@ test('batch two retains its twelve exact mappings after batch three retires seve
   assert.equal(expected.length, 30, 'retain the independent batch-one reference')
   const batchTwoRemainder = expected.filter((row, index) => !retiredIndices.includes(index))
   assert.equal(batchTwoRemainder.length, 18)
-  assert.deepEqual([...inventory.mappings.slice(-17), ...inventory.baseline_unmapped].map(controlKey).sort(), batchTwoRemainder.map(controlKey).sort())
+  assert.deepEqual([...inventory.mappings.slice(23, 40), ...inventory.baseline_unmapped].map(controlKey).sort(), batchTwoRemainder.map(controlKey).sort())
   const retired = retiredIndices.map((index, position) => {
     const { reason, ...row } = expected[index]
     return { feature_id: 'control:' + retiredIds[position], ...row }
@@ -719,7 +812,7 @@ test('batch two retains its twelve exact mappings after batch three retires seve
   assert.deepEqual(CONTROL_CENSUS_BATCH.slice(10, 22), retired)
   assert.deepEqual(expected.filter((row) => !batchTwoRemainder.some((retained) => controlKey(retained) === controlKey(row)))
     .map(controlKey), retired.map(controlKey))
-  const mappings = inventory.mappings.filter((row) => row.feature_id.startsWith('control:'))
+  const mappings = inventory.mappings.slice(0, 40).filter((row) => row.feature_id.startsWith('control:'))
   assert.deepEqual(mappings, CONTROL_CENSUS_BATCH)
   assert.equal(mappings.length, 39)
   for (const row of mappings) assert.ok(!inventory.baseline_unmapped.some((other) => controlKey(other) === controlKey(row)))
