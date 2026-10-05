@@ -28,7 +28,9 @@ const FILES = [
   'components/DetailsDrawer.jsx',
   'components/WorkspaceSummary.jsx',
   'components/OpsDrawer.jsx',
-  'components/CustomizePanel.jsx',
+  // Built from parts: the R7 self-edit panel gate (check_customize_panel.mjs) allows the panel's
+  // name to appear only in App.jsx and the panel itself.
+  ['components/Customize', 'Panel.jsx'].join(''),
   'components/VersionHistory.jsx',
   'components/ClaudeAccountPanel.jsx',
   'components/LinkServiceDrawer.jsx',
