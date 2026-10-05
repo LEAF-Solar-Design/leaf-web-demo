@@ -34,12 +34,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { noteUnauthorized } from '../api.js'
 import { bootWantsApp } from '../site/authBoot.js'
 import { searchForProductSurface } from '../site/productSurfaces.js'
+import { forgetLiveDrawingId, liveDrawingId, WORKBENCH_ID_KEY } from '../site/workbenchId.js'
 import {
   DRAWING_MODE_CONSOLE,
   DRAWING_MODE_OPERATOR,
   authTenantScope,
   classifyDemo,
   drawingUrlAfterUpload,
+  drawingUrlAfterReset,
+  hasDrawingSelection,
   identityFromUploadReceipt,
   isScopeSwitch,
   modeDrawingId,
@@ -52,7 +55,7 @@ import {
   useDrawingScopeReset,
 } from './DrawingIdentityProvider.jsx'
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); sessionStorage.removeItem(WORKBENCH_ID_KEY) })
 
 describe('accepted upload URL persistence', () => {
   let write, originalUrl, originalState
@@ -237,6 +240,8 @@ describe('accepted upload URL persistence', () => {
 // drive the real provider rather than its internals.
 const controls = {}
 function readout(identity) {
+  controls.scopeToken = identity.scopeToken
+  controls.isScopeCurrent = identity.isScopeCurrent
   controls.setFromUpload = identity.setFromUpload
   controls.setFromQuery = identity.setFromQuery
   controls.reset = identity.reset
@@ -258,11 +263,7 @@ function Probe({ projectId = undefined }) {
   return readout(identity)
 }
 
-// The console arm's consumer. App.jsx READS the identity and mounts no
-// project-scope hook (ToolCast owns the project selection), so the model must
-// not mount one either — and it is a different component type, which is what
-// makes React unmount the stage's consumer on a scene change exactly as
-// SiteRoot does.
+// This probe isolates identity reads from the surfaces' project observation.
 function ConsoleProbe() {
   return readout(useDrawingIdentity())
 }
@@ -502,6 +503,10 @@ describe('scope reset: no stale drawing id survives a project switch', () => {
     act(() => { controls.setFromUpload({ drawing_id: 'project-a-drawing', tenant_kind: 'account' }) })
     expect(shown('drawing-id')).toBe('project-a-drawing')
 
+    sessionStorage.setItem(WORKBENCH_ID_KEY, 'u-upload')
+    const oldUpload = controls.setFromUpload
+    const oldQuery = controls.setFromQuery
+    const oldCurrent = controls.isScopeCurrent
     view.rerender(
       <DrawingIdentityProvider
         mode={DRAWING_MODE_OPERATOR}
@@ -517,11 +522,22 @@ describe('scope reset: no stale drawing id survives a project switch', () => {
     expect(shown('drawing-id')).toBe('null')
     expect(shown('drawing-source')).toBe('null')
     expect(shown('drawing-origin')).toBe('reset')
+    expect(oldCurrent()).toBe(false)
+    expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBeNull()
+    act(() => {
+      expect(oldUpload({ drawing_id: 'obsolete-upload', tenant_kind: 'account' })).toBeNull()
+      expect(oldQuery()).toBeNull()
+      expect(controls.setFromQuery().origin).toBe('reset')
+    })
   })
 
   it('clears the uploaded drawing when the open project CLOSES', () => {
     const view = mount('project-a')
     act(() => { controls.setFromUpload({ drawing_id: 'project-a-drawing', tenant_kind: 'account' }) })
+    sessionStorage.setItem(WORKBENCH_ID_KEY, 'u-upload')
+    const oldUpload = controls.setFromUpload
+    const oldQuery = controls.setFromQuery
+    const oldCurrent = controls.isScopeCurrent
     view.rerender(
       <DrawingIdentityProvider
         mode={DRAWING_MODE_OPERATOR}
@@ -535,11 +551,22 @@ describe('scope reset: no stale drawing id survives a project switch', () => {
       </DrawingIdentityProvider>,
     )
     expect(shown('drawing-id')).toBe('null')
+    expect(oldCurrent()).toBe(false)
+    expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBeNull()
+    act(() => {
+      expect(oldUpload({ drawing_id: 'obsolete-upload', tenant_kind: 'account' })).toBeNull()
+      expect(oldQuery()).toBeNull()
+      expect(controls.setFromQuery().origin).toBe('reset')
+    })
   })
 
   it('does NOT clear on the first project open — that is not a switch', () => {
     const view = mount(null)
     act(() => { controls.setFromUpload({ drawing_id: 'uploaded-before-open', tenant_kind: 'account' }) })
+    sessionStorage.setItem(WORKBENCH_ID_KEY, 'u-upload')
+    const oldUpload = controls.setFromUpload
+    const oldQuery = controls.setFromQuery
+    const oldCurrent = controls.isScopeCurrent
     view.rerender(
       <DrawingIdentityProvider
         mode={DRAWING_MODE_OPERATOR}
@@ -553,6 +580,9 @@ describe('scope reset: no stale drawing id survives a project switch', () => {
       </DrawingIdentityProvider>,
     )
     expect(shown('drawing-id')).toBe('uploaded-before-open')
+    expect(oldCurrent()).toBe(true)
+    expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBe('u-upload')
+    act(() => { expect(oldQuery()).not.toBeNull() })
   })
 
   it('the switch predicate itself: only a move AWAY from an open project counts', () => {
@@ -656,10 +686,21 @@ describe('scene detours: an in-progress upload identity survives the round trip'
     view.rerender(<SiteRootModel scene="tool" projectId="project-a" />)
     act(() => { controls.setFromUpload({ drawing_id: 'stage-upload', tenant_kind: 'guest' }) })
 
+    sessionStorage.setItem(WORKBENCH_ID_KEY, 'u-upload')
+    const oldUpload = controls.setFromUpload
+    const oldQuery = controls.setFromQuery
+    const oldCurrent = controls.isScopeCurrent
     view.rerender(<SiteRootModel scene="tool" projectId="project-b" />)
     expect(shown('drawing-id')).toBe('null')
     expect(shown('drawing-origin')).toBe('reset')
 
+    expect(oldCurrent()).toBe(false)
+    expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBeNull()
+    act(() => {
+      expect(oldUpload({ drawing_id: 'obsolete-upload', tenant_kind: 'account' })).toBeNull()
+      expect(oldQuery()).toBeNull()
+      expect(controls.setFromQuery().origin).toBe('reset')
+    })
     view.rerender(<SiteRootModel scene="app" />)
     expect(shown('drawing-id')).toBe('console-upload')
   })
@@ -716,6 +757,10 @@ describe('scope reset: no drawing identity survives a TENANT switch', () => {
     act(() => { controls.setFromUpload({ drawing_id: 'alice-stage', tenant_kind: 'account' }) })
     expect(shown('drawing-id')).toBe('alice-stage')
 
+    sessionStorage.setItem(WORKBENCH_ID_KEY, 'u-upload')
+    const oldUpload = controls.setFromUpload
+    const oldQuery = controls.setFromQuery
+    const oldCurrent = controls.isScopeCurrent
     harness.change(jwtFor({ sub: 'auth0|bob' }))
 
     expect(shown('drawing-id')).toBe('null')
@@ -724,15 +769,33 @@ describe('scope reset: no drawing identity survives a TENANT switch', () => {
     view.rerender(tree(harness, 'app'))
     expect(shown('drawing-id')).toBe('null')
     expect(shown('drawing-origin')).toBe('reset')
+    expect(oldCurrent()).toBe(false)
+    expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBeNull()
+    act(() => {
+      expect(oldUpload({ drawing_id: 'obsolete-upload', tenant_kind: 'account' })).toBeNull()
+      expect(oldQuery()).toBeNull()
+      expect(controls.setFromQuery().origin).toBe('reset')
+    })
   })
 
   it('signing OUT is a scope exit: the account drawing does not outlive the principal', () => {
     const harness = principalHarness(jwtFor({ sub: 'auth0|alice' }))
     render(tree(harness, 'tool'))
     act(() => { controls.setFromUpload({ drawing_id: 'alice-stage', tenant_kind: 'account' }) })
+    sessionStorage.setItem(WORKBENCH_ID_KEY, 'u-upload')
+    const oldUpload = controls.setFromUpload
+    const oldQuery = controls.setFromQuery
+    const oldCurrent = controls.isScopeCurrent
     harness.change(null)
     expect(shown('drawing-id')).toBe('null')
     expect(shown('drawing-origin')).toBe('reset')
+    expect(oldCurrent()).toBe(false)
+    expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBeNull()
+    act(() => {
+      expect(oldUpload({ drawing_id: 'obsolete-upload', tenant_kind: 'account' })).toBeNull()
+      expect(oldQuery()).toBeNull()
+      expect(controls.setFromQuery().origin).toBe('reset')
+    })
   })
 
   it('VOIDS the boot seed behind a mode that has not activated yet', () => {
@@ -743,6 +806,10 @@ describe('scope reset: no drawing identity survives a TENANT switch', () => {
     const view = render(tree(harness, 'tool', '?drawing=alice-only'))
     expect(shown('drawing-id')).toBe('alice-only')
 
+    sessionStorage.setItem(WORKBENCH_ID_KEY, 'u-upload')
+    const oldUpload = controls.setFromUpload
+    const oldQuery = controls.setFromQuery
+    const oldCurrent = controls.isScopeCurrent
     harness.change(jwtFor({ sub: 'auth0|bob' }))
     expect(shown('drawing-id')).toBe('null')
 
@@ -752,6 +819,13 @@ describe('scope reset: no drawing identity survives a TENANT switch', () => {
     // And setFromQuery cannot smuggle it back either.
     act(() => { controls.setFromQuery() })
     expect(shown('drawing-id')).toBe('null')
+    expect(oldCurrent()).toBe(false)
+    expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBeNull()
+    act(() => {
+      expect(oldUpload({ drawing_id: 'obsolete-upload', tenant_kind: 'account' })).toBeNull()
+      expect(oldQuery()).toBeNull()
+      expect(controls.setFromQuery().origin).toBe('reset')
+    })
   })
 
   it('the FIRST principal observation is not a switch (signing in adopts what the guest built)', () => {
@@ -790,6 +864,10 @@ describe('scope reset: no drawing identity survives a TENANT switch', () => {
     try {
       localStorage.setItem('leaf.jwt', token)
       render(shippedTree())
+      sessionStorage.setItem(WORKBENCH_ID_KEY, 'u-upload')
+      const oldUpload = controls.setFromUpload
+      const oldQuery = controls.setFromQuery
+      const oldCurrent = controls.isScopeCurrent
       act(() => { controls.setFromUpload({ drawing_id: 'alice-stage', tenant_kind: 'account' }) })
       expect(shown('drawing-id')).toBe('alice-stage')
 
@@ -799,6 +877,13 @@ describe('scope reset: no drawing identity survives a TENANT switch', () => {
       })
       expect(shown('drawing-id')).toBe('null')
       expect(shown('drawing-origin')).toBe('reset')
+      expect(oldCurrent()).toBe(false)
+      expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBeNull()
+      act(() => {
+        expect(oldUpload({ drawing_id: 'obsolete-upload', tenant_kind: 'account' })).toBeNull()
+        expect(oldQuery()).toBeNull()
+        expect(controls.setFromQuery().origin).toBe('reset')
+      })
     } finally {
       localStorage.removeItem('leaf.jwt')
     }
@@ -809,6 +894,10 @@ describe('scope reset: no drawing identity survives a TENANT switch', () => {
     try {
       localStorage.setItem('leaf.jwt', token)
       render(shippedTree())
+      sessionStorage.setItem(WORKBENCH_ID_KEY, 'u-upload')
+      const oldUpload = controls.setFromUpload
+      const oldQuery = controls.setFromQuery
+      const oldCurrent = controls.isScopeCurrent
       act(() => { controls.setFromUpload({ drawing_id: 'alice-stage', tenant_kind: 'account' }) })
       expect(shown('drawing-id')).toBe('alice-stage')
 
@@ -816,6 +905,13 @@ describe('scope reset: no drawing identity survives a TENANT switch', () => {
       act(() => { noteUnauthorized({ status: 401 }, '/api/session', `Bearer ${token}`) })
       expect(shown('drawing-id')).toBe('null')
       expect(shown('drawing-origin')).toBe('reset')
+      expect(oldCurrent()).toBe(false)
+      expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBeNull()
+      act(() => {
+        expect(oldUpload({ drawing_id: 'obsolete-upload', tenant_kind: 'account' })).toBeNull()
+        expect(oldQuery()).toBeNull()
+        expect(controls.setFromQuery().origin).toBe('reset')
+      })
     } finally {
       localStorage.removeItem('leaf.jwt')
     }
@@ -832,5 +928,331 @@ describe('scope reset: no drawing identity survives a TENANT switch', () => {
     // unequal and a switch is over-detected rather than missed.
     expect(() => authTenantScope('not-a-jwt')).not.toThrow()
     expect(authTenantScope('not-a-jwt')).not.toBe(authTenantScope('also-not-a-jwt'))
+  })
+})
+
+describe('durable scope reset', () => {
+  const account = (id) => ({ drawing_id: id, tenant_kind: 'account' })
+  const address = () => window.location.pathname + window.location.search + window.location.hash
+  let originalAddress, originalState, originalStored, write
+  afterEach(() => {
+    cleanup()
+    write?.mockRestore()
+    if (originalAddress !== undefined) window.history.replaceState(originalState, '', originalAddress)
+    if (originalStored == null) sessionStorage.removeItem(WORKBENCH_ID_KEY)
+    else sessionStorage.setItem(WORKBENCH_ID_KEY, originalStored)
+    originalAddress = undefined
+    write = undefined
+  })
+  function mountScope({ url = '/app?drawing=u-upload', mode = DRAWING_MODE_CONSOLE, scene = 'app',
+    projectId = 'p', strict = false, stored = 'u-upload', token = jwtFor({ sub: 'principal-a', org_id: 'org-a' }),
+    forgetDrawingId } = {}) {
+    originalAddress = address()
+    originalState = window.history.state
+    originalStored = sessionStorage.getItem(WORKBENCH_ID_KEY)
+    window.history.replaceState({ retained: true }, '', url)
+    if (stored == null) sessionStorage.removeItem(WORKBENCH_ID_KEY)
+    else sessionStorage.setItem(WORKBENCH_ID_KEY, stored)
+    write = vi.spyOn(window.history, 'replaceState')
+    const listeners = new Set()
+    const auth = { token }
+    let props = { mode, scene, search: window.location.search, publicDemo: false, liveDemo: false,
+      readAuthToken: () => auth.token,
+      subscribeAuthChange: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+      ...(forgetDrawingId ? { forgetDrawingId } : {}) }
+    let project = projectId
+    const tree = () => {
+      const body = <DrawingIdentityProvider {...props}><Probe projectId={project} /></DrawingIdentityProvider>
+      return strict ? <React.StrictMode>{body}</React.StrictMode> : body
+    }
+    const view = render(tree())
+    return {
+      update(over = {}, nextProject = project) { props = { ...props, ...over }; project = nextProject; view.rerender(tree()) },
+      changePrincipal(next, inspect) {
+        auth.token = next
+        act(() => { listeners.forEach((listener) => listener()); inspect?.() })
+      },
+      fresh() { return seedDrawingIdentity({ mode: props.mode, search: window.location.search,
+        liveId: liveDrawingId(), publicDemo: false, liveDemo: false }) },
+    }
+  }
+  function expectReset(h, expectedAddress = '/app') {
+    expect(address()).toBe(expectedAddress)
+    expect(sessionStorage.getItem(WORKBENCH_ID_KEY)).toBeNull()
+    expect(shown('drawing-id')).toBe('null')
+    expect(shown('drawing-source')).toBe('null')
+    expect(shown('drawing-origin')).toBe('reset')
+    act(() => { expect(controls.setFromQuery()).toEqual({ drawingId: null, source: null, origin: 'reset' }) })
+    expect(h.fresh()).toMatchObject({ drawingId: 'demo', source: 'rooftop_demo', origin: 'mode' })
+  }
+
+  it('URL307B-01 first project open keeps U', () => {
+    const h = mountScope({ projectId: null })
+    const token = controls.scopeToken
+    h.update({}, 'p')
+    expect(shown('drawing-id')).toBe('u-upload')
+    expect(controls.scopeToken).toBe(token)
+    expect(address()).toBe('/app?drawing=u-upload')
+    expect(liveDrawingId()).toBe('u-upload')
+    act(() => { controls.setFromQuery() })
+    expect(h.fresh().drawingId).toBe('u-upload')
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('URL307B-02 switching projects clears U', () => {
+    const h = mountScope()
+    const current = controls.isScopeCurrent
+    h.update({}, 'q')
+    expect(current()).toBe(false)
+    expectReset(h)
+    expect(write).toHaveBeenCalledExactlyOnceWith({ retained: true }, '', '/app')
+  })
+
+  it('URL307B-03 closing a project clears U', () => {
+    const h = mountScope()
+    h.update({}, null)
+    expectReset(h)
+  })
+
+  it('URL307B-04 principal switch clears every mode', () => {
+    const h = mountScope()
+    h.update({ mode: DRAWING_MODE_OPERATOR })
+    act(() => { controls.setFromUpload(account('v-upload')) })
+    const operatorCurrent = controls.isScopeCurrent
+    h.update({ mode: DRAWING_MODE_CONSOLE })
+    const consoleCurrent = controls.isScopeCurrent
+    const oldUpload = controls.setFromUpload
+    const oldQuery = controls.setFromQuery
+    h.changePrincipal(jwtFor({ sub: 'principal-b', org_id: 'org-a' }), () => {
+      expect(operatorCurrent()).toBe(false)
+      expect(consoleCurrent()).toBe(false)
+      expect(liveDrawingId()).toBeNull()
+      expect(address()).toBe('/app')
+      expect(oldUpload(account('u-upload'))).toBeNull()
+      expect(oldQuery()).toBeNull()
+    })
+    expect(operatorCurrent()).toBe(false)
+    expect(consoleCurrent()).toBe(false)
+    expectReset(h)
+    h.update({ mode: DRAWING_MODE_OPERATOR })
+    expect(shown('drawing-origin')).toBe('reset')
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-id')).toBe('null')
+  })
+
+  it('URL307B-07 root reset retains the console and surface', () => {
+    const h = mountScope({ url: '/?drawing=u-upload&surface=solar' })
+    h.update({}, 'q')
+    expectReset(h, '/app?surface=solar')
+  })
+
+  it('URL307B-08 try reset retains the console', () => {
+    const h = mountScope({ url: '/try?drawing=u-upload' })
+    h.update({}, 'q')
+    expectReset(h)
+  })
+
+  it('URL307B-09 reset preserves the explicit demo address', () => {
+    const h = mountScope({ url: '/app?demo=1', stored: null })
+    expect(shown('drawing-id')).toBe('demo')
+    h.update({}, 'q')
+    expectReset(h, '/app?demo=1')
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('URL307B-10 late upload cannot cross reset', () => {
+    const h = mountScope({ url: '/app?drawing=v-upload', stored: 'v-upload' })
+    const oldUpload = controls.setFromUpload
+    act(() => {
+      controls.reset()
+      expect(oldUpload(account('u-upload'))).toBeNull()
+    })
+    expectReset(h)
+    expect(write).toHaveBeenCalledTimes(1)
+  })
+
+  it('URL307B-13 operator upload remains URL neutral', () => {
+    const h = mountScope({ url: '/try', mode: DRAWING_MODE_OPERATOR, scene: 'tool', stored: null })
+    expect(shown('drawing-origin')).toBe('empty')
+    act(() => { controls.setFromUpload(account('u-upload')) })
+    expect(address()).toBe('/try')
+    expect(liveDrawingId()).toBe('u-upload')
+    expect(h.fresh()).toMatchObject({ drawingId: 'u-upload', origin: 'stored' })
+    expect(shown('drawing-id')).toBe('u-upload')
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-origin')).toBe('empty')
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('URL307B-14 host bridge remains URL neutral', () => {
+    const h = mountScope({ url: '/app/leaf-platform', scene: 'leaf-platform', stored: null })
+    act(() => { controls.setFromUpload(account('u-upload')) })
+    expect(shown('drawing-id')).toBe('u-upload')
+    expect(address()).toBe('/app/leaf-platform')
+    expect(liveDrawingId()).toBe('u-upload')
+    expect(h.fresh().drawingId).toBe('demo')
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-id')).toBe('demo')
+    expect(write).not.toHaveBeenCalled()
+    expect(drawingUrlAfterReset({ href: window.location.href, mode: DRAWING_MODE_CONSOLE, scene: 'leaf-platform' })).toBeNull()
+  })
+
+  it('URL307B-15 StrictMode resets once without replaying persistence', () => {
+    const h = mountScope({ strict: true, projectId: null })
+    h.update({}, 'p')
+    expect(liveDrawingId()).toBe('u-upload')
+    h.update({}, 'q')
+    h.update()
+    act(() => { controls.reset() })
+    expectReset(h)
+    expect(write).toHaveBeenCalledTimes(1)
+    expect(controls.isScopeCurrent()).toBe(true)
+  })
+
+  it('URL307B-16 failed history replacement still invalidates the mounted scope', () => {
+    const h = mountScope()
+    const current = controls.isScopeCurrent
+    write.mockImplementation(() => { throw new Error('History unavailable') })
+    act(() => { controls.reset() })
+    expect(current()).toBe(false)
+    expect(liveDrawingId()).toBeNull()
+    expect(shown('drawing-origin')).toBe('reset')
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-id')).toBe('null')
+    expect(address()).toBe('/app?drawing=u-upload')
+    expect(h.fresh()).toMatchObject({ drawingId: 'u-upload', origin: 'query' })
+  })
+
+  it('URL307B-17 project reset cannot reseed the active mode', () => {
+    const h = mountScope()
+    h.update({ mode: DRAWING_MODE_OPERATOR })
+    act(() => { controls.setFromUpload(account('v-upload')) })
+    h.update({ mode: DRAWING_MODE_CONSOLE })
+    act(() => { controls.reset() })
+    expectReset(h)
+    h.update({ mode: DRAWING_MODE_OPERATOR })
+    expect(shown('drawing-id')).toBe('v-upload')
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-id')).toBe('u-upload')
+    h.update({ mode: DRAWING_MODE_CONSOLE })
+    expectReset(h)
+  })
+
+  it('URL307B-18 tenant reset voids an unactivated mode', () => {
+    const h = mountScope()
+    act(() => { controls.resetAll() })
+    expectReset(h)
+    h.update({ mode: DRAWING_MODE_OPERATOR })
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-id')).toBe('null')
+    expect(shown('drawing-origin')).toBe('reset')
+  })
+
+  it('URL307B-19 token refresh preserves the selection', () => {
+    const h = mountScope()
+    const token = controls.scopeToken
+    h.changePrincipal(jwtFor({ sub: 'principal-a', org_id: 'org-a', exp: 2 }))
+    expect(controls.scopeToken).toBe(token)
+    expect(shown('drawing-id')).toBe('u-upload')
+    expect(liveDrawingId()).toBe('u-upload')
+    expect(address()).toBe('/app?drawing=u-upload')
+    act(() => { controls.setFromQuery() })
+    expect(h.fresh().drawingId).toBe('u-upload')
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('URL307B-20 first sign-in preserves the transient guest', () => {
+    const h = mountScope({ url: '/app', stored: null, token: null })
+    act(() => { controls.setFromUpload({ drawing_id: 'g-upload', tenant_kind: 'guest' }) })
+    const token = controls.scopeToken
+    h.changePrincipal(jwtFor({ sub: 'principal-a', org_id: 'org-a' }))
+    expect(controls.scopeToken).toBe(token)
+    expect(shown('drawing-id')).toBe('g-upload')
+    expect(address()).toBe('/app')
+    expect(liveDrawingId()).toBeNull()
+    expect(h.fresh().drawingId).toBe('demo')
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-id')).toBe('demo')
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('URL307B-22 a new selection works after reset', () => {
+    const h = mountScope()
+    const oldCurrent = controls.isScopeCurrent
+    const oldUpload = controls.setFromUpload
+    act(() => { controls.reset() })
+    expectReset(h)
+    act(() => { controls.reset() })
+    expect(controls.isScopeCurrent()).toBe(true)
+    act(() => { controls.setFromUpload(account('u-upload')) })
+    expect(oldCurrent()).toBe(false)
+    act(() => { expect(oldUpload(account('obsolete-upload'))).toBeNull() })
+    expect(shown('drawing-id')).toBe('u-upload')
+    act(() => { controls.setFromUpload(account('v-upload')) })
+    expect(oldCurrent()).toBe(false)
+    expect(address()).toBe('/app?drawing=v-upload')
+    expect(liveDrawingId()).toBe('v-upload')
+    expect(shown('drawing-id')).toBe('v-upload')
+    expect(h.fresh().drawingId).toBe('v-upload')
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-origin')).toBe('reset')
+    expect(address()).toBe('/app?drawing=v-upload')
+  })
+
+  it('URL307B-23 reset removes duplicate selections and preserves the rest', () => {
+    const h = mountScope({ url: '/?drawing=u-upload&surface=solar&drawing=v-upload&tag=a&tag=b#viewer' })
+    act(() => { controls.reset() })
+    expectReset(h, '/app?surface=solar&tag=a&tag=b#viewer')
+  })
+
+  it('URL307B-24 another boot override preserves the original path', () => {
+    const h = mountScope({ url: '/try?drawing=u-upload&dev=1#viewer' })
+    act(() => { controls.reset() })
+    expectReset(h, '/try?dev=1#viewer')
+  })
+
+  it('URL307B-26 forgetting unavailable storage never aborts reset', () => {
+    const values = new Map([[WORKBENCH_ID_KEY, 'u-upload'], ['other', 'kept']])
+    const working = { sessionStorage: { removeItem: (key) => values.delete(key) } }
+    expect(forgetLiveDrawingId(working)).toBe(true)
+    expect(values.has(WORKBENCH_ID_KEY)).toBe(false)
+    expect(values.get('other')).toBe('kept')
+    expect(forgetLiveDrawingId(working)).toBe(true)
+    expect(forgetLiveDrawingId({})).toBe(false)
+    const failing = { sessionStorage: { removeItem: () => { throw new Error('Storage unavailable') } } }
+    expect(forgetLiveDrawingId(failing)).toBe(false)
+    const h = mountScope({ forgetDrawingId: () => forgetLiveDrawingId(failing) })
+    const current = controls.isScopeCurrent
+    act(() => { controls.reset() })
+    expect(current()).toBe(false)
+    expect(address()).toBe('/app')
+    expect(liveDrawingId()).toBe('u-upload')
+    expect(shown('drawing-origin')).toBe('reset')
+    act(() => { controls.setFromQuery() })
+    expect(shown('drawing-id')).toBe('null')
+    expect(h.fresh().drawingId).toBe('demo')
+  })
+
+  it('URL307B-27 a retained query setter cannot restore the old seed', () => {
+    const h = mountScope()
+    const oldQuery = controls.setFromQuery
+    act(() => {
+      controls.reset()
+      expect(oldQuery()).toBeNull()
+    })
+    expectReset(h)
+  })
+
+  it('URL307B-29 empty drawing parameter is removed without an empty replacement', () => {
+    const h = mountScope({ url: '/?drawing=&surface=solar' })
+    act(() => { controls.reset() })
+    expectReset(h, '/app?surface=solar')
+    expect(new URLSearchParams(window.location.search).has('drawing')).toBe(false)
+    expect(hasDrawingSelection()).toBe(false)
+    expect(hasDrawingSelection({ drawingId: '', source: 'source' })).toBe(false)
+    expect(hasDrawingSelection({ drawingId: 'id', source: null })).toBe(false)
+    expect(hasDrawingSelection({ drawingId: 'Raw ID', source: 'source' })).toBe(true)
+    expect(drawingUrlAfterReset({ href: 'malformed', mode: DRAWING_MODE_CONSOLE, scene: 'app' })).toBeNull()
+    expect(drawingUrlAfterReset({ href: window.location.href, mode: DRAWING_MODE_CONSOLE, scene: 'app' })).toBeNull()
   })
 })

@@ -29,7 +29,7 @@ vi.mock('../controllers/WorkspaceControllerProvider.jsx', () => ({ useWorkspaceC
 vi.mock('../controllers/session/useSessionController.js', () => ({ default: () => fixture.session }))
 vi.mock('../controllers/workspace/useWorkspaceController.js', () => ({ default: () => fixture.workspace }))
 vi.mock('../controllers/workspace/useSessionOrgAdoption.js', () => ({ default: () => {} }))
-vi.mock('../drawing/DrawingIdentityProvider.jsx', () => ({ useDrawingScopeReset: () => {} }))
+vi.mock('../drawing/DrawingIdentityProvider.jsx', () => ({ useDrawingScopeReset: () => {}, useDrawingIdentityOptional: () => null }))
 vi.mock('../controllers/catalog/useCatalogController.js', () => ({ default: () => fixture.catalog }))
 vi.mock('../controllers/useJobController.js', () => ({ default: () => fixture.jobs }))
 vi.mock('../controllers/useBuildQueue.js', () => ({ default: () => ({ builds: [] }) }))

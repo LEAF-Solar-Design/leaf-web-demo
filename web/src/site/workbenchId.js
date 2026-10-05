@@ -35,3 +35,14 @@ export function rememberLiveDrawingId(drawingId, scope = globalThis) {
     return false
   }
 }
+
+export function forgetLiveDrawingId(scope = globalThis) {
+  try {
+    const storage = scope.sessionStorage
+    if (!storage || typeof storage.removeItem !== 'function') return false
+    storage.removeItem(WORKBENCH_ID_KEY)
+    return true
+  } catch {
+    return false
+  }
+}
