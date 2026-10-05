@@ -612,6 +612,30 @@ it.each([
   expect(author.authorMounted).toBe(false)
 })
 
+it.each([
+  [{ mock: false, signedIn: false, sessionStatus: 'active' }, true],
+  [{ mock: false, signedIn: true, sessionStatus: 'active' }, true],
+  [{ mock: false, signedIn: true, sessionStatus: 'required' }, false],
+  [{ mock: false, signedIn: false, sessionStatus: 'required' }, false],
+  [{ mock: false, signedIn: false, sessionStatus: 'checking' }, false],
+  [{ mock: true, signedIn: false, sessionStatus: 'active' }, false],
+  [{ mock: false, signedIn: true, sessionStatus: 'checking' }, false],
+  [{ mock: true, signedIn: false, sessionStatus: 'required' }, false],
+])('A2-36 the conversation seat follows the session status, not a stored token: %j', (context, mounted) => {
+  const seats = (extra) => deriveBoardPaneSeats({
+    ...context, boardHostsProject: false, projectPane: null, authorOpen: true,
+    authorDestination: 'board', authorFallback: 'fb', canConverse: true,
+    agentMode: 'primary', projectId: 'p1', drawingId: 'd1', sessionId: 's1', authorSource: null, ...extra,
+  })
+  expect(seats({}).conversationMounted).toBe(mounted)
+  expect(seats({ canConverse: false }).conversationMounted).toBe(false)
+  expect(seats({ agentMode: null }).conversationMounted).toBe(false)
+  expect(seats({ sessionId: null }).conversationMounted).toBe(false)
+  const live = !context.mock && context.signedIn && context.sessionStatus === 'active'
+  expect(seats({}).annotationEnabled).toBe(live)
+  expect(seats({}).authorMounted).toBe(live)
+})
+
 it('author content override distinguishes empty from omitted content', () => {
   const view = render(<NavRail activeSurface="browser" authorOpen authorContent={null} />)
   expect(screen.queryByLabelText('What should the tool do?')).toBeNull()

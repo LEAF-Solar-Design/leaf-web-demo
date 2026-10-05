@@ -48,7 +48,9 @@ export function deriveBoardPaneSeats({
     boardPaneContext, boardConversation, boardAnnotations, boardAuthor,
     conversationEligible, authorEligible,
     annotationEnabled: Boolean(live && projectId && drawingId && sessionId),
-    conversationMounted: Boolean(live && canConverse && agentMode && sessionId),
+    // The conversation seat follows the session controller, not a stored token: an auth-off console is active with no
+    // token, and sign-out or a refused token moves the status off 'active' (createSessionController's `required`).
+    conversationMounted: Boolean(!mock && sessionStatus === 'active' && canConverse && agentMode && sessionId),
     // A signed-out or demo console mounts the form only where the rail renders its open section (authorSource), as
     // before #1874; a live session keeps the persistent seat, so a collapsed rail moves it to the fallback. The board
     // pane is gated by its own eligibility, which already requires a live signed-in session.

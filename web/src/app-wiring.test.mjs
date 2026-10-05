@@ -187,7 +187,8 @@ describe('project board live pane wiring', () => {
     assert.equal(derived.conversationMounted, true)
     assert.ok(appSource.includes('attach: attachAgentSession, onOpen: openAgentMode'))
     assert.ok(appSource.includes("const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'"))
-    assert.ok(appSource.includes('if (mock || !signedIn || session.status !== \'active\') clearAgentSession()'))
+    assert.ok(appSource.includes('if (mock || session.status !== \'active\') clearAgentSession()'))
+    assert.ok(!appSource.includes('!signedIn || session.status !== \'active\') clearAgentSession()'))
   })
   it('A2-02 wires Annotations to the single App subscription and decision actions', () => {
     assert.ok(slot('annotations').includes('AnnotationPaneState annotations={annotations}'))

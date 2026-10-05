@@ -2987,8 +2987,8 @@ export default function App() {
     context: conversationContext, attach: attachAgentSession, onOpen: openAgentMode,
   })
   useLayoutEffect(() => {
-    if (mock || !signedIn || session.status !== 'active') clearAgentSession()
-  }, [mock, signedIn, session.status, clearAgentSession])
+    if (mock || session.status !== 'active') clearAgentSession()
+  }, [mock, session.status, clearAgentSession])
   useEffect(() => {
     if (boardConversation && conversationEligible && agentSessionId) openAgentMode()
   }, [boardConversation, conversationEligible, agentSessionId, openAgentMode])
