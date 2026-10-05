@@ -177,7 +177,7 @@ test('a synthesized report builds a valid receipt against the live feature map',
   const liveMap = buildFeatureMap()
   const entry = liveMap.entries[0]
   const state = entry.states[0]
-  const viewport = entry.viewports[0]
+  const viewport = (entry.state_viewports?.[state] || entry.viewports)[0]
   const report = { suites: [{ specs: [{ title: `${entry.id} [${state}] @${viewport}`,
     tests: [{ expectedStatus: 'passed', results: [{ status: 'passed', duration: 1, attachments: [] }] }],
   }] }] }
@@ -186,7 +186,7 @@ test('a synthesized report builds a valid receipt against the live feature map',
   assert.equal(receipt.catalog_version, liveMap.catalog_version)
   assert.equal(receipt.evidence.cases.length, 1)
   assert.deepEqual(receipt.evidence.cases.map(tripleKey), [tripleKey({ feature_id: entry.id, state, viewport })])
-  const expected = liveMap.entries.flatMap((row) => row.states.flatMap((s) => row.viewports.map((v) =>
+  const expected = liveMap.entries.flatMap((row) => row.states.flatMap((s) => (row.state_viewports?.[s] || row.viewports).map((v) =>
     tripleKey({ feature_id: row.id, state: s, viewport: v }))))
   const seen = [...receipt.evidence.cases, ...receipt.evidence.coverage_gaps].map(tripleKey)
   assert.deepEqual([...seen].sort(), [...expected].sort())
@@ -543,6 +543,28 @@ test('artifact paths cannot escape artifacts or be supplied by evidence text', (
     { name: 'trace', path: 'web/artifacts/../../secret.zip' }]
   const failure = build(report).failures.find((row) => row.feature_id === 'drawer:nav' && row.evidence.state === 'closed')
   assert.deepEqual(failure.evidence.references, [])
+})
+
+test('per-state viewports override entry viewports while other states retain the default', () => {
+  const featureMap = { entries: [{ id: 'action:bar-escape', states: ['drawer-open', 'default'],
+    viewports: ['desktop'], state_viewports: { 'drawer-open': ['phone'] } }] }
+  const report = { suites: [{ specs: [
+    { title: 'action:bar-escape [drawer-open] @phone', tests: [{ projectName: 'phone', results: [{ status: 'passed' }] }] },
+    { title: 'action:bar-escape [default] @desktop', tests: [{ projectName: 'desktop', results: [{ status: 'passed' }] }] },
+  ] }] }
+  const receipt = build(report, featureMap)
+  assert.deepEqual(receipt.evidence.cases.map((row) => [row.state, row.viewport, row.verdict]), [
+    ['drawer-open', 'phone', 'pass'], ['default', 'desktop', 'pass'],
+  ])
+  assert.deepEqual(receipt.evidence.coverage_gaps, [])
+  report.suites[0].specs[0].title = 'action:bar-escape [drawer-open] @desktop'
+  report.suites[0].specs[0].tests[0].projectName = 'desktop'
+  assert.throws(() => build(report, featureMap), /absent from the feature map/)
+  report.suites[0].specs[0].title = 'action:bar-escape [drawer-open] @phone'
+  report.suites[0].specs[0].tests[0].projectName = 'phone'
+  report.suites[0].specs[1].title = 'action:bar-escape [default] @phone'
+  report.suites[0].specs[1].tests[0].projectName = 'phone'
+  assert.throws(() => build(report, featureMap), /absent from the feature map/)
 })
 
 test('bad attachments and report triples are rejected rather than silently discarded', () => {
