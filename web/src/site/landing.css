@@ -8,6 +8,11 @@
      ease · stagger 20ms/rank · hidden = opacity 0 + blur(14px) saturate(.6)
      scale(.965) · only opacity/filter/transform ever transition. */
 
+:root {
+  --studio-accent: #7fd6a6;
+  --studio-chip-radius: 6px;
+}
+
 .stage-root {
   --recast-enter: 1730ms;
   --recast-focus: 2250ms;   /* blur/saturate in, 1.3x enter (the focus pull) */
@@ -152,12 +157,16 @@
   box-shadow: none;
   font: 500 13px 'Inter Tight', sans-serif; padding: 8px 16px; cursor: pointer;
 }
-.lp-trial:hover { background: rgba(34, 197, 94, .14); color: #4ade80; }
+@media (hover: hover) and (pointer: fine) {
+  .lp-trial:hover { background: rgba(34, 197, 94, .14); color: #4ade80; }
+}
 .lp-solver-open {
   background: transparent; border: 0; color: #a1a1aa;
   font: 500 12px/1 'Inter Tight', sans-serif; padding: 4px 6px; cursor: pointer;
 }
-.lp-solver-open:hover { color: #fff; text-decoration: underline; }
+@media (hover: hover) and (pointer: fine) {
+  .lp-solver-open:hover { color: #fff; text-decoration: underline; }
+}
 
 /* Tool cluster overlays the same slot (rendered by ToolCast, above the bar). */
 .tc-topcluster {
@@ -185,7 +194,9 @@
   display: grid; gap: 1px; text-align: left; cursor: pointer;
   color: #a1a1aa; background: transparent;
 }
-.tc-product-tabs button:hover { color: #fff; background: rgba(255, 255, 255, .04); }
+@media (hover: hover) and (pointer: fine) {
+  .tc-product-tabs button:hover { color: #fff; background: rgba(255, 255, 255, .04); }
+}
 .tc-product-tabs button[aria-selected="true"] { color: #fff; background: #27272a; }
 .tc-product-tabs button > span { font: 600 12.5px 'Inter Tight', sans-serif; }
 .tc-product-tabs small { color: #949494; font-size: 9.5px; }
@@ -205,8 +216,8 @@
 .tc-product-tabs button:active { transform: translateY(0); }
 .tc-product-tabs button[aria-selected="true"] { box-shadow: inset 0 -2px 0 #4ade80; }
 .tc-product-morph { animation: tcProductMorph .3s ease both; }
-.studio-ground > [data-ground-phase="leaving"] { pointer-events: none; animation: studioGroundOut 180ms cubic-bezier(.2,0,0,1) both; }
-.studio-ground > [data-ground-phase="entering"] { animation: studioGroundIn 180ms cubic-bezier(.2,0,0,1) both; }
+.studio-ground > [data-ground-phase="leaving"] { pointer-events: none; animation: studioGroundOut 180ms ease both; }
+.studio-ground > [data-ground-phase="entering"] { animation: studioGroundIn 180ms cubic-bezier(.22,1,.36,1) both; }
 @keyframes studioGroundOut {
   from { opacity: 1; }
   to { opacity: 0; }
@@ -216,11 +227,11 @@
   to { opacity: 1; }
 }
 .studio-shell .app[data-studio-transition="out"] :is(header.top, #drafting-ribbon, .viewer-toolbar, [data-testid="cockpit-view"], .properties-dock, .bar.bar-command-line, footer.foot-bar, .rail-stack) {
-  animation: studioGroundOut 80ms cubic-bezier(.2,0,0,1) both;
+  animation: studioGroundOut 80ms ease both;
   pointer-events: none;
 }
 .studio-shell .app[data-studio-transition="in"] :is(header.top, #drafting-ribbon, .viewer-toolbar, [data-testid="cockpit-view"], .properties-dock, .bar.bar-command-line, footer.foot-bar, .rail-stack) {
-  animation: studioGroundIn 140ms cubic-bezier(.2,0,0,1) both;
+  animation: studioGroundIn 140ms cubic-bezier(.22,1,.36,1) both;
 }
 @keyframes tcProductMorph {
   from { opacity: 0; transform: translateY(7px); }
@@ -252,7 +263,7 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .tc-product-tabs button { transition: none; }
-  .tc-product-tabs button:hover { transform: none; }
+  .tc-product-tabs button { transform: none; }
   .tc-product-morph { animation: none; }
   .studio-ground > [data-ground-phase="leaving"],
   .studio-ground > [data-ground-phase="entering"],
@@ -287,7 +298,7 @@
 .tc-product-columns > div { padding: 18px; border: 1px solid #27272a; border-radius: 10px; background: #141416; }
 .tc-product-columns h2 { margin: 0 0 12px; color: #d4d4d8; font: 600 13px 'Inter Tight', sans-serif; }
 .tc-product-columns ul { margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 7px; list-style: none; }
-.tc-product-columns li { padding: 5px 8px; border-radius: 999px; color: #a1a1aa; background: #1c1c20; font-size: 11px; }
+.tc-product-columns li { padding: 5px 8px; border-radius: var(--studio-chip-radius); color: #a1a1aa; background: #1c1c20; font-size: 11px; }
 .tc-product-note { padding-left: 12px; border-left: 2px solid #52525b; }
 /* F-9: the Browser / Solar CAD project line, made legible. Same dark literals
    as the rest of this /try stylesheet; the .app shell re-pins these to tokens
@@ -296,15 +307,21 @@
 .tc-product-project-state > strong { color: #d4d4d8; font: 600 13px 'Inter Tight', sans-serif; }
 .tc-product-project-state > p { max-width: 560px; margin: 0; color: #a1a1aa; font-size: 12.5px; line-height: 1.55; }
 .tc-product-project-act { border: 1px solid #3f3f46; border-radius: 7px; padding: 7px 12px; color: #fff; background: #27272a; cursor: pointer; font-size: 12px; }
-.tc-product-project-act:hover:not(:disabled) { background: #3f3f46; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-product-project-act:hover:not(:disabled) { background: #3f3f46; }
+}
 .tc-product-project-act:disabled { color: #71717a; background: #1c1c20; cursor: not-allowed; }
 .tc-product-project-reason { max-width: 560px; color: #949494; font-size: 11.5px; line-height: 1.5; }
 .tc-product-cad-link { margin-top: 18px; border: 1px solid #3f3f46; border-radius: 7px; padding: 8px 12px; color: #fff; background: #27272a; cursor: pointer; }
-.tc-product-cad-link:hover { background: #3f3f46; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-product-cad-link:hover { background: #3f3f46; }
+}
 .tc-solve { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: #22c55e; }
 .tc-solve .dot { background: #22c55e; }
 .tc-back { border: 0; background: none; padding: 0; font-size: 12px; color: #22c55e; cursor: pointer; }
-.tc-back:hover { color: #4ade80; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-back:hover { color: #4ade80; }
+}
 .tc-focus-hidden { display: none !important; }
 
 /* Project lifecycle lives inside the /try workspace's Project tab rail
@@ -405,7 +422,9 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, .35);
   font: 500 14px 'Inter Tight', sans-serif; padding: 11px 22px; cursor: pointer;
 }
-.lp-cta:hover { background: #4ade80; }
+@media (hover: hover) and (pointer: fine) {
+  .lp-cta:hover { background: #4ade80; }
+}
 .lp-price { font-size: 12.5px; color: #949494; }
 .lp-stats {
   display: flex; gap: 34px; border-top: 1px solid #27272a;
@@ -469,7 +488,9 @@
   border: 0; font-size: 12px; color: #949494; background: #1c1c20;
   border-radius: 6px; padding: 4px 11px; cursor: pointer;
 }
-.lp-tab:hover { color: #a1a1aa; }
+@media (hover: hover) and (pointer: fine) {
+  .lp-tab:hover { color: #a1a1aa; }
+}
 .lp-tab.active { color: #fff; background: #27272a; }
 .lp-index-meta { margin-left: auto; font-size: 11.5px; color: #949494; }
 .lp-mono { font: 400 11px ui-monospace, monospace; }
@@ -503,7 +524,9 @@
   background: transparent; color: #949494; font-size: 11.5px; text-align: left;
   white-space: nowrap;
 }
-.tc-rail-tabs button:hover { color: #d4d4d8; background: rgba(255, 255, 255, .03); }
+@media (hover: hover) and (pointer: fine) {
+  .tc-rail-tabs button:hover { color: #d4d4d8; background: rgba(255, 255, 255, .03); }
+}
 .tc-rail-tabs button[aria-selected="true"] { color: #fff; background: #1f1f23; }
 .tc-rail-tabs button span { float: right; color: #949494; font-variant-numeric: tabular-nums; }
 .tc-rail-body { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: auto; }
@@ -523,9 +546,13 @@
   display: flex; align-items: center; flex: none;
 }
 .tc-link { font-size: 12px; color: #22c55e; cursor: pointer; }
-.tc-link:hover { color: #4ade80; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-link:hover { color: #4ade80; }
+}
 .tc-link.muted { margin-left: auto; font-size: 11.5px; color: #949494; }
-.tc-link.muted:hover { color: #a1a1aa; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-link.muted:hover { color: #a1a1aa; }
+}
 .tc-rail-foot .tc-link:only-child { margin-left: 0; }
 
 .tc-events { display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
@@ -652,8 +679,10 @@
   width: 100%; border: 0; padding: 9px 7px;
   background: transparent; color: #a1a1aa; cursor: pointer; text-align: left; font-size: 11.5px;
 }
-.tc-version-row > button:first-child:hover,
 .tc-version-row > button:first-child.active { background: rgba(34, 197, 94, .07); color: #fff; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-version-row > button:first-child:hover { background: rgba(34, 197, 94, .07); color: #fff; }
+}
 .tc-version-row > .chip-act { margin: 0 7px 8px; }
 .tc-version-recovery { display: flex; gap: 6px; padding: 0 7px 8px; }
 .tc-version-list b { color: #22c55e; font-size: 10px; font-weight: 500; }
@@ -724,7 +753,9 @@
   font: 600 11.5px 'Inter Tight', sans-serif;
   cursor: pointer;
 }
-.tc-run:hover { background: #4ade80; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-run:hover { background: #4ade80; }
+}
 .tc-run:disabled { cursor: default; opacity: .42; }
 
 /* ---------------- tool: command bar (z 30) ---------------- */
@@ -779,13 +810,17 @@
   border: 0; font-size: 11px; color: #949494; background: #1f1f23;
   border-radius: 6px; padding: 3px 10px; cursor: pointer;
 }
-.tc-bar-chip:hover { color: #a1a1aa; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-bar-chip:hover { color: #a1a1aa; }
+}
 .tc-bar-chip.sq {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; font-size: 13px; padding: 0;
 }
 .tc-bar-proj { border: 0; background: none; padding: 0; font-size: 11.5px; color: #949494; cursor: pointer; }
-.tc-bar-proj:hover { color: #a1a1aa; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-bar-proj:hover { color: #a1a1aa; }
+}
 .tc-bar-key { border: 0; cursor: pointer; background: #1f1f23; }
 
 /* ---- slice 5a: the console's PromptBox seated inside the stage's .tc-bar ----
@@ -813,7 +848,9 @@
    project label and the keycap on a phone, as it did before. */
 .tc-bar .bar-controls .bar-add { display: inline-flex; background: #1f1f23; color: #949494; }
 .tc-bar .bar-controls .bar-scope { display: inline-block; background: #1f1f23; color: #949494; font-family: inherit; font-size: 11px; }
-.tc-bar .bar-controls :is(.bar-add, .bar-scope):hover { color: #a1a1aa; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-bar .bar-controls :is(.bar-add, .bar-scope):hover { color: #a1a1aa; }
+}
 .tc-bar .bar-controls .tc-bar-proj { display: inline; font-family: inherit; font-size: 11.5px; color: #949494; }
 .tc-bar .bar-controls .key { margin-left: 0; }
 .tc-bar .bar .bar-controls .tc-bar-key { background: #1f1f23; color: #949494; }
@@ -821,13 +858,17 @@
   background: #22c55e; color: #04140a; border-radius: 6px; padding: 5px 12px;
   font: 600 11.5px 'Inter Tight', sans-serif;
 }
-.tc-bar .bar .bar-controls .tc-run:hover:not(:disabled) { background: #4ade80; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-bar .bar .bar-controls .tc-run:hover:not(:disabled) { background: #4ade80; }
+}
 .tc-bar .bar .bar-controls .tc-run:disabled { background: #22c55e; color: #04140a; opacity: .42; cursor: default; }
 /* Inert bar (sign in or a drawing is required first): the Run chip drops its filled primary face and reads as a quiet chip, so nothing on the pane invites a click that cannot run. */
 .tc-bar.tc-bar-inert .bar .bar-controls .tc-run,
 .tc-bar-inert .tc-run { background: rgba(34, 197, 94, .08); color: #71717a; box-shadow: none; opacity: 1; cursor: default; }
-.tc-bar.tc-bar-inert .bar .bar-controls .tc-run:hover:not(:disabled),
-.tc-bar-inert .tc-run:hover { background: rgba(34, 197, 94, .08); color: #71717a; }
+@media (hover: hover) and (pointer: fine) {
+  .tc-bar.tc-bar-inert .bar .bar-controls .tc-run:hover:not(:disabled),
+  .tc-bar-inert .tc-run:hover { background: rgba(34, 197, 94, .08); color: #71717a; }
+}
 
 /* ---------------- tool: caption (z 15) ---------------- */
 
@@ -1127,7 +1168,7 @@
 .studio-shell .viewer-wrap { background: transparent; pointer-events: none; }
 :where(.studio-shell .viewer-wrap > *) { pointer-events: auto; }
 
-/* SMALL SCREENS (<=980px): styles.css releases .app's 100vh trap so the
+/* SMALL SCREENS (<=980px): styles.css releases .app's viewport-height trap so the
    DOCUMENT scrolls and structural.css retires the inner scrollport. Inside a
    fixed overflow:hidden host the document has no flow height, so the shell
    itself becomes the scrollport here and the ground pins to the viewport
@@ -1156,13 +1197,15 @@
 }
 /* Unselected surface tabs and their state labels sit on the transparent nav. */
 .studio-shell .app .tc-product-tabs [role="tab"] { color: rgba(240, 242, 240, .74); }
-.studio-shell .app .tc-product-tabs [role="tab"]:hover { color: rgba(240, 242, 240, .98); background: rgba(240, 242, 240, .08); }
+@media (hover: hover) and (pointer: fine) {
+  .studio-shell .app .tc-product-tabs [role="tab"]:hover { color: rgba(240, 242, 240, .98); background: rgba(240, 242, 240, .08); }
+}
 .studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] { color: var(--foreground); background: var(--card); }
 .studio-shell .app .tc-product-tabs [role="tab"] small { color: rgba(240, 242, 240, .62); }
 /* The state labels' paper-ramp status colors (styles.css, same (0,4,1)
    specificity, later in sheet order) would win the tie: pin them one
    attribute higher with dark-ground-safe ink. */
-.studio-shell .app .tc-product-tabs [role="tab"] small[data-state="available"] { color: #7fd6a6; }
+.studio-shell .app .tc-product-tabs [role="tab"] small[data-state="available"] { color: var(--studio-accent); }
 .studio-shell .app .tc-product-tabs [role="tab"] small[data-state="unavailable"] { color: #f0997b; }
 .studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small { color: var(--muted-2); }
 .studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="available"] { color: var(--status-success); }
@@ -1172,7 +1215,9 @@
 .studio-shell .app .tc-continuity-label { color: rgba(240, 242, 240, .7); }
 .studio-shell .app .tc-continuity-item strong { color: rgba(240, 242, 240, .98); }
 .studio-shell .chip-neutral { color: rgba(240, 242, 240, .88); background: rgba(240, 242, 240, .1); }
-.studio-shell .chip-neutral:hover { background: rgba(240, 242, 240, .18); }
+@media (hover: hover) and (pointer: fine) {
+  .studio-shell .chip-neutral:hover { background: rgba(240, 242, 240, .18); }
+}
 /* Pre-intake and skeleton feedback render on the bare ground. */
 .studio-shell .viewer-wrap .loading-line,
 .studio-ground .loading-line { color: rgba(240, 242, 240, .8); }
@@ -1270,7 +1315,7 @@
   padding: 8px 12px; border: 1px solid rgba(240, 242, 240, .3); border-radius: 4px;
   background: #151b18; color: rgba(240, 242, 240, .96); cursor: pointer;
 }
-.ground-board-header :focus-visible { outline: 2px solid #7fd6a6; outline-offset: 3px; }
+.ground-board-header :focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 3px; }
 .start-board-gloss {
   margin: 0 0 6px; padding: 8px 12px; border-radius: 4px;
   background: #151b18; color: rgba(240, 242, 240, .92); font-size: 12px; line-height: 1.5;
@@ -1305,7 +1350,7 @@
   border-radius: 4px; background: #151b18; color: rgba(240, 242, 240, .96);
   font: 12px var(--font-sans); cursor: pointer;
 }
-.ground-theme-toggle:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 3px; }
+.ground-theme-toggle:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 3px; }
 .studio-ground-board.studio-ground-board[data-ground="browser"][data-board-theme="light"] {
   color: var(--leaf-foreground);
   background:
@@ -1327,9 +1372,11 @@
 .studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-theme-toggle {
   background: var(--leaf-card); color: var(--leaf-primary); border: 1px solid var(--leaf-muted);
 }
-.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-row-action:hover,
-.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-theme-toggle:hover {
-  background: var(--leaf-primary-hover); color: var(--leaf-on-accent);
+@media (hover: hover) and (pointer: fine) {
+  .studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-row-action:hover,
+  .studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-theme-toggle:hover {
+    background: var(--leaf-primary-hover); color: var(--leaf-on-accent);
+  }
 }
 .studio-ground-board[data-ground="browser"][data-board-theme="light"] :focus-visible {
   outline: 2px solid var(--leaf-primary); outline-offset: 3px;
@@ -1354,16 +1401,20 @@
 .studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header button {
   background: var(--leaf-card); color: var(--leaf-primary); border-color: var(--leaf-muted);
 }
-.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header button:hover {
-  background: var(--leaf-primary-hover); color: var(--leaf-on-accent);
+@media (hover: hover) and (pointer: fine) {
+  .studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header button:hover {
+    background: var(--leaf-primary-hover); color: var(--leaf-on-accent);
+  }
 }
 .studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-tile {
   background: var(--leaf-card); border-color: var(--leaf-muted);
 }
-.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-row-action:hover *,
-.studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-theme-toggle:hover *,
-.studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header button:hover * {
-  color: var(--leaf-on-accent);
+@media (hover: hover) and (pointer: fine) {
+  .studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-row-action:hover *,
+  .studio-ground-board[data-ground="browser"][data-board-theme="light"] .ground-theme-toggle:hover *,
+  .studio-ground-board[data-ground="browser"][data-board-theme="light"][data-board-layout="contained"] .ground-board-header button:hover * {
+    color: var(--leaf-on-accent);
+  }
 }
 .ground-device-stage { display: flex; align-items: center; justify-content: center; gap: 44px; }
 .device-frame {
@@ -1378,9 +1429,9 @@
 }
 .device-screen { display: grid; gap: 6px; padding: 0 16px; text-align: center; }
 .device-v { font: 500 15px/1.2 var(--font-sans); color: rgba(240, 242, 240, .96); }
-.device-stage { font: 11px var(--font-mono); color: #7fd6a6; }
+.device-stage { font: 11px var(--font-mono); color: var(--studio-accent); }
 .device-meta { font: 10px var(--font-mono); color: rgba(240, 242, 240, .55); word-break: break-all; }
-.studio-ground-device[data-state="ready"] .device-frame { border-color: #7fd6a6; }
+.studio-ground-device[data-state="ready"] .device-frame { border-color: var(--studio-accent); }
 .studio-ground-device[data-state="unavailable"] .device-frame { border-color: #f0997b; }
 .ground-device-side { display: grid; gap: 14px; max-width: 340px; }
 .ground-lane { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; font: 12px var(--font-mono); color: rgba(240, 242, 240, .6); }
@@ -1425,9 +1476,11 @@
   color: #f0997b; background: rgba(240, 153, 123, .12);
   border-color: rgba(240, 153, 123, .35);
 }
-.studio-shell header.top .chip-act:hover,
-.studio-shell footer.foot-bar .chip-act:hover,
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act:hover { background: rgba(240, 242, 240, .16); }
+@media (hover: hover) and (pointer: fine) {
+  .studio-shell header.top .chip-act:hover,
+  .studio-shell footer.foot-bar .chip-act:hover,
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act:hover { background: rgba(240, 242, 240, .16); }
+}
 .studio-shell aside.nav, .studio-shell aside.rail {
   position: relative; z-index: 2;
   border: 1px solid var(--border); border-radius: 8px;
@@ -1480,8 +1533,10 @@
   border: 1px solid rgba(240, 242, 240, .26); border-radius: 6px;
   cursor: pointer;
 }
-.spine-btn:hover, .inbox-toggle:hover { background: rgba(240, 242, 240, .12); }
-.spine-btn:focus-visible, .inbox-toggle:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) {
+  .spine-btn:hover, .inbox-toggle:hover { background: rgba(240, 242, 240, .12); }
+}
+.spine-btn:focus-visible, .inbox-toggle:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 .spine-expand { font-size: 13px; }
 /* The collapse control inside the expanded rail head: same button, inline. */
 .fam-title .spine-collapse { float: right; width: 24px; height: 24px; font-size: 12px; }
@@ -1524,8 +1579,10 @@
   background: none; border: 0; padding: 0 2px; cursor: pointer; border-radius: 3px;
   color: rgba(240, 242, 240, .72);
 }
-.ribbon-cluster-label.as-button:hover { color: rgba(240, 242, 240, .96); background: rgba(240, 242, 240, .08); }
-.ribbon-cluster-label.as-button:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) {
+  .ribbon-cluster-label.as-button:hover { color: rgba(240, 242, 240, .96); background: rgba(240, 242, 240, .08); }
+}
+.ribbon-cluster-label.as-button:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 .ribbon-monogram { color: rgba(127, 214, 166, .9); }
 .ribbon-cluster-tools { display: grid; grid-auto-flow: column; grid-template-rows: repeat(2, auto); gap: 3px 4px; align-content: start; }
 /* W4e slice H: the command prompt (an armed tool's operands, asked for in
@@ -1546,9 +1603,9 @@
   background: rgba(240, 242, 240, .06); border: 1px solid rgba(240, 242, 240, .22); border-radius: 3px;
 }
 .cockpit-prompt .cp-input.wide { width: 120px; }
-.cockpit-prompt .cp-input:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+.cockpit-prompt .cp-input:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 .cockpit-prompt .cp-input:disabled { color: rgba(240, 242, 240, .45); background: transparent; }
-.cockpit-prompt input[type="checkbox"] { margin: 0; accent-color: #7fd6a6; }
+.cockpit-prompt input[type="checkbox"] { margin: 0; accent-color: var(--studio-accent); }
 .cockpit-prompt .cp-note { color: rgba(240, 200, 120, .9); }
 .ribbon-tool {
   padding: 3px 8px;
@@ -1558,8 +1615,10 @@
   border: 1px solid rgba(240, 242, 240, .16); border-radius: 4px;
   cursor: pointer;
 }
-.ribbon-tool:hover:not(:disabled) { background: rgba(240, 242, 240, .12); }
-.ribbon-tool:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) {
+  .ribbon-tool:hover:not(:disabled) { background: rgba(240, 242, 240, .12); }
+}
+.ribbon-tool:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 .ribbon-tool.write { border-color: rgba(212, 175, 110, .38); }
 /* Disabled keeps legible ink (3:1 floor for disabled affordances), and the
    reason rides the title/aria-label from the component. */
@@ -1722,7 +1781,7 @@
   font: 500 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase;
   color: var(--studio-dock-ink, rgba(240, 242, 240, .92));
 }
-.dock-section-head:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+.dock-section-head:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 .dock-chev { color: rgba(240, 242, 240, .55); }
 .dock-section-body { padding: 0 10px 8px; }
 /* The hosted Legend/readout drop their own floating placement inside the
@@ -1756,7 +1815,7 @@
 }
 .studio-shell footer.foot-bar > * + * { border-left-color: rgba(240, 242, 240, .15); }
 .studio-shell footer.foot-bar :is(.dim, .foot-stat) { color: rgba(240, 242, 240, .7); }
-.studio-shell footer.foot-bar .ok-txt { color: #7fd6a6; }
+.studio-shell footer.foot-bar .ok-txt { color: var(--studio-accent); }
 .studio-shell footer.foot-bar .warn-txt { color: #f0c97b; }
 
 /* CAD / Solar CAD: the document-tab strip and the instrument strip. */
@@ -1764,10 +1823,10 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav { margin-top: 4px; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] {
   background: rgba(240, 242, 240, .1); color: rgba(240, 242, 240, .96);
-  border-color: rgba(240, 242, 240, .2); box-shadow: inset 0 2px 0 #7fd6a6;
+  border-color: rgba(240, 242, 240, .2); box-shadow: inset 0 2px 0 var(--studio-accent);
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small { color: rgba(240, 242, 240, .62); }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="available"] { color: #7fd6a6; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="available"] { color: var(--studio-accent); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="unavailable"] { color: #f0997b; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card { margin-top: 8px; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar {
@@ -1809,27 +1868,33 @@
   border: 1px solid rgba(240, 242, 240, .18); background: rgba(240, 242, 240, .06);
   color: rgba(240, 242, 240, .92); font: 500 12px var(--font-sans); cursor: pointer;
 }
-.cockpit-view button:hover { background: rgba(240, 242, 240, .16); }
-.cockpit-view button:focus-visible { outline: 2px solid #7fd6a6; outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) {
+  .cockpit-view button:hover { background: rgba(240, 242, 240, .16); }
+}
+.cockpit-view button:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 /* S3 Back and Up: a word label in the icon's 16px box height; an empty Back
    is aria-disabled (still focusable), so it dims without the disabled state. */
 .cockpit-view .ci-word { display: inline-flex; align-items: center; height: 16px; font: 600 11px/1 var(--font-sans); letter-spacing: .01em; }
 .cockpit-view button[aria-disabled="true"] { opacity: .45; cursor: default; }
-.cockpit-view button[aria-disabled="true"]:hover { background: rgba(240, 242, 240, .06); }
+@media (hover: hover) and (pointer: fine) {
+  .cockpit-view button[aria-disabled="true"]:hover { background: rgba(240, 242, 240, .06); }
+}
 .cockpit-status { display: inline-flex; gap: 14px; align-items: center; font-variant-numeric: tabular-nums; }
 .cockpit-status b { font-weight: 500; color: rgba(240, 242, 240, .96); min-width: 5.5ch; display: inline-block; text-align: right; }
 .cockpit-scale b { min-width: 0; text-align: left; }
-.cockpit-sel[data-selected="true"] { color: #7fd6a6; }
+.cockpit-sel[data-selected="true"] { color: var(--studio-accent); }
 /* kimi-critic on #899: text with its OWN declared paper color inside the
    dark chrome (an inherited re-pin never beats a declaration). */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost {
   background: rgba(240, 242, 240, .08); color: rgba(240, 242, 240, .92); border-color: rgba(240, 242, 240, .22);
 }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost:hover:not(:disabled) {
-  background: rgba(240, 242, 240, .16); color: rgba(240, 242, 240, .98);
+@media (hover: hover) and (pointer: fine) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost:hover:not(:disabled) {
+    background: rgba(240, 242, 240, .16); color: rgba(240, 242, 240, .98);
+  }
 }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-mine, .checkout-mine b) { color: #7fd6a6; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-mine, .checkout-mine b) { color: var(--studio-accent); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-chip, .checkout-chip b, .checkout-stale, .checkout-legacy) { color: #f0c97b; }
 .studio-shell header.top .tag.amber { color: #f0c97b; }
 .studio-shell header.top :is(.claude-trigger .ca-k, .claude-trigger .ca-state, .link-svc-trigger .ca-k, .link-svc-trigger .ca-state) { color: rgba(240, 242, 240, .78); }
@@ -1847,7 +1912,7 @@
 .studio-shell .workspace-card .cad-edit-workbench :is(.chip-act, .btn, .btn.ghost) {
   background: rgba(240, 242, 240, .08); border-color: rgba(240, 242, 240, .22); color: rgba(240, 242, 240, .92);
 }
-.studio-shell .workspace-card .cad-edit-workbench a { color: #7fd6a6; }
+.studio-shell .workspace-card .cad-edit-workbench a { color: var(--studio-accent); }
 @media (max-width: 980px) {
   .studio-shell aside.nav, .studio-shell aside.rail { margin: 8px 8px 0; }
   .cockpit-status { display: none; }
@@ -1911,7 +1976,7 @@
 .ground-world-marker, .ground-world-viewport {
   position: absolute; box-sizing: border-box; pointer-events: none;
   border: 1px solid currentColor;
-  transition: all 180ms cubic-bezier(.22,1,.36,1);
+  transition: left 180ms cubic-bezier(.22,1,.36,1), top 180ms cubic-bezier(.22,1,.36,1), width 180ms cubic-bezier(.22,1,.36,1), height 180ms cubic-bezier(.22,1,.36,1);
 }
 .ground-world-marker { opacity: .45; }
 .ground-world-viewport { border-color: var(--foreground); }
