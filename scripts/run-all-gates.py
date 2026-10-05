@@ -1881,6 +1881,12 @@ def build_suites() -> List[Suite]:
         # default from being re-labelled as an observed setting, so letting it
         # vanish silently would retire the guard and still report green. Moves
         # in lockstep with the assertion in scripts/test_gate_runner.py.
+        Suite("server-sip-r3a-graph", "server canonical Solar graph adapter", "pytest", SERVER,
+              _py_pytest("tests/test_sip_r3a_graph.py"), 24),
+        Suite("platform-sip-r3a-graph", "platform canonical Solar graph publication", "pytest",
+              REPO / "platform", _py_pytest("tests/test_sip_r3a_graph.py"), 10,
+              uses_database=True, db_gated=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("platform-sip-r2-publication", "platform fenced canonical publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r2_publication.py"), 17,
         uses_database=True, db_gated=True, database_skip_reasons=(
@@ -2201,7 +2207,7 @@ def build_suites() -> List[Suite]:
         # sets LEAF_GATE_REQUIRE_DATABASE=1, so this floor IS enforced there
         # against a pristine database, and an unreachable DB is a FAIL row.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 271, db_gated=True,
+              _py_pytest(f"{repo_name}/platform/tests"), 281, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -2910,7 +2916,7 @@ def build_suites() -> List[Suite]:
               # +6 (2026-10-01, ephemeral PostgreSQL lane): the gate-DSN, required-database
               # and database-catalog tests, none environment-gated.
               SCRIPTS_DIR, _py_pytest("test_gate_runner.py") +
-              ["test_studio_walk_regression_gate.py"], 94),
+              ["test_studio_walk_regression_gate.py"], 95),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
