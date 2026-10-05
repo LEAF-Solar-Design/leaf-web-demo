@@ -7,7 +7,8 @@ param(
   [ValidateSet('account', 'guest')]
   [string]$Mode = 'account',
   [switch]$KeepRunRoot,
-  [switch]$SyntheticStringSizing
+  [switch]$SyntheticStringSizing,
+  [switch]$SyntheticRooftop
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,7 +20,10 @@ $runRoot = Join-Path ([System.IO.Path]::GetTempPath()) "leaf-unified-$artifactTi
 $artifactRoot = Join-Path $repoRoot "artifacts\unified-surface-proof\$artifactTier\stack-$runId"
 $launcher = $null
 
-if ($SyntheticStringSizing) {
+if ($SyntheticStringSizing -and $SyntheticRooftop) {
+  throw 'SyntheticRooftop and SyntheticStringSizing are mutually exclusive'
+}
+if ($SyntheticStringSizing -or $SyntheticRooftop) {
   if ($Mode -ne 'account') { throw 'Synthetic string sizing runs in account mode only' }
   foreach ($postureName in @('LEAF_RUNTIME_ENV', 'LEAF_ENV')) {
     $posture = [Environment]::GetEnvironmentVariable($postureName, 'Process')
@@ -179,7 +183,15 @@ try {
     '--harness-port', $HarnessPort,
     '--web-port', $WebPort
   )
-  if ($SyntheticStringSizing) {
+  if ($SyntheticRooftop) {
+    $env:APS_LIVE = '0'
+    $env:LEAF_GUEST_DXF_EXTRACT = 'local'
+    Write-Host 'SYNTHETIC, TEST ONLY: Rooftop solve replay with fixture-derived panel IDs, not live solving.'
+    $launcherArgs = @(
+      'scripts/proof_string_sizer.py', 'supervise', '--profile', 'rooftop',
+      '--run-root', $runRoot, '--run-id', $runId, '--'
+    ) + $launcherArgs[1..($launcherArgs.Count - 1)] + @('--strict-ports')
+  } elseif ($SyntheticStringSizing) {
     Write-Host 'SYNTHETIC, TEST ONLY: recorded String Sizer replay, not live sizing.'
     $launcherArgs = @(
       'scripts/proof_string_sizer.py', 'supervise',
@@ -209,20 +221,26 @@ try {
   } finally { Pop-Location }
 } finally {
   if ($launcher -and -not $launcher.HasExited) {
-    if ($SyntheticStringSizing) {
-      & taskkill /PID $launcher.Id /T /F | Out-Null
+    if ($SyntheticStringSizing -or $SyntheticRooftop) {
+      $stopRequest = Join-Path $runRoot 'stop-request'
+      New-Item -ItemType File -Path $stopRequest -Force | Out-Null
+      if (-not $launcher.WaitForExit(60000)) {
+        & taskkill /PID $launcher.Id /T /F | Out-Null
+        $launcher.WaitForExit(10000) | Out-Null
+      }
     } else {
       Stop-Process -Id $launcher.Id
+      $launcher.WaitForExit(10000) | Out-Null
     }
-    $launcher.WaitForExit(10000) | Out-Null
   }
-  if ($SyntheticStringSizing) {
+  if ($SyntheticStringSizing -or $SyntheticRooftop) {
     $sizingReceipt = Join-Path $runRoot 'synthetic-sizing-receipt.json'
     if (Test-Path -LiteralPath $sizingReceipt) {
       Copy-Item -LiteralPath $sizingReceipt -Destination $artifactRoot
     }
     if ($launcherFile) {
-      & $launcherFile (Join-Path $repoRoot 'scripts/proof_string_sizer.py') verify-receipt --receipt $sizingReceipt --run-id $runId
+      $receiptProfile = if ($SyntheticRooftop) { 'rooftop' } else { 'string-sizing' }
+      & $launcherFile (Join-Path $repoRoot 'scripts/proof_string_sizer.py') verify-receipt --receipt $sizingReceipt --run-id $runId --profile $receiptProfile
       if ($LASTEXITCODE -ne 0 -and $proofExitCode -eq 0) { $proofExitCode = 1 }
     } elseif ($proofExitCode -eq 0) {
       $proofExitCode = 1

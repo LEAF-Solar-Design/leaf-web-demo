@@ -1,0 +1,14 @@
+{
+  "schema": "leaf.synthetic-string-sizing-fixtures.v1",
+  "label": "SYNTHETIC, TEST ONLY: Rooftop solve replay with fixture-derived panel IDs, not live solving.",
+  "fixtures": [
+    {
+      "id": "rooftop-sizing-14",
+      "path": "server/tests/fixtures/w1_rooftop_unsplit_sizing_response.json",
+      "fixture_sha256": "5eaf2977819d43d5a6321893535a4902712f5c7b4d427ee53d6fb5bd4c2ddb1a",
+      "request_wire_sha256": "c2adcc2616b290a64eacbdc9f3857447d5de567a3d297bb23b87d7bdabe269b5",
+      "response_wire_sha256": "840bb09ca947f80c274ad4beda315b7ecd26aecd889c4467ae06f8acbd6efd41",
+      "response_encoding": "original-utf8-json-value-span"
+    }
+  ]
+}
