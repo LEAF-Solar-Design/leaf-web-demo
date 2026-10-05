@@ -35,6 +35,60 @@ describe('notification bus (slice 13a)', () => {
     expect(bus.getSnapshot().visibleId).not.toBe(id1)
   })
 
+  it('updates a matching visible key in place, preserving id, length, and older history', () => {
+    const bus = createNotificationBus(2)
+    const olderId = bus.push({ text: 'older' })
+    const id = bus.push({ text: 'Saving', key: 'save' })
+    const before = bus.getSnapshot()
+    const listener = vi.fn()
+    bus.subscribe(listener)
+    const action = { label: 'Undo', undo: true, onClick: vi.fn() }
+    expect(bus.push({ text: 'Saved', kind: 'success', action, key: 'save' })).toBe(id)
+    const after = bus.getSnapshot()
+    expect(after).not.toBe(before)
+    expect(after.ring).not.toBe(before.ring)
+    expect(after.visibleId).toBe(id)
+    expect(after.ring).toHaveLength(2)
+    expect(after.ring.map((n) => n.id)).toEqual([id, olderId])
+    expect(after.ring[1]).toBe(before.ring[1])
+    expect(after.ring[0]).toMatchObject({ id, text: 'Saved', kind: 'success', key: 'save', action })
+    expect(before.ring[0].text).toBe('Saving')
+    expect(listener).toHaveBeenCalledTimes(1)
+    // Updating does not consume the next newly minted id.
+    expect(bus.push({ text: 'next' })).toBe(id + 1)
+  })
+
+  it('a keyed update replaces the action as well as the message', () => {
+    const bus = createNotificationBus()
+    const id = bus.push({ text: 'first', key: 'job', action: { onClick: vi.fn() } })
+    expect(bus.push({ text: 'second', key: 'job', action: { label: 'invalid' } })).toBe(id)
+    expect(bus.getSnapshot().ring).toHaveLength(1)
+    expect(bus.getSnapshot().ring[0].action).toBeNull()
+  })
+
+  it('only coalesces the visible key, never an older or dismissed notice', () => {
+    const bus = createNotificationBus()
+    const first = bus.push({ text: 'first', key: 'save' })
+    bus.push({ text: 'other', key: 'other' })
+    const next = bus.push({ text: 'again', key: 'save' })
+    expect(next).not.toBe(first)
+    expect(bus.getSnapshot().ring).toHaveLength(3)
+    bus.dismissVisible(next)
+    const afterDismiss = bus.push({ text: 'new save', key: 'save' })
+    expect(afterDismiss).not.toBe(next)
+    expect(bus.getSnapshot().ring).toHaveLength(4)
+  })
+
+  it('unkeyed pushes stay distinct, while an explicit empty key can update', () => {
+    const bus = createNotificationBus()
+    const first = bus.push({ text: 'one' })
+    expect(bus.push({ text: 'two' })).not.toBe(first)
+    expect(bus.getSnapshot().ring).toHaveLength(2)
+    const keyed = bus.push({ text: 'three', key: '' })
+    expect(bus.push({ text: 'updated', key: '' })).toBe(keyed)
+    expect(bus.getSnapshot().ring).toHaveLength(3)
+  })
+
   it('keeps EVERY pushed notice (kind, time, action) in the ring for the inbox, even once it is no longer visible', () => {
     const onClick = vi.fn()
     const bus = createNotificationBus(10)
