@@ -25,7 +25,7 @@ import { createPreviewRunner, resolveVersionTransfer } from './lib/boardTransfer
 import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
-import PropertiesDock, { drawingExtents } from './site/PropertiesDock.jsx'
+import PropertiesDock, { drawingExtents, drawingPropertyName } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
@@ -3492,7 +3492,7 @@ export default function App() {
     const inserts = Array.isArray(drawingIntake.inserts) ? drawingIntake.inserts.length : 0
     const faces = Array.isArray(drawingIntake.faces3d) ? drawingIntake.faces3d.length : 0
     return {
-      name: activeIntake ? activeIntake.documentId : `${projectName}.dwg`,
+      name: drawingPropertyName(shown && drawingName ? `${projectName}.dwg` : '', activeIntake?.documentId),
       entities: polylines + inserts + faces,
       polylines,
       inserts,
@@ -3503,7 +3503,7 @@ export default function App() {
       source: activeIntake ? 'browser drawing' : mock ? 'sample data' : 'project drawing',
       ...(activeIntake && engineHistory ? engineHistory : {}),
     }
-  }, [studioGround, drafting, drawingIntake, activeIntake, engineHistory, projectName, visibleLayers, mock])
+  }, [studioGround, drafting, drawingIntake, activeIntake, engineHistory, shown, drawingName, projectName, visibleLayers, mock])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same

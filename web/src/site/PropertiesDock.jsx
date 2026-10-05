@@ -78,6 +78,10 @@ export function GeometryRows({ geometry }) {
 // while nothing was selected. Client-derived truth only: the counts the
 // intake carries and the extents computed from its vertices; '—' for
 // anything absent, never an invented number.
+export function drawingPropertyName(displayName, documentId) {
+  return displayName || documentId || ''
+}
+
 export function DrawingRows({ drawing, offscreenResult = null, onShowResult = null }) {
   if (!drawing) return null
   const n = (v) => (Number.isFinite(v) ? v.toLocaleString() : '·')
