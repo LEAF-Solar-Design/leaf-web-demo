@@ -6,7 +6,8 @@ import { createHash } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
-import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
+import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
+import { PROMPTS } from '../../src/cadedit/promptKeys.js'
 import { normalizedControlKey } from './probes.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
@@ -24,7 +25,7 @@ export function injectWalkEntities(source) {
   return source.replace('0\nENDSEC\n0\nEOF', `${lines}${dimension}${polyline}0\nENDSEC\n0\nEOF`)
 }
 
-export async function holdJobRoutes(page, pattern = '**/api/jobs/**') {
+export async function holdJobRoutes(page, pattern = '**/api/jobs/**', onHold) {
   let release
   let passing = false
   let cleanupPromise
@@ -33,7 +34,10 @@ export async function holdJobRoutes(page, pattern = '**/api/jobs/**') {
   const errors = []
   const hold = (route) => {
     const continuation = (async () => {
-      if (!passing) await gate
+      if (!passing) {
+        onHold?.(route)
+        await gate
+      }
       await route.continue()
     })()
     active.add(continuation)
@@ -75,7 +79,7 @@ export async function openHistory(probe, runtime, assertions = expect) {
 export async function startPendingRun(probe, runtime, assertions = expect) {
   const { page, evidence } = runtime
   const expect = assertions
-  const catalogResponse = await page.request.get('/api/capabilities')
+  const catalogResponse = await page.request.get('/api/capabilities', { timeout: 15_000 })
   expect(catalogResponse.ok()).toBe(true)
   const catalog = await catalogResponse.json()
   const tool = catalog.families.flatMap((family) => family.capabilities).find((tool) => tool.name === 'count-by-layer')
@@ -387,7 +391,7 @@ async function engineReady(probe, runtime) {
   runtime.workerFacts.engineMounted = mounted
   if (!mounted) {
     if (page.request) {
-      const response = await page.request.get('/.leaf-walk-build.json')
+      const response = await page.request.get('/.leaf-walk-build.json', { timeout: 15_000 })
       if (response.ok()) {
         const marker = await response.json()
         runtime.workerFacts.engineUnavailableReason = marker.engine_unavailable_reason
@@ -552,7 +556,7 @@ export async function readWalkBuildFlags(probe, runtime) {
   if (!catalogSolarNeedsDrawing(probe)) return
   const facts = runtime.workerFacts
   facts.buildFlagsFetch ||= (async () => {
-    const response = await runtime.page.request.get('/.leaf-walk-build.json')
+    const response = await runtime.page.request.get('/.leaf-walk-build.json', { timeout: 15_000 })
     expect(response.ok(), 'Walk build manifest must be available').toBe(true)
     const marker = await response.json()
     facts.buildFlags = marker.flags || {}
@@ -756,6 +760,86 @@ export async function assertEngineMode(probe, runtime, locator, assertions = exp
 }
 
 // A page-specific init script: the ordinary page fixture remains unchanged.
+export function solarDocumentProbe(probe, document) {
+  if (probe.kind !== 'action' || probe.state !== 'no-drawing' || probe.locator.group !== 'solar-panels') return probe
+  if (!document.documentId) return probe
+  if (document.documentId !== 'solar-starter.dxf' || !(document.count > 0) || document.selection !== 'no selection') {
+    throw new Error('Solar no-saved-drawing recipe needs a parsed starter with no selection')
+  }
+  const action = ACTIONS.find((action) => action.id === probe.sourceId)
+  const reason = action.when({ session: { engineParsed: true, selected: null, selectedIds: [], busy: false } })
+  const name = accessibleName(action.label, reason)
+  return { ...probe, locator: { ...probe.locator, name,
+    disabledVariants: reason ? [{ name, reason, reason_code: reasonCode(reason) }] : [] },
+    assertion: reason ? { ...probe.assertion, reason, reason_code: reasonCode(reason) }
+      : { kind: 'opens', target: 'cockpit-prompt', operation: action.op, group: action.group,
+        verb: PROMPTS[action.op].verb, assertionId: probe.assertion.assertionId } }
+}
+
+export async function requireSolarDocument(probe, runtime, assertions = expect) {
+  const { page, evidence } = runtime
+  await engineReady(probe, runtime)
+  const card = page.locator('.workspace-card')
+  await assertions(card).toHaveAttribute('data-engine-document', 'solar-starter.dxf', { timeout: 60_000 })
+  await page.keyboard.press('Escape')
+  const selection = page.getByTestId('cockpit-status').locator('.cockpit-sel')
+  await assertions(selection).toHaveText('no selection')
+  const outline = page.getByRole('group', { name: 'Panel placement', exact: true })
+    .getByRole('button', { name: 'Panel outline', exact: true })
+  evidence.solarDocument = { savedDrawing: false, documentId: await card.getAttribute('data-engine-document'),
+    origin: 'starter', count: await engineCount(page), selection: await selection.innerText(),
+    outline: { visible: await outline.isVisible(), enabled: await outline.isEnabled() } }
+  if (probe.sourceId === 'solar-panels:createRectangle') {
+    try { await assertions(outline).toBeDisabled({ timeout: 500 }) }
+    catch (error) {
+      if (!error.matcherResult) throw error
+      evidence.solarDocument.originalAssertion = { message: error.message,
+        expected: error.matcherResult.expected ?? 'disabled: no engine document',
+        observed: error.matcherResult.actual ?? 'enabled: starter document loaded' }
+    }
+  }
+  runtime.solarDocument = evidence.solarDocument
+}
+
+export async function authorAvailability(probe, runtime, assertions = expect) {
+  if (probe.featureId !== 'action:author-tool' || probe.state !== 'ready') return
+  const response = await runtime.page.request.get('/api/entitlements', { timeout: 15_000 })
+  assertions(response.ok()).toBe(true)
+  const policy = await response.json()
+  runtime.evidence.authorAvailability = { status: response.status(), policy,
+    configuration: { LEAF_CUSTOMIZATION_R5_MODE: runtime.stack.env.LEAF_CUSTOMIZATION_R5_MODE } }
+  if (policy.availability?.author_stage === false) {
+    await unsupported(probe, runtime, 'Author ready requires author_stage; /api/entitlements reports false with LEAF_CUSTOMIZATION_R5_MODE=' + runtime.stack.env.LEAF_CUSTOMIZATION_R5_MODE)
+  }
+}
+
+export async function disclosureEvidence(page, group) {
+  const toolbar = page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+  const panel = toolbar.getByRole('group', { name: group, exact: true, includeHidden: true })
+  const more = toolbar.getByRole('button', { name: 'More panels', exact: true })
+  return { group, rendered: await panel.count(), visible: await panel.isVisible(),
+    disclosure: await more.count() ? await more.getAttribute('aria-expanded') : null }
+}
+
+export async function phoneRailAvailability(probe, runtime) {
+  if (probe.featureId !== 'action:rail-expand' || runtime.testInfo.project.name !== 'phone') return
+  runtime.evidence.phoneRail = await disclosureEvidence(runtime.page, 'Rail')
+  if (runtime.evidence.phoneRail.rendered === 0) {
+    await unsupported(probe, runtime, 'Phone Manage does not render the Rail ribbon group after More panels; App navSpine requires wideViewport. B2 must reconcile the map row.')
+  }
+}
+
+export async function completeSolarReadiness(probe, runtime, locator, assertions = expect, workspace = engineReady) {
+  if (!runtime.releaseSolarProjection) return
+  await runtime.releaseSolarProjection()
+  await workspace(probe, runtime)
+  await assertions(runtime.page.locator('.workspace-card')).toHaveAttribute('data-engine-document',
+    new RegExp(`^${runtime.drawingId}-v[1-9]\\d*\\.dxf$`), { timeout: 60_000 })
+  await assertions(locator.locator('[data-state]')).toHaveAttribute('data-state', 'available')
+  await assertions(locator).toContainText('Ready')
+  runtime.evidence.solarReadiness.released = 'Ready'
+}
+
 export function seedSignOutIdentity({ identity, coachKey }) {
   if (sessionStorage.getItem('leaf.walk.w1k.identity-seeded') !== '1') {
     localStorage.setItem('leaf.jwt', identity.token)
@@ -792,7 +876,7 @@ async function baselineThreeState(probe, runtime, recipe) {
       await expect(page.getByRole('listbox', { name: 'Route resolver', exact: true })).toBeHidden()
       await expect.poll(() => runtime.evidence.responses.some((response) => new URL(response.url).pathname === '/api/capabilities'
         && response.status === 200)).toBe(true)
-      const response = await page.request.get('/api/capabilities')
+      const response = await page.request.get('/api/capabilities', { timeout: 15_000 })
       expect(response.ok()).toBe(true)
       const catalog = await response.json()
       const names = catalog.families.flatMap((family) => family.capabilities.map((tool) => tool.name))
@@ -849,7 +933,7 @@ async function baselineThreeState(probe, runtime, recipe) {
   }
   if (target === 'drawing-find-no-match') {
     await expect(locator).toBeVisible()
-    const reply = await page.request.get('/api/session?dwg=' + encodeURIComponent(runtime.drawingId))
+    const reply = await page.request.get('/api/session?dwg=' + encodeURIComponent(runtime.drawingId), { timeout: 15_000 })
     expect(reply.ok()).toBe(true)
     const { intake } = await reply.json()
     expect(intake).toBeTruthy()
@@ -882,10 +966,12 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'undo-edit', 'preview-version', 'zoom-before-fit', 'require-engine-state', 'crash-engine-worker',
   'require-surface-context', 'require-local-state',
   'saved-version-history', 'require-versionless-drawing', 'seed-solar-graph',
+  'require-solar-document', 'hold-solar-projection',
 ]))
 export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
   'engine-ready', 'select-entity', 'create-line', 'hold-engine-edit',
   'require-engine-state', 'crash-engine-worker',
+  'require-solar-document',
 ]))
 const localFixtureReason = (recipe) => `The isolated stack has no public fixture recipe for ${recipe.state}; required context ${JSON.stringify(recipe.context)}`
 
@@ -898,7 +984,7 @@ export async function workerCatalog(workerFacts, request, { drawingId, version =
       delete workerFacts.catalog
       delete workerFacts.catalogError
       const query = drawingId ? `?drawing_id=${encodeURIComponent(drawingId)}&drawing_version=${encodeURIComponent(version)}` : ''
-      const response = await request.get(`/api/capabilities${query}`)
+      const response = await request.get(`/api/capabilities${query}`, { timeout: 15_000 })
       if (!response.ok()) throw new Error(`Catalog request failed: ${response.status()}`)
       const catalog = await response.json()
       if (!Array.isArray(catalog.families)
@@ -1069,6 +1155,15 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       runtime.cleanup.push(await holdJobRoutes(page, '**/engine/engine_bg.wasm'))
       return
     }
+    case 'hold-solar-projection': {
+      evidence.solarProjectionRequests = []
+      runtime.releaseSolarProjection = await holdJobRoutes(page, '**/api/drawings/*/dxf?*', (route) => {
+        evidence.solarProjectionRequests.push(route.request().url())
+      })
+      runtime.cleanup.push(runtime.releaseSolarProjection)
+      return
+    }
+    case 'require-solar-document': await requireSolarDocument(probe, runtime, assertions); return
     case 'navigate': await page.goto(recipe.url); return
     case 'open-failed-drawing': {
       const sessionReply = page.waitForResponse((response) => {
@@ -1220,6 +1315,11 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     case 'job-rail-state': await setJobRail(page, recipe.open, runtime.testInfo.project.name === 'phone', assertions); return
     case 'tool-rail-state': await setToolRail(page, recipe.open, runtime.testInfo.project.name === 'phone'); return
     case 'properties-state': {
+      if (runtime.testInfo?.project.name === 'phone') {
+        await setDrawer(page, 'Plan', recipe.open)
+        evidence.phoneProperties = { host: 'Plan', open: recipe.open }
+        return
+      }
       const dock = page.getByRole('complementary', { name: 'Properties', exact: true })
       if (await dock.isVisible() !== recipe.open) {
         await setupStep(probe, runtime, { kind: 'ribbon-tab', name: 'View' })
@@ -1359,22 +1459,23 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     }
     case 'seed-solar-graph': {
       const path = `/api/drawings/${runtime.drawingId}`
-      const versions = await page.request.get(`${path}/versions`)
+      const versions = await page.request.get(`${path}/versions`, { timeout: 15_000 })
       expect(versions.ok()).toBe(true)
       const chain = await versions.json()
       const parent = chain.versions.find((row) => Number(row.v) === Number(chain.head))
-      const toolsResponse = await page.request.get('/api/tools')
+      const toolsResponse = await page.request.get('/api/tools', { timeout: 15_000 })
       expect(toolsResponse.ok()).toBe(true)
       const settings = (await toolsResponse.json()).tools.find((tool) => tool.name === 'solar-settings')
       expect(settings).toBeTruthy()
       const checkoutPath = `${path}/checkout`
-      const checkout = await page.request.post(checkoutPath, { data: { holder: 'drafter', ttl_s: 300 } })
+      const checkout = await page.request.post(checkoutPath, { data: { holder: 'drafter', ttl_s: 300 }, timeout: 15_000 })
       expect(checkout.ok()).toBe(true)
       const lease = await checkout.json()
       expect(lease.acquired).toBe(true)
       expect(lease.checkout_capability).toBeTruthy()
       const release = async () => {
         const response = await page.request.delete(checkoutPath, {
+          timeout: 15_000,
           headers: { 'X-Checkout-Capability': lease.checkout_capability },
         })
         expect(response.ok()).toBe(true)
@@ -1397,7 +1498,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       return
     }
     case 'foreign-checkout': {
-      const response = await page.request.post(`/api/drawings/${runtime.drawingId}/checkout`, { data: { holder: 'walk-other-editor', ttl_s: 300 } })
+      const response = await page.request.post(`/api/drawings/${runtime.drawingId}/checkout`, { data: { holder: 'walk-other-editor', ttl_s: 300 }, timeout: 15_000 })
       expect(response.status()).toBe(200)
       expect((await response.json()).acquired).toBe(true)
       await page.reload()
@@ -1413,11 +1514,26 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       policy.demo[recipe.capability] = recipe.allowed
       runtime.cleanup.push(() => writeFile(path, original))
       await writeFile(path, JSON.stringify(policy))
-      const response = await page.request.get('/api/entitlements')
+      const response = await page.request.get('/api/entitlements', { timeout: 15_000 })
       expect(response.ok()).toBe(true)
-      expect((await response.json()).entitlements[recipe.capability]).toBe(recipe.allowed)
-      await page.reload()
+      const policyResponse = await response.json()
+      expect(policyResponse.entitlements[recipe.capability]).toBe(recipe.allowed)
+      if (probe.featureId === 'action:author-tool') evidence.authorPolicy = { status: response.status(), policyResponse,
+        beforeReload: await disclosureEvidence(page, 'Author') }
+      await page.reload({ timeout: 60_000 })
+      if (probe.featureId === 'action:author-tool') {
+        await requireWorkspace(runtime)
+        evidence.authorPolicy.afterReload = await disclosureEvidence(page, 'Author')
+      }
       if (runtime.ribbonTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: runtime.ribbonTab })
+      if (probe.featureId === 'action:author-tool') {
+        const author = page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+          .getByRole('group', { name: 'Author', exact: true, includeHidden: true })
+        await assertions(author).toHaveCount(1, { timeout: 15_000 })
+        await discloseControlPanel(page, { group: 'author' })
+        await assertions(author).toBeVisible()
+        evidence.authorPolicy.afterDisclosure = await disclosureEvidence(page, 'Author')
+      }
       return
     }
     case 'create-line': await createLine(probe, runtime); return
@@ -1435,7 +1551,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     }
     case 'start-pending-run': await startPendingRun(probe, runtime, assertions); return
     case 'require-authoring-off': {
-      const response = await page.request.get('/api/entitlements')
+      const response = await page.request.get('/api/entitlements', { timeout: 15_000 })
       expect(response.ok()).toBe(true)
       const entitlement = await response.json()
       evidence.entitlements = entitlement
@@ -1488,10 +1604,19 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       return
     }
     case 'require-surface-context': {
-      const response = await page.request.get('/api/health')
+      const response = await page.request.get('/api/health', { timeout: 15_000 })
       expect(response.ok()).toBe(true)
       const health = await response.json()
       evidence.health = health
+      if (runtime.releaseSolarProjection) {
+        await assertions.poll(() => evidence.solarProjectionRequests.length).toBeGreaterThan(0)
+        const solar = page.getByRole('tablist', { name: 'Workspace profile', exact: true })
+          .getByRole('tab', { name: 'Solar CAD', exact: false })
+        await assertions(solar.locator('[data-state]')).toHaveAttribute('data-state', 'beta')
+        await assertions(solar).toContainText('Beta')
+        await assertions(page.locator('.workspace-card')).not.toHaveAttribute('data-engine-document', /.+/)
+        evidence.solarReadiness = { transport: 'drawing DXF projection held', pending: 'Beta' }
+      }
       if (recipe.surface === 'cad' && recipe.context.apsLive === true && health.aps_live !== true && recipe.context.hasDrawing !== false && recipe.context.sessionActive !== false) {
         await unsupported(probe, runtime, 'The surface ready state requires APS_LIVE; the isolated local stack reports execution paused')
       }
@@ -1542,7 +1667,9 @@ async function captureBefore(probe, runtime) {
     selection: runtime.failedDrawing ? null : await page.getByTestId('cockpit-status').locator('.cockpit-sel').innerText() }
   if (probe.featureId === 'control:view-back' && probe.state === 'empty-history') return viewState(page)
   if (target.startsWith('viewer-')) return { viewport: await viewportBounds(page) }
-  if (target === 'properties-pane') return { visible: await page.getByRole('complementary', { name: 'Properties', exact: true }).isVisible() }
+  if (target === 'properties-pane') return { visible: runtime.testInfo.project.name === 'phone'
+    ? await panelButton(page, 'Plan').getAttribute('aria-expanded') === 'true'
+    : await page.getByRole('complementary', { name: 'Properties', exact: true }).isVisible() }
   if (target === 'version-history') return { visible: await page.getByRole('dialog', { name: 'Version history', exact: true }).isVisible() }
   if (target.startsWith('engine:') || target === 'browser-clipboard-cut') return { count: await engineCount(page) }
   if (target.startsWith('drawing-version-')) {
@@ -1843,6 +1970,12 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   }
   if (target === 'author-panel') { await expect(page.getByRole('textbox', { name: /describe|build|tool/i }).first()).toBeVisible(); return }
   if (target === 'properties-pane') {
+    if (runtime.testInfo?.project.name === 'phone') {
+      if (effect.value === false) expect(before.visible).toBe(true)
+      await expect(panelButton(page, 'Plan')).toHaveAttribute('aria-expanded', String(!before.visible))
+      runtime.evidence.phoneProperties = { host: 'Plan', before: before.visible, after: !before.visible }
+      return
+    }
     if (effect.value === false) {
       expect(before.visible).toBe(true)
       await expect(propertiesPane(page)).toHaveCount(0)
@@ -1929,6 +2062,16 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target.startsWith('surface:')) {
+    if (probe.state === 'signed-out') {
+      await expect(page.getByRole('heading', { name: 'You are not signed in', exact: true })).toBeVisible()
+      runtime.evidence.surfaceHost = { host: '/try', contract: 'signed-out' }
+      return
+    }
+    if (probe.state === 'no-drawing') {
+      await expect(page.getByText('No drawing yet. Upload a DWG or DXF to begin.', { exact: true })).toBeVisible()
+      runtime.evidence.surfaceHost = { host: '/try', contract: 'empty' }
+      return
+    }
     const surface = PRODUCT_SURFACES.find((surface) => surface.id === probe.sourceId)
     if (surface.contract.chrome.tab) {
       await expect(locator).toHaveAttribute('aria-selected', 'true')
@@ -1938,6 +2081,7 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     if (effect.ground === 'drawing' && effect.state !== 'setup' && effect.state !== 'sign-in') await expect(canvas(page)).toBeVisible()
     else if (effect.ground === 'board') await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeVisible()
     else if (effect.ground === 'sheet') { await expect(page).toHaveURL(/\/sheets$/); await expect(page.getByRole('main')).toBeVisible() }
+    await completeSolarReadiness(probe, runtime, locator, assertions)
     return
   }
   if (target === 'browser-clipboard') {
@@ -1999,6 +2143,7 @@ export async function runProbe(probe, runtime) {
       await unsupported(probe, runtime, initialReason)
     }
     if (typeof readWalkBuildFlags === 'function') await readWalkBuildFlags(probe, runtime)
+    if (typeof authorAvailability === 'function') await authorAvailability(probe, runtime)
     // Source-extracted fake runners may omit module dependencies.
     const reason = typeof unsupportedBeforeSetup === 'function'
       ? unsupportedBeforeSetup(probe, { engineMounted: runtime.workerFacts.engineMounted,
@@ -2028,6 +2173,11 @@ export async function runProbe(probe, runtime) {
     }
     page = runtime.page
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
+    if (runtime.solarDocument && typeof solarDocumentProbe === 'function') {
+      probe = solarDocumentProbe(probe, runtime.solarDocument)
+      evidence.effectiveEffect = probe.assertion
+      evidence.solarDocument.oracle = probe.assertion.kind
+    }
     if (probe.kind === 'tool' && typeof workerCatalog === 'function') {
       runtime.catalogFacts ||= {}
       await workerCatalog(runtime.catalogFacts, page.request, { drawingId: runtime.drawingId, version: runtime.drawingVersion || 'head' })
@@ -2049,6 +2199,7 @@ export async function runProbe(probe, runtime) {
     }
     // Source-extracted fake runners may omit module dependencies.
     if (typeof discloseControlPanel === 'function') await discloseControlPanel(page, targetRecipe)
+    if (typeof phoneRailAvailability === 'function') await phoneRailAvailability(probe, runtime)
     const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe)
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)

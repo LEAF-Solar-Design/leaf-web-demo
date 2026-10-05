@@ -8,6 +8,23 @@ import { createHash } from 'node:crypto'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+test('B1 empty surface hosts use /try while Studio readiness holds its projection before upload', () => {
+  for (const [id, state] of [['browser', 'signed-out'], ['solar', 'no-drawing']]) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === `surface:${id}`), state)
+    assert.equal(probe.locator.role, 'main')
+    assert.equal(probe.locator.name, 'Leaf operator workspace')
+    assert.equal(probe.locator.trigger, 'navigate')
+    assert.equal(probe.locator.url, `/try?surface=${id}`)
+    assert.equal(probe.setup.steps[0].kind, 'open-empty-workspace')
+  }
+  const pending = resolveProbe(map.entries.find((entry) => entry.id === 'surface:solar'), 'solar-not-ready')
+  assert.equal(pending.setup.steps[0].kind, 'hold-solar-projection')
+  assert.equal(pending.setup.steps[1].kind, 'open-private-drawing')
+  assert.equal(pending.locator.role, 'tab')
+  assert.equal(pending.assertion.state, 'beta')
+  const ready = resolveProbe(map.entries.find((entry) => entry.id === 'surface:solar'), 'ready')
+  assert.ok(ready.setup.steps.every((step) => step.kind !== 'hold-solar-projection'))
+})
 test('scoped catalogs reevaluate each drawing and version without reusing worker readiness', async () => {
   const requests = []
   const facts = {}
@@ -971,7 +988,7 @@ test('every no-drawing action uses the real failed-load screen and never the ope
     assert.deepEqual(probe.setup.steps[0], {
       kind: 'open-failed-drawing', url: `/app?surface=${ACTIONS.find((action) => action.id === entry.source_id).panel === 'solar-panels' ? 'solar' : 'cad'}&drawing=missing.invalid`,
     })
-    assert.equal(probe.setup.steps.length, 2)
+    assert.equal(probe.setup.steps.length, ACTIONS.find((action) => action.id === entry.source_id).panel === 'solar-panels' ? 3 : 2)
     assert.equal(probe.setup.steps[1].kind, 'failed-drawing-ribbon-tab')
     assert.ok(probe.locator.availableName)
     const action = ACTIONS.find((action) => action.id === entry.source_id)
