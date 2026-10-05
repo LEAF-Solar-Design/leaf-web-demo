@@ -19,7 +19,7 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
-test('B2 names all seven engine and disclosure controls without certifying missing recipes', () => {
+test('C2 certifies all seven engine and disclosure controls with real recipes', () => {
   const expected = [
     ['open-dxf', 'Open DXF', 'toggles', 'dxf-import-expanded', 'closed'],
     ['save-version', 'Save version', 'submits', 'engine-save-version', 'ready'],
@@ -33,8 +33,8 @@ test('B2 names all seven engine and disclosure controls without certifying missi
   for (const [id, title, kind, target, state] of expected) {
     const entry = entryFor(`control:${id}`)
     assert.equal(entry.title, title)
-    assert.equal(entry.certify, 'unsupported_local')
-    assert.equal(entry.certify_reason, 'needs a walk recipe (wave C)')
+    assert.equal(entry.certify, 'both')
+    assert.equal(entry.certify_reason, undefined)
     assert.equal(entry.expected_effect[state].kind, kind)
     assert.equal(entry.expected_effect[state].target, target)
     assert.equal(entry.state_contexts['failed-load'].failedLoad, true)
@@ -70,8 +70,8 @@ test('Script controls name scoped effects, native running locks and the Run refu
   for (const [id, title, kind, target] of expected) {
     const entry = entryFor(`control:${id}`)
     assert.equal(entry.title, title)
-    assert.equal(entry.certify, 'unsupported_local')
-    assert.equal(entry.certify_reason, 'needs a walk recipe (wave C)')
+    assert.equal(entry.certify, 'both')
+    assert.equal(entry.certify_reason, undefined)
     assert.ok(entry.sources.includes('web/src/cadedit/ScriptPanel.jsx'))
     assert.deepEqual(entry.expected_effect.ready, { kind, target })
     assert.equal(entry.expected_effect.running.reason, 'a script is running')
@@ -134,9 +134,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   previous.state_cases.action.patches['no-versioned-drawing'] = { hasVersions: false }
   for (const id of ['drawer:plan', 'drawer:result']) previous.overrides[id].viewports = ['desktop', 'phone']
   const previousTriples = triples(buildFeatureMap({ overrides: previous }))
-  // 21-B2 added engine:undo, engine:redo and engine:repeat plus the engine-nothing-to-undo, engine-nothing-to-redo and no-command-to-repeat patches (793 -> 811, 759 -> 777).
-  assert.equal(previousTriples.length, 811)
-  assert.equal(triples(map).length, 777)
+  // 21-B2 added engine:undo, engine:redo and engine:repeat plus the engine-nothing-to-undo, engine-nothing-to-redo and no-command-to-repeat patches (793 -> 811, 759 -> 777). C2 certifies the 41 census triples (811 -> 852, 777 -> 818).
+  assert.equal(previousTriples.length, 852)
+  assert.equal(triples(map).length, 818)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
