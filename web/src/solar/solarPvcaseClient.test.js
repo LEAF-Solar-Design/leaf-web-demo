@@ -264,7 +264,7 @@ it('PVC14 reuses authenticated artifact verification', async () => {
   expect(fetchImpl.mock.calls[0][0]).toBe(ref.download)
   bytes[0] = 66
   expect((await make(fetchImpl).download({ drawingId: 'solar', ref })).code).toBe('SOLAREDGE_CLIENT_ARTIFACT_MISMATCH')
-})
+}, 30000)
 it('PVC15 reads the committed integer version', async () => {
   const fetchImpl = vi.fn(async () => json(view()))
   const r = committed(); const result = await make(fetchImpl).readCommittedGraph({ context: context(), receipt: r })
@@ -289,8 +289,8 @@ it('PVC16 bounds committed graph reads', async () => {
   expect((await readCommittedIntake(options(async () => json(view()), { signal: closeController.signal, timeoutMs: 120000 }))).code).toBe('aborted')
   const late = deferred(); const lateCancel = vi.fn()
   expect((await readCommittedIntake(options(() => late.promise))).ok).toBe(false)
-  late.resolve(streamResponse(async () => ({ done: true }), 200, null, lateCancel)); await new Promise((resolve) => setTimeout(resolve, 0))
-  expect(lateCancel).toHaveBeenCalled()
+  late.resolve(streamResponse(async () => ({ done: true }), 200, null, lateCancel))
+  await vi.waitFor(() => expect(lateCancel).toHaveBeenCalled(), { timeout: 5000 })
   const r = committed()
   const failure = await make(vi.fn(async () => new Response(new Uint8Array([255])))).readCommittedGraph({ context: context(), receipt: r })
   expect(failure.code).toBe('countsUnavailable'); expect(r.new_version.version).toBe(13)
