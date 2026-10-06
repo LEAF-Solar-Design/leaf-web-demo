@@ -1538,6 +1538,8 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(
                   r"cannot read the website validator from origin/main: [\s\S]*"
                   r"Cross-repo contract drift is UNVERIFIED in this run\.",)),
+        Suite("server-capabilities-cold-import", "server tests/test_capabilities_cold_import.py", "pytest",
+              SERVER, _py_pytest("tests/test_capabilities_cold_import.py"), 1),
         # --- broker keystone (census #4, 2026-07-22): test_broker_boundary's --- #
         # one red was a stale pre-§19 assertion (offline `dwg` no longer
         # ignored) — fixed and registered per the #29 fix-then-register rule.

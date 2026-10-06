@@ -366,6 +366,7 @@
     "server-postgres-authority-inventory",
     "server-postgres-container-wiring",
     "server-product-capability-catalog",
+    "server-capabilities-cold-import",
     "server-project-repository-edit-contract-freeze",
     "server-project-repository-edit-primitives",
     "server-project-repository-edit-router",
