@@ -19,7 +19,7 @@
 // counter-clockwise from start to end with an end below the start wrapping
 // through 360: the DXF rule pointPicking and the intake mapper already use.
 
-import { bulgeArc } from './engineIntake.js'
+import { arcSweepDeg, bulgeArc } from './engineIntake.js'
 
 export const MAX_INTERSECT_POINTS = 1000
 // Coordinate contract: tolerance scales with the inputs, a few ulps of their magnitude, never below 1e-9.
@@ -61,13 +61,9 @@ function normDeg(a) {
   if (d < 0) d += 360
   return d >= 360 ? 0 : d
 }
-/** Counter-clockwise sweep from start to end, in (0, 360]. */
-function sweepDeg(startDeg, endDeg) {
-  let sweep = endDeg - startDeg
-  while (sweep <= 0) sweep += 360
-  while (sweep > 360) sweep -= 360
-  return sweep
-}
+/** Counter-clockwise sweep from start to end, in (0, 360]: the intake sampler's own rule
+ *  (engineIntake.js arcSweepDeg), so the kernel and the drawing never disagree on an arc. */
+const sweepDeg = arcSweepDeg
 const angleOf = (c, p) => normDeg(Math.atan2(p[1] - c[1], p[0] - c[0]) / DEG)
 const onCircle = (c, r, deg) => [c[0] + r * Math.cos(deg * DEG), c[1] + r * Math.sin(deg * DEG)]
 // Straight geometry is rounded to a nanometre of drawing unit: the maths above
