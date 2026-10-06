@@ -2668,3 +2668,61 @@ describe('RAIL overview yields to the expanded job monitor', () => {
     assert.match(cadMoves[1].split('}')[0], /right: calc\(var\(--ck-rail-width\) \+ 18px\);/)
   })
 })
+
+describe('S24 the URL keeps tool, drawer, own selection and camera view', () => {
+  const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+  const toolCastSource = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
+  const toolCastLive = esbuild.transformSync(toolCastSource, { loader: 'jsx' }).code
+  const urlStateSource = readFileSync(new URL('./lib/urlState.js', import.meta.url), 'utf8')
+
+  it('owns exactly the four allow-listed keys and never round-trips the search through URLSearchParams', () => {
+    assert.ok(urlStateSource.includes("export const VIEW_PARAM_KEYS = Object.freeze(['tool', 'drawer', 'sel', 'cam'])"))
+    assert.doesNotMatch(urlStateSource.replace(/\/\/[^\n]*/g, ''), /new URLSearchParams/)
+    assert.ok(urlStateSource.includes("window.addEventListener('popstate', onChange)"))
+    assert.ok(urlStateSource.includes("if (mode === 'push') window.history.pushState({}, '', url)"))
+    assert.ok(urlStateSource.includes("else window.history.replaceState(window.history.state, '', url)"))
+  })
+
+  it('seats the drawer, the opened tool, the own selection and the camera in App (live code, not a comment)', () => {
+    assert.match(appSource, /import \{ pushOnOpen, useCameraViewParam, useViewParamSeat \} from '\.\/lib\/urlState\.js'/)
+    for (const call of ["useViewParamSeat('drawer', {", "useViewParamSeat('tool', {", "useViewParamSeat('sel', {"]) {
+      assert.ok(appSource.includes(call), `App must call ${call}`)
+    }
+    for (const call of ['useViewParamSeat("drawer"', 'useViewParamSeat("tool"', 'useViewParamSeat("sel"', 'useCameraViewParam(viewerRef']) {
+      assert.ok(live.includes(call), `App's compiled code must keep ${call}`)
+    }
+    assert.ok(appSource.includes("value: drawer?.urlKey === 'details' ? 'details' : studioDrawer === 'none' ? null : studioDrawer,"))
+    assert.ok(appSource.includes('value: openTool?.name ?? null,'))
+    assert.ok(appSource.includes('value: selectedHandle == null ? null : String(selectedHandle),'))
+    const selectionSeat = appSource.slice(appSource.indexOf("useViewParamSeat('sel', {"), appSource.indexOf('useCameraViewParam(viewerRef'))
+    assert.ok(selectionSeat.includes('!selectEntity(drawingIntake, handle)'), 'URL selections must resolve in the loaded drawing')
+    assert.ok(appSource.includes('useCameraViewParam(viewerRef, { ready: drawingIntake != null })'))
+    const start = appSource.indexOf('const openSessionDetails = useCallback(')
+    const body = appSource.slice(start, appSource.indexOf('}, [', start))
+    assert.ok(body.includes("urlKey: 'details',"), 'the session Details drawer is the one the URL names')
+    // The bounded in-memory default stays; a URL drawer arrives through the seat's restore.
+    assert.ok(appSource.includes("const [studioDrawer, setStudioDrawer] = useState('none')"))
+  })
+
+  it('seats the same keys in ToolCast only while its scene is active', () => {
+    assert.match(toolCastSource, /import \{ CAM_FOCUS, pushOnOpen, useViewParamSeat \} from '\.\.\/lib\/urlState\.js'/)
+    for (const key of ['drawer', 'tool', 'sel', 'cam']) {
+      const at = toolCastSource.indexOf(`useViewParamSeat('${key}', {`)
+      assert.ok(at >= 0, `ToolCast must seat ${key}`)
+      assert.ok(toolCastSource.slice(at, toolCastSource.indexOf('\n  })', at)).includes('enabled: active,'), `${key} seat is gated on the active scene`)
+      assert.ok(toolCastLive.includes(`useViewParamSeat("${key}"`), `ToolCast's compiled code must keep the ${key} seat`)
+    }
+    assert.ok(toolCastSource.includes('onClick={openAccountDetails}'))
+    assert.ok(toolCastSource.includes("urlKey: 'details',"))
+    assert.ok(toolCastSource.includes('ready: !busy && !jobRunning && Array.isArray(tools) && tools.length > 0,'), 'pending tool restores wait for the current run')
+  })
+
+  it('leaves the router and SiteRoot alone and the drawing param with DrawingIdentityProvider', () => {
+    const router = readFileSync(new URL('./site/router.js', import.meta.url), 'utf8')
+    const siteRoot = readFileSync(new URL('./site/SiteRoot.jsx', import.meta.url), 'utf8')
+    assert.doesNotMatch(router, /urlState/)
+    assert.doesNotMatch(siteRoot, /urlState/)
+    assert.ok(router.includes('return { path: window.location.pathname, hash: window.location.hash }'))
+    assert.doesNotMatch(urlStateSource, /['"]drawing['"]/)
+  })
+})
