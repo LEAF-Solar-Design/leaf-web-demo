@@ -22,6 +22,12 @@
 // dashed accent with "Drop manifest to ingest — runs sandboxed". No ingest
 // path exists in src/api.js, so a drop surfaces the honest X1-style red strip
 // (never a silent ignore).
+//
+// S22 image attachments (imageAttachmentsEnabled only): a pasted image, an
+// image dropped on that same G2 well, or one picked through the "+ add" chip
+// lands as a quiet chip carrying its name and size. Every other dropped file
+// still takes the G2 ingest path above. With the flag off nothing here renders
+// and a drop is pure G2, exactly as before.
 
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
@@ -83,6 +89,30 @@ function laneDotClass(lane, hit) {
   if (lane === 'solve') return 'dot square'
   return 'dot'
 }
+
+// The attachment chip's size label: bytes under 1 KB, one decimal under
+// 10 KB and 10 MB, whole units above. Fails closed to "0 B" on a non-number.
+export function formatAttachmentSize(bytes) {
+  const n = Number(bytes)
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  if (n < 1024) return `${Math.round(n)} B`
+  const kb = n / 1024
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`
+  const mb = kb / 1024
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`
+}
+
+// A pasted screenshot often arrives with no name; the chip still says what it is.
+export function attachmentName(image) {
+  const name = typeof image?.file?.name === 'string' ? image.file.name.trim() : ''
+  return name || 'Pasted image'
+}
+
+// Dropped and picked Files reshaped as clipboard items, so all three paths
+// pass through the ONE cap gate in composer.js (clipboardImagesToAttachments).
+const filesAsItems = (files) => files.map((file) => ({ kind: 'file', type: file?.type || '', getAsFile: () => file }))
+const isAttachableImage = (file) => !!file && IMAGE_MEDIA_TYPES.has(file.type)
+const IMAGE_ACCEPT = [...IMAGE_MEDIA_TYPES].join(',')
 
 export default function PromptBox({
   value, onChange, onDispatch: dispatchWithContext, routing, hintLane, projectName, inputRef, routeActive,
@@ -220,6 +250,7 @@ export default function PromptBox({
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
   const attachmentUrlsRef = useRef(new Set())
+  const fileInputRef = useRef(null)
   const historyRef = useRef(createPromptHistoryState(sessionId))
 
   // A PromptBox instance survives session switches, so retain histories in the
@@ -425,15 +456,31 @@ export default function PromptBox({
       return
     }
     const result = clipboardImagesToAttachments(e.clipboardData?.items, attachments)
-    if (result.error) { e.preventDefault(); setAttachmentError(result.error); return }
+    if (result.error || result.attachments.length) e.preventDefault()
+    attachImages(result)
+  }
+  // Paste, drop and the "+ add" picker all land here with the cap gate's
+  // verdict: an error is shown and nothing is attached, never a partial set.
+  const attachImages = (result) => {
+    if (result.error) { setAttachmentError(result.error); return }
     if (!result.attachments.length) return
-    e.preventDefault()
     setAttachmentError(null)
     setAttachments((current) => [...current, ...result.attachments.map((image) => {
       const thumbnailUrl = URL.createObjectURL(image.file)
       attachmentUrlsRef.current.add(thumbnailUrl)
       return { ...image, id: `${Date.now()}-${Math.random()}`, thumbnailUrl }
     })])
+  }
+  const attachImageFiles = (files) => {
+    attachImages(clipboardImagesToAttachments(filesAsItems(files), attachments))
+  }
+  const onPickFiles = (e) => {
+    const files = [...(e.target.files || [])]
+    // Clear the input so picking the same file again still fires onChange.
+    e.target.value = ''
+    const images = files.filter(isAttachableImage)
+    if (images.length) attachImageFiles(images)
+    else if (files.length) setAttachmentError('Only PNG, JPEG, WebP or GIF images can be attached.')
   }
   const removeAttachment = (id) => setAttachments((current) => {
     const found = current.find((image) => image.id === id)
@@ -622,9 +669,17 @@ export default function PromptBox({
     e.preventDefault()
     dragDepth.current = 0
     setDragging(false)
+    // S22: with image attachments on, the images in a drop become chips and
+    // only the rest reaches G2 ingest. A drop of nothing but images is done.
+    const files = [...(e.dataTransfer?.files || [])]
+    const images = imageAttachmentsEnabled ? files.filter(isAttachableImage) : []
+    if (images.length) {
+      attachImageFiles(images)
+      if (images.length === files.length) return
+    }
     // Honest failure: there is no ingest endpoint in api.js — say so plainly
     // (X1 anatomy: red dot + sentence naming what failed + honest note).
-    const name = e.dataTransfer?.files?.[0]?.name
+    const name = files.find((file) => !images.includes(file))?.name
     setDropErr(`Ingest isn’t connected in this demo${name ? ` — ${name} wasn’t ingested` : ''}`)
   }
 
@@ -650,7 +705,9 @@ export default function PromptBox({
         onDrop={dropIngestEnabled ? onDrop : undefined}
       >
         {dragging && (
-          <div className="bar-drop-hint" aria-hidden="true">Drop manifest to ingest, runs sandboxed</div>
+          <div className="bar-drop-hint" aria-hidden="true">
+            {imageAttachmentsEnabled ? 'Drop an image to attach, or a manifest to ingest, runs sandboxed' : 'Drop manifest to ingest, runs sandboxed'}
+          </div>
         )}
         {menuOpen && (
           <div className="resolver slash-menu" id="slash-menu-listbox" role="listbox" aria-label="Tool commands">
@@ -867,12 +924,32 @@ export default function PromptBox({
         {(attachmentError || attachments.length > 0) && (
           <div className="converse-note" role={attachmentError ? 'alert' : undefined}>
             {attachmentError && <span className="dim">{attachmentError}</span>}
-            {attachments.map((image) => (
-              <span key={image.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 6 }}>
-                <img src={image.thumbnailUrl} alt="Pending image attachment" width="28" height="28" style={{ objectFit: 'cover' }} />
-                <button type="button" className="chip-neutral" onClick={() => removeAttachment(image.id)} aria-label="Remove image attachment">Remove</button>
-              </span>
-            ))}
+            {attachments.map((image) => {
+              const name = attachmentName(image)
+              const size = formatAttachmentSize(image.bytes)
+              return (
+                <span
+                  key={image.id}
+                  className="chip-neutral attachment-chip"
+                  data-testid="attachment-chip"
+                  title={`${name}, ${size}`}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 6, cursor: 'default', maxWidth: 260 }}
+                >
+                  <img src={image.thumbnailUrl} alt="Pending image attachment" width="18" height="18" style={{ objectFit: 'cover', borderRadius: 2 }} />
+                  <span data-testid="attachment-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{name}</span>
+                  <span className="dim" data-testid="attachment-size">{size}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(image.id)}
+                    aria-label={`Remove image attachment ${name}`}
+                    title="Remove"
+                    style={{ appearance: 'none', background: 'none', border: 0, padding: 0, color: 'inherit', font: 'inherit', cursor: 'pointer', lineHeight: 1 }}
+                  >
+                    ×
+                  </button>
+                </span>
+              )
+            })}
           </div>
         )}
         {activeScope === 'build' && (drawingId || drawingObjects?.index?.drawingKey) && (
@@ -909,6 +986,28 @@ export default function PromptBox({
           >
             scope ▾
           </button>
+          {imageAttachmentsEnabled && (
+            <>
+              <button
+                type="button"
+                className="bar-scope bar-attach"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Add image attachment"
+                title="Attach a PNG, JPEG, WebP or GIF image"
+              >
+                + add
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={IMAGE_ACCEPT}
+                multiple
+                hidden
+                data-testid="attachment-input"
+                onChange={onPickFiles}
+              />
+            </>
+          )}
           {projectSlot != null
             ? (typeof projectSlot === 'function' ? projectSlot(projectName) : projectSlot)
             : <span className="bar-proj">{projectName}</span>}
