@@ -42,6 +42,7 @@ import { PENDING_INPUT_KEY, PENDING_WORD, useEngineSessionContext } from './Engi
 import { PROMPTS, humanizeRefusal } from './promptKeys.js'
 import { isPointExpression } from './pointExpression.js'
 import { resolvePromptInputs } from './promptInputs.js'
+import ObjectSnapMenu from './ObjectSnapMenu.jsx'
 import ScriptPanel from './ScriptPanel.jsx'
 
 // W4f-6: the store's own number reading (a field the store would take as a
@@ -175,7 +176,7 @@ const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') =>
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, selectGroup, refuse, pending = null, setPending } = useEngineSessionContext()
+  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, snapModes, setSnapMode, snapLimited, reach, selectGroup, refuse, pending = null, setPending } = useEngineSessionContext()
   // The Modify panel's note is the reason every tool in it shares. With several
   // objects selected only the document rungs are shared: each tool states its own
   // multi-selection rule (modifyOpReason), so the panel never says "select one".
@@ -876,17 +877,19 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           ORTHO
         </button>
         {/* W4f-5: object snap, the reference's F3: picks land on the
-            document's endpoints, midpoints and centres within reach. */}
+            document's geometry within reach. B1b: which kinds of geometry is
+            the menu beside it, shared with the status bar's. */}
         <button
           type="button"
           className="cp-mode"
           data-testid="cockpit-osnap"
           aria-pressed={osnap}
           onClick={() => setOsnap(!osnap)}
-          title={osnap ? 'Object snap on: picks land on nearby endpoints, midpoints and centres (F3).' : 'Object snap off: picks do not snap to endpoints, midpoints or centres (F3).'}
+          title={osnap ? 'Object snap on: picks land on the selected nearby geometry (F3).' : 'Object snap off: picks do not snap to the selected nearby geometry (F3).'}
         >
           OSNAP
         </button>
+        <ObjectSnapMenu snapModes={snapModes} snapLimited={snapLimited} onSetMode={setSnapMode} />
         <button
           type="button"
           className="cp-run"
