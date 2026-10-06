@@ -43,6 +43,7 @@ import DegradedBanner from '../components/DegradedBanner.jsx'
 // its slots now, so the stage and the console cannot drift apart again.
 import SurfaceFrame from './SurfaceFrame.jsx'
 import { stageRunDisabledReason, stageHelpPaletteRow } from './stageRunReasons.js'
+import { versionShortcutDecision } from '../lib/actionRegistry.js'
 import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
@@ -1443,6 +1444,24 @@ export default function ToolCast({
     setError(null)
     await redoDrawingVersion(checkout.actions.getCapability())
   }, [busy, canRedo, checkout.actions, jobRunning, redoDrawingVersion, sessionReady])
+
+  // S25: Mod+Z / Mod+Shift+Z step the drawing's versions off the drafting
+  // surface, through the same handlers the bar's Undo and Redo chips click.
+  // The registry's versionShortcutDecision owns the yield rules (an editor,
+  // a visible engine document, Alt, an already-consumed key); undo and redo
+  // keep their own gates, and the chips' preview and busy gates apply here.
+  useEffect(() => {
+    const onVersionKey = (event) => {
+      const kind = versionShortcutDecision(event)
+      if (!kind) return
+      event.preventDefault()
+      if (drawing.versionBusy || previewLocked) return
+      if (kind === 'undo') void onUndo()
+      else void redo()
+    }
+    window.addEventListener('keydown', onVersionKey)
+    return () => window.removeEventListener('keydown', onVersionKey)
+  }, [drawing.versionBusy, onUndo, previewLocked, redo])
 
   // One controller owns readiness, launch, following, and reload recovery.
   const iosShipController = useIosShipController({

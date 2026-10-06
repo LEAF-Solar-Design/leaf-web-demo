@@ -3147,6 +3147,14 @@ export default function App() {
       selectedHandle,
       openProjectId,
       rTarget,
+      // S25: the version undo / redo records' own gates, so Mod+Z off the
+      // drafting surface answers to exactly the ribbon's Undo and Redo.
+      hasVersions: !!drawingState,
+      canUndo,
+      canRedo,
+      versionBusy: !!versionBusy,
+      previewing: !!previewing,
+      mutationsBlocked: !!drawingMutationsBlocked,
     }
     // The handlers the record names, built only once a decision came back.
     const ladderHandlers = (state) => ({
@@ -3188,6 +3196,8 @@ export default function App() {
       onRetryCatalog: () => loadCatalog(),
       onRetryRefresh: () => onRetryViewerRefresh(),
       onOpenShortcuts: () => setShortcutsOpen(true),
+      onUndo: () => { void onUndo() },
+      onRedo: () => { void onRedo() },
     })
     // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7). The
     // listener stamps only a branch that will handle the key: type-to-fall-
@@ -3198,7 +3208,7 @@ export default function App() {
   }, [startOpen, onReturnToDrawing, drawer, phoneViewport, studioShell, studioDrawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
-      onDismissSolarFlowRoute])
+      onDismissSolarFlowRoute, drawingState, canUndo, canRedo, versionBusy, previewing, drawingMutationsBlocked, onUndo, onRedo])
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
   const projectSwitcherRef = useRef(null)
   // Each bump opens the header switcher on its inline create field.

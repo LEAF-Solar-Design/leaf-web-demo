@@ -3062,3 +3062,37 @@ describe('S20 console chrome', () => {
     assert.ok(def.includes('onRequestCatalogRun(tool, sameRun ? last.params : ' + LB + RB + ", null, 'catalog', " + LB + ' complete: sameRun ' + RB + ')'))
   })
 })
+
+describe('S25 version Mod+Z wiring', () => {
+  const LB = String.fromCharCode(123), RB = String.fromCharCode(125)
+  const toolCastNoComments = decomment(readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8'))
+  function between(source, from, to) {
+    const start = source.indexOf(from)
+    const end = source.indexOf(to, start)
+    assert.ok(start >= 0 && end > start, `${from} must survive comment removal`)
+    return source.slice(start, end)
+  }
+
+  it('S25 App hands the key ladder the ribbon version gates and the ribbon onUndo / onRedo', () => {
+    const effect = between(appNoComments, 'const shell = ' + LB, 'ladderListener(shell, ladderHandlers, markInstant)')
+    for (const line of [
+      'hasVersions: !!drawingState,', 'canUndo,', 'canRedo,', 'versionBusy: !!versionBusy,',
+      'previewing: !!previewing,', 'mutationsBlocked: !!drawingMutationsBlocked,',
+      'onUndo: () => ' + LB + ' void onUndo() ' + RB, 'onRedo: () => ' + LB + ' void onRedo() ' + RB,
+    ]) assert.ok(effect.includes(line), `the ladder effect carries ${line}`)
+  })
+
+  it('S25 ToolCast steps versions on the registry decision through onUndo and the bar redo', () => {
+    assert.ok(toolCastNoComments.includes("import " + LB + " versionShortcutDecision " + RB + " from '../lib/actionRegistry.js'"))
+    const listener = between(toolCastNoComments, 'const onVersionKey = (event) => ' + LB, "window.removeEventListener('keydown', onVersionKey)")
+    assert.ok(listener.includes('const kind = versionShortcutDecision(event)'))
+    assert.ok(listener.includes('if (!kind) return'))
+    assert.ok(listener.includes('event.preventDefault()'))
+    assert.ok(listener.includes('if (drawing.versionBusy || previewLocked) return'))
+    assert.ok(listener.includes("if (kind === 'undo') void onUndo()"))
+    assert.ok(listener.includes('else void redo()'))
+    assert.ok(listener.includes("window.addEventListener('keydown', onVersionKey)"))
+    assert.ok(toolCastNoComments.indexOf('const redo = useCallback') < toolCastNoComments.indexOf('const onVersionKey'),
+      'the listener reads the bar redo after it is declared')
+  })
+})
