@@ -533,8 +533,9 @@ function buildEntry(item, config, snapshot, registries) {
       for (const target of Object.keys(RETRY_RUNGS)) candidates.push([`retry-${target}`, { ...candidates[0][1], rTarget: target }])
     }
     addCases(entry, candidates, (ctx) => ({ effect: actionEffect(record, ctx, override), title: record.title(ctx) }),
-      (ctx) => ctx.session?.selected?.editable === false && !record.when(ctx)
-        && !!record.when(merge(ctx, { session: { selected: { type: 'LINE' } } })))
+      (ctx) => (record.group === 'modify' && ctx.session?.selectedIds?.length > 1 && !record.when(ctx))
+        || (ctx.session?.selected?.editable === false && !record.when(ctx)
+          && !!record.when(merge(ctx, { session: { selected: { type: 'LINE' } } }))))
     // Rungs are exported product data; every one must have a reachable case.
     if (record.id === 'bar:escape') {
       for (const rung of ESCAPE_RUNGS) {

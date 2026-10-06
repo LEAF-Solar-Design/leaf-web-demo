@@ -10,6 +10,39 @@ import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, disc
 
 const map = buildFeatureMap()
 
+test('G4 selection-set probes reuse the real two-LINE recipe and registry oracles', () => {
+  for (const op of ['delete', 'move', 'copy', 'rotate', 'scale', 'mirror']) {
+    const entry = map.entries.find((entry) => entry.id === `action:modify-${op}`)
+    const probe = resolveProbe(entry, 'multiple-selected')
+    assert.deepEqual(probe.setup.steps.filter((step) => step.kind === 'select-entity'),
+      [{ kind: 'select-entity', type: 'LINE', editable: true, multiple: true }])
+    assert.equal(probe.assertion.operation, op)
+    assert.equal(probe.assertion.target, op === 'delete' ? 'engine:delete' : 'cockpit-prompt')
+    assert.equal(probe.assertion.kind, op === 'delete' ? 'submits' : 'opens')
+    assert.equal(probe.locator.name, ACTIONS.find((action) => action.id === entry.source_id).label)
+  }
+})
+
+test('G4 each selection-set prompt requires the armed verb and two selected objects', async () => {
+  for (const op of ['move', 'copy', 'rotate', 'scale', 'mirror']) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === `action:modify-${op}`), 'multiple-selected')
+    const calls = []
+    const page = { getByTestId: (id) => id }
+    const assertions = (value) => ({
+      toBe: (expected) => assert.equal(value, expected),
+      toBeVisible: async () => calls.push(['visible', value]),
+      toHaveAccessibleName: async (name) => calls.push(['name', value, name]),
+      toHaveText: async (text) => calls.push(['text', value, text]),
+    })
+    const runtime = { page, evidence: {} }
+    await assertEffect(probe, runtime, {}, { selectionCount: 2 }, assertions)
+    assert.deepEqual(calls, [['visible', 'cockpit-prompt'], ['name', 'cockpit-prompt', `${probe.assertion.verb} command`],
+      ['text', 'dock-selection-count', '2 objects selected']])
+    assert.deepEqual(runtime.evidence.multipleSelection, { selectionCount: 2, verb: probe.assertion.verb, promptArmed: true })
+    await assert.rejects(assertEffect(probe, runtime, {}, { selectionCount: 1 }, assertions), assert.AssertionError)
+  }
+})
+
 test('G3 ready Solar refusals locate exact disabled names from scoped catalog availability', () => {
   for (const [name, code, reason] of [
     ['solar-equipment-move', 'equipment_assignment_required', 'Assign inverter equipment first'],

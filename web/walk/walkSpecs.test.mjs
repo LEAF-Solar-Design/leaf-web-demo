@@ -27,6 +27,7 @@ const knownProofSpecs = [
   'w1z-catalog-recovery.spec.mjs',
   'w1z-engine-history.spec.mjs',
   'w1z-solar-availability.spec.mjs',
+  'w1z-multi-select.spec.mjs',
   'w1y-recipes.spec.mjs',
 ]
 

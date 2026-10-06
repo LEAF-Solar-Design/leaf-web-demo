@@ -2331,7 +2331,7 @@
         "engine-crashed": {"session": {"errorKind": "crashed"}},
         "engine-busy": {"session": {"busy": true}},
         "no-selection": {"session": {"selected": null, "selectedIds": []}},
-        "multiple-selected": {"session": {"selectedIds": ["one", "two"]}},
+        "multiple-selected": {"session": {"selected": {"id": "one", "editable": true, "type": "LINE"}, "selectedIds": ["one", "two"], "entities": [{"id": "one", "editable": true, "type": "LINE"}, {"id": "two", "editable": true, "type": "LINE"}]}},
         "placed-insert": {"session": {"selected": {"editable": false, "type": "INSERT"}}},
         "placed-dimension": {"session": {"selected": {"editable": false, "type": "DIMENSION"}}},
         "empty-clipboard": {"session": {"clipboard": null}},
