@@ -107,6 +107,25 @@ test('G3 Solar editors use product refusals while catalog decisions retain runti
   }
 })
 
+test('C3 maps Object snap modes as a scoped disclosure with no fabricated disabled state', () => {
+  const entry = entryFor('control:object-snap-modes')
+  assert.deepEqual(entry.states, ['closed', 'failed-load', 'open'])
+  assert.equal(entry.certify, 'both')
+  assert.ok(entry.sources.includes('web/src/cadedit/ObjectSnapMenu.jsx'))
+  for (const state of entry.states) {
+    assert.equal(entry.state_contexts[state].toolbar, 'Drafting settings')
+    assert.equal(entry.state_contexts[state].name, 'Object snap modes')
+    assert.equal(entry.state_contexts[state].expanded, state === 'open')
+    assert.deepEqual(entry.expected_effect[state], {
+      kind: 'toggles', target: 'object-snap-menu-expanded', value: state !== 'open',
+    })
+  }
+  const invalid = clone(overrides)
+  invalid.controls.find((row) => row.id === entry.id).expected_effect.open.value = true
+  assert.throws(() => buildFeatureMap({ overrides: invalid }), /opposite setup and effect/)
+  assert.throws(() => checkCompleteness({ ...map, entries: map.entries.filter((row) => row.id !== entry.id) }), /completeness failed/)
+})
+
 test('C2 certifies all seven engine and disclosure controls with real recipes', () => {
   const expected = [
     ['open-dxf', 'Open DXF', 'toggles', 'dxf-import-expanded', 'closed'],
@@ -154,7 +173,7 @@ test('Script controls name scoped effects, native running locks and the Run refu
     ['choose-script', 'Choose script', 'opens', 'script-file-picker'],
     ['run-script', 'Run script', 'submits', 'script-run'],
   ]
-  assert.deepEqual(overrides.controls.slice(46).map((row) => row.id), expected.map(([id]) => `control:${id}`))
+  assert.deepEqual(overrides.controls.slice(47).map((row) => row.id), expected.map(([id]) => `control:${id}`))
   for (const [id, title, kind, target] of expected) {
     const entry = entryFor(`control:${id}`)
     assert.equal(entry.title, title)
@@ -224,8 +243,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   const previousTriples = triples(buildFeatureMap({ overrides: previous }))
   // 21-B2 added engine:undo, engine:redo and engine:repeat plus the engine-nothing-to-undo, engine-nothing-to-redo and no-command-to-repeat patches (793 -> 811, 759 -> 777). C2 certifies the 41 census triples (811 -> 852, 777 -> 818).
   // G4 changes six multiple-selected effects, retaining all six rows: 852 + 0 and 818 + 0 triples.
-  assert.equal(previousTriples.length, 852)
-  assert.equal(triples(map).length, 818)
+  // C3 adds three Object snap modes disclosure states: 852 + 3 = 855, 818 + 3 = 821.
+  assert.equal(previousTriples.length, 855)
+  assert.equal(triples(map).length, 821)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
@@ -542,7 +562,7 @@ test('completeness rejects every omitted row, including tools and the none drawe
   assert.throws(() => checkCompleteness({ ...map, entries: [...map.entries, map.entries[0]] }), /duplicate/)
 })
 
-test('forty-nine exact control declarations participate in independent completeness', () => {
+test('fifty exact control declarations participate in independent completeness', () => {
   const expected = ['fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
     'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up',
     'properties-close', 'properties-drawing', 'properties-layers', 'properties-panels', 'properties-plan',
@@ -550,8 +570,9 @@ test('forty-nine exact control declarations participate in independent completen
     'drawing-overview', 'drawing-overview-collapse',
     'scope-add', 'demo-return', 'claude-accounts', 'drawing-close-start', 'notification-collapse', 'session-details', 'version-history', 'linked-services', 'project-board', 'prompt-run', 'prompt-scope', 'sign-out', 'start-board', 'take-edit-lock', 'cost-panel', 'command-bar', 'find-drawing',
     'open-dxf', 'save-version', 'undo-edit', 'redo-edit', 'more-panels', 'open-dxf-browser', 'objects',
-    'ribbon-script', 'choose-script', 'run-script'].map((id) => 'control:' + id).sort()
-  assert.equal(expected.length, 49)
+    'ribbon-script', 'choose-script', 'run-script', 'object-snap-modes'].map((id) => 'control:' + id).sort()
+  // One disclosure control joins the previous 49 declarations: 49 + 1 = 50.
+  assert.equal(expected.length, 50)
   assert.deepEqual(map.entries.filter((row) => row.kind === 'control').map((row) => row.id), expected)
   for (const declaration of overrides.controls) {
     const entry = entryFor(declaration.id)

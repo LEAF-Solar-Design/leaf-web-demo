@@ -18,7 +18,7 @@ const escapePattern = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 export const CENSUS_RECIPE_CONTROLS = Object.freeze([
   'open-dxf', 'save-version', 'undo-edit', 'redo-edit', 'more-panels',
-  'open-dxf-browser', 'objects', 'ribbon-script', 'choose-script', 'run-script',
+  'open-dxf-browser', 'objects', 'ribbon-script', 'choose-script', 'run-script', 'object-snap-modes',
 ].map((id) => `control:${id}`))
 
 // Independent presence obligations: retiring a baseline must not bless a control that disappeared.
