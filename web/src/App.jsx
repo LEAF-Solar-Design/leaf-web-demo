@@ -1622,12 +1622,16 @@ export default function App() {
     viewer.setView({ center: { x: (resultBounds.minX + resultBounds.maxX) / 2, y: (resultBounds.minY + resultBounds.maxY) / 2 }, zoom })
   }, [resultBounds, studioGround, pushViewSnapshot])
 
+  // Toast actions outlive the render that created the version; use the current undo handler.
+  const undoActionRef = useRef(null)
+  const onUndo = useCallback(() => undoActionRef.current?.(), [])
+
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
   const seatVersion = useCallback((view, drawingId, note) => {
     seatDrawingVersion(view, { drawingId, source: 'version' })
-    if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'View', onClick: viewViewer } })
-  }, [seatDrawingVersion, showToast, viewViewer])
+    if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'Undo', undo: true, onClick: onUndo } })
+  }, [onUndo, seatDrawingVersion, showToast])
 
   const seatCompletedVersion = useCallback(async (newVersion, envelope, options) => {
     const scopeCurrent = isScopeCurrent
@@ -1642,7 +1646,7 @@ export default function App() {
         version = commit.version
       } catch {
         if (!current()) return false
-        if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+        if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
         markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
         return false
       }
@@ -1650,7 +1654,7 @@ export default function App() {
     if (envelope?.result?.new_version_readable === false) {
       if (!current()) return false
       recordCommittedUnreadableHead(newVersion)
-      if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
       return false
     }
     try {
@@ -1660,23 +1664,24 @@ export default function App() {
       return true
     } catch {
       if (!current()) return false
-      if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
       markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
       return false
     }
-  }, [intake, isScopeCurrent, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast])
+  }, [intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast])
   completedVersionRef.current = seatCompletedVersion
 
   // P2 wave C-2: engagement depth (real CAD work). ONE event for the four
   // version-navigation gestures; action is the closed vocabulary
   // undo/redo/history/preview, counted only when the navigation happened.
-  const onUndo = useCallback(async () => {
+  const undoCurrentVersion = useCallback(async () => {
     const view = await undoDrawingVersion()
     if (view) {
       track('drawing.version_navigated', { action: 'undo' })
       showToast({ text: `Reverted to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
     }
   }, [drawingState, showToast, undoDrawingVersion, viewViewer])
+  undoActionRef.current = undoCurrentVersion
 
   const onRedo = useCallback(async () => {
     const view = await redoDrawingVersion()
@@ -1919,7 +1924,7 @@ export default function App() {
         } catch {
           // Completed act -> plain NT2 toast; the failed refresh surfaces as an
           // X1 red row at the viewer card (a failed act is never a toast).
-          showToast({ text: `Version ${nv.version} created` })
+          showToast({ text: `Version ${nv.version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
           setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
         }
       }
@@ -1939,7 +1944,7 @@ export default function App() {
         } catch {
           // Completed act -> plain NT2 toast; the failed refresh surfaces as an
           // X1 red row at the viewer card (a failed act is never a toast).
-          showToast({ text: `Version ${commit?.version ?? nv.version} created` })
+          showToast({ text: `Version ${commit?.version ?? nv.version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
           setRefreshFail({ drawing_id: nv.drawing_id, version: commit?.version ?? nv.version })
         }
       }
@@ -2222,7 +2227,7 @@ export default function App() {
             const view = await getDrawingIntake(false, nv.drawing_id, 'head')
             seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
           } catch {
-            showToast({ text: `Version ${nv.version} created` })
+            showToast({ text: `Version ${nv.version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
             setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
           }
         }

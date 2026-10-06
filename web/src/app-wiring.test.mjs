@@ -25,6 +25,125 @@ import { slashDecision, alternativeDecision } from './controllers/catalog/catalo
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 
+describe('S17 version-created toast Undo wiring', () => {
+  const surfaces = [
+    { name: 'App', source: appSource, completion: 'seatCompletedVersion', directCount: 3, undoHandler: 'undoCurrentVersion' },
+    { name: 'ToolCast', source: readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8'), completion: 'onCompleteVersion', directCount: 3, undoHandler: 'undo' },
+  ]
+  function property(object, name) {
+    return object?.type === 'ObjectExpression'
+      ? object.properties.find((item) => csuKey(item) === name)?.value
+      : undefined
+  }
+  function toastObjects(tree) {
+    const found = []
+    csuWalk(tree, (node) => {
+      if (node.type !== 'CallExpression' || node.callee.type !== 'Identifier' || node.callee.name !== 'showToast') return
+      csuWalk(node.arguments[0], (argument) => {
+        if (property(argument, 'text')) found.push(argument)
+      })
+    })
+    return found
+  }
+  function textPattern(object) {
+    const text = property(object, 'text')
+    if (text?.type === 'StringLiteral') return text.value
+    if (text?.type === 'TemplateLiteral') return text.quasis.map((part) => part.value.cooked).join('#')
+    return ''
+  }
+  function assertUndo(object) {
+    const action = property(object, 'action')
+    assert.equal(action?.type, 'ObjectExpression')
+    assert.equal(action.properties.length, 3)
+    assert.ok(action.properties.every((item) => item.type === 'ObjectProperty'))
+    assert.equal(property(action, 'label')?.value, 'Undo')
+    assert.equal(property(action, 'undo')?.type, 'BooleanLiteral')
+    assert.equal(property(action, 'undo')?.value, true)
+    assert.equal(property(action, 'onClick')?.type, 'Identifier')
+    assert.equal(property(action, 'onClick')?.name, 'onUndo')
+  }
+
+  for (const surface of surfaces) {
+    const tree = parseJs(surface.source, { sourceType: 'module', plugins: ['jsx'] })
+    const declarations = new Map()
+    csuWalk(tree, (node) => {
+      if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') declarations.set(node.id.name, node)
+    })
+    const completion = declarations.get(surface.completion)
+    const seat = surface.name === 'App' ? declarations.get('seatVersion') : null
+    const versionToasts = toastObjects(tree).filter((object) => /^Version .+ created$/.test(textPattern(object)))
+    const seatedToasts = seat ? toastObjects(seat.init.arguments[0]) : []
+
+    it(`${surface.name}: every live version-created toast has Undo wired to onUndo`, () => {
+      assert.equal(versionToasts.length, surface.directCount, 'all completion branches must announce the version')
+      for (const object of versionToasts) assertUndo(object)
+      assert.ok(versionToasts.every((object) => object.start > completion.start && object.end < completion.end))
+      assert.ok(completion.init.arguments[1].elements.some((node) => node.name === 'onUndo'))
+      if (seat) {
+        assert.equal(seatedToasts.length, 1, 'the successful App seat also announces the new version')
+        assert.equal(textPattern(seatedToasts[0]), '# · #')
+        assertUndo(seatedToasts[0])
+        assert.ok(seat.init.arguments[1].elements.some((node) => node.name === 'onUndo'))
+      }
+    })
+
+    it(`${surface.name}: the retained toast calls the current version Undo handler`, () => {
+      const onUndo = declarations.get('onUndo')
+      assert.ok(onUndo.start < completion.start, 'onUndo must be initialized before the completion hook dependencies')
+      if (seat) assert.ok(onUndo.start < seat.start)
+      assert.equal(onUndo.init.arguments[1].elements.length, 0, 'the retained callback must stay stable')
+      const callback = onUndo.init.arguments[0]
+      const undoActionRef = { current: () => 'old render' }
+      const retained = new Function('undoActionRef', `return (${surface.source.slice(callback.start, callback.end)})`)(undoActionRef)
+      assert.equal(retained(), 'old render')
+      undoActionRef.current = () => 'current render'
+      assert.equal(retained(), 'current render')
+      let wired = false
+      csuWalk(tree, (node) => {
+        if (node.type === 'AssignmentExpression'
+            && surface.source.slice(node.left.start, node.left.end) === 'undoActionRef.current'
+            && node.right.type === 'Identifier' && node.right.name === surface.undoHandler) wired = true
+      })
+      assert.ok(wired, 'the current drawing Undo handler must feed the retained action')
+      const handler = declarations.get(surface.undoHandler)
+      assert.ok(surface.source.slice(handler.start, handler.end).includes('await undoDrawingVersion('))
+    })
+
+    it(`${surface.name}: delete, reset, authored removal and other toasts never receive version Undo`, () => {
+      const versionObjects = new Set([...versionToasts, ...seatedToasts])
+      for (const object of toastObjects(tree)) {
+        if (versionObjects.has(object)) continue
+        const action = property(object, 'action')
+        assert.notEqual(property(action, 'undo')?.value, true, `no Undo on ${textPattern(object) || 'non-version notice'}`)
+        assert.notEqual(property(action, 'label')?.value, 'Undo')
+        if (/project.*(?:deleted|reset)|tool.*removed|removed.*tool/i.test(textPattern(object))) {
+          assert.equal(action, undefined, 'terminal completion toasts have no action')
+        }
+      }
+      if (surface.name === 'ToolCast') {
+        const deleted = toastObjects(declarations.get('forgetDeletedProject').init.arguments[0])
+        assert.equal(deleted.length, 1)
+        assert.equal(property(deleted[0], 'action'), undefined)
+      }
+    })
+  }
+
+  it('project reset and delete remain terminal in the shared lifecycle panel', () => {
+    const source = readFileSync(new URL('./projects/ProjectLifecyclePanel.jsx', import.meta.url), 'utf8')
+    const tree = parseJs(source, { sourceType: 'module', plugins: ['jsx'] })
+    const dangerZones = []
+    csuWalk(tree, (node) => {
+      if (node.type === 'JSXOpeningElement' && node.name.type === 'JSXIdentifier' && node.name.name === 'DangerZone') dangerZones.push(node)
+    })
+    assert.equal(dangerZones.length, 1)
+    const attributes = dangerZones[0].attributes
+    assert.ok(attributes.some((node) => node.name?.name === 'onReset'))
+    assert.ok(attributes.some((node) => node.name?.name === 'onDelete'))
+    assert.ok(attributes.every((node) => node.type === 'JSXAttribute' && !['resetUndo', 'deleteUndo'].includes(node.name.name)))
+    assert.equal(toastObjects(tree).length, 0, 'reset has a receipt, without an Undo toast')
+  })
+})
+
 describe('project board live pane wiring', () => {
   const tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
   function elements(name) {
@@ -674,7 +793,7 @@ describe('W20-07b combiner workspace wiring', () => {
     const read = body.indexOf("await getDrawingIntake(mock, newVersion.drawing_id, 'head')")
     assert.ok(body.includes('const scopeCurrent = isScopeCurrent'))
     assert.match(body, /const current = \(\) => scopeCurrent\(\)\s+&& \(typeof options\?\.isCurrent !== 'function' \|\| options\.isCurrent\(\)\)/)
-    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast]'))
+    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast]'))
     const guard = 'if (!current()) return false'
     const entryGuard = body.indexOf(guard)
     assert.ok(entryGuard > body.indexOf('const current =') && entryGuard < body.indexOf('let version ='))
