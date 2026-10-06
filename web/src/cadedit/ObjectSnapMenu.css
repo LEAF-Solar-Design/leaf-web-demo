@@ -1,0 +1,40 @@
+/* B1b: the object snap mode menu. The popup is fixed to the viewport; its
+   top, left and max-height are written by ObjectSnapMenu.jsx on open, resize
+   and scroll, so it can flip above the status bar and scroll when tall. */
+.object-snap { display: inline-flex; position: relative; }
+.object-snap-trigger {
+  min-width: 16px; padding: 0 3px; margin-right: 4px;
+  font: inherit; line-height: 1; color: inherit;
+  background: transparent; border: 1px solid var(--ck-edge, #3f3f3f); border-radius: 2px; cursor: pointer;
+}
+.object-snap-trigger[aria-expanded="true"] { border-color: var(--ck-active, #4fb3e8); }
+.object-snap-trigger:focus-visible { outline: 2px solid var(--ck-sel, currentColor); outline-offset: 1px; }
+.object-snap-popup {
+  position: fixed; top: 0; left: 0; z-index: 60;
+  box-sizing: border-box; width: max-content; max-width: min(320px, calc(100vw - 16px));
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: 4px 0;
+  background: var(--ck-glass-dock, #24282e); color: var(--ck-ink, #f3f4f6);
+  border: 1px solid var(--ck-edge, #68717b); border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  font-size: 12px; text-align: left; white-space: normal;
+}
+.object-snap-menu { display: flex; flex-direction: column; }
+.object-snap-item {
+  display: flex; align-items: center; gap: 6px;
+  min-height: 24px; padding: 2px 10px; cursor: pointer; outline: none;
+}
+.object-snap-item:hover { background: var(--ck-hover, rgba(255, 255, 255, 0.08)); }
+.object-snap-item:focus-visible, .object-snap-item:focus { box-shadow: inset 0 0 0 2px var(--ck-sel, #4fb3e8); }
+.object-snap-check { display: inline-block; width: 12px; text-align: center; }
+.object-snap-limited, .object-snap-help { margin: 6px 10px 2px; line-height: 1.35; }
+.object-snap-limited { font-weight: 600; color: var(--ck-warn, #c9a86a); }
+.object-snap-help { color: var(--ck-ink-off, #b8bec6); }
+/* The status bar's polite limitation line beside the live OSNAP master; it
+   stays mounted (empty) so a change is announced, and takes no room empty. */
+.cockpit-osnap-limited { align-self: center; padding: 0 4px; font-size: 10.5px; white-space: nowrap; color: var(--ck-warn, #c9a86a); }
+.cockpit-osnap-limited:empty { padding: 0; }
+@media (pointer: coarse) {
+  .object-snap-trigger { min-width: 44px; min-height: 44px; }
+  .object-snap-item { min-height: 44px; }
+}

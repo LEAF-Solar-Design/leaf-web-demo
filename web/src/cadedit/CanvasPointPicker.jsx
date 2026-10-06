@@ -16,10 +16,10 @@
  * ghost). Listens on the GROUND node, the same node the cursor readout uses,
  * so only pointer traffic that reaches the drawing counts.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
-import { applyPick, buildSnapIndex, currentStep, ghostFor, orthoPoint, snapPoint, startPicking, wantsPick } from './pointPicking.js'
+import { applyPick, buildSnapIndex, currentStep, ghostFor, orthoAnchor, orthoPoint, snapPoint, startPicking, wantsPick } from './pointPicking.js'
 
 const CLICK_MOVE_PX = 5
 const CLICK_MAX_MS = 500
@@ -43,16 +43,17 @@ function focusRun() {
 export default function CanvasPointPicker({ viewerRef = null, ground = null, onPicking = null, canvasSelector = null }) {
   const canvasSelectorRef = useRef(canvasSelector)
   canvasSelectorRef.current = canvasSelector
-  const { session, inputs, setInput, armed, ortho, setOrtho, osnap, setOsnap, highlightedIds } = useEngineSessionContext()
+  const { session, inputs, setInput, armed, ortho, setOrtho, osnap, setOsnap, snapModes, setSnapLimited, highlightedIds } = useEngineSessionContext()
   useEffect(() => {
     viewerRef?.current?.setHighlight?.(Array.from(highlightedIds || []))
     return () => viewerRef?.current?.setHighlight?.([])
   }, [viewerRef, highlightedIds])
   // W4f-4: ORTHO (F8) constrains the cursor to the axis of the larger delta
   // from the last point, for the pick and the rubber band alike. W4f-5:
-  // OSNAP (F3) lands the cursor on the document's endpoints, midpoints and
-  // centres within SNAP_PX, and wins over ORTHO when it finds one. Both read
-  // through refs so the pointer path allocates nothing and re-binds nothing.
+  // OSNAP (F3) lands the cursor on the document's geometry within SNAP_PX
+  // (B1b: the kinds the provider's snapModes select), and wins over ORTHO
+  // when it finds one. Both read through refs so the pointer path allocates
+  // nothing and re-binds nothing.
   const orthoRef = useRef(ortho)
   orthoRef.current = ortho
   const setOrthoRef = useRef(setOrtho)
@@ -61,6 +62,24 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
   osnapRef.current = osnap
   const setOsnapRef = useRef(setOsnap)
   setOsnapRef.current = setOsnap
+  // B1b: the selected snap modes (the provider's mask) and the query's own
+  // diagnostics, one reused record, so a query allocates nothing for them.
+  const snapModesRef = useRef(snapModes)
+  snapModesRef.current = snapModes
+  const diagnosticsRef = useRef({ invalid: false, truncated: false, localOverflow: false, admitted: 0, omitted: 0, pairs: 0 })
+  // Whether the last query near the cursor met a bound. Sent to the provider
+  // only when it CHANGES, so repeated moves cost no React update.
+  const setSnapLimitedRef = useRef(setSnapLimited)
+  setSnapLimitedRef.current = setSnapLimited
+  const limitedRef = useRef(false)
+  const reportLimited = useRef((next) => {
+    if (limitedRef.current === next) return
+    limitedRef.current = next
+    setSnapLimitedRef.current?.(next)
+  }).current
+  // The ground listener's redraw (or null before it binds): a mode, master,
+  // anchor or index change re-runs the stationary cursor's preview.
+  const feedbackRef = useRef(null)
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
     const onKey = (event) => {
@@ -105,6 +124,12 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
     const live = !!(machine.current && machine.current.sequence)
     onPickingRef.current?.(live)
     viewerRef?.current?.setRubberBand?.(null)
+    // A new anchor, a new entity list (or no sequence at all) re-reads the
+    // snap under a stationary cursor at once, in the same effect that gives
+    // the click its new machine, so a held frame can never leave the marker
+    // on a point the click no longer resolves (Astra round two, B1b);
+    // without a sequence the marker and limit clear.
+    feedbackRef.current?.redrawNow()
     return () => { onPickingRef.current?.(false) }
   }, [armed, armedOp, fromKey, entities, viewerRef, groupPickDone, blockPickDone])
 
@@ -121,47 +146,67 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       return target instanceof Element && ground.contains(target) && ground.contains(target.closest(selector))
     }
     const viewer = () => viewerRef?.current
-    // The snap under the cursor, if any: the aperture in world units is one
-    // extra unproject SNAP_PX to the right (zoom-aware), the search is one
-    // linear pass over the packed candidates. The marker is redrawn only
-    // when the snapped point changes.
-    let snapX = NaN
-    let snapY = NaN
-    let markerShown = false
+    // The snap under the cursor, if any, ONE query for hover and click alike:
+    // the raw cursor, the aperture in world units one extra unproject SNAP_PX
+    // to the right (zoom-aware), the selected modes, and the anchor the
+    // sequence measures from (none on a first point, so perpendicular and
+    // tangent find nothing there). An index with no fixed points can still
+    // hold insertion points, so its size is not a gate. The query's
+    // diagnostics are read on a hit AND a miss.
     const snapAt = (v, m, cx, cy, p) => {
-      if (!osnapRef.current || !p || !snapIndex.current?.n) return null
+      const index = snapIndex.current
+      if (!osnapRef.current || !p || !index) { reportLimited(false); return null }
       const q = v.unproject(cx + SNAP_PX, cy)
       const tol = q ? Math.abs(q.x - p.x) : 0
-      const hit = snapPoint(snapIndex.current, p.x, p.y, tol)
+      const diagnostics = diagnosticsRef.current
+      const hit = snapPoint(index, p.x, p.y, tol, { modes: snapModesRef.current, anchor: orthoAnchor(m), diagnostics })
+      reportLimited(!!(diagnostics.truncated || diagnostics.localOverflow))
       if (!hit) return null
       hit.tol = tol
       return hit
     }
+    // The marker is redrawn only when its point, kind or size changes.
+    let markerShown = false
+    let markerX = NaN
+    let markerY = NaN
+    let markerKind = ''
+    let markerSize = NaN
     const showMarker = (v, hit) => {
       if (hit) {
-        if (!markerShown || hit.x !== snapX || hit.y !== snapY) {
-          v.setSnapMarker?.({ x: hit.x, y: hit.y }, hit.tol)
-          snapX = hit.x; snapY = hit.y; markerShown = true
+        if (!markerShown || hit.x !== markerX || hit.y !== markerY || hit.kind !== markerKind || hit.tol !== markerSize) {
+          v.setSnapMarker?.({ x: hit.x, y: hit.y, kind: hit.kind }, hit.tol)
+          markerShown = true; markerX = hit.x; markerY = hit.y; markerKind = hit.kind; markerSize = hit.tol
         }
       } else if (markerShown) {
         v.setSnapMarker?.(null)
-        markerShown = false; snapX = NaN; snapY = NaN
+        markerShown = false; markerX = NaN; markerY = NaN; markerKind = ''; markerSize = NaN
       }
+    }
+    // No snap feedback: the marker goes and the limitation clears.
+    const clearFeedback = (v) => {
+      if (v) showMarker(v, null)
+      reportLimited(false)
     }
     const draw = () => {
       frame = 0
       const v = viewer()
       const m = machine.current
-      if (!v || !m || !m.sequence || !last || typeof v.unproject !== 'function') return
+      if (!v) return
+      if (!m || !m.sequence || !last) { clearFeedback(v); return }
+      if (typeof v.unproject !== 'function') return
       const p = v.unproject(last.x, last.y)
       // No allocation on this per-frame path with both modes off; on, the
       // constrained pair or the snap hit is the price of the mode (kimi
       // note on #982).
       let gx = p ? p.x : NaN
       let gy = p ? p.y : NaN
-      const hit = snapAt(v, m, last.x, last.y, p)
+      // An edge step names an ENTITY: its cursor stays raw (no snap, no
+      // ORTHO), the same as its click.
+      const edgeStep = currentStep(m)?.kind === 'edge'
+      const hit = edgeStep ? null : snapAt(v, m, last.x, last.y, p)
+      if (edgeStep) reportLimited(false)
       showMarker(v, hit)
-      if (hit) { gx = hit.x; gy = hit.y } else if (p && orthoRef.current) { const q = orthoPoint(m, gx, gy); gx = q[0]; gy = q[1] }
+      if (hit) { gx = hit.x; gy = hit.y } else if (p && !edgeStep && orthoRef.current) { const q = orthoPoint(m, gx, gy); gx = q[0]; gy = q[1] }
       // W4g-7b: an armed INSERT reads its typed name, scale and rotation, and
       // the document's block catalogue, so the ghost can be the definition's
       // own bounding box; every other op ignores the extra arguments.
@@ -251,6 +296,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       const edgeStep = currentStep(m)?.kind === 'edge'
       const apertureStep = currentStep(m)?.aperture === true
       const hit = edgeStep ? null : snapAt(v, m, event.clientX, event.clientY, p)
+      if (edgeStep) reportLimited(false)
       const [px, py] = hit ? [hit.x, hit.y] : (!edgeStep && orthoRef.current ? orthoPoint(m, p.x, p.y) : [p.x, p.y])
       let edgeCtx = null
       if (edgeStep) {
@@ -270,7 +316,23 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       }
       acceptPoint(m, px, py, edgeStep ? edgeCtx : apertureCtx)
     }
-    const onLeave = () => { last = null; const v = viewer(); v?.setRubberBand?.(null); if (v) showMarker(v, null) }
+    const onLeave = () => { last = null; const v = viewer(); v?.setRubberBand?.(null); clearFeedback(v) }
+    // The stationary cursor's preview again, through the same frame path; with
+    // no cursor on the ground or no sequence, the feedback just clears.
+    const redraw = () => {
+      if (!last || !machine.current?.sequence) { clearFeedback(viewer()); return }
+      if (!frame) frame = window.requestAnimationFrame(draw)
+    }
+    // The same feedback at once, for a change the next click reads immediately
+    // (a mode or the master): a pending frame is dropped and drawn now, so the
+    // marker never shows a mask the click no longer uses (Astra round one, B1b).
+    const redrawNow = () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      frame = 0
+      if (!last || !machine.current?.sequence) { clearFeedback(viewer()); return }
+      draw()
+    }
+    feedbackRef.current = { redraw, redrawNow }
     const onCancel = () => {
       down = null
       if (frame) window.cancelAnimationFrame(frame)
@@ -301,9 +363,43 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       ground.removeEventListener('pointercancel', onCancel)
       window.removeEventListener('pointercancel', onCancel)
       if (canvasSelector != null) window.removeEventListener('pointerup', onWindowUp, true)
+      if (feedbackRef.current?.redraw === redraw) feedbackRef.current = null
       viewer()?.setRubberBand?.(null)
       viewer()?.setSnapMarker?.(null)
+      reportLimited(false)
     }
   }, [ground, viewerRef, setInput, canvasSelector])
+  // B1b: a mode, master or ORTHO change re-reads a stationary cursor (the
+  // master off clears the marker and the limitation; the selection itself is
+  // kept; ORTHO moves the ghost of an unsnapped cursor, Astra round two).
+  // A layout effect: the marker is redrawn in the same commit as the mask the
+  // click handler reads, before any further input event can arrive.
+  useLayoutEffect(() => {
+    if (!osnap) reportLimited(false)
+    feedbackRef.current?.redrawNow()
+  }, [osnap, snapModes, ortho, reportLimited])
+  // B1b: a camera change (zoom, pan, fit) moves the drawing under a still
+  // cursor. The Viewer's camera channel re-reads it as soon as a snapshot is
+  // delivered, so the marker and the ghost follow the camera the next click
+  // unprojects through (Astra round two, B1b). Subscribed the way
+  // DrawingCameraControls does: again whenever the viewer behind the ref
+  // changes, never twice for one viewer, and released on unmount.
+  const cameraSubscription = useRef(null)
+  useEffect(() => {
+    const api = viewerRef?.current || null
+    if (cameraSubscription.current && cameraSubscription.current.api === api) return
+    cameraSubscription.current?.off?.()
+    const owner = { api, off: null }
+    cameraSubscription.current = owner
+    const off = api?.subscribeCamera?.(() => {
+      if (cameraSubscription.current === owner) feedbackRef.current?.redrawNow()
+    })
+    owner.off = typeof off === 'function' ? off : null
+  })
+  useEffect(() => () => {
+    const previous = cameraSubscription.current
+    cameraSubscription.current = null
+    previous?.off?.()
+  }, [])
   return null
 }

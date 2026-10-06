@@ -43,6 +43,7 @@ import { byId } from '../lib/actionRegistry.js'
 
 import useEngineSession, { SESSION_ERROR } from './engineSession.js'
 import { PROMPTS, promptKeys } from './promptKeys.js'
+import { DEFAULT_SNAP_MODES, snapModeBit } from './snapModes.js'
 
 const EngineSessionContext = createContext(null)
 const DRAWING_EDIT_ACTIONS = Object.freeze(new Set(['create', 'applyEdit', 'pasteFromClipboard', 'undo', 'redo']))
@@ -264,6 +265,26 @@ export default function EngineSessionProvider({
   // decided 2026-09-04 (askall w4fnext). F3 or the prompt's chip turns it off.
   const [osnap, setOsnapState] = useState(true)
   const setOsnap = useCallback((next) => { setOsnapState(next === true) }, [])
+  // B1b: WHICH object snaps a pick looks for, a snapModes.js mask. OSNAP
+  // above stays the master switch; turning it off keeps this selection. Set
+  // one mode at a time by its kind (an absolute value, never a toggle), so
+  // an unknown kind or a non-boolean is dropped. Zero modes is allowed. The
+  // selection lives as long as this provider (edits, loads and presentation
+  // changes keep it) and is never persisted.
+  const [snapModes, setSnapModesState] = useState(DEFAULT_SNAP_MODES)
+  const setSnapMode = useCallback((kind, enabled) => {
+    const bit = typeof kind === 'string' ? snapModeBit(kind) : 0
+    if (!bit || typeof enabled !== 'boolean') return
+    setSnapModesState((current) => (enabled ? current | bit : current & ~bit))
+  }, [])
+  // B1b: the picker's last query near the cursor met a bound (a truncated
+  // index or more nearby geometry than one query examines). The picker
+  // writes it only when it changes; a non-boolean is dropped.
+  const [snapLimited, setSnapLimitedState] = useState(false)
+  const setSnapLimited = useCallback((next) => {
+    if (typeof next !== 'boolean') return
+    setSnapLimitedState(next)
+  }, [])
 
   // W4g-7b-05c: a typed deferred word (LEADER, BLOCK, GROUP, UNGROUP) arms
   // nothing, so CommandLineArmer has no prompt or run refusal to carry its
@@ -371,9 +392,10 @@ export default function EngineSessionProvider({
   const value = useMemo(
     () => ({
       session: sessionForConsumers, inputs, setInput, canSave, armed, setArmed, lastArmedCommand, ortho, setOrtho, osnap, setOsnap,
+      snapModes, setSnapMode, snapLimited, setSnapLimited,
       reach, setReach, refuse, highlightedIds, selectGroup, pending, setPending,
     }),
-    [sessionForConsumers, inputs, setInput, canSave, armed, setArmed, lastArmedCommand, ortho, setOrtho, osnap, setOsnap, reach, setReach, refuse, highlightedIds, selectGroup, pending, setPending],
+    [sessionForConsumers, inputs, setInput, canSave, armed, setArmed, lastArmedCommand, ortho, setOrtho, osnap, setOsnap, snapModes, setSnapMode, snapLimited, setSnapLimited, reach, setReach, refuse, highlightedIds, selectGroup, pending, setPending],
   )
   return <EngineSessionContext.Provider value={value}>{children}</EngineSessionContext.Provider>
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { snapPrimitives, nearestOnPrimitive, perpendicularCandidates, tangentCandidates, intersectionCandidates } from './snapGeometry.js'
+import { buildSnapIndex, snapPoint } from './pointPicking.js'
 
 const line = (a = [0, 0], b = [10, 0]) => snapPrimitives({ type: 'LINE', vertices: [a, b] })[0]
 const circle = (c = [0, 0], radius = 5) => snapPrimitives({ type: 'CIRCLE', vertices: [c], radius })[0]
@@ -104,6 +105,74 @@ describe('snap geometry', () => {
   it('OSG23 invalid arc angle and zero line', () => {
     expect(snapPrimitives({ type: 'ARC', vertices: [[0, 0]], radius: 5, startDeg: Infinity, endDeg: 90 })).toEqual([])
     expect(snapPrimitives({ type: 'LINE', vertices: [[0, 0], [0, 0]] })).toEqual([])
+  })
+})
+
+// B1b: the four mutation gaps the record owed, through the public index and
+// query (pointPicking.js). Each expectation is the record's measured base
+// result (section 5) and fails under its named mutant.
+describe('snap query ordering and bounds (B1b)', () => {
+  const L = (a, b) => ({ type: 'LINE', vertices: [a, b] })
+  const query = (entities, xy, tol, modes) => {
+    const diagnostics = {}
+    const hit = snapPoint(buildSnapIndex(entities), xy[0], xy[1], tol, { modes, diagnostics })
+    return { hit, diagnostics }
+  }
+  const diag = (over) => ({ invalid: false, truncated: false, localOverflow: false, admitted: 0, omitted: 0, pairs: 0, ...over })
+
+  it('B1B-G01 source tie-break', () => {
+    // Two lines one unit either side of the cursor: the earlier SOURCE wins
+    // the exact tie (mutant without the tie-break: (0, -1)).
+    const { hit, diagnostics } = query([L([-10, 1], [10, 1]), L([-10, -1], [10, -1])], [0, 0], 2, 512)
+    expect(hit).toEqual({ x: 0, y: 1, kind: 'nearest' })
+    expect(diagnostics).toEqual(diag({ admitted: 2 }))
+  })
+
+  it('B1B-G02 part tie-break', () => {
+    // One open polyline whose first and third parts tie: the earlier PART wins.
+    const poly = { type: 'LWPOLYLINE', vertices: [[-10, 1], [10, 1], [10, -1], [-10, -1]], closed: false }
+    const { hit, diagnostics } = query([poly], [0, 0], 2, 512)
+    expect(hit).toEqual({ x: 0, y: 1, kind: 'nearest' })
+    expect(diagnostics).toEqual(diag({ admitted: 2 }))
+  })
+
+  it('B1B-G03 closest 64', () => {
+    // 64 lines at 0.5 fill the local heap first; the 65th, closer, must
+    // displace one (mutant keeping the first 64: (0, 0.5)).
+    const entities = [...Array.from({ length: 64 }, () => L([-10, 0.5], [10, 0.5])), L([-10, 0.125], [10, 0.125])]
+    const { hit, diagnostics } = query(entities, [0, 0], 1, 512)
+    expect(hit).toEqual({ x: 0, y: 0.125, kind: 'nearest' })
+    expect(diagnostics).toEqual(diag({ admitted: 64, omitted: 1, localOverflow: true }))
+  })
+
+  it('B1B-G04 insertion truncation hit and miss', () => {
+    // 20,001 single-line texts overflow the insertion budget by one: the
+    // query reports truncation on a hit and on a miss alike.
+    const texts = Array.from({ length: 20001 }, () => ({ type: 'TEXT', vertices: [[3, 4]] }))
+    const index = buildSnapIndex(texts)
+    expect(index.n).toBe(0)
+    expect(index.insertions.truncated).toBe(true)
+    const hitDiagnostics = {}
+    expect(snapPoint(index, 3, 4, 1, { modes: 64, diagnostics: hitDiagnostics })).toEqual({ x: 3, y: 4, kind: 'insertion' })
+    expect(hitDiagnostics).toEqual(diag({ truncated: true }))
+    const missDiagnostics = {}
+    expect(snapPoint(index, 30, 40, 1, { modes: 64, diagnostics: missDiagnostics })).toBeNull()
+    expect(missDiagnostics).toEqual(diag({ truncated: true }))
+    // Insertion off (endpoints only): that budget is not this query's limit.
+    const off = {}
+    expect(snapPoint(index, 3, 4, 1, { modes: 1, diagnostics: off })).toBeNull()
+    expect(off.truncated).toBe(false)
+  })
+
+  it('B1B-G05 huge arc residue', () => {
+    // A start angle of 1e19 degrees is reduced exactly, never collapsed to
+    // zero (mutant: nearest (5, 0)).
+    const { hit, diagnostics } = query([{ type: 'ARC', vertices: [[0, 0]], radius: 5, startDeg: 1e19, endDeg: 90 }], [3, -4], 10, 512)
+    expect(hit.kind).toBe('nearest')
+    expect(Math.abs(hit.x - 3.000000000000002)).toBeLessThanOrEqual(1e-9)
+    expect(Math.abs(hit.y - -3.9999999999999982)).toBeLessThanOrEqual(1e-9)
+    expect(Math.hypot(hit.x - 5, hit.y)).toBeGreaterThan(1)
+    expect(diagnostics).toEqual(diag({ admitted: 1 }))
   })
 })
 

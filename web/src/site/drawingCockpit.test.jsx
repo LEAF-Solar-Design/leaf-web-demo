@@ -193,6 +193,132 @@ describe('StatusToggles', () => {
       expect(container.innerHTML).toBe(before)
     }
   })
+
+  // B1b: the object snap mode menu beside the live OSNAP master.
+  const trigger = () => screen.queryByRole('button', { name: 'Object snap modes' })
+  const items = () => screen.getAllByRole('menuitemcheckbox')
+  const checked = () => items().filter((el) => el.getAttribute('aria-checked') === 'true').map((el) => el.dataset.kind)
+  const limitLine = () => document.querySelector('[data-testid="cockpit-osnap-limited"]')
+
+  it('B1B-D01 legacy publication defaults', () => {
+    render(<StatusToggles />)
+    modes({ live: true, ortho: false, osnap: true })
+    expect(button('osnap').disabled).toBe(false)
+    fireEvent.click(trigger())
+    expect(checked()).toEqual(['endpoint', 'midpoint', 'centre', 'quadrant'])
+    expect(limitLine().textContent).toBe('')
+    expect(screen.queryByText('Object snap limited near this point.')).toBeNull()
+    // The full shape replaces the defaults immediately, in both places.
+    modes({ live: true, ortho: false, osnap: true, snapModes: 32 | 512, snapLimited: true })
+    expect(checked()).toEqual(['intersection', 'nearest'])
+    expect(limitLine().textContent).toBe('Object snap limited near this point.')
+    expect(screen.getByRole('menu').parentElement.textContent).toContain('Object snap limited near this point.')
+    // A legacy publication again reads as the defaults.
+    modes({ live: true, ortho: true, osnap: false })
+    expect(checked()).toEqual(['endpoint', 'midpoint', 'centre', 'quadrant'])
+    expect(limitLine().textContent).toBe('')
+  })
+
+  it('B1B-D02 malformed supplied fields rejected', () => {
+    const { container } = render(<StatusToggles />)
+    modes({ live: true, ortho: false, osnap: true, snapModes: 55, snapLimited: true })
+    const before = container.innerHTML
+    for (const detail of [
+      { live: true, ortho: false, osnap: true, snapModes: 2 ** 32 },
+      { live: true, ortho: false, osnap: true, snapModes: 2 ** 32 + 1 },
+      { live: true, ortho: false, osnap: true, snapModes: 1016 },
+      { live: true, ortho: false, osnap: true, snapModes: 8 },
+      { live: true, ortho: false, osnap: true, snapModes: -1 },
+      { live: true, ortho: false, osnap: true, snapModes: 1.5 },
+      { live: true, ortho: false, osnap: true, snapModes: '23' },
+      { live: true, ortho: false, osnap: true, snapModes: null },
+      { live: true, ortho: false, osnap: true, snapModes: undefined },
+      { live: true, ortho: false, osnap: true, snapModes: Number.NaN },
+      { live: true, ortho: false, osnap: true, snapLimited: 'true' },
+      { live: true, ortho: false, osnap: true, snapLimited: 1 },
+      { live: true, ortho: false, osnap: true, snapLimited: undefined },
+      { live: true, ortho: false, osnap: true, snapLimited: null },
+      { live: true, ortho: false, osnap: true, snapModes: 2 ** 32, grid: true },
+      { grid: true, snapModes: 2 ** 32 },
+      { grid: false, snapLimited: 'yes' },
+      { live: false, snapModes: 'bad' },
+    ]) {
+      modes(detail)
+      expect(container.innerHTML).toBe(before)
+    }
+    expect(button('grid').disabled).toBe(true)
+  })
+
+  it('B1B-D03 GRID preserves engine fields', () => {
+    render(<StatusToggles />)
+    modes({ live: true, ortho: true, osnap: false, snapModes: 1015, snapLimited: true })
+    modes({ grid: true })
+    modes({ grid: false })
+    expect(button('ortho').getAttribute('aria-pressed')).toBe('true')
+    expect(button('osnap').getAttribute('aria-pressed')).toBe('false')
+    expect(limitLine().textContent).toBe('Object snap limited near this point.')
+    fireEvent.click(trigger())
+    expect(checked()).toEqual(['endpoint', 'midpoint', 'centre', 'quadrant', 'intersection', 'insertion', 'perpendicular', 'tangent', 'nearest'])
+    expect(button('grid').getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('B1B-D04 status menu without prompt', () => {
+    render(<StatusToggles />)
+    expect(trigger()).toBeNull()
+    modes({ live: true, ortho: false, osnap: false })
+    const requests = vi.fn()
+    const toggles = vi.fn()
+    window.addEventListener('cockpit:osnap-mode-set', requests)
+    window.addEventListener('cockpit:mode-toggle', toggles)
+    try {
+      // No command prompt exists here; the status menu stands alone.
+      expect(document.getElementById('cockpit-prompt')).toBeNull()
+      expect(trigger().getAttribute('aria-haspopup')).toBe('menu')
+      expect(trigger().getAttribute('aria-expanded')).toBe('false')
+      fireEvent.click(trigger())
+      expect(trigger().getAttribute('aria-expanded')).toBe('true')
+      expect(trigger().getAttribute('aria-controls')).toBe(screen.getByRole('menu').id)
+      fireEvent.click(items()[4])
+      expect(requests).toHaveBeenCalledTimes(1)
+      expect(requests.mock.calls[0][0].detail).toEqual({ kind: 'intersection', enabled: true })
+      // Controlled: nothing changes until the provider publishes.
+      expect(items()[4].getAttribute('aria-checked')).toBe('false')
+      modes({ live: true, ortho: false, osnap: false, snapModes: 55, snapLimited: false })
+      expect(items()[4].getAttribute('aria-checked')).toBe('true')
+      fireEvent.click(items()[0])
+      expect(requests.mock.calls[1][0].detail).toEqual({ kind: 'endpoint', enabled: false })
+      // A mode request never flips the master, and the menu stays open.
+      expect(toggles).not.toHaveBeenCalled()
+      expect(screen.getByRole('menu')).not.toBeNull()
+    } finally {
+      window.removeEventListener('cockpit:osnap-mode-set', requests)
+      window.removeEventListener('cockpit:mode-toggle', toggles)
+    }
+  })
+
+  it('B1B-D05 offline closes menu and restores DOM', () => {
+    const add = vi.spyOn(document, 'addEventListener')
+    const remove = vi.spyOn(document, 'removeEventListener')
+    try {
+      const { container } = render(<StatusToggles />)
+      const before = container.innerHTML
+      modes({ live: true, ortho: true, osnap: true, snapModes: 1015, snapLimited: true })
+      fireEvent.click(trigger())
+      expect(screen.getByRole('menu')).not.toBeNull()
+      const outside = add.mock.calls.filter(([type]) => type === 'pointerdown')
+      expect(outside).toHaveLength(1)
+      modes({ live: false })
+      expect(screen.queryByRole('menu')).toBeNull()
+      expect(trigger()).toBeNull()
+      expect(limitLine()).toBeNull()
+      expect(remove).toHaveBeenCalledWith('pointerdown', outside[0][1], true)
+      expectDisabled()
+      expect(container.innerHTML).toBe(before)
+    } finally {
+      add.mockRestore()
+      remove.mockRestore()
+    }
+  })
 })
 
 describe('grid geometry', () => {
