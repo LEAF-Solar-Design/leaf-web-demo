@@ -25,6 +25,132 @@ import { slashDecision, alternativeDecision } from './controllers/catalog/catalo
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 
+describe('S17 version-created toast Undo wiring', () => {
+  const surfaces = [
+    { name: 'App', source: appSource, completion: 'seatCompletedVersion', directCount: 3, undoHandler: 'undoCurrentVersion' },
+    { name: 'ToolCast', source: readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8'), completion: 'onCompleteVersion', directCount: 3, undoHandler: 'undo' },
+  ]
+  function property(object, name) {
+    return object?.type === 'ObjectExpression'
+      ? object.properties.find((item) => csuKey(item) === name)?.value
+      : undefined
+  }
+  function toastObjects(tree) {
+    const found = []
+    csuWalk(tree, (node) => {
+      if (node.type !== 'CallExpression' || node.callee.type !== 'Identifier' || node.callee.name !== 'showToast') return
+      csuWalk(node.arguments[0], (argument) => {
+        if (property(argument, 'text')) found.push(argument)
+      })
+    })
+    return found
+  }
+  function textPattern(object) {
+    const text = property(object, 'text')
+    if (text?.type === 'StringLiteral') return text.value
+    if (text?.type === 'TemplateLiteral') return text.quasis.map((part) => part.value.cooked).join('#')
+    return ''
+  }
+  function assertUndo(object) {
+    const action = property(object, 'action')
+    assert.equal(action?.type, 'ObjectExpression')
+    assert.equal(action.properties.length, 3)
+    assert.ok(action.properties.every((item) => item.type === 'ObjectProperty'))
+    assert.equal(property(action, 'label')?.value, 'Undo')
+    assert.equal(property(action, 'undo')?.type, 'BooleanLiteral')
+    assert.equal(property(action, 'undo')?.value, true)
+    assert.equal(property(action, 'onClick')?.type, 'Identifier')
+    assert.equal(property(action, 'onClick')?.name, 'onUndo')
+  }
+
+  for (const surface of surfaces) {
+    const tree = parseJs(surface.source, { sourceType: 'module', plugins: ['jsx'] })
+    const declarations = new Map()
+    csuWalk(tree, (node) => {
+      if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') declarations.set(node.id.name, node)
+    })
+    const completion = declarations.get(surface.completion)
+    const seat = surface.name === 'App' ? declarations.get('seatVersion') : null
+    const versionToasts = toastObjects(tree).filter((object) => /^Version .+ created$/.test(textPattern(object)))
+    const seatedToasts = seat ? toastObjects(seat.init.arguments[0]) : []
+
+    it(`${surface.name}: every live version-created toast has Undo wired to onUndo`, () => {
+      assert.equal(versionToasts.length, surface.directCount, 'all completion branches must announce the version')
+      for (const object of versionToasts) assertUndo(object)
+      assert.ok(versionToasts.every((object) => object.start > completion.start && object.end < completion.end))
+      assert.ok(completion.init.arguments[1].elements.some((node) => node.name === 'onUndo'))
+      if (seat) {
+        assert.equal(seatedToasts.length, 1, 'the successful App seat also announces the new version')
+        assert.equal(textPattern(seatedToasts[0]), '# · #')
+        assertUndo(seatedToasts[0])
+        assert.ok(seat.init.arguments[1].elements.some((node) => node.name === 'onUndo'))
+      }
+    })
+
+    it(`${surface.name}: the retained toast calls the current version Undo handler`, () => {
+      const onUndo = declarations.get('onUndo')
+      assert.ok(onUndo.start < completion.start, 'onUndo must be initialized before the completion hook dependencies')
+      if (seat) assert.ok(onUndo.start < seat.start)
+      assert.equal(onUndo.init.arguments[1].elements.length, 0, 'the retained callback must stay stable')
+      const callback = onUndo.init.arguments[0]
+      const undoActionRef = { current: () => 'old render' }
+      const retained = new Function('undoActionRef', `return (${surface.source.slice(callback.start, callback.end)})`)(undoActionRef)
+      assert.equal(retained(), 'old render')
+      undoActionRef.current = () => 'current render'
+      assert.equal(retained(), 'current render')
+      let wired = false
+      csuWalk(tree, (node) => {
+        if (node.type === 'AssignmentExpression'
+            && surface.source.slice(node.left.start, node.left.end) === 'undoActionRef.current'
+            && node.right.type === 'Identifier' && node.right.name === surface.undoHandler) wired = true
+      })
+      assert.ok(wired, 'the current drawing Undo handler must feed the retained action')
+      const handler = declarations.get(surface.undoHandler)
+      assert.ok(surface.source.slice(handler.start, handler.end).includes('await undoDrawingVersion('))
+    })
+
+    it(`${surface.name}: delete, reset, authored removal and other toasts never receive version Undo`, () => {
+      const attach = declarations.get(surface.name === 'App' ? 'onAttachAgentJob' : 'attachJob')
+      const checkpointToasts = toastObjects(tree).filter((object) => property(object, 'key')?.value === 'agent-checkpoint')
+      assert.equal(checkpointToasts.length, 1, 'one agent checkpoint notice may offer version Undo')
+      const checkpoint = checkpointToasts[0]
+      assert.ok(checkpoint.start > attach.start && checkpoint.end < attach.end, 'only the agent attach handler may raise the checkpoint')
+      assert.equal(textPattern(checkpoint), 'Checkpoint saved')
+      assert.equal(property(property(checkpoint, 'action'), 'label')?.value, 'Undo')
+      const versionObjects = new Set([...versionToasts, ...seatedToasts, ...checkpointToasts])
+      for (const object of toastObjects(tree)) {
+        if (versionObjects.has(object)) continue
+        const action = property(object, 'action')
+        assert.notEqual(property(action, 'undo')?.value, true, `no Undo on ${textPattern(object) || 'non-version notice'}`)
+        assert.notEqual(property(action, 'label')?.value, 'Undo')
+        if (/project.*(?:deleted|reset)|tool.*removed|removed.*tool/i.test(textPattern(object))) {
+          assert.equal(action, undefined, 'terminal completion toasts have no action')
+        }
+      }
+      if (surface.name === 'ToolCast') {
+        const deleted = toastObjects(declarations.get('forgetDeletedProject').init.arguments[0])
+        assert.equal(deleted.length, 1)
+        assert.equal(property(deleted[0], 'action'), undefined)
+      }
+    })
+  }
+
+  it('project reset and delete remain terminal in the shared lifecycle panel', () => {
+    const source = readFileSync(new URL('./projects/ProjectLifecyclePanel.jsx', import.meta.url), 'utf8')
+    const tree = parseJs(source, { sourceType: 'module', plugins: ['jsx'] })
+    const dangerZones = []
+    csuWalk(tree, (node) => {
+      if (node.type === 'JSXOpeningElement' && node.name.type === 'JSXIdentifier' && node.name.name === 'DangerZone') dangerZones.push(node)
+    })
+    assert.equal(dangerZones.length, 1)
+    const attributes = dangerZones[0].attributes
+    assert.ok(attributes.some((node) => node.name?.name === 'onReset'))
+    assert.ok(attributes.some((node) => node.name?.name === 'onDelete'))
+    assert.ok(attributes.every((node) => node.type === 'JSXAttribute' && !['resetUndo', 'deleteUndo'].includes(node.name.name)))
+    assert.equal(toastObjects(tree).length, 0, 'reset has a receipt, without an Undo toast')
+  })
+})
+
 describe('project board live pane wiring', () => {
   const tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
   function elements(name) {
@@ -674,7 +800,7 @@ describe('W20-07b combiner workspace wiring', () => {
     const read = body.indexOf("await getDrawingIntake(mock, newVersion.drawing_id, 'head')")
     assert.ok(body.includes('const scopeCurrent = isScopeCurrent'))
     assert.match(body, /const current = \(\) => scopeCurrent\(\)\s+&& \(typeof options\?\.isCurrent !== 'function' \|\| options\.isCurrent\(\)\)/)
-    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast]'))
+    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast]'))
     const guard = 'if (!current()) return false'
     const entryGuard = body.indexOf(guard)
     assert.ok(entryGuard > body.indexOf('const current =') && entryGuard < body.indexOf('let version ='))
@@ -2724,5 +2850,177 @@ describe('S24 the URL keeps tool, drawer, own selection and camera view', () => 
     assert.doesNotMatch(siteRoot, /urlState/)
     assert.ok(router.includes('return { path: window.location.pathname, hash: window.location.hash }'))
     assert.doesNotMatch(urlStateSource, /['"]drawing['"]/)
+  })
+})
+
+describe('S23 agent checkpoint toast', () => {
+  const LB = '{', RB = '}'
+  // The live handler, comments removed (the legacy commented-out copy above
+  // it disappears with them), evaluated with spies for every free name.
+  function sliceBetween(source, from, to) {
+    const start = source.indexOf(from)
+    const end = source.indexOf(to, start)
+    assert.ok(start >= 0 && end > start, `${from} must survive comment removal`)
+    return source.slice(start, end)
+  }
+  const appHandler = sliceBetween(appNoComments, 'const onAttachAgentJob = useCallback', 'const onAuthor = useCallback')
+  function appAttach({ mock = false, envelope }) {
+    const h = {
+      attachSharedJob: async () => envelope,
+      showToast: [], undo: 0, tracked: [], selected: [],
+    }
+    const context = {
+      useCallback: (callback) => callback,
+      mock,
+      track: (...args) => h.tracked.push(args),
+      setSelectedTool: (value) => h.selected.push(value),
+      attachSharedJob: (...args) => { h.attachArgs = args; return h.attachSharedJob() },
+      showToast: (notice) => h.showToast.push(notice),
+      onUndo: async (...args) => { h.undo += 1; h.undoArgs = args },
+    }
+    h.attach = new Function(...Object.keys(context), appHandler + '\nreturn onAttachAgentJob')(...Object.values(context))
+    return h
+  }
+  const committed = { ok: true, tool: 'drawing.write', result: { new_version: { drawing_id: 'd1', version: 4 } } }
+
+  it('S23-A1 an agent job that committed a version raises one keyed Checkpoint saved notice', async () => {
+    const h = appAttach({ envelope: committed })
+    assert.equal(await h.attach('job-1', 'drawing.write'), committed)
+    assert.deepEqual(h.attachArgs, ['job-1', { toolName: 'drawing.write', persist: true }])
+    assert.equal(h.showToast.length, 1)
+    const [notice] = h.showToast
+    assert.equal(notice.key, 'agent-checkpoint')
+    assert.equal(notice.text, 'Checkpoint saved')
+    assert.equal(notice.action.label, 'Undo')
+  })
+
+  it('S23-A2 the notice Undo runs the ribbon onUndo and nothing else', async () => {
+    const h = appAttach({ envelope: committed })
+    await h.attach('job-1', 'drawing.write')
+    assert.equal(h.undo, 0, 'raising the notice must not undo anything')
+    h.showToast[0].action.onClick({ type: 'click' })
+    await Promise.resolve()
+    assert.equal(h.undo, 1)
+    assert.deepEqual(h.undoArgs, [])
+  })
+
+  it('S23-A3 no checkpoint for a failed job, a job with no new version, a superseded attach or mock', async () => {
+    for (const envelope of [
+      { ok: false, result: { new_version: { version: 4 } } },
+      { ok: true, result: {} },
+      { ok: true },
+      null,
+    ]) {
+      const h = appAttach({ envelope })
+      assert.equal(await h.attach('job-1', 'drawing.write'), envelope)
+      assert.equal(h.showToast.length, 0, `no checkpoint for ${JSON.stringify(envelope)}`)
+    }
+    const mocked = appAttach({ mock: true, envelope: committed })
+    assert.equal(await mocked.attach('job-1', 'drawing.write'), null)
+    assert.equal(mocked.showToast.length, 0)
+  })
+
+  it('S23-A4 the handler lists what it reads and onUndo is declared before it', () => {
+    assert.match(appHandler, new RegExp('\\' + RB + ', \\[attachSharedJob, mock, onUndo, showToast\\]\\)'))
+    const undoAt = appNoComments.indexOf('const onUndo = useCallback')
+    assert.ok(undoAt >= 0 && undoAt < appNoComments.indexOf('const onAttachAgentJob = useCallback'))
+    assert.ok(stripped.includes('key: "agent-checkpoint"'), 'the keyed notice survives the transform')
+  })
+
+  it('S23-A5 the history drawer receives the ribbon Undo and its blocks for Rewind', () => {
+    assert.match(appNoComments, new RegExp('<VersionHistory\\s[^>]*onUndo=\\' + LB + 'onUndo\\' + RB))
+    assert.match(appNoComments, new RegExp('<VersionHistory\\s[^>]*undoDisabled=\\' + LB + 'versionBusy \\|\\| running \\|\\| !canUndo\\' + RB))
+  })
+
+  it('S23-T1 /try raises the same keyed checkpoint and its Undo reaches the bar Undo', async () => {
+    // Raw source: the slice evaluated below keeps its comments, which are
+    // valid inside the Function body.
+    const toolCast = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
+    const retainedUndo = sliceBetween(toolCast, 'const undoActionRef = useRef(null)', 'const onCompleteVersion = useCallback')
+    const handler = sliceBetween(toolCast, 'const attachJob = useCallback', 'const openResultDetails = useCallback')
+    const h = { toasts: [], undo: 0 }
+    const context = {
+      useCallback: (callback) => callback,
+      useRef: (value) => ({ current: value }),
+      sessionReady: true,
+      onJobLinked: () => {},
+      attachTrackedJob: async () => committed,
+      showToast: (notice) => h.toasts.push(notice),
+      setPhase: () => {}, setError: () => {},
+      workspace: { rehydrate: async () => {} },
+      checkout: { actions: { refresh: () => {} } },
+    }
+    const made = new Function(...Object.keys(context), retainedUndo + handler + '\nreturn ' + LB + ' attachJob, undoActionRef, onUndo ' + RB)(...Object.values(context))
+    made.undoActionRef.current = async () => { h.undo += 1 }
+    await made.attachJob('job-1', 'arrange-panels-as-cat')
+    assert.equal(h.toasts.length, 1)
+    assert.equal(h.toasts[0].key, 'agent-checkpoint')
+    assert.equal(h.toasts[0].text, 'Checkpoint saved')
+    assert.equal(h.toasts[0].action.label, 'Undo')
+    assert.equal(h.toasts[0].action.undo, true)
+    assert.equal(h.toasts[0].action.onClick, made.onUndo)
+    h.toasts[0].action.onClick()
+    assert.equal(h.undo, 1)
+    const undoAt = toolCast.indexOf('const undo = useCallback')
+    assert.ok(undoAt > 0 && toolCast.indexOf('undoActionRef.current = undo', undoAt) > undoAt, 'the ref follows the bar Undo')
+    assert.doesNotMatch(toolCast, /\bundoRef\b/, 'the checkpoint and version toasts share one Undo ref')
+    assert.ok(handler.includes('[attachTrackedJob, checkout.actions, onJobLinked, onUndo, sessionReady, showToast, workspace]'))
+    const rewindAt = toolCast.indexOf('rewind=' + LB + LB)
+    assert.ok(rewindAt > 0 && toolCast.slice(rewindAt, rewindAt + 400).includes('run: () => undo(),'), 'the tab Rewind runs the bar Undo')
+  })
+})
+
+describe('S20 console chrome', () => {
+  const LB = String.fromCharCode(123), RB = String.fromCharCode(125), BT = String.fromCharCode(96)
+  it('S20 the drawing line never renders a bare loading literal; it waits on useLoadingPhase and says Loading drawing', () => {
+    assert.equal(/[\x27\x22\x60]loading[\x27\x22\x60]/.test(appNoComments), false)
+    assert.match(appNoComments, /import \x7b useLoadingPhase \x7d from \x27\.\/lib\/loadingTiming\.js\x27/)
+    assert.ok(appNoComments.includes("const drawingLoading = !shown && drawingLoad.state === 'pending'"))
+    assert.ok(appNoComments.includes('const drawingLoadPhase = useLoadingPhase(drawingLoading)'))
+    assert.ok(appNoComments.includes("const drawingLoadShown = drawingLoading && (drawingLoadPhase === 'shown' || drawingLoadPhase === 'long')"))
+    const start = appNoComments.indexOf('<span className="meta">')
+    const end = appNoComments.indexOf('</span>', appNoComments.indexOf('Loading drawing', start))
+    assert.ok(start >= 0 && end > start)
+    const meta = appNoComments.slice(start, end)
+    assert.ok(meta.includes(': drawingLoadShown && ('))
+    assert.match(meta, /<span className="dot hollow" aria-hidden="true" \/>Loading drawing/)
+  })
+
+  it('S20 the Approvals chip shows a dot, not a number, and keeps the counted aria-label', () => {
+    const label = 'aria-label=' + LB + BT + 'Pending approvals $' + LB + 'pendingApprovalCount' + RB + BT + RB
+    const start = appNoComments.indexOf(label)
+    assert.ok(start >= 0, 'the counted aria-label is kept')
+    const chip = appNoComments.slice(start, appNoComments.indexOf('</button>', start))
+    assert.equal(/\x7bpendingApprovalCount\x7d/.test(chip.slice(label.length)), false, 'no visible count inside the chip')
+    assert.equal(/className=\x22key\x22/.test(chip), false)
+    assert.ok(chip.includes(LB + 'pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />' + RB))
+    assert.ok(chip.includes(LB + 'pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />' + RB))
+  })
+
+  it('S20 the nav rail seeds from and writes to the remembered preference', () => {
+    assert.match(appNoComments, /import \x7b readNavExpanded, writeNavExpanded \x7d from \x27\.\/lib\/navExpandedPreference\.js\x27/)
+    assert.ok(appNoComments.includes('const [navExpanded, setNavExpandedState] = useState(() => readNavExpanded())'))
+    const start = appNoComments.indexOf('const setNavExpanded = useCallback((open) => ' + LB)
+    const end = appNoComments.indexOf(RB + ', [])', start)
+    assert.ok(start >= 0 && end > start)
+    const setter = appNoComments.slice(start, end)
+    assert.ok(setter.includes('setNavExpandedState(open)'))
+    assert.ok(setter.includes('writeNavExpanded(!!open)'))
+    // The rewritten comment cites the fork that overrides the rollback contract.
+    assert.ok(appSource.includes('REMEMBERED under fork F-studio-rollback-storage (S20)'))
+    assert.equal(appSource.includes('IN-MEMORY on purpose'), false)
+  })
+
+  it('S20 the jobRail slot passes onRetryJob, which re-dispatches through the confirm path', () => {
+    const start = appNoComments.indexOf('jobRail=' + LB + LB)
+    const end = appNoComments.indexOf('toast=' + LB, start)
+    assert.ok(start >= 0 && end > start)
+    assert.match(appNoComments.slice(start, end), /\bonRetryJob,/)
+    const defStart = appNoComments.indexOf('const onRetryJob = useCallback((job) => ' + LB)
+    const defEnd = appNoComments.indexOf(RB + ', [', defStart)
+    assert.ok(defStart >= 0 && defEnd > defStart)
+    const def = appNoComments.slice(defStart, defEnd)
+    assert.ok(def.includes("job.status !== 'failed'"))
+    assert.ok(def.includes('onRequestCatalogRun(tool, sameRun ? last.params : ' + LB + RB + ", null, 'catalog', " + LB + ' complete: sameRun ' + RB + ')'))
   })
 })

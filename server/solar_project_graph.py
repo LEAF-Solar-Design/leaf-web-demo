@@ -21,7 +21,19 @@ from solar_graph_seed import new_empty_graph, validate_seed_request
 
 SCHEMA = "leaf.solar-project-graph-commit.v1"
 ADAPTER_KIND = "project-local-graph-commit"
-SUPPORTED_TOOLS = frozenset(("solar-settings",))
+SUPPORTED_TOOLS = frozenset((
+    "solar-settings",
+    "solar-panels-from-drawing",
+    "solar-size-strings",
+    "solar-combiners",
+    "solar-feeders",
+    "solar-homeruns",
+    "solar-schedule",
+))
+# Sizing runs only its pure manual-global branch here; every other mode needs stored
+# service evidence this path does not have and is refused before the builtin loads.
+SIZING_TOOL = "solar-size-strings"
+MANUAL_SIZING_MODE = "manual-global"
 
 
 def _sha(raw):
@@ -165,7 +177,17 @@ def _parameters(context, params):
     return normalized
 
 
-def _candidate(context, tool, params, initialized):
+def _run_builtin(context, tool, graph, params, trusted, job_id):
+    """The canonical builtin dispatcher; it never reaches an outbound service."""
+    if tool == SIZING_TOOL:
+        if type(params) is not dict or params.get("mode") != MANUAL_SIZING_MODE:
+            raise project.ProjectContextError("SIP_R3_SERVICE_EVIDENCE_REQUIRED")
+        return local._load_builtin(tool).run_bound(
+            graph, params, tenant_id=str(context.organization_id), job_id=str(job_id))
+    return local._load_builtin(tool).run(graph, params, **trusted)
+
+
+def _candidate(context, tool, params, initialized, job_id):
     before = _companion(context.intake)
     builtin_params = copy.deepcopy(params)
     base = None
@@ -186,8 +208,8 @@ def _candidate(context, tool, params, initialized):
     trusted = {}
     if "source_intake" in solar_tools.get(tool)["trusted_inputs"]:
         trusted["source_intake"] = _canonical_source_intake(context)
-    after = local._load_builtin(tool).run(copy.deepcopy(base if initialized else before),
-                                         builtin_params, **trusted)
+    after = _run_builtin(context, tool, copy.deepcopy(base if initialized else before),
+                         builtin_params, trusted, job_id)
     if builtin_params.get("cancel") is True:
         raise GraphValidationError("GRAPH_COMMIT_CANCELLED")
     output = local.canonical_bytes(local.version_companion(context.intake, before, after))
@@ -209,7 +231,7 @@ def _prepare(context, tool, params, *, checkout, job_id, attempt, tool_manifest_
             or not isinstance(job_id, UUID) or type(attempt) is not int or attempt < 1):
         _reject()
     parameters = _parameters(context, params)
-    before, after, base, output = _candidate(context, tool, parameters, initialized)
+    before, after, base, output = _candidate(context, tool, parameters, initialized, job_id)
     request = {"schema": SCHEMA, "organization_id": str(context.organization_id),
         "project_id": str(context.project_id), "drawing_id": str(context.drawing_id),
         "parent_version_id": str(context.parent_version_id),

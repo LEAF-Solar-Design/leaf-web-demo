@@ -653,7 +653,9 @@
     "server-w22c2-block-panels",
     "server-customization-revision-evolve",
     "server-sip-r3a-graph",
-    "platform-sip-r3a-graph"
+    "platform-sip-r3a-graph",
+    "server-sip-r3b-tools",
+    "platform-sip-r3b-tools"
   ],
   "unresolved_mandatory": [],
   "mandatory_justification": "L4 web-demo mandatory table expanded against build_suites; every other declaration remains mandatory because no traced classification has been admitted. Workflow, web build and license checks also remain unconditional in ci.sh.",

@@ -156,7 +156,7 @@ function mountCompletion() {
     const context = {
       useCallback: (callback) => callback, isScopeCurrent: identity.isScopeCurrent,
       intake: h.controller.intake, mock: false, mockVersions: h.mockVersions,
-      getDrawingIntake: h.getDrawingIntake, showToast: h.showToast,
+      getDrawingIntake: h.getDrawingIntake, showToast: h.showToast, onUndo: () => {},
       markRefreshFailure: h.controller.actions.markRefreshFailure,
       recordCommittedUnreadableHead: (value) => {
         h.unreadable(value)

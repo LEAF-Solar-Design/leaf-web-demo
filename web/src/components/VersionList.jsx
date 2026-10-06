@@ -92,6 +92,24 @@ export function SourceRefChip({ sourceRef }) {
   )
 }
 
+// S23 agent checkpoints. A version an agent turn committed carries the id of
+// that turn (`turn_id`) in its row. That field is the ONE agent-turn marker
+// this file reads; a row without it (every version a person made, and every
+// row from a server that does not stamp it yet) is not an agent checkpoint and
+// shows no Rewind. Fails closed: anything but a bounded non-empty string is no
+// marker, so a malformed row never grows an action.
+export const AGENT_TURN_ID_MAX = 128
+export function isAgentTurnVersion(row) {
+  const id = row?.turn_id
+  return typeof id === 'string' && id.length > 0 && id.length <= AGENT_TURN_ID_MAX
+}
+
+// What Rewind does NOT cover, said on the control itself. Rewind is the
+// ordinary Undo step: it moves the drawing head back one version and touches
+// nothing outside the drawing.
+export const REWIND_COVERAGE =
+  'Rewind undoes this agent turn\'s drawing change only; server side effects and published tools stay as they are.'
+
 // The read-only-preview strip both shells show while an older version is
 // seated in the viewer. One behaviour (announce the seated version, offer the
 // way back to head), two skins pinned by each surface's e2e selectors.
@@ -142,6 +160,12 @@ export function VersionPreviewStrip({ variant = 'drawer', version, latest, onBac
  *          { run(v): Promise, mode: 'restore'|'recover',
  *            eligible(row, isHead): boolean, disabled: boolean }
  *        The primitive owns confirm/pending/error; the shell owns the effect.
+ * @param {object|null} rewind      the S23 agent-checkpoint Rewind, or null.
+ *        Shape: { run(): Promise|void, disabled: boolean }. `run` is the
+ *        shell's existing Undo path and is called with no arguments. It shows
+ *        only on the HEAD row and only when that row carries the agent-turn
+ *        marker, because Undo steps the head back one version: on any other
+ *        row it would undo something other than the row it sits on.
  */
 export default function VersionList({
   variant = 'drawer',
@@ -152,6 +176,7 @@ export default function VersionList({
   rowTitle,
   rowSub,
   restore = null,
+  rewind = null,
 }) {
   // The two-step confirm state machine, owned HERE so both shells answer the
   // same way and a fix lands once. `pending` doubles as the single-flight
@@ -189,6 +214,37 @@ export default function VersionList({
     } finally {
       setPending(null)
     }
+  }
+
+  // Rewind shares the restore single-flight guard: one version mutation in
+  // flight across the whole list, whichever control started it.
+  async function runRewind(v) {
+    if (!rewind || pending != null || rewind.disabled) return
+    setPending(v)
+    setFailure(null)
+    setConfirming(null)
+    try {
+      await rewind.run()
+    } catch (cause) {
+      setFailure({ version: v, message: cause?.message || 'Rewind failed.' })
+    } finally {
+      setPending(null)
+    }
+  }
+
+  function rewindControl(v) {
+    return (
+      <button
+        type={btnType}
+        className="chip-act"
+        data-testid={`version-rewind-v${v}`}
+        title={REWIND_COVERAGE}
+        disabled={pending != null || rewind.disabled}
+        onClick={() => runRewind(v)}
+      >
+        {pending === v ? 'Rewinding…' : 'Rewind'}
+      </button>
+    )
   }
 
   function restoreControls(v) {
@@ -237,6 +293,7 @@ export default function VersionList({
           const v = Number(row.v)
           const isHead = v === Number(head)
           const showRestore = Boolean(restore && restore.eligible(row, isHead))
+          const showRewind = Boolean(rewind && isHead && isAgentTurnVersion(row))
           return (
             <div className="tc-version-row" key={v} data-testid={`try-version-v${v}`}>
               <button
@@ -255,6 +312,7 @@ export default function VersionList({
                   ? <span className="tc-version-recovery">{restoreControls(v)}</span>
                   : restoreControls(v))
                 : null}
+              {showRewind ? rewindControl(v) : null}
             </div>
           )
         })}
@@ -270,6 +328,7 @@ export default function VersionList({
         const isHead = v === Number(head)
         const isPreview = previewingVersion === v
         const showRestore = Boolean(restore && restore.eligible(row, isHead))
+        const showRewind = Boolean(rewind && isHead && isAgentTurnVersion(row))
         return (
           <li key={v} data-testid={`vh-row-v${v}`}>
             <div className="vh-row-line">
@@ -297,6 +356,13 @@ export default function VersionList({
               {showRestore && (
                 <span className="vh-restore" aria-label={`Restore version ${v}`}>
                   {restoreControls(v)}
+                </span>
+              )}
+              {/* S23: a SIBLING of the .vh-row button, never inside it (no
+                  button inside a button), beside where .vh-restore sits. */}
+              {showRewind && (
+                <span className="vh-rewind" aria-label={`Rewind version ${v}`}>
+                  {rewindControl(v)}
                 </span>
               )}
             </div>

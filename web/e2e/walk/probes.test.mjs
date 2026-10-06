@@ -5,10 +5,79 @@ import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/acti
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { observeSolarEditorRequests } from './fixtures.mjs'
+import { observeSolarEditorRequests, solarAvailabilityProbe } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+test('G4 selection-set probes reuse the real two-LINE recipe and registry oracles', () => {
+  for (const op of ['delete', 'move', 'copy', 'rotate', 'scale', 'mirror']) {
+    const entry = map.entries.find((entry) => entry.id === `action:modify-${op}`)
+    const probe = resolveProbe(entry, 'multiple-selected')
+    assert.deepEqual(probe.setup.steps.filter((step) => step.kind === 'select-entity'),
+      [{ kind: 'select-entity', type: 'LINE', editable: true, multiple: true }])
+    assert.equal(probe.assertion.operation, op)
+    assert.equal(probe.assertion.target, op === 'delete' ? 'engine:delete' : 'cockpit-prompt')
+    assert.equal(probe.assertion.kind, op === 'delete' ? 'submits' : 'opens')
+    assert.equal(probe.locator.name, ACTIONS.find((action) => action.id === entry.source_id).label)
+  }
+})
+
+test('G4 each selection-set prompt requires the armed verb and two selected objects', async () => {
+  for (const op of ['move', 'copy', 'rotate', 'scale', 'mirror']) {
+    const probe = resolveProbe(map.entries.find((entry) => entry.id === `action:modify-${op}`), 'multiple-selected')
+    const calls = []
+    const page = { getByTestId: (id) => id }
+    const assertions = (value) => ({
+      toBe: (expected) => assert.equal(value, expected),
+      toBeVisible: async () => calls.push(['visible', value]),
+      toHaveAccessibleName: async (name) => calls.push(['name', value, name]),
+      toHaveText: async (text) => calls.push(['text', value, text]),
+    })
+    const runtime = { page, evidence: {} }
+    await assertEffect(probe, runtime, {}, { selectionCount: 2 }, assertions)
+    assert.deepEqual(calls, [['visible', 'cockpit-prompt'], ['name', 'cockpit-prompt', `${probe.assertion.verb} command`],
+      ['text', 'dock-selection-count', '2 objects selected']])
+    assert.deepEqual(runtime.evidence.multipleSelection, { selectionCount: 2, verb: probe.assertion.verb, promptArmed: true })
+    await assert.rejects(assertEffect(probe, runtime, {}, { selectionCount: 1 }, assertions), assert.AssertionError)
+  }
+})
+
+test('G3 ready Solar refusals locate exact disabled names from scoped catalog availability', () => {
+  for (const [name, code, reason] of [
+    ['solar-equipment-move', 'equipment_assignment_required', 'Assign inverter equipment first'],
+    ['solar-cable-export', 'solar_output_not_current', 'Rerun the earlier Solar steps so the whole design is current first'],
+    ['solar-electrical-schedules', 'solar_output_not_current', 'Rerun the earlier Solar steps so the whole design is current first'],
+    ['solar-solaredge-accept', 'frames_required', 'Create panel groups first'],
+  ]) {
+    const entry = map.entries.find((row) => row.id === `tool:${name}`)
+    const initial = resolveProbe(entry, 'ready')
+    assert.equal(initial.assertion.target, 'solar-step-editor')
+    assert.equal(initial.locator.name, accessibleName(name, initial.assertion.reason))
+    const snapshot = JSON.parse(readFileSync(new URL('../../walk/fixtures/capabilities.snapshot.json', import.meta.url), 'utf8'))
+    const tool = snapshot.response.families.flatMap((family) => family.capabilities).find((tool) => tool.name === name)
+    tool.availability = { entitled: true, engine_ready: true, implemented: true,
+      input_ready: false, refusal_reasons: [code] }
+    const probe = solarAvailabilityProbe(initial, snapshot.response)
+    assert.equal(probe.locator.name, `${name} (unavailable: ${reason})`)
+    assert.equal(probe.locator.exact, true)
+    assert.equal(probe.assertion.reason_code, code)
+    assert.equal(probe.assertion.assertionId, `${entry.id}/ready/disabled_with_reason`)
+    assert.deepEqual(probe.setup, initial.setup)
+    tool.availability.input_ready = true
+    const ready = solarAvailabilityProbe(initial, snapshot.response)
+    assert.equal(ready.assertion.target, 'solar-step-editor')
+    assert.equal(ready.locator.name, name)
+    delete tool.availability
+    assert.deepEqual(solarAvailabilityProbe(initial, snapshot.response), ready)
+    const locked = resolveProbe(entry, 'job-running')
+    assert.equal(solarAvailabilityProbe(locked, snapshot.response), locked)
+    const runDecision = { ...initial, assertion: { ...initial.assertion, target: 'catalog-run-decision' } }
+    tool.availability = { entitled: true, engine_ready: true, implemented: true,
+      input_ready: false, refusal_reasons: [code] }
+    assert.equal(solarAvailabilityProbe(runDecision, snapshot.response), runDecision)
+  }
+})
 
 test('engine history lives in Quick access without a ribbon group or tab', () => {
   for (const id of ['action:engine-undo', 'action:engine-redo']) {
@@ -124,8 +193,11 @@ test('G1 run observation starts before activation and remains through Cancel', (
 })
 
 test('G1 Solar form probes retain the editor effect and catalog setup', () => {
+  const snapshot = JSON.parse(readFileSync(new URL('../../walk/fixtures/capabilities.snapshot.json', import.meta.url), 'utf8'))
+  for (const tool of snapshot.response.families.flatMap((family) => family.capabilities)) delete tool.availability
+  const readyMap = buildFeatureMap({ snapshot })
   for (const id of ['tool:solar-unit-sync', 'tool:solar-design-presets']) {
-    const probe = resolveProbe(map.entries.find((row) => row.id === id), 'ready')
+    const probe = resolveProbe(readyMap.entries.find((row) => row.id === id), 'ready')
     assert.equal(probe.assertion.target, 'solar-step-editor')
     assert.equal(probe.assertion.tool, probe.sourceId)
     assert.deepEqual(probe.setup.steps.at(-1), { kind: 'catalog-tool', name: probe.sourceId })
@@ -180,7 +252,26 @@ test('control resolves CSS recipes directly and preserves role recipes', () => {
   assert.deepEqual(calls, [['page-role', 'button', { name: 'Line', exact: true }]])
 })
 
-test('C2 resolves all 41 census rows to real setup and effect recipes', () => {
+test('C3 snap disclosure uses the Drafting settings trigger and a real menu oracle', () => {
+  const entry = map.entries.find((entry) => entry.id === 'control:object-snap-modes')
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    assert.deepEqual(probe.locator.scope, { role: 'toolbar', name: 'Drafting settings', exact: true })
+    assert.equal(probe.locator.role, 'button')
+    assert.equal(probe.locator.name, 'Object snap modes')
+    assert.equal(probe.assertion.target, 'object-snap-menu-expanded')
+    assert.deepEqual(probe.setup.steps.map((recipe) => recipe.kind), [
+      state === 'failed-load' ? 'open-failed-drawing' : 'open-private-drawing', 'census-disclosure',
+    ])
+  }
+  const source = readFileSync(new URL('./w1z-census-snap.spec.mjs', import.meta.url), 'utf8')
+  assert.match(source, /process\.env\.LEAF_WALK_PROOF === '1'/)
+  assert.match(source, /for \(const state of entry\.states\)/)
+  assert.match(source, /control-census:studio \[ready\]/)
+  assert.match(source, /requireControlCensusBatch\(census/)
+})
+
+test('C2 and C3 resolve all 44 census rows to real setup and effect recipes', () => {
   let rows = 0
   for (const id of CENSUS_RECIPE_CONTROLS) {
     const entry = map.entries.find((entry) => entry.id === id)
@@ -214,7 +305,7 @@ test('C2 resolves all 41 census rows to real setup and effect recipes', () => {
       if (id === 'control:save-version' && state === 'engine-busy') assert.ok(kinds.indexOf('create-line') < kinds.indexOf('hold-engine-edit'))
     }
   }
-  assert.equal(rows, 41)
+  assert.equal(rows, 44)
   const source = readFileSync(new URL('./w1z-census.spec.mjs', import.meta.url), 'utf8')
   assert.match(source, /process\.env\.LEAF_WALK_PROOF === '1'/)
   assert.match(source, /for \(const featureId of CENSUS_RECIPE_CONTROLS\)/)

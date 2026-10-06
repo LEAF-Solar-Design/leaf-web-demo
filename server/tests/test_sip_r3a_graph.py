@@ -279,7 +279,7 @@ def test_sip_r3a_tool_manifest(memory):
 
 
 def test_sip_r3a_unsupported_tool(memory):
-    for tool in ("solar-panels-from-drawing", "solar-size-strings", "unknown", {}):
+    for tool in ("solar-commit-solve", "unknown", {}):
         refused("SIP_R3_TOOL_UNSUPPORTED", lambda: adapter.prepare_project_graph_commit(
             memory.context(), tool, {}, checkout=memory.lease, job_id=memory.job, attempt=1,
             tool_manifest_sha256="sha256:" + "0" * 64))
@@ -464,7 +464,8 @@ def test_sip_r3a_additive_entrypoints_no_activation(memory, monkeypatch):
         sentinel = object()
         monkeypatch.setattr(adapter, name, lambda *args, **kwargs: sentinel)
         assert getattr(local, name)("forwarded") is sentinel
-    assert adapter.SUPPORTED_TOOLS == {"solar-settings"}
+    assert adapter.SUPPORTED_TOOLS == {"solar-settings", "solar-panels-from-drawing",
+        "solar-size-strings", "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule"}
     root = Path(local.__file__).parent
     assert "solar_project_graph" not in (root / "canonical_worker.py").read_text(encoding="utf-8")
     assert "canonical_only" not in solar_tools.trusted_record("solar-settings")

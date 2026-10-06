@@ -412,6 +412,8 @@ export default function ToolCast({
   // no drawing until one loads or uploads), so the claim still starts at mount
   // and the reload handoff is still bootstrapped in the authority effect.
   const catalogAdapters = useMemo(() => ({
+    onDraftRestored: (text) => setPrompt(text),
+    onDraftScopeChanged: () => setPrompt(''),
     previewRoute: matchPrompt,
     commitDecision: (decision) => catalogDecisionRef.current?.(decision),
     dismissDecision: () => {
@@ -596,6 +598,9 @@ export default function ToolCast({
   }, [active, drawing.drawingState?.drawing_id, drawing.head, drawing.shown, drawingId, platformSession.actions, platformSession.recoveries, requireAuth, seatIntake, sessionRetry])
 
   // showToast comes from useToastBus() above (slice 13a).
+  // The toast keeps this callback while the current undo eligibility changes.
+  const undoActionRef = useRef(null)
+  const onUndo = useCallback(() => undoActionRef.current?.(), [])
 
   const onCompleteVersion = useCallback(async (newVersion, envelope) => {
     const scopeAtStart = activeDrawingIdRef.current
@@ -609,18 +614,19 @@ export default function ToolCast({
       if (envelope?.result?.new_version_readable === false) {
         if (activeDrawingIdRef.current !== scopeAtStart) return
         drawing.actions.recordCommittedUnreadableHead(newVersion)
-        showToast({ text: `Version ${newVersion?.version || 'created'} created` })
+        showToast({ text: `Version ${newVersion?.version || 'created'} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
         return
       }
       const view = await getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
       if (activeDrawingIdRef.current !== scopeAtStart) return
       seatVersion(view, { drawingId, source: 'job', event: 'complete' })
+      showToast({ text: `Version ${newVersion?.version || 'created'} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
     } catch {
       if (activeDrawingIdRef.current !== scopeAtStart) return
       drawing.actions.markRefreshFailure({ drawing_id: drawingId, version: newVersion?.version })
-      showToast({ text: `Version ${newVersion?.version || 'created'} created` })
+      showToast({ text: `Version ${newVersion?.version || 'created'} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
     }
-  }, [drawing.actions, drawing.shown, seatVersion, showToast])
+  }, [drawing.actions, drawing.shown, onUndo, seatVersion, showToast])
 
   const onJobNotice = useCallback(({ text }) => {
     showToast({ text, action: { label: 'View', onClick: () => setRightView('execution') } })
@@ -1223,6 +1229,15 @@ export default function ToolCast({
       toolName: toolName || 'arrange-panels-as-cat',
       persist: true,
     })
+    // S23 agent checkpoints, the same keyed notice /app raises: an agent
+    // turn's job that committed a version offers Undo in one place.
+    if (envelope?.ok && envelope.result?.new_version) {
+      showToast({
+        key: 'agent-checkpoint',
+        text: 'Checkpoint saved',
+        action: { label: 'Undo', undo: true, onClick: onUndo },
+      })
+    }
     if (envelope && !envelope.ok) {
       setPhase('failed')
       setError(null)
@@ -1232,7 +1247,7 @@ export default function ToolCast({
     }
     await workspace.rehydrate()
     checkout.actions.refresh()
-  }, [attachTrackedJob, checkout.actions, onJobLinked, sessionReady, workspace])
+  }, [attachTrackedJob, checkout.actions, onJobLinked, onUndo, sessionReady, showToast, workspace])
 
   const openResultDetails = useCallback((envelope = jobResult, jobId = currentJobId) => {
     if (!envelope) return
@@ -1421,6 +1436,7 @@ export default function ToolCast({
     setError(null)
     await undoDrawingVersion(checkout.actions.getCapability())
   }, [busy, canUndo, checkout.actions, jobRunning, sessionReady, undoDrawingVersion])
+  undoActionRef.current = undo
 
   const redo = useCallback(async () => {
     if (!sessionReady || busy || jobRunning || !canRedo) return
@@ -2318,6 +2334,12 @@ export default function ToolCast({
                 // is the authority and denies missing capability with 403: Checkout capability required.
                 eligible: (_row, isHead) => sessionReady && !isHead,
                 disabled: Boolean(drawing.unreadableHead?.pending),
+              }}
+              rewind={{
+                // S23: an agent-made head gets Rewind, which is the bar's
+                // Undo under the same blocks as the bar's Undo chip.
+                run: () => undo(),
+                disabled: Boolean(busy || jobRunning || drawing.versionBusy || previewLocked || !canUndo),
               }}
             />
           </div>

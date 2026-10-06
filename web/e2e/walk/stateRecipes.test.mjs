@@ -7,6 +7,47 @@ import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, 
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
+import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
+
+test('G4 delete removes both fixture LINEs and one Undo restores the whole drawing', async () => {
+  const geometry = { entities: [{ id: 0xA100, type: 'LINE' }, { id: 0xA101, type: 'LINE' }, { id: 9, type: 'CIRCLE' }] }
+  for (const removed of [2, 1]) {
+    let current = geometry
+    let undoClicks = 0
+    const page = {
+      getByTestId: (id) => ({ id, innerText: async () => String(current.entities.length) }),
+      evaluate: async () => current,
+      getByRole: (role, options) => {
+        assert.equal(role, 'toolbar')
+        assert.equal(options.name, 'Quick access')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          assert.equal(options.name, ACTIONS.find((action) => action.id === 'engine:undo').label)
+          return { click: async () => { undoClicks++; current = geometry } }
+        } }
+      },
+    }
+    const assertions = (value) => ({
+      toBe: (expected) => assert.equal(value, expected),
+      toEqual: (expected) => assert.deepEqual(value, expected),
+      toHaveText: async (expected) => { assert.equal(value.id, 'dock-selection-count'); assert.equal(expected, '2 objects selected') },
+    })
+    assertions.poll = (read) => ({ toBe: async (expected) => assert.equal(await read(), expected) })
+    const runtime = { page, evidence: {} }
+    const before = await captureMultipleSelection({ assertion: { target: 'engine:delete' } }, runtime, assertions)
+    assert.equal(before.selectionCount, 2)
+    assert.equal(before.count, 3)
+    current = { entities: geometry.entities.slice(removed) }
+    if (removed === 1) {
+      await assert.rejects(assertMultipleSelectionDelete(runtime, before, assertions), assert.AssertionError)
+      assert.equal(undoClicks, 0)
+    } else {
+      await assertMultipleSelectionDelete(runtime, before, assertions)
+      assert.equal(undoClicks, 1)
+      assert.deepEqual(runtime.evidence.multipleSelection, { selectionCount: 2, before: 3, after: 1, restored: 3, undoSteps: 1 })
+    }
+  }
+})
 import { captureEngineRepeat, activateEngineRepeat } from './fixtures.mjs'
 import { faultRouteOnce, drawingRequest, setupVersionFault, finishVersionFault,
   setupHistoryFault, assertHistoryRecovery, setupRealProject } from './fixtures.mjs'
@@ -166,7 +207,17 @@ censusAssertions.poll = (callback) => ({
   toBeGreaterThan: async (expected) => assert.ok(await callback() > expected),
 })
 
-test('C2 disclosures click into each initial state, reject a wrong effect and close before restoring viewport', async () => {
+test('C3 snap oracle rejects an expanded trigger without a visible mode menu', async () => {
+  const target = 'object-snap-menu-expanded'
+  const button = { getAttribute: async () => 'true' }
+  for (const menu of [{ countValue: 0, visible: false }, { countValue: 1, visible: false }]) {
+    const page = { locator: (selector) => selector === CENSUS_DISCLOSURES[target].body ? button : menu }
+    await assert.rejects(assertCensusEffect({ assertion: { target, value: true } }, { page }, button, {}, censusAssertions),
+      assert.AssertionError)
+  }
+})
+
+test('C2 and C3 disclosures click into each initial state, reject a wrong effect and close before restoring viewport', async () => {
   for (const target of Object.keys(CENSUS_DISCLOSURES)) {
     for (const expanded of [false, true]) {
       let open = false
@@ -176,7 +227,8 @@ test('C2 disclosures click into each initial state, reject a wrong effect and cl
       const button = { visible: true, getAttribute: async () => String(open),
         click: async (options) => { assert.equal(options.timeout, 15_000); open = !open; events.push('click') } }
       const page = { locator: (selector) => {
-        assert.ok([CENSUS_DISCLOSURES[target].body, '.drawing-objects-content'].includes(selector))
+        assert.ok([CENSUS_DISCLOSURES[target].body, CENSUS_DISCLOSURES[target].menu, '.drawing-objects-content'].includes(selector))
+        if (selector === CENSUS_DISCLOSURES[target].menu) return { countValue: open ? 1 : 0, visible: open }
         return selector === '.drawing-objects-content' ? { countValue: open ? 1 : 0 } : body
       }, getByRole: () => button, viewportSize: () => ({ width: 1440, height: 900 }),
       setViewportSize: async (size) => events.push(size.width) }
