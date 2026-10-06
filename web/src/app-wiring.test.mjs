@@ -2668,3 +2668,56 @@ describe('RAIL overview yields to the expanded job monitor', () => {
     assert.match(cadMoves[1].split('}')[0], /right: calc\(var\(--ck-rail-width\) \+ 18px\);/)
   })
 })
+describe('S20 console chrome', () => {
+  it('S20 the drawing line never renders a bare loading literal; it waits on useLoadingPhase and says Loading drawing', () => {
+    assert.equal(/['"`]loading['"`]/.test(appNoComments), false)
+    assert.match(appNoComments, /import \{ useLoadingPhase \} from '\.\/lib\/loadingTiming\.js'/)
+    assert.ok(appNoComments.includes("const drawingLoading = !shown && drawingLoad.state === 'pending'"))
+    assert.ok(appNoComments.includes('const drawingLoadPhase = useLoadingPhase(drawingLoading)'))
+    assert.ok(appNoComments.includes("const drawingLoadShown = drawingLoading && (drawingLoadPhase === 'shown' || drawingLoadPhase === 'long')"))
+    const start = appNoComments.indexOf('<span className="meta">')
+    const end = appNoComments.indexOf('</span>', appNoComments.indexOf('Loading drawing', start))
+    assert.ok(start >= 0 && end > start)
+    const meta = appNoComments.slice(start, end)
+    assert.ok(meta.includes(': drawingLoadShown && ('))
+    assert.match(meta, /<span className="dot hollow" aria-hidden="true" \/>Loading drawing/)
+  })
+
+  it('S20 the Approvals chip shows a dot, not a number, and keeps the counted aria-label', () => {
+    const label = 'aria-label={`Pending approvals ${pendingApprovalCount}`}'
+    const start = appNoComments.indexOf(label)
+    assert.ok(start >= 0, 'the counted aria-label is kept')
+    const chip = appNoComments.slice(start, appNoComments.indexOf('</button>', start))
+    assert.equal(/\{pendingApprovalCount\}/.test(chip.slice(label.length)), false, 'no visible count inside the chip')
+    assert.equal(/className="key"/.test(chip), false)
+    assert.ok(chip.includes('{pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />}'))
+    assert.ok(chip.includes('{pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />}'))
+  })
+
+  it('S20 the nav rail seeds from and writes to the remembered preference', () => {
+    assert.match(appNoComments, /import \{ readNavExpanded, writeNavExpanded \} from '\.\/lib\/navExpandedPreference\.js'/)
+    assert.ok(appNoComments.includes('const [navExpanded, setNavExpandedState] = useState(() => readNavExpanded())'))
+    const start = appNoComments.indexOf('const setNavExpanded = useCallback((open) => {')
+    const end = appNoComments.indexOf('}, [])', start)
+    assert.ok(start >= 0 && end > start)
+    const setter = appNoComments.slice(start, end)
+    assert.ok(setter.includes('setNavExpandedState(open)'))
+    assert.ok(setter.includes('writeNavExpanded(!!open)'))
+    // The rewritten comment cites the fork that overrides the rollback contract.
+    assert.ok(appSource.includes('REMEMBERED under fork F-studio-rollback-storage (S20)'))
+    assert.equal(appSource.includes('IN-MEMORY on purpose'), false)
+  })
+
+  it('S20 the jobRail slot passes onRetryJob, which re-dispatches through the confirm path', () => {
+    const start = appNoComments.indexOf('jobRail={{')
+    const end = appNoComments.indexOf('toast={', start)
+    assert.ok(start >= 0 && end > start)
+    assert.match(appNoComments.slice(start, end), /\bonRetryJob,/)
+    const defStart = appNoComments.indexOf('const onRetryJob = useCallback((job) => {')
+    const defEnd = appNoComments.indexOf('}, [', defStart)
+    assert.ok(defStart >= 0 && defEnd > defStart)
+    const def = appNoComments.slice(defStart, defEnd)
+    assert.ok(def.includes("job.status !== 'failed'"))
+    assert.ok(def.includes("onRequestCatalogRun(tool, sameRun ? last.params : {}, null, 'catalog', { complete: sameRun })"))
+  })
+})

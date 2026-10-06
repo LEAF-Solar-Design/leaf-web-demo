@@ -62,6 +62,13 @@ button.rail-row { cursor: pointer; }
    height once jobs replace the loading placeholder. */
 .rail-ske { display: flex; flex-direction: column; gap: 8px; --skeleton-h: 32px; }
 
+/* --- S20 console chrome (header band beside the rails) ---
+   The Approvals chip's waiting dot (a dot, never a visible count; the count is
+   in the chip's aria-label) and the drawing line's hollow-dot "Loading drawing",
+   both on styles.css's 6px dot grammar. */
+.approvals-dot { margin-left: 6px; vertical-align: middle; }
+.meta-loading { display: inline-flex; align-items: center; gap: 5px; }
+
 /* --- workspace summary: ONE big number, demoted sibling stats --- */
 .ws-stats {
   align-self: flex-end; padding-bottom: 5px;
