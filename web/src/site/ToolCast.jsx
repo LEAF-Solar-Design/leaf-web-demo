@@ -595,6 +595,9 @@ export default function ToolCast({
   }, [active, drawing.drawingState?.drawing_id, drawing.head, drawing.shown, drawingId, platformSession.actions, platformSession.recoveries, requireAuth, seatIntake, sessionRetry])
 
   // showToast comes from useToastBus() above (slice 13a).
+  // The toast keeps this callback while the current undo eligibility changes.
+  const undoActionRef = useRef(null)
+  const onUndo = useCallback(() => undoActionRef.current?.(), [])
 
   const onCompleteVersion = useCallback(async (newVersion, envelope) => {
     const scopeAtStart = activeDrawingIdRef.current
@@ -608,18 +611,19 @@ export default function ToolCast({
       if (envelope?.result?.new_version_readable === false) {
         if (activeDrawingIdRef.current !== scopeAtStart) return
         drawing.actions.recordCommittedUnreadableHead(newVersion)
-        showToast({ text: `Version ${newVersion?.version || 'created'} created` })
+        showToast({ text: `Version ${newVersion?.version || 'created'} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
         return
       }
       const view = await getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
       if (activeDrawingIdRef.current !== scopeAtStart) return
       seatVersion(view, { drawingId, source: 'job', event: 'complete' })
+      showToast({ text: `Version ${newVersion?.version || 'created'} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
     } catch {
       if (activeDrawingIdRef.current !== scopeAtStart) return
       drawing.actions.markRefreshFailure({ drawing_id: drawingId, version: newVersion?.version })
-      showToast({ text: `Version ${newVersion?.version || 'created'} created` })
+      showToast({ text: `Version ${newVersion?.version || 'created'} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
     }
-  }, [drawing.actions, drawing.shown, seatVersion, showToast])
+  }, [drawing.actions, drawing.shown, onUndo, seatVersion, showToast])
 
   const onJobNotice = useCallback(({ text }) => {
     showToast({ text, action: { label: 'View', onClick: () => setRightView('execution') } })
@@ -1420,6 +1424,7 @@ export default function ToolCast({
     setError(null)
     await undoDrawingVersion(checkout.actions.getCapability())
   }, [busy, canUndo, checkout.actions, jobRunning, sessionReady, undoDrawingVersion])
+  undoActionRef.current = undo
 
   const redo = useCallback(async () => {
     if (!sessionReady || busy || jobRunning || !canRedo) return
