@@ -9,7 +9,10 @@ import {
   MAX_ARTIFACT_ROWS_PER_KIND,
   actionPaletteRows,
   actionRow,
+  drawingObjectRows,
   findResultRows,
+  PALETTE_GROUP_LABELS,
+  projectArtifactRows,
   sessionArtifactRows,
   toolArtifactRows,
   versionArtifactRows,
@@ -82,6 +85,17 @@ describe('artifact rows', () => {
 })
 
 describe('findResultRows', () => {
+  it('keeps server version and session rows and pins their group labels', () => {
+    const results = [
+      { kind: 'version', id: 'version:2', label: 'v2', description: 'drawing.write · panel move' },
+      { kind: 'session', id: 'session:opsess-1', label: 'opsess-1', description: 'default · staging · idle' },
+    ]
+    expect(findResultRows({ results })).toEqual(results)
+    expect(PALETTE_GROUP_LABELS.version).toBe('Versions')
+    expect(PALETTE_GROUP_LABELS.session).toBe('Sessions')
+    expect(PALETTE_GROUP_LABELS['drawing-object']).toBe('Drawing objects')
+    expect(PALETTE_GROUP_LABELS.project).toBe('Projects')
+  })
   it('reshapes the search endpoint payload and drops a malformed row rather than throwing', () => {
     const rows = findResultRows({
       results: [
@@ -95,5 +109,27 @@ describe('findResultRows', () => {
 
   it('an absent payload is zero rows, never a throw', () => {
     expect(findResultRows(undefined)).toEqual([])
+  })
+})
+
+describe('local find indexes', () => {
+  it('matches drawing object names, paths, handles and aliases, capped per group', () => {
+    const records = Array.from({ length: 12 }, (_, i) => ({ id: `h:${i}`, name: `Panel ${i}`, path: 'drawing / roof', aliases: ['module'] }))
+    expect(drawingObjectRows({ records }, 'PANEL')).toHaveLength(MAX_ARTIFACT_ROWS_PER_KIND)
+    expect(drawingObjectRows({ records }, 'roof')[0]).toEqual({ kind: 'drawing-object', id: 'h:0', label: 'Panel 0', description: 'drawing / roof' })
+    expect(drawingObjectRows({ records }, 'module')).toHaveLength(MAX_ARTIFACT_ROWS_PER_KIND)
+    expect(drawingObjectRows({ records }, 'h:11').map((r) => r.id)).toEqual(['h:11'])
+    expect(drawingObjectRows({ records }, '')).toEqual([])
+    expect(drawingObjectRows(null, 'panel')).toEqual([])
+    expect(drawingObjectRows({ records }, 'missing')).toEqual([])
+  })
+
+  it('matches canonical projects without inventing a project from a drawing name', () => {
+    const projects = Array.from({ length: 12 }, (_, i) => ({ project_id: `p${i}`, name: `Roof ${i}` }))
+    expect(projectArtifactRows(projects, 'ROOF')).toHaveLength(MAX_ARTIFACT_ROWS_PER_KIND)
+    expect(projectArtifactRows(projects, 'p11')).toEqual([{ kind: 'project', id: 'project:p11', label: 'Roof 11', description: '' }])
+    expect(projectArtifactRows([null, { name: 'Roof' }, { project_id: 'p1' }], 'roof')).toEqual([])
+    expect(projectArtifactRows(undefined, 'roof')).toEqual([])
+    expect(projectArtifactRows(projects, '')).toEqual([])
   })
 })
