@@ -475,7 +475,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       # The two executor/ files cover the executor suite (cryptography 50,
       # gunicorn, psycopg, redis); one pip resolve across all seven keeps the
