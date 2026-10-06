@@ -1,6 +1,10 @@
 {
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
+    "agent/authorLoop.ts": {
+      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior.",
+      "sha256": "09e46316007b6c2425025468d3cebe4722b7edc9d7678853bbb9a0aeb86f34cd"
+    },
     "agent/tools/submitToolProposal.ts": {
       "reason": "w22-d2b1: lossless server revision classification and exact version production; retire when upstream includes equivalent behavior.",
       "sha256": "b654ff1354ace3549c1ba0782705ed5d8326c64c46dfaf5875e3576fd6fef2fc"
@@ -14,8 +18,8 @@
       "sha256": "ad67275b16d64bd7525ec520dd36b2a6a7bd533107f6ec8132f2392e7e83afda"
     },
     "ports/impl/agentSdkRunner.ts": {
-      "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8",
-      "sha256": "25fe66a365395cd24c67f8e21ed64019293cc05ba8f445d91cffd9bf7da2bff4"
+      "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8; w22-d2b2: model-visible additive-minor revision rule; retire when upstream includes equivalent behavior.",
+      "sha256": "5a5109ebd1669509db06e36502de30e9d02e9e028015139ff1307bdb97f072ef"
     },
     "ports/impl/agentSdkTurnRunner.ts": {
       "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8",
@@ -59,7 +63,7 @@
     }
   },
   "files": {
-    "agent/authorLoop.ts": "99cdb16c5fdedc5740a21f0b40f71666f65a95826f9abaa2231e9a89304c44dd",
+    "agent/authorLoop.ts": "09e46316007b6c2425025468d3cebe4722b7edc9d7678853bbb9a0aeb86f34cd",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
     "agent/systemPrompt.ts": "f7ca7fd5451f144f5f86cfd88931b39dbd0684e6912f1f86998ccfed923e4805",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",
@@ -84,7 +88,7 @@
     "ports/fakes/fakeTenantRepo.ts": "d1c545d5fe141870e1ceabbbcc15794b92e8c4e2a22ea8138e7b9da4234a1a0d",
     "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
     "ports/fakes/fakeUpstreamSink.ts": "ba55ed5b026a219ecf8f316af102638d7397a7d66363d1adafa53dd794c74d17",
-    "ports/impl/agentSdkRunner.ts": "25fe66a365395cd24c67f8e21ed64019293cc05ba8f445d91cffd9bf7da2bff4",
+    "ports/impl/agentSdkRunner.ts": "5a5109ebd1669509db06e36502de30e9d02e9e028015139ff1307bdb97f072ef",
     "ports/impl/agentSdkTurnRunner.ts": "d2c4098b4b6d836a6e86fa962b9d235c233879585a14df69f7db3e8f1bb9f2e6",
     "ports/impl/capabilityApproval.ts": "2e0e833df4bcb5e6aa347fbd01d043ef546c486aad4ba0e2f126e6452b401372",
     "ports/impl/conversationManager.ts": "423899c87e552aef85fb8b4b14f78a25a8813284adff56fb0b32946b7032ce4e",

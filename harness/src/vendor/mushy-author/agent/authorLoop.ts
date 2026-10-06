@@ -16,7 +16,12 @@ import { isDeepStrictEqual } from "node:util";
 import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
-import { submitToolProposal } from "./tools/submitToolProposal.js";
+import {
+  REVISION_ERROR,
+  revisionSchemaChange,
+  revisionVersion,
+  submitToolProposal,
+} from "./tools/submitToolProposal.js";
 import { submitSurfaceConfig } from "./tools/submitSurfaceConfig.js";
 import { validateTool } from "./tools/validateTool.js";
 import {
@@ -303,6 +308,99 @@ function safeStringArray(value: unknown): string[] | null {
   // before `git add -A` (sol-critic PR #2 rounds 22-23, probed).
   intrinsics.sortStrings(out);
   return out;
+}
+
+type RevisionBase = {
+  rawRegistry: string;
+  tool: ToolPackage;
+  source: Buffer;
+  receipt: ToolSourceReceipt;
+};
+
+function readRevisionBase(repoDir: string, target: string): RevisionBase {
+  const rawRegistry = readFileSync(join(repoDir, REGISTRY_FILE), "utf8");
+  const tool = findTool(repoDir, target);
+  if (!tool || tool.provenance?.author !== "agent") {
+    throw new AuthorLoopError(
+      "tool revision target is not an existing authored tool", 422,
+    );
+  }
+  if (tool.kind !== "script" || tool.entry !== `tools/${target}/tool.py`) {
+    throw new AuthorLoopError(
+      "tool revision target has an unsupported package identity", 422,
+    );
+  }
+  const entry = tool.entry;
+  const manifest = `tools/${target}/tool.json`;
+  const source = readFileSync(join(repoDir, entry));
+  const manifestBytes = readFileSync(join(repoDir, manifest));
+  const packageManifest = JSON.parse(manifestBytes.toString("utf8")) as ToolPackage;
+  if (!isDeepStrictEqual(packageManifest, { ...tool, entry: "tool.py" })) {
+    throw new AuthorLoopError(
+      "tool revision target manifest does not match its registry entry", 422,
+    );
+  }
+  return {
+    rawRegistry, tool, source,
+    receipt: {
+      contract: "leaf.tool-source.v1",
+      source_sha256: createHash("sha256").update(source).digest("hex"),
+      manifest_sha256: createHash("sha256").update(manifestBytes).digest("hex"),
+      source_bytes: source.byteLength,
+      manifest_bytes: manifestBytes.byteLength,
+      entry,
+      manifest,
+    },
+  };
+}
+
+type RevisionCandidate = Pick<
+  ToolPackage, "name" | "engine_op" | "capabilities" | "params" | "returns"
+> & {
+  kind?: ToolPackage["kind"];
+  entry?: string;
+  version?: string;
+};
+
+function assertRevision(
+  base: RevisionBase,
+  candidate: RevisionCandidate,
+  source: string,
+  final: boolean,
+): void {
+  const refuse = (message: string): never => {
+    throw withFailureCategory(new Error(message), "validation_failed");
+  };
+  if (candidate.name !== base.tool.name) {
+    refuse("tool revision must keep the bound target name");
+  }
+  if ((candidate.kind ?? "script") !== base.tool.kind) refuse(REVISION_ERROR);
+  if (
+    (candidate.entry !== undefined && candidate.entry !== base.tool.entry) ||
+    (final && candidate.entry !== base.tool.entry)
+  ) refuse(REVISION_ERROR);
+  for (const key of ["engine_op", "capabilities"] as const) {
+    if (!isDeepStrictEqual(candidate[key], base.tool[key])) {
+      refuse(`tool revision cannot change ${key}`);
+    }
+  }
+  let expected: string;
+  try {
+    for (const key of ["params", "returns"] as const) {
+      if (revisionSchemaChange(
+        JSON.stringify(base.tool[key]), JSON.stringify(candidate[key]),
+      ) === "breaking") refuse(REVISION_ERROR);
+    }
+    expected = revisionVersion(
+      base.rawRegistry, base.tool.name, JSON.stringify(candidate),
+    );
+  } catch {
+    refuse(REVISION_ERROR);
+  }
+  if (final && candidate.version !== expected!) refuse(REVISION_ERROR);
+  if (base.source.equals(Buffer.from(source, "utf8"))) {
+    refuse("invalid_staged_paths");
+  }
 }
 
 export class AuthorLoop {
@@ -604,51 +702,33 @@ export class AuthorLoop {
   }
 
   /** Build the exactly-three-tool toolset the author session is granted. */
-  private toolsetFor(repoDir: string, tenantId: string, targetToolName?: string): AuthorToolset {
-    let previousReceipt: ToolSourceReceipt | undefined;
-    return {
+  private toolsetFor(repoDir: string, tenantId: string, targetToolName?: string) {
+    const revision = targetToolName
+      ? readRevisionBase(repoDir, targetToolName) : undefined;
+    let previousReceipt: ToolSourceReceipt | undefined = revision?.receipt;
+    const toolset: AuthorToolset = {
       fsTenantRepo: new FsTenantRepo(repoDir),
       submitTool: (proposal) => {
-        if (targetToolName && !previousReceipt) {
-          if (proposal.name !== targetToolName) {
-            throw withFailureCategory(new Error("tool revision must keep the bound target name"), "validation_failed");
-          }
-          const existing = findTool(repoDir, targetToolName);
-          if (!existing || existing.provenance?.author !== "agent") {
-            throw withFailureCategory(new Error("tool revision target is not an existing authored tool"), "validation_failed");
-          }
-          if (existing.kind !== "script" || existing.entry !== `tools/${targetToolName}/tool.py`) {
-            throw withFailureCategory(new Error("tool revision target has an unsupported package identity"), "validation_failed");
-          }
-          for (const key of ["engine_op", "capabilities", "params", "returns"] as const) {
-            if (!isDeepStrictEqual(proposal[key], existing[key])) {
-              throw new Error(`tool revision cannot change ${key}`);
-            }
-          }
-          const entry = `tools/${targetToolName}/tool.py`;
-          const manifest = `tools/${targetToolName}/tool.json`;
-          const sourceBytes = readFileSync(join(repoDir, entry));
-          const manifestBytes = readFileSync(join(repoDir, manifest));
-          const packageManifest = JSON.parse(manifestBytes.toString("utf8")) as ToolPackage;
-          if (!isDeepStrictEqual(packageManifest, { ...existing, entry: "tool.py" })) {
-            throw withFailureCategory(new Error("tool revision target manifest does not match its registry entry"), "validation_failed");
-          }
-          previousReceipt = {
-            contract: "leaf.tool-source.v1",
-            source_sha256: createHash("sha256").update(sourceBytes).digest("hex"),
-            manifest_sha256: createHash("sha256").update(manifestBytes).digest("hex"),
-            source_bytes: sourceBytes.byteLength,
-            manifest_bytes: manifestBytes.byteLength,
-            entry,
-            manifest,
-          };
-        }
-        const submitted = submitToolProposal(repoDir, proposal, new Date(), previousReceipt);
+        if (revision) assertRevision(revision, proposal, proposal.source, false);
+        const submitted = submitToolProposal(
+          repoDir, proposal, new Date(), previousReceipt,
+        );
         previousReceipt = submitted.receipt;
         return submitted;
       },
       apsTestRun: makeApsTestRun(this.ports.broker, tenantId),
       submitSurfaceConfig: (proposal) => submitSurfaceConfig(repoDir, proposal),
+    };
+    return {
+      toolset,
+      verifyRevision: (run: AgentRunResult): void => {
+        if (!revision) return;
+        try {
+          assertRevision(revision, run.tool, run.code, true);
+        } catch (error) {
+          throw new AuthorLoopError((error as Error).message, 422);
+        }
+      },
     };
   }
 
@@ -850,7 +930,8 @@ export class AuthorLoop {
     let run: AgentRunResult | undefined;
     let failure: unknown;
     try {
-      const toolset = this.toolsetFor(repoDir, tenantId, targetToolName);
+      const { toolset, verifyRevision } =
+        this.toolsetFor(repoDir, tenantId, targetToolName);
       // THE RUNNER IS THE UNTRUSTED BOUNDARY, so anything it throws is marked
       // here rather than trusted for what it claims about itself. A private
       // symbol is not a capability in-process: the runner can import
@@ -907,6 +988,7 @@ export class AuthorLoop {
         );
       }
       run = snapshot;
+      verifyRevision(run);
 
       this.verifySubmittedTool(tenantId, repoDir, run);
 
