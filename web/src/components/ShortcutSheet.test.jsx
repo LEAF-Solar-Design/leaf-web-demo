@@ -11,8 +11,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import ShortcutSheet, { DOC_LINKS } from './ShortcutSheet.jsx'
 import { keyboardTable, ladderListener } from '../lib/actionRegistry.js'
+import { SINGLE_KEY_SHORTCUTS_KEY, readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  localStorage.removeItem(SINGLE_KEY_SHORTCUTS_KEY)
+})
 
 describe('ShortcutSheet', () => {
   it('renders nothing when closed', () => {
@@ -27,7 +31,37 @@ describe('ShortcutSheet', () => {
     keyboardTable().forEach((row, i) => {
       expect(rows[i].querySelector('.label').textContent).toBe(row.label)
       expect(rows[i].querySelector('.key').textContent).toBe(row.kbd)
+      expect(rows[i].querySelector('.context').textContent).toBe(row.context)
     })
+  })
+
+  it('S25 the Single-key shortcuts switch defaults on, persists off, and marks R and Shift+? off', () => {
+    render(<ShortcutSheet open onClose={() => {}} />)
+    const toggle = screen.getByRole('switch', { name: 'Single-key shortcuts' })
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    expect(readSingleKeyShortcuts()).toBe(true)
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    expect(localStorage.getItem(SINGLE_KEY_SHORTCUTS_KEY)).toBe('off')
+    expect(readSingleKeyShortcuts()).toBe(false)
+    const off = screen.getAllByTestId('shortcut-row').filter((row) => row.getAttribute('aria-disabled') === 'true')
+      .map((row) => row.getAttribute('data-shortcut-id'))
+    expect(off).toEqual(['bar:retry', 'bar:shortcuts'])
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    expect(readSingleKeyShortcuts()).toBe(true)
+    expect(screen.getAllByTestId('shortcut-row').some((row) => row.getAttribute('aria-disabled') === 'true')).toBe(false)
+  })
+
+  it('S25 clicking the switch does not close the sheet', () => {
+    const onClose = vi.fn()
+    render(<ShortcutSheet open onClose={onClose} />)
+    const toggle = screen.getByRole('switch', { name: 'Single-key shortcuts' })
+    fireEvent.mouseDown(toggle)
+    fireEvent.click(toggle)
+    expect(onClose).not.toHaveBeenCalled()
   })
 
   it('Close button, Escape and an outside click all call onClose', () => {
@@ -99,6 +133,26 @@ describe('Shift+? opens the sheet through the real ladder', () => {
       </div>,
     )
     fireEvent.keyDown(screen.getByTestId('field'), { key: '?' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('S25 with single-key shortcuts switched off, Shift+? opens nothing', () => {
+    localStorage.setItem(SINGLE_KEY_SHORTCUTS_KEY, 'off')
+    render(<ShiftQuestionMarkHarness />)
+    fireEvent.keyDown(window, { key: '?' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('S25 Escape closes the sheet after switching single keys off, even with switch focus', () => {
+    render(<ShiftQuestionMarkHarness />)
+    fireEvent.keyDown(window, { key: '?' })
+    const toggle = screen.getByRole('switch', { name: 'Single-key shortcuts' })
+    toggle.focus()
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    fireEvent.keyDown(toggle, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    fireEvent.keyDown(window, { key: '?' })
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 })
