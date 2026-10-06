@@ -1023,6 +1023,8 @@ export async function setupRealProject(runtime, assertions = expect) {
 }
 
 export const CENSUS_DISCLOSURES = Object.freeze({
+  'object-snap-menu-expanded': { body: '.cockpit-status-toggles .object-snap-trigger', attribute: 'aria-expanded',
+    menu: '.cockpit-status-toggles .object-snap-menu' },
   'dxf-import-expanded': { body: '#cockpit-import-pane', attribute: 'data-import-open' },
   'ribbon-overflow-expanded': { body: '#drafting-ribbon', attribute: 'data-overflow-open' },
   'drawing-objects-expanded': { body: 'details.drawing-objects-panel', native: true },
@@ -1050,6 +1052,11 @@ export async function setupCensusDisclosure(runtime, recipe, assertions = expect
     if (await censusDisclosureState(page, recipe.target, assertions) !== expanded) await button.click({ timeout: 15_000 })
     if (!CENSUS_DISCLOSURES[recipe.target].native) await assertions(button).toHaveAttribute('aria-expanded', String(expanded))
     await assertions.poll(() => censusDisclosureState(page, recipe.target, assertions)).toBe(expanded)
+    if (CENSUS_DISCLOSURES[recipe.target].menu) {
+      const menu = page.locator(CENSUS_DISCLOSURES[recipe.target].menu)
+      await assertions(menu).toHaveCount(expanded ? 1 : 0)
+      if (expanded) await assertions(menu).toBeVisible()
+    }
   }
   runtime.cleanup.push(async () => { await set(false); runtime.evidence.censusDisclosure.cleaned = true })
   runtime.evidence.censusDisclosure = { target: recipe.target, initial: recipe.expanded }
@@ -1156,6 +1163,11 @@ export async function assertCensusEffect(probe, runtime, locator, before, assert
   if (CENSUS_DISCLOSURES[target]) {
     if (!CENSUS_DISCLOSURES[target].native) await assertions(locator).toHaveAttribute('aria-expanded', String(probe.assertion.value))
     await assertions.poll(() => censusDisclosureState(page, target, assertions)).toBe(probe.assertion.value)
+    if (CENSUS_DISCLOSURES[target].menu) {
+      const menu = page.locator(CENSUS_DISCLOSURES[target].menu)
+      await assertions(menu).toHaveCount(probe.assertion.value ? 1 : 0)
+      if (probe.assertion.value) await assertions(menu).toBeVisible()
+    }
     if (target === 'dxf-import-expanded') await assertions(page.getByLabel('DXF file', { exact: true }))
       [probe.assertion.value ? 'toBeVisible' : 'toBeHidden']()
     if (target === 'drawing-objects-expanded') await assertions(page.locator('.drawing-objects-content'))

@@ -207,7 +207,17 @@ censusAssertions.poll = (callback) => ({
   toBeGreaterThan: async (expected) => assert.ok(await callback() > expected),
 })
 
-test('C2 disclosures click into each initial state, reject a wrong effect and close before restoring viewport', async () => {
+test('C3 snap oracle rejects an expanded trigger without a visible mode menu', async () => {
+  const target = 'object-snap-menu-expanded'
+  const button = { getAttribute: async () => 'true' }
+  for (const menu of [{ countValue: 0, visible: false }, { countValue: 1, visible: false }]) {
+    const page = { locator: (selector) => selector === CENSUS_DISCLOSURES[target].body ? button : menu }
+    await assert.rejects(assertCensusEffect({ assertion: { target, value: true } }, { page }, button, {}, censusAssertions),
+      assert.AssertionError)
+  }
+})
+
+test('C2 and C3 disclosures click into each initial state, reject a wrong effect and close before restoring viewport', async () => {
   for (const target of Object.keys(CENSUS_DISCLOSURES)) {
     for (const expanded of [false, true]) {
       let open = false
@@ -217,7 +227,8 @@ test('C2 disclosures click into each initial state, reject a wrong effect and cl
       const button = { visible: true, getAttribute: async () => String(open),
         click: async (options) => { assert.equal(options.timeout, 15_000); open = !open; events.push('click') } }
       const page = { locator: (selector) => {
-        assert.ok([CENSUS_DISCLOSURES[target].body, '.drawing-objects-content'].includes(selector))
+        assert.ok([CENSUS_DISCLOSURES[target].body, CENSUS_DISCLOSURES[target].menu, '.drawing-objects-content'].includes(selector))
+        if (selector === CENSUS_DISCLOSURES[target].menu) return { countValue: open ? 1 : 0, visible: open }
         return selector === '.drawing-objects-content' ? { countValue: open ? 1 : 0 } : body
       }, getByRole: () => button, viewportSize: () => ({ width: 1440, height: 900 }),
       setViewportSize: async (size) => events.push(size.width) }

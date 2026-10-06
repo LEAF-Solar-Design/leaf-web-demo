@@ -424,7 +424,7 @@ function validateControls(controls) {
         const initial = effect.target === 'drafting-grid' || /^engine-mode:(ortho|osnap)$/.test(effect.target) ? context.pressed
           : effect.target === 'document-fullscreen' ? context.fullscreen
             : /^properties-(drawing|layers|plan|selection)-section$/.test(effect.target)
-              || ['drawing-overview-expanded', 'dxf-import-expanded', 'ribbon-overflow-expanded', 'drawing-objects-expanded'].includes(effect.target) ? context.expanded
+              || ['drawing-overview-expanded', 'dxf-import-expanded', 'ribbon-overflow-expanded', 'drawing-objects-expanded', 'object-snap-menu-expanded'].includes(effect.target) ? context.expanded
               : /^layer-(panels|walk)-visible$/.test(effect.target) ? context.visible : undefined
         if (typeof initial !== 'boolean' || typeof effect.value !== 'boolean' || effect.value === initial) {
           throw new Error('featureMap: control toggle needs opposite setup and effect states ' + record.id + '/' + state)
