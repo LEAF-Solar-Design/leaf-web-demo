@@ -1215,6 +1215,9 @@ export default function ToolCast({
     setError(null)
   }, [])
 
+  // S23: `undo` is declared below; the checkpoint notice reaches it through
+  // this ref, so the notice's Undo is always the bar's current Undo.
+  const undoRef = useRef(null)
   const attachJob = useCallback(async (nextJobId, toolName) => {
     if (!sessionReady || !nextJobId) return
     onJobLinked(nextJobId)
@@ -1222,6 +1225,15 @@ export default function ToolCast({
       toolName: toolName || 'arrange-panels-as-cat',
       persist: true,
     })
+    // S23 agent checkpoints, the same keyed notice /app raises: an agent
+    // turn's job that committed a version offers Undo in one place.
+    if (envelope?.ok && envelope.result?.new_version) {
+      showToast({
+        key: 'agent-checkpoint',
+        text: 'Checkpoint saved',
+        action: { label: 'Undo', onClick: () => { void undoRef.current?.() } },
+      })
+    }
     if (envelope && !envelope.ok) {
       setPhase('failed')
       setError(null)
@@ -1231,7 +1243,7 @@ export default function ToolCast({
     }
     await workspace.rehydrate()
     checkout.actions.refresh()
-  }, [attachTrackedJob, checkout.actions, onJobLinked, sessionReady, workspace])
+  }, [attachTrackedJob, checkout.actions, onJobLinked, sessionReady, showToast, workspace])
 
   const openResultDetails = useCallback((envelope = jobResult, jobId = currentJobId) => {
     if (!envelope) return
@@ -1420,6 +1432,7 @@ export default function ToolCast({
     setError(null)
     await undoDrawingVersion(checkout.actions.getCapability())
   }, [busy, canUndo, checkout.actions, jobRunning, sessionReady, undoDrawingVersion])
+  undoRef.current = undo
 
   const redo = useCallback(async () => {
     if (!sessionReady || busy || jobRunning || !canRedo) return
@@ -2251,6 +2264,12 @@ export default function ToolCast({
                 // is the authority and denies missing capability with 403: Checkout capability required.
                 eligible: (_row, isHead) => sessionReady && !isHead,
                 disabled: Boolean(drawing.unreadableHead?.pending),
+              }}
+              rewind={{
+                // S23: an agent-made head gets Rewind, which is the bar's
+                // Undo under the same blocks as the bar's Undo chip.
+                run: () => undo(),
+                disabled: Boolean(busy || jobRunning || drawing.versionBusy || previewLocked || !canUndo),
               }}
             />
           </div>

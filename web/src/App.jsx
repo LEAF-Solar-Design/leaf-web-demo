@@ -2245,8 +2245,19 @@ export default function App() {
     // where a chat-dispatched job enters the run pane.
     track('agent.job_linked', { tool: toolName || 'job' })
     setSelectedTool({ name: toolName || 'job' })
-    return attachSharedJob(jobId, { toolName: toolName || 'job', persist: true })
-  }, [attachSharedJob, mock])
+    const envelope = await attachSharedJob(jobId, { toolName: toolName || 'job', persist: true })
+    // S23 agent checkpoints: an agent turn whose job committed a drawing
+    // version raises one keyed notice (S1 keyed push, so a second checkpoint
+    // updates it in place) whose Undo is the ribbon's own onUndo.
+    if (envelope?.ok && envelope.result?.new_version) {
+      showToast({
+        key: 'agent-checkpoint',
+        text: 'Checkpoint saved',
+        action: { label: 'Undo', onClick: () => { void onUndo() } },
+      })
+    }
+    return envelope
+  }, [attachSharedJob, mock, onUndo, showToast])
 
   // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
   const onAuthor = useCallback(async (description, targetToolName = null, opts = {}) => {
@@ -4536,6 +4547,8 @@ export default function App() {
                         onBeforeRestore={closeStartForChange}
                         headWarning={unreadableHead}
                         mutationBlocked={drawingMutationsBlocked}
+                        onUndo={onUndo}
+                        undoDisabled={versionBusy || running || !canUndo}
                       />
                     )}
                   </div>}

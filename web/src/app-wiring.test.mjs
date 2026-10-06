@@ -2668,3 +2668,115 @@ describe('RAIL overview yields to the expanded job monitor', () => {
     assert.match(cadMoves[1].split('}')[0], /right: calc\(var\(--ck-rail-width\) \+ 18px\);/)
   })
 })
+
+describe('S23 agent checkpoint toast', () => {
+  const LB = '{', RB = '}'
+  // The live handler, comments removed (the legacy commented-out copy above
+  // it disappears with them), evaluated with spies for every free name.
+  function sliceBetween(source, from, to) {
+    const start = source.indexOf(from)
+    const end = source.indexOf(to, start)
+    assert.ok(start >= 0 && end > start, `${from} must survive comment removal`)
+    return source.slice(start, end)
+  }
+  const appHandler = sliceBetween(appNoComments, 'const onAttachAgentJob = useCallback', 'const onAuthor = useCallback')
+  function appAttach({ mock = false, envelope }) {
+    const h = {
+      attachSharedJob: async () => envelope,
+      showToast: [], undo: 0, tracked: [], selected: [],
+    }
+    const context = {
+      useCallback: (callback) => callback,
+      mock,
+      track: (...args) => h.tracked.push(args),
+      setSelectedTool: (value) => h.selected.push(value),
+      attachSharedJob: (...args) => { h.attachArgs = args; return h.attachSharedJob() },
+      showToast: (notice) => h.showToast.push(notice),
+      onUndo: async (...args) => { h.undo += 1; h.undoArgs = args },
+    }
+    h.attach = new Function(...Object.keys(context), appHandler + '\nreturn onAttachAgentJob')(...Object.values(context))
+    return h
+  }
+  const committed = { ok: true, tool: 'drawing.write', result: { new_version: { drawing_id: 'd1', version: 4 } } }
+
+  it('S23-A1 an agent job that committed a version raises one keyed Checkpoint saved notice', async () => {
+    const h = appAttach({ envelope: committed })
+    assert.equal(await h.attach('job-1', 'drawing.write'), committed)
+    assert.deepEqual(h.attachArgs, ['job-1', { toolName: 'drawing.write', persist: true }])
+    assert.equal(h.showToast.length, 1)
+    const [notice] = h.showToast
+    assert.equal(notice.key, 'agent-checkpoint')
+    assert.equal(notice.text, 'Checkpoint saved')
+    assert.equal(notice.action.label, 'Undo')
+  })
+
+  it('S23-A2 the notice Undo runs the ribbon onUndo and nothing else', async () => {
+    const h = appAttach({ envelope: committed })
+    await h.attach('job-1', 'drawing.write')
+    assert.equal(h.undo, 0, 'raising the notice must not undo anything')
+    h.showToast[0].action.onClick({ type: 'click' })
+    await Promise.resolve()
+    assert.equal(h.undo, 1)
+    assert.deepEqual(h.undoArgs, [])
+  })
+
+  it('S23-A3 no checkpoint for a failed job, a job with no new version, a superseded attach or mock', async () => {
+    for (const envelope of [
+      { ok: false, result: { new_version: { version: 4 } } },
+      { ok: true, result: {} },
+      { ok: true },
+      null,
+    ]) {
+      const h = appAttach({ envelope })
+      assert.equal(await h.attach('job-1', 'drawing.write'), envelope)
+      assert.equal(h.showToast.length, 0, `no checkpoint for ${JSON.stringify(envelope)}`)
+    }
+    const mocked = appAttach({ mock: true, envelope: committed })
+    assert.equal(await mocked.attach('job-1', 'drawing.write'), null)
+    assert.equal(mocked.showToast.length, 0)
+  })
+
+  it('S23-A4 the handler lists what it reads and onUndo is declared before it', () => {
+    assert.match(appHandler, new RegExp('\\' + RB + ', \\[attachSharedJob, mock, onUndo, showToast\\]\\)'))
+    const undoAt = appNoComments.indexOf('const onUndo = useCallback')
+    assert.ok(undoAt >= 0 && undoAt < appNoComments.indexOf('const onAttachAgentJob = useCallback'))
+    assert.ok(stripped.includes('key: "agent-checkpoint"'), 'the keyed notice survives the transform')
+  })
+
+  it('S23-A5 the history drawer receives the ribbon Undo and its blocks for Rewind', () => {
+    assert.match(appNoComments, new RegExp('<VersionHistory\\s[^>]*onUndo=\\' + LB + 'onUndo\\' + RB))
+    assert.match(appNoComments, new RegExp('<VersionHistory\\s[^>]*undoDisabled=\\' + LB + 'versionBusy \\|\\| running \\|\\| !canUndo\\' + RB))
+  })
+
+  it('S23-T1 /try raises the same keyed checkpoint and its Undo reaches the bar Undo', async () => {
+    // Raw source: the slice evaluated below keeps its comments, which are
+    // valid inside the Function body.
+    const toolCast = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
+    const handler = sliceBetween(toolCast, 'const undoRef = useRef(null)', 'const openResultDetails = useCallback')
+    const h = { toasts: [], undo: 0 }
+    const context = {
+      useCallback: (callback) => callback,
+      useRef: (value) => ({ current: value }),
+      sessionReady: true,
+      onJobLinked: () => {},
+      attachTrackedJob: async () => committed,
+      showToast: (notice) => h.toasts.push(notice),
+      setPhase: () => {}, setError: () => {},
+      workspace: { rehydrate: async () => {} },
+      checkout: { actions: { refresh: () => {} } },
+    }
+    const made = new Function(...Object.keys(context), handler + '\nreturn ' + LB + ' attachJob, undoRef ' + RB)(...Object.values(context))
+    made.undoRef.current = async () => { h.undo += 1 }
+    await made.attachJob('job-1', 'arrange-panels-as-cat')
+    assert.equal(h.toasts.length, 1)
+    assert.equal(h.toasts[0].key, 'agent-checkpoint')
+    assert.equal(h.toasts[0].text, 'Checkpoint saved')
+    assert.equal(h.toasts[0].action.label, 'Undo')
+    h.toasts[0].action.onClick()
+    assert.equal(h.undo, 1)
+    const undoAt = toolCast.indexOf('const undo = useCallback')
+    assert.ok(undoAt > 0 && toolCast.indexOf('undoRef.current = undo', undoAt) > undoAt, 'the ref follows the bar Undo')
+    const rewindAt = toolCast.indexOf('rewind=' + LB + LB)
+    assert.ok(rewindAt > 0 && toolCast.slice(rewindAt, rewindAt + 400).includes('run: () => undo(),'), 'the tab Rewind runs the bar Undo')
+  })
+})
