@@ -234,11 +234,13 @@ export function registryMcpAttachment(env: NodeJS.ProcessEnv = process.env): Reg
 }
 
 /** Consultation guide appended to the prompt only when the registry is attached. */
+const REVISION_GUIDE = `For a revision of the explicitly bound existing tool, change its implementation while preserving its name, kind, entry, engine operation, and capabilities. You may only add top-level optional properties to its input or output schema; preserve every existing property, required list, and other schema field. The harness assigns the next minor version with patch zero for these additions, or the next patch version when both schemas are unchanged. The entry source must change.`;
+
 const REGISTRY_GUIDE = `
 === Registry (read-only) ===
 Before authoring, call registry_list to see this tenant's already-registered
-tools. If an equivalent tool already exists, version-bump/extend it instead of
-authoring a duplicate; use registry_get(pack) for its recorded versions.
+tools. Use registry_get(pack) for its recorded versions.
+${REVISION_GUIDE}
 `;
 export const AUTHOR_FS_ACTIONS = ["read", "list", "exists"] as const;
 
@@ -250,6 +252,7 @@ export const AUTHOR_FS_ACTIONS = ["read", "list", "exists"] as const;
  */
 export const AUTHOR_RUNNER_GUIDE = `
 === How to author (drive these three tools, nothing else) ===
+${REVISION_GUIDE}
 1. Choose a kebab-case tool NAME and a snake_case ENGINE_OP.
 2. Choose kind "script" for CAD computation or kind "view" for an inline
    visualization. Write the entry source in your validate_tool call. Do not write repo files.
@@ -268,7 +271,6 @@ export const AUTHOR_RUNNER_GUIDE = `
    numbers look sane; fix tool.py + re-validate if not.
    Views stop after validate_tool says VALID; they never call aps_test_run.
 5. Stop once the required validation is green. Do not write anything outside tools/<name>/.
-
 Be efficient: you do NOT need to read the repo or other tools first. Submit once
 (fix and resubmit only if it reports diagnostics), call aps_test_run
 once to confirm the numbers, then stop. Avoid unnecessary exploration.
@@ -323,6 +325,15 @@ deterministically, sort source panels by stable handle, and return one removal a
 one planar replacement per panel. Do not invent a special engine_op
 implementation. The persisted tool.py is the implementation and may use any
 descriptive snake_case engine_op.`;
+
+
+export function authorPrompt(
+  systemPrompt: string,
+  description: string,
+  registryAttached: boolean,
+): string {
+  return `${systemPrompt}\n${AUTHOR_RUNNER_GUIDE}${registryAttached ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${description}`;
+}
 
 // --------------------------------------------------------------------------- //
 // The runner
@@ -668,7 +679,7 @@ export class AgentSdkRunner implements AgentRunner {
     });
     const allowed = new Set(composition.allowedTools ?? []);
     const q = sdk.query({
-      prompt: `${input.systemPrompt}\n${AUTHOR_RUNNER_GUIDE}${registry ? REGISTRY_GUIDE : ""}\n\nAuthor a tool for this request:\n${input.description}`,
+      prompt: authorPrompt(input.systemPrompt, input.description, registry !== null),
       options: {
         env: childEnv,
         model: resolveAuthorModel(this.opts.model),
