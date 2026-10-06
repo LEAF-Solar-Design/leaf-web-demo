@@ -1228,6 +1228,15 @@ export default function ToolCast({
       toolName: toolName || 'arrange-panels-as-cat',
       persist: true,
     })
+    // S23 agent checkpoints, the same keyed notice /app raises: an agent
+    // turn's job that committed a version offers Undo in one place.
+    if (envelope?.ok && envelope.result?.new_version) {
+      showToast({
+        key: 'agent-checkpoint',
+        text: 'Checkpoint saved',
+        action: { label: 'Undo', undo: true, onClick: onUndo },
+      })
+    }
     if (envelope && !envelope.ok) {
       setPhase('failed')
       setError(null)
@@ -1237,7 +1246,7 @@ export default function ToolCast({
     }
     await workspace.rehydrate()
     checkout.actions.refresh()
-  }, [attachTrackedJob, checkout.actions, onJobLinked, sessionReady, workspace])
+  }, [attachTrackedJob, checkout.actions, onJobLinked, onUndo, sessionReady, showToast, workspace])
 
   const openResultDetails = useCallback((envelope = jobResult, jobId = currentJobId) => {
     if (!envelope) return
@@ -2258,6 +2267,12 @@ export default function ToolCast({
                 // is the authority and denies missing capability with 403: Checkout capability required.
                 eligible: (_row, isHead) => sessionReady && !isHead,
                 disabled: Boolean(drawing.unreadableHead?.pending),
+              }}
+              rewind={{
+                // S23: an agent-made head gets Rewind, which is the bar's
+                // Undo under the same blocks as the bar's Undo chip.
+                run: () => undo(),
+                disabled: Boolean(busy || jobRunning || drawing.versionBusy || previewLocked || !canUndo),
               }}
             />
           </div>
