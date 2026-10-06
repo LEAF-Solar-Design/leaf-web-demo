@@ -51,6 +51,7 @@ import {
   ladderDecision,
   ladderListener,
   modifyReason,
+  modifyOpReason,
   propertyReason,
   propertyControlReason,
   retryRung,
@@ -697,6 +698,32 @@ describe('the accessible name', () => {
 // --- the reason ladders, still pure over the session record ----------------
 
 describe('the engine reason ladders', () => {
+  it('enables only the six selection-set edit records and keeps the generic gate single-only', () => {
+    const entities = [
+      { id: '16', type: 'LINE', editable: true },
+      { id: '19', type: 'CIRCLE', editable: true },
+    ]
+    const session = { engineParsed: true, busy: false, selectedIds: ['16', '19'], selectedId: '', selected: null, entities }
+    expect(modifyReason(session)).toBe(MODIFY_REASONS.multiSelection)
+    for (const op of ['delete', 'move', 'copy', 'rotate', 'scale', 'mirror']) {
+      expect(modifyOpReason(op, session)).toBe('')
+      expect(byId(`modify:${op}`).when({ session })).toBe('')
+      expect(modifyOpReason(op, { ...session, busy: true })).toBe(MODIFY_REASONS.busy)
+      expect(modifyOpReason(op, { ...session, engineParsed: false })).toBe(MODIFY_REASONS.noDocument)
+      expect(modifyOpReason(op, { ...session, selectedIds: ['16', '999'] })).toBe(MODIFY_REASONS.missingSelection)
+      expect(modifyOpReason(op, { ...session, selectedIds: ['16', 19] })).toBe(MODIFY_REASONS.invalidSelection)
+      const many = Array.from({ length: 257 }, (_, i) => String(i + 16))
+      expect(modifyOpReason(op, { ...session, selectedIds: many })).toBe(MODIFY_REASONS.selectionLimit)
+    }
+    for (const op of ['explode', 'offset', 'trim', 'extend', 'fillet', 'chamfer', 'arrayRect', 'arrayPolar', 'copyClip', 'cutClip']) {
+      expect(modifyOpReason(op, session)).toBe(MODIFY_REASONS.multiSelection)
+    }
+    for (const [type, reason] of [['INSERT', MODIFY_REASONS.placedInsert], ['DIMENSION', MODIFY_REASONS.placedDimension], ['MLEADER', MODIFY_REASONS.placedMleader], ['XLINE', MODIFY_REASONS.readOnlyKind]]) {
+      const mixed = { ...session, entities: [entities[0], { ...entities[1], type, editable: false }] }
+      for (const op of ['move', 'copy', 'rotate', 'scale', 'mirror']) expect(modifyOpReason(op, mixed)).toBe(reason)
+      expect(modifyOpReason('delete', mixed)).toBe(type === 'XLINE' ? MODIFY_REASONS.readOnlyKind : '')
+    }
+  })
   it('answers the Draw ladder in resolution order', () => {
     expect(drawReason(null)).toBe(DRAW_REASONS.noDocument)
     expect(drawReason({ errorKind: 'crashed' })).toBe(DRAW_REASONS.crashed)

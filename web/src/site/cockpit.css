@@ -524,7 +524,7 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cad-edit-workbench {
     position: fixed; top: calc(var(--ck-canvas-top) + 36px); left: calc(var(--ck-pane) + 12px); z-index: 4;
-    width: 420px; max-height: calc(100vh - var(--ck-canvas-top) - 36px - 90px);
+    width: 420px; max-height: calc(100dvh - var(--ck-canvas-top) - 36px - 90px);
   }
 
   /* The Solar flow seat: the form host and the flow host in one bounded panel to the right of the 420px
@@ -533,7 +533,7 @@
   .studio-shell .app[data-surface="solar"] .solar-flow-seat {
     position: fixed; left: calc(var(--ck-pane) + 458px); top: calc(var(--ck-canvas-top) + 86px); z-index: 4;
     width: 280px; max-width: calc(100vw - var(--ck-pane) - 470px);
-    max-height: calc(100vh - var(--ck-canvas-top) - 86px - 122px);
+    max-height: calc(100dvh - var(--ck-canvas-top) - 86px - 122px);
     box-sizing: border-box; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
     pointer-events: auto;
   }
@@ -1278,4 +1278,44 @@
 
 @media (min-width: 1500px) {
   .studio-shell .app[data-surface="solar"] .solar-flow-seat { width: 360px; }
+}
+
+@media (pointer: coarse) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt {
+    min-height: 44px;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt :is(.cp-input, .cp-mode, .cp-run, .cp-cancel, .cp-field) {
+    min-width: 44px;
+    min-height: 44px;
+    box-sizing: border-box;
+  }
+}
+
+/* The dense skin stays append-only: outside the mouse hover gate, restore
+   each control's resting paint. Expanded, selected and pressed states keep
+   their persistent feedback. */
+@media (hover: none), (pointer: coarse), (pointer: none) {
+  .cockpit-quick button:hover:not(:disabled):not([aria-expanded="true"]),
+  .cockpit-strip button:hover:not(:disabled),
+  .doc-tab-add:hover { background: transparent; }
+  .cockpit-ribbon-tabs [role="tab"]:hover:not(:disabled) { background: transparent; }
+  .cockpit-ribbon-tabs [role="tab"]:hover:not(:disabled):not([aria-selected="true"]) { color: #d4d4d4; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster-label.as-button:hover { color: #9a9a9a; background: transparent; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster[data-note] .ribbon-cluster-label.as-button:hover { color: var(--ck-warn); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool:hover:not(:disabled):not([aria-expanded="true"]) { background: transparent; }
+  .doc-tab-start:hover { background: transparent; color: #d4d4d4; }
+  .doc-tab-close:hover { background: var(--ck-active); color: rgba(255, 255, 255, .85); }
+  @media (min-width: 981px) {
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"]:hover:not([aria-selected="true"]) { background: transparent; color: #9a9a9a; }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button:hover { background: transparent; }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button[aria-disabled="true"]:hover { background: transparent; }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-close:hover { background: transparent; color: #cfcfcf; }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls :is(.bar-add, .bar-scope, .chip-act):hover:not(:disabled) { background: transparent; color: #9a9a9a; }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-run:hover:not(:disabled) { background: transparent; color: var(--ck-cmd); }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-cancel:hover:not(:disabled) { background: transparent; color: #cfcfcf; }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-mode:hover:not([aria-pressed="true"]) { color: #8a8a8a; }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-add:hover { background: transparent; color: #d4d4d4; }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button:hover:not(:disabled):not([aria-pressed="true"]) { background: transparent; }
+    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .legend-row:hover:not(:disabled) { background: transparent; }
+  }
 }

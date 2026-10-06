@@ -43,6 +43,91 @@ function render(ui) {
   return { ...view, rerender(next) { view.rerender(next); expand() } }
 }
 
+describe('campaign field input hints', () => {
+  it.each([['Title', 'next'], ['Prompt', 'enter']])('sets autocomplete and the enter key hint for %s', (label, hint) => {
+    render(panel())
+    const field = screen.getByLabelText(label)
+    expect(field.getAttribute('autocomplete')).toBe('off')
+    expect(field.getAttribute('enterkeyhint')).toBe(hint)
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    expect(screen.getByLabelText(label).getAttribute('autocomplete')).toBe('off')
+    expect(screen.getByLabelText(label).getAttribute('enterkeyhint')).toBe(hint)
+  })
+})
+
+describe('campaign skeleton timing', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    campaign.status = 'loading'
+    campaign.campaigns = []
+    campaign.selected = null
+    campaign.selectedId = null
+  })
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+  })
+  const advance = ms => act(() => vi.advanceTimersByTime(ms))
+
+  it('delays the skeleton for 200 ms and holds it for 400 ms once shown', () => {
+    const { container, rerender } = renderCollapsed(panel())
+    expect(screen.queryByRole('status', { name: 'Loading campaigns' })).toBeNull()
+    expect(container.querySelector('.skeleton-stack')).toBeNull()
+    advance(199)
+    expect(container.querySelector('.skeleton-stack')).toBeNull()
+    advance(1)
+    expect(screen.getByRole('status', { name: 'Loading campaigns' })).toBeTruthy()
+    expect(container.querySelector('.skeleton-stack')).toBeTruthy()
+    advance(50)
+    campaign.status = 'ready'
+    rerender(panel())
+    expect(container.querySelector('.skeleton-stack')).toBeTruthy()
+    advance(349)
+    expect(container.querySelector('.skeleton-stack')).toBeTruthy()
+    advance(1)
+    expect(screen.queryByRole('status', { name: 'Loading campaigns' })).toBeNull()
+    expect(container.querySelector('.skeleton-stack')).toBeNull()
+    expect(screen.getByText('No campaigns yet.')).toBeTruthy()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([0, 199])('never flashes a skeleton when campaigns arrive at %i ms', duration => {
+    const { container, rerender } = renderCollapsed(panel())
+    expect(container.querySelector('.skeleton-stack')).toBeNull()
+    advance(duration)
+    campaign.status = 'ready'
+    rerender(panel())
+    expect(container.querySelector('.skeleton-stack')).toBeNull()
+    advance(10000)
+    expect(screen.queryByRole('status', { name: 'Loading campaigns' })).toBeNull()
+    expect(container.querySelector('.skeleton-stack')).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps the skeleton during a long load and removes it when loading finishes', () => {
+    const { container, rerender } = renderCollapsed(panel())
+    advance(9999)
+    expect(container.querySelector('.skeleton-stack')).toBeTruthy()
+    advance(1)
+    expect(screen.getByRole('status', { name: 'Loading campaigns' })).toBeTruthy()
+    expect(container.querySelector('.skeleton-stack')).toBeTruthy()
+    campaign.status = 'ready'
+    rerender(panel())
+    expect(container.querySelector('.skeleton-stack')).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('cleans up the skeleton timer when the panel unmounts', () => {
+    const { unmount } = renderCollapsed(panel())
+    expect(vi.getTimerCount()).toBe(1)
+    advance(200)
+    expect(screen.getByRole('status', { name: 'Loading campaigns' })).toBeTruthy()
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
 describe('finish request navigation', () => {
   function freshProject() {
     campaign.campaigns = []
@@ -1190,11 +1275,8 @@ describe('campaign panel in the project workspace', () => {
     expect(campaign.refetch).toHaveBeenCalledTimes(1)
   })
 
-  it('shows a cold-load skeleton and selects another campaign', () => {
-    campaign.status = 'loading'
-    const { container, rerender } = render(panel())
-    expect(container.querySelector('.skeleton-stack')).toBeTruthy()
-    campaign.status = 'ready'
+  it('selects another campaign after campaigns load', () => {
+    const { rerender } = render(panel())
     campaign.campaigns = [row, { ...row, campaign_id: 'other', title: 'Another campaign' }]
     rerender(panel())
     expect(screen.getByRole('button', { name: 'Release documents' }).getAttribute('aria-pressed')).toBe('true')

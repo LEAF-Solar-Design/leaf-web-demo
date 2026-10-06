@@ -1,4 +1,6 @@
 import './panels.css'
+import { absoluteWithZone, relativeUntil } from '../lib/railTime.js'
+import useRelativeNow from '../lib/useRelativeNow.js'
 
 // Single-writer checkout line: shown near the version note when the drawing's
 // version manifest carries a non-null `checkout` lock held by SOMEONE ELSE
@@ -25,39 +27,15 @@ import './panels.css'
 // clock disagrees (skew), or the record carries an `expires` we cannot read. The
 // browser clock never decides the lock is free (checkoutIdentity.js
 // `looksStale`), so the chip must keep rendering sanely when the two disagree.
-function fmtUntil(iso) {
-  if (!iso) return null
-  const d = new Date(iso)
-  // An `expires` we cannot parse is not a horizon either, and echoing it raw
-  // put the string itself where a duration goes ("until banana"). It is a real
-  // record shape, not a hypothetical: `looksStale` already treats an
-  // unparseable expiry as elapsed for exactly this reason, so the rail said
-  // "until banana … this lease looks expired" in one breath. Same answer as the
-  // elapsed case — no horizon, and let the sibling note carry the meaning.
-  if (Number.isNaN(d.getTime())) return { rel: null, abs: null }
-  const abs = d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-  const remainingMs = d.getTime() - Date.now()
-  // At or past expiry there is no horizon left to name: a null `rel` is what
-  // tells the caller to drop the "until …" clause, and the absolute clock stays
-  // for the hover title. The test is on the raw millisecond delta, not on
-  // rounded minutes, so a lease with 20 seconds left rounds UP to "~1 m" rather
-  // than down into the expired branch.
-  if (remainingMs <= 0) return { rel: null, abs }
-  const mins = Math.max(Math.round(remainingMs / 60000), 1)
-  if (mins >= 1440) {
-    return { rel: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }), abs }
-  }
-  if (mins >= 60) return { rel: `~${Math.round(mins / 60)} h`, abs }
-  return { rel: `~${mins} m`, abs }
-}
-
 export default function CheckoutChip({ checkout }) {
+  const now = useRelativeNow()
   if (!checkout || !checkout.holder) return null
-  const until = fmtUntil(checkout.expires)
+  const expires = Date.parse(checkout.expires)
+  const until = relativeUntil(expires, now)
   return (
-    <span className="checkout-chip" role="status" title={until?.abs || undefined}>
+    <span className="checkout-chip" role="status" title={absoluteWithZone(expires)}>
       Editing locked by <b>{checkout.holder}</b>
-      {until?.rel ? <> until <b className="t-rel">{until.rel}</b></> : null}
+      {until ? <> until <b className="t-rel">{until}</b></> : null}
       {/* No leading punctuation: .checkout-chip is inline-flex with a 6px gap
           (styles.css), so this note is its own flex item and a leading "." or
           "," renders as a mark floating clear of the value before it. */}

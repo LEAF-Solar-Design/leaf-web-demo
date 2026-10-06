@@ -19,6 +19,38 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
+test('G1 Solar editor effects follow catalog view, placement and surface fold', () => {
+  for (const name of ['solar-unit-sync', 'solar-design-presets']) {
+    const id = `tool:${name}`
+    assert.deepEqual(entryFor(id).expected_effect.ready, { kind: 'opens', target: 'solar-step-editor', tool: name })
+    assert.equal(entryFor(id).expected_effect['job-running'].kind, 'disabled_with_reason')
+    for (const mutate of [
+      (tool) => { tool.placement = { tab: 'manage' } },
+      (tool) => { tool.solar.interaction.mode = 'none' },
+      (tool) => { delete tool.solar },
+      (tool, family) => { family.family_id = 'drawing' },
+    ]) {
+      const changed = clone(snapshot)
+      const family = changed.response.families.find((row) => row.capabilities.some((tool) => tool.name === name))
+      const tool = family.capabilities.find((tool) => tool.name === name)
+      mutate(tool, family)
+      // Use an actual folded family id from the surface manifest.
+      if (family.family_id === 'drawing') family.family_id = PRODUCT_SURFACES.find((row) => row.id === 'solar').familyIds[0]
+      assert.equal(buildFeatureMap({ snapshot: changed }).entries.find((row) => row.id === id)
+        .expected_effect.ready.target, 'catalog-run-decision')
+    }
+  }
+  const changed = clone(snapshot)
+  const family = changed.response.families.find((row) => row.capabilities.some((tool) => tool.name === 'solar-unit-sync'))
+  const tool = family.capabilities.find((tool) => tool.name === 'solar-unit-sync')
+  tool.name = 'record-derived-form'
+  tool.solar.name = tool.name
+  const config = clone(overrides)
+  delete config.overrides['tool:solar-unit-sync']
+  assert.equal(buildFeatureMap({ snapshot: changed, overrides: config }).entries
+    .find((row) => row.id === 'tool:record-derived-form').expected_effect.ready.target, 'solar-step-editor')
+})
+
 test('C2 certifies all seven engine and disclosure controls with real recipes', () => {
   const expected = [
     ['open-dxf', 'Open DXF', 'toggles', 'dxf-import-expanded', 'closed'],

@@ -38,8 +38,203 @@ import { checkViewFragment, VIEW_ENTRY_BASENAME } from "../../registry/viewCheck
 const KEBAB = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ENGINE_OP = /^[a-z][a-z0-9_]{0,63}$/;
 const RUN_FUNCTION = /(?:^|\n)[ \t]*def[ \t]+run[ \t]*\([ \t]*intake[ \t]*,[ \t]*params[ \t]*\)[ \t]*:/;
-const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
+// ASCII digits only, at most CPython's default int_max_str_digits (4300) per
+// group: the server reads a version with Python's `\d`, whose Unicode table
+// differs between Python and Node releases, and converts the incremented group
+// with int() and str(), which raise past 4300 digits. A version outside this
+// grammar is refused here even where one server build would accept it.
+export const MAX_VERSION_GROUP_DIGITS = 4300;
+const SEMVER = /^([0-9]{1,4300})\.([0-9]{1,4300})\.([0-9]{1,4300})$/;
 export const MAX_TOOL_SOURCE_BYTES = 512 * 1024;
+
+export const REVISION_ERROR = "invalid_staged_catalog_revision";
+
+class JsonNumber {
+  constructor(readonly token: string) {}
+}
+
+type JsonNode =
+  | null | boolean | string | JsonNumber
+  | JsonNode[] | Map<string, JsonNode>;
+
+function lossless(text: string): JsonNode {
+  const quoted = text.replace(
+    /"(?:\\[\s\S]|[^"\\])*"|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/g,
+    token => JSON.stringify(
+      token[0] === '"' ? "s:" + JSON.parse(token) : "n:" + token,
+    ),
+  );
+  function lift(value: unknown): JsonNode {
+    if (typeof value === "string") {
+      return value.startsWith("s:")
+        ? value.slice(2) : new JsonNumber(value.slice(2));
+    }
+    if (value === null || typeof value === "boolean") return value;
+    if (Array.isArray(value)) return value.map(lift);
+    if (typeof value === "object") {
+      return new Map(Object.entries(value).map(([key, child]) => {
+        if (!key.startsWith("s:")) throw new Error(REVISION_ERROR);
+        return [key.slice(2), lift(child)] as [string, JsonNode];
+      }));
+    }
+    throw new Error(REVISION_ERROR);
+  }
+  return lift(JSON.parse(quoted));
+}
+
+function numberKey(token: string): string {
+  if (!/[.eE]/.test(token)) return "i:" + BigInt(token);
+  const match = /^(-?)([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$/.exec(token);
+  if (!match) throw new Error(REVISION_ERROR);
+  const sign = match[1];
+  const digits = (match[2] + (match[3] ?? "")).replace(/^0+/, "");
+  if (!digits) return "f:" + sign + "0";
+  const scale = BigInt(match[4] ?? "0") - BigInt((match[3] ?? "").length);
+  const magnitude = BigInt(digits.length) - 1n + scale;
+  if (magnitude > 308n) return "f:" + sign + "inf";
+  if (magnitude < -324n) return "f:" + sign + "0";
+
+  let numerator = BigInt(digits);
+  let denominator = 1n;
+  if (scale >= 0n) numerator *= 10n ** scale;
+  else denominator = 10n ** (-scale);
+
+  let exponent = BigInt(
+    numerator.toString(2).length - denominator.toString(2).length,
+  );
+  if (
+    exponent >= 0n
+      ? numerator < (denominator << exponent)
+      : (numerator << (-exponent)) < denominator
+  ) exponent -= 1n;
+
+  let power = exponent - 52n;
+  if (power < -1074n) power = -1074n;
+  if (power >= 0n) denominator <<= power;
+  else numerator <<= -power;
+
+  let significand = numerator / denominator;
+  const remainder = numerator % denominator;
+  if (
+    2n * remainder > denominator ||
+    (2n * remainder === denominator && significand % 2n === 1n)
+  ) significand += 1n;
+
+  if (significand === 0n) return "f:" + sign + "0";
+  if (significand === 2n ** 53n) {
+    significand /= 2n;
+    power += 1n;
+  }
+  if (power > 971n) return "f:" + sign + "inf";
+  return "f:" + sign + significand + "p" + power;
+}
+
+function schemaEqual(
+  left: JsonNode | undefined,
+  right: JsonNode | undefined,
+  depth = 0,
+): boolean {
+  if (depth > 128) return false;
+  if (left instanceof JsonNumber || right instanceof JsonNumber) {
+    return left instanceof JsonNumber && right instanceof JsonNumber &&
+      numberKey(left.token) === numberKey(right.token);
+  }
+  if (left instanceof Map || right instanceof Map) {
+    return left instanceof Map && right instanceof Map &&
+      left.size === right.size &&
+      [...left].every(([key, value]) =>
+        right.has(key) && schemaEqual(value, right.get(key), depth + 1));
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => schemaEqual(value, right[index], depth + 1));
+  }
+  return left === right;
+}
+
+type SchemaChange = "same" | "additive" | "breaking";
+
+function classifySchema(base: JsonNode, staged: JsonNode): SchemaChange {
+  if (schemaEqual(base, staged)) return "same";
+  if (
+    !(base instanceof Map) || !(staged instanceof Map) ||
+    base.get("type") !== "object" || staged.get("type") !== "object"
+  ) return "breaking";
+
+  const rest = (value: Map<string, JsonNode>) =>
+    new Map([...value].filter(([key]) => key !== "properties"));
+  if (!schemaEqual(rest(base), rest(staged))) return "breaking";
+
+  const before = base.has("properties") ? base.get("properties") : new Map();
+  const after = staged.has("properties") ? staged.get("properties") : new Map();
+  if (!(before instanceof Map) || !(after instanceof Map)) return "breaking";
+
+  if (base.has("required")) {
+    const required = base.get("required");
+    if (
+      !Array.isArray(required) ||
+      required.some(key => typeof key !== "string" || !before.has(key)) ||
+      new Set(required).size !== required.length
+    ) return "breaking";
+  }
+  if ([...before].some(([key, value]) =>
+    !after.has(key) || !schemaEqual(value, after.get(key)))) return "breaking";
+
+  const added = [...after.keys()].filter(key => !before.has(key));
+  if (
+    !added.length ||
+    added.some(key =>
+      !(after.get(key) instanceof Map) && typeof after.get(key) !== "boolean")
+  ) return "breaking";
+  return "additive";
+}
+
+export function revisionSchemaChange(
+  baseJson: string,
+  stagedJson: string,
+): SchemaChange {
+  return classifySchema(lossless(baseJson), lossless(stagedJson));
+}
+
+function incrementDecimal(value: string): string {
+  const next = (BigInt(value) + 1n).toString();
+  if (next.length > MAX_VERSION_GROUP_DIGITS) throw new Error(REVISION_ERROR);
+  return next;
+}
+
+export function revisionVersion(
+  rawRegistry: string,
+  targetName: string,
+  candidateJson: string,
+): string {
+  try {
+    const registry = lossless(rawRegistry);
+    const candidate = lossless(candidateJson);
+    const tools = registry instanceof Map ? registry.get("tools") : null;
+    if (!Array.isArray(tools) || !(candidate instanceof Map)) {
+      throw new Error(REVISION_ERROR);
+    }
+    const matches = tools.filter(
+      (tool): tool is Map<string, JsonNode> =>
+        tool instanceof Map && tool.get("name") === targetName,
+    );
+    if (matches.length !== 1) throw new Error(REVISION_ERROR);
+    const base = matches[0]!;
+    const changes = ["params", "returns"].map(key =>
+      classifySchema(base.get(key) ?? null, candidate.get(key) ?? null));
+    const version = base.get("version");
+    const match = typeof version === "string" ? SEMVER.exec(version) : null;
+    if (
+      changes.includes("breaking") || !match || match[0] !== version
+    ) throw new Error(REVISION_ERROR);
+    return changes.includes("additive")
+      ? `${match[1]}.${incrementDecimal(match[2]!)}.0`
+      : `${match[1]}.${match[2]}.${incrementDecimal(match[3]!)}`;
+  } catch {
+    throw new Error(REVISION_ERROR);
+  }
+}
 
 function sha256(bytes: Buffer | string): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -129,6 +324,9 @@ export function submitToolProposal(
   now = new Date(),
   previous?: ToolSourceReceipt,
 ): ToolSubmissionResult {
+  const candidateJson = JSON.stringify(proposal);
+  if (candidateJson === undefined) throw new Error(REVISION_ERROR);
+  proposal = JSON.parse(candidateJson) as ToolSourceProposal;
   const diagnostics: string[] = [];
   if (!KEBAB.test(proposal.name) || proposal.name.length > 64) {
     diagnostics.push("name must be 1-64 lowercase kebab-case characters");
@@ -189,14 +387,13 @@ export function submitToolProposal(
   const created = existsSync(targetDir)
     ? assertReplaceable(targetDir, previous!, entry, manifestPath, modified, entryBasename)
     : modified;
-  let version = "1.0.0";
-  if (registered.length === 1) {
-    const match = SEMVER.exec(registered[0]!.version);
-    if (!match || Number(match[3]) >= Number.MAX_SAFE_INTEGER) {
-      throw new Error("tool proposal rejected: revision target has an unsupported version");
-    }
-    version = `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
-  }
+  const version = registered.length === 1
+    ? revisionVersion(
+        readFileSync(join(root, "registry.json"), "utf8"),
+        proposal.name,
+        candidateJson,
+      )
+    : "1.0.0";
   const tool: ToolPackage = {
     name: proposal.name,
     version,

@@ -6,7 +6,9 @@ import { PRODUCT_SURFACES, productSurfaceStates } from '../src/site/productSurfa
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../src/lib/studioDrawers.js'
 import { PROMPTS } from '../src/cadedit/promptKeys.js'
-import { isWriteTool, toolMcpSource } from '../src/lib/toolRecord.js'
+import { isWriteTool, toolMcpSource, toolPlacementTab } from '../src/lib/toolRecord.js'
+import { familiesForSurface } from '../src/lib/surfaceRails.js'
+import { solarFormKeys, solarView } from '../src/solar/solarView.js'
 
 const readJson = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'))
 export const DEFAULT_REGISTRIES = Object.freeze({
@@ -438,7 +440,7 @@ function actionEffect(action, ctx, override) {
   throw new Error(`featureMap: action ${action.id} needs an explicit effect override`)
 }
 
-function toolEffect(tool, ctx) {
+function toolEffect(tool, ctx, solarEditor = false) {
   // The familyCluster run ladder, using the product's reason vocabulary and
   // write/MCP predicates. ribbonClusters.js itself imports JSX consumers.
   const why = toolMcpSource(tool) ? REASONS.mcpToolNotWired
@@ -447,7 +449,7 @@ function toolEffect(tool, ctx) {
         : isWriteTool(tool) && ctx.writeLocked ? REASONS.writeLocked
           : isWriteTool(tool) && !ctx.writeEntitled ? REASONS.writeUnentitled
             : isWriteTool(tool) && ctx.engineDirty ? REASONS.unsavedEngineEdits : ''
-  return why ? disabled(why) : { kind: 'opens', target: 'catalog-run-decision', tool: tool.name }
+  return why ? disabled(why) : { kind: 'opens', target: solarEditor ? 'solar-step-editor' : 'catalog-run-decision', tool: tool.name }
 }
 
 function addCases(entry, candidates, evaluate, relevant = () => false) {
@@ -513,7 +515,13 @@ function buildEntry(item, config, snapshot, registries) {
     entry.catalog_version = snapshot.catalog_version
     entry.tool_version = record.version
     entry.family_id = item.family_id
-    addCases(entry, cases(config, kind), (ctx) => ({ effect: toolEffect(record, ctx) }))
+    const { view } = solarView(record)
+    const solarEditor = !toolPlacementTab(record)
+      && !familiesForSurface(snapshot.response.families, 'solar').some((family) => family.family_id === item.family_id)
+      && view?.interaction.mode === 'form'
+      && solarFormKeys({ ...record, params: record.params || record.params_schema }, view).length > 0
+    entry.sources.push('web/src/lib/surfaceRails.js', 'web/src/solar/solarView.js')
+    addCases(entry, cases(config, kind), (ctx) => ({ effect: toolEffect(record, ctx, solarEditor) }))
   } else if (kind === 'tab') {
     entry.profile = profile
     entry.sources = ['web/src/lib/ribbonTabs.data.js', 'web/src/site/CockpitTopBand.jsx']

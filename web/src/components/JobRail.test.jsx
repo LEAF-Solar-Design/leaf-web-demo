@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { fromBrokerJob, validateBuildRecord } from '../lib/buildQueue.js'
 import JobRail from './JobRail.jsx'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
 
 const doneJob = Object.freeze({
   job_id: 'job-verified',
@@ -17,6 +20,124 @@ const doneJob = Object.freeze({
 const terminalRecord = fromBrokerJob({
   ...doneJob,
   receipts: [{ kind: 'terminal', ref: 'receipts/job-verified/receipt.json', at: 1725400001 }],
+})
+
+describe('JobRail failed-job retry', () => {
+  const failedJob = { ...doneJob, job_id: 'job-failed', status: 'failed' }
+
+  it('shows Retry only on failed jobs and calls the handler once per click with that job', () => {
+    const onRetryJob = vi.fn()
+    const onSelectJob = vi.fn()
+    const jobs = ['submitted', 'queued', 'running', 'complete'].map((status) => ({
+      ...doneJob, job_id: `job-${status}`, status,
+    }))
+    const failedRecord = { ...fromBrokerJob(failedJob), actions: [] }
+    const { container } = render(
+      <JobRail mock jobs={[...jobs, failedJob]} builds={[failedRecord]}
+        onRetryJob={onRetryJob} onSelectJob={onSelectJob} />,
+    )
+    const retries = container.querySelectorAll('button[data-action="retry"]')
+    expect(retries).toHaveLength(1)
+    expect(retries[0].textContent).toBe('Retry')
+    expect(retries[0].closest('.bq-card').getAttribute('data-state')).toBe('failed')
+    for (const count of [1, 2]) {
+      fireEvent.click(retries[0])
+      expect(onRetryJob).toHaveBeenCalledTimes(count)
+      expect(onRetryJob.mock.calls[count - 1]).toEqual([failedJob])
+      expect(onRetryJob.mock.calls[count - 1][0]).toBe(failedJob)
+    }
+    expect(onSelectJob).not.toHaveBeenCalled()
+  })
+
+  it('renders no Retry without a function handler', () => {
+    for (const onRetryJob of [undefined, null, true]) {
+      const { container, unmount } = render(
+        <JobRail mock jobs={[failedJob]} currentJob={failedJob} onRetryJob={onRetryJob} />,
+      )
+      expect(container.querySelectorAll('.bq-card')).toHaveLength(1)
+      expect(container.querySelector('[data-action="retry"]')).toBeNull()
+      unmount()
+    }
+  })
+
+  it('supports the current-session failed row without duplicating it when the list catches up', () => {
+    const onRetryJob = vi.fn()
+    const { container, rerender } = render(
+      <JobRail mock jobs={[]} currentJob={failedJob} onRetryJob={onRetryJob} />,
+    )
+    fireEvent.click(container.querySelector('[data-action="retry"]'))
+    expect(onRetryJob).toHaveBeenCalledTimes(1)
+    expect(onRetryJob).toHaveBeenLastCalledWith(failedJob)
+    rerender(<JobRail mock jobs={[failedJob]} currentJob={failedJob} onRetryJob={onRetryJob} />)
+    expect(container.querySelectorAll('[data-action="retry"]')).toHaveLength(1)
+    fireEvent.click(container.querySelector('[data-action="retry"]'))
+    expect(onRetryJob).toHaveBeenCalledTimes(2)
+    expect(onRetryJob).toHaveBeenLastCalledWith(failedJob)
+  })
+})
+
+describe('JobRail loading presentation', () => {
+  it('delays the inferred first-fetch skeleton until 200 ms', () => {
+    vi.useFakeTimers()
+    const { container } = render(<JobRail jobs={[]} />)
+    expect(container.querySelector('.rail-ske')).toBeNull()
+    expect(container.querySelector('.rail-empty')).toBeNull()
+    act(() => vi.advanceTimersByTime(199))
+    expect(container.querySelector('.rail-ske')).toBeNull()
+    act(() => vi.advanceTimersByTime(1))
+    expect(container.querySelectorAll('.skeleton-row')).toHaveLength(2)
+    act(() => vi.advanceTimersByTime(3800))
+    expect(container.querySelector('.rail-ske')).toBeNull()
+    expect(container.querySelector('.rail-empty')).not.toBeNull()
+  })
+
+  it('never flashes a skeleton for a fetch that finishes under 200 ms', () => {
+    vi.useFakeTimers()
+    const { container, rerender } = render(<JobRail jobs={[]} loading />)
+    act(() => vi.advanceTimersByTime(199))
+    expect(container.querySelector('.rail-ske')).toBeNull()
+    rerender(<JobRail jobs={[]} loading={false} />)
+    act(() => vi.advanceTimersByTime(1000))
+    expect(container.querySelector('.rail-ske')).toBeNull()
+    expect(container.querySelector('.rail-empty')).not.toBeNull()
+  })
+
+  it('keeps a shown skeleton visible for the shared minimum display duration', () => {
+    vi.useFakeTimers()
+    const { container, rerender } = render(<JobRail jobs={[]} loading />)
+    act(() => vi.advanceTimersByTime(200))
+    expect(container.querySelector('.rail-ske')).not.toBeNull()
+    act(() => vi.advanceTimersByTime(50))
+    rerender(<JobRail jobs={[]} loading={false} />)
+    act(() => vi.advanceTimersByTime(349))
+    expect(container.querySelector('.rail-ske')).not.toBeNull()
+    expect(container.querySelector('.rail-empty')).toBeNull()
+    act(() => vi.advanceTimersByTime(1))
+    expect(container.querySelector('.rail-ske')).toBeNull()
+    expect(container.querySelector('.rail-empty')).not.toBeNull()
+  })
+
+  it('keeps cached job, current-session and build rows mounted at 60% opacity during refetch', () => {
+    vi.useFakeTimers()
+    const props = {
+      jobs: [doneJob],
+      currentJob: { ...doneJob, job_id: 'job-current' },
+      builds: [terminalRecord, { ...terminalRecord, id: 'job-older' }],
+    }
+    const { container, rerender } = render(<JobRail {...props} loading={false} />)
+    const cards = [...container.querySelectorAll('.bq-card')]
+    expect(cards).toHaveLength(3)
+    expect(container.querySelector('.rail-ledger').style.opacity).toBe('')
+    rerender(<JobRail {...props} loading />)
+    expect(getComputedStyle(container.querySelector('.rail-ledger')).opacity).toBe('0.6')
+    act(() => vi.advanceTimersByTime(10000))
+    expect(container.querySelector('.rail-ske')).toBeNull()
+    expect(container.querySelector('.rail-empty')).toBeNull()
+    expect([...container.querySelectorAll('.bq-card')]).toEqual(cards)
+    cards.forEach((card, index) => expect(container.querySelectorAll('.bq-card')[index]).toBe(card))
+    rerender(<JobRail {...props} loading={false} />)
+    expect(container.querySelector('.rail-ledger').style.opacity).toBe('')
+  })
 })
 
 describe('JobRail build-record reconciliation', () => {

@@ -123,6 +123,7 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
     <div className="drawing-find-band" data-nav-find>
     <div className="drawing-find-field">
     <label htmlFor={inputId}>Find in drawing</label>
+    {/* Autocomplete is off because queries are specific to the current drawing. */}
     <input id={inputId} role="combobox" value={query} autoComplete="off"
       aria-autocomplete="list" aria-expanded={!!results} aria-controls={results ? listId : undefined}
       aria-activedescendant={results ? `${listId}-${active}` : undefined}

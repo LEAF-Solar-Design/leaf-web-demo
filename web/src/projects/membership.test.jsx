@@ -41,6 +41,23 @@ function setup(over = {}) {
   return { onInvite, onChangeRole, onRevoke, ...rendered }
 }
 
+describe('membership field input hints', () => {
+  it('sets autocomplete and the search enter key hint for the member search', () => {
+    setup()
+    const search = screen.getByLabelText('Search organization members')
+    expect(search.getAttribute('type')).toBe('search')
+    expect(search.getAttribute('autocomplete')).toBe('off')
+    expect(search.getAttribute('enterkeyhint')).toBe('search')
+  })
+
+  it.each(MEMBERS.map(member => member.name))('sets autocomplete and the done enter key hint for the display name of %s', name => {
+    setup({ authority: { ...OWNER_AUTHORITY, can_label: true }, onSetLabel: vi.fn() })
+    const displayName = screen.getByLabelText(`Display name for ${name}`)
+    expect(displayName.getAttribute('autocomplete')).toBe('off')
+    expect(displayName.getAttribute('enterkeyhint')).toBe('done')
+  })
+})
+
 it('B5 an org owner saves a display name for a roster member', async () => {
   const onSetLabel = vi.fn().mockResolvedValue(undefined)
   setup({ authority: { ...OWNER_AUTHORITY, can_label: true }, onSetLabel })
