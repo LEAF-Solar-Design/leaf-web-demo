@@ -1,5 +1,6 @@
 import ToolsPanel from './ToolsPanel.jsx'
 import { ToolHistoryProvider } from './ToolHistory.jsx'
+import { useLoadingPhase } from '../lib/loadingTiming.js'
 
 export default function CapabilityCatalog({
   catalog,
@@ -23,6 +24,8 @@ export default function CapabilityCatalog({
   runDisabledNote = null,
 }) {
   const families = catalog?.families || []
+  const loadingPhase = useLoadingPhase(!catalogError && families.length === 0)
+  const showSkeleton = !catalogError && (loadingPhase === 'shown' || loadingPhase === 'long')
   const capabilityCount = families.reduce(
     (count, family) => count + (family.capabilities?.length || 0),
     0,
@@ -59,14 +62,15 @@ export default function CapabilityCatalog({
           />
         </div>
       )}
-      {!catalogError && families.length === 0 && (
-        <div className="skeleton-stack" aria-label="Loading capability families">
+      {showSkeleton && (
+        // Match a collapsed family row: 44px header plus its two 1px borders.
+        <div className="skeleton-stack" aria-label="Loading capability families" style={{ '--skeleton-h': '46px' }}>
           <div className="skeleton-row" />
           <div className="skeleton-row" />
           <div className="skeleton-row" />
         </div>
       )}
-      {!catalogError && families.map((family) => {
+      {!catalogError && !showSkeleton && families.map((family) => {
         const open = !!openFamilies?.[family.family_id]
         const count = family.capabilities?.length || 0
         return (
