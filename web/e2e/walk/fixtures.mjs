@@ -1,6 +1,7 @@
 import { test as base, expect } from '@playwright/test'
 import { startStack } from '../../walk/stack.mjs'
 import { prepareProductionBundle } from '../../walk/sameOriginProxy.mjs'
+import { SERVER_ERROR_CAP, extractErrorId, serverDiagnostic } from '../../walk/serverDiagnostics.mjs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { basename, join } from 'node:path'
@@ -189,6 +190,7 @@ export const test = base.extend({
     const evidence = {
       schema: 'leaf.walk-evidence.v1', test: testInfo.title, viewport: testInfo.project.name,
       consoleErrors: [], pageErrors: [], failedRequests: [], abortedRequests: [], httpErrors: [],
+      serverErrors: [], serverErrorsDropped: 0,
       responses: [], steps: [], accessibility: null,
       startedAt: new Date().toISOString(),
     }
@@ -202,6 +204,7 @@ export const test = base.extend({
     }
   }, { auto: true }],
   page: async ({ page, stack, firstRun, walkEvidence }, use) => {
+    const pendingDiagnostics = []
     const consoleError = (message) => {
       if (message.type() === 'error') walkEvidence.consoleErrors.push({ text: message.text(), location: message.location() })
     }
@@ -215,6 +218,25 @@ export const test = base.extend({
       const record = { url: reply.url(), method: reply.request().method(), status: reply.status() }
       walkEvidence.responses.push(record)
       if (reply.status() >= 400) walkEvidence.httpErrors.push(record)
+      if (reply.status() >= 500) {
+        if (walkEvidence.serverErrors.length >= SERVER_ERROR_CAP) {
+          walkEvidence.serverErrorsDropped += 1
+          return
+        }
+        const diagnosticRecord = { ...record, errorId: null, matched: false, serverOutput: '' }
+        walkEvidence.serverErrors.push(diagnosticRecord)
+        pendingDiagnostics.push((async () => {
+          let timer
+          const body = await Promise.race([
+            Promise.resolve().then(() => reply.text()),
+            new Promise((resolve) => { timer = setTimeout(() => resolve(''), 2000) }),
+          ]).catch(() => '').finally(() => clearTimeout(timer))
+          diagnosticRecord.errorId = extractErrorId(body)
+          const diagnostic = serverDiagnostic(stack?.output?.(), diagnosticRecord.errorId)
+          diagnosticRecord.matched = diagnostic.matched
+          diagnosticRecord.serverOutput = diagnostic.text
+        })())
+      }
     }
     page.on('console', consoleError)
     page.on('pageerror', pageError)
@@ -232,6 +254,14 @@ export const test = base.extend({
       page.off('pageerror', pageError)
       page.off('requestfailed', requestFailed)
       page.off('response', response)
+      await Promise.allSettled(pendingDiagnostics)
+      for (const record of walkEvidence.serverErrors) {
+        const diagnostic = serverDiagnostic(stack?.output?.(), record.errorId)
+        if (diagnostic.matched || !record.matched) {
+          record.matched = diagnostic.matched
+          record.serverOutput = diagnostic.text
+        }
+      }
     }
   },
 })
