@@ -249,8 +249,8 @@ const CREATE_TABLE = new Map(Object.entries(CREATE_OPS))
 
 // W4g-6: the most steps one `batch` carries. FILLET and CHAMFER cut two
 // entities and create one; a TRIM that splits keeps one and creates one.
-// Mirrored by the store's MAX_BATCH_STEPS (intersect.js).
-const MAX_BATCH_STEPS = 4
+// Selection edits allow 256 members; the intersection planner stays at four.
+const MAX_BATCH_STEPS = 256
 
 /**
  * One op against the held document. Returns { createdHandle, createdHandles }
@@ -365,30 +365,41 @@ async function applyEdit(engine, message) {
   // Every op that makes MORE than one entity (explode's parts, an array's
   // copies, a batch's creates) reports them here, in document order.
   let createdHandles = null
+  let rollback = null
+  const reasonOf = (error) => error instanceof Error ? error.message : String(error)
   if (op === 'batch') {
     // W4g-6: one verb, several steps, ONE turn. The steps run in order
     // against the held document, each addressed by handle (so a delete
     // inside the batch cannot skew a later step); the bytes before the
     // first step are the snapshot a refusal restores. So a batch is atomic,
-    // all of it or none, and costs exactly one write-back (one undo step)
-    // either way.
+    // all of it or none. Only success costs one write-back and undo step.
     const steps = Array.isArray(payload?.steps) ? payload.steps : null
     if (!steps || steps.length === 0) return refused(op, 'batch_empty')
     if (steps.length > MAX_BATCH_STEPS) return refused(op, 'batch_too_many_steps')
-    const snapshot = engine.writeDxf(doc)
-    const restore = () => { current = { documentId: current.documentId, doc: reparseDocument(engine, snapshot, doc) } }
+    let snapshot
+    try { snapshot = engine.writeDxf(doc) }
+    catch (error) { return refused(op, `batch_snapshot_failed:${reasonOf(error)}`) }
+    const documentId = current.documentId
+    rollback = (reason) => {
+      try {
+        current = { documentId, doc: reparseDocument(engine, snapshot, doc) }
+        return refused(op, reason)
+      } catch (error) {
+        current = null
+        return { type: 'error', message: `batch_restore_failed:${reasonOf(error)}` }
+      }
+    }
     const made = []
     for (let i = 0; i < steps.length; i += 1) {
       const step = steps[i] && typeof steps[i] === 'object' ? steps[i] : {}
       const stepOp = String(step.op ?? '')
-      if (stepOp === 'batch') { restore(); return refused(op, `step_${i}_batch_nested`) }
+      if (stepOp === 'batch') return rollback(`step_${i}_batch_nested`)
       try {
         const r = applyOne(doc, stepOp, step.payload)
         if (r.createdHandle !== null) made.push(r.createdHandle)
         if (r.createdHandles !== null) for (const h of r.createdHandles) made.push(h)
       } catch (error) {
-        restore()
-        return refused(op, `step_${i}_${stepOp}:${error instanceof Error ? error.message : String(error)}`)
+        return rollback(`step_${i}_${stepOp}:${reasonOf(error)}`)
       }
     }
     // The selection lands on the LAST entity a batch made (a fillet's arc,
@@ -409,18 +420,28 @@ async function applyEdit(engine, message) {
   }
   // Write-back leg: serialize, reparse, report from the REPARSE — the UI
   // renders what the written bytes actually say.
-  const written = engine.writeDxf(doc)
+  let written
+  try { written = engine.writeDxf(doc) }
+  catch (error) {
+    if (rollback) return rollback(`batch_write_failed:${reasonOf(error)}`)
+    throw error
+  }
   const blockBasePatched = doc.blockBasePatched ?? false
-  const reparsed = reparseDocument(engine, written, doc)
+  let reparsed
+  try { reparsed = reparseDocument(engine, written, doc) }
+  catch (error) {
+    if (rollback) return rollback(`batch_parse_failed:${reasonOf(error)}`)
+    throw error
+  }
   let projection
   try {
     projection = projectDocument(reparsed)
   } catch (error) {
+    if (rollback) return rollback(`batch_projection_failed:${reasonOf(error)}`)
     current = null
     return refused(op, error instanceof Error ? error.message : String(error))
   }
   const { entities, groups, blocks, linetypes, linetypesTruncated, dimstyles, mlstyles } = projection
-  current = { documentId: current.documentId, doc: reparsed }
   const reply = {
     type: 'editApplied',
     groups,
@@ -446,7 +467,11 @@ async function applyEdit(engine, message) {
     const byHandle = new Map(entities.map((e) => [e.handle, e.id]))
     if (createdHandle !== null) reply.createdId = op === 'createGroup' ? createdHandle : byHandle.get(createdHandle) ?? null
     if (createdHandles !== null) reply.createdIds = createdHandles.map((h) => byHandle.get(h) ?? null)
+    if (rollback && (reply.createdId === null || reply.createdIds?.some((id) => id === null))) {
+      return rollback('batch_projection_failed:created_entity_lost')
+    }
   }
+  current = { documentId: current.documentId, doc: reparsed }
   return reply
 }
 

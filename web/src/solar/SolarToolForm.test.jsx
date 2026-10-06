@@ -77,6 +77,57 @@ it('SolarToolForm Escape and Cancel close without a run', () => {
   expect(onSubmit).not.toHaveBeenCalled()
 })
 
+const focusCases = [tool, presetTool].flatMap((formTool) =>
+  ['Cancel', 'Escape'].map((action) => [formTool.name, action, formTool]))
+
+it.each(focusCases)('%s %s returns focus to its visible ribbon button without submitting', (name, action, formTool) => {
+  const onSubmit = vi.fn()
+  const onClose = vi.fn()
+  render(<>
+    <button data-tool={name}>Open tool</button>
+    <SolarToolForm tool={formTool} onSubmit={onSubmit} onClose={onClose} />
+  </>)
+  const cancel = screen.getByRole('button', { name: 'Cancel', exact: true })
+  cancel.focus()
+  if (action === 'Cancel') fireEvent.click(cancel)
+  else fireEvent.keyDown(cancel, { key: 'Escape' })
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open tool' }))
+  expect(onClose).toHaveBeenCalledTimes(1)
+  expect(onSubmit).not.toHaveBeenCalled()
+})
+
+it.each(focusCases)('%s %s returns focus to More panels when its ribbon group is hidden', (name, action, formTool) => {
+  const onSubmit = vi.fn()
+  const onClose = vi.fn()
+  render(<>
+    <div id="drafting-ribbon-panels"><div hidden><button data-tool={name}>Open tool</button></div></div>
+    <button aria-controls="drafting-ribbon-panels" aria-expanded="false">More panels</button>
+    <SolarToolForm tool={formTool} onSubmit={onSubmit} onClose={onClose} />
+  </>)
+  const cancel = screen.getByRole('button', { name: 'Cancel', exact: true })
+  cancel.focus()
+  if (action === 'Cancel') fireEvent.click(cancel)
+  else fireEvent.keyDown(cancel, { key: 'Escape' })
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'More panels' }))
+  expect(onClose).toHaveBeenCalledTimes(1)
+  expect(onSubmit).not.toHaveBeenCalled()
+})
+
+it.each(focusCases)('%s %s leaves focus alone when no return control exists', (name, action, formTool) => {
+  const onSubmit = vi.fn()
+  const onClose = vi.fn()
+  render(<SolarToolForm tool={formTool} onSubmit={onSubmit} onClose={onClose} />)
+  const cancel = screen.getByRole('button', { name: 'Cancel', exact: true })
+  cancel.focus()
+  expect(() => {
+    if (action === 'Cancel') fireEvent.click(cancel)
+    else fireEvent.keyDown(cancel, { key: 'Escape' })
+  }).not.toThrow()
+  expect(document.activeElement).toBe(cancel)
+  expect(onClose).toHaveBeenCalledTimes(1)
+  expect(onSubmit).not.toHaveBeenCalled()
+})
+
 it('ST4 routes design presets to the typed form', () => {
   const { container } = render(<SolarToolForm tool={presetTool} onSubmit={vi.fn()} onClose={vi.fn()} />)
   expect(screen.getByTestId('solar-preset-form')).toBeTruthy()

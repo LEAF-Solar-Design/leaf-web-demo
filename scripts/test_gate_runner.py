@@ -84,11 +84,28 @@ def test_sip_r1_gate_registration():
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
-    assert suites["platform"].expected == 271
-    assert suites["gate-runner-selftest"].expected == 94
+    assert suites["platform"].expected == 281
+    assert suites["gate-runner-selftest"].expected == 95
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_sip_r3a_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suite_id, directory, floor, database in (
+            ("server-sip-r3a-graph", "server", 24, False),
+            ("platform-sip-r3a-graph", "platform", 10, True)):
+        suite = suites[suite_id]
+        assert suite.cwd == REPO / directory
+        assert suite.argv == runner._py_pytest("tests/test_sip_r3a_graph.py")
+        assert suite.kind == "pytest" and suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert suite.allowed_skip_reasons == ()
+        assert suite.database_skip_reasons == ((r"PostgreSQL integration test requires DATABASE_URL",) if database else ())
+        assert suite_id in selection["mandatory_suite_ids"]
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -382,7 +399,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     assert suites["web-vitest"].allowed_vitest_skips == (
         ("src/cad/engineWasmHarness.realwasm.test.js", 1),
         ("src/cadedit/cadEditSurface.test.jsx", 16),
-        ("src/cad/engineBatchAtomic.test.js", 10),
+        ("src/cad/engineBatchAtomic.test.js", 12),
     )
 
     restore = suites["server-version-restore"]
@@ -3924,7 +3941,7 @@ def test_web_walk_unit_is_one_mandatory_fixed_script_row():
     assert package["scripts"]["check:walk-unit"].split() == [
         "node", "--test", "walk/featureMap.test.mjs", "walk/pureRegistries.test.mjs",
         "walk/controlInventory.test.mjs", "walk/processTable.test.mjs",
-        "walk/stackEnv.test.mjs", "walk/memory.test.mjs",
+        "walk/stackEnv.test.mjs", "walk/stackPorts.test.mjs", "walk/memory.test.mjs",
         "walk/buildFlags.test.mjs", "walk/engineArtifacts.test.mjs",
         "walk/report.test.mjs", "walk/walkSpecs.test.mjs", "e2e/walk/probes.test.mjs", "e2e/walk/stateRecipes.test.mjs", "e2e/walk/unsupported.test.mjs", "e2e/walk/lenses.test.mjs",
         "e2e/walk/uxMetrics.test.mjs",

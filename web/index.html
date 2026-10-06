@@ -8,7 +8,9 @@
          Preloading more defeats the preload (W0 craft #2). -->
     <link rel="preload" href="/fonts/barlow-400-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/ibm-plex-mono-400-latin.woff2" as="font" type="font/woff2" crossorigin />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover draws under the notch and home indicator; the phone
+         dock, toast and foot bar pad themselves with env(safe-area-inset-*). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <!-- App-only surface: the indexable site is https://www.leafautomation.ai
          (front-door contract, contract/FRONT-DOOR.md). Every route of this SPA
          serves this shell, so this one tag noindexes the whole deployment. -->
@@ -26,7 +28,7 @@
            bright flash before a black surface. The /app console is paper now,
            so it briefly shows this dark card instead — the right trade, since
            /app is the operator surface and the stage faces prospects. -->
-      <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#131614;color:#a3aca3;font-family:'Barlow',system-ui,-apple-system,sans-serif;">
+      <div style="min-height:100dvh;display:flex;align-items:center;justify-content:center;background:#131614;color:#a3aca3;font-family:'Barlow',system-ui,-apple-system,sans-serif;">
         <div style="text-align:center;">
           <div style="width:18px;height:18px;margin:0 auto 16px;background:#1e6b45;transform:rotate(45deg);border-radius:4px;"></div>
           <div style="font-size:14px;letter-spacing:0.01em;">Loading workspace…</div>

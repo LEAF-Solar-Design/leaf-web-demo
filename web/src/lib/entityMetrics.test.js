@@ -31,6 +31,27 @@ describe('entityGeometry', () => {
   it('closed polyline: vertices, perimeter, area', () => {
     const g = entityGeometry({ pts: SQUARE, closed: true }, 'polyline')
     expect(g).toEqual({ vertices: 4, closed: true, length: 40, area: 100 })
+    expect(Object.keys(g)).toEqual(['vertices', 'closed', 'length', 'area'])
+  })
+  it('open bulged polyline measures the displayed arc and keeps the original vertex count', () => {
+    const g = entityGeometry({ pts: [[0, 0, 0], [10, 0, 0]], closed: false, bulges: [1, 0] }, 'polyline')
+    expect(g.vertices).toBe(2)
+    expect(Math.abs(g.length - 15.696751)).toBeLessThan(1e-5) // drawing units
+    expect(g.area).toBeNull()
+    expect(g.first).toEqual([0, 0])
+    expect(g.last).toEqual([10, 0])
+  })
+  it('closed bulged polyline measures the displayed area and keeps the original vertex count', () => {
+    const g = entityGeometry({ pts: SQUARE, closed: true, bulges: [1, 0, 0, 0] }, 'polyline')
+    expect(g.vertices).toBe(4)
+    expect(g.closed).toBe(true)
+    expect(Math.abs(g.area - 139.27)).toBeLessThan(0.5) // drawing units squared
+  })
+  it('malformed bulge lists still measure chords', () => {
+    for (const bulges of [[1], ['1', 0, 0, 0], [NaN, 0, 0, 0], [Infinity, 0, 0, 0]]) {
+      expect(entityGeometry({ pts: SQUARE, closed: true, bulges }, 'polyline'))
+        .toEqual({ vertices: 4, closed: true, length: 40, area: 100 })
+    }
   })
   it('OPEN polyline gets NO area (an open path encloses nothing)', () => {
     const g = entityGeometry({ pts: SQUARE, closed: false }, 'polyline')

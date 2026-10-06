@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import { config, getDrawingVersions, restoreDrawingVersion } from '../api.js'
 import VersionList, { VersionPreviewStrip } from './VersionList.jsx'
+import { relativeTime } from '../lib/railTime.js'
+import useRelativeNow from '../lib/useRelativeNow.js'
 import './popovers.css'
 
 // Version-history browser: a DT2 right drawer (title + Esc cap header) listing
@@ -39,16 +41,6 @@ import './popovers.css'
 // `config.mockDefault` / no-capability fallbacks below remain only for a
 // caller that omits the props (none in-tree today).
 
-function fmtWhen(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return String(iso)
-  const mins = Math.round((Date.now() - d.getTime()) / 60000)
-  if (mins >= 0 && mins < 60) return `${mins} m`
-  if (mins >= 0 && mins < 1440) return `${Math.round(mins / 60)} h`
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
 // E2 empty state: the action chip focuses the composer directly (the docked
 // bar's input, falling back to the legacy prompt textarea) — no parent wiring
 // needed, same move as JobRail's empty state.
@@ -73,6 +65,7 @@ export default function VersionHistory({
   retryKey, exiting, mock, capability, onRestored, headWarning, mutationBlocked = false,
   onBeforeRestore = null,
 }) {
+  const now = useRelativeNow()
   // Self-contained restore state (see the integration note above for why).
   // The CONFIRM/PENDING/ERROR machine lives in VersionList; what stays here is
   // the drawer's own best-effort refresh of the chain after a commit.
@@ -189,7 +182,7 @@ export default function VersionHistory({
               <span className="vh-row-sub">
                 {r.note && <span className="vh-note-txt">{r.note}</span>}
                 {r.sha256 && <span className="drawer-mono">{String(r.sha256).slice(0, 12)}</span>}
-                <span className="vh-when">{fmtWhen(r.created)}</span>
+                <span className="vh-when">{relativeTime(Date.parse(r.created), now)}</span>
               </span>
             )}
             restore={{

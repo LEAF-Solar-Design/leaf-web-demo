@@ -21,6 +21,7 @@ import './rails.css'
 import BuildQueueCard from './BuildQueueCard.jsx'
 import { currentJobCountsAsRunning, fromBrokerJob, runningBuildCount } from '../lib/buildQueue.js'
 import { dayLabel, fmtWhen } from '../lib/railTime.js'
+import { useLoadingPhase } from '../lib/loadingTiming.js'
 
 // TM1 time helpers moved to lib/railTime.js (slice 11a); re-exported so
 // WorkspaceSummary and operator/SessionPanel keep importing from here.
@@ -34,7 +35,7 @@ function focusComposer() {
   if (el) el.focus()
 }
 
-function JobRow({ job, buildRecord, current, onSelect }) {
+function JobRow({ job, buildRecord, current, onSelect, onRetry }) {
   const mapped = fromBrokerJob(job)
   // A job whose status this rail has no word for renders nothing rather than
   // a guessed row (fromBrokerJob fails closed on an unknown status).
@@ -46,11 +47,15 @@ function JobRow({ job, buildRecord, current, onSelect }) {
     && buildRecord.id === mapped.id && buildRecord.state === mapped.state
     ? buildRecord
     : mapped
+  const canRetry = job.status === 'failed' && typeof onRetry === 'function'
   return (
     <BuildQueueCard
-      record={record}
+      record={canRetry && !record.actions.includes('retry')
+        ? { ...record, actions: [...record.actions, 'retry'] }
+        : record}
       current={current}
       onSelect={onSelect ? () => onSelect(job) : undefined}
+      actions={canRetry ? { retry: () => onRetry(job) } : undefined}
     />
   )
 }
@@ -126,7 +131,7 @@ function PendingRunNote({ pendingRun, onResumePendingRun, onDiscardPendingRun })
 // count and one expand button); `onCollapse` adds the collapse control to the
 // expanded rail's header. Both undefined = the rail exactly as before (rail
 // OFF is byte-identical by construction).
-export default function JobRail({ mock, jobs, currentJob, inflight, reattaching, onSelectJob, builds, buildFeed, spine = false, onExpand, onCollapse, staleResults, onDismissStale, pendingRun, onResumePendingRun, onDiscardPendingRun }) {
+export default function JobRail({ mock, jobs, currentJob, inflight, reattaching, onSelectJob, onRetryJob, loading, builds, buildFeed, spine = false, onExpand, onCollapse, staleResults, onDismissStale, pendingRun, onResumePendingRun, onDiscardPendingRun }) {
   const list = jobs || []
   const knownIds = new Set(list.map((j) => j.job_id))
   const showCurrent = currentJob && (!currentJob.job_id || !knownIds.has(currentJob.job_id))
@@ -147,15 +152,18 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
   const selectedId = currentJob && currentJob.job_id
 
   // First-fetch grace: in live mode an empty list means "still loading" until
-  // ~two poll ticks have passed — skeletons until then, so the empty-state
-  // sentence is only ever asserted once it is true.
+  // ~two poll ticks have passed. An explicit loading prop takes precedence;
+  // cached rows stay visible while the host refetches them.
   const [settled, setSettled] = useState(false)
   useEffect(() => {
     if (mock) return undefined
     const t = setTimeout(() => setSettled(true), 4000)
     return () => clearTimeout(t)
   }, [mock])
-  const loaded = mock || settled || list.length > 0
+  const hasRows = !!showCurrent || list.length > 0 || extra.length > 0
+  const loaded = typeof loading === 'boolean' ? !loading : mock || settled || hasRows
+  const phase = useLoadingPhase(!loaded)
+  const showSkeleton = !hasRows && (phase === 'shown' || phase === 'long')
 
   // Day-grouped ledger rows (list arrives newest-first from the server).
   const rows = []
@@ -173,6 +181,7 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
         buildRecord={brokerBuilds.get(job.job_id)}
         current={selectedId != null && job.job_id === selectedId}
         onSelect={onSelectJob}
+        onRetry={onRetryJob}
       />,
     )
   }
@@ -251,26 +260,27 @@ export default function JobRail({ mock, jobs, currentJob, inflight, reattaching,
 
       <StaleResultNotes staleResults={staleResults} onDismissStale={onDismissStale} />
 
-      <div className="rail-ledger">
+      <div className="rail-ledger" style={!loaded && hasRows ? { opacity: 0.6 } : undefined}>
         {showCurrent && (
           <JobRow
             job={currentJob}
             buildRecord={currentJob.job_id ? brokerBuilds.get(currentJob.job_id) : undefined}
             current
             onSelect={onSelectJob}
+            onRetry={onRetryJob}
           />
         )}
         {rows}
       </div>
 
-      {!loaded && !showCurrent && list.length === 0 && extra.length === 0 && (
+      {showSkeleton && (
         <div className="rail-ske">
           <div className="skeleton-row" />
           <div className="skeleton-row" />
         </div>
       )}
 
-      {loaded && !showCurrent && list.length === 0 && extra.length === 0 && (
+      {loaded && !showSkeleton && !hasRows && (
         <div className="rail-empty">
           <div className="rail-note">Jobs you dispatch will appear here.</div>
           <button className="chip-act" onClick={focusComposer}>Dispatch a prompt</button>

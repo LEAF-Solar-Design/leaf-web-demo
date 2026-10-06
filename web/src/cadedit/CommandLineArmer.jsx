@@ -19,7 +19,8 @@ import { useEffect, useRef, useState } from 'react'
 import { DEFERRED_REASONS, byId, engineShortcutDecision } from '../lib/actionRegistry.js'
 import { COCKPIT_COMMAND_EVENT } from '../lib/commandWords.js'
 
-import { PROMPTS, modifyReason, historyStepReason } from './EngineRibbonClusters.jsx'
+import { PROMPTS, historyStepReason } from './EngineRibbonClusters.jsx'
+import { modifyOpReason } from '../lib/actionRegistry.js'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { readNumber } from './engineSession.js'
 import { SESSION_ERROR } from './engineSessionErrors.js'
@@ -244,7 +245,7 @@ export default function CommandLineArmer() {
       if (RUN_ON_ARRIVAL.has(detail.op)) {
         // ERASE and EXPLODE run on a live selection; otherwise surface the
         // ladder's sentence without arming a prompt.
-        const reason = modifyReason(session)
+        const reason = modifyOpReason(detail.op, session)
         if (reason) refuse(reason)
         else applyEdit(detail.op, inputs)
         return

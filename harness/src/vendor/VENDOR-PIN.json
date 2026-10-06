@@ -1,6 +1,10 @@
 {
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
+    "agent/tools/submitToolProposal.ts": {
+      "reason": "w22-d2b1: lossless server revision classification and exact version production; retire when upstream includes equivalent behavior.",
+      "sha256": "b654ff1354ace3549c1ba0782705ed5d8326c64c46dfaf5875e3576fd6fef2fc"
+    },
     "ports/converse.ts": {
       "reason": "Optional app-built ContextPacket grounding on the live POST /turn wire; absent-safe downstream addition for platform-context-packet-live-caller.; plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8)",
       "sha256": "4f5fccd7162350df3fc151403633e890f7bdca05fab47a23813fcc62715b235e"
@@ -62,7 +66,7 @@
     "agent/tools/fsTenantRepo.ts": "51d065a4394996e304463098205c341d4c42bebd438a1bc353ccda35a210db23",
     "agent/tools/repoPathSafety.ts": "e7883d6c9566923748759c036e2566b6e1dbd02388cc2851df639c7f62fb5673",
     "agent/tools/submitSurfaceConfig.ts": "76d8b0bae5d2c91ef5d17c2e890555fb143ea6a4c5139f93cd8307c7a3bc14fb",
-    "agent/tools/submitToolProposal.ts": "46488bde244581383b52b04206d88d873a7e0cd4d96573067e5e8514cefb8159",
+    "agent/tools/submitToolProposal.ts": "b654ff1354ace3549c1ba0782705ed5d8326c64c46dfaf5875e3576fd6fef2fc",
     "agent/tools/surfaceConfigSchema.ts": "a1ee124e4ea169b75346da8dba9a67c5875404df9ffc42f5ebb8b956174d7319",
     "agent/tools/toolExecutionReceipt.ts": "f71cd9293dcade693e1847220c3cc89fa704e8715fd6e87eb7f82422a317b04b",
     "agent/tools/validateTool.ts": "df8a0522f5703a3cb76e9fbff5c3200e4a717a0ab4c99d12f912d8c44e38faee",

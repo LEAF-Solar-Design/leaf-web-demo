@@ -358,10 +358,11 @@ test('the frozen tool arm effect split follows the registry and excludes every r
   assert.deepEqual([...TOOL_ARM_EFFECT_KINDS], ['opens'])
   const map = buildFeatureMap()
   const kinds = new Set()
+  const armTargets = new Set(['catalog-run-decision', 'solar-step-editor'])
   for (const entry of map.entries.filter((entry) => entry.kind === 'tool')) {
     for (const state of entry.states) {
       const probe = resolveProbe(entry, state)
-      if (probe.assertion.target === 'catalog-run-decision') kinds.add(probe.assertion.kind)
+      if (armTargets.has(probe.assertion.target)) kinds.add(probe.assertion.kind)
       else assert.equal(TOOL_ARM_EFFECT_KINDS.has(probe.assertion.kind), false)
     }
   }

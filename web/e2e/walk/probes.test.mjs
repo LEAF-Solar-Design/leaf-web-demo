@@ -5,9 +5,92 @@ import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/acti
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { observeSolarEditorRequests } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+test('G1 Solar editor reviews, dismisses and cancels without submitting a run', async () => {
+  for (const [tool, submitted, railVisible] of [
+    ['solar-unit-sync', false, true], ['solar-unit-sync', true, true], ['solar-design-presets', false, true],
+    ['solar-unit-sync', false, false], ['solar-unit-sync', true, false], ['solar-design-presets', false, false],
+  ]) {
+    const calls = []
+    const inputs = []
+    let listener, visible = true, decisionVisible = false, focused = null
+    const locator = { click: async () => { visible = true }, isVisible: async () => railVisible }
+    const more = {}
+    const field = { count: async () => 0 }
+    const review = { click: async () => {
+      calls.push('review'); decisionVisible = true
+      if (submitted) listener({ method: () => 'POST', url: () => 'http://walk/api/run?wait=1' })
+    } }
+    const cancel = { click: async () => { calls.push('cancel'); visible = false; focused = railVisible ? locator : more } }
+    const region = { getByLabel: (name) => {
+      if (name === 'Expected rev') return { count: async () => 1, inputValue: async () => '',
+        fill: async (value) => { inputs.push([name, value]) } }
+      if (name === 'Distance unit' && tool === 'solar-unit-sync' || name === 'Subcommand' && tool === 'solar-design-presets') {
+        return { count: async () => 1, selectOption: async (option) => { inputs.push([name, option]) } }
+      }
+      if (name === 'Name' && tool === 'solar-design-presets') return { count: async () => 1,
+        fill: async (value) => { inputs.push([name, value]) } }
+      return field
+    }, isVisible: async () => visible,
+      getByRole: (role, options) => options.name === 'Review & run' ? review : cancel }
+    const decision = { focus: async () => { calls.push('decision-focus') } }
+    const page = {
+      locator: (selector) => { assert.equal(selector, 'button[aria-controls="drafting-ribbon-panels"]'); return more },
+      on: (event, handler) => { assert.equal(event, 'request'); listener = handler },
+      off: (event, handler) => { assert.equal(event, 'request'); assert.equal(handler, listener); calls.push('unobserve') },
+      getByRole: (role, options) => {
+        if (role === 'region') { assert.equal(options.name, `${tool} parameters`); return region }
+        assert.equal(options.name, `Run ${tool}`); return decision
+      },
+      keyboard: { press: async (key) => { assert.equal(key, 'Escape'); calls.push('dismiss'); decisionVisible = false } },
+    }
+    const assertions = (value) => ({
+      toBeVisible: async () => assert.equal(value === region ? visible : decisionVisible, true),
+      toBeHidden: async () => assert.equal(value === region ? visible : decisionVisible, false),
+      toBeEnabled: async () => assert.equal(value, review),
+      toBeFocused: async () => { assert.equal(value, railVisible ? locator : more); assert.equal(focused, value) },
+      toEqual: (expected) => assert.deepEqual(value, expected),
+    })
+    const runtime = { page, cleanup: [], evidence: {} }
+    const before = observeSolarEditorRequests(runtime)
+    listener({ method: () => 'GET', url: () => 'http://walk/api/run' })
+    listener({ method: () => 'POST', url: () => 'http://walk/api/other' })
+    const probe = { kind: 'tool', assertion: { target: 'solar-step-editor', tool } }
+    const pending = assertEffect(probe, runtime, locator, before, assertions)
+    if (submitted) await assert.rejects(pending, assert.AssertionError)
+    else {
+      await pending
+      assert.deepEqual(runtime.evidence.solarStepEditor, { tool, reviewed: true, cancelled: true, runRequests: [] })
+    }
+    assert.deepEqual(inputs, tool === 'solar-unit-sync'
+      ? [['Expected rev', '0'], ['Distance unit', { label: 'Meters' }]]
+      : [['Expected rev', '0'], ['Subcommand', { label: 'Create' }], ['Name', 'Walk proof preset']])
+    await runtime.cleanup[0]()
+    assert.deepEqual(calls, ['review', 'decision-focus', 'dismiss', 'cancel', 'unobserve'])
+  }
+})
+
+test('G1 run observation starts before activation and remains through Cancel', () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const capture = source.slice(source.indexOf('async function captureBefore('), source.indexOf('async function activate('))
+  assert.match(capture, /solar-step-editor.*return observeSolarEditorRequests\(runtime\)/)
+  const oracle = source.slice(source.indexOf('export async function assertSolarStepEditor('), source.indexOf('export function seedSignOutIdentity'))
+  assert.ok(oracle.indexOf("name: 'Cancel'") < oracle.indexOf('assertions(before.runRequests).toEqual([])'))
+  assert.match(oracle, /assertions\(locator\)\.toBeFocused/)
+})
+
+test('G1 Solar form probes retain the editor effect and catalog setup', () => {
+  for (const id of ['tool:solar-unit-sync', 'tool:solar-design-presets']) {
+    const probe = resolveProbe(map.entries.find((row) => row.id === id), 'ready')
+    assert.equal(probe.assertion.target, 'solar-step-editor')
+    assert.equal(probe.assertion.tool, probe.sourceId)
+    assert.deepEqual(probe.setup.steps.at(-1), { kind: 'catalog-tool', name: probe.sourceId })
+  }
+})
 test('C2 Objects uses the native disclosure summary for every state', () => {
   const entry = map.entries.find((entry) => entry.id === 'control:objects')
   for (const state of entry.states) {
@@ -571,6 +654,7 @@ test('catalog-tool evidence stays compact and hashes the catalog once per worker
           return { click: async () => { tabs.push(options.name) } }
         } }
       }
+      if (role === 'toolbar') return { getByRole: () => ({ filter: () => ({ isVisible: async () => false }) }) }
       assert.equal(role, 'button')
       assert.equal(options.name, 'More panels')
       return { isVisible: async () => false }
