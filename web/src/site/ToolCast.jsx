@@ -1221,9 +1221,6 @@ export default function ToolCast({
     setError(null)
   }, [])
 
-  // S23: `undo` is declared below; the checkpoint notice reaches it through
-  // this ref, so the notice's Undo is always the bar's current Undo.
-  const undoRef = useRef(null)
   const attachJob = useCallback(async (nextJobId, toolName) => {
     if (!sessionReady || !nextJobId) return
     onJobLinked(nextJobId)
@@ -1237,7 +1234,7 @@ export default function ToolCast({
       showToast({
         key: 'agent-checkpoint',
         text: 'Checkpoint saved',
-        action: { label: 'Undo', onClick: () => { void undoRef.current?.() } },
+        action: { label: 'Undo', undo: true, onClick: onUndo },
       })
     }
     if (envelope && !envelope.ok) {
@@ -1249,7 +1246,7 @@ export default function ToolCast({
     }
     await workspace.rehydrate()
     checkout.actions.refresh()
-  }, [attachTrackedJob, checkout.actions, onJobLinked, sessionReady, showToast, workspace])
+  }, [attachTrackedJob, checkout.actions, onJobLinked, onUndo, sessionReady, showToast, workspace])
 
   const openResultDetails = useCallback((envelope = jobResult, jobId = currentJobId) => {
     if (!envelope) return
@@ -1438,7 +1435,6 @@ export default function ToolCast({
     setError(null)
     await undoDrawingVersion(checkout.actions.getCapability())
   }, [busy, canUndo, checkout.actions, jobRunning, sessionReady, undoDrawingVersion])
-  undoRef.current = undo
   undoActionRef.current = undo
 
   const redo = useCallback(async () => {

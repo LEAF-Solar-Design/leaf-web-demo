@@ -110,7 +110,14 @@ describe('S17 version-created toast Undo wiring', () => {
     })
 
     it(`${surface.name}: delete, reset, authored removal and other toasts never receive version Undo`, () => {
-      const versionObjects = new Set([...versionToasts, ...seatedToasts])
+      const attach = declarations.get(surface.name === 'App' ? 'onAttachAgentJob' : 'attachJob')
+      const checkpointToasts = toastObjects(tree).filter((object) => property(object, 'key')?.value === 'agent-checkpoint')
+      assert.equal(checkpointToasts.length, 1, 'one agent checkpoint notice may offer version Undo')
+      const checkpoint = checkpointToasts[0]
+      assert.ok(checkpoint.start > attach.start && checkpoint.end < attach.end, 'only the agent attach handler may raise the checkpoint')
+      assert.equal(textPattern(checkpoint), 'Checkpoint saved')
+      assert.equal(property(property(checkpoint, 'action'), 'label')?.value, 'Undo')
+      const versionObjects = new Set([...versionToasts, ...seatedToasts, ...checkpointToasts])
       for (const object of toastObjects(tree)) {
         if (versionObjects.has(object)) continue
         const action = property(object, 'action')
@@ -2871,7 +2878,8 @@ describe('S23 agent checkpoint toast', () => {
     // Raw source: the slice evaluated below keeps its comments, which are
     // valid inside the Function body.
     const toolCast = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
-    const handler = sliceBetween(toolCast, 'const undoRef = useRef(null)', 'const openResultDetails = useCallback')
+    const retainedUndo = sliceBetween(toolCast, 'const undoActionRef = useRef(null)', 'const onCompleteVersion = useCallback')
+    const handler = sliceBetween(toolCast, 'const attachJob = useCallback', 'const openResultDetails = useCallback')
     const h = { toasts: [], undo: 0 }
     const context = {
       useCallback: (callback) => callback,
@@ -2884,17 +2892,21 @@ describe('S23 agent checkpoint toast', () => {
       workspace: { rehydrate: async () => {} },
       checkout: { actions: { refresh: () => {} } },
     }
-    const made = new Function(...Object.keys(context), handler + '\nreturn ' + LB + ' attachJob, undoRef ' + RB)(...Object.values(context))
-    made.undoRef.current = async () => { h.undo += 1 }
+    const made = new Function(...Object.keys(context), retainedUndo + handler + '\nreturn ' + LB + ' attachJob, undoActionRef, onUndo ' + RB)(...Object.values(context))
+    made.undoActionRef.current = async () => { h.undo += 1 }
     await made.attachJob('job-1', 'arrange-panels-as-cat')
     assert.equal(h.toasts.length, 1)
     assert.equal(h.toasts[0].key, 'agent-checkpoint')
     assert.equal(h.toasts[0].text, 'Checkpoint saved')
     assert.equal(h.toasts[0].action.label, 'Undo')
+    assert.equal(h.toasts[0].action.undo, true)
+    assert.equal(h.toasts[0].action.onClick, made.onUndo)
     h.toasts[0].action.onClick()
     assert.equal(h.undo, 1)
     const undoAt = toolCast.indexOf('const undo = useCallback')
-    assert.ok(undoAt > 0 && toolCast.indexOf('undoRef.current = undo', undoAt) > undoAt, 'the ref follows the bar Undo')
+    assert.ok(undoAt > 0 && toolCast.indexOf('undoActionRef.current = undo', undoAt) > undoAt, 'the ref follows the bar Undo')
+    assert.doesNotMatch(toolCast, /\bundoRef\b/, 'the checkpoint and version toasts share one Undo ref')
+    assert.ok(handler.includes('[attachTrackedJob, checkout.actions, onJobLinked, onUndo, sessionReady, showToast, workspace]'))
     const rewindAt = toolCast.indexOf('rewind=' + LB + LB)
     assert.ok(rewindAt > 0 && toolCast.slice(rewindAt, rewindAt + 400).includes('run: () => undo(),'), 'the tab Rewind runs the bar Undo')
   })
