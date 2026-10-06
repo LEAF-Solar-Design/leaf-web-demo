@@ -1022,10 +1022,14 @@ export class ConverseLoop {
         result = err(`tool error: ${(e as Error).message}`);
       }
 
+      const publicationResult = tool === "request_publication" && !result.isError
+        ? projectPublicationResult(result.content)
+        : undefined;
       await emit("tool_result", {
         tool,
         ok: !result.isError,
         summary: resultSummary(tool, result),
+        ...(publicationResult ? { result: publicationResult } : {}),
       });
       return result;
     };
@@ -1674,6 +1678,38 @@ function sanitizeCustomizeEdits(
     });
   }
   return out;
+}
+
+/** Project only the validated service fields, never the human-facing summary. */
+function projectPublicationResult(content: string): Record<string, unknown> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const response = parsed as Record<string, unknown>;
+  const boundedString = (value: unknown): value is string =>
+    typeof value === "string" && value.length >= 1 && value.length <= 128 && value.trim() === value;
+  if (response.contract !== "leaf.customization.v1" || !boundedString(response.change_set_id)) {
+    return undefined;
+  }
+  const status = response.status;
+  if (status !== "published" && status !== "awaiting_approval" && status !== "denied" && status !== "staging") {
+    return undefined;
+  }
+  if (status === "published") {
+    if (!boundedString(response.catalog_digest)) return undefined;
+  } else if (Object.prototype.hasOwnProperty.call(response, "catalog_digest")) {
+    return undefined;
+  }
+  return {
+    contract: response.contract,
+    change_set_id: response.change_set_id,
+    status,
+    ...(status === "published" ? { catalog_digest: response.catalog_digest } : {}),
+  };
 }
 
 function resultSummary(tool: SpineToolName, result: SpineToolResult): string {

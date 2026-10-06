@@ -252,7 +252,26 @@ test('control resolves CSS recipes directly and preserves role recipes', () => {
   assert.deepEqual(calls, [['page-role', 'button', { name: 'Line', exact: true }]])
 })
 
-test('C2 resolves all 41 census rows to real setup and effect recipes', () => {
+test('C3 snap disclosure uses the Drafting settings trigger and a real menu oracle', () => {
+  const entry = map.entries.find((entry) => entry.id === 'control:object-snap-modes')
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    assert.deepEqual(probe.locator.scope, { role: 'toolbar', name: 'Drafting settings', exact: true })
+    assert.equal(probe.locator.role, 'button')
+    assert.equal(probe.locator.name, 'Object snap modes')
+    assert.equal(probe.assertion.target, 'object-snap-menu-expanded')
+    assert.deepEqual(probe.setup.steps.map((recipe) => recipe.kind), [
+      state === 'failed-load' ? 'open-failed-drawing' : 'open-private-drawing', 'census-disclosure',
+    ])
+  }
+  const source = readFileSync(new URL('./w1z-census-snap.spec.mjs', import.meta.url), 'utf8')
+  assert.match(source, /process\.env\.LEAF_WALK_PROOF === '1'/)
+  assert.match(source, /for \(const state of entry\.states\)/)
+  assert.match(source, /control-census:studio \[ready\]/)
+  assert.match(source, /requireControlCensusBatch\(census/)
+})
+
+test('C2 and C3 resolve all 44 census rows to real setup and effect recipes', () => {
   let rows = 0
   for (const id of CENSUS_RECIPE_CONTROLS) {
     const entry = map.entries.find((entry) => entry.id === id)
@@ -286,7 +305,7 @@ test('C2 resolves all 41 census rows to real setup and effect recipes', () => {
       if (id === 'control:save-version' && state === 'engine-busy') assert.ok(kinds.indexOf('create-line') < kinds.indexOf('hold-engine-edit'))
     }
   }
-  assert.equal(rows, 41)
+  assert.equal(rows, 44)
   const source = readFileSync(new URL('./w1z-census.spec.mjs', import.meta.url), 'utf8')
   assert.match(source, /process\.env\.LEAF_WALK_PROOF === '1'/)
   assert.match(source, /for \(const featureId of CENSUS_RECIPE_CONTROLS\)/)
