@@ -132,6 +132,17 @@ export function locatorRecipe(entry, state) {
   if (entry.kind === 'action') {
     const action = actionRecord(entry)
     const why = effect.kind === 'disabled_with_reason' ? effect.reason : ''
+    if (action.id === 'engine:repeat') return {
+      ...role(state === 'no-drawing' ? 'main' : 'region', state === 'no-drawing' ? '' : 'Drawing'),
+      trigger: 'keyboard', key: 'Enter', keyboardAction: 'engine:repeat',
+    }
+    if (['engine:undo', 'engine:redo'].includes(action.id)) return {
+      ...role('button', state === 'no-drawing' ? new RegExp(`^${escapePattern(accessibleName(action.label, why))}$`)
+        : accessibleName(action.label, why), role('toolbar', 'Quick access')), trigger: 'click',
+      ...(why ? { unavailableName: new RegExp(`^${escapePattern(action.label)}(?: \\(unavailable: .+\\))?$`) } : {}),
+      ...(state === 'no-drawing' ? { availableName: action.label,
+        disabledVariants: [{ name: accessibleName(action.label, why), reason: why, reason_code: reasonCode(why) }] } : {}),
+    }
     if (action.surface === 'bar') {
       // The registry declares keyboard-only actions. Their reachable control
       // is the command bar; do not invent a clickable Escape or Retry button.
@@ -291,7 +302,8 @@ export function stateRecipe(entry, state) {
   if (state === 'no-drawing' && entry.kind === 'action') {
     return { context, steps: [
       step('open-failed-drawing', { url: `/app?surface=${surface}&drawing=missing.invalid` }),
-      step('failed-drawing-ribbon-tab', { name: actionTab(actionRecord(entry)) }),
+      ...(['engine:undo', 'engine:redo', 'engine:repeat'].includes(entry.source_id) ? []
+        : [step('failed-drawing-ribbon-tab', { name: actionTab(actionRecord(entry)) })]),
       ...(surface === 'solar' ? [step('require-solar-document')] : []),
     ] }
   }
@@ -303,7 +315,9 @@ export function stateRecipe(entry, state) {
   if (entry.kind === 'action') {
     const action = actionRecord(entry)
     if (action.surface === 'slash') steps.push(step('slash-menu', { command: action.label }))
-    else if (action.surface !== 'bar') steps.push(step('ribbon-tab', { name: actionTab(action) }))
+    else if (action.surface !== 'bar' && !['engine:undo', 'engine:redo', 'engine:repeat'].includes(action.id)) {
+      steps.push(step('ribbon-tab', { name: actionTab(action) }))
+    }
     if (action.group === 'modify' || action.group === 'clipboard') {
       if (context.session?.engineParsed) steps.push(step('engine-ready'))
       const needsClipboard = action.op === 'pasteClip' && context.session?.clipboard && context.session?.engineParsed
@@ -312,7 +326,7 @@ export function stateRecipe(entry, state) {
         type: action.op === 'explode' && state === 'ready' ? 'LWPOLYLINE' : context.session.selected.type, editable: context.session.selected.editable,
         multiple: context.session.selectedIds?.length > 1,
       }))
-    } else if (action.op && context.session?.engineParsed) steps.push(step('engine-ready'))
+    } else if ((action.op || action.id === 'engine:repeat') && context.session?.engineParsed) steps.push(step('engine-ready'))
   }
   if (entry.kind === 'tool') {
     if (entry.source_id.startsWith('solar-')) steps.push(step('seed-solar-graph'))
@@ -339,6 +353,11 @@ export function stateRecipe(entry, state) {
   }))
   if (state === 'unsaved-engine-edits') steps.push(step('create-line'))
   if (state === 'nothing-to-undo' || state === 'nothing-to-redo') steps.push(step('engine-ready'), step('fresh-history'))
+  if (['engine-nothing-to-undo', 'engine-nothing-to-redo'].includes(state)) steps.push(step('fresh-history'))
+  if (entry.kind === 'action' && ['engine:undo', 'engine:redo', 'engine:repeat'].includes(entry.source_id) && state === 'ready') {
+    steps.push(step('create-line'))
+    if (entry.source_id === 'engine:redo') steps.push(step('undo-edit'))
+  }
   if (entry.kind === 'action' && ['undo', 'redo'].includes(entry.source_id) && state === 'ready') {
     if (effect.target?.startsWith('drawing-version-')) steps.push(step('saved-version-history', { redo: entry.source_id === 'redo' }))
     else steps.push(step('engine-ready'), step('create-line'), step('create-line'), step('undo-edit'))

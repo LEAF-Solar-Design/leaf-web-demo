@@ -7,6 +7,7 @@ import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, 
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
+import { captureEngineRepeat, activateEngineRepeat } from './fixtures.mjs'
 import { faultRouteOnce, drawingRequest, setupVersionFault, finishVersionFault,
   setupHistoryFault, assertHistoryRecovery, setupRealProject } from './fixtures.mjs'
 import { CENSUS_DISCLOSURES, censusDisclosureState, setupCensusDisclosure, setupCensusScript,
@@ -25,6 +26,76 @@ const censusAssertions = (value) => ({
   toHaveValue: async (expected) => assert.equal(value.text, expected),
   toHaveText: async (expected) => assert.equal(value.text, expected),
   toContainText: async (expected) => assert.ok(value.text.includes(expected)),
+})
+
+test('Repeat focuses the drawing landmark, presses Enter and restores its tab stop', async () => {
+  for (const original of [null, '0']) {
+    const events = []
+    let tabindex = original, focused = false
+    const element = {
+      setAttribute: (name, value) => { assert.equal(name, 'tabindex'); tabindex = value },
+      removeAttribute: (name) => { assert.equal(name, 'tabindex'); tabindex = null },
+      focus: () => { focused = true; events.push('focus') },
+    }
+    const locator = { getAttribute: async () => tabindex, evaluate: async (fn, arg) => fn(element, arg) }
+    const runtime = { cleanup: [], page: { keyboard: { press: async (key) => { assert.ok(focused); events.push(key) } } } }
+    await activateEngineRepeat(runtime, locator, () => ({ toBeFocused: async () => assert.ok(focused) }))
+    assert.deepEqual(events, ['focus', 'Enter'])
+    assert.equal(tabindex, '-1')
+    await runtime.cleanup[0]()
+    assert.equal(tabindex, original)
+  }
+})
+
+test('Repeat baseline dismisses an old operand prompt and observes worker messages', async () => {
+  const events = []
+  const dispatches = [{ type: 'loadDocument' }]
+  const runtime = { evidence: {}, page: {
+    keyboard: { press: async (key) => events.push(key) },
+    getByRole: () => ({ fill: async (value) => { assert.equal(value, ''); events.push('empty-bar') } }),
+    getByTestId: () => ({ visible: false }),
+    evaluate: async (fn) => fn.toString().includes('structuredClone') ? structuredClone(dispatches) : undefined,
+  } }
+  assert.deepEqual(await captureEngineRepeat({ state: 'engine-busy' }, runtime, censusAssertions), { dispatches })
+  assert.deepEqual(events, ['Escape', 'empty-bar'])
+  assert.deepEqual(runtime.evidence.repeatBaseline, { dispatches })
+})
+
+test('every Repeat oracle distinguishes a prompt, an announced refusal and a silent ignored key', async () => {
+  const entry = buildFeatureMap().entries.find((row) => row.id === 'action:engine-repeat')
+  assert.deepEqual([...entry.states].sort(), ['engine-busy', 'engine-crashed', 'engine-not-parsed', 'no-command-to-repeat', 'no-drawing', 'ready'])
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    for (const fault of [null, 'dispatch', ...(state === 'ready' ? ['wrong-command'] : ['armed']),
+      ...(['engine-busy', 'no-command-to-repeat'].includes(state) ? ['wrong-refusal'] : [])]) {
+      const prompt = { visible: state === 'ready' || fault === 'armed', name: fault === 'wrong-command' ? 'CIRCLE command' : 'LINE command' }
+      const status = { text: fault === 'wrong-refusal' ? 'unrelated status' : probe.assertion.reason,
+        innerText: async () => status.text, isVisible: async () => false }
+      let statusReads = 0
+      const before = { dispatches: [{ type: 'loadDocument' }] }
+      const runtime = { evidence: {}, page: {
+        getByTestId: (id) => id === 'cockpit-prompt' ? prompt : { getByRole: (role, options) => {
+          assert.equal(role, 'status'); assert.deepEqual(options, { includeHidden: true }); statusReads++; return status
+        } },
+        evaluate: async (fn) => fn.toString().includes('structuredClone')
+          ? [...before.dispatches, ...(fault === 'dispatch' ? [{ type: 'edit', op: 'createLine' }] : [])] : undefined,
+      } }
+      const assertions = (value) => ({ ...censusAssertions(value),
+        toEqual: (expected) => assert.deepEqual(value, expected),
+        toHaveAccessibleName: async (expected) => assert.equal(value.name, expected),
+      })
+      const check = () => assertEffect(probe, runtime, {}, before, assertions)
+      if (fault) await assert.rejects(check())
+      else {
+        await check()
+        const ignored = ['no-drawing', 'engine-not-parsed', 'engine-crashed'].includes(state)
+        assert.equal(runtime.evidence.repeatIgnored, ignored ? true : undefined)
+        assert.equal(statusReads, ignored || state === 'ready' ? 0 : 1)
+        assert.deepEqual(runtime.evidence.repeatDispatches.after, before.dispatches)
+        if (statusReads) assert.deepEqual(runtime.evidence.repeatRefusal, { text: probe.assertion.reason, visible: false })
+      }
+    }
+  }
 })
 
 test('failed catalog recovery listens before Retry, awaits its reply and retries only once', async () => {
