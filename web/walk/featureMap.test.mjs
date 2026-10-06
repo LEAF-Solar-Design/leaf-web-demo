@@ -186,7 +186,7 @@ test('W21B2-map-engine-actions', () => {
     })
   }
   assert.deepEqual(entryFor('action:engine-repeat').expected_effect.ready, {
-    kind: 'opens', target: 'cockpit-prompt',
+    kind: 'opens', target: 'cockpit-prompt', operation: 'createLine', group: 'draw',
   })
   for (const id of engineActions) {
     const entry = entryFor(featureId('action', id))
