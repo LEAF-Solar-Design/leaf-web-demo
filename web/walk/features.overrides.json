@@ -2368,7 +2368,7 @@
     }
   },
   "overrides": {
-    "action:engine-repeat": {"effect": {"kind": "opens", "target": "cockpit-prompt"}, "sources": ["web/src/cadedit/CommandLineArmer.jsx"]},
+    "action:engine-repeat": {"effect": {"kind": "opens", "target": "cockpit-prompt", "operation": "createLine", "group": "draw"}, "sources": ["web/src/cadedit/CommandLineArmer.jsx"]},
     "action:fit": {"effect": {"kind": "renders", "target": "viewer-home"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-in": {"effect": {"kind": "renders", "target": "viewer-zoom-in"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-out": {"effect": {"kind": "renders", "target": "viewer-zoom-out"}, "sources": ["web/src/lib/ribbonClusters.js"]},
