@@ -10,6 +10,7 @@ import { familiesForSurface } from '../../src/lib/surfaceRails.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
 import { normalizedControlKey } from './probes.mjs'
+import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
 import { seedParams, runBody } from '../solarGraphCommitProof.mjs'
@@ -1333,6 +1334,50 @@ export async function assertEngineRepeat(probe, runtime, before, assertions = ex
   runtime.evidence.repeatDispatches = { before: before.dispatches, after: dispatches }
 }
 
+export function solarAvailabilityProbe(probe, catalog) {
+  if (probe.kind !== 'tool' || probe.state !== 'ready' || !probe.sourceId.startsWith('solar-')) return probe
+  if (probe.assertion.target === 'catalog-run-decision') return probe
+  const family = catalog?.families.find((family) => family.capabilities.some((tool) => tool.name === probe.sourceId))
+  const tool = family?.capabilities.find((tool) => tool.name === probe.sourceId)
+  if (!tool) return probe
+  const effect = solarToolReadyEffect(tool, family.family_id, catalog.families)
+  if (effect.target === 'catalog-run-decision') return probe
+  return { ...probe, assertion: { ...effect,
+    assertionId: `${probe.featureId}/${probe.state}/${effect.kind}` },
+  locator: { ...probe.locator, name: accessibleName(tool.name,
+    effect.kind === 'disabled_with_reason' ? effect.reason : '') } }
+}
+
+export async function captureMultipleSelection(probe, runtime, assertions = expect) {
+  const { page } = runtime
+  await assertions(page.getByTestId('dock-selection-count')).toHaveText('2 objects selected')
+  const before = { selectionCount: 2 }
+  if (probe.assertion.target === 'engine:delete') {
+    before.count = await engineCount(page)
+    before.geometry = await observedGeometry(page)
+    before.selectedIds = [0xA100, 0xA101].map(String)
+    assertions(before.geometry.entities.filter((entity) => before.selectedIds.includes(String(entity.id))).length).toBe(2)
+  }
+  runtime.evidence.multipleSelection = { selectionCount: before.selectionCount }
+  return before
+}
+
+export async function assertMultipleSelectionDelete(runtime, before, assertions = expect) {
+  const { page } = runtime
+  assertions(before.selectionCount).toBe(2)
+  await assertions.poll(() => engineCount(page)).toBe(before.count - 2)
+  const after = await observedGeometry(page)
+  assertions(after.entities.some((entity) => before.selectedIds.includes(String(entity.id)))).toBe(false)
+  assertions(after.entities.map(({ index, ...entity }) => entity)).toEqual(before.geometry.entities
+    .filter((entity) => !before.selectedIds.includes(String(entity.id))).map(({ index, ...entity }) => entity))
+  await page.getByRole('toolbar', { name: 'Quick access', exact: true })
+    .getByRole('button', { name: ACTIONS.find((action) => action.id === 'engine:undo').label, exact: true }).click()
+  await assertions.poll(() => engineCount(page)).toBe(before.count)
+  assertions(await observedGeometry(page)).toEqual(before.geometry)
+  runtime.evidence.multipleSelection = { selectionCount: before.selectionCount, before: before.count,
+    after: after.entities.length, restored: await engineCount(page), undoSteps: 1 }
+}
+
 export function seedSignOutIdentity({ identity, coachKey }) {
   if (sessionStorage.getItem('leaf.walk.w1k.identity-seeded') !== '1') {
     localStorage.setItem('leaf.jwt', identity.token)
@@ -2158,6 +2203,8 @@ async function captureBefore(probe, runtime) {
   // Refusal probes do not activate the action or need its enabled-state baseline.
   if (probe.assertion.kind === 'disabled_with_reason' && probe.kind === 'action') return {}
   const target = probe.assertion.target || ''
+  if (probe.state === 'multiple-selected' && ['engine:delete', 'cockpit-prompt'].includes(target)
+    && typeof captureMultipleSelection === 'function') return captureMultipleSelection(probe, runtime)
   if (target === 'engine-refusal') return captureEngineRefusal(runtime)
   if (target === 'browser-clipboard' || target === 'engine:explode') return { count: await engineCount(page), geometry: await observedGeometry(page) }
   if (/^properties-(drawing|layers|plan|selection)-section$/.test(target)) {
@@ -2480,6 +2527,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   if (target === 'cockpit-prompt') {
     await expect(page.getByTestId('cockpit-prompt')).toBeVisible()
     await expect(page.getByTestId('cockpit-prompt')).toHaveAccessibleName(`${effect.verb} command`)
+    if (probe.state === 'multiple-selected') {
+      expect(before.selectionCount).toBe(2)
+      await expect(page.getByTestId('dock-selection-count')).toHaveText('2 objects selected')
+      runtime.evidence.multipleSelection = { selectionCount: before.selectionCount, verb: effect.verb, promptArmed: true }
+    }
     return
   }
   if (target === 'command-menu') { await expect(page.getByRole('listbox', { name: 'Tool commands', exact: true })).toBeVisible(); return }
@@ -2652,6 +2704,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     ])
     return
   }
+  if (target === 'engine:delete' && probe.state === 'multiple-selected'
+    && typeof assertMultipleSelectionDelete === 'function') {
+    await assertMultipleSelectionDelete(runtime, before, assertions)
+    return
+  }
   if (target.startsWith('engine:') || target === 'browser-clipboard-cut') {
     // Immediate engine operations must commit geometry, not merely leave
     // their button enabled or open an unrelated panel.
@@ -2703,6 +2760,7 @@ export async function runProbe(probe, runtime) {
     }
     if (typeof installGeometryObserver === 'function' && (probe.locator?.keyboardAction === 'engine:repeat'
       || barNoRung(probe) || ['engine-refusal', 'engine:explode', 'browser-clipboard'].includes(probe.assertion.target)
+      || (probe.state === 'multiple-selected' && ['engine:delete', 'cockpit-prompt'].includes(probe.assertion.target))
       || probe.assertion.target?.startsWith('drawing-version-'))) await page.addInitScript(installGeometryObserver)
     for (const recipe of probe.setup.steps) {
       await (runtime.runStep || test.step)(`Setup: ${recipe.kind}`, async () => {
@@ -2726,6 +2784,10 @@ export async function runProbe(probe, runtime) {
       runtime.catalogFacts ||= {}
       await workerCatalog(runtime.catalogFacts, page.request, { drawingId: runtime.drawingId, version: runtime.drawingVersion || 'head' })
       if (runtime.catalogFacts.catalogError) throw runtime.catalogFacts.catalogError
+      if (typeof solarAvailabilityProbe === 'function') {
+        probe = solarAvailabilityProbe(probe, runtime.catalogFacts.catalog)
+        evidence.effectiveEffect = probe.assertion
+      }
       const availabilityReason = unsupportedBeforeSetup(probe, runtime.catalogFacts)
       if (availabilityReason) {
         runtime.unsupportedAvailability = toolAvailabilityEvidence(probe, runtime.catalogFacts)
