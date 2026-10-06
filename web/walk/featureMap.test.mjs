@@ -19,6 +19,23 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
+test('G4 multiple-selected contains two editable LINEs and derives selection-set effects', () => {
+  for (const op of ['delete', 'move', 'copy', 'rotate', 'scale', 'mirror']) {
+    const entry = entryFor(`action:modify-${op}`)
+    const context = entry.state_contexts['multiple-selected']
+    assert.deepEqual(context.session.entities.map((entity) => entity.id), context.session.selectedIds)
+    assert.ok(context.session.entities.every((entity) => entity.type === 'LINE' && entity.editable))
+    assert.equal(context.session.selected.id, context.session.selectedIds[0])
+    const action = ACTIONS.find((action) => action.id === entry.source_id)
+    assert.equal(action.when(context), '')
+    assert.deepEqual(entry.expected_effect['multiple-selected'], entry.expected_effect.ready)
+    const missing = clone(context)
+    missing.session.entities.pop()
+    assert.equal(action.when(missing), MODIFY_REASONS.missingSelection)
+  }
+  assert.equal(entryFor('action:modify-move-vertex').expected_effect['multiple-selected'].reason, MODIFY_REASONS.multiSelection)
+})
+
 test('G1 Solar editor effects follow catalog view, placement and surface fold', () => {
   const readySnapshot = clone(snapshot)
   for (const tool of readySnapshot.response.families.flatMap((family) => family.capabilities)) {
@@ -206,6 +223,7 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   for (const id of ['drawer:plan', 'drawer:result']) previous.overrides[id].viewports = ['desktop', 'phone']
   const previousTriples = triples(buildFeatureMap({ overrides: previous }))
   // 21-B2 added engine:undo, engine:redo and engine:repeat plus the engine-nothing-to-undo, engine-nothing-to-redo and no-command-to-repeat patches (793 -> 811, 759 -> 777). C2 certifies the 41 census triples (811 -> 852, 777 -> 818).
+  // G4 changes six multiple-selected effects, retaining all six rows: 852 + 0 and 818 + 0 triples.
   assert.equal(previousTriples.length, 852)
   assert.equal(triples(map).length, 818)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
