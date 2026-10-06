@@ -31,6 +31,8 @@ import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry
 import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
+import { readNavExpanded, writeNavExpanded } from './lib/navExpandedPreference.js'
+import { useLoadingPhase } from './lib/loadingTiming.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
 import SolarSettingsForm from './solar/SolarSettingsForm.jsx'
 import { ENV_SOLAR_SETTINGS_FORM } from './solar/flag.js'
@@ -1622,12 +1624,16 @@ export default function App() {
     viewer.setView({ center: { x: (resultBounds.minX + resultBounds.maxX) / 2, y: (resultBounds.minY + resultBounds.maxY) / 2 }, zoom })
   }, [resultBounds, studioGround, pushViewSnapshot])
 
+  // Toast actions outlive the render that created the version; use the current undo handler.
+  const undoActionRef = useRef(null)
+  const onUndo = useCallback(() => undoActionRef.current?.(), [])
+
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
   const seatVersion = useCallback((view, drawingId, note) => {
     seatDrawingVersion(view, { drawingId, source: 'version' })
-    if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'View', onClick: viewViewer } })
-  }, [seatDrawingVersion, showToast, viewViewer])
+    if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'Undo', undo: true, onClick: onUndo } })
+  }, [onUndo, seatDrawingVersion, showToast])
 
   const seatCompletedVersion = useCallback(async (newVersion, envelope, options) => {
     const scopeCurrent = isScopeCurrent
@@ -1642,7 +1648,7 @@ export default function App() {
         version = commit.version
       } catch {
         if (!current()) return false
-        if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+        if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
         markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
         return false
       }
@@ -1650,7 +1656,7 @@ export default function App() {
     if (envelope?.result?.new_version_readable === false) {
       if (!current()) return false
       recordCommittedUnreadableHead(newVersion)
-      if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
       return false
     }
     try {
@@ -1660,23 +1666,24 @@ export default function App() {
       return true
     } catch {
       if (!current()) return false
-      if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
       markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
       return false
     }
-  }, [intake, isScopeCurrent, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast])
+  }, [intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast])
   completedVersionRef.current = seatCompletedVersion
 
   // P2 wave C-2: engagement depth (real CAD work). ONE event for the four
   // version-navigation gestures; action is the closed vocabulary
   // undo/redo/history/preview, counted only when the navigation happened.
-  const onUndo = useCallback(async () => {
+  const undoCurrentVersion = useCallback(async () => {
     const view = await undoDrawingVersion()
     if (view) {
       track('drawing.version_navigated', { action: 'undo' })
       showToast({ text: `Reverted to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
     }
   }, [drawingState, showToast, undoDrawingVersion, viewViewer])
+  undoActionRef.current = undoCurrentVersion
 
   const onRedo = useCallback(async () => {
     const view = await redoDrawingVersion()
@@ -1919,7 +1926,7 @@ export default function App() {
         } catch {
           // Completed act -> plain NT2 toast; the failed refresh surfaces as an
           // X1 red row at the viewer card (a failed act is never a toast).
-          showToast({ text: `Version ${nv.version} created` })
+          showToast({ text: `Version ${nv.version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
           setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
         }
       }
@@ -1939,7 +1946,7 @@ export default function App() {
         } catch {
           // Completed act -> plain NT2 toast; the failed refresh surfaces as an
           // X1 red row at the viewer card (a failed act is never a toast).
-          showToast({ text: `Version ${commit?.version ?? nv.version} created` })
+          showToast({ text: `Version ${commit?.version ?? nv.version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
           setRefreshFail({ drawing_id: nv.drawing_id, version: commit?.version ?? nv.version })
         }
       }
@@ -2105,6 +2112,22 @@ export default function App() {
     if (last) onRequestCatalogRun(last.tool, last.params, null, 'catalog', { complete: true })
   }, [onRequestCatalogRun])
 
+  // S20: a failed job row's Retry in the rail re-dispatches that job's tool
+  // through the same confirm path as onRetry (never a silent run). The row
+  // that IS the last run keeps its inputs; any other failed row re-arms the
+  // tool with its defaults, because the jobs list carries no params.
+  const onRetryJob = useCallback((job) => {
+    if (!job || job.status !== 'failed' || typeof job.tool !== 'string') return
+    const last = lastRunRef.current
+    const sameRun = !!last && last.tool?.name === job.tool && currentJob?.job_id === job.job_id
+    const tool = sameRun ? last.tool : tools.find((candidate) => candidate.name === job.tool)
+    if (!tool) {
+      setRunErr(`${job.tool} cannot be retried: it is no longer in the catalog.`)
+      return
+    }
+    onRequestCatalogRun(tool, sameRun ? last.params : {}, null, 'catalog', { complete: sameRun })
+  }, [currentJob, onRequestCatalogRun, setRunErr, tools])
+
   // Guided Solar step rail: Solar settings opens its typed form; every other step opens the step editor.
   const onOpenSolarFlowStep = useCallback((row) => {
     if (!row || typeof row.name !== 'string') return
@@ -2222,7 +2245,7 @@ export default function App() {
             const view = await getDrawingIntake(false, nv.drawing_id, 'head')
             seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
           } catch {
-            showToast({ text: `Version ${nv.version} created` })
+            showToast({ text: `Version ${nv.version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
             setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
           }
         }
@@ -2851,17 +2874,26 @@ export default function App() {
     request(id)
   }, [returnToDrawing, request])
   // W4c-V1: the nav rail's spine posture on drafting surfaces under the
-  // studio. IN-MEMORY on purpose: the rollback contract forbids new storage
-  // keys under the studio and stale ?params, so the posture resets per page
-  // load (accepted V1 cost). Default COLLAPSED on CAD/Solar — the drafting
+  // studio. REMEMBERED under fork F-studio-rollback-storage (S20), which
+  // overrides the W4c rollback contract's no-new-storage-keys rule for this
+  // ONE key (lib/navExpandedPreference.js, every access in try/catch). No
+  // stored value keeps the default COLLAPSED on CAD/Solar — the drafting
   // ribbon carries the tool set there and an expanded catalog beside it is
   // exactly the duplication ACCEPTANCE deferred the ribbon to avoid.
   const [studioDrawer, setStudioDrawer] = useState('none')
-  const [navExpanded, setNavExpandedState] = useState(false)
+  const [navExpanded, setNavExpandedState] = useState(() => readNavExpanded())
   const setNavExpanded = useCallback((open) => {
     setNavExpandedState(open)
+    writeNavExpanded(!!open)
     setStudioDrawer((current) => open ? 'nav' : current === 'nav' ? 'none' : current)
   }, [])
+  // S20: the header's drawing line waits out the loading grace before it says
+  // anything, then shows a hollow dot and "Loading drawing" (A8 timing). Only
+  // a pending load counts: no selection, an absent or a failed drawing never
+  // claims to be loading.
+  const drawingLoading = !shown && drawingLoad.state === 'pending'
+  const drawingLoadPhase = useLoadingPhase(drawingLoading)
+  const drawingLoadShown = drawingLoading && (drawingLoadPhase === 'shown' || drawingLoadPhase === 'long')
   // W4c-C: the DXF import surface is a floating cockpit pane on drafting
   // surfaces (it was a full-width page block across the drawing); the ribbon
   // opens it.
@@ -3782,6 +3814,7 @@ export default function App() {
         inflight: inflightPtr,
         reattaching,
         onSelectJob,
+        onRetryJob,
         builds: buildQueue.builds,
         buildFeed: { status: buildQueue.status, dropped: buildQueue.dropped, onRetry: buildQueue.resume },
         staleResults,
@@ -3844,7 +3877,13 @@ export default function App() {
             onOpenProject={onOpenProject}
           />
           <span className="meta">
-            {shown ? `${shown.polylines.length} polylines · ${shown.layers.length} layers` : 'loading'}
+            {shown
+              ? `${shown.polylines.length} polylines · ${shown.layers.length} layers`
+              : drawingLoadShown && (
+                <span className="meta-loading" role="status">
+                  <span className="dot hollow" aria-hidden="true" />Loading drawing
+                </span>
+              )}
           </span>
           {mock && <span className="tag amber">Demo</span>}
         </div>
@@ -3867,8 +3906,10 @@ export default function App() {
                 : 'Open pending approvals'}
             >
               Approvals
-              {pendingApprovalCount > 0 && <span className="key">{pendingApprovalCount}</span>}
-              {pendingApprovalsUnavailable && <span className="dot red" aria-hidden="true" />}
+              {/* S20 (F-studio-nt2-count): a dot, never a visible number, while
+                  items wait; the count lives in the aria-label above. */}
+              {pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />}
+              {pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />}
             </button>
           )}
           <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>

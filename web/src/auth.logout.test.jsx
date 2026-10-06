@@ -115,3 +115,38 @@ it('URL307B-06 explicit logout clears before SDK navigation', async () => {
   expect(detached).not.toHaveBeenCalled()
   h.offThrow()
 })
+
+it.each([false, true])('S21 logout clears all command-bar draft scopes before navigation (SDK=%s)', async (sdkEnabled) => {
+  const h = await mountLogout(sdkEnabled)
+  const { composerDraftKey, createComposerDraft } = await import('./lib/composerDraft.js')
+  const keys = [
+    composerDraftKey('guest', '/try'),
+    composerDraftKey('account:a', '/app'),
+    composerDraftKey('account:b', '/try'),
+  ]
+  for (const key of keys) localStorage.setItem(key, 'draw a 20 ft fence')
+  localStorage.setItem('leaf.inflightAuthor.v1', 'author pointer')
+  localStorage.setItem('leaf.unrelated', 'keep')
+  const pending = createComposerDraft({ storage: localStorage, accountScope: 'account:a', route: '/app' })
+  pending.update('a pending edit must not return after logout')
+  const assertDraftsCleared = () => {
+    for (const key of keys) expect(localStorage.getItem(key)).toBeNull()
+    expect(localStorage.getItem('leaf.inflightAuthor.v1')).toBeNull()
+    expect(localStorage.getItem('leaf.unrelated')).toBe('keep')
+    pending.flush()
+    for (const key of keys) expect(localStorage.getItem(key)).toBeNull()
+  }
+  h.reload.mockImplementation(assertDraftsCleared)
+  h.sdk.logout.mockImplementation(async () => assertDraftsCleared())
+  try {
+    await act(async () => { await h.auth.logout() })
+    assertDraftsCleared()
+    expect(sdkEnabled ? h.sdk.logout : h.reload).toHaveBeenCalledOnce()
+  } finally {
+    pending.dispose({ save: false })
+    for (const key of keys) localStorage.removeItem(key)
+    localStorage.removeItem('leaf.inflightAuthor.v1')
+    localStorage.removeItem('leaf.unrelated')
+    h.offThrow()
+  }
+})
