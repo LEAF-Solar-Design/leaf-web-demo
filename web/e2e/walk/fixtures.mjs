@@ -10,6 +10,7 @@ import { familiesForSurface } from '../../src/lib/surfaceRails.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
 import { normalizedControlKey } from './probes.mjs'
+import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
 import { seedParams, runBody } from '../solarGraphCommitProof.mjs'
@@ -1331,6 +1332,20 @@ export async function assertEngineRepeat(probe, runtime, before, assertions = ex
   const dispatches = await page.evaluate(() => structuredClone(globalThis.__walkGeometry.dispatches))
   assertions(dispatches).toEqual(before.dispatches)
   runtime.evidence.repeatDispatches = { before: before.dispatches, after: dispatches }
+}
+
+export function solarAvailabilityProbe(probe, catalog) {
+  if (probe.kind !== 'tool' || probe.state !== 'ready' || !probe.sourceId.startsWith('solar-')) return probe
+  if (probe.assertion.target === 'catalog-run-decision') return probe
+  const family = catalog?.families.find((family) => family.capabilities.some((tool) => tool.name === probe.sourceId))
+  const tool = family?.capabilities.find((tool) => tool.name === probe.sourceId)
+  if (!tool) return probe
+  const effect = solarToolReadyEffect(tool, family.family_id, catalog.families)
+  if (effect.target === 'catalog-run-decision') return probe
+  return { ...probe, assertion: { ...effect,
+    assertionId: `${probe.featureId}/${probe.state}/${effect.kind}` },
+  locator: { ...probe.locator, name: accessibleName(tool.name,
+    effect.kind === 'disabled_with_reason' ? effect.reason : '') } }
 }
 
 export function seedSignOutIdentity({ identity, coachKey }) {
@@ -2726,6 +2741,10 @@ export async function runProbe(probe, runtime) {
       runtime.catalogFacts ||= {}
       await workerCatalog(runtime.catalogFacts, page.request, { drawingId: runtime.drawingId, version: runtime.drawingVersion || 'head' })
       if (runtime.catalogFacts.catalogError) throw runtime.catalogFacts.catalogError
+      if (typeof solarAvailabilityProbe === 'function') {
+        probe = solarAvailabilityProbe(probe, runtime.catalogFacts.catalog)
+        evidence.effectiveEffect = probe.assertion
+      }
       const availabilityReason = unsupportedBeforeSetup(probe, runtime.catalogFacts)
       if (availabilityReason) {
         runtime.unsupportedAvailability = toolAvailabilityEvidence(probe, runtime.catalogFacts)

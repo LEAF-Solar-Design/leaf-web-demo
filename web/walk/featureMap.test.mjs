@@ -20,9 +20,15 @@ const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
 test('G1 Solar editor effects follow catalog view, placement and surface fold', () => {
+  const readySnapshot = clone(snapshot)
+  for (const tool of readySnapshot.response.families.flatMap((family) => family.capabilities)) {
+    delete tool.availability
+  }
+  const editorMap = buildFeatureMap({ snapshot: readySnapshot })
   for (const name of ['solar-unit-sync', 'solar-design-presets']) {
     const id = `tool:${name}`
-    assert.deepEqual(entryFor(id).expected_effect.ready, { kind: 'opens', target: 'solar-step-editor', tool: name })
+    assert.deepEqual(editorMap.entries.find((entry) => entry.id === id).expected_effect.ready,
+      { kind: 'opens', target: 'solar-step-editor', tool: name })
     assert.equal(entryFor(id).expected_effect['job-running'].kind, 'disabled_with_reason')
     for (const mutate of [
       (tool) => { tool.placement = { tab: 'manage' } },
@@ -34,6 +40,7 @@ test('G1 Solar editor effects follow catalog view, placement and surface fold', 
       const family = changed.response.families.find((row) => row.capabilities.some((tool) => tool.name === name))
       const tool = family.capabilities.find((tool) => tool.name === name)
       mutate(tool, family)
+      delete tool.availability // This test isolates editor placement from readiness.
       // Use an actual folded family id from the surface manifest.
       if (family.family_id === 'drawing') family.family_id = PRODUCT_SURFACES.find((row) => row.id === 'solar').familyIds[0]
       assert.equal(buildFeatureMap({ snapshot: changed }).entries.find((row) => row.id === id)
@@ -45,10 +52,42 @@ test('G1 Solar editor effects follow catalog view, placement and surface fold', 
   const tool = family.capabilities.find((tool) => tool.name === 'solar-unit-sync')
   tool.name = 'record-derived-form'
   tool.solar.name = tool.name
+  delete tool.availability
   const config = clone(overrides)
   delete config.overrides['tool:solar-unit-sync']
   assert.equal(buildFeatureMap({ snapshot: changed, overrides: config }).entries
     .find((row) => row.id === 'tool:record-derived-form').expected_effect.ready.target, 'solar-step-editor')
+})
+
+test('G3 Solar editors use product refusals while catalog decisions retain runtime readiness', () => {
+  for (const [name, code, sentence] of [
+    ['solar-equipment-move', 'equipment_assignment_required', 'Assign inverter equipment first'],
+    ['solar-cable-export', 'solar_output_not_current', 'Rerun the earlier Solar steps so the whole design is current first'],
+    ['solar-electrical-schedules', 'solar_output_not_current', 'Rerun the earlier Solar steps so the whole design is current first'],
+    ['solar-solaredge-accept', 'frames_required', 'Create panel groups first'],
+  ]) {
+    const changed = clone(snapshot)
+    const tool = changed.response.families.flatMap((family) => family.capabilities).find((tool) => tool.name === name)
+    const readyEffect = () => buildFeatureMap({ snapshot: changed }).entries
+      .find((row) => row.id === `tool:${name}`).expected_effect.ready
+    tool.availability = { entitled: true, engine_ready: true, implemented: true,
+      input_ready: false, refusal_reasons: [code] }
+    assert.deepEqual(readyEffect(), { kind: 'disabled_with_reason', reason: sentence, reason_code: code })
+    tool.availability.input_ready = true
+    // The flags, rather than a stale refusal list, decide readiness.
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'solar-step-editor', tool: name })
+    delete tool.availability
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'solar-step-editor', tool: name })
+    tool.availability = { entitled: true, engine_ready: true, implemented: true,
+      input_ready: false, refusal_reasons: ['drawing_context_required'] }
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'solar-step-editor', tool: name })
+    tool.placement = { tab: 'manage' }
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'catalog-run-decision', tool: name })
+    tool.availability.refusal_reasons = [code]
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'catalog-run-decision', tool: name })
+    tool.availability = { entitled: true, engine_ready: true, implemented: true, input_ready: true }
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'catalog-run-decision', tool: name })
+  }
 })
 
 test('C2 certifies all seven engine and disclosure controls with real recipes', () => {
