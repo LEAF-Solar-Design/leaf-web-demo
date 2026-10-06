@@ -72,26 +72,17 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import importlib.util
+import importlib
 import json
 import math
-from pathlib import Path
 import re
-import sys
 
 from solar_design_graph import new_id as graph_new_id, validate_graph
 
 
 def _load_sibling(name):
-    """A server module by path (any cwd), shared through sys.modules so its error classes are one."""
-    if name in sys.modules:
-        return sys.modules[name]
-    path = Path(__file__).resolve().with_name(name + ".py")
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    """Share a fully initialized server module and its error classes across callers."""
+    return importlib.import_module(name)
 
 
 st = _load_sibling("solar_inverter_state")
