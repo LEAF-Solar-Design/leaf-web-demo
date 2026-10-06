@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AUTHOR_SYSTEM_PROMPT } from "../src/agent/systemPrompt.js";
 import {
   AUTHOR_RUNNER_GUIDE,
+  authorPrompt,
   completeRequiredBrokerTest,
   resolveAuthorModel,
   sampleBrokerTestParams,
@@ -183,4 +184,22 @@ describe("Agent SDK author contract", () => {
     await expect(completeRequiredBrokerTest(TOOL, run, passed)).resolves.toBeNull();
     expect(run).not.toHaveBeenCalled();
   });
+});
+
+it.each([false, true])("D2b2 G registry=%s", (attached) => {
+  const prompt = authorPrompt("SYSTEM", "REQUEST", attached);
+  expect(prompt).toContain(
+    "For a revision of the explicitly bound existing tool, change its implementation while preserving its name, kind, entry, engine operation, and capabilities.",
+  );
+  expect(prompt).toContain(
+    "You may only add top-level optional properties to its input or output schema; preserve every existing property, required list, and other schema field.",
+  );
+  expect(prompt).toContain(
+    "The harness assigns the next minor version with patch zero for these additions, or the next patch version when both schemas are unchanged.",
+  );
+  expect(prompt).toContain("The entry source must change.");
+  expect(prompt).not.toContain("version-bump/extend");
+  expect(prompt.includes("registry_get(pack)")).toBe(attached);
+  expect(prompt.startsWith("SYSTEM\n")).toBe(true);
+  expect(prompt.endsWith("Author a tool for this request:\nREQUEST")).toBe(true);
 });
