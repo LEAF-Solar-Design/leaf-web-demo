@@ -6,6 +6,7 @@ import {
   MAX_BATCH_STEPS, MAX_COORD, MAX_INTERSECT_POINTS, chamferLines, crossings, curveOf, extendEntity, filletLines,
   locate, nearestEntity, trimEntity,
 } from './intersect.js'
+import { arcSweepDeg } from './engineIntake.js'
 
 const line = (id, a, b, layer = 'A') => ({ id, type: 'LINE', layer, closed: false, vertices: [[...a, 0], [...b, 0]], radius: null, startDeg: null, endDeg: null, editable: true })
 const poly = (id, pts, closed, layer = 'A', bulges = null) => ({ id, type: 'LWPOLYLINE', layer, closed, vertices: pts.map((p) => [...p, 0]), radius: null, startDeg: null, endDeg: null, editable: true, ...(bulges ? { bulges } : {}) })
@@ -1460,5 +1461,85 @@ describe('Kimi notes on #1064 (W4g-6e record 15)', () => {
     expect(bulges).toHaveLength(2)
     expect(bulges[0]).toBeCloseTo(Math.tan(Math.PI / 8), 9)
     expect(bulges[1]).toBe(0)
+  })
+})
+
+// ARC-SWEEP: the kernel reads an arc's sweep in constant time and exactly at any magnitude (AX
+// rows). Past four turns the sweep is the difference of the angles' exact residues, so an arc
+// whose difference spans many turns reads as its reduced arc, one whose difference overflows
+// reads as the arc between its residues, and a huge start keeps its sweep.
+describe('ARC-SWEEP bounded kernel', () => {
+  const arcEntity = (start, end) => ({ id: '9', type: 'ARC', layer: 'A', closed: false, vertices: [[0, 0, 0]], radius: 5, startDeg: start, endDeg: end, editable: true })
+  // Integer-valued doubles: BigInt gives their exact residues without the product's float path.
+  const residue = (deg) => Number(BigInt(deg) % 360n)
+  // The base sweep rule, copied as the oracle for differences up to four turns.
+  function legacySweep(startDeg, endDeg) {
+    let sweep = endDeg - startDeg
+    while (sweep <= 0) sweep += 360
+    while (sweep > 360) sweep -= 360
+    return sweep
+  }
+
+  it('AX1 a difference of many turns reads the reduced arc', () => {
+    const got = curveOf(arcEntity(0, 1e300))
+    expect(got).toEqual(curveOf(arcEntity(0, 1e300 % 360)))
+    expect(curveOf(arcEntity(10, 10 + 360 * 1e6 + 30))).toEqual(curveOf(arcEntity(10, 40)))
+  })
+
+  it('AX2 a difference that overflows reads the arc between the two residues', () => {
+    const r = residue(1.7e308)
+    const got = curveOf(arcEntity(-1.7e308, 1.7e308))
+    expect(got.refusal).toBeUndefined()
+    expect(got).toEqual(curveOf(arcEntity(-r, r)))
+    expect(curveOf(arcEntity(-1.7e308, 1.7e308), 'target')).toEqual(curveOf(arcEntity(-r, r), 'target'))
+  })
+
+  it('AX3 differences up to four turns read exactly as before', () => {
+    let state = 0x23a7
+    const rnd = () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296 }
+    for (let k = 0; k < 2000; k += 1) {
+      const start = 1440 * rnd() - 720
+      const end = start + 2880 * rnd() - 1440
+      expect(curveOf(arcEntity(start, end)).sweep).toBe(legacySweep(start, end))
+    }
+    for (const d of [1440, -1440, 0, 360]) expect(curveOf(arcEntity(5, 5 + d)).sweep).toBe(legacySweep(5, 5 + d))
+  })
+
+  it('AX4 a trim of a many-turn arc equals the trim of its reduced arc', () => {
+    const edge = line('E', [0, -10], [0, 10])
+    const pick = [5 * Math.cos(Math.PI / 4), 5 * Math.sin(Math.PI / 4)]
+    const reduced = trimEntity(arcEntity(0, 180), edge, pick[0], pick[1])
+    expect(trimEntity(arcEntity(0, 360 * 1e6 + 180), edge, pick[0], pick[1])).toEqual(reduced)
+    expect(reduced.refusal).toBeUndefined()
+  })
+
+  it('AX5 a huge start keeps its sweep', () => {
+    // 1e19 mod 360 is 280 by hand (0 mod 40, 1 mod 9): the arc runs 280 -> 90, sweep 170.
+    expect(residue(1e19)).toBe(280)
+    const got = curveOf(arcEntity(1e19, 90))
+    expect(got).toEqual(curveOf(arcEntity(280, 90)))
+    expect(got.start).toBe(280)
+    expect(got.end).toBe(90)
+    expect(got.sweep).toBe(170)
+  })
+
+  it('AX6 a sliver past four turns stays a sliver, and a trim across it is refused', () => {
+    // -79.99999999999999 is exactly -80 + 2^-46 and 1e19 mod 360 is 280: the true sweep is 2^-46.
+    const sliver = 2 ** -46
+    expect(curveOf(arcEntity(1e19, -79.99999999999999)).sweep).toBe(sliver)
+    expect(curveOf(arcEntity(-80.00000000000001, 1e19)).sweep).toBe(sliver)
+    // The line x = 0 meets the circle at 90 and 270, neither inside the sliver near 280.
+    const edge = line('E', [0, -10], [0, 10])
+    for (const [start, end] of [[1e19, -79.99999999999999], [-80.00000000000001, 1e19]]) {
+      const got = trimEntity(arcEntity(start, end), edge, -5, 0)
+      expect(got.refusal).toBe('Trim refused: the cutting edge does not cross the selection.')
+    }
+  })
+
+  it('AX7 the kernel reads the intake sampler\'s own sweep rule', () => {
+    const pairs = [[10, 40], [1e19, 90], [1e19, -79.99999999999999], [-80.00000000000001, 1e19],
+      [-1e-14, 1440], [0, -1440], [0, 1440], [-1.7e308, 1.7e308], [5, 5]]
+    for (const [start, end] of pairs) expect(curveOf(arcEntity(start, end)).sweep).toBe(arcSweepDeg(start, end))
+    expect(curveOf(arcEntity(-1e-14, 1440)).sweep).toBe(360)
   })
 })

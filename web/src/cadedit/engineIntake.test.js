@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { expandBulgedPolylines } from './engineIntake.js'
 
-import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, MIN_ARC_POINTS, dimensionSchematic, mleaderSchematic, engineIntake, entityToPolyline, formatMeasurement, hexHandle } from './engineIntake.js'
+import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, MIN_ARC_POINTS, dimensionSchematic, mleaderSchematic, engineIntake, entityToPolyline, arcSweepDeg, formatMeasurement, hexHandle, intakeRoundPolylines } from './engineIntake.js'
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
@@ -462,5 +462,182 @@ describe('W4g-bulge-plane-aware: a bulged segment samples in its own OCS plane',
       expect(() => bulgePoints(a, b, bulge, z, normal)).not.toThrow()
       expect(bulgePoints(a, b, bulge, z, normal)).toEqual(today)
     }
+  })
+})
+
+// ARC-SWEEP: an arc's sweep is computed in constant time and exactly at any magnitude. Past
+// four turns the sweep is the difference of the two angles' exact residues (% is exact for
+// doubles) and the samples start from the start angle's residue, so an ARC whose angles are huge
+// draws the arc those angles name instead of looping forever, losing the smaller angle to
+// rounding, or collapsing onto its start. Every expected value is the same arc drawn with its
+// angles already reduced, a hand-derived point, or the base sampler copied as an oracle.
+describe('ARC-SWEEP bounded arc sampling', () => {
+  // The base sampler, copied as the oracle for differences up to four turns.
+  function legacyArcPoints(cx, cy, z, r, startDeg, endDeg) {
+    let sweep = endDeg - startDeg
+    while (sweep <= 0) sweep += 360
+    while (sweep > 360) sweep -= 360
+    const n = Math.max(MIN_ARC_POINTS, Math.ceil(sweep / ARC_STEP_DEG) + 1)
+    const pts = new Array(n)
+    for (let i = 0; i < n; i += 1) {
+      const a = ((startDeg + (sweep * i) / (n - 1)) * Math.PI) / 180
+      pts[i] = [cx + r * Math.cos(a), cy + r * Math.sin(a), z]
+    }
+    return pts
+  }
+  // Integer-valued doubles: BigInt gives their exact residues without the product's float path.
+  const residue = (deg) => Number(BigInt(deg) % 360n)
+  const roundArc = (start, end) => intakeRoundPolylines({ arcs: [{ handle: 'A', layer: 'L', c: [1, 2, 0], r: 3, start_deg: start, end_deg: end }] })
+  const engineArc = (start, end) => ({ id: '7', type: 'ARC', layer: 'L', closed: false, vertices: [[1, 2, 0]], radius: 3, startDeg: start, endDeg: end })
+
+  it('AS1 a difference of many turns draws the reduced arc', () => {
+    expect(roundArc(10, 10 + 360 * 1e6 + 30)).toEqual(roundArc(10, 40))
+    expect(entityToPolyline(engineArc(10, 10 + 360 * 1e6 + 30))).toEqual(entityToPolyline(engineArc(10, 40)))
+  })
+
+  it('AS2 a difference of 1e300 returns the reduced arc', () => {
+    const got = roundArc(0, 1e300)
+    const mapped = entityToPolyline(engineArc(0, 1e300))
+    expect(got).toEqual(roundArc(0, 1e300 % 360))
+    expect(mapped).toEqual(entityToPolyline(engineArc(0, 1e300 % 360)))
+    expect(got[0].pts.length).toBeGreaterThanOrEqual(MIN_ARC_POINTS)
+  })
+
+  it('AS3 a difference that overflows draws the arc between the two residues', () => {
+    const r = residue(1.7e308)
+    expect(1.7e308 % 360).toBe(r)
+    expect(roundArc(-1.7e308, 1.7e308)).toEqual(roundArc(-r, r))
+    expect(entityToPolyline(engineArc(-1.7e308, 1.7e308))).toEqual(entityToPolyline(engineArc(-r, r)))
+    const both = intakeRoundPolylines({ arcs: [
+      { handle: 'X', layer: 'L', c: [1, 2, 0], r: 3, start_deg: -1.7e308, end_deg: 1.7e308 },
+      { handle: 'A', layer: 'L', c: [1, 2, 0], r: 3, start_deg: 10, end_deg: 40 },
+    ] })
+    expect(both.map((p) => p.handle)).toEqual(['X', 'A'])
+    expect(both[1]).toEqual(roundArc(10, 40)[0])
+  })
+
+  it('AS4 differences up to four turns draw exactly as before', () => {
+    let state = 0x5a17
+    const rnd = () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296 }
+    for (let k = 0; k < 2000; k += 1) {
+      const start = 1440 * rnd() - 720
+      const end = start + 2880 * rnd() - 1440
+      const [got] = roundArc(start, end)
+      expect(got.pts).toEqual(legacyArcPoints(1, 2, 0, 3, start, end))
+    }
+  })
+
+  it('AS5 the four-turn boundary keeps the loop on its own side', () => {
+    for (const d of [1440, -1440, 1080.5, -1079.25, 0, 360]) {
+      expect(roundArc(5, 5 + d)[0].pts).toEqual(legacyArcPoints(1, 2, 0, 3, 5, 5 + d))
+    }
+  })
+
+  it('AS6 a huge start draws from its exact residue, not collapsed onto the start', () => {
+    // 1e19 mod 360 is 280 by hand (0 mod 40, 1 mod 9): the arc runs 280 -> 90, sweep 170.
+    expect(residue(1e19)).toBe(280)
+    const [got] = roundArc(1e19, 90)
+    expect(got).toEqual(roundArc(280, 90)[0])
+    expect(entityToPolyline(engineArc(1e19, 90))).toEqual(entityToPolyline(engineArc(280, 90)))
+    const at = (deg) => [1 + 3 * Math.cos((deg * Math.PI) / 180), 2 + 3 * Math.sin((deg * Math.PI) / 180)]
+    const first = got.pts[0]
+    const last = got.pts[got.pts.length - 1]
+    expect(Math.abs(first[0] - at(280)[0])).toBeLessThan(1e-9)
+    expect(Math.abs(first[1] - at(280)[1])).toBeLessThan(1e-9)
+    expect(Math.abs(last[0] - 1)).toBeLessThan(1e-9)
+    expect(Math.abs(last[1] - 5)).toBeLessThan(1e-9)
+  })
+
+  // Exact rationals for doubles: x * 2^1074 as a BigInt, so residues and differences are exact.
+  function scaled(x) {
+    const view = new DataView(new ArrayBuffer(8))
+    view.setFloat64(0, x)
+    const hi = view.getUint32(0)
+    const sign = hi >>> 31 ? -1n : 1n
+    const exp = (hi >>> 20) & 0x7ff
+    const frac = (BigInt(hi & 0xfffff) << 32n) | BigInt(view.getUint32(4))
+    if (exp === 0) return sign * frac
+    return sign * ((frac | (1n << 52n)) << BigInt(exp - 1))
+  }
+  // One ulp of a positive finite double, in the same scale.
+  function ulpScaled(x) {
+    const view = new DataView(new ArrayBuffer(8))
+    view.setFloat64(0, x)
+    const exp = (view.getUint32(0) >>> 20) & 0x7ff
+    return exp === 0 ? 1n : 1n << BigInt(exp - 1)
+  }
+  const TURN = 360n << 1074n
+  // The true counter-clockwise sweep between the two angles' exact residues, in (0, TURN].
+  function exactSweep(start, end) {
+    let d = (scaled(end) % TURN) - (scaled(start) % TURN)
+    while (d <= 0n) d += TURN
+    while (d > TURN) d -= TURN
+    return d
+  }
+
+  it('AS7 a sliver past four turns stays a sliver, either sign', () => {
+    // -79.99999999999999 is exactly -80 + 2^-46 and 1e19 mod 360 is 280: the true sweep is 2^-46,
+    // and the rounded residue difference (-360) would draw the whole circle.
+    const sliver = 2 ** -46
+    expect(-79.99999999999999).toBe(-80 + sliver)
+    expect(arcSweepDeg(1e19, -79.99999999999999)).toBe(sliver)
+    expect(arcSweepDeg(-80.00000000000001, 1e19)).toBe(sliver)
+    const near280 = [1 + 3 * Math.cos((280 * Math.PI) / 180), 2 + 3 * Math.sin((280 * Math.PI) / 180)]
+    for (const [start, end] of [[1e19, -79.99999999999999], [-80.00000000000001, 1e19]]) {
+      const [got] = roundArc(start, end)
+      expect(got.pts.length).toBe(MIN_ARC_POINTS)
+      for (const p of got.pts) {
+        expect(Math.abs(p[0] - near280[0])).toBeLessThan(1e-9)
+        expect(Math.abs(p[1] - near280[1])).toBeLessThan(1e-9)
+      }
+      expect(entityToPolyline(engineArc(start, end)).pts.length).toBe(MIN_ARC_POINTS)
+    }
+  })
+
+  it('AS8 the four-turn boundary keeps the base rule where the two rules disagree', () => {
+    // -1e-14 to 1440 rounds to a difference of exactly 1440, which the base rule (and this one up
+    // to four turns) reads as a full circle; the residue rule would read the 1e-14 sliver. Drawing
+    // the full circle here pins which side of the boundary the case takes.
+    expect(1440 - -1e-14).toBe(1440)
+    expect(arcSweepDeg(-1e-14, 1440)).toBe(360)
+    expect(roundArc(-1e-14, 1440)[0].pts).toEqual(legacyArcPoints(1, 2, 0, 3, -1e-14, 1440))
+    expect(roundArc(-1e-14, 1440)[0].pts.length).toBe(Math.ceil(360 / ARC_STEP_DEG) + 1)
+  })
+
+  it('AS9 past four turns the sweep is the exact sweep rounded once (BigInt oracle)', () => {
+    let state = 0x7e31
+    const rnd = () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296 }
+    const huge = [1e19, -1e19, 2 ** 60 + 4096, -(2 ** 70), 1e300, -1e300, 1.7e308, -1.7e308, 1e17, 3.3e22]
+    const offsets = [0, 2 ** -46, -(2 ** -46), 2 ** -60, -(2 ** -60), 5e-324, -5e-324, 1e-300, 1e-14]
+    // Measured witnesses where adding 360 to a small negative residue difference rounds, so the
+    // rounding error of that addition must be carried to stay within half an ulp.
+    const witnesses = [[6.404326603412502e-7, -4.788203013917946e+112], [4.2980020149344314e+172, 4.890027472723243e-13],
+      [-4.210455386748698e-11, -6.081700334532813e+163], [-0.000004379423019229556, -6.038752527121911e+286]]
+    let checked = 0
+    const check = (start, end) => {
+      if (Math.abs(end - start) <= 1440) return
+      const got = arcSweepDeg(start, end)
+      expect(got > 0 && got <= 360).toBe(true)
+      const err = scaled(got) - exactSweep(start, end)
+      expect(2n * (err < 0n ? -err : err) <= ulpScaled(got)).toBe(true)
+      checked += 1
+    }
+    for (const [start, end] of witnesses) check(start, end)
+    for (const s of huge) {
+      const rs = s % 360
+      for (const off of offsets) {
+        for (const k of [-360, 0, 360]) {
+          check(s, rs + k + off)
+          check(rs + k + off, s)
+        }
+      }
+    }
+    for (let i = 0; i < 1000; i += 1) {
+      const s = (rnd() < 0.5 ? -1 : 1) * rnd() * 10 ** (4 + Math.floor(rnd() * 300))
+      const e = (rnd() < 0.5 ? -1 : 1) * rnd() * 10 ** (4 + Math.floor(rnd() * 300))
+      check(s, e)
+      check(s, (s % 360) + 360 * Math.floor(rnd() * 3 - 1) + (rnd() - 0.5) * 2 ** -40)
+    }
+    expect(checked).toBeGreaterThan(1500)
   })
 })
