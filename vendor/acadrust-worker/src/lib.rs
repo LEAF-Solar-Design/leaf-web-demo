@@ -704,6 +704,21 @@ fn scan_mlstyle_segments(bytes: &[u8]) -> HashMap<Handle, i32> {
     segments
 }
 
+// The pinned DXF reader stores supplied MLINESTYLE angles as degrees.
+// Preserve constructor defaults and non-finite values; convert other values
+// once at the parse boundary. Explicit default-valued degrees are ambiguous.
+fn convert_mlinestyle_angles(document: &mut CadDocument) {
+    let default_bits = std::f64::consts::FRAC_PI_2.to_bits();
+    for object in document.objects.values_mut() {
+        let ObjectType::MLineStyle(style) = object else { continue; };
+        for angle in [&mut style.start_angle, &mut style.end_angle] {
+            if angle.to_bits() != default_bits && angle.is_finite() {
+                *angle = angle.to_radians();
+            }
+        }
+    }
+}
+
 fn mlstyles_catalogue(document: &CadDocument, segments: &HashMap<Handle, i32>) -> Vec<serde_json::Value> {
     let mut styles: Vec<_> = document.objects.values().filter_map(|object| {
         let ObjectType::MultiLeaderStyle(style) = object else { return None; };
@@ -885,6 +900,7 @@ fn parse_dxf_core(bytes: &[u8]) -> Result<ParsedDxf, Refusal> {
         .map_err(|e| e.to_string())?.read().map_err(|e| e.to_string())?;
     validate_block_names(&inner, definitions)?;
     let unknown_block_bases = retain_block_bases(&mut inner, bytes)?;
+    convert_mlinestyle_angles(&mut inner);
     Ok(ParsedDxf { group_names: group_names(&inner), inner, block_base_patched: Cell::new(false), block_bases_unknown: bytes.starts_with(b"AutoCAD Binary DXF"), unknown_block_bases, mlstyle_segments: scan_mlstyle_segments(bytes) })
 }
 
@@ -4583,5 +4599,510 @@ mod w4g_7b_04c_dimension_rows {
         doc.inner.dim_styles.add(acadrust::tables::DimStyle::new("alpha")).unwrap();
         let names = dimstyles_catalogue(&doc.inner);
         assert_eq!(names, vec!["alpha".to_string(), "Standard".to_string(), "Zeta".to_string()]);
+    }
+}
+// MLINESTYLE angles convert once at the DXF parse boundary.
+// Constructor defaults and non-finite values keep their parsed bits.
+// Explicit 1.5707963267948966-degree values share the default bits and write 90.0.
+// The smallest subnormals (from_bits(1) and from_bits(2)) become zero; this
+// does not apply to every subnormal. Some values move one ulp on the first
+// trip; 1.5, 2.3, 30 and 60 then settle over three distinct parse/write cycles.
+// Converting the same in-memory document twice is unsupported.
+#[cfg(test)]
+mod mlinestyle_angles {
+    use super::*;
+    use std::f64::consts::FRAC_PI_2;
+    use acadrust::objects::MLineStyle;
+    use acadrust::io::dxf::{DxfBinaryWriter, DxfStreamWriter};
+
+    const MINIMAL: &[u8] = b"0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n";
+
+    fn write(doc: &ParsedDxf) -> Vec<u8> {
+        DxfWriter::new(&doc.inner).write_to_vec().unwrap()
+    }
+
+    // The writer's own output for a minimal document, with the Standard
+    // MLINESTYLE's 51 and 52 lines replaced by `pairs` (code, value) in order.
+    fn fixture(pairs: &[(&str, &str)]) -> Vec<u8> {
+        let base = write(&parse_dxf_core(MINIMAL).unwrap());
+        let text = String::from_utf8(base).unwrap();
+        let lines: Vec<&str> = text.split("\r\n").collect();
+        let mut out: Vec<String> = Vec::new();
+        let mut i = 0;
+        let mut in_style = false;
+        let mut placed = false;
+        // Walk code/value PAIRS: a value line such as a 70 flag's "     0"
+        // must never be read as a group-0 line.
+        while i + 1 < lines.len() {
+            let code = lines[i].trim();
+            if code == "0" {
+                in_style = lines[i + 1] == "MLINESTYLE";
+            }
+            if in_style && (code == "51" || code == "52") {
+                if !placed {
+                    for (code, value) in pairs {
+                        out.push(format!(" {code}"));
+                        out.push(value.to_string());
+                    }
+                    placed = true;
+                }
+                i += 2;
+                continue;
+            }
+            out.push(lines[i].to_string());
+            out.push(lines[i + 1].to_string());
+            i += 2;
+        }
+        while i < lines.len() {
+            out.push(lines[i].to_string());
+            i += 1;
+        }
+        assert!(placed, "fixture found no MLINESTYLE 51/52 lines");
+        out.join("\r\n").into_bytes()
+    }
+
+    fn style(doc: &ParsedDxf) -> (Handle, f64, f64) {
+        let styles: Vec<_> = doc.inner.objects.values().filter_map(|object| match object {
+            ObjectType::MLineStyle(s) => Some((s.handle, s.start_angle, s.end_angle)),
+            _ => None,
+        }).collect();
+        assert_eq!(styles.len(), 1, "expected exactly one MLINESTYLE");
+        styles[0]
+    }
+
+    // The value lines the writer emitted for the first MLINESTYLE's 51 and 52.
+    fn written_angles(bytes: &[u8]) -> (String, String) {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let lines: Vec<&str> = text.split("\r\n").collect();
+        let at = (0..lines.len() - 1).find(|&i| lines[i].trim() == "0" && lines[i + 1] == "MLINESTYLE").unwrap();
+        let mut start = String::new();
+        let mut end = String::new();
+        let mut i = at + 2;
+        while i + 1 < lines.len() && lines[i].trim() != "0" {
+            if lines[i].trim() == "51" { start = lines[i + 1].to_string(); }
+            if lines[i].trim() == "52" { end = lines[i + 1].to_string(); }
+            i += 2;
+        }
+        (start, end)
+    }
+
+    // Every group-0 record of a written file, sorted. The pinned crate keeps
+    // its objects in a hash map, so the ORDER of records differs from one
+    // write to the next (measured: 681 of 6,121 lines move); the records
+    // themselves must not change.
+    fn records(bytes: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let lines: Vec<&str> = text.split("\r\n").collect();
+        let mut records: Vec<String> = Vec::new();
+        let mut current: Vec<&str> = Vec::new();
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            if lines[i].trim() == "0" && !current.is_empty() {
+                records.push(current.join("\n"));
+                current.clear();
+            }
+            current.push(lines[i]);
+            current.push(lines[i + 1]);
+            i += 2;
+        }
+        records.push(current.join("\n"));
+        records.sort();
+        records
+    }
+
+
+    fn raw(bytes: &[u8]) -> CadDocument {
+        DxfReader::from_reader(std::io::Cursor::new(bytes.to_vec())).unwrap().read().unwrap()
+    }
+
+    fn probe(body: &[u8]) -> Vec<u8> {
+        let mut bytes = b"0\nSECTION\n2\nOBJECTS\n0\nMLINESTYLE\n5\n7F0A1\n2\nProbe\n".to_vec();
+        bytes.extend_from_slice(body);
+        bytes.extend_from_slice(b"0\nENDSEC\n0\nEOF\n");
+        bytes
+    }
+
+    fn named_style(document: &CadDocument, name: &str) -> (Handle, f64, f64) {
+        document.objects.values().find_map(|object| match object {
+            ObjectType::MLineStyle(s) if s.name == name => Some((s.handle, s.start_angle, s.end_angle)),
+            _ => None,
+        }).unwrap()
+    }
+
+    // Walk pairs, selecting only MLINESTYLE records within OBJECTS.
+    fn object_angles(bytes: &[u8]) -> HashMap<String, (String, String)> {
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        let pairs: Vec<_> = lines.chunks_exact(2).map(|p| (p[0].trim(), p[1])).collect();
+        let mut out = HashMap::new();
+        let mut objects = false;
+        let mut i = 0;
+        while i < pairs.len() {
+            if pairs[i] == ("0", "SECTION") {
+                objects = pairs.get(i + 1) == Some(&("2", "OBJECTS"));
+            } else if pairs[i] == ("0", "ENDSEC") {
+                objects = false;
+            } else if objects && pairs[i] == ("0", "MLINESTYLE") {
+                let mut name = String::new();
+                let mut angles = (String::new(), String::new());
+                i += 1;
+                while i < pairs.len() && pairs[i].0 != "0" {
+                    match pairs[i].0 {
+                        "2" => name = pairs[i].1.to_string(),
+                        "51" => angles.0 = pairs[i].1.to_string(),
+                        "52" => angles.1 = pairs[i].1.to_string(),
+                        _ => {},
+                    }
+                    i += 1;
+                }
+                assert!(out.insert(name, angles).is_none());
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    fn assert_fields(actual: (Handle, f64, f64), expected: (f64, f64)) {
+        assert_eq!(actual.1.to_bits(), expected.0.to_bits());
+        assert_eq!(actual.2.to_bits(), expected.1.to_bits());
+    }
+
+    fn assert_written(bytes: &[u8], name: &str, expected: (f64, f64)) {
+        let values = object_angles(bytes);
+        let pair = values.get(name).unwrap();
+        assert_eq!(pair.0.parse::<f64>().unwrap().to_bits(), expected.0.to_bits());
+        assert_eq!(pair.1.parse::<f64>().unwrap().to_bits(), expected.1.to_bits());
+    }
+
+    fn assert_case(pairs: &[(&str, &str)], expected: (f64, f64)) {
+        let doc = parse_dxf_core(&fixture(pairs)).unwrap();
+        assert_eq!(style(&doc).0, Handle::new(0x2A));
+        assert_fields(style(&doc), expected);
+        assert_written(&write(&doc), "Standard", (expected.0.to_degrees(), expected.1.to_degrees()));
+    }
+
+    fn explicit_default_cases() {
+        for (pairs, expected) in [
+            (vec![("51", "1.5707963267948966"), ("52", "45")], (FRAC_PI_2, 45.0f64.to_radians())),
+            (vec![("51", "45"), ("52", "1.5707963267948966")], (45.0f64.to_radians(), FRAC_PI_2)),
+            (vec![("51", "1.5707963267948966"), ("52", "1.5707963267948966")], (FRAC_PI_2, FRAC_PI_2)),
+        ] { assert_case(&pairs, expected); }
+    }
+
+    fn rejected_handle() -> Vec<u8> {
+        let original = String::from_utf8(fixture(&[("51", "90.0")])).unwrap();
+        let text = original.replacen("\r\n  5\r\n2A\r\n", "\r\n  5\r\n2A \r\n", 1);
+        assert_ne!(text, original, "handle substitution must change the fixture");
+        text.into_bytes()
+    }
+
+    fn multiple_styles() -> Vec<u8> {
+        let text = String::from_utf8(fixture(&[("51", "90.0"), ("52", "45.0")])).unwrap();
+        let at = text.find("  0\r\nMLINESTYLE\r\n").unwrap();
+        let next = text[at + 1..].find("\r\n  0\r\n").unwrap() + at + 1 + 2;
+        let record = &text[at..next];
+        assert!(!text.contains("\r\n  5\r\n7F0A1\r\n"));
+        let second = record.replacen("\r\n2A\r\n", "\r\n7F0A1\r\n", 1).replacen("Standard", "Second", 1)
+            .replacen("\r\n90.0\r\n", "\r\n30.0\r\n", 1).replacen("\r\n45.0\r\n", "\r\n60.0\r\n", 1);
+        format!("{}{}{}", &text[..next], second, &text[next..]).into_bytes()
+    }
+
+    fn assert_multiple_styles(bytes: &[u8]) {
+        let doc = parse_dxf_core(bytes).unwrap();
+        for (name, handle, start, end) in [
+            ("Standard", Handle::new(0x2A), 90.0f64, 45.0f64),
+            ("Second", Handle::new(0x7F0A1), 30.0f64, 60.0f64),
+        ] {
+            let actual = named_style(&doc.inner, name);
+            assert_eq!(actual.0, handle);
+            assert_fields(actual, (start.to_radians(), end.to_radians()));
+            assert_written(&write(&doc), name, (start.to_radians().to_degrees(), end.to_radians().to_degrees()));
+        }
+        assert_eq!(object_angles(&write(&doc)).len(), 2);
+    }
+
+    #[test]
+    fn t01_file_degrees_read_as_radians() {
+        for (a, b) in [
+            ("90", "45"), ("45", "90"), ("0", "180"), ("270", "-90"),
+            ("1.5", "2.3"), ("30", "60"), ("1e-300", "1e300"), ("5e-324", "1e-323"),
+        ] {
+            let x = a.parse::<f64>().unwrap();
+            let y = b.parse::<f64>().unwrap();
+            assert_case(&[("51", a), ("52", b)], (x.to_radians(), y.to_radians()));
+        }
+        assert_eq!(f64::from_bits(1).to_radians().to_bits(), 0.0f64.to_bits());
+        assert_eq!(f64::from_bits(2).to_radians().to_bits(), 0.0f64.to_bits());
+        assert_case(&[("51", "30"), ("51", "60"), ("52", "10"), ("52", " 20 ")],
+            (60.0f64.to_radians(), 20.0f64.to_radians()));
+        assert_case(&[("51", "45"), ("51", "abc"), ("52", "60"), ("52", "abc")],
+            (45.0f64.to_radians(), 60.0f64.to_radians()));
+        explicit_default_cases();
+    }
+
+    #[test]
+    fn t02_three_write_reparse_cycles_keep_every_record() {
+        for (a, b) in [("90", "45"), ("1.5", "2.3"), ("30", "60")] {
+            let mut bytes = fixture(&[("51", a), ("52", b)]);
+            let initial = (a.parse::<f64>().unwrap(), b.parse::<f64>().unwrap());
+            let settled = (initial.0.to_radians().to_degrees(), initial.1.to_radians().to_degrees());
+            let mut input = initial;
+            let mut written = Vec::new();
+            for _ in 0..3 {
+                let doc = parse_dxf_core(&bytes).unwrap();
+                assert_fields(style(&doc), (input.0.to_radians(), input.1.to_radians()));
+                bytes = write(&doc);
+                assert_written(&bytes, "Standard", settled);
+                if a == "90" {
+                    assert_eq!(written_angles(&bytes), ("90.0".to_string(), "45.0".to_string()));
+                }
+                written.push(bytes.clone());
+                input = settled;
+            }
+            assert_eq!(records(&written[0]), records(&written[1]));
+            assert_eq!(records(&written[1]), records(&written[2]));
+        }
+    }
+    #[test]
+    fn t03_inexact_angles_settle_after_one_trip() {
+        let mut bytes = fixture(&[("51", "1.5"), ("52", "2.3")]);
+        let mut written = Vec::new();
+        for _ in 0..3 {
+            let doc = parse_dxf_core(&bytes).unwrap();
+            let (_, start, end) = style(&doc);
+            assert!((start.to_degrees() - 1.5).abs() < 1e-12, "start {}", start.to_degrees());
+            assert!((end.to_degrees() - 2.3).abs() < 1e-12, "end {}", end.to_degrees());
+            bytes = write(&doc);
+            written.push(bytes.clone());
+        }
+        // Measured: 1.5 reads back as 1.5000000000000002 after the first
+        // degrees-to-radians-to-degrees trip and stays there.
+        assert_eq!(written_angles(&written[0]), written_angles(&written[1]));
+        assert_eq!(written_angles(&written[1]), written_angles(&written[2]));
+        assert_eq!(records(&written[0]), records(&written[1]));
+        assert_eq!(records(&written[1]), records(&written[2]));
+    }
+
+    #[test]
+    fn t04_default_style_still_writes_ninety() {
+        let first = write(&parse_dxf_core(MINIMAL).unwrap());
+        assert_eq!(written_angles(&first), ("90.0".to_string(), "90.0".to_string()));
+        let doc = parse_dxf_core(&first).unwrap();
+        let (_, start, end) = style(&doc);
+        assert_eq!((start, end), (FRAC_PI_2, FRAC_PI_2));
+        let second = write(&doc);
+        assert_eq!(written_angles(&second), ("90.0".to_string(), "90.0".to_string()));
+        assert_eq!(records(&second), records(&first));
+    }
+
+    #[test]
+    fn t05_absent_angle_keeps_its_default() {
+        let doc = parse_dxf_core(&fixture(&[("51", "45.0")])).unwrap();
+        let (_, start, end) = style(&doc);
+        assert_eq!(start, 45.0f64.to_radians());
+        assert_eq!(end, FRAC_PI_2);
+    }
+
+    #[test]
+    fn t06_unparseable_angle_keeps_the_earlier_value() {
+        let doc = parse_dxf_core(&fixture(&[("51", "abc"), ("52", "45.0")])).unwrap();
+        let (_, start, end) = style(&doc);
+        assert_eq!(start, FRAC_PI_2);
+        assert_eq!(end, 45.0f64.to_radians());
+        let doc = parse_dxf_core(&fixture(&[("51", "45"), ("51", "abc")])).unwrap();
+        assert_eq!(style(&doc).1, 45.0f64.to_radians());
+    }
+
+    #[test]
+    fn t07_last_parseable_duplicate_wins() {
+        let doc = parse_dxf_core(&fixture(&[("51", "30"), ("51", "60"), ("52", "10"), ("52", " 20 ")])).unwrap();
+        let (_, start, end) = style(&doc);
+        assert_eq!(start, 60.0f64.to_radians());
+        assert_eq!(end, 20.0f64.to_radians());
+    }
+
+
+    #[test]
+    fn t08_records_outside_objects_do_not_supply_style_angles() {
+        let bytes = b"0\nSECTION\n2\nENTITIES\n0\nMLINESTYLE\n5\n2A\n51\n90.0\n0\nENDSEC\n0\nEOF\n";
+        let doc = parse_dxf_core(bytes).unwrap();
+        assert_fields(style(&doc), (FRAC_PI_2, FRAC_PI_2));
+        assert_eq!(object_angles(&write(&doc)).get("Standard"),
+            Some(&("90.0".to_string(), "90.0".to_string())));
+        let bytes = b"0\nSECTION\n2\nOBJECTS\n0\nENDSEC\n0\nMLINESTYLE\n5\n2A\n51\n90.0\n0\nEOF\n";
+        let doc = parse_dxf_core(bytes).unwrap();
+        assert_eq!(doc.inner.objects.values().filter(|o| matches!(o, ObjectType::MLineStyle(_))).count(), 0);
+        assert!(object_angles(&write(&doc)).is_empty());
+    }
+
+    #[test]
+    fn t09_binary_dxf_round_trip_preserves_angles() {
+        for (start, end) in [(90.0f64, 45.0f64), (45.0f64, 90.0f64)] {
+            let mut writer = DxfBinaryWriter::new(Vec::new()).unwrap();
+            writer.write_string(0, "SECTION").unwrap();
+            writer.write_string(2, "OBJECTS").unwrap();
+            writer.write_string(0, "MLINESTYLE").unwrap();
+            writer.write_handle(5, Handle::new(0x7F0A1)).unwrap();
+            writer.write_string(2, "Probe").unwrap();
+            writer.write_double(51, start).unwrap();
+            writer.write_double(52, end).unwrap();
+            writer.write_string(0, "ENDSEC").unwrap();
+            writer.write_string(0, "EOF").unwrap();
+            writer.flush().unwrap();
+            let bytes = writer.into_inner();
+            assert!(bytes.starts_with(b"AutoCAD Binary DXF\r\n\x1a\x00"));
+            assert_eq!(&bytes[22..24], &[0, 0]);
+            assert_fields(named_style(&raw(&bytes), "Probe"), (start, end));
+            let doc = parse_dxf_core(&bytes).unwrap();
+            assert_fields(style(&doc), (start.to_radians(), end.to_radians()));
+            let expected = (start.to_radians().to_degrees(), end.to_radians().to_degrees());
+            assert_written(&write(&doc), "Probe", expected);
+            assert_eq!(object_angles(&write(&doc))["Probe"],
+                (format!("{start:.1}"), format!("{end:.1}")));
+            let binary = DxfWriter::new_binary(&doc.inner).write_to_vec().unwrap();
+            assert!(binary.starts_with(b"AutoCAD Binary DXF\r\n\x1a\x00"));
+            assert_fields(named_style(&raw(&binary), "Probe"), expected);
+            // A two-byte group code immediately precedes each binary double.
+            for (code, value) in [(51i16, expected.0), (52i16, expected.1)] {
+                let mut pair = code.to_le_bytes().to_vec();
+                pair.extend_from_slice(&value.to_le_bytes());
+                assert!(binary.windows(pair.len()).any(|window| window == pair));
+            }
+            let back = parse_dxf_core(&binary).unwrap();
+            assert_fields(style(&back), (expected.0.to_radians(), expected.1.to_radians()));
+            assert_eq!(object_angles(&write(&back))["Probe"], object_angles(&write(&doc))["Probe"]);
+        }
+    }
+
+    #[test]
+    fn t11_lf_file_converts_too() {
+        let lf = String::from_utf8(fixture(&[("51", "90.0"), ("52", "45.0")])).unwrap().replace("\r\n", "\n");
+        let doc = parse_dxf_core(lf.as_bytes()).unwrap();
+        let (_, start, end) = style(&doc);
+        assert_eq!((start, end), (90.0f64.to_radians(), 45.0f64.to_radians()));
+    }
+
+
+    #[test]
+    fn t12_non_finite_angle_is_left_as_parsed() {
+        for token in ["inf", "-inf", "NaN"] {
+            for (a, b) in [(token, "45"), ("45", token), (token, token)] {
+                let bytes = fixture(&[("51", a), ("52", b)]);
+                let mut document = raw(&bytes);
+                let before = named_style(&document, "Standard");
+                convert_mlinestyle_angles(&mut document);
+                let after = named_style(&document, "Standard");
+                let doc = parse_dxf_core(&bytes).unwrap();
+                let parsed = style(&doc);
+                for (original, converted, boundary) in [
+                    (before.1, after.1, parsed.1), (before.2, after.2, parsed.2),
+                ] {
+                    if original.is_finite() {
+                        assert_eq!(converted.to_bits(), 45.0f64.to_radians().to_bits());
+                        assert_eq!(boundary.to_bits(), converted.to_bits());
+                    } else {
+                        assert_eq!(converted.to_bits(), original.to_bits());
+                        assert_eq!(boundary.is_nan(), original.is_nan());
+                        assert_eq!(boundary.is_infinite(), original.is_infinite());
+                        if original.is_infinite() { assert_eq!(boundary.is_sign_positive(), original.is_sign_positive()); }
+                    }
+                }
+                let expected = (if before.1.is_finite() { 45.0 } else { 0.0 },
+                    if before.2.is_finite() { 45.0 } else { 0.0 });
+                let written = write(&doc);
+                assert_written(&written, "Standard", expected);
+                assert_eq!(written_angles(&written), (format!("{:.1}", expected.0), format!("{:.1}", expected.1)));
+                assert_fields(style(&parse_dxf_core(&written).unwrap()),
+                    (expected.0.to_radians(), expected.1.to_radians()));
+            }
+        }
+    }
+
+    #[test]
+    fn t13_rejected_handle_does_not_suppress_conversion() {
+        let doc = parse_dxf_core(&rejected_handle()).unwrap();
+        assert_fields(style(&doc), (90.0f64.to_radians(), FRAC_PI_2));
+        assert_eq!(written_angles(&write(&doc)), ("90.0".to_string(), "90.0".to_string()));
+    }
+
+    #[test]
+    fn t14_every_style_converts_its_own_angles() {
+        assert_multiple_styles(&multiple_styles());
+    }
+
+    #[test]
+    fn t15_default_bits_and_explicit_default_exception() {
+        for constructor in [MLineStyle::new("Probe"), MLineStyle::standard(), MLineStyle::default()] {
+            // The writer omits an object whose handle is NULL; give each constructor a real one.
+            let mut constructor = constructor;
+            constructor.handle = Handle::new(0x5A0);
+            let name = constructor.name.clone();
+            let captured = (constructor.start_angle.to_bits(), constructor.end_angle.to_bits());
+            assert_eq!(captured, (FRAC_PI_2.to_bits(), FRAC_PI_2.to_bits()));
+            let mut document = raw(MINIMAL);
+            document.objects.clear();
+            document.objects.insert(constructor.handle, ObjectType::MLineStyle(constructor));
+            convert_mlinestyle_angles(&mut document);
+            let actual = named_style(&document, &name);
+            assert_eq!((actual.1.to_bits(), actual.2.to_bits()), captured);
+            let bytes = DxfWriter::new(&document).write_to_vec().unwrap();
+            assert_eq!(object_angles(&bytes)[&name], ("90.0".to_string(), "90.0".to_string()));
+        }
+        let doc = parse_dxf_core(MINIMAL).unwrap();
+        assert_fields(style(&doc), (FRAC_PI_2, FRAC_PI_2));
+        assert_eq!(written_angles(&write(&doc)), ("90.0".to_string(), "90.0".to_string()));
+        for pairs in [vec![], vec![("51", "abc"), ("52", "abc")]] {
+            assert_case(&pairs, (FRAC_PI_2, FRAC_PI_2));
+        }
+        assert_case(&[("51", "45")], (45.0f64.to_radians(), FRAC_PI_2));
+        assert_case(&[("52", "45")], (FRAC_PI_2, 45.0f64.to_radians()));
+        explicit_default_cases();
+    }
+
+    #[test]
+    fn t16_decoder_family_uses_decoded_values() {
+        for body in [
+            &b"51\n^I90^I\n52\n^J45^M\n"[..],
+            &b"51\n30\n51\n^I90^I\n52\n45\n"[..],
+            &b"51\n\xA090\xA0\n52\n45\n"[..],
+        ] {
+            let bytes = probe(body);
+            assert_fields(named_style(&raw(&bytes), "Probe"), (90.0, 45.0));
+            let doc = parse_dxf_core(&bytes).unwrap();
+            assert_fields(style(&doc), (90.0f64.to_radians(), 45.0f64.to_radians()));
+            assert_eq!(object_angles(&write(&doc))["Probe"], ("90.0".to_string(), "45.0".to_string()));
+        }
+    }
+
+    #[test]
+    fn t17_record_boundary_family_preserves_defaults() {
+        for bytes in [
+            &b"0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n0\nSECTION\n2\nOBJECTS\n0\nMLINESTYLE\n5\n2A\n51\n1.5707963267948966\n0\nENDSEC\n0\nEOF\n"[..],
+            &b"0\nSECTION\n999\ncomment\n2\nOBJECTS\n0\nMLINESTYLE\n5\n2A\n51\n1.5707963267948966\n0\nENDSEC\n0\nEOF\n"[..],
+        ] {
+            let doc = parse_dxf_core(bytes).unwrap();
+            assert_fields(style(&doc), (FRAC_PI_2, FRAC_PI_2));
+            assert_eq!(named_style(&doc.inner, "Standard").0, style(&doc).0);
+            assert_eq!(object_angles(&write(&doc))["Standard"], ("90.0".to_string(), "90.0".to_string()));
+        }
+    }
+
+    #[test]
+    fn t18_handle_family_converts_surviving_styles() {
+        let bytes = b"0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n7F0A1\n10\n0\n20\n0\n11\n1\n21\n1\n0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n0\nMLINESTYLE\n5\n7F0A1\n2\nProbe\n51\n90\n52\n45\n0\nENDSEC\n0\nEOF\n";
+        let oracle = raw(bytes);
+        let expected_handle = named_style(&oracle, "Probe").0;
+        let doc = parse_dxf_core(bytes).unwrap();
+        let actual = named_style(&doc.inner, "Probe");
+        assert_eq!(actual.0, expected_handle);
+        let line = doc.inner.entities().next().unwrap();
+        assert_ne!(actual.0, line.common().handle);
+        assert_fields(actual, (90.0f64.to_radians(), 45.0f64.to_radians()));
+        assert_eq!(object_angles(&write(&doc))["Probe"], ("90.0".to_string(), "45.0".to_string()));
+        let doc = parse_dxf_core(&rejected_handle()).unwrap();
+        assert_fields(style(&doc), (90.0f64.to_radians(), FRAC_PI_2));
+        assert_eq!(written_angles(&write(&doc)), ("90.0".to_string(), "90.0".to_string()));
+        assert_multiple_styles(&multiple_styles());
     }
 }

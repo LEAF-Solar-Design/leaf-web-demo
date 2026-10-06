@@ -543,6 +543,13 @@
 .studio-shell .app[data-surface="solar"] .workspace-card[data-cockpit-picking="1"] .solar-flow-seat { opacity: 0.42; }
 
   /* ---- y 880-905: the command line, x 600-1320 ---- */
+  .studio-shell .cockpit-engine-status {
+    min-width: 0; padding: 2px 8px; margin: 0;
+    font: 400 11px/18px var(--ck-font); color: rgba(240, 242, 240, .72);
+    background: var(--ck-recess); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .studio-shell .cockpit-engine-status[data-error="true"] { color: var(--status-danger, #e24947); }
+  #cockpit-engine-status-slot:empty { display: none; }
   /* Centred, 720 wide: x 600-1320 at the reference's 1920. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-dock {
     position: fixed; left: 50%; right: auto; bottom: 35px; width: 720px; max-width: none; margin: 0 0 0 -360px; z-index: 30;

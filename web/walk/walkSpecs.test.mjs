@@ -11,6 +11,7 @@ const knownProofSpecs = [
   'unsupported-fast.spec.mjs',
   'u6-drawer-escape.spec.mjs',
   'u7-catalog-error.spec.mjs',
+  'u8-engine-status.spec.mjs',
   'ux-evidence.spec.mjs',
   'w1o-solar-unsupported.spec.mjs',
   'w1z-map.spec.mjs',
@@ -24,6 +25,7 @@ const knownProofSpecs = [
   'w1z-census.spec.mjs',
   'w1z-solar-forms.spec.mjs',
   'w1z-catalog-recovery.spec.mjs',
+  'w1z-engine-history.spec.mjs',
   'w1y-recipes.spec.mjs',
 ]
 
