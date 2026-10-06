@@ -2844,6 +2844,43 @@ describe('S24 the URL keeps tool, drawer, own selection and camera view', () => 
     assert.ok(toolCastSource.includes('ready: !busy && !jobRunning && Array.isArray(tools) && tools.length > 0,'), 'pending tool restores wait for the current run')
   })
 
+  it('restores the catalog tool without hiding a resumed authoring request or interrupting a current run', () => {
+    const start = toolCastSource.indexOf("useViewParamSeat('tool', " + LB)
+    const end = toolCastSource.indexOf("useViewParamSeat('sel', " + LB, start)
+    assert.ok(start >= 0 && end > start)
+    const seatSource = toolCastSource.slice(start, end)
+    const tool = { name: 'count-panels-near-edge' }
+    function seat({ pointer = null, busy = false, jobRunning = false } = {}) {
+      const selected = [], panels = []
+      let config
+      const context = {
+        useViewParamSeat: (_key, value) => { config = value },
+        selectedCatalogTool: null, active: true, busy, jobRunning, tools: [tool],
+        authorStage: { pointer }, pushOnOpen: () => 'push',
+        setSelectedCatalogTool: (value) => selected.push(value),
+        setLeftView: (value) => panels.push(value),
+      }
+      new Function(...Object.keys(context), seatSource)(...Object.values(context))
+      return { config, selected, panels }
+    }
+    for (const pointer of [null, { target_tool_name: tool.name }, { target_tool_name: tool.name, terminal_staged: true }]) {
+      const restored = seat({ pointer })
+      assert.equal(restored.config.ready, true)
+      assert.equal(restored.config.onRestore(tool.name), true)
+      assert.deepEqual(restored.selected, [tool])
+      assert.deepEqual(restored.panels, [pointer ? 'author' : 'catalog'])
+      assert.equal(restored.config.onRestore('missing-tool'), false)
+      assert.equal(restored.config.onRestore(null), true)
+      assert.deepEqual(restored.selected, [tool, null])
+    }
+    for (const state of [{ busy: true }, { jobRunning: true }]) {
+      const waiting = seat(state)
+      assert.equal(waiting.config.ready, false)
+      assert.deepEqual(waiting.selected, [])
+      assert.deepEqual(waiting.panels, [])
+    }
+  })
+
   it('leaves the router and SiteRoot alone and the drawing param with DrawingIdentityProvider', () => {
     const router = readFileSync(new URL('./site/router.js', import.meta.url), 'utf8')
     const siteRoot = readFileSync(new URL('./site/SiteRoot.jsx', import.meta.url), 'utf8')

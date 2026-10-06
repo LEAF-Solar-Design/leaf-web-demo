@@ -1548,7 +1548,10 @@ export default function ToolCast({
       const found = tools.find((tool) => tool?.name === name)
       if (!found) return false
       setSelectedCatalogTool(found)
-      setLeftView('catalog')
+      // A resumed authoring request owns the Author panel, including staged
+      // revisions awaiting publication. Restoring its catalog card must not
+      // hide that panel after the resume effect has opened it.
+      setLeftView(authorStage.pointer ? 'author' : 'catalog')
       return true
     },
     mode: pushOnOpen,
