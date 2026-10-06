@@ -31,6 +31,7 @@ import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry
 import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
+import { pushOnOpen, useCameraViewParam, useViewParamSeat } from './lib/urlState.js'
 import { readNavExpanded, writeNavExpanded } from './lib/navExpandedPreference.js'
 import { useLoadingPhase } from './lib/loadingTiming.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
@@ -2693,6 +2694,8 @@ export default function App() {
     rows.push(`build ${__BUILD_HASH__}`)
     setDrawer({
       title: 'Session · provenance',
+      // S24: the one DT2 drawer the URL may name (`drawer=details`).
+      urlKey: 'details',
       rows,
       diagnostics: composeDiagnostics({
         buildHash: __BUILD_HASH__, mode: mock ? 'sample data' : 'live',
@@ -2876,7 +2879,10 @@ export default function App() {
   // W4c-V1: the nav rail's spine posture on drafting surfaces under the
   // studio. REMEMBERED under fork F-studio-rollback-storage (S20), which
   // overrides the W4c rollback contract's no-new-storage-keys rule for this
-  // ONE key (lib/navExpandedPreference.js, every access in try/catch). No
+  // ONE key (lib/navExpandedPreference.js, every access in try/catch). The
+  // same fork (S24) admits exactly four allow-listed URL keys
+  // (lib/urlState.js): the open drawer rides `drawer`, seated both ways
+  // below, so a reload reopens it and Back closes it. No
   // stored value keeps the default COLLAPSED on CAD/Solar — the drafting
   // ribbon carries the tool set there and an expanded catalog beside it is
   // exactly the duplication ACCEPTANCE deferred the ribbon to avoid.
@@ -2915,6 +2921,60 @@ export default function App() {
       if (details) details.open = true
     }
   }, [])
+  // S24 (A14): the URL keeps the open drawer, the opened tool, the operator's
+  // own selection and the camera view (lib/urlState.js owns the four keys and
+  // preserves every boot flag, Auth0 key and the hash byte for byte). Opening
+  // a drawer or a tool pushes, so Back closes it; a close, a selection and a
+  // camera move replace. A reload restores each one once its data is ready.
+  const studioDrawerRef = useRef(studioDrawer)
+  studioDrawerRef.current = studioDrawer
+  const detailsDrawerRef = useRef(drawer)
+  detailsDrawerRef.current = drawer
+  const restoreUrlDrawer = useCallback((name) => {
+    if (name === 'details') { openSessionDetails(); return true }
+    if (detailsDrawerRef.current?.urlKey === 'details') setDrawer(null)
+    const current = studioDrawerRef.current
+    if (name == null) {
+      if (current === 'nav') setNavExpanded(false)
+      else if (current === 'jobs') setJobRailExpanded(false)
+      else setStudioDrawer('none')
+      return true
+    }
+    if (!STUDIO_DRAWERS.includes(name) || name === 'none') return false
+    if (name === 'nav') setNavExpanded(true)
+    else if (name === 'jobs') setJobRailExpanded(true)
+    else if (current !== name) toggleStudioDrawer(name)
+    return true
+  }, [openSessionDetails, setNavExpanded, setJobRailExpanded, toggleStudioDrawer])
+  useViewParamSeat('drawer', {
+    value: drawer?.urlKey === 'details' ? 'details' : studioDrawer === 'none' ? null : studioDrawer,
+    onRestore: restoreUrlDrawer,
+    // Closing Details back onto an open studio drawer is a close, not a commit.
+    mode: (previous, next) => (previous === 'details' ? 'replace' : pushOnOpen(previous, next)),
+  })
+  useViewParamSeat('tool', {
+    value: openTool?.name ?? null,
+    ready: Array.isArray(tools) && tools.length > 0,
+    onRestore: (name) => {
+      if (name == null) { setOpenTool(null); return true }
+      const found = tools.find((tool) => tool?.name === name)
+      if (!found) return false
+      setOpenTool(found)
+      return true
+    },
+    mode: pushOnOpen,
+  })
+  useViewParamSeat('sel', {
+    value: selectedHandle == null ? null : String(selectedHandle),
+    ready: drawingIntake != null,
+    onRestore: (handle) => {
+      if (handle != null && !selectEntity(drawingIntake, handle)) return false
+      setSelectedHandle(handle ?? null)
+      return true
+    },
+    mode: 'replace',
+  })
+  useCameraViewParam(viewerRef, { ready: drawingIntake != null })
   // Slice 11a: the builds poll (GET /api/builds, validated records from
   // every lane). Mock mode makes no request; the rail hosts one
   // BuildQueueCard per record and the toolbar badge counts the open ones.
