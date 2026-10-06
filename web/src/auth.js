@@ -14,6 +14,7 @@
 // http://localhost:8080 callback.
 
 import { track, flushNow } from './telemetry.js'
+import { clearComposerDrafts } from './lib/composerDraft.js'
 import {
   stageCheckoutAuthReturn,
   clearCheckoutAuthReturn,
@@ -181,6 +182,7 @@ export async function logout() {
     localStorage.removeItem(JWT_KEY)
     localStorage.removeItem(INFLIGHT_AUTHOR_KEY)
   } catch { /* ignore */ }
+  clearComposerDrafts()
   const c = await client()
   if (c) {
     try { await c.logout({ logoutParams: { returnTo: window.location.origin } }); return } catch { /* fall through */ }

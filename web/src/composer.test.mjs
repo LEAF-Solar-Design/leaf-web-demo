@@ -658,18 +658,47 @@ describe('the credential guard sits on the transport, not on the composers', () 
     assert.deepEqual(evaluators, ['lib/secretGuardTransport.js', 'lib/secretPatterns.js'])
   })
 
-  // guardedText has exactly one caller outside the transports: the author
-  // pointer's STORAGE boundary, which writes the description to localStorage
-  // before any transport runs. Named here so it stays a deliberate exception.
+  // The author pointer and command-bar draft are storage boundaries: both
+  // inspect free text before writing it, independently of any send override.
   it('the guard seam is called only by the transports and the storage boundary', () => {
     const callers = SRC_FILES.filter((file) => readStripped(file).includes('guardedText('))
     assert.deepEqual(callers, [
       'api.js',
       'controllers/useAuthorStageController.js',
       'converse.js',
+      'lib/composerDraft.js',
       'lib/secretGuardTransport.js',
       'operatorClient.js',
     ])
+  })
+
+  it('every command-bar draft write goes through guardedText with no override', () => {
+    const owner = 'lib/composerDraft.js'
+    const source = bare(readStripped(owner))
+    assert.ok(source.includes('leaf.composerDraft.v1:'), 'the draft namespace must be explicit')
+    assert.equal((source.match(/\.setItem\(/g) || []).length, 1, 'there is exactly one draft write boundary')
+    const at = source.indexOf('constflush=')
+    const end = source.indexOf('constupdate=', at)
+    assert.ok(at >= 0 && end > at, 'the flush write boundary must be readable')
+    const body = source.slice(at, end)
+    const guardAt = body.indexOf('constverdict=guardedText(text)')
+    const refuseAt = body.search(/if\(!verdict\.ok\)\{clear\(\);return;?\}/)
+    const writeAt = body.indexOf('storage?.setItem(key,verdict.text)')
+    assert.ok(guardAt >= 0 && refuseAt > guardAt && writeAt > refuseAt,
+      'the guarded verdict must refuse before its text can reach storage')
+    assert.ok(!source.includes('allowSecretOnce'), 'draft persistence may never accept a send override')
+    assert.deepEqual(SRC_FILES.filter((file) => readStripped(file).includes('leaf.composerDraft.v1:')),
+      [owner], 'only the guarded boundary may construct the draft namespace')
+    // A consumer of the key builder cannot become a second writer, including
+    // a write through an aliased key variable.
+    for (const file of SRC_FILES.filter((file) => file !== owner &&
+      /composerDraftKey\(|COMPOSER_DRAFT_PREFIX/.test(readStripped(file)))) {
+      assert.doesNotMatch(readStripped(file), /\.setItem\(/,
+        `${file} must use the guarded draft writer`)
+    }
+    const unguarded = body.replace('constverdict=guardedText(text)', 'constverdict={ok:true,text}')
+    assert.notEqual(unguarded, body, 'falsification must remove the real guard call')
+    assert.ok(!unguarded.includes('constverdict=guardedText(text)'), 'an unguarded write fails this pin')
   })
 
   // THE ROUND-3 FIX, pinned as an absence. Round 2's override was a latch: a
