@@ -73,16 +73,59 @@ function circlePoints(cx, cy, z, r) {
   return pts
 }
 
-function arcPoints(cx, cy, z, r, startDeg, endDeg) {
-  // DXF arcs sweep counter-clockwise from start to end; an end below the
-  // start wraps through 360.
+/**
+ * Counter-clockwise sweep in degrees from startDeg to endDeg, in (0, 360]: the DXF rule, an
+ * end below the start wrapping through 360. Constant time. Up to four turns (|endDeg -
+ * startDeg| <= 1440 as computed in doubles) it is the base rule over the rounded difference,
+ * unchanged, at most five additions or three subtractions of 360. Past four turns, or when the
+ * difference is not finite, it is the true sweep between the two exact residues (% is exact for
+ * doubles): their difference is carried as an exact two-term sum (hi + lo) through at most two
+ * additions or subtractions of 360 and rounded once at the end, so a sweep far below one ulp of
+ * 360 stays that sweep and is never read as a full circle. The intake sampler and the
+ * intersection kernel both read this one function. No allocation.
+ */
+export function arcSweepDeg(startDeg, endDeg) {
   let sweep = endDeg - startDeg
-  while (sweep <= 0) sweep += 360
-  while (sweep > 360) sweep -= 360
+  if (Math.abs(sweep) <= 1440) {
+    while (sweep <= 0) sweep += 360
+    while (sweep > 360) sweep -= 360
+    return sweep
+  }
+  const a = endDeg % 360
+  const b = -(startDeg % 360)
+  // TwoSum: hi + lo is exactly a + b.
+  let hi = a + b
+  let t = hi - a
+  let lo = (a - (hi - t)) + (b - t)
+  while (hi < 0 || (hi === 0 && lo <= 0)) {
+    const s = hi + 360
+    t = s - hi
+    const e = (hi - (s - t)) + (360 - t)
+    // FastTwoSum: |s| dominates e + lo, so hi + lo stays the exact sum.
+    const m = e + lo
+    hi = s + m
+    lo = m - (hi - s)
+  }
+  while (hi > 360 || (hi === 360 && lo > 0)) {
+    const s = hi - 360
+    t = s - hi
+    const e = (hi - (s - t)) + (-360 - t)
+    const m = e + lo
+    hi = s + m
+    lo = m - (hi - s)
+  }
+  return hi
+}
+
+function arcPoints(cx, cy, z, r, startDeg, endDeg) {
+  // DXF arcs sweep counter-clockwise from start to end (arcSweepDeg), and the samples start
+  // from the start's exact residue past four turns, so a huge start cannot absorb the sweep.
+  const sweep = arcSweepDeg(startDeg, endDeg)
+  const s0 = Math.abs(startDeg) <= 1440 ? startDeg : startDeg % 360
   const n = Math.max(MIN_ARC_POINTS, Math.ceil(sweep / ARC_STEP_DEG) + 1)
   const pts = new Array(n)
   for (let i = 0; i < n; i += 1) {
-    const a = ((startDeg + (sweep * i) / (n - 1)) * Math.PI) / 180
+    const a = ((s0 + (sweep * i) / (n - 1)) * Math.PI) / 180
     pts[i] = [cx + r * Math.cos(a), cy + r * Math.sin(a), z]
   }
   return pts

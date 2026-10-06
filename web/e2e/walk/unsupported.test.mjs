@@ -155,6 +155,18 @@ test('only an observed false suppresses engine setup, including helpers and boot
     { engineMounted: false }), null)
 })
 
+test('Repeat refusal rows still activate Enter before reaching their keyboard oracle', async () => {
+  const entry = buildFeatureMap().entries.find((row) => row.id === 'action:engine-repeat')
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    const normal = await run(probe, {})
+    assert.deepEqual(normal.log, [...probe.setup.steps.map((step) => step.kind), 'ux', 'activate', 'assert'])
+    assert.equal(normal.runtime.evidence.oracleReached, probe.assertion.assertionId)
+    assert.equal(normal.runtime.evidence.result.result, 'passed')
+    assert.equal(normal.runtime.evidence.cleanupCompleted, true)
+  }
+})
+
 test('engineReady records its observation before declaring unavailable or awaiting parsed entities', async () => {
   const ready = new AsyncFunction('probe', 'runtime', 'unsupported', 'expect',
     body('async function engineReady(probe, runtime) {', '\nasync function createLine'))

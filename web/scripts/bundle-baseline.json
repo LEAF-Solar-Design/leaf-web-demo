@@ -1,23 +1,23 @@
 {
   "_comment": "gzip -9 bytes per chunk-stem (hash-stripped) from `npm run build` at the commit named in _ref. Regenerate with: node scripts/check_bundle_budget.mjs --write-baseline",
-  "_ref": "c00b2bef",
+  "_ref": "403bbd16",
   "chunks": {
     "App.css": 9812,
-    "App.js": 96565,
+    "App.js": 96575,
     "ElementContextMenu.js": 34332,
-    "LeafPlatformScene.css": 494,
+    "index.js": 192499,
+    "index.css": 39535,
     "LeafPlatformScene.js": 9094,
+    "LeafPlatformScene.css": 494,
     "SheetsPage.css": 2585,
-    "SheetsPage.js": 5403,
-    "Viewer.js": 12884,
-    "index.css": 39461,
-    "index.js": 193458,
-    "useAnnotations.js": 2029,
+    "SheetsPage.js": 5400,
+    "useAnnotations.js": 2027,
     "vendor-react.js": 45900,
     "vendor-viewer.js": 124240,
+    "Viewer.js": 12883,
     "worker-browser.js": 3825
   },
-  "total": 580082,
+  "total": 579201,
   "total_allowance_bytes": 16384,
   "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers."
 }

@@ -10,6 +10,46 @@ import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, disc
 
 const map = buildFeatureMap()
 
+test('engine history lives in Quick access without a ribbon group or tab', () => {
+  for (const id of ['action:engine-undo', 'action:engine-redo']) {
+    const entry = map.entries.find((row) => row.id === id)
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      assert.deepEqual(probe.locator.scope, { role: 'toolbar', name: 'Quick access', exact: true })
+      assert.equal(probe.locator.group, undefined)
+      assert.equal(probe.locator.role, 'button')
+      assert.ok(!probe.setup.steps.some((step) => step.kind.includes('ribbon-tab')))
+      const label = id === 'action:engine-undo' ? 'Undo edit' : 'Redo edit'
+      if (state === 'ready') assert.equal(probe.locator.name, label)
+      else {
+        assert.match(`${label} (unavailable: changed refusal)`, probe.locator.unavailableName)
+        assert.doesNotMatch(`${label} version`, probe.locator.unavailableName)
+      }
+    }
+    const kinds = resolveProbe(entry, 'ready').setup.steps.map((step) => step.kind)
+    assert.equal(kinds.filter((kind) => kind === 'create-line').length, 1)
+    assert.equal(kinds.includes('undo-edit'), id === 'action:engine-redo')
+  }
+})
+
+test('Repeat uses Enter from eligible focus and seeds an accepted LINE only for ready', () => {
+  const entry = map.entries.find((row) => row.id === 'action:engine-repeat')
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    assert.equal(probe.locator.trigger, 'keyboard')
+    assert.equal(probe.locator.key, 'Enter')
+    assert.equal(probe.locator.keyboardAction, 'engine:repeat')
+    assert.equal(probe.locator.name, state === 'no-drawing' ? '' : 'Drawing')
+    assert.equal(probe.locator.role, state === 'no-drawing' ? 'main' : 'region')
+    assert.equal(probe.locator.scope, undefined)
+    assert.equal(probe.locator.unavailableName, undefined)
+    assert.ok(!probe.setup.steps.some((step) => step.kind.includes('ribbon-tab')))
+    assert.equal(probe.setup.steps.some((step) => step.kind === 'create-line'), state === 'ready')
+    if (state === 'ready') assert.equal(probe.assertion.verb, 'LINE')
+    if (state === 'no-command-to-repeat') assert.ok(probe.setup.steps.some((step) => step.kind === 'engine-ready'))
+  }
+})
+
 test('G1 Solar editor reviews, dismisses and cancels without submitting a run', async () => {
   for (const [tool, submitted, railVisible] of [
     ['solar-unit-sync', false, true], ['solar-unit-sync', true, true], ['solar-design-presets', false, true],
@@ -1150,7 +1190,7 @@ for (const entry of map.entries) {
         assert.equal(probe.assertion.reason_code, entry.expected_effect[state].reason_code)
         if (entry.kind === 'action') {
           const action = ACTIONS.find((action) => action.id === entry.source_id)
-          if (!['bar', 'slash'].includes(action.surface)) {
+          if (!['bar', 'slash'].includes(action.surface) && action.id !== 'engine:repeat') {
             const name = accessibleName(probe.locator.role === 'combobox' ? action.text : action.label, probe.assertion.reason)
             if (state === 'no-drawing') assert.match(name, probe.locator.name)
             else assert.equal(probe.locator.name, name)
@@ -1253,6 +1293,13 @@ test('every no-drawing action uses the real failed-load screen and never the ope
     assert.deepEqual(probe.setup.steps[0], {
       kind: 'open-failed-drawing', url: `/app?surface=${ACTIONS.find((action) => action.id === entry.source_id).panel === 'solar-panels' ? 'solar' : 'cad'}&drawing=missing.invalid`,
     })
+    if (['engine:undo', 'engine:redo', 'engine:repeat'].includes(entry.source_id)) {
+      assert.equal(probe.setup.steps.length, 1)
+      assert.equal(probe.locator.group, undefined)
+      if (entry.source_id === 'engine:repeat') assert.equal(probe.locator.keyboardAction, 'engine:repeat')
+      else assert.equal(probe.locator.scope.name, 'Quick access')
+      continue
+    }
     assert.equal(probe.setup.steps.length, ACTIONS.find((action) => action.id === entry.source_id).panel === 'solar-panels' ? 3 : 2)
     assert.equal(probe.setup.steps[1].kind, 'failed-drawing-ribbon-tab')
     assert.ok(probe.locator.availableName)

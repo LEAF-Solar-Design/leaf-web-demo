@@ -103,6 +103,7 @@ import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 // proof finding this record fixes).
 import EngineDockProperties from './cadedit/EngineDockProperties.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
+import CockpitEngineStatus from './site/CockpitEngineStatus.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
@@ -4320,6 +4321,7 @@ export default function App() {
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)
                   reach the engine through this consumer; renders nothing. */}
               {ENV_CAD_EDIT && drafting && <CommandLineArmer />}
+              {ENV_CAD_EDIT && studioGround && drafting && <CockpitEngineStatus importOpen={importOpen} slotId="cockpit-engine-status-slot" />}
               {ENV_CAD_EDIT && drafting && <StatusModesBridge />}
               {/* W4f slice A1: a click on the drawing answers the armed
                   prompt's point steps; while a point command is live the
@@ -4952,6 +4954,7 @@ export default function App() {
               round 3 wires secretRefusal at that same declaration (the bar has
               no guard of its own; the transport raises the refusal), not here. */}
           <SurfaceFrame.CommandBar />
+          {ENV_CAD_EDIT && studioGround && drafting && <div id="cockpit-engine-status-slot" />}
         </div>
 
         {/* The golden path's payoff (result numbers) and the running strip are
