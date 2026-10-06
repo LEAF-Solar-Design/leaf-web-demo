@@ -13,6 +13,96 @@ def test_drawing_readiness_during_cold_cabling_import(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_sibling_loaders_share_lock_from_any_cwd(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-P", str(Path(__file__).resolve()), str(tmp_path), "siblings"],
+        cwd=tmp_path, capture_output=True, text=True,
+        timeout=60, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _sibling_process():
+    import concurrent.futures
+    import importlib.machinery
+    import importlib.util
+    import threading
+
+    server = Path(__file__).resolve().parents[1]
+    sys.path[:] = [entry for entry in sys.path if Path(entry).resolve() != server]
+    spec = importlib.util.spec_from_file_location(
+        "solar_inverter_cabling", server / "solar_inverter_cabling.py")
+    cabling = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = cabling
+    spec.loader.exec_module(cabling)
+    cabling._load_sibling("solar_design_graph")
+    bridge = cabling._load_sibling("solar_electrical_state_bridge")
+    assert bridge.cab is cabling
+    assert bridge.st is cabling.st
+
+    name = "_leaf_sibling_probe"
+    paused, release, started = threading.Event(), threading.Event(), threading.Event()
+    execute = importlib.machinery.SourceFileLoader.exec_module
+    executions = []
+
+    def probe(loader, module):
+        if module.__name__ != name:
+            return execute(loader, module)
+        assert Path(loader.path) == server / (name + ".py")
+        executions.append(module)
+        assert bridge._load_sibling(name) is module  # same-thread circular load
+        paused.set()
+        assert release.wait(20), "sibling import was never released"
+        module.ready = True
+
+    def competing_load():
+        started.set()
+        return bridge._load_sibling(name)
+
+    importlib.machinery.SourceFileLoader.exec_module = probe
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(cabling._load_sibling, name)
+            try:
+                assert paused.wait(20), "sibling did not start cold"
+                second = pool.submit(competing_load)
+                assert started.wait(20), "competing loader did not start"
+                try:
+                    second.result(timeout=0.1)
+                except concurrent.futures.TimeoutError:
+                    pass
+                else:
+                    raise AssertionError("competing loader exposed a partial module")
+            finally:
+                release.set()
+            left, right = first.result(timeout=20), second.result(timeout=20)
+        assert left is right and left.ready
+        assert executions == [left]
+        assert left._leaf_sibling_completed is True
+
+        del sys.modules[name]
+
+        def failing(loader, module):
+            if module.__name__ == name:
+                raise RuntimeError("probe failed")
+            return execute(loader, module)
+
+        importlib.machinery.SourceFileLoader.exec_module = failing
+        for load in (bridge._load_sibling, cabling._load_sibling):
+            try:
+                load(name)
+            except RuntimeError as exc:
+                assert str(exc) == "probe failed"
+            else:
+                raise AssertionError("sibling failure was swallowed")
+            assert name not in sys.modules
+        importlib.machinery.SourceFileLoader.exec_module = probe
+        assert bridge._load_sibling(name).ready
+    finally:
+        release.set()
+        sys.modules.pop(name, None)
+        importlib.machinery.SourceFileLoader.exec_module = execute
+
+
 def _cold_process(root):
     import concurrent.futures
     import hashlib
@@ -111,4 +201,7 @@ def _cold_process(root):
 
 
 if __name__ == "__main__":
-    _cold_process(Path(sys.argv[1]))
+    if len(sys.argv) > 2 and sys.argv[2] == "siblings":
+        _sibling_process()
+    else:
+        _cold_process(Path(sys.argv[1]))

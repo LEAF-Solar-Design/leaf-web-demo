@@ -73,15 +73,47 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib
+import importlib.util
 import json
 import math
+from pathlib import Path
 import re
+import sys
+import threading
 
 from solar_design_graph import new_id as graph_new_id, validate_graph
 
 
 def _load_sibling(name):
-    """Share a fully initialized server module and its error classes across callers."""
+    """Load a server module by path (any cwd), sharing its module and error classes."""
+    lock = sys.__dict__.setdefault("_leaf_server_sibling_lock", threading.RLock())
+    with lock:
+        module = sys.modules.get(name)
+        if module is not None:
+            completed = getattr(module, "_leaf_sibling_completed", None)
+            if completed is True:
+                return module
+            if completed is False:
+                # Only the loading thread can re-enter this lock: a circular import.
+                return module
+            if not getattr(getattr(module, "__spec__", None), "_initializing", False):
+                module._leaf_sibling_completed = True
+                return module
+        else:
+            spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+            module = importlib.util.module_from_spec(spec)
+            module._leaf_sibling_completed = False
+            sys.modules[name] = module
+            try:
+                spec.loader.exec_module(module)
+                module._leaf_sibling_completed = True
+            except BaseException:
+                if sys.modules.get(name) is module:
+                    del sys.modules[name]
+                raise
+            return module
+    # A normal Python import already owns this module. Wait through its import
+    # lock without holding ours, so that thread can load its own siblings.
     return importlib.import_module(name)
 
 
