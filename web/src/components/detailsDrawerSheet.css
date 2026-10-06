@@ -1,0 +1,80 @@
+/* F-phone-details-sheet: geometry snaps; only opacity condenses. Extra
+   specificity keeps the phone fork independent of stylesheet import order. */
+@media (max-width: 639px) {
+  .drawer-layer.drawer-sheet-layer,
+  .app[data-project-workspace="results"] > .drawer-layer.drawer-sheet-layer {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    pointer-events: none;
+  }
+
+  .drawer-layer.drawer-sheet-layer > .drawer.drawer-sheet {
+    position: absolute;
+    inset: auto 0 0;
+    box-sizing: border-box;
+    width: 100%;
+    height: 50vh;
+    height: 50dvh;
+    max-height: 100%;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 12px 12px 0 0;
+    box-shadow: 0 -18px 44px rgba(25, 29, 26, .14);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    transform: none;
+    transition: opacity 120ms ease-out;
+    animation: details-sheet-medium 120ms ease-out both;
+    pointer-events: auto;
+  }
+
+  .drawer-layer.drawer-sheet-layer > .drawer.drawer-sheet[data-detent="large"] {
+    height: 90vh;
+    height: 90dvh;
+    animation-name: details-sheet-large;
+  }
+
+  .drawer-layer.drawer-sheet-layer > .drawer.drawer-sheet.exit {
+    animation: m1-out 180ms ease-out both;
+  }
+
+  .drawer-sheet .drawer-head {
+    position: relative;
+    padding-top: 30px;
+    flex-shrink: 0;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .drawer-sheet .drawer-body { min-height: 0; }
+  .drawer-sheet .drawer-foot { flex-shrink: 0; }
+  .drawer-sheet .drawer-sheet-handle {
+    position: absolute;
+    top: 0;
+    left: calc(50% - 24px);
+    width: 48px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: ns-resize;
+  }
+  .drawer-sheet-handle > span {
+    display: block;
+    width: 32px;
+    height: 4px;
+    margin: auto;
+    border-radius: 2px;
+    background: var(--muted-2);
+  }
+}
+
+@keyframes details-sheet-medium { from { opacity: .65; } to { opacity: 1; } }
+@keyframes details-sheet-large { from { opacity: .65; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer-layer.drawer-sheet-layer > .drawer.drawer-sheet {
+    animation: none;
+    transition: none;
+  }
+}

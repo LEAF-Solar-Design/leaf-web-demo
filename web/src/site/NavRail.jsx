@@ -79,6 +79,7 @@ export default function NavRail({
   onToggleAuthor = null,
   onCollapse = null,
   authorSectionRef = null,
+  authorContent = undefined,
   onAuthor = null,
   onPublish = null,
   onUseAuthored = null,
@@ -196,7 +197,7 @@ export default function NavRail({
         onToggle={onToggleAuthor}
         innerRef={authorSectionRef}
       >
-        <AuthorPanel
+        {authorContent !== undefined ? authorContent : <AuthorPanel
           onAuthor={onAuthor}
           onPublish={onPublish}
           onUseAuthored={onUseAuthored}
@@ -210,7 +211,7 @@ export default function NavRail({
           notLinked={claudeNotLinked}
           onLinkClaude={onLinkClaude}
           buildEntitled={buildEntitled}
-        />
+        />}
       </Section>
       {controls}
       </>

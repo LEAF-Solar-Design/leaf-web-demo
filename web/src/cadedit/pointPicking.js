@@ -14,7 +14,9 @@ const round3 = (v) => {
 const finite = (v) => typeof v === 'number' && Number.isFinite(v)
 const num = (s) => { const n = Number.parseFloat(s); return Number.isFinite(n) ? n : null }
 
-import { nearestEntity } from './intersect.js'
+import { nearestEntity, locate } from './intersect.js'
+import { snapPrimitives, nearestOnPrimitive, perpendicularCandidates, tangentCandidates, intersectionCandidates } from './snapGeometry.js'
+import { DEFAULT_SNAP_MODES, isSnapModeMask, snapModeBit } from './snapModes.js'
 import { bulgeArc, dimensionSchematic } from './engineIntake.js'
 /** The pick sequence per op, or null for ops with nothing to pick. */
 export const PICK_SEQUENCES = Object.freeze({
@@ -179,14 +181,27 @@ export function orthoPoint(state, x, y) {
  * points, W4f-5b; arcs contribute their endpoints and midpoint instead).
  */
 export const MAX_SNAP_POINTS = 20000
-export const SNAP_KIND = Object.freeze({ END: 0, MID: 1, CENTRE: 2, QUADRANT: 3 })
-const SNAP_KIND_NAME = Object.freeze(['endpoint', 'midpoint', 'centre', 'quadrant'])
+export const MAX_INSERTION_POINTS = 20000
+export const MAX_SNAP_PRIMITIVES = 20000
+export const MAX_SNAP_SOURCES = 20000
+export const MAX_SNAP_VERTICES = 60000
+export const MAX_LOCAL_PRIMITIVES = 64
+export const SNAP_KIND = Object.freeze({ END: 0, MID: 1, CENTRE: 2, QUADRANT: 3,
+  INTERSECTION: 4, PERPENDICULAR: 5, TANGENT: 6, NEAREST: 7, INSERTION: 8 })
+const SNAP_KIND_NAME = Object.freeze(['endpoint', 'midpoint', 'centre', 'quadrant',
+  'intersection', 'perpendicular', 'tangent', 'nearest', 'insertion'])
+const SNAP_BITS = SNAP_KIND_NAME.map(snapModeBit)
 const DEG = Math.PI / 180
 
 // A DXF arc sweeps counter-clockwise from start to end; an end below the
 // start wraps through 360 (the same rule the viewer intake draws it with).
 function arcSweepDeg(startDeg, endDeg) {
   let sweep = endDeg - startDeg
+  // Constant time and exact at any magnitude: past four turns the sweep is the difference of the
+  // two exact residues (% is exact for doubles), never of the rounded difference, which loses the
+  // smaller angle (90 - 1e19 is -1e19) or overflows. Two finite angles always have a sweep, and the
+  // loops then run at most twice.
+  if (!(Math.abs(sweep) <= 1440)) sweep = (endDeg % 360) - (startDeg % 360)
   while (sweep <= 0) sweep += 360
   while (sweep > 360) sweep -= 360
   return sweep
@@ -196,12 +211,34 @@ export function buildSnapIndex(entities) {
   const xs = []
   const ys = []
   const kinds = []
+  const insertionXs = [], insertionYs = []
+  let insertionsTruncated = false
+  const prims = []
+  let primsTruncated = false
+  let sources = 0, vertices = 0, ordinal = 0
   const push = (x, y, kind) => {
     if (xs.length >= MAX_SNAP_POINTS || !finite(x) || !finite(y)) return
     xs.push(x); ys.push(y); kinds.push(kind)
   }
   for (const e of Array.isArray(entities) ? entities : []) {
     const v = Array.isArray(e?.vertices) ? e.vertices : []
+    const source = ordinal++
+    const ip = e?.type === 'INSERT' ? e.ip : e?.type === 'TEXT' ? v[0] : null
+    if (ip && finite(ip[0]) && finite(ip[1])) {
+      if (insertionXs.length < MAX_INSERTION_POINTS) {
+        insertionXs.push(ip[0]); insertionYs.push(ip[1])
+      } else insertionsTruncated = true
+    }
+    if (!primsTruncated) {
+      const charge = Math.min(v.length, 1001)
+      if (sources + 1 > MAX_SNAP_SOURCES || vertices + charge > MAX_SNAP_VERTICES) primsTruncated = true
+      else {
+        sources += 1; vertices += charge
+        const next = snapPrimitives(e, source)
+        if (prims.length + next.length > MAX_SNAP_PRIMITIVES) primsTruncated = true
+        else for (const prim of next) prims.push(prim)
+      }
+    }
     if (e?.type === 'CIRCLE' || e?.type === 'ARC') {
       // The centre; then, with a finite positive radius, a circle's four
       // quadrants, or an arc's two endpoints and its midpoint (W4f-5b).
@@ -219,10 +256,13 @@ export function buildSnapIndex(entities) {
         push(cx, cy - r, SNAP_KIND.QUADRANT)
       } else if (finite(e.startDeg) && finite(e.endDeg)) {
         const sweep = arcSweepDeg(e.startDeg, e.endDeg)
+        // Past four turns the start is reduced exactly first, so a huge start cannot absorb the
+        // sweep (1e19 + 170 is 1e19) and put the end and the midpoint on the start point.
+        const s0 = Math.abs(e.startDeg) <= 1440 ? e.startDeg : e.startDeg % 360
         const at = (deg) => [cx + r * Math.cos(deg * DEG), cy + r * Math.sin(deg * DEG)]
-        const a = at(e.startDeg)
-        const b = at(e.startDeg + sweep)
-        const m = at(e.startDeg + sweep / 2)
+        const a = at(s0)
+        const b = at(s0 + sweep)
+        const m = at(s0 + sweep / 2)
         push(a[0], a[1], SNAP_KIND.END)
         push(b[0], b[1], SNAP_KIND.END)
         push(m[0], m[1], SNAP_KIND.MID)
@@ -264,7 +304,9 @@ export function buildSnapIndex(entities) {
       } else push((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, SNAP_KIND.MID)
     }
   }
-  return Object.freeze({ n: xs.length, xs: Float64Array.from(xs), ys: Float64Array.from(ys), kinds: Uint8Array.from(kinds), truncated: xs.length >= MAX_SNAP_POINTS })
+  return Object.freeze({ n: xs.length, xs: Float64Array.from(xs), ys: Float64Array.from(ys), kinds: Uint8Array.from(kinds), truncated: xs.length >= MAX_SNAP_POINTS,
+    insertions: { n: insertionXs.length, xs: Float64Array.from(insertionXs), ys: Float64Array.from(insertionYs), truncated: insertionsTruncated },
+    prims: Object.freeze(prims), primsTruncated })
 }
 
 /**
@@ -273,21 +315,106 @@ export function buildSnapIndex(entities) {
  * allocation on a miss; an endpoint beats a midpoint or a centre at equal
  * distance. Non-finite input or tolerance finds nothing.
  */
-export function snapPoint(index, x, y, tol) {
-  if (!index || !index.n || !finite(x) || !finite(y) || !finite(tol) || tol <= 0) return null
+// Reused, bounded scratch: the heap root is the worst retained primitive.
+const localHeap = Array.from({ length: MAX_LOCAL_PRIMITIVES }, () => ({ prim: null, d: 0 }))
+const queryCursor = [0, 0]
+const candidateBuffer = []
+const worseLocal = (a, b) => a.d > b.d || (a.d === b.d &&
+  (a.prim.source > b.prim.source || (a.prim.source === b.prim.source && a.prim.part > b.prim.part)))
+function siftLocal(size, at) {
+  while (at * 2 + 1 < size) {
+    let child = at * 2 + 1
+    if (child + 1 < size && worseLocal(localHeap[child + 1], localHeap[child])) child += 1
+    if (!worseLocal(localHeap[child], localHeap[at])) break
+    const swap = localHeap[at]; localHeap[at] = localHeap[child]; localHeap[child] = swap
+    at = child
+  }
+}
+export function snapPoint(index, x, y, tol, { modes = DEFAULT_SNAP_MODES, anchor, diagnostics } = {}) {
+  const diag = diagnostics !== null && typeof diagnostics === 'object' ? diagnostics : null
+  if (diag) Object.assign(diag, { invalid: false, truncated: false, localOverflow: false, admitted: 0, omitted: 0, pairs: 0 })
+  if (!isSnapModeMask(modes)) {
+    if (diag) diag.invalid = true
+    return null
+  }
+  if (diag && index) diag.truncated = !!((modes & 23 && index.truncated) ||
+    (modes & 64 && index.insertions?.truncated) || (modes & 928 && index.primsTruncated))
+  if (!index || !finite(x) || !finite(y) || !finite(tol) || tol <= 0) return null
   const { n, xs, ys, kinds } = index
   const tol2 = tol * tol
-  let best = -1
   let bestD = Infinity
-  for (let i = 0; i < n; i += 1) {
-    const dx = xs[i] - x
-    const dy = ys[i] - y
-    const d = dx * dx + dy * dy
-    if (d > tol2) continue
-    if (d < bestD || (d === bestD && best >= 0 && kinds[i] < kinds[best])) { best = i; bestD = d }
+  let bestKind = -1, bestSource = Infinity, bestPart = Infinity, bestX, bestY
+  const offer = (cx, cy, kind, source = Infinity, part = Infinity) => {
+    const dx = cx - x, dy = cy - y, d = dx * dx + dy * dy
+    if (d > tol2) return
+    if (d < bestD || (d === bestD && bestKind >= 0 && (kind < bestKind ||
+      (kind === bestKind && (source < bestSource || (source === bestSource && part < bestPart)))))) {
+      bestD = d; bestKind = kind; bestSource = source; bestPart = part; bestX = cx; bestY = cy
+    }
   }
-  if (best < 0) return null
-  return { x: xs[best], y: ys[best], kind: SNAP_KIND_NAME[kinds[best]] }
+  for (let i = 0; i < n; i += 1) {
+    if (modes & SNAP_BITS[kinds[i]]) offer(xs[i], ys[i], kinds[i])
+  }
+  if (modes & 64) {
+    const insertions = index.insertions
+    for (let i = 0; i < (insertions?.n ?? 0); i += 1) offer(insertions.xs[i], insertions.ys[i], SNAP_KIND.INSERTION)
+  }
+  const anchored = Array.isArray(anchor) && finite(anchor[0]) && finite(anchor[1])
+  const dynamic = (modes & (32 | 512)) || (anchored && (modes & (128 | 256)))
+  let size = 0, considered = 0
+  if (dynamic) {
+    queryCursor[0] = x; queryCursor[1] = y
+    for (const prim of index.prims ?? []) {
+      if (!(modes & (32 | 512 | (anchored ? 128 : 0))) && !(anchored && prim.circular && (modes & 256))) continue
+      const box = prim.box
+      if (x < box[0] - tol || y < box[1] - tol || x > box[2] + tol || y > box[3] + tol) continue
+      const d = locate(prim.curve, queryCursor).d
+      if (!(d <= tol)) continue
+      considered += 1
+      if (size < MAX_LOCAL_PRIMITIVES) {
+        let at = size++
+        localHeap[at].prim = prim; localHeap[at].d = d
+        while (at > 0) {
+          const parent = (at - 1) >> 1
+          if (!worseLocal(localHeap[at], localHeap[parent])) break
+          const swap = localHeap[at]; localHeap[at] = localHeap[parent]; localHeap[parent] = swap
+          at = parent
+        }
+      } else {
+        const root = localHeap[0]
+        if (d < root.d || (d === root.d && (prim.source < root.prim.source ||
+          (prim.source === root.prim.source && prim.part < root.prim.part)))) {
+          root.prim = prim; root.d = d; siftLocal(size, 0)
+        }
+      }
+    }
+    if (diag) { diag.admitted = size; diag.omitted = considered - size; diag.localOverflow = considered > size }
+    const offerPoints = (points, kind, prim) => {
+      candidateBuffer.length = 0
+      for (const p of points) candidateBuffer.push(p)
+      for (const p of candidateBuffer) offer(p[0], p[1], kind, prim.source, prim.part)
+    }
+    for (let i = 0; i < size; i += 1) {
+      const prim = localHeap[i].prim
+      if (modes & 512) {
+        const p = nearestOnPrimitive(prim, queryCursor)
+        if (p) offer(p[0], p[1], SNAP_KIND.NEAREST, prim.source, prim.part)
+      }
+      if (anchored && (modes & 128)) offerPoints(perpendicularCandidates(prim, anchor), SNAP_KIND.PERPENDICULAR, prim)
+      if (anchored && prim.circular && (modes & 256)) offerPoints(tangentCandidates(prim, anchor), SNAP_KIND.TANGENT, prim)
+      if (modes & 32) for (let j = i + 1; j < size; j += 1) {
+        const other = localHeap[j].prim
+        const first = prim.source < other.source || (prim.source === other.source && prim.part <= other.part) ? prim : other
+        const second = first === prim ? other : prim
+        if (diag) diag.pairs += 1
+        offerPoints(intersectionCandidates(first, second), SNAP_KIND.INTERSECTION, first)
+      }
+    }
+  }
+  for (let i = 0; i < size; i += 1) localHeap[i].prim = null
+  candidateBuffer.length = 0
+  if (bestKind < 0) return null
+  return { x: bestX, y: bestY, kind: SNAP_KIND_NAME[bestKind] }
 }
 
 // W4g-4b: the FIXED ratio the ellipse ghost is drawn at. The ratio input has
