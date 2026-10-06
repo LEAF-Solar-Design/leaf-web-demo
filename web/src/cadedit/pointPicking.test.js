@@ -336,3 +336,343 @@ describe('OSNAP on curved polyline segments (W4g-6d follow-up)', () => {
     expect([...truthy.kinds].filter((k) => k === SNAP_KIND.CENTRE)).toHaveLength(0)
   })
 })
+
+import { bulgeArc } from './engineIntake.js'
+import { DEFAULT_SNAP_MODES, ALL_SNAP_MODES } from './snapModes.js'
+
+const finite = (v) => typeof v === 'number' && Number.isFinite(v)
+const DEG = Math.PI / 180
+const LEGACY_SNAP_KIND_NAME = Object.freeze(['endpoint', 'midpoint', 'centre', 'quadrant'])
+
+function legacyArcSweepDeg(startDeg, endDeg) {
+  let sweep = endDeg - startDeg
+  while (sweep <= 0) sweep += 360
+  while (sweep > 360) sweep -= 360
+  return sweep
+}
+
+function legacyBuildSnapIndex(entities) {
+  const xs = []
+  const ys = []
+  const kinds = []
+  const push = (x, y, kind) => {
+    if (xs.length >= MAX_SNAP_POINTS || !finite(x) || !finite(y)) return
+    xs.push(x); ys.push(y); kinds.push(kind)
+  }
+  for (const e of Array.isArray(entities) ? entities : []) {
+    const v = Array.isArray(e?.vertices) ? e.vertices : []
+    if (e?.type === 'CIRCLE' || e?.type === 'ARC') {
+      // The centre; then, with a finite positive radius, a circle's four
+      // quadrants, or an arc's two endpoints and its midpoint (W4f-5b).
+      const c = v[0]
+      if (!c) continue
+      const cx = c[0]
+      const cy = c[1]
+      push(cx, cy, SNAP_KIND.CENTRE)
+      const r = e.radius
+      if (!finite(r) || r <= 0) continue
+      if (e.type === 'CIRCLE') {
+        push(cx + r, cy, SNAP_KIND.QUADRANT)
+        push(cx, cy + r, SNAP_KIND.QUADRANT)
+        push(cx - r, cy, SNAP_KIND.QUADRANT)
+        push(cx, cy - r, SNAP_KIND.QUADRANT)
+      } else if (finite(e.startDeg) && finite(e.endDeg)) {
+        const sweep = legacyArcSweepDeg(e.startDeg, e.endDeg)
+        const at = (deg) => [cx + r * Math.cos(deg * DEG), cy + r * Math.sin(deg * DEG)]
+        const a = at(e.startDeg)
+        const b = at(e.startDeg + sweep)
+        const m = at(e.startDeg + sweep / 2)
+        push(a[0], a[1], SNAP_KIND.END)
+        push(b[0], b[1], SNAP_KIND.END)
+        push(m[0], m[1], SNAP_KIND.MID)
+      }
+      continue
+    }
+    // W4g-4b: a POINT is its own endpoint; an ELLIPSE offers its centre.
+    if (e?.type === 'POINT') {
+      if (v[0]) push(v[0][0], v[0][1], SNAP_KIND.END)
+      continue
+    }
+    if (e?.type === 'ELLIPSE') {
+      if (v[0]) push(v[0][0], v[0][1], SNAP_KIND.CENTRE)
+      continue
+    }
+    if (e?.type !== 'LINE' && e?.type !== 'LWPOLYLINE') continue
+    for (let i = 0; i < v.length; i += 1) push(v[i][0], v[i][1], SNAP_KIND.END)
+    const bulges = Array.isArray(e.bulges) && e.bulges.length === v.length ? e.bulges : null
+    // A closed polyline visits its closing segment. Two vertices closed by two
+    // STRAIGHT sides would offer one chord midpoint twice, so that case alone
+    // keeps one segment; when either side curves (a bulge on either vertex)
+    // both sides are real and the drawing shows both.
+    const curvedAt = (i) => !!(bulges && Number.isFinite(bulges[i]) && Math.abs(bulges[i]) > 1e-10)
+    const twoSides = v.length === 2 && (curvedAt(0) || curvedAt(1))
+    const segments = e.type === 'LWPOLYLINE' && e.closed === true && (v.length > 2 || twoSides) ? v.length : v.length - 1
+    // A curved segment (a bulge on its start vertex, one per vertex, the
+    // mapper's rule) offers the ARC's midpoint, not the chord's, and its
+    // centre; a list that does not match the points reads as straight, as
+    // it does for the drawing.
+    for (let i = 0; i < segments; i += 1) {
+      const a = v[i]
+      const b = v[(i + 1) % v.length]
+      if (!a || !b) continue
+      const arc = bulges ? bulgeArc(a, b, bulges[i]) : null
+      if (arc) {
+        const mid = arc.a0 + arc.sweep / 2
+        push(arc.cx + arc.r * Math.cos(mid), arc.cy + arc.r * Math.sin(mid), SNAP_KIND.MID)
+        push(arc.cx, arc.cy, SNAP_KIND.CENTRE)
+      } else push((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, SNAP_KIND.MID)
+    }
+  }
+  return Object.freeze({ n: xs.length, xs: Float64Array.from(xs), ys: Float64Array.from(ys), kinds: Uint8Array.from(kinds), truncated: xs.length >= MAX_SNAP_POINTS })
+}
+
+/**
+ * The nearest candidate within `tol` (world units) of (x, y), or null. One
+ * linear pass over at most MAX_SNAP_POINTS (about 0.1 ms at the cap), no
+ * allocation on a miss; an endpoint beats a midpoint or a centre at equal
+ * distance. Non-finite input or tolerance finds nothing.
+ */
+function legacySnapPoint(index, x, y, tol) {
+  if (!index || !index.n || !finite(x) || !finite(y) || !finite(tol) || tol <= 0) return null
+  const { n, xs, ys, kinds } = index
+  const tol2 = tol * tol
+  let best = -1
+  let bestD = Infinity
+  for (let i = 0; i < n; i += 1) {
+    const dx = xs[i] - x
+    const dy = ys[i] - y
+    const d = dx * dx + dy * dy
+    if (d > tol2) continue
+    if (d < bestD || (d === bestD && best >= 0 && kinds[i] < kinds[best])) { best = i; bestD = d }
+  }
+  if (best < 0) return null
+  return { x: xs[best], y: ys[best], kind: LEGACY_SNAP_KIND_NAME[kinds[best]] }
+}
+
+
+const osLine = (a = [0, 0], b = [10, 0]) => ({ type: 'LINE', vertices: [a, b] })
+const osCircle = (c = [0, 0], radius = 5) => ({ type: 'CIRCLE', vertices: [c], radius })
+function osRandom(seed) {
+  let state = seed
+  return () => {
+    state = (Math.imul(1664525, state) + 1013904223) >>> 0
+    return state / 4294967296
+  }
+}
+function oracleDocument(k) {
+  const r = osRandom(0x1000 + k)
+  const entities = []
+  for (let i = 0; i < 200; i += 1) {
+    const type = Math.floor(r() * 10)
+    let e
+    if (type <= 2) e = osLine([100 * r(), 100 * r()], [100 * r(), 100 * r()])
+    else if (type === 3) {
+      const count = 2 + Math.floor(r() * 5)
+      const vertices = Array.from({ length: count }, () => [100 * r(), 100 * r()])
+      const closed = r() < 0.5
+      const bulges = r() < 0.5 ? vertices.map(() => r() < 0.5 ? 0 : 2 * r() - 1) : undefined
+      e = { type: 'LWPOLYLINE', vertices, closed, bulges }
+    } else if (type === 4) e = osCircle([100 * r(), 100 * r()], 10 * r())
+    else if (type === 5) e = { type: 'ARC', vertices: [[100 * r(), 100 * r()]], radius: 10 * r() + 0.1, startDeg: 1440 * r() - 720, endDeg: 1440 * r() - 720 }
+    else {
+      const x = 100 * r(), y = 100 * r()
+      e = type === 8 ? { type: 'INSERT', ip: [x, y, 0] }
+        : { type: ['POINT', 'ELLIPSE', 'INSERT', 'TEXT'][type - 6], vertices: [[x, y, 0]] }
+    }
+    if (i % 50 === 0) e = [null, {}, { type: 'LINE' }, { type: 'LINE', vertices: [[NaN, 0], [1, 1]] }][i / 50]
+    entities.push(e)
+  }
+  const legacy = legacyBuildSnapIndex(entities)
+  const queries = Array.from({ length: 100 }, (_, q) => {
+    if (q < 70) return [120 * r() - 10, 120 * r() - 10, [0.5, 2, 10][q % 3]]
+    const i = q - 70
+    return [legacy.xs[i] + (i % 2 ? 0.01 : 0), legacy.ys[i], [0.5, 2, 10][q % 3]]
+  })
+  return { entities, legacy, queries }
+}
+const osOracles = Array.from({ length: 20 }, (_, k) => oracleDocument(k))
+function osHatch() {
+  const entities = []
+  for (let j = 0; j < 250; j += 1) {
+    const v = -24.9 + 0.2 * j
+    entities.push(osLine([v, -500], [v, 500]), osLine([-500, v], [500, v]))
+  }
+  return entities
+}
+function expectOsNear(hit, x, y, kind) {
+  expect(hit?.kind).toBe(kind)
+  expect(Math.abs(hit.x - x)).toBeLessThanOrEqual(1e-9)
+  expect(Math.abs(hit.y - y)).toBeLessThanOrEqual(1e-9)
+}
+
+describe('bounded object snap modes', () => {
+  it('OSQ01 legacy index fields match the base oracle', () => {
+    for (const { entities, legacy } of osOracles) {
+      const index = buildSnapIndex(entities)
+      for (const key of ['n', 'xs', 'ys', 'kinds', 'truncated']) expect(index[key]).toEqual(legacy[key])
+    }
+  })
+  it('OSQ02 four argument query matches all legacy queries', () => {
+    for (const { entities, legacy, queries } of osOracles) {
+      const index = buildSnapIndex(entities)
+      for (const [x, y, tol] of queries) expect(snapPoint(index, x, y, tol)).toEqual(legacySnapPoint(legacy, x, y, tol))
+    }
+  })
+  it('OSQ03 explicit default modes and anchor preserve the query', () => {
+    for (const { entities, queries } of osOracles) {
+      const index = buildSnapIndex(entities)
+      for (const [x, y, tol] of queries) expect(snapPoint(index, x, y, tol, { modes: DEFAULT_SNAP_MODES, anchor: [1, 2] })).toEqual(snapPoint(index, x, y, tol))
+    }
+  })
+  it('OSQ04 huge and overflowed arc sweeps terminate', () => {
+    // Both angles of each arc are integer-valued doubles, so BigInt gives their exact residues
+    // independently of the product's float arithmetic. 1e19 mod 360 is 280 (by hand: 0 mod 40,
+    // 1 mod 9), so the first arc runs 280 -> 90 (sweep 170, midpoint at 5 degrees).
+    const pt = (deg) => [5 * Math.cos((deg * Math.PI) / 180), 5 * Math.sin((deg * Math.PI) / 180)]
+    const residue = (deg) => Number(BigInt(deg) % 360n)
+    expect(residue(1e19)).toBe(280)
+    for (const [startDeg, endDeg] of [[1e19, 90], [-1.7e308, 1.7e308]]) {
+      const index = buildSnapIndex([{ type: 'ARC', vertices: [[0, 0]], radius: 5, startDeg, endDeg }])
+      expect(index.n).toBe(4)
+      expect(index.xs[0]).toBe(0)
+      expect(index.ys[0]).toBe(0)
+      for (const v of [...index.xs, ...index.ys]) expect(Number.isFinite(v)).toBe(true)
+      expect([...index.kinds].slice(1, 4)).toEqual([SNAP_KIND.END, SNAP_KIND.END, SNAP_KIND.MID])
+      const s = residue(startDeg)
+      const e = residue(endDeg)
+      let sweep = e - s
+      while (sweep <= 0) sweep += 360
+      while (sweep > 360) sweep -= 360
+      const want = [pt(s), pt(e), pt(s + sweep / 2)]
+      for (let i = 0; i < 3; i += 1) {
+        expect(Math.abs(index.xs[i + 1] - want[i][0])).toBeLessThan(1e-9)
+        expect(Math.abs(index.ys[i + 1] - want[i][1])).toBeLessThan(1e-9)
+      }
+    }
+    // The 1e19 arc's end is its 90-degree point and its midpoint the 5-degree point, not the start.
+    const big = buildSnapIndex([{ type: 'ARC', vertices: [[0, 0]], radius: 5, startDeg: 1e19, endDeg: 90 }])
+    expect(Math.abs(big.xs[2] - 0)).toBeLessThan(1e-9)
+    expect(Math.abs(big.ys[2] - 5)).toBeLessThan(1e-9)
+    expect(Math.abs(big.xs[3] - pt(5)[0])).toBeLessThan(1e-9)
+    expect(Math.abs(big.ys[3] - pt(5)[1])).toBeLessThan(1e-9)
+  })
+  it('OSQ05 fixed modes filter candidates', () => {
+    const index = buildSnapIndex([osLine(), osCircle([20, 0], 2)])
+    expect(snapPoint(index, 5.1, 0.1, 1)).toEqual({ x: 5, y: 0, kind: 'midpoint' })
+    expect(snapPoint(index, 5.1, 0.1, 1, { modes: 1 })).toBeNull()
+    expect(snapPoint(index, 5.1, 0.1, 1, { modes: 2 })).toEqual({ x: 5, y: 0, kind: 'midpoint' })
+    expect(snapPoint(index, 20.1, 0, 1)).toEqual({ x: 20, y: 0, kind: 'centre' })
+    expect(snapPoint(index, 20.1, 0, 1, { modes: 16 })).toBeNull()
+    expect(snapPoint(index, 20.1, 0, 1, { modes: 0 })).toBeNull()
+  })
+  it('OSQ06 invalid mode masks', () => {
+    const index = buildSnapIndex([osLine()])
+    for (const modes of [8, 1024, -1, 1.5, '23', null]) {
+      const diagnostics = {}
+      expect(snapPoint(index, 0, 0, 1, { modes, diagnostics })).toBeNull()
+      expect(diagnostics.invalid).toBe(true)
+    }
+  })
+  it('OSQ07 insertion points and independent budget', () => {
+    const index = buildSnapIndex([
+      { type: 'INSERT', ip: [3, 4, 0] },
+      { type: 'TEXT', vertices: [[7, -2, 0]] },
+      { type: 'INSERT', ip: [-1, 6, 0], scale: [2, 3, 1], rotationDeg: 90, editable: false },
+      { type: 'MTEXT', vertices: [[50, 50, 0]] },
+    ])
+    expect(snapPoint(index, 3.1, 4, 1)).toBeNull()
+    expect(snapPoint(index, 3.1, 4, 1, { modes: 64 })).toEqual({ x: 3, y: 4, kind: 'insertion' })
+    expect(snapPoint(index, 7.1, -2, 1, { modes: 64 })).toEqual({ x: 7, y: -2, kind: 'insertion' })
+    expect(snapPoint(index, -1.1, 6, 1, { modes: 64 })).toEqual({ x: -1, y: 6, kind: 'insertion' })
+    expect(snapPoint(index, 50, 50.1, 1, { modes: 64 })).toBeNull()
+    for (const count of [20000, 20001]) {
+      const capped = buildSnapIndex([...Array.from({ length: count }, () => ({ type: 'TEXT', vertices: [[3, 4]] })), osLine()])
+      expect(capped.n).toBe(3)
+      expect(capped.truncated).toBe(false)
+      expect(capped.insertions.n).toBe(20000)
+      expect(capped.insertions.truncated).toBe(count > 20000)
+    }
+  })
+  it('OSQ08 intersection query and endpoint priority', () => {
+    const entities = [osLine([0, 0], [10, 10]), osLine([0, 10], [10, 0])]
+    const index = buildSnapIndex(entities)
+    expect(snapPoint(index, 5.3, 4.8, 1, { modes: 32 })).toEqual({ x: 5, y: 5, kind: 'intersection' })
+    // Both specified diagonals already offer (5,5) as a legacy midpoint.
+    expect(snapPoint(index, 5.3, 4.8, 1)).toEqual({ x: 5, y: 5, kind: 'midpoint' })
+    const crossing = buildSnapIndex([osLine([0, 0], [12, 12]), osLine([0, 10], [12, -2])])
+    expect(snapPoint(crossing, 5.3, 4.8, 1)).toBeNull()
+    expect(snapPoint(crossing, 5.3, 4.8, 1, { modes: 32 })).toEqual({ x: 5, y: 5, kind: 'intersection' })
+    expect(snapPoint(buildSnapIndex([...entities, osLine([5, 5], [5, 9])]), 5.2, 5, 1, { modes: 1 | 32 })).toEqual({ x: 5, y: 5, kind: 'endpoint' })
+  })
+  it('OSQ09 perpendicular requires a finite anchor', () => {
+    const index = buildSnapIndex([osLine([2, 0], [2, 10])])
+    expect(snapPoint(index, 2.2, 5.1, 1, { modes: 128 })).toBeNull()
+    expect(snapPoint(index, 2.2, 5.1, 1, { modes: 128, anchor: [0, 5] })).toEqual({ x: 2, y: 5, kind: 'perpendicular' })
+    expect(snapPoint(index, 2.2, 5.1, 1, { modes: 128, anchor: [NaN, 5] })).toBeNull()
+  })
+  it('OSQ10 tangent query aperture', () => {
+    const index = buildSnapIndex([osCircle()])
+    const opts = { modes: 256, anchor: [10, 0] }
+    expectOsNear(snapPoint(index, 2.6, 4.4, 1, opts), 2.5, 4.330127018922193, 'tangent')
+    expectOsNear(snapPoint(index, 2.6, -4.4, 1, opts), 2.5, -4.330127018922193, 'tangent')
+    expect(snapPoint(index, 2.6, 4.4, 0.01, opts)).toBeNull()
+    expect(snapPoint(index, 2.6, 4.4, 1, { modes: 256, anchor: [3, 0] })).toBeNull()
+  })
+  it('OSQ11 nearest distance and endpoint tie', () => {
+    const index = buildSnapIndex([osLine()])
+    expect(snapPoint(index, 0.2, 0.1, 1, { modes: 1 | 512 })).toEqual({ x: 0.2, y: 0, kind: 'nearest' })
+    expect(snapPoint(index, 0.2, 0.1, 1, { modes: 1 })).toEqual({ x: 0, y: 0, kind: 'endpoint' })
+    expect(snapPoint(index, 0, 0.5, 1, { modes: 1 | 512 })).toEqual({ x: 0, y: 0, kind: 'endpoint' })
+  })
+  it('OSQ12 diagnostics reset on a miss', () => {
+    const diagnostics = { invalid: true, truncated: true, localOverflow: true, admitted: 99, omitted: 9, pairs: 5000 }
+    expect(snapPoint(buildSnapIndex([osLine()]), 1000, 1000, 1, { modes: ALL_SNAP_MODES, diagnostics })).toBeNull()
+    expect(diagnostics).toEqual({ invalid: false, truncated: false, localOverflow: false, admitted: 0, omitted: 0, pairs: 0 })
+  })
+  it('OSQ13 hatch local heap and pair bounds', () => {
+    const index = buildSnapIndex(osHatch()), diagnostics = {}
+    const hit = snapPoint(index, 0, 0, 10, { modes: ALL_SNAP_MODES, anchor: [60, 60], diagnostics })
+    expect(diagnostics).toEqual({ invalid: false, truncated: false, localOverflow: true, admitted: 64, omitted: 136, pairs: 2016 })
+    expect(hit).not.toBeNull()
+    expect(Math.hypot(hit.x, hit.y)).toBeLessThanOrEqual(10)
+    for (let q = 0; q < 30; q += 1) {
+      const i = q * 33
+      snapPoint(index, -20 + 0.4 * (i % 100), -20 + 4 * Math.floor(i / 100), 10, { modes: ALL_SNAP_MODES, anchor: [60, 60], diagnostics })
+      expect(diagnostics.admitted).toBeLessThanOrEqual(64)
+      expect(diagnostics.pairs).toBeLessThanOrEqual(2016)
+    }
+  })
+  it('OSQ14 primitive and vertex caps', () => {
+    const lines = buildSnapIndex(Array.from({ length: 20001 }, (_, i) => osLine([i, 0], [i, 1])))
+    expect(lines.prims).toHaveLength(20000)
+    expect(lines.primsTruncated).toBe(true)
+    const poly = { type: 'LWPOLYLINE', vertices: Array.from({ length: 999 }, (_, i) => [i, 0]) }
+    const polys = buildSnapIndex(Array.from({ length: 25 }, () => poly))
+    expect(polys.prims).toHaveLength(19960)
+    expect(polys.primsTruncated).toBe(true)
+    const bad = { type: 'LWPOLYLINE', vertices: [...Array.from({ length: 999 }, (_, i) => [i, 0]), [NaN, 0]] }
+    const bads = buildSnapIndex(Array.from({ length: 61 }, () => bad))
+    expect(bads.prims).toHaveLength(0)
+    expect(bads.primsTruncated).toBe(true)
+    const refused = buildSnapIndex([{ type: 'LWPOLYLINE', vertices: Array.from({ length: 1001 }, (_, i) => [i, 0]) }])
+    expect(refused.prims).toHaveLength(0)
+    expect(refused.primsTruncated).toBe(false)
+  })
+  it('OSQ15 source cap does not stop the legacy loop', () => {
+    const index = buildSnapIndex([...Array.from({ length: 20001 }, () => ({ type: 'HATCH' })), osLine()])
+    expect(index.n).toBe(3)
+    expect(index.truncated).toBe(false)
+    expect(index.prims).toHaveLength(0)
+    expect(index.primsTruncated).toBe(true)
+    const diagnostics = {}
+    expect(snapPoint(index, 5, 0.5, 1, { diagnostics })).toEqual({ x: 5, y: 0, kind: 'midpoint' })
+    expect(diagnostics.truncated).toBe(false)
+    expect(snapPoint(index, 5, 0.5, 1, { modes: 512, diagnostics })).toBeNull()
+    expect(diagnostics.truncated).toBe(true)
+  })
+  it('OSQ16 ellipse centre without dynamic approximation', () => {
+    const index = buildSnapIndex([{ type: 'ELLIPSE', vertices: [[5, 5]] }])
+    expect(snapPoint(index, 5.1, 5, 1)).toEqual({ x: 5, y: 5, kind: 'centre' })
+    expect(snapPoint(index, 5.1, 5, 1, { modes: 512 })).toBeNull()
+  })
+})
