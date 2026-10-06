@@ -1330,6 +1330,7 @@ export default function ToolCast({
       event.preventDefault()
       event.stopImmediatePropagation()
       catalog.actions.dismissRoute()
+      setSelectedCatalogTool(null)
       requestAnimationFrame(() => document.querySelector('.tc-bar-input')?.focus())
     }
     window.addEventListener('keydown', dismissProposalOnEscape, true)
