@@ -8,6 +8,14 @@ import {
 } from './catalogRouting.js'
 import { track } from '../../telemetry.js'
 import { isSecretRefused } from '../../lib/secretGuardTransport.js'
+import {
+  composerDraftAccountScope,
+  composerDraftKey,
+  composerDraftRoute,
+  composerDraftStorage,
+  createComposerDraft,
+} from '../../lib/composerDraft.js'
+import { notificationBus } from '../../lib/notifications.js'
 import { solarView } from '../../solar/solarView.js'
 import { canInitializeSolarSettings } from '../../solar/solarSettingsWire.js'
 
@@ -60,6 +68,9 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     ...context,
   }
   let started = false
+  let draft = null
+  let draftGeneration = 0
+  const restoredDrafts = new Set()
   let lastRefusedText = null
   let refusedCount = 0
   // NO OVERRIDE STATE LIVES HERE, and that absence is the round-3 fix. Round 2
@@ -83,6 +94,36 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     state = { ...state, ...patch }
     snapshot = null
     for (const listener of listeners) listener()
+  }
+
+  const ensureDraft = () => {
+    const storage = adapters.draftStorage === undefined ? composerDraftStorage() : adapters.draftStorage
+    const accountScope = current.accountScope === undefined
+      ? composerDraftAccountScope(storage) : current.accountScope
+    const route = current.draftRoute === undefined ? composerDraftRoute() : current.draftRoute
+    const key = composerDraftKey(accountScope, route)
+    if (draft && draft.key === key) return draft
+    const changed = !!draft
+    draft?.dispose()
+    draft = createComposerDraft({ storage, accountScope, route })
+    draftGeneration += 1
+    if (changed) {
+      publish({ prompt: '', route: null, routeError: null, secretRefusal: null })
+      adapters.onDraftScopeChanged?.()
+    }
+    return draft
+  }
+
+  const restoreDraft = () => {
+    const active = ensureDraft()
+    if (!active.key || restoredDrafts.has(active.key)) return
+    restoredDrafts.add(active.key)
+    if (state.prompt) return
+    const text = active.restore()
+    if (!text) return
+    publish({ prompt: text })
+    adapters.onDraftRestored?.(text)
+    notificationBus.push({ text: 'Draft restored' })
   }
 
   const getSnapshot = () => {
@@ -228,6 +269,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const setPrompt = (value) => {
+    ensureDraft().update(value)
     if (value.trim() !== lastRefusedText) {
       lastRefusedText = null
       refusedCount = 0
@@ -264,8 +306,10 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     // failed twice: the census was short by one both times. This is the choke
     // point, so a new bar cannot be added around it.
     //
+    const activeDraft = ensureDraft()
     const text = (typeof override === 'string' ? override : state.prompt).trim()
     if (!text || state.routing || current.running) return undefined
+    activeDraft.clear()
     if (text !== lastRefusedText) {
       lastRefusedText = null
       refusedCount = 0
@@ -431,11 +475,21 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     start() {
       if (started) return
       started = true
+      ensureDraft()
+      const generation = draftGeneration
+      // The console resets transient catalog state during its boot effect.
+      // Restore after that effect, once per scope even under StrictMode.
+      queueMicrotask(() => {
+        if (started && generation === draftGeneration) restoreDraft()
+      })
       void loadTools()
       void loadCatalog()
     },
     destroy() {
       started = false
+      draft?.dispose()
+      draft = null
+      draftGeneration += 1
       toolsRequest += 1
       catalogRequest += 1
       listeners.clear()
@@ -448,6 +502,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const derivedChanged = Object.prototype.hasOwnProperty.call(next, 'entitlements') &&
         next.entitlements !== current.entitlements
       current = { ...current, ...next }
+      if (started) restoreDraft()
       if (drawingChanged) {
         catalogRequest += 1
         adapters.dismissDecision?.()

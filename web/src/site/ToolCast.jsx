@@ -411,6 +411,8 @@ export default function ToolCast({
   // no drawing until one loads or uploads), so the claim still starts at mount
   // and the reload handoff is still bootstrapped in the authority effect.
   const catalogAdapters = useMemo(() => ({
+    onDraftRestored: (text) => setPrompt(text),
+    onDraftScopeChanged: () => setPrompt(''),
     previewRoute: matchPrompt,
     commitDecision: (decision) => catalogDecisionRef.current?.(decision),
     dismissDecision: () => {
