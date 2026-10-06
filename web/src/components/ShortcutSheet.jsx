@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import { keyboardTable } from '../lib/actionRegistry.js'
+import { readSingleKeyShortcuts, writeSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 
 // Slice 10b: the shortcut sheet. GENERATED straight from the action
 // registry's own `kbd` fields (keyboardTable()) — a cap added to the
@@ -11,6 +12,16 @@ import { keyboardTable } from '../lib/actionRegistry.js'
 // its own Escape / outside-click pair rather than trapping focus.
 export default function ShortcutSheet({ open, onClose }) {
   const rootRef = useRef(null)
+  // S25: the single-key switch (WCAG 2.1.4). Readers (the ladder, ResultPanel)
+  // read the stored value at keystroke time, so writing it is the whole effect.
+  const [singleKeyOn, setSingleKeyOn] = useState(() => readSingleKeyShortcuts())
+  useEffect(() => {
+    if (open) setSingleKeyOn(readSingleKeyShortcuts())
+  }, [open])
+  const toggleSingleKey = () => {
+    const next = !singleKeyOn
+    if (writeSingleKeyShortcuts(next)) setSingleKeyOn(next)
+  }
 
   // Same pattern as PromptBox's scope-menu listener: capture-phase Escape so
   // the global ladder's own Escape rung never also fires, and an
@@ -32,18 +43,44 @@ export default function ShortcutSheet({ open, onClose }) {
   const rows = keyboardTable()
 
   return (
-    <div className="resolver shortcut-sheet" role="dialog" aria-label="Keyboard shortcuts" ref={rootRef}>
+    <div
+      className="resolver shortcut-sheet"
+      role="dialog"
+      aria-label="Keyboard shortcuts"
+      ref={rootRef}
+      // This sheet is a shell sibling, not a child of the bar dock. Keep it
+      // above the dock and tool rail, and scroll the growing registry inside
+      // the panel so every control remains reachable in a short viewport.
+      style={{ position: 'fixed', left: 16, right: 16, bottom: 'calc(132px + env(safe-area-inset-bottom, 0px))', margin: '0 auto', maxWidth: 720, maxHeight: 'calc(100dvh - 180px)', overflowY: 'auto', zIndex: 80 }}
+    >
       <div className="resolver-header">
         Keyboard shortcuts
         <EscCap type="button" onClick={onClose} label="Close" />
       </div>
-      {rows.map((row) => (
-        <div className="resolver-row" key={row.id} data-testid="shortcut-row">
-          <span className="lbar" aria-hidden="true" />
-          <span className="label">{row.label}</span>
-          <span className="key hot">{row.kbd}</span>
-        </div>
-      ))}
+      {rows.map((row) => {
+        const off = row.singleKey && !singleKeyOn
+        return (
+          <div className="resolver-row" key={row.id} data-testid="shortcut-row" data-shortcut-id={row.id} aria-disabled={off || undefined}>
+            <span className="lbar" aria-hidden="true" />
+            <span className="label">{row.label}</span>
+            <span className="context" data-testid="shortcut-context">{off ? `${row.context} (off)` : row.context}</span>
+            <span className="key hot">{row.kbd}</span>
+          </div>
+        )
+      })}
+      <button
+        type="button"
+        className="resolver-row"
+        role="switch"
+        aria-checked={singleKeyOn}
+        aria-label="Single-key shortcuts"
+        data-testid="single-key-switch"
+        onClick={toggleSingleKey}
+      >
+        <span className="lbar" aria-hidden="true" />
+        <span className="label">Single-key shortcuts</span>
+        <span className="key" aria-hidden="true">{singleKeyOn ? 'On' : 'Off'}</span>
+      </button>
       {/* Honest gap (slice 10b spec): sheets anchors and receipts have no
           index today. Named here rather than rendered as a row nothing
           backs. */}

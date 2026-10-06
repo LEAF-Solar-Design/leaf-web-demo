@@ -110,7 +110,14 @@ describe('S17 version-created toast Undo wiring', () => {
     })
 
     it(`${surface.name}: delete, reset, authored removal and other toasts never receive version Undo`, () => {
-      const versionObjects = new Set([...versionToasts, ...seatedToasts])
+      const attach = declarations.get(surface.name === 'App' ? 'onAttachAgentJob' : 'attachJob')
+      const checkpointToasts = toastObjects(tree).filter((object) => property(object, 'key')?.value === 'agent-checkpoint')
+      assert.equal(checkpointToasts.length, 1, 'one agent checkpoint notice may offer version Undo')
+      const checkpoint = checkpointToasts[0]
+      assert.ok(checkpoint.start > attach.start && checkpoint.end < attach.end, 'only the agent attach handler may raise the checkpoint')
+      assert.equal(textPattern(checkpoint), 'Checkpoint saved')
+      assert.equal(property(property(checkpoint, 'action'), 'label')?.value, 'Undo')
+      const versionObjects = new Set([...versionToasts, ...seatedToasts, ...checkpointToasts])
       for (const object of toastObjects(tree)) {
         if (versionObjects.has(object)) continue
         const action = property(object, 'action')
@@ -2787,6 +2794,220 @@ describe('RAIL overview yields to the expanded job monitor', () => {
     assert.match(cadMoves[1].split('}')[0], /right: calc\(var\(--ck-rail-width\) \+ 18px\);/)
   })
 })
+
+describe('S24 the URL keeps tool, drawer, own selection and camera view', () => {
+  const LB = String.fromCharCode(123), RB = String.fromCharCode(125)
+  const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+  const toolCastSource = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
+  const toolCastLive = esbuild.transformSync(toolCastSource, { loader: 'jsx' }).code
+  const urlStateSource = readFileSync(new URL('./lib/urlState.js', import.meta.url), 'utf8')
+
+  it('owns exactly the four allow-listed keys and never round-trips the search through URLSearchParams', () => {
+    assert.ok(urlStateSource.includes("export const VIEW_PARAM_KEYS = Object.freeze(['tool', 'drawer', 'sel', 'cam'])"))
+    assert.doesNotMatch(urlStateSource.replace(/\/\/[^\n]*/g, ''), /new URLSearchParams/)
+    assert.ok(urlStateSource.includes("window.addEventListener('popstate', onChange)"))
+    assert.ok(urlStateSource.includes("if (mode === 'push') window.history.pushState(" + LB + RB + ", '', url)"))
+    assert.ok(urlStateSource.includes("else window.history.replaceState(window.history.state, '', url)"))
+  })
+
+  it('seats the drawer, the opened tool, the own selection and the camera in App (live code, not a comment)', () => {
+    assert.match(appSource, /import \x7b pushOnOpen, useCameraViewParam, useViewParamSeat \x7d from \x27\.\/lib\/urlState\.js\x27/)
+    for (const call of ["useViewParamSeat('drawer', " + LB, "useViewParamSeat('tool', " + LB, "useViewParamSeat('sel', " + LB]) {
+      assert.ok(appSource.includes(call), `App must call ${call}`)
+    }
+    for (const call of ['useViewParamSeat("drawer"', 'useViewParamSeat("tool"', 'useViewParamSeat("sel"', 'useCameraViewParam(viewerRef']) {
+      assert.ok(live.includes(call), `App's compiled code must keep ${call}`)
+    }
+    assert.ok(appSource.includes("value: drawer?.urlKey === 'details' ? 'details' : studioDrawer === 'none' ? null : studioDrawer,"))
+    assert.ok(appSource.includes('value: openTool?.name ?? null,'))
+    assert.ok(appSource.includes('value: selectedHandle == null ? null : String(selectedHandle),'))
+    const selectionSeat = appSource.slice(appSource.indexOf("useViewParamSeat('sel', " + LB), appSource.indexOf('useCameraViewParam(viewerRef'))
+    assert.ok(selectionSeat.includes('!selectEntity(drawingIntake, handle)'), 'URL selections must resolve in the loaded drawing')
+    assert.ok(appSource.includes('useCameraViewParam(viewerRef, ' + LB + ' ready: drawingIntake != null ' + RB + ')'))
+    const start = appSource.indexOf('const openSessionDetails = useCallback(')
+    const body = appSource.slice(start, appSource.indexOf(RB + ', [', start))
+    assert.ok(body.includes("urlKey: 'details',"), 'the session Details drawer is the one the URL names')
+    // The bounded in-memory default stays; a URL drawer arrives through the seat's restore.
+    assert.ok(appSource.includes("const [studioDrawer, setStudioDrawer] = useState('none')"))
+  })
+
+  it('seats the same keys in ToolCast only while its scene is active', () => {
+    assert.match(toolCastSource, /import \x7b CAM_FOCUS, pushOnOpen, useViewParamSeat \x7d from \x27\.\.\/lib\/urlState\.js\x27/)
+    for (const key of ['drawer', 'tool', 'sel', 'cam']) {
+      const at = toolCastSource.indexOf(`useViewParamSeat('${key}', ` + LB)
+      assert.ok(at >= 0, `ToolCast must seat ${key}`)
+      assert.ok(toolCastSource.slice(at, toolCastSource.indexOf('\n  ' + RB + ')', at)).includes('enabled: active,'), `${key} seat is gated on the active scene`)
+      assert.ok(toolCastLive.includes(`useViewParamSeat("${key}"`), `ToolCast's compiled code must keep the ${key} seat`)
+    }
+    assert.ok(toolCastSource.includes('onClick=' + LB + 'openAccountDetails' + RB))
+    assert.ok(toolCastSource.includes("urlKey: 'details',"))
+    assert.ok(toolCastSource.includes('ready: !busy && !jobRunning && Array.isArray(tools) && tools.length > 0,'), 'pending tool restores wait for the current run')
+  })
+
+  it('restores the catalog tool without hiding a resumed authoring request or interrupting a current run', () => {
+    const start = toolCastSource.indexOf("useViewParamSeat('tool', " + LB)
+    const end = toolCastSource.indexOf("useViewParamSeat('sel', " + LB, start)
+    assert.ok(start >= 0 && end > start)
+    const seatSource = toolCastSource.slice(start, end)
+    const tool = { name: 'count-panels-near-edge' }
+    function seat({ pointer = null, busy = false, jobRunning = false } = {}) {
+      const selected = [], panels = []
+      let config
+      const context = {
+        useViewParamSeat: (_key, value) => { config = value },
+        selectedCatalogTool: null, active: true, busy, jobRunning, tools: [tool],
+        authorStage: { pointer }, pushOnOpen: () => 'push',
+        setSelectedCatalogTool: (value) => selected.push(value),
+        setLeftView: (value) => panels.push(value),
+      }
+      new Function(...Object.keys(context), seatSource)(...Object.values(context))
+      return { config, selected, panels }
+    }
+    for (const pointer of [null, { target_tool_name: tool.name }, { target_tool_name: tool.name, terminal_staged: true }]) {
+      const restored = seat({ pointer })
+      assert.equal(restored.config.ready, true)
+      assert.equal(restored.config.onRestore(tool.name), true)
+      assert.deepEqual(restored.selected, [tool])
+      assert.deepEqual(restored.panels, [pointer ? 'author' : 'catalog'])
+      assert.equal(restored.config.onRestore('missing-tool'), false)
+      assert.equal(restored.config.onRestore(null), true)
+      assert.deepEqual(restored.selected, [tool, null])
+    }
+    for (const state of [{ busy: true }, { jobRunning: true }]) {
+      const waiting = seat(state)
+      assert.equal(waiting.config.ready, false)
+      assert.deepEqual(waiting.selected, [])
+      assert.deepEqual(waiting.panels, [])
+    }
+  })
+
+  it('leaves the router and SiteRoot alone and the drawing param with DrawingIdentityProvider', () => {
+    const router = readFileSync(new URL('./site/router.js', import.meta.url), 'utf8')
+    const siteRoot = readFileSync(new URL('./site/SiteRoot.jsx', import.meta.url), 'utf8')
+    assert.doesNotMatch(router, /urlState/)
+    assert.doesNotMatch(siteRoot, /urlState/)
+    assert.ok(router.includes('return ' + LB + ' path: window.location.pathname, hash: window.location.hash ' + RB))
+    assert.doesNotMatch(urlStateSource, /[\x27\x22]drawing[\x27\x22]/)
+  })
+})
+
+describe('S23 agent checkpoint toast', () => {
+  const LB = '{', RB = '}'
+  // The live handler, comments removed (the legacy commented-out copy above
+  // it disappears with them), evaluated with spies for every free name.
+  function sliceBetween(source, from, to) {
+    const start = source.indexOf(from)
+    const end = source.indexOf(to, start)
+    assert.ok(start >= 0 && end > start, `${from} must survive comment removal`)
+    return source.slice(start, end)
+  }
+  const appHandler = sliceBetween(appNoComments, 'const onAttachAgentJob = useCallback', 'const onAuthor = useCallback')
+  function appAttach({ mock = false, envelope }) {
+    const h = {
+      attachSharedJob: async () => envelope,
+      showToast: [], undo: 0, tracked: [], selected: [],
+    }
+    const context = {
+      useCallback: (callback) => callback,
+      mock,
+      track: (...args) => h.tracked.push(args),
+      setSelectedTool: (value) => h.selected.push(value),
+      attachSharedJob: (...args) => { h.attachArgs = args; return h.attachSharedJob() },
+      showToast: (notice) => h.showToast.push(notice),
+      onUndo: async (...args) => { h.undo += 1; h.undoArgs = args },
+    }
+    h.attach = new Function(...Object.keys(context), appHandler + '\nreturn onAttachAgentJob')(...Object.values(context))
+    return h
+  }
+  const committed = { ok: true, tool: 'drawing.write', result: { new_version: { drawing_id: 'd1', version: 4 } } }
+
+  it('S23-A1 an agent job that committed a version raises one keyed Checkpoint saved notice', async () => {
+    const h = appAttach({ envelope: committed })
+    assert.equal(await h.attach('job-1', 'drawing.write'), committed)
+    assert.deepEqual(h.attachArgs, ['job-1', { toolName: 'drawing.write', persist: true }])
+    assert.equal(h.showToast.length, 1)
+    const [notice] = h.showToast
+    assert.equal(notice.key, 'agent-checkpoint')
+    assert.equal(notice.text, 'Checkpoint saved')
+    assert.equal(notice.action.label, 'Undo')
+  })
+
+  it('S23-A2 the notice Undo runs the ribbon onUndo and nothing else', async () => {
+    const h = appAttach({ envelope: committed })
+    await h.attach('job-1', 'drawing.write')
+    assert.equal(h.undo, 0, 'raising the notice must not undo anything')
+    h.showToast[0].action.onClick({ type: 'click' })
+    await Promise.resolve()
+    assert.equal(h.undo, 1)
+    assert.deepEqual(h.undoArgs, [])
+  })
+
+  it('S23-A3 no checkpoint for a failed job, a job with no new version, a superseded attach or mock', async () => {
+    for (const envelope of [
+      { ok: false, result: { new_version: { version: 4 } } },
+      { ok: true, result: {} },
+      { ok: true },
+      null,
+    ]) {
+      const h = appAttach({ envelope })
+      assert.equal(await h.attach('job-1', 'drawing.write'), envelope)
+      assert.equal(h.showToast.length, 0, `no checkpoint for ${JSON.stringify(envelope)}`)
+    }
+    const mocked = appAttach({ mock: true, envelope: committed })
+    assert.equal(await mocked.attach('job-1', 'drawing.write'), null)
+    assert.equal(mocked.showToast.length, 0)
+  })
+
+  it('S23-A4 the handler lists what it reads and onUndo is declared before it', () => {
+    assert.match(appHandler, new RegExp('\\' + RB + ', \\[attachSharedJob, mock, onUndo, showToast\\]\\)'))
+    const undoAt = appNoComments.indexOf('const onUndo = useCallback')
+    assert.ok(undoAt >= 0 && undoAt < appNoComments.indexOf('const onAttachAgentJob = useCallback'))
+    assert.ok(stripped.includes('key: "agent-checkpoint"'), 'the keyed notice survives the transform')
+  })
+
+  it('S23-A5 the history drawer receives the ribbon Undo and its blocks for Rewind', () => {
+    assert.match(appNoComments, new RegExp('<VersionHistory\\s[^>]*onUndo=\\' + LB + 'onUndo\\' + RB))
+    assert.match(appNoComments, new RegExp('<VersionHistory\\s[^>]*undoDisabled=\\' + LB + 'versionBusy \\|\\| running \\|\\| !canUndo\\' + RB))
+  })
+
+  it('S23-T1 /try raises the same keyed checkpoint and its Undo reaches the bar Undo', async () => {
+    // Raw source: the slice evaluated below keeps its comments, which are
+    // valid inside the Function body.
+    const toolCast = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
+    const retainedUndo = sliceBetween(toolCast, 'const undoActionRef = useRef(null)', 'const onCompleteVersion = useCallback')
+    const handler = sliceBetween(toolCast, 'const attachJob = useCallback', 'const openResultDetails = useCallback')
+    const h = { toasts: [], undo: 0 }
+    const context = {
+      useCallback: (callback) => callback,
+      useRef: (value) => ({ current: value }),
+      sessionReady: true,
+      onJobLinked: () => {},
+      attachTrackedJob: async () => committed,
+      showToast: (notice) => h.toasts.push(notice),
+      setPhase: () => {}, setError: () => {},
+      workspace: { rehydrate: async () => {} },
+      checkout: { actions: { refresh: () => {} } },
+    }
+    const made = new Function(...Object.keys(context), retainedUndo + handler + '\nreturn ' + LB + ' attachJob, undoActionRef, onUndo ' + RB)(...Object.values(context))
+    made.undoActionRef.current = async () => { h.undo += 1 }
+    await made.attachJob('job-1', 'arrange-panels-as-cat')
+    assert.equal(h.toasts.length, 1)
+    assert.equal(h.toasts[0].key, 'agent-checkpoint')
+    assert.equal(h.toasts[0].text, 'Checkpoint saved')
+    assert.equal(h.toasts[0].action.label, 'Undo')
+    assert.equal(h.toasts[0].action.undo, true)
+    assert.equal(h.toasts[0].action.onClick, made.onUndo)
+    h.toasts[0].action.onClick()
+    assert.equal(h.undo, 1)
+    const undoAt = toolCast.indexOf('const undo = useCallback')
+    assert.ok(undoAt > 0 && toolCast.indexOf('undoActionRef.current = undo', undoAt) > undoAt, 'the ref follows the bar Undo')
+    assert.doesNotMatch(toolCast, /\bundoRef\b/, 'the checkpoint and version toasts share one Undo ref')
+    assert.ok(handler.includes('[attachTrackedJob, checkout.actions, onJobLinked, onUndo, sessionReady, showToast, workspace]'))
+    const rewindAt = toolCast.indexOf('rewind=' + LB + LB)
+    assert.ok(rewindAt > 0 && toolCast.slice(rewindAt, rewindAt + 400).includes('run: () => undo(),'), 'the tab Rewind runs the bar Undo')
+  })
+})
+
 describe('S20 console chrome', () => {
   const LB = String.fromCharCode(123), RB = String.fromCharCode(125), BT = String.fromCharCode(96)
   it('S20 the drawing line never renders a bare loading literal; it waits on useLoadingPhase and says Loading drawing', () => {
@@ -2839,5 +3060,39 @@ describe('S20 console chrome', () => {
     const def = appNoComments.slice(defStart, defEnd)
     assert.ok(def.includes("job.status !== 'failed'"))
     assert.ok(def.includes('onRequestCatalogRun(tool, sameRun ? last.params : ' + LB + RB + ", null, 'catalog', " + LB + ' complete: sameRun ' + RB + ')'))
+  })
+})
+
+describe('S25 version Mod+Z wiring', () => {
+  const LB = String.fromCharCode(123), RB = String.fromCharCode(125)
+  const toolCastNoComments = decomment(readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8'))
+  function between(source, from, to) {
+    const start = source.indexOf(from)
+    const end = source.indexOf(to, start)
+    assert.ok(start >= 0 && end > start, `${from} must survive comment removal`)
+    return source.slice(start, end)
+  }
+
+  it('S25 App hands the key ladder the ribbon version gates and the ribbon onUndo / onRedo', () => {
+    const effect = between(appNoComments, 'const shell = ' + LB, 'ladderListener(shell, ladderHandlers, markInstant)')
+    for (const line of [
+      'hasVersions: !!drawingState,', 'canUndo,', 'canRedo,', 'versionBusy: !!versionBusy,',
+      'previewing: !!previewing,', 'mutationsBlocked: !!drawingMutationsBlocked,',
+      'onUndo: () => ' + LB + ' void onUndo() ' + RB, 'onRedo: () => ' + LB + ' void onRedo() ' + RB,
+    ]) assert.ok(effect.includes(line), `the ladder effect carries ${line}`)
+  })
+
+  it('S25 ToolCast steps versions on the registry decision through onUndo and the bar redo', () => {
+    assert.ok(toolCastNoComments.includes("import " + LB + " versionShortcutDecision " + RB + " from '../lib/actionRegistry.js'"))
+    const listener = between(toolCastNoComments, 'const onVersionKey = (event) => ' + LB, "window.removeEventListener('keydown', onVersionKey)")
+    assert.ok(listener.includes('const kind = versionShortcutDecision(event)'))
+    assert.ok(listener.includes('if (!kind) return'))
+    assert.ok(listener.includes('event.preventDefault()'))
+    assert.ok(listener.includes('if (drawing.versionBusy || previewLocked) return'))
+    assert.ok(listener.includes("if (kind === 'undo') void onUndo()"))
+    assert.ok(listener.includes('else void redo()'))
+    assert.ok(listener.includes("window.addEventListener('keydown', onVersionKey)"))
+    assert.ok(toolCastNoComments.indexOf('const redo = useCallback') < toolCastNoComments.indexOf('const onVersionKey'),
+      'the listener reads the bar redo after it is declared')
   })
 })

@@ -84,11 +84,28 @@ def test_sip_r1_gate_registration():
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
-    assert suites["platform"].expected == 281
-    assert suites["gate-runner-selftest"].expected == 95
+    assert suites["platform"].expected == 288
+    assert suites["gate-runner-selftest"].expected == 96
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_sip_r3b_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suite_id, directory, floor, database in (
+        ("server-sip-r3b-tools", "server", 19, False),
+            ("platform-sip-r3b-tools", "platform", 7, True)):
+        suite = suites[suite_id]
+        assert suite.cwd == REPO / directory
+        assert suite.argv == runner._py_pytest("tests/test_sip_r3b_tools.py")
+        assert suite.kind == "pytest" and suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert suite.allowed_skip_reasons == ()
+        assert suite.database_skip_reasons == ((r"PostgreSQL integration test requires DATABASE_URL",) if database else ())
+        assert suite_id in selection["mandatory_suite_ids"]
 
 
 def test_sip_r3a_gate_registration():

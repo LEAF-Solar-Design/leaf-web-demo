@@ -1640,6 +1640,181 @@ describe("FakeGateClient — approval records are bound and single-use", () => {
   });
 });
 
+describe("ConverseLoop — structured publication results", () => {
+  const C = "leaf.customization.v1";
+  const I = "7f3a51f0-9d9a-43be-8d29-cbdba31249c8";
+  const H = "a".repeat(64);
+  const P = { contract: C, change_set_id: I, status: "published", catalog_digest: H };
+  const A = { contract: C, change_set_id: I, status: "awaiting_approval" };
+  const D = { contract: C, change_set_id: I, status: "denied" };
+  const G = { contract: C, change_set_id: I, status: "staging" };
+  const T = (s: string, n: number) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+  const B = (response: unknown) => ({
+    tool: "request_publication",
+    ok: true,
+    summary: T(JSON.stringify(response), 80),
+  });
+  const E = (response: unknown, projection: unknown) => ({ ...B(response), result: projection });
+
+  async function publicationData(response: unknown): Promise<Record<string, unknown>> {
+    const { loop, appRun, store } = makeLoop();
+    // Deliberately exercise malformed service containers through real dispatch.
+    appRun.requestPublication = async () => response as Record<string, unknown>;
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const live: ConverseEvent[] = [];
+    await sendText(loop, s, `PUBLISH:${I}`, (event) => live.push(event));
+    const results = ofType(await store.eventsAfter(s.session_id, 0), "tool_result");
+    expect(results).toHaveLength(1);
+    const data = results[0]!.data;
+    expect(live.filter((event) => event.type === "tool_result").map((event) => event.data)).toEqual([data]);
+    return data;
+  }
+
+  async function expectOmitted(response: unknown): Promise<void> {
+    const data = await publicationData(response);
+    expect(data).toEqual(B(response));
+    expect(Object.prototype.hasOwnProperty.call(data, "result")).toBe(false);
+  }
+
+  function fieldVariants(field: string, values: unknown[]): Record<string, unknown>[] {
+    const missing: Record<string, unknown> = { ...P };
+    delete missing[field];
+    return [missing, ...values.map((value) => ({ ...P, [field]: value }))];
+  }
+
+  it("C40-01 published carries all four fields", async () => {
+    expect(await publicationData(P)).toEqual(E(P, P));
+  });
+
+  it("C40-02 awaiting approval carries three fields", async () => {
+    const data = await publicationData(A);
+    expect(data).toEqual(E(A, A));
+    expect(Object.prototype.hasOwnProperty.call(data.result, "catalog_digest")).toBe(false);
+  });
+
+  it("C40-03 denied is a successful service response", async () => {
+    expect(await publicationData(D)).toEqual(E(D, D));
+  });
+
+  it("C40-04 staging carries three fields", async () => {
+    expect(await publicationData(G)).toEqual(E(G, G));
+  });
+
+  it("C40-05 malformed contract omits result", async () => {
+    for (const response of fieldVariants("contract", [null, 7, "", "leaf.customization.v2"])) {
+      await expectOmitted(response);
+    }
+  });
+
+  it("C40-06 malformed change set id omits result", async () => {
+    for (const response of fieldVariants("change_set_id", [null, 7, "", " ", " cs-1", "cs-1 ", "x".repeat(129)])) {
+      await expectOmitted(response);
+    }
+  });
+
+  it("C40-07 malformed status omits result", async () => {
+    for (const response of fieldVariants("status", [null, 7, "", "publishing", "superseded", "Published"])) {
+      await expectOmitted(response);
+      // Without the published digest, only the status allowlist can refuse the response.
+      const withoutDigest: Record<string, unknown> = { ...response };
+      delete withoutDigest.catalog_digest;
+      await expectOmitted(withoutDigest);
+    }
+  });
+
+  it("C40-08 malformed published digest omits result", async () => {
+    for (const response of fieldVariants("catalog_digest", [null, 7, "", " ", " digest", "digest ", "x".repeat(129)])) {
+      await expectOmitted(response);
+    }
+  });
+
+  it("C40-09 malformed response container omits result", async () => {
+    for (const response of [{}, [], 7, "not-json"]) {
+      await expectOmitted(response);
+    }
+  });
+
+  it("C40-10 isError publication omits result", async () => {
+    const { loop, appRun, store } = makeLoop();
+    appRun.requestPublication = async () => { throw new Error("publication failed"); };
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, `PUBLISH:${I}`);
+    const data = ofType(await store.eventsAfter(s.session_id, 0), "tool_result")[0]!.data;
+    expect(data).toEqual({
+      tool: "request_publication", ok: false, summary: "error: tool error: publication failed",
+    });
+    expect(Object.prototype.hasOwnProperty.call(data, "result")).toBe(false);
+  });
+
+  it("C40-11 non publication tool never gains result", async () => {
+    const { loop, appRun, store } = makeLoop();
+    appRun.getDrawingState = async () => ({ ...P });
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, "STATE:summary");
+    const data = ofType(await store.eventsAfter(s.session_id, 0), "tool_result")[0]!.data;
+    expect(data).toEqual({ tool: "drawing_state", ok: true, summary: "ok" });
+    expect(Object.prototype.hasOwnProperty.call(data, "result")).toBe(false);
+  });
+
+  it("C40-12 confirmation material is excluded", async () => {
+    const response = {
+      ...P, confirmation_id: "must-not-copy", approval: { confirmation_id: "nested-must-not-copy" },
+    };
+    const data = await publicationData(response);
+    expect(data).toEqual(E(response, P));
+    expect(Object.keys(data.result as Record<string, unknown>)).toEqual([
+      "contract", "change_set_id", "status", "catalog_digest",
+    ]);
+    expect(JSON.stringify(data)).not.toContain("confirmation_id");
+    expect(JSON.stringify(data.result)).not.toContain("must-not-copy");
+    expect(Object.prototype.hasOwnProperty.call(data.result, "approval")).toBe(false);
+  });
+
+  it("C40-13 digest on non published status is malformed", async () => {
+    for (const base of [A, D, G]) {
+      for (const catalog_digest of [H, null]) {
+        await expectOmitted({ ...base, catalog_digest });
+      }
+    }
+  });
+
+  it("C40-14 string bounds are inclusive", async () => {
+    for (const value of ["x", "x".repeat(128)]) {
+      const response = { ...P, change_set_id: value, catalog_digest: value };
+      expect(await publicationData(response)).toEqual(E(response, response));
+    }
+  });
+
+  it("C40-15 valid strings are copied without normalization", async () => {
+    const response = { ...P, change_set_id: "Case-Sensitive_Id", catalog_digest: "Case-Sensitive_Digest" };
+    expect(await publicationData(response)).toEqual(E(response, response));
+  });
+
+  it("C40-16 unknown fields are not copied", async () => {
+    const response = { ...P, tenant_id: "private-tenant", extra: { status: "denied" }, unexpected: true };
+    expect(await publicationData(response)).toEqual(E(response, P));
+  });
+
+  it("C40-17 service identity is authoritative", async () => {
+    const response = { ...P, change_set_id: "server-returned-id" };
+    expect(await publicationData(response)).toEqual(E(response, response));
+  });
+
+  it("C40-18 shared fake response remains unchanged", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, s, `PUBLISH:${I}`);
+    const response = { change_set_id: I, status: "awaiting_approval" };
+    const data = ofType(await store.eventsAfter(s.session_id, 0), "tool_result")[0]!.data;
+    expect(data).toEqual(B(response));
+    expect(Object.prototype.hasOwnProperty.call(data, "result")).toBe(false);
+    expect(appRun.publicationCalls).toEqual([{ tenantId: "demo-tenant", changeSetId: I }]);
+    expect(gate.checks).toContainEqual(expect.objectContaining({
+      action: "request_publication", args: { change_set_id: I }, decision: "allow",
+    }));
+  });
+});
+
 describe("ConverseLoop — finalization crash-safety", () => {
   it("a store append failure during finalization still releases the turn lock", async () => {
     const { loop, store } = makeLoop();

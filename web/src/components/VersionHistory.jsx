@@ -40,6 +40,10 @@ import './popovers.css'
 // `onRestored` (wired to the version controller's refreshHead). The
 // `config.mockDefault` / no-capability fallbacks below remain only for a
 // caller that omits the props (none in-tree today).
+//
+// S23 agent checkpoints: App also passes `onUndo` (the ribbon's Undo) and
+// `undoDisabled`. An agent-made head row (VersionList's agent-turn marker)
+// then shows one Rewind beside .vh-restore that runs exactly that Undo.
 
 // E2 empty state: the action chip focuses the composer directly (the docked
 // bar's input, falling back to the legacy prompt textarea) — no parent wiring
@@ -63,7 +67,7 @@ function fmtAbs(iso) {
 export default function VersionHistory({
   data, error, loading, previewingVersion, onPreview, onBackToHead, onClose, onRetry,
   retryKey, exiting, mock, capability, onRestored, headWarning, mutationBlocked = false,
-  onBeforeRestore = null,
+  onBeforeRestore = null, onUndo = null, undoDisabled = false,
 }) {
   const now = useRelativeNow()
   // Self-contained restore state (see the integration note above for why).
@@ -193,6 +197,13 @@ export default function VersionHistory({
               eligible: (_row, isHead) => !isHead,
               disabled: restoreBlocked,
             }}
+            rewind={onUndo ? {
+              // S23: an agent-made head gets one Rewind, which is the ribbon's
+              // own Undo (App's onUndo), held to the same blocks the ribbon's
+              // Undo button honours. No onUndo, no Rewind.
+              run: () => onUndo(),
+              disabled: Boolean(undoDisabled || mutationBlocked || previewingVersion != null),
+            } : null}
           />
         )}
       </div>
