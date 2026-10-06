@@ -253,8 +253,8 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertIn('loader_check=receipt["loader_check"]', receipt)
         self.assertIn('print("LEAF_SELECTION " + canonical(detail))', receipt)
         finalize = script.split("<<'LEAF_SELECTION_FINALIZE'", 1)[1]
-        self.assertIn('"$reporters_ready" "$trusted_sha_override" "$loader_check" '
-                      "<<'LEAF_SELECTION_FINALIZE'", script)
+        self.assertIn('"$reporters_ready" "$trusted_sha_override" "$loader_check" \\\n  "${CODEBUILD_BUILD_ID:-}"', script)
+        self.assertIn("<<'LEAF_SELECTION_FINALIZE'", script)
         self.assertIn('trusted_sha_override=sys.argv[5] == "1", loader_check=sys.argv[6]', finalize)
         self.assertIn('print("LEAF_SELECTION_FINAL " + canonical(detail))', finalize)
         self.assertIn('"trusted_sha_override": detail["trusted_sha_override"]', finalize)
