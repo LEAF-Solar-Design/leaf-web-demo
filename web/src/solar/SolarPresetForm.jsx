@@ -5,6 +5,7 @@ import {
 } from './solarPresetModel.js'
 import './solarPresetForm.css'
 import returnToolFocus from './returnToolFocus.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revision, autoRevision = null, reading = false }) {
   const spec = presetFormSpec(tool?.params)
@@ -61,15 +62,14 @@ export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revi
     returnToolFocus(tool.name)
   }
 
+  // S27: Escape from inside the form cancels it through the one owner stack
+  // (edit layer, scoped to the form as the old section handler was).
+  const formRef = useRef(null)
+  useEscapeOwner('solar-preset-form', true, cancel, { layer: 'edit', scope: formRef, scoped: true })
+
   return (
-    <section id="solar-tool-form" className="solar-tool-form tool-body solar-preset-form"
-      aria-label={`${text} parameters`} data-testid="solar-preset-form"
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') {
-          event.stopPropagation()
-          cancel()
-        }
-      }}>
+    <section ref={formRef} id="solar-tool-form" className="solar-tool-form tool-body solar-preset-form"
+      aria-label={`${text} parameters`} data-testid="solar-preset-form">
       <h3>{text}</h3>
       {!spec.ok ? <>
         <p role="status" data-testid="solar-preset-reason">{SOLAR_PRESET_REASONS['preset_declaration_unsupported']}</p>

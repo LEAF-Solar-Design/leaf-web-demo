@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import { keyboardTable } from '../lib/actionRegistry.js'
 import { readSingleKeyShortcuts, writeSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 // Slice 10b: the shortcut sheet. GENERATED straight from the action
 // registry's own `kbd` fields (keyboardTable()) — a cap added to the
@@ -23,20 +24,16 @@ export default function ShortcutSheet({ open, onClose }) {
     if (writeSingleKeyShortcuts(next)) setSingleKeyOn(next)
   }
 
-  // Same pattern as PromptBox's scope-menu listener: capture-phase Escape so
-  // the global ladder's own Escape rung never also fires, and an
-  // outside-mousedown close so a click elsewhere dismisses it like every
+  // S27: Escape belongs to the one owner stack at the sheet layer, so it
+  // closes this sheet before a drawer under it and the global ladder never
+  // also reads the key. An outside mousedown still dismisses it like every
   // other resolver on this bar.
+  useEscapeOwner('shortcuts', open, () => onClose?.(), { layer: 'sheet', scope: rootRef })
   useEffect(() => {
     if (!open) return undefined
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) onClose?.() }
-    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose?.() } }
     document.addEventListener('mousedown', onDoc)
-    window.addEventListener('keydown', onKey, true)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      window.removeEventListener('keydown', onKey, true)
-    }
+    return () => document.removeEventListener('mousedown', onDoc)
   }, [open, onClose])
 
   if (!open) return null

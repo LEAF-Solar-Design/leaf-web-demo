@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { shouldOfferCoach } from './tourEntry.js'
 import { modChord } from '../lib/keys.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import './coach.css'
 
 // HP-01 — first-run coach mark.
@@ -89,11 +90,12 @@ export default function FirstRunCoach({ signedIn = false, active = true, sceneAc
     return () => { cancelAnimationFrame(first); if (second) cancelAnimationFrame(second) }
   }, [visible])
 
+  // S27: Escape dismisses the card through the owner stack (proposal layer),
+  // only while the card is up in the active scene.
+  useEscapeOwner('first-run-coach', visible && sceneActive, dismiss, { layer: 'proposal' })
+
   useEffect(() => {
     if (!visible || !sceneActive) return undefined
-    const onKey = (event) => {
-      if (event.key === 'Escape') dismiss()
-    }
     // The coach must never cost a click: the first pointerdown anywhere
     // outside the card hides it for this page view (without recording a
     // dismissal, so a genuinely fresh visitor still gets offered next load).
@@ -102,13 +104,9 @@ export default function FirstRunCoach({ signedIn = false, active = true, sceneAc
         setSessionHidden(true)
       }
     }
-    window.addEventListener('keydown', onKey)
     document.addEventListener('pointerdown', onPointerDown, true)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      document.removeEventListener('pointerdown', onPointerDown, true)
-    }
-  }, [visible, sceneActive, dismiss])
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [visible, sceneActive])
 
   if (!visible) return null
 

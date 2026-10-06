@@ -3,6 +3,7 @@ import EscCap from './EscCap.jsx'
 import { getAccountControls, getOpsUsage, setTenantDisabled, updateAccountControls } from '../api.js'
 import { formatUsageCount, formatUsageUsd, normalizeOpsUsage } from './opsUsage.js'
 import './popovers.css'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 // Internal ops drawer — visible only with ?ops=1 in the URL. A DT2 right drawer
 // (title + Esc cap header, endpoint provenance in the foot) listing tenants from
@@ -90,26 +91,12 @@ export default function OpsDrawer({ onDismiss, exiting }) {
     }
   }, [])
 
-  // Own Escape before the scene-level ladder can navigate away from /try.
-  useEffect(() => {
-    if (!onDismiss) return
-    const onKey = (event) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      onDismiss()
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [onDismiss])
+  // S27: Escape is the owner stack's (drawer layer), so it closes this drawer
+  // before the scene-level eject can navigate away from /try. Not while the
+  // exit fade holds the mount.
+  useEscapeOwner('ops', !!onDismiss && !exiting, () => onDismiss?.(), { layer: 'drawer', scope: drawerRef })
 
   const ownKeyboard = (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      event.stopPropagation()
-      onDismiss?.()
-      return
-    }
     if (event.key !== 'Tab') return
     const focusable = [...(drawerRef.current?.querySelectorAll('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') || [])]
       .filter((element) => element.getClientRects().length > 0)

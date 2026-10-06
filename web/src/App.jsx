@@ -28,6 +28,7 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents, drawingPropertyName } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
+import useEscapeOwner from './lib/useEscapeOwner.js'
 import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
@@ -3209,6 +3210,15 @@ export default function App() {
       interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
       onDismissSolarFlowRoute, drawingState, canUndo, canRedo, versionBusy, previewing, drawingMutationsBlocked, onUndo, onRedo])
+  // S27: Escape from inside the typed Solar settings form closes it through
+  // the one owner stack (edit layer, scoped to the form's wrapper; while the
+  // wrapper is not mounted the owner claims nothing).
+  const solarSettingsFormRef = useRef(null)
+  useEscapeOwner('solar-settings-form', !!solarFormTool, () => {
+    settingsRunRef.current = null
+    setSettingsRunResult(null)
+    setSolarFormTool(null)
+  }, { layer: 'edit', scope: solarSettingsFormRef, scoped: true })
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
   const projectSwitcherRef = useRef(null)
   // Each bump opens the header switcher on its inline create field.
@@ -4311,14 +4321,7 @@ export default function App() {
           <SolarFlowSeat seated={solarFlowSeated}>
           {ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (
             ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext }) === 'typed' ? (
-              <div id="solar-tool-form" key={solarFormTool.name} onKeyDown={(event) => {
-                if (event.key === 'Escape') {
-                  event.stopPropagation()
-                  settingsRunRef.current = null
-                  setSettingsRunResult(null)
-                  setSolarFormTool(null)
-                }
-              }}>
+              <div id="solar-tool-form" key={solarFormTool.name} ref={solarSettingsFormRef}>
                 <SolarSettingsForm
                   context={catalogRunContext}
                   readIntake={SOLAR_SETTINGS_LOADERS.readIntake}

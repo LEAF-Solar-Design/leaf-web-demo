@@ -31,6 +31,7 @@ import {
 } from '../composer.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { REASONS } from '../lib/actionRegistry.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import Markdown from './Markdown.jsx'
 import LiveRegion from './LiveRegion.jsx'
@@ -237,6 +238,9 @@ export default function ConversePanel({
   const [pendingApprovalsError, setPendingApprovalsError] = useState(false)
   const [questionChoices, setQuestionChoices] = useState({ sendingQuestionIds: [] })
   const [stopping, setStopping] = useState(false)  // an interrupt is in flight
+  // S27: the turn an Escape already asked to stop. One Escape action per turn:
+  // after it, the next Escape climbs to whatever is under the turn.
+  const [escapeStoppedTurn, setEscapeStoppedTurn] = useState(null)
   const [expandedTools, setExpandedTools] = useState({}) // chip key -> expanded (full args/result)
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
@@ -595,41 +599,23 @@ export default function ConversePanel({
       // completion would — one code path, not two.
     } catch (e) {
       setSendErr(bannerFor(e))
+      // A refused stop leaves the turn running: Escape may ask again.
+      setEscapeStoppedTurn(null)
     } finally {
       setStopping(false)
     }
   }
 
-  // Esc interrupts, matching the terminal client. Document-level because the
-  // reply input is disabled while a turn runs (a disabled control receives no
-  // keys).
-  //
-  // It sits BETWEEN the existing Esc consumers, which is why both calls below
-  // are load-bearing:
-  //   * `defaultPrevented` DEFERS to anything nearer the target that already
-  //     handled the key — PromptBox's slash menu closes itself with
-  //     preventDefault (its scope resolver never reaches us at all, stopping
-  //     the key in the capture phase) — so that ladder is unchanged.
-  //   * `stopPropagation` keeps the key from ALSO reaching App's window-level
-  //     ladder (App.jsx: `window.addEventListener('keydown', …)`), which
-  //     dismisses the drawer/route and does NOT check defaultPrevented.
-  //     Without it, one Esc would interrupt the turn AND dismiss whatever was
-  //     behind it. Document listeners fire before window ones in the bubble
-  //     phase, so stopping here is what makes "interrupt the running turn"
-  //     the single effect of that keypress.
-  // Both only happen when there is actually a turn to stop; otherwise the key
-  // is left entirely alone.
-  useEffect(() => {
-    if (assistantTab !== 'conversation' || !busy || !stoppableTurnId) return undefined
-    const onEsc = (e) => {
-      if (e.key !== 'Escape' || e.defaultPrevented) return
-      e.preventDefault()
-      e.stopPropagation()
-      stop()
-    }
-    document.addEventListener('keydown', onEsc)
-    return () => document.removeEventListener('keydown', onEsc)
-  }, [assistantTab, busy, stoppableTurnId, stopping]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Esc interrupts, matching the terminal client. Page-wide because the reply
+  // input is disabled while a turn runs (a disabled control receives no keys).
+  // S27: through the one owner stack at the run layer. Every menu, sheet,
+  // drawer, open card or proposal above it closes first, the stack consumes
+  // the key so App's ladder never also reads it, and it is an owner only while
+  // there is actually a turn to stop that Escape has not already asked to
+  // stop; otherwise the key is left alone.
+  useEscapeOwner('converse-interrupt',
+    assistantTab === 'conversation' && busy && !!stoppableTurnId && escapeStoppedTurn !== stoppableTurnId,
+    () => { setEscapeStoppedTurn(stoppableTurnId); void stop() }, { layer: 'run' })
 
   const attachmentPayloads = async () => Promise.all(attachments.map((image) => new Promise((resolve, reject) => {
     const reader = new FileReader()

@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import * as operatorClient from '../../operatorClient.js'
+import useEscapeOwner from '../../lib/useEscapeOwner.js'
 import AuditPanel from './AuditPanel.jsx'
 import RunbooksPanel from './RunbooksPanel.jsx'
 import SessionPanel from './SessionPanel.jsx'
@@ -50,17 +51,17 @@ export default function OperatorConsole({ onClose }) {
 
   useEffect(() => { closeButtonRef.current?.focus() }, [])
 
-  const onKeyDown = (e) => {
-    if (e.key === 'Escape') onClose?.()
-  }
+  // S27: a modal console, so Escape is the owner stack's at the sheet layer.
+  const rootRef = useRef(null)
+  useEscapeOwner('operator-console', true, () => onClose?.(), { layer: 'sheet', scope: rootRef })
 
   return (
     <div
+      ref={rootRef}
       className="operator-console"
       role="dialog"
       aria-modal="true"
       aria-label="Operator console"
-      onKeyDown={onKeyDown}
     >
       <header className="operator-console-head">
         <h1>Operator console</h1>

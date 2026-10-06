@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { authHeaders, config, getCost } from '../api.js'
 import './CostTransparencyPanel.css'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 const TITLE = 'What Leaf costs to operate'
 const COPY = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
@@ -96,6 +97,7 @@ export default function CostTransparencyPanel({ mock = false }) {
   const [retry, setRetry] = useState(0)
   const trigger = useRef(null)
   const closeButton = useRef(null)
+  const panelRef = useRef(null)
 
   useEffect(() => {
     let active = true
@@ -124,6 +126,9 @@ export default function CostTransparencyPanel({ mock = false }) {
   }, [open])
 
   const close = () => { setOpen(false); trigger.current?.focus() }
+  // S27: Escape from inside the open panel is the owner stack's (menu layer,
+  // scoped to the panel as the old section-level handler was).
+  useEscapeOwner('cost-panel', open && !mock, close, { layer: 'menu', scope: panelRef, scoped: true })
   if (mock) return null
   const resources = data?.resources || []
   const own = data?.own_use
@@ -132,9 +137,7 @@ export default function CostTransparencyPanel({ mock = false }) {
       <button type="button" className="chip-neutral" ref={trigger} aria-expanded={open}
         onClick={() => setOpen(!open)}>{TITLE}</button>
       {open && (
-        <section className="cost-panel" aria-label={TITLE} onKeyDown={(event) => {
-          if (event.key === 'Escape') { event.stopPropagation(); close() }
-        }}>
+        <section ref={panelRef} className="cost-panel" aria-label={TITLE}>
           <button type="button" ref={closeButton} className="chip-neutral cost-close" onClick={close}>Close cost panel</button>
           <h2>{TITLE}</h2>
           <p>{COPY}</p>

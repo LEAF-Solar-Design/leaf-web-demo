@@ -17,6 +17,8 @@
 // 4. THE ACCESSIBLE-NAME COMPOSER reproduces the strings draftingRibbon.test.jsx
 //    and engineSessionProvider.test.jsx pin, byte for byte.
 import { describe, expect, it, vi } from 'vitest'
+import { createElement } from 'react'
+import { fireEvent, render } from '@testing-library/react'
 
 import {
   ACTIONS,
@@ -65,6 +67,7 @@ import {
   versionShortcutDecision,
 } from './actionRegistry.js'
 import { SINGLE_KEY_SHORTCUTS_KEY, writeSingleKeyShortcuts } from './singleKeyPreference.js'
+import useEscapeOwner from './useEscapeOwner.js'
 
 // --- 1: the registry holds up ---------------------------------------------
 
@@ -536,7 +539,7 @@ describe('the key ladder, table-driven', () => {
 
   it('pops exactly one Esc rung, topmost first, and runs only that handler', () => {
     expect(ESCAPE_RUNGS.map((r) => r.id))
-      .toEqual(['drawer', 'history', 'start', 'route', 'errors', 'running', 'selection', 'project'])
+      .toEqual(['owner', 'drawer', 'history', 'start', 'route', 'errors', 'running', 'selection', 'project'])
     const seen = []
     const ctx = {
       drawer: 'tools', historyOpen: true, running: true, openProjectId: 'p1',
@@ -555,6 +558,36 @@ describe('the key ladder, table-driven', () => {
     // Nothing open: no handler runs and the record says why.
     expect(byId('bar:escape').run({})).toBe('')
     expect(byId('bar:escape').when({})).toBe(LADDER_REASONS.nothingOpen)
+  })
+
+  it('S27 reads the Escape owner stack before every shell rung', () => {
+    const onEscape = vi.fn()
+    const onCloseDrawer = vi.fn()
+    function Owner() {
+      useEscapeOwner('sheet-under-test', true, onEscape, { layer: 'sheet' })
+      return null
+    }
+    const ctx = { drawer: 'details', onCloseDrawer }
+    expect(escapeRung(ctx)).toBe('drawer')
+    const { unmount } = render(createElement(Owner))
+    expect(escapeRung(ctx)).toBe('owner')
+    expect(byId('bar:escape').when(ctx)).toBe('')
+    expect(byId('bar:escape').run(ctx)).toBe('owner')
+    expect(onEscape).toHaveBeenCalledTimes(1)
+    expect(onCloseDrawer).not.toHaveBeenCalled()
+    // A real keypress: the stack consumes it in the capture phase, so the
+    // ladder's own listener sees a prevented key and runs no shell rung.
+    const ladder = ladderListener(ctx, (state) => state)
+    window.addEventListener('keydown', ladder)
+    try {
+      fireEvent.keyDown(window, { key: 'Escape' })
+    } finally {
+      window.removeEventListener('keydown', ladder)
+    }
+    expect(onEscape).toHaveBeenCalledTimes(2)
+    expect(onCloseDrawer).not.toHaveBeenCalled()
+    unmount()
+    expect(escapeRung(ctx)).toBe('drawer')
   })
 
   it.each(['nav', 'jobs', 'result', 'plan'])('closes the phone Studio %s drawer before lower Escape rungs', (studioDrawer) => {

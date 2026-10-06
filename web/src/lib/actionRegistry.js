@@ -69,6 +69,7 @@
 import { SESSION_ERROR } from '../cadedit/engineSessionErrors.js'
 import { SELECTION_EDIT_OPS, MAX_SELECTION_EDIT_ENTITIES } from '../cadedit/selection.js'
 import { readSingleKeyShortcuts } from './singleKeyPreference.js'
+import { closeTopEscapeOwner, topEscapeOwnerId } from './useEscapeOwner.js'
 
 // The ribbon's reason vocabulary. Lived in ribbonClusters.js until this slice;
 // it moved here because `when` is the registry's half of the honesty contract
@@ -474,12 +475,19 @@ export function accessibleName(label, reason = '') {
 export const INTERACTIVE_TARGET_SELECTOR = 'button, a, summary, [role="button"], [role="option"], [role="menuitem"]'
 
 /**
- * Esc pops ONE rung at a time, topmost surface first. The order is the ladder
- * App.jsx has always walked; the first rung whose `open` answers true wins and
- * nothing below it fires. Each `run` names the handler the caller supplies —
- * this module performs no effect of its own.
+ * Esc pops ONE rung at a time, topmost surface first. S27: the top rung is the
+ * Escape owner stack (useEscapeOwner.js, motion standard section 7): any
+ * surface registered there closes before the shell's own rungs, and the stack
+ * consumes its key in the capture phase, so the ladder below only ever sees an
+ * Escape no owner took. The rest is the ladder App.jsx has always walked; the
+ * first rung whose `open` answers true wins and nothing below it fires. Each
+ * `run` names the handler the caller supplies, except `owner`, which runs the
+ * stack's topmost owner.
  */
 export const ESCAPE_RUNGS = Object.freeze([
+  // Judged against the key itself when the ladder has one, so a scoped owner
+  // that declined this keypress in the capture phase declines it here too.
+  Object.freeze({ id: 'owner', open: (ctx, event) => topEscapeOwnerId(event) !== '', run: (ctx, event) => closeTopEscapeOwner(event) }),
   Object.freeze({ id: 'drawer', open: (ctx) => (!!ctx.drawer && ctx.drawer !== 'none')
     || (ctx.phoneViewport === true && !!ctx.studioDrawer && ctx.studioDrawer !== 'none'), run: (ctx) => ctx.onCloseDrawer?.() }),
   Object.freeze({ id: 'history', open: (ctx) => !!ctx.historyOpen, run: (ctx) => ctx.onCloseHistory?.() }),
@@ -510,9 +518,12 @@ export const RETRY_RUNGS = Object.freeze({
   refresh: (ctx) => ctx.onRetryRefresh?.(),
 })
 
-/** The Esc rung that would fire for this context, or '' when none would. */
-export function escapeRung(ctx = {}) {
-  const rung = ESCAPE_RUNGS.find((r) => r.open(ctx))
+/**
+ * The Esc rung that would fire for this context, or '' when none would. The
+ * owner stack is read first; `event`, when given, is the key being judged.
+ */
+export function escapeRung(ctx = {}, event = undefined) {
+  const rung = ESCAPE_RUNGS.find((r) => r.open(ctx, event))
   return rung ? rung.id : ''
 }
 
@@ -572,11 +583,11 @@ export function ladderDecision(event, ctx = {}) {
   }
 
   if (event.key === 'Escape') {
-    const rung = escapeRung(ctx)
+    const rung = escapeRung(ctx, event)
     // No open rung: nothing to close, so the ladder leaves the key alone
     // (null, no preventDefault). Esc is not printable, so it never reaches the
     // type-to-fall-through route below either.
-    return rung ? { id: 'bar:escape', rung, route: 'kbd', preventDefault: rung === 'start', instant: true } : null
+    return rung ? { id: 'bar:escape', rung, route: 'kbd', preventDefault: rung === 'start' || rung === 'owner', instant: true } : null
   }
 
   // S25: with single-key shortcuts switched off, bare R and Shift+? are no

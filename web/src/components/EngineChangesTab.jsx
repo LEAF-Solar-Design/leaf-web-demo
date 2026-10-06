@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { absoluteWithZone, relativeTime } from '../lib/railTime.js'
 import useRelativeNow from '../lib/useRelativeNow.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import {
   engineChangeDiscussText,
   getEngineChange,
@@ -59,6 +60,7 @@ export default function EngineChangesTab({
   const patchesRef = useRef({})
   const rowsRef = useRef(new Map())
   const backRef = useRef(null)
+  const cardRef = useRef(null)
   const focusRowRef = useRef(null)
   const requestRef = useRef(0)
   const mountedRef = useRef(true)
@@ -174,13 +176,15 @@ export default function EngineChangesTab({
     }
   }
 
+  // S27: Escape from inside an open card goes back to the list, through the
+  // owner stack (edit layer, scoped to the card as the old handler was).
+  useEscapeOwner('engine-change-card', !!(selected && detail), back, { layer: 'edit', scope: cardRef, scoped: true })
+
   if (selected && detail) {
     const held = !!detail.hold_requested_at || detail.state === 'held'
     const holdAttempted = holdLatchRef.current.has(detail.card_id)
     return (
-      <div className="engine-changes-body" onKeyDown={(event) => {
-        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); back() }
-      }}>
+      <div ref={cardRef} className="engine-changes-body">
         <button type="button" className="chip-neutral" ref={backRef} onClick={back}>Back</button>
         <div className="engine-changes-heading">
           <h3>{text(detail.title)}</h3>
