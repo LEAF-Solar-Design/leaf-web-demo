@@ -8,6 +8,7 @@ import { basename, join } from 'node:path'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
 import { familiesForSurface } from '../../src/lib/surfaceRails.js'
+import { buildViewSearch } from '../../src/lib/urlState.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
 import { normalizedControlKey } from './probes.mjs'
@@ -2556,7 +2557,14 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await expect(rail.locator('.rail-ledger')).toHaveCount(1)
     await expect(rail.locator('.rail-ske, .rail-empty, .rail-ledger > *').first()).toBeVisible()
     await expect(rail.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })).toBeVisible()
-    expect(page.url()).toBe(before.url)
+    const beforeUrl = new URL(before.url)
+    const afterUrl = new URL(page.url())
+    expect(afterUrl.origin).toBe(beforeUrl.origin)
+    expect(afterUrl.pathname).toBe(beforeUrl.pathname)
+    expect(afterUrl.hash).toBe(beforeUrl.hash)
+    // App.jsx setJobRailExpanded seats drawer=jobs via useViewParamSeat in both ready and failed-load states.
+    expect(afterUrl.search).toBe(buildViewSearch(beforeUrl.search, { drawer: 'jobs' }))
+    runtime.evidence.jobMonitorUrl = { before: before.url, after: page.url() }
     if (runtime.failedDrawing) await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ }))
       .toHaveText(before.workspace, { useInnerText: true })
     else await expect(propertiesPane(page).getByTestId('dock-drawing')).toHaveText(before.workspace, { useInnerText: true })
