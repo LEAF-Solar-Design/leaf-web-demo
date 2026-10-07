@@ -178,6 +178,24 @@ function deactivate(record) {
   sync()
 }
 
+function createOwnerRecord(id, handlerRef, whenRef, options) {
+  const { layer = 'drawer', scope = null, scoped = false } = options
+  return { id: String(id), rank: layerRank(layer), seq: 0, scopeRef: scope, scoped: !!scoped, handlerRef, whenRef }
+}
+
+function mountOwner(record) {
+  mounted.add(record)
+  return () => { mounted.delete(record); deactivate(record) }
+}
+
+/** Register an active Escape owner without React; unregister when its surface closes. */
+export function registerEscapeOwner(id, onEscape, options = {}) {
+  const record = createOwnerRecord(id, { current: onEscape }, { current: options.when ?? null }, options)
+  const unregister = mountOwner(record)
+  activate(record)
+  return unregister
+}
+
 /**
  * Register a surface as an Escape owner while `open` is true.
  *
@@ -200,7 +218,7 @@ export default function useEscapeOwner(id, open, onEscape, options = {}) {
   whenRef.current = when
   const recordRef = useRef(null)
   if (!recordRef.current) {
-    recordRef.current = { id: String(id), rank, seq: 0, scopeRef: scope, scoped: !!scoped, handlerRef, whenRef }
+    recordRef.current = createOwnerRecord(id, handlerRef, whenRef, options)
   }
   const record = recordRef.current
   record.id = String(id)
@@ -208,10 +226,7 @@ export default function useEscapeOwner(id, open, onEscape, options = {}) {
   record.scopeRef = scope
   record.scoped = !!scoped
 
-  useLayoutEffect(() => {
-    mounted.add(record)
-    return () => { mounted.delete(record); deactivate(record) }
-  }, [record])
+  useLayoutEffect(() => mountOwner(record), [record])
 
   // Match ownership to the committed UI before another Escape can arrive.
   // Passive cleanup can leave a dismissed proposal above the scene even

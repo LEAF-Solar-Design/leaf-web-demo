@@ -11,6 +11,7 @@ import useEscapeOwner, {
   ESCAPE_LAYERS,
   closeTopEscapeOwner,
   escapeOwnerStack,
+  registerEscapeOwner,
   topEscapeOwnerId,
 } from './useEscapeOwner.js'
 
@@ -28,6 +29,30 @@ function Owner({ id, open = true, layer, onEscape, children = null, when, scoped
 }
 
 const press = (target = window) => fireEvent.keyDown(target, { key: 'Escape' })
+
+describe('registerEscapeOwner', () => {
+  it('registers an active owner and unregisters harmlessly twice', () => {
+    const fn = vi.fn()
+    const unregister = registerEscapeOwner('t', fn, { layer: 'menu' })
+    try {
+      expect(escapeOwnerStack()).toEqual(['t'])
+      expect(topEscapeOwnerId()).toBe('t')
+      expect(closeTopEscapeOwner()).toBe('t')
+      expect(fn).toHaveBeenCalledTimes(1)
+    } finally {
+      unregister()
+    }
+    expect(escapeOwnerStack()).toEqual([])
+    unregister()
+    expect(escapeOwnerStack()).toEqual([])
+    expect(topEscapeOwnerId()).toBe('')
+  })
+
+  it('rejects an unknown layer without registering an owner', () => {
+    expect(() => registerEscapeOwner('t', vi.fn(), { layer: 'unknown' })).toThrow(/unknown layer/)
+    expect(escapeOwnerStack()).toEqual([])
+  })
+})
 
 describe('useEscapeOwner stack order', () => {
   it('orders the section 7 layers topmost first', () => {

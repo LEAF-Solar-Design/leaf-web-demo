@@ -5,6 +5,7 @@ import { ACTIONS, ESCAPE_RUNGS, RETRY_RUNGS, reasonCode, REASONS, DRAW_REASONS, 
 import { PRODUCT_SURFACES } from '../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../src/lib/studioDrawers.js'
+import { escapeOwnerStack } from '../src/lib/useEscapeOwner.js'
 import { PROMPTS } from '../src/cadedit/promptKeys.js'
 import {
   buildFeatureMap, checkCompleteness, DEFAULT_REGISTRIES, featureId,
@@ -244,8 +245,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   // 21-B2 added engine:undo, engine:redo and engine:repeat plus the engine-nothing-to-undo, engine-nothing-to-redo and no-command-to-repeat patches (793 -> 811, 759 -> 777). C2 certifies the 41 census triples (811 -> 852, 777 -> 818).
   // G4 changes six multiple-selected effects, retaining all six rows: 852 + 0 and 818 + 0 triples.
   // C3 adds three Object snap modes disclosure states: 852 + 3 = 855, 818 + 3 = 821.
-  assert.equal(previousTriples.length, 855)
-  assert.equal(triples(map).length, 821)
+  // S27 adds the bar:escape owner-open state for the Escape owner rung: 855 + 1 = 856, 821 + 1 = 822.
+  assert.equal(previousTriples.length, 856)
+  assert.equal(triples(map).length, 822)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
@@ -830,6 +832,12 @@ test('action cases project registry gates and engine prompt behavior', () => {
   for (const action of ACTIONS) {
     const entry = entryFor(featureId('action', action.id))
     for (const state of entry.states) {
+      if (action.id === 'bar:escape' && state === 'owner-open') {
+        assert.deepEqual(entry.state_contexts[state].escapeOwner, { id: 'walk-owner', layer: 'menu' })
+        assert.deepEqual(entry.expected_effect[state], { kind: 'toggles', target: 'escape:owner' })
+        assert.deepEqual(escapeOwnerStack(), [])
+        continue
+      }
       const reason = action.when(entry.state_contexts[state])
       const effect = entry.expected_effect[state]
       if (reason) {

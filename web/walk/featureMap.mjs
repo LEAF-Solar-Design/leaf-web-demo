@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
+import { registerEscapeOwner } from '../src/lib/useEscapeOwner.js'
 import { ACTIONS, ESCAPE_RUNGS, RETRY_RUNGS, REASONS, reasonCode, escapeRung, retryRung } from '../src/lib/actionRegistry.js'
 import { PRODUCT_SURFACES, productSurfaceStates } from '../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
@@ -453,6 +454,16 @@ function cases(config, kind) {
 }
 
 function actionEffect(action, ctx, override) {
+  if (action.id === 'bar:escape' && ctx.escapeOwner) {
+    const unregister = registerEscapeOwner(ctx.escapeOwner.id, () => {}, { layer: ctx.escapeOwner.layer })
+    try {
+      const why = action.when(ctx)
+      if (why) return disabled(why)
+      return { kind: 'toggles', target: `escape:${escapeRung(ctx, { key: 'Escape' })}` }
+    } finally {
+      unregister()
+    }
+  }
   const why = action.when(ctx)
   if (why) return disabled(why)
   if (action.id === 'bar:escape') return { kind: 'toggles', target: `escape:${escapeRung(ctx)}` }
@@ -529,6 +540,9 @@ function buildEntry(item, config, snapshot, registries) {
       if (record.op !== 'explode') entry.sources.push('web/src/cadedit/clipboard.js')
     }
     const candidates = cases(config, kind)
+    if (record.id === 'bar:escape') {
+      candidates.push(['owner-open', { ...candidates[0][1], escapeOwner: { id: 'walk-owner', layer: 'menu' } }])
+    }
     if (record.id === 'bar:retry') {
       for (const target of Object.keys(RETRY_RUNGS)) candidates.push([`retry-${target}`, { ...candidates[0][1], rTarget: target }])
     }
