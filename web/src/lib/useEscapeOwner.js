@@ -46,6 +46,7 @@ const FOREIGN_OWNER_SELECTOR = '[data-escape-owner], [role="menu"]'
 
 const active = []          // active owner records, unordered
 const mounted = new Set()  // every mounted record, active or not
+const decisionOwners = new WeakMap()
 let activations = 0
 let listening = false
 
@@ -111,6 +112,35 @@ function foreignOwnerVisible() {
   return false
 }
 
+// Adopt decision surfaces that predate the hook as proposal owners. Read the
+// committed DOM when resolving the stack so a passive/owned transition takes
+// effect even when the next Escape arrives before a MutationObserver runs.
+// These owners keep the decision open; a registered proposal's newer sequence
+// wins at the same layer and invokes its actual dismiss handler instead.
+function decisionOwnerRecords() {
+  if (typeof document === 'undefined') return []
+  const records = []
+  for (const strip of document.querySelectorAll('.strip-decision')) {
+    if (strip.getAttribute('data-escape-passive') === 'true' ||
+        strip.getAttribute('role') === 'status' || strip.getAttribute('role') === 'alert' ||
+        !visible(strip)) continue
+    let owned = false
+    for (const record of active) {
+      const scope = scopeOf(record)
+      if (!record.scoped && scope?.contains(strip)) { owned = true; break }
+    }
+    if (owned) continue
+    let record = decisionOwners.get(strip)
+    if (!record) {
+      record = createOwnerRecord('decision-strip', { current: () => {} }, { current: null },
+        { layer: 'proposal', scope: { current: strip } })
+      decisionOwners.set(strip, record)
+    }
+    records.push(record)
+  }
+  return records
+}
+
 /**
  * The owner that would take this Escape, or null when none would. `event` may
  * be omitted (the registry asks without one); scoped owners then judge the
@@ -120,7 +150,7 @@ export function topEscapeOwner(event) {
   if (active.length === 0) return null
   if (foreignOwnerVisible()) return null
   let top = null
-  for (const record of active) {
+  for (const record of [...active, ...decisionOwnerRecords()]) {
     if (!claims(record, event)) continue
     if (!top || above(record, top)) top = record
   }

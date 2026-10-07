@@ -179,6 +179,52 @@ describe('useEscapeOwner stack order', () => {
     expect(exit).toHaveBeenCalledTimes(1)
   })
 
+  it('adopts an owned decision strip above the scene on the same press it stops being passive', () => {
+    const exit = vi.fn()
+    render(h(Owner, { id: 'scene', layer: 'scene', onEscape: exit }))
+    const strip = document.createElement('div')
+    strip.className = 'strip-decision'
+    strip.setAttribute('data-escape-passive', 'true')
+    document.body.appendChild(strip)
+    press()
+    expect(exit).toHaveBeenCalledTimes(1)
+    strip.removeAttribute('data-escape-passive')
+    expect(topEscapeOwnerId()).toBe('decision-strip')
+    press()
+    expect(exit).toHaveBeenCalledTimes(1)
+    expect(strip.isConnected).toBe(true)
+    strip.remove()
+    press()
+    expect(exit).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps registered proposal and menu handlers above an adopted decision strip', () => {
+    const proposal = vi.fn()
+    const menu = vi.fn()
+    const tree = (menuOpen) => h('div', null,
+      h(Owner, { id: 'proposal', layer: 'proposal', onEscape: proposal }),
+      h(Owner, { id: 'menu', layer: 'menu', open: menuOpen, onEscape: menu }),
+      h('div', { className: 'strip-decision' }),
+    )
+    const { rerender } = render(tree(true))
+    press()
+    expect(menu).toHaveBeenCalledTimes(1)
+    expect(proposal).not.toHaveBeenCalled()
+    rerender(tree(false))
+    press()
+    expect(proposal).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['status', 'alert'])('leaves a passive %s strip below the scene', (role) => {
+    const exit = vi.fn()
+    render(h('div', null,
+      h('div', { className: 'strip-decision', role }),
+      h(Owner, { id: 'scene', layer: 'scene', onEscape: exit }),
+    ))
+    press()
+    expect(exit).toHaveBeenCalledTimes(1)
+  })
+
   it('removes a dismissed proposal during the closing commit, before passive effects', () => {
     const exit = vi.fn()
     const observed = []

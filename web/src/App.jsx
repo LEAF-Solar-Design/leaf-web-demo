@@ -3214,7 +3214,7 @@ export default function App() {
   // the one owner stack (edit layer, scoped to the form's wrapper; while the
   // wrapper is not mounted the owner claims nothing).
   const solarSettingsFormRef = useRef(null)
-  useEscapeOwner('solar-settings-form', !!solarFormTool, () => {
+  useEscapeOwner('solar-tool-form', !!solarFormTool, () => {
     settingsRunRef.current = null
     setSettingsRunResult(null)
     setSolarFormTool(null)
