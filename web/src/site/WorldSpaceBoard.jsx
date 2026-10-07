@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { boundsOfRects, fitCameraToBounds, screenToWorld, worldToScreen } from './worldSpaceGeometry.js'
 import localStore, { CARD_NAMES, validWorldState } from './worldSpaceStore.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 export const DEFAULT_VIEWPORT = { width: 1200, height: 760 }
 export const CARD_SIZE = { width: 320, height: 260 }
@@ -100,9 +101,15 @@ export default function WorldSpaceBoard({ scopeId = 'anonymous', viewport, store
     else persist()
     event.target.releasePointerCapture?.(event.pointerId)
   }
+  // S27: Escape from inside the board fits all cards through the one owner
+  // stack (focus layer, scoped to the board); a control inside keeps its own.
+  useEscapeOwner('world-board', true, () => focus(null), {
+    layer: 'focus', scope: root, scoped: true,
+    when: (event) => !(event?.target instanceof Element && event.target.closest('button, a, input, textarea, select')),
+  })
   const keyDown = (event) => {
     if (event.target.closest('button, a, input, textarea, select')) return
-    if (event.key === 'Escape' || event.key === '0') { event.preventDefault(); focus(null); return }
+    if (event.key === '0') { event.preventDefault(); focus(null); return }
     if (event.target !== event.currentTarget) return
     const pan = { ArrowLeft: [40, 0], ArrowRight: [-40, 0], ArrowUp: [0, 40], ArrowDown: [0, -40] }[event.key]
     if (pan) {

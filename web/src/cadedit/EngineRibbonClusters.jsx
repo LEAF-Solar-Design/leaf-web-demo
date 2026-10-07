@@ -29,8 +29,9 @@
  * reference's tools this engine has no operation for (rectangle, copy,
  * mirror, ...) are present, disabled, with "not in the browser engine yet".
  */
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
@@ -113,8 +114,6 @@ const stepValue = (v) => {
 export const PROMPT_SLOT_ID = 'cockpit-prompt-slot'
 export const PROMPT_ID = 'cockpit-prompt'
 
-const ESC_OWNER_SELECTOR = '[data-escape-owner]'
-
 // S1 (Apply boundary): where an Escape cancels a staged property change (the
 // Properties cluster, its slot, the strip), the strip's own marker, and the
 // widget id each staged op's combo carries.
@@ -144,17 +143,10 @@ export function armedToolElement(group, op) {
 // to read the property ladder instead of the full Modify one.
 const PROPERTY_OPS = new Set(forGroup('modify').filter((a) => a.panel === 'properties').map((a) => a.op))
 
-// Some layers leave focus on the button that opened them. An explicit marker
-// lets those layers claim Esc without treating every nonmodal dialog as an
-// owner (the guided tour is a dialog but deliberately does not claim Esc).
-function hasVisibleEscOwner() {
-  return [...document.querySelectorAll(ESC_OWNER_SELECTOR)].some((layer) => {
-    if (layer.hidden || layer.hasAttribute('inert') || layer.getAttribute('aria-hidden') === 'true') return false
-    if (layer instanceof HTMLDialogElement && !layer.open) return false
-    const style = window.getComputedStyle(layer)
-    return style.display !== 'none' && style.visibility !== 'hidden'
-  })
-}
+// S27: a layer that leaves focus on the button that opened it claims Esc
+// through the one owner stack (useEscapeOwner.js), which also yields to a
+// visible [data-escape-owner] layer it does not hold; the guided tour is a
+// dialog but deliberately does not claim Esc.
 
 // The Draw and Modify vocabulary and their reason ladders moved to the action
 // registry with slice 10a (one record behind the ribbon, the engine ops, the
@@ -497,33 +489,25 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   }, [armedOp, session.busy])
   const cancelRef = useRef(cancel)
   cancelRef.current = cancel
-  useEffect(() => {
-    // W4f-2: Esc cancels the armed command from ANYWHERE, as the reference's
-    // command line drops a command on Esc wherever the pointer is (the
-    // drawing, a ribbon tool, the body after a run). Capture phase on the
-    // window, so App's window-level Esc rung never also fires for the same
-    // key. Esc inside a text field OUTSIDE the prompt keeps that field's own
-    // meaning (the Command bar clears itself); the prompt's own fields are
-    // handled by the row below.
-    if (!armedOp || typeof window === 'undefined') return undefined
-    const onWindowKeyDown = (event) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return
-      const target = event.target
-      if (target instanceof Node && promptRef.current?.contains(target)) return
-      // S1: while a property change is staged, an Esc in the Properties
-      // cluster or its strip cancels that change, not the armed command.
-      if (pendingRef.current && target instanceof Element && target.closest(PENDING_ESC_SCOPE)) return
-      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return
-      // An open dialog or drawer owns its Esc. Check the whole visible layer
-      // stack too because a layer may leave focus on its outside opener.
-      if ((target instanceof Element && target.closest('[role="dialog"], [aria-modal="true"], dialog, .drawer-layer')) || hasVisibleEscOwner()) return
-      event.preventDefault()
-      event.stopPropagation()
-      cancelRef.current()
-    }
-    window.addEventListener('keydown', onWindowKeyDown, true)
-    return () => window.removeEventListener('keydown', onWindowKeyDown, true)
-  }, [armedOp])
+  // W4f-2: Esc cancels the armed command from ANYWHERE, as the reference's
+  // command line drops a command on Esc wherever the pointer is (the drawing,
+  // a ribbon tool, the body after a run, the prompt's own fields). S27: it is
+  // the command layer of the one owner stack, so a menu, sheet, drawer, the
+  // version history or a staged property change above it closes first, and
+  // App's window-level Esc rung never also fires for the same key. Esc inside
+  // a text field OUTSIDE the prompt keeps that field's own meaning (the
+  // Command bar clears itself), and a dialog the stack does not hold (a drawer
+  // layer that parks focus on its own button) keeps its own Esc.
+  const armedOwnsEscape = useCallback((event) => {
+    const target = event?.target
+    if (target instanceof Node && promptRef.current?.contains(target)) return true
+    // S1: while a property change is staged, an Esc in the Properties
+    // cluster or its strip cancels that change, not the armed command.
+    if (pendingRef.current && target instanceof Element && target.closest(PENDING_ESC_SCOPE)) return false
+    if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return false
+    return !(target instanceof Element && target.closest('[role="dialog"], [aria-modal="true"], dialog, .drawer-layer'))
+  }, [])
+  useEscapeOwner('armed-command', !!armedOp, () => cancelRef.current(), { layer: 'command', when: armedOwnsEscape })
   const onPromptKeyDown = (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) {
       // Enter on Run or Cancel keeps the button's own activation (one
@@ -537,13 +521,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         return
       }
       run()
-    } else if (event.key === 'Escape') {
-      // The prompt owns this Esc: it must not ALSO climb to App's
-      // window-level Esc rung (a drawer or route reacting to the same key).
-      event.preventDefault()
-      event.stopPropagation()
-      cancel()
     }
+    // Esc in the prompt is the armed-command owner's (above): one handler,
+    // and it never also climbs to App's window-level Esc rung.
   }
   // The armed tool exposes the prompt it opened; only a tool this table
   // knows can be expanded, so an out-of-contract op never leaves a dangling
@@ -713,22 +693,14 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const cancelPendingRef = useRef(cancelPending)
   cancelPendingRef.current = cancelPending
   const hasPending = !!pending
-  useEffect(() => {
-    // Esc in the Properties cluster or the strip cancels the staged change and
-    // is swallowed there, like the prompt row's Esc: capture phase, so App's
-    // window key ladder (selection, then project) never also reads it.
-    if (!hasPending || typeof window === 'undefined') return undefined
-    const onWindowKeyDown = (event) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return
-      const target = event.target
-      if (!(target instanceof Element) || !target.closest(PENDING_ESC_SCOPE)) return
-      event.preventDefault()
-      event.stopPropagation()
-      cancelPendingRef.current()
-    }
-    window.addEventListener('keydown', onWindowKeyDown, true)
-    return () => window.removeEventListener('keydown', onWindowKeyDown, true)
-  }, [hasPending])
+  // Esc in the Properties cluster or the strip cancels the staged change and
+  // is swallowed there, like the prompt's Esc. S27: the edit layer of the one
+  // owner stack, above the armed command, so App's window key ladder
+  // (selection, then project) never also reads it.
+  useEscapeOwner('staged-property', hasPending, () => cancelPendingRef.current(), {
+    layer: 'edit',
+    when: (event) => event?.target instanceof Element && !!event.target.closest(PENDING_ESC_SCOPE),
+  })
   useEffect(() => {
     // A pick that staged while its combo kept focus leaves focus there. A
     // keyboard walk committed on blur (Tab) would leave it on a sibling combo

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import { getPlatformChange, landPlatformChange, mergePlatformChange, proposePlatformChange } from '../api.js'
 import './popovers.css'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 // Platform self-edit drawer (R7 admin lane) — opened by ?customize=1 or the
 // entitled admin's header entry. Both require a policy read that carries
@@ -132,26 +133,12 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
     }
   }, [])
 
-  // Own Escape before the scene-level ladder can navigate away.
-  useEffect(() => {
-    if (!onDismiss) return
-    const onKey = (event) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      onDismiss()
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [onDismiss])
+  // S27: Escape is the owner stack's (drawer layer), so it closes this drawer
+  // before the scene-level eject can navigate away. Not while the exit fade
+  // holds the mount.
+  useEscapeOwner('customize', !!onDismiss && !exiting, () => onDismiss?.(), { layer: 'drawer', scope: drawerRef })
 
   const ownKeyboard = (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      event.stopPropagation()
-      onDismiss?.()
-      return
-    }
     if (event.key !== 'Tab') return
     const focusable = [...(drawerRef.current?.querySelectorAll('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') || [])]
       .filter((element) => element.getClientRects().length > 0)

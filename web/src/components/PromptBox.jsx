@@ -34,6 +34,7 @@ import EscCap from './EscCap.jsx'
 import useExit from '../useExit.js'
 import { digest, trackUsage } from '../telemetry.js'
 import { byId } from '../lib/actionRegistry.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { authHeaders, config, getDrawingVersions, getStoredOrgId, listProjects, listOperatorSessions, noteUnauthorized, searchIndex } from '../api.js'
 import { modChord } from '../lib/keys.js'
 import { SECRET_REASONS, SECRET_REASONS_NO_MOUNT } from '../lib/secretPatterns.js'
@@ -526,9 +527,6 @@ export default function PromptBox({
       if (e.key === 'ArrowUp' && scopeRows.length > 0) {
         e.preventDefault(); setPaletteIdx(Math.max(paletteIdxClamped - 1, 0)); return
       }
-      if (e.key === 'Escape') {
-        e.preventDefault(); e.stopPropagation(); setActiveScope(null); return
-      }
       if (e.key === 'Enter' && scopeRows[paletteIdxClamped]) {
         e.preventDefault(); runPaletteRow(scopeRows[paletteIdxClamped]); return
       }
@@ -542,10 +540,6 @@ export default function PromptBox({
       }
       if (e.key === 'Tab' && matches[idx]) {
         e.preventDefault(); complete(matches[idx]); return
-      }
-      if (e.key === 'Escape') {
-        // closes ONLY the menu — the global Esc ladder must not also fire
-        e.preventDefault(); e.stopPropagation(); setMenuDismissed(true); return
       }
       if (e.key === 'Enter' && matches[idx]) {
         e.preventDefault(); pick(matches[idx]); return
@@ -634,14 +628,21 @@ export default function PromptBox({
     setActiveScope(null)
   }
 
-  // Scope resolver keys (capture, so the app's global Esc/Enter ladders stand
+  // S27: the bar's three resolvers own Escape through the one owner stack
+  // (menu layer). Each closes ONLY itself, and the stack consumes the key so
+  // the global ladder never also fires. They never overlap (the act/find
+  // palette stands down while the "/" menu or the scope picker is up).
+  useEscapeOwner('prompt-slash-menu', menuOpen, () => setMenuDismissed(true), { layer: 'menu', scope: rootRef })
+  useEscapeOwner('prompt-palette', scopeMenuOpen && !menuOpen, () => setActiveScope(null), { layer: 'menu', scope: rootRef })
+  useEscapeOwner('prompt-scope-menu', scopeOpen, () => setScopeOpen(false), { layer: 'menu', scope: rootRef })
+
+  // Scope resolver keys (capture, so the app's global Enter ladder stands
   // down while the menu is open) + outside-click close — the ProjectSwitcher
   // popover's pattern.
   useEffect(() => {
     if (!scopeOpen) return undefined
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setScopeOpen(false) }
     const onKey = (e) => {
-      if (e.key === 'Escape') { e.stopPropagation(); setScopeOpen(false); return }
       if (e.key === 'ArrowDown') { e.preventDefault(); setScopeIdx((i) => Math.min(i + 1, SCOPES.length - 1)); return }
       if (e.key === 'ArrowUp') { e.preventDefault(); setScopeIdx((i) => Math.max(i - 1, 0)); return }
       if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); pickScope(SCOPES[scopeIdx]) }

@@ -22,8 +22,9 @@
 // it; the provider keeps one identity PER MODE so the hoist cannot serve the
 // console's identity to the stage or the reverse.
 
-import React, { Suspense, useEffect, useRef, useState } from 'react'
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { markInstant } from '../lib/instant.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { useRoute, navigate } from './router.js'
 import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './routeScene.js'
 import { StudioGroundContext } from './studioGround.js'
@@ -123,19 +124,28 @@ export default function SiteRoot() {
         return
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return
-      // The eject predicate, not a scene literal: console mode must never
-      // reach navigate('/') here (ACCEPTANCE; APP_ONLY_HOSTS redirect would
-      // discard live console work). See routeScene.js.
-      if (e.key === 'Escape' && sceneAllowsMarketingEject(scene)) {
-        // A passive status strip has no dialog and never holds Escape; every other decision strip still does.
-        const ownedSurface = document.querySelector('.proj-menu, .route, .strip-decision:not([data-escape-passive]), .resolver, .drawer-layer .drawer, .claude-pop')
-        if (!ownedSurface) navigate('/')
-      }
-      else if ((e.key === 't' || e.key === 'T') && scene === 'site') enterWorkspace()
+      if ((e.key === 't' || e.key === 'T') && scene === 'site') enterWorkspace()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [scene])
+
+  // S27: the marketing eject is the BOTTOM rung of the one Escape owner stack
+  // (scene layer). Every menu, drawer, proposal and run above it is an owner
+  // that closes first, which replaces the selector list this listener used to
+  // check. The eject predicate, not a scene literal: console mode must never
+  // reach navigate('/') here (ACCEPTANCE; APP_ONLY_HOSTS redirect would
+  // discard live console work). See routeScene.js. Never from an editable
+  // element or with a modifier, as before.
+  const ejectScene = scene === 'site' || scene === 'tool'
+  const allowMarketingEject = useCallback((e) => {
+    if (!e || isEditable(e.target) || e.metaKey || e.ctrlKey || e.altKey) return false
+    // Proposals register above this scene owner. A status/error banner is
+    // not an Escape owner and must not strand the operator in the scene.
+    return e.key === 'Escape' && sceneAllowsMarketingEject(scene)
+  }, [scene])
+  useEscapeOwner('marketing-eject', ejectScene && sceneAllowsMarketingEject(scene), () => navigate('/'),
+    { layer: 'scene', when: allowMarketingEject })
 
   // The inactive cast is inert + aria-hidden (pointer-events already die in
   // CSS; this removes it from tab order and the accessibility tree too).

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './panels.css'
 import useExit from '../useExit.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { EMPTY_WORKSPACE_PROJECT, formatProjectsUnavailable } from '../site/workspaceProjectState.js'
 import { addRecentProject, readProjectPrincipal, readRecentProjects, togglePinnedProject, writeRecentProjects } from '../lib/recentProjects.js'
 
@@ -120,11 +121,14 @@ export default function ProjectSwitcher({
     setHi(idx >= 0 ? idx : 0)
   }, [open, menuProjects, openProjectId])
 
+  // S27: Escape is the owner stack's (menu layer), which replaces the old "an
+  // open drawer owns Esc" selector check with the section 7 order.
+  useEscapeOwner('project-menu', open && !mock, () => setOpen(false), { layer: 'menu', scope: rootRef })
+
   useEffect(() => {
     if (!open) return
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false) }
     const onKey = (e) => {
-      if (e.key === 'Escape' && !document.querySelector('.drawer-layer .drawer')) { setOpen(false); return } // an open drawer owns Esc
       if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) {
         if (e.key === 'Enter' && !e.isComposing && e.target.tagName === 'INPUT' && rootRef.current?.contains(e.target)) {
           e.preventDefault()

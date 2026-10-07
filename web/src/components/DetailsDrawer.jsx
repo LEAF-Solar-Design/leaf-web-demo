@@ -2,12 +2,13 @@
 // over the events rail — hairline left edge + deep shadow, title + Esc cap
 // header, provenance in mono, ONE quiet action. Rendered at App level inside
 // .drawer-layer (structural.css) so the rail behind never re-flows. Esc closes
-// (App's global key ladder) and the header cap mirrors it.
+// (the Escape owner stack, drawer layer) and the header cap mirrors it.
 // The diagnostics block sanctions a second control for support near the top band.
 
 import { useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import useExit from '../useExit.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import './detailsDrawerSheet.css'
 
 const PHONE_QUERY = '(max-width: 639px)'
@@ -91,13 +92,12 @@ export default function DetailsDrawer({ data, onClose }) {
     }
   }, [open])
 
+  // S27: Escape is the owner stack's (drawer layer), from anywhere on the
+  // page, not only from focus inside the drawer; a sheet or menu above it
+  // closes first. The keydown handler below keeps only the Tab trap.
+  useEscapeOwner('details', open, () => onClose?.(), { layer: 'drawer', scope: drawerRef })
+
   const ownKeyboard = (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      event.stopPropagation()
-      onClose?.()
-      return
-    }
     if (event.key !== 'Tab' || !modal) return
     const focusable = [...(drawerRef.current?.querySelectorAll('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') || [])]
       .filter((element) => element.getClientRects().length > 0)

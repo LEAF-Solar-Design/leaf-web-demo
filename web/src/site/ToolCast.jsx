@@ -44,6 +44,7 @@ import DegradedBanner from '../components/DegradedBanner.jsx'
 import SurfaceFrame from './SurfaceFrame.jsx'
 import { stageRunDisabledReason, stageHelpPaletteRow } from './stageRunReasons.js'
 import { versionShortcutDecision } from '../lib/actionRegistry.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
@@ -889,6 +890,7 @@ export default function ToolCast({
     lastConfirmedRunRef.current = null
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     catalog.actions.dismissRoute()
+    setSelectedCatalogTool(null)
     clearConverse()
     resetCached()
   }, [activeDrawingId, catalog.actions, clearConverse, resetCached, resetJob])
@@ -1300,57 +1302,29 @@ export default function ToolCast({
     }
   }, [adoptEnvelope, sessionReady])
 
-  useEffect(() => {
-    if (!drawer) return undefined
-    const closeOnEscape = (event) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      setDrawer(null)
-    }
-    window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [drawer])
+  // S27: Escape on /try goes through the one owner stack. The details drawer
+  // and the ops drawer own their own Escape (DetailsDrawer, OpsDrawer); this
+  // shell owns the two rungs below them, and the stack's layer order replaces
+  // the selector checks each listener used to make for what sat above it.
+  // Proposal layer: dismiss the route proposal and hand the caret back to the bar.
+  const dismissProposalOnEscape = useCallback(() => {
+    catalog.actions.dismissRoute()
+    // #1932: dismissing the proposal also clears the ?tool= key, so a second Escape leaves the scene.
+    setSelectedCatalogTool(null)
+    requestAnimationFrame(() => document.querySelector('.tc-bar-input')?.focus())
+  }, [catalog.actions])
+  useEscapeOwner('proposal', !!route, dismissProposalOnEscape, { layer: 'proposal' })
 
-  useEffect(() => {
-    if (!opsOpen) return undefined
-    const closeOpsOnEscape = (event) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      setOpsOpen(false)
-    }
-    window.addEventListener('keydown', closeOpsOnEscape)
-    return () => window.removeEventListener('keydown', closeOpsOnEscape)
-  }, [opsOpen])
-
-  useEffect(() => {
-    if (!route) return undefined
-    const dismissProposalOnEscape = (event) => {
-      if (event.key !== 'Escape') return
-      if (document.querySelector('.drawer-layer .drawer, .claude-pop, .proj-menu')) return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      catalog.actions.dismissRoute()
-      setSelectedCatalogTool(null)
-      requestAnimationFrame(() => document.querySelector('.tc-bar-input')?.focus())
-    }
-    window.addEventListener('keydown', dismissProposalOnEscape, true)
-    return () => window.removeEventListener('keydown', dismissProposalOnEscape, true)
-  }, [catalog.actions, route])
-
-  useEffect(() => {
+  // Run layer: Escape detaches from the running job without the page-close
+  // beacon (the job keeps running in Jobs).
+  const detachOnEscape = useCallback(() => {
     if (!jobRunning) return undefined
-    const detachOnEscape = (event) => {
-      if (event.key !== 'Escape') return
-      if (route || drawer || opsOpen || document.querySelector('.claude-pop, .proj-menu')) return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      const toolName = currentJob?.tool || selectedCatalogTool?.name || 'job'
-      detachJob()
-      showToast({ text: `Detached from ${toolName}. The job keeps running in Jobs.` })
-    }
-    window.addEventListener('keydown', detachOnEscape)
-    return () => window.removeEventListener('keydown', detachOnEscape)
-  }, [currentJob?.tool, detachJob, drawer, jobRunning, opsOpen, route, selectedCatalogTool?.name, showToast])
+    const toolName = currentJob?.tool || selectedCatalogTool?.name || 'job'
+    detachJob()
+    showToast({ text: `Detached from ${toolName}. The job keeps running in Jobs.` })
+    return undefined
+  }, [currentJob?.tool, detachJob, jobRunning, selectedCatalogTool?.name, showToast])
+  useEscapeOwner('detach', jobRunning, detachOnEscape, { layer: 'run' })
 
   const changePrompt = useCallback((value) => {
     setPrompt(value)
@@ -2484,8 +2458,11 @@ export default function ToolCast({
           : 'Live service chain: web → app → harness → broker. Requests are not preloaded or simulated.'}
       </div>
 
+      {/* The Result panel has its own object-navigation announcements. Keep
+          the separate run channel quiet until there is run state to announce. */}
       <LiveRegion
         role="status"
+        live={jobRunning || jobResult || jobError ? 'polite' : 'off'}
         visuallyHidden={HIDE_WITH_CLASS}
         atomic
         label="Run status announcements"

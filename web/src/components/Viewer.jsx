@@ -8,6 +8,7 @@ import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIn
 import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -265,6 +266,12 @@ const Viewer = forwardRef(function Viewer(
   onSelectRef.current = onSelectEntity
   const marqueeRef = useRef(null)
   marqueeRef.current = { gate: marqueeGate, select: onMarqueeSelect, visibleLayers }
+  // S27: a marquee drag in progress owns Escape through the one owner stack
+  // (command layer). State flips only when a drag starts or ends, never per
+  // pointer move; the scene build hands its clear function over the ref.
+  const [marqueeLive, setMarqueeLive] = useState(false)
+  const clearMarqueeRef = useRef(null)
+  useEscapeOwner('viewer-marquee', marqueeLive, () => clearMarqueeRef.current?.(), { layer: 'command' })
   const onGlErrorRef = useRef(onGlError)
   onGlErrorRef.current = onGlError
   // controlsEnabled read via ref inside the scene build (and synced by its own
@@ -744,6 +751,7 @@ const Viewer = forwardRef(function Viewer(
       const pointerId = marquee.pointerId
       marquee.overlay.remove()
       marquee = null
+      setMarqueeLive(false)
       try {
         if (dom.hasPointerCapture(pointerId)) dom.releasePointerCapture(pointerId)
       } catch {}
@@ -792,6 +800,7 @@ const Viewer = forwardRef(function Viewer(
         overlay.style.pointerEvents = 'none'
         mount.appendChild(overlay)
         marquee = { pointerId: candidate.pointerId, start: candidate.start, overlay }
+        setMarqueeLive(true)
         try { dom.setPointerCapture(e.pointerId) } catch {}
       }
       if (!marquee || e.pointerId !== marquee.pointerId) return
@@ -839,18 +848,12 @@ const Viewer = forwardRef(function Viewer(
       const active = marquee || candidate
       if (active && e.pointerId === active.pointerId && !mount.contains(e.target)) clearMarquee()
     }
-    function escapeMarquee(e) {
-      if (e.key === 'Escape' && (marquee || candidate)) {
-        if (marquee) e.stopPropagation()
-        clearMarquee()
-      }
-    }
+    clearMarqueeRef.current = clearMarquee
     mount.addEventListener('pointerdown', startMarquee, true)
     mount.addEventListener('pointermove', moveMarquee, true)
     mount.addEventListener('pointerup', finishMarquee, true)
     mount.addEventListener('pointercancel', cancelMarquee, true)
     mount.addEventListener('lostpointercapture', cancelMarquee, true)
-    window.addEventListener('keydown', escapeMarquee, true)
     window.addEventListener('pointerup', orphanRelease, true)
     window.addEventListener('pointercancel', orphanRelease, true)
     dom.addEventListener('pointerdown', onPointerDown)
@@ -960,12 +963,12 @@ const Viewer = forwardRef(function Viewer(
       ro.disconnect()
       dom.removeEventListener('pointerdown', onPointerDown)
       clearMarquee()
+      if (clearMarqueeRef.current === clearMarquee) clearMarqueeRef.current = null
       mount.removeEventListener('pointerdown', startMarquee, true)
       mount.removeEventListener('pointermove', moveMarquee, true)
       mount.removeEventListener('pointerup', finishMarquee, true)
       mount.removeEventListener('pointercancel', cancelMarquee, true)
       mount.removeEventListener('lostpointercapture', cancelMarquee, true)
-      window.removeEventListener('keydown', escapeMarquee, true)
       window.removeEventListener('pointerup', orphanRelease, true)
       window.removeEventListener('pointercancel', orphanRelease, true)
       dom.removeEventListener('pointerup', onPointerUp)

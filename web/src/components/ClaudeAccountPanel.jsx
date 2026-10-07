@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import './popovers.css'
 import useExit from '../useExit.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { absoluteWithZone, relativeTime } from '../lib/railTime.js'
 import useRelativeNow from '../lib/useRelativeNow.js'
 
@@ -42,20 +43,16 @@ export default function ClaudeAccountPanel({
       ? [{ id: null, label: grant.kind === 'api_key' ? 'Anthropic API key' : 'Legacy Claude mount', kind: grant.kind, linked_at: grant.linked_at, active: true }]
       : []
 
+  // S27: Escape is the owner stack's (menu layer: an anchored popover); the
+  // stack's order replaces the old "an open drawer owns Esc" selector check.
+  useEscapeOwner('claude-account', !!open && !mock, () => onToggle(false), { layer: 'menu', scope: rootRef })
   useEffect(() => {
     if (!open) return undefined
     const onDoc = (event) => {
       if (rootRef.current && !rootRef.current.contains(event.target)) onToggle(false)
     }
-    const onKey = (event) => {
-      if (event.key === 'Escape' && !document.querySelector('.drawer-layer .drawer')) onToggle(false)
-    }
     document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
+    return () => document.removeEventListener('mousedown', onDoc)
   }, [open, onToggle])
 
   useEffect(() => {
