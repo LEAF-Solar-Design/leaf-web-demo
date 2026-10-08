@@ -126,6 +126,37 @@ describe('late results are listed as stale, never applied', () => {
     expect(onCompleteVersion.mock.calls[0][0]).toBe(8)
   })
 
+  it('lists a committed result that finishes after another job is adopted', async () => {
+    const hook = mountHook()
+    const running = await startRun(hook, { jobId: 'job-background' })
+
+    act(() => {
+      hook.result.current.adoptEnvelope(
+        { ok: true, tool: 'count-panels', result: { count: 12 } },
+        { jobId: 'job-adopted', toolName: 'count-panels' },
+      )
+    })
+    await settle(running, { ok: true, tool: TOOL, result: { new_version: 7 } })
+
+    expect(hook.result.current.result).toMatchObject({ tool: 'count-panels' })
+    expect(hook.result.current.staleResults).toEqual([
+      { job_id: 'job-background', tool: TOOL, new_version: 7 },
+    ])
+  })
+
+  it('lists a committed result that finishes after the user detaches', async () => {
+    const hook = mountHook()
+    const running = await startRun(hook, { jobId: 'job-detached' })
+
+    act(() => { hook.result.current.detachJob() })
+    await settle(running, { ok: true, tool: TOOL, result: { new_version: 8 } })
+
+    expect(hook.result.current.currentJob).toBeNull()
+    expect(hook.result.current.staleResults).toEqual([
+      { job_id: 'job-detached', tool: TOOL, new_version: 8 },
+    ])
+  })
+
   it('does not list a superseded failed result', async () => {
     const hook = mountHook()
     const a = await startRun(hook, { jobId: 'job-a' })

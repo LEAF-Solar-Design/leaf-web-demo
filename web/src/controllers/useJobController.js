@@ -146,9 +146,6 @@ export default function useJobController({
   const [pendingRun, setPendingRun] = useState(() => (mock ? null : readPendingRun(storage)))
 
   const sequenceRef = useRef(0)
-  // The sequence of the newest runJob/attachJob start. A result whose own
-  // sequence is no longer this one was superseded by a newer run.
-  const runStartRef = useRef(0)
   // Bumped by reset(): a result from before a reset belongs to a context this
   // view has left, so it is not listed as stale either.
   const epochRef = useRef(0)
@@ -252,11 +249,12 @@ export default function useJobController({
   // committed its version, but it is not loaded into this view, and no
   // notice, result or version seat follows. The record carries no envelope
   // body, one row per job id, newest first, bounded to MAX_STALE_RESULTS.
-  const recordStale = useCallback((envelope, sequence, { jobId, toolName, epoch }) => {
+  const recordStale = useCallback((envelope, { jobId, toolName, epoch }) => {
     if (!envelope?.ok || !isJobId(jobId)) return
-    // Declared, not covered: a result superseded by an adopt or a detach
-    // (rather than a newer run) still returns here and is dropped silently.
-    if (runStartRef.current === sequence || epochRef.current !== epoch) return
+    // An adopt or detach supersedes the active presentation just like a newer
+    // run does. Keep a successful committed result visible in the stale list
+    // unless reset() moved the controller to another drawing/context.
+    if (epochRef.current !== epoch) return
     const tool = isToolName(toolName) && toolName !== 'job'
       ? toolName
       : (isToolName(envelope.tool) ? envelope.tool : 'job')
@@ -271,7 +269,7 @@ export default function useJobController({
 
   const finishEnvelope = useCallback(async (envelope, sequence, toolName, stale = null) => {
     if (sequenceRef.current !== sequence) {
-      if (stale) recordStale(envelope, sequence, { ...stale, toolName })
+      if (stale) recordStale(envelope, { ...stale, toolName })
       return false
     }
     setResult(envelope)
@@ -300,7 +298,6 @@ export default function useJobController({
   } = {}) => {
     if (!jobId || mock) return null
     const sequence = ++sequenceRef.current
-    runStartRef.current = sequence
     const stale = { jobId, epoch: epochRef.current }
     let keepPointer = false
     setJobId(jobId)
@@ -362,7 +359,6 @@ export default function useJobController({
     const origin = typeof capturedDrawingKey === 'string' && capturedDrawingKey.length > 0
       ? { drawingKey: capturedDrawingKey } : undefined
     const sequence = ++sequenceRef.current
-    runStartRef.current = sequence
     const epoch = epochRef.current
     let submittedJobId = null
     let keepPointer = false
