@@ -42,11 +42,11 @@ function envelope(ok: boolean, errorCode?: string): ResultEnvelope {
 
 describe("Agent SDK author contract", () => {
   it("uses the explicit, environment, then proven default model", () => {
-    expect(resolveAuthorModel("claude-opus-4-1", { LEAF_SPINE_MODEL: "claude-haiku-4-5" })).toBe(
+    expect(resolveAuthorModel("claude-opus-4-1", { LEAF_SPINE_MODEL: "claude-haiku-5-5" })).toBe(
       "claude-opus-4-1",
     );
-    expect(resolveAuthorModel(undefined, { LEAF_SPINE_MODEL: "claude-haiku-4-5" })).toBe(
-      "claude-haiku-4-5",
+    expect(resolveAuthorModel(undefined, { LEAF_SPINE_MODEL: "claude-haiku-5-5" })).toBe(
+      "claude-haiku-5-5",
     );
     expect(resolveAuthorModel(undefined, {})).toBe("claude-sonnet-5-5");
   });

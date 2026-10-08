@@ -524,10 +524,10 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     expect(mock.tools.map((t) => t.name)).toEqual([...SPINE_TOOL_NAMES]);
   });
 
-  it("model precedence: input.model > constructor model", async () => {
+  it.each(["claude-haiku-5-5", "claude-haiku-4-5"])("model precedence: input.model %s > constructor model", async (model) => {
     const mock = makeMockSdk([resultSuccess()]);
-    await collect(runnerWith(mock), makeInput({ model: "claude-haiku-4-5" }));
-    expect(mock.queries[0]!.options.model).toBe("claude-haiku-4-5");
+    await collect(runnerWith(mock), makeInput({ model }));
+    expect(mock.queries[0]!.options.model).toBe(model);
   });
 
   it("defaults the model to claude-sonnet-5-5 when neither option nor env is set", async () => {
