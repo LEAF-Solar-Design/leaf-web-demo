@@ -102,15 +102,15 @@ function BuildFeedNotes({ buildFeed }) {
   )
 }
 
-// solar-parity-017: a result that finished after a newer run started is listed
-// here and never loaded into the view (the server already committed it), and a
-// run kept across a sign-in expiry waits behind 'Review and run'. Absent or
-// empty props render nothing.
+// solar-parity-017: a result that finished after its view context changed is
+// listed here and never loaded into the view (the server already committed it),
+// and a run kept across a sign-in expiry waits behind 'Review and run'. Absent
+// or empty props render nothing.
 function StaleResultNotes({ staleResults, onDismissStale }) {
   if (!Array.isArray(staleResults) || staleResults.length === 0) return null
   return staleResults.map((row) => (
     <div key={row.job_id} className="rail-note rail-stale" role="status" data-stale-job={row.job_id}>
-      <span>{`${row.tool} finished after a newer run started. Its result was not loaded into this view.`}</span>{' '}
+      <span>{`${row.tool} finished after this view changed. Its result was not loaded into this view.`}</span>{' '}
       <button type="button" className="chip-act" onClick={() => onDismissStale?.(row.job_id)}>Dismiss</button>
     </div>
   ))
