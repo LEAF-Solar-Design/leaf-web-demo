@@ -5,7 +5,7 @@
  * the one the loop built before this feature existed.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConverseLoop } from "../src/agent/converseLoop.js";
 import { FakeAppRunClient } from "../src/ports/fakes/fakeAppRunClient.js";
@@ -139,6 +139,31 @@ describe("turn intent synthesis", () => {
 });
 
 describe("classifier containment", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("defaults to claude-haiku-5-5 without thinking, sampling, or prefill options", async () => {
+    vi.stubEnv("LEAF_INTENT_MODEL", undefined as unknown as string);
+    const seen: Array<{ prompt: unknown; options: Record<string, unknown> }> = [];
+    const sdkStub = {
+      async *query(args: { prompt: unknown; options: Record<string, unknown> }) {
+        seen.push(args);
+        yield { content: [{ type: "text", text: '{"target":"product"}' }] };
+      },
+    };
+    const synth = new HaikuIntentSynthesizer({
+      grant: { kind: "api_key", apiKey: "test-key-not-real" },
+      sdkImport: async () => sdkStub,
+    });
+
+    expect(await synth.synthesize("change the background to light mode")).toEqual({ target: "product" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.options.model).toBe("claude-haiku-5-5");
+    expect(typeof seen[0]!.prompt).toBe("string");
+    for (const key of ["thinking", "maxThinkingTokens", "budget_tokens", "temperature", "top_p", "top_k", "topP", "topK", "extraArgs"]) {
+      expect(seen[0]!.options).not.toHaveProperty(key);
+    }
+  });
+
   /**
    * This classifier feeds UNTRUSTED user text to a model, so its sandbox is the
    * whole design. Three review rounds each found a different knob missing, and

@@ -58,8 +58,8 @@
       "sha256": "7cc65099cb8b31a6ec796ed162fbe7c55a05ee4ed66ce2abf3eb089e65bd4552"
     },
     "ports/modelAllowlist.ts": {
-      "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8",
-      "sha256": "5c7cbac1e5982b66023895b74b03587ea12f120938f4d21b5f6a913c809c4a2c"
+      "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8; claude-haiku-5-5 allowlist entry from mushy-code 74e50286 carried too ahead of a re-pin; retire at the next re-pin past 74e50286",
+      "sha256": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17"
     }
   },
   "files": {
@@ -118,7 +118,7 @@
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantRepoProvider.ts": "a1469ba8882eea3b79e450135abad9f29b95718e67bf511180d9c728052f8c15",
     "ports/index.ts": "7cc65099cb8b31a6ec796ed162fbe7c55a05ee4ed66ce2abf3eb089e65bd4552",
-    "ports/modelAllowlist.ts": "5c7cbac1e5982b66023895b74b03587ea12f120938f4d21b5f6a913c809c4a2c",
+    "ports/modelAllowlist.ts": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
     "ports/wireGrant.ts": "ac9619a708b426ff3920c796497727497bc7e707d70a5a5503c759324e379904",
     "redact.ts": "1f0d0b8e7010b7789719c4a56c40fe0f61cfdc94fba06b5559b443f47cc14b2e",

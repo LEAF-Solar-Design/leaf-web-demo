@@ -101,6 +101,7 @@ ALLOWED_MODELS = frozenset({
     "claude-sonnet-5-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
+    "claude-haiku-5-5",
     "claude-haiku-4-5",
     "claude-fable-5",
 })

@@ -79,6 +79,11 @@ import deps  # noqa: E402
 from envelopes import ErrorCode  # noqa: E402
 
 
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-haiku-4-5"])
+def test_admits_haiku_spine_models(model):
+    assert turn_runner.is_allowed_model(model)
+
+
 # =========================================================================== #
 # stub harness — real HTTP/1.1 chunked application/x-ndjson streaming
 # =========================================================================== #

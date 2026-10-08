@@ -97,7 +97,7 @@ export class HaikuIntentSynthesizer implements IntentSynthesizer {
   constructor(opts: HaikuIntentSynthesizerOptions) {
     this.grant = opts.grant;
     this.model =
-      opts.model ?? process.env.LEAF_INTENT_MODEL ?? "claude-haiku-4-5-20251001";
+      opts.model ?? process.env.LEAF_INTENT_MODEL ?? "claude-haiku-5-5";
     this.timeoutMs =
       opts.timeoutMs ?? (Number(process.env.LEAF_INTENT_TIMEOUT_MS || "") || 6000);
     this.sdkImport =
