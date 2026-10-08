@@ -68,6 +68,8 @@
 // is React-free), so engineSessionErrors.js holds the constant both read.
 import { SESSION_ERROR } from '../cadedit/engineSessionErrors.js'
 import { SELECTION_EDIT_OPS, MAX_SELECTION_EDIT_ENTITIES } from '../cadedit/selection.js'
+import { readSingleKeyShortcuts } from './singleKeyPreference.js'
+import { closeTopEscapeOwner, topEscapeOwnerId } from './useEscapeOwner.js'
 
 // The ribbon's reason vocabulary. Lived in ribbonClusters.js until this slice;
 // it moved here because `when` is the registry's half of the honesty contract
@@ -356,6 +358,83 @@ export function engineShortcutDecision(event, ctx = {}) {
   return 'engine:repeat'
 }
 
+// S25: version undo and redo on the keyboard, OFF the drafting surface only.
+// On a visible engine document Mod+Z is the engine's own edit history
+// (engineShortcutDecision above); everywhere else it steps the drawing's
+// versions, the same handlers the version ribbon's Undo and Redo click.
+export const VERSION_SHORTCUTS = Object.freeze({
+  undo: 'Mod+Z',
+  redo: 'Mod+Shift+Z',
+})
+
+// Where a cap fires, as the shortcut sheet prints it. Two rows share Mod+Z, so
+// the sheet must say which surface each one answers on.
+export const KBD_CONTEXTS = Object.freeze({
+  anywhere: 'Anywhere',
+  outsideFields: 'Outside text fields',
+  canvas: 'Drawing canvas',
+  offCanvas: 'Off the drawing canvas',
+})
+
+export const ENGINE_DOCUMENT_SELECTOR = '[data-engine-document]'
+
+function visibleNode(element) {
+  const view = element.ownerDocument?.defaultView
+  for (let node = element; node; node = node.parentElement) {
+    if (node.hidden || node.hasAttribute?.('inert') || node.getAttribute?.('aria-hidden') === 'true') return false
+    if (node.tagName === 'DIALOG' && !node.open) return false
+    const style = view?.getComputedStyle?.(node)
+    if (style && (style.display === 'none' || style.visibility === 'hidden')) return false
+  }
+  return true
+}
+
+/**
+ * Whether a drafting engine document is on screen, read fresh from the DOM.
+ * Called only for a Mod+Z chord, never per keystroke. Fails closed toward
+ * "no document" when there is no DOM to read.
+ */
+export function engineDocumentVisible(root) {
+  const doc = root === undefined || root === null ? globalThis.document : root
+  if (!doc?.querySelectorAll) return false
+  for (const element of doc.querySelectorAll(ENGINE_DOCUMENT_SELECTOR)) {
+    if (visibleNode(element)) return true
+  }
+  return false
+}
+
+/**
+ * Mod+Z / Mod+Shift+Z as version undo / redo, or null. Pure apart from the two
+ * DOM reads it is handed (or makes, when the caller hands none): yields when
+ * the key was already consumed, when Alt or both Ctrl and Meta are held, while
+ * composing or auto-repeating, when the target or the focused element is an
+ * editor (a field keeps its own text undo), and when a visible engine document
+ * owns Mod+Z for its edit history. `ctx.draftingVisible` (a function) and
+ * `ctx.activeElement` override the DOM reads for a caller or a test.
+ */
+export function versionShortcutDecision(event, ctx = {}) {
+  if (!event || event.defaultPrevented || event.isComposing || event.keyCode === 229
+      || event.repeat || event.altKey) return null
+  if (!(event.ctrlKey || event.metaKey) || (event.ctrlKey && event.metaKey)) return null
+  if (event.key !== 'z' && event.key !== 'Z') return null
+  const active = Object.prototype.hasOwnProperty.call(ctx, 'activeElement') ? ctx.activeElement : globalThis.document?.activeElement
+  if (editorTarget(event.target) || editorTarget(active)) return null
+  const drafting = typeof ctx.draftingVisible === 'function'
+    ? ctx.draftingVisible()
+    : engineDocumentVisible(event.target?.ownerDocument)
+  if (drafting) return null
+  return event.shiftKey ? 'redo' : 'undo'
+}
+
+/**
+ * Whether single-key shortcuts (bare R, Shift+?) may fire. A boolean on the
+ * context wins; otherwise the stored preference is read at keystroke time, so
+ * the ShortcutSheet switch takes effect on the next key.
+ */
+export function singleKeyShortcutsOn(ctx = {}) {
+  return typeof ctx.singleKeyShortcuts === 'boolean' ? ctx.singleKeyShortcuts : readSingleKeyShortcuts()
+}
+
 /**
  * The version cluster's shared ladder: the blockers undo, redo and history all
  * answer to before their own. Lifted out of versionCluster unchanged so the
@@ -396,12 +475,19 @@ export function accessibleName(label, reason = '') {
 export const INTERACTIVE_TARGET_SELECTOR = 'button, a, summary, [role="button"], [role="option"], [role="menuitem"]'
 
 /**
- * Esc pops ONE rung at a time, topmost surface first. The order is the ladder
- * App.jsx has always walked; the first rung whose `open` answers true wins and
- * nothing below it fires. Each `run` names the handler the caller supplies —
- * this module performs no effect of its own.
+ * Esc pops ONE rung at a time, topmost surface first. S27: the top rung is the
+ * Escape owner stack (useEscapeOwner.js, motion standard section 7): any
+ * surface registered there closes before the shell's own rungs, and the stack
+ * consumes its key in the capture phase, so the ladder below only ever sees an
+ * Escape no owner took. The rest is the ladder App.jsx has always walked; the
+ * first rung whose `open` answers true wins and nothing below it fires. Each
+ * `run` names the handler the caller supplies, except `owner`, which runs the
+ * stack's topmost owner.
  */
 export const ESCAPE_RUNGS = Object.freeze([
+  // Judged against the key itself when the ladder has one, so a scoped owner
+  // that declined this keypress in the capture phase declines it here too.
+  Object.freeze({ id: 'owner', open: (ctx, event) => topEscapeOwnerId(event) !== '', run: (ctx, event) => closeTopEscapeOwner(event) }),
   Object.freeze({ id: 'drawer', open: (ctx) => (!!ctx.drawer && ctx.drawer !== 'none')
     || (ctx.phoneViewport === true && !!ctx.studioDrawer && ctx.studioDrawer !== 'none'), run: (ctx) => ctx.onCloseDrawer?.() }),
   Object.freeze({ id: 'history', open: (ctx) => !!ctx.historyOpen, run: (ctx) => ctx.onCloseHistory?.() }),
@@ -432,9 +518,12 @@ export const RETRY_RUNGS = Object.freeze({
   refresh: (ctx) => ctx.onRetryRefresh?.(),
 })
 
-/** The Esc rung that would fire for this context, or '' when none would. */
-export function escapeRung(ctx = {}) {
-  const rung = ESCAPE_RUNGS.find((r) => r.open(ctx))
+/**
+ * The Esc rung that would fire for this context, or '' when none would. The
+ * owner stack is read first; `event`, when given, is the key being judged.
+ */
+export function escapeRung(ctx = {}, event = undefined) {
+  const rung = ESCAPE_RUNGS.find((r) => r.open(ctx, event))
   return rung ? rung.id : ''
 }
 
@@ -472,7 +561,10 @@ function isInteractiveTarget(target) {
  * THROUGH to the bar; Shift+? (slice 10b) opens the shortcut sheet, same
  * outside-a-text-field guard as R; and any other bare printable keystroke
  * falls into the bar unless the target is editable or interactive, or an
- * overlay (drawer, history) owns the typing.
+ * overlay (drawer, history) owns the typing. S25 adds two rules: Mod+Z and
+ * Mod+Shift+Z run the version undo / redo records off the drafting surface
+ * (versionShortcutDecision), and with single-key shortcuts switched off bare R
+ * and Shift+? return null.
  */
 export function ladderDecision(event, ctx = {}) {
   if (!event || event.defaultPrevented || typeof event.key !== 'string') return null
@@ -483,13 +575,27 @@ export function ladderDecision(event, ctx = {}) {
     return { id: 'bar:focus', rung: '', route: 'kbd', preventDefault: true, instant: true }
   }
 
+  // S25: Mod+Z / Mod+Shift+Z step the drawing's versions, but only off the
+  // drafting surface and outside an editor (versionShortcutDecision).
+  if (event.metaKey || event.ctrlKey) {
+    const version = versionShortcutDecision(event, ctx)
+    if (version) return { id: version, rung: '', route: 'kbd', preventDefault: true, instant: false }
+  }
+
   if (event.key === 'Escape') {
-    const rung = escapeRung(ctx)
+    const rung = escapeRung(ctx, event)
     // No open rung: nothing to close, so the ladder leaves the key alone
     // (null, no preventDefault). Esc is not printable, so it never reaches the
     // type-to-fall-through route below either.
-    return rung ? { id: 'bar:escape', rung, route: 'kbd', preventDefault: rung === 'start', instant: true } : null
+    return rung ? { id: 'bar:escape', rung, route: 'kbd', preventDefault: rung === 'start' || rung === 'owner', instant: true } : null
   }
+
+  // S25: with single-key shortcuts switched off, bare R and Shift+? are no
+  // longer the ladder's at all (null, no fall-through). Read only for these
+  // two keys, so every other key costs nothing.
+  const singleKey = !typing && !event.metaKey && !event.ctrlKey && !event.altKey
+    && (event.key === 'r' || event.key === 'R' || event.key === '?')
+  if (singleKey && !singleKeyShortcutsOn(ctx)) return null
 
   if (!typing && (event.key === 'r' || event.key === 'R')
       && !event.metaKey && !event.ctrlKey && !event.altKey) {
@@ -534,7 +640,13 @@ export function ladderListener(shell, handlers, markInstant) {
     if (!decision) return
     if (decision.instant) markInstant?.()
     if (decision.preventDefault) event.preventDefault()
-    byId(decision.id)?.run(handlers(shell))
+    const action = byId(decision.id)
+    if (!action) return
+    const ctx = handlers(shell)
+    // A gated record answers to its own ladder (S25: version undo with nothing
+    // to undo, or a run in flight): the key is claimed, nothing runs.
+    if (action.gated && action.when(ctx)) return
+    action.run(ctx)
   }
 }
 
@@ -652,12 +764,14 @@ const ACTION_LIST = [
     always, (ctx) => ctx.onTogglePane?.(), { cluster: 'view' }),
 
   // Version: undo / redo / history, under EXACTLY the toolbar's gates.
+  // S25: both carry a cap, fired by the global ladder off the drafting
+  // surface (versionShortcutDecision); on the canvas Mod+Z is engine:undo's.
   ribbon('undo', 'undo', 'Undo', 'undo', 'Undo the last version',
     (ctx) => versionSharedReason(ctx) || (!ctx.canUndo ? REASONS.nothingToUndo : ''),
-    (ctx) => ctx.onUndo?.(), { cluster: 'version' }),
+    (ctx) => ctx.onUndo?.(), { cluster: 'version', kbd: VERSION_SHORTCUTS.undo, kbdContext: KBD_CONTEXTS.offCanvas, triggers: { ...BUTTON_TRIGGERS, keyboard: 'kbd' } }),
   ribbon('redo', 'redo', 'Redo', 'redo', 'Redo the undone version',
     (ctx) => versionSharedReason(ctx) || (!ctx.canRedo ? REASONS.nothingToRedo : ''),
-    (ctx) => ctx.onRedo?.(), { cluster: 'version' }),
+    (ctx) => ctx.onRedo?.(), { cluster: 'version', kbd: VERSION_SHORTCUTS.redo, kbdContext: KBD_CONTEXTS.offCanvas, triggers: { ...BUTTON_TRIGGERS, keyboard: 'kbd' } }),
   // History answers to a SHORTER ladder than undo/redo: reading the versions
   // is legal while a run is in flight, changing them is not.
   ribbon('history', 'history', 'History', 'history', 'Open the version history',
@@ -786,8 +900,8 @@ const ACTION_LIST = [
     surface: 'slash',
   },
 
-  // The global key ladder. These four are the ONLY actions in this registry
-  // that carry a `kbd`, because they are the only four bound today.
+  // The global key ladder's four shell rungs. The other caps in this registry
+  // are the engine's (ENGINE_SHORTCUTS) and the version pair (VERSION_SHORTCUTS).
   {
     id: 'bar:focus',
     gated: false,
@@ -795,6 +909,7 @@ const ACTION_LIST = [
     text: 'Command bar',
     icon: '',
     kbd: 'Mod+K',
+    kbdContext: KBD_CONTEXTS.anywhere,
     title: text('Focus the command bar'),
     when: always,
     run: (ctx) => ctx.focusBar?.(),
@@ -808,6 +923,7 @@ const ACTION_LIST = [
     text: 'Close',
     icon: '',
     kbd: 'Escape',
+    kbdContext: KBD_CONTEXTS.anywhere,
     title: text('Close the topmost open surface'),
     when: (ctx) => (escapeRung(ctx) ? '' : LADDER_REASONS.nothingOpen),
     run: (ctx) => {
@@ -826,6 +942,8 @@ const ACTION_LIST = [
     text: 'Retry',
     icon: '',
     kbd: 'R',
+    kbdContext: KBD_CONTEXTS.outsideFields,
+    singleKey: true,
     title: text('Retry the highest-priority failed step'),
     when: (ctx) => {
       if (ctx.rTarget === 'result') return LADDER_REASONS.retryOwnedByResult
@@ -853,6 +971,8 @@ const ACTION_LIST = [
     text: 'Shortcuts',
     icon: '',
     kbd: 'Shift+?',
+    kbdContext: KBD_CONTEXTS.outsideFields,
+    singleKey: true,
     title: text('Open the keyboard shortcut sheet'),
     when: always,
     run: (ctx) => ctx.onOpenShortcuts?.(),
@@ -873,6 +993,9 @@ export const MAX_ID_CHARS = 64
 export const MAX_LABEL_CHARS = 120
 
 const bounded = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max
+// Engine caps fire only on the drawing canvas (engineShortcutDecision needs a
+// shown canvas), so every engine record shares that one context.
+const kbdContextOf = (a) => a.kbdContext || (a.surface === 'engine' ? KBD_CONTEXTS.canvas : '')
 
 /**
  * Every invariant a record must hold, checked ONCE at module load and thrown on
@@ -906,6 +1029,8 @@ export function validateRegistry(actions) {
     // A cap with no keyboard trigger is a shortcut nobody bound; a keyboard
     // trigger of 'kbd' with no cap is a key nobody can find. Both are lies.
     if ((a.kbd === null) !== (t.keyboard !== 'kbd')) throw new Error(`actionRegistry: ${a.id} kbd and keyboard trigger disagree`)
+    // S25: a cap the sheet prints must say where it fires (two rows share Mod+Z).
+    if (a.kbd !== null && !bounded(kbdContextOf(a), MAX_LABEL_CHARS)) throw new Error(`actionRegistry: ${a.id} has a cap with no context`)
     // `when` and `title` must be TOTAL: a renderer calls them with whatever
     // context it holds, including none at all on first paint.
     if (typeof a.gated !== 'boolean') throw new Error(`actionRegistry: ${a.id} does not declare gated`)
@@ -981,7 +1106,8 @@ export function forGroup(group) {
 /**
  * The shortcut sheet's source: every action that actually carries a cap today,
  * in ladder order. An action with `kbd: null` is absent because nothing is
- * bound to it, not because the sheet forgot it.
+ * bound to it, not because the sheet forgot it. `context` says where the cap
+ * fires; `singleKey` marks a cap the single-key switch turns off (S25).
  */
 export function keyboardTable() {
   return ACTIONS.filter((a) => a.kbd !== null).map((a) => ({
@@ -989,6 +1115,8 @@ export function keyboardTable() {
     label: a.label,
     kbd: a.kbd,
     surface: a.surface,
+    context: kbdContextOf(a),
+    singleKey: a.singleKey === true,
   }))
 }
 

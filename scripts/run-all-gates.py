@@ -1538,6 +1538,8 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(
                   r"cannot read the website validator from origin/main: [\s\S]*"
                   r"Cross-repo contract drift is UNVERIFIED in this run\.",)),
+        Suite("server-capabilities-cold-import", "server tests/test_capabilities_cold_import.py", "pytest",
+              SERVER, _py_pytest("tests/test_capabilities_cold_import.py"), 1),
         # --- broker keystone (census #4, 2026-07-22): test_broker_boundary's --- #
         # one red was a stale pre-§19 assertion (offline `dwg` no longer
         # ignored) — fixed and registered per the #29 fix-then-register rule.
@@ -1881,6 +1883,18 @@ def build_suites() -> List[Suite]:
         # default from being re-labelled as an observed setting, so letting it
         # vanish silently would retire the guard and still report green. Moves
         # in lockstep with the assertion in scripts/test_gate_runner.py.
+        Suite("server-sip-r3a-graph", "server canonical Solar graph adapter", "pytest", SERVER,
+              _py_pytest("tests/test_sip_r3a_graph.py"), 24),
+        Suite("server-sip-r3b-tools", "server canonical Solar tool chain", "pytest", SERVER,
+      _py_pytest("tests/test_sip_r3b_tools.py"), 19),
+        Suite("platform-sip-r3b-tools", "platform canonical Solar tool publication", "pytest",
+              REPO / "platform", _py_pytest("tests/test_sip_r3b_tools.py"), 7,
+              uses_database=True, db_gated=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-sip-r3a-graph", "platform canonical Solar graph publication", "pytest",
+              REPO / "platform", _py_pytest("tests/test_sip_r3a_graph.py"), 10,
+              uses_database=True, db_gated=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("platform-sip-r2-publication", "platform fenced canonical publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r2_publication.py"), 17,
         uses_database=True, db_gated=True, database_skip_reasons=(
@@ -2201,7 +2215,8 @@ def build_suites() -> List[Suite]:
         # sets LEAF_GATE_REQUIRE_DATABASE=1, so this floor IS enforced there
         # against a pristine database, and an unreachable DB is a FAIL row.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests"), 271, db_gated=True,
+              # sip-r3b-1 adds seven canonical Solar publication rows.
+              _py_pytest(f"{repo_name}/platform/tests"), 288, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -2298,7 +2313,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_native_release_producer.py"), 32),
         # Proves labelled sizing replay isolation; opens loopback sockets and short-lived child Pythons only.
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 33),
+              SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for
@@ -2910,7 +2925,8 @@ def build_suites() -> List[Suite]:
               # +6 (2026-10-01, ephemeral PostgreSQL lane): the gate-DSN, required-database
               # and database-catalog tests, none environment-gated.
               SCRIPTS_DIR, _py_pytest("test_gate_runner.py") +
-              ["test_studio_walk_regression_gate.py"], 94),
+              # sip-r3b-1 adds the canonical Solar tool registration row.
+              ["test_studio_walk_regression_gate.py"], 96),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

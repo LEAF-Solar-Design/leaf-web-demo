@@ -4,9 +4,51 @@ import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
   captureEngineRefusal, assertEngineRefusal, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
-import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError } from './fixtures.mjs'
+import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
+import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
+
+test('G4 delete removes both fixture LINEs and one Undo restores the whole drawing', async () => {
+  const geometry = { entities: [{ id: 0xA100, type: 'LINE' }, { id: 0xA101, type: 'LINE' }, { id: 9, type: 'CIRCLE' }] }
+  for (const removed of [2, 1]) {
+    let current = geometry
+    let undoClicks = 0
+    const page = {
+      getByTestId: (id) => ({ id, innerText: async () => String(current.entities.length) }),
+      evaluate: async () => current,
+      getByRole: (role, options) => {
+        assert.equal(role, 'toolbar')
+        assert.equal(options.name, 'Quick access')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          assert.equal(options.name, ACTIONS.find((action) => action.id === 'engine:undo').label)
+          return { click: async () => { undoClicks++; current = geometry } }
+        } }
+      },
+    }
+    const assertions = (value) => ({
+      toBe: (expected) => assert.equal(value, expected),
+      toEqual: (expected) => assert.deepEqual(value, expected),
+      toHaveText: async (expected) => { assert.equal(value.id, 'dock-selection-count'); assert.equal(expected, '2 objects selected') },
+    })
+    assertions.poll = (read) => ({ toBe: async (expected) => assert.equal(await read(), expected) })
+    const runtime = { page, evidence: {} }
+    const before = await captureMultipleSelection({ assertion: { target: 'engine:delete' } }, runtime, assertions)
+    assert.equal(before.selectionCount, 2)
+    assert.equal(before.count, 3)
+    current = { entities: geometry.entities.slice(removed) }
+    if (removed === 1) {
+      await assert.rejects(assertMultipleSelectionDelete(runtime, before, assertions), assert.AssertionError)
+      assert.equal(undoClicks, 0)
+    } else {
+      await assertMultipleSelectionDelete(runtime, before, assertions)
+      assert.equal(undoClicks, 1)
+      assert.deepEqual(runtime.evidence.multipleSelection, { selectionCount: 2, before: 3, after: 1, restored: 3, undoSteps: 1 })
+    }
+  }
+})
+import { captureEngineRepeat, activateEngineRepeat } from './fixtures.mjs'
 import { faultRouteOnce, drawingRequest, setupVersionFault, finishVersionFault,
   setupHistoryFault, assertHistoryRecovery, setupRealProject } from './fixtures.mjs'
 import { CENSUS_DISCLOSURES, censusDisclosureState, setupCensusDisclosure, setupCensusScript,
@@ -26,12 +68,156 @@ const censusAssertions = (value) => ({
   toHaveText: async (expected) => assert.equal(value.text, expected),
   toContainText: async (expected) => assert.ok(value.text.includes(expected)),
 })
+
+test('Repeat focuses the drawing landmark, presses Enter and restores its tab stop', async () => {
+  for (const original of [null, '0']) {
+    const events = []
+    let tabindex = original, focused = false
+    const element = {
+      setAttribute: (name, value) => { assert.equal(name, 'tabindex'); tabindex = value },
+      removeAttribute: (name) => { assert.equal(name, 'tabindex'); tabindex = null },
+      focus: () => { focused = true; events.push('focus') },
+    }
+    const locator = { getAttribute: async () => tabindex, evaluate: async (fn, arg) => fn(element, arg) }
+    const runtime = { cleanup: [], page: { keyboard: { press: async (key) => { assert.ok(focused); events.push(key) } } } }
+    await activateEngineRepeat(runtime, locator, () => ({ toBeFocused: async () => assert.ok(focused) }))
+    assert.deepEqual(events, ['focus', 'Enter'])
+    assert.equal(tabindex, '-1')
+    await runtime.cleanup[0]()
+    assert.equal(tabindex, original)
+  }
+})
+
+test('Repeat baseline dismisses an old operand prompt and observes worker messages', async () => {
+  const events = []
+  const dispatches = [{ type: 'loadDocument' }]
+  const runtime = { evidence: {}, page: {
+    keyboard: { press: async (key) => events.push(key) },
+    getByRole: () => ({ fill: async (value) => { assert.equal(value, ''); events.push('empty-bar') } }),
+    getByTestId: () => ({ visible: false }),
+    evaluate: async (fn) => fn.toString().includes('structuredClone') ? structuredClone(dispatches) : undefined,
+  } }
+  assert.deepEqual(await captureEngineRepeat({ state: 'engine-busy' }, runtime, censusAssertions), { dispatches })
+  assert.deepEqual(events, ['Escape', 'empty-bar'])
+  assert.deepEqual(runtime.evidence.repeatBaseline, { dispatches })
+})
+
+test('every Repeat oracle distinguishes a prompt, an announced refusal and a silent ignored key', async () => {
+  const entry = buildFeatureMap().entries.find((row) => row.id === 'action:engine-repeat')
+  assert.deepEqual([...entry.states].sort(), ['engine-busy', 'engine-crashed', 'engine-not-parsed', 'no-command-to-repeat', 'no-drawing', 'ready'])
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    for (const fault of [null, 'dispatch', ...(state === 'ready' ? ['wrong-command'] : ['armed']),
+      ...(['engine-busy', 'no-command-to-repeat'].includes(state) ? ['wrong-refusal'] : [])]) {
+      const prompt = { visible: state === 'ready' || fault === 'armed', name: fault === 'wrong-command' ? 'CIRCLE command' : 'LINE command' }
+      const status = { text: fault === 'wrong-refusal' ? 'unrelated status' : probe.assertion.reason,
+        innerText: async () => status.text, isVisible: async () => false }
+      let statusReads = 0
+      const before = { dispatches: [{ type: 'loadDocument' }] }
+      const runtime = { evidence: {}, page: {
+        getByTestId: (id) => id === 'cockpit-prompt' ? prompt : { getByRole: (role, options) => {
+          assert.equal(role, 'status'); assert.deepEqual(options, { includeHidden: true }); statusReads++; return status
+        } },
+        evaluate: async (fn) => fn.toString().includes('structuredClone')
+          ? [...before.dispatches, ...(fault === 'dispatch' ? [{ type: 'edit', op: 'createLine' }] : [])] : undefined,
+      } }
+      const assertions = (value) => ({ ...censusAssertions(value),
+        toEqual: (expected) => assert.deepEqual(value, expected),
+        toHaveAccessibleName: async (expected) => assert.equal(value.name, expected),
+      })
+      const check = () => assertEffect(probe, runtime, {}, before, assertions)
+      if (fault) await assert.rejects(check())
+      else {
+        await check()
+        const ignored = ['no-drawing', 'engine-not-parsed', 'engine-crashed'].includes(state)
+        assert.equal(runtime.evidence.repeatIgnored, ignored ? true : undefined)
+        assert.equal(statusReads, ignored || state === 'ready' ? 0 : 1)
+        assert.deepEqual(runtime.evidence.repeatDispatches.after, before.dispatches)
+        if (statusReads) assert.deepEqual(runtime.evidence.repeatRefusal, { text: probe.assertion.reason, visible: false })
+      }
+    }
+  }
+})
+
+test('failed catalog recovery listens before Retry, awaits its reply and retries only once', async () => {
+  const events = []
+  let visible = true, resolveResponse
+  const reason = "Couldn't load tools: startup timed out Retry"
+  const status = {
+    filter: (options) => { assert.match(reason, options.hasText); return status },
+    isVisible: async () => visible,
+    innerText: async () => reason,
+    getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Retry', exact: true })
+      return { click: async (options) => { assert.equal(options.timeout, 15_000); events.push('click') } }
+    },
+  }
+  const page = {
+    getByRole: (role, options) => {
+      assert.equal(role, 'toolbar')
+      assert.deepEqual(options, { name: 'Drafting tools', exact: true })
+      return { getByRole: (role) => { assert.equal(role, 'status'); return status } }
+    },
+    waitForResponse: (predicate, options) => {
+      assert.equal(options.timeout, 15_000)
+      const reply = (method, path, ok) => ({ request: () => ({ method: () => method }),
+        url: () => `http://walk${path}`, ok: () => ok })
+      assert.equal(predicate(reply('GET', '/api/capabilities?drawing_id=private', true)), true)
+      assert.equal(predicate(reply('POST', '/api/capabilities', true)), false)
+      assert.equal(predicate(reply('GET', '/api/capabilities', false)), false)
+      assert.equal(predicate(reply('GET', '/api/tools', true)), false)
+      events.push('listen')
+      return new Promise((resolve) => { resolveResponse = () => { events.push('response'); resolve() } })
+    },
+  }
+  const assertions = (value) => ({ toBeHidden: async (options) => {
+    assert.equal(value, status); assert.equal(options.timeout, 15_000)
+    assert.equal(visible, false); events.push('hidden')
+  } })
+  const runtime = { evidence: {} }
+  const recovery = recoverFailedCatalog(page, runtime, assertions)
+  // Let the visibility, reason and click awaits settle while the reply remains pending.
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(events, ['listen', 'click'])
+  await recoverFailedCatalog(page, runtime, assertions)
+  assert.deepEqual(events, ['listen', 'click'])
+  visible = false
+  resolveResponse()
+  await recovery
+  assert.deepEqual(events, ['listen', 'click', 'response', 'hidden'])
+  assert.deepEqual(runtime.evidence.catalogRecovery, { reason, retried: true })
+  visible = true
+  await recoverFailedCatalog(page, runtime, assertions)
+  assert.deepEqual(events, ['listen', 'click', 'response', 'hidden'])
+})
+
+test('catalog recovery leaves a page without a visible failure untouched', async () => {
+  const runtime = { evidence: {} }
+  const page = { getByRole: () => ({ getByRole: () => ({ filter: () => ({
+    isVisible: async () => false,
+    getByRole: () => assert.fail('no Retry without a visible failure'),
+  }) }) }), waitForResponse: () => assert.fail('no response wait without a failure') }
+  await recoverFailedCatalog(page, runtime)
+  assert.deepEqual(runtime.evidence, {})
+  assert.equal(runtime.catalogRecoveryAttempted, undefined)
+})
 censusAssertions.poll = (callback) => ({
   toBe: async (expected) => assert.equal(await callback(), expected),
   toBeGreaterThan: async (expected) => assert.ok(await callback() > expected),
 })
 
-test('C2 disclosures click into each initial state, reject a wrong effect and close before restoring viewport', async () => {
+test('C3 snap oracle rejects an expanded trigger without a visible mode menu', async () => {
+  const target = 'object-snap-menu-expanded'
+  const button = { getAttribute: async () => 'true' }
+  for (const menu of [{ countValue: 0, visible: false }, { countValue: 1, visible: false }]) {
+    const page = { locator: (selector) => selector === CENSUS_DISCLOSURES[target].body ? button : menu }
+    await assert.rejects(assertCensusEffect({ assertion: { target, value: true } }, { page }, button, {}, censusAssertions),
+      assert.AssertionError)
+  }
+})
+
+test('C2 and C3 disclosures click into each initial state, reject a wrong effect and close before restoring viewport', async () => {
   for (const target of Object.keys(CENSUS_DISCLOSURES)) {
     for (const expanded of [false, true]) {
       let open = false
@@ -41,7 +227,8 @@ test('C2 disclosures click into each initial state, reject a wrong effect and cl
       const button = { visible: true, getAttribute: async () => String(open),
         click: async (options) => { assert.equal(options.timeout, 15_000); open = !open; events.push('click') } }
       const page = { locator: (selector) => {
-        assert.ok([CENSUS_DISCLOSURES[target].body, '.drawing-objects-content'].includes(selector))
+        assert.ok([CENSUS_DISCLOSURES[target].body, CENSUS_DISCLOSURES[target].menu, '.drawing-objects-content'].includes(selector))
+        if (selector === CENSUS_DISCLOSURES[target].menu) return { countValue: open ? 1 : 0, visible: open }
         return selector === '.drawing-objects-content' ? { countValue: open ? 1 : 0 } : body
       }, getByRole: () => button, viewportSize: () => ({ width: 1440, height: 900 }),
       setViewportSize: async (size) => events.push(size.width) }
@@ -752,6 +939,7 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
         assert.equal(role, 'toolbar')
         assert.equal(options.name, 'Drafting tools')
         return { getByRole: (role, options) => {
+          if (role === 'status') return { filter: () => ({ isVisible: async () => false }) }
           assert.equal(role, 'group')
           assert.equal(options.name, 'Stringing')
           return { getByRole: (role, options) => {
@@ -819,6 +1007,7 @@ test('catalog tools choose their first tab from the active surface without a rea
               return { click: async () => tabs.push(options.name) }
             } }
           }
+          if (role === 'toolbar') return { getByRole: () => ({ filter: () => ({ isVisible: async () => false }) }) }
           assert.equal(role, 'button')
           assert.equal(options.name, 'More panels')
           return { isVisible: async () => false }
@@ -843,6 +1032,7 @@ function fakePage() {
     const name = options.name
     return {
       getByRole: locator,
+      filter: () => ({ isVisible: async () => false }),
       get visible() {
         if (role === 'dialog') return historyOpen
         if (name === 'More panels') return false
@@ -1152,6 +1342,7 @@ test('available solve proposal does not wait on the settings-form browser catalo
     request: { get: async () => ({ ok: () => true, json: async () => ({ families: [{ label: 'Solar', capabilities: [record] }] }) }) },
     getByRole: (role) => {
       if (role === 'tablist') return { getByRole: () => ({ click: async () => {} }) }
+      if (role === 'toolbar') return { getByRole: () => ({ filter: () => ({ isVisible: async () => false }) }) }
       return { isVisible: async () => false }
     },
   } }

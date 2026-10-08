@@ -1,15 +1,18 @@
 import { test as base, expect } from '@playwright/test'
 import { startStack } from '../../walk/stack.mjs'
 import { prepareProductionBundle } from '../../walk/sameOriginProxy.mjs'
+import { SERVER_ERROR_CAP, extractErrorId, serverDiagnostic } from '../../walk/serverDiagnostics.mjs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { PRODUCT_SURFACES } from '../../src/site/productSurfaces.js'
 import { toolPlacementTab } from '../../src/lib/toolRecord.js'
 import { familiesForSurface } from '../../src/lib/surfaceRails.js'
+import { buildViewSearch } from '../../src/lib/urlState.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
 import { normalizedControlKey } from './probes.mjs'
+import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
 import { seedParams, runBody } from '../solarGraphCommitProof.mjs'
@@ -188,6 +191,7 @@ export const test = base.extend({
     const evidence = {
       schema: 'leaf.walk-evidence.v1', test: testInfo.title, viewport: testInfo.project.name,
       consoleErrors: [], pageErrors: [], failedRequests: [], abortedRequests: [], httpErrors: [],
+      serverErrors: [], serverErrorsDropped: 0,
       responses: [], steps: [], accessibility: null,
       startedAt: new Date().toISOString(),
     }
@@ -201,6 +205,7 @@ export const test = base.extend({
     }
   }, { auto: true }],
   page: async ({ page, stack, firstRun, walkEvidence }, use) => {
+    const pendingDiagnostics = []
     const consoleError = (message) => {
       if (message.type() === 'error') walkEvidence.consoleErrors.push({ text: message.text(), location: message.location() })
     }
@@ -214,6 +219,25 @@ export const test = base.extend({
       const record = { url: reply.url(), method: reply.request().method(), status: reply.status() }
       walkEvidence.responses.push(record)
       if (reply.status() >= 400) walkEvidence.httpErrors.push(record)
+      if (reply.status() >= 500) {
+        if (walkEvidence.serverErrors.length >= SERVER_ERROR_CAP) {
+          walkEvidence.serverErrorsDropped += 1
+          return
+        }
+        const diagnosticRecord = { ...record, errorId: null, matched: false, serverOutput: '' }
+        walkEvidence.serverErrors.push(diagnosticRecord)
+        pendingDiagnostics.push((async () => {
+          let timer
+          const body = await Promise.race([
+            Promise.resolve().then(() => reply.text()),
+            new Promise((resolve) => { timer = setTimeout(() => resolve(''), 2000) }),
+          ]).catch(() => '').finally(() => clearTimeout(timer))
+          diagnosticRecord.errorId = extractErrorId(body)
+          const diagnostic = serverDiagnostic(stack?.output?.(), diagnosticRecord.errorId)
+          diagnosticRecord.matched = diagnostic.matched
+          diagnosticRecord.serverOutput = diagnostic.text
+        })())
+      }
     }
     page.on('console', consoleError)
     page.on('pageerror', pageError)
@@ -231,6 +255,14 @@ export const test = base.extend({
       page.off('pageerror', pageError)
       page.off('requestfailed', requestFailed)
       page.off('response', response)
+      await Promise.allSettled(pendingDiagnostics)
+      for (const record of walkEvidence.serverErrors) {
+        const diagnostic = serverDiagnostic(stack?.output?.(), record.errorId)
+        if (diagnostic.matched || !record.matched) {
+          record.matched = diagnostic.matched
+          record.serverOutput = diagnostic.text
+        }
+      }
     }
   },
 })
@@ -1022,6 +1054,8 @@ export async function setupRealProject(runtime, assertions = expect) {
 }
 
 export const CENSUS_DISCLOSURES = Object.freeze({
+  'object-snap-menu-expanded': { body: '.cockpit-status-toggles .object-snap-trigger', attribute: 'aria-expanded',
+    menu: '.cockpit-status-toggles .object-snap-menu' },
   'dxf-import-expanded': { body: '#cockpit-import-pane', attribute: 'data-import-open' },
   'ribbon-overflow-expanded': { body: '#drafting-ribbon', attribute: 'data-overflow-open' },
   'drawing-objects-expanded': { body: 'details.drawing-objects-panel', native: true },
@@ -1049,6 +1083,11 @@ export async function setupCensusDisclosure(runtime, recipe, assertions = expect
     if (await censusDisclosureState(page, recipe.target, assertions) !== expanded) await button.click({ timeout: 15_000 })
     if (!CENSUS_DISCLOSURES[recipe.target].native) await assertions(button).toHaveAttribute('aria-expanded', String(expanded))
     await assertions.poll(() => censusDisclosureState(page, recipe.target, assertions)).toBe(expanded)
+    if (CENSUS_DISCLOSURES[recipe.target].menu) {
+      const menu = page.locator(CENSUS_DISCLOSURES[recipe.target].menu)
+      await assertions(menu).toHaveCount(expanded ? 1 : 0)
+      if (expanded) await assertions(menu).toBeVisible()
+    }
   }
   runtime.cleanup.push(async () => { await set(false); runtime.evidence.censusDisclosure.cleaned = true })
   runtime.evidence.censusDisclosure = { target: recipe.target, initial: recipe.expanded }
@@ -1155,6 +1194,11 @@ export async function assertCensusEffect(probe, runtime, locator, before, assert
   if (CENSUS_DISCLOSURES[target]) {
     if (!CENSUS_DISCLOSURES[target].native) await assertions(locator).toHaveAttribute('aria-expanded', String(probe.assertion.value))
     await assertions.poll(() => censusDisclosureState(page, target, assertions)).toBe(probe.assertion.value)
+    if (CENSUS_DISCLOSURES[target].menu) {
+      const menu = page.locator(CENSUS_DISCLOSURES[target].menu)
+      await assertions(menu).toHaveCount(probe.assertion.value ? 1 : 0)
+      if (probe.assertion.value) await assertions(menu).toBeVisible()
+    }
     if (target === 'dxf-import-expanded') await assertions(page.getByLabel('DXF file', { exact: true }))
       [probe.assertion.value ? 'toBeVisible' : 'toBeHidden']()
     if (target === 'drawing-objects-expanded') await assertions(page.locator('.drawing-objects-content'))
@@ -1255,6 +1299,126 @@ export async function assertSolarStepEditor(probe, runtime, locator, before, ass
   else await assertions(page.locator('button[aria-controls="drafting-ribbon-panels"]')).toBeFocused()
   assertions(before.runRequests).toEqual([])
   runtime.evidence.solarStepEditor = { tool, reviewed: true, cancelled: true, runRequests: [...before.runRequests] }
+}
+
+export async function recoverFailedCatalog(page, runtime, assertions = expect) {
+  if (runtime.catalogRecoveryAttempted) return
+  const status = page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+    .getByRole('status').filter({ hasText: /^Couldn't load tools:/ })
+  if (!await status.isVisible()) return
+  runtime.catalogRecoveryAttempted = true
+  const reason = await status.innerText()
+  const response = page.waitForResponse((reply) => reply.request().method() === 'GET'
+    && new URL(reply.url()).pathname === '/api/capabilities' && reply.ok(), { timeout: 15_000 })
+  response.catch(() => {})
+  await status.getByRole('button', { name: 'Retry', exact: true }).click({ timeout: 15_000 })
+  runtime.evidence.catalogRecovery = { reason, retried: true }
+  await response
+  await assertions(status).toBeHidden({ timeout: 15_000 })
+}
+
+export async function captureEngineRepeat(probe, runtime, assertions = expect) {
+  const { page } = runtime
+  if (probe.state === 'engine-crashed') {
+    await assertions(page.getByRole('toolbar', { name: 'Quick access', exact: true }).getByRole('button', {
+      name: /^Undo edit \(unavailable: engine stopped: open a drawing again\)$/, exact: true,
+    })).toBeVisible()
+  }
+  // A held edit can leave its operand prompt mounted. Escape dismisses it
+  // without releasing the worker reply or changing the engine-busy state.
+  await page.keyboard.press('Escape')
+  const bar = page.getByRole('combobox', { name: 'Command bar', exact: true })
+  await bar.fill('')
+  await assertions(page.getByTestId('cockpit-prompt')).toBeHidden()
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  const dispatches = await page.evaluate(() => structuredClone(globalThis.__walkGeometry.dispatches))
+  runtime.evidence.repeatBaseline = { dispatches }
+  return { dispatches }
+}
+
+export async function activateEngineRepeat(runtime, locator, assertions = expect) {
+  // Surface landmarks are not necessarily tab stops. Temporarily making the
+  // real Drawing region programmatically focusable avoids an activation
+  // element, an editor, and a canvas click that would change selection.
+  const tabindex = await locator.getAttribute('tabindex')
+  await locator.evaluate((element) => { element.setAttribute('tabindex', '-1'); element.focus() })
+  runtime.cleanup.push(async () => locator.evaluate((element, original) => {
+    if (original === null) element.removeAttribute('tabindex')
+    else element.setAttribute('tabindex', original)
+  }, tabindex))
+  await assertions(locator).toBeFocused()
+  await runtime.page.keyboard.press('Enter')
+}
+
+export async function assertEngineRepeat(probe, runtime, before, assertions = expect) {
+  const { page } = runtime
+  const prompt = page.getByTestId('cockpit-prompt')
+  if (probe.state === 'ready') {
+    await assertions(prompt).toBeVisible()
+    await assertions(prompt).toHaveAccessibleName(`${probe.assertion.verb} command`)
+  } else {
+    await assertions(prompt).toBeHidden()
+    // CommandLineArmer.jsx onKey calls current.refuse(action.when(ctx)).
+    // EngineSessionProvider.jsx exposes that exact sentence as session status.
+    // engineShortcutDecision (actionRegistry.js) returns null for absent
+    // canvas/unparsed/crashed engines, so those paths announce no refusal.
+    if (['no-drawing', 'engine-not-parsed', 'engine-crashed'].includes(probe.state)) {
+      runtime.evidence.repeatIgnored = true
+    } else {
+      const status = page.getByTestId('cad-edit-workbench').getByRole('status', { includeHidden: true })
+      await assertions(status).toHaveText(probe.assertion.reason)
+      runtime.evidence.repeatRefusal = { text: await status.innerText(), visible: await status.isVisible() }
+    }
+  }
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  await assertions(prompt)[probe.state === 'ready' ? 'toBeVisible' : 'toBeHidden']()
+  const dispatches = await page.evaluate(() => structuredClone(globalThis.__walkGeometry.dispatches))
+  assertions(dispatches).toEqual(before.dispatches)
+  runtime.evidence.repeatDispatches = { before: before.dispatches, after: dispatches }
+}
+
+export function solarAvailabilityProbe(probe, catalog) {
+  if (probe.kind !== 'tool' || probe.state !== 'ready' || !probe.sourceId.startsWith('solar-')) return probe
+  if (probe.assertion.target === 'catalog-run-decision') return probe
+  const family = catalog?.families.find((family) => family.capabilities.some((tool) => tool.name === probe.sourceId))
+  const tool = family?.capabilities.find((tool) => tool.name === probe.sourceId)
+  if (!tool) return probe
+  const effect = solarToolReadyEffect(tool, family.family_id, catalog.families)
+  if (effect.target === 'catalog-run-decision') return probe
+  return { ...probe, assertion: { ...effect,
+    assertionId: `${probe.featureId}/${probe.state}/${effect.kind}` },
+  locator: { ...probe.locator, name: accessibleName(tool.name,
+    effect.kind === 'disabled_with_reason' ? effect.reason : '') } }
+}
+
+export async function captureMultipleSelection(probe, runtime, assertions = expect) {
+  const { page } = runtime
+  await assertions(page.getByTestId('dock-selection-count')).toHaveText('2 objects selected')
+  const before = { selectionCount: 2 }
+  if (probe.assertion.target === 'engine:delete') {
+    before.count = await engineCount(page)
+    before.geometry = await observedGeometry(page)
+    before.selectedIds = [0xA100, 0xA101].map(String)
+    assertions(before.geometry.entities.filter((entity) => before.selectedIds.includes(String(entity.id))).length).toBe(2)
+  }
+  runtime.evidence.multipleSelection = { selectionCount: before.selectionCount }
+  return before
+}
+
+export async function assertMultipleSelectionDelete(runtime, before, assertions = expect) {
+  const { page } = runtime
+  assertions(before.selectionCount).toBe(2)
+  await assertions.poll(() => engineCount(page)).toBe(before.count - 2)
+  const after = await observedGeometry(page)
+  assertions(after.entities.some((entity) => before.selectedIds.includes(String(entity.id)))).toBe(false)
+  assertions(after.entities.map(({ index, ...entity }) => entity)).toEqual(before.geometry.entities
+    .filter((entity) => !before.selectedIds.includes(String(entity.id))).map(({ index, ...entity }) => entity))
+  await page.getByRole('toolbar', { name: 'Quick access', exact: true })
+    .getByRole('button', { name: ACTIONS.find((action) => action.id === 'engine:undo').label, exact: true }).click()
+  await assertions.poll(() => engineCount(page)).toBe(before.count)
+  assertions(await observedGeometry(page)).toEqual(before.geometry)
+  runtime.evidence.multipleSelection = { selectionCount: before.selectionCount, before: before.count,
+    after: after.entities.length, restored: await engineCount(page), undoSteps: 1 }
 }
 
 export function seedSignOutIdentity({ identity, coachKey }) {
@@ -1865,6 +2029,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         && await page.locator('.app').first().getAttribute('data-surface') === 'solar'
         ? 'Solar' : placementTab || 'manage'
       await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
+      if (typeof recoverFailedCatalog === 'function') await recoverFailedCatalog(page, runtime, assertions)
       if (probe.state === 'ready' && solarBrowserCatalogRequired(recipe.name) && !toolAvailabilityEvidence(probe, facts)) {
         // The API-side catalog is not proof that the browser seated the same
         // drawing context. Observe its own request before accepting readiness.
@@ -2068,6 +2233,9 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
 
 async function captureBefore(probe, runtime) {
   const { page } = runtime
+  if (probe.locator?.keyboardAction === 'engine:repeat' && typeof captureEngineRepeat === 'function') {
+    return captureEngineRepeat(probe, runtime)
+  }
   if (probe.assertion.target === 'solar-step-editor') return observeSolarEditorRequests(runtime)
   if (['engine-save-version', 'engine-undo-edit', 'engine-redo-edit', 'script-run'].includes(probe.assertion.target)) return captureCensusEffect(probe, runtime)
   if (typeof barNoRung === 'function' && barNoRung(probe)) {
@@ -2078,6 +2246,8 @@ async function captureBefore(probe, runtime) {
   // Refusal probes do not activate the action or need its enabled-state baseline.
   if (probe.assertion.kind === 'disabled_with_reason' && probe.kind === 'action') return {}
   const target = probe.assertion.target || ''
+  if (probe.state === 'multiple-selected' && ['engine:delete', 'cockpit-prompt'].includes(target)
+    && typeof captureMultipleSelection === 'function') return captureMultipleSelection(probe, runtime)
   if (target === 'engine-refusal') return captureEngineRefusal(runtime)
   if (target === 'browser-clipboard' || target === 'engine:explode') return { count: await engineCount(page), geometry: await observedGeometry(page) }
   if (/^properties-(drawing|layers|plan|selection)-section$/.test(target)) {
@@ -2118,6 +2288,10 @@ async function captureBefore(probe, runtime) {
 async function activate(probe, runtime, locator) {
   const { page } = runtime
   const recipe = probe.locator
+  if (recipe?.keyboardAction === 'engine:repeat' && typeof activateEngineRepeat === 'function') {
+    await activateEngineRepeat(runtime, locator)
+    return
+  }
   if (probe.assertion.target === 'script-file-picker') {
     await activateCensusFileChooser(runtime, locator)
     return
@@ -2163,6 +2337,10 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (probe.locator?.keyboardAction === 'engine:repeat' && typeof assertEngineRepeat === 'function') {
+    await assertEngineRepeat(probe, runtime, before, assertions)
+    return
+  }
   if (target === 'solar-step-editor') {
     await assertSolarStepEditor(probe, runtime, locator, before, assertions)
     return
@@ -2379,7 +2557,14 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await expect(rail.locator('.rail-ledger')).toHaveCount(1)
     await expect(rail.locator('.rail-ske, .rail-empty, .rail-ledger > *').first()).toBeVisible()
     await expect(rail.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })).toBeVisible()
-    expect(page.url()).toBe(before.url)
+    const beforeUrl = new URL(before.url)
+    const afterUrl = new URL(page.url())
+    expect(afterUrl.origin).toBe(beforeUrl.origin)
+    expect(afterUrl.pathname).toBe(beforeUrl.pathname)
+    expect(afterUrl.hash).toBe(beforeUrl.hash)
+    // App.jsx setJobRailExpanded seats drawer=jobs via useViewParamSeat in both ready and failed-load states.
+    expect(afterUrl.search).toBe(buildViewSearch(beforeUrl.search, { drawer: 'jobs' }))
+    runtime.evidence.jobMonitorUrl = { before: before.url, after: page.url() }
     if (runtime.failedDrawing) await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ }))
       .toHaveText(before.workspace, { useInnerText: true })
     else await expect(propertiesPane(page).getByTestId('dock-drawing')).toHaveText(before.workspace, { useInnerText: true })
@@ -2392,6 +2577,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   if (target === 'cockpit-prompt') {
     await expect(page.getByTestId('cockpit-prompt')).toBeVisible()
     await expect(page.getByTestId('cockpit-prompt')).toHaveAccessibleName(`${effect.verb} command`)
+    if (probe.state === 'multiple-selected') {
+      expect(before.selectionCount).toBe(2)
+      await expect(page.getByTestId('dock-selection-count')).toHaveText('2 objects selected')
+      runtime.evidence.multipleSelection = { selectionCount: before.selectionCount, verb: effect.verb, promptArmed: true }
+    }
     return
   }
   if (target === 'command-menu') { await expect(page.getByRole('listbox', { name: 'Tool commands', exact: true })).toBeVisible(); return }
@@ -2564,10 +2754,17 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     ])
     return
   }
+  if (target === 'engine:delete' && probe.state === 'multiple-selected'
+    && typeof assertMultipleSelectionDelete === 'function') {
+    await assertMultipleSelectionDelete(runtime, before, assertions)
+    return
+  }
   if (target.startsWith('engine:') || target === 'browser-clipboard-cut') {
     // Immediate engine operations must commit geometry, not merely leave
     // their button enabled or open an unrelated panel.
-    await expect.poll(() => engineCount(page)).not.toBe(before.count)
+    if (target === 'engine:undo' || target === 'engine:redo') {
+      await expect.poll(() => engineCount(page)).toBe(before.count + (target === 'engine:undo' ? -1 : 1))
+    } else await expect.poll(() => engineCount(page)).not.toBe(before.count)
     return
   }
   throw new Error(`No effect oracle for ${probe.featureId}/${probe.state}: ${effect.kind} ${target}`)
@@ -2611,7 +2808,9 @@ export async function runProbe(probe, runtime) {
       }
       await unsupported(probe, runtime, reason)
     }
-    if (typeof installGeometryObserver === 'function' && (barNoRung(probe) || ['engine-refusal', 'engine:explode', 'browser-clipboard'].includes(probe.assertion.target)
+    if (typeof installGeometryObserver === 'function' && (probe.locator?.keyboardAction === 'engine:repeat'
+      || barNoRung(probe) || ['engine-refusal', 'engine:explode', 'browser-clipboard'].includes(probe.assertion.target)
+      || (probe.state === 'multiple-selected' && ['engine:delete', 'cockpit-prompt'].includes(probe.assertion.target))
       || probe.assertion.target?.startsWith('drawing-version-'))) await page.addInitScript(installGeometryObserver)
     for (const recipe of probe.setup.steps) {
       await (runtime.runStep || test.step)(`Setup: ${recipe.kind}`, async () => {
@@ -2635,6 +2834,10 @@ export async function runProbe(probe, runtime) {
       runtime.catalogFacts ||= {}
       await workerCatalog(runtime.catalogFacts, page.request, { drawingId: runtime.drawingId, version: runtime.drawingVersion || 'head' })
       if (runtime.catalogFacts.catalogError) throw runtime.catalogFacts.catalogError
+      if (typeof solarAvailabilityProbe === 'function') {
+        probe = solarAvailabilityProbe(probe, runtime.catalogFacts.catalog)
+        evidence.effectiveEffect = probe.assertion
+      }
       const availabilityReason = unsupportedBeforeSetup(probe, runtime.catalogFacts)
       if (availabilityReason) {
         runtime.unsupportedAvailability = toolAvailabilityEvidence(probe, runtime.catalogFacts)
@@ -2642,7 +2845,7 @@ export async function runProbe(probe, runtime) {
       }
     }
     let targetRecipe = runtime.catalogPanelName ? { ...probe.locator, panelName: runtime.catalogPanelName } : probe.locator
-    if (probe.kind === 'action' && probe.assertion.kind === 'disabled_with_reason') {
+    if (probe.kind === 'action' && probe.assertion.kind === 'disabled_with_reason' && probe.locator?.keyboardAction !== 'engine:repeat') {
       // A changed refusal is an oracle verdict; only a missing action is a
       // pre-oracle failure. Match the stable label with any refusal suffix.
       const stableName = probe.locator.availableName || (typeof probe.locator.name === 'string'
@@ -2661,13 +2864,16 @@ export async function runProbe(probe, runtime) {
     const failedDrawingGroup = runtime.failedDrawing && probe.locator.group
       ? page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
         .getByRole('group', { name: groupNames[probe.locator.group], exact: true, includeHidden: true }) : null
-    if (runtime.failedDrawing && (runtime.ribbonAbsent || (failedDrawingGroup && await failedDrawingGroup.count() === 0))) {
+    const failedDrawingQuickAbsent = runtime.failedDrawing && probe.locator.scope?.name === 'Quick access'
+      && await locator.count() === 0
+    if (runtime.failedDrawing && (runtime.ribbonAbsent || failedDrawingQuickAbsent || (failedDrawingGroup && await failedDrawingGroup.count() === 0))) {
       await test.step(probe.assertion.assertionId, async () => {
         expect(probe.assertion.kind).toBe('disabled_with_reason')
         if (runtime.ribbonAbsent) {
           await expect(page.getByRole('tablist', { name: 'Ribbon', exact: true })).toHaveCount(0)
           await expect(page.getByRole('toolbar', { name: 'Drafting tools', exact: true })).toHaveCount(0)
-        } else await expect(failedDrawingGroup).toHaveCount(0)
+        } else if (failedDrawingQuickAbsent) await expect(locator).toHaveCount(0)
+        else await expect(failedDrawingGroup).toHaveCount(0)
         // Check the action globally as well: an absent scope alone would
         // make every scoped locator empty, even if the action moved elsewhere.
         await expect(page.getByRole(probe.locator.role, { name: probe.locator.unavailableName, includeHidden: true })).toHaveCount(0)
@@ -2676,6 +2882,7 @@ export async function runProbe(probe, runtime) {
       evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
       return
     }
+    if (probe.kind === 'tool' && typeof recoverFailedCatalog === 'function') await recoverFailedCatalog(page, runtime)
     await expect(locator).toBeVisible()
     if (probe.kind === 'control') {
       await expect(locator).toHaveCount(1)
@@ -2699,7 +2906,7 @@ export async function runProbe(probe, runtime) {
       page.on('request', observe)
       runtime.cleanup.push(async () => page.off('request', observe))
     }
-    if (probe.assertion.kind !== 'disabled_with_reason') {
+    if (probe.assertion.kind !== 'disabled_with_reason' || probe.locator?.keyboardAction === 'engine:repeat') {
       await test.step(`Activate ${probe.featureId}`, () => activate(probe, runtime, locator))
     }
     await test.step(probe.assertion.assertionId, () => {

@@ -121,24 +121,47 @@ InverterCablingError; a path this port does not cover raises InverterCablingNotP
 from __future__ import annotations
 
 import copy
+import importlib
 import importlib.util
 import math
 from pathlib import Path
 import re
 import sys
+import threading
 import time
 
 
 def _load_sibling(name):
-    """A server module by path (any cwd), shared through sys.modules so its error classes are one."""
-    if name in sys.modules:
-        return sys.modules[name]
-    path = Path(__file__).resolve().with_name(name + ".py")
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    """Load a server module by path (any cwd), sharing its module and error classes."""
+    lock = sys.__dict__.setdefault("_leaf_server_sibling_lock", threading.RLock())
+    with lock:
+        module = sys.modules.get(name)
+        if module is not None:
+            completed = getattr(module, "_leaf_sibling_completed", None)
+            if completed is True:
+                return module
+            if completed is False:
+                # Only the loading thread can re-enter this lock: a circular import.
+                return module
+            if not getattr(getattr(module, "__spec__", None), "_initializing", False):
+                module._leaf_sibling_completed = True
+                return module
+        else:
+            spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+            module = importlib.util.module_from_spec(spec)
+            module._leaf_sibling_completed = False
+            sys.modules[name] = module
+            try:
+                spec.loader.exec_module(module)
+                module._leaf_sibling_completed = True
+            except BaseException:
+                if sys.modules.get(name) is module:
+                    del sys.modules[name]
+                raise
+            return module
+    # A normal Python import already owns this module. Wait through its import
+    # lock without holding ours, so that thread can load its own siblings.
+    return importlib.import_module(name)
 
 
 st = _load_sibling("solar_inverter_state")

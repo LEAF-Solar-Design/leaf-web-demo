@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { runInNewContext } from 'node:vm'
+import { registerEscapeOwner } from '../src/lib/useEscapeOwner.js'
 import { ACTIONS, ESCAPE_RUNGS, RETRY_RUNGS, REASONS, reasonCode, escapeRung, retryRung } from '../src/lib/actionRegistry.js'
 import { PRODUCT_SURFACES, productSurfaceStates } from '../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
@@ -9,8 +11,33 @@ import { PROMPTS } from '../src/cadedit/promptKeys.js'
 import { isWriteTool, toolMcpSource, toolPlacementTab } from '../src/lib/toolRecord.js'
 import { familiesForSurface } from '../src/lib/surfaceRails.js'
 import { solarFormKeys, solarView } from '../src/solar/solarView.js'
+import { canOpenSolarSettingsForm } from '../src/solar/solarSettingsWire.js'
 
 const readJson = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'))
+// The product module imports JSX consumers. Evaluate only its pure exported
+// vocabulary and gate, so Node walks reuse the product sentences and predicates.
+const ribbonSource = readFileSync(new URL('../src/lib/ribbonClusters.js', import.meta.url), 'utf8')
+const solarReasonStart = ribbonSource.indexOf('export const SOLAR_REFUSAL_REASONS =')
+const solarReasonEnd = ribbonSource.indexOf('// A Solar run refusal', solarReasonStart)
+if (solarReasonStart < 0 || solarReasonEnd < 0) throw new Error('featureMap: Solar reason gate source not found')
+const solarRailReason = runInNewContext(ribbonSource.slice(solarReasonStart, solarReasonEnd)
+  .replace(/^export /gm, '') + '\nsolarRailReason', {}, { timeout: 1000 })
+
+export function solarRailAvailabilityEffect(tool) {
+  if (tool.availability === undefined || solarView(tool).state === 'absent') return null
+  // The frozen unscoped catalog asks for a drawing. Resolve that gate after
+  // drawing and graph setup, rather than freezing it into the ready oracle.
+  if (tool.availability?.refusal_reasons?.includes('drawing_context_required')) return null
+  const reason = solarRailReason(tool.availability, {
+    openTypedForm: canOpenSolarSettingsForm(tool.name, tool.availability),
+  })
+  if (!reason) return null
+  const codes = tool.availability?.refusal_reasons
+  const validAvailability = tool.availability && typeof tool.availability === 'object'
+    && !Array.isArray(tool.availability)
+  return disabled(reason, Array.isArray(codes) && codes.length
+    ? codes.join('; ') : validAvailability ? 'capability_not_ready' : 'capability_availability_unavailable')
+}
 export const DEFAULT_REGISTRIES = Object.freeze({
   actions: ACTIONS, surfaces: PRODUCT_SURFACES, drawers: STUDIO_DRAWERS,
   tabs: PROFILE_RIBBON_TABS, surfaceStates: productSurfaceStates,
@@ -398,7 +425,7 @@ function validateControls(controls) {
         const initial = effect.target === 'drafting-grid' || /^engine-mode:(ortho|osnap)$/.test(effect.target) ? context.pressed
           : effect.target === 'document-fullscreen' ? context.fullscreen
             : /^properties-(drawing|layers|plan|selection)-section$/.test(effect.target)
-              || ['drawing-overview-expanded', 'dxf-import-expanded', 'ribbon-overflow-expanded', 'drawing-objects-expanded'].includes(effect.target) ? context.expanded
+              || ['drawing-overview-expanded', 'dxf-import-expanded', 'ribbon-overflow-expanded', 'drawing-objects-expanded', 'object-snap-menu-expanded'].includes(effect.target) ? context.expanded
               : /^layer-(panels|walk)-visible$/.test(effect.target) ? context.visible : undefined
         if (typeof initial !== 'boolean' || typeof effect.value !== 'boolean' || effect.value === initial) {
           throw new Error('featureMap: control toggle needs opposite setup and effect states ' + record.id + '/' + state)
@@ -427,6 +454,16 @@ function cases(config, kind) {
 }
 
 function actionEffect(action, ctx, override) {
+  if (action.id === 'bar:escape' && ctx.escapeOwner) {
+    const unregister = registerEscapeOwner(ctx.escapeOwner.id, () => {}, { layer: ctx.escapeOwner.layer })
+    try {
+      const why = action.when(ctx)
+      if (why) return disabled(why)
+      return { kind: 'toggles', target: `escape:${escapeRung(ctx, { key: 'Escape' })}` }
+    } finally {
+      unregister()
+    }
+  }
   const why = action.when(ctx)
   if (why) return disabled(why)
   if (action.id === 'bar:escape') return { kind: 'toggles', target: `escape:${escapeRung(ctx)}` }
@@ -449,7 +486,24 @@ function toolEffect(tool, ctx, solarEditor = false) {
         : isWriteTool(tool) && ctx.writeLocked ? REASONS.writeLocked
           : isWriteTool(tool) && !ctx.writeEntitled ? REASONS.writeUnentitled
             : isWriteTool(tool) && ctx.engineDirty ? REASONS.unsavedEngineEdits : ''
-  return why ? disabled(why) : { kind: 'opens', target: solarEditor ? 'solar-step-editor' : 'catalog-run-decision', tool: tool.name }
+  if (why) return disabled(why)
+  // Catalog run decisions retain their drawing-scoped unsupported_local path.
+  // Editors bypass that run path, so their rail refusal is the UI oracle.
+  const unavailable = solarEditor ? solarRailAvailabilityEffect(tool) : null
+  if (unavailable) return unavailable
+  return { kind: 'opens', target: solarEditor ? 'solar-step-editor' : 'catalog-run-decision', tool: tool.name }
+}
+
+export function solarToolReadyEffect(tool, familyId, families) {
+  return toolEffect(tool, { writeEntitled: true }, solarToolEditor(tool, familyId, families))
+}
+
+function solarToolEditor(tool, familyId, families) {
+  const { view } = solarView(tool)
+  return !toolPlacementTab(tool)
+    && !familiesForSurface(families, 'solar').some((family) => family.family_id === familyId)
+    && view?.interaction.mode === 'form'
+    && solarFormKeys({ ...tool, params: tool.params || tool.params_schema }, view).length > 0
 }
 
 function addCases(entry, candidates, evaluate, relevant = () => false) {
@@ -486,12 +540,16 @@ function buildEntry(item, config, snapshot, registries) {
       if (record.op !== 'explode') entry.sources.push('web/src/cadedit/clipboard.js')
     }
     const candidates = cases(config, kind)
+    if (record.id === 'bar:escape') {
+      candidates.push(['owner-open', { ...candidates[0][1], escapeOwner: { id: 'walk-owner', layer: 'menu' } }])
+    }
     if (record.id === 'bar:retry') {
       for (const target of Object.keys(RETRY_RUNGS)) candidates.push([`retry-${target}`, { ...candidates[0][1], rTarget: target }])
     }
     addCases(entry, candidates, (ctx) => ({ effect: actionEffect(record, ctx, override), title: record.title(ctx) }),
-      (ctx) => ctx.session?.selected?.editable === false && !record.when(ctx)
-        && !!record.when(merge(ctx, { session: { selected: { type: 'LINE' } } })))
+      (ctx) => (record.group === 'modify' && ctx.session?.selectedIds?.length > 1 && !record.when(ctx))
+        || (ctx.session?.selected?.editable === false && !record.when(ctx)
+          && !!record.when(merge(ctx, { session: { selected: { type: 'LINE' } } }))))
     // Rungs are exported product data; every one must have a reachable case.
     if (record.id === 'bar:escape') {
       for (const rung of ESCAPE_RUNGS) {
@@ -515,12 +573,8 @@ function buildEntry(item, config, snapshot, registries) {
     entry.catalog_version = snapshot.catalog_version
     entry.tool_version = record.version
     entry.family_id = item.family_id
-    const { view } = solarView(record)
-    const solarEditor = !toolPlacementTab(record)
-      && !familiesForSurface(snapshot.response.families, 'solar').some((family) => family.family_id === item.family_id)
-      && view?.interaction.mode === 'form'
-      && solarFormKeys({ ...record, params: record.params || record.params_schema }, view).length > 0
-    entry.sources.push('web/src/lib/surfaceRails.js', 'web/src/solar/solarView.js')
+    const solarEditor = solarToolEditor(record, item.family_id, snapshot.response.families)
+    entry.sources.push('web/src/lib/surfaceRails.js', 'web/src/solar/solarView.js', 'web/src/solar/solarSettingsWire.js')
     addCases(entry, cases(config, kind), (ctx) => ({ effect: toolEffect(record, ctx, solarEditor) }))
   } else if (kind === 'tab') {
     entry.profile = profile

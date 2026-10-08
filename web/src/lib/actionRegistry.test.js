@@ -17,6 +17,8 @@
 // 4. THE ACCESSIBLE-NAME COMPOSER reproduces the strings draftingRibbon.test.jsx
 //    and engineSessionProvider.test.jsx pin, byte for byte.
 import { describe, expect, it, vi } from 'vitest'
+import { createElement } from 'react'
+import { fireEvent, render } from '@testing-library/react'
 
 import {
   ACTIONS,
@@ -35,12 +37,15 @@ import {
   REASONS,
   REPEAT_REASONS,
   ENGINE_SHORTCUTS,
+  KBD_CONTEXTS,
+  VERSION_SHORTCUTS,
   RETRY_RUNGS,
   SURFACES,
   accessibleName,
   reasonCode,
   byId,
   drawReason,
+  engineDocumentVisible,
   engineShortcutDecision,
   historyStepReason,
   escapeRung,
@@ -59,7 +64,10 @@ import {
   slashCommandHandlers,
   slashStaticEntries,
   validateRegistry,
+  versionShortcutDecision,
 } from './actionRegistry.js'
+import { SINGLE_KEY_SHORTCUTS_KEY, writeSingleKeyShortcuts } from './singleKeyPreference.js'
+import useEscapeOwner from './useEscapeOwner.js'
 
 // --- 1: the registry holds up ---------------------------------------------
 
@@ -228,21 +236,43 @@ describe('honest triggers', () => {
     }
   })
 
-  it('B2-34 advertises exactly the four shell and seven engine shortcut rows', () => {
+  it('B2-34 advertises exactly the four shell, seven engine and two version shortcut rows', () => {
     expect(keyboardTable().filter((row) => row.surface === 'bar')).toEqual([
-      { id: 'bar:focus', label: 'Command bar', kbd: 'Mod+K', surface: 'bar' },
-      { id: 'bar:escape', label: 'Close the topmost surface', kbd: 'Escape', surface: 'bar' },
-      { id: 'bar:retry', label: 'Retry the failed step', kbd: 'R', surface: 'bar' },
+      { id: 'bar:focus', label: 'Command bar', kbd: 'Mod+K', surface: 'bar', context: KBD_CONTEXTS.anywhere, singleKey: false },
+      { id: 'bar:escape', label: 'Close the topmost surface', kbd: 'Escape', surface: 'bar', context: KBD_CONTEXTS.anywhere, singleKey: false },
+      { id: 'bar:retry', label: 'Retry the failed step', kbd: 'R', surface: 'bar', context: KBD_CONTEXTS.outsideFields, singleKey: true },
       // Slice 10b: the shortcut sheet's own cap, generated FROM this table
       // rather than hand-typed a second place.
-      { id: 'bar:shortcuts', label: 'Keyboard shortcuts', kbd: 'Shift+?', surface: 'bar' },
+      { id: 'bar:shortcuts', label: 'Keyboard shortcuts', kbd: 'Shift+?', surface: 'bar', context: KBD_CONTEXTS.outsideFields, singleKey: true },
     ])
     const byActionId = ([a], [b]) => a.localeCompare(b)
     expect(keyboardTable().filter((row) => row.surface === 'engine').map(({ id, kbd }) => [id, kbd]).sort(byActionId))
       .toEqual(Object.entries(ENGINE_SHORTCUTS).sort(byActionId))
+    expect(keyboardTable().filter((row) => row.surface === 'ribbon').map(({ id, kbd }) => [id, kbd]).sort(byActionId))
+      .toEqual(Object.entries(VERSION_SHORTCUTS).sort(byActionId))
     for (const action of ACTIONS) {
-      if (action.surface !== 'bar') expect(action.kbd).toBe(ENGINE_SHORTCUTS[action.id] || null)
+      if (action.surface === 'engine') expect(action.kbd).toBe(ENGINE_SHORTCUTS[action.id] || null)
+      if (action.surface === 'ribbon') expect(action.kbd).toBe(VERSION_SHORTCUTS[action.id] || null)
+      if (action.surface === 'slash') expect(action.kbd).toBeNull()
     }
+    // Every printed cap says where it fires, and only R and Shift+? are single keys.
+    for (const row of keyboardTable()) expect(Object.values(KBD_CONTEXTS)).toContain(row.context)
+    expect(keyboardTable().filter((row) => row.singleKey).map((row) => row.id)).toEqual(['bar:retry', 'bar:shortcuts'])
+  })
+
+  // S25, re-read at the w21-b2 merge (17129296, #1865): the four undo / redo
+  // rows the sheet prints, by id, each with its cap and where it fires. Two
+  // rows share Mod+Z; the context label is what tells them apart.
+  it('S25 prints engine and version undo / redo as four rows with their caps and contexts', () => {
+    const undoRows = keyboardTable()
+      .filter((row) => ['engine:undo', 'engine:redo', 'undo', 'redo'].includes(row.id))
+      .map(({ id, kbd, context }) => ({ id, kbd, context }))
+    expect(undoRows).toEqual([
+      { id: 'engine:undo', kbd: 'Mod+Z', context: 'Drawing canvas' },
+      { id: 'engine:redo', kbd: 'Mod+Y / Mod+Shift+Z', context: 'Drawing canvas' },
+      { id: 'undo', kbd: 'Mod+Z', context: 'Off the drawing canvas' },
+      { id: 'redo', kbd: 'Mod+Shift+Z', context: 'Off the drawing canvas' },
+    ])
   })
 
   it('projects the ribbon clusters and the engine groups the builders seat, in registry order', () => {
@@ -509,7 +539,7 @@ describe('the key ladder, table-driven', () => {
 
   it('pops exactly one Esc rung, topmost first, and runs only that handler', () => {
     expect(ESCAPE_RUNGS.map((r) => r.id))
-      .toEqual(['drawer', 'history', 'start', 'route', 'errors', 'running', 'selection', 'project'])
+      .toEqual(['owner', 'drawer', 'history', 'start', 'route', 'errors', 'running', 'selection', 'project'])
     const seen = []
     const ctx = {
       drawer: 'tools', historyOpen: true, running: true, openProjectId: 'p1',
@@ -528,6 +558,36 @@ describe('the key ladder, table-driven', () => {
     // Nothing open: no handler runs and the record says why.
     expect(byId('bar:escape').run({})).toBe('')
     expect(byId('bar:escape').when({})).toBe(LADDER_REASONS.nothingOpen)
+  })
+
+  it('S27 reads the Escape owner stack before every shell rung', () => {
+    const onEscape = vi.fn()
+    const onCloseDrawer = vi.fn()
+    function Owner() {
+      useEscapeOwner('sheet-under-test', true, onEscape, { layer: 'sheet' })
+      return null
+    }
+    const ctx = { drawer: 'details', onCloseDrawer }
+    expect(escapeRung(ctx)).toBe('drawer')
+    const { unmount } = render(createElement(Owner))
+    expect(escapeRung(ctx)).toBe('owner')
+    expect(byId('bar:escape').when(ctx)).toBe('')
+    expect(byId('bar:escape').run(ctx)).toBe('owner')
+    expect(onEscape).toHaveBeenCalledTimes(1)
+    expect(onCloseDrawer).not.toHaveBeenCalled()
+    // A real keypress: the stack consumes it in the capture phase, so the
+    // ladder's own listener sees a prevented key and runs no shell rung.
+    const ladder = ladderListener(ctx, (state) => state)
+    window.addEventListener('keydown', ladder)
+    try {
+      fireEvent.keyDown(window, { key: 'Escape' })
+    } finally {
+      window.removeEventListener('keydown', ladder)
+    }
+    expect(onEscape).toHaveBeenCalledTimes(2)
+    expect(onCloseDrawer).not.toHaveBeenCalled()
+    unmount()
+    expect(escapeRung(ctx)).toBe('drawer')
   })
 
   it.each(['nav', 'jobs', 'result', 'plan'])('closes the phone Studio %s drawer before lower Escape rungs', (studioDrawer) => {
@@ -651,6 +711,112 @@ describe('the key ladder, table-driven', () => {
   it('refuses a listener with no shell or no handler builder at construction, not on the first key', () => {
     expect(() => ladderListener({}, null, () => {})).toThrow(TypeError)
     expect(() => ladderListener(null, () => ({}), () => {})).toThrow(TypeError)
+  })
+})
+
+// --- S25: version Mod+Z off the drafting surface, the single-key switch ----
+
+describe('S25 version Mod+Z off the drafting surface', () => {
+  const body = () => document.createElement('div')
+  const offCanvas = { draftingVisible: () => false, activeElement: null }
+  const onCanvas = { draftingVisible: () => true, activeElement: null }
+  const versionDecision = (id) => ({ id, rung: '', route: 'kbd', preventDefault: true, instant: false })
+
+  it('Mod+Z and Mod+Shift+Z run version undo / redo outside drafting, through the records the ribbon clicks', () => {
+    for (const mod of [{ ctrlKey: true }, { metaKey: true }]) {
+      expect(ladderDecision({ key: 'z', ...mod, target: body() }, offCanvas)).toEqual(versionDecision('undo'))
+      expect(ladderDecision({ key: 'Z', shiftKey: true, ...mod, target: body() }, offCanvas)).toEqual(versionDecision('redo'))
+      expect(ladderDecision({ key: 'z', shiftKey: true, ...mod, target: body() }, offCanvas)).toEqual(versionDecision('redo'))
+    }
+    const onUndo = vi.fn()
+    const onRedo = vi.fn()
+    const preventDefault = vi.fn()
+    const shell = { ...offCanvas, hasVersions: true, canUndo: true, canRedo: true }
+    const onKey = ladderListener(shell, (state) => ({ ...state, onUndo, onRedo }))
+    onKey({ key: 'z', ctrlKey: true, target: body(), preventDefault })
+    onKey({ key: 'Z', ctrlKey: true, shiftKey: true, target: body(), preventDefault })
+    expect(onUndo).toHaveBeenCalledTimes(1)
+    expect(onRedo).toHaveBeenCalledTimes(1)
+    expect(preventDefault).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['nothing to undo', { canUndo: false }],
+    ['no versions', { hasVersions: false }],
+    ['a run in flight', { running: true }],
+    ['a preview', { previewing: true }],
+    ['a version change in flight', { versionBusy: true }],
+    ['blocked mutations', { mutationsBlocked: true }],
+  ])('claims Mod+Z but runs nothing under the ribbon gate: %s', (_, blocked) => {
+    const onUndo = vi.fn()
+    const shell = { ...offCanvas, hasVersions: true, canUndo: true, ...blocked }
+    expect(byId('undo').when(shell)).not.toBe('')
+    ladderListener(shell, (state) => ({ ...state, onUndo }))({ key: 'z', ctrlKey: true, target: body(), preventDefault: vi.fn() })
+    expect(onUndo).not.toHaveBeenCalled()
+  })
+
+  it('yields Mod+Z to the engine inside drafting (a visible engine document)', () => {
+    expect(ladderDecision({ key: 'z', ctrlKey: true, target: body() }, onCanvas)).toBeNull()
+    expect(ladderDecision({ key: 'Z', ctrlKey: true, shiftKey: true, target: body() }, onCanvas)).toBeNull()
+    // The real DOM read: a visible [data-engine-document] yields, a hidden one does not.
+    const host = document.createElement('div')
+    host.setAttribute('data-engine-document', 'one.dxf')
+    const target = document.createElement('div')
+    document.body.append(host, target)
+    try {
+      expect(engineDocumentVisible()).toBe(true)
+      expect(ladderDecision({ key: 'z', ctrlKey: true, target }, { activeElement: null })).toBeNull()
+      host.hidden = true
+      expect(engineDocumentVisible()).toBe(false)
+      expect(ladderDecision({ key: 'z', ctrlKey: true, target }, { activeElement: null })).toEqual(versionDecision('undo'))
+    } finally {
+      host.remove()
+      target.remove()
+    }
+  })
+
+  it('leaves Mod+Z to a typing target, a focused editor, Alt, a consumed key and a repeat', () => {
+    for (const html of ['<input />', '<textarea></textarea>', '<select></select>', '<div role="textbox"></div>', '<div contenteditable="true"></div>']) {
+      expect(ladderDecision({ key: 'z', ctrlKey: true, target: el(html) }, offCanvas)).toBeNull()
+    }
+    expect(ladderDecision({ key: 'z', ctrlKey: true, target: body() }, { ...offCanvas, activeElement: el('<input />') })).toBeNull()
+    expect(ladderDecision({ key: 'z', ctrlKey: true, altKey: true, target: body() }, offCanvas)).toBeNull()
+    expect(ladderDecision({ key: 'z', ctrlKey: true, metaKey: true, target: body() }, offCanvas)).toBeNull()
+    expect(ladderDecision({ key: 'z', ctrlKey: true, repeat: true, target: body() }, offCanvas)).toBeNull()
+    expect(ladderDecision({ key: 'z', ctrlKey: true, defaultPrevented: true, target: body() }, offCanvas)).toBeNull()
+    expect(versionShortcutDecision({ key: 'y', ctrlKey: true, target: body() }, offCanvas)).toBeNull()
+    // A bare z is not a chord: it still falls into the bar like any letter.
+    expect(ladderDecision({ key: 'z', target: body() }, offCanvas).route).toBe('type')
+  })
+})
+
+describe('S25 the single-key shortcut switch', () => {
+  const body = () => document.createElement('div')
+
+  it('with the switch off, bare R and Shift+? are null and Mod chords still work', () => {
+    const off = { singleKeyShortcuts: false, rTarget: 'route' }
+    expect(ladderDecision({ key: 'r', target: body() }, off)).toBeNull()
+    expect(ladderDecision({ key: 'R', target: body() }, off)).toBeNull()
+    expect(ladderDecision({ key: '?', target: body() }, off)).toBeNull()
+    expect(ladderDecision({ key: 'r', target: body() }, { ...off, singleKeyShortcuts: true }).id).toBe('bar:retry')
+    expect(ladderDecision({ key: '?', target: body() }, { singleKeyShortcuts: true }).id).toBe('bar:shortcuts')
+    expect(ladderDecision({ key: 'k', ctrlKey: true, target: body() }, off).id).toBe('bar:focus')
+    expect(ladderDecision({ key: 'z', ctrlKey: true, target: body() }, { ...off, draftingVisible: () => false, activeElement: null }).id).toBe('undo')
+    expect(ladderDecision({ key: 'Escape', target: body() }, { ...off, drawer: 'tools' }).rung).toBe('drawer')
+    expect(ladderDecision({ key: 'a', target: body() }, off).route).toBe('type')
+  })
+
+  it('reads the stored switch at keystroke time when the context carries none', () => {
+    try {
+      expect(writeSingleKeyShortcuts(false)).toBe(true)
+      expect(ladderDecision({ key: '?', target: body() }, {})).toBeNull()
+      expect(ladderDecision({ key: 'r', target: body() }, { rTarget: 'route' })).toBeNull()
+      expect(writeSingleKeyShortcuts(true)).toBe(true)
+      expect(ladderDecision({ key: '?', target: body() }, {}).id).toBe('bar:shortcuts')
+      expect(ladderDecision({ key: 'r', target: body() }, { rTarget: 'route' }).id).toBe('bar:retry')
+    } finally {
+      localStorage.removeItem(SINGLE_KEY_SHORTCUTS_KEY)
+    }
   })
 })
 

@@ -30,6 +30,7 @@
 import AuthorPanel from '../components/AuthorPanel.jsx'
 import ToolsPanel from '../components/ToolsPanel.jsx'
 import { ToolHistoryProvider } from '../components/ToolHistory.jsx'
+import { useLoadingPhase } from '../lib/loadingTiming.js'
 
 import { surfaceContract } from './productSurfaces.js'
 
@@ -79,6 +80,7 @@ export default function NavRail({
   onToggleAuthor = null,
   onCollapse = null,
   authorSectionRef = null,
+  authorContent = undefined,
   onAuthor = null,
   onPublish = null,
   onUseAuthored = null,
@@ -98,6 +100,8 @@ export default function NavRail({
   // as App.jsx:2721 spelled `studioGround && drafting`.
   const cockpit = !!studio && surfaceContract(activeSurface).chrome.cockpit
   const families = openFamilies || {}
+  const loadingPhase = useLoadingPhase(!catalogErr && catalogFamilyCount === 0)
+  const showSkeleton = !catalogErr && (loadingPhase === 'shown' || loadingPhase === 'long')
   return (
     <ToolHistoryProvider enabled={catalogSource === 'endpoint' || catalogSource === 'flat-fallback'}>
     {(controls) => (
@@ -154,15 +158,16 @@ export default function NavRail({
       {/* The skeleton reads the WHOLE catalog, not the surface-filtered rail:
           a surface whose familyIds match nothing is honestly empty, not
           loading. App.jsx spelled this `catalog.families.length === 0`. */}
-      {!catalogErr && catalogFamilyCount === 0 && (
+      {showSkeleton && (
         // Loading = static content-shaped skeleton rows (no spinner, no text note).
-        <div className="skeleton-stack" aria-hidden="true">
+        // Match a collapsed family row: 44px header plus its two 1px borders.
+        <div className="skeleton-stack" aria-hidden="true" style={{ '--skeleton-h': '46px' }}>
           <div className="skeleton-row" />
           <div className="skeleton-row" />
           <div className="skeleton-row" />
         </div>
       )}
-      {railFamilies.map((fam) => (
+      {!showSkeleton && railFamilies.map((fam) => (
         <Section
           key={fam.family_id}
           title={fam.label}
@@ -196,7 +201,7 @@ export default function NavRail({
         onToggle={onToggleAuthor}
         innerRef={authorSectionRef}
       >
-        <AuthorPanel
+        {authorContent !== undefined ? authorContent : <AuthorPanel
           onAuthor={onAuthor}
           onPublish={onPublish}
           onUseAuthored={onUseAuthored}
@@ -210,7 +215,7 @@ export default function NavRail({
           notLinked={claudeNotLinked}
           onLinkClaude={onLinkClaude}
           buildEntitled={buildEntitled}
-        />
+        />}
       </Section>
       {controls}
       </>

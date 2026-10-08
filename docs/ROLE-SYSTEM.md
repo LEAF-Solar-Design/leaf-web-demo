@@ -75,6 +75,7 @@ baseline stands) — pointing at an override is an operator act, and a
 vanished mount must never silently restore the shipped defaults. The
 elevated-only rule is structural: `platform_customize` in a plain `grants`
 block is dropped at load time, in any policy file.
+For a vanished or unreadable override, see the [roles mount-loss runbook](runbooks/roles-mount-loss.md).
 
 ## Add a new role
 

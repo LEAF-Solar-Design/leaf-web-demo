@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createNotificationBus, useNotices, useToastBus } from './notifications.js'
+import Toast from '../components/Toast.jsx'
 
 afterEach(cleanup)
 
@@ -48,5 +49,35 @@ describe('useToastBus / useNotices lifecycle', () => {
     fireEvent.click(screen.getByRole('button', { name: 'no toast' }))
     expect(screen.getByRole('button')).toHaveTextContent('hello')
     expect(screen.getByTestId('count')).toHaveTextContent('1')
+  })
+
+  it('preserves the version Undo action through the bus and invokes it from the toast', () => {
+    const bus = createNotificationBus(5)
+    const onUndo = vi.fn()
+    const action = { label: 'Undo', undo: true, onClick: onUndo }
+    function VersionProbe() {
+      const { toast, showToast, onToastDone } = useToastBus(bus)
+      const notices = useNotices(bus)
+      return (
+        <>
+          <button type="button" onClick={() => showToast({ text: 'Version 2 created', action })}>
+            Create version
+          </button>
+          <span data-testid="kept-undo">{notices[0]?.action?.undo === true ? 'Undo kept' : 'no Undo'}</span>
+          <Toast toast={toast} onDone={onToastDone} />
+        </>
+      )
+    }
+    render(<VersionProbe />)
+    fireEvent.click(screen.getByRole('button', { name: 'Create version' }))
+    expect(screen.getByRole('status')).toHaveTextContent('Version 2 created')
+    expect(screen.getByTestId('kept-undo')).toHaveTextContent('Undo kept')
+    expect(bus.getSnapshot().ring[0].action).toBe(action)
+    expect(bus.getSnapshot().ring[0].action.onClick).toBe(onUndo)
+    fireEvent.click(screen.getByRole('button', { name: 'Undo' }))
+    expect(onUndo).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(bus.getSnapshot().visibleId).toBeNull()
+    expect(bus.getSnapshot().ring[0].action).toBe(action)
   })
 })

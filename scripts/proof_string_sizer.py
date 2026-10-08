@@ -29,6 +29,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LABEL = "SYNTHETIC, TEST ONLY: recorded String Sizer replay, not live sizing."
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "scripts/fixtures/string_sizer_replay_manifest.json"
+ROOFTOP_SIZING_MANIFEST = REPO / "scripts/fixtures/rooftop_string_sizer_replay_manifest.json"
+ROOFTOP_SOLVE_MANIFEST = REPO / "scripts/fixtures/rooftop_solve_replay_manifest.json"
+ROOFTOP_LABEL = "SYNTHETIC, TEST ONLY: Rooftop solve replay with fixture-derived panel IDs, not live solving."
+ROOFTOP_SCHEMA = "leaf.synthetic-rooftop-solve-fixtures.v1"
+ROOFTOP_PACKAGE_SHA = "53ed4b7b1f8d5c22c9a5e991d0eafd100e6fb598fe702114b091d3f7d66c4618"
 MANIFEST_SCHEMA = "leaf.synthetic-string-sizing-fixtures.v1"
 RECEIPT_SCHEMA = "leaf.synthetic-string-sizing-receipt.v1"
 GRANT_REF = "synthetic-sizing-g2"
@@ -95,7 +100,7 @@ def sizing_module(server_dir=None):
     return importlib.import_module("solar_sizing_client")
 
 
-def load_manifest(path, repo_root):
+def load_manifest(path, repo_root, *, label=LABEL):
     root = Path(repo_root).resolve()
     try:
         manifest = json.loads(Path(path).read_bytes())
@@ -107,7 +112,7 @@ def load_manifest(path, repo_root):
     if set(manifest) != root_keys:
         raise ReplayConfigError("manifest keys: missing " + repr(sorted(root_keys - set(manifest)))
                                 + "; extra " + repr(sorted(set(manifest) - root_keys)))
-    for key, expected in (("schema", MANIFEST_SCHEMA), ("label", LABEL)):
+    for key, expected in (("schema", MANIFEST_SCHEMA), ("label", label)):
         if manifest.get(key) != expected:
             raise ReplayConfigError(key + ": unsupported value")
     entries = manifest.get("fixtures")
@@ -162,13 +167,101 @@ def load_manifest(path, repo_root):
             raise ReplayConfigError("response_wire_sha256: invalid response span") from exc
         if sha256(response) != entry["response_wire_sha256"]:
             raise ReplayConfigError("response_wire_sha256: pin mismatch")
+        try:
+            client.validate_response(json.loads(response))
+        except (ValueError, client.CloudError) as exc:
+            raise ReplayConfigError("response: invalid sizing model") from exc
         result[digest] = (fixture_id, response, sha256(response))
     return result
 
 
+def solve_module():
+    sizing_module()
+    return importlib.import_module("leaf_cloud_client")
+
+
+def contained_path(root, value, within=None):
+    if not isinstance(value, str):
+        raise ReplayConfigError("path: expected string")
+    relative, windows = Path(value), PureWindowsPath(value)
+    if (relative.is_absolute() or windows.is_absolute() or windows.drive
+            or ".." in relative.parts or ".." in windows.parts):
+        raise ReplayConfigError("path: repository-relative path required")
+    target = (Path(root).resolve() / relative).resolve()
+    if not target.is_relative_to(Path(root).resolve()):
+        raise ReplayConfigError("path: outside repository")
+    if within is not None and not target.is_relative_to((Path(root).resolve() / within).resolve()):
+        raise ReplayConfigError("path: outside " + within)
+    return target
+
+
+def load_solve_manifest(path, repo_root):
+    """Validate the fixed derived package before creating any listener or grant."""
+    try:
+        manifest = json.loads(Path(path).read_bytes())
+        if (set(manifest) != {"schema", "label", "package", "fixtures"}
+                or manifest["schema"] != ROOFTOP_SCHEMA or manifest["label"] != ROOFTOP_LABEL):
+            raise ReplayConfigError("solve manifest: unsupported keys or profile")
+        pin = manifest["package"]
+        if set(pin) != {"path", "bytes", "sha256"}:
+            raise ReplayConfigError("package: invalid keys")
+        raw = contained_path(repo_root, pin["path"], within="scripts/fixtures").read_bytes()
+        if (pin["bytes"] != 366852 or pin["sha256"] != ROOFTOP_PACKAGE_SHA
+                or len(raw) != pin["bytes"] or sha256(raw) != pin["sha256"]):
+            raise ReplayConfigError("package: pin mismatch")
+        package = json.loads(raw)
+        if (set(package) != {"schema", "label", "source_intake_sha256", "upload_intake_sha256",
+                             "source_solve_fixture_sha256", "fixtures"}
+                or package["schema"] != ROOFTOP_SCHEMA or package["label"] != ROOFTOP_LABEL):
+            raise ReplayConfigError("package: invalid keys or profile")
+        entries = manifest["fixtures"]
+        pairs = package["fixtures"]
+        if not isinstance(entries, list) or len(entries) != 7 or len(pairs) != 7:
+            raise ReplayConfigError("fixtures: expected seven solves")
+        client = solve_module()
+        result, ids = {}, set()
+        keys = {"id", "request_bytes", "request_wire_sha256", "response_bytes",
+                "response_wire_sha256", "response_encoding"}
+        digests = [entry["request_wire_sha256"] for entry in entries]
+        if len(set(digests)) != len(digests):
+            raise ReplayConfigError("request_wire_sha256: duplicate request digest")
+        for entry, pair in zip(entries, pairs):
+            if set(entry) != keys or set(pair) != {"id", "request", "response"}:
+                raise ReplayConfigError("fixtures: invalid keys")
+            identity = entry["id"]
+            if (not isinstance(identity, str) or not re.fullmatch(r"rooftop-piece-[0-9]+", identity)
+                    or identity in ids or pair["id"] != identity):
+                raise ReplayConfigError("id: invalid or repeated")
+            ids.add(identity)
+            if entry["response_encoding"] != "canonical-json":
+                raise ReplayConfigError("response_encoding: unsupported value")
+            request = client.StringerRequest.model_validate(pair["request"])
+            request_raw = client.canonical_bytes(request.wire_payload())
+            response_raw = client.canonical_bytes(pair["response"])
+            response = client.StringerResponse.model_validate_json(response_raw)
+            response.original_visited_path(request)
+            digest = sha256(request_raw)
+            if digest in result:
+                raise ReplayConfigError("request_wire_sha256: duplicate request digest")
+            if (len(request_raw) != entry["request_bytes"] or digest != entry["request_wire_sha256"]
+                    or len(response_raw) != entry["response_bytes"]
+                    or sha256(response_raw) != entry["response_wire_sha256"]):
+                raise ReplayConfigError("wire: pin mismatch")
+            result[digest] = (identity, response_raw, sha256(response_raw))
+        return result
+    except ReplayConfigError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise ReplayConfigError("solve manifest: invalid package or model") from exc
+
+
 class ReplayServer:
     def __init__(self, fixture_map, bearer_token, *, read_timeout_s=5.0,
-                 max_body_bytes=65536, max_events=1024):
+                 max_body_bytes=65536, max_events=1024, endpoint="/string-length", label=LABEL):
+        if endpoint not in {"/string-length", "/api/ml/"}:
+            raise ReplayConfigError("endpoint: unsupported replay path")
+        self.endpoint = endpoint
+        self.label = label
         self.fixture_map = dict(fixture_map)
         self.events = []
         self.failed = False
@@ -228,7 +321,7 @@ class ReplayServer:
                     return None, None
                 method = words[0].decode("ascii", errors="replace")
                 target = words[1]
-                return method, "/string-length" if target == b"/string-length" else "other"
+                return method, endpoint if target == endpoint.encode("ascii") else "other"
 
             def record_once(self, status, digest=None, fixture_id=None, response_digest=None):
                 if not self.recorded:
@@ -261,15 +354,23 @@ class ReplayServer:
                         self.record_once("timeout")
                     return
                 self.record_once(code)
-                body = json.dumps({"status": code, "label": LABEL}).encode("utf-8")
+                body = json.dumps({"status": code, "label": label}).encode("utf-8")
                 try:
                     self.send_response(code)
+                    self.send_header("X-Leaf-Synthetic-Replay", label)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
                 except OSError:
                     pass
+
+            def send_response(self, code, message=None):
+                # The stdlib suppresses headers for malformed/HTTP-0.9 request
+                # lines. Every emitted refusal still needs its synthetic label.
+                if self.request_version == "HTTP/0.9":
+                    self.request_version = "HTTP/1.0"
+                super().send_response(code, message)
 
             def log_message(self, *args):
                 pass  # Never log headers, tokens or incoming bodies.
@@ -281,7 +382,7 @@ class ReplayServer:
                     return
                 digest = fixture_id = response_digest = None
                 status, body = 200, None
-                if self.identity()[1] != "/string-length":
+                if self.identity()[1] != endpoint:
                     status = 404
                 elif self.command != "POST":
                     status = 405
@@ -323,14 +424,15 @@ class ReplayServer:
                                 status = 409
                                 body = {"classification": "SYNTHETIC_REPLAY_REQUEST_MISMATCH",
                                         "expected_sha256": sorted(owner.fixture_map),
-                                        "actual_sha256": digest, "label": LABEL}
+                                        "actual_sha256": digest, "label": label}
                             else:
                                 fixture_id, body, response_digest = match
                 self.record_once(status, digest, fixture_id, response_digest)
                 if not isinstance(body, bytes):
-                    body = json.dumps(body or {"status": status, "label": LABEL}).encode("utf-8")
+                    body = json.dumps(body or {"status": status, "label": label}).encode("utf-8")
                 try:
                     self.send_response(status)
+                    self.send_header("X-Leaf-Synthetic-Replay", label)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -345,7 +447,7 @@ class ReplayServer:
                 raise AttributeError(name)
 
         self.server = DeadlineServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_port}/string-length"
+        self.url = f"http://127.0.0.1:{self.server.server_port}{endpoint}"
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        kwargs={"poll_interval": .05}, daemon=True)
         self.thread.start()
@@ -353,7 +455,7 @@ class ReplayServer:
     def record(self, method, path, status, digest, fixture_id, response_digest, max_events):
         if method is not None and method not in {"POST", "GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
             method = "other"
-        if path is not None and path != "/string-length":
+        if path is not None and path != self.endpoint:
             path = "other"
         with self.lock:
             if status != 200 or len(self.events) >= max_events:
@@ -400,11 +502,13 @@ def write_grant_file(run_root, *, ttl_s):
     return path, token
 
 
-def prepare_child(role, sizing_url, server_dir=None):
+def prepare_child(role, sizing_url, server_dir=None, *, solver_url=None):
     if role not in {"broker", "app"}:
         raise ReplayConfigError("role: broker or app required")
     if not re.fullmatch(r"http://127\.0\.0\.1:[0-9]{1,5}/string-length", sizing_url):
         raise ReplayConfigError("sizing-url: loopback replay URL required")
+    if solver_url is not None and not re.fullmatch(r"http://127\.0\.0\.1:[0-9]{1,5}/api/ml/", solver_url):
+        raise ReplayConfigError("solver-url: loopback replay URL required")
     directory = Path(server_dir or REPO / "server").resolve()
     client = sizing_module(directory)
     requests = importlib.import_module("requests")
@@ -422,22 +526,78 @@ def prepare_child(role, sizing_url, server_dir=None):
 
     client.SIZING_URL = sizing_url
     client.requests = IsolatedRequests
+    if solver_url is not None:
+        solver = importlib.import_module("leaf_cloud_client")
+        solver.SOLVER_URL = solver_url
+        solver.requests = IsolatedRequests
     return directory / (role + ".py")
 
 
-def verify_receipt(path, run_id):
+def verify_receipt(path, run_id, profile="string-sizing"):
+    if profile not in {"string-sizing", "rooftop"}:
+        print("Synthetic sizing receipt: invalid profile")
+        return 1
     try:
         receipt = json.loads(Path(path).read_bytes())
     except (OSError, ValueError):
         print("Synthetic sizing receipt: unreadable JSON")
         return 1
-    for key, expected in (("schema", RECEIPT_SCHEMA), ("label", LABEL),
+    rooftop = profile == "rooftop"
+    if isinstance(receipt, dict) and (
+            (rooftop and receipt.get("profile") != "rooftop")
+            or (not rooftop and "profile" in receipt)):
+        print("Synthetic sizing receipt: invalid profile")
+        return 1
+    for key, expected in (("schema", RECEIPT_SCHEMA), ("label", ROOFTOP_LABEL if rooftop else LABEL),
                           ("run_id", run_id), ("ok", True)):
         if not isinstance(receipt, dict) or receipt.get(key) != expected or (
                 key == "ok" and receipt.get(key) is not True):
             print("Synthetic sizing receipt: invalid " + key)
             return 1
+    if rooftop:
+        try:
+            expected = rooftop_pins()
+            if (receipt.get("pins") != expected or receipt.get("cleanup_complete") is not True
+                    or receipt.get("record") != "sf-sp21a-rooftop-replay"
+                    or receipt.get("ttl_expired") is not False
+                    or receipt.get("bootstrap_roles") != ["broker", "app"]):
+                raise ValueError()
+            sizing_manifest = json.loads(ROOFTOP_SIZING_MANIFEST.read_bytes())
+            solve_manifest = json.loads(ROOFTOP_SOLVE_MANIFEST.read_bytes())
+            sizing_pins = [{key: entry[key] for key in
+                            ("id", "fixture_sha256", "request_wire_sha256", "response_wire_sha256")}
+                           for entry in sizing_manifest["fixtures"]]
+            if (receipt.get("manifest_sha256") != expected["sizing_manifest_sha256"]
+                    or receipt.get("fixtures") != sizing_pins
+                    or receipt.get("solve_fixtures") != solve_manifest["fixtures"]):
+                raise ValueError()
+            endpoints = receipt["endpoints"]
+            if set(endpoints) != {"/string-length", "/api/ml/"}:
+                raise ValueError()
+            for endpoint, url in endpoints.items():
+                if not re.fullmatch(r"http://127\.0\.0\.1:[0-9]{1,5}" + re.escape(endpoint), url):
+                    raise ValueError()
+            if receipt["endpoint"] != endpoints["/string-length"]:
+                raise ValueError()
+            maps = {"/string-length": load_manifest(ROOFTOP_SIZING_MANIFEST, REPO, label=ROOFTOP_LABEL),
+                    "/api/ml/": load_solve_manifest(ROOFTOP_SOLVE_MANIFEST, REPO)}
+            for event in receipt["events"]:
+                endpoint = event["path"]
+                match = maps[endpoint][event["request_sha256"]]
+                if (event["method"] != "POST" or event["status"] != 200
+                        or event["endpoint"] != endpoints[endpoint]
+                        or event["fixture_id"] != match[0] or event["response_sha256"] != match[2]):
+                    raise ValueError()
+        except (OSError, ValueError, TypeError, KeyError, ReplayConfigError):
+            print("Synthetic Rooftop receipt: invalid profile proof")
+            return 1
     return 0
+
+
+def rooftop_pins():
+    return {"sizing_manifest_sha256": sha256(ROOFTOP_SIZING_MANIFEST.read_bytes()),
+            "solve_manifest_sha256": sha256(ROOFTOP_SOLVE_MANIFEST.read_bytes()),
+            "package_sha256": ROOFTOP_PACKAGE_SHA, "package_bytes": 366852}
 
 
 def supervise(args):
@@ -451,13 +611,33 @@ def supervise(args):
     root = Path(args.run_root).resolve()
     receipt_path = root / "synthetic-sizing-receipt.json"
     receipt_path.unlink(missing_ok=True)
-    manifest_path = Path(args.manifest or MANIFEST).resolve()
-    fixtures = load_manifest(manifest_path, REPO)
+    stop_path = root / "stop-request"
+    stop_path.unlink(missing_ok=True)
+    profile = getattr(args, "profile", "string-sizing")
+    if profile not in {"string-sizing", "rooftop"}:
+        raise ReplayConfigError("profile: unsupported value")
+    rooftop = profile == "rooftop"
+    label = ROOFTOP_LABEL if rooftop else LABEL
+    if rooftop and args.manifest is not None:
+        raise ReplayConfigError("manifest: Rooftop uses the owned pinned manifests")
+    manifest_path = Path(args.manifest or (ROOFTOP_SIZING_MANIFEST if rooftop else MANIFEST)).resolve()
+    fixtures = load_manifest(manifest_path, REPO, label=label) if rooftop else load_manifest(manifest_path, REPO)
+    solves = load_solve_manifest(ROOFTOP_SOLVE_MANIFEST, REPO) if rooftop else None
     manifest_raw = manifest_path.read_bytes()
     manifest = json.loads(manifest_raw)
     grant_path, token = write_grant_file(root, ttl_s=args.max_seconds)
-    listener = ReplayServer(fixtures, token)
-    receipt = {"schema": RECEIPT_SCHEMA, "label": LABEL, "run_id": args.run_id,
+    listener = ReplayServer(fixtures, token, label=label) if rooftop else ReplayServer(fixtures, token)
+    solver_listener = None
+    if rooftop:
+        try:
+            solver_listener = ReplayServer(solves, token, endpoint="/api/ml/", label=label,
+                                           max_body_bytes=solve_module().MAX_RESPONSE_BYTES)
+            solver_listener.lock = listener.lock
+        except BaseException:
+            listener.close()
+            raise
+    listeners = [listener] + ([solver_listener] if solver_listener is not None else [])
+    receipt = {"schema": RECEIPT_SCHEMA, "label": label, "run_id": args.run_id,
                "record": "sf-w3-sizing-replay", "pid": os.getpid(),
                "manifest_sha256": sha256(manifest_raw),
                "fixtures": [{key: entry[key] for key in
@@ -468,23 +648,40 @@ def supervise(args):
                "limitations": [LABEL, "synthetic fixture, not a live-service capture",
                                "no browser walk (G2b)", "no staging sizing (G3)",
                                "a drawing sized under one replay port does not re-verify under another"]}
+    if rooftop:
+        receipt.update(profile=profile, record="sf-sp21a-rooftop-replay", pins=rooftop_pins(),
+                       endpoints={item.endpoint: item.url for item in listeners}, cleanup_complete=False,
+                       solve_fixtures=json.loads(ROOFTOP_SOLVE_MANIFEST.read_bytes())["fixtures"])
+        receipt["limitations"] = [label, "fixed fixture-derived identities, not live solving",
+                                  "source/build-context packaging evidence only; no image inspection",
+                                  "zero events do not prove a walk; browser proof belongs to SP-21C"]
     main_failed = False
 
     def publish():
         with listener.lock:
-            receipt["events"] = list(listener.events)
-            receipt["ok"] = not (listener.failed or receipt["ttl_expired"] or main_failed)
+            receipt["events"] = [dict(event, endpoint=item.url) if rooftop else dict(event)
+                                 for item in listeners for event in item.events]
+            receipt["ok"] = not (any(item.failed for item in listeners) or receipt["ttl_expired"] or main_failed)
             atomic_json(receipt_path, receipt)
 
     listener.on_event = publish
+    if solver_listener is not None:
+        solver_listener.on_event = publish
     finished = threading.Event()
 
     def watchdog():
-        if not finished.wait(args.max_seconds):
-            with listener.lock:
-                receipt["ttl_expired"] = True
-                publish()
-            _thread.interrupt_main()
+        deadline = time.monotonic() + args.max_seconds
+        stop_signalled = False
+        while not finished.wait(0.25):
+            if stop_path.exists() and not stop_signalled:
+                stop_signalled = True
+                _thread.interrupt_main()
+            if time.monotonic() >= deadline:
+                with listener.lock:
+                    receipt["ttl_expired"] = True
+                    publish()
+                _thread.interrupt_main()
+                return
 
     launcher = None
     previous_argv = sys.argv
@@ -520,6 +717,8 @@ def supervise(args):
                 cmd = [sys.executable, "-B", str(Path(__file__).resolve()), "bootstrap",
                        "--role", role, "--sizing-url", listener.url,
                        "--server-dir", str(server_dir)]
+                if solver_listener is not None:
+                    cmd += ["--solver-url", solver_listener.url]
                 if role == "broker":
                     child_env["LEAF_CLOUD_GRANTS_FILE"] = str(grant_path)
                 with listener.lock:
@@ -551,7 +750,10 @@ def supervise(args):
             code = 1
             print("Synthetic sizing supervisor: cleanup failed", file=sys.stderr)
         finally:
-            listener.close()
+            for item in listeners:
+                item.close()
+            if rooftop:
+                receipt["cleanup_complete"] = True
             main_failed = code != 0
             publish()
             sys.argv = previous_argv
@@ -568,11 +770,13 @@ def main():
     bootstrap = commands.add_parser("bootstrap")
     bootstrap.add_argument("--role", choices=("broker", "app"), required=True)
     bootstrap.add_argument("--sizing-url", required=True)
+    bootstrap.add_argument("--solver-url")
     bootstrap.add_argument("--server-dir", type=Path)
     supervisor = commands.add_parser("supervise")
     supervisor.add_argument("--run-root", type=Path, required=True)
     supervisor.add_argument("--run-id", required=True)
     supervisor.add_argument("--manifest", type=Path)
+    supervisor.add_argument("--profile", choices=("string-sizing", "rooftop"), default="string-sizing")
     supervisor.add_argument("--max-seconds", type=int, default=1800)
     supervisor.add_argument("--launcher", type=Path)
     supervisor.add_argument("--server-dir", type=Path)
@@ -580,15 +784,16 @@ def main():
     verify = commands.add_parser("verify-receipt")
     verify.add_argument("--receipt", type=Path, required=True)
     verify.add_argument("--run-id", required=True)
+    verify.add_argument("--profile", choices=("string-sizing", "rooftop"), default="string-sizing")
     args = parser.parse_args()
     try:
         if args.command == "bootstrap":
-            entry = prepare_child(args.role, args.sizing_url, args.server_dir)
+            entry = prepare_child(args.role, args.sizing_url, args.server_dir, solver_url=args.solver_url)
             sys.argv = [str(entry)]
             runpy.run_path(str(entry), run_name="__main__")
             return 0
         if args.command == "verify-receipt":
-            return verify_receipt(args.receipt, args.run_id)
+            return verify_receipt(args.receipt, args.run_id, profile=args.profile)
         if not 1 <= args.max_seconds <= 7200:
             parser.error("--max-seconds must be in 1..7200")
         return supervise(args)

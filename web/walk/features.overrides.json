@@ -2080,6 +2080,59 @@
     }
     ,
     {
+      "id": "control:object-snap-modes",
+      "source_id": "object-snap-modes",
+      "title": "Object snap modes",
+      "sources": [
+        "web/src/site/DrawingCockpit.jsx",
+        "web/src/cadedit/ObjectSnapMenu.jsx"
+      ],
+      "states": [
+        "closed",
+        "open",
+        "failed-load"
+      ],
+      "state_contexts": {
+        "closed": {
+          "toolbar": "Drafting settings",
+          "name": "Object snap modes",
+          "expanded": false
+        },
+        "open": {
+          "toolbar": "Drafting settings",
+          "name": "Object snap modes",
+          "expanded": true
+        },
+        "failed-load": {
+          "toolbar": "Drafting settings",
+          "name": "Object snap modes",
+          "expanded": false,
+          "failedLoad": true
+        }
+      },
+      "expected_effect": {
+        "closed": {
+          "kind": "toggles",
+          "target": "object-snap-menu-expanded",
+          "value": true
+        },
+        "open": {
+          "kind": "toggles",
+          "target": "object-snap-menu-expanded",
+          "value": false
+        },
+        "failed-load": {
+          "kind": "toggles",
+          "target": "object-snap-menu-expanded",
+          "value": true
+        }
+      },
+      "viewports": [
+        "desktop"
+      ],
+      "certify": "both"
+    },
+    {
       "id": "control:ribbon-script",
       "source_id": "ribbon-script",
       "title": "ribbon script",
@@ -2331,7 +2384,7 @@
         "engine-crashed": {"session": {"errorKind": "crashed"}},
         "engine-busy": {"session": {"busy": true}},
         "no-selection": {"session": {"selected": null, "selectedIds": []}},
-        "multiple-selected": {"session": {"selectedIds": ["one", "two"]}},
+        "multiple-selected": {"session": {"selected": {"id": "one", "editable": true, "type": "LINE"}, "selectedIds": ["one", "two"], "entities": [{"id": "one", "editable": true, "type": "LINE"}, {"id": "two", "editable": true, "type": "LINE"}]}},
         "placed-insert": {"session": {"selected": {"editable": false, "type": "INSERT"}}},
         "placed-dimension": {"session": {"selected": {"editable": false, "type": "DIMENSION"}}},
         "empty-clipboard": {"session": {"clipboard": null}},
@@ -2368,7 +2421,7 @@
     }
   },
   "overrides": {
-    "action:engine-repeat": {"effect": {"kind": "opens", "target": "cockpit-prompt"}, "sources": ["web/src/cadedit/CommandLineArmer.jsx"]},
+    "action:engine-repeat": {"effect": {"kind": "opens", "target": "cockpit-prompt", "operation": "createLine", "group": "draw"}, "sources": ["web/src/cadedit/CommandLineArmer.jsx"]},
     "action:fit": {"effect": {"kind": "renders", "target": "viewer-home"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-in": {"effect": {"kind": "renders", "target": "viewer-zoom-in"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-out": {"effect": {"kind": "renders", "target": "viewer-zoom-out"}, "sources": ["web/src/lib/ribbonClusters.js"]},

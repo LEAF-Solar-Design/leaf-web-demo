@@ -43,6 +43,8 @@ import DegradedBanner from '../components/DegradedBanner.jsx'
 // its slots now, so the stage and the console cannot drift apart again.
 import SurfaceFrame from './SurfaceFrame.jsx'
 import { stageRunDisabledReason, stageHelpPaletteRow } from './stageRunReasons.js'
+import { versionShortcutDecision } from '../lib/actionRegistry.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import SessionGate from '../components/SessionGate.jsx'
 import OpsDrawer from '../components/OpsDrawer.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
@@ -59,6 +61,7 @@ import { useWorkspaceControllers } from '../controllers/WorkspaceControllerProvi
 import useCatalogController from '../controllers/catalog/useCatalogController.js'
 import { setCredentialMountAvailable } from '../lib/secretGuardTransport.js'
 import { useToastBus } from '../lib/notifications.js'
+import { CAM_FOCUS, pushOnOpen, useViewParamSeat } from '../lib/urlState.js'
 import { resolvePublishedCatalogTool } from './publishedCatalogTool.js'
 import { track, setTourStep } from '../telemetry.js'
 import useBuildQueue from '../controllers/useBuildQueue.js'
@@ -411,6 +414,8 @@ export default function ToolCast({
   // no drawing until one loads or uploads), so the claim still starts at mount
   // and the reload handoff is still bootstrapped in the authority effect.
   const catalogAdapters = useMemo(() => ({
+    onDraftRestored: (text) => setPrompt(text),
+    onDraftScopeChanged: () => setPrompt(''),
     previewRoute: matchPrompt,
     commitDecision: (decision) => catalogDecisionRef.current?.(decision),
     dismissDecision: () => {
@@ -595,6 +600,9 @@ export default function ToolCast({
   }, [active, drawing.drawingState?.drawing_id, drawing.head, drawing.shown, drawingId, platformSession.actions, platformSession.recoveries, requireAuth, seatIntake, sessionRetry])
 
   // showToast comes from useToastBus() above (slice 13a).
+  // The toast keeps this callback while the current undo eligibility changes.
+  const undoActionRef = useRef(null)
+  const onUndo = useCallback(() => undoActionRef.current?.(), [])
 
   const onCompleteVersion = useCallback(async (newVersion, envelope) => {
     const scopeAtStart = activeDrawingIdRef.current
@@ -608,18 +616,19 @@ export default function ToolCast({
       if (envelope?.result?.new_version_readable === false) {
         if (activeDrawingIdRef.current !== scopeAtStart) return
         drawing.actions.recordCommittedUnreadableHead(newVersion)
-        showToast({ text: `Version ${newVersion?.version || 'created'} created` })
+        showToast({ text: `Version ${newVersion?.version || 'created'} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
         return
       }
       const view = await getDrawingIntake(PUBLIC_DEMO, drawingId, 'head')
       if (activeDrawingIdRef.current !== scopeAtStart) return
       seatVersion(view, { drawingId, source: 'job', event: 'complete' })
+      showToast({ text: `Version ${newVersion?.version || 'created'} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
     } catch {
       if (activeDrawingIdRef.current !== scopeAtStart) return
       drawing.actions.markRefreshFailure({ drawing_id: drawingId, version: newVersion?.version })
-      showToast({ text: `Version ${newVersion?.version || 'created'} created` })
+      showToast({ text: `Version ${newVersion?.version || 'created'} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
     }
-  }, [drawing.actions, drawing.shown, seatVersion, showToast])
+  }, [drawing.actions, drawing.shown, onUndo, seatVersion, showToast])
 
   const onJobNotice = useCallback(({ text }) => {
     showToast({ text, action: { label: 'View', onClick: () => setRightView('execution') } })
@@ -881,6 +890,7 @@ export default function ToolCast({
     lastConfirmedRunRef.current = null
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     catalog.actions.dismissRoute()
+    setSelectedCatalogTool(null)
     clearConverse()
     resetCached()
   }, [activeDrawingId, catalog.actions, clearConverse, resetCached, resetJob])
@@ -1222,6 +1232,15 @@ export default function ToolCast({
       toolName: toolName || 'arrange-panels-as-cat',
       persist: true,
     })
+    // S23 agent checkpoints, the same keyed notice /app raises: an agent
+    // turn's job that committed a version offers Undo in one place.
+    if (envelope?.ok && envelope.result?.new_version) {
+      showToast({
+        key: 'agent-checkpoint',
+        text: 'Checkpoint saved',
+        action: { label: 'Undo', undo: true, onClick: onUndo },
+      })
+    }
     if (envelope && !envelope.ok) {
       setPhase('failed')
       setError(null)
@@ -1231,7 +1250,7 @@ export default function ToolCast({
     }
     await workspace.rehydrate()
     checkout.actions.refresh()
-  }, [attachTrackedJob, checkout.actions, onJobLinked, sessionReady, workspace])
+  }, [attachTrackedJob, checkout.actions, onJobLinked, onUndo, sessionReady, showToast, workspace])
 
   const openResultDetails = useCallback((envelope = jobResult, jobId = currentJobId) => {
     if (!envelope) return
@@ -1283,56 +1302,29 @@ export default function ToolCast({
     }
   }, [adoptEnvelope, sessionReady])
 
-  useEffect(() => {
-    if (!drawer) return undefined
-    const closeOnEscape = (event) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      setDrawer(null)
-    }
-    window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [drawer])
+  // S27: Escape on /try goes through the one owner stack. The details drawer
+  // and the ops drawer own their own Escape (DetailsDrawer, OpsDrawer); this
+  // shell owns the two rungs below them, and the stack's layer order replaces
+  // the selector checks each listener used to make for what sat above it.
+  // Proposal layer: dismiss the route proposal and hand the caret back to the bar.
+  const dismissProposalOnEscape = useCallback(() => {
+    catalog.actions.dismissRoute()
+    // #1932: dismissing the proposal also clears the ?tool= key, so a second Escape leaves the scene.
+    setSelectedCatalogTool(null)
+    requestAnimationFrame(() => document.querySelector('.tc-bar-input')?.focus())
+  }, [catalog.actions])
+  useEscapeOwner('proposal', !!route, dismissProposalOnEscape, { layer: 'proposal' })
 
-  useEffect(() => {
-    if (!opsOpen) return undefined
-    const closeOpsOnEscape = (event) => {
-      if (event.key !== 'Escape') return
-      event.preventDefault()
-      setOpsOpen(false)
-    }
-    window.addEventListener('keydown', closeOpsOnEscape)
-    return () => window.removeEventListener('keydown', closeOpsOnEscape)
-  }, [opsOpen])
-
-  useEffect(() => {
-    if (!route) return undefined
-    const dismissProposalOnEscape = (event) => {
-      if (event.key !== 'Escape') return
-      if (document.querySelector('.drawer-layer .drawer, .claude-pop, .proj-menu')) return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      catalog.actions.dismissRoute()
-      requestAnimationFrame(() => document.querySelector('.tc-bar-input')?.focus())
-    }
-    window.addEventListener('keydown', dismissProposalOnEscape, true)
-    return () => window.removeEventListener('keydown', dismissProposalOnEscape, true)
-  }, [catalog.actions, route])
-
-  useEffect(() => {
+  // Run layer: Escape detaches from the running job without the page-close
+  // beacon (the job keeps running in Jobs).
+  const detachOnEscape = useCallback(() => {
     if (!jobRunning) return undefined
-    const detachOnEscape = (event) => {
-      if (event.key !== 'Escape') return
-      if (route || drawer || opsOpen || document.querySelector('.claude-pop, .proj-menu')) return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      const toolName = currentJob?.tool || selectedCatalogTool?.name || 'job'
-      detachJob()
-      showToast({ text: `Detached from ${toolName}. The job keeps running in Jobs.` })
-    }
-    window.addEventListener('keydown', detachOnEscape)
-    return () => window.removeEventListener('keydown', detachOnEscape)
-  }, [currentJob?.tool, detachJob, drawer, jobRunning, opsOpen, route, selectedCatalogTool?.name, showToast])
+    const toolName = currentJob?.tool || selectedCatalogTool?.name || 'job'
+    detachJob()
+    showToast({ text: `Detached from ${toolName}. The job keeps running in Jobs.` })
+    return undefined
+  }, [currentJob?.tool, detachJob, jobRunning, selectedCatalogTool?.name, showToast])
+  useEscapeOwner('detach', jobRunning, detachOnEscape, { layer: 'run' })
 
   const changePrompt = useCallback((value) => {
     setPrompt(value)
@@ -1420,12 +1412,31 @@ export default function ToolCast({
     setError(null)
     await undoDrawingVersion(checkout.actions.getCapability())
   }, [busy, canUndo, checkout.actions, jobRunning, sessionReady, undoDrawingVersion])
+  undoActionRef.current = undo
 
   const redo = useCallback(async () => {
     if (!sessionReady || busy || jobRunning || !canRedo) return
     setError(null)
     await redoDrawingVersion(checkout.actions.getCapability())
   }, [busy, canRedo, checkout.actions, jobRunning, redoDrawingVersion, sessionReady])
+
+  // S25: Mod+Z / Mod+Shift+Z step the drawing's versions off the drafting
+  // surface, through the same handlers the bar's Undo and Redo chips click.
+  // The registry's versionShortcutDecision owns the yield rules (an editor,
+  // a visible engine document, Alt, an already-consumed key); undo and redo
+  // keep their own gates, and the chips' preview and busy gates apply here.
+  useEffect(() => {
+    const onVersionKey = (event) => {
+      const kind = versionShortcutDecision(event)
+      if (!kind) return
+      event.preventDefault()
+      if (drawing.versionBusy || previewLocked) return
+      if (kind === 'undo') void onUndo()
+      else void redo()
+    }
+    window.addEventListener('keydown', onVersionKey)
+    return () => window.removeEventListener('keydown', onVersionKey)
+  }, [drawing.versionBusy, onUndo, previewLocked, redo])
 
   // One controller owns readiness, launch, following, and reload recovery.
   const iosShipController = useIosShipController({
@@ -1490,6 +1501,75 @@ export default function ToolCast({
     window.history.pushState({}, '', `${window.location.pathname}${search}${window.location.hash}`)
     setActiveSurface(surfaceId)
   }, [])
+  const openAccountDetails = useCallback(() => setDrawer({
+    title: 'Account details',
+    // S24: the one drawer here the URL may name (`drawer=details`).
+    urlKey: 'details',
+    rows: [
+      `tenant ${tenantId}`,
+      `organization ${sessionOrg || workspace.orgId || 'unknown'}`,
+      `tier ${sessionTier || platform.entitlements?.tier || 'unknown'}`,
+      `authentication ${sessionAuthRequired ? 'sign in required' : 'active'}`,
+    ],
+    action: isSignedIn() ? { label: 'Sign out', onClick: platformSession.actions.signOut } : null,
+    foot: 'Platform identity and Claude account credit are separate.',
+  }), [platform.entitlements?.tier, platformSession.actions.signOut, sessionAuthRequired, sessionOrg, sessionTier, tenantId, workspace.orgId])
+  // S24 (A14): the URL keeps the open Details drawer, the opened catalog
+  // tool, the operator's own selection and the Focus 3D camera preset
+  // (lib/urlState.js owns the four keys and preserves every boot flag, Auth0
+  // key and the hash byte for byte). Only the ACTIVE scene seats them: this
+  // cast stays mounted behind the landing cover. Opening pushes, so Back
+  // closes; a selection or a preset change replaces.
+  const toolDrawerRef = useRef(drawer)
+  toolDrawerRef.current = drawer
+  useViewParamSeat('drawer', {
+    value: drawer?.urlKey === 'details' ? 'details' : null,
+    enabled: active,
+    onRestore: (name) => {
+      if (name === 'details') { openAccountDetails(); return true }
+      if (toolDrawerRef.current?.urlKey === 'details') setDrawer(null)
+      return name == null
+    },
+    mode: pushOnOpen,
+  })
+  useViewParamSeat('tool', {
+    value: selectedCatalogTool?.name ?? null,
+    enabled: active,
+    // A run owns its tool until it finishes; then a pending URL restore may proceed.
+    ready: !busy && !jobRunning && Array.isArray(tools) && tools.length > 0,
+    onRestore: (name) => {
+      if (name == null) { setSelectedCatalogTool(null); return true }
+      const found = tools.find((tool) => tool?.name === name)
+      if (!found) return false
+      setSelectedCatalogTool(found)
+      // A resumed authoring request owns the Author panel, including staged
+      // revisions awaiting publication. Restoring its catalog card must not
+      // hide that panel after the resume effect has opened it.
+      setLeftView(authorStage.pointer ? 'author' : 'catalog')
+      return true
+    },
+    mode: pushOnOpen,
+  })
+  useViewParamSeat('sel', {
+    value: selectedHandle == null ? null : String(selectedHandle),
+    enabled: active,
+    ready: drawing.shown != null,
+    onRestore: (handle) => {
+      if (handle == null) { onSelectedHandleChange?.(null); return true }
+      if (!selectEntity(drawing.shown, handle)) return false
+      onSelectedHandleChange?.(handle)
+      return true
+    },
+    mode: 'replace',
+  })
+  useViewParamSeat('cam', {
+    value: sculpture && focusView ? CAM_FOCUS : null,
+    enabled: active,
+    ready: sculpture,
+    // Another surface's pose value is not this cast's to clear.
+    onRestore: (preset) => { setFocusView(preset === CAM_FOCUS); return true },
+    mode: 'replace',
+  })
   const projectSlot = (
     <ProjectSwitcher
       mock={transportMock}
@@ -2252,6 +2332,12 @@ export default function ToolCast({
                 eligible: (_row, isHead) => sessionReady && !isHead,
                 disabled: Boolean(drawing.unreadableHead?.pending),
               }}
+              rewind={{
+                // S23: an agent-made head gets Rewind, which is the bar's
+                // Undo under the same blocks as the bar's Undo chip.
+                run: () => undo(),
+                disabled: Boolean(busy || jobRunning || drawing.versionBusy || previewLocked || !canUndo),
+              }}
             />
           </div>
         )}
@@ -2322,17 +2408,7 @@ export default function ToolCast({
             <button
               type="button"
               className="chip-act tc-account-details"
-              onClick={() => setDrawer({
-                title: 'Account details',
-                rows: [
-                  `tenant ${tenantId}`,
-                  `organization ${sessionOrg || workspace.orgId || 'unknown'}`,
-                  `tier ${sessionTier || platform.entitlements?.tier || 'unknown'}`,
-                  `authentication ${sessionAuthRequired ? 'sign in required' : 'active'}`,
-                ],
-                action: isSignedIn() ? { label: 'Sign out', onClick: platformSession.actions.signOut } : null,
-                foot: 'Platform identity and Claude account credit are separate.',
-              })}
+              onClick={openAccountDetails}
             >
               Account details
             </button>
@@ -2382,8 +2458,11 @@ export default function ToolCast({
           : 'Live service chain: web → app → harness → broker. Requests are not preloaded or simulated.'}
       </div>
 
+      {/* The Result panel has its own object-navigation announcements. Keep
+          the separate run channel quiet until there is run state to announce. */}
       <LiveRegion
         role="status"
+        live={jobRunning || jobResult || jobError ? 'polite' : 'off'}
         visuallyHidden={HIDE_WITH_CLASS}
         atomic
         label="Run status announcements"

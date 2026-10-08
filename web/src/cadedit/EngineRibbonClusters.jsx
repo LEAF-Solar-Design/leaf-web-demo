@@ -29,8 +29,9 @@
  * reference's tools this engine has no operation for (rectangle, copy,
  * mirror, ...) are present, disabled, with "not in the browser engine yet".
  */
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
@@ -41,7 +42,9 @@ import { ACI_NAMES, LINEWEIGHT_VALUES, SESSION_ERROR, admissibleBlockName, admis
 import { PENDING_INPUT_KEY, PENDING_WORD, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { PROMPTS, humanizeRefusal } from './promptKeys.js'
 import { isPointExpression } from './pointExpression.js'
+import { parseDimension } from './numericExpression.js'
 import { resolvePromptInputs } from './promptInputs.js'
+import ObjectSnapMenu from './ObjectSnapMenu.jsx'
 import ScriptPanel from './ScriptPanel.jsx'
 
 // W4f-6: the store's own number reading (a field the store would take as a
@@ -49,12 +52,67 @@ import ScriptPanel from './ScriptPanel.jsx'
 // strict ("10abc" is outlined, not read as 10).
 const readsAsNumber = (raw) => readNumber(raw) !== null
 
+// S26: a dimension field (mode 'decimal' or 'decimal-default') takes typed
+// units and @ arithmetic beside the point grammar. "@" then +, -, * or / with
+// no ',' or '<' is arithmetic on the field's own value; every other '@' form,
+// and any pair or polar text, stays a point expression and reaches
+// promptInputs.js unchanged.
+const DIMENSION_MODES = new Set(['decimal', 'decimal-default'])
+const DRAWING_UNITS = new Set(['mm', 'cm', 'm', 'in', 'ft'])
+// Angles, ratios and factors take arithmetic but never a length unit.
+const UNITLESS_KEYS = new Set(['a0', 'a1', 'rot', 'deg', 'totalDeg', 'ratio', 'factor', 'sx', 'sy'])
+const ARITHMETIC = /^\s*@\s*[-+*/]/
+// Pixels of horizontal label drag per step.
+export const SCRUB_PX = 4
+const isDimensionArithmetic = (raw) => typeof raw === 'string' && ARITHMETIC.test(raw) && !/[,<]/.test(raw)
+
+/** The drawing's length unit when the engine session names one, else null (unknown). */
+export function drawingUnitOf(session) {
+  const unit = session?.drawingUnit ?? session?.entities?.drawingUnit
+  return typeof unit === 'string' && DRAWING_UNITS.has(unit) ? unit : null
+}
+
+/**
+ * One dimension field's raw text judged by parseDimension: `{ value }` (the
+ * canonical number as a string) or `{ reason }`, or null when the text is not
+ * this grammar's to judge (empty, a plain number the store already reads, a
+ * point expression, or a word with no digit, which keeps the store's own
+ * sentence). `current` is the field's value before this edit, the operand of
+ * @ arithmetic. With no drawing unit (or a unitless field) the text must mean
+ * the same number in any unit, so a typed unit is refused, never guessed.
+ * Bounded: at most two parses of at most 64 characters.
+ */
+export function evaluateDimension(raw, { current, unit = null, unitless = false } = {}) {
+  if (typeof raw !== 'string' || !raw.trim() || readNumber(raw) !== null) return null
+  const arithmetic = isDimensionArithmetic(raw)
+  if (!arithmetic && (isPointExpression(raw) || !/\d/.test(raw))) return null
+  const base = readNumber(current)
+  const options = base === null ? {} : { current: base }
+  if (unit && !unitless) {
+    const result = parseDimension(raw, { ...options, unit })
+    return result.ok ? { value: result.canonical } : { reason: result.reason }
+  }
+  const asMm = parseDimension(raw, { ...options, unit: 'mm' })
+  if (!asMm.ok) return { reason: asMm.reason }
+  const asIn = parseDimension(raw, { ...options, unit: 'in' })
+  if (!asIn.ok || asIn.value !== asMm.value) {
+    return { reason: unitless
+      ? 'A length unit does not apply here; type a plain number or @ arithmetic.'
+      : 'The drawing unit is unknown, so a typed unit cannot be converted; type a plain number.' }
+  }
+  return { value: asMm.canonical }
+}
+
+// An arrow step or a scrub lands on a decimal without float noise.
+const stepValue = (v) => {
+  const r = Math.round(v * 1e6) / 1e6
+  return String(Object.is(r, -0) ? 0 : r)
+}
+
 // The bar-dock's slot the prompt portals into, and the prompt's own id (the
 // armed tool's aria-controls target).
 export const PROMPT_SLOT_ID = 'cockpit-prompt-slot'
 export const PROMPT_ID = 'cockpit-prompt'
-
-const ESC_OWNER_SELECTOR = '[data-escape-owner]'
 
 // S1 (Apply boundary): where an Escape cancels a staged property change (the
 // Properties cluster, its slot, the strip), the strip's own marker, and the
@@ -85,17 +143,10 @@ export function armedToolElement(group, op) {
 // to read the property ladder instead of the full Modify one.
 const PROPERTY_OPS = new Set(forGroup('modify').filter((a) => a.panel === 'properties').map((a) => a.op))
 
-// Some layers leave focus on the button that opened them. An explicit marker
-// lets those layers claim Esc without treating every nonmodal dialog as an
-// owner (the guided tour is a dialog but deliberately does not claim Esc).
-function hasVisibleEscOwner() {
-  return [...document.querySelectorAll(ESC_OWNER_SELECTOR)].some((layer) => {
-    if (layer.hidden || layer.hasAttribute('inert') || layer.getAttribute('aria-hidden') === 'true') return false
-    if (layer instanceof HTMLDialogElement && !layer.open) return false
-    const style = window.getComputedStyle(layer)
-    return style.display !== 'none' && style.visibility !== 'hidden'
-  })
-}
+// S27: a layer that leaves focus on the button that opened it claims Esc
+// through the one owner stack (useEscapeOwner.js), which also yields to a
+// visible [data-escape-owner] layer it does not hold; the guided tour is a
+// dialog but deliberately does not claim Esc.
 
 // The Draw and Modify vocabulary and their reason ladders moved to the action
 // registry with slice 10a (one record behind the ribbon, the engine ops, the
@@ -175,7 +226,7 @@ const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') =>
 })
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
-  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, reach, selectGroup, refuse, pending = null, setPending } = useEngineSessionContext()
+  const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, snapModes, setSnapMode, snapLimited, reach, selectGroup, refuse, pending = null, setPending } = useEngineSessionContext()
   // The Modify panel's note is the reason every tool in it shares. With several
   // objects selected only the document rungs are shared: each tool states its own
   // multi-selection rule (modifyOpReason), so the panel never says "select one".
@@ -263,14 +314,40 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // exactly two decimal operands.
   // W4g-7a: the resolution lives in promptInputs.js, shared with the script
   // runner, so a script line and a typed prompt read the same numbers.
-  const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, promptInputs, armed && armed.from ? armed.from : null)
+  // S26: a dimension field's typed units and @ arithmetic resolve to their
+  // number BEFORE the point grammar and the store judge the inputs, so Run
+  // lights for "12 ft" or "@+2" while the field still shows what was typed.
+  // `dimensionBaseRef` holds each field's value from before the current edit
+  // (the @ operand), recorded on its first keystroke and dropped once a
+  // commit stores a number. A refusal is shown once the field is committed
+  // (Enter, blur) and cleared by the next keystroke.
+  const drawingUnit = drawingUnitOf(session)
+  const dimensionBaseRef = useRef({})
+  const [refusedDimensions, setRefusedDimensions] = useState(() => new Set())
+  const dimension = {}
+  let typedInputs = promptInputs
+  for (const step of prompt?.steps || []) {
+    for (const [key, label, mode = 'decimal'] of step.fields) {
+      if (!DIMENSION_MODES.has(mode) || dimension[key]) continue
+      const result = evaluateDimension(promptInputs[key], { current: dimensionBaseRef.current[key], unit: drawingUnit, unitless: UNITLESS_KEYS.has(key) })
+      if (!result) continue
+      dimension[key] = { ...result, label }
+      if (result.value !== undefined) {
+        if (typedInputs === promptInputs) typedInputs = { ...promptInputs }
+        typedInputs[key] = result.value
+      }
+    }
+  }
+  const refusedKey = Object.keys(dimension).find((key) => dimension[key].reason && refusedDimensions.has(key))
+  const dimensionRefusal = refusedKey ? `${prompt.verb} refused: ${dimension[refusedKey].label}: ${dimension[refusedKey].reason}` : ''
+  const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, typedInputs, armed && armed.from ? armed.from : null)
   const gatheringMembers = (armedOp === 'group' && !inputs.groupName || armedOp === 'createBlock') && !inputs.membersDone
-  const liveRefusal = prompt && !promptReason && !waitingStep && !gatheringMembers
-    ? (expressionRefusal || (armedGroup === 'draw'
+  const liveRefusal = prompt && !promptReason && !gatheringMembers
+    ? (dimensionRefusal || (waitingStep ? '' : (expressionRefusal || (armedGroup === 'draw'
       ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles, session, session.entities.mlstyles)
       : session.selectedIds?.length > 1
         ? buildSelectionEditPayload(armedOp, session.selectedIds, effective, session.entities)
-        : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')
+        : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')))
     : ''
   const runOff = promptOff || !!liveRefusal || (!!waitingStep && !gatheringMembers)
   const runReason = humanizeRefusal(promptReason || liveRefusal, prompt)
@@ -315,6 +392,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     }
     // Commit resolved expressions as numbers before the engine sees them:
     // the fields, the record and the chain all carry what was drawn.
+    for (const key of Object.keys(dimension)) {
+      if (dimension[key].value === undefined) continue
+      setInput(key, dimension[key].value)
+      delete dimensionBaseRef.current[key]
+    }
     for (const step of pointSteps) {
       const [[kx], [ky]] = step.fields
       if (isPointExpression(inputs[kx])) { setInput(kx, effective[kx]); setInput(ky, effective[ky]) }
@@ -357,6 +439,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     if (!detail.handled) promptRef.current?.querySelector(fallback)?.focus()
   }
   const blockArm = armedOp === 'createBlock' ? armed : null
+  useEffect(() => {
+    // A new command starts every dimension field's edit afresh.
+    dimensionBaseRef.current = {}
+    setRefusedDimensions((prev) => (prev.size ? new Set() : prev))
+  }, [armedOp])
   useEffect(() => {
     // Arming puts the caret in the first field the way the reference's
     // command line takes typing the moment a command starts.
@@ -402,33 +489,25 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   }, [armedOp, session.busy])
   const cancelRef = useRef(cancel)
   cancelRef.current = cancel
-  useEffect(() => {
-    // W4f-2: Esc cancels the armed command from ANYWHERE, as the reference's
-    // command line drops a command on Esc wherever the pointer is (the
-    // drawing, a ribbon tool, the body after a run). Capture phase on the
-    // window, so App's window-level Esc rung never also fires for the same
-    // key. Esc inside a text field OUTSIDE the prompt keeps that field's own
-    // meaning (the Command bar clears itself); the prompt's own fields are
-    // handled by the row below.
-    if (!armedOp || typeof window === 'undefined') return undefined
-    const onWindowKeyDown = (event) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return
-      const target = event.target
-      if (target instanceof Node && promptRef.current?.contains(target)) return
-      // S1: while a property change is staged, an Esc in the Properties
-      // cluster or its strip cancels that change, not the armed command.
-      if (pendingRef.current && target instanceof Element && target.closest(PENDING_ESC_SCOPE)) return
-      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return
-      // An open dialog or drawer owns its Esc. Check the whole visible layer
-      // stack too because a layer may leave focus on its outside opener.
-      if ((target instanceof Element && target.closest('[role="dialog"], [aria-modal="true"], dialog, .drawer-layer')) || hasVisibleEscOwner()) return
-      event.preventDefault()
-      event.stopPropagation()
-      cancelRef.current()
-    }
-    window.addEventListener('keydown', onWindowKeyDown, true)
-    return () => window.removeEventListener('keydown', onWindowKeyDown, true)
-  }, [armedOp])
+  // W4f-2: Esc cancels the armed command from ANYWHERE, as the reference's
+  // command line drops a command on Esc wherever the pointer is (the drawing,
+  // a ribbon tool, the body after a run, the prompt's own fields). S27: it is
+  // the command layer of the one owner stack, so a menu, sheet, drawer, the
+  // version history or a staged property change above it closes first, and
+  // App's window-level Esc rung never also fires for the same key. Esc inside
+  // a text field OUTSIDE the prompt keeps that field's own meaning (the
+  // Command bar clears itself), and a dialog the stack does not hold (a drawer
+  // layer that parks focus on its own button) keeps its own Esc.
+  const armedOwnsEscape = useCallback((event) => {
+    const target = event?.target
+    if (target instanceof Node && promptRef.current?.contains(target)) return true
+    // S1: while a property change is staged, an Esc in the Properties
+    // cluster or its strip cancels that change, not the armed command.
+    if (pendingRef.current && target instanceof Element && target.closest(PENDING_ESC_SCOPE)) return false
+    if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return false
+    return !(target instanceof Element && target.closest('[role="dialog"], [aria-modal="true"], dialog, .drawer-layer'))
+  }, [])
+  useEscapeOwner('armed-command', !!armedOp, () => cancelRef.current(), { layer: 'command', when: armedOwnsEscape })
   const onPromptKeyDown = (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) {
       // Enter on Run or Cancel keeps the button's own activation (one
@@ -442,13 +521,9 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         return
       }
       run()
-    } else if (event.key === 'Escape') {
-      // The prompt owns this Esc: it must not ALSO climb to App's
-      // window-level Esc rung (a drawer or route reacting to the same key).
-      event.preventDefault()
-      event.stopPropagation()
-      cancel()
     }
+    // Esc in the prompt is the armed-command owner's (above): one handler,
+    // and it never also climbs to App's window-level Esc rung.
   }
   // The armed tool exposes the prompt it opened; only a tool this table
   // knows can be expanded, so an out-of-contract op never leaves a dangling
@@ -618,22 +693,14 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   const cancelPendingRef = useRef(cancelPending)
   cancelPendingRef.current = cancelPending
   const hasPending = !!pending
-  useEffect(() => {
-    // Esc in the Properties cluster or the strip cancels the staged change and
-    // is swallowed there, like the prompt row's Esc: capture phase, so App's
-    // window key ladder (selection, then project) never also reads it.
-    if (!hasPending || typeof window === 'undefined') return undefined
-    const onWindowKeyDown = (event) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return
-      const target = event.target
-      if (!(target instanceof Element) || !target.closest(PENDING_ESC_SCOPE)) return
-      event.preventDefault()
-      event.stopPropagation()
-      cancelPendingRef.current()
-    }
-    window.addEventListener('keydown', onWindowKeyDown, true)
-    return () => window.removeEventListener('keydown', onWindowKeyDown, true)
-  }, [hasPending])
+  // Esc in the Properties cluster or the strip cancels the staged change and
+  // is swallowed there, like the prompt's Esc. S27: the edit layer of the one
+  // owner stack, above the armed command, so App's window key ladder
+  // (selection, then project) never also reads it.
+  useEscapeOwner('staged-property', hasPending, () => cancelPendingRef.current(), {
+    layer: 'edit',
+    when: (event) => event?.target instanceof Element && !!event.target.closest(PENDING_ESC_SCOPE),
+  })
   useEffect(() => {
     // A pick that staged while its combo kept focus leaves focus there. A
     // keyboard walk committed on blur (Tab) would leave it on a sibling combo
@@ -766,6 +833,89 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // "quick-<id>", the band's locator contract).
   const quick = fileTools.map((tool) => ({ ...tool, id: `quick-${tool.id}`, dataTool: `quick-${tool.id}`, label: tool.text }))
 
+  // S26: a dimension field's edit, commit, arrow step and label scrub.
+  const dropRefusedDimension = (key) => setRefusedDimensions((prev) => {
+    if (!prev.has(key)) return prev
+    const next = new Set(prev)
+    next.delete(key)
+    return next
+  })
+  const editDimension = (key, raw) => {
+    if (!(key in dimensionBaseRef.current)) dimensionBaseRef.current[key] = String(typedInputs[key] ?? '')
+    dropRefusedDimension(key)
+    setPromptInput(key, raw)
+  }
+  // Enter or blur: a resolved text becomes its number; a refused one keeps
+  // the text, the outline and the sentence until the next keystroke.
+  const commitDimension = (key) => {
+    const result = dimension[key]
+    if (result?.reason) {
+      setRefusedDimensions((prev) => (prev.has(key) ? prev : new Set(prev).add(key)))
+      return
+    }
+    // Any other commit ends the edit: the next @ measures from what is stored.
+    delete dimensionBaseRef.current[key]
+    if (result) setPromptInput(key, result.value)
+  }
+  // The number an arrow step or a scrub starts from: the field's resolved
+  // value, zero for an empty field, null for text that is not a number
+  // (a point expression, a refusal), which neither gesture touches.
+  const dimensionStart = (key) => {
+    const value = readNumber(typedInputs[key])
+    if (value !== null) return value
+    return String(promptInputs[key] ?? '').trim() === '' ? 0 : null
+  }
+  const setDimension = (key, value) => {
+    delete dimensionBaseRef.current[key]
+    dropRefusedDimension(key)
+    setPromptInput(key, stepValue(value))
+  }
+  const stepSize = (event) => (event.shiftKey ? 10 : event.altKey ? 0.1 : 1)
+  const onDimensionKeyDown = (key, event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) { commitDimension(key); return }
+    if ((event.key !== 'ArrowUp' && event.key !== 'ArrowDown') || event.ctrlKey || event.metaKey) return
+    const start = dimensionStart(key)
+    if (start === null) return
+    event.preventDefault()
+    setDimension(key, start + (event.key === 'ArrowUp' ? 1 : -1) * stepSize(event))
+  }
+  // A horizontal drag on a one-field step's label scrubs its value: one step
+  // per SCRUB_PX, Shift for 10, Alt for 0.1, fixed at the press. Window
+  // listeners live only for the drag; an unmount mid-drag removes them.
+  const scrubStopRef = useRef(null)
+  useEffect(() => () => scrubStopRef.current?.(), [])
+  const startScrub = (key, event) => {
+    if (event.button !== 0 || fieldsOff || typeof window === 'undefined') return
+    const start = dimensionStart(key)
+    if (start === null) return
+    event.preventDefault()
+    scrubStopRef.current?.()
+    const originX = event.clientX
+    const size = stepSize(event)
+    let steps = 0
+    const onMove = (move) => {
+      const next = Math.trunc((move.clientX - originX) / SCRUB_PX)
+      if (!Number.isFinite(next) || next === steps) return
+      steps = next
+      setDimension(key, start + steps * size)
+    }
+    const stop = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', stop)
+      window.removeEventListener('pointercancel', stop)
+      if (scrubStopRef.current === stop) scrubStopRef.current = null
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', stop)
+    window.addEventListener('pointercancel', stop)
+    scrubStopRef.current = stop
+  }
+  const scrubKey = (step) => {
+    if (step.fields.length !== 1) return null
+    const [key, , mode = 'decimal'] = step.fields[0]
+    return DIMENSION_MODES.has(mode) ? key : null
+  }
+
   // One field of the prompt: the SAME operator record the pane's fields bind
   // to (provider `inputs`), named `ribbon <label>` for the locator contract.
   const field = (definition) => {
@@ -807,10 +957,14 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     // refused is the one to fix: outlined, and named by the note. A
     // 'decimal-default' field (INSERT's scale and rotation) is blamed only
     // once something was actually typed: empty is its default, not a mistake.
-    const invalid = !!liveRefusal && (mode === 'decimal'
+    // S26: a committed dimension refusal stays outlined even while another
+    // step is still waiting.
+    const dimensional = DIMENSION_MODES.has(mode)
+    const dimensionRefused = dimensional && refusedDimensions.has(key) && !!dimension[key]?.reason
+    const invalid = dimensionRefused || (!!liveRefusal && !waitingStep && (mode === 'decimal'
       ? (failedExpression.has(key) || !readsAsNumber(effective[key]))
-      : mode === 'decimal-default' && String(promptInputs[key] ?? '').trim() !== '' && !readsAsNumber(effective[key]))
-    return (
+      : mode === 'decimal-default' && String(promptInputs[key] ?? '').trim() !== '' && !readsAsNumber(effective[key])))
+    const input = (
       <input
         key={`${key}:${label}`}
         className={`cp-input${wide ? ' wide' : ''}`}
@@ -819,13 +973,23 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         list={key === 'name' && armedOp === 'createInsert' ? BLOCK_CATALOGUE_ID : key === 'groupName' && armedOp === 'ungroup' ? 'cockpit-group-names' : undefined}
         maxLength={key === 'groupName' ? 255 : undefined}
         value={promptInputs[key]}
-        onChange={(event) => setPromptInput(key, event.target.value)}
+        onChange={(event) => (dimensional ? editDimension(key, event.target.value) : setPromptInput(key, event.target.value))}
+        onKeyDown={dimensional ? (event) => onDimensionKeyDown(key, event) : undefined}
+        onBlur={dimensional ? () => commitDimension(key) : undefined}
         aria-label={`ribbon ${accessibleLabel}`}
         aria-invalid={invalid ? 'true' : undefined}
         placeholder={shown}
-        title={shown}
+        title={dimensionRefused ? `${shown}: ${dimension[key].reason}` : shown}
         disabled={fieldsOff}
       />
+    )
+    // The drawing unit beside a length field, when the session names one.
+    if (!dimensional || !drawingUnit || UNITLESS_KEYS.has(key)) return input
+    return (
+      <Fragment key={`${key}:${label}`}>
+        {input}
+        <span className="cp-unit" data-unit-for={key} aria-hidden="true">{drawingUnit}</span>
+      </Fragment>
     )
   }
 
@@ -855,12 +1019,17 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
             .map((name) => <option key={name} value={name} />)}
         </datalist>
       )}
-      {prompt.steps.map((step) => (
-        <span key={step.ask} className="cp-step">
-          <span className="cp-ask">{step.ask}</span>
-          {step.fields.map(field)}
-        </span>
-      ))}
+      {prompt.steps.map((step) => {
+        const scrub = scrubKey(step)
+        return (
+          <span key={step.ask} className="cp-step">
+            {scrub
+              ? <span className="cp-ask" data-scrub={scrub} style={{ cursor: 'ew-resize', touchAction: 'none' }} onPointerDown={(event) => startScrub(scrub, event)}>{step.ask}</span>
+              : <span className="cp-ask">{step.ask}</span>}
+            {step.fields.map(field)}
+          </span>
+        )
+      })}
       {runReason ? <span className="cp-note" data-testid="cockpit-prompt-note">{runReason}</span> : null}
       <span className="cp-actions">
         {/* W4f-4: the drafting mode the picks obey, the reference's F8. A
@@ -876,17 +1045,19 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
           ORTHO
         </button>
         {/* W4f-5: object snap, the reference's F3: picks land on the
-            document's endpoints, midpoints and centres within reach. */}
+            document's geometry within reach. B1b: which kinds of geometry is
+            the menu beside it, shared with the status bar's. */}
         <button
           type="button"
           className="cp-mode"
           data-testid="cockpit-osnap"
           aria-pressed={osnap}
           onClick={() => setOsnap(!osnap)}
-          title={osnap ? 'Object snap on: picks land on nearby endpoints, midpoints and centres (F3).' : 'Object snap off: picks do not snap to endpoints, midpoints or centres (F3).'}
+          title={osnap ? 'Object snap on: picks land on the selected nearby geometry (F3).' : 'Object snap off: picks do not snap to the selected nearby geometry (F3).'}
         >
           OSNAP
         </button>
+        <ObjectSnapMenu snapModes={snapModes} snapLimited={snapLimited} onSetMode={setSnapMode} />
         <button
           type="button"
           className="cp-run"

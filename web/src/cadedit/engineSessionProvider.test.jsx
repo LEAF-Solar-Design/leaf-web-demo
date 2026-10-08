@@ -15,10 +15,11 @@
  * ribbon's honest gating over it. The real engine is exercised where it
  * already is (cadEditSurface.test.jsx, gated on the machine-local wasm).
  */
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
+import { StatusToggles } from '../site/DrawingCockpit.jsx'
 import {
   DRAWING_MODE_OPERATOR,
   DrawingIdentityProvider,
@@ -33,6 +34,8 @@ import EngineRibbonClusters, {
 } from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { DEFAULT_EDIT_INPUTS, MAX_INPUT_CHARS, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { SESSION_ERROR } from './engineSession.js'
+import { DEFAULT_SNAP_MODES, SNAP_MODES } from './snapModes.js'
+import StatusModesBridge from './StatusModesBridge.jsx'
 
 afterEach(cleanup)
 
@@ -103,8 +106,10 @@ function mount({ saveTarget = null, onSaved = null, onBeforeEdit, onBeforeArm, o
   })
   const handle = { workers, createWorker }
 
+  handle.renders = 0
   function Probe() {
     handle.context = useEngineSessionContext()
+    handle.renders += 1
     if (withIdentity) handle.identity = useDrawingIdentity()
     return null
   }
@@ -1381,6 +1386,168 @@ describe('W4g-7b-04c-8: each arm speaks only to its prompt', () => {
     expect(studio.context.inputs.style).toBe(style)
     act(() => { studio.context.setArmed({ group: 'draw', op: 'createCircle' }) })
     expect(studio.context.inputs.style).toBe(DEFAULT_EDIT_INPUTS.style)
+  })
+})
+
+// B1b: which object snap modes the picker queries, and whether its last query
+// near the cursor was bounded, live in the ONE provider beside the masters.
+describe('B1b object snap modes in the provider', () => {
+  const drawTool = (op) => document.querySelector(`.drafting-ribbon [data-tool="draw:${op}"]`)
+  const bit = (kind) => SNAP_MODES.find((mode) => mode.kind === kind).bit
+
+  it('B1B-S01 defaults', () => {
+    const studio = mount()
+    expect(studio.context.snapModes).toBe(DEFAULT_SNAP_MODES)
+    expect(DEFAULT_SNAP_MODES).toBe(23)
+    expect(studio.context.snapLimited).toBe(false)
+    expect(typeof studio.context.setSnapMode).toBe('function')
+    expect(typeof studio.context.setSnapLimited).toBe('function')
+    expect(studio.context.osnap).toBe(true)
+    expect(studio.createWorker).not.toHaveBeenCalled()
+  })
+
+  it('B1B-S02 absolute validated mode updates', () => {
+    const studio = mount()
+    const set = (kind, enabled) => act(() => { studio.context.setSnapMode(kind, enabled) })
+    set('intersection', true)
+    expect(studio.context.snapModes).toBe(23 | 32)
+    // Absolute: repeating a value changes nothing.
+    set('intersection', true)
+    expect(studio.context.snapModes).toBe(55)
+    set('endpoint', false)
+    set('endpoint', false)
+    expect(studio.context.snapModes).toBe(54)
+    // Fails closed on an unknown kind or a non-boolean.
+    for (const [kind, enabled] of [
+      ['bogus', true], [32, true], [null, true], ['Endpoint', true], ['constructor', true], ['toString', false],
+      ['nearest', 'true'], ['nearest', 1], ['nearest', undefined], ['midpoint', null], ['midpoint', 0],
+    ]) set(kind, enabled)
+    expect(studio.context.snapModes).toBe(54)
+    // Functional updates: two writes in one batch both land.
+    act(() => { studio.context.setSnapMode('tangent', true); studio.context.setSnapMode('nearest', true) })
+    expect(studio.context.snapModes).toBe(54 | bit('tangent') | bit('nearest'))
+    // Zero selected modes is allowed, and the master is untouched throughout.
+    act(() => { for (const { kind } of SNAP_MODES) studio.context.setSnapMode(kind, false) })
+    expect(studio.context.snapModes).toBe(0)
+    expect(studio.context.osnap).toBe(true)
+  })
+
+  it('B1B-S03 preferences survive document and presentation changes', async () => {
+    const studio = mount()
+    await openAndLoad(studio, [LINE])
+    act(() => {
+      studio.context.setSnapMode('endpoint', false)
+      studio.context.setSnapMode('nearest', true)
+      studio.context.setOsnap(false)
+    })
+    const chosen = (DEFAULT_SNAP_MODES & ~bit('endpoint')) | bit('nearest')
+    expect(studio.context.snapModes).toBe(chosen)
+    // Another document.
+    await openAndLoad(studio, [LINE, POLY], 'two.dxf')
+    expect(studio.context.session.documentId).toBe('two.dxf')
+    expect(studio.context.snapModes).toBe(chosen)
+    // An applied edit.
+    fireEvent.click(drawTool('createLine'))
+    runPrompt()
+    studio.workers.at(-1).emit({ ...editApplied('createLine', [LINE, POLY, { id: 'n1', type: 'LINE', layer: '0', vertices: [[0, 0], [100, 0]] }]), createdId: 'n1' })
+    expect(studio.context.session.entities).toHaveLength(3)
+    expect(studio.context.snapModes).toBe(chosen)
+    // A crashed worker (the document goes) keeps them too.
+    studio.workers.at(-1).die()
+    expect(studio.context.snapModes).toBe(chosen)
+    expect(studio.context.osnap).toBe(false)
+    // A presentation change re-renders the provider with other props and
+    // another tree under it; the provider's state stays.
+    const handle = {}
+    function Reader() { handle.context = useEngineSessionContext(); return null }
+    const createWorker = vi.fn(() => new ScriptedWorker())
+    const { rerender } = render(<EngineSessionProvider createWorker={createWorker}><Reader /></EngineSessionProvider>)
+    act(() => { handle.context.setSnapMode('tangent', true) })
+    rerender(
+      <EngineSessionProvider createWorker={createWorker} onDirtyChange={() => {}} onBeforeArm={() => true}>
+        <div className="presented"><Reader /></div>
+      </EngineSessionProvider>,
+    )
+    expect(handle.context.snapModes).toBe(DEFAULT_SNAP_MODES | bit('tangent'))
+  })
+
+  it('B1B-S04 limitation setter is strict and idempotent', () => {
+    const studio = mount()
+    act(() => { studio.context.setSnapLimited(true) })
+    expect(studio.context.snapLimited).toBe(true)
+    const renders = studio.renders
+    act(() => { studio.context.setSnapLimited(true) })
+    expect(studio.renders).toBe(renders)
+    for (const value of ['true', 1, null, undefined, 0, 'false', {}]) {
+      act(() => { studio.context.setSnapLimited(value) })
+      expect(studio.context.snapLimited).toBe(true)
+    }
+    expect(studio.renders).toBe(renders)
+    act(() => { studio.context.setSnapLimited(false) })
+    expect(studio.context.snapLimited).toBe(false)
+    // The limitation never touches the selection or the master.
+    expect(studio.context.snapModes).toBe(DEFAULT_SNAP_MODES)
+    expect(studio.context.osnap).toBe(true)
+  })
+
+  it('B1B-S05 prompt and status share selection', async () => {
+    const workers = []
+    const createWorker = vi.fn(() => { const worker = new ScriptedWorker(); workers.push(worker); return worker })
+    const studio = { workers }
+    function Probe() { studio.context = useEngineSessionContext(); return null }
+    render(
+      <>
+        <EngineSessionProvider createWorker={createWorker}>
+          <Probe />
+          <StatusModesBridge />
+          <Cockpit />
+        </EngineSessionProvider>
+        <StatusToggles />
+      </>,
+    )
+    await openAndLoad(studio, [LINE])
+    fireEvent.click(drawTool('createLine'))
+    const prompt = () => within(screen.getByTestId('cockpit-prompt'))
+    const status = () => within(screen.getByTestId('cockpit-status-toggles'))
+    const checkedIn = (scope) => scope.getAllByRole('menuitemcheckbox').filter((el) => el.getAttribute('aria-checked') === 'true').map((el) => el.dataset.kind)
+    const itemIn = (scope, kind) => scope.getAllByRole('menuitemcheckbox').find((el) => el.dataset.kind === kind)
+    // The prompt's menu writes the provider.
+    fireEvent.click(prompt().getByRole('button', { name: 'Object snap modes' }))
+    fireEvent.click(itemIn(prompt(), 'intersection'))
+    expect(studio.context.snapModes).toBe(55)
+    expect(checkedIn(prompt())).toEqual(['endpoint', 'midpoint', 'centre', 'quadrant', 'intersection'])
+    // The status menu shows the same selection at once.
+    fireEvent.click(status().getByRole('button', { name: 'Object snap modes' }))
+    expect(checkedIn(status())).toEqual(['endpoint', 'midpoint', 'centre', 'quadrant', 'intersection'])
+    // And the status menu's write reaches the prompt's.
+    fireEvent.click(itemIn(status(), 'nearest'))
+    expect(studio.context.snapModes).toBe(55 | 512)
+    expect(itemIn(prompt(), 'nearest').getAttribute('aria-checked')).toBe('true')
+    expect(itemIn(status(), 'nearest').getAttribute('aria-checked')).toBe('true')
+    // Neither checkbox touched the master; the master keeps the selection.
+    expect(studio.context.osnap).toBe(true)
+    fireEvent.click(screen.getByTestId('cockpit-osnap'))
+    expect(studio.context.osnap).toBe(false)
+    expect(studio.context.snapModes).toBe(55 | 512)
+    fireEvent.click(itemIn(prompt(), 'tangent'))
+    expect(studio.context.osnap).toBe(false)
+    expect(itemIn(status(), 'tangent').getAttribute('aria-checked')).toBe('true')
+    // The limitation sentence reaches both surfaces.
+    act(() => { studio.context.setSnapLimited(true) })
+    expect(screen.getByTestId('cockpit-osnap-limited').textContent).toBe('Object snap limited near this point.')
+    expect(prompt().getByRole('menu').parentElement.textContent).toContain('Object snap limited near this point.')
+    // Esc in the prompt's menu closes the menu, not the command.
+    const trigger = prompt().getByRole('button', { name: 'Object snap modes' })
+    fireEvent.keyDown(itemIn(prompt(), 'tangent'), { key: 'Escape' })
+    expect(prompt().queryByRole('menu')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
+    expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('createLine')
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine' })
+    // Enter on a checkbox inside the prompt changes the mode, never runs the command.
+    fireEvent.click(trigger)
+    fireEvent.keyDown(prompt().getAllByRole('menuitemcheckbox')[0], { key: 'Enter' })
+    expect(studio.context.snapModes & 1).toBe(0)
+    expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toHaveLength(0)
   })
 })
 

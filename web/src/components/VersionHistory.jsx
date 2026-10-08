@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { config, getDrawingVersions, restoreDrawingVersion } from '../api.js'
 import VersionList, { VersionPreviewStrip } from './VersionList.jsx'
 import { relativeTime } from '../lib/railTime.js'
@@ -40,6 +41,10 @@ import './popovers.css'
 // `onRestored` (wired to the version controller's refreshHead). The
 // `config.mockDefault` / no-capability fallbacks below remain only for a
 // caller that omits the props (none in-tree today).
+//
+// S23 agent checkpoints: App also passes `onUndo` (the ribbon's Undo) and
+// `undoDisabled`. An agent-made head row (VersionList's agent-turn marker)
+// then shows one Rewind beside .vh-restore that runs exactly that Undo.
 
 // E2 empty state: the action chip focuses the composer directly (the docked
 // bar's input, falling back to the legacy prompt textarea) — no parent wiring
@@ -63,7 +68,7 @@ function fmtAbs(iso) {
 export default function VersionHistory({
   data, error, loading, previewingVersion, onPreview, onBackToHead, onClose, onRetry,
   retryKey, exiting, mock, capability, onRestored, headWarning, mutationBlocked = false,
-  onBeforeRestore = null,
+  onBeforeRestore = null, onUndo = null, undoDisabled = false,
 }) {
   const now = useRelativeNow()
   // Self-contained restore state (see the integration note above for why).
@@ -88,11 +93,12 @@ export default function VersionHistory({
   const restoreBlocked = mutationBlocked && !recoveryRestoreAllowed
 
   // Esc closes — the header cap is the affordance, the key must actually work.
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('.drawer-layer .drawer')) onClose() } // an open drawer owns Esc
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onClose])
+  // S27: through the owner stack at the history layer, under the drawers (the
+  // old "an open drawer owns Esc" check), and not while the exit fade holds the
+  // mount. The root keeps its data-escape-owner marker for the command-line
+  // armer; the stack knows the marker is its own through `scope`.
+  const rootRef = useRef(null)
+  useEscapeOwner('version-history', !exiting, () => onClose?.(), { layer: 'history', scope: rootRef })
 
   // The EFFECT of a restore; VersionList owns the confirm/pending/error UX and
   // rethrows nothing it did not receive, so a failure here surfaces on the row
@@ -120,7 +126,7 @@ export default function VersionHistory({
   // column into the toolbar. `.drawer-fixed` (styles.css) anchors it as a
   // floating right panel below the header / above the footer instead.
   return (
-    <div className={`drawer drawer-fixed${exiting ? ' exit' : ''}`} role="dialog" aria-label="Version history" data-escape-owner>
+    <div ref={rootRef} className={`drawer drawer-fixed${exiting ? ' exit' : ''}`} role="dialog" aria-label="Version history" data-escape-owner>
       <div className="drawer-head">
         <span className="drawer-title">Version history{effective ? ` · ${rows.length}` : ''}</span>
         <EscCap onClick={onClose} label="Close version history" />
@@ -193,6 +199,13 @@ export default function VersionHistory({
               eligible: (_row, isHead) => !isHead,
               disabled: restoreBlocked,
             }}
+            rewind={onUndo ? {
+              // S23: an agent-made head gets one Rewind, which is the ribbon's
+              // own Undo (App's onUndo), held to the same blocks the ribbon's
+              // Undo button honours. No onUndo, no Rewind.
+              run: () => onUndo(),
+              disabled: Boolean(undoDisabled || mutationBlocked || previewingVersion != null),
+            } : null}
           />
         )}
       </div>

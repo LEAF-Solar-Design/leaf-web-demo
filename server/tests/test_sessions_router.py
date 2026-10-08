@@ -806,16 +806,19 @@ def test_create_session_rejects_unknown_model(client):
     assert r.json()["error"]["error_code"] == "BAD_PARAMS"
 
 
-def test_stored_session_model_reaches_the_turn_wire(client, wired):
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-haiku-4-5"])
+def test_stored_session_model_reaches_the_turn_wire(client, wired, model):
     """A session created with a model forwards THAT model on POST /turn even when
     the message itself carries none — the env default is thus overridden."""
     url, state = wired
-    r = _create_session_via_client(client, "tenant-model", "dwg-wire-1", "claude-haiku-4-5")
+    r = _create_session_via_client(client, "tenant-model", "dwg-wire-1", model)
+    assert r.status_code == 200, r.text
+    assert r.json()["model"] == model
     sess = {"session_id": r.json()["session_id"], "tenant_id": "tenant-model",
             "drawing_id": "dwg-wire-1"}
     assert _post_text(client, sess, text="hi").status_code == 202
     _wait_terminal(sess["session_id"])
-    assert state.bodies[0]["model"] == "claude-haiku-4-5"
+    assert state.bodies[0]["model"] == model
 
 
 def test_per_turn_model_override_wins_over_stored(client, wired):

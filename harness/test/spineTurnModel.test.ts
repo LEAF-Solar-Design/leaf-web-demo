@@ -23,6 +23,7 @@ import { FakeGateClient } from "../src/ports/fakes/fakeGateClient.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
 import type { AgentGrant, OAuthGrantProvider } from "../src/ports/index.js";
 import type { ConverseTurnInput, HarnessTurnEvent } from "../src/ports/converse.js";
+import { ALLOWED_MODELS, MODEL_REASONING_CATALOG } from "../src/ports/modelAllowlist.js";
 
 /** OAuth provider that FAILS if consulted — proves a wire credential bypasses it. */
 class UnusedOAuthProvider implements OAuthGrantProvider {
@@ -95,6 +96,15 @@ function serializedState(store: FakeSessionStore): string {
 describe("mount your LLM — per-session model", () => {
   afterEach(() => vi.unstubAllEnvs());
 
+  it("offers Haiku 5.5 with exactly four reasoning ids and keeps Haiku 4.5 disabled-only", () => {
+    expect(ALLOWED_MODELS).toContain("claude-haiku-5-5");
+    expect(ALLOWED_MODELS.indexOf("claude-haiku-5-5") + 1).toBe(ALLOWED_MODELS.indexOf("claude-haiku-4-5"));
+    expect(MODEL_REASONING_CATALOG.find(entry => entry.id === "claude-haiku-5-5")?.reasoning_ids).toEqual([
+      "disabled", "low", "medium", "high",
+    ]);
+    expect(MODEL_REASONING_CATALOG.find(entry => entry.id === "claude-haiku-4-5")?.reasoning_ids).toEqual(["disabled"]);
+  });
+
   it("routes a turn's {model} to the runner (sdk.query options.model)", async () => {
     const { adapter, runner } = makeAdapter(new RecordingOAuthProvider());
     await drain(adapter.runTurn(turnInput({ text: "hi", model: "claude-opus-4-8" })));
@@ -103,12 +113,12 @@ describe("mount your LLM — per-session model", () => {
     expect(runner.runs[0]!.model).toBe("claude-opus-4-8");
   });
 
-  it("preserves the env default (LEAF_SPINE_MODEL) when no wire model is set", async () => {
-    vi.stubEnv("LEAF_SPINE_MODEL", "claude-haiku-4-5");
+  it.each(["claude-haiku-5-5", "claude-haiku-4-5"])("preserves the env default %s when no wire model is set", async (model) => {
+    vi.stubEnv("LEAF_SPINE_MODEL", model);
     const { adapter, runner } = makeAdapter(new RecordingOAuthProvider());
     await drain(adapter.runTurn(turnInput({ text: "hi" })));
 
-    expect(runner.runs[0]!.model).toBe("claude-haiku-4-5");
+    expect(runner.runs[0]!.model).toBe(model);
   });
 
   it("falls back to claude-sonnet-5-5 when neither wire model nor env is set", async () => {

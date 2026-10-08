@@ -9,6 +9,11 @@
 export const MAX_ACTION_ROWS = 24
 export const MAX_ARTIFACT_ROWS_PER_KIND = 8
 
+export const PALETTE_GROUP_LABELS = {
+  action: 'Actions', tool: 'Tools', version: 'Versions', session: 'Sessions',
+  'drawing-object': 'Drawing objects', project: 'Projects',
+}
+
 function includesFold(haystack, needle) {
   return String(haystack || '').toLowerCase().includes(needle)
 }
@@ -112,6 +117,29 @@ export function findResultRows(searchPayload) {
   for (const r of searchPayload?.results || []) {
     if (!r || typeof r.id !== 'string' || typeof r.label !== 'string') continue
     rows.push({ kind: r.kind || 'result', id: r.id, label: r.label, description: r.description || '' })
+  }
+  return rows
+}
+
+export function drawingObjectRows(index, query, limit = MAX_ARTIFACT_ROWS_PER_KIND) {
+  if (!String(query || '').trim()) return []
+  const rows = []
+  for (const record of index?.records || []) {
+    if (!matches(query, record.id, record.name, record.path, ...(record.aliases || []))) continue
+    rows.push({ kind: 'drawing-object', id: record.id, label: record.name, description: record.path || '' })
+    if (rows.length >= limit) break
+  }
+  return rows
+}
+
+export function projectArtifactRows(projects, query, limit = MAX_ARTIFACT_ROWS_PER_KIND) {
+  if (!String(query || '').trim()) return []
+  const rows = []
+  for (const project of projects || []) {
+    const id = project?.project_id || project?.id
+    if (!id || !project?.name || !matches(query, id, project.name)) continue
+    rows.push({ kind: 'project', id: `project:${id}`, label: project.name, description: '' })
+    if (rows.length >= limit) break
   }
   return rows
 }

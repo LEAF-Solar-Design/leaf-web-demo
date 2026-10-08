@@ -5,6 +5,7 @@ import { solarFlowPrefill } from './solarFlowModel.js'
 import SolarPresetForm from './SolarPresetForm.jsx'
 import { PRESET_TOOL } from './solarPresetModel.js'
 import returnToolFocus from './returnToolFocus.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 export default function SolarToolForm({ tool, onSubmit, onClose, presetListing, presetRevision, readIntake, drawingId = null, drawingVersion = null }) {
   if (tool?.name === PRESET_TOOL) {
@@ -127,17 +128,17 @@ function GenericSolarToolForm({ tool, onSubmit, onClose, readIntake, drawingId, 
     returnToolFocus(tool.name)
   }
 
+  // S27: Escape from inside the form cancels it through the one owner stack
+  // (edit layer, scoped to the form as the old section handler was).
+  const formRef = useRef(null)
+  useEscapeOwner('solar-tool-form', true, cancel, { layer: 'edit', scope: formRef, scoped: true })
+
   return (
     <section
+      ref={formRef}
       id="solar-tool-form"
       className="solar-tool-form tool-body"
       aria-label={`${text} parameters`}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') {
-          event.stopPropagation()
-          cancel()
-        }
-      }}
     >
       <h3>{text}</h3>
       <SchemaForm schema={schema} values={values} onChange={change} onValidityChange={setFormValid} />

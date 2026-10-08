@@ -11,10 +11,12 @@
 // legend's material, never paper. The cursor readout is a rAF-throttled DOM
 // write, never React state: pointer-rate re-renders were risk R11 in the
 // convergence plan.
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 
 import CockpitIcon from './CockpitIcon.jsx'
+import ObjectSnapMenu, { SNAP_LIMITED_SENTENCE } from '../cadedit/ObjectSnapMenu.jsx'
+import { ALL_SNAP_MODES, DEFAULT_SNAP_MODES, isSnapModeMask } from '../cadedit/snapModes.js'
 import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
 import { layerBounds } from '../lib/viewHistory.js'
 
@@ -501,8 +503,26 @@ function requestFullscreen() {
 // real GRID through ViewerGrid on the same cockpit:modes path; snap and
 // polar stay disabled. Fullscreen is also real. An engine detail carries
 // `live`; a viewer detail carries `grid` (null when the grid owner is gone).
+// B1b: a publication's snap fields. Absent (an older bridge) reads as the
+// defaults; present, even as an explicit undefined, they must be a whole
+// mode mask inside ALL_SNAP_MODES and a boolean, or the whole detail is
+// dropped. The range check matters: isSnapModeMask's bitwise test truncates
+// to 32 bits, so 2 ** 32 would otherwise read as no modes.
+const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
+function validSnapFields(detail) {
+  if (hasOwn(detail, 'snapModes')) {
+    const value = detail.snapModes
+    if (!Number.isSafeInteger(value) || value < 0 || value > ALL_SNAP_MODES || !isSnapModeMask(value)) return false
+  }
+  return !hasOwn(detail, 'snapLimited') || typeof detail.snapLimited === 'boolean'
+}
+const OFFLINE_ENGINE = Object.freeze({ live: false, ortho: false, osnap: true, snapModes: DEFAULT_SNAP_MODES, snapLimited: false })
+const requestSnapMode = (kind, enabled) => {
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cockpit:osnap-mode-set', { detail: { kind, enabled } }))
+}
+
 export function StatusToggles() {
-  const [state, setState] = useState({ live: false, ortho: false, osnap: true, grid: null })
+  const [state, setState] = useState({ ...OFFLINE_ENGINE, grid: null })
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
     const onModes = ({ detail }) => {
@@ -511,11 +531,18 @@ export function StatusToggles() {
       if (hasGrid && detail.grid !== null && typeof detail.grid !== 'boolean') return
       const hasEngine = typeof detail.live === 'boolean'
       if (hasEngine && detail.live && (typeof detail.ortho !== 'boolean' || typeof detail.osnap !== 'boolean')) return
+      if (!validSnapFields(detail)) return
       if (!hasGrid && !hasEngine) return
       setState((previous) => ({
         ...(!hasEngine
-          ? { live: previous.live, ortho: previous.ortho, osnap: previous.osnap }
-          : detail.live ? { live: true, ortho: detail.ortho, osnap: detail.osnap } : { live: false, ortho: false, osnap: true }),
+          ? { live: previous.live, ortho: previous.ortho, osnap: previous.osnap, snapModes: previous.snapModes, snapLimited: previous.snapLimited }
+          : detail.live
+            ? {
+              live: true, ortho: detail.ortho, osnap: detail.osnap,
+              snapModes: hasOwn(detail, 'snapModes') ? detail.snapModes : DEFAULT_SNAP_MODES,
+              snapLimited: hasOwn(detail, 'snapLimited') ? detail.snapLimited : false,
+            }
+            : OFFLINE_ENGINE),
         grid: hasGrid ? detail.grid : previous.grid,
       }))
     }
@@ -526,19 +553,31 @@ export function StatusToggles() {
   return (
     <span className="cockpit-status-toggles" role="toolbar" aria-label="Drafting settings" data-testid="cockpit-status-toggles">
       {STATUS_TOGGLES.map((t) => toggleLive(t, state) ? (
-        <button
-          key={t.id + '-live'}
-          type="button"
-          data-toggle={t.id}
-          aria-pressed={state[t.id]}
-          title={`${t.label} ${state[t.id] ? 'on' : 'off'}${t.key ? ` (${t.key})` : ''}. ${t.effect[0].toUpperCase() + t.effect.slice(1)}.`}
-          aria-label={t.label}
-          onClick={() => {
-            if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: t.id } }))
-          }}
-        >
-          <CockpitIcon id={t.icon} fallback={t.label} size="strip" />
-        </button>
+        <Fragment key={t.id + '-live'}>
+          <button
+            type="button"
+            data-toggle={t.id}
+            aria-pressed={state[t.id]}
+            title={`${t.label} ${state[t.id] ? 'on' : 'off'}${t.key ? ` (${t.key})` : ''}. ${t.effect[0].toUpperCase() + t.effect.slice(1)}.`}
+            aria-label={t.label}
+            onClick={() => {
+              if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cockpit:mode-toggle', { detail: { id: t.id } }))
+            }}
+          >
+            <CockpitIcon id={t.icon} fallback={t.label} size="strip" />
+          </button>
+          {/* B1b: the mode menu rides beside the live OSNAP master only, so
+              the offline bar keeps its exact DOM; the polite line speaks
+              only when the limitation changes. */}
+          {t.id === 'osnap' ? (
+            <>
+              <ObjectSnapMenu snapModes={state.snapModes} snapLimited={state.snapLimited} onSetMode={requestSnapMode} />
+              <span className="cockpit-osnap-limited" role="status" aria-live="polite" data-testid="cockpit-osnap-limited">
+                {state.snapLimited ? SNAP_LIMITED_SENTENCE : ''}
+              </span>
+            </>
+          ) : null}
+        </Fragment>
       ) : (
         <button
           key={t.id}

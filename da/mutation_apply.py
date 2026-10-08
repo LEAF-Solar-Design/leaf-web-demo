@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import argparse
+import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,8 +91,12 @@ def inspection_activity_spec() -> dict[str, Any]:
     }
 
 
-def activity_spec(contract: int = 2) -> dict[str, Any]:
+def activity_spec(contract: int = 2, source_revision: str | None = None) -> dict[str, Any]:
     """Return the complete fixed Activity definition."""
+    if source_revision is not None and (
+        not isinstance(source_revision, str) or re.fullmatch(r"[0-9a-f]{40}", source_revision) is None
+    ):
+        raise ValueError("source revision must be 40 lowercase hexadecimal characters")
     target = CONTRACTS[contract]
     inspect_script = build_scr(INTAKE_LOCALNAME, extra_blocks=target.inspect_blocks)
     return {
@@ -131,6 +137,7 @@ def activity_spec(contract: int = 2) -> dict[str, Any]:
         "description": (
             "Leaf fixed closed-format drawing mutation interpreter with "
             "same-WorkItem output inspection."
+            + (" leaf-source=" + source_revision if source_revision is not None else "")
         ),
     }
 
@@ -184,7 +191,10 @@ def _version(value: dict[str, Any], operation: str) -> int:
 def provision_activity(contract: int = 2) -> dict[str, Any]:
     """Create/advance the Activity and point its prod alias at the new version."""
     target = CONTRACTS[contract]
-    spec = activity_spec(contract)
+    source_revision = os.environ.get("LEAF_SOURCE_SHA")
+    if source_revision is None or re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        source_revision = None
+    spec = activity_spec(contract, source_revision=source_revision)
     response = _post("/activities", spec)
     advanced = response.status_code == 409
     if advanced:
@@ -206,7 +216,7 @@ def provision_activity(contract: int = 2) -> dict[str, Any]:
     _require_status(alias, (200, 201), "activity alias update")
     return {
         "id": target.activity_id, "alias": target.alias, "version": version,
-        "advanced": advanced,
+        "advanced": advanced, "source_revision": source_revision,
     }
 
 
@@ -227,6 +237,23 @@ def alias_state(contract: int = 2) -> dict[str, Any]:
         "id": target.activity_id, "alias": target.alias, "exists": True,
         "version": _version(value, "activity alias"),
     }
+
+
+def provenance(contract: int = 2) -> dict[str, Any]:
+    """Read the installed immutable Activity version's source stamp."""
+    observed = alias_state(contract)
+    source_revision = None
+    if observed["exists"]:
+        deployed = _read_json(
+            f"/activities/{observed['id']}/versions/{observed['version']}",
+            "activity version read",
+        )
+        description = deployed.get("description")
+        if isinstance(description, str):
+            matches = re.findall(r"(?:^|\s)leaf-source=([0-9a-f]{40})(?=\s|$)", description)
+            if len(matches) == 1:
+                source_revision = matches[0]
+    return {**observed, "source_revision": source_revision}
 
 
 def restore_alias(version: int | None, contract: int = 2) -> dict[str, Any]:
@@ -317,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     """Protected operator CLI with stable, nonsecret JSON receipts."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("provision", "readiness", "alias-state"):
+    for command in ("provision", "readiness", "alias-state", "provenance"):
         child = subparsers.add_parser(command)
         child.add_argument("--json", action="store_true", dest="as_json")
         child.add_argument("--contract", type=int, choices=(2, 3), default=2)
@@ -357,6 +384,22 @@ def main(argv: list[str] | None = None) -> int:
                 "ok": False, "operation": "alias-state",
                 "error": "alias snapshot failed",
                 "contract": args.contract,
+            }
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+            return 1
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+
+    if args.command == "provenance":
+        try:
+            result = {
+                "ok": True, "operation": "provenance",
+                **provenance(contract=args.contract), "contract": args.contract,
+            }
+        except Exception:
+            result = {
+                "ok": False, "operation": "provenance",
+                "error": "provenance read failed", "contract": args.contract,
             }
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             return 1

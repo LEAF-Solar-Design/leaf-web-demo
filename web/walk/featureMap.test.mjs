@@ -5,6 +5,7 @@ import { ACTIONS, ESCAPE_RUNGS, RETRY_RUNGS, reasonCode, REASONS, DRAW_REASONS, 
 import { PRODUCT_SURFACES } from '../src/site/productSurfaces.js'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
 import { STUDIO_DRAWERS } from '../src/lib/studioDrawers.js'
+import { escapeOwnerStack } from '../src/lib/useEscapeOwner.js'
 import { PROMPTS } from '../src/cadedit/promptKeys.js'
 import {
   buildFeatureMap, checkCompleteness, DEFAULT_REGISTRIES, featureId,
@@ -19,10 +20,33 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
+test('G4 multiple-selected contains two editable LINEs and derives selection-set effects', () => {
+  for (const op of ['delete', 'move', 'copy', 'rotate', 'scale', 'mirror']) {
+    const entry = entryFor(`action:modify-${op}`)
+    const context = entry.state_contexts['multiple-selected']
+    assert.deepEqual(context.session.entities.map((entity) => entity.id), context.session.selectedIds)
+    assert.ok(context.session.entities.every((entity) => entity.type === 'LINE' && entity.editable))
+    assert.equal(context.session.selected.id, context.session.selectedIds[0])
+    const action = ACTIONS.find((action) => action.id === entry.source_id)
+    assert.equal(action.when(context), '')
+    assert.deepEqual(entry.expected_effect['multiple-selected'], entry.expected_effect.ready)
+    const missing = clone(context)
+    missing.session.entities.pop()
+    assert.equal(action.when(missing), MODIFY_REASONS.missingSelection)
+  }
+  assert.equal(entryFor('action:modify-move-vertex').expected_effect['multiple-selected'].reason, MODIFY_REASONS.multiSelection)
+})
+
 test('G1 Solar editor effects follow catalog view, placement and surface fold', () => {
+  const readySnapshot = clone(snapshot)
+  for (const tool of readySnapshot.response.families.flatMap((family) => family.capabilities)) {
+    delete tool.availability
+  }
+  const editorMap = buildFeatureMap({ snapshot: readySnapshot })
   for (const name of ['solar-unit-sync', 'solar-design-presets']) {
     const id = `tool:${name}`
-    assert.deepEqual(entryFor(id).expected_effect.ready, { kind: 'opens', target: 'solar-step-editor', tool: name })
+    assert.deepEqual(editorMap.entries.find((entry) => entry.id === id).expected_effect.ready,
+      { kind: 'opens', target: 'solar-step-editor', tool: name })
     assert.equal(entryFor(id).expected_effect['job-running'].kind, 'disabled_with_reason')
     for (const mutate of [
       (tool) => { tool.placement = { tab: 'manage' } },
@@ -34,6 +58,7 @@ test('G1 Solar editor effects follow catalog view, placement and surface fold', 
       const family = changed.response.families.find((row) => row.capabilities.some((tool) => tool.name === name))
       const tool = family.capabilities.find((tool) => tool.name === name)
       mutate(tool, family)
+      delete tool.availability // This test isolates editor placement from readiness.
       // Use an actual folded family id from the surface manifest.
       if (family.family_id === 'drawing') family.family_id = PRODUCT_SURFACES.find((row) => row.id === 'solar').familyIds[0]
       assert.equal(buildFeatureMap({ snapshot: changed }).entries.find((row) => row.id === id)
@@ -45,10 +70,61 @@ test('G1 Solar editor effects follow catalog view, placement and surface fold', 
   const tool = family.capabilities.find((tool) => tool.name === 'solar-unit-sync')
   tool.name = 'record-derived-form'
   tool.solar.name = tool.name
+  delete tool.availability
   const config = clone(overrides)
   delete config.overrides['tool:solar-unit-sync']
   assert.equal(buildFeatureMap({ snapshot: changed, overrides: config }).entries
     .find((row) => row.id === 'tool:record-derived-form').expected_effect.ready.target, 'solar-step-editor')
+})
+
+test('G3 Solar editors use product refusals while catalog decisions retain runtime readiness', () => {
+  for (const [name, code, sentence] of [
+    ['solar-equipment-move', 'equipment_assignment_required', 'Assign inverter equipment first'],
+    ['solar-cable-export', 'solar_output_not_current', 'Rerun the earlier Solar steps so the whole design is current first'],
+    ['solar-electrical-schedules', 'solar_output_not_current', 'Rerun the earlier Solar steps so the whole design is current first'],
+    ['solar-solaredge-accept', 'frames_required', 'Create panel groups first'],
+  ]) {
+    const changed = clone(snapshot)
+    const tool = changed.response.families.flatMap((family) => family.capabilities).find((tool) => tool.name === name)
+    const readyEffect = () => buildFeatureMap({ snapshot: changed }).entries
+      .find((row) => row.id === `tool:${name}`).expected_effect.ready
+    tool.availability = { entitled: true, engine_ready: true, implemented: true,
+      input_ready: false, refusal_reasons: [code] }
+    assert.deepEqual(readyEffect(), { kind: 'disabled_with_reason', reason: sentence, reason_code: code })
+    tool.availability.input_ready = true
+    // The flags, rather than a stale refusal list, decide readiness.
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'solar-step-editor', tool: name })
+    delete tool.availability
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'solar-step-editor', tool: name })
+    tool.availability = { entitled: true, engine_ready: true, implemented: true,
+      input_ready: false, refusal_reasons: ['drawing_context_required'] }
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'solar-step-editor', tool: name })
+    tool.placement = { tab: 'manage' }
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'catalog-run-decision', tool: name })
+    tool.availability.refusal_reasons = [code]
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'catalog-run-decision', tool: name })
+    tool.availability = { entitled: true, engine_ready: true, implemented: true, input_ready: true }
+    assert.deepEqual(readyEffect(), { kind: 'opens', target: 'catalog-run-decision', tool: name })
+  }
+})
+
+test('C3 maps Object snap modes as a scoped disclosure with no fabricated disabled state', () => {
+  const entry = entryFor('control:object-snap-modes')
+  assert.deepEqual(entry.states, ['closed', 'failed-load', 'open'])
+  assert.equal(entry.certify, 'both')
+  assert.ok(entry.sources.includes('web/src/cadedit/ObjectSnapMenu.jsx'))
+  for (const state of entry.states) {
+    assert.equal(entry.state_contexts[state].toolbar, 'Drafting settings')
+    assert.equal(entry.state_contexts[state].name, 'Object snap modes')
+    assert.equal(entry.state_contexts[state].expanded, state === 'open')
+    assert.deepEqual(entry.expected_effect[state], {
+      kind: 'toggles', target: 'object-snap-menu-expanded', value: state !== 'open',
+    })
+  }
+  const invalid = clone(overrides)
+  invalid.controls.find((row) => row.id === entry.id).expected_effect.open.value = true
+  assert.throws(() => buildFeatureMap({ overrides: invalid }), /opposite setup and effect/)
+  assert.throws(() => checkCompleteness({ ...map, entries: map.entries.filter((row) => row.id !== entry.id) }), /completeness failed/)
 })
 
 test('C2 certifies all seven engine and disclosure controls with real recipes', () => {
@@ -98,7 +174,7 @@ test('Script controls name scoped effects, native running locks and the Run refu
     ['choose-script', 'Choose script', 'opens', 'script-file-picker'],
     ['run-script', 'Run script', 'submits', 'script-run'],
   ]
-  assert.deepEqual(overrides.controls.slice(46).map((row) => row.id), expected.map(([id]) => `control:${id}`))
+  assert.deepEqual(overrides.controls.slice(47).map((row) => row.id), expected.map(([id]) => `control:${id}`))
   for (const [id, title, kind, target] of expected) {
     const entry = entryFor(`control:${id}`)
     assert.equal(entry.title, title)
@@ -167,8 +243,11 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   for (const id of ['drawer:plan', 'drawer:result']) previous.overrides[id].viewports = ['desktop', 'phone']
   const previousTriples = triples(buildFeatureMap({ overrides: previous }))
   // 21-B2 added engine:undo, engine:redo and engine:repeat plus the engine-nothing-to-undo, engine-nothing-to-redo and no-command-to-repeat patches (793 -> 811, 759 -> 777). C2 certifies the 41 census triples (811 -> 852, 777 -> 818).
-  assert.equal(previousTriples.length, 852)
-  assert.equal(triples(map).length, 818)
+  // G4 changes six multiple-selected effects, retaining all six rows: 852 + 0 and 818 + 0 triples.
+  // C3 adds three Object snap modes disclosure states: 852 + 3 = 855, 818 + 3 = 821.
+  // S27 adds the bar:escape owner-open state for the Escape owner rung: 855 + 1 = 856, 821 + 1 = 822.
+  assert.equal(previousTriples.length, 856)
+  assert.equal(triples(map).length, 822)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
@@ -186,7 +265,7 @@ test('W21B2-map-engine-actions', () => {
     })
   }
   assert.deepEqual(entryFor('action:engine-repeat').expected_effect.ready, {
-    kind: 'opens', target: 'cockpit-prompt',
+    kind: 'opens', target: 'cockpit-prompt', operation: 'createLine', group: 'draw',
   })
   for (const id of engineActions) {
     const entry = entryFor(featureId('action', id))
@@ -485,7 +564,7 @@ test('completeness rejects every omitted row, including tools and the none drawe
   assert.throws(() => checkCompleteness({ ...map, entries: [...map.entries, map.entries[0]] }), /duplicate/)
 })
 
-test('forty-nine exact control declarations participate in independent completeness', () => {
+test('fifty exact control declarations participate in independent completeness', () => {
   const expected = ['fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
     'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up',
     'properties-close', 'properties-drawing', 'properties-layers', 'properties-panels', 'properties-plan',
@@ -493,8 +572,9 @@ test('forty-nine exact control declarations participate in independent completen
     'drawing-overview', 'drawing-overview-collapse',
     'scope-add', 'demo-return', 'claude-accounts', 'drawing-close-start', 'notification-collapse', 'session-details', 'version-history', 'linked-services', 'project-board', 'prompt-run', 'prompt-scope', 'sign-out', 'start-board', 'take-edit-lock', 'cost-panel', 'command-bar', 'find-drawing',
     'open-dxf', 'save-version', 'undo-edit', 'redo-edit', 'more-panels', 'open-dxf-browser', 'objects',
-    'ribbon-script', 'choose-script', 'run-script'].map((id) => 'control:' + id).sort()
-  assert.equal(expected.length, 49)
+    'ribbon-script', 'choose-script', 'run-script', 'object-snap-modes'].map((id) => 'control:' + id).sort()
+  // One disclosure control joins the previous 49 declarations: 49 + 1 = 50.
+  assert.equal(expected.length, 50)
   assert.deepEqual(map.entries.filter((row) => row.kind === 'control').map((row) => row.id), expected)
   for (const declaration of overrides.controls) {
     const entry = entryFor(declaration.id)
@@ -752,6 +832,12 @@ test('action cases project registry gates and engine prompt behavior', () => {
   for (const action of ACTIONS) {
     const entry = entryFor(featureId('action', action.id))
     for (const state of entry.states) {
+      if (action.id === 'bar:escape' && state === 'owner-open') {
+        assert.deepEqual(entry.state_contexts[state].escapeOwner, { id: 'walk-owner', layer: 'menu' })
+        assert.deepEqual(entry.expected_effect[state], { kind: 'toggles', target: 'escape:owner' })
+        assert.deepEqual(escapeOwnerStack(), [])
+        continue
+      }
       const reason = action.when(entry.state_contexts[state])
       const effect = entry.expected_effect[state]
       if (reason) {

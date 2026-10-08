@@ -28,9 +28,13 @@ import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents, drawingPropertyName } from './site/PropertiesDock.jsx'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
+import useEscapeOwner from './lib/useEscapeOwner.js'
 import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
+import { pushOnOpen, useCameraViewParam, useViewParamSeat } from './lib/urlState.js'
+import { readNavExpanded, writeNavExpanded } from './lib/navExpandedPreference.js'
+import { useLoadingPhase } from './lib/loadingTiming.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
 import SolarSettingsForm from './solar/SolarSettingsForm.jsx'
 import { ENV_SOLAR_SETTINGS_FORM } from './solar/flag.js'
@@ -103,6 +107,7 @@ import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 // proof finding this record fixes).
 import EngineDockProperties from './cadedit/EngineDockProperties.jsx'
 import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
+import CockpitEngineStatus from './site/CockpitEngineStatus.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
@@ -160,6 +165,7 @@ import { editFixture, pendingEditDemo, editFixtureV2 } from './mock/editFixture.
 import { resumeHref } from './components/ConversationList.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from './components/LiveRegion.jsx'
 import ConversePanel from './components/ConversePanel.jsx'
+import AuthorPanel from './components/AuthorPanel.jsx'
 import {
   THRESHOLDS, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
@@ -173,7 +179,7 @@ import usePlatformTrustController from './controllers/platform/usePlatformTrustC
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
 import useDrawingUploadController from './controllers/upload/useDrawingUploadController.js'
 import DrawingUploadControl from './components/DrawingUploadControl.jsx'
-import ProjectWorkspacePanels, { paneForCapability } from './workspace/ProjectWorkspacePanels.jsx'
+import ProjectWorkspacePanels, { paneForCapability, deriveBoardPaneSeats, BoardPaneState, PersistentSeat, useBoardConversation, ConversationOpening, AnnotationPaneState } from './workspace/ProjectWorkspacePanels.jsx'
 import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
@@ -622,6 +628,7 @@ export default function App() {
     sessionId: agentSessionId,
     turns: agentTurns,
     startTurn: startAgentTurn,
+    attach: attachAgentSession,
     clear: clearAgentSession,
     setProjectContext,
   } = converse
@@ -837,6 +844,13 @@ export default function App() {
   } = workspaceController
   useDrawingScopeReset(openProjectId)
   const [projectPane, setProjectPane] = useState(null)
+  const [conversationSource, setConversationSource] = useState(null)
+  const [conversationDestination, setConversationDestination] = useState(null)
+  const [annotationSource, setAnnotationSource] = useState(null)
+  const [annotationDestination, setAnnotationDestination] = useState(null)
+  const [authorSource, setAuthorSource] = useState(null)
+  const [authorDestination, setAuthorDestination] = useState(null)
+  const [authorFallback, setAuthorFallback] = useState(null)
   const [boardJob, setBoardJob] = useState(null)
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
   const boardPreviewRunRef = useRef(null)
@@ -844,10 +858,6 @@ export default function App() {
     setProjectPane(null)
     setBoardJob(null)
   }, [openProjectId])
-  const annotationEnabled = Boolean(
-    !mock && signedIn && openProjectId && drawingState?.drawing_id && agentSessionId,
-  )
-  const annotations = useAnnotations(agentSessionId, { enabled: annotationEnabled })
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
   // else the applied write-loop version, else the base intake.
   // The MOUNTED DRAWING's own name — deliberately NOT called a project. It is
@@ -1616,12 +1626,16 @@ export default function App() {
     viewer.setView({ center: { x: (resultBounds.minX + resultBounds.maxX) / 2, y: (resultBounds.minY + resultBounds.maxY) / 2 }, zoom })
   }, [resultBounds, studioGround, pushViewSnapshot])
 
+  // Toast actions outlive the render that created the version; use the current undo handler.
+  const undoActionRef = useRef(null)
+  const onUndo = useCallback(() => undoActionRef.current?.(), [])
+
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
   const seatVersion = useCallback((view, drawingId, note) => {
     seatDrawingVersion(view, { drawingId, source: 'version' })
-    if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'View', onClick: viewViewer } })
-  }, [seatDrawingVersion, showToast, viewViewer])
+    if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'Undo', undo: true, onClick: onUndo } })
+  }, [onUndo, seatDrawingVersion, showToast])
 
   const seatCompletedVersion = useCallback(async (newVersion, envelope, options) => {
     const scopeCurrent = isScopeCurrent
@@ -1636,7 +1650,7 @@ export default function App() {
         version = commit.version
       } catch {
         if (!current()) return false
-        if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+        if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
         markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
         return false
       }
@@ -1644,7 +1658,7 @@ export default function App() {
     if (envelope?.result?.new_version_readable === false) {
       if (!current()) return false
       recordCommittedUnreadableHead(newVersion)
-      if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
       return false
     }
     try {
@@ -1654,23 +1668,24 @@ export default function App() {
       return true
     } catch {
       if (!current()) return false
-      if (options?.announce !== false) showToast({ text: `Version ${version} created` })
+      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
       markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
       return false
     }
-  }, [intake, isScopeCurrent, markRefreshFailure, mock, recordCommittedUnreadableHead, seatVersion, showToast])
+  }, [intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast])
   completedVersionRef.current = seatCompletedVersion
 
   // P2 wave C-2: engagement depth (real CAD work). ONE event for the four
   // version-navigation gestures; action is the closed vocabulary
   // undo/redo/history/preview, counted only when the navigation happened.
-  const onUndo = useCallback(async () => {
+  const undoCurrentVersion = useCallback(async () => {
     const view = await undoDrawingVersion()
     if (view) {
       track('drawing.version_navigated', { action: 'undo' })
       showToast({ text: `Reverted to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
     }
   }, [drawingState, showToast, undoDrawingVersion, viewViewer])
+  undoActionRef.current = undoCurrentVersion
 
   const onRedo = useCallback(async () => {
     const view = await redoDrawingVersion()
@@ -1913,7 +1928,7 @@ export default function App() {
         } catch {
           // Completed act -> plain NT2 toast; the failed refresh surfaces as an
           // X1 red row at the viewer card (a failed act is never a toast).
-          showToast({ text: `Version ${nv.version} created` })
+          showToast({ text: `Version ${nv.version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
           setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
         }
       }
@@ -1933,7 +1948,7 @@ export default function App() {
         } catch {
           // Completed act -> plain NT2 toast; the failed refresh surfaces as an
           // X1 red row at the viewer card (a failed act is never a toast).
-          showToast({ text: `Version ${commit?.version ?? nv.version} created` })
+          showToast({ text: `Version ${commit?.version ?? nv.version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
           setRefreshFail({ drawing_id: nv.drawing_id, version: commit?.version ?? nv.version })
         }
       }
@@ -2099,6 +2114,22 @@ export default function App() {
     if (last) onRequestCatalogRun(last.tool, last.params, null, 'catalog', { complete: true })
   }, [onRequestCatalogRun])
 
+  // S20: a failed job row's Retry in the rail re-dispatches that job's tool
+  // through the same confirm path as onRetry (never a silent run). The row
+  // that IS the last run keeps its inputs; any other failed row re-arms the
+  // tool with its defaults, because the jobs list carries no params.
+  const onRetryJob = useCallback((job) => {
+    if (!job || job.status !== 'failed' || typeof job.tool !== 'string') return
+    const last = lastRunRef.current
+    const sameRun = !!last && last.tool?.name === job.tool && currentJob?.job_id === job.job_id
+    const tool = sameRun ? last.tool : tools.find((candidate) => candidate.name === job.tool)
+    if (!tool) {
+      setRunErr(`${job.tool} cannot be retried: it is no longer in the catalog.`)
+      return
+    }
+    onRequestCatalogRun(tool, sameRun ? last.params : {}, null, 'catalog', { complete: sameRun })
+  }, [currentJob, onRequestCatalogRun, setRunErr, tools])
+
   // Guided Solar step rail: Solar settings opens its typed form; every other step opens the step editor.
   const onOpenSolarFlowStep = useCallback((row) => {
     if (!row || typeof row.name !== 'string') return
@@ -2216,7 +2247,7 @@ export default function App() {
             const view = await getDrawingIntake(false, nv.drawing_id, 'head')
             seatVersion(view, nv.drawing_id, `Version ${nv.version} created`)
           } catch {
-            showToast({ text: `Version ${nv.version} created` })
+            showToast({ text: `Version ${nv.version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
             setRefreshFail({ drawing_id: nv.drawing_id, version: nv.version })
           }
         }
@@ -2239,8 +2270,19 @@ export default function App() {
     // where a chat-dispatched job enters the run pane.
     track('agent.job_linked', { tool: toolName || 'job' })
     setSelectedTool({ name: toolName || 'job' })
-    return attachSharedJob(jobId, { toolName: toolName || 'job', persist: true })
-  }, [attachSharedJob, mock])
+    const envelope = await attachSharedJob(jobId, { toolName: toolName || 'job', persist: true })
+    // S23 agent checkpoints: an agent turn whose job committed a drawing
+    // version raises one keyed notice (S1 keyed push, so a second checkpoint
+    // updates it in place) whose Undo is the ribbon's own onUndo.
+    if (envelope?.ok && envelope.result?.new_version) {
+      showToast({
+        key: 'agent-checkpoint',
+        text: 'Checkpoint saved',
+        action: { label: 'Undo', onClick: () => { void onUndo() } },
+      })
+    }
+    return envelope
+  }, [attachSharedJob, mock, onUndo, showToast])
 
   // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
   const onAuthor = useCallback(async (description, targetToolName = null, opts = {}) => {
@@ -2653,6 +2695,8 @@ export default function App() {
     rows.push(`build ${__BUILD_HASH__}`)
     setDrawer({
       title: 'Session · provenance',
+      // S24: the one DT2 drawer the URL may name (`drawer=details`).
+      urlKey: 'details',
       rows,
       diagnostics: composeDiagnostics({
         buildHash: __BUILD_HASH__, mode: mock ? 'sample data' : 'live',
@@ -2834,17 +2878,29 @@ export default function App() {
     request(id)
   }, [returnToDrawing, request])
   // W4c-V1: the nav rail's spine posture on drafting surfaces under the
-  // studio. IN-MEMORY on purpose: the rollback contract forbids new storage
-  // keys under the studio and stale ?params, so the posture resets per page
-  // load (accepted V1 cost). Default COLLAPSED on CAD/Solar — the drafting
+  // studio. REMEMBERED under fork F-studio-rollback-storage (S20), which
+  // overrides the W4c rollback contract's no-new-storage-keys rule for this
+  // ONE key (lib/navExpandedPreference.js, every access in try/catch). The
+  // same fork (S24) admits exactly four allow-listed URL keys
+  // (lib/urlState.js): the open drawer rides `drawer`, seated both ways
+  // below, so a reload reopens it and Back closes it. No
+  // stored value keeps the default COLLAPSED on CAD/Solar — the drafting
   // ribbon carries the tool set there and an expanded catalog beside it is
   // exactly the duplication ACCEPTANCE deferred the ribbon to avoid.
   const [studioDrawer, setStudioDrawer] = useState('none')
-  const [navExpanded, setNavExpandedState] = useState(false)
+  const [navExpanded, setNavExpandedState] = useState(() => readNavExpanded())
   const setNavExpanded = useCallback((open) => {
     setNavExpandedState(open)
+    writeNavExpanded(!!open)
     setStudioDrawer((current) => open ? 'nav' : current === 'nav' ? 'none' : current)
   }, [])
+  // S20: the header's drawing line waits out the loading grace before it says
+  // anything, then shows a hollow dot and "Loading drawing" (A8 timing). Only
+  // a pending load counts: no selection, an absent or a failed drawing never
+  // claims to be loading.
+  const drawingLoading = !shown && drawingLoad.state === 'pending'
+  const drawingLoadPhase = useLoadingPhase(drawingLoading)
+  const drawingLoadShown = drawingLoading && (drawingLoadPhase === 'shown' || drawingLoadPhase === 'long')
   // W4c-C: the DXF import surface is a floating cockpit pane on drafting
   // surfaces (it was a full-width page block across the drawing); the ribbon
   // opens it.
@@ -2866,6 +2922,60 @@ export default function App() {
       if (details) details.open = true
     }
   }, [])
+  // S24 (A14): the URL keeps the open drawer, the opened tool, the operator's
+  // own selection and the camera view (lib/urlState.js owns the four keys and
+  // preserves every boot flag, Auth0 key and the hash byte for byte). Opening
+  // a drawer or a tool pushes, so Back closes it; a close, a selection and a
+  // camera move replace. A reload restores each one once its data is ready.
+  const studioDrawerRef = useRef(studioDrawer)
+  studioDrawerRef.current = studioDrawer
+  const detailsDrawerRef = useRef(drawer)
+  detailsDrawerRef.current = drawer
+  const restoreUrlDrawer = useCallback((name) => {
+    if (name === 'details') { openSessionDetails(); return true }
+    if (detailsDrawerRef.current?.urlKey === 'details') setDrawer(null)
+    const current = studioDrawerRef.current
+    if (name == null) {
+      if (current === 'nav') setNavExpanded(false)
+      else if (current === 'jobs') setJobRailExpanded(false)
+      else setStudioDrawer('none')
+      return true
+    }
+    if (!STUDIO_DRAWERS.includes(name) || name === 'none') return false
+    if (name === 'nav') setNavExpanded(true)
+    else if (name === 'jobs') setJobRailExpanded(true)
+    else if (current !== name) toggleStudioDrawer(name)
+    return true
+  }, [openSessionDetails, setNavExpanded, setJobRailExpanded, toggleStudioDrawer])
+  useViewParamSeat('drawer', {
+    value: drawer?.urlKey === 'details' ? 'details' : studioDrawer === 'none' ? null : studioDrawer,
+    onRestore: restoreUrlDrawer,
+    // Closing Details back onto an open studio drawer is a close, not a commit.
+    mode: (previous, next) => (previous === 'details' ? 'replace' : pushOnOpen(previous, next)),
+  })
+  useViewParamSeat('tool', {
+    value: openTool?.name ?? null,
+    ready: Array.isArray(tools) && tools.length > 0,
+    onRestore: (name) => {
+      if (name == null) { setOpenTool(null); return true }
+      const found = tools.find((tool) => tool?.name === name)
+      if (!found) return false
+      setOpenTool(found)
+      return true
+    },
+    mode: pushOnOpen,
+  })
+  useViewParamSeat('sel', {
+    value: selectedHandle == null ? null : String(selectedHandle),
+    ready: drawingIntake != null,
+    onRestore: (handle) => {
+      if (handle != null && !selectEntity(drawingIntake, handle)) return false
+      setSelectedHandle(handle ?? null)
+      return true
+    },
+    mode: 'replace',
+  })
+  useCameraViewParam(viewerRef, { ready: drawingIntake != null })
   // Slice 11a: the builds poll (GET /api/builds, validated records from
   // every lane). Mock mode makes no request; the rail hosts one
   // BuildQueueCard per record and the toolbar badge counts the open ones.
@@ -2964,6 +3074,39 @@ export default function App() {
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   // The Browser board's panel slot hosts the project panels; CAD and Solar Start keep them inline because they pass no panel.
   const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'
+  const paneSeats = deriveBoardPaneSeats({
+    mock, signedIn, sessionStatus: session.status, projectId: openProjectId,
+    drawingId: drawingState?.drawing_id, sessionId: agentSessionId,
+    boardHostsProject, projectPane, canConverse, agentMode, authorOpen,
+    conversationSource, conversationDestination, annotationSource,
+    annotationDestination, authorSource, authorDestination, authorFallback,
+  })
+  const {
+    boardPaneContext, boardConversation, boardAnnotations, boardAuthor,
+    conversationEligible, authorEligible, annotationEnabled,
+  } = paneSeats
+  const annotations = useAnnotations(agentSessionId, { enabled: annotationEnabled })
+  const conversationContext = useMemo(() => ({}), [mock, signedIn, session.status, openProjectId, drawingState?.drawing_id])
+  const conversationOpening = useBoardConversation({
+    active: boardConversation, eligible: conversationEligible, sessionId: agentSessionId,
+    context: conversationContext, attach: attachAgentSession, onOpen: openAgentMode,
+  })
+  useLayoutEffect(() => {
+    if (mock || session.status !== 'active') clearAgentSession()
+  }, [mock, session.status, clearAgentSession])
+  useEffect(() => {
+    if (boardConversation && conversationEligible && agentSessionId) openAgentMode()
+  }, [boardConversation, conversationEligible, agentSessionId, openAgentMode])
+  useEffect(() => {
+    if (boardAuthor && authorEligible) {
+      setAuthorOpenState(true)
+      setNavExpanded(true)
+    }
+  }, [boardAuthor, authorEligible])
+  useLayoutEffect(() => {
+    if (boardAuthor && authorDestination) authorSectionRef.current = authorDestination
+    else authorSectionRef.current = authorSource || authorFallback
+  }, [boardAuthor, authorDestination, authorSource, authorFallback])
   const effectiveGround = studioGround ? (boardVisible ? 'board' : surfaceGround(activeSurface)) : null
   const leavingGround = useLeavingGround(effectiveGround)
   // Keeps its name: ~20 sites read `studioGround && drafting`, and the App
@@ -3005,6 +3148,14 @@ export default function App() {
       selectedHandle,
       openProjectId,
       rTarget,
+      // S25: the version undo / redo records' own gates, so Mod+Z off the
+      // drafting surface answers to exactly the ribbon's Undo and Redo.
+      hasVersions: !!drawingState,
+      canUndo,
+      canRedo,
+      versionBusy: !!versionBusy,
+      previewing: !!previewing,
+      mutationsBlocked: !!drawingMutationsBlocked,
     }
     // The handlers the record names, built only once a decision came back.
     const ladderHandlers = (state) => ({
@@ -3046,6 +3197,8 @@ export default function App() {
       onRetryCatalog: () => loadCatalog(),
       onRetryRefresh: () => onRetryViewerRefresh(),
       onOpenShortcuts: () => setShortcutsOpen(true),
+      onUndo: () => { void onUndo() },
+      onRedo: () => { void onRedo() },
     })
     // Hotkey-driven changes land frame-of-keypress (data-instant, W0#7). The
     // listener stamps only a branch that will handle the key: type-to-fall-
@@ -3056,7 +3209,16 @@ export default function App() {
   }, [startOpen, onReturnToDrawing, drawer, phoneViewport, studioShell, studioDrawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
-      onDismissSolarFlowRoute])
+      onDismissSolarFlowRoute, drawingState, canUndo, canRedo, versionBusy, previewing, drawingMutationsBlocked, onUndo, onRedo])
+  // S27: Escape from inside the typed Solar settings form closes it through
+  // the one owner stack (edit layer, scoped to the form's wrapper; while the
+  // wrapper is not mounted the owner claims nothing).
+  const solarSettingsFormRef = useRef(null)
+  useEscapeOwner('solar-tool-form', !!solarFormTool, () => {
+    settingsRunRef.current = null
+    setSettingsRunResult(null)
+    setSolarFormTool(null)
+  }, { layer: 'edit', scope: solarSettingsFormRef, scoped: true })
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
   const projectSwitcherRef = useRef(null)
   // Each bump opens the header switcher on its inline create field.
@@ -3732,6 +3894,7 @@ export default function App() {
         inflight: inflightPtr,
         reattaching,
         onSelectJob,
+        onRetryJob,
         builds: buildQueue.builds,
         buildFeed: { status: buildQueue.status, dropped: buildQueue.dropped, onRetry: buildQueue.resume },
         staleResults,
@@ -3794,7 +3957,13 @@ export default function App() {
             onOpenProject={onOpenProject}
           />
           <span className="meta">
-            {shown ? `${shown.polylines.length} polylines · ${shown.layers.length} layers` : 'loading'}
+            {shown
+              ? `${shown.polylines.length} polylines · ${shown.layers.length} layers`
+              : drawingLoadShown && (
+                <span className="meta-loading" role="status">
+                  <span className="dot hollow" aria-hidden="true" />Loading drawing
+                </span>
+              )}
           </span>
           {mock && <span className="tag amber">Demo</span>}
         </div>
@@ -3817,8 +3986,10 @@ export default function App() {
                 : 'Open pending approvals'}
             >
               Approvals
-              {pendingApprovalCount > 0 && <span className="key">{pendingApprovalCount}</span>}
-              {pendingApprovalsUnavailable && <span className="dot red" aria-hidden="true" />}
+              {/* S20 (F-studio-nt2-count): a dot, never a visible number, while
+                  items wait; the count lives in the aria-label above. */}
+              {pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />}
+              {pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />}
             </button>
           )}
           <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>
@@ -3892,9 +4063,13 @@ export default function App() {
         openFamilies={openFamilies}
         onToggleFamily={toggleFamily}
         authorOpen={authorOpen}
-        onToggleAuthor={() => setAuthorOpen((o) => !o)}
+        onToggleAuthor={() => {
+          if (boardAuthor) { setProjectPane(null); setAuthorOpen(false) }
+          else setAuthorOpen((o) => !o)
+        }}
         onCollapse={() => setNavExpanded(false)}
         authorSectionRef={authorSectionRef}
+        authorContent={<div ref={setAuthorSource} />}
         onAuthor={onAuthor}
         onPublish={onPublishAuthor}
         onUseAuthored={onUseAuthored}
@@ -4039,7 +4214,18 @@ export default function App() {
                 onBack={() => setProjectPane(null)}
                 receipts={workspace?.receipts}
                 shipReceipts={workspace?.ship_receipts}
-                slots={{ catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul> }}
+                slots={{
+                  catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul>,
+                  conversation: <BoardPaneState pane="conversation" context={boardPaneContext}>
+                    {!canConverse ? <EntitlementNotice required="converse" tier={entTier} />
+                      : agentSessionId ? <div ref={setConversationDestination} />
+                        : <ConversationOpening status={conversationOpening.status} onRetry={conversationOpening.retry} />}
+                  </BoardPaneState>,
+                  annotations: <BoardPaneState pane="annotations" context={boardPaneContext} onOpenConversation={() => setProjectPane('conversation')}>
+                    <AnnotationPaneState annotations={annotations}><div ref={setAnnotationDestination} /></AnnotationPaneState>
+                  </BoardPaneState>,
+                  authoring: <BoardPaneState pane="authoring" context={boardPaneContext}><div ref={setAuthorDestination} /></BoardPaneState>,
+                }}
                 onOpenVersion={(version) => selectCanonicalVersion(version.version_id)}
                 onSelectJob={setBoardJob}
                 currentJob={boardJob}
@@ -4135,14 +4321,7 @@ export default function App() {
           <SolarFlowSeat seated={solarFlowSeated}>
           {ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (
             ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext }) === 'typed' ? (
-              <div id="solar-tool-form" key={solarFormTool.name} onKeyDown={(event) => {
-                if (event.key === 'Escape') {
-                  event.stopPropagation()
-                  settingsRunRef.current = null
-                  setSettingsRunResult(null)
-                  setSolarFormTool(null)
-                }
-              }}>
+              <div id="solar-tool-form" key={solarFormTool.name} ref={solarSettingsFormRef}>
                 <SolarSettingsForm
                   context={catalogRunContext}
                   readIntake={SOLAR_SETTINGS_LOADERS.readIntake}
@@ -4267,6 +4446,7 @@ export default function App() {
               {/* W4f slice B: the command line's typed words (LINE, C, MOVE ...)
                   reach the engine through this consumer; renders nothing. */}
               {ENV_CAD_EDIT && drafting && <CommandLineArmer />}
+              {ENV_CAD_EDIT && studioGround && drafting && <CockpitEngineStatus importOpen={importOpen} slotId="cockpit-engine-status-slot" />}
               {ENV_CAD_EDIT && drafting && <StatusModesBridge />}
               {/* W4f slice A1: a click on the drawing answers the armed
                   prompt's point steps; while a point command is live the
@@ -4481,6 +4661,8 @@ export default function App() {
                         onBeforeRestore={closeStartForChange}
                         headWarning={unreadableHead}
                         mutationBlocked={drawingMutationsBlocked}
+                        onUndo={onUndo}
+                        undoDisabled={versionBusy || running || !canUndo}
                       />
                     )}
                   </div>}
@@ -4767,7 +4949,8 @@ export default function App() {
           />
         )}
 
-        {annotationEnabled && annotations.annotation && (
+        <div ref={setAnnotationSource} />
+        {annotationEnabled && annotations.annotation && paneSeats.annotationTarget && createPortal(
           <AnnotationDecisionCard
             annotation={annotations.annotation}
             busy={annotations.busy}
@@ -4778,20 +4961,45 @@ export default function App() {
             onReject={annotations.reject}
             onRetry={annotations.retry}
             onUndo={annotations.undo}
-          />
+          />,
+          paneSeats.annotationTarget,
         )}
 
-        {!mock && agentMode && agentSessionId && (
+        <div ref={setConversationSource} />
+        {paneSeats.conversationMounted && (
+          <PersistentSeat destination={paneSeats.conversationTarget}>
           <ConversePanel
             sessionId={agentSessionId}
             userTurns={agentTurns}
-            onDismiss={clearAgentMode}
+            onDismiss={() => { clearAgentMode(); if (boardConversation) setProjectPane(null) }}
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
             onBeforeWriteApproval={closeStartForChange}
             engineDirty={engineDirty}
           />
+          </PersistentSeat>
+        )}
+
+        <div ref={setAuthorFallback} />
+        {paneSeats.authorMounted && (
+          <PersistentSeat destination={paneSeats.authorTarget}>
+            <AuthorPanel
+              onAuthor={onAuthor}
+              onPublish={onPublishAuthor}
+              onUseAuthored={onUseAuthored}
+              seed={authorSeed}
+              seedSignal={authorSignal}
+              seedAutoSubmit={tourOn}
+              targetToolName={authorTargetTool}
+              onCancelRevision={onCancelAuthorRevision}
+              stageActivity={authorStage}
+              onResumeAuthor={authorStage.resume}
+              notLinked={claudeNotLinked}
+              onLinkClaude={() => setClaudeOpen(true)}
+              buildEntitled={canBuild}
+            />
+          </PersistentSeat>
         )}
 
         {/* Studio drafting surfaces host it in the dock (see the dock's Plan
@@ -4873,6 +5081,7 @@ export default function App() {
               round 3 wires secretRefusal at that same declaration (the bar has
               no guard of its own; the transport raises the refusal), not here. */}
           <SurfaceFrame.CommandBar />
+          {ENV_CAD_EDIT && studioGround && drafting && <div id="cockpit-engine-status-slot" />}
         </div>
 
         {/* The golden path's payoff (result numbers) and the running strip are
