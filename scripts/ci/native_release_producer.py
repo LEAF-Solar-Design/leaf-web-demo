@@ -35,6 +35,7 @@ FRESHNESS = {
     "web": ("WEB_ALPINE_MAIN_APKINDEX_SHA256",),
 }
 TRIXIE = ("TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256", "TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256")
+PIN_RACE_MARKERS = ("computed checksum did NOT match", "InRelease")
 
 # Reviewed infrastructure NO_SOURCE loader, normalized to LF (native_release_start.py).
 FORGE_BUILDSPEC_SHA256 = "dab800906a375e62bbe09021b57999ff44afdc18d66e1e93b448cb3c9c1e115a"
@@ -476,21 +477,34 @@ def runtime_identity(mode: str, source: str, env: dict, codebuild) -> dict:
     return identity
 
 
+def _channel_digest(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=30) as response:
+        payload = response.read(8 * 1024 * 1024 + 1)
+    if not payload or len(payload) > 8 * 1024 * 1024:
+        raise ValueError("package channel document exceeds bound")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def refresh_debian_freshness(service: str) -> dict[str, str]:
+    if service == "web" or service not in SERVICES:
+        raise ValueError("no Debian package pin for this service")
+    names = FRESHNESS.get(service, TRIXIE)
+    distribution = "bookworm" if names == FRESHNESS["harness"] else "trixie"
+    return {
+        names[0]: _channel_digest(f"https://deb.debian.org/debian-security/dists/{distribution}-security/InRelease"),
+        names[1]: _channel_digest(f"https://deb.debian.org/debian/dists/{distribution}-updates/InRelease"),
+    }
+
+
 def resolve_freshness(root: Path, *, harness_only=False, app_harness=False) -> dict[str, dict[str, str]]:
     """Fetch the same signed package-channel inputs as the image workflow."""
-    def digest(url):
-        with urllib.request.urlopen(url, timeout=30) as response:
-            payload = response.read(8 * 1024 * 1024 + 1)
-        if not payload or len(payload) > 8 * 1024 * 1024:
-            raise ValueError("package channel document exceeds bound")
-        return hashlib.sha256(payload).hexdigest()
     if harness_only and app_harness:
         raise ValueError("conflicting freshness selection")
     hashes = {}
     channels = (("bookworm", FRESHNESS["harness"]),) if harness_only else (("bookworm", FRESHNESS["harness"]), ("trixie", TRIXIE))
     for distribution, names in channels:
-        hashes[names[0]] = digest(f"https://deb.debian.org/debian-security/dists/{distribution}-security/InRelease")
-        hashes[names[1]] = digest(f"https://deb.debian.org/debian/dists/{distribution}-updates/InRelease")
+        hashes[names[0]] = _channel_digest(f"https://deb.debian.org/debian-security/dists/{distribution}-security/InRelease")
+        hashes[names[1]] = _channel_digest(f"https://deb.debian.org/debian/dists/{distribution}-updates/InRelease")
     if harness_only:
         return {"harness": hashes}
     if app_harness:
@@ -504,7 +518,7 @@ def resolve_freshness(root: Path, *, harness_only=False, app_harness=False) -> d
     main = [url for url in repositories if re.fullmatch(r"https://dl-cdn.alpinelinux.org/alpine/v[0-9]+\.[0-9]+/main", url)]
     if len(main) != 1:
         raise ValueError("nginx base does not identify one Alpine main channel")
-    hashes[FRESHNESS["web"][0]] = digest(main[0] + "/x86_64/APKINDEX.tar.gz")
+    hashes[FRESHNESS["web"][0]] = _channel_digest(main[0] + "/x86_64/APKINDEX.tar.gz")
     return {service: {name: hashes[name] for name in FRESHNESS.get(service, TRIXIE)} for service in SERVICES}
 
 
@@ -599,19 +613,27 @@ def stage_harness_release(output: Path, *, source, tree, identity, harness, gate
 BUILD_LOG_TAIL_BYTES = 1024 * 1024
 
 
-def _print_build_logs(work: Path, services) -> None:
+def _build_log_tail(path: Path) -> str | None:
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, 2)
+            stream.seek(max(0, stream.tell() - BUILD_LOG_TAIL_BYTES))
+            tail = stream.read(BUILD_LOG_TAIL_BYTES)
+    except FileNotFoundError:
+        return None
+    return tail.decode("utf-8", errors="replace")
+
+
+def _print_build_logs(work: Path, services, *, retry=False) -> None:
     """Print each image log's last 1 MiB in the given order; bounded read, never raises on absence."""
     for service in services:
-        print(f"==== image build log: {service} ====", flush=True)
-        try:
-            with (work / f"{service}.log").open("rb") as stream:
-                stream.seek(0, 2)
-                stream.seek(max(0, stream.tell() - BUILD_LOG_TAIL_BYTES))
-                tail = stream.read(BUILD_LOG_TAIL_BYTES)
-        except FileNotFoundError:
+        label = f"{service} (retry 1)" if retry else service
+        print(f"==== image build log: {label} ====", flush=True)
+        tail = _build_log_tail(work / (f"{service}.retry1.log" if retry else f"{service}.log"))
+        if tail is None:
             print("(no log)", flush=True)
             continue
-        print(tail.decode("utf-8", errors="replace"), flush=True)
+        print(tail, flush=True)
 
 
 def _build_images(root: Path, services, source: str, build_number: int,
@@ -628,11 +650,35 @@ def _build_images(root: Path, services, source: str, build_number: int,
                                         log_path=work / f"{service}.log", **extras.get(service, {}))
                    for service in ordered}
     _print_build_logs(work, ordered)
+    errors = {service: futures[service].exception() for service in ordered}
+    results = {service: futures[service].result() for service in ordered if errors[service] is None}
+    # Bounded, one retry only on the InRelease pin race, re-pinning to the newer current index.
     for service in ordered:
-        error = futures[service].exception()
+        if service == "web" or not isinstance(errors[service], subprocess.CalledProcessError):
+            continue
+        tail = _build_log_tail(work / f"{service}.log")
+        if tail is None or not all(marker in tail for marker in PIN_RACE_MARKERS):
+            continue
+        try:
+            fresh = refresh_debian_freshness(service)
+        except Exception:
+            continue
+        if fresh == freshness[service]:
+            continue
+        print(f"image {service}: package index pin moved during build; rebuilding once with refreshed pins", flush=True)
+        try:
+            results[service] = build_image(root, service, source, build_number, fresh,
+                                          work / f"{service}.retry1.json",
+                                          log_path=work / f"{service}.retry1.log", **extras.get(service, {}))
+            errors[service] = None
+        except Exception as exc:
+            errors[service] = exc
+        _print_build_logs(work, (service,), retry=True)
+    for service in ordered:
+        error = errors[service]
         if error is not None:
             raise error
-    return {service: futures[service].result() for service in ordered}
+    return {service: results[service] for service in ordered}
 
 
 def produce_release(root: Path, output: Path, request: dict, env: dict, codebuild, s3) -> dict:
