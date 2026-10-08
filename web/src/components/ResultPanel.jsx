@@ -4,6 +4,7 @@ import './resultObjectLinks.css'
 import { humanKey } from '../labels.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
+import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 import SolarReadResult from '../solar/SolarReadResult.jsx'
 import { isSolarReadResult } from '../solar/solarReadResultModel.js'
@@ -270,6 +271,9 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
     const onKey = (e) => {
       if (e.key !== 'r' && e.key !== 'R') return
       if (e.metaKey || e.ctrlKey || e.altKey) return
+      // S25: the ShortcutSheet switch turns single-key shortcuts off; read at
+      // keystroke time so a flip takes effect on the next key.
+      if (!readSingleKeyShortcuts()) return
       const t = e.target
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
       e.preventDefault()

@@ -1,11 +1,13 @@
 import { expect, test } from '@playwright/test'
 import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
-// Standardization slice 10d (keyboard rows). Three of the FOUR registry
-// actions that carry a real `kbd` cap (web/src/lib/actionRegistry.js: only
-// bar:focus/bar:escape/bar:retry/bar:shortcuts have one — never inventing a
-// fifth), proven on the console: the key ladder (App.jsx's ladderListener)
-// runs the exact same handler its other, non-keyboard trigger already runs.
+// Standardization slice 10d (keyboard rows). Three of the FOUR shell
+// registry actions that carry a real `kbd` cap (web/src/lib/actionRegistry.js:
+// bar:focus/bar:escape/bar:retry/bar:shortcuts; the engine and version caps
+// are proven elsewhere), proven on the console: the key ladder (App.jsx's
+// ladderListener) runs the exact same handler its other, non-keyboard trigger
+// already runs. S25 adds the sheet's Single-key shortcuts switch: off, bare
+// Shift+? and R stop firing while Mod+K keeps working.
 //   - bar:shortcuts (Shift+?): the SAME onSelect the act-palette's own
 //     "Keyboard shortcuts" row runs (paletteActions in App.jsx wires both to
 //     `() => setShortcutsOpen(true)`).
@@ -70,7 +72,10 @@ test('bar:retry — R runs the exact handler the visible Retry button runs', asy
   await page.goto('/app?surface=browser')
 
   // The one failed-catalog surface: NavRail's own "Retry" chip (onRetryCatalog).
-  const retryButton = page.getByRole('button', { name: 'Retry', exact: true })
+  // The ribbon also carries a tools Retry. Prove the catalog handler through
+  // its own families error rather than counting unrelated retry controls.
+  const retryButton = page.locator('aside.nav .inline-error').filter({ hasText: /Couldn.t load families/ })
+    .getByRole('button', { name: 'Retry', exact: true })
   const railButton = page.getByRole('button', { name: 'Tool rail', exact: true })
   await expect(railButton).toBeVisible({ timeout: 20_000 })
   await expect(retryButton).toHaveCount(0)
@@ -86,6 +91,55 @@ test('bar:retry — R runs the exact handler the visible Retry button runs', asy
   await page.keyboard.press('r')
   await expect(retryButton).toHaveCount(0, { timeout: 15_000 })
   await expect(page.getByText(/Couldn.t load families/)).toHaveCount(0)
+})
+
+test('S25 Single-key shortcuts off: Shift+? and R stop firing, Mod+K still focuses the bar', async ({ page }) => {
+  test.setTimeout(60_000)
+  const catalogGate = { succeed: false }
+  await installFixture(page, { catalogGate })
+  await page.goto('/app?surface=browser')
+
+  const retryButton = page.locator('aside.nav .inline-error').filter({ hasText: /Couldn.t load families/ })
+    .getByRole('button', { name: 'Retry', exact: true })
+  const railButton = page.getByRole('button', { name: 'Tool rail', exact: true })
+  await expect(railButton).toBeVisible({ timeout: 20_000 })
+  await railButton.click()
+  await expect(retryButton).toBeVisible({ timeout: 20_000 })
+
+  // Switch single-key shortcuts off from the sheet itself.
+  await page.evaluate(() => document.activeElement?.blur())
+  await page.keyboard.press('Shift+?')
+  const sheet = page.getByRole('dialog', { name: 'Keyboard shortcuts' })
+  await expect(sheet).toBeVisible()
+  const toggle = sheet.getByRole('switch', { name: 'Single-key shortcuts' })
+  await expect(toggle).toHaveAttribute('aria-checked', 'true')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-checked', 'false')
+  await page.keyboard.press('Escape')
+  await expect(sheet).toHaveCount(0)
+
+  // Off: Shift+? opens nothing, and R does not retry even with the catalog
+  // ready to succeed.
+  await page.evaluate(() => document.activeElement?.blur())
+  await page.keyboard.press('Shift+?')
+  await expect(sheet).toHaveCount(0)
+  catalogGate.succeed = true
+  await page.keyboard.press('r')
+  await expect(retryButton).toBeVisible()
+  await expect(page.getByText(/Couldn.t load families/)).toBeVisible()
+
+  // Mod chords are not single keys.
+  const bar = page.getByLabel('Command bar', { exact: true })
+  await page.keyboard.press('Control+K')
+  await expect(bar).toBeFocused()
+
+  // The switch is remembered and read at keystroke time: clearing it turns
+  // single keys back on with no reload, and R recovers the catalog again.
+  expect(await page.evaluate(() => localStorage.getItem('leaf.singleKeyShortcuts'))).toBe('off')
+  await page.evaluate(() => localStorage.removeItem('leaf.singleKeyShortcuts'))
+  await page.evaluate(() => document.activeElement?.blur())
+  await page.keyboard.press('r')
+  await expect(retryButton).toHaveCount(0, { timeout: 15_000 })
 })
 
 test('bar:focus — Mod+K reaches the exact command-bar element a direct focus reaches', async ({ page }) => {

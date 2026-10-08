@@ -166,8 +166,12 @@ overlay, never drawing entities or certified equipment data.
   drawing is `shown` (`App.jsx:2481`), so an honest-empty drafting surface shows three.
   The `plan` section is conditional on its prop too, and that prop is always supplied here.
 - **`rails.left` and `rails.right` are also first-render values.** `navExpanded`
-  (`App.jsx:2217`) and `jobRailExpanded` (`App.jsx:2224`) both start `false` and are
-  in-memory only, so the posture resets per page load by design.
+  (`App.jsx:2217`) and `jobRailExpanded` (`App.jsx:2224`) both start `false`.
+  `jobRailExpanded` is in-memory only, so its posture resets per page load by design.
+  Since S20, under fork F-studio-rollback-storage, `navExpanded` seeds from and writes
+  to one storage key (`leaf.studio.navExpanded.v1`, `web/src/lib/navExpandedPreference.js`,
+  every access in try/catch); with no stored value it starts `false`, so the first
+  render on CAD and Solar is still the spine.
 - **`chrome.productFrame` is `true` on solar.** `App.jsx:2838` tests `!== 'cad'`, so the
   product frame renders over the shown workspace card on Solar CAD. That is today's
   behaviour, pinned as-is. It is a candidate for slice 2 to make declarative, not a defect

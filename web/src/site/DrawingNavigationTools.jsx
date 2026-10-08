@@ -4,6 +4,7 @@ import { useEngineSessionOptional } from '../cadedit/EngineSessionProvider.jsx'
 import { useSurfaceFrame } from './SurfaceFrame.jsx'
 import { useStudioGround } from './studioGround.js'
 import './drawingNavigation.css'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 // The index preserves physical containment, not layer membership. Recover
 // underlying layers from geometry, then propagate them to physical parents.
@@ -104,11 +105,14 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
     else if (result.status === 'ambiguous') { setResults(result); setActive(0) }
     else { setResults(null); setMessage('No matching object in this drawing.') }
   }
+  // S27: Escape in the Find field closes its match list (and is the field's
+  // own, never the drawing's or the shell's) through the one owner stack:
+  // menu layer, scoped to the field, as the old input handler was.
+  const inputRef = useRef(null)
+  useEscapeOwner('drawing-find', true, () => setResults(null), { layer: 'menu', scope: inputRef, scoped: true })
   const keyDown = (event) => {
     if (event.nativeEvent.isComposing) return
-    if (event.key === 'Escape') {
-      event.preventDefault(); event.stopPropagation(); setResults(null)
-    } else if (event.key === 'Enter') {
+    if (event.key === 'Enter') {
       event.preventDefault(); event.stopPropagation()
       if (results) choose(results.matches[active])
       else resolve()
@@ -124,7 +128,7 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
     <div className="drawing-find-field">
     <label htmlFor={inputId}>Find in drawing</label>
     {/* Autocomplete is off because queries are specific to the current drawing. */}
-    <input id={inputId} role="combobox" value={query} autoComplete="off"
+    <input ref={inputRef} id={inputId} role="combobox" value={query} autoComplete="off"
       aria-autocomplete="list" aria-expanded={!!results} aria-controls={results ? listId : undefined}
       aria-activedescendant={results ? `${listId}-${active}` : undefined}
       onChange={(event) => { setQuery(event.target.value); setResults(null); setMessage('') }} onKeyDown={keyDown} />

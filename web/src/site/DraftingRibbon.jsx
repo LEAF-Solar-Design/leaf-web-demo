@@ -33,6 +33,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 
 import { accessibleName, reasonCode } from '../lib/actionRegistry.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { familyMonogram } from '../lib/surfaceRails.js'
 import CockpitIcon from './CockpitIcon.jsx'
@@ -131,10 +132,18 @@ export function RibbonWidget({ widget }) {
     setWalk(null)
     onChange?.(next)
   }
+  // S27: Escape in the select abandons a keyboard walk through the one owner
+  // stack, scoped to the select, only while a walk is buffered. Command layer,
+  // UNDER a staged property change (edit layer): cancelling that change blurs
+  // the select, and the blur already drops the buffered walk.
+  const selectRef = useRef(null)
+  useEscapeOwner('ribbon-widget-walk', walk !== null, () => { keyboardWalkRef.current = false; setWalk(null) },
+    { layer: 'command', scope: selectRef, scoped: true })
   return (
     <label className="ribbon-widget" data-widget={id} title={unavailable ? reason : (title || label)}>
       <span className="ribbon-note">{label}</span>
       <select
+        ref={selectRef}
         aria-label={accessibleName(label, unavailable ? reason : '')}
         data-reason-code={unavailable ? (reasonCode(reason) || undefined) : undefined}
         value={walk ?? value}
@@ -143,7 +152,6 @@ export function RibbonWidget({ widget }) {
         onKeyDown={(event) => {
           if (event.key === 'ArrowUp' || event.key === 'ArrowDown') keyboardWalkRef.current = true
           else if (event.key === 'Enter' && keyboardWalkRef.current) commitWalk()
-          else if (event.key === 'Escape') { keyboardWalkRef.current = false; setWalk(null) }
         }}
         onChange={(event) => {
           if (keyboardWalkRef.current) { setWalk(event.target.value); return }
@@ -289,6 +297,13 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
     panelsRef.current?.querySelectorAll('.ribbon-cluster').forEach((group) => { group.hidden = false })
     panelsRef.current?.querySelector('.ribbon-tool:not(:disabled)')?.focus()
   }, [open])
+  // S27: Escape from inside the ribbon closes the open overflow and hands
+  // focus back to More, through the one owner stack (menu layer, scoped to
+  // the ribbon as the old toolbar handler was).
+  useEscapeOwner('ribbon-overflow', open, () => {
+    moreRef.current?.focus()
+    setOpen(false)
+  }, { layer: 'menu', scope: ref, scoped: true })
   useBandHeight(ref)
   return (
     <div
@@ -301,14 +316,6 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
       data-testid="drafting-ribbon"
       data-tab={tab}
       data-overflow-open={open ? 'true' : undefined}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape' && open) {
-          event.preventDefault()
-          event.stopPropagation()
-          moreRef.current?.focus()
-          setOpen(false)
-        }
-      }}
       onBlur={(event) => {
         if (open && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
       }}

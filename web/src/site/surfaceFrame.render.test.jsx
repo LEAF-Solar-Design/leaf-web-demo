@@ -26,10 +26,9 @@
 // byte-identity rows' job (web/e2e/local/one-shell-mount.spec.mjs), and it is
 // why the slot mounts stayed exactly where the elements already stood.
 import { readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 
-import { cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import EntitlementGate from '../components/EntitlementGate.jsx'
@@ -45,7 +44,9 @@ import SurfaceFrame from './SurfaceFrame.jsx'
 import { surfaceContract } from './productSurfaces.js'
 import { EMPTY_WORKSPACE_PROJECT, deriveWorkspaceProjectState } from './workspaceProjectState.js'
 
-const FIXTURE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'surfaceFrame.today-fixture.json')
+// Read from the web root (Vitest runs from web/): import.meta.url need not be
+// a file URL under Vitest.
+const FIXTURE_PATH = join(process.cwd(), 'src/site/surfaceFrame.today-fixture.json')
 // Regeneration is a deliberate, out-of-band act, never something a failing run
 // can do for itself: SURFACE_FRAME_CAPTURE=1 npx vitest run src/site/surfaceFrame.render.test.jsx
 // rewrites the fixture from the transcription and asserts nothing. The
@@ -792,6 +793,53 @@ describe.skipIf(CAPTURE)('SurfaceFrame, the builds feed', () => {
       const end = source.indexOf('toast={', start)
       expect(end, rel.join('/')).toBeGreaterThan(start)
       expect(source.slice(start, end), rel.join('/')).toContain(FEED)
+    }
+  })
+})
+
+// B1b: the object snap mode menu is LIVE-only. Offline, the cockpit slot is
+// the frozen fixture byte for byte; a live engine publication adds exactly
+// the menu and its limitation line beside the OSNAP master, and going
+// offline again restores the frozen sequence.
+describe.skipIf(CAPTURE)('SurfaceFrame, the live object snap menu (B1b)', () => {
+  const drafting = SURFACES.filter((id) => surfaceContract(id).chrome.cockpit)
+  const publish = (detail) => act(() => { window.dispatchEvent(new CustomEvent('cockpit:modes', { detail })) })
+
+  it('B1B-F01 offline status fixture preserved', () => {
+    expect(drafting.length).toBeGreaterThan(0)
+    for (const id of drafting) {
+      const key = `console:${id}`
+      const rows = slotSequence(framed(id, { console: true }).cockpit)
+      expect(rows).toEqual(expected(key, 'cockpit'))
+      expect(rows.length).toBeGreaterThan(0)
+      expect(FIXTURE[key].cockpit.some((row) => row.includes('object-snap'))).toBe(false)
+    }
+  })
+
+  it('B1B-F02 live status adds mode trigger', () => {
+    for (const id of drafting) {
+      const key = `console:${id}`
+      const { container, unmount } = render(<div><ContinuityStore>{framed(id, { console: true }).cockpit}</ContinuityStore></div>)
+      const root = container.firstChild
+      expect(sequence(root)).toEqual(expected(key, 'cockpit'))
+      publish({ live: true, ortho: false, osnap: true, snapModes: 23, snapLimited: false })
+      const osnap = root.querySelector('[data-toggle="osnap"]')
+      const menu = osnap.nextElementSibling
+      expect(menu.className).toBe('object-snap')
+      const trigger = menu.querySelector('button')
+      expect(trigger.getAttribute('aria-label')).toBe('Object snap modes')
+      expect(trigger.getAttribute('aria-haspopup')).toBe('menu')
+      expect(trigger.getAttribute('aria-expanded')).toBe('false')
+      expect(menu.nextElementSibling.getAttribute('data-testid')).toBe('cockpit-osnap-limited')
+      // Without the two additions, the live slot is the frozen sequence.
+      const stripped = root.cloneNode(true)
+      for (const el of stripped.querySelectorAll('.object-snap, [data-testid="cockpit-osnap-limited"]')) el.remove()
+      expect(sequence(stripped)).toEqual(expected(key, 'cockpit'))
+      expect(sequence(root).length).toBe(expected(key, 'cockpit').length + sequence(menu).length + 2)
+      publish({ live: false })
+      expect(root.querySelector('.object-snap')).toBeNull()
+      expect(sequence(root)).toEqual(expected(key, 'cockpit'))
+      unmount()
     }
   })
 })

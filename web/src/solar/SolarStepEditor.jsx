@@ -6,6 +6,7 @@ import SolarStringComposer from './SolarStringComposer.jsx'
 import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL } from './solarStringComposerModel.js'
 import { solarFormKeys, solarView } from './solarView.js'
 import { solarFlowPrefill, solarFlowStepId } from './solarFlowModel.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 function ownsKey(record, key) {
   return record !== null && typeof record === 'object' && Object.prototype.hasOwnProperty.call(record, key)
@@ -61,18 +62,18 @@ export default function SolarStepEditor({
     if (button && typeof button.focus === 'function') button.focus()
   }
 
+  // S27: Escape from inside the editor closes it through the one owner stack
+  // (edit layer, scoped to the editor as the old section handler was).
+  const editorRef = useRef(null)
+  useEscapeOwner('solar-step-editor', true, close, { layer: 'edit', scope: editorRef, scoped: true })
+
   return (
     <section
+      ref={editorRef}
       id="solar-step-editor"
       className="solar-step-editor tool-body"
       aria-label={`${text} parameters`}
       data-status={status ?? 'idle'}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') {
-          event.stopPropagation()
-          close()
-        }
-      }}
     >
       <h3>{text}</h3>
       {row.name === 'solar-string-conductors' ? (

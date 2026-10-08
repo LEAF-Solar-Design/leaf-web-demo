@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import './popovers.css'
 import useExit from '../useExit.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 // Standardization slice 8c. Reuses ClaudeAccountPanel.jsx's isolated-field
 // discipline verbatim: single-purpose fields (a URL and a label, nothing
@@ -50,20 +51,15 @@ export default function LinkServiceDrawer({
   const pop = useExit(open)
   const list = Array.isArray(servers) ? servers : []
 
+  // S27: Escape is the owner stack's (menu layer: this is an anchored popover).
+  useEscapeOwner('link-service', !!open && !mock, () => onToggle(false), { layer: 'menu', scope: rootRef })
   useEffect(() => {
     if (!open) return undefined
     const onDoc = (event) => {
       if (rootRef.current && !rootRef.current.contains(event.target)) onToggle(false)
     }
-    const onKey = (event) => {
-      if (event.key === 'Escape') onToggle(false)
-    }
     document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
+    return () => document.removeEventListener('mousedown', onDoc)
   }, [open, onToggle])
 
   useEffect(() => {

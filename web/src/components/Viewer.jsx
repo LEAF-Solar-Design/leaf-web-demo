@@ -5,8 +5,10 @@ import { createCameraChannel } from './cameraChannel.js'
 import { viewportFromCamera } from './viewerMath.js'
 import { validObjectBounds } from '../lib/drawingObjectIndex.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
+import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -47,15 +49,71 @@ export function addPickDescriptor(index, handle, descriptor) {
   index.get(handle).push(descriptor)
 }
 
+function hitHandle(hit) {
+  const ud = hit.object.userData
+  if (hit.object.parent?.visible === false) return null
+  const handle = ud.kind === 'polyfill' ? ud.triHandles[hit.faceIndex]
+    : ud.kind === 'blocklines' ? ud.lineHandles[Math.floor(hit.index / 2)] : ud.handle
+  return handle ?? null
+}
+
 export function pickHandleFromHits(hits) {
   for (const hit of hits) {
-    const ud = hit.object.userData
-    if (hit.object.parent?.visible === false) continue
-    const handle = ud.kind === 'polyfill' ? ud.triHandles[hit.faceIndex]
-      : ud.kind === 'blocklines' ? ud.lineHandles[Math.floor(hit.index / 2)] : ud.handle
+    const handle = hitHandle(hit)
     if (handle != null) return handle
   }
   return null
+}
+
+// Distinct handles under one click ray, nearest first (raycaster order), with
+// the same visibility and attribution rules as pickHandleFromHits, so
+// stackedPickOrder(hits)[0] is always the plain pick. One pass, no sort.
+export function stackedPickOrder(hits) {
+  const order = []
+  const seen = new Set()
+  for (const hit of hits) {
+    const handle = hitHandle(hit)
+    if (handle == null || seen.has(handle)) continue
+    seen.add(handle)
+    order.push(handle)
+  }
+  return order
+}
+
+export const STACKED_PICK_MOVE_PX = 4
+export const STACKED_PICK_WINDOW_MS = 600
+
+function sameOrder(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+// Stacked pick disambiguation: a repeat click within movePx and windowMs of the
+// previous click over the same stack selects the next candidate (wrapping).
+// A pointer move over movePx, a gap over windowMs, or a different stack resets
+// to the nearest hit. A single or empty stack picks exactly as before.
+export function createStackedPickCycle({ movePx = STACKED_PICK_MOVE_PX, windowMs = STACKED_PICK_WINDOW_MS } = {}) {
+  let last = null // { x, y, t, order, index }
+  return {
+    pick(order, x, y, t) {
+      if (!Array.isArray(order) || order.length < 2) {
+        last = null
+        return order?.[0] ?? null
+      }
+      const repeat = last !== null
+        && t - last.t >= 0 && t - last.t <= windowMs
+        && Math.hypot(x - last.x, y - last.y) <= movePx
+        && sameOrder(last.order, order)
+      const index = repeat ? (last.index + 1) % order.length : 0
+      last = { x, y, t, order, index }
+      return order[index]
+    },
+    move(x, y) {
+      if (last && Math.hypot(x - last.x, y - last.y) > movePx) last = null
+    },
+    reset() { last = null },
+  }
 }
 
 function configureControls(controls, enabled, rotate) {
@@ -208,6 +266,12 @@ const Viewer = forwardRef(function Viewer(
   onSelectRef.current = onSelectEntity
   const marqueeRef = useRef(null)
   marqueeRef.current = { gate: marqueeGate, select: onMarqueeSelect, visibleLayers }
+  // S27: a marquee drag in progress owns Escape through the one owner stack
+  // (command layer). State flips only when a drag starts or ends, never per
+  // pointer move; the scene build hands its clear function over the ref.
+  const [marqueeLive, setMarqueeLive] = useState(false)
+  const clearMarqueeRef = useRef(null)
+  useEscapeOwner('viewer-marquee', marqueeLive, () => clearMarqueeRef.current?.(), { layer: 'command' })
   const onGlErrorRef = useRef(onGlError)
   onGlErrorRef.current = onGlError
   // controlsEnabled read via ref inside the scene build (and synced by its own
@@ -632,6 +696,7 @@ const Viewer = forwardRef(function Viewer(
     const raycaster = new THREE.Raycaster()
     const ndc = new THREE.Vector2()
     let down = null // { x, y, t, pointerId }
+    const stackedPick = createStackedPickCycle()
     function onPointerDown(e) {
       if (e.button !== 0) return // only left-click selects
       if (down && down.pointerId !== e.pointerId && e.isPrimary === false) return
@@ -655,13 +720,21 @@ const Viewer = forwardRef(function Viewer(
         ? Math.hypot(adjacent.x - world.x, adjacent.y - world.y) : undefined
       raycaster.params.Line.threshold = pickLineThreshold(worldPerPixel)
       const hits = raycaster.intersectObjects(pickables, false)
-      const handle = pickHandleFromHits(hits)
+      const additive = e.shiftKey || e.ctrlKey || e.metaKey
+      let handle
+      if (additive) {
+        stackedPick.reset()
+        handle = pickHandleFromHits(hits)
+      } else {
+        handle = stackedPick.pick(stackedPickOrder(hits), e.clientX, e.clientY, performance.now())
+      }
       const cb = onSelectRef.current
-      if (cb) cb(handle, { additive: e.shiftKey || e.ctrlKey || e.metaKey })
+      if (cb) cb(handle, { additive })
     }
     function onPointerCancel(e) {
       if (down && down.pointerId === e.pointerId) down = null
     }
+    function onPickMove(e) { stackedPick.move(e.clientX, e.clientY) }
     const dom = renderer.domElement
     let candidate = null
     let marquee = null
@@ -678,6 +751,7 @@ const Viewer = forwardRef(function Viewer(
       const pointerId = marquee.pointerId
       marquee.overlay.remove()
       marquee = null
+      setMarqueeLive(false)
       try {
         if (dom.hasPointerCapture(pointerId)) dom.releasePointerCapture(pointerId)
       } catch {}
@@ -726,6 +800,7 @@ const Viewer = forwardRef(function Viewer(
         overlay.style.pointerEvents = 'none'
         mount.appendChild(overlay)
         marquee = { pointerId: candidate.pointerId, start: candidate.start, overlay }
+        setMarqueeLive(true)
         try { dom.setPointerCapture(e.pointerId) } catch {}
       }
       if (!marquee || e.pointerId !== marquee.pointerId) return
@@ -773,23 +848,18 @@ const Viewer = forwardRef(function Viewer(
       const active = marquee || candidate
       if (active && e.pointerId === active.pointerId && !mount.contains(e.target)) clearMarquee()
     }
-    function escapeMarquee(e) {
-      if (e.key === 'Escape' && (marquee || candidate)) {
-        if (marquee) e.stopPropagation()
-        clearMarquee()
-      }
-    }
+    clearMarqueeRef.current = clearMarquee
     mount.addEventListener('pointerdown', startMarquee, true)
     mount.addEventListener('pointermove', moveMarquee, true)
     mount.addEventListener('pointerup', finishMarquee, true)
     mount.addEventListener('pointercancel', cancelMarquee, true)
     mount.addEventListener('lostpointercapture', cancelMarquee, true)
-    window.addEventListener('keydown', escapeMarquee, true)
     window.addEventListener('pointerup', orphanRelease, true)
     window.addEventListener('pointercancel', orphanRelease, true)
     dom.addEventListener('pointerdown', onPointerDown)
     dom.addEventListener('pointerup', onPointerUp)
     dom.addEventListener('pointercancel', onPointerCancel)
+    dom.addEventListener('pointermove', onPickMove)
 
     let raf
     function animate() {
@@ -893,16 +963,17 @@ const Viewer = forwardRef(function Viewer(
       ro.disconnect()
       dom.removeEventListener('pointerdown', onPointerDown)
       clearMarquee()
+      if (clearMarqueeRef.current === clearMarquee) clearMarqueeRef.current = null
       mount.removeEventListener('pointerdown', startMarquee, true)
       mount.removeEventListener('pointermove', moveMarquee, true)
       mount.removeEventListener('pointerup', finishMarquee, true)
       mount.removeEventListener('pointercancel', cancelMarquee, true)
       mount.removeEventListener('lostpointercapture', cancelMarquee, true)
-      window.removeEventListener('keydown', escapeMarquee, true)
       window.removeEventListener('pointerup', orphanRelease, true)
       window.removeEventListener('pointercancel', orphanRelease, true)
       dom.removeEventListener('pointerup', onPointerUp)
       dom.removeEventListener('pointercancel', onPointerCancel)
+      dom.removeEventListener('pointermove', onPickMove)
       controls.removeEventListener('change', recordCameraPose)
       controls.removeEventListener('start', onControlsStart)
       controls.removeEventListener('change', onControlsChange)
@@ -1042,8 +1113,8 @@ const Viewer = forwardRef(function Viewer(
       g.add(mesh)
       return true
     },
-    // W4f-5: the object-snap marker, a square of `size` world units centred
-    // on the snapped point, or nothing. Called when the snap CHANGES (the
+    // W4f-5: the object-snap marker, the snap kind's glyph `size` world units
+    // across centred on the snapped point, or nothing. Called when the snap CHANGES (the
     // picker remembers the last one), so it disposes what it replaces and
     // allocates nothing when clearing an empty group.
     setHighlight: (ids) => {
@@ -1051,21 +1122,18 @@ const Viewer = forwardRef(function Viewer(
         try { return BigInt(id).toString(16).toUpperCase() } catch { return String(id) }
       }))
     },
+    // B1b: the glyph is the snap kind's own (snapMarkerSegments), so an
+    // unknown kind or a bad point or size draws nothing.
     setSnapMarker: (pt, size = 1) => {
       const s = stateRef.current
       if (!s) return false
       const g = s.snapGroup
       for (const child of g.children) { child.geometry?.dispose?.(); child.material?.dispose?.() }
       g.clear()
-      if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y) || !Number.isFinite(size) || size <= 0) return true
-      const h = size / 2
-      const [x, y] = [pt.x, pt.y]
-      const pos = [
-        x - h, y - h, 2, x + h, y - h, 2,
-        x + h, y - h, 2, x + h, y + h, 2,
-        x + h, y + h, 2, x - h, y + h, 2,
-        x - h, y + h, 2, x - h, y - h, 2,
-      ]
+      const segments = snapMarkerSegments(pt, size)
+      if (!segments.length) return true
+      const pos = []
+      for (const [[x1, y1], [x2, y2]] of segments) pos.push(x1, y1, 2, x2, y2, 2)
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
       const mat = new THREE.LineBasicMaterial({ color: s.tokens.select, depthTest: false })

@@ -119,3 +119,11 @@ harness/tenant-checkouts/
 
 # The deploy pack itself is referenced by dockerfile path, not copied wholesale
 # (kept out of the python/node source COPYs implicitly).
+
+# Synthetic proof transports and fixed replay packages are host-only test assets.
+scripts/proof_string_sizer.py
+scripts/test_proof_string_sizer.py
+scripts/fixtures/string_sizer_replay_manifest.json
+scripts/fixtures/rooftop_string_sizer_replay_manifest.json
+scripts/fixtures/rooftop_solve_replay_manifest.json
+scripts/fixtures/rooftop_solve_replay.json

@@ -22,17 +22,25 @@
 // dashed accent with "Drop manifest to ingest — runs sandboxed". No ingest
 // path exists in src/api.js, so a drop surfaces the honest X1-style red strip
 // (never a silent ignore).
+//
+// S22 image attachments (imageAttachmentsEnabled only): a pasted image, an
+// image dropped on that same G2 well, or one picked through the "+ add" chip
+// lands as a quiet chip carrying its name and size. Every other dropped file
+// still takes the G2 ingest path above. With the flag off nothing here renders
+// and a drop is pure G2, exactly as before.
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import useExit from '../useExit.js'
 import { digest, trackUsage } from '../telemetry.js'
 import { byId } from '../lib/actionRegistry.js'
-import { authHeaders, config, getDrawingVersions, listOperatorSessions, noteUnauthorized, searchIndex } from '../api.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
+import { authHeaders, config, getDrawingVersions, getStoredOrgId, listProjects, listOperatorSessions, noteUnauthorized, searchIndex } from '../api.js'
 import { modChord } from '../lib/keys.js'
 import { SECRET_REASONS, SECRET_REASONS_NO_MOUNT } from '../lib/secretPatterns.js'
 import { isWriteTool } from '../lib/toolRecord.js'
-import { actionPaletteRows, findResultRows, sessionArtifactRows, toolArtifactRows, versionArtifactRows } from '../lib/palette.js'
+import { actionPaletteRows, drawingObjectRows, findResultRows, MAX_ARTIFACT_ROWS_PER_KIND, PALETTE_GROUP_LABELS, projectArtifactRows, sessionArtifactRows, toolArtifactRows, versionArtifactRows } from '../lib/palette.js'
+import { useDrawingObjects } from '../site/DrawingObjectsContext.jsx'
 import CockpitIcon from '../site/CockpitIcon.jsx'
 import {
   appendPromptHistory,
@@ -83,8 +91,32 @@ function laneDotClass(lane, hit) {
   return 'dot'
 }
 
+// The attachment chip's size label: bytes under 1 KB, one decimal under
+// 10 KB and 10 MB, whole units above. Fails closed to "0 B" on a non-number.
+export function formatAttachmentSize(bytes) {
+  const n = Number(bytes)
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  if (n < 1024) return `${Math.round(n)} B`
+  const kb = n / 1024
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`
+  const mb = kb / 1024
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`
+}
+
+// A pasted screenshot often arrives with no name; the chip still says what it is.
+export function attachmentName(image) {
+  const name = typeof image?.file?.name === 'string' ? image.file.name.trim() : ''
+  return name || 'Pasted image'
+}
+
+// Dropped and picked Files reshaped as clipboard items, so all three paths
+// pass through the ONE cap gate in composer.js (clipboardImagesToAttachments).
+const filesAsItems = (files) => files.map((file) => ({ kind: 'file', type: file?.type || '', getAsFile: () => file }))
+const isAttachableImage = (file) => !!file && IMAGE_MEDIA_TYPES.has(file.type)
+const IMAGE_ACCEPT = [...IMAGE_MEDIA_TYPES].join(',')
+
 export default function PromptBox({
-  value, onChange, onDispatch, routing, hintLane, projectName, inputRef, routeActive,
+  value, onChange, onDispatch: dispatchWithContext, routing, hintLane, projectName, inputRef, routeActive,
   onOpenAuthor, tools = [], skills = [], sessionId = null,
   // action name -> handler, for registry entries of kind "command". An entry
   // whose action has no handler here is filtered out of the menu entirely
@@ -190,16 +222,36 @@ export default function PromptBox({
   const [mcpServers, setMcpServers] = useState([])
   // Slice 10b/10c: which named scope (find/act) currently owns the well's
   // typed text, or null for the ordinary prompt-draft behaviour every
-  // existing mount keeps. Picking 'build' never sets this (onOpenAuthor
-  // owns that lane already); only find/act turn the well into a resolver.
+  // existing mount keeps. Build records the scope for its egress notice;
+  // only find/act turn the well into a resolver.
   const [activeScope, setActiveScope] = useState(null)
   const [paletteIdx, setPaletteIdx] = useState(0)
   const [versionsData, setVersionsData] = useState(null)
   const [sessionsData, setSessionsData] = useState(null)
   const [findResults, setFindResults] = useState(null)
+  const [projectsData, setProjectsData] = useState([])
+  const drawingObjects = useDrawingObjects()
+  const selectionKey = JSON.stringify([drawingObjects?.index?.drawingKey, drawingObjects?.selectedHandles || []])
+  const [removedContext, setRemovedContext] = useState({ key: null, ids: [] })
+  useEffect(() => { setRemovedContext({ key: selectionKey, ids: [] }) }, [selectionKey])
+  // Resolve only the selection in this drawing's index, and send this exact
+  // bounded, visible list. A removed chip stays removed until selection changes.
+  const contextChips = [...new Set((drawingObjects?.selectedHandles || []).map((handle) =>
+    drawingObjects?.index?.byHandle.get(String(handle).replace(/^0x/i, '').toUpperCase()),
+  ).filter(Boolean))].slice(0, MAX_ARTIFACT_ROWS_PER_KIND)
+    .filter((record) => removedContext.key !== selectionKey || !removedContext.ids.includes(record.id))
+  const removeContext = (id) => setRemovedContext((current) => ({ key: selectionKey,
+    ids: [...(current.key === selectionKey ? current.ids : []), id] }))
+  // Enrich the host callback with the visible selection while keeping the
+  // credential authorisation a parameter on the existing dispatch call.
+  const onDispatch = (override, options) => dispatchWithContext(override, {
+    ...options,
+    context: contextChips.map((record) => ({ id: record.id, kind: record.kind, label: record.name, handles: [...record.handles] })),
+  })
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState(null)
   const attachmentUrlsRef = useRef(new Set())
+  const fileInputRef = useRef(null)
   const historyRef = useRef(createPromptHistoryState(sessionId))
 
   // A PromptBox instance survives session switches, so retain histories in the
@@ -287,6 +339,18 @@ export default function PromptBox({
     return () => { live = false; clearTimeout(timer) }
   }, [activeScope, value, drawingId])
 
+  // Use the existing org-scoped project API only on an entitled find mount.
+  // Public /try and mounts with no workspace org make no project request.
+  const projectOrgId = getStoredOrgId()
+  useEffect(() => {
+    setProjectsData([])
+    if (activeScope !== 'find' || !mcpDiscoveryEnabled || !projectOrgId) return undefined
+    let live = true
+    listProjects(projectOrgId).then((projects) => { if (live) setProjectsData(projects) })
+      .catch(() => { if (live) setProjectsData([]) })
+    return () => { live = false }
+  }, [activeScope, mcpDiscoveryEnabled, projectOrgId])
+
   // Slice 5a: an alias is appended to the box's own class, never swapped in
   // for it, so the console's selectors and the stage's both resolve.
   const withAlias = (base, alias) => (alias ? `${base} ${alias}` : base)
@@ -339,9 +403,13 @@ export default function PromptBox({
       ...sessionArtifactRows(sessionsData, value),
     ] : []
   ), [activeScope, trigger, paletteActions, tools, versionsData, sessionsData, value])
-  const findRows = useMemo(() => (
-    activeScope === 'find' && !trigger ? findResultRows(findResults) : []
-  ), [activeScope, trigger, findResults])
+  const objectMatches = drawingObjectRows(drawingObjects?.index, value, MAX_ARTIFACT_ROWS_PER_KIND + 1)
+  const projectMatches = projectArtifactRows(projectsData, value, MAX_ARTIFACT_ROWS_PER_KIND + 1)
+  const findRows = activeScope === 'find' && !trigger ? [
+    ...objectMatches.slice(0, MAX_ARTIFACT_ROWS_PER_KIND),
+    ...projectMatches.slice(0, MAX_ARTIFACT_ROWS_PER_KIND),
+    ...findResultRows(findResults),
+  ] : []
   const scopeRows = activeScope === 'act' ? paletteRows : activeScope === 'find' ? findRows : []
   // NOT gated on scopeMenu.shown (unlike menuOpen above): activeScope is set
   // in the SAME tick pickScope closes the scope picker, so gating on the
@@ -350,7 +418,7 @@ export default function PromptBox({
   // continuation judgment), not a style choice to preserve. The picker's own
   // render below drops out on `!activeScope` instead, so the two never
   // double-render.
-  const scopeMenuOpen = !!activeScope && !trigger && !menuDismissed && !routeActive
+  const scopeMenuOpen = (activeScope === 'find' || activeScope === 'act') && !scopeOpen && !trigger && !menuDismissed && !routeActive
 
   // Any edit re-arms a dismissed menu and re-anchors the highlight. The
   // credential refusal is retired by the controller's own setPrompt, which the
@@ -389,15 +457,31 @@ export default function PromptBox({
       return
     }
     const result = clipboardImagesToAttachments(e.clipboardData?.items, attachments)
-    if (result.error) { e.preventDefault(); setAttachmentError(result.error); return }
+    if (result.error || result.attachments.length) e.preventDefault()
+    attachImages(result)
+  }
+  // Paste, drop and the "+ add" picker all land here with the cap gate's
+  // verdict: an error is shown and nothing is attached, never a partial set.
+  const attachImages = (result) => {
+    if (result.error) { setAttachmentError(result.error); return }
     if (!result.attachments.length) return
-    e.preventDefault()
     setAttachmentError(null)
     setAttachments((current) => [...current, ...result.attachments.map((image) => {
       const thumbnailUrl = URL.createObjectURL(image.file)
       attachmentUrlsRef.current.add(thumbnailUrl)
       return { ...image, id: `${Date.now()}-${Math.random()}`, thumbnailUrl }
     })])
+  }
+  const attachImageFiles = (files) => {
+    attachImages(clipboardImagesToAttachments(filesAsItems(files), attachments))
+  }
+  const onPickFiles = (e) => {
+    const files = [...(e.target.files || [])]
+    // Clear the input so picking the same file again still fires onChange.
+    e.target.value = ''
+    const images = files.filter(isAttachableImage)
+    if (images.length) attachImageFiles(images)
+    else if (files.length) setAttachmentError('Only PNG, JPEG, WebP or GIF images can be attached.')
   }
   const removeAttachment = (id) => setAttachments((current) => {
     const found = current.find((image) => image.id === id)
@@ -443,9 +527,6 @@ export default function PromptBox({
       if (e.key === 'ArrowUp' && scopeRows.length > 0) {
         e.preventDefault(); setPaletteIdx(Math.max(paletteIdxClamped - 1, 0)); return
       }
-      if (e.key === 'Escape') {
-        e.preventDefault(); e.stopPropagation(); setActiveScope(null); return
-      }
       if (e.key === 'Enter' && scopeRows[paletteIdxClamped]) {
         e.preventDefault(); runPaletteRow(scopeRows[paletteIdxClamped]); return
       }
@@ -459,10 +540,6 @@ export default function PromptBox({
       }
       if (e.key === 'Tab' && matches[idx]) {
         e.preventDefault(); complete(matches[idx]); return
-      }
-      if (e.key === 'Escape') {
-        // closes ONLY the menu — the global Esc ladder must not also fire
-        e.preventDefault(); e.stopPropagation(); setMenuDismissed(true); return
       }
       if (e.key === 'Enter' && matches[idx]) {
         e.preventDefault(); pick(matches[idx]); return
@@ -522,7 +599,7 @@ export default function PromptBox({
   const openScope = (idx) => { setScopeIdx(idx); setScopeOpen(true) }
   const pickScope = (s) => {
     setScopeOpen(false)
-    if (s.lane === 'build' && onOpenAuthor) { onOpenAuthor(); return }
+    if (s.lane === 'build') { setActiveScope('build'); onOpenAuthor?.(); return }
     // Slice 10b/10c: find/act now resolve to a real resolver (the palette or
     // the search results) instead of just returning focus to a blank
     // composer. Reselecting the SAME scope while it is already active is a
@@ -541,6 +618,7 @@ export default function PromptBox({
         : { row_hash: digest(row.id) }),
     }
     trackUsage('palette.pick', labels)
+    if (row.kind === 'drawing-object') { drawingObjects?.focus(row.id); return }
     if (row.kind === 'action') { row.onSelect?.(); changePrompt(''); setActiveScope(null); return }
     // An artifact or find-result row has no run handler of its own yet
     // (slice 10b/10c ship the index, not per-kind navigation): it completes
@@ -550,14 +628,21 @@ export default function PromptBox({
     setActiveScope(null)
   }
 
-  // Scope resolver keys (capture, so the app's global Esc/Enter ladders stand
+  // S27: the bar's three resolvers own Escape through the one owner stack
+  // (menu layer). Each closes ONLY itself, and the stack consumes the key so
+  // the global ladder never also fires. They never overlap (the act/find
+  // palette stands down while the "/" menu or the scope picker is up).
+  useEscapeOwner('prompt-slash-menu', menuOpen, () => setMenuDismissed(true), { layer: 'menu', scope: rootRef })
+  useEscapeOwner('prompt-palette', scopeMenuOpen && !menuOpen, () => setActiveScope(null), { layer: 'menu', scope: rootRef })
+  useEscapeOwner('prompt-scope-menu', scopeOpen, () => setScopeOpen(false), { layer: 'menu', scope: rootRef })
+
+  // Scope resolver keys (capture, so the app's global Enter ladder stands
   // down while the menu is open) + outside-click close — the ProjectSwitcher
   // popover's pattern.
   useEffect(() => {
     if (!scopeOpen) return undefined
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setScopeOpen(false) }
     const onKey = (e) => {
-      if (e.key === 'Escape') { e.stopPropagation(); setScopeOpen(false); return }
       if (e.key === 'ArrowDown') { e.preventDefault(); setScopeIdx((i) => Math.min(i + 1, SCOPES.length - 1)); return }
       if (e.key === 'ArrowUp') { e.preventDefault(); setScopeIdx((i) => Math.max(i - 1, 0)); return }
       if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); pickScope(SCOPES[scopeIdx]) }
@@ -585,9 +670,17 @@ export default function PromptBox({
     e.preventDefault()
     dragDepth.current = 0
     setDragging(false)
+    // S22: with image attachments on, the images in a drop become chips and
+    // only the rest reaches G2 ingest. A drop of nothing but images is done.
+    const files = [...(e.dataTransfer?.files || [])]
+    const images = imageAttachmentsEnabled ? files.filter(isAttachableImage) : []
+    if (images.length) {
+      attachImageFiles(images)
+      if (images.length === files.length) return
+    }
     // Honest failure: there is no ingest endpoint in api.js — say so plainly
     // (X1 anatomy: red dot + sentence naming what failed + honest note).
-    const name = e.dataTransfer?.files?.[0]?.name
+    const name = files.find((file) => !images.includes(file))?.name
     setDropErr(`Ingest isn’t connected in this demo${name ? ` — ${name} wasn’t ingested` : ''}`)
   }
 
@@ -613,7 +706,9 @@ export default function PromptBox({
         onDrop={dropIngestEnabled ? onDrop : undefined}
       >
         {dragging && (
-          <div className="bar-drop-hint" aria-hidden="true">Drop manifest to ingest, runs sandboxed</div>
+          <div className="bar-drop-hint" aria-hidden="true">
+            {imageAttachmentsEnabled ? 'Drop an image to attach, or a manifest to ingest, runs sandboxed' : 'Drop manifest to ingest, runs sandboxed'}
+          </div>
         )}
         {menuOpen && (
           <div className="resolver slash-menu" id="slash-menu-listbox" role="listbox" aria-label="Tool commands">
@@ -675,6 +770,10 @@ export default function PromptBox({
                 : <>No action or artifact matches {value ? `“${value}”` : 'anything yet. Keep typing'}</>}
             </div>
             {scopeRows.map((row, i) => (
+              <Fragment key={`${row.kind}:${row.id}`}>
+              {(i === 0 || scopeRows[i - 1].kind !== row.kind) && (
+                <div className="resolver-header">{PALETTE_GROUP_LABELS[row.kind] || row.kind}</div>
+              )}
               <div
                 key={`${row.kind}:${row.id}`}
                 id={`act-opt-${i}`}
@@ -699,6 +798,7 @@ export default function PromptBox({
                 <span className="count">{row.kind}</span>
                 {row.kind === 'action' && row.kbd && <span className="key hot">{row.kbd}</span>}
               </div>
+              </Fragment>
             ))}
           </div>
         )}
@@ -706,12 +806,16 @@ export default function PromptBox({
           <div className="resolver find-results" id="find-results-listbox" role="listbox" aria-label="Search results">
             <div className="resolver-header">
               {!value.trim()
-                ? 'Type to search drawings in reach, versions, sessions and tools'
+                ? 'Type to search drawing objects, projects, versions, sessions and tools'
                 : scopeRows.length > 0
                   ? `${scopeRows.length} result${scopeRows.length === 1 ? '' : 's'} · Enter jumps to one`
                   : `No results for “${value}”`}
             </div>
             {scopeRows.map((row, i) => (
+              <Fragment key={`${row.kind}:${row.id}`}>
+              {(i === 0 || scopeRows[i - 1].kind !== row.kind) && (
+                <div className="resolver-header">{PALETTE_GROUP_LABELS[row.kind] || row.kind}</div>
+              )}
               <div
                 key={`${row.kind}:${row.id}`}
                 id={`find-opt-${i}`}
@@ -730,7 +834,10 @@ export default function PromptBox({
                 </span>
                 <span className="count">{row.kind}</span>
               </div>
+              </Fragment>
             ))}
+            {objectMatches.length > MAX_ARTIFACT_ROWS_PER_KIND && <div className="resolver-header">More drawing objects match. Keep typing to narrow the results.</div>}
+            {projectMatches.length > MAX_ARTIFACT_ROWS_PER_KIND && <div className="resolver-header">More projects match. Keep typing to narrow the results.</div>}
           </div>
         )}
         {mcpOpen && (
@@ -818,13 +925,36 @@ export default function PromptBox({
         {(attachmentError || attachments.length > 0) && (
           <div className="converse-note" role={attachmentError ? 'alert' : undefined}>
             {attachmentError && <span className="dim">{attachmentError}</span>}
-            {attachments.map((image) => (
-              <span key={image.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 6 }}>
-                <img src={image.thumbnailUrl} alt="Pending image attachment" width="28" height="28" style={{ objectFit: 'cover' }} />
-                <button type="button" className="chip-neutral" onClick={() => removeAttachment(image.id)} aria-label="Remove image attachment">Remove</button>
-              </span>
-            ))}
+            {attachments.map((image) => {
+              const name = attachmentName(image)
+              const size = formatAttachmentSize(image.bytes)
+              return (
+                <span
+                  key={image.id}
+                  className="chip-neutral attachment-chip"
+                  data-testid="attachment-chip"
+                  title={`${name}, ${size}`}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 6, cursor: 'default', maxWidth: 260 }}
+                >
+                  <img src={image.thumbnailUrl} alt="Pending image attachment" width="18" height="18" style={{ objectFit: 'cover', borderRadius: 2 }} />
+                  <span data-testid="attachment-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{name}</span>
+                  <span className="dim" data-testid="attachment-size">{size}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(image.id)}
+                    aria-label={`Remove image attachment ${name}`}
+                    title="Remove"
+                    style={{ appearance: 'none', background: 'none', border: 0, padding: 0, color: 'inherit', font: 'inherit', cursor: 'pointer', lineHeight: 1 }}
+                  >
+                    ×
+                  </button>
+                </span>
+              )
+            })}
           </div>
+        )}
+        {activeScope === 'build' && (drawingId || drawingObjects?.index?.drawingKey) && (
+          <div className="converse-note dim" data-testid="build-egress">Sends the drawing to Claude</div>
         )}
         <div className="bar-controls">
           <button
@@ -836,6 +966,18 @@ export default function PromptBox({
           >
             +
           </button>
+          {contextChips.map((record) => (
+            <button type="button" key={record.id} className="chip-neutral bar-context"
+              style={{ background: 'var(--surface-2, rgba(128,128,128,.12))' }}
+              aria-label={`Remove context: ${record.name}`}
+              onClick={() => removeContext(record.id)}
+              onKeyDown={(e) => {
+                if (e.key !== 'Backspace') return
+                e.preventDefault(); e.stopPropagation(); removeContext(record.id)
+                rootRef.current?.querySelector('.bar-field')?.focus()
+              }}
+            >{record.name}</button>
+          ))}
           <button
             type="button"
             className="bar-scope"
@@ -845,6 +987,28 @@ export default function PromptBox({
           >
             scope ▾
           </button>
+          {imageAttachmentsEnabled && (
+            <>
+              <button
+                type="button"
+                className="bar-scope bar-attach"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Add image attachment"
+                title="Attach a PNG, JPEG, WebP or GIF image"
+              >
+                + add
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={IMAGE_ACCEPT}
+                multiple
+                hidden
+                data-testid="attachment-input"
+                onChange={onPickFiles}
+              />
+            </>
+          )}
           {projectSlot != null
             ? (typeof projectSlot === 'function' ? projectSlot(projectName) : projectSlot)
             : <span className="bar-proj">{projectName}</span>}
@@ -873,7 +1037,7 @@ export default function PromptBox({
             </span>
           )}
         </div>
-        {scopeMenu.shown && !activeScope && (
+        {scopeMenu.shown && (scopeOpen || !activeScope) && (
           <div
             className={`resolver${scopeMenu.exiting ? ' exit' : ''}`}
             role="listbox"

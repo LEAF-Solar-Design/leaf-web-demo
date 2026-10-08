@@ -1,11 +1,39 @@
 import React from 'react'
-import { cleanup, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import ResultPanel from './ResultPanel.jsx'
+import { SINGLE_KEY_SHORTCUTS_KEY, writeSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  localStorage.removeItem(SINGLE_KEY_SHORTCUTS_KEY)
+})
+
+describe('ResultPanel R retry and the single-key switch (S25)', () => {
+  const retryable = { ok: false, error: { error_code: 'UPSTREAM_TIMEOUT', message: 'The run timed out.', retryable: true } }
+
+  it('R calls onRetry with single-key shortcuts on (the default)', () => {
+    const onRetry = vi.fn()
+    render(<ResultPanel running={false} result={retryable} onRetry={onRetry} />)
+    fireEvent.keyDown(window, { key: 'r' })
+    expect(onRetry).toHaveBeenCalledTimes(1)
+  })
+
+  it('R does not call onRetry with the switch off, and does again once it is back on', () => {
+    const onRetry = vi.fn()
+    render(<ResultPanel running={false} result={retryable} onRetry={onRetry} />)
+    expect(writeSingleKeyShortcuts(false)).toBe(true)
+    fireEvent.keyDown(window, { key: 'r' })
+    fireEvent.keyDown(window, { key: 'R' })
+    expect(onRetry).not.toHaveBeenCalled()
+    // Read at keystroke time: flipping back on needs no remount.
+    expect(writeSingleKeyShortcuts(true)).toBe(true)
+    fireEvent.keyDown(window, { key: 'r' })
+    expect(onRetry).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('ResultPanel outcome fallbacks', () => {
   it('does not call highlight overlay output empty', () => {

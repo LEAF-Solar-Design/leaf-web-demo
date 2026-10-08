@@ -8,6 +8,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import PromptBox from './PromptBox.jsx'
+import { setStoredOrgId } from '../api.js'
+
+const drawing = vi.hoisted(() => ({ current: null }))
+vi.mock('../site/DrawingObjectsContext.jsx', () => ({ useDrawingObjects: () => drawing.current }))
 
 const noop = () => {}
 
@@ -25,8 +29,13 @@ function mount(props = {}) {
 }
 
 beforeEach(() => {
+  drawing.current = null
+  setStoredOrgId(null)
   vi.stubGlobal('fetch', vi.fn((url) => {
     const u = String(url)
+    if (u.endsWith('/api/projects')) {
+      return jsonResponse({ projects: Array.from({ length: 12 }, (_, i) => ({ project_id: `p${i}`, name: `panel project ${i}` })) })
+    }
     if (u.includes('/api/drawings/')) {
       return jsonResponse({ drawing_id: 'demo', head: 2, latest: 2, versions: [
         { v: 1, parent: null, tool: 'drawing.ingest', note: 'first' },
@@ -44,6 +53,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   cleanup()
+  setStoredOrgId(null)
   vi.unstubAllGlobals()
 })
 
@@ -91,10 +101,48 @@ describe('act scope: the resolver lists registry actions with honest reasons', (
     openScope(container, 'act')
     await waitFor(() => expect(screen.getByText('v2')).toBeTruthy())
     expect(screen.getByText('opsess-1')).toBeTruthy()
+    expect(screen.getByText('Versions')).toBeTruthy()
+    expect(screen.getByText('Sessions')).toBeTruthy()
+    expect(container.querySelectorAll('.act-palette .count')[0].textContent).toBe('version')
   })
 })
 
 describe('find scope: consumes GET /api/search', () => {
+  it('groups bounded drawing objects and org projects alongside unchanged server versions and sessions', async () => {
+    setStoredOrgId('org-test')
+    const focus = vi.fn()
+    drawing.current = { index: { records: Array.from({ length: 12 }, (_, i) => ({ id: `h:${i}`, name: `panel object ${i}`, path: 'drawing / panels', handles: [] })) }, selectedHandles: [], focus }
+    const originalFetch = fetch
+    vi.stubGlobal('fetch', vi.fn((url, options) => String(url).includes('/api/search')
+      ? jsonResponse({ query: 'panel', results: [
+        { kind: 'version', id: 'version:2', label: 'v2', description: 'drawing.write · panel move' },
+        { kind: 'session', id: 'session:opsess-1', label: 'opsess-1', description: 'default · staging · idle' },
+      ] }) : originalFetch(url, options)))
+    const { container } = mount({ value: 'panel' })
+    openScope(container, 'find')
+    await waitFor(() => expect(screen.getByText('panel project 0')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('v2')).toBeTruthy())
+    for (const label of ['Drawing objects', 'Projects', 'Versions', 'Sessions']) expect(screen.getByText(label)).toBeTruthy()
+    const counts = [...container.querySelectorAll('.find-results .count')].map((node) => node.textContent)
+    expect(counts.filter((kind) => kind === 'drawing-object')).toHaveLength(8)
+    expect(counts.filter((kind) => kind === 'project')).toHaveLength(8)
+    expect(counts.slice(-2)).toEqual(['version', 'session'])
+    expect(screen.queryByText('panel object 8')).toBeNull()
+    expect(screen.queryByText('panel project 8')).toBeNull()
+    expect(screen.getByText('More drawing objects match. Keep typing to narrow the results.')).toBeTruthy()
+    expect(screen.getByText('More projects match. Keep typing to narrow the results.')).toBeTruthy()
+    expect(screen.getByText('opsess-1')).toBeTruthy()
+    expect(screen.getByText(/drawing.write · panel move/)).toBeTruthy()
+    fireEvent.click(screen.getByText('panel object 0'))
+    expect(focus).toHaveBeenCalledWith('h:0')
+  })
+
+  it('does not fetch private projects for a public mount, even with a stored org', () => {
+    setStoredOrgId('org-test')
+    const { container } = mount({ value: 'panel', mcpDiscoveryEnabled: false })
+    openScope(container, 'find')
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/api/projects'))).toBe(false)
+  })
   it('typing after opening "find" queries the search index and renders a result row', async () => {
     const onChange = vi.fn()
     const { container, rerender } = mount({ onChange })

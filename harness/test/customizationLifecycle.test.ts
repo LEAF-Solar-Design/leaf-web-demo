@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -12,6 +12,9 @@ import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
 import type {
   CustomizationCoordination,
+  JsonSchema,
+  ToolPackage,
+  ToolSourceProposal,
   AgentRunner,
   HarnessPorts,
   StagedCustomizationReceipt,
@@ -258,7 +261,19 @@ describe("customizationLifecycle", () => {
   });
 
   it("rejects a generated name that differs from the durable revision target", async () => {
-    const { bare, loop } = await setup();
+    const { bare, loop, tenantRepo } = await setup();
+    const seed = await tenantRepo.checkout(TENANT);
+    const existing = JSON.parse(git(seed.dir, ["show", "HEAD:registry.json"])).tools[0];
+    mkdirSync(join(seed.dir, "tools/count-by-layer"), { recursive: true });
+    writeFileSync(join(seed.dir, "tools/count-by-layer/tool.py"), S0);
+    writeFileSync(join(seed.dir, "tools/count-by-layer/tool.json"),
+      JSON.stringify({ ...existing, entry: "tool.py" }, null, 2) + "\n");
+    git(seed.dir, ["add", "."]);
+    git(seed.dir, [
+      "-c", "user.name=Leaf Test", "-c", "user.email=test@leafdesign.ai",
+      "commit", "-m", "seed bound revision target",
+    ]);
+    git(seed.dir, ["push", "--force", bare.dir, "HEAD:main"]);
     const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
     await expect(loop.stage(TENANT, "count entities per layer", {
       ...request(CHANGE_A, base), targetToolName: "count-by-layer",
@@ -448,4 +463,186 @@ describe("customizationLifecycle", () => {
     await expect(loop.publish(staged.receipt, base)).rejects.toThrow("Git ref conflict");
     expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
   });
+});
+
+const B = {
+  type: "object", properties: { x: { type: "string" } }, required: ["x"],
+};
+const O = { type: "object" };
+const A = { ...B, properties: { ...B.properties, y: true } };
+const AO = { type: "object", properties: { y: true } };
+const BAD = { ...B, properties: {} };
+const S0 = "def run(intake, params):\n    return ({}, None)\n";
+const S1 = S0 + "# first\n";
+const S2 = S0 + "# corrected\n";
+const E = "invalid_staged_catalog_revision";
+
+type RevisionRow = {
+  name: string;
+  firstParams?: JsonSchema;
+  firstReturns?: JsonSchema;
+  firstSource?: string;
+  second?: Partial<ToolSourceProposal>;
+  final?: Partial<ToolPackage>;
+  finalSource?: string;
+  error?: string;
+  versions?: string[];
+  expectedSource?: string;
+  rawParams?: string;
+  noSubmit?: boolean;
+};
+
+const revisionRows: RevisionRow[] = [
+  { name: "D2b2 L01", firstParams: A, versions: ["1.3.0"] },
+  { name: "D2b2 L02", firstReturns: AO, versions: ["1.3.0"] },
+  { name: "D2b2 L03", firstParams: A, firstReturns: AO, versions: ["1.3.0"] },
+  { name: "D2b2 L04", versions: ["1.2.4"] },
+  { name: "D2b2 L05", firstSource: S0, error: "invalid_staged_paths" },
+  { name: "D2b2 L06", firstParams: A, firstSource: S0, error: "invalid_staged_paths" },
+  { name: "D2b2 L07", firstParams: A, second: { params: BAD, source: S2 }, error: E },
+  { name: "D2b2 L08", firstParams: A, second: { name: "other-tool", source: S2 }, error: "tool revision must keep the bound target name" },
+  { name: "D2b2 L09", firstParams: A, second: { kind: "view", source: S2 }, error: E },
+  { name: "D2b2 L10", firstParams: A, second: { engine_op: "other_op", source: S2 }, error: "tool revision cannot change engine_op" },
+  { name: "D2b2 L11", firstParams: A, second: { capabilities: [], source: S2 }, error: "tool revision cannot change capabilities" },
+  { name: "D2b2 L12", firstParams: A, second: { source: S2 }, versions: ["1.3.0", "1.3.0"], expectedSource: S2 },
+  { name: "D2b2 L13", firstParams: A, second: { params: B, source: S2 }, versions: ["1.3.0", "1.2.4"], expectedSource: S2 },
+  { name: "D2b2 L14", firstParams: A, second: { source: S0 }, error: "invalid_staged_paths" },
+  { name: "D2b2 L15", firstParams: A, final: { version: "1.3.0-beta" }, error: E },
+  { name: "D2b2 L16", firstParams: A, final: { version: "1.2.4" }, error: E },
+  { name: "D2b2 L17", final: { version: "1.3.0" }, error: E },
+  { name: "D2b2 L18", firstParams: A, final: { version: "2.0.0" }, error: E },
+  { name: "D2b2 L19", firstParams: A, final: { version: "1.4.0" }, error: E },
+  { name: "D2b2 L20", firstParams: A, final: { version: "1.3.1" }, error: E },
+  { name: "D2b2 L21", firstParams: A, final: { params: BAD }, error: E },
+  { name: "D2b2 L22", firstParams: A, finalSource: S0, error: "invalid_staged_paths" },
+  { name: "D2b2 L23", firstParams: A, final: { entry: "tools/count-by-layer/other.py" }, error: E },
+  { name: "D2b2 L24", rawParams: '{"type":"object","properties":{"x":{"default":1.0}}}', error: E },
+  { name: "D2b2 L25", rawParams: '{"type":"object","properties":{"x":{"default":1.0}}}', noSubmit: true, final: { params: { type: "object", properties: { x: { default: 1 } } }, version: "1.2.4" }, finalSource: S1, error: E },
+  { name: "D2b2 L26", firstParams: A, second: { source: S1 }, versions: ["1.3.0", "1.3.0"], expectedSource: S1 },
+];
+
+describe("registered-base revisions", () => {
+  for (const row of revisionRows) {
+    it(row.name, async () => {
+      const tenantRepo = new FakeTenantRepoProvider(FIXTURE);
+      const coordination = new TestCustomizationCoordination();
+      const versions: string[] = [];
+      let repoDir: string | undefined;
+      const baseParams: JsonSchema = row.rawParams ? JSON.parse(row.rawParams) : B;
+      const agent: AgentRunner = {
+        async run(input) {
+          repoDir = input.repoDir;
+          const proposal: ToolSourceProposal = {
+            name: "count-by-layer", description: "Revision fixture",
+            engine_op: "count_by_layer", capabilities: ["drawing.read"],
+            params: row.firstParams ?? baseParams, returns: row.firstReturns ?? O,
+            source: row.firstSource ?? S1, session: "revision-test",
+          };
+          const submit = (candidate: ToolSourceProposal, refused: boolean) => {
+            const sourcePath = join(input.repoDir, "tools/count-by-layer/tool.py");
+            const manifestPath = join(input.repoDir, "tools/count-by-layer/tool.json");
+            const beforeSource = readFileSync(sourcePath);
+            const beforeManifest = readFileSync(manifestPath);
+            try {
+              const submitted = input.toolset.submitTool(candidate);
+              expect(refused).toBe(false);
+              versions.push(submitted.tool.version);
+              return submitted;
+            } catch (error) {
+              expect(refused).toBe(true);
+              expect((error as Error).message).toBe(row.error);
+              expect(readFileSync(sourcePath)).toEqual(beforeSource);
+              expect(readFileSync(manifestPath)).toEqual(beforeManifest);
+              throw error;
+            }
+          };
+          let submitted = row.noSubmit ? undefined
+            : submit(proposal, !!row.error && !row.second && !row.final && row.finalSource === undefined);
+          if (row.second) {
+            submitted = submit({ ...proposal, ...row.second }, !!row.error);
+          }
+          if (row.final || row.finalSource !== undefined) {
+            const tool = { ...(submitted?.tool ?? baseTool), ...row.final } as ToolPackage;
+            const code = row.finalSource ?? submitted!.code;
+            const entry = tool.entry!;
+            const manifestPath = "tools/count-by-layer/tool.json";
+            mkdirSync(dirname(join(input.repoDir, entry)), { recursive: true });
+            writeFileSync(join(input.repoDir, entry), code);
+            const manifest = JSON.stringify({
+              ...tool, entry: entry.split("/").at(-1),
+            }, null, 2) + "\n";
+            writeFileSync(join(input.repoDir, manifestPath), manifest);
+            const receipt = {
+              contract: "leaf.tool-source.v1" as const,
+              source_sha256: createHash("sha256").update(code).digest("hex"),
+              manifest_sha256: createHash("sha256").update(manifest).digest("hex"),
+              source_bytes: Buffer.byteLength(code),
+              manifest_bytes: Buffer.byteLength(manifest),
+              entry, manifest: manifestPath,
+            };
+            submitted = { tool, code, receipt, files: [manifestPath, entry] };
+          }
+          if (!submitted) throw new Error("revision fixture requires a final package when noSubmit is set");
+          return {
+            tool: submitted.tool, code: submitted.code, preview: "revised",
+            files: submitted.files, sourceReceipt: submitted.receipt,
+          };
+        },
+      };
+      const loop = new AuthorLoop({
+        oauth: new FakeOAuthGrantProvider(), tenantRepo,
+        broker: new FakeBrokerApsClient(), agentRunner: agent,
+        customizationCoordination: coordination,
+      });
+      const bare = await tenantRepo.bare(TENANT);
+      const seed = await tenantRepo.checkout(TENANT);
+      const existing = JSON.parse(git(seed.dir, ["show", "HEAD:registry.json"])).tools[0];
+      const baseTool = {
+        ...existing, name: "count-by-layer", engine_op: "count_by_layer",
+        kind: "script", entry: "tools/count-by-layer/tool.py",
+        capabilities: ["drawing.read"], version: "1.2.3", params: baseParams, returns: O,
+      };
+      const rawTool = JSON.stringify(baseTool);
+      const registeredTool = row.rawParams
+        ? rawTool.replace(JSON.stringify(baseParams), row.rawParams) : rawTool;
+      writeFileSync(join(seed.dir, "registry.json"), '{"tools":[' + registeredTool + ']}\n');
+      mkdirSync(join(seed.dir, "tools/count-by-layer"), { recursive: true });
+      writeFileSync(join(seed.dir, "tools/count-by-layer/tool.py"), S0);
+      writeFileSync(join(seed.dir, "tools/count-by-layer/tool.json"),
+        JSON.stringify({ ...baseTool, entry: "tool.py" }, null, 2) + "\n");
+      git(seed.dir, ["add", "."]);
+      git(seed.dir, [
+        "-c", "user.name=Leaf Test", "-c", "user.email=test@leafdesign.ai",
+        "commit", "-m", "seed revision fixture",
+      ]);
+      git(seed.dir, ["push", "--force", bare.dir, "HEAD:main"]);
+      const base = git(bare.dir, ["rev-parse", "refs/heads/main"]);
+      const stage = loop.stage(TENANT, "revise count-by-layer", {
+        ...request(CHANGE_A, base), targetToolName: "count-by-layer",
+      });
+      if (row.error) {
+        await expect(stage).rejects.toMatchObject({ message: row.error });
+        expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+        expect(git(bare.dir, ["rev-parse", `refs/leaf/changes/${CHANGE_A}`])).toBe(base);
+        expect(coordination.staged.has(CHANGE_A)).toBe(false);
+      } else {
+        const staged = await stage;
+        const show = (path: string) => execFileSync("git", [
+          "show", `${staged.receipt.staged_commit}:${path}`,
+        ], { cwd: bare.dir, encoding: "utf8" });
+        const registry = JSON.parse(show("registry.json"));
+        const manifest = JSON.parse(show("tools/count-by-layer/tool.json"));
+        const committedSource = show("tools/count-by-layer/tool.py");
+        const expectedVersion = row.versions!.at(-1);
+        const expectedSource = row.expectedSource ?? S1;
+        expect(versions).toEqual(row.versions);
+        expect(registry.tools).toHaveLength(1);
+        expect(registry.tools[0].version).toBe(expectedVersion);
+        expect(manifest.version).toBe(expectedVersion);
+        expect(committedSource).toBe(expectedSource);
+        expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+      }
+      expect(repoDir).toBeTypeOf("string");
+    });
+  }
 });

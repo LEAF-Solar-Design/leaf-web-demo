@@ -93,6 +93,8 @@ import copy
 import importlib.util
 import math
 import re
+import sys
+import threading
 import solar_tools
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -299,12 +301,26 @@ def physical_state_readiness(readiness, backend, tenant, drawing_id):
     return readiness
 
 
-@lru_cache(maxsize=solar_tools.MAX_DECLARATIONS)
+_READINESS_IMPORT_LOCK = threading.RLock()
+
+
 def _load_readiness_builtin(builtin):
+    # lru_cache protects its dictionary, but concurrent misses still execute twice.
+    with _READINESS_IMPORT_LOCK:
+        return _cached_readiness_builtin(builtin)
+
+
+@lru_cache(maxsize=solar_tools.MAX_DECLARATIONS)
+def _cached_readiness_builtin(builtin):
     path = Path(__file__).resolve().parent / builtin
     spec = importlib.util.spec_from_file_location("_solar_readiness_" + path.stem, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(spec.name, None)
+        raise
+    sys.modules[spec.name] = module
     return module
 
 

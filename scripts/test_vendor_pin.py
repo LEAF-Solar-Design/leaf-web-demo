@@ -82,6 +82,8 @@ def test_downstream_overlay_inventory_matches_current_vendor():
     overlays = sync.downstream_overlays(manifest)
 
     assert set(overlays) == {
+        "agent/authorLoop.ts",
+        "agent/tools/submitToolProposal.ts",
         "ports/converse.ts",
         "ports/fakes/fakeSessionStore.ts",
         "ports/impl/agentSdkRunner.ts",

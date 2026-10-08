@@ -603,3 +603,18 @@ def run_local_graph_commit(backend, tenant_id, tool, params, *, drawing_id, sour
             "graph_sha256": receipt["graph_sha256"], "intake_sha256": receipt["intake_sha256"],
             "before_rev": context["graph"]["rev"], "after_rev": after["rev"],
             "drawing_changed": True, "replayed": receipt["replayed"]}
+
+
+def run_project_graph_seed(*args, **kwargs):
+    from solar_project_graph import run_project_graph_seed as run
+    return run(*args, **kwargs)
+
+
+def run_project_graph_commit(*args, **kwargs):
+    from solar_project_graph import run_project_graph_commit as run
+    return run(*args, **kwargs)
+
+
+def project_graph_commit_provenance(*args, **kwargs):
+    from solar_project_graph import project_graph_commit_provenance as prove
+    return prove(*args, **kwargs)
