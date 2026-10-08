@@ -47,6 +47,7 @@ class Http:
 
 @pytest.fixture(autouse=True)
 def auth(monkeypatch):
+    monkeypatch.delenv("LEAF_SOURCE_SHA", raising=False)
     monkeypatch.setattr(
         subject.client, "_auth_headers",
         lambda: {"Authorization": "Bearer secret"},
@@ -203,6 +204,168 @@ def test_activity_spec_pins_pure_script_contract():
     assert '"output-intake.txt"' in spec["settings"]["inspectScript"]["value"]
 
 
+@pytest.mark.parametrize("contract", [2, 3])
+def test_activity_source_stamp_changes_only_description(contract):
+    legacy = subject.activity_spec(contract)
+    assert subject.activity_spec(contract, source_revision=None) == legacy
+    assert legacy["description"] == (
+        "Leaf fixed closed-format drawing mutation interpreter with "
+        "same-WorkItem output inspection."
+    )
+    stamped = subject.activity_spec(contract, source_revision="a" * 40)
+    assert stamped.pop("description") == legacy.pop("description") + " leaf-source=" + "a" * 40
+    assert stamped == legacy
+
+
+@pytest.mark.parametrize("revision", [
+    "", "unknown", "a" * 39, "a" * 41, "A" * 40, "g" * 40, "a" * 40 + "\n", 123, True,
+])
+def test_activity_spec_rejects_invalid_source_revision(revision):
+    with pytest.raises(ValueError):
+        subject.activity_spec(source_revision=revision)
+
+
+@pytest.mark.parametrize("contract", [2, 3])
+@pytest.mark.parametrize("revision", ["a" * 40, "unknown", None])
+@pytest.mark.parametrize("advanced", [False, True])
+def test_provision_stamps_only_valid_image_source(monkeypatch, contract, revision, advanced):
+    if revision is not None:
+        monkeypatch.setenv("LEAF_SOURCE_SHA", revision)
+    posts = [Response(201, {"version": 4}), Response(201)]
+    if advanced:
+        posts.insert(0, Response(409))
+    http = Http(post=posts)
+    monkeypatch.setattr(subject, "requests", http)
+
+    result = subject.provision_activity(contract)
+
+    expected_revision = revision if revision == "a" * 40 else None
+    assert result == {
+        "id": subject.CONTRACTS[contract].activity_id, "alias": "prod", "version": 4,
+        "advanced": advanced, "source_revision": expected_revision,
+    }
+    expected = subject.activity_spec(contract, source_revision=expected_revision)
+    assert json.loads(http.calls[0][2]["data"]) == expected
+    if advanced:
+        expected.pop("id")
+        assert json.loads(http.calls[1][2]["data"]) == expected
+
+
+@pytest.mark.parametrize("contract", [2, 3])
+def test_provenance_absent_alias_requires_only_one_read(monkeypatch, contract):
+    monkeypatch.setattr(subject.client, "ALIAS", "canary")
+    http = Http(get=[Response(404)])
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.provenance(contract) == {
+        "id": subject.CONTRACTS[contract].activity_id, "alias": "canary",
+        "exists": False, "version": None, "source_revision": None,
+    }
+    assert [(method, url) for method, url, _ in http.calls] == [
+        ("get", f"{subject.client.DA}/activities/{subject.CONTRACTS[contract].activity_id}/aliases/canary"),
+    ]
+
+
+@pytest.mark.parametrize("contract", [2, 3])
+@pytest.mark.parametrize("description,expected", [
+    ("description leaf-source=" + "a" * 40, "a" * 40),
+    ("leaf-source=" + "a" * 40 + "\tother", "a" * 40),
+    ("unstamped description", None),
+    ("leaf-source=" + "a" * 40 + " leaf-source=" + "b" * 40, None),
+    ("leaf-source=" + "a" * 40 + " leaf-source=" + "a" * 40, None),
+    (123, None),
+    (None, None),
+    ("prefixleaf-source=" + "a" * 40, None),
+    ("leaf-source=" + "a" * 41, None),
+    ("leaf-source=" + "A" * 40, None),
+])
+def test_provenance_reads_one_unambiguous_stamp(monkeypatch, contract, description, expected):
+    monkeypatch.setattr(subject.client, "ALIAS", "canary")
+    deployed = {} if description is None else {"description": description}
+    http = Http(get=[Response(200, {"version": "7"}), Response(200, deployed)])
+    monkeypatch.setattr(subject, "requests", http)
+    activity_id = subject.CONTRACTS[contract].activity_id
+    assert subject.provenance(contract) == {
+        "id": activity_id, "alias": "canary", "exists": True,
+        "version": 7, "source_revision": expected,
+    }
+    assert [(method, url) for method, url, _ in http.calls] == [
+        ("get", f"{subject.client.DA}/activities/{activity_id}/aliases/canary"),
+        ("get", f"{subject.client.DA}/activities/{activity_id}/versions/7"),
+    ]
+
+
+@pytest.mark.parametrize("responses", [
+    [Response(500)],
+    [Response(200, ["invalid"])],
+    [Response(200, {"version": 7}), Response(500)],
+    [Response(200, {"version": 7}), Response(200, ["invalid"])],
+])
+def test_provenance_http_or_json_shape_failure_raises(monkeypatch, responses):
+    monkeypatch.setattr(subject, "requests", Http(get=responses))
+    with pytest.raises(RuntimeError):
+        subject.provenance()
+
+
+@pytest.mark.parametrize("stage", ["alias", "version"])
+def test_provenance_invalid_json_raises(monkeypatch, stage):
+    class InvalidJsonResponse(Response):
+        def json(self):
+            raise ValueError("secret response")
+
+    responses = [InvalidJsonResponse(200)]
+    if stage == "version":
+        responses.insert(0, Response(200, {"version": 7}))
+    monkeypatch.setattr(subject, "requests", Http(get=responses))
+    with pytest.raises(RuntimeError, match="returned invalid JSON"):
+        subject.provenance()
+
+
+@pytest.mark.parametrize("contract", [2, 3])
+def test_cli_provenance_success_receipt(monkeypatch, capsys, contract):
+    http = Http(get=[
+        Response(200, {"version": 7}),
+        Response(200, {"description": "leaf-source=" + "a" * 40}),
+    ])
+    monkeypatch.setattr(subject, "requests", http)
+    argv = ["provenance", "--json"]
+    if contract == 3:
+        argv.extend(["--contract", "3"])
+    assert subject.main(argv) == 0
+    expected = {
+        "ok": True, "operation": "provenance", "contract": contract,
+        "id": subject.CONTRACTS[contract].activity_id, "alias": "prod",
+        "exists": True, "version": 7, "source_revision": "a" * 40,
+    }
+    assert capsys.readouterr().out == json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+@pytest.mark.parametrize("contract", [2, 3])
+def test_cli_provenance_failure_receipt_redacts_exception(monkeypatch, capsys, contract):
+    def fail(contract=2):
+        raise RuntimeError("secret signed request")
+
+    monkeypatch.setattr(subject, "provenance", fail)
+    assert subject.main(["provenance", "--contract", str(contract), "--json"]) == 1
+    expected = {
+        "ok": False, "operation": "provenance",
+        "error": "provenance read failed", "contract": contract,
+    }
+    assert capsys.readouterr().out == json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+@pytest.mark.parametrize("contract", [2, 3])
+def test_readiness_accepts_stamped_version(monkeypatch, contract):
+    http = Http(get=[
+        Response(200, {"version": 7}),
+        Response(200, subject.activity_spec(contract, source_revision="a" * 40)),
+    ])
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.readiness(contract) == {
+        "ready": True, "mismatches": [], "contract": contract,
+        "activity": {"alias": "prod", "version": 7},
+    }
+
+
 def test_409_advances_version_and_patches_alias(monkeypatch):
     http = Http(
         post=[Response(409), Response(201, {"version": 4}), Response(409)],
@@ -212,7 +375,7 @@ def test_409_advances_version_and_patches_alias(monkeypatch):
     result = subject.provision_activity()
     assert result == {
         "id": "LeafApplyMutations", "alias": "prod", "version": 4,
-        "advanced": True,
+        "advanced": True, "source_revision": None,
     }
     body = json.loads(http.calls[1][2]["data"])
     assert "id" not in body
@@ -573,6 +736,7 @@ def test_v3_provision_advances_only_the_separate_activity(monkeypatch):
     monkeypatch.setattr(subject, "requests", http)
     assert subject.provision_activity(3) == {
         "id": "LeafApplyMutationsV3", "alias": "prod", "version": 2, "advanced": True,
+        "source_revision": None,
     }
     assert json.loads(http.calls[0][2]["data"]) == subject.activity_spec(3)
     assert http.calls[1][1].endswith("/activities/LeafApplyMutationsV3/versions")
@@ -607,6 +771,7 @@ def test_cli_v3_readiness_echoes_contract_when_alias_is_absent(monkeypatch, caps
     ("provision", "provision_activity", []),
     ("readiness", "readiness", []),
     ("alias-state", "alias_state", []),
+    ("provenance", "provenance", []),
     ("restore-alias", "restore_alias", ["--version", "absent"]),
 ])
 def test_every_cli_command_routes_the_contract(monkeypatch, capsys, command, function, extra):
