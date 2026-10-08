@@ -17,6 +17,147 @@ from ci.native_release_producer import image_build_command, SERVICES, FRESHNESS,
 from ci import native_release_producer as producer
 
 
+def pin_race_case(tmp_path, monkeypatch, *, service="broker", markers=None,
+                  error=None, unchanged=False, refresh_error=None, retry_error=None):
+    freshness = {name: {pin: "a" * 64 for pin in FRESHNESS.get(name, TRIXIE)}
+                 for name in SERVICES}
+    fresh = dict(freshness[service]) if unchanged else {pin: "b" * 64 for pin in freshness[service]}
+    original = error if error is not None else subprocess.CalledProcessError(1, ["docker", "buildx"])
+    calls = {name: [] for name in SERVICES}
+    refreshes = []
+    log = "InRelease: FAILED\nsha256sum: WARNING: 1 computed checksum did NOT match\n" if markers is None else markers
+    extras = {"canonical-worker": {"solver_revision": "c" * 40, "solver_root": tmp_path / "solver"}}
+
+    def build(root, name, source, number, pins, metadata, *, log_path=None, **kwargs):
+        assert root == tmp_path and source == "d" * 40 and number == 73
+        assert kwargs == extras.get(name, {})
+        calls[name].append((pins, metadata, log_path))
+        if log_path is not None:
+            log_path.write_text(log if name == service else "build succeeded\n", encoding="utf-8")
+        if name == service:
+            if len(calls[name]) == 1:
+                raise original
+            if retry_error is not None:
+                raise retry_error
+        return {"service": name, "attempt": len(calls[name])}
+
+    def refresh(name):
+        assert all(calls[item] for item in SERVICES)
+        refreshes.append(name)
+        if refresh_error is not None:
+            raise refresh_error
+        return fresh
+
+    monkeypatch.setattr(producer, "build_image", build)
+    monkeypatch.setattr(producer, "refresh_debian_freshness", refresh)
+
+    def run():
+        return producer._build_images(tmp_path, SERVICES, "d" * 40, 73, freshness, tmp_path, extras)
+
+    return run, calls, refreshes, original, fresh
+
+
+def test_inrelease_pin_race_rebuilds_once_with_refreshed_pins(tmp_path, monkeypatch, capsys):
+    run, calls, refreshes, _, fresh = pin_race_case(tmp_path, monkeypatch)
+    images = run()
+    assert list(images) == list(SERVICES)
+    assert images == {name: {"service": name, "attempt": 2 if name == "broker" else 1}
+                      for name in SERVICES}
+    assert refreshes == ["broker"]
+    assert calls["broker"][1] == (fresh, tmp_path / "broker.retry1.json", tmp_path / "broker.retry1.log")
+    assert calls["broker"][1][0] is fresh
+    assert {name: len(items) for name, items in calls.items()} == {
+        name: 2 if name == "broker" else 1 for name in SERVICES}
+    output = capsys.readouterr().out
+    message = "image broker: package index pin moved during build; rebuilding once with refreshed pins\n"
+    assert output.count(message) == 1
+    assert output.index("==== image build log: web ====") < output.index(message)
+    assert "==== image build log: broker (retry 1) ====\n" in output
+
+
+def test_inrelease_unchanged_pins_preserve_original_failure(tmp_path, monkeypatch):
+    run, calls, refreshes, original, _ = pin_race_case(tmp_path, monkeypatch, unchanged=True)
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        run()
+    assert raised.value is original
+    assert refreshes == ["broker"]
+    assert all(len(items) == 1 for items in calls.values())
+
+
+def test_inrelease_missing_markers_do_not_refresh(tmp_path, monkeypatch):
+    for markers in ("unrelated failure", "InRelease: FAILED", "computed checksum did NOT match"):
+        run, calls, refreshes, original, _ = pin_race_case(tmp_path, monkeypatch, markers=markers)
+        with pytest.raises(subprocess.CalledProcessError) as raised:
+            run()
+        assert raised.value is original
+        assert refreshes == []
+        assert all(len(items) == 1 for items in calls.values())
+
+
+def test_inrelease_web_failure_does_not_refresh(tmp_path, monkeypatch):
+    run, calls, refreshes, original, _ = pin_race_case(tmp_path, monkeypatch, service="web")
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        run()
+    assert raised.value is original
+    assert refreshes == []
+    assert all(len(items) == 1 for items in calls.values())
+
+
+def test_inrelease_retry_failure_replaces_original_without_third_build(tmp_path, monkeypatch, capsys):
+    retry_error = subprocess.CalledProcessError(2, ["docker", "buildx", "retry"])
+    run, calls, refreshes, _, _ = pin_race_case(tmp_path, monkeypatch, retry_error=retry_error)
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        run()
+    assert raised.value is retry_error
+    assert refreshes == ["broker"]
+    assert {name: len(items) for name, items in calls.items()} == {
+        name: 2 if name == "broker" else 1 for name in SERVICES}
+    assert "==== image build log: broker (retry 1) ====" in capsys.readouterr().out
+
+
+def test_inrelease_refresh_failure_preserves_original_build_error(tmp_path, monkeypatch):
+    run, calls, refreshes, original, _ = pin_race_case(
+        tmp_path, monkeypatch, refresh_error=ValueError("channel unavailable"))
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        run()
+    assert raised.value is original
+    assert refreshes == ["broker"]
+    assert all(len(items) == 1 for items in calls.values())
+
+
+def test_refresh_debian_freshness_fetches_only_service_channels(monkeypatch):
+    urls = []
+
+    def digest(url):
+        urls.append(url)
+        return ("a" if "-security/" in url else "b") * 64
+
+    monkeypatch.setattr(producer, "_channel_digest", digest)
+    for service, distribution, names in (("broker", "trixie", TRIXIE),
+                                         ("harness", "bookworm", FRESHNESS["harness"])):
+        urls.clear()
+        assert producer.refresh_debian_freshness(service) == {names[0]: "a" * 64, names[1]: "b" * 64}
+        assert urls == [
+            f"https://deb.debian.org/debian-security/dists/{distribution}-security/InRelease",
+            f"https://deb.debian.org/debian/dists/{distribution}-updates/InRelease",
+        ]
+    urls.clear()
+    for service in ("web", "unknown"):
+        with pytest.raises(ValueError, match="^no Debian package pin for this service$"):
+            producer.refresh_debian_freshness(service)
+    assert urls == []
+
+
+def test_inrelease_non_process_failure_does_not_refresh(tmp_path, monkeypatch):
+    run, calls, refreshes, original, _ = pin_race_case(
+        tmp_path, monkeypatch, error=ValueError("invalid image metadata"))
+    with pytest.raises(ValueError) as raised:
+        run()
+    assert raised.value is original
+    assert refreshes == []
+    assert all(len(items) == 1 for items in calls.values())
+
+
 def forge_case(tmp_path, monkeypatch):
     """Fake providers and commands; retain real gate, build and packaging code."""
     roots = {role: tmp_path / role for role in producer.FORGE_CHECKOUTS}
