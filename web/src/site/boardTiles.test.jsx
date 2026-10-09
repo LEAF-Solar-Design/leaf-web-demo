@@ -18,6 +18,31 @@ const props = {
 }
 const makeActions = () => Object.fromEntries(['onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability'].map((name) => [name, vi.fn()]))
 
+it('BI03-01 Project settings opens from both board layouts', () => {
+  for (const contained of [false, true]) {
+    for (const worldSpace of [false, true]) {
+      const actions = { ...makeActions(), onOpenSettings: vi.fn() }
+      const { container, rerender, unmount } = render(<ProjectBoardGround active contained={contained}
+        worldSpace={worldSpace} {...props} actions={actions} panel={<section data-testid="settings-panel" />} />)
+      const buttons = screen.getAllByRole('button', { name: 'Project settings' })
+      expect(buttons).toHaveLength(1)
+      const button = buttons[0]
+      expect(button.tagName).toBe('BUTTON')
+      expect(button.type).toBe('button')
+      expect(button.parentElement).toBe(container.querySelector('.ground-desk'))
+      expect(button.nextElementSibling).toBe(screen.getByTestId('settings-panel'))
+      fireEvent.click(button)
+      expect(actions.onOpenSettings).toHaveBeenCalledTimes(1)
+      fireEvent.click(container.querySelector('[data-action="drawing"]'))
+      expect(actions.onOpenDrawing).toHaveBeenCalledTimes(1)
+      rerender(<ProjectBoardGround active contained={contained} worldSpace={worldSpace}
+        {...props} actions={makeActions()} panel={<section data-testid="settings-panel" />} />)
+      expect(screen.queryByRole('button', { name: 'Project settings' })).toBeNull()
+      unmount()
+    }
+  }
+})
+
 const makeTransferActions = () => ({ ...makeActions(), transferProjectId: 'project1', onTransferVersion: vi.fn() })
 const versionRef = encodeVersionRef({ projectId: 'project1', drawingId: version.drawing_id, versionId: version.version_id, seq: version.seq })
 const MAIN_BOARD_HTML = '<section class="ground-tile" data-tile="drawing" aria-label="Drawing"><h3>Drawing</h3><button type="button" class="ground-row-action" data-action="drawing" data-id="drawing1">Roof</button><p>12 polylines · 2 layers</p></section><section class="ground-tile" data-tile="versions" aria-label="Versions"><h3>Versions</h3><strong>1 drawing version</strong><ul><li data-element-id="version:v1"><button type="button" class="ground-row-action" data-action="version" data-id="v1">v1 · drawing1</button></li></ul></section><section class="ground-tile" data-tile="jobs" aria-label="Jobs"><h3>Jobs</h3><ul><li data-element-id="job:j1"><button type="button" class="ground-row-action" data-action="job" data-id="j1"><strong>Measure</strong> · succeeded</button></li></ul></section><section class="ground-tile" data-tile="tools" aria-label="Built tools"><h3>Built tools</h3><ul><li data-element-id="tool:t1"><button type="button" class="ground-row-action" data-action="tool" data-id="t1">Count</button></li></ul></section><section class="ground-tile" data-tile="catalog" aria-label="Catalog"><h3>Catalog</h3><strong>1 family · 0 tools</strong><ul><li data-element-id="family:f1"><button type="button" class="ground-row-action" data-action="family" data-id="f1">Measure family</button></li></ul></section><section class="ground-tile" data-tile="shared" aria-label="Shared everywhere"><h3>Shared everywhere</h3><ul><li><button type="button" class="ground-row-action" data-action="capability" data-id="conversation" aria-label="Open conversation">conversation</button></li><li><button type="button" class="ground-row-action" data-action="capability" data-id="annotations" aria-label="Open annotations">annotations</button></li><li><button type="button" class="ground-row-action" data-action="capability" data-id="authoring" aria-label="Open authoring">authoring</button></li><li><button type="button" class="ground-row-action" data-action="capability" data-id="approvals" aria-label="Open approvals">approvals</button></li><li><button type="button" class="ground-row-action" data-action="capability" data-id="versions" aria-label="Open versions">versions</button></li><li><button type="button" class="ground-row-action" data-action="capability" data-id="receipts" aria-label="Open receipts">receipts</button></li><li><button type="button" class="ground-row-action" data-action="capability" data-id="marathons" aria-label="Open marathons">marathons</button></li><li><button type="button" class="ground-row-action" data-action="capability" data-id="one-shot execution" aria-label="Open one-shot execution">one-shot execution</button></li></ul></section>'

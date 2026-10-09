@@ -4,6 +4,88 @@ import { createPortal } from 'react-dom'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import ProjectWorkspacePanels, { PANE_NAMES, paneForCapability, BoardPaneState, deriveBoardPaneSeats,
   PersistentSeat, useBoardConversation, ConversationOpening, AnnotationPaneState } from './ProjectWorkspacePanels.jsx'
+
+const settingsContext = {
+  lifecycleEnabled: true, mock: false, signedIn: true, sessionStatus: 'active',
+  projectId: 'project-a', boardHostsProject: true, projectPane: 'settings',
+  settingsDestination: 'settings-destination',
+}
+
+it('BI03-05 Settings eligibility fails closed with exact reasons', () => {
+  const failures = [
+    [{ lifecycleEnabled: false, mock: true, signedIn: false, sessionStatus: 'idle', projectId: null }, 'Project settings are unavailable in this build.'],
+    [{ mock: true, signedIn: false, sessionStatus: 'idle', projectId: null }, 'Project settings are unavailable in this offline demo.'],
+    [{ signedIn: false, sessionStatus: 'idle', projectId: null }, 'Sign in to use project settings.'],
+    ...['idle', 'signed_out', 'required', 'activating', 'error', undefined].map((sessionStatus) =>
+      [{ sessionStatus, projectId: null }, 'Start an active session to use project settings.']),
+    [{ projectId: null }, 'Open a project to use project settings.'],
+    // Single faults: every other input is eligible and the project is open, so each guard is the only one failing.
+    [{ lifecycleEnabled: false }, 'Project settings are unavailable in this build.'],
+    [{ mock: true }, 'Project settings are unavailable in this offline demo.'],
+    [{ signedIn: false }, 'Sign in to use project settings.'],
+    ...['idle', 'signed_out', 'required', 'activating', 'error', undefined].map((sessionStatus) =>
+      [{ sessionStatus }, 'Start an active session to use project settings.']),
+  ]
+  for (const [patch, reason] of failures) {
+    const result = deriveBoardPaneSeats({ ...settingsContext, ...patch })
+    expect(result.lifecycleEligible).toBe(false)
+    expect(result.settingsTarget).toBeNull()
+    expect(result.settingsReason).toBe(reason)
+  }
+  const enabled = deriveBoardPaneSeats(settingsContext)
+  expect(enabled.lifecycleEligible).toBe(true)
+  expect(enabled.settingsReason).toBeNull()
+})
+
+it('BI03-25 Settings eligibility agrees with its reason over every input', () => {
+  let cases = 0
+  for (const lifecycleEnabled of [true, false]) {
+    for (const mock of [true, false]) {
+      for (const signedIn of [true, false]) {
+        for (const sessionStatus of ['active', 'idle', 'signed_out', 'required', 'activating', 'error', undefined]) {
+          for (const projectId of ['p1', null]) {
+            const result = deriveBoardPaneSeats({ ...settingsContext, lifecycleEnabled, mock, signedIn, sessionStatus, projectId })
+            const eligible = lifecycleEnabled && !mock && signedIn && sessionStatus === 'active' && projectId !== null
+            expect([lifecycleEnabled, mock, signedIn, sessionStatus, projectId, result.lifecycleEligible])
+              .toEqual([lifecycleEnabled, mock, signedIn, sessionStatus, projectId, eligible])
+            expect(result.lifecycleEligible).toBe(result.settingsReason === null)
+            if (!result.lifecycleEligible) expect(result.settingsTarget).toBeNull()
+            cases += 1
+          }
+        }
+      }
+    }
+  }
+  expect(cases).toBe(112)
+})
+
+it('BI03-17 Generic Settings keeps its no-slot fallback', () => {
+  const { rerender } = render(<ProjectWorkspacePanels pane="settings" />)
+  expect(screen.getAllByText('Settings is not mounted on this surface.')).toHaveLength(1)
+  rerender(<ProjectWorkspacePanels pane="settings" slots={{ settings: <p>Supplied settings</p> }} />)
+  expect(screen.getByText('Supplied settings')).toBeTruthy()
+  expect(screen.queryByText('Settings is not mounted on this surface.')).toBeNull()
+  rerender(<ProjectWorkspacePanels pane="tools" />)
+  expect(screen.getByText('No built tools yet. Author one from the Manage tab.')).toBeTruthy()
+})
+
+it('BI03-24 Only board Settings receives the lifecycle destination', () => {
+  for (const patch of [
+    {}, { drawingId: null, canonicalVersionId: null, sessionId: null, canConverse: false, agentMode: null },
+    { drawingId: 'drawing-a', sessionId: 'conversation-a', canConverse: true, agentMode: 'primary' },
+  ]) {
+    expect(deriveBoardPaneSeats({ ...settingsContext, ...patch }).settingsTarget).toBe('settings-destination')
+  }
+  for (const patch of [
+    { boardHostsProject: false }, { settingsDestination: null },
+    ...PANE_NAMES.filter((pane) => pane !== 'settings').map((projectPane) => ({ projectPane })),
+    { projectPane: null },
+  ]) {
+    const result = deriveBoardPaneSeats({ ...settingsContext, ...patch })
+    expect(result.lifecycleEligible).toBe(true)
+    expect(result.settingsTarget).toBeNull()
+  }
+})
 import ConversePanel from '../components/ConversePanel.jsx'
 import AuthorPanel from '../components/AuthorPanel.jsx'
 import AnnotationDecisionCard from '../components/AnnotationDecisionCard.jsx'
