@@ -112,8 +112,9 @@ def test_sip_r3b_chain_pg_scope_isolation(scope):
     # A second real drawing in the same project embeds identical graph and intake bytes.
     source = str(uuid4())
     key = f"tenants/{scope.org}/drawings/{source}/v/00000001.intake.json"
+    artifact = store.create_drawing_artifact(scope.org, scope.project, "Second drawing")
     parent = store.create_drawing_version(scope.org, scope.project,
-        oss_object=key[:-12] + ".dwg", intake_ref=key)
+        drawing_id=artifact.drawing_id, oss_object=key[:-12] + ".dwg", intake_ref=key)
     scope.blobs.data[key] = first.intake_bytes
     provenance = {"schema": "leaf.drawing-import.v1", "source": {
         "kind": "account_upload", "tenant_id": str(scope.org), "drawing_id": source,
