@@ -31,7 +31,7 @@ const pointOf = value => {
   return [x, y]
 }
 
-// Mounted nowhere until the App record. This is a bounded 2D preview of stored
+// Mounted by App in Viewer's matching scene. This is a bounded 2D preview of stored
 // design data, with projection-scoped validation; server/version rails remain
 // authoritative for all other fields, topology, freshness and revisions.
 // Viewer consumes only pts/color, so colours encode kinds. Equipment squares
@@ -85,7 +85,9 @@ function project(graph, options) {
       if (pt === null) return { error: 'invalid_graph' }
       pts.push(pt)
     }
-    return length === 1 ? { error: 'invalid_graph' } : { pts }
+    // One stored point is a valid path (the graph contract sets no minimum, and a single-panel string stores
+    // exactly its panel's centre). It is validated above and has no segment, so it draws nothing.
+    return { pts: length === 1 ? [] : pts }
   }
 
   // The decoder receives a dense array of the same frame objects, read by index.
@@ -184,4 +186,12 @@ export function solarGraphOverlay(graph, options) {
     // Proxies, accessors and other malformed caller values cannot escape.
     return refused('invalid_graph')
   }
+}
+
+// The intake on the Viewer's canvas, from the override the Viewer reported and the base intake it is
+// given: the override when it was applied over that same base, else the base. The Viewer drops an
+// override one commit after its base changes, so an override reported over another base is gone.
+export function solarOverlayCanvasIntake(override, baseIntake) {
+  const applied = override != null && override.base === baseIntake ? override.intake : null
+  return applied || baseIntake || null
 }

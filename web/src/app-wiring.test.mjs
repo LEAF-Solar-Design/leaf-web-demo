@@ -26,6 +26,286 @@ import { createWorkspaceController } from './controllers/workspace/createWorkspa
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 
+describe('A1b-2 stored Solar graph wiring', () => {
+  const tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
+  const viewerSource = readFileSync(new URL('./components/Viewer.jsx', import.meta.url), 'utf8')
+  const viewerTree = parseJs(viewerSource, { sourceType: 'module', plugins: ['jsx'] })
+  const nodes = (root, predicate) => {
+    const found = []
+    csuWalk(root, node => { if (predicate(node)) found.push(node) })
+    return found
+  }
+  const calls = nodes(tree, node => node.type === 'CallExpression'
+    && node.callee.type === 'Identifier' && node.callee.name === 'useSolarGraphOverlay')
+  const text = (node, source = appSource) => source.slice(node.start, node.end)
+  const property = name => calls[0].arguments[0].properties.find(prop => csuKey(prop) === name)?.value
+  const overlaySource = readFileSync(new URL('./solar/solarGraphOverlay.js', import.meta.url), 'utf8')
+  const canvasNode = nodes(parseJs(overlaySource, { sourceType: 'module' }), node =>
+    node.type === 'FunctionDeclaration' && node.id?.name === 'solarOverlayCanvasIntake')[0]
+  const canvasIntake = Function(overlaySource.slice(canvasNode.start, canvasNode.end)
+    + '; return solarOverlayCanvasIntake')()
+  const evaluate = (node, scope) => Function(...Object.keys(scope), 'return (' + text(node) + ')')(...Object.values(scope))
+  const defaults = () => ({
+    studioGround: true, drafting: true, surfaceSlots: { toolbar: { profile: 'solar' } },
+    shown: { source: 'shown' }, intake: { source: 'original' }, drawingIntake: { source: 'displayed' },
+    consoleDrawingKey: 'console:D', isScopeCurrent: () => true,
+    drawingLoad: { state: 'seated', drawingId: 'D' }, REQUESTED_DRAWING_ID: 'D',
+    refreshFail: null, unreadableHead: null, activeIntake: { source: 'engine' },
+    viewerOverride: null, SOLAR_STARTER_EMPTY_INTAKE: { source: 'starter' },
+    solarOverlayCanvasIntake: canvasIntake,
+    engineDocument: { documentId: 'D-v1.dxf', documentOrigin: 'head', committedVersion: 7 },
+    engineDirty: false, drawing: { activeVersion: 7 },
+  })
+  const viewer = () => {
+    const found = nodes(tree, node => node.type === 'JSXElement' && node.openingElement.name.name === 'Viewer')
+    assert.equal(found.length, 1)
+    return found[0]
+  }
+  const propExpression = (element, name) => element.openingElement.attributes
+    .find(attr => attr.type === 'JSXAttribute' && attr.name.name === name)?.value?.expression
+
+  it('A1B2-W01 adapter uses the ten live inputs unconditionally', () => {
+    assert.equal(calls.length, 1)
+    const call = calls[0]
+    const declaration = nodes(tree, node => node.type === 'VariableDeclarator' && node.init === call)[0]
+    assert.equal(declaration?.id.type, 'ObjectPattern')
+    const block = nodes(tree, node => node.type === 'BlockStatement'
+      && node.body.some(statement => statement.type === 'VariableDeclaration' && statement.declarations.includes(declaration)))[0]
+    assert.ok(block, 'the hook is a direct declaration in the component body')
+    assert.ok(block.body.some(statement => statement.type === 'ReturnStatement'), 'not a nested callback')
+    const properties = call.arguments[0].properties
+    assert.deepEqual(properties.map(csuKey), ['enabled', 'shown', 'drawingKey', 'sceneCurrent',
+      'refreshPending', 'activeIntake', 'engineDocument', 'engineDirty', 'activeVersion', 'requestedDrawingId'])
+    const scope = defaults(), result = evaluate(call.arguments[0], scope)
+    assert.equal(result.shown, scope.shown)
+    assert.equal(result.activeIntake, scope.intake)
+    assert.equal(result.engineDocument, scope.engineDocument)
+    assert.equal(result.drawingKey, scope.consoleDrawingKey)
+    assert.equal(result.activeVersion, 7)
+    assert.equal(result.engineDirty, false)
+    assert.equal(result.enabled, true)
+    const version = { sentinel: 'uncoerced version' }
+    const normalized = evaluate(call.arguments[0], { ...scope, shown: undefined, activeIntake: undefined,
+      engineDocument: undefined, REQUESTED_DRAWING_ID: undefined, drawing: { activeVersion: version } })
+    assert.equal(normalized.shown, null)
+    assert.equal(normalized.activeIntake, scope.intake)
+    assert.equal(normalized.engineDocument, null)
+    assert.equal(normalized.requestedDrawingId, null)
+    assert.equal(normalized.activeVersion, version)
+    const index = block.body.findIndex(statement => statement.type === 'VariableDeclaration' && statement.declarations.includes(declaration))
+    assert.ok(text(block.body[index - 1]).includes('const drafting = surfaceSlots.chrome.cockpit'))
+    assert.ok(text(block.body[index + 1]).includes('solarOverlayStatusOf(solarOverlayReason)'))
+  })
+
+  it('A1B2-W02 current scene requires matching seated scope', () => {
+    const scope = defaults()
+    assert.equal(evaluate(property('sceneCurrent'), scope), true)
+    for (const state of ['pending', 'absent', 'failed', 'idle'])
+      assert.equal(evaluate(property('sceneCurrent'), { ...scope, drawingLoad: { state, drawingId: 'D' } }), false)
+    assert.equal(evaluate(property('sceneCurrent'), { ...scope, drawingLoad: { state: 'seated', drawingId: 'old' } }), false)
+    assert.equal(evaluate(property('sceneCurrent'), { ...scope, isScopeCurrent: () => false }), false)
+  })
+
+  it('A1B2-W03 refresh includes every unreadable head', () => {
+    const scope = defaults()
+    assert.equal(evaluate(property('refreshPending'), scope), false)
+    for (const unreadableHead of [{ pending: false }, { pending: true }, {}])
+      assert.equal(evaluate(property('refreshPending'), { ...scope, unreadableHead }), true)
+    assert.equal(evaluate(property('refreshPending'), { ...scope, refreshFail: {} }), true)
+  })
+
+  it('A1B2-W04 Viewer binding preserves independent results', () => {
+    const element = viewer(), solarOverlay = {}, overlay = { highlight_handles: [], markers: [], polylines: [] }
+    const scope = { solarOverlay, overlay, consoleDrawingKey: 'console:D' }
+    assert.equal(evaluate(propExpression(element, 'solarOverlay'), scope), solarOverlay)
+    assert.equal(evaluate(propExpression(element, 'drawingKey'), scope), scope.consoleDrawingKey)
+    assert.equal(evaluate(propExpression(element, 'highlightHandles'), scope), overlay.highlight_handles)
+    assert.equal(evaluate(propExpression(element, 'markers'), scope), overlay.markers)
+    assert.equal(evaluate(propExpression(element, 'overlayPolylines'), scope), overlay.polylines)
+    assert.equal(text(propExpression(element, 'intake')), 'intake ?? SOLAR_STARTER_EMPTY_INTAKE')
+    assert.equal(text(propExpression(element, 'ref')), 'intake ? viewerRef : solarStarterViewerRef')
+    assert.equal(text(propExpression(element, 'onIntakeOverride')), 'onViewerIntakeOverride')
+  })
+
+  it('A1B2-W05 status executes the production helper and JSX in both seats', () => {
+    const helper = nodes(tree, node => node.type === 'FunctionDeclaration' && node.id?.name === 'solarOverlayStatusOf')
+    assert.equal(helper.length, 1)
+    const reasonsSource = readFileSync(new URL('./solar/useSolarGraphOverlay.js', import.meta.url), 'utf8')
+    const reasonsTree = parseJs(reasonsSource, { sourceType: 'module' })
+    const reasonsNode = nodes(reasonsTree, node => node.type === 'VariableDeclarator'
+      && node.id.name === 'SOLAR_OVERLAY_REASONS')[0]
+    const reasons = Function('return (' + reasonsSource.slice(reasonsNode.init.start, reasonsNode.init.end) + ')')()
+    const statusOf = Function('SOLAR_OVERLAY_REASONS', text(helper[0]) + '; return solarOverlayStatusOf')(reasons)
+    const declaration = nodes(tree, node => node.type === 'VariableDeclarator' && node.id.name === 'solarOverlayStatus')[0]
+    const statusNodes = nodes(tree, node => node.type === 'JSXElement'
+      && node.openingElement.attributes.some(attr => attr.name?.name === 'data-testid'
+        && attr.value?.value === 'solar-graph-overlay-status'))
+    assert.equal(statusNodes.length, 1)
+    const seat = nodes(tree, node => node.type === 'JSXElement' && node.openingElement.name.name === 'SolarFlowSeat')[0]
+    assert.ok(seat.start < statusNodes[0].start && statusNodes[0].end < seat.end)
+    const container = seat.children.find(child => child.type === 'JSXExpressionContainer'
+      && child.expression.start <= statusNodes[0].start && child.expression.end >= statusNodes[0].end)
+    assert.ok(container)
+    const jsxCode = esbuild.transformSync('(' + text(container.expression) + ')',
+      { loader: 'jsx', jsxFactory: 'h' }).code
+    const h = (type, props, ...children) => ({ type, props: props || {}, children })
+    const renderStatus = Function('h', 'solarOverlayStatus', 'return ' + jsxCode)
+    const seatSource = readFileSync(new URL('./solar/SolarFlowSeat.jsx', import.meta.url), 'utf8')
+    const seatTree = parseJs(seatSource, { sourceType: 'module', plugins: ['jsx'] })
+    const seatFunction = nodes(seatTree, node => node.type === 'FunctionDeclaration')[0]
+    const seatCode = esbuild.transformSync(seatSource.slice(seatFunction.start, seatFunction.end),
+      { loader: 'jsx', jsxFactory: 'h' }).code
+    const renderSeat = Function('h', seatCode + '; return SolarFlowSeat')(h)
+    for (const [reason, expected] of [
+      ['invalid_graph', reasons.invalid_graph], ['invalid_scale', reasons.invalid_scale],
+      ['overlay_limit', reasons.overlay_limit], ['drawing_mismatch', reasons.drawing_mismatch],
+    ]) {
+      const status = evaluate(declaration.init, { solarOverlayStatusOf: statusOf, solarOverlayReason: reason })
+      assert.equal(status, expected)
+      const rendered = renderStatus(h, status)
+      assert.equal(rendered.type, 'p')
+      assert.deepEqual(rendered.props, { role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true',
+        className: 'solar-workspace-announce', 'data-testid': 'solar-graph-overlay-status' })
+      assert.equal(rendered.children.join(''), status)
+      assert.equal(renderSeat({ seated: false, children: rendered }), rendered)
+      assert.equal(renderSeat({ seated: true, children: rendered }).children[0], rendered)
+    }
+    for (const reason of ['refresh_pending', null, undefined, 'unknown', 'constructor', 'toString']) {
+      assert.equal(statusOf(reason), null)
+      assert.equal(renderStatus(h, statusOf(reason)), null)
+    }
+    assert.ok(appSource.includes('{unreadableHead && unreadableHead.pending && ('))
+    assert.ok(appSource.includes('{unreadableHead && !unreadableHead.pending && ('))
+    assert.ok(appSource.includes('{refreshFail && ('))
+  })
+
+  it('A1B2-W06 lifetime captures scene and layer ownership', () => {
+    const imports = nodes(viewerTree, node => node.type === 'ImportDeclaration'
+      && node.source.value === '../solar/solarGraphOverlayLayer.js')
+    assert.equal(imports.length, 1)
+    const effects = nodes(viewerTree, node => node.type === 'CallExpression' && node.callee.name === 'useEffect')
+    const solar = effects.find(effect => nodes(effect.arguments[0], node => node.type === 'CallExpression'
+      && node.callee.name === 'buildSolarGraphOverlayLayer').length)
+    assert.ok(solar)
+    assert.equal(text(solar.arguments[1], viewerSource),
+      '[solarOverlay?.polylines, solarOverlay?.intake, solarOverlay?.drawingKey, buildTick]')
+    const body = text(solar.arguments[0], viewerSource)
+    assert.ok(body.includes('s.intake !== solarOverlay.intake'))
+    assert.ok(body.includes('s.drawingKey !== solarOverlay.drawingKey'))
+    assert.ok(body.includes('solarOverlay.polylines.length === 0'))
+    assert.ok(body.includes('s.solarGroup.add(layer.group)'))
+    assert.ok(body.includes('layer.dispose()'))
+    assert.ok(body.includes('if (s.solarLayer === layer) s.solarLayer = null'))
+    assert.ok(!body.slice(body.indexOf('return () =>')).includes('stateRef.current'))
+    const build = effects.find(effect => text(effect.arguments[0], viewerSource).includes('new THREE.WebGLRenderer'))
+    const buildBody = text(build.arguments[0], viewerSource)
+    assert.ok(buildBody.includes('const solarGroup = new THREE.Group(); scene.add(solarGroup)'))
+    assert.ok(buildBody.includes('const sceneState ='))
+    assert.ok(buildBody.includes('solarGroup, solarLayer: null'))
+    const disposeAt = buildBody.indexOf('sceneState.solarLayer?.dispose()')
+    const clearAt = buildBody.indexOf('sceneState.solarLayer = null')
+    const traverseAt = buildBody.indexOf('scene.traverse((o)')
+    assert.ok(disposeAt >= 0, 'the scene owner disposes its Solar layer')
+    assert.ok(clearAt >= 0, 'the scene owner clears its Solar layer')
+    assert.ok(traverseAt >= 0, 'the generic disposal traversal exists')
+    assert.ok(disposeAt < traverseAt)
+    assert.ok(clearAt < traverseAt)
+    assert.ok(buildBody.includes('if (stateRef.current === sceneState) stateRef.current = null'))
+  })
+
+  it('A1B2-W07 source ownership uses shown and committed seating', () => {
+    assert.equal(text(property('shown')), 'shown ?? null')
+    assert.equal(text(property('activeVersion')), 'drawing.activeVersion')
+    assert.equal(text(property('activeIntake')),
+      'solarOverlayCanvasIntake(viewerOverride, intake ?? SOLAR_STARTER_EMPTY_INTAKE)')
+    assert.equal(text(property('activeIntake').arguments[1]), text(propExpression(viewer(), 'intake')))
+    const completed = nodes(tree, node => node.type === 'JSXAttribute' && node.name.name === 'onDrawingVersionChanged')
+    assert.ok(completed.length > 0)
+    assert.ok(completed.every(node => node.value.expression.name === 'seatCompletedVersion'))
+    const providers = nodes(tree, node => node.type === 'JSXElement'
+      && node.openingElement.attributes.some(attr => attr.name?.name === 'onDocumentChange'))
+    assert.ok(providers.some(provider => text(propExpression(provider, 'onDocumentChange')) === 'setEngineDocument'
+      && text(propExpression(provider, 'onDirtyChange')) === 'onEngineDirtyChange'))
+    assert.ok(appSource.includes('setActiveIntake(intake)'))
+    assert.ok(appSource.includes('setActiveIntake(null)'))
+  })
+
+  it('A1B2-W08 no extra renderer or drawing fetch is introduced', () => {
+    const builds = nodes(viewerTree, node => node.type === 'NewExpression'
+      && node.callee.type === 'MemberExpression' && node.callee.property.name === 'WebGLRenderer')
+    // One conditional, two spellings (transparent or opaque): both sit in the one scene-build effect.
+    assert.equal(builds.length, 2)
+    const effects = nodes(viewerTree, node => node.type === 'CallExpression' && node.callee.name === 'useEffect')
+    const build = effects.find(effect => effect.start <= builds[0].start && effect.end >= builds[0].end)
+    assert.ok(build && builds.every(made => build.start <= made.start && build.end >= made.end))
+    assert.equal(text(build.arguments[1], viewerSource),
+      '[activeIntake, paletteRevision === undefined ? colorForLayer : null, background, panelSculpture, sceneDrawingKey]')
+    assert.ok(viewerSource.includes('solarOverlay = null'))
+    const stageSource = readFileSync(new URL('./site/StageLayer.jsx', import.meta.url), 'utf8')
+    const stageTree = parseJs(stageSource, { sourceType: 'module', plugins: ['jsx'] })
+    const mounts = nodes(stageTree, node => node.type === 'JSXElement' && node.openingElement.name.name === 'Viewer')
+    assert.ok(mounts.length > 0)
+    assert.ok(mounts.every(mount => !propExpression(mount, 'solarOverlay')))
+    const rendererCalls = nodes(tree, node => node.type === 'NewExpression' && node.callee.property?.name === 'WebGLRenderer')
+    assert.equal(rendererCalls.length, 0)
+    assert.equal(nodes(calls[0].arguments[0], node => node.type === 'CallExpression'
+      && /fetch|load|read|project/i.test(node.callee.name || '')).length, 0)
+  })
+
+  it('A1B2-W09 the overlay is told what the Viewer shows, never a remembered engine intake', () => {
+    const argument = property('activeIntake')
+    assert.equal(nodes(argument, node => node.type === 'Identifier' && node.name === 'activeIntake').length, 0)
+    const engine = { source: 'engine' }, base = { source: 'original' }, other = { source: 'another base' }
+    const scope = { ...defaults(), intake: base }
+    const at = viewerOverride => evaluate(argument, { ...scope, viewerOverride })
+    assert.equal(at({ base, intake: engine }), engine)
+    assert.equal(at({ base: other, intake: engine }), base)
+    assert.equal(at({ base, intake: null }), base)
+    assert.equal(at(null), base)
+    assert.equal(at(undefined), base)
+    assert.equal(evaluate(argument, { ...scope, intake: undefined, viewerOverride: null }),
+      scope.SOLAR_STARTER_EMPTY_INTAKE)
+    const state = nodes(tree, node => node.type === 'VariableDeclarator' && node.id.type === 'ArrayPattern'
+      && node.id.elements[0]?.name === 'viewerOverride')
+    assert.equal(state.length, 1)
+    assert.equal(text(state[0]), '[viewerOverride, setViewerOverride] = useState(null)')
+    const declared = nodes(tree, node => node.type === 'VariableDeclarator' && node.id.name === 'onViewerIntakeOverride')
+    assert.equal(declared.length, 1)
+    assert.equal(declared[0].init.callee.name, 'useCallback')
+    assert.equal(text(declared[0].init.arguments[1]), '[]')
+    const stored = []
+    const report = evaluate(declared[0].init.arguments[0], { setViewerOverride: value => stored.push(value) })
+    report(engine, base)
+    report(null, base)
+    report(undefined, base)
+    assert.equal(stored.length, 3)
+    assert.deepEqual(Object.keys(stored[0]), ['base', 'intake'])
+    assert.equal(stored[0].base, base)
+    assert.equal(stored[0].intake, engine)
+    assert.equal(stored[1], null)
+    assert.equal(stored[2], null)
+    // Every write of the Viewer's override is reported beside it, with the base it sits over.
+    const writes = nodes(viewerTree, node => node.type === 'CallExpression' && node.callee.name === 'setInternalIntake')
+    assert.equal(writes.length, 2)
+    const effects = nodes(viewerTree, node => node.type === 'CallExpression' && node.callee.name === 'useEffect')
+    const reset = effects.filter(effect => text(effect.arguments[0], viewerSource).includes('setInternalIntake('))
+    assert.equal(reset.length, 1)
+    assert.equal(text(reset[0].arguments[0], viewerSource),
+      '() => { setInternalIntake(null); onIntakeOverrideRef.current?.(null, intake) }')
+    assert.equal(text(reset[0].arguments[1], viewerSource), '[intake]')
+    const handleAt = viewerSource.indexOf('applyVersion: (newIntake) => {')
+    assert.ok(handleAt >= 0)
+    const handle = viewerSource.slice(handleAt, viewerSource.indexOf('\n    },', handleAt))
+    const writeAt = handle.indexOf('setInternalIntake(newIntake)')
+    const reportAt = handle.indexOf('onIntakeOverrideRef.current?.(newIntake || null, baseIntakeRef.current)')
+    assert.ok(writeAt >= 0 && reportAt > writeAt)
+    assert.ok(viewerSource.includes('  onIntakeOverrideRef.current = onIntakeOverride\n'))
+    assert.ok(viewerSource.includes('  baseIntakeRef.current = intake\n'))
+    assert.equal(viewerSource.split('onIntakeOverrideRef.current?.(').length - 1, 2)
+  })
+})
+
+
 describe('S17 version-created toast Undo wiring', () => {
   const surfaces = [
     { name: 'App', source: appSource, completion: 'seatCompletedVersion', directCount: 3, undoHandler: 'undoCurrentVersion' },
@@ -1026,7 +1306,7 @@ function seatCssStructure(cssText) {
     if (css.startsWith('.solar-flow-seat', i)) occurrences.push({ index: i, headers: headers.slice() })
     if (css[i] === '{') {
       const header = css.slice(headerStart, i).trim()
-      rules.push({ header, headers: headers.slice() })
+      rules.push({ header, headers: headers.slice(), open: i })
       headers.push(header)
       headerStart = i + 1
     } else if (css[i] === '}') {
@@ -1057,6 +1337,31 @@ function seatRulePlacementFailures(cssText) {
         failures.push('rule must be inside unrestricted desktop media: ' + selector)
       }
     }
+  }
+  return failures
+}
+
+function seatChildRuleFailures(cssText) {
+  const selector = '.studio-shell .workspace-card .solar-flow-seat > *'
+  const css = maskSeatCss(cssText)
+  const { rules, failures } = seatCssStructure(cssText)
+  const matches = rules.filter(({ header }) => header === maskSeatCss(selector))
+  if (matches.length !== 1) return failures.concat('expected exactly one direct-child seat rule, found ' + matches.length)
+  const { headers, open } = matches[0]
+  if (headers.length !== 1 || headers[0] !== '@media (min-width: 981px)') {
+    failures.push('the direct-child seat rule must sit directly inside @media (min-width: 981px): ' + JSON.stringify(headers))
+  }
+  const close = css.indexOf('}', open + 1)
+  const body = close < 0 ? null : css.slice(open + 1, close).trim()
+  if (body !== 'flex: 0 0 auto;') failures.push('the direct-child seat rule must declare exactly flex: 0 0 auto; found ' + JSON.stringify(body))
+  // No other rule that names the seat may size a flex item: a later or more specific one would win the cascade.
+  const sizing = new Set(['flex', 'flex-grow', 'flex-shrink', 'flex-basis'])
+  for (const other of rules) {
+    if (other === matches[0] || other.header.startsWith('@')) continue
+    if (![other.header, ...other.headers].some((header) => header.includes('.solar-flow-seat'))) continue
+    const end = css.indexOf('}', other.open + 1)
+    const declared = (end < 0 ? '' : css.slice(other.open + 1, end)).split(';').map((part) => part.split(':')[0].trim().toLowerCase())
+    if (declared.some((name) => sizing.has(name))) failures.push('another seat rule sets a flex sizing property: ' + other.header)
   }
   return failures
 }
@@ -1520,6 +1825,48 @@ describe('Solar step rail wiring', () => {
     for (const { index, headers } of occurrences) {
       assert.ok(headers.some((header) => header.startsWith('@media ') && header.includes('min-width: 981px')), 'seat material outside desktop media at ' + index)
     }
+  })
+
+  it('SEAT wiring W8 the seat scrolls instead of shrinking a direct child', () => {
+    const source = readFileSync(new URL('./solar/solarFlow.css', import.meta.url), 'utf8')
+    assert.deepEqual(seatChildRuleFailures(source), [])
+    const rule = '.studio-shell .workspace-card .solar-flow-seat > * { flex: 0 0 auto; }'
+    const outer = '@media (min-width: 981px) {'
+    assert.equal(source.split(rule).length - 1, 1)
+    assert.equal(source.split(outer).length - 1, 1)
+    const without = source.replace(rule, '')
+    const swap = (body) => source.replace(rule, rule.replace('{ flex: 0 0 auto; }', body))
+    for (const [name, mutated] of [
+      ['rule removed', without],
+      ['rule outside media', without + '\n' + rule + '\n'],
+      ['outer media narrow only', source.replace(outer, '@media (max-width: 980px) {')],
+      ['outer media widened by a comma query', source.replace(outer, '@media (min-width: 981px), (orientation: portrait) {')],
+      ['rule nested in a narrow query', source.replace(rule, '@media (max-width: 980px) { ' + rule + ' }')],
+      ['second identical rule', source.replace(rule, rule + '\n' + rule)],
+      ['declaration changed', swap('{ flex: 1 1 auto; }')],
+      ['declaration removed', swap('{ }')],
+      ['declaration undone by a later one', swap('{ flex: 0 0 auto; flex-shrink: 1; }')],
+    ]) {
+      assert.ok(seatChildRuleFailures(mutated).length > 0, name)
+    }
+    assert.deepEqual(seatChildRuleFailures(source + '\n.probe::before { content: "{"; }\n'), [])
+    const seat = '.studio-shell .workspace-card .solar-flow-seat'
+    const after = (text) => source.replace(rule, rule + '\n' + text)
+    for (const [name, mutated] of [
+      ['a later twin spelled without the space', after(seat + ' >* { flex: 1 1 auto; }')],
+      ['a more specific child rule', after(seat + ' > .solar-workspace-announce { flex: 1 1 auto; }')],
+      ['a first-child rule', after(seat + ' > *:first-child { flex-shrink: 1; }')],
+      ['a descendant rule that also matches a direct child', after(seat + ' * { flex-grow: 1; }')],
+      ['a nested rule under the seat', after(seat + ' { & > * { flex-basis: 0; } }')],
+      ['a twin in a block that also applies below the boundary', source + '\n@media (min-width: 981px), (max-width: 980px) {\n' + seat + ' >* { flex: 0 0 auto; }\n}\n'],
+    ]) {
+      const found = seatChildRuleFailures(mutated)
+      assert.equal(found.length, 1, name)
+      assert.ok(found[0].startsWith('another seat rule sets a flex sizing property: '), name)
+    }
+    // The scan reads this stylesheet only, judges only rules that name the seat, and only the four sizing properties.
+    assert.deepEqual(seatChildRuleFailures(after(seat + ' .probe { flex-wrap: wrap; flex-direction: row; flex-flow: row; }')), [])
+    assert.deepEqual(seatChildRuleFailures(source + '\n.probe { flex: 1 1 auto; }\n'), [])
   })
 
   it('SEAT wiring W5 the overview yields in the narrow desktop band', () => {
