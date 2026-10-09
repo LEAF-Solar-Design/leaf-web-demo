@@ -27,7 +27,7 @@
  *     Membership keys rows by `member_id`. member_id === membership_id here,
  *     which is exactly what the revoke route wants back.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { humanizeError } from '../errorHumanize.js'
 import {
@@ -102,8 +102,15 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
   const [identities, setIdentities] = useState(null)
   const [identitiesStatus, setIdentitiesStatus] = useState('idle')
   const identitiesGenerationRef = useRef(0)
+  // What the COMMITTED hook shows. Written at commit, never during render: a
+  // render React abandons (a transition that suspends) reuses these same ref
+  // objects, and an assignment made while rendering would outlive it.
   const currentProjectRef = useRef(projectId)
-  currentProjectRef.current = projectId
+  const enabledRef = useRef(enabled)
+  useLayoutEffect(() => {
+    currentProjectRef.current = projectId
+    enabledRef.current = enabled
+  }, [enabled, projectId])
   // Keep sequences across project switches so returning to a project cannot
   // make an older response current again after a newer save was issued.
   const labelSaveSequencesRef = useRef(new Map())
@@ -134,7 +141,26 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
   // Bumped on every load and on unmount: a stale response must never overwrite
   // a newer one's state, and a resolved fetch after unmount must not set state.
   const generationRef = useRef(0)
-  useEffect(() => () => { generationRef.current += 1 }, [])
+  // True only while this instance is committed. Set and cleared in a LAYOUT
+  // effect: React runs a removed component's layout cleanup inside the commit
+  // that removes it and its passive cleanup in a later task, so a mutation
+  // resolving between the two would still read a passive flag as mounted.
+  // StrictMode's cleanup and second setup leave it true for the live instance.
+  const mountedRef = useRef(false)
+  useLayoutEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      generationRef.current += 1
+    }
+  }, [])
+  // A mutation's follow-up read belongs to the instance, project and enabled
+  // state it started under. Once any of them is gone the read is skipped: it
+  // would be a request nobody shows, and its generation bump would discard the
+  // newer project's own load.
+  const stillCurrent = useCallback((startedFor) => (
+    mountedRef.current && enabledRef.current && currentProjectRef.current === startedFor
+  ), [])
 
   // A REFETCH IS NOT A COLD LOAD. Mutations refetch on success, and dropping
   // status to 'loading' unmounted the very dialog that had just been handed its
@@ -194,10 +220,11 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
   // success renders post-mutation server truth. A failed mutation rethrows
   // untouched — the component that owns the affordance surfaces it.
   const runThenRefetch = useCallback(async (operation) => {
+    const startedFor = projectId
     const result = await operation()
-    await load({ refresh: true })
+    if (stillCurrent(startedFor)) await load({ refresh: true })
     return result
-  }, [load])
+  }, [load, projectId, stillCurrent])
 
   const bindingFor = useCallback(
     (memberId) => data.members.find((m) => m.member_id === memberId)?.binding_id || null,
@@ -221,7 +248,7 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
       const sequence = (labelSaveSequencesRef.current.get(saveKey) || 0) + 1
       labelSaveSequencesRef.current.set(saveKey, sequence)
       const result = await setIdentityDisplayName(data.project?.org_id, bindingId, displayName)
-      if (currentProjectRef.current !== projectId
+      if (!stillCurrent(projectId)
         || labelSaveSequencesRef.current.get(saveKey) !== sequence) return result
       // A read started before this saved row must not put its old label back.
       identitiesGenerationRef.current += 1
@@ -244,7 +271,7 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
     export: (options) => runThenRefetch(() => exportProject(projectId, options)),
     reset: () => runThenRefetch(() => resetProject(projectId)),
     remove: () => deleteProject(projectId), // no refetch: the project is gone
-  }), [bindingFor, data.project?.org_id, load, projectId, runThenRefetch])
+  }), [bindingFor, data.project?.org_id, load, projectId, runThenRefetch, stillCurrent])
 
   return { status, refreshing, error, refetch: load, actions, identities, identitiesStatus, loadIdentities, ...data }
 }
