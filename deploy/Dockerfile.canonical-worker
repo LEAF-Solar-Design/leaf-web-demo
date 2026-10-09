@@ -49,6 +49,9 @@ RUN pip install --no-cache-dir -r /app/platform/requirements.txt
 
 COPY server/ /app/server/
 COPY platform/ /app/platform/
+# The Solar project graph adapter reads da/store.py and the packaged graph schema.
+COPY da/ /app/da/
+COPY contract/ /app/contract/
 COPY scripts/canonical-container-smoke.py /app/scripts/canonical-container-smoke.py
 COPY deploy/autofill-solver-sources.json /app/deploy/autofill-solver-sources.json
 COPY --from=autofill_solver . /opt/leaf/autofill-solver/

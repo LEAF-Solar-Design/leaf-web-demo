@@ -1895,6 +1895,11 @@ def build_suites() -> List[Suite]:
               REPO / "platform", _py_pytest("tests/test_sip_r3a_graph.py"), 10,
               uses_database=True, db_gated=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
+        # Floor 4: the canonical worker image carries the Solar graph adapter's dependencies,
+        # da/ and the packaged schema, the release manifest fingerprints both copy roots, and
+        # the import gate judges every import by the file it resolves to.
+        Suite("server-sip-r4-runtime", "server canonical Solar worker runtime", "pytest", SERVER,
+              _py_pytest("tests/test_sip_r4_runtime.py"), 4),
         Suite("platform-sip-r2-publication", "platform fenced canonical publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r2_publication.py"), 17,
         uses_database=True, db_gated=True, database_skip_reasons=(
@@ -2926,7 +2931,7 @@ def build_suites() -> List[Suite]:
               # and database-catalog tests, none environment-gated.
               SCRIPTS_DIR, _py_pytest("test_gate_runner.py") +
               # sip-r3b-1 adds the canonical Solar tool registration row.
-              ["test_studio_walk_regression_gate.py"], 96),
+              ["test_studio_walk_regression_gate.py"], 97),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

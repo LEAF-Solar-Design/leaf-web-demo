@@ -85,7 +85,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
     assert suites["platform"].expected == 288
-    assert suites["gate-runner-selftest"].expected == 96
+    assert suites["gate-runner-selftest"].expected == 97
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -123,6 +123,20 @@ def test_sip_r3a_gate_registration():
         assert suite.allowed_skip_reasons == ()
         assert suite.database_skip_reasons == ((r"PostgreSQL integration test requires DATABASE_URL",) if database else ())
         assert suite_id in selection["mandatory_suite_ids"]
+
+
+def test_sip_r4_runtime_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    suite = suites["server-sip-r4-runtime"]
+    assert suite.cwd == REPO / "server"
+    assert suite.argv == runner._py_pytest("tests/test_sip_r4_runtime.py")
+    assert suite.kind == "pytest" and suite.expected == 4
+    assert suite.uses_database is False and suite.db_gated is False
+    assert suite.allowed_skip_reasons == () and suite.database_skip_reasons == ()
+    assert "server-sip-r4-runtime" in selection["mandatory_suite_ids"]
+    assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
 
 
 @pytest.mark.parametrize("text, expected", [
