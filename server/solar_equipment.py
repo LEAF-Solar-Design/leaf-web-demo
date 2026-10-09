@@ -7,7 +7,7 @@ import copy
 import math
 from datetime import datetime, timezone
 
-from solar_design_graph import GraphValidationError, _bounded_json, new_id, validate_graph
+from solar_design_graph import GraphValidationError, _bounded_json, entities, new_id, validate_graph
 from solar_sizing_client import compact_slot_tables, advance, checked_graph, require_sizing
 
 
@@ -66,8 +66,14 @@ def _validity(entity, reasons, refreshed=frozenset()):
                           previous["state"] if unresolved else "valid"}
 
 
-def equipment_candidate(graph, params):
-    """Return one isolated revision; the broker owns DWG creation and publication."""
+def equipment_candidate(graph, params, *, _creation=None):
+    """Return one isolated revision; the broker owns DWG creation and publication.
+
+    `_creation` is the canonical dispatcher's private channel: when given, an empty-ID
+    configuration takes the ID derived for its position in `equipment` and a new inverter
+    takes the parent's creation time, instead of a random UUID and the clock. A supplied
+    nonempty ID keeps its meaning exactly.
+    """
     _bounded_json(params)
     if (type(params) is not dict
             or set(params) - {"expected_rev", "equipment", "assignments", "cancel", "preview"}
@@ -85,18 +91,33 @@ def equipment_candidate(graph, params):
         raise GraphValidationError("INVALID_EQUIPMENT_REQUEST")
     previous = {item["id"]: item for item in result["inverters"]}
     inverters, numbers = {}, set()
-    for config in equipment:
+    occupied = None
+    if _creation is not None:
+        # Built once: every entity ID in the graph and every compact slot panel; each ID this
+        # candidate allocates (supplied or derived) joins it, so a derived ID never adopts one.
+        occupied = {entity["id"] for entity in entities(result)}
+        occupied.update(ref for table in tables.values() for ref in table.ids)
+    for index, config in enumerate(equipment):
         _configuration(config)
-        ref = config["id"] or new_id("inverter")
+        if config["id"]:
+            ref = config["id"]
+        elif _creation is None:
+            ref = new_id("inverter")
+        else:
+            ref = _creation["new_id"]("inverter", index, occupied)
         if ref in inverters or config["number"] in numbers:
             raise GraphValidationError("DUPLICATE_EQUIPMENT")
         numbers.add(config["number"])
+        if occupied is not None:
+            occupied.add(ref)
         item = copy.deepcopy(previous.get(ref))
         if item is None:
+            created_at = (datetime.now(timezone.utc).isoformat() if _creation is None
+                          else _creation["created_at"])
             item = {"id": ref, "kind": "inverter", "rev": result["rev"], "extra": {},
                     "validity": {"state": "valid", "reasons": []},
                     "provenance": {"created_by": "solar-assign-equipment",
-                                   "created_at": datetime.now(timezone.utc).isoformat(),
+                                   "created_at": created_at,
                                    "last_writer": "solar-assign-equipment", "source_rev": result["rev"]}}
         item.update(copy.deepcopy({key: value for key, value in config.items() if key != "id"}))
         item.update(is_l2=False, input_assignments=[])

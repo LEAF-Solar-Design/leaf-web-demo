@@ -29,11 +29,19 @@ SUPPORTED_TOOLS = frozenset((
     "solar-feeders",
     "solar-homeruns",
     "solar-schedule",
+    "solar-string-add",
+    "solar-assign-equipment",
 ))
 # Sizing runs only its pure manual-global branch here; every other mode needs stored
 # service evidence this path does not have and is refused before the builtin loads.
 SIZING_TOOL = "solar-size-strings"
 MANUAL_SIZING_MODE = "manual-global"
+# Tools that create entities. Their IDs and creation times derive from the exact parent
+# and normalized request, so preparation, publication and proof regenerate equal bytes.
+STRING_TOOL = "solar-string-add"
+STRING_OPERATION = "add-string"
+CREATION_TOOLS = frozenset((STRING_TOOL, "solar-assign-equipment"))
+CREATION_SCHEMA = "leaf.solar-project-creation.v1"
 
 
 def _sha(raw):
@@ -177,6 +185,44 @@ def _parameters(context, params):
     return normalized
 
 
+def _creation_id(context, tool, params, kind, index):
+    """One derived entity ID: a pure function of the parent, the request and the slot."""
+    raw = local.canonical_bytes({
+        "schema": CREATION_SCHEMA,
+        "organization_id": str(context.organization_id),
+        "project_id": str(context.project_id),
+        "drawing_id": str(context.drawing_id),
+        "parent_version_id": str(context.parent_version_id),
+        "parent_intake_sha256": context.intake_sha256,
+        "created_at": context.created_at,
+        "tool": tool,
+        "parameters": params,
+        "kind": kind,
+        "index": index,
+    })
+    return "leaf:" + kind + ":" + str(UUID(bytes=hashlib.sha256(raw).digest()[:16], version=4))
+
+
+def _creation(context, tool, params):
+    """The private creation inputs a creating builtin consumes in place of UUIDs and the clock.
+
+    `created_at` is the exact parent's stored timestamp. `new_id(kind, index, occupied)` returns
+    `_creation_id` for that slot, or refuses DUPLICATE_APPLICATION_ID when the derived ID is
+    already in `occupied` (every entity ID in the graph plus IDs allocated earlier in this
+    candidate), so a derived ID never overwrites or adopts an existing entity. `params` is
+    copied here, so nothing the builtin does later can move a derived ID. Holds no shared state.
+    """
+    frozen = copy.deepcopy(params)
+
+    def new_id(kind, index, occupied):
+        ref = _creation_id(context, tool, frozen, kind, index)
+        if ref in occupied:
+            raise GraphValidationError("DUPLICATE_APPLICATION_ID")
+        return ref
+
+    return {"created_at": context.created_at, "new_id": new_id}
+
+
 def _run_builtin(context, tool, graph, params, trusted, job_id):
     """The canonical builtin dispatcher; it never reaches an outbound service."""
     if tool == SIZING_TOOL:
@@ -184,6 +230,13 @@ def _run_builtin(context, tool, graph, params, trusted, job_id):
             raise project.ProjectContextError("SIP_R3_SERVICE_EVIDENCE_REQUIRED")
         return local._load_builtin(tool).run_bound(
             graph, params, tenant_id=str(context.organization_id), job_id=str(job_id))
+    if tool in CREATION_TOOLS:
+        # Only the single add is admitted here; any other string operation stays unsupported.
+        if tool == STRING_TOOL and (type(params) is not dict
+                                    or params.get("operation") != STRING_OPERATION):
+            raise GraphValidationError("INVALID_STRING_ADD_REQUEST")
+        return local._load_builtin(tool).run(graph, params, **trusted,
+                                             _creation=_creation(context, tool, params))
     return local._load_builtin(tool).run(graph, params, **trusted)
 
 

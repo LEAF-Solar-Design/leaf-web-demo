@@ -1891,6 +1891,16 @@ def build_suites() -> List[Suite]:
               REPO / "platform", _py_pytest("tests/test_sip_r3b_tools.py"), 7,
               uses_database=True, db_gated=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
+        # sip-r3b-2: deterministic string and equipment creation; planned acceptance counts.
+        Suite("server-sip-r3b-chain", "server canonical Solar deterministic creation",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r3b_chain.py"), 12),
+        Suite("platform-sip-r3b-chain", "platform canonical Solar deterministic creation",
+              "pytest", REPO / "platform",
+              _py_pytest("tests/test_sip_r3b_chain.py"), 6,
+              uses_database=True, db_gated=True,
+              database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",
+              )),
         Suite("platform-sip-r3a-graph", "platform canonical Solar graph publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r3a_graph.py"), 10,
               uses_database=True, db_gated=True, database_skip_reasons=(
@@ -2221,7 +2231,8 @@ def build_suites() -> List[Suite]:
         # against a pristine database, and an unreachable DB is a FAIL row.
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               # sip-r3b-1 adds seven canonical Solar publication rows.
-              _py_pytest(f"{repo_name}/platform/tests"), 288, db_gated=True,
+              # sip-r3b-2 adds six deterministic creation rows.
+              _py_pytest(f"{repo_name}/platform/tests"), 294, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -2931,6 +2942,7 @@ def build_suites() -> List[Suite]:
               # and database-catalog tests, none environment-gated.
               SCRIPTS_DIR, _py_pytest("test_gate_runner.py") +
               # sip-r3b-1 adds the canonical Solar tool registration row.
+              # sip-r3b-2 adds the deterministic creation registration row.
               ["test_studio_walk_regression_gate.py"], 97),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
