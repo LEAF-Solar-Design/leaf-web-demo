@@ -85,6 +85,9 @@ export function ProjectBoardGround({
             {themeToggle}
           </header>
         )}
+        {typeof actions?.onOpenSettings === 'function' && (
+          <button type="button" onClick={actions.onOpenSettings}>Project settings</button>
+        )}
         {panel}
         {worldSpace ? (
           <WorldSpaceBoard key={workspaceProject?.project_id || 'anonymous'} scopeId={workspaceProject?.project_id || 'anonymous'} viewport={win} store={store}>

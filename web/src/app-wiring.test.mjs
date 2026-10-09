@@ -22,6 +22,7 @@ import {
   stageRunIntent, confirmRunIntent, dismissRunIntent,
 } from './runIntent.js'
 import { slashDecision, alternativeDecision } from './controllers/catalog/catalogRouting.js'
+import { createWorkspaceController } from './controllers/workspace/createWorkspaceController.js'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
 
@@ -244,6 +245,7 @@ describe('project board live pane wiring', () => {
       mock: 'mock', signedIn: 'signedIn', sessionStatus: 'session.status',
       projectId: 'openProjectId', drawingId: 'drawingState?.drawing_id',
       sessionId: 'agentSessionId',
+      lifecycleEnabled: 'ENV_LIFECYCLE_UI', settingsDestination: 'settingsDestination',
       ...Object.fromEntries(identities.map((name) => [name, name])),
     })
     const scope = {
@@ -256,6 +258,7 @@ describe('project board live pane wiring', () => {
       annotationSource: 'annotation-source', annotationDestination: 'annotation-board',
       authorSource: 'author-source', authorDestination: 'author-board',
       authorFallback: 'author-fallback',
+      ENV_LIFECYCLE_UI: true, settingsDestination: 'settings-board',
       ...patch,
       deriveBoardPaneSeats: productionDerivation(),
     }
@@ -425,6 +428,168 @@ describe('project board live pane wiring', () => {
     assert.equal(author.authorTarget, 'author-fallback')
   })
 
+  function lifecycleAdapter(scope) {
+    const init = declaration('onLifecycleProjectDeleted').init
+    assert.equal(init.callee.name, 'useCallback')
+    assert.equal(source(init.arguments[1]), '[workspaceController, onCloseProject, showToast]')
+    const callback = source(init.arguments[0])
+    for (const forbidden of ['rehydrate', 'onOpenProject', 'openProject(']) {
+      assert.ok(!callback.includes(forbidden))
+    }
+    return evaluate(init.arguments[0], scope)
+  }
+  async function deletionFixture() {
+    const calls = { close: [], pane: [], job: [], toast: [], open: [], list: [] }
+    let resolveList, rejectList
+    const list = new Promise((resolve, reject) => { resolveList = resolve; rejectList = reject })
+    const controller = createWorkspaceController({
+      storage: { getItem: () => 'org-a' },
+      services: {
+        openProject: async (id) => { calls.open.push(id); return { project: { project_id: id } } },
+        listProjects: (org) => { calls.list.push(org); return list },
+      },
+    })
+    await controller.openProject('A')
+    controller.selectCanonicalVersion('version-a')
+    calls.open.length = 0
+    const scope = {
+      workspaceController: controller,
+      onCloseProject: () => { calls.close.push(true); controller.closeProject() },
+      setProjectPane: (value) => calls.pane.push(value),
+      setBoardJob: (value) => calls.job.push(value),
+      showToast: (value) => calls.toast.push(value),
+    }
+    return { controller, calls, adapter: lifecycleAdapter(scope), resolveList, rejectList }
+  }
+  function assertClosed(fixture, text) {
+    const { controller, calls } = fixture
+    const snapshot = controller.getSnapshot()
+    for (const key of ['openProjectId', 'workspace', 'canonicalVersionId']) assert.equal(snapshot[key], null)
+    assert.equal(snapshot.workspaceLoading, false)
+    assert.deepEqual(calls.close, [true])
+    assert.deepEqual(calls.pane, [null])
+    assert.deepEqual(calls.job, [null])
+    assert.deepEqual(calls.toast, [{ text }])
+    assert.deepEqual(calls.list, ['org-a'])
+    assert.deepEqual(calls.open, [])
+  }
+  it('BI03-14 Deleting the current project closes it and preserves its receipt', async () => {
+    const fixture = await deletionFixture()
+    assert.ok(fixture.controller.getSnapshot().workspace)
+    fixture.adapter('A', 'receipt-a')
+    assertClosed(fixture, 'Project deleted. Receipt: receipt-a')
+    fixture.resolveList([])
+    await Promise.resolve()
+    assertClosed(fixture, 'Project deleted. Receipt: receipt-a')
+  })
+  it('BI03-16 A late deletion cannot close the newly opened project', async () => {
+    for (const current of ['B', null]) {
+      const fixture = await deletionFixture()
+      if (current) await fixture.controller.openProject(current)
+      else fixture.controller.closeProject()
+      fixture.calls.open.length = 0
+      const before = fixture.controller.getSnapshot()
+      fixture.adapter('A', 'receipt-a')
+      assert.equal(fixture.controller.getSnapshot().openProjectId, current)
+      assert.equal(fixture.controller.getSnapshot().workspace, before.workspace)
+      for (const key of ['close', 'pane', 'job', 'open']) assert.deepEqual(fixture.calls[key], [])
+      assert.deepEqual(fixture.calls.toast, [{ text: 'Project deleted. Receipt: receipt-a' }])
+      assert.deepEqual(fixture.calls.list, ['org-a'])
+      fixture.resolveList([])
+      await Promise.resolve()
+      assert.equal(fixture.controller.getSnapshot().openProjectId, current)
+    }
+  })
+  it('BI03-22 Deletion without a receipt invents no receipt', async () => {
+    const fixture = await deletionFixture()
+    fixture.adapter('A', null)
+    assertClosed(fixture, 'Project deleted.')
+    fixture.resolveList([])
+    await Promise.resolve()
+  })
+  it('BI03-23 Project-list refresh does not restore the deleted project', async () => {
+    for (const fails of [false, true]) {
+      const fixture = await deletionFixture()
+      fixture.adapter('A', 'receipt-a')
+      assertClosed(fixture, 'Project deleted. Receipt: receipt-a')
+      if (fails) fixture.rejectList(new Error('List unavailable'))
+      else fixture.resolveList([{ project_id: 'B', name: 'Other project' }])
+      await Promise.resolve()
+      await Promise.resolve()
+      assertClosed(fixture, 'Project deleted. Receipt: receipt-a')
+      assert.equal(fixture.controller.getSnapshot().projectsLoading, false)
+      if (fails) assert.equal(fixture.controller.getSnapshot().projectsError, 'List unavailable')
+      else assert.deepEqual(fixture.controller.getSnapshot().projects.map((p) => p.project_id), ['B'])
+    }
+  })
+  it('BI03-18 App owns one keyed lifecycle seat behind the flag-first fence', () => {
+    const panels = elements('ProjectLifecyclePanel')
+    assert.equal(panels.length, 1)
+    const panel = panels[0]
+    assert.deepEqual(panel.openingElement.attributes.map((attr) => attr.name.name),
+      ['projectId', 'projectName', 'onProjectDeleted'])
+    for (const [name, value] of Object.entries({ projectId: 'openProjectId',
+      projectName: 'currentProjectName', onProjectDeleted: 'onLifecycleProjectDeleted' })) binding(panel, name, value)
+    const seat = elements('PersistentSeat').find((item) => item.children.includes(panel))
+    assert.ok(seat)
+    binding(seat, 'key', 'openProjectId')
+    binding(seat, 'destination', 'paneSeats.settingsTarget')
+    guard('ProjectLifecyclePanel', 'ENV_LIFECYCLE_UI && paneSeats.lifecycleEligible')
+    assert.ok(source(ownerExpression('ProjectLifecyclePanel')).startsWith('ENV_LIFECYCLE_UI &&'))
+    assert.ok(!source(elements('ProjectWorkspacePanels')[0]).includes('ProjectLifecyclePanel'))
+    csuWalk(tree, (node) => {
+      if (node.type === 'CallExpression' && node.callee.name === 'createPortal') {
+        assert.ok(!(node.start < seat.start && node.end > seat.end), 'lifecycle is outside board portal')
+      }
+    })
+    for (const name of ['useProjectLifecycle', 'getProjectLifecycle', 'getOrgIdentities', 'onLoadIdentities']) {
+      assert.ok(!appSource.includes(name), `App does not own ${name}`)
+    }
+    assert.ok(appSource.includes('setProjectContext(openProjectId || null)'))
+  })
+  it('BI03-19 App binds the Settings action slot and eligibility inputs', () => {
+    const grounds = elements('SurfaceGrounds')[0]
+    const actions = expression(grounds, 'actions')
+    assert.equal(source(actions.test), "surfaceSlots.ground === 'board'")
+    const open = actions.consequent.properties.find((prop) => csuKey(prop) === 'onOpenSettings').value
+    assert.equal(source(open.test), 'paneSeats.lifecycleEligible')
+    assert.equal(source(open.alternate), 'undefined')
+    const calls = []
+    evaluate(open.consequent, { setProjectPane: (value) => calls.push(value) })()
+    assert.deepEqual(calls, ['settings'])
+    // The branch is pinned, not the text: the reason selects the sentence and its absence selects the destination.
+    const settingsSlot = expression(elements('ProjectWorkspacePanels')[0], 'slots').properties
+      .find((prop) => csuKey(prop) === 'settings').value
+    assert.equal(settingsSlot.type, 'ConditionalExpression')
+    assert.equal(source(settingsSlot.test), 'paneSeats.settingsReason')
+    assert.equal(source(settingsSlot.consequent), '<p>{paneSeats.settingsReason}</p>')
+    assert.equal(source(settingsSlot.alternate), '<div ref={setSettingsDestination} />')
+    assert.deepEqual(slotRefs('settings'), ['setSettingsDestination'])
+    const seats = appSeats({ projectPane: 'settings', drawingState: null, agentSessionId: null,
+      canConverse: false, agentMode: null })
+    assert.equal(seats.lifecycleEligible, true)
+    assert.equal(seats.settingsTarget, 'settings-board')
+    assert.equal(seats.settingsReason, null)
+  })
+  it('BI03-20 App preserves existing owners and declares the new totals', () => {
+    for (const name of ['ProjectWorkspacePanels', 'ConversePanel', 'AuthorPanel',
+      'AnnotationDecisionCard', 'ProjectLifecyclePanel']) assert.equal(elements(name).length, 1, name)
+    assert.equal(elements('PersistentSeat').length, 3)
+    assert.deepEqual(expression(elements('ProjectWorkspacePanels')[0], 'slots').properties.map(csuKey),
+      ['catalog', 'conversation', 'annotations', 'authoring', 'settings'])
+    const actions = expression(elements('SurfaceGrounds')[0], 'actions').consequent
+    assert.deepEqual(actions.properties.map(csuKey), ['transferProjectId', 'transferStatus', 'onTransferVersion',
+      'onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability', 'onOpenSettings'])
+    const bindings = objectBindings(actions)
+    for (const [key, expected] of Object.entries({
+      onOpenDrawing: "() => setProjectPane('material')", onOpenVersion: "() => setProjectPane('versions')",
+      onOpenJob: "(job) => { setBoardJob(job); setProjectPane('jobs') }",
+      onOpenTool: "() => setProjectPane('tools')",
+      onOpenFamily: "(family) => { setFamilyOpen(family.family_id, true); setNavExpanded(true); setProjectPane('catalog') }",
+      onOpenCapability: '(capability) => setProjectPane(paneForCapability(capability))',
+    })) assert.equal(bindings[key], expected)
+  })
+
   function slotRefs(name) {
     assert.equal(elements('ProjectWorkspacePanels').length, 1)
     const slots = expression(elements('ProjectWorkspacePanels')[0], 'slots')
@@ -440,6 +605,7 @@ describe('project board live pane wiring', () => {
     assert.deepEqual(slotRefs('conversation'), ['setConversationDestination'])
     assert.deepEqual(slotRefs('annotations'), ['setAnnotationDestination'])
     assert.deepEqual(slotRefs('authoring'), ['setAuthorDestination'])
+    assert.deepEqual(slotRefs('settings'), ['setSettingsDestination'])
   })
   it('A2-32 opens the author and the rail only while Authoring is the eligible board pane', () => {
     const effects = []
@@ -2716,8 +2882,9 @@ describe('App.jsx wiring', () => {
       const mount = new RegExp('<' + component + '\\s[\\s\\S]*?/>|<' + component + '\\s[\\s\\S]*?>')
       // J1 gives the ground nested JSX panel props; its first /> now closes
       // ProjectStartPanel, not SurfaceGrounds. Read through the portal argument.
+      // Read through to the portal argument because the slots carry their own '/>,'.
       const source = component === 'SurfaceGrounds'
-        ? appNoComments.match(/<SurfaceGrounds\s[\s\S]*?\/>,/)?.[0]
+        ? appNoComments.match(/<SurfaceGrounds\s[\s\S]*?\/>,\s*studioGround,/)?.[0]
         : appNoComments.match(mount)?.[0]
       assert.ok(source, component + ' mount exists')
       assert.match(source, new RegExp('studioPresentation=\\{Boolean\\(studioGround\\)\\}'))

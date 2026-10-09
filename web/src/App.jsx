@@ -166,6 +166,8 @@ import { resumeHref } from './components/ConversationList.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from './components/LiveRegion.jsx'
 import ConversePanel from './components/ConversePanel.jsx'
 import AuthorPanel from './components/AuthorPanel.jsx'
+import ProjectLifecyclePanel from './projects/ProjectLifecyclePanel.jsx'
+import { ENV_LIFECYCLE_UI } from './projects/flag.js'
 import {
   THRESHOLDS, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
@@ -851,6 +853,7 @@ export default function App() {
   const [authorSource, setAuthorSource] = useState(null)
   const [authorDestination, setAuthorDestination] = useState(null)
   const [authorFallback, setAuthorFallback] = useState(null)
+  const [settingsDestination, setSettingsDestination] = useState(null)
   const [boardJob, setBoardJob] = useState(null)
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
   const boardPreviewRunRef = useRef(null)
@@ -858,6 +861,19 @@ export default function App() {
     setProjectPane(null)
     setBoardJob(null)
   }, [openProjectId])
+  const onLifecycleProjectDeleted = useCallback((projectId, receiptId) => {
+    if (projectId && workspaceController.getSnapshot().openProjectId === projectId) {
+      onCloseProject()
+      setProjectPane(null)
+      setBoardJob(null)
+    }
+    showToast({
+      text: receiptId
+        ? `Project deleted. Receipt: ${receiptId}`
+        : 'Project deleted.',
+    })
+    void workspaceController.loadProjects()
+  }, [workspaceController, onCloseProject, showToast])
   // What the panels/legend/selection reflect: a read-only version PREVIEW wins,
   // else the applied write-loop version, else the base intake.
   // The MOUNTED DRAWING's own name — deliberately NOT called a project. It is
@@ -3080,6 +3096,8 @@ export default function App() {
     boardHostsProject, projectPane, canConverse, agentMode, authorOpen,
     conversationSource, conversationDestination, annotationSource,
     annotationDestination, authorSource, authorDestination, authorFallback,
+    lifecycleEnabled: ENV_LIFECYCLE_UI,
+    settingsDestination,
   })
   const {
     boardPaneContext, boardConversation, boardAnnotations, boardAuthor,
@@ -4186,6 +4204,9 @@ export default function App() {
               onOpenTool: () => setProjectPane('tools'),
               onOpenFamily: (family) => { setFamilyOpen(family.family_id, true); setNavExpanded(true); setProjectPane('catalog') },
               onOpenCapability: (capability) => setProjectPane(paneForCapability(capability)),
+              onOpenSettings: paneSeats.lifecycleEligible
+                ? () => setProjectPane('settings')
+                : undefined,
             } : undefined}
             panel={surfaceSlots.ground === 'board' ? <>
               {!mock && signedIn && !openProjectId && <ProjectStartPanel
@@ -4225,6 +4246,9 @@ export default function App() {
                     <AnnotationPaneState annotations={annotations}><div ref={setAnnotationDestination} /></AnnotationPaneState>
                   </BoardPaneState>,
                   authoring: <BoardPaneState pane="authoring" context={boardPaneContext}><div ref={setAuthorDestination} /></BoardPaneState>,
+                  settings: paneSeats.settingsReason
+                    ? <p>{paneSeats.settingsReason}</p>
+                    : <div ref={setSettingsDestination} />,
                 }}
                 onOpenVersion={(version) => selectCanonicalVersion(version.version_id)}
                 onSelectJob={setBoardJob}
@@ -4998,6 +5022,16 @@ export default function App() {
               notLinked={claudeNotLinked}
               onLinkClaude={() => setClaudeOpen(true)}
               buildEntitled={canBuild}
+            />
+          </PersistentSeat>
+        )}
+
+        {ENV_LIFECYCLE_UI && paneSeats.lifecycleEligible && (
+          <PersistentSeat key={openProjectId} destination={paneSeats.settingsTarget}>
+            <ProjectLifecyclePanel
+              projectId={openProjectId}
+              projectName={currentProjectName}
+              onProjectDeleted={onLifecycleProjectDeleted}
             />
           </PersistentSeat>
         )}

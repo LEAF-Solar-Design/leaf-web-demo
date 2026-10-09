@@ -18,7 +18,8 @@
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useEffect, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 
 vi.mock('./api.js', () => ({
@@ -36,10 +37,12 @@ vi.mock('./api.js', () => ({
 
 vi.mock('./flag.js', () => ({ ENV_LIFECYCLE_UI: true }))
 
-import { cloneProject, deleteProject, exportProject, getOrgIdentities, getProjectLifecycle, inviteMember, resetProject, setIdentityDisplayName } from './api.js'
+import { cloneProject, deleteProject, exportProject, getOrgIdentities, getProjectLifecycle, inviteMember, resetProject, revokeMember, setIdentityDisplayName } from './api.js'
 import { renderHook } from '@testing-library/react'
 import useProjectLifecycle from './useProjectLifecycle.js'
 import ProjectLifecyclePanel from './ProjectLifecyclePanel.jsx'
+import ProjectWorkspacePanels, { deriveBoardPaneSeats, PersistentSeat } from '../workspace/ProjectWorkspacePanels.jsx'
+import { ProjectBoardGround } from '../site/ProjectBoardGround.jsx'
 
 afterEach(cleanup)
 
@@ -395,9 +398,23 @@ describe('ToolCast mounts the lifecycle block behind the exact ratified gate', (
     }
   })
 
-  it('is the only ProjectLifecyclePanel mount, and ProjectList is gone from the tree', () => {
+  it('ToolCast is the only ProjectLifecyclePanel mount in its source, and ProjectList is gone', () => {
     expect(source.match(/<ProjectLifecyclePanel/g).length).toBe(1)
     expect(source).not.toContain('ProjectList')
+  })
+
+  it('BI03-21 ToolCast retains its lifecycle mount and fences', () => {
+    expect(source.match(/<ProjectLifecyclePanel/g).length).toBe(1)
+    expect(source).not.toContain('ProjectList')
+    const mount = source.slice(source.indexOf("{ENV_LIFECYCLE_UI && leftView === 'workspace'"))
+      .split('/>')[0]
+    for (const fence of ['!PUBLIC_DEMO', '!transportMock', 'canOperate', 'workspace.openProjectId']) {
+      expect(mount).toContain(fence)
+    }
+    for (const prop of ['projectId={workspace.openProjectId}', 'projectName={currentProjectName}',
+      'onProjectDeleted={forgetDeletedProject}']) expect(mount).toContain(prop)
+    expect(source).toContain('const workspaceServices = { createOrg, listProjects, createProject, openProject }')
+    expect(source).not.toContain('createBlankProject')
   })
 
   // The blank-project factory mints the owner membership binding the lifecycle
@@ -410,5 +427,343 @@ describe('ToolCast mounts the lifecycle block behind the exact ratified gate', (
     expect(source).toContain('const workspaceServices = { createOrg, listProjects, createProject, openProject }')
     expect(source).not.toContain('createProject: createBlankProject')
     expect(source).not.toContain('createBlankProject')
+  })
+})
+
+// The real owner stays at one React position; pane and surface changes move
+// the production PersistentSeat's container rather than reconstructing it.
+function ObservedLifecycle({ counts, ...props }) {
+  useEffect(() => {
+    counts.mounts += 1
+    return () => { counts.unmounts += 1 }
+  }, [counts])
+  return <ProjectLifecyclePanel {...props} />
+}
+
+function LifecycleBoard({ counts, onProjectDeleted, surface = 'board', initialPane = null, ...patch }) {
+  const [pane, setPane] = useState(initialPane)
+  const [destination, setDestination] = useState(null)
+  const inputs = {
+    lifecycleEnabled: true, mock: false, signedIn: true, sessionStatus: 'active',
+    projectId: PROJECT_ID, drawingId: null, canonicalVersionId: null,
+    sessionId: null, canConverse: false, agentMode: null,
+    ...patch, boardHostsProject: surface === 'board', projectPane: pane,
+    settingsDestination: destination,
+  }
+  const seats = deriveBoardPaneSeats(inputs)
+  return <>
+    {surface === 'board' && <ProjectBoardGround active worldSpace={false}
+      actions={{ onOpenSettings: seats.lifecycleEligible ? () => setPane('settings') : undefined,
+        onOpenCapability: setPane }}
+      panel={<ProjectWorkspacePanels pane={pane} onBack={() => setPane(null)}
+        slots={{ settings: seats.settingsReason ? <p>{seats.settingsReason}</p> : <div ref={setDestination} /> }} />} />}
+    {inputs.lifecycleEnabled && seats.lifecycleEligible &&
+      <PersistentSeat key={inputs.projectId} destination={seats.settingsTarget}>
+        <ObservedLifecycle counts={counts} projectId={inputs.projectId}
+          projectName={inputs.projectId === PROJECT_ID ? 'Rooftop Array' : 'Project B'}
+          onProjectDeleted={onProjectDeleted} />
+      </PersistentSeat>}
+  </>
+}
+
+describe('board Settings lifecycle seating', () => {
+  beforeEach(() => {
+    for (const transport of [getProjectLifecycle, getOrgIdentities, cloneProject, exportProject,
+      deleteProject, inviteMember, revokeMember, resetProject, setIdentityDisplayName]) transport.mockReset()
+    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, org_id: 'org-a' } })
+    getOrgIdentities.mockResolvedValue({ identities: [{ binding_id: 'binding-new', label: 'New member' }] })
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  function mountBoard(patch = {}) {
+    const counts = { mounts: 0, unmounts: 0 }
+    const deleted = vi.fn()
+    const view = render(<LifecycleBoard counts={counts} onProjectDeleted={deleted} {...patch} />)
+    return { ...view, counts, deleted,
+      update: (next) => view.rerender(<LifecycleBoard counts={counts} onProjectDeleted={deleted} {...patch} {...next} />) }
+  }
+  async function openSettings() {
+    fireEvent.click(screen.getByRole('button', { name: 'Project settings' }))
+    return screen.findByTestId('membership-panel')
+  }
+  function leaveSettings() {
+    fireEvent.click(screen.getByRole('button', { name: 'Back to board' }))
+  }
+  function openDeleteDraft(value = 'partial project name') {
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    const input = screen.getByLabelText('Type the project name to confirm delete')
+    fireEvent.change(input, { target: { value } })
+    return input
+  }
+  function expectSilent() {
+    expect(getProjectLifecycle).not.toHaveBeenCalled()
+    expect(getOrgIdentities).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('projects-surface')).toBeNull()
+    for (const name of ['Clone project', 'Export project', 'Delete', 'Reset']) {
+      expect(screen.queryByRole('button', { name })).toBeNull()
+    }
+  }
+
+  it('BI03-02 Settings contains the real lifecycle surface', async () => {
+    mountBoard()
+    await openSettings()
+    expect(screen.getByTestId('projects-surface').closest('[data-pane="settings"]')).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'Membership' })).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'Project timeline' })).toBeTruthy()
+    for (const name of ['Clone project', 'Export project', 'Reset', 'Delete']) {
+      expect(screen.getByRole('button', { name })).not.toBeDisabled()
+    }
+    expect(screen.queryByText('Settings is not mounted on this surface.')).toBeNull()
+  })
+
+  it('BI03-03 An open project needs no drawing or conversation', async () => {
+    const view = mountBoard()
+    // The owner loads while still detached, before the first visit to Settings.
+    await waitFor(() => expect(getProjectLifecycle).toHaveBeenCalledTimes(1))
+    expect(screen.queryByTestId('projects-surface')).toBeNull()
+    await openSettings()
+    expect(getProjectLifecycle).toHaveBeenCalledWith(PROJECT_ID)
+    expect(getProjectLifecycle).toHaveBeenCalledTimes(1)
+    expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
+    expect(screen.getByLabelText('Role for Member bbbbbbbb')).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Revoke Member bbbbbbbb' })).not.toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Load organization members' }))
+    await screen.findByRole('option', { name: 'New member' })
+    expect(screen.getByRole('button', { name: 'Clone project' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Export project' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Delete' })).not.toBeDisabled()
+  })
+
+  it('BI03-04 Flag off leaves lifecycle unmounted and silent', () => {
+    const view = mountBoard({ lifecycleEnabled: false, initialPane: 'settings' })
+    expectSilent()
+    expect(view.counts.mounts).toBe(0)
+    expect(screen.getByText('Project settings are unavailable in this build.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Project settings' })).toBeNull()
+  })
+
+  it('BI03-06 Ineligible contexts perform no lifecycle transport', () => {
+    for (const [patch, reason] of [
+      [{ mock: true }, 'Project settings are unavailable in this offline demo.'],
+      [{ signedIn: false }, 'Sign in to use project settings.'],
+      [{ sessionStatus: 'required' }, 'Start an active session to use project settings.'],
+      [{ projectId: null }, 'Open a project to use project settings.'],
+    ]) {
+      const view = mountBoard({ ...patch, initialPane: 'settings' })
+      expectSilent()
+      expect(view.counts.mounts).toBe(0)
+      expect(screen.getByText(reason)).toBeTruthy()
+      expect(screen.queryByRole('button', { name: 'Project settings' })).toBeNull()
+      view.unmount()
+    }
+  })
+
+  it('BI03-07 Pane changes preserve the lifecycle owner and draft', async () => {
+    const view = mountBoard()
+    await openSettings()
+    const panel = screen.getByTestId('projects-surface')
+    const container = panel.parentElement
+    fireEvent.click(screen.getByRole('button', { name: 'Clone project' }))
+    const dialog = screen.getByRole('dialog')
+    const draft = openDeleteDraft()
+    fireEvent.click(screen.getByRole('button', { name: 'Open conversation' }))
+    expect(container.isConnected).toBe(false)
+    expect(screen.queryByTestId('projects-surface')).toBeNull()
+    await openSettings()
+    expect(screen.getByTestId('projects-surface')).toBe(panel)
+    expect(panel.parentElement).toBe(container)
+    expect(screen.getByRole('dialog')).toBe(dialog)
+    expect(screen.getByLabelText('Type the project name to confirm delete')).toBe(draft)
+    expect(draft.value).toBe('partial project name')
+    expect(getProjectLifecycle).toHaveBeenCalledTimes(1)
+    expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
+  })
+
+  it('BI03-08 Surface changes detach and reseat one lifecycle owner', async () => {
+    const view = mountBoard()
+    await openSettings()
+    const panel = screen.getByTestId('projects-surface')
+    const container = panel.parentElement
+    openDeleteDraft('surface draft')
+    view.update({ surface: 'other' })
+    expect(container.isConnected).toBe(false)
+    expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
+    view.update({ surface: 'board' })
+    await screen.findByTestId('membership-panel')
+    expect(container.isConnected).toBe(true)
+    expect(screen.getAllByTestId('projects-surface')).toEqual([panel])
+    expect(panel.parentElement).toBe(container)
+    expect(screen.getByLabelText('Type the project name to confirm delete').value).toBe('surface draft')
+    expect(getProjectLifecycle).toHaveBeenCalledTimes(1)
+    expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
+  })
+
+  it('BI03-09 Project changes discard prior dialog and receipt state', async () => {
+    const view = mountBoard()
+    await openSettings()
+    const panelA = screen.getByTestId('projects-surface')
+    const containerA = panelA.parentElement
+    fireEvent.click(screen.getByRole('button', { name: 'Load organization members' }))
+    await screen.findByRole('option', { name: 'New member' })
+    cloneProject.mockResolvedValue({ project: { project_id: 'copy-a', name: 'Copy A' },
+      receipt: { receipt_id: 'receipt-a', action: 'project_cloned', created_at: '2026-10-06T00:00:00Z' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Clone project' }))
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Clone project' }))
+    await screen.findByText(/Clone complete:/)
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }))
+    openDeleteDraft('A draft')
+    let resolveA
+    getProjectLifecycle.mockImplementation((id) => id === PROJECT_ID
+      ? new Promise((resolve) => { resolveA = resolve })
+      : Promise.resolve({ ...SNAPSHOT, project: { project_id: 'B', name: 'Project B', org_id: 'org-b' }, receipts: [] }))
+    inviteMember.mockResolvedValue({})
+    fireEvent.change(screen.getByLabelText('Role for Member bbbbbbbb'), { target: { value: 'editor' } })
+    await waitFor(() => expect(resolveA).toBeTypeOf('function'))
+    view.update({ projectId: 'B' })
+    await screen.findByTestId('membership-panel')
+    expect(screen.getByTestId('projects-surface')).not.toBe(panelA)
+    expect(containerA.isConnected).toBe(false)
+    expect(view.counts).toEqual({ mounts: 2, unmounts: 1 })
+    expect(getProjectLifecycle).toHaveBeenCalledWith('B')
+    expect(screen.queryByLabelText('Type the project name to confirm delete')).toBeNull()
+    expect(screen.queryByText('Receipt: receipt-a')).toBeNull()
+    expect(screen.queryByRole('option', { name: 'New member' })).toBeNull()
+    await act(async () => { resolveA({ ...SNAPSHOT, project: { ...SNAPSHOT.project, name: 'Late A' } }) })
+    expect(screen.queryByText('Late A')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(screen.getByLabelText('Type the project name to confirm delete').value).toBe('')
+    expect(screen.getByText('Project B', { selector: 'strong' })).toBeTruthy()
+  })
+
+  it('BI03-10 Losing eligibility unmounts the lifecycle owner', async () => {
+    for (const patch of [{ mock: true }, { signedIn: false }, { sessionStatus: 'required' }, { projectId: null }]) {
+      getProjectLifecycle.mockClear()
+      const view = mountBoard()
+      await openSettings()
+      const container = screen.getByTestId('projects-surface').parentElement
+      view.update(patch)
+      expect(container.isConnected).toBe(false)
+      expect(screen.queryByTestId('projects-surface')).toBeNull()
+      expect(view.counts).toEqual({ mounts: 1, unmounts: 1 })
+      view.update({ ...patch, unrelated: 'rerender' })
+      expect(getProjectLifecycle).toHaveBeenCalledTimes(1)
+      view.unmount()
+    }
+  })
+
+  it('BI03-11 Membership mutation refetches the existing owner once', async () => {
+    for (const kind of ['invite', 'role', 'revoke']) {
+      getProjectLifecycle.mockReset().mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, org_id: 'org-a' } })
+      inviteMember.mockReset().mockResolvedValue({})
+      revokeMember.mockReset().mockResolvedValue({})
+      const view = mountBoard()
+      await openSettings()
+      const panel = screen.getByTestId('projects-surface')
+      const updated = { ...SNAPSHOT, members: kind === 'revoke' ? [SNAPSHOT.members[0]]
+        : kind === 'invite' ? [...SNAPSHOT.members, { membership_id: 'm-new', binding_id: 'binding-new',
+          label: 'Invited server member', role: 'editor', status: 'active' }]
+          : SNAPSHOT.members.map((member) => member.membership_id === 'm-2' ? { ...member, role: 'editor' } : member) }
+      getProjectLifecycle.mockResolvedValue(updated)
+      if (kind === 'invite') {
+        fireEvent.click(screen.getByRole('button', { name: 'Load organization members' }))
+        await screen.findByRole('option', { name: 'New member' })
+        fireEvent.change(screen.getByLabelText('Invite member'), { target: { value: 'binding-new' } })
+        fireEvent.change(screen.getByLabelText('Invite role'), { target: { value: 'editor' } })
+        fireEvent.click(screen.getByRole('button', { name: 'Invite' }))
+      } else if (kind === 'role') {
+        fireEvent.change(screen.getByLabelText('Role for Member bbbbbbbb'), { target: { value: 'editor' } })
+      } else fireEvent.click(screen.getByRole('button', { name: 'Revoke Member bbbbbbbb' }))
+      await waitFor(() => expect(getProjectLifecycle).toHaveBeenCalledTimes(2))
+      if (kind === 'revoke') {
+        expect(revokeMember).toHaveBeenCalledTimes(1)
+        expect(revokeMember).toHaveBeenCalledWith(PROJECT_ID, 'm-2')
+        expect(inviteMember).not.toHaveBeenCalled()
+        await waitFor(() => expect(screen.queryByLabelText('Role for Member bbbbbbbb')).toBeNull())
+      } else {
+        expect(inviteMember).toHaveBeenCalledTimes(1)
+        expect(inviteMember).toHaveBeenCalledWith(PROJECT_ID,
+          kind === 'invite' ? 'binding-new' : SNAPSHOT.members[1].binding_id, 'editor')
+        expect(revokeMember).not.toHaveBeenCalled()
+        await waitFor(() => expect(screen.getByLabelText(kind === 'invite'
+          ? 'Role for Invited server member' : 'Role for Member bbbbbbbb').value).toBe('editor'))
+      }
+      expect(screen.getByTestId('projects-surface')).toBe(panel)
+      expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
+      view.unmount()
+    }
+  })
+
+  it('BI03-12 Clone results survive pane changes', async () => {
+    cloneProject.mockResolvedValue({ project: { project_id: 'copy-a', name: 'Server copy' },
+      receipt: { receipt_id: 'clone-seat-receipt', action: 'project_cloned', created_at: '2026-10-06T00:00:00Z' } })
+    const view = mountBoard()
+    await openSettings()
+    fireEvent.click(screen.getByRole('button', { name: 'Clone project' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clone project' }))
+    await within(dialog).findByText(/Clone complete: "Server copy"/)
+    leaveSettings()
+    await openSettings()
+    expect(screen.getByRole('dialog')).toBe(dialog)
+    expect(within(dialog).getByText('clone-seat-receipt')).toBeTruthy()
+    expect(screen.getByText('Receipt: clone-seat-receipt')).toBeTruthy()
+    expect(cloneProject).toHaveBeenCalledTimes(1)
+    expect(cloneProject).toHaveBeenCalledWith(PROJECT_ID, 'Rooftop Array (copy)')
+    expect(getProjectLifecycle).toHaveBeenCalledTimes(2)
+    expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
+  })
+
+  it('BI03-13 Export results survive pane changes', async () => {
+    const createObjectURL = vi.fn(() => 'blob:settings-export')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL = revokeObjectURL
+    })
+    exportProject.mockResolvedValue({ export: { schema: 'leaf.project-export.v1', project: { name: 'Rooftop Array' } },
+      receipt: { receipt_id: 'export-seat-receipt', action: 'project_exported', created_at: '2026-10-06T00:00:00Z' } })
+    const view = mountBoard()
+    await openSettings()
+    fireEvent.click(screen.getByRole('button', { name: 'Export project' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Export' }))
+    const download = await within(dialog).findByRole('link', { name: 'Download' })
+    expect(download.getAttribute('href')).toBe('blob:settings-export')
+    expect(download.getAttribute('download')).toBe('rooftop-array-export.json')
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob)
+    leaveSettings()
+    await openSettings()
+    expect(screen.getByRole('dialog')).toBe(dialog)
+    expect(within(dialog).getByText('export-seat-receipt')).toBeTruthy()
+    expect(within(dialog).getByRole('link', { name: 'Download' })).toBe(download)
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+    expect(exportProject).toHaveBeenCalledTimes(1)
+    expect(exportProject).toHaveBeenCalledWith(PROJECT_ID, { signal: expect.any(AbortSignal) })
+    expect(getProjectLifecycle).toHaveBeenCalledTimes(2)
+    expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
+    view.unmount()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:settings-export')
+  })
+
+  it('BI03-15 Failed or cancelled deletion leaves the project open', async () => {
+    const view = mountBoard()
+    await openSettings()
+    const panel = screen.getByTestId('projects-surface')
+    openDeleteDraft('Rooftop Array')
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(deleteProject).not.toHaveBeenCalled()
+    expect(view.deleted).not.toHaveBeenCalled()
+    deleteProject.mockRejectedValue(new Error('Deletion rejected by server'))
+    openDeleteDraft('Rooftop Array')
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await screen.findByText('Deletion rejected by server')
+    expect(deleteProject).toHaveBeenCalledTimes(1)
+    expect(deleteProject).toHaveBeenCalledWith(PROJECT_ID)
+    expect(view.deleted).not.toHaveBeenCalled()
+    expect(screen.getByTestId('projects-surface')).toBe(panel)
+    expect(screen.getByLabelText('Type the project name to confirm delete').value).toBe('Rooftop Array')
+    expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
+    expect(getProjectLifecycle).toHaveBeenCalledTimes(1)
   })
 })

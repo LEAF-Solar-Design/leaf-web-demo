@@ -33,6 +33,7 @@ export function deriveBoardPaneSeats({
   boardHostsProject, projectPane, canConverse, agentMode, authorOpen,
   conversationSource, conversationDestination, annotationSource,
   annotationDestination, authorSource, authorDestination, authorFallback,
+  lifecycleEnabled, settingsDestination,
 }) {
   const live = !mock && signedIn && sessionStatus === 'active'
   const boardPaneContext = {
@@ -44,9 +45,18 @@ export function deriveBoardPaneSeats({
   const boardAuthor = boardHostsProject && projectPane === 'authoring'
   const conversationEligible = !boardPaneReason('conversation', boardPaneContext) && canConverse
   const authorEligible = !boardPaneReason('authoring', boardPaneContext)
+  const lifecycleEligible = Boolean(lifecycleEnabled && !mock && signedIn && sessionStatus === 'active' && projectId)
+  const settingsReason = !lifecycleEnabled ? 'Project settings are unavailable in this build.'
+    : mock ? 'Project settings are unavailable in this offline demo.'
+      : !signedIn ? 'Sign in to use project settings.'
+        : sessionStatus !== 'active' ? 'Start an active session to use project settings.'
+          : !projectId ? 'Open a project to use project settings.' : null
   return {
     boardPaneContext, boardConversation, boardAnnotations, boardAuthor,
     conversationEligible, authorEligible,
+    lifecycleEligible, settingsReason,
+    settingsTarget: lifecycleEligible && boardHostsProject && projectPane === 'settings'
+      ? settingsDestination || null : null,
     annotationEnabled: Boolean(live && projectId && drawingId && sessionId),
     // The conversation seat follows the session controller, not a stored token: an auth-off console is active with no
     // token, and sign-out or a refused token moves the status off 'active' (createSessionController's `required`).
