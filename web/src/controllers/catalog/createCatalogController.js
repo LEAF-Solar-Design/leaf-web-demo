@@ -85,6 +85,24 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   let snapshot = null
   const listeners = new Set()
   const learnedSolar = new Map()
+  const catalogPublications = new Set()
+
+  const consumeCatalogPublication = (argument) => {
+    try {
+      if (!argument || typeof argument !== 'object') return false
+      const { sessionId, changeSetId } = argument
+      if (typeof sessionId !== 'string' || sessionId.length < 1 || sessionId.length > 256) return false
+      if (typeof changeSetId !== 'string' || changeSetId.length < 1 || changeSetId.length > 128 ||
+          changeSetId.trim() !== changeSetId) return false
+      const key = JSON.stringify([sessionId, changeSetId])
+      if (catalogPublications.has(key)) return false
+      catalogPublications.add(key)
+      while (catalogPublications.size > 512) catalogPublications.delete(catalogPublications.values().next().value)
+      return true
+    } catch {
+      return false
+    }
+  }
 
   const humanizeError = adapters.humanizeError || defaultHumanize
   const isUnauthorized = adapters.isUnauthorized || defaultUnauthorized
@@ -414,6 +432,19 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const actions = Object.freeze({
+    refreshCatalog() {
+      // Each load is contained on its own: a loader that throws or rejects
+      // (an error formatter or a subscriber that throws) can neither reject
+      // this promise nor let it settle while the other load is pending.
+      const settled = (load) => {
+        try {
+          return Promise.resolve(load()).then(() => undefined, () => undefined)
+        } catch {
+          return Promise.resolve()
+        }
+      }
+      return Promise.all([settled(loadTools), settled(loadCatalog)]).then(() => undefined)
+    },
     loadTools,
     retryTools() {
       publish({ toolsRetryKey: state.toolsRetryKey + 1 })
@@ -472,6 +503,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   })
 
   return Object.freeze({
+    consumeCatalogPublication,
     start() {
       if (started) return
       started = true
