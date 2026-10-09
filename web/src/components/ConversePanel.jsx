@@ -213,6 +213,38 @@ function bannerFor(e) {
   return { kind, ...errorPresentation(e, fallback), message: fallback }
 }
 
+const publicationString = (value) =>
+  typeof value === 'string' && value.length >= 1 && value.length <= 128 && value.trim() === value
+
+function notifyCatalogPublication(env, openedSession, active, sessionRef, callbackRef, claimRef) {
+  if (!active) return
+  if (openedSession !== sessionRef.current) return
+  if (!env || typeof env !== 'object' || !openedSession || env.session_id !== openedSession) return
+  if (env.type !== 'tool_result') return
+  const data = env.data
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return
+  if (data.tool !== 'request_publication') return
+  if (data.ok !== true) return
+  const result = data.result
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return
+  if (result.contract !== 'leaf.customization.v1') return
+  if (result.status !== 'published') return
+  if (!publicationString(result.change_set_id) || !publicationString(result.catalog_digest)) return
+  const callback = callbackRef.current
+  const claim = claimRef.current
+  if (typeof callback !== 'function' || typeof claim !== 'function') return
+  const publication = {
+    sessionId: env.session_id,
+    changeSetId: result.change_set_id,
+    catalogDigest: result.catalog_digest,
+  }
+  try {
+    if (claim(publication) === true) callback(publication)
+  } catch {
+    // Publication owners must not interrupt transcript ingestion.
+  }
+}
+
 export default function ConversePanel({
   sessionId,
   userTurns = [],            // [{turnId, text}] — turns App dispatched into this session
@@ -225,6 +257,8 @@ export default function ConversePanel({
   // approval is held with the one-head sentence.
   engineDirty = false,
   onBeforeWriteApproval = null,
+  onCatalogChanged = null,
+  consumeCatalogPublication = null,
 }) {
   const [events, setEvents] = useState([])
   const [input, setInput] = useState('')
@@ -260,10 +294,16 @@ export default function ConversePanel({
   const writeLockedRef = useRef(writeLocked)
   const engineDirtyRef = useRef(engineDirty)
   const onBeforeWriteApprovalRef = useRef(onBeforeWriteApproval)
+  const sessionIdRef = useRef(sessionId)
+  const onCatalogChangedRef = useRef(onCatalogChanged)
+  const consumeCatalogPublicationRef = useRef(consumeCatalogPublication)
   const refreshApprovalsRef = useRef(null)
   writeLockedRef.current = writeLocked
   engineDirtyRef.current = engineDirty
   onBeforeWriteApprovalRef.current = onBeforeWriteApproval
+  sessionIdRef.current = sessionId
+  onCatalogChangedRef.current = onCatalogChanged
+  consumeCatalogPublicationRef.current = consumeCatalogPublication
   const writeHold = (isWrite) => {
     const held = isWrite && (writeLocked || engineDirty)
     return { held, label: writeLocked ? 'Editing locked' : 'Unsaved browser edits', title: writeLocked ? undefined : REASONS.unsavedEngineEdits }
@@ -301,8 +341,10 @@ export default function ConversePanel({
     jobSeenRef.current = new Set()
     setQueueState(createQueuedTurnState())
     track('conversation.opened') // P2: panel opened/reopened a session — no session id in labels (identity is server-stamped)
+    let active = true
     const stream = openStream(sessionId, 0, {
       onEvent: (env) => {
+        notifyCatalogPublication(env, sessionId, active, sessionIdRef, onCatalogChangedRef, consumeCatalogPublicationRef)
         const queued = reconcileQueuedTurn(queueStateRef.current, env)
         setQueueState(queued.state)
         if (queued.action === 'promote') {
@@ -315,7 +357,7 @@ export default function ConversePanel({
         setEvents((prev) => [...prev, env])
       },
     })
-    return () => stream.close()
+    return () => { active = false; stream.close() }
   }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
