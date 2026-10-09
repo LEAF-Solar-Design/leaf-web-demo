@@ -36,7 +36,7 @@ import copy
 from datetime import datetime, timezone
 import math
 
-from solar_design_graph import GraphValidationError, _bounded_json, new_id
+from solar_design_graph import GraphValidationError, _bounded_json, entities, new_id
 from solar_sizing_client import checked_graph
 from solar_solve_results import finish_mutation, invalidate_dependents, sync_assignments
 
@@ -140,11 +140,13 @@ def _valid_request(params):
             and all(type(ref) is str and ref for ref in refs))
 
 
-def _new_string(graph, refs, tables):
+def _new_string(graph, refs, tables, *, _creation=None):
     """The circuit SINGLESTRING commits: one polyline through the panels, in order.
 
     Called on the private copy only, after every refusal has already run; `tables` are the slot
-    tables of the graph it was copied from (the copy carries the same blocks).
+    tables of the graph it was copied from (the copy carries the same blocks). `_creation` is the
+    canonical dispatcher's private channel: when given, the ID and creation time derive from the
+    exact parent instead of a random UUID and the clock.
     """
     panels = find_panels(graph, refs, tables)
     tags = {string["circuit_tag"] for string in graph["strings"]}
@@ -159,10 +161,17 @@ def _new_string(graph, refs, tables):
     points = [copy.deepcopy(panels[ref]["centre"]) for ref in refs]
     length_m = sum(math.dist(a + [0] * (3 - len(a)), b + [0] * (3 - len(b)))
                    for a, b in zip(points, points[1:]))
+    if _creation is None:
+        string_id, created_at = new_id("string"), datetime.now(timezone.utc).isoformat()
+    else:
+        # One pass: every stored entity and every compact slot panel is occupied.
+        occupied = {entity["id"] for entity in entities(graph)}
+        occupied.update(ref for table in tables.values() for ref in table.ids)
+        string_id, created_at = _creation["new_id"]("string", 0, occupied), _creation["created_at"]
     return {
-        "id": new_id("string"), "kind": "string", "rev": graph["rev"],
+        "id": string_id, "kind": "string", "rev": graph["rev"],
         "validity": {"state": "valid", "reasons": []},
-        "provenance": {"created_by": TOOL, "created_at": datetime.now(timezone.utc).isoformat(),
+        "provenance": {"created_by": TOOL, "created_at": created_at,
                        "last_writer": TOOL, "source_rev": graph["rev"],
                        "source_hash": graph["source_hash"],
                        "catalog_versions": copy.deepcopy(graph["catalog_versions"])},
@@ -189,7 +198,7 @@ def _new_string(graph, refs, tables):
     }
 
 
-def add_string(graph, params):
+def add_string(graph, params, *, _creation=None):
     """Create exactly one circuit over the named panels, in the named order."""
     _bounded_json(params)
     if not _valid_request(params):
@@ -213,7 +222,10 @@ def add_string(graph, params):
         # reaching one here is a caller error, never a drawing state.
         raise GraphValidationError("PANEL_ALREADY_ASSIGNED")
     result = copy.deepcopy(before)
-    string = _new_string(result, refs, tables)
+    if _creation is None:
+        string = _new_string(result, refs, tables)
+    else:
+        string = _new_string(result, refs, tables, _creation=_creation)
     result["strings"].append(string)
     # Panel assignments, frame sequences, frame panel_assignments and matrix cells are
     # redundant views of string membership: one pass rebuilds all of them, so the newly
@@ -232,7 +244,7 @@ def add_string(graph, params):
 OPERATIONS = {"add-string": add_string}
 
 
-def run(intake, params):
+def run(intake, params, *, _creation=None):
     _bounded_json(params)
     # The operation is named as a string or the request is refused: an unhashable
     # value must never reach the lookup.
@@ -240,4 +252,6 @@ def run(intake, params):
             or params["operation"] not in OPERATIONS):
         raise GraphValidationError("INVALID_STRING_ADD_REQUEST")
     request = {key: value for key, value in params.items() if key != "operation"}
-    return OPERATIONS[params["operation"]](intake, request)["graph"]
+    if _creation is None:
+        return OPERATIONS[params["operation"]](intake, request)["graph"]
+    return OPERATIONS[params["operation"]](intake, request, _creation=_creation)["graph"]

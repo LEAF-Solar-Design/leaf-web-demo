@@ -465,7 +465,8 @@ def test_sip_r3a_additive_entrypoints_no_activation(memory, monkeypatch):
         monkeypatch.setattr(adapter, name, lambda *args, **kwargs: sentinel)
         assert getattr(local, name)("forwarded") is sentinel
     assert adapter.SUPPORTED_TOOLS == {"solar-settings", "solar-panels-from-drawing",
-        "solar-size-strings", "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule"}
+        "solar-size-strings", "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
+        "solar-string-add", "solar-assign-equipment"}
     root = Path(local.__file__).parent
     assert "solar_project_graph" not in (root / "canonical_worker.py").read_text(encoding="utf-8")
     assert "canonical_only" not in solar_tools.trusted_record("solar-settings")

@@ -79,8 +79,11 @@ def assign_equipment(graph, params, *, drawing_intake, licensed_equipment=None):
             "ready": equipment_ready(candidate)}
 
 
-def run(graph, params):
-    candidate = equipment_candidate(graph, params)
+def run(graph, params, *, _creation=None):
+    if _creation is None:
+        candidate = equipment_candidate(graph, params)
+    else:
+        candidate = equipment_candidate(graph, params, _creation=_creation)
     if params.get("preview", False):
         raise GraphValidationError("EQUIPMENT_PREVIEW_UNSUPPORTED")
     if params.get("cancel", False):
