@@ -36,6 +36,18 @@ function belowConfirmFloor(route) {
   return route.confidence < floor
 }
 
+// Arrow keys belong to an editor that is using them: a text caret, a select's
+// choice, a spin button's value. A button is not an editor here, because the
+// resolver's own rows are option buttons and keep their arrows.
+const ARROW_EDITOR_SELECTOR = [
+  'input', 'textarea', 'select',
+  '[contenteditable]:not([contenteditable="false"])',
+  '[role="textbox"]', '[role="searchbox"]', '[role="combobox"]', '[role="spinbutton"]',
+].join(',')
+function arrowHeldByEditor(e) {
+  return e.target instanceof Element && !!e.target.closest(ARROW_EDITOR_SELECTOR)
+}
+
 export default function RoutePanel({
   route: liveRoute, tools, running, writeLocked, writeEntitled = true,
   // Why the write is paused, supplied by the surface that owns the lock. /app
@@ -103,11 +115,15 @@ export default function RoutePanel({
   }, [activeIdx])
 
   // Enter / arrow keys while a decision surface is up (Esc lives in App's
-  // global ladder). Editors and focused controls own their Enter key.
+  // global ladder). Editors and focused controls own their Enter key, an editor
+  // owns its arrow keys, and so does whatever already handled one (a stepper, an
+  // open menu): those leave here untouched, before any row moves.
   // A fading (exiting) surface is display-only — no keys.
   useEffect(() => {
     if (!route || exiting) return undefined
     const onKey = (e) => {
+      const arrow = e.key === 'ArrowDown' || e.key === 'ArrowUp'
+      if (arrow && (e.defaultPrevented || arrowHeldByEditor(e))) return
       if (e.key === 'ArrowDown' && rows.length > 0) {
         e.preventDefault(); setActiveIdx((i) => Math.min(i + 1, rows.length - 1)); return
       }

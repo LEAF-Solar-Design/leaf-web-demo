@@ -362,3 +362,184 @@ describe('RoutePanel solve lane', () => {
     expect(onConfirmIntent).not.toHaveBeenCalled()
   })
 })
+
+describe('RoutePanel arrow ownership', () => {
+  const arrowTools = [
+    { name: 'count-panels', description: 'Count panels', capabilities: ['drawing.read'], params: { properties: {} } },
+    { name: 'list-layers', description: 'List layers', capabilities: ['drawing.read'], params: { properties: {} } },
+    { name: 'measure-area', description: 'Measure area', capabilities: ['drawing.read'], params: { properties: {} } },
+  ]
+  // A live no-match offers every catalog tool as a pick: three resolver rows.
+  const pickRoute = { lane: 'run', tool: null, confidence: 0.1, alternatives: [] }
+
+  function mountArrows(editor, nextRoute = pickRoute) {
+    const callbacks = {
+      onConfirmIntent: vi.fn(),
+      onPickAlternative: vi.fn(),
+      onOpenAuthor: vi.fn(),
+      onDismiss: vi.fn(),
+    }
+    render(
+      <>
+        {editor}
+        <RoutePanel route={nextRoute} tools={arrowTools} running={false} writeLocked={false} {...callbacks} />
+      </>,
+    )
+    return callbacks
+  }
+  // Only the resolver's own rows: a native select brings options of its own.
+  const options = () => Array.from(screen.getByRole('listbox', { name: 'Route resolver' }).querySelectorAll('[role="option"]'))
+  const selected = () => options().findIndex((option) => option.getAttribute('aria-selected') === 'true')
+  const untouched = (callbacks) => Object.values(callbacks).every((fn) => fn.mock.calls.length === 0)
+
+  // fireEvent returns false only when a handler prevented the default action.
+  it.each([
+    ['input', <input data-testid="editor" />],
+    ['textarea', <textarea data-testid="editor" />],
+    ['select', <select data-testid="editor"><option>one</option><option>two</option></select>],
+    ['nested contenteditable', <div contentEditable suppressContentEditableWarning><span data-testid="editor">text</span></div>],
+    ['textbox role', <div data-testid="editor" role="textbox" tabIndex={0} />],
+    ['searchbox role', <div data-testid="editor" role="searchbox" tabIndex={0} />],
+    ['combobox role', <div data-testid="editor" role="combobox" tabIndex={0} />],
+    ['spinbutton role', <div data-testid="editor" role="spinbutton" tabIndex={0} />],
+  ])('KEYS-A01 arrows from %s stay with the editor', (_name, editor) => {
+    const callbacks = mountArrows(editor)
+    const target = screen.getByTestId('editor')
+    target.focus()
+    const focused = document.activeElement
+
+    expect(selected()).toBe(0)
+    expect(fireEvent.keyDown(target, { key: 'ArrowDown' })).toBe(true)
+    expect(selected()).toBe(0)
+
+    fireEvent.keyDown(document.body, { key: 'ArrowDown' })
+    expect(selected()).toBe(1)
+    expect(fireEvent.keyDown(target, { key: 'ArrowUp' })).toBe(true)
+    expect(selected()).toBe(1)
+
+    expect(document.activeElement).toBe(focused)
+    expect(untouched(callbacks)).toBe(true)
+  })
+
+  it('KEYS-A02 arrows outside an editor still move the active row and clamp', () => {
+    const callbacks = mountArrows(null)
+
+    expect(selected()).toBe(0)
+    expect(fireEvent.keyDown(document.body, { key: 'ArrowUp' })).toBe(false)
+    expect(selected()).toBe(0)
+    expect(fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(false)
+    expect(selected()).toBe(1)
+    fireEvent.keyDown(document.body, { key: 'ArrowDown' })
+    expect(selected()).toBe(2)
+    expect(fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(false)
+    expect(selected()).toBe(2)
+    fireEvent.keyDown(document.body, { key: 'ArrowUp' })
+    expect(selected()).toBe(1)
+    expect(untouched(callbacks)).toBe(true)
+  })
+
+  it('KEYS-A03 an arrow from a focused row moves focus with the selection', () => {
+    mountArrows(null)
+    options()[0].focus()
+
+    expect(fireEvent.keyDown(options()[0], { key: 'ArrowDown' })).toBe(false)
+    expect(selected()).toBe(1)
+    expect(document.activeElement).toBe(options()[1])
+
+    fireEvent.keyDown(options()[1], { key: 'ArrowUp' })
+    expect(selected()).toBe(0)
+    expect(document.activeElement).toBe(options()[0])
+  })
+
+  it('KEYS-A04 an arrow from inside a row button reaches the next row', () => {
+    mountArrows(null)
+    const inner = options()[0].querySelector('.route-tool')
+
+    expect(inner).not.toBeNull()
+    expect(fireEvent.keyDown(inner, { key: 'ArrowDown' })).toBe(false)
+    expect(selected()).toBe(1)
+  })
+
+  it('KEYS-A05 a region marked not editable does not hold the arrows', () => {
+    mountArrows(<div data-testid="plain" contentEditable={false} tabIndex={0} />)
+
+    expect(fireEvent.keyDown(screen.getByTestId('plain'), { key: 'ArrowDown' })).toBe(false)
+    expect(selected()).toBe(1)
+  })
+
+  it('KEYS-A06 a decision with no rows leaves every arrow alone', () => {
+    const callbacks = mountArrows(<input data-testid="editor" />, {
+      lane: 'run',
+      tool: 'count-panels',
+      confidence: 0.99,
+      runIntent: { tool: 'count-panels', params: {} },
+    })
+
+    expect(screen.queryAllByRole('option')).toHaveLength(0)
+    expect(fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(true)
+    expect(fireEvent.keyDown(screen.getByTestId('editor'), { key: 'ArrowUp' })).toBe(true)
+    expect(untouched(callbacks)).toBe(true)
+  })
+
+  it('KEYS-A07 Enter acts on the row the arrows chose, never on an editor arrow', () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(0)
+    const callbacks = mountArrows(<input data-testid="editor" />)
+    clock.mockReturnValue(500)
+
+    fireEvent.keyDown(screen.getByTestId('editor'), { key: 'ArrowDown' })
+    fireEvent.keyDown(screen.getByTestId('editor'), { key: 'ArrowDown' })
+    fireEvent.keyDown(document.body, { key: 'ArrowDown' })
+    fireEvent.keyDown(document.body, { key: 'Enter' })
+
+    expect(callbacks.onPickAlternative).toHaveBeenCalledTimes(1)
+    expect(callbacks.onPickAlternative).toHaveBeenCalledWith('list-layers')
+    expect(callbacks.onConfirmIntent).not.toHaveBeenCalled()
+  })
+
+  it('KEYS-A08 an arrow a control already handled stays with that control', () => {
+    const callbacks = mountArrows(
+      <>
+        <button
+          type="button"
+          data-testid="handled"
+          onKeyDown={(e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') e.preventDefault() }}
+        >
+          stepper
+        </button>
+        <button type="button" data-testid="plain">plain</button>
+      </>,
+    )
+    const handled = screen.getByTestId('handled')
+    handled.focus()
+
+    expect(selected()).toBe(0)
+    expect(fireEvent.keyDown(handled, { key: 'ArrowDown' })).toBe(false)
+    expect(selected()).toBe(0)
+
+    // The same kind of control with no handler of its own leaves the arrow to the list.
+    expect(fireEvent.keyDown(screen.getByTestId('plain'), { key: 'ArrowDown' })).toBe(false)
+    expect(selected()).toBe(1)
+    expect(fireEvent.keyDown(handled, { key: 'ArrowUp' })).toBe(false)
+    expect(selected()).toBe(1)
+
+    expect(document.activeElement).toBe(handled)
+    expect(untouched(callbacks)).toBe(true)
+  })
+
+  it('KEYS-A09 an arrow an open menu took upstream is not the list\'s', () => {
+    const callbacks = mountArrows(null)
+    // The shape the scope picker and the project switcher use while they are open.
+    const menu = (e) => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') e.preventDefault() }
+    window.addEventListener('keydown', menu, true)
+    try {
+      expect(fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(false)
+      expect(selected()).toBe(0)
+    } finally {
+      window.removeEventListener('keydown', menu, true)
+    }
+
+    expect(fireEvent.keyDown(document.body, { key: 'ArrowDown' })).toBe(false)
+    expect(selected()).toBe(1)
+    expect(untouched(callbacks)).toBe(true)
+  })
+})
