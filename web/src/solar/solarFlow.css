@@ -37,6 +37,7 @@
   display: flex; flex-direction: column; overflow-wrap: anywhere;
 }
 .studio-shell .workspace-card .solar-flow-seat * { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.studio-shell .workspace-card .solar-flow-seat > * { flex: 0 0 auto; }
 .studio-shell .workspace-card .solar-flow-seat :is(.params, .param, .solar-flow-button) { flex-wrap: wrap; }
 .studio-shell .workspace-card .solar-flow-seat .params { display: flex; flex-direction: column; }
 .studio-shell .workspace-card .solar-flow-seat .param { display: flex; flex-direction: column; }

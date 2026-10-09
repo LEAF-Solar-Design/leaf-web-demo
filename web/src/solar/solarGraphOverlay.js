@@ -85,7 +85,9 @@ function project(graph, options) {
       if (pt === null) return { error: 'invalid_graph' }
       pts.push(pt)
     }
-    return length === 1 ? { error: 'invalid_graph' } : { pts }
+    // One stored point is a valid path (the graph contract sets no minimum, and a single-panel string stores
+    // exactly its panel's centre). It is validated above and has no segment, so it draws nothing.
+    return { pts: length === 1 ? [] : pts }
   }
 
   // The decoder receives a dense array of the same frame objects, read by index.

@@ -180,8 +180,39 @@ describe('solarGraphOverlay', () => {
     expect(run(G({ panels: [P(1, [2, 3])], strings: [S(1, []), S(2, [1])],
       routes: [R(1, 'feeder', [])] }))).toEqual(empty)
   })
-  it('SGO15 refuses a one-point explicit string route', () => {
-    expect(run(G({ strings: [S(1, [], [[0, 0]])] }))).toEqual(NO('invalid_graph'))
+  it('SGO15 draws nothing for a single-panel string and keeps every other line', () => {
+    expect(run(G({ panels: [P(1, [0, 0])], strings: [S(1, [1], [[0, 0]])] }))).toEqual(empty)
+    const g = roof()
+    g.panels.push(P(7, [5, 5]))
+    g.strings.push(S(3, [7], [[5, 5]]))
+    expect(run(g)).toEqual(OK(metreLines))
+  })
+  it('SGO35 draws the panel-centre line when a multi-panel string stores one route point', () => {
+    expect(run(G({ panels: [P(1, [0, 0]), P(2, [1, 0])], strings: [S(1, [1, 2], [[9, 9]])] })))
+      .toEqual(OK([L([[0, 0], [1, 0]], green)]))
+  })
+  it('SGO36 draws nothing for a one-point conductor route and keeps the others', () => {
+    expect(run(G({ routes: [R(1, 'feeder', [[3, 3]]), R(2, 'feeder', [[0, 0], [1, 1]]),
+      R(3, 'trench', [[4, 4]])] }))).toEqual(OK([L([[0, 0], [1, 1]], pink)]))
+  })
+  it('SGO37 still refuses a malformed single point', () => {
+    for (const point of [['0', 0], [NaN, 0], [1], [0, 0, 'z'], null]) {
+      expect(run(G({ panels: [P(1, [0, 0])], strings: [S(1, [1], [point])] }))).toEqual(NO('invalid_graph'))
+      expect(run(G({ routes: [R(1, 'feeder', [point])] }))).toEqual(NO('invalid_graph'))
+    }
+  })
+  it('SGO38 counts a one-point path toward the read-point bound', () => {
+    const big = n => R(n, 'trench', Array.from({ length: 249999 }, () => [0, 0]))
+    expect(run(G({ routes: [big(1), big(2), R(3, 'feeder', [[1, 1]]), R(4, 'feeder', [[2, 2]])] })))
+      .toEqual(empty)
+    expect(run(G({ routes: [big(1), big(2), R(3, 'feeder', [[1, 1]]), R(4, 'feeder', [[2, 2]]),
+      R(5, 'feeder', [[3, 3]])] }))).toEqual(NO('overlay_limit'))
+  })
+  it('SGO39 draws nothing for a single-panel string on a decoded Ground frame', () => {
+    const g = ground()
+    const centre = decodeGroundFrameSlots(g.frames).frames[0].slots[1].centre
+    g.strings = [S(1, [2], [[centre.x, centre.y]]), S(2, [1])]
+    expect(solarGraphOverlay(g, { metersPerUnit: 2 })).toEqual(empty)
   })
   it('SGO16 includes the 4096-polyline boundary', () => {
     expect(run(lines(4096))).toEqual(OK(Array.from({ length: 4096 }, () => L([[0, 0], [1, 1]], pink))))

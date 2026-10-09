@@ -1306,7 +1306,7 @@ function seatCssStructure(cssText) {
     if (css.startsWith('.solar-flow-seat', i)) occurrences.push({ index: i, headers: headers.slice() })
     if (css[i] === '{') {
       const header = css.slice(headerStart, i).trim()
-      rules.push({ header, headers: headers.slice() })
+      rules.push({ header, headers: headers.slice(), open: i })
       headers.push(header)
       headerStart = i + 1
     } else if (css[i] === '}') {
@@ -1337,6 +1337,31 @@ function seatRulePlacementFailures(cssText) {
         failures.push('rule must be inside unrestricted desktop media: ' + selector)
       }
     }
+  }
+  return failures
+}
+
+function seatChildRuleFailures(cssText) {
+  const selector = '.studio-shell .workspace-card .solar-flow-seat > *'
+  const css = maskSeatCss(cssText)
+  const { rules, failures } = seatCssStructure(cssText)
+  const matches = rules.filter(({ header }) => header === maskSeatCss(selector))
+  if (matches.length !== 1) return failures.concat('expected exactly one direct-child seat rule, found ' + matches.length)
+  const { headers, open } = matches[0]
+  if (headers.length !== 1 || headers[0] !== '@media (min-width: 981px)') {
+    failures.push('the direct-child seat rule must sit directly inside @media (min-width: 981px): ' + JSON.stringify(headers))
+  }
+  const close = css.indexOf('}', open + 1)
+  const body = close < 0 ? null : css.slice(open + 1, close).trim()
+  if (body !== 'flex: 0 0 auto;') failures.push('the direct-child seat rule must declare exactly flex: 0 0 auto; found ' + JSON.stringify(body))
+  // No other rule that names the seat may size a flex item: a later or more specific one would win the cascade.
+  const sizing = new Set(['flex', 'flex-grow', 'flex-shrink', 'flex-basis'])
+  for (const other of rules) {
+    if (other === matches[0] || other.header.startsWith('@')) continue
+    if (![other.header, ...other.headers].some((header) => header.includes('.solar-flow-seat'))) continue
+    const end = css.indexOf('}', other.open + 1)
+    const declared = (end < 0 ? '' : css.slice(other.open + 1, end)).split(';').map((part) => part.split(':')[0].trim().toLowerCase())
+    if (declared.some((name) => sizing.has(name))) failures.push('another seat rule sets a flex sizing property: ' + other.header)
   }
   return failures
 }
@@ -1800,6 +1825,48 @@ describe('Solar step rail wiring', () => {
     for (const { index, headers } of occurrences) {
       assert.ok(headers.some((header) => header.startsWith('@media ') && header.includes('min-width: 981px')), 'seat material outside desktop media at ' + index)
     }
+  })
+
+  it('SEAT wiring W8 the seat scrolls instead of shrinking a direct child', () => {
+    const source = readFileSync(new URL('./solar/solarFlow.css', import.meta.url), 'utf8')
+    assert.deepEqual(seatChildRuleFailures(source), [])
+    const rule = '.studio-shell .workspace-card .solar-flow-seat > * { flex: 0 0 auto; }'
+    const outer = '@media (min-width: 981px) {'
+    assert.equal(source.split(rule).length - 1, 1)
+    assert.equal(source.split(outer).length - 1, 1)
+    const without = source.replace(rule, '')
+    const swap = (body) => source.replace(rule, rule.replace('{ flex: 0 0 auto; }', body))
+    for (const [name, mutated] of [
+      ['rule removed', without],
+      ['rule outside media', without + '\n' + rule + '\n'],
+      ['outer media narrow only', source.replace(outer, '@media (max-width: 980px) {')],
+      ['outer media widened by a comma query', source.replace(outer, '@media (min-width: 981px), (orientation: portrait) {')],
+      ['rule nested in a narrow query', source.replace(rule, '@media (max-width: 980px) { ' + rule + ' }')],
+      ['second identical rule', source.replace(rule, rule + '\n' + rule)],
+      ['declaration changed', swap('{ flex: 1 1 auto; }')],
+      ['declaration removed', swap('{ }')],
+      ['declaration undone by a later one', swap('{ flex: 0 0 auto; flex-shrink: 1; }')],
+    ]) {
+      assert.ok(seatChildRuleFailures(mutated).length > 0, name)
+    }
+    assert.deepEqual(seatChildRuleFailures(source + '\n.probe::before { content: "{"; }\n'), [])
+    const seat = '.studio-shell .workspace-card .solar-flow-seat'
+    const after = (text) => source.replace(rule, rule + '\n' + text)
+    for (const [name, mutated] of [
+      ['a later twin spelled without the space', after(seat + ' >* { flex: 1 1 auto; }')],
+      ['a more specific child rule', after(seat + ' > .solar-workspace-announce { flex: 1 1 auto; }')],
+      ['a first-child rule', after(seat + ' > *:first-child { flex-shrink: 1; }')],
+      ['a descendant rule that also matches a direct child', after(seat + ' * { flex-grow: 1; }')],
+      ['a nested rule under the seat', after(seat + ' { & > * { flex-basis: 0; } }')],
+      ['a twin in a block that also applies below the boundary', source + '\n@media (min-width: 981px), (max-width: 980px) {\n' + seat + ' >* { flex: 0 0 auto; }\n}\n'],
+    ]) {
+      const found = seatChildRuleFailures(mutated)
+      assert.equal(found.length, 1, name)
+      assert.ok(found[0].startsWith('another seat rule sets a flex sizing property: '), name)
+    }
+    // The scan reads this stylesheet only, judges only rules that name the seat, and only the four sizing properties.
+    assert.deepEqual(seatChildRuleFailures(after(seat + ' .probe { flex-wrap: wrap; flex-direction: row; flex-flow: row; }')), [])
+    assert.deepEqual(seatChildRuleFailures(source + '\n.probe { flex: 1 1 auto; }\n'), [])
   })
 
   it('SEAT wiring W5 the overview yields in the narrow desktop band', () => {
