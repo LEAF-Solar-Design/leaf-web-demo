@@ -9,6 +9,7 @@ import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import { buildSolarGraphOverlayLayer } from '../solar/solarGraphOverlayLayer.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -201,7 +202,8 @@ const Viewer = forwardRef(function Viewer(
     selectedHandle, onSelectEntity, pendingEdit,
     marqueeGate, onMarqueeSelect,
     background, controlsEnabled = true, rotateEnabled = false,
-    panelSculpture = false, stringRoutes, onGlError, safeRect = null, drawingKey = null, onSceneReady,
+    panelSculpture = false, stringRoutes, onGlError, safeRect = null, drawingKey = null, onSceneReady, solarOverlay = null,
+    onIntakeOverride,
   },
   ref,
 ) {
@@ -212,6 +214,10 @@ const Viewer = forwardRef(function Viewer(
   const desiredSceneRef = useRef(null)
   const onSceneReadyRef = useRef(onSceneReady)
   onSceneReadyRef.current = onSceneReady
+  const onIntakeOverrideRef = useRef(onIntakeOverride)
+  onIntakeOverrideRef.current = onIntakeOverride
+  const baseIntakeRef = useRef(intake)
+  baseIntakeRef.current = intake
   const channel = () => channelRef.current || (channelRef.current = createCameraChannel({
     schedule: (fn) => requestAnimationFrame(fn), cancel: (id) => cancelAnimationFrame(id),
   }))
@@ -287,7 +293,9 @@ const Viewer = forwardRef(function Viewer(
   const [internalIntake, setInternalIntake] = useState(null)
   const [groupHighlight, setGroupHighlight] = useState([])
   useEffect(() => { setGroupHighlight([]) }, [intake])
-  useEffect(() => { setInternalIntake(null) }, [intake])
+  // The owner is told about every write of this override, in the batch that makes it and with the
+  // base intake it sits over, so the owner knows which intake is on the canvas on every render.
+  useEffect(() => { setInternalIntake(null); onIntakeOverrideRef.current?.(null, intake) }, [intake])
   const activeIntake = internalIntake || intake
   const sceneDrawingKey = activeIntake?.source === 'engine' ? `engine:${activeIntake.documentId}` : drawingKey
   desiredSceneRef.current = { intake: activeIntake, drawingKey: sceneDrawingKey }
@@ -586,6 +594,7 @@ const Viewer = forwardRef(function Viewer(
     const highlightGroup = new THREE.Group(); scene.add(highlightGroup)
     const markerGroup = new THREE.Group(); scene.add(markerGroup)
     const overlayGroup = new THREE.Group(); scene.add(overlayGroup)
+    const solarGroup = new THREE.Group(); scene.add(solarGroup)
     const selectionGroup = new THREE.Group(); scene.add(selectionGroup)
     const pendingGroup = new THREE.Group(); scene.add(pendingGroup)
     const stringGroup = new THREE.Group(); scene.add(stringGroup)
@@ -891,13 +900,15 @@ const Viewer = forwardRef(function Viewer(
     const ro = new ResizeObserver(() => { onResize(); publishCamera() })
     ro.observe(mount)
 
-    stateRef.current = {
+    const sceneState = {
       intake: activeIntake, drawingKey: sceneDrawingKey,
       scene, camera, renderer, controls, layerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens, sculpture,
+      solarGroup, solarLayer: null,
     }
+    stateRef.current = sceneState
     if (focusMarkerRef.current?.drawingKey === sceneDrawingKey) setFocusMarker(focusMarkerRef.current.bounds)
     else focusMarkerRef.current = null
     publishCamera()
@@ -982,17 +993,32 @@ const Viewer = forwardRef(function Viewer(
       controls.dispose()
       renderer.dispose()
       if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement)
+      sceneState.solarLayer?.dispose()
+      sceneState.solarLayer = null
       scene.traverse((o) => { o.geometry?.dispose?.(); o.material?.dispose?.() })
       delete mount.dataset.viewMode
       delete mount.dataset.depthSpan
       delete mount.dataset.cameraPosition
       delete mount.dataset.cameraTarget
       delete mount.__cadviewer
-      stateRef.current = null
+      if (stateRef.current === sceneState) stateRef.current = null
       channel().publish({ pose: null, viewport: null })
     }
   }, [activeIntake, paletteRevision === undefined ? colorForLayer : null, background, panelSculpture, sceneDrawingKey])
   useEffect(() => () => { channelRef.current?.dispose(); channelRef.current = null }, [])
+
+  useEffect(() => {
+    const s = stateRef.current
+    if (!s || solarOverlay == null || solarOverlay.polylines.length === 0
+      || s.intake !== solarOverlay.intake || s.drawingKey !== solarOverlay.drawingKey) return
+    const layer = buildSolarGraphOverlayLayer(solarOverlay.polylines)
+    s.solarGroup.add(layer.group)
+    s.solarLayer = layer
+    return () => {
+      layer.dispose()
+      if (s.solarLayer === layer) s.solarLayer = null
+    }
+  }, [solarOverlay?.polylines, solarOverlay?.intake, solarOverlay?.drawingKey, buildTick])
 
   useEffect(() => {
     if (paletteRevision === undefined || !stateRef.current) return
@@ -1045,6 +1071,7 @@ const Viewer = forwardRef(function Viewer(
     applyVersion: (newIntake) => {
       if (stateRef.current && stateRef.current.intake !== (newIntake || intake)) stateRef.current.pending = true
       publishCamera(); setGroupHighlight([]); setInternalIntake(newIntake)
+      onIntakeOverrideRef.current?.(newIntake || null, baseIntakeRef.current)
     },
     // Project a world point to a client pixel (production twin of the DEV
     // mount.__cadviewer hook — used by the site layer and automated checks).

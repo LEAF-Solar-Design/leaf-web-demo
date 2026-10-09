@@ -23,6 +23,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { parse as parseJs } from '@babel/parser'
 
 import {
   DEFAULT_PRODUCT_SURFACE,
@@ -36,6 +37,41 @@ import { groundShowsDrawing } from './SurfaceGrounds.jsx'
 // Every id the module ships, as a literal, so a surface added without a row
 // here fails the completeness test below rather than quietly going unpinned.
 const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'sheets']
+
+it('A1B2-S01 stored graph surface admission', () => {
+  const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  const tree = parseJs(source, { sourceType: 'module', plugins: ['jsx'] })
+  const calls = []
+  function walk(node, visit) {
+    if (!node || typeof node.type !== 'string') return
+    visit(node)
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(child => walk(child, visit))
+      else if (value && typeof value.type === 'string') walk(value, visit)
+    }
+  }
+  walk(tree, node => {
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
+      && node.callee.name === 'useSolarGraphOverlay') calls.push(node)
+  })
+  expect(calls).toHaveLength(1)
+  const enabled = calls[0].arguments[0].properties.find(prop => prop.key.name === 'enabled').value
+  const expression = source.slice(enabled.start, enabled.end)
+  expect(expression).toBe("Boolean(studioGround && drafting && surfaceSlots.toolbar.profile === 'solar')")
+  const evaluate = Function('studioGround', 'drafting', 'surfaceSlots', 'return (' + expression + ')')
+  for (const id of SURFACE_IDS) {
+    const slots = surfaceContract(id)
+    for (const mock of [false, true]) {
+      for (const flags of [false, true]) {
+        const decorated = { ...slots, mock, railProgress: flags ? 10 : 0,
+          selectedTool: flags ? 'run' : null, railEnabled: flags }
+        expect(evaluate(true, slots.chrome.cockpit, decorated)).toBe(id === 'solar')
+        expect(evaluate(false, slots.chrome.cockpit, decorated)).toBe(false)
+        expect(evaluate(true, false, decorated)).toBe(false)
+      }
+    }
+  }
+})
 
 it('pins the server capability baseline for every surface', () => {
   const expected = {

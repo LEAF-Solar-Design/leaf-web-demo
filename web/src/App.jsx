@@ -1,4 +1,6 @@
 import './structural.css'
+import { useSolarGraphOverlay, SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
+import { solarOverlayCanvasIntake } from './solar/solarGraphOverlay.js'
 import './site/studioShell.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
 import { createPortal, flushSync } from 'react-dom'
@@ -200,6 +202,16 @@ const PALETTE = ['#6b9fd4', '#8fbf9c', '#b49bd1', '#d4af6e', '#cf8fa6', '#79bcc7
 
 // Suspense fallback while the lazy viewer chunk arrives — L1 indeterminate:
 // pulse dot + verb, top-left (the centered position is reserved for X3 failures).
+function solarOverlayStatusOf(reason) {
+  switch (reason) {
+    case 'invalid_graph': return SOLAR_OVERLAY_REASONS.invalid_graph
+    case 'invalid_scale': return SOLAR_OVERLAY_REASONS.invalid_scale
+    case 'overlay_limit': return SOLAR_OVERLAY_REASONS.overlay_limit
+    case 'drawing_mismatch': return SOLAR_OVERLAY_REASONS.drawing_mismatch
+    default: return null
+  }
+}
+
 function ViewerSkeleton() {
   // Material follows the host: --viewer-skeleton-bg is re-pinned by the
   // studio ground (landing.css) so the fallback sheet matches whichever
@@ -487,6 +499,13 @@ export default function App() {
   const canvasMarqueeRef = useRef(null)
   const registerCanvasMarquee = useCallback((fn) => { canvasMarqueeRef.current = fn }, [])
   const [activeIntake, setActiveIntake] = useState(null)
+  // The Viewer's own intake override (an engine document, a previewed or re-seated version) and the
+  // base it sits over, as the Viewer reports them. The Solar overlay binds to what is on the canvas,
+  // never to a remembered engine intake: a version replacement leaves that one behind.
+  const [viewerOverride, setViewerOverride] = useState(null)
+  const onViewerIntakeOverride = useCallback((override, base) => {
+    setViewerOverride(override == null ? null : { base, intake: override })
+  }, [])
   const [engineHistory, setEngineHistory] = useState(null)
   const [resultCandidate, setResultCandidate] = useState(null)
   const [offscreenResult, setOffscreenResult] = useState(null)
@@ -3131,6 +3150,19 @@ export default function App() {
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
   const drafting = surfaceSlots.chrome.cockpit
+  const { solarOverlay, reason: solarOverlayReason } = useSolarGraphOverlay({
+    enabled: Boolean(studioGround && drafting && surfaceSlots.toolbar.profile === 'solar'),
+    shown: shown ?? null,
+    drawingKey: consoleDrawingKey,
+    sceneCurrent: Boolean(isScopeCurrent() && drawingLoad.state === 'seated' && drawingLoad.drawingId === REQUESTED_DRAWING_ID),
+    refreshPending: Boolean(refreshFail || unreadableHead),
+    activeIntake: solarOverlayCanvasIntake(viewerOverride, intake ?? SOLAR_STARTER_EMPTY_INTAKE),
+    engineDocument: engineDocument ?? null,
+    engineDirty,
+    activeVersion: drawing.activeVersion,
+    requestedDrawingId: REQUESTED_DRAWING_ID ?? null,
+  })
+  const solarOverlayStatus = solarOverlayStatusOf(solarOverlayReason)
   const solarFlowSeated = ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar'
   useEffect(() => {
     if (!(ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar')) {
@@ -4343,6 +4375,12 @@ export default function App() {
             </div>
           )}
           <SolarFlowSeat seated={solarFlowSeated}>
+          {solarOverlayStatus && (
+            <p role="status" aria-live="polite" aria-atomic="true"
+              className="solar-workspace-announce" data-testid="solar-graph-overlay-status">
+              {solarOverlayStatus}
+            </p>
+          )}
           {ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (
             ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext }) === 'typed' ? (
               <div id="solar-tool-form" key={solarFormTool.name} ref={solarSettingsFormRef}>
@@ -4785,6 +4823,8 @@ export default function App() {
                   ref={intake ? viewerRef : solarStarterViewerRef}
                   intake={intake ?? SOLAR_STARTER_EMPTY_INTAKE}
                   drawingKey={consoleDrawingKey}
+                  solarOverlay={solarOverlay}
+                  onIntakeOverride={onViewerIntakeOverride}
                   onSceneReady={onDrawingSceneReady}
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
                   paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
