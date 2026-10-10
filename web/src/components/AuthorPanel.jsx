@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { authorTool } from '../api'
+import { authorStartFailureOf } from '../controllers/useAuthorStageController.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import { finiteOrNull, orDash, usageCostLabel } from '../usage.js'
 
@@ -247,6 +248,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   // the wire, and this is the notice that says so.
   const [secretNotice, setSecretNotice] = useState(null)
   const lastSignal = useRef(null)
+  const shownErrorRef = useRef(null)
   const startRef = useRef(null)
   const authoredRef = useRef(null)
   const descRef = useRef(null)
@@ -277,17 +279,33 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
 
   useEffect(() => {
     const e = stageActivity?.error
+    const arrived = shownErrorRef.current !== e
+    shownErrorRef.current = e
     if (!e) {
       if (stageActivity?.active) setErr(null)
       return
     }
+    if (isSecretRefused(e)) {
+      // A credential refused while the turn was starting never left the browser.
+      setSecretNotice(e.refusal)
+      setErr(null)
+      return
+    }
+    // A different failure retires the credential notice: that refusal is no
+    // longer what happened last.
+    if (arrived) setSecretNotice(null)
     if (stageActivity?.failedRequest || stageActivity?.resumable) setErr(e)
     else if (e.entitlementRequired) setBuildGate(true)
-    else if (e.grantRequired) setGrantGate(true)
+    else if (e.grantRequired || authorStartFailureOf(e)?.kind === 'grant') setGrantGate(true)
     else if (e.quotaExceeded) setQuotaGate({ limit: e.limit, used: e.used })
     else if (isServiceDown(e)) setSvcGate(true)
     else setErr(e)
   }, [stageActivity?.error, stageActivity?.resumable, stageActivity?.failedRequest])
+
+  // A run that is under way retires the credential notice the last one left.
+  useEffect(() => {
+    if (stageActivity?.active) setSecretNotice(null)
+  }, [stageActivity?.active])
 
   useEffect(() => {
     if ((stageActivity?.failedRequest || stageActivity?.draftOnly) && stageActivity.pointer?.description) {
@@ -418,6 +436,17 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   })
 
   const prov = authored ? readProvenance(authored) : null
+  // The link gate already says what a grant refusal would: while it shows, the
+  // failure line reads as it did before, so the panel never says it twice.
+  const linkGateShown = buildEntitled && !buildGate && !quotaGate && !svcGate && (!!notLinked || grantGate)
+  const recordedStartFailure = err ? authorStartFailureOf(err) : null
+  const startFailure = recordedStartFailure && !(recordedStartFailure.kind === 'grant' && linkGateShown)
+    ? recordedStartFailure : null
+  // A grant refusal the link gate cannot voice, because a gate above it holds
+  // the screen, is said by its sentence. It is read from the controller's
+  // current error and lasts only as long as the gate it stands in for.
+  const hiddenGrantFailure = !err && grantGate && !linkGateShown ? authorStartFailureOf(stageActivity?.error) : null
+  const gatedGrantFailure = hiddenGrantFailure?.kind === 'grant' ? hiddenGrantFailure : null
   const authorError = err ? errorPresentation(err, 'Tool authoring failed.') : null
   const publicationError = publishErr ? errorPresentation(publishErr, lifecycleMessage(publishErr)) : null
   const provLine = authored ? authoredProvLine(authored) : null
@@ -519,14 +548,21 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
           <span className="dim"> · {stageActivity?.progress || 'safe to wait or reload'}</span>
         </div>
       )}
+      {gatedGrantFailure && (
+        <div className="inline-error" role="alert">
+          <span data-testid="author-start-failure">{gatedGrantFailure.message}</span>
+        </div>
+      )}
       {err && (
-        <div className="inline-error">
+        <div className="inline-error" role={startFailure ? 'alert' : undefined}>
+          {startFailure ? <span data-testid="author-start-failure">{startFailure.message}</span> : <>
           <span>
             Couldn’t author the tool — {authorError.message}
             {authorError.code && <> <code className="dim">{authorError.code}</code></>}
           </span>
           {authorError.nextAction && <span className="dim">Next: {authorError.nextAction}</span>}
           {authorError.actor && <span className="key">{errorActorLabel(authorError.actor)}</span>}
+          </>}
           {stageActivity?.failedRequest ? <>
             <span data-testid="author-failed-request">
               Request {stageActivity.failedRequest.change_set_id || 'not accepted'} is saved for recovery. No new request was started.
