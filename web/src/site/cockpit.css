@@ -508,7 +508,7 @@
 
   /* ---- floating instruments over the canvas ---- */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block {
-    position: fixed; left: calc(var(--ck-pane) + 12px); bottom: 66px; z-index: 3;
+    position: fixed; left: calc(var(--ck-pane) + 12px); bottom: calc(66px + var(--ck-status-rise, 0px)); z-index: 3;
     width: 420px; max-height: 40vh;
   }
   /* Idle (no run, no result, no error) the result panel is only its own
@@ -550,6 +550,11 @@
   }
   .studio-shell .cockpit-engine-status[data-error="true"] { color: var(--status-danger, #e24947); }
   #cockpit-engine-status-slot:empty { display: none; }
+  /* The status line (an 18px line with 2px of padding above and below) sits under the
+     command line inside the dock, separated by the dock's 8px gap and its 8px sibling
+     margin, so the dock's top rises 38px while the line shows. The result block, seated
+     just above the dock, rises with it. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(#cockpit-engine-status-slot:not(:empty)) { --ck-status-rise: 38px; }
   /* Centred, 720 wide: x 600-1320 at the reference's 1920. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-dock {
     position: fixed; left: 50%; right: auto; bottom: 35px; width: 720px; max-width: none; margin: 0 0 0 -360px; z-index: 30;
@@ -994,7 +999,7 @@
      the ribbon and prompt. Idle uses the same treatment as the wide frame. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block {
     position: fixed; top: var(--ck-canvas-top); bottom: auto; left: auto; right: 4px;
-    width: min(420px, 40vw); max-height: max(0px, calc(100dvh - var(--ck-canvas-top) - 100px));
+    width: min(420px, 40vw); max-height: max(0px, calc(100dvh - var(--ck-canvas-top) - 100px - var(--ck-status-rise, 0px)));
     box-sizing: border-box; overflow: auto; pointer-events: none;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block:has(.result-panel > p.panel-sub) { display: none; }
@@ -1009,6 +1014,16 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-dock {
     position: fixed; left: 4px; right: 4px; bottom: 50px; width: auto; max-width: none; margin: 0;
   }
+}
+
+/* On the tablet frame (the fixed result block above) an empty status slot takes no room,
+   as on the wide frame, and the status line is one 19px line. So the dock's rise is exact:
+   19px plus the dock's 8px gap and its 8px sibling margin. Short landscape and the phone
+   drawer keep their own layouts. */
+@media (min-width: 601px) and (max-width: 980px) and (min-height: 500px) {
+  #cockpit-engine-status-slot:empty { display: none; }
+  .studio-shell .cockpit-engine-status { margin: 0; line-height: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(#cockpit-engine-status-slot:not(:empty)) { --ck-status-rise: 35px; }
 }
 
 /* Short landscape keeps the scrolling bands and full-viewport ground,

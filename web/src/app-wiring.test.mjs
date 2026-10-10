@@ -12,7 +12,7 @@
 // is a direct, cheap answer. Verified to fail on the exact commit where the
 // declaration sat inside that block.
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
 import esbuild from 'esbuild'
@@ -1889,6 +1889,304 @@ describe('Solar step rail wiring', () => {
     assert.ok(band.includes('.studio-shell .app[data-surface="solar"]:has(.solar-flow-seat):has(.properties-dock) .cad-overview { display: none; }'))
     const narrow = mediaBlock('@media (max-width: 980px)')
     assert.ok(narrow.includes('.studio-shell .app[data-surface="solar"] .solar-flow-seat { display: contents; }'))
+  })
+})
+
+// The command dock grows upward while the engine status line shows, so the result block seated just above it
+// must rise by the same amount. The amount is derived here from the three stylesheets that produce it.
+const DOCK_APP = '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])'
+const DOCK_RISE_RULE = DOCK_APP + ':has(#cockpit-engine-status-slot:not(:empty))'
+const DOCK_WIDE = '@media (min-width: 981px)'
+const DOCK_TABLET = '@media (min-width: 601px) and (max-width: 980px) and (min-height: 500px)'
+const DOCK_TABLET_FRAME = '@media (max-width: 980px) and (min-height: 500px)'
+
+// Comments blanked, quoted text kept: a selector is compared with its attribute values intact.
+function maskDockComments(cssText) {
+  const masked = cssText.split('')
+  for (let i = 0; i < cssText.length; i += 1) {
+    if (cssText.startsWith('/*', i)) {
+      const end = cssText.indexOf('*/', i + 2)
+      const stop = end < 0 ? cssText.length : end + 2
+      for (; i < stop; i += 1) masked[i] = ' '
+      i -= 1
+    } else if (cssText[i] === '"' || cssText[i] === "'") {
+      const quote = cssText[i]
+      for (i += 1; i < cssText.length; i += 1) {
+        if (cssText[i] === '\\') i += 1
+        else if (cssText[i] === quote) break
+      }
+    }
+  }
+  return masked.join('')
+}
+
+function dockDeclarations(cssText) {
+  const css = maskSeatCss(cssText)
+  const quoted = maskDockComments(cssText)
+  const { rules, failures } = seatCssStructure(cssText)
+  const found = rules.filter(({ header }) => !header.startsWith('@')).map((rule) => {
+    const close = css.indexOf('}', rule.open + 1)
+    const start = Math.max(css.lastIndexOf('{', rule.open - 1), css.lastIndexOf('}', rule.open - 1), css.lastIndexOf(';', rule.open - 1)) + 1
+    const declared = new Map()
+    for (const part of (close < 0 ? '' : css.slice(rule.open + 1, close)).split(';')) {
+      const colon = part.indexOf(':')
+      if (colon > 0) declared.set(part.slice(0, colon).trim().toLowerCase(), part.slice(colon + 1).trim())
+    }
+    return { selector: dockSelector(quoted.slice(start, rule.open)), headers: rule.headers.map(dockHeader), declared }
+  })
+  return { rules: found, failures }
+}
+
+const dockHeader = (header) => header.replace(/\s+/g, ' ').trim()
+
+// One spelling per selector: outside quoted text a run of whitespace is one space, and the spaces a selector
+// does not need (around a combinator or a comma, just inside a bracket) are dropped. Quoted text is kept as written.
+function dockSelector(text) {
+  const parts = []
+  let plain = ''
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (ch !== '"' && ch !== "'") {
+      plain += ch
+      continue
+    }
+    const start = i
+    for (i += 1; i < text.length; i += 1) {
+      if (text[i] === '\\') i += 1
+      else if (text[i] === ch) break
+    }
+    parts.push(plain, text.slice(start, i + 1))
+    plain = ''
+  }
+  parts.push(plain)
+  const tidy = (part) => part.replace(/\s+/g, ' ').replace(/ ?([>+~,]) ?/g, '$1').replace(/([(\[]) /g, '$1').replace(/ ([)\]])/g, '$1')
+  return parts.map((part, index) => (index % 2 ? part : tidy(part))).join('').trim()
+}
+
+// The compound each selector in a list ends on: the element the rule styles.
+function dockSubjects(selector) {
+  const subjects = []
+  let depth = 0
+  let quote = ''
+  let subject = ''
+  for (let i = 0; i < selector.length; i += 1) {
+    const ch = selector[i]
+    if (quote) {
+      subject += ch
+      if (ch === '\\') {
+        i += 1
+        subject += selector[i] ?? ''
+      } else if (ch === quote) quote = ''
+    } else if (ch === '"' || ch === "'") {
+      quote = ch
+      subject += ch
+    } else if (depth === 0 && ch === ',') {
+      subjects.push(subject)
+      subject = ''
+    } else if (depth === 0 && (ch === ' ' || ch === '>' || ch === '+' || ch === '~')) subject = ''
+    else {
+      if (ch === '(' || ch === '[') depth += 1
+      else if (ch === ')' || ch === ']') depth -= 1
+      subject += ch
+    }
+  }
+  subjects.push(subject)
+  return subjects
+}
+
+const DOCK_SLOT_NAME = /#cockpit-engine-status-slot(?![\w-])/
+const DOCK_LINE_NAME = /\.cockpit-engine-status(?![\w-])/
+// A declaration that can make the box it lands on taller.
+const dockAddsHeight = (name) => name.startsWith('padding') || name.startsWith('margin') || name.endsWith('height')
+  || (name.startsWith('border') && !name.endsWith('-radius') && !name.endsWith('-color'))
+
+function dockPx(value) {
+  const match = /^(-?\d+(?:\.\d+)?)px$/.exec(String(value ?? '').trim())
+  return match ? Number(match[1]) : NaN
+}
+
+// The top and bottom of a padding shorthand of one to four lengths.
+function dockVerticalPadding(value) {
+  const parts = String(value ?? '').trim().split(/\s+/).filter(Boolean).map((part) => (part === '0' ? 0 : dockPx(part)))
+  if (parts.length < 1 || parts.length > 4 || parts.some((part) => !(part >= 0))) return NaN
+  return parts[0] + (parts.length >= 3 ? parts[2] : parts[0])
+}
+
+// otherSheets: [name, text] for every other stylesheet the app loads; none of them may set the rise.
+function dockClearanceFailures(cockpitCss, baseCss, structuralCss, otherSheets = []) {
+  const cockpit = dockDeclarations(cockpitCss)
+  const base = dockDeclarations(baseCss)
+  const structural = dockDeclarations(structuralCss)
+  const failures = [...cockpit.failures, ...base.failures, ...structural.failures]
+  // A rule is found by its selector, attribute values included, inside exactly the named blocks. Spacing and
+  // comments inside a selector or a block header are not part of either.
+  const find = (sheet, selector, headers, what) => {
+    const wanted = JSON.stringify(headers.map(dockHeader))
+    const matches = sheet.rules.filter((rule) => rule.selector === dockSelector(selector) && JSON.stringify(rule.headers) === wanted)
+    if (matches.length !== 1) failures.push('expected one ' + what + ', found ' + matches.length)
+    return matches.length === 1 ? matches[0] : { declared: new Map() }
+  }
+  const one = (sheet, selector, headers, what) => find(sheet, selector, headers, what).declared
+  // The dock's own spacing above the status slot: its flex gap and the sibling margin both apply.
+  const gap = dockPx(one(base, '.bar-dock', [], 'top-level dock rule in styles.css').get('gap'))
+  const sibling = dockPx(one(structural, '.bar-dock > * + *', [], 'dock sibling rule in structural.css').get('margin-top'))
+  // An empty slot takes no room in either layout, so each rise is the populated slot's whole contribution.
+  for (const [headers, what] of [[[DOCK_WIDE], 'wide'], [[DOCK_TABLET], 'tablet']]) {
+    if (one(cockpit, '#cockpit-engine-status-slot:empty', headers, what + ' empty slot rule').get('display') !== 'none') {
+      failures.push('the ' + what + ' empty status slot must take no room')
+    }
+  }
+  // Wide frame: one line of text plus its padding above and below, and nothing else that adds height.
+  const wideLineRule = find(cockpit, '.studio-shell .cockpit-engine-status', [DOCK_WIDE], 'wide status line rule')
+  const wideLine = wideLineRule.declared
+  const wideHeight = Number((/\/(\d+(?:\.\d+)?)px(?:\s|$)/.exec(wideLine.get('font') ?? '') ?? [])[1])
+  const padding = dockVerticalPadding(wideLine.get('padding'))
+  if (wideLine.get('white-space') !== 'nowrap') failures.push('the wide status line must stay one line')
+  if (wideLine.get('margin') !== '0') failures.push('the wide status line must carry no margin')
+  for (const name of wideLine.keys()) {
+    if (name.startsWith('padding-') || name.startsWith('margin-') || name.startsWith('border') || name.endsWith('height')) failures.push('the wide status line must not declare ' + name)
+  }
+  // 601 to 980: one fixed line, no padding, no margin.
+  const tabletLineRule = find(cockpit, '.studio-shell .cockpit-engine-status', [DOCK_TABLET], 'tablet status line rule')
+  const tabletLine = tabletLineRule.declared
+  const tabletHeight = dockPx(tabletLine.get('line-height'))
+  if (tabletLine.get('white-space') !== 'nowrap') failures.push('the tablet status line must stay one line')
+  if (tabletLine.get('margin') !== '0') failures.push('the tablet status line must carry no margin')
+  if ([...tabletLine.keys()].some((name) => name.startsWith('padding'))) failures.push('the tablet status line must carry no padding')
+  for (const name of tabletLine.keys()) {
+    if (name.startsWith('margin-') || name.startsWith('border') || name === 'font' || (name.endsWith('height') && name !== 'line-height')) failures.push('the tablet status line must not declare ' + name)
+  }
+  // Nothing else gives the slot or the status line height: any other rule in the three stylesheets that styles
+  // either one, or is conditional on either one, is refused a declaration that makes a box taller.
+  for (const [sheet, sheetName] of [[cockpit, 'cockpit.css'], [base, 'styles.css'], [structural, 'structural.css']]) {
+    for (const rule of sheet.rules) {
+      if (rule === wideLineRule || rule === tabletLineRule) continue
+      if (!dockSubjects(rule.selector).some((subject) => DOCK_SLOT_NAME.test(subject) || DOCK_LINE_NAME.test(subject))) continue
+      for (const name of rule.declared.keys()) {
+        if (dockAddsHeight(name)) failures.push(sheetName + ': ' + rule.selector + ' must not declare ' + name)
+      }
+    }
+  }
+  const rises = cockpit.rules.filter((rule) => rule.declared.has('--ck-status-rise'))
+  if (rises.length !== 2) failures.push('expected exactly two rules that set the rise, found ' + rises.length)
+  for (const [sheetName, sheet] of [['styles.css', base], ['structural.css', structural], ...otherSheets.map(([sheetName, text]) => [sheetName, dockDeclarations(text)])]) {
+    if (sheet.rules.some((rule) => rule.declared.has('--ck-status-rise'))) failures.push(sheetName + ' must not set the rise')
+  }
+  const wideRise = dockPx(one(cockpit, DOCK_RISE_RULE, [DOCK_WIDE], 'wide rise rule').get('--ck-status-rise'))
+  const tabletRise = dockPx(one(cockpit, DOCK_RISE_RULE, [DOCK_TABLET], 'tablet rise rule').get('--ck-status-rise'))
+  if (wideRise !== wideHeight + padding + gap + sibling) {
+    failures.push('wide rise ' + wideRise + ' must equal line ' + wideHeight + ' + padding above and below ' + padding + ' + gap ' + gap + ' + sibling margin ' + sibling)
+  }
+  if (tabletRise !== tabletHeight + gap + sibling) {
+    failures.push('tablet rise ' + tabletRise + ' must equal line ' + tabletHeight + ' + gap ' + gap + ' + sibling margin ' + sibling)
+  }
+  // The consumers: the wide block's bottom edge and the tablet block's height.
+  const wideBlock = one(cockpit, DOCK_APP + ' .result-block', [DOCK_WIDE], 'wide result block rule')
+  const wideBottom = /^calc\((\d+(?:\.\d+)?)px \+ var\(--ck-status-rise, 0px\)\)$/.exec(wideBlock.get('bottom') ?? '')
+  if (!wideBottom) failures.push('the wide result block must rise with the dock')
+  const dock = one(cockpit, DOCK_APP + ' .bar-dock', [DOCK_WIDE], 'wide dock rule')
+  const bar = one(cockpit, DOCK_APP + ' .bar.bar-command-line', [DOCK_WIDE], 'wide command line rule')
+  const clearance = Number(wideBottom?.[1]) - dockPx(dock.get('bottom')) - dockPx(bar.get('height'))
+  if (!(clearance > 0)) failures.push('the wide result block must sit above the dock, clearance ' + clearance)
+  const tabletBlock = one(cockpit, DOCK_APP + ' .result-block', [DOCK_TABLET_FRAME], 'tablet result block rule')
+  if (tabletBlock.get('max-height') !== 'max(0px, calc(100dvh - var(--ck-canvas-top) - 100px - var(--ck-status-rise, 0px)))') {
+    failures.push('the tablet result block must shrink by the rise')
+  }
+  return failures
+}
+
+describe('DOCK clearance', () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').split('\r').join('')
+  const cockpit = read('./site/cockpit.css')
+  const base = read('./styles.css')
+  const structural = read('./structural.css')
+  // Every other stylesheet under src, so a rise set anywhere else is seen.
+  const others = readdirSync(new URL('.', import.meta.url), { recursive: true })
+    .map((name) => String(name).split('\\').join('/'))
+    .filter((name) => name.endsWith('.css') && !['site/cockpit.css', 'styles.css', 'structural.css'].includes(name))
+    .sort()
+    .map((name) => [name, read('./' + name)])
+
+  it('DOCK D1 the result block rises with the dock by the status line and its spacing', () => {
+    assert.ok(others.length >= 20, 'the other stylesheets were not found: ' + others.length)
+    assert.deepEqual(dockClearanceFailures(cockpit, base, structural, others), [])
+  })
+
+  it('DOCK D2 a drifted number, a dropped consumer or a misplaced rule fails', () => {
+    const swap = (source, from, to) => {
+      assert.equal(source.split(from).length - 1, 1, from)
+      return source.replace(from, to)
+    }
+    const wideRise = DOCK_RISE_RULE + ' { --ck-status-rise: 38px; }'
+    const tabletRise = DOCK_RISE_RULE + ' { --ck-status-rise: 35px; }'
+    const rising = 'bottom: calc(66px + var(--ck-status-rise, 0px));'
+    const dockGap = '  flex-direction: column;\n  gap: 8px;\n}\n.bar-dock .resolver {'
+    const siblingRule = '.bar-dock > * + * { margin-top: 8px; }'
+    const widePadding = 'min-width: 0; padding: 2px 8px; margin: 0;'
+    const emptyRule = '#cockpit-engine-status-slot:empty { display: none; }'
+    const wideEmpty = emptyRule + '\n  /* The status line (an 18px line'
+    const tabletEmpty = DOCK_TABLET + ' {\n  ' + emptyRule
+    for (const [name, a, b, c, extra = []] of [
+      ['wide padding heavier below', swap(cockpit, widePadding, widePadding.replace('2px 8px;', '2px 8px 10px;')), base, structural],
+      ['wide line bordered', swap(cockpit, widePadding, widePadding + ' border-top: 1px solid;'), base, structural],
+      ['wide rise names another surface', swap(cockpit, wideRise, wideRise.replace('"cad"', '"pad"')), base, structural],
+      ['tablet rise names another surface', swap(cockpit, tabletRise, tabletRise.replace('"solar"', '"polar"')), base, structural],
+      ['wide empty slot keeps its room', swap(cockpit, wideEmpty, wideEmpty.replace(emptyRule, '')), base, structural],
+      ['wide empty slot shown', swap(cockpit, wideEmpty, wideEmpty.replace('display: none', 'display: block')), base, structural],
+      ['tablet empty slot keeps its room', swap(cockpit, tabletEmpty, tabletEmpty.replace(emptyRule, '')), base, structural],
+      ['wide rise drifted', swap(cockpit, wideRise, wideRise.replace('38px', '30px')), base, structural],
+      ['wide rise rule removed', swap(cockpit, wideRise, ''), base, structural],
+      ['wide rise made unconditional', swap(cockpit, wideRise, DOCK_APP + ' { --ck-status-rise: 38px; }'), base, structural],
+      ['tablet rise drifted', swap(cockpit, tabletRise, tabletRise.replace('35px', '34px')), base, structural],
+      ['tablet rise outside its block', swap(cockpit, tabletRise, '') + '\n' + tabletRise + '\n', base, structural],
+      ['third rise rule', cockpit + '\n.probe { --ck-status-rise: 12px; }\n', base, structural],
+      ['wide padding changed', swap(cockpit, widePadding, widePadding.replace('2px 8px;', '4px 8px;')), base, structural],
+      ['wide line height changed', swap(cockpit, 'font: 400 11px/18px var(--ck-font); color: rgba(240, 242, 240, .72);', 'font: 400 11px/20px var(--ck-font); color: rgba(240, 242, 240, .72);'), base, structural],
+      ['tablet line height changed', swap(cockpit, 'margin: 0; line-height: 19px; white-space: nowrap;', 'margin: 0; line-height: 20px; white-space: nowrap;'), base, structural],
+      ['tablet line may wrap', swap(cockpit, 'line-height: 19px; white-space: nowrap;', 'line-height: 19px;'), base, structural],
+      ['tablet line padded', swap(cockpit, 'margin: 0; line-height: 19px;', 'margin: 0; padding: 2px 0; line-height: 19px;'), base, structural],
+      ['wide block no longer rises', swap(cockpit, rising, 'bottom: 66px;'), base, structural],
+      ['wide block seated on the dock', swap(cockpit, rising, rising.replace('66px', '60px')), base, structural],
+      ['tablet block no longer shrinks', swap(cockpit, ' - 100px - var(--ck-status-rise, 0px)))', ' - 100px))'), base, structural],
+      ['dock gap changed', cockpit, swap(base, dockGap, dockGap.replace('8px', '6px')), structural],
+      ['dock sibling margin changed', cockpit, base, swap(structural, siblingRule, siblingRule.replace('8px', '0'))],
+      // The populated slot and the status line get no height from any other rule, in any of the three sheets.
+      ['wide slot padded', swap(cockpit, wideRise, '#cockpit-engine-status-slot { padding: 20px 0; }\n  ' + wideRise), base, structural],
+      ['tablet slot padded', swap(cockpit, tabletRise, '#cockpit-engine-status-slot { padding: 20px 0; }\n  ' + tabletRise), base, structural],
+      ['populated slot given a minimum height', swap(cockpit, wideRise, '#cockpit-engine-status-slot:not(:empty) { min-height: 40px; }\n  ' + wideRise), base, structural],
+      ['slot bordered through the dock', swap(cockpit, tabletRise, '.bar-dock > #cockpit-engine-status-slot { border-top: 1px solid; }\n  ' + tabletRise), base, structural],
+      ['slot margin in styles.css', cockpit, base + '\n#cockpit-engine-status-slot { margin-top: 4px; }\n', structural],
+      ['slot padding in structural.css', cockpit, base, structural + '\n.bar-dock #cockpit-engine-status-slot { padding-bottom: 4px; }\n'],
+      ['second status line rule adds padding', swap(cockpit, wideRise, '.bar-dock .cockpit-engine-status { padding-top: 6px; }\n  ' + wideRise), base, structural],
+      ['status line margin in styles.css', cockpit, base + '\n.cockpit-engine-status { margin-bottom: 6px; }\n', structural],
+      ['wide line margin longhand', swap(cockpit, widePadding, widePadding + ' margin-top: 6px;'), base, structural],
+      ['tablet line margin longhand', swap(cockpit, 'margin: 0; line-height: 19px;', 'margin: 0; margin-bottom: 6px; line-height: 19px;'), base, structural],
+      // The rise is set by the two cockpit rules and nowhere else.
+      ['rise set in styles.css', cockpit, base + '\n.probe { --ck-status-rise: 12px; }\n', structural],
+      ['rise set in structural.css', cockpit, base, structural + '\n.probe { --ck-status-rise: 12px; }\n'],
+      ['rise set in another stylesheet', cockpit, base, structural, [['site/landing.css', '.probe { --ck-status-rise: 12px; }\n']]],
+    ]) {
+      assert.ok(dockClearanceFailures(a, b, c, extra).length > 0, name)
+    }
+    // A quoted declaration is text, never a rule.
+    assert.deepEqual(dockClearanceFailures(cockpit + '\n.probe::before { content: "{ --ck-status-rise: 1px; }"; }\n', base, structural), [])
+    // The same padding spelled with three or four lengths is the same height, so it still holds.
+    for (const same of ['2px 8px 2px;', '2px 8px 2px 8px;']) {
+      assert.deepEqual(dockClearanceFailures(swap(cockpit, widePadding, widePadding.replace('2px 8px;', same)), base, structural), [], same)
+    }
+    // Edits that change no layout still hold: a comment or extra spacing inside a selector, a combinator
+    // written without spaces, a colour on the slot, and a second reader of the rise in another stylesheet.
+    const tabletLine = '.studio-shell .cockpit-engine-status { margin: 0; line-height: 19px;'
+    for (const [name, a, b, c, extra = []] of [
+      ['comment inside a selector', swap(cockpit, tabletLine, tabletLine.replace('.studio-shell ', '.studio-shell /* status */ ')), base, structural],
+      ['two spaces inside a selector', swap(cockpit, tabletLine, tabletLine.replace('.studio-shell ', '.studio-shell  ')), base, structural],
+      ['rise selector spread over two lines', swap(cockpit, tabletRise, tabletRise.replace('"cad"], [', '"cad"],\n    [')), base, structural],
+      ['sibling combinators without spaces', cockpit, base, swap(structural, siblingRule, siblingRule.replace('.bar-dock > * + *', '.bar-dock>*+*'))],
+      ['a colour on the slot', swap(cockpit, wideRise, '#cockpit-engine-status-slot { color: inherit; }\n  ' + wideRise), base, structural],
+      ['the rise read in another stylesheet', cockpit, base, structural, [['site/landing.css', '.probe { bottom: var(--ck-status-rise, 0px); }\n']]],
+    ]) {
+      assert.deepEqual(dockClearanceFailures(a, b, c, extra), [], name)
+    }
   })
 })
 
