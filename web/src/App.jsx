@@ -172,7 +172,7 @@ import AuthorPanel from './components/AuthorPanel.jsx'
 import ProjectLifecyclePanel from './projects/ProjectLifecyclePanel.jsx'
 import { ENV_LIFECYCLE_UI } from './projects/flag.js'
 import {
-  THRESHOLDS, fetchRegistry, fetchSkills, listPendingApprovals,
+  THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import { entitlementAllowed } from './controllers/platform/index.js'
@@ -277,10 +277,6 @@ const devControls = (() => {
   } catch { /* no import.meta in a non-vite host */ }
   return new URLSearchParams(window.location.search).get('dev') === '1'
 })()
-
-// A self-minted author-authority turn is reusable for this long — a wide
-// margin under the server's TURN_MAX_S default of 300s (server/turn_runner.py).
-const AUTHOR_AUTHORITY_TTL_MS = 120_000
 
 // Live-mode landing when there is no session: instead of a wall of red 401s with
 // no way forward, a calm gate — sign-in for the live surface is coming; the demo
@@ -1413,53 +1409,51 @@ export default function App() {
 
   // Turn-authority provider for the author panel's stage POST (server fail-
   // closes without it: X-Authority-Session-Id/-Turn-Id naming an ACTIVE turn
-  // whose subject matches the caller). Reuses a self-minted turn within TTL
-  // (a wide margin under the server's TURN_MAX_S default of 300s) rather than
-  // reusing an arbitrary composer turn: useConverseSessionController exposes
-  // no live "still active" signal for turns already in flight (its `turns`
-  // entries are a one-time snapshot from turn start, never updated to
-  // terminal), so trusting one here could hand the server a turn id that has
-  // already ended. Minting is the safe default; the server 409s harmlessly if
-  // this races and loses.
-  const agentSessionIdRef = useRef(agentSessionId)
-  useEffect(() => { agentSessionIdRef.current = agentSessionId }, [agentSessionId])
-  const authorAuthorityRef = useRef(null) // { projectId, sessionId, turnId, mintedAt }
+  // whose subject matches the caller). Every submission mints its own turn:
+  // nothing here learns when an earlier turn ended, so reusing one could hand
+  // the server a turn id that has already finished.
   const authorProjectRef = useRef(openProjectId || null)
   authorProjectRef.current = openProjectId || null
   useLayoutEffect(() => {
     setProjectContext(openProjectId || null)
-    authorAuthorityRef.current = null
   }, [openProjectId, setProjectContext])
-  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, forceFresh = false, projectId } = {}) => {
+  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, projectId } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
-    // truly cannot converse returns no authority and the controller stops
-    // before submitting an authoring request.
+    // truly cannot converse fails, and the controller stops before submitting
+    // an authoring request.
     const requestedProjectId = projectId === undefined ? authorProjectRef.current : projectId || null
     if (requestedProjectId !== authorProjectRef.current) return null
-    const cached = authorAuthorityRef.current
-    if (!forceFresh && cached && cached.projectId === requestedProjectId && cached.sessionId === agentSessionIdRef.current
-        && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
-      return { sessionId: cached.sessionId, turnId: cached.turnId }
-    }
+    let response
     try {
       // `allowSecretOnce` must reach this mint too: it starts a converse turn
       // on the SAME guarded transport (startTurn -> the wire), so an
       // AuthorPanel "Send anyway" re-stage with credential-shaped text would
-      // otherwise have its authority mint refused here and silently fall
-      // back to null-authority — a refusal the click never saw or overrode.
-      const response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce, requireImmediateTurn: true })
-      if (requestedProjectId !== authorProjectRef.current) return null
-      // The response's own session id, never the state-fed ref alone: the
-      // first mint resolves before React has re-rendered the fresh sessionId.
-      const sessionId = response?.session_id
-      if (!sessionId || !response?.turn_id) return null
-      authorAuthorityRef.current = { projectId: requestedProjectId, sessionId, turnId: response.turn_id, mintedAt: Date.now() }
-      return { sessionId, turnId: response.turn_id }
-    } catch {
-      return null
+      // otherwise have its authority mint refused here.
+      response = await startAgentTurn(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce, requireImmediateTurn: true })
+    } catch (error) {
+      // A project switched away from gets nothing, as after a successful
+      // start. The signed-out demo has no conversation to start, and the
+      // controller names that limit. A conversation busy with another turn
+      // starts nothing either, and the controller says to wait for that
+      // turn. Every other failure is the drafter's to see, so it is thrown
+      // on unchanged.
+      if (mock || requestedProjectId !== authorProjectRef.current) return null
+      // A failure whose fields cannot be read is not a busy conversation, and
+      // it is still the failure the drafter must see: nothing raised while
+      // classifying it may take its place.
+      let busy = false
+      try { busy = classifyAgentError(error) === 'busy' } catch { /* unreadable: the original failure stands */ }
+      if (busy) return null
+      throw error
     }
-  }, [startAgentTurn])
+    if (requestedProjectId !== authorProjectRef.current) return null
+    // The response's own session id, never the state-fed ref alone: the
+    // first mint resolves before React has re-rendered the fresh sessionId.
+    const sessionId = response?.session_id
+    if (!sessionId || !response?.turn_id) return null
+    return { sessionId, turnId: response.turn_id }
+  }, [mock, startAgentTurn])
 
   const authorStage = useAuthorStageController({ mock, authorityProvider: authorAuthorityProvider })
   authorPendingRef.current = !!authorStage.pointer

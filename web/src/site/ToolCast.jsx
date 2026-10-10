@@ -19,6 +19,7 @@ import {
   restoreDrawingVersion,
   runTool,
 } from '../api.js'
+import { classifyAgentError } from '../converse.js'
 import { resumeHref } from '../components/ConversationList.jsx'
 import LiveRegion, { HIDE_WITH_CLASS } from '../components/LiveRegion.jsx'
 import ConversePanel from '../components/ConversePanel.jsx'
@@ -710,33 +711,35 @@ export default function ToolCast({
 
   // Turn-authority provider for the author panel's stage POST: the server
   // fail-closes (409 stage_authority_invalid) without X-Authority-Session-Id/
-  // -Turn-Id naming an ACTIVE turn owned by this subject, so mint one from the
-  // converse session right before staging and reuse it briefly. The response's
-  // own session_id is authoritative; the state-fed sessionId can lag a render.
-  // A failed mint returns null and the server still answers with its own
-  // refusal — never a client-side one.
-  // Wide margin under the server's TURN_MAX_S default of 300s.
-  const AUTHOR_AUTHORITY_TTL_MS = 120_000
-  const authorAuthorityRef = useRef(null) // { sessionId, turnId, mintedAt }
-  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, forceFresh = false } = {}) => {
-    const cached = authorAuthorityRef.current
-    if (!forceFresh && cached && Date.now() - cached.mintedAt < AUTHOR_AUTHORITY_TTL_MS) {
-      return { sessionId: cached.sessionId, turnId: cached.turnId }
-    }
+  // -Turn-Id naming an ACTIVE turn owned by this subject, so every submission
+  // mints its own turn from the converse session right before staging. The
+  // response's own session_id is authoritative; the state-fed sessionId can
+  // lag a render.
+  const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false } = {}) => {
+    let response
     try {
       // `allowSecretOnce` must reach this mint too: it starts a converse turn
       // on the SAME guarded transport, so an AuthorPanel "Send anyway"
       // re-stage with credential-shaped text would otherwise have its
-      // authority mint refused here and silently fall back to
-      // null-authority — a refusal the click never saw or overrode.
-      const response = await startTurnRef.current(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce, requireImmediateTurn: true })
-      const mintedSession = response?.session_id
-      if (!mintedSession || !response?.turn_id) return null
-      authorAuthorityRef.current = { sessionId: mintedSession, turnId: response.turn_id, mintedAt: Date.now() }
-      return { sessionId: mintedSession, turnId: response.turn_id }
-    } catch {
-      return null
+      // authority mint refused here.
+      response = await startTurnRef.current(description, { source: 'author_panel', purpose: 'stage_authority' }, { allowSecretOnce, requireImmediateTurn: true })
+    } catch (error) {
+      // The signed-out demo has no conversation to start, and the controller
+      // names that limit. A conversation busy with another turn starts nothing
+      // either, and the controller says to wait for that turn. Every other
+      // failure is the drafter's to see, so it is thrown on unchanged.
+      if (PUBLIC_DEMO) return null
+      // A failure whose fields cannot be read is not a busy conversation, and
+      // it is still the failure the drafter must see: nothing raised while
+      // classifying it may take its place.
+      let busy = false
+      try { busy = classifyAgentError(error) === 'busy' } catch { /* unreadable: the original failure stands */ }
+      if (busy) return null
+      throw error
     }
+    const mintedSession = response?.session_id
+    if (!mintedSession || !response?.turn_id) return null
+    return { sessionId: mintedSession, turnId: response.turn_id }
   }, [])
 
   const authorStage = useAuthorStageController({
