@@ -1341,6 +1341,75 @@ class CustomizationService:
             raise CustomizationServiceError("record_fields_write_failed", 503) from exc
         return completed, changed
 
+    # The job status each stored stage state can project to. A row whose state and
+    # projection disagree (a staged state with no staged commit, a failed state that
+    # carries one) is a corrupt stage row: recovery answers it as a failure, never as
+    # a found job. A state with no entry here has no product writer for a stage row
+    # and is refused the same way.
+    _RECOVERY_JOB_STATUSES = {
+        ChangeState.STAGING: frozenset({"running", "queued"}),
+        ChangeState.FAILED: frozenset({"failed"}),
+        ChangeState.STAGED: frozenset({"staged"}),
+        ChangeState.AWAITING_APPROVAL: frozenset({"staged"}),
+        ChangeState.APPROVED: frozenset({"staged"}),
+        ChangeState.PUBLISHING: frozenset({"staged"}),
+        ChangeState.PUBLISHED: frozenset({"staged"}),
+        ChangeState.SUPERSEDED: frozenset({"staged"}),
+        ChangeState.ROLLED_BACK: frozenset({"staged"}),
+    }
+
+    def recover_stage(self, *, tenant: Any, idempotency_key: str) -> dict[str, Any]:
+        """Read an author's reserved stage request without current turn authority."""
+        tenant_id = _tenant_id(tenant)
+        if not enabled(5, tenant_id):
+            raise CustomizationServiceError("customization_stage_disabled", 404)
+        binding = _binding(tenant)
+        if binding.role not in {"owner", "editor"}:
+            raise CustomizationServiceError("tenant_role_denied", 403)
+        tier = entitlements.resolve_tier(tenant)
+        roles, elevated = entitlements.resolve_roles(tenant)
+        if not entitlements.entitlements_for(tier, roles, elevated).get("build", False):
+            raise CustomizationServiceError("builder_entitlement_missing", 403)
+        not_found = {
+            "contract": "leaf.customization-stage-recovery.v1", "status": "not_found",
+        }
+        try:
+            change = self.store.get_change_set_by_idempotency(
+                tenant_id=tenant_id, idempotency_key=idempotency_key
+            )
+        except ChangeSetNotFoundError:
+            return not_found
+        except ToolRecordFieldError as exc:
+            raise CustomizationServiceError("record_fields_invalid", 503) from exc
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+            raise CustomizationServiceError("customization_stage_failed", 503) from exc
+        if change.author_subject != binding.subject:
+            return not_found
+        if change.request_description is None and change.request_fingerprint is None:
+            return not_found
+        if (not isinstance(change.request_description, str)
+                or not isinstance(change.request_fingerprint, str)
+                or hashlib.sha256(change.request_description.encode("utf-8")).hexdigest()
+                != change.request_fingerprint):
+            raise CustomizationServiceError("customization_stage_failed", 503)
+        if change.state is ChangeState.CREATED:
+            return {
+                "contract": "leaf.customization-stage-recovery.v1",
+                "status": "admission_pending", "retry_after_ms": 1000,
+            }
+        try:
+            job = self.stage_status_change(change)
+        except CustomizationServiceError:
+            raise
+        except Exception as exc:
+            raise CustomizationServiceError("customization_stage_failed", 503) from exc
+        if job.get("status") not in self._RECOVERY_JOB_STATUSES.get(change.state, frozenset()):
+            raise CustomizationServiceError("customization_stage_failed", 503)
+        return {
+            "contract": "leaf.customization-stage-recovery.v1",
+            "status": "found", "job": job,
+        }
+
     def stage_status(self, *, tenant: Any, change_set_id: str) -> dict[str, Any]:
         try:
             change = self.store.get_change_set(

@@ -21,7 +21,7 @@ from typing import Any, Dict, Literal
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictStr
 
 import author_quota
 import catalog
@@ -83,6 +83,13 @@ class AuthorRequest(BaseModel):
 class StageRequest(AuthorRequest):
     mode: str = Field(..., max_length=20)
     idempotency_key: str = Field(..., min_length=1, max_length=200)
+
+    class Config:
+        extra = "forbid"
+
+
+class StageRecoveryRequest(BaseModel):
+    idempotency_key: StrictStr = Field(..., min_length=1, max_length=200)
 
     class Config:
         extra = "forbid"
@@ -912,6 +919,37 @@ def stage(
         return _customization_error(
             CustomizationServiceError("customization_stage_failed", 503), cause=exc
         )
+
+
+@router.post("/api/author/stage/recover")
+def recover_stage(
+    req: StageRecoveryRequest, tenant=Depends(deps.require_tenant)
+) -> Dict[str, Any]:
+    denied = _customization_gate(5, tenant)
+    if denied is not None:
+        return denied
+    if not req.idempotency_key.strip():
+        return _customization_error(
+            CustomizationServiceError("invalid_recovery_request", 422)
+        )
+    try:
+        outcome = CustomizationService.configured().recover_stage(
+            tenant=tenant, idempotency_key=req.idempotency_key
+        )
+    except ToolRecordFieldError as exc:
+        return _record_fields_error(exc)
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(
+            CustomizationServiceError("customization_stage_failed", 503), cause=exc
+        )
+    status_code = {"found": 200, "admission_pending": 202, "not_found": 404}[outcome["status"]]
+    return JSONResponse(status_code=status_code, content=outcome)
 
 
 @router.get("/api/author/stages/{change_set_id}")
