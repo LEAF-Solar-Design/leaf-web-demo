@@ -227,6 +227,7 @@ def test_api_run_refuses_unavailable_capability_before_submission(monkeypatch, n
 
 
 def test_capabilities_route_passes_authenticated_context(monkeypatch):
+    monkeypatch.delenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", raising=False)
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from routers import capabilities as route

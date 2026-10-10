@@ -33,6 +33,7 @@ import write_loop
 import product_capability_availability as capability_catalog
 import customization_service
 import solar_authored_graph
+import solar_project_admission
 from solar_design_graph import GraphValidationError
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_obj, error_response, with_envelope_fields
 
@@ -297,6 +298,18 @@ def _capability_access(rec, tenant, *, write=False):
     """Authorize with the verified caller and stored project on every observation."""
     if rec is None:
         return
+    context = rec.get("execution_context")
+    if isinstance(context, dict) and context.get("schema") == "leaf.solar-project-graph-job.v1":
+        if (not isinstance(tenant, deps.TenantContext) or not tenant.subject
+                or rec.get("tenant_id") != _bound_tenant_id(tenant)
+                or rec.get("org_id") != rec.get("tenant_id")):
+            raise LookupError("job unavailable")
+        org_id = uuid.UUID(str(rec.get("org_id")))
+        project_id = uuid.UUID(str(rec.get("project_id")))
+        org = jobs.platform_link.require_project_access(tenant, project_id, write=write)
+        if str(org) != str(org_id):
+            raise LookupError("job unavailable")
+        return
     kinds = [key for key in ("capability_provenance", "completion_provenance") if key in rec]
     if not kinds:
         return
@@ -329,6 +342,73 @@ def _access_error(rec, tenant, job_id, *, write=False):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
     return None
+
+
+def _catalog_digest_matches(candidate, current):
+    """Fails closed on any digest text: hmac refuses a non-ASCII string, so one never matches."""
+    return (isinstance(candidate, str) and candidate.isascii()
+            and hmac.compare_digest(candidate, current))
+
+
+def _project_solar_admission(tool, tenant, req, org_header, project_header,
+                             authorization, checkout_header, *, idempotency_key, preview):
+    """Share transport pins between exact catalog previews and submissions."""
+    digest = deps.catalog_tool_digest(tool)
+    if not _catalog_digest_matches(req.catalog_digest, digest):
+        return error_response(
+            ErrorCode.BAD_PARAMS,
+            "catalog tool changed or confirmation digest is missing; refresh tools and confirm again",
+            retryable=False, tool=req.tool, status_code=409)
+    if req.dwg_version is not None:
+        return error_response(ErrorCode.BAD_PARAMS,
+            "dwg_version applies to the legacy path; canonical runs pin by version UUID in dwg",
+            retryable=False, status_code=409)
+    if req.expected_drawing_head is not None:
+        return error_response(ErrorCode.BAD_PARAMS,
+            "expected_drawing_head applies only to legacy versioned drawings",
+            retryable=False, status_code=409)
+    if req.tool_manifest_sha256 is not None and req.tool_manifest_sha256 != digest:
+        return error_response(ErrorCode.BAD_PARAMS,
+            "tool manifest changed after approval; refresh tools and confirm again",
+            retryable=False, status_code=409)
+    defaults = tool.get("default_params")
+    drawing_id = req.params.get("drawing_id")
+    if "drawing_id" not in req.params and isinstance(defaults, dict):
+        drawing_id = defaults.get("drawing_id")
+    auth = authorization if isinstance(authorization, str) else None
+    result = solar_project_admission.project_tool_admission(
+        tool, tenant,
+        org_header=org_header if isinstance(org_header, str) else None,
+        project_header=project_header if isinstance(project_header, str) else None,
+        authorization=auth,
+        input_version_id=req.dwg, drawing_id=drawing_id, params=req.params,
+        catalog_digest=req.catalog_digest,
+        idempotency_key=idempotency_key if isinstance(idempotency_key, str) else None,
+        checkout_capability=checkout_header if isinstance(checkout_header, str) else None,
+        preview=preview)
+    return JSONResponse(status_code=result["status_code"], content=result["content"])
+
+
+def _wait_project_solar(submitted, tenant):
+    """A queued graph job remains submitted when the observation deadline passes."""
+    job_id = json.loads(submitted.body)["job_id"]
+    deadline = time.time() + jobs.job_max_s() + 30
+    while True:
+        rec = _job_for_tenant(job_id, _bound_tenant_id(tenant))
+        if rec is None:
+            return error_response(ErrorCode.INTERNAL, "job record vanished", retryable=False)
+        denied = _access_error(rec, tenant, job_id)
+        if denied is not None:
+            return denied
+        if rec["status"] == "complete":
+            return JSONResponse(status_code=200, content=rec["result"])
+        if rec["status"] in jobs.TERMINAL:
+            env = jobs.failed_envelope_from(rec)
+            code = env["error"]["error_code"]
+            return JSONResponse(status_code=DEFAULT_HTTP_STATUS.get(code, 500), content=env)
+        if time.time() >= deadline:
+            return submitted
+        time.sleep(0.1)
 
 
 def _active_binding_tenant(tenant: Any) -> Optional[str]:
@@ -616,8 +696,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                               retryable=False, tool=req.tool)
     tool_view = deps.catalog_tool_view(tool)
     current_catalog_digest = tool_view["catalog_digest"]
-    if not isinstance(req.catalog_digest, str) or not hmac.compare_digest(
-            req.catalog_digest, current_catalog_digest):
+    if not _catalog_digest_matches(req.catalog_digest, current_catalog_digest):
         return error_response(
             ErrorCode.BAD_PARAMS,
             "catalog tool changed or confirmation digest is missing; refresh tools and confirm again",
@@ -635,6 +714,16 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                                retryable=False),
             "reason_code": entity_scope.SCOPED_MUTATION_REASON,
         }))
+
+    if (solar_project_admission.project_runs_enabled()
+            and (isinstance(x_org_id, str) or isinstance(x_project_id, str))
+            and tool.get("name") in capability_catalog.SOLAR_CAPABILITIES):
+        response = _project_solar_admission(
+            tool, tenant_id, req, x_org_id, x_project_id, authorization,
+            x_checkout_capability, idempotency_key=idempotency_key, preview=False)
+        if wait and response.status_code == 202:
+            return _wait_project_solar(response, tenant_id)
+        return response
 
     # ENTITLEMENT GATE (§17): the tenant's tier must grant the capability this tool needs
     # (run_write for a drawing.write tool, else run_read). Enforced HERE in the execution

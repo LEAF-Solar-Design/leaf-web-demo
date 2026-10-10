@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import os
 import json
+import math
 import sys
-from typing import Any, Dict, Optional
+from copy import deepcopy
+from typing import Annotated, Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -20,11 +22,55 @@ import customization_service
 import deps
 import mcp_tool_projection
 import product_capability_availability as availability
-from envelopes import ErrorCode, error_obj, with_envelope_fields
+import solar_project_admission
+from envelopes import ErrorCode, error_obj, error_response, with_envelope_fields
+from routers import jobs as jobs_router
 from routers import ops as ops_router
 from routers import platform_customize as platform_customize_router
 
 router = APIRouter()
+
+# The request headers the project run path forwards, spelled once.
+_Header = Annotated[Optional[str], Header()]
+
+
+def _project_requests(text, names, drawing_id):
+    """Decode bounded exact requests without retaining caller query text."""
+    if text is None:
+        return {}
+    if len(text.encode("utf-8")) > 262144:
+        raise ValueError()
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError()
+            result[key] = value
+        return result
+    def finite(value):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError()
+        return number
+    def invalid(value):
+        raise ValueError()
+    requests = json.loads(text, object_pairs_hook=pairs, parse_float=finite, parse_constant=invalid)
+    if not isinstance(requests, dict):
+        raise ValueError()
+    for name, entry in requests.items():
+        if (name not in names or not isinstance(entry, dict)
+                or set(entry) != {"params", "catalog_digest", "idempotency_key"}
+                or not isinstance(entry["params"], dict)
+                or not isinstance(entry["catalog_digest"], str)
+                or not isinstance(entry["idempotency_key"], str)):
+            raise ValueError()
+        params = deepcopy(entry["params"])
+        if "drawing_id" in params and drawing_id is not None and params["drawing_id"] != drawing_id:
+            raise ValueError()
+        if "drawing_id" not in params:
+            params["drawing_id"] = drawing_id
+        entry["params"] = params
+    return requests
 
 
 def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSONResponse:
@@ -44,7 +90,13 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
                  tenant=Depends(deps.require_tenant),
                  drawing_id: Optional[str] = None,
                  project_id: Optional[str] = None,
-                 drawing_version: str = "head") -> Any:
+                 drawing_version: str = "head",
+                 input_version_id: Optional[str] = None,
+                 project_runs: Optional[str] = None,
+                 x_org_id: _Header = None,
+                 x_project_id: _Header = None,
+                 authorization: _Header = None,
+                 x_checkout_capability: _Header = None) -> Any:
     """Capability catalog, TENANT-SCOPED for the folded portion (wave 4): globals for
     everyone, only the requesting tenant's OWN repo tools folded in."""
     include_internal = (x_internal_role or "").strip().lower() == "qa"
@@ -116,11 +168,55 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         operator_owned_engine_source=operator_owned_engine_source,
     )
     families = catalog.build_catalog(tools, include_internal=include_internal)
-    families = availability.annotate_w1_availability(
-        families, tenant, drawing_id,
-        project_id=project_id,
-        version=drawing_version,
-    )
+    selected_project = project_id if isinstance(project_id, str) else (
+        x_project_id if isinstance(x_project_id, str) else None)
+    if solar_project_admission.project_runs_enabled() and selected_project is not None:
+        if (isinstance(project_id, str) and isinstance(x_project_id, str)
+                and project_id != x_project_id):
+            return error_response(ErrorCode.BAD_PARAMS, "project_id must match X-Project-Id",
+                                  retryable=False, status_code=400)
+        if drawing_version != "head":
+            return error_response(ErrorCode.BAD_PARAMS,
+                "drawing_version applies only to legacy versioned drawings",
+                retryable=False, status_code=400)
+        raw_by_name = {tool.get("name"): tool for tool in raw_tools}
+        names = {row.get("name") for family in families
+                 for row in family.get("capabilities") or []
+                 if row.get("name") in availability.SOLAR_CAPABILITIES}
+        try:
+            requests = _project_requests(project_runs, names, drawing_id)
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return error_response(ErrorCode.BAD_PARAMS,
+                "project_runs must contain valid project admission requests",
+                retryable=False, status_code=400)
+        states = {}
+        for family in families:
+            for row in family.get("capabilities") or []:
+                name = row.get("name")
+                if name not in names:
+                    continue
+                if name not in states:
+                    tool = raw_by_name.get(name, {})
+                    state = solar_project_admission.project_catalog_availability(tool, enabled=True)
+                    entry = requests.get(name)
+                    if entry is not None and state["engine_ready"]:
+                        # An absent version uses an empty pin so policy returns its UUID refusal.
+                        req = jobs_router.RunRequest(tool=name, params=entry["params"],
+                            dwg=input_version_id or "", catalog_digest=entry["catalog_digest"])
+                        response = jobs_router._project_solar_admission(
+                            tool, tenant, req, x_org_id, selected_project, authorization,
+                            x_checkout_capability, idempotency_key=entry["idempotency_key"], preview=True)
+                        state = solar_project_admission.project_catalog_availability(tool, enabled=True,
+                            admission={"status_code": response.status_code,
+                                       "content": json.loads(response.body)})
+                    states[name] = state
+                row["availability"] = deepcopy(states[name])
+    else:
+        families = availability.annotate_w1_availability(
+            families, tenant, drawing_id,
+            project_id=project_id,
+            version=drawing_version,
+        )
     return with_envelope_fields({
         "families": families,
         "cad_engine": cad_engine_selector(),
