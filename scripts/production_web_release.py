@@ -30,6 +30,21 @@ PREPARED_V2_SCHEMA = "leaf.production-web-prepared.v2"
 PREPARED_SCHEMA = PREPARED_V1_SCHEMA
 RECEIPT_SCHEMA = "leaf.production-web-deployment.v1"
 APPROVAL_SCHEMA = "leaf.production-web-approval.v2"
+NATIVE_REPOSITORY = {"id": 46, "full_name": "LEAF-Solar-Design/leaf-web-demo"}
+NATIVE_PRODUCER_PROJECT = (
+    "arn:aws:codebuild:us-east-1:807034087062:project/leaf-studio-native-release"
+)
+NATIVE_GATE_PROJECT = (
+    "arn:aws:codebuild:us-east-1:807034087062:project/leaf-studio-native-gate"
+)
+NATIVE_DELIVERY_BUCKET = "leaf-native-staging-delivery-807034087062"
+NATIVE_RELEASE_BUCKET = "leaf-studio-release-artifacts-807034087062-us-east-1"
+NATIVE_CONTRACT_BUCKET = "leaf-developer-platform-artifacts-807034087062-us-east-1"
+NATIVE_STAGING_LISTENER = (
+    "arn:aws:elasticloadbalancing:us-east-1:807034087062:listener/app/"
+    "leaf-automation-staging-api/d5cae470e8fcdbae/96cc5c0ab89ab4d3"
+)
+NATIVE_BRANCH_SCOPE = "canonical-native-five-service-staging"
 # The two approval modes the production deploy workflow can record. Closed set:
 # an unrecognized mode is refused rather than treated as independent.
 _APPROVAL_MODES = frozenset({"independent", "administrator-self-authorization"})
@@ -50,6 +65,9 @@ _DEPLOYMENT_URL = re.compile(r"^[a-z0-9][a-z0-9-]*\.vercel\.app$")
 _ENTRY_ASSET = re.compile(rb"assets/index-[A-Za-z0-9_-]+\.js")
 _LOGIN = re.compile(r"^[A-Za-z0-9-]{1,39}$")
 _UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+_NATIVE_UTC = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$"
+)
 
 
 class ReleaseError(ValueError):
@@ -107,7 +125,9 @@ def _object_ref(value: Any, label: str, *, revision: bool = False) -> dict[str, 
     return value
 
 
-def _build_identity(value: Any, label: str) -> dict[str, Any]:
+def _build_identity(
+    value: Any, label: str, expected_project: str
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReleaseError(f"{label} is invalid")
     _exact(value, {"project_arn", "build_arn", "build_number"}, label)
@@ -115,6 +135,8 @@ def _build_identity(value: Any, label: str) -> dict[str, Any]:
         value["project_arn"]
     ):
         raise ReleaseError(f"{label} project is invalid")
+    if value["project_arn"] != expected_project:
+        raise ReleaseError(f"{label} project is not the canonical native project")
     if not isinstance(value["build_arn"], str) or not _CODEBUILD_ARN.fullmatch(
         value["build_arn"]
     ):
@@ -125,6 +147,103 @@ def _build_identity(value: Any, label: str) -> dict[str, Any]:
     if type(value["build_number"]) is not int or value["build_number"] < 1:
         raise ReleaseError(f"{label} build number is invalid")
     return value
+
+
+def _native_delivery_ref(
+    value: Any,
+    transaction_id: str,
+    name: str,
+    label: str,
+    *,
+    revision: bool,
+) -> dict[str, Any]:
+    reference = _object_ref(value, label, revision=revision)
+    expected_key = f"delivery/v1/{transaction_id}/{reference['sha256']}/{name}"
+    if reference["bucket"] != NATIVE_DELIVERY_BUCKET or reference["key"] != expected_key:
+        raise ReleaseError(f"{label} is outside the canonical delivery prefix")
+    return reference
+
+
+def _native_contract_ref(value: Any, label: str) -> dict[str, Any]:
+    reference = _object_ref(value, label)
+    if (
+        reference["bucket"] != NATIVE_CONTRACT_BUCKET
+        or reference["sha256"] not in reference["key"].split("/")
+        or any(part in {"", ".", ".."} for part in reference["key"].split("/"))
+    ):
+        raise ReleaseError(f"{label} is not the pinned producer contract")
+    return reference
+
+
+def _native_success_readback(
+    value: Any, identity: dict[str, Any], label: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ReleaseError(f"{label} readback is invalid")
+    _exact(
+        value,
+        {"project_arn", "build_arn", "build_number", "status"},
+        f"{label} readback",
+    )
+    if value["status"] != "SUCCEEDED" or {
+        key: value[key] for key in identity
+    } != identity:
+        raise ReleaseError(f"{label} readback does not prove success")
+    return value
+
+
+def _native_tags(value: Any, source: str, label: str) -> None:
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(row, dict) or set(row) != {"key", "value"} for row in value)
+        or any(not isinstance(row["key"], str) or not isinstance(row["value"], str) for row in value)
+        or len({row["key"] for row in value}) != len(value)
+    ):
+        raise ReleaseError(f"semantic {label} tags are invalid")
+    if {row["key"]: row["value"] for row in value}.get("leaf:source") != source:
+        raise ReleaseError(f"semantic {label} source tag differs")
+
+
+def _native_route(value: Any, name: str) -> None:
+    if name in {"app", "web"}:
+        priorities = {"44", "50", "51"} if name == "app" else {"60"}
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"kind", "listener", "rules"}
+            or value["kind"] != "alb"
+            or value["listener"] != NATIVE_STAGING_LISTENER
+            or not isinstance(value["rules"], dict)
+            or set(value["rules"]) != priorities
+        ):
+            raise ReleaseError(f"semantic {name} route is not canonical staging")
+        rule_prefix = (
+            NATIVE_STAGING_LISTENER.replace(":listener/", ":listener-rule/") + "/"
+        )
+        target_prefix = (
+            "arn:aws:elasticloadbalancing:us-east-1:807034087062:targetgroup/"
+            "leaf-stg-platform-"
+        )
+        for row in value["rules"].values():
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"arn", "actions", "conditions"}
+                or not isinstance(row["arn"], str)
+                or not row["arn"].startswith(rule_prefix)
+                or not isinstance(row["actions"], list)
+                or not row["actions"]
+                or not isinstance(row["conditions"], list)
+            ):
+                raise ReleaseError(f"semantic {name} route rule is invalid")
+            encoded = json.dumps(row, sort_keys=True)
+            targets = re.findall(r'"TargetGroupArn":\s*"([^"]+)"', encoded)
+            if (
+                not targets
+                or any(not target.startswith(target_prefix) for target in targets)
+                or "platform-staging.leafdesign.ai" not in encoded
+            ):
+                raise ReleaseError(f"semantic {name} route leaves staging")
+    elif value != {"kind": "unrouted"}:
+        raise ReleaseError(f"semantic {name} route is not canonical staging")
 
 
 def extract_artifact(archive: Path, destination: Path) -> None:
@@ -321,9 +440,17 @@ def _validate_native_semantic(
         if row["image"] != acceptance["images"][name]:
             raise ReleaseError(f"semantic {name} image differs from the handoff")
         _sha256(row["config"], f"semantic {name} config digest")
-        if not isinstance(row["tags"], dict) or not isinstance(row["route"], dict):
-            raise ReleaseError(f"semantic {name} metadata is invalid")
-        _object_ref(row["evidence"], f"semantic {name} evidence", revision=True)
+        _native_tags(row["tags"], source, name)
+        _native_route(row["route"], name)
+        evidence = _native_delivery_ref(
+            row["evidence"],
+            acceptance["transaction_id"],
+            "readback.json",
+            f"semantic {name} evidence",
+            revision=True,
+        )
+        if evidence != acceptance["service_evidence"][name]:
+            raise ReleaseError(f"semantic {name} evidence differs from the handoff")
 
 
 def validate_native_bundle(
@@ -371,13 +498,31 @@ def validate_native_bundle(
         raise ReleaseError("Forge-native release evidence is invalid")
     _exact(
         release,
-        {"transaction_id", "producer", "gate", "artifact", "manifest_sha256"},
+        {
+            "transaction_id",
+            "source_revision",
+            "source_tree",
+            "producer",
+            "producer_readback",
+            "gate",
+            "gate_readback",
+            "artifact",
+            "manifest_sha256",
+            "producer_contract",
+        },
         "Forge-native release evidence",
     )
     transaction_id = release["transaction_id"]
     if not isinstance(transaction_id, str) or not _TRANSACTION.fullmatch(transaction_id):
         raise ReleaseError("Forge-native transaction ID is invalid")
-    producer = _build_identity(release["producer"], "Forge-native producer")
+    if release["source_revision"] != source or release["source_tree"] != tree:
+        raise ReleaseError("Forge-native release source differs")
+    producer = _build_identity(
+        release["producer"], "Forge-native producer", NATIVE_PRODUCER_PROJECT
+    )
+    _native_success_readback(
+        release["producer_readback"], producer, "Forge-native producer"
+    )
     gate = release["gate"]
     if not isinstance(gate, dict):
         raise ReleaseError("Forge-native gate evidence is invalid")
@@ -386,14 +531,32 @@ def validate_native_bundle(
         {"producer", "source_revision", "source_tree", "archive", "proof_sha256"},
         "Forge-native gate evidence",
     )
-    gate_producer = _build_identity(gate["producer"], "Forge-native gate producer")
-    if gate_producer["project_arn"] == producer["project_arn"]:
-        raise ReleaseError("Forge-native producer and gate are not separate")
+    gate_producer = _build_identity(
+        gate["producer"], "Forge-native gate producer", NATIVE_GATE_PROJECT
+    )
+    _native_success_readback(
+        release["gate_readback"], gate_producer, "Forge-native gate"
+    )
     if gate["source_revision"] != source or gate["source_tree"] != tree:
         raise ReleaseError("Forge-native gate source differs")
-    _object_ref(gate["archive"], "Forge-native gate archive")
+    gate_archive = _object_ref(gate["archive"], "Forge-native gate archive")
+    gate_build_id = gate_producer["build_arn"].rsplit(":", 1)[-1]
+    if (
+        gate_archive["bucket"] != NATIVE_RELEASE_BUCKET
+        or gate_archive["key"] != f"gate/{gate_build_id}/evidence.zip"
+    ):
+        raise ReleaseError("Forge-native gate archive is outside the canonical lane")
     _sha256(gate["proof_sha256"], "Forge-native gate proof digest")
-    release_object = _object_ref(release["artifact"], "Forge-native release object")
+    release_object = _native_delivery_ref(
+        release["artifact"],
+        transaction_id,
+        "native-release.zip",
+        "Forge-native release object",
+        revision=True,
+    )
+    producer_contract = _native_contract_ref(
+        release["producer_contract"], "Forge-native producer contract"
+    )
     _sha256(release["manifest_sha256"], "native release manifest digest")
 
     services = _validate_service_set(handoff, source)
@@ -405,6 +568,8 @@ def validate_native_bundle(
         {
             "schema",
             "transaction_id",
+            "environment",
+            "state",
             "semantic_receipt",
             "live_binding_revision",
             "repository",
@@ -412,6 +577,12 @@ def validate_native_bundle(
             "source_revision",
             "source_tree",
             "images",
+            "web",
+            "service_evidence",
+            "authority_receipt",
+            "branch_authority",
+            "transaction_readback",
+            "canonical_head",
             "settled",
         },
         "Forge-native staging acceptance",
@@ -421,16 +592,15 @@ def validate_native_bundle(
         raise ReleaseError("Forge-native staging repository is invalid")
     _exact(repository, {"id", "full_name"}, "Forge-native staging repository")
     if (
-        type(repository["id"]) is not int
-        or repository["id"] < 1
-        or not isinstance(repository["full_name"], str)
-        or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository["full_name"])
+        repository != NATIVE_REPOSITORY
     ):
         raise ReleaseError("Forge-native staging repository is invalid")
     expected_images = {name: services[name]["image_digest"] for name in SERVICES}
     if (
         acceptance["schema"] != "leaf.native-staging-semantic.v1"
         or acceptance["transaction_id"] != transaction_id
+        or acceptance["environment"] != "staging"
+        or acceptance["state"] != "LIVE"
         or acceptance["branch"] != "main"
         or acceptance["source_revision"] != source
         or acceptance["source_tree"] != tree
@@ -440,9 +610,118 @@ def validate_native_bundle(
         or acceptance["live_binding_revision"] < 1
     ):
         raise ReleaseError("Forge-native staging acceptance differs")
-    semantic_ref = _object_ref(
-        acceptance["semantic_receipt"], "Forge-native semantic receipt"
+    semantic_ref = _native_delivery_ref(
+        acceptance["semantic_receipt"],
+        transaction_id,
+        "semantic-live.json",
+        "Forge-native semantic receipt",
+        revision=True,
     )
+    service_evidence = acceptance["service_evidence"]
+    if not isinstance(service_evidence, dict) or set(service_evidence) != set(SERVICES):
+        raise ReleaseError("Forge-native service evidence set differs")
+    for name in SERVICES:
+        _native_delivery_ref(
+            service_evidence[name],
+            transaction_id,
+            "readback.json",
+            f"Forge-native {name} service evidence",
+            revision=True,
+        )
+
+    authority_ref = _native_delivery_ref(
+        acceptance["authority_receipt"],
+        transaction_id,
+        "authority-tx.json",
+        "Forge-native authority receipt",
+        revision=True,
+    )
+    authority = acceptance["branch_authority"]
+    if not isinstance(authority, dict):
+        raise ReleaseError("Forge-native branch authority is invalid")
+    _exact(
+        authority,
+        {
+            "schema",
+            "transaction_id",
+            "grant",
+            "proof",
+            "repository_id",
+            "branch",
+            "source_revision",
+            "source_tree",
+            "target",
+            "scope",
+            "expires_at",
+        },
+        "Forge-native branch authority",
+    )
+    _object_ref(authority["grant"], "Forge-native branch grant")
+    _object_ref(authority["proof"], "Forge-native trusted CI proof")
+    if (
+        authority["schema"] != "leaf.native-staging-authority-binding.v1"
+        or authority["transaction_id"] != transaction_id
+        or authority["repository_id"] != NATIVE_REPOSITORY["id"]
+        or authority["branch"] != "main"
+        or authority["source_revision"] != source
+        or authority["source_tree"] != tree
+        or authority["target"] != "staging"
+        or authority["scope"] != NATIVE_BRANCH_SCOPE
+        or not isinstance(authority["expires_at"], str)
+        or not _NATIVE_UTC.fullmatch(authority["expires_at"])
+        or hashlib.sha256(_canonical(authority)).hexdigest() != authority_ref["sha256"]
+    ):
+        raise ReleaseError("Forge-native branch authority differs")
+
+    transaction = acceptance["transaction_readback"]
+    if not isinstance(transaction, dict):
+        raise ReleaseError("Forge-native transaction readback is invalid")
+    _exact(
+        transaction,
+        {
+            "schema",
+            "transaction_id",
+            "state",
+            "repository",
+            "branch",
+            "commit",
+            "tree",
+            "semantic_receipt",
+            "authority_receipt",
+            "producer_contract",
+            "revision",
+        },
+        "Forge-native transaction readback",
+    )
+    if transaction != {
+        "schema": "leaf.native-staging-transaction.v1",
+        "transaction_id": transaction_id,
+        "state": "LIVE",
+        "repository": NATIVE_REPOSITORY,
+        "branch": "main",
+        "commit": source,
+        "tree": tree,
+        "semantic_receipt": semantic_ref,
+        "authority_receipt": authority_ref,
+        "producer_contract": producer_contract,
+        "revision": transaction["revision"],
+    } or type(transaction["revision"]) is not int or transaction["revision"] < 1:
+        raise ReleaseError("Forge-native transaction readback differs")
+    canonical_head = acceptance["canonical_head"]
+    if not isinstance(canonical_head, dict):
+        raise ReleaseError("Forge-native canonical head is invalid")
+    _exact(
+        canonical_head,
+        {"repository", "branch", "commit", "tree"},
+        "Forge-native canonical head",
+    )
+    if canonical_head != {
+        "repository": NATIVE_REPOSITORY,
+        "branch": "main",
+        "commit": source,
+        "tree": tree,
+    }:
+        raise ReleaseError("Forge-native source is not canonical main")
 
     web = handoff["web"]
     if not isinstance(web, dict):
@@ -458,15 +737,11 @@ def validate_native_bundle(
     if services["web"]["artifact_sha256"] != web_artifact_sha:
         raise ReleaseError("Forge-native web content identity differs")
     web_archive_sha = _sha256(web["archive_sha256"], "web archive digest")
-    if handoff["proof"] != {
-        "source_is_canonical_main": True,
-        "producer_and_gate_succeeded": True,
-        "staging_state_is_live": True,
-        "staging_digests_equal_release": True,
-        "web_archive_bytes_equal_release": True,
+    if acceptance["web"] != {
+        "artifact_sha256": web_artifact_sha,
+        "archive_sha256": web_archive_sha,
     }:
-        raise ReleaseError("Forge-native handoff proof is incomplete")
-
+        raise ReleaseError("Forge-native accepted web digests differ")
     manifest_bytes = bundle["staging-supply-set.json"]
     if hashlib.sha256(manifest_bytes).hexdigest() != release["manifest_sha256"]:
         raise ReleaseError("native release manifest digest differs from the handoff")
@@ -479,6 +754,36 @@ def validate_native_bundle(
     _validate_native_semantic(semantic, handoff, source, tree)
     if hashlib.sha256(bundle["web-dist.zip"]).hexdigest() != web_archive_sha:
         raise ReleaseError("web archive bytes differ from the Forge-native handoff")
+    if _native_web_members(bundle["web-dist.zip"]) != web_artifact_sha:
+        raise ReleaseError("web content digest differs from the Forge-native handoff")
+    derived_proof = {
+        "source_is_canonical_main": canonical_head["commit"] == source,
+        "producer_and_gate_succeeded": (
+            release["producer_readback"]["status"] == "SUCCEEDED"
+            and release["gate_readback"]["status"] == "SUCCEEDED"
+        ),
+        "staging_state_is_live": (
+            acceptance["environment"] == "staging"
+            and acceptance["state"] == "LIVE"
+            and transaction["state"] == "LIVE"
+            and semantic["settled"] is True
+        ),
+        "staging_digests_equal_release": (
+            acceptance["images"]
+            == {name: services[name]["image_digest"] for name in SERVICES}
+            and acceptance["web"]
+            == {
+                "artifact_sha256": web_artifact_sha,
+                "archive_sha256": web_archive_sha,
+            }
+        ),
+        "web_archive_bytes_equal_release": (
+            hashlib.sha256(bundle["web-dist.zip"]).hexdigest()
+            == web_archive_sha
+        ),
+    }
+    if handoff["proof"] != derived_proof or not all(derived_proof.values()):
+        raise ReleaseError("Forge-native handoff proof is incomplete")
     return handoff
 
 
@@ -708,7 +1013,8 @@ def prepare(
     }
 
 
-def _native_web_members(archive: bytes) -> None:
+def _native_web_members(archive: bytes) -> str:
+    digest = hashlib.sha256(b"leaf.web-dist.v1\0")
     try:
         with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
             members = bundle.infolist()
@@ -728,8 +1034,15 @@ def _native_web_members(archive: bytes) -> None:
                     or mode not in {0, stat.S_IFREG}
                 ):
                     raise ReleaseError("native web archive contains an unsupported path")
+                relative = name.removeprefix("dist/").encode()
+                payload = bundle.read(member)
+                digest.update(len(relative).to_bytes(8, "big"))
+                digest.update(relative)
+                digest.update(len(payload).to_bytes(8, "big"))
+                digest.update(payload)
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         raise ReleaseError("native web archive is malformed") from exc
+    return digest.hexdigest()
 
 
 def _read_native_bundle(bundle_root: Path) -> dict[str, bytes]:

@@ -2341,7 +2341,7 @@ def build_suites() -> List[Suite]:
         # identities, semantic LIVE receipt, closed bundle and replay refusal.
         Suite("forge-native-production-handoff",
               "scripts test_forge_native_production_handoff.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_forge_native_production_handoff.py"), 13),
+              SCRIPTS_DIR, _py_pytest("test_forge_native_production_handoff.py"), 23),
         # Proves labelled sizing replay isolation; opens loopback sockets and short-lived child Pythons only.
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),

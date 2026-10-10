@@ -42,6 +42,45 @@ DIGESTS = {
 NATIVE_TREE = "b" * 40
 NATIVE_TX = "d10-1234567890abcdef"
 NATIVE_REPOSITORY = {"id": 46, "full_name": "LEAF-Solar-Design/leaf-web-demo"}
+NATIVE_DELIVERY_BUCKET = "leaf-native-staging-delivery-807034087062"
+NATIVE_CONTRACT_BUCKET = "leaf-developer-platform-artifacts-807034087062-us-east-1"
+NATIVE_RELEASE_BUCKET = "leaf-studio-release-artifacts-807034087062-us-east-1"
+NATIVE_STAGING_LISTENER = (
+    "arn:aws:elasticloadbalancing:us-east-1:807034087062:listener/app/"
+    "leaf-automation-staging-api/d5cae470e8fcdbae/96cc5c0ab89ab4d3"
+)
+
+
+def _native_staging_route(name: str) -> dict:
+    if name not in {"app", "web"}:
+        return {"kind": "unrouted"}
+    priorities = {"44", "50", "51"} if name == "app" else {"60"}
+    target = (
+        "arn:aws:elasticloadbalancing:us-east-1:807034087062:targetgroup/"
+        f"leaf-stg-platform-{name}/12339c8d6d4846c8"
+    )
+    return {
+        "kind": "alb",
+        "listener": NATIVE_STAGING_LISTENER,
+        "rules": {
+            priority: {
+                "arn": NATIVE_STAGING_LISTENER.replace(
+                    ":listener/", ":listener-rule/"
+                )
+                + f"/{priority}/rule",
+                "actions": [{"Type": "forward", "TargetGroupArn": target}],
+                "conditions": [
+                    {
+                        "Field": "host-header",
+                        "HostHeaderConfig": {
+                            "Values": ["platform-staging.leafdesign.ai"]
+                        },
+                    }
+                ],
+            }
+            for priority in priorities
+        },
+    }
 
 
 def _native_identity(project: str, number: int) -> dict:
@@ -55,12 +94,15 @@ def _native_identity(project: str, number: int) -> dict:
     }
 
 
-def _native_ref(seed: str, transaction: str, *, revision: bool = False) -> dict:
+def _native_ref(
+    seed: str, transaction: str, *, revision: bool = False, name: str | None = None
+) -> dict:
+    digest = hashlib.sha256(seed.encode()).hexdigest()
     value = {
-        "bucket": "leaf-native-staging-delivery-807034087062",
-        "key": f"delivery/v1/{transaction}/{seed}.json",
+        "bucket": NATIVE_DELIVERY_BUCKET,
+        "key": f"delivery/v1/{transaction}/{digest}/{name or seed + '.json'}",
         "version_id": f"version-{seed}",
-        "sha256": hashlib.sha256(seed.encode()).hexdigest(),
+        "sha256": digest,
     }
     if revision:
         value["revision"] = 1
@@ -132,8 +174,22 @@ def _native_web(source: str) -> tuple[bytes, str]:
 def _native_bundle(
     *, source: str = SOURCE, transaction: str = NATIVE_TX
 ) -> dict[str, bytes]:
-    producer = _native_identity("leaf-forge-native-publisher", 42)
-    gate_identity = _native_identity("leaf-forge-native-gate", 41)
+    producer = _native_identity("leaf-studio-native-release", 42)
+    gate_identity = _native_identity("leaf-studio-native-gate", 41)
+    gate_build_id = gate_identity["build_arn"].rsplit(":", 1)[-1]
+    gate_archive = {
+        "bucket": NATIVE_RELEASE_BUCKET,
+        "key": f"gate/{gate_build_id}/evidence.zip",
+        "version_id": "version-gate",
+        "sha256": "7" * 64,
+    }
+    contract_sha = "4" * 64
+    producer_contract = {
+        "bucket": NATIVE_CONTRACT_BUCKET,
+        "key": f"trusted/native-producer/{contract_sha}/contract.json",
+        "version_id": "version-contract",
+        "sha256": contract_sha,
+    }
     web_archive, web_artifact_sha = _native_web(source)
     native = {
         "schema": "leaf.native-release.v1",
@@ -160,7 +216,7 @@ def _native_bundle(
             "producer": gate_identity,
             "source_revision": source,
             "source_tree": NATIVE_TREE,
-            "archive": _native_ref("gate-archive", transaction),
+            "archive": gate_archive,
             "proof_sha256": "1" * 64,
         },
     }
@@ -172,10 +228,10 @@ def _native_bundle(
             name: {
                 "image": DIGESTS[name],
                 "config": f"{index + 5:064x}",
-                "tags": {"leaf:source": source},
-                "route": {"target": "staging"},
+                "tags": [{"key": "leaf:source", "value": source}],
+                "route": _native_staging_route(name),
                 "evidence": _native_ref(
-                    f"{name}-readback", transaction, revision=True
+                    "readback", transaction, revision=True, name="readback.json"
                 ),
             }
             for index, name in enumerate(DIGESTS)
@@ -189,8 +245,13 @@ def _native_bundle(
     semantic_bytes = (
         json.dumps(semantic, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode()
-    semantic_ref = _native_ref("semantic-live", transaction)
+    semantic_ref = _native_ref(
+        "semantic-live", transaction, revision=True, name="semantic-live.json"
+    )
     semantic_ref["sha256"] = hashlib.sha256(semantic_bytes).hexdigest()
+    semantic_ref["key"] = (
+        f"delivery/v1/{transaction}/{semantic_ref['sha256']}/semantic-live.json"
+    )
     binding = {
         "schema": "leaf.native-staging-live-binding.v1",
         "repository": NATIVE_REPOSITORY,
@@ -198,17 +259,48 @@ def _native_bundle(
         "transaction_id": transaction,
         "source_revision": source,
         "source_tree": NATIVE_TREE,
-        "semantic_receipt": semantic_ref,
+        "semantic_receipt": {
+            key: semantic_ref[key]
+            for key in ("bucket", "key", "version_id", "sha256")
+        },
         "revision": 9,
     }
     transaction_readback = {
         "schema": "leaf.native-staging-transaction.v1",
         "transaction_id": transaction,
         "state": "LIVE",
+        "repository": NATIVE_REPOSITORY,
+        "branch": "main",
         "commit": source,
         "tree": NATIVE_TREE,
         "semantic_receipt": semantic_ref,
+        "producer_contract": producer_contract,
         "revision": 12,
+    }
+    branch_authority = {
+        "schema": "leaf.native-staging-authority-binding.v1",
+        "transaction_id": transaction,
+        "grant": _native_ref("standing-grant", transaction),
+        "proof": _native_ref("trusted-ci", transaction),
+        "repository_id": NATIVE_REPOSITORY["id"],
+        "branch": "main",
+        "source_revision": source,
+        "source_tree": NATIVE_TREE,
+        "target": "staging",
+        "scope": "canonical-native-five-service-staging",
+        "expires_at": "2027-10-03T00:00:00Z",
+    }
+    authority_bytes = _canonical_json(branch_authority)
+    authority_ref = _native_ref(
+        "authority", transaction, revision=True, name="authority-tx.json"
+    )
+    authority_ref["sha256"] = hashlib.sha256(authority_bytes).hexdigest()
+    authority_ref["key"] = (
+        f"delivery/v1/{transaction}/{authority_ref['sha256']}/authority-tx.json"
+    )
+    transaction_readback["authority"] = {
+        **authority_ref,
+        "transaction_id": transaction,
     }
     release_stream = io.BytesIO()
     with zipfile.ZipFile(
@@ -220,8 +312,13 @@ def _native_bundle(
         )
         release_archive.writestr("web-dist.zip", web_archive)
     release_bytes = release_stream.getvalue()
-    release_object = _native_ref("native-release", transaction)
+    release_object = _native_ref(
+        "native-release", transaction, revision=True, name="native-release.zip"
+    )
     release_object["sha256"] = hashlib.sha256(release_bytes).hexdigest()
+    release_object["key"] = (
+        f"delivery/v1/{transaction}/{release_object['sha256']}/native-release.zip"
+    )
     return build_handoff_bundle(
         release_object=release_object,
         release_archive=release_bytes,
@@ -230,6 +327,8 @@ def _native_bundle(
         semantic_live=semantic,
         live_binding=binding,
         transaction=transaction_readback,
+        producer_contract=producer_contract,
+        branch_authority=branch_authority,
         forge_head={
             "repository": NATIVE_REPOSITORY,
             "branch": "main",
@@ -456,6 +555,13 @@ def test_native_consumer_accepts_closed_provider_bound_bundle():
         "archive",
         "producer identity",
         "gate identity",
+        "producer status",
+        "repository",
+        "environment",
+        "route",
+        "source tag",
+        "proof",
+        "web content",
         "semantic receipt",
         "incomplete bundle",
     ],
@@ -471,6 +577,27 @@ def test_native_consumer_rejects_forged_or_incomplete_evidence(failure: str):
         semantic = json.loads(bundle["semantic-live.json"])
         semantic["source_revision"] = "f" * 40
         bundle["semantic-live.json"] = _canonical_json(semantic)
+    elif failure == "route":
+        _rewrite_semantic(
+            bundle,
+            lambda semantic: semantic["services"]["web"]["route"]["rules"][
+                "60"
+            ]["actions"][0].update(
+                TargetGroupArn=(
+                    "arn:aws:elasticloadbalancing:us-east-1:807034087062:"
+                    "targetgroup/leaf-production-web/0123456789abcdef"
+                )
+            ),
+        )
+    elif failure == "source tag":
+        _rewrite_semantic(
+            bundle,
+            lambda semantic: semantic["services"]["app"].update(
+                tags=[{"key": "leaf:source", "value": "f" * 40}]
+            ),
+        )
+    elif failure == "web content":
+        _rewrite_web_content(bundle)
     elif failure == "incomplete bundle":
         bundle.pop("semantic-live.json")
     else:
@@ -479,12 +606,63 @@ def test_native_consumer_rejects_forged_or_incomplete_evidence(failure: str):
             handoff["provider"] = "github-actions"
         elif failure == "producer identity":
             handoff["release"]["producer"]["build_number"] += 1
-        else:
+        elif failure == "gate identity":
             handoff["release"]["gate"]["producer"]["build_number"] += 1
+        elif failure == "producer status":
+            handoff["release"]["producer_readback"]["status"] = "FAILED"
+        elif failure == "repository":
+            forged = {"id": 99, "full_name": "other-org/other-repo"}
+            handoff["staging_acceptance"]["repository"] = forged
+            handoff["staging_acceptance"]["canonical_head"]["repository"] = forged
+            handoff["staging_acceptance"]["transaction_readback"]["repository"] = forged
+        elif failure == "environment":
+            handoff["staging_acceptance"]["environment"] = "production"
+        elif failure == "proof":
+            handoff["proof"]["producer_and_gate_succeeded"] = False
         bundle["production-handoff-candidate.json"] = _canonical_json(handoff)
 
     with pytest.raises(ReleaseError):
         validate_native_bundle(bundle, source=source)
+
+
+def _rewrite_semantic(bundle: dict[str, bytes], mutate) -> None:
+    semantic = json.loads(bundle["semantic-live.json"])
+    mutate(semantic)
+    semantic_bytes = _canonical_json(semantic)
+    digest = hashlib.sha256(semantic_bytes).hexdigest()
+    handoff = json.loads(bundle["production-handoff-candidate.json"])
+    reference = handoff["staging_acceptance"]["semantic_receipt"]
+    reference["sha256"] = digest
+    reference["key"] = f"delivery/v1/{NATIVE_TX}/{digest}/semantic-live.json"
+    handoff["staging_acceptance"]["transaction_readback"]["semantic_receipt"] = reference
+    bundle["semantic-live.json"] = semantic_bytes
+    bundle["production-handoff-candidate.json"] = _canonical_json(handoff)
+
+
+def _rewrite_web_content(bundle: dict[str, bytes]) -> None:
+    with zipfile.ZipFile(io.BytesIO(bundle["web-dist.zip"])) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    entries["dist/assets/index-good.js"] = b"console.log('forged')\n"
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name in sorted(entries):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3
+            info.external_attr = (stat.S_IFREG | 0o644) << 16
+            archive.writestr(info, entries[name])
+    web = stream.getvalue()
+    archive_sha = hashlib.sha256(web).hexdigest()
+    manifest = json.loads(bundle["staging-supply-set.json"])
+    manifest["web"]["archive_sha256"] = archive_sha
+    manifest_bytes = _canonical_json(manifest)
+    handoff = json.loads(bundle["production-handoff-candidate.json"])
+    handoff["release"]["manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+    handoff["web"]["archive_sha256"] = archive_sha
+    handoff["staging_acceptance"]["web"]["archive_sha256"] = archive_sha
+    bundle["staging-supply-set.json"] = manifest_bytes
+    bundle["web-dist.zip"] = web
+    bundle["production-handoff-candidate.json"] = _canonical_json(handoff)
 
 
 def test_native_consumer_rejects_replayed_candidate_evidence():

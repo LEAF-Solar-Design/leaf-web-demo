@@ -429,15 +429,25 @@ The release path is a staged, receipt-bound chain:
    fields. `scripts/forge_native_production_handoff.py` verifies the immutable
    native release object, separate successful CodeBuild producer and gate
    identities, exact Forge `main` source/tree, LIVE D10 transaction, semantic
-   staging receipt, and five accepted image digests. It emits a closed bundle
+   staging receipt, immutable producer-contract pin, branch authority binding,
+   and five accepted image digests. The repository is fixed to Forge repository
+   ID `46` (`LEAF-Solar-Design/leaf-web-demo`), the builds are fixed to
+   `leaf-studio-native-release` and `leaf-studio-native-gate`, and every
+   semantic row must carry the admitted `leaf:source` tag plus the canonical
+   staging route. The versioned release ZIP is read back only as
+   `delivery/v1/<transaction>/<sha256>/native-release.zip` in
+   `leaf-native-staging-delivery-807034087062`; the semantic and authority
+   receipts use the same content-addressed transaction prefix. It emits a closed bundle
    of exactly `staging-supply-set.json`, the unchanged `web-dist.zip`,
    `semantic-live.json`, and a provider-discriminated
    `leaf.production-handoff-candidate.v2` document.
 
    `scripts/production_web_release.py prepare-native` consumes only that closed
    bundle. It independently binds the manifest, build identities, semantic
-   receipt, immutable object versions, source/tree, transaction, web content
-   digest, and web archive digest; rejects non-`forge-native` v2 providers; and
+   receipt, provider-success readbacks, branch authority, immutable object
+   versions, source/tree, transaction, web content digest (recomputed from the
+   closed inner ZIP), and web archive digest; rejects non-`forge-native` v2
+   providers; recomputes every v2 proof boolean from the retained evidence; and
    verifies `build-config.json`, both CAD engine files, and
    `engine/PROVENANCE.json` before writing a no-build Vercel output directory.
    Its `leaf.production-web-prepared.v2` proof contains no fabricated workflow
