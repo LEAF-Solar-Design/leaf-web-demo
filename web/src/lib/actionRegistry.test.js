@@ -714,6 +714,107 @@ describe('the key ladder, table-driven', () => {
   })
 })
 
+// --- KEYS-c: a key pressed during a text composition is the input method's ---
+
+describe('KEYS-C: a key pressed during a text composition is never the ladder\'s', () => {
+  const field = () => el('<input />')
+  const plainTarget = () => document.createElement('div')
+  // The two ways an engine marks a composing keydown, and the keydown that carries both.
+  const ALL_MODIFIERS = { ctrlKey: true, shiftKey: true, altKey: true, metaKey: true }
+  const MARKS = [
+    ['isComposing', { isComposing: true }],
+    ['keyCode 229', { keyCode: 229 }],
+    ['isComposing and keyCode 229', { isComposing: true, keyCode: 229 }],
+    // A mark withholds the key whatever rides beside it: the key's ordinary code, or held modifiers.
+    ['isComposing with keyCode 27', { isComposing: true, keyCode: 27 }],
+    ['isComposing with every modifier held', { isComposing: true, ...ALL_MODIFIERS }],
+    ['keyCode 229 with every modifier held', { keyCode: 229, ...ALL_MODIFIERS }],
+  ]
+  const OPEN_RUNGS = [
+    ['drawer', { drawer: 'tools' }, 'drawer'],
+    ['phone drawer', { phoneViewport: true, studioDrawer: 'nav' }, 'drawer'],
+    ['history', { historyOpen: true }, 'history'],
+    ['Start', { startOpen: true }, 'start'],
+    ['route decision', { route: { tool: 'x' } }, 'route'],
+    ['error', { routeErr: 'boom' }, 'errors'],
+    ['running job', { running: true }, 'running'],
+    ['selection', { selectedHandle: 'h1' }, 'selection'],
+    ['project', { openProjectId: 'p1' }, 'project'],
+  ]
+
+  it.each(OPEN_RUNGS)('KEYS-C01 Escape during a composition leaves the open %s alone', (name, shell, rung) => {
+    for (const [, mark] of MARKS) {
+      expect(ladderDecision({ key: 'Escape', ...mark, target: field() }, shell)).toBeNull()
+      expect(ladderDecision({ key: 'Escape', ...mark, target: plainTarget() }, shell)).toBeNull()
+    }
+    // The control: the same key outside a composition is the ladder's.
+    const plain = ladderDecision({ key: 'Escape', keyCode: 27, isComposing: false, target: field() }, shell)
+    expect(plain).toMatchObject({ id: 'bar:escape', rung, route: 'kbd' })
+  })
+
+  it.each(MARKS)('KEYS-C02 the listener runs nothing for an Escape marked %s, then closes the drawer for a plain one', (name, mark) => {
+    const shell = { phoneViewport: true, studioDrawer: 'nav', historyOpen: true }
+    const onCloseDrawer = vi.fn()
+    const onCloseHistory = vi.fn()
+    const handlers = vi.fn((state) => ({ ...state, onCloseDrawer, onCloseHistory }))
+    const markInstant = vi.fn()
+    const preventDefault = vi.fn()
+    const onKey = ladderListener(shell, handlers, markInstant)
+    onKey({ key: 'Escape', ...mark, target: field(), preventDefault })
+    expect(handlers).not.toHaveBeenCalled()
+    expect(markInstant).not.toHaveBeenCalled()
+    expect(preventDefault).not.toHaveBeenCalled()
+    expect(onCloseDrawer).not.toHaveBeenCalled()
+    expect(onCloseHistory).not.toHaveBeenCalled()
+    onKey({ key: 'Escape', keyCode: 27, target: field(), preventDefault })
+    expect(handlers).toHaveBeenCalledTimes(1)
+    expect(onCloseDrawer).toHaveBeenCalledTimes(1)
+    expect(onCloseHistory).not.toHaveBeenCalled()
+    expect(markInstant).toHaveBeenCalledTimes(1)
+  })
+
+  it('KEYS-C03 reads the flag a real composing keydown carries', () => {
+    const shell = { drawer: 'tools' }
+    const composing = new KeyboardEvent('keydown', { key: 'Escape', isComposing: true, cancelable: true })
+    expect(composing.isComposing).toBe(true)
+    expect(ladderDecision(composing, shell)).toBeNull()
+    const plain = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })
+    expect(plain.isComposing).toBe(false)
+    expect(ladderDecision(plain, shell)).toMatchObject({ id: 'bar:escape', rung: 'drawer' })
+  })
+
+  it.each(MARKS)('KEYS-C04 Mod+K marked %s stays with the input method, and focuses the bar otherwise', (name, mark) => {
+    for (const mod of [{ ctrlKey: true }, { metaKey: true }]) {
+      for (const key of ['k', 'K']) {
+        expect(ladderDecision({ key, ...mod, ...mark, target: field() }, {})).toBeNull()
+        expect(ladderDecision({ key, ...mod, target: field() }, {}))
+          .toEqual({ id: 'bar:focus', rung: '', route: 'kbd', preventDefault: true, instant: true })
+      }
+    }
+  })
+
+  it.each(MARKS)('KEYS-C05 R, Shift+? and a printable key marked %s decide nothing outside a text field', (name, mark) => {
+    const shell = { rTarget: 'route' }
+    for (const key of ['r', 'R', '?', 'a']) {
+      expect(ladderDecision({ key, ...mark, target: plainTarget() }, shell)).toBeNull()
+    }
+    expect(ladderDecision({ key: 'r', target: plainTarget() }, shell))
+      .toEqual({ id: 'bar:retry', rung: 'route', route: 'kbd', preventDefault: true, instant: true })
+    expect(ladderDecision({ key: '?', target: plainTarget() }, shell))
+      .toEqual({ id: 'bar:shortcuts', rung: '', route: 'kbd', preventDefault: true, instant: false })
+    expect(ladderDecision({ key: 'a', target: plainTarget() }, shell))
+      .toEqual({ id: 'bar:focus', rung: '', route: 'type', preventDefault: false, instant: false })
+  })
+
+  it('KEYS-C06 only the two composition marks withhold a key: every other keyCode and a false flag do not', () => {
+    const shell = { drawer: 'tools' }
+    for (const extra of [{}, { keyCode: 0 }, { keyCode: 27 }, { keyCode: 228 }, { keyCode: 230 }, { keyCode: '229' },
+      { isComposing: false }, { isComposing: undefined, keyCode: undefined }]) {
+      expect(ladderDecision({ key: 'Escape', ...extra, target: field() }, shell)).toMatchObject({ rung: 'drawer' })
+    }
+  })
+})
+
 // --- S25: version Mod+Z off the drafting surface, the single-key switch ----
 
 describe('S25 version Mod+Z off the drafting surface', () => {

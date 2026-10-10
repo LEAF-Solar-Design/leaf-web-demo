@@ -564,10 +564,16 @@ function isInteractiveTarget(target) {
  * overlay (drawer, history) owns the typing. S25 adds two rules: Mod+Z and
  * Mod+Shift+Z run the version undo / redo records off the drafting surface
  * (versionShortcutDecision), and with single-key shortcuts switched off bare R
- * and Shift+? return null.
+ * and Shift+? return null. KEYS-c: a key pressed during a text composition
+ * (isComposing, or keyCode 229 where an engine reports no isComposing) is the
+ * input method's, so every rule above returns null for it.
  */
 export function ladderDecision(event, ctx = {}) {
-  if (!event || event.defaultPrevented || typeof event.key !== 'string') return null
+  // KEYS-c: the input method owns a key pressed while it is composing (Escape cancels the
+  // composition or backs out of candidate selection, and an input method may bind a modified
+  // letter of its own), so the ladder never decides it.
+  if (!event || event.defaultPrevented || event.isComposing || event.keyCode === 229
+      || typeof event.key !== 'string') return null
   const tag = String(event.target?.tagName || '').toLowerCase()
   const typing = isTypingTag(tag)
 

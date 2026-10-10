@@ -14,6 +14,7 @@ import useEscapeOwner, {
   registerEscapeOwner,
   topEscapeOwnerId,
 } from './useEscapeOwner.js'
+import { ladderListener } from './actionRegistry.js'
 
 afterEach(() => {
   cleanup()
@@ -341,5 +342,89 @@ describe('useEscapeOwner unmount', () => {
     expect(closeTopEscapeOwner()).toBe('a')
     expect(first).not.toHaveBeenCalled()
     expect(second).toHaveBeenCalledTimes(1)
+  })
+})
+
+// --- KEYS-c: an Escape pressed during a text composition is the input method's ---
+
+describe('KEYS-C: an Escape pressed during a text composition is not the stack\'s', () => {
+  // The two ways an engine marks a composing keydown, and the keydown that carries both.
+  const ALL_MODIFIERS = { ctrlKey: true, shiftKey: true, altKey: true, metaKey: true }
+  const MARKS = [
+    ['isComposing', { isComposing: true }],
+    ['keyCode 229', { keyCode: 229 }],
+    ['isComposing and keyCode 229', { isComposing: true, keyCode: 229 }],
+    // A mark withholds the key whatever rides beside it: the key's ordinary code, or held modifiers.
+    ['isComposing with keyCode 27', { isComposing: true, keyCode: 27 }],
+    ['isComposing with every modifier held', { isComposing: true, ...ALL_MODIFIERS }],
+    ['keyCode 229 with every modifier held', { keyCode: 229, ...ALL_MODIFIERS }],
+  ]
+  const escape = (extra = {}) => new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true, ...extra })
+
+  it.each(MARKS)('KEYS-C07 an Escape marked %s closes no owner and stays with the page, then a plain one closes the top owner', (name, mark) => {
+    const below = vi.fn()
+    const close = vi.fn()
+    window.addEventListener('keydown', below)
+    try {
+      render(h(Owner, { id: 'drawer', layer: 'drawer', onEscape: close }))
+      const composing = escape(mark)
+      document.body.dispatchEvent(composing)
+      expect(close).not.toHaveBeenCalled()
+      expect(composing.defaultPrevented).toBe(false)
+      expect(below).toHaveBeenCalledTimes(1)
+      expect(escapeOwnerStack()).toEqual(['drawer'])
+      const plain = escape({ keyCode: 27 })
+      document.body.dispatchEvent(plain)
+      expect(close).toHaveBeenCalledTimes(1)
+      expect(plain.defaultPrevented).toBe(true)
+      expect(below).toHaveBeenCalledTimes(1)
+    } finally {
+      window.removeEventListener('keydown', below)
+    }
+  })
+
+  it.each(MARKS)('KEYS-C08 with the key ladder listening below the stack, an Escape marked %s closes nothing at all', (name, mark) => {
+    const closeOwner = vi.fn()
+    const onCloseDrawer = vi.fn()
+    const markInstant = vi.fn()
+    const handlers = vi.fn((state) => ({ ...state, onCloseDrawer }))
+    const ladder = ladderListener({ phoneViewport: true, studioDrawer: 'nav' }, handlers, markInstant)
+    const unregister = registerEscapeOwner('phone-drawer', closeOwner, { layer: 'drawer' })
+    window.addEventListener('keydown', ladder)
+    try {
+      const field = document.body.appendChild(document.createElement('input'))
+      const composing = escape(mark)
+      field.dispatchEvent(composing)
+      expect(closeOwner).not.toHaveBeenCalled()
+      expect(handlers).not.toHaveBeenCalled()
+      expect(onCloseDrawer).not.toHaveBeenCalled()
+      expect(markInstant).not.toHaveBeenCalled()
+      expect(composing.defaultPrevented).toBe(false)
+      // The control: the same key outside a composition closes the drawer once, through the stack alone.
+      const plain = escape({ keyCode: 27 })
+      field.dispatchEvent(plain)
+      expect(closeOwner).toHaveBeenCalledTimes(1)
+      expect(plain.defaultPrevented).toBe(true)
+      expect(handlers).not.toHaveBeenCalled()
+      expect(onCloseDrawer).not.toHaveBeenCalled()
+    } finally {
+      window.removeEventListener('keydown', ladder)
+      unregister()
+    }
+  })
+
+  it('KEYS-C09 only the two composition marks withhold the key: every other key code and a false flag close the owner', () => {
+    for (const extra of [{}, { keyCode: 0 }, { keyCode: 27 }, { keyCode: 228 }, { keyCode: 230 }, { isComposing: false }]) {
+      const close = vi.fn()
+      const unregister = registerEscapeOwner('t', close, { layer: 'menu' })
+      try {
+        const event = escape(extra)
+        document.body.dispatchEvent(event)
+        expect(close).toHaveBeenCalledTimes(1)
+        expect(event.defaultPrevented).toBe(true)
+      } finally {
+        unregister()
+      }
+    }
   })
 })
