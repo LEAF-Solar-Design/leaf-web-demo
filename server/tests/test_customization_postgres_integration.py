@@ -346,6 +346,56 @@ def stage(store, change, prefix: str):
     )
 
 
+def test_postgres_stage_recovery_parity(store, monkeypatch) -> None:
+    import hashlib
+    from uuid import uuid4
+
+    import customization_service
+    import deps
+    from customization_authority import TenantBinding
+    from customization_service import CustomizationService
+
+    tenant_id = f"pg-recovery-{uuid4().hex[:12]}"
+    key = str(uuid4())
+    subject = "auth0|recovery-author"
+    description = "postgres stage recovery parity"
+    change, created = store.reserve_stage(
+        tenant_id=tenant_id, idempotency_key=key,
+        base_commit=BASE, desired_platform_release="platform@sha256:abc",
+        workspace_contract_digest=WORKSPACE, author_subject=subject,
+        change_kind="create", target_tool_name=None,
+        request_description=description,
+        request_fingerprint=hashlib.sha256(description.encode("utf-8")).hexdigest(),
+        authority_session_id=str(uuid4()), authority_turn_id=str(uuid4()),
+    )
+    assert created
+    change = store.transition(
+        tenant_id=tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        expected_state=ChangeState.CREATED, idempotency_key=str(uuid4()),
+    )
+    monkeypatch.setattr(customization_service, "enabled", lambda *_args: True)
+    monkeypatch.setattr(
+        customization_service, "_binding",
+        lambda tenant: TenantBinding(str(tenant), tenant.subject, "owner", True),
+    )
+    monkeypatch.setattr(customization_service.entitlements, "resolve_tier", lambda _tenant: "hosted_pro")
+    monkeypatch.setattr(customization_service.entitlements, "resolve_roles", lambda _tenant: ((), False))
+    monkeypatch.setattr(customization_service.entitlements, "entitlements_for", lambda *_args: {"build": True})
+    service = CustomizationService(store)
+    author = deps.TenantContext(tenant_id, tier="hosted_pro", subject=subject)
+    other = deps.TenantContext(tenant_id, tier="hosted_pro", subject="auth0|other-author")
+    before = _postgres_snapshot(platform_db())
+    assert service.recover_stage(tenant=author, idempotency_key=key) == {
+        "contract": "leaf.customization-stage-recovery.v1", "status": "found",
+        "job": service.stage_status_change(change),
+    }
+    miss = {"contract": "leaf.customization-stage-recovery.v1", "status": "not_found"}
+    assert service.recover_stage(tenant=other, idempotency_key=key) == miss
+    assert service.recover_stage(tenant=author, idempotency_key=str(uuid4())) == miss
+    assert _postgres_snapshot(platform_db()) == before
+
+
 def test_postgres_async_stage_claim_race_is_single_owner(store) -> None:
     description = "postgres async race"
     change, created = store.reserve_stage(

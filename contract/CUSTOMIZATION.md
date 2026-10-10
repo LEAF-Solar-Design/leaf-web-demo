@@ -118,6 +118,58 @@ The response carries a `leaf.customization.v1` staged receipt, tool preview,
 server validation, and server-generated diff summary. Staging MUST NOT change
 the effective catalog or tenant main ref.
 
+### R5 stage recovery
+
+`POST /api/author/stage/recover`
+
+Request (exactly one string field, 1–200 characters, not all whitespace):
+
+```json
+{"idempotency_key": "client-generated-stable-key"}
+```
+
+Recovery is author-only and read-only. The authenticated caller must still have
+an owner or editor role and the Build entitlement. Recovery reads no authority
+headers and does not require the original session or turn to remain live. It
+does not reserve, charge, dispatch, transition, or publish work. Opening the
+store runs the store's own one-time schema migration, which can backfill legacy
+confirmation bindings on the first request a store instance serves; that is store
+initialization shared by every route, and recovery adds no write of its own.
+
+HTTP 200 returns the following body, where `J` is the complete stored job using
+the existing `leaf.customization-stage-job.v1` projection, including its
+`poll_url` and all applicable receipt, result, or error fields:
+
+```text
+{"contract": "leaf.customization-stage-recovery.v1", "status": "found", "job": J}
+```
+
+HTTP 202 returns a reservation whose admission is still pending, without a job
+or poll URL:
+
+```json
+{"contract": "leaf.customization-stage-recovery.v1", "status": "admission_pending", "retry_after_ms": 1000}
+```
+
+HTTP 404 returns the same miss for an absent key, another tenant, another
+author, or a non-stage row. A stored row whose record fields cannot be decoded
+answers 503 `record_fields_invalid` before its author is compared, so such a row
+is distinguishable from an absent key; the answer carries no job content:
+
+```json
+{"contract": "leaf.customization-stage-recovery.v1", "status": "not_found"}
+```
+
+A client MUST treat any 404 without
+`"contract": "leaf.customization-stage-recovery.v1"` as an error, never as a
+miss. Store failures and corrupt stage rows are errors, never misses. A stored
+state that contradicts its own job projection (a staged state with no staged
+commit or catalog digest, a failed or staging state that carries both, a state no
+stage row reaches) answers 503 `customization_stage_failed`, never a found job. A
+staged row whose pinned catalog content cannot be decoded answers the ordinary
+stage poll's 502 `invalid_staged_catalog`. Ordinary stage admission retains its
+exact idempotency and authority comparisons.
+
 ### R6 publish
 
 `POST /api/author/register`
