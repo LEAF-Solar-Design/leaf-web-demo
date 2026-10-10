@@ -2000,9 +2000,6 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
      keycap, which is the next surviving child. */
   .bar-controls .key { margin-left: auto; }
   .bar-input { height: calc(var(--bar-folded-height) - 2px); padding: 0 16px; }
-  @media (min-width: 601px) and (max-width: 980px) and (min-height: 500px) {
-    .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar.bar-command-line { height: var(--bar-folded-height); box-sizing: border-box; }
-  }
 }
 
 /* SB3: the bar never carries a drop halo — the focused-composer ring is the only pop */

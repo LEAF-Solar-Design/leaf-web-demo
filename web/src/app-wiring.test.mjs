@@ -2301,7 +2301,7 @@ function dockClearanceFailures(cockpitCss, baseCss, structuralCss, otherSheets =
   if (one(base, '.bar-input', [DOCK_FOLD], 'folded input rule').get('height') !== 'calc(var(--bar-folded-height) - 2px)') {
     failures.push('the folded input must read the absolute bar height less its border')
   }
-  const foldedBar = one(base, DOCK_APP + ' .bar.bar-command-line', [DOCK_FOLD, DOCK_TABLET], 'folded tablet command bar rule')
+  const foldedBar = one(cockpit, DOCK_APP + ' .bar.bar-command-line', [DOCK_FOLD, DOCK_TABLET], 'folded tablet command bar rule in cockpit.css')
   if (foldedBar.get('height') !== 'var(--bar-folded-height)' || foldedBar.get('box-sizing') !== 'border-box') {
     failures.push('the tablet bar itself must read the same absolute border-box height')
   }
@@ -2449,9 +2449,9 @@ describe('DOCK folded tablet clearance', () => {
   it('DOCK D3 the tablet reservations share the absolute folded command-bar height', () => {
     assert.deepEqual(dockClearanceFailures(cockpit, base, structural), [])
     // The unchanged CSS must fail this row, including its original 40px input.
-    const unchanged = swap(swap(swap(swap(cockpit, reservation, ''), centre, 'inset: 88px 0 100px;'),
+    const unchanged = swap(swap(swap(swap(swap(cockpit, foldedBar, ''), reservation, ''), centre, 'inset: 88px 0 100px;'),
       panel, 'bottom: 100px;'), result, ' - 100px - var(--ck-status-rise, 0px)))')
-    const unfoldedContract = swap(swap(swap(base, ':root { --bar-folded-height: 42px; }', ''), input, 'height: 40px;'), foldedBar, '')
+    const unfoldedContract = swap(swap(base, ':root { --bar-folded-height: 42px; }', ''), input, 'height: 40px;')
     assert.ok(dockClearanceFailures(unchanged, unfoldedContract, structural).length > 0, 'unchanged base must fail D3')
   })
 
@@ -2459,7 +2459,10 @@ describe('DOCK folded tablet clearance', () => {
     for (const [name, a, b, extra = []] of [
       ['folded absolute height drift', cockpit, swap(base, '--bar-folded-height: 42px;', '--bar-folded-height: 44px;')],
       ['folded input stops reading height', cockpit, swap(base, input, 'height: 40px;')],
-      ['folded bar stops reading height', cockpit, swap(base, 'height: var(--bar-folded-height);', 'height: 42px;')],
+      ['folded bar stops reading height', swap(cockpit, 'height: var(--bar-folded-height);', 'height: 42px;'), base],
+      ['folded bar dropped', swap(cockpit, foldedBar, ''), base],
+      ['folded bar moved to global styles', swap(cockpit, foldedBar, ''), base + '\n' + DOCK_FOLD + ' {\n' + foldedBar + '}\n'],
+      ['folded bar boundary drift', swap(cockpit, DOCK_FOLD, '@media (max-height: 761px)'), base],
       ['reservation stops reading height', swap(cockpit, reservation, reservation.replace('var(--bar-folded-height, 32px)', '32px')), base],
       ['centre reservation dropped', swap(cockpit, centre, 'inset: 88px 0 100px;'), base],
       ['panel reservation dropped', swap(cockpit, panel, 'bottom: 100px;'), base],
