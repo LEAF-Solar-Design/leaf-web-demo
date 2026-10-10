@@ -968,7 +968,7 @@
   .studio-shell .cockpit-ribbon-tabs [role="tab"] { padding: 0 10px; min-width: 44px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav { height: 44px; min-height: 44px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { height: 42px; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .center-col { position: absolute; inset: 88px 0 100px; min-height: 0; overflow: hidden; }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .center-col { position: absolute; inset: 88px 0 var(--ck-tablet-reservation, 100px); min-height: 0; overflow: hidden; }
   /* Collapsed activity headings occupy their own strip below the drawing,
      above the command input. The grid's auto placement cannot cover tools. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) > .rail-stack {
@@ -986,7 +986,7 @@
     flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) > aside.nav {
-    position: fixed; top: var(--ck-canvas-top); right: 0; bottom: 100px; left: auto;
+    position: fixed; top: var(--ck-canvas-top); right: 0; bottom: var(--ck-tablet-reservation, 100px); left: auto;
     width: min(240px, 40vw); min-height: 0; overflow: auto;
   }
   .studio-shell .selection-readout { position: fixed; left: 14px; bottom: 110px; pointer-events: none; }
@@ -999,7 +999,7 @@
      the ribbon and prompt. Idle uses the same treatment as the wide frame. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block {
     position: fixed; top: var(--ck-canvas-top); bottom: auto; left: auto; right: 4px;
-    width: min(420px, 40vw); max-height: max(0px, calc(100dvh - var(--ck-canvas-top) - 100px - var(--ck-status-rise, 0px)));
+    width: min(420px, 40vw); max-height: max(0px, calc(100dvh - var(--ck-canvas-top) - var(--ck-tablet-reservation, 100px) - var(--ck-status-rise, 0px)));
     box-sizing: border-box; overflow: auto; pointer-events: none;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block:has(.result-panel > p.panel-sub) { display: none; }
@@ -1021,6 +1021,9 @@
    19px plus the dock's 8px gap and its 8px sibling margin. Short landscape and the phone
    drawer keep their own layouts. */
 @media (min-width: 601px) and (max-width: 980px) and (min-height: 500px) {
+  /* 68px of dock spacing plus the bar's absolute height (32px when unfolded).
+     The phone frame keeps 100px; short landscape's app padding stays below. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-tablet-reservation: calc(68px + var(--bar-folded-height, 32px)); }
   #cockpit-engine-status-slot:empty { display: none; }
   .studio-shell .cockpit-engine-status { margin: 0; line-height: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(#cockpit-engine-status-slot:not(:empty)) { --ck-status-rise: 35px; }
