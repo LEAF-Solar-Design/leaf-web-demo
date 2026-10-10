@@ -40,6 +40,16 @@
   font: inherit;
   line-height: 16px;
 }
+.drawing-navigation .drawing-find-field .drawing-find-submit {
+  flex-shrink: 0;
+  min-width: 24px;
+  min-height: 24px;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  font: inherit;
+  line-height: 16px;
+}
 .drawing-navigation :focus-visible { outline: 2px solid #91c9ff; outline-offset: 2px; }
 .drawing-find-results { position: absolute; top: 26px; left: 0; right: 0; max-height: 180px; overflow: auto; }
 .drawing-find-results ul { position: relative; list-style: none; margin: 0; padding: 0; }
