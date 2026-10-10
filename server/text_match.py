@@ -17,8 +17,12 @@ def text_matches(candidate, current) -> bool:
     A value that is not a ``str``, or that cannot be encoded (a lone surrogate),
     never matches. The text is read through ``str.encode`` itself, so a ``str``
     subclass is compared by the characters it holds, never by what it overrides.
+    The type is read with ``type()``, never through ``__class__``, so no caller code
+    runs before the comparison and an object cannot claim to be text.
     """
-    if not isinstance(candidate, str) or not isinstance(current, str):
+    # type() reads the real type; isinstance() would consult an object's __class__,
+    # which a caller-built object can make raise or lie.
+    if not issubclass(type(candidate), str) or not issubclass(type(current), str):
         return False
     try:
         left = str.encode(candidate, "utf-8")

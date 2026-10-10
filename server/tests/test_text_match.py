@@ -110,6 +110,41 @@ def test_text_match_total_over_every_pair():
         assert outcome is expected, (left, right)
 
 
+class _ClassRaises:
+    """Not text; its __class__ property raises, as a caller-built object can."""
+
+    @property
+    def __class__(self):
+        raise RuntimeError("class lookup")
+
+
+class _ClassClaimsText:
+    """Not text; its __class__ property claims str."""
+
+    @property
+    def __class__(self):
+        return str
+
+
+class _TextWhoseClassRaises(str):
+    """Real text whose __class__ property raises; still compared by its characters."""
+
+    @property
+    def __class__(self):
+        raise RuntimeError("class lookup")
+
+
+def test_text_match_never_consults_a_class_override():
+    for impostor in (_ClassRaises(), _ClassClaimsText()):
+        assert text_matches(impostor, "a") is False
+        assert text_matches("a", impostor) is False
+        assert text_matches(impostor, impostor) is False
+    real = _TextWhoseClassRaises("broker-secret")
+    assert text_matches(real, "broker-secret") is True
+    assert text_matches("broker-secret", real) is True
+    assert text_matches(real, "wrong") is False
+
+
 def test_text_match_uses_the_constant_time_primitive_on_bytes(monkeypatch):
     calls = []
 

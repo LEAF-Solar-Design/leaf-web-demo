@@ -1915,7 +1915,7 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r5-policy", "server canonical Solar admission policy",
               "pytest", SERVER, _py_pytest("tests/test_sip_r5_policy.py"), 14),
         Suite("server-text-match", "server constant-time text comparison that never raises",
-              "pytest", SERVER, _py_pytest("tests/test_text_match.py"), 10),
+              "pytest", SERVER, _py_pytest("tests/test_text_match.py"), 11),
         Suite("server-sip-r5-routes", "server canonical Solar admission and catalog routes",
               "pytest", SERVER, _py_pytest("tests/test_sip_r5_routes.py"), 18),
         Suite("platform-sip-r5-admission", "platform Solar HTTP admission and settlement",
