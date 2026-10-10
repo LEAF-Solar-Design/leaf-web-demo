@@ -3908,3 +3908,32 @@ describe('S25 version Mod+Z wiring', () => {
       'the listener reads the bar redo after it is declared')
   })
 })
+
+describe('KEYS-b the phone Studio drawer is an Escape owner', () => {
+  const keysCode = codeOnly(appSource).split('\r').join('')
+  const keysCount = (needle) => keysCode.split(needle).length - 1
+
+  it('KEYS-B13 App registers the open phone drawer with the owner stack exactly once', () => {
+    assert.equal(keysCount("import usePhoneDrawerEscape from './lib/usePhoneDrawerEscape.js'"), 1)
+    const call = "usePhoneDrawerEscape({ studioShell, phoneViewport, studioDrawer }, () => setStudioDrawer('none'))"
+    assert.equal(keysCount(call), 1, 'one registration, closing exactly as the shell rung does')
+    assert.equal(keysCount('usePhoneDrawerEscape('), 1, 'no second call site')
+    const at = keysCode.indexOf(call)
+    for (const declared of [
+      'const [studioDrawer, setStudioDrawer] = useState(',
+      'const [phoneViewport, setPhoneViewport] = useState(',
+      'const studioShell = ',
+    ]) {
+      const where = keysCode.indexOf(declared)
+      assert.ok(where >= 0 && where < at, declared + ' is declared before the registration reads it')
+    }
+    // The ladder keeps its own drawer rung for a key the stack hands back.
+    assert.equal(keysCount("if (drawer && drawer !== 'none') setDrawer(null)\n        else setStudioDrawer('none')"), 1)
+    assert.equal(keysCount("studioDrawer: studioShell ? studioDrawer : 'none',"), 1)
+  })
+
+  it('KEYS-B14 the pin reads code, not a comment', () => {
+    const commented = "// usePhoneDrawerEscape({ studioShell, phoneViewport, studioDrawer }, () => setStudioDrawer('none'))"
+    assert.equal(codeOnly(commented).includes('usePhoneDrawerEscape('), false)
+  })
+})

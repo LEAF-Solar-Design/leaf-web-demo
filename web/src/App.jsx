@@ -31,6 +31,7 @@ import PropertiesDock, { drawingExtents, drawingPropertyName } from './site/Prop
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import useEscapeOwner from './lib/useEscapeOwner.js'
+import usePhoneDrawerEscape from './lib/usePhoneDrawerEscape.js'
 import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
@@ -3269,6 +3270,12 @@ export default function App() {
     setSettingsRunResult(null)
     setSolarFormTool(null)
   }, { layer: 'edit', scope: solarSettingsFormRef, scoped: true })
+  // KEYS-b: an open phone Studio drawer is an Escape owner at the drawer
+  // layer, so it closes before an armed command, the version history or a
+  // running turn below it, and still yields to a menu or a sheet above it
+  // (lib/usePhoneDrawerEscape.js). The ladder's own drawer rung stays for a
+  // key the stack hands back.
+  usePhoneDrawerEscape({ studioShell, phoneViewport, studioDrawer }, () => setStudioDrawer('none'))
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
   const projectSwitcherRef = useRef(null)
   // Each bump opens the header switcher on its inline create field.
