@@ -1,7 +1,7 @@
 // W4f slice A1: a click on the ground answers the armed prompt's point
 // steps through the viewer's unproject, the caret moves on, the rubber band
 // follows the cursor, and nothing happens without an armed point command.
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
@@ -82,6 +82,88 @@ function click(x, y) {
     ground.dispatchEvent(new MouseEvent('pointerup', { clientX: x, clientY: y, button: 0, bubbles: true }))
   })
 }
+
+function compositionEvent(el, key, isComposing, keyCode) {
+  const event = createEvent.keyDown(el, { key, bubbles: true, cancelable: true, isComposing, keyCode })
+  expect(event.isComposing).toBe(isComposing)
+  expect(event.keyCode).toBe(keyCode)
+  event.stopPropagation = vi.fn(event.stopPropagation.bind(event))
+  return event
+}
+
+async function promptCompositionEnter(isComposing, keyCode) {
+  mount()
+  await openAndLoad()
+  fireEvent.click(document.querySelector('.drafting-ribbon [data-tool="draw:createLine"]'))
+  click(120, 30)
+  click(200, 80)
+  const el = screen.getByLabelText('ribbon x2')
+  act(() => el.focus())
+  const operands = { ...context.inputs }
+  const armed = context.armed
+  const before = workers[0].posted.filter((message) => message.type === 'applyEdit')
+  expect(operands).toMatchObject({ x: '12', y: '3', x2: '20', y2: '8' })
+  const event = compositionEvent(el, 'Enter', isComposing, keyCode)
+  fireEvent(el, event)
+  expect(event.defaultPrevented).toBe(false)
+  expect(event.stopPropagation).not.toHaveBeenCalled()
+  expect(context.inputs).toEqual(operands)
+  expect(context.armed).toBe(armed)
+  expect(document.activeElement).toBe(el)
+  expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toEqual(before)
+  const ordinary = compositionEvent(el, 'Enter', false, 0)
+  fireEvent(el, ordinary)
+  expect(ordinary.defaultPrevented).toBe(true)
+  expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toEqual([
+    ...before, { type: 'applyEdit', op: 'createLine', payload: { x1: 12, y1: 3, x2: 20, y2: 8, layer: '' } },
+  ])
+}
+
+async function draftingCompositionKeys(isComposing, keyCode) {
+  mount(false, null, <input aria-label="composition drafting input" defaultValue="draft" />)
+  await openAndLoad()
+  const el = screen.getByLabelText('composition drafting input')
+  act(() => el.focus())
+  expect(context.ortho).toBe(false)
+  expect(context.osnap).toBe(true)
+  for (const key of ['F8', 'F3']) {
+    const modes = { ortho: context.ortho, osnap: context.osnap }
+    const before = workers[0].posted.filter((message) => message.type === 'applyEdit')
+    const event = compositionEvent(el, key, isComposing, keyCode)
+    fireEvent(el, event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(event.stopPropagation).not.toHaveBeenCalled()
+    expect({ ortho: context.ortho, osnap: context.osnap }).toEqual(modes)
+    expect(el.value).toBe('draft')
+    expect(document.activeElement).toBe(el)
+    expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toEqual(before)
+    const ordinary = compositionEvent(el, key, false, 0)
+    fireEvent(el, ordinary)
+    expect(ordinary.defaultPrevented).toBe(true)
+    expect({ ortho: context.ortho, osnap: context.osnap }).toEqual({
+      ortho: key === 'F8' ? !modes.ortho : modes.ortho,
+      osnap: key === 'F3' ? !modes.osnap : modes.osnap,
+    })
+    expect(document.activeElement).toBe(el)
+    expect(workers[0].posted.filter((message) => message.type === 'applyEdit')).toEqual(before)
+  }
+}
+
+it('KEYS-D40 armed prompt Enter yields native composition', async () => {
+  await promptCompositionEnter(true, 0)
+})
+
+it('KEYS-D41 armed prompt Enter yields key code 229', async () => {
+  await promptCompositionEnter(false, 229)
+})
+
+it('KEYS-D50 drafting mode keys yield native composition', async () => {
+  await draftingCompositionKeys(true, 0)
+})
+
+it('KEYS-D51 drafting mode keys yield key code 229', async () => {
+  await draftingCompositionKeys(false, 229)
+})
 
 it('a bar point uses the click sequence and its ghost anchor', async () => {
   mount()

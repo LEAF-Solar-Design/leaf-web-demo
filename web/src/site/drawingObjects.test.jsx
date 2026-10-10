@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import DrawingNavigationTools from './DrawingNavigationTools.jsx'
 import { DrawingObjectsProvider, useDrawingObjects } from './DrawingObjectsContext.jsx'
@@ -92,6 +92,131 @@ const find = (query) => { type(query); enter() }
 const back = () => fireEvent.click(screen.getByRole('button', { name: 'Back to the previous view' }))
 const up = () => fireEvent.click(screen.getByRole('button', { name: 'Up one level' }))
 const selectThree = (h) => act(() => h.probe.engine.session.actions.selectReplace(['42', '43', '44']))
+
+function compositionEvent(el, key, isComposing, keyCode) {
+  const event = createEvent.keyDown(el, { key, bubbles: true, cancelable: true, isComposing, keyCode })
+  expect(event.isComposing).toBe(isComposing)
+  expect(event.keyCode).toBe(keyCode)
+  event.stopPropagation = vi.fn(event.stopPropagation.bind(event))
+  return event
+}
+
+function findSnapshot(h) {
+  return {
+    query: input().value,
+    expanded: input().getAttribute('aria-expanded'),
+    active: input().getAttribute('aria-activedescendant'),
+    options: screen.queryAllByRole('option').map((option) => ({ text: option.textContent, selected: option.getAttribute('aria-selected') })),
+    focusId: h.probe.objects.focusId,
+    pose: JSON.parse(JSON.stringify(h.viewer.getPose())),
+    viewerCalls: Object.fromEntries(Object.entries(h.viewer).filter(([, method]) => method.mock).map(([name, method]) => [name, method.mock.calls.length])),
+    selection: [...h.probe.engine.session.selectedIds],
+    selectedHandle: h.probe.selectedHandle,
+    layers: { ...h.probe.visibleLayers },
+    historySize: h.history.size(),
+    historyHead: JSON.parse(JSON.stringify(h.history.peek())),
+  }
+}
+
+function findCompositionEnter(isComposing, keyCode) {
+  for (const scenario of ['unique', 'ambiguous', 'populated']) {
+    const h = setup()
+    try {
+      selectThree(h)
+      find('2A')
+      type(scenario === 'unique' ? 'Module south' : 'Module')
+      if (scenario === 'populated') {
+        enter()
+        fireEvent.keyDown(input(), { key: 'ArrowDown' })
+        expect(screen.getAllByRole('option')[1].getAttribute('aria-selected')).toBe('true')
+      }
+      const el = input()
+      act(() => el.focus())
+      const before = findSnapshot(h)
+      const event = compositionEvent(el, 'Enter', isComposing, keyCode)
+      fireEvent(el, event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(event.stopPropagation).not.toHaveBeenCalled()
+      expect(document.activeElement).toBe(el)
+      expect(findSnapshot(h)).toEqual(before)
+      const ordinary = compositionEvent(el, 'Enter', false, 0)
+      fireEvent(el, ordinary)
+      expect(ordinary.defaultPrevented).toBe(true)
+      expect(ordinary.stopPropagation).toHaveBeenCalledTimes(1)
+      expect(el.value).toBe(before.query)
+      expect(h.probe.engine.session.selectedIds).toEqual(before.selection)
+      if (scenario === 'ambiguous') {
+        expect(screen.getAllByRole('option')).toHaveLength(2)
+        expect(screen.getAllByRole('option')[0].getAttribute('aria-selected')).toBe('true')
+        expect(h.probe.objects.focusId).toBe(before.focusId)
+        expect(h.viewer.getPose()).toEqual(before.pose)
+        expect(h.history.size()).toBe(before.historySize)
+        expect(findSnapshot(h).viewerCalls).toEqual(before.viewerCalls)
+      } else {
+        expect(screen.queryByRole('listbox')).toBeNull()
+        expect(h.probe.objects.focusId).toBe('h:2B')
+        expect(h.viewer.frame).toHaveBeenCalledTimes(before.viewerCalls.frame + 1)
+        expect(h.viewer.setFocusMarker).toHaveBeenCalledTimes(before.viewerCalls.setFocusMarker + 1)
+        expect(h.history.size()).toBe(before.historySize + 1)
+      }
+    } finally {
+      h.unmount()
+    }
+  }
+}
+
+function findCompositionArrows(isComposing, keyCode) {
+  for (const key of ['ArrowDown', 'ArrowUp']) {
+    const h = setup()
+    try {
+      selectThree(h)
+      find('2A')
+      find('Module')
+      const el = input()
+      act(() => el.focus())
+      expect(screen.getAllByRole('option')).toHaveLength(2)
+      expect(screen.getAllByRole('option')[0].getAttribute('aria-selected')).toBe('true')
+      const before = findSnapshot(h)
+      const event = compositionEvent(el, key, isComposing, keyCode)
+      fireEvent(el, event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(event.stopPropagation).not.toHaveBeenCalled()
+      expect(document.activeElement).toBe(el)
+      expect(findSnapshot(h)).toEqual(before)
+      const ordinary = compositionEvent(el, key, false, 0)
+      fireEvent(el, ordinary)
+      expect(ordinary.defaultPrevented).toBe(true)
+      expect(ordinary.stopPropagation).toHaveBeenCalledTimes(1)
+      expect(screen.getAllByRole('option')[1].getAttribute('aria-selected')).toBe('true')
+      expect(screen.getAllByRole('option')[0].getAttribute('aria-selected')).toBe('false')
+      const after = findSnapshot(h)
+      expect(after).toEqual({
+        ...before,
+        active: el.getAttribute('aria-controls') + '-1',
+        options: before.options.map((option, index) => ({ ...option, selected: index === 1 ? 'true' : 'false' })),
+      })
+      expect(document.activeElement).toBe(el)
+    } finally {
+      h.unmount()
+    }
+  }
+}
+
+it('KEYS-D46 drawing Find Enter yields native composition', () => {
+  findCompositionEnter(true, 0)
+})
+
+it('KEYS-D47 drawing Find Enter yields key code 229', () => {
+  findCompositionEnter(false, 229)
+})
+
+it('KEYS-D48 drawing Find arrows yield native composition', () => {
+  findCompositionArrows(true, 0)
+})
+
+it('KEYS-D49 drawing Find arrows yield key code 229', () => {
+  findCompositionArrows(false, 229)
+})
 
 it.each(['Module north', 'panel-a', '2A', 'zoom to Module north', 'go to 2A'])('finds %s on the guest engine drawing without console intake or selecting', (query) => {
   const h = setup()

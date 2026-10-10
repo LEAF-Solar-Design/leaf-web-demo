@@ -32,6 +32,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
@@ -509,6 +510,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   }, [])
   useEscapeOwner('armed-command', !!armedOp, () => cancelRef.current(), { layer: 'command', when: armedOwnsEscape })
   const onPromptKeyDown = (event) => {
+    if (isCompositionKey(event)) return
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) {
       // Enter on Run or Cancel keeps the button's own activation (one
       // click, one action); the row's Enter is for the fields only. Without
@@ -872,6 +874,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   }
   const stepSize = (event) => (event.shiftKey ? 10 : event.altKey ? 0.1 : 1)
   const onDimensionKeyDown = (key, event) => {
+    if (isCompositionKey(event)) return
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) { commitDimension(key); return }
     if ((event.key !== 'ArrowUp' && event.key !== 'ArrowDown') || event.ctrlKey || event.metaKey) return
     const start = dimensionStart(key)
