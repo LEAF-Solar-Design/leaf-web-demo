@@ -45,6 +45,8 @@ FORGE_SOLVER_REVISION = "760d3888018f762e0ab8dbe289dae8a2871216ea"
 FORGE_CHECKOUTS = {"source_snapshot": "LEAF_FORGE_SOURCE_DIR",
                    "contract_snapshot": "LEAF_FORGE_CONTRACT_DIR",
                    "solver_snapshot": "LEAF_FORGE_SOLVER_DIR"}
+WEB_BUILD_CONFIG = {"schema": "leaf.web-build-config.v1", "vite_cad_edit": "1"}
+WEB_ENGINE_FILES = ("engine.js", "engine_bg.wasm")
 
 
 def _hex(value, length, label):
@@ -418,6 +420,25 @@ def package_web_image(root: Path, image_digest: str, source: str,
     health = json.loads((dist / "health.json").read_text(encoding="utf-8"))
     if health.get("source_sha") != source or health.get("ok") is not True:
         raise ValueError("web image files do not carry the admitted source")
+    config = json.loads((dist / "build-config.json").read_text(encoding="utf-8"))
+    if config != WEB_BUILD_CONFIG:
+        raise ValueError("web image files do not carry the reviewed build config")
+    provenance = json.loads(
+        (dist / "engine" / "PROVENANCE.json").read_text(encoding="utf-8")
+    )
+    if (provenance.get("contract") != "leaf.cad-engine-stage.v1"
+            or set(provenance.get("files", {})) != set(WEB_ENGINE_FILES)):
+        raise ValueError("web image engine provenance differs")
+    for name in WEB_ENGINE_FILES:
+        path = dist / "engine" / name
+        if not path.is_file():
+            raise ValueError(f"web image is missing required engine runtime: {name}")
+        content = path.read_bytes()
+        record = provenance["files"][name]
+        if (not content or not isinstance(record, dict)
+                or record.get("bytes") != len(content)
+                or record.get("sha256") != hashlib.sha256(content).hexdigest()):
+            raise ValueError(f"web image engine provenance differs: {name}")
     archive = output_dir / "web-dist.zip"
     result = subprocess.run(
         [sys.executable, "scripts/platform_release_manifest.py", "pack-web-dist",
