@@ -2010,6 +2010,8 @@ export default function ToolCast({
             <ConversePanel
               sessionId={sessionId}
               userTurns={turns}
+              onCatalogChanged={catalog.actions.refreshCatalog}
+              consumeCatalogPublication={catalog.controller.consumeCatalogPublication}
               onDismiss={() => {}}
               onLinkClaude={() => { setRightView('trust'); setClaudeOpen(true) }}
               onAttachJob={attachJob}
