@@ -375,11 +375,12 @@ def _project_solar_admission(tool, tenant, req, org_header, project_header,
     drawing_id = req.params.get("drawing_id")
     if "drawing_id" not in req.params and isinstance(defaults, dict):
         drawing_id = defaults.get("drawing_id")
+    auth = authorization if isinstance(authorization, str) else None
     result = solar_project_admission.project_tool_admission(
         tool, tenant,
         org_header=org_header if isinstance(org_header, str) else None,
         project_header=project_header if isinstance(project_header, str) else None,
-        authorization=authorization if isinstance(authorization, str) else None,
+        authorization=auth,
         input_version_id=req.dwg, drawing_id=drawing_id, params=req.params,
         catalog_digest=req.catalog_digest,
         idempotency_key=idempotency_key if isinstance(idempotency_key, str) else None,

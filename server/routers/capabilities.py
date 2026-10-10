@@ -30,6 +30,9 @@ from routers import platform_customize as platform_customize_router
 
 router = APIRouter()
 
+# The request headers the project run path forwards, spelled once.
+_Header = Annotated[Optional[str], Header()]
+
 
 def _project_requests(text, names, drawing_id):
     """Decode bounded exact requests without retaining caller query text."""
@@ -90,10 +93,10 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
                  drawing_version: str = "head",
                  input_version_id: Optional[str] = None,
                  project_runs: Optional[str] = None,
-                 x_org_id: Annotated[Optional[str], Header()] = None,
-                 x_project_id: Annotated[Optional[str], Header()] = None,
-                 authorization: Annotated[Optional[str], Header()] = None,
-                 x_checkout_capability: Annotated[Optional[str], Header()] = None) -> Any:
+                 x_org_id: _Header = None,
+                 x_project_id: _Header = None,
+                 authorization: _Header = None,
+                 x_checkout_capability: _Header = None) -> Any:
     """Capability catalog, TENANT-SCOPED for the folded portion (wave 4): globals for
     everyone, only the requesting tenant's OWN repo tools folded in."""
     include_internal = (x_internal_role or "").strip().lower() == "qa"
