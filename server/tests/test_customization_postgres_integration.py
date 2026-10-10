@@ -346,7 +346,7 @@ def stage(store, change, prefix: str):
     )
 
 
-def test_postgres_stage_recovery_parity(store, monkeypatch) -> None:
+def test_postgres_stage_recovery_parity(store, monkeypatch, request) -> None:
     import hashlib
     from uuid import uuid4
 
@@ -374,6 +374,13 @@ def test_postgres_stage_recovery_parity(store, monkeypatch) -> None:
         next_state=ChangeState.STAGING, expected_version=change.version,
         expected_state=ChangeState.CREATED, idempotency_key=str(uuid4()),
     )
+    # The store is module-scoped and claim_stage takes the oldest claimable STAGING row of any
+    # tenant, so a row left in STAGING here is claimed by the race row below; end it in FAILED.
+    request.addfinalizer(lambda: store.transition(
+        tenant_id=tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.FAILED, expected_version=change.version,
+        expected_state=ChangeState.STAGING, idempotency_key=str(uuid4()),
+    ))
     monkeypatch.setattr(customization_service, "enabled", lambda *_args: True)
     monkeypatch.setattr(
         customization_service, "_binding",
