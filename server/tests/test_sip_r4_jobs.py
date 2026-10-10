@@ -732,6 +732,7 @@ def test_sip_r4_result_projection(memory):
 
 
 def test_sip_r4_no_http_activation(monkeypatch):
+    monkeypatch.delenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", raising=False)
     from routers import jobs as router
     root = Path(graph.__file__).parent
     monkeypatch.setattr(platform_link, "submit_canonical_graph", forbidden)
