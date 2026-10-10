@@ -39,12 +39,17 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
   const frame = useSurfaceFrame()
   const ground = useStudioGround()
   const [query, setQuery] = useState('')
-  const [results, setResults] = useState(null)
+  // A match list belongs to the index it was computed from. An edit to the same drawing builds a new
+  // index, which hides the old list, so neither Enter nor the Find button acts on a record the drawing
+  // may no longer have; the next Enter or Find runs the query fresh.
+  const [listing, setListing] = useState(null)
   const [active, setActive] = useState(0)
   const [message, setMessage] = useState('')
   const inputId = useId(), listId = useId(), pathId = useId()
   const listRef = useRef(null)
   const index = objects?.index
+  const results = listing && listing.index === index ? listing.result : null
+  const setResults = (result) => setListing(result ? { index, result } : null)
   const layers = useMemo(() => objectLayers(index, engine?.session.entities), [index, engine?.session.entities])
   const latest = useRef(null)
   latest.current = { objects, engine, query, layers }
@@ -134,6 +139,12 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
       aria-autocomplete="list" aria-expanded={!!results} aria-controls={results ? listId : undefined}
       aria-activedescendant={results ? `${listId}-${active}` : undefined}
       onChange={(event) => { setQuery(event.target.value); setResults(null); setMessage('') }} onKeyDown={keyDown} />
+    {/* KEYS-e: a visible way to run Find. Enter is the field's own key, but a keyboard that reports
+        Enter as key code 229 never gets past the composition guard, so this resolves the query exactly
+        as Enter does on a fresh query. It never chooses a listed match; an option is clicked for that.
+        mousedown keeps the caret in the field so the arrow keys can walk the list it opens. */}
+    <button type="button" className="drawing-find-submit" onMouseDown={(event) => event.preventDefault()}
+      onClick={() => resolve()}>Find</button>
     </div>
     <div className="drawing-find-status">
     {message && <span role="status">{message}</span>}

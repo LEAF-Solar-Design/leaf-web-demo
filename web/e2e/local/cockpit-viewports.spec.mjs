@@ -65,7 +65,7 @@ async function navigationGeometry(page) {
       return [{ element, selector, box }]
     })
     const failures = []
-    for (const control of document.querySelectorAll('.drawing-find-field input, .drawing-focus button, [data-nav-objects] > summary')) {
+    for (const control of document.querySelectorAll('.drawing-find-field input, .drawing-find-field button, .drawing-focus button, [data-nav-objects] > summary')) {
       if (!control.checkVisibility()) continue
       const box = control.getBoundingClientRect()
       if (box.width < 24 || box.height < 24) failures.push(`${control.tagName} target is smaller than 24px`)
@@ -143,6 +143,14 @@ for (const condition of [...conditions, { name: '844x390', viewport: { width: 84
             expect(await navigationSafeRect(page)).toEqual(baseline)
             await find.fill('no-such-layout-object'); await find.press('Enter')
             await expect(page.locator('.drawing-find-status > [role="status"]')).toHaveText('No matching object in this drawing.')
+            await navigationGeometry(page)
+            expect(await navigationSafeRect(page)).toEqual(baseline)
+            // KEYS-e: the Find button resolves a fresh query as Enter does and keeps the caret in the field.
+            await find.fill('no-such-layout-object-again')
+            await expect(page.locator('.drawing-find-status > [role="status"]')).toHaveCount(0)
+            await page.locator('[data-nav-find]').getByRole('button', { name: 'Find', exact: true }).click()
+            await expect(page.locator('.drawing-find-status > [role="status"]')).toHaveText('No matching object in this drawing.')
+            await expect(find).toBeFocused()
             await navigationGeometry(page)
             expect(await navigationSafeRect(page)).toEqual(baseline)
             await find.fill('LINE'); await find.press('Enter')

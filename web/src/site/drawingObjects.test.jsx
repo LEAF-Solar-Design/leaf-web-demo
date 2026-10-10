@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import DrawingNavigationTools from './DrawingNavigationTools.jsx'
 import { DrawingObjectsProvider, useDrawingObjects } from './DrawingObjectsContext.jsx'
@@ -216,6 +216,135 @@ it('KEYS-D48 drawing Find arrows yield native composition', () => {
 
 it('KEYS-D49 drawing Find arrows yield key code 229', () => {
   findCompositionArrows(false, 229)
+})
+
+const findButton = () => within(input().closest('[data-nav-find]')).getByRole('button', { name: 'Find', exact: true })
+const findStatus = () => document.querySelector('.drawing-find-status > [role="status"]')?.textContent ?? null
+function findOutcome(h) {
+  const snapshot = findSnapshot(h)
+  const active = snapshot.active && snapshot.active.slice(snapshot.active.lastIndexOf('-'))
+  return { ...snapshot, active, status: findStatus() }
+}
+
+it('KEYS-E01 the Find band carries a visible Find button after the field', () => {
+  setup()
+  const button = findButton()
+  expect(button.tagName).toBe('BUTTON')
+  expect(button.getAttribute('type')).toBe('button')
+  expect(button.disabled).toBe(false)
+  expect(button.closest('.drawing-find-field')).toBe(input().closest('.drawing-find-field'))
+  expect(input().compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+})
+
+it.each([
+  ['a unique match', 'Module south', (outcome) => { expect(outcome.focusId).toBe('h:2B'); expect(outcome.options).toEqual([]) }],
+  ['several matches', 'Module', (outcome) => expect(outcome.options).toHaveLength(2)],
+  ['no match', 'absent object', (outcome) => expect(outcome.status).toBe('No matching object in this drawing.')],
+  ['an empty query', '', (outcome) => expect(outcome.status).toBe('No matching object in this drawing.')],
+  ['an all-whitespace query', '   ', (outcome) => expect(outcome.status).toBe('No matching object in this drawing.')],
+  ['a query with surrounding spaces', '  Module south  ', (outcome) => { expect(outcome.focusId).toBe('h:2B'); expect(outcome.options).toEqual([]) }],
+  ['a go to query', 'go to 2B', (outcome) => { expect(outcome.focusId).toBe('h:2B'); expect(outcome.options).toEqual([]) }],
+  ['a zoom to query', 'zoom to 2B', (outcome) => { expect(outcome.focusId).toBe('h:2B'); expect(outcome.options).toEqual([]) }],
+])('KEYS-E02 the Find button resolves %s exactly as Enter does', (_, query, check) => {
+  const outcome = (run) => {
+    const h = setup()
+    try {
+      selectThree(h)
+      find('2A')
+      type(query)
+      act(() => input().focus())
+      run()
+      return findOutcome(h)
+    } finally {
+      h.unmount()
+    }
+  }
+  const byEnter = outcome(() => enter())
+  const byButton = outcome(() => fireEvent.click(findButton()))
+  check(byEnter)
+  expect(byButton).toEqual(byEnter)
+})
+
+it('KEYS-E03 after the input method keeps an Enter, the Find button still resolves the query', () => {
+  const h = setup()
+  selectThree(h)
+  find('2A')
+  type('Module south')
+  const el = input()
+  act(() => el.focus())
+  const before = findSnapshot(h)
+  fireEvent(el, compositionEvent(el, 'Enter', false, 229))
+  expect(findSnapshot(h)).toEqual(before)
+  fireEvent.click(findButton())
+  expect(h.probe.objects.focusId).toBe('h:2B')
+  expect(h.history.size()).toBe(before.historySize + 1)
+  expect(h.viewer.frame).toHaveBeenCalledTimes(before.viewerCalls.frame + 1)
+})
+
+it('KEYS-E04 pressing the Find button keeps the caret in the field so the arrows walk its list', () => {
+  setup()
+  type('Module')
+  const el = input()
+  act(() => el.focus())
+  const down = createEvent.mouseDown(findButton(), { bubbles: true, cancelable: true })
+  fireEvent(findButton(), down)
+  expect(down.defaultPrevented).toBe(true)
+  fireEvent.click(findButton())
+  expect(document.activeElement).toBe(el)
+  expect(screen.getAllByRole('option')).toHaveLength(2)
+  expect(screen.getAllByRole('option')[0].getAttribute('aria-selected')).toBe('true')
+  fireEvent.keyDown(el, { key: 'ArrowDown' })
+  expect(screen.getAllByRole('option')[1].getAttribute('aria-selected')).toBe('true')
+})
+
+it('KEYS-E05 with the list open the Find button lists the query again and chooses nothing', () => {
+  const h = setup()
+  selectThree(h)
+  find('2A')
+  find('Module')
+  fireEvent.keyDown(input(), { key: 'ArrowDown' })
+  expect(screen.getAllByRole('option')[1].getAttribute('aria-selected')).toBe('true')
+  const before = findSnapshot(h)
+  fireEvent.click(findButton())
+  expect(h.probe.objects.focusId).toBe(before.focusId)
+  expect(h.history.size()).toBe(before.historySize)
+  expect(findSnapshot(h).viewerCalls).toEqual(before.viewerCalls)
+  expect(screen.getAllByRole('option')).toHaveLength(2)
+  expect(screen.getAllByRole('option')[0].getAttribute('aria-selected')).toBe('true')
+})
+
+it('KEYS-E06 an edit to the same drawing hides an open list, and Enter and the Find button then run the query fresh', () => {
+  const outcome = (run) => {
+    const h = setup()
+    try {
+      selectThree(h)
+      find('2A')
+      find('Module')
+      expect(screen.getAllByRole('option')).toHaveLength(2)
+      const before = h.probe.objects.index
+      act(() => h.worker.emit({ type: 'editApplied', op: 'deleteEntity', ok: true,
+        entities: entities.filter((entity) => entity.id !== '42'), entityCount: entities.length - 1, byteLength: 1 }))
+      expect(h.probe.objects.index).not.toBe(before)
+      expect(h.probe.objects.index.drawingKey).toBe(before.drawingKey)
+      expect(screen.queryAllByRole('option')).toHaveLength(0)
+      expect(input().getAttribute('aria-expanded')).toBe('false')
+      expect(input().value).toBe('Module')
+      act(() => input().focus())
+      run()
+      return findOutcome(h)
+    } finally {
+      h.unmount()
+    }
+  }
+  const byEnter = outcome(() => enter())
+  const byButton = outcome(() => fireEvent.click(findButton()))
+  expect(byEnter.options).toEqual([
+    { text: 'drawing / North frame / Module north', selected: 'true' },
+    { text: 'drawing / North frame / Module south', selected: 'false' },
+  ])
+  expect(byEnter.focusId).toBeNull()
+  expect(byEnter.status).toBeNull()
+  expect(byButton).toEqual(byEnter)
 })
 
 it.each(['Module north', 'panel-a', '2A', 'zoom to Module north', 'go to 2A'])('finds %s on the guest engine drawing without console intake or selecting', (query) => {
