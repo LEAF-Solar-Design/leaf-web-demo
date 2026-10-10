@@ -2097,6 +2097,8 @@ const DOCK_RISE_RULE = DOCK_APP + ':has(#cockpit-engine-status-slot:not(:empty))
 const DOCK_WIDE = '@media (min-width: 981px)'
 const DOCK_TABLET = '@media (min-width: 601px) and (max-width: 980px) and (min-height: 500px)'
 const DOCK_TABLET_FRAME = '@media (max-width: 980px) and (min-height: 500px)'
+const DOCK_FOLD = '@media (max-height: 760px)'
+const DOCK_RESERVATION = 'var(--tb-r, 100px)'
 
 // Comments blanked, quoted text kept: a selector is compared with its attribute values intact.
 function maskDockComments(cssText) {
@@ -2287,8 +2289,48 @@ function dockClearanceFailures(cockpitCss, baseCss, structuralCss, otherSheets =
   const clearance = Number(wideBottom?.[1]) - dockPx(dock.get('bottom')) - dockPx(bar.get('height'))
   if (!(clearance > 0)) failures.push('the wide result block must sit above the dock, clearance ' + clearance)
   const tabletBlock = one(cockpit, DOCK_APP + ' .result-block', [DOCK_TABLET_FRAME], 'tablet result block rule')
-  if (tabletBlock.get('max-height') !== 'max(0px, calc(100dvh - var(--ck-canvas-top) - 100px - var(--ck-status-rise, 0px)))') {
+  if (tabletBlock.get('max-height') !== `max(0px, calc(100dvh - var(--ck-canvas-top) - ${DOCK_RESERVATION} - var(--ck-status-rise, 0px)))`) {
     failures.push('the tablet result block must shrink by the rise')
+  }
+  // D3: the short fold's absolute border-box height drives the input (less its two
+  // border pixels) and every tablet reservation. At 761px the fallback is 32px.
+  // Keep this in the same parser and scope checks as the status-rise contract.
+  if (one(base, 'body', [DOCK_FOLD], 'folded height declaration').get('--tb-h') !== '42px') {
+    failures.push('the folded command bar must keep its absolute 42px height at 760px and below')
+  }
+  if (one(base, '.bar-input', [DOCK_FOLD], 'folded input rule').get('height') !== 'calc(var(--tb-h) - 2px)') {
+    failures.push('the folded input must read the absolute bar height less its border')
+  }
+  const foldedBar = one(cockpit, DOCK_APP + ' .bar.bar-command-line', [DOCK_TABLET], 'tablet command bar rule in cockpit.css')
+  if (foldedBar.get('height') !== 'var(--tb-h, 32px)') {
+    failures.push('the tablet bar itself must read the same absolute border-box height')
+  }
+  if (one(cockpit, DOCK_APP, [DOCK_TABLET], 'tablet reservation rule').get('--tb-r') !== 'calc(68px + var(--tb-h, 32px))') {
+    failures.push('both tablet surfaces must reserve the dock spacing plus the effective bar height')
+  }
+  if (one(cockpit, DOCK_APP + ' .center-col', [DOCK_TABLET_FRAME], 'tablet centre column rule').get('inset') !== '88px 0 ' + DOCK_RESERVATION) {
+    failures.push('the tablet centre column must read the reservation')
+  }
+  if (one(cockpit, DOCK_APP + ' > aside.nav', [DOCK_TABLET_FRAME], 'tablet right panel rule').get('bottom') !== DOCK_RESERVATION) {
+    failures.push('the tablet right panel must read the reservation')
+  }
+  // The fourth 100px reservation is app padding in short landscape, outside
+  // the tablet frame. Its viewport envelope and value must stay unchanged.
+  if (one(cockpit, DOCK_APP, ['@media (max-width: 980px) and (max-height: 499px)'], 'short landscape app padding').get('padding-bottom') !== '100px') {
+    failures.push('short landscape app padding must stay 100px')
+  }
+  const foldedSheets = [['cockpit.css', cockpit], ['styles.css', base], ['structural.css', structural],
+    ...otherSheets.map(([name, text]) => [name, dockDeclarations(text)])]
+  for (const [property, owner, selector, headers] of [
+    ['--tb-h', 'styles.css', 'body', [DOCK_FOLD]],
+    ['--tb-r', 'cockpit.css', DOCK_APP, [DOCK_TABLET]],
+  ]) {
+    const declarations = foldedSheets.flatMap(([name, sheet]) => sheet.rules
+      .filter((rule) => rule.declared.has(property)).map((rule) => ({ name, rule })))
+    if (declarations.length !== 1 || declarations.some(({ name, rule }) => name !== owner
+      || rule.selector !== dockSelector(selector) || JSON.stringify(rule.headers) !== JSON.stringify(headers.map(dockHeader)))) {
+      failures.push(property + ' must be declared once in its owning viewport block')
+    }
   }
   return failures
 }
@@ -2323,7 +2365,7 @@ describe('DOCK clearance', () => {
     const widePadding = 'min-width: 0; padding: 2px 8px; margin: 0;'
     const emptyRule = '#cockpit-engine-status-slot:empty { display: none; }'
     const wideEmpty = emptyRule + '\n  /* The status line (an 18px line'
-    const tabletEmpty = DOCK_TABLET + ' {\n  ' + emptyRule
+    const tabletEmpty = emptyRule + '\n  .studio-shell .cockpit-engine-status'
     for (const [name, a, b, c, extra = []] of [
       ['wide padding heavier below', swap(cockpit, widePadding, widePadding.replace('2px 8px;', '2px 8px 10px;')), base, structural],
       ['wide line bordered', swap(cockpit, widePadding, widePadding + ' border-top: 1px solid;'), base, structural],
@@ -2345,7 +2387,7 @@ describe('DOCK clearance', () => {
       ['tablet line padded', swap(cockpit, 'margin: 0; line-height: 19px;', 'margin: 0; padding: 2px 0; line-height: 19px;'), base, structural],
       ['wide block no longer rises', swap(cockpit, rising, 'bottom: 66px;'), base, structural],
       ['wide block seated on the dock', swap(cockpit, rising, rising.replace('66px', '60px')), base, structural],
-      ['tablet block no longer shrinks', swap(cockpit, ' - 100px - var(--ck-status-rise, 0px)))', ' - 100px))'), base, structural],
+      ['tablet block no longer shrinks', swap(cockpit, ' - ' + DOCK_RESERVATION + ' - var(--ck-status-rise, 0px)))', ' - ' + DOCK_RESERVATION + '))'), base, structural],
       ['dock gap changed', cockpit, swap(base, dockGap, dockGap.replace('8px', '6px')), structural],
       ['dock sibling margin changed', cockpit, base, swap(structural, siblingRule, siblingRule.replace('8px', '0'))],
       // The populated slot and the status line get no height from any other rule, in any of the three sheets.
@@ -2384,6 +2426,58 @@ describe('DOCK clearance', () => {
       ['the rise read in another stylesheet', cockpit, base, structural, [['site/landing.css', '.probe { bottom: var(--ck-status-rise, 0px); }\n']]],
     ]) {
       assert.deepEqual(dockClearanceFailures(a, b, c, extra), [], name)
+    }
+  })
+})
+
+describe('DOCK folded tablet clearance', () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').split('\r').join('')
+  const cockpit = read('./site/cockpit.css')
+  const base = read('./styles.css')
+  const structural = read('./structural.css')
+  const swap = (source, from, to) => {
+    assert.equal(source.split(from).length - 1, 1, from)
+    return source.replace(from, to)
+  }
+  const reservation = DOCK_APP + ' { --tb-r: calc(68px + var(--tb-h, 32px)); }'
+  const input = 'height: calc(var(--tb-h) - 2px);'
+  const foldedBar = DOCK_APP + ' .bar.bar-command-line { height: var(--tb-h, 32px); }'
+  const centre = 'inset: 88px 0 ' + DOCK_RESERVATION + ';'
+  const panel = 'bottom: ' + DOCK_RESERVATION + ';'
+  const result = ' - ' + DOCK_RESERVATION + ' - var(--ck-status-rise, 0px)))'
+
+  it('DOCK D3 the tablet reservations share the absolute folded command-bar height', () => {
+    assert.deepEqual(dockClearanceFailures(cockpit, base, structural), [])
+    // The unchanged CSS must fail this row, including its original 40px input.
+    const unchanged = swap(swap(swap(swap(swap(cockpit, foldedBar, ''), reservation, ''), centre, 'inset: 88px 0 100px;'),
+      panel, 'bottom: 100px;'), result, ' - 100px - var(--ck-status-rise, 0px)))')
+    const unfoldedContract = swap(swap(base, 'body { --tb-h: 42px; }', ''), input, 'height: 40px;')
+    assert.ok(dockClearanceFailures(unchanged, unfoldedContract, structural).length > 0, 'unchanged base must fail D3')
+  })
+
+  it('DOCK D3 rejects folded drift, dropped or misplaced consumers, boundary drift and single-surface scope', () => {
+    for (const [name, a, b, extra = []] of [
+      ['folded absolute height drift', cockpit, swap(base, '--tb-h: 42px;', '--tb-h: 44px;')],
+      ['folded input stops reading height', cockpit, swap(base, input, 'height: 40px;')],
+      ['folded bar stops reading height', swap(cockpit, 'height: var(--tb-h, 32px);', 'height: 42px;'), base],
+      ['folded bar dropped', swap(cockpit, foldedBar, ''), base],
+      ['folded bar moved to global styles', swap(cockpit, foldedBar, ''), base + '\n' + DOCK_TABLET + ' {\n' + foldedBar + '}\n'],
+      ['folded bar fallback drift', swap(cockpit, foldedBar, foldedBar.replace('32px', '31px')), base],
+      ['reservation stops reading height', swap(cockpit, reservation, reservation.replace('var(--tb-h, 32px)', '32px')), base],
+      ['centre reservation dropped', swap(cockpit, centre, 'inset: 88px 0 100px;'), base],
+      ['panel reservation dropped', swap(cockpit, panel, 'bottom: 100px;'), base],
+      ['result reservation dropped', swap(cockpit, result, ' - 100px - var(--ck-status-rise, 0px)))'), base],
+      ['centre consumer outside tablet block', swap(cockpit, centre, '') + '\n' + DOCK_APP + ' .center-col { ' + centre + ' }\n', base],
+      ['reservation outside tablet block', swap(cockpit, reservation, '') + '\n' + reservation + '\n', base],
+      ['fold boundary one pixel early', cockpit, swap(base, DOCK_FOLD, '@media (max-height: 759px)')],
+      ['fold boundary one pixel late', cockpit, swap(base, DOCK_FOLD, '@media (max-height: 761px)')],
+      ['CAD only', swap(cockpit, reservation, reservation.replace(DOCK_APP, '.studio-shell .app[data-surface="cad"]')), base],
+      ['Solar only', swap(cockpit, reservation, reservation.replace(DOCK_APP, '.studio-shell .app[data-surface="solar"]')), base],
+      ['phone receives tablet reservation', swap(cockpit, reservation, '') + '\n' + DOCK_TABLET_FRAME + ' { ' + reservation + ' }\n', base],
+      ['fourth reservation changed', swap(cockpit, '{ padding-bottom: 100px; }', '{ padding-bottom: ' + DOCK_RESERVATION + '; }'), base],
+      ['height shadowed elsewhere', cockpit, base, [['site/landing.css', 'body { --tb-h: 40px; }']]],
+    ]) {
+      assert.ok(dockClearanceFailures(a, b, structural, extra).length > 0, name)
     }
   })
 })

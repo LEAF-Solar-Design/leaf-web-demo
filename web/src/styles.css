@@ -1984,6 +1984,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 
 /* ---------------- SB3 fold: below 760px tall the bar is one 40px row ---------------- */
 @media (max-height: 760px) {
+  body { --tb-h: 42px; }
   /* Fold the controls row to ONE short line — do not delete it. `display:none`
      here also removed the Run button and the Enter keycap (both live in this
      row), and an iPhone 12 in PORTRAIT is ~664px CSS tall, so the most common
@@ -1998,7 +1999,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
      right; hiding it would left-bunch them, so hand the auto margin to the
      keycap, which is the next surviving child. */
   .bar-controls .key { margin-left: auto; }
-  .bar-input { height: 40px; padding: 0 16px; }
+  .bar-input { height: calc(var(--tb-h) - 2px); padding: 0 16px; }
 }
 
 /* SB3: the bar never carries a drop halo — the focused-composer ring is the only pop */
