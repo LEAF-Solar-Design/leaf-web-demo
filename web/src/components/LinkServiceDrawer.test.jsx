@@ -5,7 +5,7 @@
 // useTenantMcpRegistry hands it, so a drift in either shape fails a test
 // here first.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 import LinkServiceDrawer from './LinkServiceDrawer.jsx'
 
@@ -157,4 +157,57 @@ describe('LinkServiceDrawer', () => {
     expect(container.querySelector('.claude-trigger')).toBeNull()
     expect(container.querySelector('.link-svc-trigger')).not.toBeNull()
   })
+})
+
+
+function retainedKey(target, key, marks, modifiers = {}) {
+  const event = createEvent.keyDown(target, {
+    key, bubbles: true, cancelable: true, ...modifiers, ...marks,
+  })
+  expect(event.isComposing).toBe(marks.isComposing)
+  expect(event.keyCode).toBe(marks.keyCode)
+  const stop = event.stopPropagation.bind(event)
+  event.stopPropagation = vi.fn(() => stop())
+  return event
+}
+
+function expectYielded(event) {
+  expect(event.defaultPrevented).toBe(false)
+  expect(event.stopPropagation).not.toHaveBeenCalled()
+}
+
+async function serviceComposition(marks) {
+  const onRegister = vi.fn().mockResolvedValue(null)
+  render(<LinkServiceDrawer {...baseProps({ onRegister })} />)
+  const label = screen.getByLabelText('Service label')
+  const input = screen.getByLabelText('Service URL')
+  fireEvent.change(label, { target: { value: 'Draft service' } })
+  fireEvent.change(input, { target: { value: 'service-value' } })
+  input.focus()
+  expect(input).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Link service' })).toBeEnabled()
+  const event = retainedKey(input, 'Enter', marks)
+  fireEvent(input, event)
+  expectYielded(event)
+  expect(onRegister).not.toHaveBeenCalled()
+  expect(label.value).toBe('Draft service')
+  expect(input.value).toBe('service-value')
+  expect(input).toHaveFocus()
+  const ordinary = retainedKey(input, 'Enter', { isComposing: false, keyCode: 0 })
+  fireEvent(input, ordinary)
+  expect(ordinary.defaultPrevented).toBe(false)
+  expect(onRegister).toHaveBeenCalledTimes(1)
+  expect(onRegister).toHaveBeenCalledWith('service-value', 'Draft service')
+  await waitFor(() => {
+    expect(label.value).toBe('')
+    expect(input.value).toBe('')
+  })
+}
+
+it('KEYS-D21 service URL Enter yields native composition', async () => {
+  await serviceComposition({ isComposing: true, keyCode: 0 })
+})
+
+it('KEYS-D22 service URL Enter yields key code 229', async () => {
+  await serviceComposition({ isComposing: false, keyCode: 229 })
 })
