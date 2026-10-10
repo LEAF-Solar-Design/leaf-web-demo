@@ -84,7 +84,7 @@ def test_sip_r1_gate_registration():
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
-    assert suites["platform"].expected == 306
+    assert suites["platform"].expected == 308
     assert suites["gate-runner-selftest"].expected == 98
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
@@ -96,8 +96,8 @@ def test_sip_r4_jobs_gate_registration():
     suites = {suite.id: suite for suite in runner.build_suites()}
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     for suite_id, directory, floor, database in (
-            ("server-sip-r4-jobs", "server", 16, False),
-            ("platform-sip-r4-jobs", "platform", 12, True)):
+            ("server-sip-r4-jobs", "server", 26, False),
+            ("platform-sip-r4-jobs", "platform", 14, True)):
         suite = suites[suite_id]
         assert suite.id == suite_id
         assert suite.kind == "pytest" and suite.cwd == REPO / directory

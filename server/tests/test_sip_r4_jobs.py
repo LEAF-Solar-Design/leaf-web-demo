@@ -18,11 +18,26 @@ import solar_project_jobs as service
 import solar_project_graph as graph
 import solar_project_context as project
 import solar_tools
+import tool_validate
 from leaf_platform import canonical_jobs as jobs, entitlements
 from solar_design_graph import GraphValidationError
-from test_sip_r3a_graph import prepare as seed, publish, refused
-from test_sip_r3b_tools import memory, manifest  # noqa: F401
-from test_sip_r3b_chain import NINE, S, E, rev4, commit
+from test_sip_r3a_graph import UNITS, prepare as seed, publish, refused
+from test_sip_r3b_tools import chain, memory, manifest, prepare  # noqa: F401
+from test_sip_r3b_chain import NINE, S, E, rev4, commit, through_string
+from test_w1_design_graph import graph as graph_fixture  # noqa: F401
+from test_w1_equipment import case, equipment, licensed  # noqa: F401
+from test_w2_string_add import free_panels, solved  # noqa: F401
+
+SIMPLE = {"expected_rev": 1}
+CLEAN = {
+    "solar-assign-equipment": SIMPLE, "solar-feeders": SIMPLE, "solar-homeruns": SIMPLE,
+    "solar-panels-from-drawing": SIMPLE, "solar-schedule": SIMPLE,
+    "solar-settings": {"expected_rev": 1, "changes": {"num_mppt": 2}},
+    "solar-size-strings": {"expected_rev": 3, "mode": "manual-global", "confirm": True},
+    "solar-combiners": {"expected_rev": 1, "hardware": {"model": "fixture", "max_dc_voltage": 1500,
+                                                       "max_ac_power_kw": 100}},
+    "solar-string-add": S,
+}
 
 
 def forbidden(*args, **kwargs):
@@ -166,7 +181,7 @@ def test_sip_r4_submission_context(admission, monkeypatch):
         refused("SIP_R1_STALE_VERSION", lambda: submit(a, tool_manifest_sha256="bad"))
 
 
-def test_sip_r4_submission_no_secrets(admission):
+def test_sip_r4_submission_no_secrets(admission, monkeypatch):
     submit(admission)
     accepted = admission.accepted[0]
     kwargs = accepted[6]
@@ -186,6 +201,322 @@ def test_sip_r4_submission_no_secrets(admission):
         with pytest.raises(GraphValidationError, match="INVALID_SETTINGS_REQUEST"):
             submit(admission, params=dict(seed(admission.s).request["parameters"], **extra))
     assert len(admission.accepted) == 1 and admission.events.count("insert") == 1
+
+    calls = []
+    original = service._validate_new_project_graph_params
+    def spy(*args, **kwargs):
+        calls.append(args[1])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(service, "_validate_new_project_graph_params", spy)
+    assert set(CLEAN) == NINE
+    for name in sorted(NINE):
+        clean = deepcopy(CLEAN[name])
+        assert not tool_validate.validate_params(solar_tools.trusted_record(name), clean)
+        inserts, entitlements_read, preparations = (
+            len(admission.accepted), admission.events.count("entitlement"), len(calls))
+        with pytest.raises(GraphValidationError, match="INVALID_SETTINGS_REQUEST"):
+            submit(admission, params={**clean, "surprise": 1}, tool_name=name,
+                   tool_manifest_sha256=manifest(name))
+        assert len(admission.accepted) == inserts
+        assert admission.events.count("entitlement") == entitlements_read
+        assert len(calls) == preparations
+
+
+def at(a, monkeypatch, ctx, tool):
+    s = a.s
+    monkeypatch.setattr(project, "verify_at_admission", lambda *args, **k:
+        project.AdmissionContext(s.context(ctx.parent_version_id), s.lease))
+    return {"input_version_id": ctx.parent_version_id, "tool_name": tool,
+            "tool_manifest_sha256": manifest(tool)}
+
+
+def check_admission_refusal(a, code, params, *, error=GraphValidationError, **kwargs):
+    before = deepcopy(params)
+    counts = len(a.accepted), a.events.count("insert"), a.events.count("entitlement")
+    with pytest.raises(error, match=code):
+        submit(a, params=params, **kwargs)
+    assert (len(a.accepted), a.events.count("insert"), a.events.count("entitlement")) == counts
+    assert params == before
+
+
+def check_admitted(a, params, **kwargs):
+    before = deepcopy(params)
+    counts = len(a.accepted), a.events.count("insert"), a.events.count("entitlement")
+    submit(a, params=params, **kwargs)
+    assert (len(a.accepted), a.events.count("insert"), a.events.count("entitlement")) == tuple(
+        n + 1 for n in counts)
+    assert params == before
+    return a.accepted[-1][4]
+
+
+def test_sip_r4_nested_parameter_admission(admission, monkeypatch):
+    a = admission
+    params = seed(a.s).request["parameters"]
+    params["changes"]["surprise"] = 1
+    check_admission_refusal(a, "INVALID_SETTINGS_REQUEST", params)
+    _, _, ctx5 = through_string(a.s)
+    kw = at(a, monkeypatch, chain(a.s, 1)[-1][2], "solar-settings")
+    params = {"expected_rev": 1, "changes": {
+        "num_mppt": 2, "panel_layer_contains": "Panel", "surprise": 1}}
+    check_admission_refusal(a, "INVALID_SETTINGS_REQUEST", params, **kw)
+    kw = at(a, monkeypatch, ctx5, "solar-assign-equipment")
+    for node, code in (("equipment", "INVALID_EQUIPMENT_CONFIGURATION"),
+                       ("assignments", "INVALID_EQUIPMENT_ASSIGNMENT")):
+        params = E()
+        params[node][0]["surprise"] = 1
+        check_admission_refusal(a, code, params, **kw)
+    kw = at(a, monkeypatch, chain(a.s, 3)[-1][2], "solar-size-strings")
+    check_admission_refusal(a, "INVALID_SIZING_REQUEST", {
+        "expected_rev": 3, "mode": "manual-global", "confirm": True,
+        "requests": {"surprise": 1}}, **kw)
+    assert not a.accepted and a.events.count("entitlement") == a.events.count("insert") == 0
+
+
+def test_sip_r4_request_value_parity(admission, monkeypatch):
+    a = admission
+    _, _, ctx5 = through_string(a.s)
+    kw = at(a, monkeypatch, chain(a.s, 1)[-1][2], "solar-settings")
+    settings = {"expected_rev": 1, "changes": {"num_mppt": 2, "panel_layer_contains": "Panel"}}
+    params = deepcopy(settings)
+    params["changes"]["num_mppt"] = "two"
+    check_admission_refusal(a, "INVALID_GRAPH_SCHEMA", params, **kw)
+    params = deepcopy(settings)
+    params["changes"]["num_mppt"] = 2.0
+    stored = check_admitted(a, params, **kw)
+    assert stored["changes"]["num_mppt"] == 2.0
+    assert type(stored["changes"]["num_mppt"]) is float
+    check_admission_refusal(a, "STALE_GRAPH_REVISION", {**settings, "expected_rev": 7}, **kw)
+    for injected in (False, True):
+        params = deepcopy(settings)
+        params["cancel"] = True
+        if injected:
+            params["changes"]["surprise"] = 1
+        check_admission_refusal(a, "GRAPH_COMMIT_CANCELLED", params, **kw)
+    kw = at(a, monkeypatch, ctx5, "solar-assign-equipment")
+    for node, field, code in (("equipment", "number", "INVALID_EQUIPMENT_CONFIGURATION"),
+                              ("assignments", "input_number", "INVALID_EQUIPMENT_ASSIGNMENT")):
+        params = E()
+        params[node][0][field] = True
+        check_admission_refusal(a, code, params, **kw)
+    params = E()
+    params["cancel"] = True
+    params["equipment"][0]["surprise"] = 1
+    check_admission_refusal(a, "GRAPH_COMMIT_CANCELLED", params, **kw)
+    params = E()
+    params["assignments"][0]["input_number"] = 5
+    assert check_admitted(a, params, **kw) == params
+    kw = at(a, monkeypatch, chain(a.s, 3)[-1][2], "solar-size-strings")
+    sizing = {"expected_rev": 3, "mode": "manual-global", "confirm": True}
+    check_admission_refusal(a, "INVALID_SIZING_REQUEST", {**sizing, "requests": {}}, **kw)
+    check_admission_refusal(a, "INVALID_SIZING_REQUEST", {
+        "expected_rev": 3, "mode": "manual-global"}, **kw)
+    check_admission_refusal(a, "SIP_R3_SERVICE_EVIDENCE_REQUIRED", {
+        "expected_rev": 3, "mode": "global", "confirm": True,
+        "requests": {"surprise": 1}, "grant_ref": "g1"},
+        error=project.ProjectContextError, **kw)
+
+
+def test_sip_r4_valid_admission_preparation(admission, monkeypatch):
+    a, s = admission, admission.s
+    check_admitted(a, seed(s).request["parameters"])
+    _, _, ctx5 = through_string(s)
+    kw = at(a, monkeypatch, chain(s, 1)[-1][2], "solar-settings")
+    check_admitted(a, {"expected_rev": 1, "changes": {
+        "num_mppt": 2, "panel_layer_contains": "Panel"}}, **kw)
+    ctx = chain(s, 3)[-1][2]
+    sizing = {"expected_rev": 3, "mode": "manual-global", "confirm": True}
+    check_admitted(a, sizing, **at(a, monkeypatch, ctx, "solar-size-strings"))
+    check_admitted(a, E(), **at(a, monkeypatch, ctx5, "solar-assign-equipment"))
+    check_admitted(a, deepcopy(S), **at(a, monkeypatch, rev4(s), "solar-string-add"))
+    assert len(a.accepted) == a.events.count("insert") == a.events.count("entitlement") == 5
+    for real, zero in ((seed(s), seed(s, job_id=UUID(int=0))),
+                       (prepare(s, "solar-size-strings", sizing, ctx),
+                        prepare(s, "solar-size-strings", sizing, ctx, job_id=UUID(int=0)))):
+        assert real.output_intake_bytes == zero.output_intake_bytes
+        assert real.request["parameters"] == zero.request["parameters"]
+
+
+def test_sip_r4_seed_parameter_admission(admission, monkeypatch):
+    a = admission
+    base = seed(a.s).request["parameters"]
+    params = deepcopy(base)
+    params["initialize"]["units"]["surprise"] = 1
+    check_admission_refusal(a, "INVALID_SEED_REQUEST", params)
+    params = deepcopy(base)
+    params["changes"]["surprise"] = 1
+    check_admission_refusal(a, "INVALID_SETTINGS_REQUEST", params)
+    check_admission_refusal(a, "INVALID_SEED_REQUEST", deepcopy(base), tool_name="solar-feeders",
+                            tool_manifest_sha256=manifest("solar-feeders"))
+    params = deepcopy(base)
+    params["initialize"]["source_intake_sha256"] = "0" * 64
+    check_admission_refusal(a, "SOURCE_HASH_MISMATCH", params)
+    params = deepcopy(base)
+    del params["initialize"]
+    check_admission_refusal(a, "GRAPH_NOT_EMBEDDED", params)
+    ctx = chain(a.s, 1)[-1][2]
+    params = {"expected_rev": 1, "changes": {"num_mppt": 2}, "initialize": {
+        "schema_version": 1, "source_intake_sha256": ctx.intake_sha256, "units": deepcopy(UNITS)}}
+    check_admission_refusal(a, "GRAPH_ALREADY_EMBEDDED", params,
+                            **at(a, monkeypatch, ctx, "solar-settings"))
+    assert not a.accepted and a.events.count("insert") == a.events.count("entitlement") == 0
+
+
+def test_sip_r4_every_tool_prepared_at_admission(admission, monkeypatch):
+    # No tool reaches the job table without the worker's own preparation: with schema-valid parameters each
+    # of the nine refuses a graphless parent and a stale revision before the insert.
+    a = admission
+    for tool in sorted(NINE):
+        check_admission_refusal(a, "GRAPH_NOT_EMBEDDED", deepcopy(CLEAN[tool]), tool_name=tool,
+                                tool_manifest_sha256=manifest(tool))
+    ctx = chain(a.s, 1)[-1][2]
+    for tool in sorted(NINE):
+        params = deepcopy(CLEAN[tool])
+        params["expected_rev"] = 97
+        check_admission_refusal(a, "STALE_GRAPH_REVISION", params, **at(a, monkeypatch, ctx, tool))
+    assert not a.accepted and a.events.count("insert") == a.events.count("entitlement") == 0
+
+
+PREREQUISITE_REFUSALS = {
+    "solar-assign-equipment": "SIZING_CONFIRMATION_REQUIRED", "solar-combiners": "VALID_SETTINGS_REQUIRED",
+    "solar-feeders": "VALID_SETTINGS_REQUIRED", "solar-homeruns": "EQUIPMENT_ASSIGNMENT_REQUIRED",
+    "solar-schedule": "INVALID_ROUTE_POINT", "solar-size-strings": "MISSING_PANEL",
+    "solar-string-add": "MISSING_PANEL",
+}
+
+
+def test_sip_r4_prerequisite_refusals_at_admission(admission, monkeypatch):
+    # On a seeded parent at the right revision the tool's own preparation decides admission, not only the
+    # context and revision checks: seven tools refuse with the worker's own code before the insert and the
+    # entitlement read, and the two with no unmet prerequisite are admitted.
+    a = admission
+    ctx = chain(a.s, 1)[-1][2]
+    for tool, code in sorted(PREREQUISITE_REFUSALS.items()):
+        params = deepcopy(CLEAN[tool])
+        params["expected_rev"] = 1
+        check_admission_refusal(a, f"^{code}:", params, **at(a, monkeypatch, ctx, tool))
+    assert not a.accepted and a.events.count("insert") == a.events.count("entitlement") == 0
+    for tool in sorted(set(NINE) - set(PREREQUISITE_REFUSALS)):
+        params = deepcopy(CLEAN[tool])
+        params["expected_rev"] = 1
+        check_admitted(a, params, **at(a, monkeypatch, ctx, tool))
+    assert [row[3] for row in a.accepted] == ["solar-panels-from-drawing", "solar-settings"]
+
+
+
+def test_sip_r4_validated_params_persisted(admission, monkeypatch):
+    a, s = admission, admission.s
+    values = []
+    original = service._validate_new_project_graph_params
+    def capture(*args, **kwargs):
+        value = original(*args, **kwargs)
+        values.append(deepcopy(value))
+        return value
+    monkeypatch.setattr(service, "_validate_new_project_graph_params", capture)
+    params = {**seed(s).request["parameters"], "drawing_id": str(s.drawing)}
+    stored = check_admitted(a, params)
+    assert stored == values[-1] and "drawing_id" not in stored and "initialize" in stored
+    ctx = chain(s, 1)[-1][2]
+    kw = at(a, monkeypatch, ctx, "solar-settings")
+    params = {"expected_rev": 1, "changes": {"num_mppt": 2}, "drawing_id": str(s.drawing)}
+    stored = check_admitted(a, params, **kw)
+    assert stored == values[-1] and "drawing_id" not in stored
+    assert len(values) == 2
+    def marked(*args, **kwargs):
+        value = deepcopy(original(*args, **kwargs))
+        value["changes"]["panel_layer_contains"] = "Marked"
+        values.append(deepcopy(value))
+        return value
+    monkeypatch.setattr(service, "_validate_new_project_graph_params", marked)
+    stored = check_admitted(a, params, **kw)
+    assert stored == values[-1] and stored["changes"]["panel_layer_contains"] == "Marked"
+    assert stored != {k: v for k, v in params.items() if k != "drawing_id"}
+    assert a.accepted[-1][6]["submission_fingerprint"] == service._submission_fingerprint(
+        s.org, s.project, s.drawing, ctx.parent_version_id, str(s.org), s.actor,
+        "solar-settings", values[-1], manifest("solar-settings"))
+
+
+def test_sip_r4_legacy_nested_replay(admission, monkeypatch):
+    a, s = admission, admission.s
+    params = seed(s).request["parameters"]
+    params["changes"]["surprise"] = 1
+    fingerprint = service._submission_fingerprint(s.org, s.project, s.drawing,
+        s.parent.version_id, str(s.org), s.actor, "solar-settings", params, manifest("solar-settings"))
+    accepted = {"job_id": str(s.job), "params": deepcopy(params),
+        "execution_context": {"schema": jobs.PROJECT_GRAPH_JOB_SCHEMA},
+        "submission_fingerprint": fingerprint, "deleted_at": None}
+    snapshot = deepcopy(accepted)
+    monkeypatch.setattr(jobs, "get_project_graph_job_by_key", lambda *a, **k: accepted)
+    monkeypatch.setattr(service, "_validate_new_project_graph_params", forbidden)
+    monkeypatch.setattr(project, "verify_at_admission", forbidden)
+    monkeypatch.setattr(entitlements, "stored_job_entitlement_verdict", forbidden)
+    monkeypatch.setattr(jobs, "submit_project_graph_job", forbidden)
+    before = deepcopy(params)
+    assert submit(a, params=params) is accepted
+    assert accepted == snapshot and params == before
+    changed = deepcopy(params)
+    changed["changes"]["surprise"] = 2
+    check_admission_refusal(a, "SIP_R4_IDEMPOTENCY_CONFLICT", changed,
+                            error=project.ProjectContextError)
+    assert accepted == snapshot and not a.accepted
+    assert a.events.count("insert") == a.events.count("entitlement") == 0
+
+
+def test_sip_r4_admission_preparation_order(admission, monkeypatch):
+    a = admission
+    original = service._validate_new_project_graph_params
+    def spy(*args, **kwargs):
+        a.events.append("prepare")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(service, "_validate_new_project_graph_params", spy)
+    submit(a)
+    events = [x if isinstance(x, str) else x[0] for x in a.events]
+    assert events.count("prepare") == 1
+    assert events.index("admission") < events.index("prepare") < events.index("entitlement")
+    assert events.index("entitlement") < events.index("insert")
+    base = seed(a.s).request["parameters"]
+    for code, params, kw in (
+        ("INVALID_SETTINGS_REQUEST", {**base, "surprise": 1}, {}),
+        ("INVALID_SEED_REQUEST", deepcopy(base), {"tool_name": "solar-feeders",
+                                                  "tool_manifest_sha256": manifest("solar-feeders")})):
+        start = len(a.events)
+        check_admission_refusal(a, code, params, **kw)
+        assert "prepare" not in a.events[start:]
+    params = deepcopy(base)
+    params["changes"]["surprise"] = 1
+    start = len(a.events)
+    check_admission_refusal(a, "INVALID_SETTINGS_REQUEST", params)
+    events = a.events[start:]
+    assert events.count("prepare") == 1 and "entitlement" not in events and "insert" not in events
+
+
+def test_sip_r4_admission_preparation_isolation(admission, monkeypatch):
+    a, s = admission, admission.s
+    contexts = []
+    original = service._validate_new_project_graph_params
+    def capture(context, *args, **kwargs):
+        parent = context.parent_version_id
+        contexts.append((context, parent))
+        result = original(context, *args, **kwargs)
+        assert context.parent_version_id == parent
+        return result
+    monkeypatch.setattr(service, "_validate_new_project_graph_params", capture)
+    params = seed(s).request["parameters"]
+    writes = deepcopy(s.writes)
+    with monkeypatch.context() as patch:
+        patch.setattr(graph, "publish_project_graph_commit", forbidden)
+        check_admitted(a, params)
+    assert s.writes == writes and len(contexts) == 1
+    ctx = chain(s, 1)[-1][2]
+    kw = at(a, monkeypatch, ctx, "solar-settings")
+    params = {"expected_rev": 1, "changes": {"num_mppt": 2, "panel_layer_contains": "Panel"}}
+    writes = deepcopy(s.writes)
+    with monkeypatch.context() as patch:
+        patch.setattr(graph, "publish_project_graph_commit", forbidden)
+        check_admitted(a, params, **kw)
+    assert s.writes == writes and len(contexts) == 2
+    assert all(context.parent_version_id == parent for context, parent in contexts)
+    assert [parent for _, parent in contexts] == [s.parent.version_id, ctx.parent_version_id]
+    assert len(a.accepted) == a.events.count("insert") == a.events.count("entitlement") == 2
 
 
 def test_sip_r4_preparation_binding(memory, monkeypatch):

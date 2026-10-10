@@ -1911,9 +1911,9 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r4-runtime", "server canonical Solar worker runtime", "pytest", SERVER,
               _py_pytest("tests/test_sip_r4_runtime.py"), 4),
         Suite("server-sip-r4-jobs", "server durable canonical Solar graph jobs",
-              "pytest", SERVER, _py_pytest("tests/test_sip_r4_jobs.py"), 16),
+              "pytest", SERVER, _py_pytest("tests/test_sip_r4_jobs.py"), 26),
         Suite("platform-sip-r4-jobs", "platform atomic Solar graph jobs",
-              "pytest", REPO / "platform", _py_pytest("tests/test_sip_r4_jobs.py"), 12,
+              "pytest", REPO / "platform", _py_pytest("tests/test_sip_r4_jobs.py"), 14,
               uses_database=True, db_gated=True,
               database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",
@@ -2240,7 +2240,7 @@ def build_suites() -> List[Suite]:
         Suite("platform", "platform/tests (Postgres)", "pytest", REPO_PARENT,
               # sip-r3b-1 adds seven canonical Solar publication rows.
               # sip-r3b-2 adds six deterministic creation rows.
-              _py_pytest(f"{repo_name}/platform/tests"), 306, db_gated=True,
+              _py_pytest(f"{repo_name}/platform/tests"), 308, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),

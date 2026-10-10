@@ -30,6 +30,23 @@ def _submission_fingerprint(org, proj, drawing, parent, tenant, actor, tool, par
     })
 
 
+def _validate_new_project_graph_params(context, tool_name, params, *, checkout,
+                                       tool_manifest_sha256):
+    """Prepare a new submission once, publishing nothing, and return the parameters it bound.
+
+    The tool schemas leave nested request nodes open, so the worker's own preparation is the
+    only complete request contract: what it would refuse is refused here, before the insert,
+    with its existing code. The probe job identity never leaves this function.
+    """
+    args = {"checkout": checkout, "job_id": UUID(int=0), "attempt": 1,
+            "tool_manifest_sha256": tool_manifest_sha256}
+    if "initialize" in params:
+        prepared = graph.prepare_project_graph_seed(context, params, **args)
+    else:
+        prepared = graph.prepare_project_graph_commit(context, tool_name, params, **args)
+    return prepared.request["parameters"]
+
+
 def submit_project_graph_job(
     tenant, project_id, drawing_id, input_version_id, tool_name, params, *,
     tool_manifest_sha256, checkout_capability, idempotency_key,
@@ -61,10 +78,12 @@ def submit_project_graph_job(
         if tool_name != "solar-settings":
             raise GraphValidationError("INVALID_SEED_REQUEST")
         validate_seed_request(normalized["initialize"])
-    # The job row stores these parameters verbatim, so nothing the tool's own closed schema
-    # does not declare (a caller storage path, authorization material) may reach the insert.
+    # The job row stores these parameters verbatim. The tool's schema closes the request root
+    # (a caller storage path, authorization material); preparation closes what it leaves open.
     if tool_validate.validate_params(solar_tools.trusted_record(tool_name), normalized):
         raise GraphValidationError("INVALID_SETTINGS_REQUEST")
+    normalized = _validate_new_project_graph_params(context, tool_name, normalized,
+        checkout=admission.checkout, tool_manifest_sha256=tool_manifest_sha256)
     from leaf_platform import entitlements
     denial, stored_org = entitlements.stored_job_entitlement_verdict(org, "run")
     if denial is not None:

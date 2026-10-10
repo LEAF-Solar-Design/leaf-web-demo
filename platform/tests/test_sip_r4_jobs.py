@@ -1,4 +1,4 @@
-"""Twelve native PostgreSQL proofs of graph custody and atomic settlement."""
+"""Fourteen native PostgreSQL proofs of graph custody and atomic settlement."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
@@ -132,6 +132,19 @@ def blocked(*args, **kwargs):
     raise AssertionError("replay repeated publication, proof, content IO or builtin")
 
 
+def _generic_success(row):
+    digest = lambda v: sha256(json.dumps(v, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False).encode("utf-8")).hexdigest()
+    solver_input, solver_result = {"probe": 1}, {"probe": 2}
+    provenance = {"attempt": row["attempt"], "execution_path": "local", "solver_revision": "r4c",
+                  "source_sha256": "a" * 64, "runtime": "test"}
+    result = {"solver": row["tool_name"], "solver_input": solver_input, "solver_result": solver_result,
+              "request_sha256": digest(row["params"]), "input_sha256": digest(solver_input),
+              "result_sha256": digest(solver_result), "solver_revision": provenance["solver_revision"],
+              "source_sha256": provenance["source_sha256"], "runtime": provenance["runtime"]}
+    return result, provenance
+
+
 def test_sip_r4_pg_idempotency(world, monkeypatch):
     s = world()
     params = seed_params(s)
@@ -227,32 +240,46 @@ def test_sip_r4_pg_two_claimers(world):
     s = world()
     job = submit(s)
     unrelated = store.create_job(s.org, s.project, "build", tool_name="solar-settings", params={})
-    other_tool = submit(s, tool="solar-feeders", params={"expected_rev": 0}, key="other-tool")
+    other_tool = store.create_job(s.org, s.project, "run", tool_name="solar-feeders", params={"expected_rev": 0})
     wrong_schema = store.create_job(s.org, s.project, "run", tool_name="solar-settings", params={})
     # A queued job of another kind that carries the graph discriminator: only the kind filter
     # keeps it out of the graph population, so a claim without that filter takes it.
     graph_build = store.create_job(s.org, s.project, "build", tool_name="solar-settings", params={})
+    exhausted_build = store.create_job(s.org, s.project, "build", tool_name="solar-settings", params={})
     with db.cursor() as cur:
         cur.execute("UPDATE jobs SET request_tenant_id=%s WHERE job_id=%s",
                     (str(s.org), unrelated.job_id))
         cur.execute("UPDATE jobs SET request_tenant_id=%s, execution_context=%s WHERE job_id=%s",
+                    (str(s.org), Jsonb({"schema": jobs.PROJECT_GRAPH_JOB_SCHEMA}), other_tool.job_id))
+        cur.execute("UPDATE jobs SET request_tenant_id=%s, execution_context=%s WHERE job_id=%s",
                     (str(s.org), Jsonb({"schema": "leaf.other-job.v1"}), wrong_schema.job_id))
         cur.execute("UPDATE jobs SET request_tenant_id=%s, execution_context=%s WHERE job_id=%s",
                     (str(s.org), Jsonb({"schema": jobs.PROJECT_GRAPH_JOB_SCHEMA}), graph_build.job_id))
+        cur.execute("UPDATE jobs SET request_tenant_id=%s, execution_context=%s, status='running', "
+                    "attempt=max_attempts, lease_owner='gone', "
+                    "lease_expires_at=clock_timestamp() - interval '1 minute', "
+                    "started_at=clock_timestamp() - interval '2 minutes', "
+                    "heartbeat_at=clock_timestamp() - interval '1 minute' WHERE job_id=%s",
+                    (str(s.org), Jsonb({"schema": jobs.PROJECT_GRAPH_JOB_SCHEMA}), exhausted_build.job_id))
+    snapshot = deepcopy(load(exhausted_build.job_id))
     barrier = Barrier(2)
     def take(owner):
         barrier.wait(timeout=10)
-        return jobs.claim_project_graph_job(owner, tool_name="solar-settings")
+        result = jobs.claim_project_graph_job(owner, tool_name="solar-settings")
+        assert load(exhausted_build.job_id) == snapshot
+        return result
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(take, owner) for owner in ("one", "two")]
         results = [f.result(timeout=20) for f in futures]
     winners = [r for r in results if r is not None]
     assert len(winners) == 1 and winners[0]["job_id"] == job["job_id"] and winners[0]["attempt"] == 1
     assert jobs.claim_project_graph_job("other", tool_name="solar-string-add") is None
+    assert load(exhausted_build.job_id) == snapshot
     assert load(unrelated.job_id)["attempt"] == 0 and load(unrelated.job_id)["status"] == "queued"
-    assert load(other_tool["job_id"])["status"] == "queued"
+    assert load(other_tool.job_id)["status"] == "queued"
     assert load(wrong_schema.job_id)["status"] == "queued"
     assert jobs.claim_project_graph_job("three", tool_name="solar-settings") is None
+    assert load(exhausted_build.job_id) == snapshot
     assert load(graph_build.job_id)["attempt"] == 0 and load(graph_build.job_id)["status"] == "queued"
 
 
@@ -500,6 +527,17 @@ def test_sip_r4_pg_stored_proof(world):
 
 
 def test_sip_r4_pg_legacy_isolation(world):
+    done_s = world()
+    done = claim(done_s, submit(done_s, key="done-graph"))
+    assert complete(done, prepared(done))[0] == "applied"
+    stored = deepcopy(load(done["job_id"]))
+    result, provenance = _generic_success(stored)
+    jobs._validate_success(stored, result, provenance)
+    census_before = census(done_s)
+    assert jobs.complete_solve(UUID(str(done["job_id"])), stored["lease_owner"] or "owner",
+                               result, provenance) == "conflict"
+    assert load(done["job_id"]) == stored
+    assert census(done_s) == census_before
     s = world()
     first = submit(s)
     # A second graph job stays QUEUED through the whole row, so the generic selector is
@@ -531,6 +569,97 @@ def test_sip_r4_pg_legacy_isolation(world):
     assert jobs.fail_or_retry(ordinary.job_id, "generic",
         {"message": "retry", "retryable": True}, {"attempt": 1}) == "retry"
     assert load(ordinary.job_id)["status"] == "queued"
+
+
+def graph_refused(code, operation):
+    # Preparation refuses with the builtins' own graph validation error, not a project context error.
+    with pytest.raises(service.GraphValidationError) as exc:
+        operation()
+    assert exc.value.code == code
+
+
+def test_sip_r4_pg_nested_submission(world, monkeypatch):
+    def job_count(scope):
+        with db.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM jobs WHERE org_id=%s", (scope.org,))
+            return cur.fetchone()["n"]
+
+    s = world()
+    params = seed_params(s)
+    bad = deepcopy(params)
+    bad["changes"]["surprise"] = 1
+    graph_refused("INVALID_SETTINGS_REQUEST", lambda: submit(s, params=bad, key="bad-seed-changes"))
+    assert job_count(s) == 0 and bad["changes"]["surprise"] == 1
+    graphless = deepcopy(params)
+    del graphless["initialize"]
+    graph_refused("GRAPH_NOT_EMBEDDED", lambda: submit(s, params=graphless, key="graphless-commit"))
+    assert job_count(s) == 0
+    with_drawing = {**deepcopy(params), "drawing_id": str(s.drawing)}
+    before = deepcopy(with_drawing)
+    row = submit(s, params=with_drawing, key="valid-seed-drawing")
+    assert job_count(s) == 1 and load(row["job_id"])["params"] == params
+    assert with_drawing == before
+
+    sizing_s = world()
+    _, _, sizing_ctx = _chain.commit(sizing_s, "solar-panels-from-drawing", {"expected_rev": 2},
+                                      panels_parent(sizing_s))
+    sizing = {"expected_rev": 3, "mode": "manual-global", "confirm": True,
+              "requests": {"surprise": 1}}
+    before, count_before = deepcopy(sizing), job_count(sizing_s)
+    graph_refused("INVALID_SIZING_REQUEST", lambda: submit(sizing_s, tool="solar-size-strings",
+        params=sizing, parent=sizing_ctx.parent_version_id, key="bad-sizing-requests"))
+    assert job_count(sizing_s) == count_before and sizing == before
+
+    equipment_s = world()
+    _, _, equipment_ctx = through_string(equipment_s)
+    params = equipment_params(equipment_ctx)
+    count_before = job_count(equipment_s)
+    for node, code in (("equipment", "INVALID_EQUIPMENT_CONFIGURATION"),
+                       ("assignments", "INVALID_EQUIPMENT_ASSIGNMENT")):
+        bad = deepcopy(params)
+        bad[node][0]["surprise"] = 1
+        before = deepcopy(bad)
+        graph_refused(code, lambda: submit(equipment_s, tool="solar-assign-equipment", params=bad,
+            parent=equipment_ctx.parent_version_id, key="bad-" + node))
+        assert job_count(equipment_s) == count_before and bad == before
+    before = deepcopy(params)
+    row = submit(equipment_s, tool="solar-assign-equipment", params=params,
+                 parent=equipment_ctx.parent_version_id, key="valid-equipment")
+    assert job_count(equipment_s) == count_before + 1
+    assert load(row["job_id"])["params"] == params and params == before
+
+
+def test_sip_r4_pg_legacy_nested_replay(world, monkeypatch):
+    def job_count():
+        with db.cursor() as cur:
+            cur.execute("SELECT count(*) AS n FROM jobs WHERE org_id=%s", (s.org,))
+            return cur.fetchone()["n"]
+
+    s = world()
+    row = submit(s, key="historical-nested")
+    bad = deepcopy(seed_params(s))
+    bad["changes"]["surprise"] = 1
+    fingerprint = service._submission_fingerprint(s.org, s.project, s.drawing, s.parent,
+        str(s.org), s.actor, "solar-settings", bad, manifest("solar-settings"))
+    with db.cursor() as cur:
+        cur.execute("UPDATE jobs SET params=%s, submission_fingerprint=%s WHERE job_id=%s",
+                    (Jsonb(bad), fingerprint, row["job_id"]))
+    snapshot = deepcopy(load(row["job_id"]))
+    before = deepcopy(bad)
+    with monkeypatch.context() as patch:
+        patch.setattr(service, "_validate_new_project_graph_params", blocked)
+        patch.setattr(project, "verify_at_admission", blocked)
+        patch.setattr(entitlements, "stored_job_entitlement_verdict", blocked)
+        patch.setattr(jobs, "submit_project_graph_job", blocked)
+        assert submit(s, params=bad, key="historical-nested")["job_id"] == row["job_id"]
+        assert load(row["job_id"]) == snapshot and bad == before and job_count() == 1
+        changed = deepcopy(bad)
+        changed["changes"]["surprise"] = 2
+        changed_before = deepcopy(changed)
+        refused("SIP_R4_IDEMPOTENCY_CONFLICT", lambda:
+            submit(s, params=changed, key="historical-nested"))
+        assert load(row["job_id"]) == snapshot and changed == changed_before
+        assert job_count() == 1
 
 
 def test_sip_r4_pg_final_clock(world, monkeypatch):
