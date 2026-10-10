@@ -25,20 +25,80 @@ function walk(node, visit) {
   }
 }
 
-function readShell({ name, file, app, demoName, retired, converse }) {
-  const source = readFileSync(`${process.cwd()}/src/${file}`, 'utf8')
+const CLASSIFIER = 'classifyAgentError'
+const CONTROLLER = 'useAuthorStageController'
+
+function walkWithParent(node, parent, visit) {
+  if (!node || typeof node.type !== 'string') return
+  visit(node, parent)
+  for (const key of Object.keys(node)) {
+    const value = node[key]
+    if (Array.isArray(value)) for (const child of value) walkWithParent(child, node, visit)
+    else if (value && typeof value === 'object') walkWithParent(value, node, visit)
+  }
+}
+
+// Every way the controller call could hand the controller something other than the two plain
+// properties the rows read: a second argument, a spread, a method, a computed or quoted key, or
+// one key written twice (the later one wins at run time).
+function controllerCallProblems(call) {
+  const problems = []
+  if (call.arguments.length !== 1) problems.push(`${call.arguments.length} arguments`)
+  const options = call.arguments[0]
+  if (options?.type !== 'ObjectExpression') {
+    problems.push(`argument is ${options?.type || 'missing'}`)
+    return problems
+  }
+  const seen = new Set()
+  for (const property of options.properties) {
+    if (property.type !== 'ObjectProperty') problems.push(property.type)
+    else if (property.computed) problems.push('computed key')
+    else if (property.key.type !== 'Identifier') problems.push(`${property.key.type} key`)
+    else if (seen.has(property.key.name)) problems.push(`duplicate ${property.key.name}`)
+    else seen.add(property.key.name)
+  }
+  return problems
+}
+
+function readShell(meta) {
+  return readShellSource(readFileSync(`${process.cwd()}/src/${meta.file}`, 'utf8'), meta)
+}
+
+function readShellSource(source, { name, file, app, demoName, retired, converse, controllerModule, enabledBy, componentHead }) {
   const tree = parse(source, { sourceType: 'module', plugins: ['jsx'] })
   const text = (node) => source.slice(node.start, node.end)
   const declarators = []
   const seats = []
   const controllers = []
+  const controllerProblems = []
   const imports = {}
+  const defaults = {}
+  // Every mention of the controller hook's name, sorted the same way as the classifier's below:
+  // the default import, a call of it, or anything else (a parameter, a default, an alias), which
+  // would stand in front of the import for the one call the shell makes.
+  const hook = { imports: 0, calls: 0, other: [] }
+  walkWithParent(tree, null, (node, parent) => {
+    if (node.type !== 'Identifier' || node.name !== CONTROLLER) return
+    if (parent?.type === 'ImportDefaultSpecifier') hook.imports += 1
+    else if (parent?.type === 'CallExpression' && parent.callee === node) hook.calls += 1
+    else hook.other.push(parent?.type || 'none')
+  })
+  // Every mention of the classifier's name, sorted by what it is: the import, a call of it, or
+  // anything else (a parameter, a default, an alias, a property), which could hide the import.
+  const classifier = { imports: 0, calls: [], other: [] }
+  walkWithParent(tree, null, (node, parent) => {
+    if (node.type !== 'Identifier' || node.name !== CLASSIFIER) return
+    if (parent?.type === 'ImportSpecifier') classifier.imports += 1
+    else if (parent?.type === 'CallExpression' && parent.callee === node) classifier.calls.push(node.start)
+    else classifier.other.push(parent?.type || 'none')
+  })
   walk(tree, (node) => {
     if (node.type === 'ImportDeclaration') {
       for (const specifier of node.specifiers) {
         if (specifier.type === 'ImportSpecifier') {
           imports[specifier.local.name] = `${text(specifier.imported)} from ${node.source.value}`
         }
+        if (specifier.type === 'ImportDefaultSpecifier') defaults[specifier.local.name] = node.source.value
       }
     }
     if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && node.id.name === PROVIDER) {
@@ -54,7 +114,7 @@ function readShell({ name, file, app, demoName, retired, converse }) {
         }
       }
     }
-    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'useAuthorStageController') {
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === CONTROLLER) {
       const properties = {}
       for (const property of node.arguments[0]?.properties || []) {
         if (property.type === 'ObjectProperty' && property.key.type === 'Identifier') {
@@ -62,6 +122,7 @@ function readShell({ name, file, app, demoName, retired, converse }) {
         }
       }
       controllers.push(properties)
+      controllerProblems.push(...controllerCallProblems(node))
     }
   })
   if (declarators.length !== 1) throw new Error(`${file}: ${declarators.length} ${PROVIDER} declarators, expected one`)
@@ -70,8 +131,10 @@ function readShell({ name, file, app, demoName, retired, converse }) {
       || call.arguments[1].type !== 'ArrayExpression') {
     throw new Error(`${file}: ${PROVIDER} is not a useCallback with a literal dependency list`)
   }
+  const provider = declarators[0]
   return {
     name,
+    file,
     app,
     demoName,
     retired,
@@ -80,9 +143,29 @@ function readShell({ name, file, app, demoName, retired, converse }) {
     deps: call.arguments[1].elements.map(text),
     seats,
     controllers,
+    controllerProblems,
     imports,
+    defaults,
+    hook,
     converse,
+    controllerModule,
+    enabledBy,
+    componentHead,
+    classifier: {
+      imports: classifier.imports,
+      calls: classifier.calls.length,
+      callsInProvider: classifier.calls.filter((at) => at >= provider.start && at < provider.end).length,
+      other: classifier.other,
+    },
   }
+}
+
+// One exact textual change to a shell's source, re-read the way the real file is. A change that
+// does not apply exactly once throws, so a row built on it can never pass by changing nothing.
+function reread(shell, find, replacement) {
+  const parts = shell.source.split(find)
+  if (parts.length !== 2) throw new Error(`${shell.file}: ${parts.length - 1} occurrences of ${JSON.stringify(find)}`)
+  return readShellSource(parts.join(replacement), shell)
 }
 
 const SHELLS = [
@@ -93,6 +176,13 @@ const SHELLS = [
     demoName: 'mock',
     converse: './converse.js',
     retired: ['AUTHOR_AUTHORITY_TTL_MS', 'authorAuthorityRef', 'agentSessionIdRef'],
+    controllerModule: './controllers/useAuthorStageController.js',
+    // App passes no `enabled`, so the hook's own default (on) applies.
+    enabledBy: undefined,
+    componentHead: [
+      'export default function App() {',
+      `export default function App({ ${CONTROLLER} = () => ({ pointer: null }) } = {}) {`,
+    ],
   }),
   readShell({
     name: 'ToolCast',
@@ -101,6 +191,12 @@ const SHELLS = [
     demoName: 'PUBLIC_DEMO',
     converse: '../converse.js',
     retired: ['AUTHOR_AUTHORITY_TTL_MS', 'authorAuthorityRef'],
+    controllerModule: '../controllers/useAuthorStageController.js',
+    enabledBy: 'sessionReady',
+    componentHead: [
+      'export default function ToolCast({',
+      `export default function ToolCast({\n  ${CONTROLLER} = () => ({ pointer: null }),`,
+    ],
   }),
 ]
 
@@ -183,6 +279,10 @@ const FAILURES = [
   ['an expired sign-in', () => Object.assign(new Error('unauthenticated'), { status: 401 })],
   ['a network failure', () => new TypeError('Failed to fetch')],
   ['a frozen error', () => Object.freeze(new Error('frozen'))],
+  // Reading this value's code throws. The drafter must still get this value, never the error
+  // raised while it was being classified.
+  ['a value whose code cannot be read', () => Object.freeze({ get errorCode() { throw new Error('getter exploded') } })],
+  ['a thrown string', () => 'offline'],
 ]
 
 for (const shell of SHELLS) {
@@ -341,9 +441,79 @@ for (const shell of SHELLS) {
       expect(shell.controllers).toHaveLength(1)
       expect(shell.controllers[0].authorityProvider).toBe(PROVIDER)
       expect(shell.controllers[0].mock).toBe(shell.demoName)
+      // The call is one plain object literal, so the two properties read above are the two the
+      // controller receives: nothing spread, computed or written twice can replace them.
+      expect(shell.controllerProblems).toEqual([])
       expect(shell.seats).toEqual(shell.app
         ? ['CampaignPanel.authorityProvider', 'CampaignPanel.authorityProvider']
         : [])
+    })
+
+    it(`C8B-20 ${shell.name}: a controller call that could replace the provider is refused`, () => {
+      const wired = `authorityProvider: ${PROVIDER}`
+      // Each entry: the replacement, the problems the shape check names, and what the older
+      // property read still reports. Four of the five leave that read on the provider, which is
+      // why that read alone could not see them; a plain second key is the one it does see.
+      const replacements = [
+        ['a spread after it', `${wired}, ...{ authorityProvider: async () => null }`, ['SpreadElement'], PROVIDER],
+        ['the key written twice', `${wired}, authorityProvider: undefined`, ['duplicate authorityProvider'], 'undefined'],
+        ['a computed key', `${wired}, ['authorityProvider']: undefined`, ['computed key'], PROVIDER],
+        ['a quoted key', `${wired}, 'authorityProvider': undefined`, ['StringLiteral key'], PROVIDER],
+        ['a method', `${wired}, authorityProvider() { return null }`, ['ObjectMethod'], PROVIDER],
+      ]
+      for (const [label, replacement, problems, olderRead] of replacements) {
+        const changed = reread(shell, wired, replacement)
+        expect(changed.controllers[0].authorityProvider, label).toBe(olderRead)
+        expect(changed.controllerProblems, label).toEqual(problems)
+      }
+      const second = reread(shell, `${CONTROLLER}({`, `${CONTROLLER}({}, {`)
+      expect(second.controllerProblems).toEqual(['2 arguments'])
+    })
+
+    // The two rows above read the controller CALL. These read the name it is called by: the
+    // shell's default import of the hook, with no parameter, default or alias in front of it.
+    it(`C8B-29 ${shell.name}: the controller the shell calls is the hook it imports`, () => {
+      expect(shell.defaults[CONTROLLER]).toBe(shell.controllerModule)
+      expect(shell.hook).toEqual({ imports: 1, calls: 1, other: [] })
+    })
+
+    it(`C8B-30 ${shell.name}: a name that hides the controller hook is refused`, () => {
+      const anchor = `const ${PROVIDER} = useCallback(`
+      const hidden = [
+        ['a destructured parameter default', `const hide = ({ ${CONTROLLER} = () => ({ pointer: null }) }) => null\n  `],
+        ['a plain parameter', `const hide = (${CONTROLLER}) => null\n  `],
+        ['an alias', `const alias = ${CONTROLLER}\n  `],
+      ]
+      for (const [label, binding] of hidden) {
+        const changed = reread(shell, anchor, `${binding}${anchor}`)
+        // The import and the one call are untouched, so C8B-14's read of the call still passes.
+        expect(changed.defaults[CONTROLLER], label).toBe(shell.controllerModule)
+        expect(changed.controllers[0].authorityProvider, label).toBe(PROVIDER)
+        expect(changed.controllerProblems, label).toEqual([])
+        expect(changed.hook.other.length, label).toBeGreaterThan(0)
+      }
+      // The component's own parameter list is where a stand-in would bind for the real call.
+      const shadowed = reread(shell, shell.componentHead[0], shell.componentHead[1])
+      expect(shadowed.controllers).toHaveLength(1)
+      expect(shadowed.controllers[0].authorityProvider).toBe(PROVIDER)
+      expect(shadowed.controllerProblems).toEqual([])
+      expect(shadowed.hook.other.length).toBeGreaterThan(0)
+      // A second call is a second controller, whatever it is given.
+      const twice = reread(shell, anchor, `${CONTROLLER}({})\n  ${anchor}`)
+      expect(twice.hook).toMatchObject({ imports: 1, calls: 2, other: [] })
+    })
+
+    it(`C8B-31 ${shell.name}: the controller is switched on by what the shell intends and nothing else`, () => {
+      expect(Object.keys(shell.controllers[0]).sort()).toEqual(shell.enabledBy
+        ? ['authorityProvider', 'enabled', 'mock']
+        : ['authorityProvider', 'mock'])
+      expect(shell.controllers[0].enabled).toBe(shell.enabledBy)
+      if (shell.enabledBy) {
+        // The row reads the option's own text, so both ways of losing the gate change what it reads.
+        const wired = `enabled: ${shell.enabledBy},`
+        expect(reread(shell, wired, 'enabled: false,').controllers[0].enabled).toBe('false')
+        expect(reread(shell, wired, '').controllers[0].enabled).toBeUndefined()
+      }
     })
 
     it(`C8B-17 ${shell.name}: a busy conversation gets no authority and no error`, async () => {
@@ -379,6 +549,32 @@ for (const shell of SHELLS) {
       expect(shell.imports.classifyAgentError).toBe(`classifyAgentError from ${shell.converse}`)
       expect(shell.callbackSource).toContain("classifyAgentError(error) === 'busy'")
       expect(shell.source.match(/\b(?:const|let|var|function)\s+classifyAgentError\b/g)).toBeNull()
+      // Every mention of the name in the whole shell is the import or the one call inside the
+      // provider. Any other mention is a second binding or a second route to the function.
+      expect(shell.classifier).toEqual({ imports: shell.classifier.imports, calls: 1, callsInProvider: 1, other: [] })
+      expect(shell.classifier.imports).toBeGreaterThan(0)
+    })
+
+    it(`C8B-21 ${shell.name}: a name that hides the classifier is refused`, () => {
+      const anchor = `const ${PROVIDER} = useCallback(`
+      const hidden = [
+        ['a destructured parameter default', `const hide = ({ ${CLASSIFIER} = () => 'busy' }) => null\n  `],
+        ['a plain parameter', `const hide = (${CLASSIFIER}) => null\n  `],
+        ['an alias', `const alias = ${CLASSIFIER}\n  `],
+        ['a caught name', `try { hide() } catch (${CLASSIFIER}) { hide() }\n  `],
+      ]
+      for (const [label, binding] of hidden) {
+        const changed = reread(shell, anchor, `${binding}${anchor}`)
+        // The import and the provider's call are untouched, and no declaration keyword precedes
+        // the name, so the three older checks all still pass on this source.
+        expect(changed.imports.classifyAgentError, label).toBe(`classifyAgentError from ${shell.converse}`)
+        expect(changed.callbackSource, label).toContain("classifyAgentError(error) === 'busy'")
+        expect(changed.source.match(/\b(?:const|let|var|function)\s+classifyAgentError\b/g), label).toBeNull()
+        expect(changed.classifier.other.length, label).toBeGreaterThan(0)
+      }
+      // A second call outside the provider is a second route to the function.
+      const elsewhere = reread(shell, anchor, `${CLASSIFIER}(null)\n  ${anchor}`)
+      expect(elsewhere.classifier).toMatchObject({ calls: 2, callsInProvider: 1, other: [] })
     })
 
     it(`C8B-15 ${shell.name}: two submissions started together each mint their own turn`, async () => {

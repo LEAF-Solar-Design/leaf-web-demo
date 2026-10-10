@@ -1439,7 +1439,12 @@ export default function App() {
       // turn. Every other failure is the drafter's to see, so it is thrown
       // on unchanged.
       if (mock || requestedProjectId !== authorProjectRef.current) return null
-      if (classifyAgentError(error) === 'busy') return null
+      // A failure whose fields cannot be read is not a busy conversation, and
+      // it is still the failure the drafter must see: nothing raised while
+      // classifying it may take its place.
+      let busy = false
+      try { busy = classifyAgentError(error) === 'busy' } catch { /* unreadable: the original failure stands */ }
+      if (busy) return null
       throw error
     }
     if (requestedProjectId !== authorProjectRef.current) return null

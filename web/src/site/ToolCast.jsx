@@ -729,7 +729,12 @@ export default function ToolCast({
       // either, and the controller says to wait for that turn. Every other
       // failure is the drafter's to see, so it is thrown on unchanged.
       if (PUBLIC_DEMO) return null
-      if (classifyAgentError(error) === 'busy') return null
+      // A failure whose fields cannot be read is not a busy conversation, and
+      // it is still the failure the drafter must see: nothing raised while
+      // classifying it may take its place.
+      let busy = false
+      try { busy = classifyAgentError(error) === 'busy' } catch { /* unreadable: the original failure stands */ }
+      if (busy) return null
       throw error
     }
     const mintedSession = response?.session_id

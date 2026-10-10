@@ -136,6 +136,13 @@ export default function useAuthorStageController({
   const pointerRef = useRef(pointer)
   const runningRef = useRef(false)
   const preparedSubmissionRef = useRef(null)
+  // The authority minted for a request, kept with that request's idempotency
+  // key. The server binds a request to the turn that first sent it, so a
+  // repeat of the same request must carry that same authority: a new turn
+  // could never replay it, and starting one would only add a second turn. It
+  // is matched by key, so it can never serve another request; the next mint
+  // replaces it. It lives in memory only: after a reload nothing is held.
+  const heldAuthorityRef = useRef(null)
   storageRef.current = storage
 
   const updatePointer = useCallback((next) => {
@@ -184,7 +191,13 @@ export default function useAuthorStageController({
       // Only the initial POST carries authority; a poll/reconnect (poll_url
       // already set) never re-submits, so skip minting/reusing a turn for it.
       let authority = null
-      if (authorityProvider && !initial.poll_url) {
+      let minted = false
+      const held = heldAuthorityRef.current
+      if (authorityProvider && !initial.poll_url && held?.key === initial.idempotency_key) {
+        // A repeat of a request this controller already minted for (its first
+        // POST may or may not have landed): the same authority, no new turn.
+        authority = held.authority
+      } else if (authorityProvider && !initial.poll_url) {
         try {
           // The one-call credential override also applies to the turn start.
           authority = (await authorityProvider(initial.description, { allowSecretOnce, ...(initial.prior_staged ? { forceFresh: true } : {}) })) || null
@@ -195,6 +208,7 @@ export default function useAuthorStageController({
             if (mock) failure.reasonCode = 'signed-out-demo'
             throw failure
           }
+          minted = true
         } catch (cause) {
           // No stage POST has happened, so do not retain a pointer that would
           // silently start another turn on reconnect. A new click may retry.
@@ -205,6 +219,9 @@ export default function useAuthorStageController({
         }
       }
       if (sequenceRef.current !== sequence || abortController.signal.aborted) return null
+      // Held only by the run that is still current: an authority that arrives
+      // for a superseded run must not replace the one a newer run already sent.
+      if (minted) heldAuthorityRef.current = { key: initial.idempotency_key, authority }
       const staged = await stageAuthorTool(
         mock,
         initial.description,
@@ -332,11 +349,13 @@ export default function useAuthorStageController({
       return coalesced
     }
     if (validCurrent && !(current.terminal_failed && newAttempt)) {
-      // A valid pointer that never got its poll_url (the first POST did not
-      // land) is re-run here, and its mint runs again: the caller's live
-      // override rides along, or a Send-anyway re-stage would be refused at
-      // the mint and swallowed into a null authority. The mount-time resumes
-      // below carry no override on purpose: nobody consented on that call.
+      // A valid pointer that never got its poll_url (its first POST may not
+      // have landed) is re-run here with the authority this controller minted
+      // for it. When nothing is held (after a reload) its mint runs again, and
+      // the caller's live override rides along, or a Send-anyway re-stage
+      // would be refused at the mint and swallowed into a null authority. The
+      // mount-time resumes below carry no override on purpose: nobody
+      // consented on that call.
       return runPointer(current, { reconnecting: true, allowSecretOnce })
     }
     if (!mock && current && !validCurrent) clearInflightAuthor(null, storageRef.current)
