@@ -26,7 +26,9 @@ assert(app.includes('useAuthorStageController') && app.includes('publishStagedAu
 assert(toolCast.includes('useAuthorStageController') && toolCast.includes('publishStagedAuthor'), 'unified surface must separate staging from publishing')
 assert(authorController.includes('authorPointerValid') && authorPointer.includes('leaf.inflightAuthor.v1'), 'author staging must use its own scoped durable pointer')
 assert(authorController.includes('initial.prior_staged ? { forceFresh: true } : {}'), 'revised staged requests must ask for fresh turn authority')
-assert(toolCast.includes('forceFresh = false') && toolCast.includes('!forceFresh && cached &&'), 'unified author authority must bypass its cache for revisions')
+for (const source of [app, toolCast]) {
+  assert(!source.includes('AUTHOR_AUTHORITY_TTL_MS') && !source.includes('authorAuthorityRef'), 'author authority must not be cached across submissions')
+}
 assert(panel.includes('seedAutoSubmit && !stageActivity?.pointer && !stageActivity?.draftOnly'), 'pending requests and prepared drafts must never auto-submit from a seed')
 assert(panel.includes('disabled={authorLocked || !!stageActivity?.pointer}') && panel.includes('Finish or discard the current request before cancelling the revision.'), 'revision cancellation must explain why a pending pointer blocks it')
 

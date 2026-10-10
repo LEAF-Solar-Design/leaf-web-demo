@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import AuthorPanel from '../components/AuthorPanel.jsx'
 import { config } from '../api.js'
@@ -122,14 +120,6 @@ describe('prepared author drafts', () => {
     expect(opts.stageAuthorTool).toHaveBeenCalledTimes(2)
     expect(opts.stageAuthorTool.mock.calls[1][3].authority).toEqual({ sessionId: 'session-live', turnId: 'turn-2' })
     expect(opts.stageAuthorTool.mock.calls[1][3].authority.turnId).not.toBe(firstAuthority.turnId)
-  })
-
-  it('W21D1B-toolcast-forcefresh', () => {
-    const source = readFileSync(resolve(process.cwd(), 'src/site/ToolCast.jsx'), 'utf8')
-    const provider = source.slice(source.indexOf('const authorAuthorityProvider'), source.indexOf('const authorStage ='))
-    expect(provider).toMatch(/description,\s*\{\s*allowSecretOnce = false,\s*forceFresh = false\s*\} = \{\}/)
-    expect(provider).toMatch(/if\s*\(!forceFresh && cached && Date\.now\(\) - cached\.mintedAt < AUTHOR_AUTHORITY_TTL_MS\)/)
-    expect(provider).toContain('authorAuthorityRef.current = { sessionId: mintedSession, turnId: response.turn_id, mintedAt: Date.now() }')
   })
 
   it('W21D1B-second-revision-receipt', async () => {
