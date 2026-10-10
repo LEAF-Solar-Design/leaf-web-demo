@@ -176,7 +176,9 @@ export function escapeOwnerStack() {
 }
 
 function onWindowKeyDown(event) {
-  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return
+  // KEYS-c: an Escape pressed during a text composition is the input method's. An engine marks it
+  // with isComposing; some have reported keyCode 229 alone on the keydown that ends a composition.
+  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return
   const top = topEscapeOwner(event)
   if (!top) return
   event.preventDefault()
