@@ -463,6 +463,24 @@ def submit_canonical_solve(context: Dict[str, Any], request_tenant_id: str,
     return str(job["job_id"])
 
 
+def submit_canonical_graph(
+    tenant, project_id, drawing_id, input_version_id, tool_name, params, *,
+    tool_manifest_sha256, checkout_capability, idempotency_key,
+) -> str:
+    from solar_project_jobs import submit_project_graph_job
+    _ensure_platform_package()
+    from leaf_platform.entitlements import EntitlementDenied
+
+    try:
+        job = submit_project_graph_job(
+            tenant, project_id, drawing_id, input_version_id, tool_name, params,
+            tool_manifest_sha256=tool_manifest_sha256,
+            checkout_capability=checkout_capability, idempotency_key=idempotency_key)
+    except EntitlementDenied as exc:
+        raise CanonicalEntitlementDenied(exc.response) from None
+    return str(job["job_id"])
+
+
 def _canonical_record(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if record is None:
         return None

@@ -397,6 +397,37 @@ def project_graph_commit_provenance(tenant, result, *, expected, conn=None):
         return project.platform_link.platform_db().run_transaction(
             lambda connection: project_graph_commit_provenance(tenant, result,
                                                                expected=expected, conn=connection))
+
+    def authorize(request):
+        if str(tenant) != request["organization_id"]:
+            _reject()
+        org, _actor = project._access(tenant, UUID(request["project_id"]), write=False)
+        if str(org) != request["organization_id"]:
+            _reject()
+        return org
+
+    return _project_graph_provenance(result, expected=expected, conn=conn, authorize=authorize)
+
+
+def project_graph_job_provenance(job_id, result, *, expected, conn):
+    """Prove from a freshly loaded job's stored editor, never request identity."""
+    jobs = project.platform_link._canonical_jobs_module()
+    if not isinstance(job_id, UUID):
+        jobs._graph_binding_error()
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL", (job_id,))
+        row = cur.fetchone()
+    if row is None:
+        project.refuse("CONTEXT_NOT_FOUND")
+    request = expected.request if isinstance(expected, PreparedProjectGraphCommit) else expected
+    jobs._validate_graph_request(row, request)
+    jobs._graph_scope(row, conn)
+    return _project_graph_provenance(result, expected=expected, conn=conn,
+                                    authorize=lambda request: UUID(str(row["org_id"])))
+
+
+def _project_graph_provenance(result, *, expected, conn, authorize):
+    """Shared historical byte reconstruction with authority supplied internally."""
     try:
         request = expected.request if isinstance(expected, PreparedProjectGraphCommit) else copy.deepcopy(expected)
         if type(request) is not dict or type(result) is not dict:
@@ -409,11 +440,7 @@ def project_graph_commit_provenance(tenant, result, *, expected, conn=None):
                 or local.canonical_bytes({key: result[key] for key in request})
                 != local.canonical_bytes(request)):
             _reject()
-        if str(tenant) != request["organization_id"]:
-            _reject()
-        org, _actor = project._access(tenant, UUID(request["project_id"]), write=False)
-        if str(org) != request["organization_id"]:
-            _reject()
+        org = authorize(request)
         parent, parent_version = _stored_context(request, UUID(request["parent_version_id"]), conn)
         _publication_fingerprint(parent_version, conn)
         try:

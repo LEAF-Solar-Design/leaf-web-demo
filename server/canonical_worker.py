@@ -15,6 +15,8 @@ import uuid
 from typing import Any, Dict
 
 import platform_link
+import solar_project_graph
+import solar_project_jobs
 from solver_adapters import arlo_design, autofill
 
 ADAPTERS = {autofill.TOOL_NAME: autofill.run, arlo_design.TOOL_NAME: arlo_design.run}
@@ -73,6 +75,8 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS,
              tool_name: str = autofill.TOOL_NAME) -> bool:
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
+    if tool_name in solar_project_graph.SUPPORTED_TOOLS:
+        return solar_project_jobs.run_once(owner, tool_name=tool_name, lease_seconds=lease_seconds)
     canonical_jobs = platform_link._canonical_jobs_module()
     if tool_name == autofill.TOOL_NAME:
         descriptor = autofill.descriptor()
@@ -152,7 +156,7 @@ def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SEC
 def main() -> None:
     parser = argparse.ArgumentParser(description="Leaf canonical solve worker")
     parser.add_argument("--once", action="store_true")
-    parser.add_argument("--tool", choices=sorted(ADAPTERS), default=autofill.TOOL_NAME)
+    parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS), default=autofill.TOOL_NAME)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--lease-seconds", type=float, default=float(
         os.environ.get("LEAF_CANONICAL_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)))
