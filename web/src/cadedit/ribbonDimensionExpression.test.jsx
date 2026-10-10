@@ -3,7 +3,7 @@
 // blur, step on the arrow keys and scrub on a horizontal label drag. Point
 // expressions in a point step's first field keep the W4f-8 path unchanged,
 // and a refused dimension keeps its outline and its reason.
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
@@ -68,6 +68,77 @@ const focus = (el) => act(() => el.focus())
 const leave = (el) => fireEvent.focusOut(el)
 const type = (el, value) => fireEvent.change(el, { target: { value } })
 const enter = (el) => fireEvent.keyDown(el, { key: 'Enter' })
+
+function compositionEvent(el, key, isComposing, keyCode, modifiers = {}) {
+  const event = createEvent.keyDown(el, { key, bubbles: true, cancelable: true, isComposing, keyCode, ...modifiers })
+  expect(event.isComposing).toBe(isComposing)
+  expect(event.keyCode).toBe(keyCode)
+  event.stopPropagation = vi.fn(event.stopPropagation.bind(event))
+  return event
+}
+
+async function dimensionCompositionEnter(isComposing, keyCode) {
+  await openDrawing('in')
+  arm('createCircle')
+  const r = field('r')
+  focus(r)
+  type(r, '12 ft')
+  const before = [...edits()]
+  const event = compositionEvent(r, 'Enter', isComposing, keyCode)
+  fireEvent(r, event)
+  expect(event.defaultPrevented).toBe(false)
+  expect(event.stopPropagation).not.toHaveBeenCalled()
+  expect(r.value).toBe('12 ft')
+  expect(document.activeElement).toBe(r)
+  expect(edits()).toEqual(before)
+  const ordinary = compositionEvent(r, 'Enter', false, 0)
+  fireEvent(r, ordinary)
+  expect(ordinary.defaultPrevented).toBe(true)
+  expect(r.value).toBe('144')
+  expect(edits()).toEqual([...before, { type: 'applyEdit', op: 'createCircle', payload: { cx: 0, cy: 0, radius: 144, layer: '' } }])
+}
+
+async function dimensionCompositionArrows(isComposing, keyCode) {
+  await openDrawing('in')
+  arm('createCircle')
+  const r = field('r')
+  focus(r)
+  for (const key of ['ArrowUp', 'ArrowDown']) {
+    for (const [modifiers, step] of [[{}, 1], [{ shiftKey: true }, 10], [{ altKey: true }, 0.1]]) {
+      type(r, '20')
+      const before = [...edits()]
+      const event = compositionEvent(r, key, isComposing, keyCode, modifiers)
+      fireEvent(r, event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(event.stopPropagation).not.toHaveBeenCalled()
+      expect(r.value).toBe('20')
+      expect(document.activeElement).toBe(r)
+      expect(edits()).toEqual(before)
+      const ordinary = compositionEvent(r, key, false, 0, modifiers)
+      fireEvent(r, ordinary)
+      expect(ordinary.defaultPrevented).toBe(true)
+      expect(r.value).toBe(String(20 + (key === 'ArrowUp' ? step : -step)))
+      expect(document.activeElement).toBe(r)
+      expect(edits()).toEqual(before)
+    }
+  }
+}
+
+it('KEYS-D42 dimension Enter yields native composition', async () => {
+  await dimensionCompositionEnter(true, 0)
+})
+
+it('KEYS-D43 dimension Enter yields key code 229', async () => {
+  await dimensionCompositionEnter(false, 229)
+})
+
+it('KEYS-D44 dimension arrows yield native composition', async () => {
+  await dimensionCompositionArrows(true, 0)
+})
+
+it('KEYS-D45 dimension arrows yield key code 229', async () => {
+  await dimensionCompositionArrows(false, 229)
+})
 
 beforeEach(() => {
   globalThis.URL.createObjectURL = vi.fn(() => 'blob:cad-edit-test')

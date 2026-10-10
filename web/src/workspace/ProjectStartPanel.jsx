@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 // First-run project entry for the board. The workspace controller owns all IO.
 export function ProjectStartPanel({
@@ -16,6 +17,7 @@ export function ProjectStartPanel({
   const rows = useRef([])
   const busy = pending || orgBusy || projectBusy
   const submitOnEnter = (event) => {
+    if (isCompositionKey(event)) return
     if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
     event.preventDefault()
     event.currentTarget.form?.requestSubmit()

@@ -5,6 +5,7 @@ import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { absoluteWithZone, relativeTime } from '../lib/railTime.js'
 import useRelativeNow from '../lib/useRelativeNow.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 function detectKind(token) {
   if (/^sk-ant-api/i.test((token || '').trim())) return 'api_key'
@@ -192,7 +193,10 @@ export default function ClaudeAccountPanel({
                   type="password"
                   value={token}
                   onChange={(event) => changeToken(event.target.value)}
-                  onKeyDown={(event) => { if (event.key === 'Enter') submit() }}
+                  onKeyDown={(event) => {
+                    if (isCompositionKey(event)) return
+                    if (event.key === 'Enter') submit()
+                  }}
                   placeholder={isApiKey ? 'sk-ant-api03-…' : 'sk-ant-oat01-…'}
                   autoComplete="off"
                   spellCheck={false}

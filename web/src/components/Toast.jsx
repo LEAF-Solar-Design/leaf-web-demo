@@ -4,6 +4,7 @@
 // Anatomy/colors come from styles.css (.toast, .toast .action, .enter/.exit).
 
 import { useEffect, useRef, useState } from 'react'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 const TOAST_MS = 5000 // visible window before the exit fade
 const UNDO_MS = 8000
@@ -97,6 +98,7 @@ export default function Toast({ toast, onDone }) {
     if (!toast) return undefined
     const root = rootRef.current
     const onKeyDown = (event) => {
+      if (isCompositionKey(event)) return
       if (event.key !== 'F6' || event.altKey || event.ctrlKey || event.metaKey) return
       event.preventDefault()
       if (root.contains(document.activeElement) && returnFocusRef.current) {

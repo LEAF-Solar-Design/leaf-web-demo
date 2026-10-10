@@ -59,6 +59,7 @@ import {
   clipboardImagesToAttachments,
   IMAGE_MEDIA_TYPES,
 } from '../composer.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 // The client's own "/" rows, projected from the action registry (slice 10a):
 // `mcp` is the one command with no server entry, so this client contributes
@@ -516,6 +517,7 @@ export default function PromptBox({
   }
 
   const onKeyDown = (e) => {
+    if (isCompositionKey(e)) return
     // Slice 10b/10c: the act/find resolver takes the SAME arrow/Enter/Esc
     // keys the "/" picker uses (menuOpen below) — the two never overlap
     // (scopeMenuOpen stands down the instant `trigger` fires), so this
@@ -643,6 +645,7 @@ export default function PromptBox({
     if (!scopeOpen) return undefined
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setScopeOpen(false) }
     const onKey = (e) => {
+      if (isCompositionKey(e)) return
       if (e.key === 'ArrowDown') { e.preventDefault(); setScopeIdx((i) => Math.min(i + 1, SCOPES.length - 1)); return }
       if (e.key === 'ArrowUp') { e.preventDefault(); setScopeIdx((i) => Math.max(i - 1, 0)); return }
       if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); pickScope(SCOPES[scopeIdx]) }

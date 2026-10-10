@@ -40,6 +40,7 @@ import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { listEngineChanges } from '../engineChanges.js'
 import { moveRovingTab } from '../lib/roving.js'
 import EngineChangesTab from './EngineChangesTab.jsx'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -1232,6 +1233,7 @@ export default function ConversePanel({
           // there; a notice outliving its text reads as a stuck error.
           onChange={(e) => { setInput(e.target.value); setSecretNotice(null) }}
           onKeyDown={(e) => {
+            if (isCompositionKey(e)) return
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send() }
           }}
           onPaste={onPaste}

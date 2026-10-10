@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import ProjectStartPanel from './ProjectStartPanel.jsx'
 
 afterEach(cleanup)
@@ -72,4 +72,60 @@ it('navigates the project picker with arrow keys', () => {
   expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Oak' }))
   fireEvent.click(document.activeElement)
   expect(open).toHaveBeenCalledWith('b')
+})
+
+
+function retainedKey(target, key, marks, modifiers = {}) {
+  const event = createEvent.keyDown(target, {
+    key, bubbles: true, cancelable: true, ...modifiers, ...marks,
+  })
+  expect(event.isComposing).toBe(marks.isComposing)
+  expect(event.keyCode).toBe(marks.keyCode)
+  const stop = event.stopPropagation.bind(event)
+  event.stopPropagation = vi.fn(() => stop())
+  return event
+}
+
+function expectYielded(event) {
+  expect(event.defaultPrevented).toBe(false)
+  expect(event.stopPropagation).not.toHaveBeenCalled()
+}
+
+async function creationComposition(marks) {
+  for (const bootstrapState of ['unbound', 'bound']) {
+    const onCreateOrg = vi.fn().mockResolvedValue(null)
+    const onCreateProject = vi.fn().mockResolvedValue(null)
+    const view = render(<ProjectStartPanel bootstrapState={bootstrapState}
+      onCreateOrg={onCreateOrg} onCreateProject={onCreateProject} />)
+    try {
+      const input = screen.getByLabelText(bootstrapState === 'unbound' ? 'Workspace name' : 'Project name')
+      fireEvent.change(input, { target: { value: 'Retained draft' } })
+      input.focus()
+      const event = retainedKey(input, 'Enter', marks)
+      fireEvent(input, event)
+      expectYielded(event)
+      expect(onCreateOrg).not.toHaveBeenCalled()
+      expect(onCreateProject).not.toHaveBeenCalled()
+      expect(input.value).toBe('Retained draft')
+      expect(input).toHaveFocus()
+      const ordinary = retainedKey(input, 'Enter', { isComposing: false, keyCode: 0 })
+      await act(async () => { fireEvent(input, ordinary) })
+      expect(ordinary.defaultPrevented).toBe(true)
+      const create = bootstrapState === 'unbound' ? onCreateOrg : onCreateProject
+      const other = bootstrapState === 'unbound' ? onCreateProject : onCreateOrg
+      expect(create).toHaveBeenCalledExactlyOnceWith('Retained draft')
+      expect(other).not.toHaveBeenCalled()
+      expect(input.value).toBe('Retained draft')
+    } finally {
+      view.unmount()
+    }
+  }
+}
+
+it('KEYS-D25 both creation fields yield native composition', async () => {
+  await creationComposition({ isComposing: true, keyCode: 0 })
+})
+
+it('KEYS-D26 both creation fields yield key code 229', async () => {
+  await creationComposition({ isComposing: false, keyCode: 229 })
 })

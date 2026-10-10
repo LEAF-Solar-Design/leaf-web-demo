@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import Toast from './Toast.jsx'
@@ -335,4 +335,59 @@ describe('Toast lifetime and interaction', () => {
     expect(onDone).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })
+})
+
+
+function retainedKey(target, key, marks, modifiers = {}) {
+  const event = createEvent.keyDown(target, {
+    key, bubbles: true, cancelable: true, ...modifiers, ...marks,
+  })
+  expect(event.isComposing).toBe(marks.isComposing)
+  expect(event.keyCode).toBe(marks.keyCode)
+  const stop = event.stopPropagation.bind(event)
+  event.stopPropagation = vi.fn(() => stop())
+  return event
+}
+
+function expectYielded(event) {
+  expect(event.defaultPrevented).toBe(false)
+  expect(event.stopPropagation).not.toHaveBeenCalled()
+}
+
+function toastComposition(marks) {
+  for (const withAction of [true, false]) {
+    const onClick = vi.fn()
+    const onDone = vi.fn()
+    const toast = { id: 1, text: 'Saved', action: withAction ? { label: 'View', onClick } : null }
+    const view = render(<><input aria-label="Draft origin" defaultValue="draft-value" /><Toast toast={toast} onDone={onDone} /></>)
+    try {
+      const input = screen.getByLabelText('Draft origin')
+      const root = screen.getByRole('status')
+      act(() => { input.focus() })
+      const event = retainedKey(input, 'F6', marks)
+      fireEvent(input, event)
+      expectYielded(event)
+      expect(input).toHaveFocus()
+      expect(input.value).toBe('draft-value')
+      expect(root).toHaveClass('enter')
+      expect(onClick).not.toHaveBeenCalled()
+      expect(onDone).not.toHaveBeenCalled()
+      const ordinary = retainedKey(input, 'F6', { isComposing: false, keyCode: 0 })
+      fireEvent(input, ordinary)
+      expect(ordinary.defaultPrevented).toBe(true)
+      expect(withAction ? screen.getByRole('button', { name: 'View' }) : root).toHaveFocus()
+      expect(onClick).not.toHaveBeenCalled()
+      expect(onDone).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  }
+}
+
+it('KEYS-D31 toast F6 yields native composition', () => {
+  toastComposition({ isComposing: true, keyCode: 0 })
+})
+
+it('KEYS-D32 toast F6 yields key code 229', () => {
+  toastComposition({ isComposing: false, keyCode: 229 })
 })

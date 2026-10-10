@@ -4,6 +4,7 @@ import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { EMPTY_WORKSPACE_PROJECT, formatProjectsUnavailable } from '../site/workspaceProjectState.js'
 import { addRecentProject, readProjectPrincipal, readRecentProjects, togglePinnedProject, writeRecentProjects } from '../lib/recentProjects.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 // The header PROJECT chip, made real: a calm switcher over the canonical
 // org-scoped Project entity (platform/api.py). LIVE only — in mock mode it is a
@@ -129,6 +130,7 @@ export default function ProjectSwitcher({
     if (!open) return
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false) }
     const onKey = (e) => {
+      if (isCompositionKey(e)) return
       if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) {
         if (e.key === 'Enter' && !e.isComposing && e.target.tagName === 'INPUT' && rootRef.current?.contains(e.target)) {
           e.preventDefault()

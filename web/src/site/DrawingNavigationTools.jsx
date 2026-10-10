@@ -5,6 +5,7 @@ import { useSurfaceFrame } from './SurfaceFrame.jsx'
 import { useStudioGround } from './studioGround.js'
 import './drawingNavigation.css'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 // The index preserves physical containment, not layer membership. Recover
 // underlying layers from geometry, then propagate them to physical parents.
@@ -111,6 +112,7 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
   const inputRef = useRef(null)
   useEscapeOwner('drawing-find', true, () => setResults(null), { layer: 'menu', scope: inputRef, scoped: true })
   const keyDown = (event) => {
+    if (isCompositionKey(event)) return
     if (event.nativeEvent.isComposing) return
     if (event.key === 'Enter') {
       event.preventDefault(); event.stopPropagation()

@@ -20,6 +20,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
 
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { applyPick, buildSnapIndex, currentStep, ghostFor, orthoAnchor, orthoPoint, snapPoint, startPicking, wantsPick } from './pointPicking.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 const CLICK_MOVE_PX = 5
 const CLICK_MAX_MS = 500
@@ -83,6 +84,7 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
     const onKey = (event) => {
+      if (isCompositionKey(event)) return
       if (event.defaultPrevented) return
       if (event.key === 'F8') { event.preventDefault(); setOrthoRef.current(!orthoRef.current); return }
       if (event.key === 'F3') { event.preventDefault(); setOsnapRef.current(!osnapRef.current) }

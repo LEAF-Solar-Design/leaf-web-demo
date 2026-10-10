@@ -1912,6 +1912,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_sip_r4_runtime.py"), 4),
         Suite("server-sip-r4-jobs", "server durable canonical Solar graph jobs",
               "pytest", SERVER, _py_pytest("tests/test_sip_r4_jobs.py"), 26),
+        Suite("server-sip-r5-policy", "server canonical Solar admission policy",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r5_policy.py"), 14),
         Suite("platform-sip-r4-jobs", "platform atomic Solar graph jobs",
               "pytest", REPO / "platform", _py_pytest("tests/test_sip_r4_jobs.py"), 14,
               uses_database=True, db_gated=True,
@@ -2951,7 +2953,8 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_gate_runner.py") +
               # sip-r3b-1 adds the canonical Solar tool registration row.
               # sip-r3b-2 adds the deterministic creation registration row.
-              ["test_studio_walk_regression_gate.py"], 98),
+              # +1 (2026-10-10): canonical Solar admission policy registration.
+              ["test_studio_walk_regression_gate.py"], 99),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
