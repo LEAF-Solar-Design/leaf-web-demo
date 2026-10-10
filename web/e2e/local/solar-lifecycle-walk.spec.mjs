@@ -183,7 +183,14 @@ test('W1-12 solar lifecycle history reopen and profile continuity through the br
   const head = async (version) => {
     const document = `${drawingId}-v${version}.dxf`
     await expect(page.locator('.workspace-card[data-engine-document]')).toHaveAttribute('data-engine-document', document, { timeout: 60000 })
-    await expect(page.getByTestId('dock-drawing').locator('dt').filter({ hasText: /^Name$/ }).locator('+ dd')).toHaveText(document, { timeout: 60000 })
+    // The dock names the drawing as the footer's document tab does; the engine document id is the
+    // card attribute above, and the Source row proves that document is the one shown.
+    const dock = page.getByTestId('dock-drawing')
+    await expect(dock.locator('dt').filter({ hasText: /^Source$/ }).locator('+ dd')).toHaveText('browser drawing', { timeout: 60000 })
+    await expect(page.locator('.foot-doc-tab')).toBeVisible({ timeout: 60000 })
+    const shownName = (await page.locator('.foot-doc-tab').innerText()).trim()
+    expect(shownName).toContain('distinctive-panel')
+    await expect(dock.locator('dt').filter({ hasText: /^Name$/ }).locator('+ dd')).toHaveText(shownName, { timeout: 60000 })
   }
   const intakeAt = async (version) => {
     await expect.poll(() => intakes.some((view) => view.version === version), { timeout: 120000 }).toBe(true)
@@ -364,8 +371,10 @@ test('W1-12 solar lifecycle history reopen and profile continuity through the br
   await expect(page.locator('#solar-step-solar-size-strings')).toBeEnabled({ timeout: 60000 })
   await click(page.locator('#solar-step-solar-size-strings'))
   await expect(editor.getByText('Saved project ZIP: 44224', { exact: true })).toBeVisible({ timeout: 30000 })
-  await expect(editor.getByText(settingsId, { exact: true })).toBeVisible()
+  // The form opens on the saved global length; a calculated scope names its settings entity.
+  await expect(editor.getByRole('combobox', { name: 'Scope', exact: true })).toHaveValue('manual-global')
   for (const [label, value] of Object.entries(SIZING_SELECT)) await select(editor.getByRole('combobox', { name: label, exact: true }), value)
+  await expect(editor.getByText(settingsId, { exact: true })).toBeVisible()
   for (const [label, value] of Object.entries(SIZING_TEXT)) await fill(editor.getByLabel(label, { exact: true }), value)
   await reachable(editor.getByLabel('Use module parameters', { exact: true }))
   await editor.getByLabel('Use module parameters', { exact: true }).setChecked(false)
@@ -413,6 +422,9 @@ test('W1-12 solar lifecycle history reopen and profile continuity through the br
   expect(sizedGraph.frames.map((frame) => frame.module_power_watts)).toEqual([595, 595])
   expect(sizedGraph.frames.map((frame) => frame.module_slots)).toEqual([3, 2])
   expect(sizedGraph.frames.map((frame) => frame.installation_design)).toEqual(['Ground', 'Ground'])
+  // After a run the form reopens on the saved global length; the calculated scope shows the power.
+  await expect(editor.getByText('Saved global string length: 27', { exact: true })).toBeVisible({ timeout: 60000 })
+  await select(editor.getByRole('combobox', { name: 'Scope', exact: true }), 'global')
   await expect(editor.getByText('Confirmed module power: 595 W', { exact: true })).toBeVisible({ timeout: 60000 })
   await screenshot('lifecycle-07-sizing-replay.png')
   await click(editor.getByRole('button', { name: 'Cancel', exact: true }).last())

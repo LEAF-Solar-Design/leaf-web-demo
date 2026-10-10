@@ -40,11 +40,13 @@ function flagsOn(testInfo) {
 async function reachable(control) {
   await control.scrollIntoViewIfNeeded()
   await expect(control).toBeVisible()
-  expect(await control.evaluate((element) => {
+  // A transient toast (about 5 s, components/Toast.jsx) may sit over a control for a moment, so the centre
+  // must come free within 10 s; a cover that outlasts that is a real defect and fails here.
+  await expect.poll(() => control.evaluate((element) => {
     const r = element.getBoundingClientRect()
     const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
     return hit === element || element.contains(hit)
-  })).toBe(true)
+  }), { timeout: 10000 }).toBe(true)
 }
 async function click(control) { await reachable(control); await control.click() }
 async function fill(control, value) { await reachable(control); await control.fill(String(value)) }
@@ -138,7 +140,14 @@ test('G1b ground electrical boundary through the browser', async ({ page }, test
   const head = async (version) => {
     const document = `${drawingId}-v${version}.dxf`
     await expect(page.locator('.workspace-card[data-engine-document]')).toHaveAttribute('data-engine-document', document, { timeout: 60000 })
-    await expect(page.getByTestId('dock-drawing').locator('dt').filter({ hasText: /^Name$/ }).locator('+ dd')).toHaveText(document, { timeout: 60000 })
+    // The dock names the drawing as the footer's document tab does; the engine document id is the
+    // card attribute above, and the Source row proves that document is the one shown.
+    const dock = page.getByTestId('dock-drawing')
+    await expect(dock.locator('dt').filter({ hasText: /^Source$/ }).locator('+ dd')).toHaveText('browser drawing', { timeout: 60000 })
+    await expect(page.locator('.foot-doc-tab')).toBeVisible({ timeout: 60000 })
+    const shownName = (await page.locator('.foot-doc-tab').innerText()).trim()
+    expect(shownName).toContain('distinctive-panel')
+    await expect(dock.locator('dt').filter({ hasText: /^Name$/ }).locator('+ dd')).toHaveText(shownName, { timeout: 60000 })
   }
   const intakeAt = async (version) => {
     await expect.poll(() => intakes.some((view) => view.version === version), { timeout: 120000 }).toBe(true)
