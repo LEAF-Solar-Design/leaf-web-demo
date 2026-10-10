@@ -2295,7 +2295,7 @@ function dockClearanceFailures(cockpitCss, baseCss, structuralCss, otherSheets =
   // D3: the short fold's absolute border-box height drives the input (less its two
   // border pixels) and every tablet reservation. At 761px the fallback is 32px.
   // Keep this in the same parser and scope checks as the status-rise contract.
-  if (one(base, ':root', [DOCK_FOLD], 'folded height declaration').get('--tb-h') !== '42px') {
+  if (one(base, 'body', [DOCK_FOLD], 'folded height declaration').get('--tb-h') !== '42px') {
     failures.push('the folded command bar must keep its absolute 42px height at 760px and below')
   }
   if (one(base, '.bar-input', [DOCK_FOLD], 'folded input rule').get('height') !== 'calc(var(--tb-h) - 2px)') {
@@ -2322,7 +2322,7 @@ function dockClearanceFailures(cockpitCss, baseCss, structuralCss, otherSheets =
   const foldedSheets = [['cockpit.css', cockpit], ['styles.css', base], ['structural.css', structural],
     ...otherSheets.map(([name, text]) => [name, dockDeclarations(text)])]
   for (const [property, owner, selector, headers] of [
-    ['--tb-h', 'styles.css', ':root', [DOCK_FOLD]],
+    ['--tb-h', 'styles.css', 'body', [DOCK_FOLD]],
     ['--tb-r', 'cockpit.css', DOCK_APP, [DOCK_TABLET]],
   ]) {
     const declarations = foldedSheets.flatMap(([name, sheet]) => sheet.rules
@@ -2451,7 +2451,7 @@ describe('DOCK folded tablet clearance', () => {
     // The unchanged CSS must fail this row, including its original 40px input.
     const unchanged = swap(swap(swap(swap(swap(cockpit, foldedBar, ''), reservation, ''), centre, 'inset: 88px 0 100px;'),
       panel, 'bottom: 100px;'), result, ' - 100px - var(--ck-status-rise, 0px)))')
-    const unfoldedContract = swap(swap(base, ':root { --tb-h: 42px; }', ''), input, 'height: 40px;')
+    const unfoldedContract = swap(swap(base, 'body { --tb-h: 42px; }', ''), input, 'height: 40px;')
     assert.ok(dockClearanceFailures(unchanged, unfoldedContract, structural).length > 0, 'unchanged base must fail D3')
   })
 
@@ -2475,7 +2475,7 @@ describe('DOCK folded tablet clearance', () => {
       ['Solar only', swap(cockpit, reservation, reservation.replace(DOCK_APP, '.studio-shell .app[data-surface="solar"]')), base],
       ['phone receives tablet reservation', swap(cockpit, reservation, '') + '\n' + DOCK_TABLET_FRAME + ' { ' + reservation + ' }\n', base],
       ['fourth reservation changed', swap(cockpit, '{ padding-bottom: 100px; }', '{ padding-bottom: ' + DOCK_RESERVATION + '; }'), base],
-      ['height shadowed elsewhere', cockpit, base, [['site/landing.css', ':root { --tb-h: 40px; }']]],
+      ['height shadowed elsewhere', cockpit, base, [['site/landing.css', 'body { --tb-h: 40px; }']]],
     ]) {
       assert.ok(dockClearanceFailures(a, b, structural, extra).length > 0, name)
     }
