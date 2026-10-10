@@ -14,6 +14,78 @@ import {
 
 export { INFLIGHT_AUTHOR_KEY, clearInflightAuthor, readInflightAuthor } from '../authorStagePointer.js'
 
+// Why an authoring request could not start, for the failures the panel has no
+// calmer surface for. Read from structured fields only: never from the server's
+// message text and never from the client's own grantRequired heuristic. The
+// daily authoring quota is left alone on purpose: its gate carries the numbers.
+const AUTHOR_START_REASONS = Object.freeze({
+  grant: 'Link your Claude account to start authoring.',
+  quota: 'Your Claude usage limit has been reached; try again when usage is available.',
+  rate_limited: 'Authoring is temporarily rate limited; wait before trying again.',
+  auth: 'Sign in to Leaf again to start authoring.',
+  network: 'Could not reach the authoring service; check your connection and try again.',
+  transport: 'The authoring service is temporarily unavailable; try again.',
+})
+
+// One frozen record per kind, shared by every failure of that kind.
+const AUTHOR_START_FAILURES = Object.freeze(Object.fromEntries(
+  Object.entries(AUTHOR_START_REASONS).map(([kind, message]) => [kind, Object.freeze({ kind, message })]),
+))
+
+// The reasons a 502, 503 or 504 may name and still be a passing outage. Any
+// other named reason keeps the server's own sentence: it describes a fault
+// that trying again does not clear.
+const TRANSIENT_START_CODES = Object.freeze(['customization_harness_unavailable', 'customization_stage_failed'])
+
+// The record is kept beside the error, never on it: a frozen error must not
+// throw here, and an error object thrown a second time must not keep the
+// record of its first throw.
+const authorStartFailures = new WeakMap()
+
+// Read-only: the start failure the controller recorded for this exact error
+// object, or null. A property set on an error by anyone else is never read.
+export function authorStartFailureOf(error) {
+  if (error === null || (typeof error !== 'object' && typeof error !== 'function')) return null
+  return authorStartFailures.get(error) || null
+}
+
+function classifyAuthorStartFailure(error) {
+  if (!error || error.secretRefused === true || error.name === 'AbortError'
+    || error.reasonCode === 'signed-out-demo') return null
+  const body = error.body && typeof error.body === 'object' ? error.body : null
+  const nested = body?.error && typeof body.error === 'object' ? body.error : null
+  const codes = [
+    error.errorCode, error.code, error.reasonCode,
+    body?.errorCode, body?.error_code, body?.reason, body?.reason_code,
+    nested?.error_code, nested?.code, nested?.reason_code,
+  ].filter((value) => typeof value === 'string').map((value) => value.toLowerCase())
+  const has = (code) => codes.includes(code)
+  // The reason a refusal names for itself, apart from its error class.
+  const reasons = [error.reasonCode, body?.reason, body?.reason_code, nested?.reason_code]
+    .filter((value) => typeof value === 'string').map((value) => value.toLowerCase())
+  const status = Number(error.status)
+  if (has('customization_auth_required')) return null
+  if (body?.grant_required === true || nested?.grant_required === true || has('grant_required')) {
+    return AUTHOR_START_FAILURES.grant
+  }
+  if (status === 429 && [body?.quota_kind, nested?.quota_kind]
+    .some((value) => typeof value === 'string' && value.toLowerCase() === 'daily_author')) return null
+  if (has('llm_quota_exhausted')) return AUTHOR_START_FAILURES.quota
+  if (has('llm_rate_limited')) return AUTHOR_START_FAILURES.rate_limited
+  if (status === 401) return AUTHOR_START_FAILURES.auth
+  if ([502, 503, 504].includes(status)
+    || ['broker_unreachable', 'service_unavailable', 'harness_unreachable'].some(has)) {
+    return reasons.every((reason) => TRANSIENT_START_CODES.includes(reason))
+      ? AUTHOR_START_FAILURES.transport : null
+  }
+  if ((!Number.isFinite(status) || status === 0)
+    && /failed to fetch|fetch failed|networkerror|network error|load failed|err_(connection|network)|econnrefused|connection refused/i
+      .test(String(error.message || ''))) {
+    return AUTHOR_START_FAILURES.network
+  }
+  return null
+}
+
 function requestId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
   return `leaf-author-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -177,6 +249,19 @@ export default function useAuthorStageController({
       return staged
     } catch (cause) {
       if (sequenceRef.current !== sequence) return null
+      // Only a request that never reached a durable job is a start failure. Any
+      // record from an earlier throw of this same object is dropped first.
+      // Classifying never decides how the request settles: a failure whose
+      // fields cannot be read stays unclassified and settles as it always did.
+      let failure = null
+      try {
+        failure = cause instanceof Error ? cause : new Error(String(cause))
+        authorStartFailures.delete(failure)
+        if (!acceptedPointer.poll_url && !abortController.signal.aborted) {
+          const startFailure = classifyAuthorStartFailure(failure)
+          if (startFailure) authorStartFailures.set(failure, startFailure)
+        }
+      } catch { /* left unclassified */ }
       const terminal = !!cause?.authorTerminal
       if (terminal) {
         const acceptedFailure = acceptedPointer.change_set_id && acceptedPointer.poll_url
@@ -213,7 +298,7 @@ export default function useAuthorStageController({
         setPhase('interrupted')
         setProgress('connection interrupted')
       }
-      setError(cause instanceof Error ? cause : new Error(String(cause)))
+      setError(failure || (cause instanceof Error ? cause : new Error(String(cause))))
       return null
     } finally {
       if (sequenceRef.current === sequence) runningRef.current = false
