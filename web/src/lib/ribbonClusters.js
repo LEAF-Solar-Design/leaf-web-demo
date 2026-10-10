@@ -133,6 +133,9 @@ export const SOLAR_REFUSAL_REASONS = Object.freeze({
   ground_layout_invalid: 'The Ground layout cannot be converted into panel groups',
   ground_layout_too_large: 'The Ground layout holds more panel slots, in total or on one tracker, than a design can carry',
   capability_availability_unavailable: 'Tool readiness has not loaded for this drawing',
+  project_execution_disabled: 'Project Solar execution is not enabled on this server',
+  project_adapter_unavailable: 'This solar tool has no connected project engine',
+  project_request_required: 'Confirm the tool parameters to check project admission',
   capability_not_ready: 'This solar tool is not ready for this drawing',
   unlisted: 'The server refused this solar tool',
 })
