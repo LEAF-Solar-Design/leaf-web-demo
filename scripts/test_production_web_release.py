@@ -312,13 +312,13 @@ def _native_bundle(
         )
         release_archive.writestr("web-dist.zip", web_archive)
     release_bytes = release_stream.getvalue()
-    release_object = _native_ref(
-        "native-release", transaction, revision=True, name="native-release.zip"
-    )
-    release_object["sha256"] = hashlib.sha256(release_bytes).hexdigest()
-    release_object["key"] = (
-        f"delivery/v1/{transaction}/{release_object['sha256']}/native-release.zip"
-    )
+    release_build_id = producer["build_arn"].rsplit(":", 1)[-1]
+    release_object = {
+        "bucket": NATIVE_RELEASE_BUCKET,
+        "key": f"release/{release_build_id}/evidence.zip",
+        "version_id": "version-release",
+        "sha256": hashlib.sha256(release_bytes).hexdigest(),
+    }
     return build_handoff_bundle(
         release_object=release_object,
         release_archive=release_bytes,
@@ -555,6 +555,7 @@ def test_native_consumer_accepts_closed_provider_bound_bundle():
         "archive",
         "producer identity",
         "gate identity",
+        "release artifact",
         "producer status",
         "repository",
         "environment",
@@ -608,6 +609,8 @@ def test_native_consumer_rejects_forged_or_incomplete_evidence(failure: str):
             handoff["release"]["producer"]["build_number"] += 1
         elif failure == "gate identity":
             handoff["release"]["gate"]["producer"]["build_number"] += 1
+        elif failure == "release artifact":
+            handoff["release"]["artifact"]["key"] = "release/other/evidence.zip"
         elif failure == "producer status":
             handoff["release"]["producer_readback"]["status"] = "FAILED"
         elif failure == "repository":

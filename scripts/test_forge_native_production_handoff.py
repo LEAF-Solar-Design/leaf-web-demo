@@ -242,9 +242,13 @@ def _evidence() -> dict:
         )
         bundle.writestr("web-dist.zip", WEB_ARCHIVE)
     release_archive = release_stream.getvalue()
-    release_object = _ref("native-release", revision=True, name="native-release.zip")
-    release_object["sha256"] = hashlib.sha256(release_archive).hexdigest()
-    release_object["key"] = f"delivery/v1/{TX}/{release_object['sha256']}/native-release.zip"
+    release_build_id = producer["build_arn"].rsplit(":", 1)[-1]
+    release_object = {
+        "bucket": RELEASE_BUCKET,
+        "key": f"release/{release_build_id}/evidence.zip",
+        "version_id": "version-release",
+        "sha256": hashlib.sha256(release_archive).hexdigest(),
+    }
     return {
         "release_object": release_object,
         "release_archive": release_archive,
@@ -359,7 +363,7 @@ def test_native_handoff_bundle_is_closed_and_reuses_exact_web_bytes():
         ),
         (
             "wrong release key",
-            lambda value: value["release_object"].update(key="delivery/v1/other/native-release.zip"),
+            lambda value: value["release_object"].update(key="release/other/evidence.zip"),
         ),
         (
             "production route",
@@ -430,9 +434,6 @@ def _polluted_archive(value):
         bundle.writestr("web-dist.zip", web)
     result = stream.getvalue()
     value["release_object"]["sha256"] = hashlib.sha256(result).hexdigest()
-    value["release_object"]["key"] = (
-        f"delivery/v1/{TX}/{value['release_object']['sha256']}/native-release.zip"
-    )
     return result
 
 
@@ -454,7 +455,4 @@ def _changed_web_archive(value):
         bundle.writestr("web-dist.zip", changed)
     result = stream.getvalue()
     value["release_object"]["sha256"] = hashlib.sha256(result).hexdigest()
-    value["release_object"]["key"] = (
-        f"delivery/v1/{TX}/{value['release_object']['sha256']}/native-release.zip"
-    )
     return result

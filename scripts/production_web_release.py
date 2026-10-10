@@ -164,6 +164,20 @@ def _native_delivery_ref(
     return reference
 
 
+def _native_release_ref(
+    value: Any, producer: dict[str, Any], label: str
+) -> dict[str, Any]:
+    """Bind a release archive to the canonical CodeBuild artifact object."""
+    reference = _object_ref(value, label)
+    build_id = producer["build_arn"].rsplit(":", 1)[-1]
+    if (
+        reference["bucket"] != NATIVE_RELEASE_BUCKET
+        or reference["key"] != f"release/{build_id}/evidence.zip"
+    ):
+        raise ReleaseError(f"{label} is outside the canonical native release lane")
+    return reference
+
+
 def _native_contract_ref(value: Any, label: str) -> dict[str, Any]:
     reference = _object_ref(value, label)
     if (
@@ -547,12 +561,10 @@ def validate_native_bundle(
     ):
         raise ReleaseError("Forge-native gate archive is outside the canonical lane")
     _sha256(gate["proof_sha256"], "Forge-native gate proof digest")
-    release_object = _native_delivery_ref(
+    release_object = _native_release_ref(
         release["artifact"],
-        transaction_id,
-        "native-release.zip",
+        producer,
         "Forge-native release object",
-        revision=True,
     )
     producer_contract = _native_contract_ref(
         release["producer_contract"], "Forge-native producer contract"

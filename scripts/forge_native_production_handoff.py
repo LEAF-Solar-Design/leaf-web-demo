@@ -156,6 +156,18 @@ def _delivery_ref(value: Any, transaction_id: str, name: str, label: str, *, rev
     return reference
 
 
+def _release_ref(value: Any, producer: dict[str, Any], label: str) -> dict[str, Any]:
+    """Bind the release archive to the canonical CodeBuild artifact object."""
+    reference = _object_ref(value, label)
+    build_id = producer["build_arn"].rsplit(":", 1)[-1]
+    if (
+        reference["bucket"] != RELEASE_BUCKET
+        or reference["key"] != f"release/{build_id}/evidence.zip"
+    ):
+        raise HandoffError(f"{label} is outside the canonical native release lane")
+    return reference
+
+
 def _producer_contract(value: Any, label: str) -> dict[str, Any]:
     reference = _object_ref(value, label)
     if (
@@ -415,17 +427,12 @@ def build_handoff(
     if not isinstance(transaction, dict):
         raise HandoffError("transaction readback is invalid")
     transaction_id = _hex(transaction.get("transaction_id"), _TX, "transaction id")
-    release_ref = _delivery_ref(
-        release_object,
-        transaction_id,
-        "native-release.zip",
-        "native release object",
-        revision=True,
-    )
+    release_ref = _object_ref(release_object, "native release object")
     release_manifest, web_archive = _release_members(release_archive, release_ref)
     native, services, producer_status, gate_status = _native_release(
         release_manifest, producer_readback, gate_readback
     )
+    release_ref = _release_ref(release_ref, native["producer"], "native release object")
     source, tree = native["source_revision"], native["source_tree"]
     if hashlib.sha256(web_archive).hexdigest() != native[
         "web"
@@ -638,12 +645,10 @@ def canonical_handoff_bytes(value: dict[str, Any]) -> bytes:
 def build_handoff_bundle(**evidence: Any) -> dict[str, bytes]:
     """Return the closed, no-rebuild artifact set for a verified native release."""
     handoff = build_handoff(**evidence)
-    reference = _delivery_ref(
+    reference = _release_ref(
         evidence.get("release_object"),
-        handoff["release"]["transaction_id"],
-        "native-release.zip",
+        handoff["release"]["producer"],
         "native release object",
-        revision=True,
     )
     manifest, web_archive = _release_members(evidence.get("release_archive"), reference)
     semantic = evidence.get("semantic_live")

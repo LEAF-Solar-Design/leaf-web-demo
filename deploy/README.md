@@ -434,10 +434,10 @@ The release path is a staged, receipt-bound chain:
    ID `46` (`LEAF-Solar-Design/leaf-web-demo`), the builds are fixed to
    `leaf-studio-native-release` and `leaf-studio-native-gate`, and every
    semantic row must carry the admitted `leaf:source` tag plus the canonical
-   staging route. The versioned release ZIP is read back only as
-   `delivery/v1/<transaction>/<sha256>/native-release.zip` in
-   `leaf-native-staging-delivery-807034087062`; the semantic and authority
-   receipts use the same content-addressed transaction prefix. It emits a closed bundle
+   staging route. The versioned release ZIP is read back only as the publisher's
+   `release/<producer-build-id>/evidence.zip` object in
+   `leaf-studio-release-artifacts-807034087062-us-east-1`; the semantic and
+   authority receipts use the content-addressed D10 transaction prefix. It emits a closed bundle
    of exactly `staging-supply-set.json`, the unchanged `web-dist.zip`,
    `semantic-live.json`, and a provider-discriminated
    `leaf.production-handoff-candidate.v2` document.
