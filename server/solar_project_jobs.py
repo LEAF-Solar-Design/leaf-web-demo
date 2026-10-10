@@ -49,7 +49,7 @@ def _validate_new_project_graph_params(context, tool_name, params, *, checkout,
 
 def submit_project_graph_job(
     tenant, project_id, drawing_id, input_version_id, tool_name, params, *,
-    tool_manifest_sha256, checkout_capability, idempotency_key,
+    tool_manifest_sha256, checkout_capability, idempotency_key, preview=False,
 ):
     org, actor = project._access(tenant, project_id, write=True)
     if not isinstance(drawing_id, UUID) or not isinstance(input_version_id, UUID):
@@ -100,6 +100,8 @@ def submit_project_graph_job(
     with project.write_loop.drawing_mutation_refusal_guard() as refusal:
         if refusal is not None:
             project.refuse("WRITES_DRAINED")
+        if preview:
+            return {"admissible": True, "replay": False}
         return platform_link.platform_db().run_transaction(lambda conn:
             jobs.submit_project_graph_job(org, project_id, str(tenant), tool_name, normalized,
                 idempotency_key, input_version_id=input_version_id,

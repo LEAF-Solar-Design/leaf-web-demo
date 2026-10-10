@@ -1630,6 +1630,7 @@ describe('solar refusal copy', () => {
       'ground_installation_required', 'ground_conversion_in_use', 'ground_physical_state_required',
       'project_name_required', 'project_zip_required', 'invalid_project_zip', 'invalid_project_coordinates',
       'project_units_required',
+      'project_execution_disabled', 'project_adapter_unavailable', 'project_request_required',
     ]
     for (const code of SERVER_CODES) {
       expect(Object.hasOwn(SOLAR_REFUSAL_REASONS, code)).toBe(true)
@@ -1685,7 +1686,8 @@ describe('solar refusal copy', () => {
       'invalid_seed_request', 'inverter_assignment_mismatch', 'licensed_graph_commit_required',
       'matrix_cell_mismatch', 'matrix_input_mismatch', 'module_power_required',
       'not_current_head', 'panel_layer_filter_required', 'panels_already_present',
-      'panels_required', 'persisted_graph_unavailable', 'project_name_required',
+      'panels_required', 'persisted_graph_unavailable', 'project_adapter_unavailable',
+      'project_execution_disabled', 'project_name_required', 'project_request_required',
       'project_units_required', 'project_zip_required', 'proposal_job_required',
       'pvcase_conversion_required', 'pvcase_empty_target_required', 'pvcase_solve_required',
       'pvcase_source_required', 'pvcase_source_unavailable', 'pvcase_target_in_use',
