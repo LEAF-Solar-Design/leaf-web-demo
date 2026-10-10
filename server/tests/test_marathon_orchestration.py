@@ -453,3 +453,109 @@ def test_worker_callback_rejects_empty_success_provenance(monkeypatch):
         job_id, body, x_tenant_id="tenant-marathon", x_broker_secret="broker-test-secret")
     assert response.status_code == 400
     assert jobs.get_job(job_id)["status"] == "running"
+
+
+CALLBACK = {"worker_id": "worker-a", "status": "complete", "result": {"ok": True},
+            "provenance": {"attempt": 1, "execution_path": "local"}}
+
+
+def _callback_over_asgi(job_id, secret_bytes):
+    """POST the worker callback with the header bytes exactly as given.
+
+    The HTTP test client re-encodes every header value as UTF-8, so it cannot put a single
+    latin-1 byte on the wire. This drives the application through its ASGI interface instead:
+    the bytes in the scope are the bytes the server decodes.
+    """
+    import asyncio
+    import json
+
+    from fastapi import FastAPI
+
+    import envelopes
+
+    app = FastAPI()
+    envelopes.install_error_handlers(app)
+    app.include_router(jobs_router.router)
+    payload = json.dumps(CALLBACK).encode("utf-8")
+    path = f"/internal/jobs/{job_id}/callback"
+    headers = [
+        (b"host", b"testserver"),
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(payload)).encode("ascii")),
+        (b"x-tenant-id", b"tenant-marathon"),
+    ]
+    if secret_bytes is not None:
+        headers.append((b"x-broker-secret", secret_bytes))
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": path, "raw_path": path.encode("ascii"), "query_string": b"",
+        "root_path": "", "headers": headers, "server": ("testserver", 80),
+        "client": ("testclient", 50000),
+    }
+    inbox = [{"type": "http.request", "body": payload, "more_body": False}]
+    sent = []
+
+    async def receive():
+        return inbox.pop(0) if inbox else {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return status, json.loads(body)
+
+
+def test_worker_callback_refuses_a_non_ascii_secret_without_a_server_error(monkeypatch):
+    job_id = _submit()
+    assert jobs.claim_lease(job_id, "worker-a") == 1
+    body = jobs_router.TerminalCallback(**CALLBACK)
+    monkeypatch.setenv("LEAF_BROKER_SECRET", "broker-test-secret")
+
+    wrong = jobs_router.terminal_callback(
+        job_id, body, x_tenant_id="tenant-marathon", x_broker_secret="wrong")
+    assert wrong.status_code == 401
+    for value in ("\u00e9", "\uff10" * 8, "broker-test-secret\u00e9",
+                  "\u00e9broker-test-secret", "\ud800"):
+        refused = jobs_router.terminal_callback(
+            job_id, body, x_tenant_id="tenant-marathon", x_broker_secret=value)
+        assert refused.status_code == 401, value
+        assert refused.body == wrong.body, value
+        assert jobs.get_job(job_id)["status"] == "running"
+
+    wrong_wire = _callback_over_asgi(job_id, b"wrong")
+    assert wrong_wire[0] == 401
+    for raw in (b"\xe9", "\u00e9".encode("utf-8"), b"broker-test-secret\xe9",
+                b"\xe9broker-test-secret", "\uff10".encode("utf-8") * 8, b"\xff\xfe"):
+        assert _callback_over_asgi(job_id, raw) == wrong_wire, raw
+        assert jobs.get_job(job_id)["status"] == "running"
+    assert _callback_over_asgi(job_id, None) == wrong_wire
+    assert jobs.get_job(job_id)["status"] == "running"
+
+    status, accepted = _callback_over_asgi(job_id, b"broker-test-secret")
+    assert status == 200
+    assert accepted["status"] == "complete"
+    assert jobs.get_job(job_id)["status"] == "complete"
+
+
+def test_worker_callback_non_ascii_configured_secret_matches_only_as_configured(monkeypatch):
+    # The configured secret is text and a header is decoded as latin-1. So a secret with an
+    # accented letter matches the worker that sends that letter as one latin-1 byte, and does
+    # not match the UTF-8 spelling of the same letter. Neither is a server error.
+    secret = "broker-s\u00e9cret"
+    monkeypatch.setenv("LEAF_BROKER_SECRET", secret)
+    job_id = _submit()
+    assert jobs.claim_lease(job_id, "worker-a") == 1
+
+    status, _refusal = _callback_over_asgi(job_id, secret.encode("utf-8"))
+    assert status == 401
+    assert jobs.get_job(job_id)["status"] == "running"
+    status, _refusal = _callback_over_asgi(job_id, b"broker-secret")
+    assert status == 401
+    assert jobs.get_job(job_id)["status"] == "running"
+
+    status, accepted = _callback_over_asgi(job_id, secret.encode("latin-1"))
+    assert status == 200
+    assert accepted["status"] == "complete"
+    assert jobs.get_job(job_id)["status"] == "complete"

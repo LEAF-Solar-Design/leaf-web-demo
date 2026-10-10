@@ -5,7 +5,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+import envelopes
 from routers import capabilities as capabilities_router
 from routers import jobs as jobs_router
 from customization_service import CustomizationServiceError
@@ -425,3 +428,91 @@ def test_canonical_run_does_not_require_legacy_checkout(monkeypatch):
 
     assert response.status_code == 202
     assert submitted == ["canonical"]
+
+
+PIN_FIELDS = ("tool_manifest_sha256", "catalog_commit", "effective_catalog_digest")
+# Text hmac.compare_digest cannot compare as str: one accented letter, sixty-four full-width
+# zeros, the digest scheme followed by accented letters, and a lone surrogate.
+NON_ASCII_PINS = (
+    "\u00e9",
+    "\uff10" * 64,
+    "sha256:" + "\u00e9" * 64,
+    "\ud800",
+)
+
+
+def _prepare_pins(monkeypatch):
+    monkeypatch.setattr(jobs_router.deps, "find_tool", lambda *_args: WRITE_TOOL)
+    monkeypatch.setattr(jobs_router, "_legacy_drawing_head", lambda *_args: 7)
+    monkeypatch.setattr(
+        jobs_router.customization_service,
+        "effective_catalog_pin",
+        lambda _tenant: {
+            "catalog_commit": COMMIT,
+            "effective_catalog_digest": CATALOG,
+        },
+    )
+    submitted = []
+    monkeypatch.setattr(
+        jobs_router.jobs,
+        "submit_job",
+        lambda *_args, **_kwargs: submitted.append(True) or "unexpected-job",
+    )
+    return submitted
+
+
+def test_non_ascii_pin_reads_as_a_stale_pin(monkeypatch):
+    submitted = _prepare_pins(monkeypatch)
+
+    for field in PIN_FIELDS:
+        stale = _run(_request(**{field: "x" * 40}))
+        assert stale.status_code == 409, field
+        assert json.loads(stale.body)["error"]["error_code"] == "BAD_PARAMS", field
+        for value in NON_ASCII_PINS:
+            response = _run(_request(**{field: value}))
+            assert response.status_code == 409, (field, value)
+            assert response.body == stale.body, (field, value)
+
+    assert submitted == []
+
+
+def test_non_ascii_pin_over_http_is_a_conflict_not_a_server_error(monkeypatch):
+    submitted = _prepare_pins(monkeypatch)
+    app = FastAPI()
+    envelopes.install_error_handlers(app)
+    app.include_router(jobs_router.router)
+    app.dependency_overrides[jobs_router.deps.require_tenant] = lambda: "pin-tenant"
+    client = TestClient(app, raise_server_exceptions=False)
+    digest = jobs_router.deps.catalog_tool_digest(WRITE_TOOL)
+
+    def post(field, value):
+        body = {
+            "tool": WRITE_TOOL["name"],
+            "params": {},
+            "dwg": "cat-panels",
+            "dwg_version": 7,
+            "expected_drawing_head": 7,
+            "catalog_digest": digest,
+            "tool_manifest_sha256": digest,
+            "catalog_commit": COMMIT,
+            "effective_catalog_digest": CATALOG,
+        }
+        body[field] = value
+        # ensure_ascii keeps every value, the lone surrogate included, as a JSON escape,
+        # so the bytes on the wire are plain ASCII and the server does the decoding.
+        return client.post(
+            "/api/run",
+            content=json.dumps(body, ensure_ascii=True).encode("ascii"),
+            headers={"content-type": "application/json"},
+        )
+
+    for field in PIN_FIELDS:
+        stale = post(field, "x" * 40)
+        assert stale.status_code == 409, field
+        assert stale.json()["error"]["error_code"] == "BAD_PARAMS", field
+        for value in NON_ASCII_PINS:
+            response = post(field, value)
+            assert response.status_code == 409, (field, value)
+            assert response.json() == stale.json(), (field, value)
+
+    assert submitted == []

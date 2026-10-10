@@ -1301,7 +1301,7 @@ def build_suites() -> List[Suite]:
         # comment above records. Floors are collected counts on this tree;
         # all four files are dependency-free (monkeypatch + tmp stores only).
         Suite("server-exact-write-pins", "server tests/test_exact_write_pins.py", "pytest",
-              SERVER, _py_pytest("tests/test_exact_write_pins.py"), 11),
+              SERVER, _py_pytest("tests/test_exact_write_pins.py"), 13),
         Suite("server-catalog-read-fallback", "server tests/test_catalog_read_fallback.py",
               "pytest", SERVER, _py_pytest("tests/test_catalog_read_fallback.py"), 21),
         Suite("server-instant-catalog-metadata",
@@ -1402,7 +1402,7 @@ def build_suites() -> List[Suite]:
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
               SERVER, _py_pytest("tests/test_canonical_worker.py"), 25),
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
-              "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 18),
+              "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 20),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
               "pytest", SERVER, _py_pytest("tests/test_inverter_placement_adapter.py"), 1,
               allowed_skip_reasons=(
@@ -1914,6 +1914,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_sip_r4_jobs.py"), 26),
         Suite("server-sip-r5-policy", "server canonical Solar admission policy",
               "pytest", SERVER, _py_pytest("tests/test_sip_r5_policy.py"), 14),
+        Suite("server-text-match", "server constant-time text comparison that never raises",
+              "pytest", SERVER, _py_pytest("tests/test_text_match.py"), 10),
         Suite("server-sip-r5-routes", "server canonical Solar admission and catalog routes",
               "pytest", SERVER, _py_pytest("tests/test_sip_r5_routes.py"), 18),
         Suite("platform-sip-r5-admission", "platform Solar HTTP admission and settlement",
