@@ -285,7 +285,20 @@ def forge_case(tmp_path, monkeypatch):
         elif command[:2] == ["docker", "create"]:
             stdout = "d" * 64
         elif command[:2] == ["docker", "cp"]:
-            (Path(command[-1]) / "health.json").write_text(json.dumps({"ok": True, "source_sha": "a" * 40}))
+            dist = Path(command[-1])
+            engine = dist / "engine"
+            engine.mkdir()
+            files = {"engine.js": b"engine glue", "engine_bg.wasm": b"\x00asm"}
+            for name, content in files.items():
+                (engine / name).write_bytes(content)
+            (engine / "PROVENANCE.json").write_text(json.dumps({
+                "contract": "leaf.cad-engine-stage.v1",
+                "files": {name: {"sha256": hashlib.sha256(content).hexdigest(),
+                                 "bytes": len(content)}
+                          for name, content in files.items()},
+            }))
+            (dist / "build-config.json").write_text(json.dumps(producer.WEB_BUILD_CONFIG))
+            (dist / "health.json").write_text(json.dumps({"ok": True, "source_sha": "a" * 40}))
         elif "pack-web-dist" in command:
             archive = Path(command[command.index("--output") + 1])
             with zipfile.ZipFile(archive, "w") as bundle:
@@ -899,13 +912,30 @@ def test_web_package_reads_exact_image_without_starting_it(tmp_path, monkeypatch
     calls = []
     container = "d" * 64
 
+    def write_web_artifact(dist):
+        engine = dist / "engine"
+        engine.mkdir()
+        files = {"engine.js": b"export default async function init() {}\n",
+                 "engine_bg.wasm": b"\x00asm\x01\x00\x00\x00"}
+        for name, content in files.items():
+            (engine / name).write_bytes(content)
+        (engine / "PROVENANCE.json").write_text(json.dumps({
+            "contract": "leaf.cad-engine-stage.v1",
+            "files": {name: {"sha256": hashlib.sha256(content).hexdigest(),
+                             "bytes": len(content)}
+                      for name, content in files.items()},
+        }), encoding="utf-8")
+        (dist / "build-config.json").write_text(
+            json.dumps(producer.WEB_BUILD_CONFIG), encoding="utf-8")
+        (dist / "health.json").write_text(
+            json.dumps({"ok": True, "source_sha": "a" * 40}), encoding="utf-8")
+
     def run(command, **kwargs):
         calls.append(command)
         if command[1] == "create":
             return SimpleNamespace(stdout=container)
         if command[1] == "cp":
-            (Path(command[-1]) / "health.json").write_text(
-                json.dumps({"ok": True, "source_sha": "a" * 40}), encoding="utf-8")
+            write_web_artifact(Path(command[-1]))
         if "pack-web-dist" in command:
             return SimpleNamespace(stdout=json.dumps({"artifact_sha256": "b" * 64, "archive_sha256": "c" * 64}))
         return SimpleNamespace(stdout="")
@@ -916,6 +946,56 @@ def test_web_package_reads_exact_image_without_starting_it(tmp_path, monkeypatch
     assert not any("start" in command or "run" in command for command in calls)
     assert ["docker", "rm", container] in calls
     assert result["archive_sha256"] == "c" * 64
+
+
+def test_web_image_recipe_materializes_engine_and_reviewed_build_config():
+    dockerfile = (Path(__file__).parents[1] / "deploy" / "Dockerfile.web").read_text(
+        encoding="utf-8")
+    assert "test -f /web/dist/engine/engine.js" in dockerfile
+    assert "test -f /web/dist/engine/engine_bg.wasm" in dockerfile
+    assert "\"schema\":\"leaf.web-build-config.v1\"" in dockerfile
+    assert "\"vite_cad_edit\":\"%s\"" in dockerfile
+    assert '"$VITE_CAD_EDIT" > /web/dist/build-config.json' in dockerfile
+
+
+@pytest.mark.parametrize("failure", ["engine.js", "engine_bg.wasm", "provenance", "config"])
+def test_web_package_refuses_incomplete_engine_or_disabled_build_config(
+        tmp_path, monkeypatch, failure):
+    container = "d" * 64
+
+    def run(command, **kwargs):
+        if command[1] == "create":
+            return SimpleNamespace(stdout=container)
+        if command[1] == "cp":
+            dist = Path(command[-1])
+            engine = dist / "engine"
+            engine.mkdir()
+            files = {"engine.js": b"engine glue", "engine_bg.wasm": b"\x00asm"}
+            for name, content in files.items():
+                if failure != name:
+                    (engine / name).write_bytes(content)
+            records = {name: {"sha256": hashlib.sha256(content).hexdigest(),
+                              "bytes": len(content)}
+                       for name, content in files.items()}
+            if failure == "provenance":
+                records["engine.js"]["sha256"] = "0" * 64
+            (engine / "PROVENANCE.json").write_text(json.dumps({
+                "contract": "leaf.cad-engine-stage.v1", "files": records,
+            }), encoding="utf-8")
+            config = dict(producer.WEB_BUILD_CONFIG)
+            if failure == "config":
+                config["vite_cad_edit"] = "0"
+            (dist / "build-config.json").write_text(json.dumps(config), encoding="utf-8")
+            (dist / "health.json").write_text(
+                json.dumps({"ok": True, "source_sha": "a" * 40}), encoding="utf-8")
+        if "pack-web-dist" in command:
+            pytest.fail("an invalid web artifact must not be packed")
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(producer.subprocess, "run", run)
+    with pytest.raises((FileNotFoundError, ValueError)):
+        producer.package_web_image(
+            tmp_path, "sha256:" + "e" * 64, "a" * 40, tmp_path / "web")
 
 
 def test_web_package_cleans_container_after_copy_failure(tmp_path, monkeypatch):

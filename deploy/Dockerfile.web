@@ -95,8 +95,11 @@ COPY --from=engine /engine-src/pkg-web /vendor/acadrust-worker/pkg-web
 COPY scripts/stage_cad_engine.mjs /scripts/stage_cad_engine.mjs
 RUN npm run build && \
     node /scripts/stage_cad_engine.mjs && \
+    test -f /web/dist/engine/engine.js && \
     test -f /web/dist/engine/engine_bg.wasm && \
     test -n "$(find /web/dist/assets -name 'worker-browser*.js' -print -quit)" && \
+    printf '{"schema":"leaf.web-build-config.v1","vite_cad_edit":"%s"}\n' \
+      "$VITE_CAD_EDIT" > /web/dist/build-config.json && \
     printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
       "$LEAF_SOURCE_SHA" > /web/dist/health.json
 
