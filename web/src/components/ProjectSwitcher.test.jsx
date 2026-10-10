@@ -7,7 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import ProjectSwitcher from './ProjectSwitcher.jsx'
 import { createWorkspaceController } from '../controllers/workspace/createWorkspaceController.js'
 import { deriveWorkspaceProjectState, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
@@ -374,4 +374,153 @@ describe('recent and pinned projects', () => {
     expect(screen.queryByRole('button')).toBeNull()
     expect(readRecentProjects('alice', storage)).toEqual({ recent: [], pinned: ['p2'] })
   })
+})
+
+
+function retainedKey(target, key, marks, modifiers = {}) {
+  const event = createEvent.keyDown(target, {
+    key, bubbles: true, cancelable: true, ...modifiers, ...marks,
+  })
+  expect(event.isComposing).toBe(marks.isComposing)
+  expect(event.keyCode).toBe(marks.keyCode)
+  const stop = event.stopPropagation.bind(event)
+  event.stopPropagation = vi.fn(() => stop())
+  return event
+}
+
+function expectYielded(event) {
+  expect(event.defaultPrevented).toBe(false)
+  expect(event.stopPropagation).not.toHaveBeenCalled()
+}
+
+function compositionProjectMenu(bootstrapState) {
+  const onCreateOrg = vi.fn().mockResolvedValue(null)
+  const onCreateProject = vi.fn().mockResolvedValue(null)
+  const onOpenProject = vi.fn()
+  const storage = { getItem: () => null, setItem: vi.fn() }
+  const view = render(<ProjectSwitcher bootstrapState={bootstrapState} orgId={bootstrapState === 'bound' ? 'o1' : undefined}
+    projects={[{ id: 'p1', name: 'Maple' }, { id: 'p2', name: 'Oak' }]} storage={storage} principalId={null}
+    onCreateOrg={onCreateOrg} onCreateProject={onCreateProject} onOpenProject={onOpenProject} />)
+  fireEvent.click(chip())
+  return { ...view, onCreateOrg, onCreateProject, onOpenProject }
+}
+
+async function projectCreationComposition(marks) {
+  for (const bootstrapState of ['unbound', 'bound']) {
+    const view = compositionProjectMenu(bootstrapState)
+    try {
+      const input = screen.getByLabelText(bootstrapState === 'unbound' ? 'Workspace name' : 'New project')
+      if (bootstrapState === 'bound') fireEvent.mouseEnter(view.container.querySelectorAll('.resolver-row')[1])
+      fireEvent.change(input, { target: { value: 'Retained draft' } })
+      input.focus()
+      const highlighted = view.container.querySelector('.resolver-row.active')
+      const event = retainedKey(input, 'Enter', marks)
+      fireEvent(input, event)
+      expectYielded(event)
+      expect(view.onCreateOrg).not.toHaveBeenCalled()
+      expect(view.onCreateProject).not.toHaveBeenCalled()
+      expect(view.onOpenProject).not.toHaveBeenCalled()
+      expect(input.value).toBe('Retained draft')
+      expect(input).toHaveFocus()
+      expect(view.container.querySelector('.resolver-row.active')).toBe(highlighted)
+      expect(chip()).toHaveAttribute('aria-expanded', 'true')
+      const ordinary = retainedKey(input, 'Enter', { isComposing: false, keyCode: 0 })
+      await act(async () => { fireEvent(input, ordinary) })
+      expect(ordinary.defaultPrevented).toBe(true)
+      const create = bootstrapState === 'unbound' ? view.onCreateOrg : view.onCreateProject
+      const other = bootstrapState === 'unbound' ? view.onCreateProject : view.onCreateOrg
+      expect(create).toHaveBeenCalledExactlyOnceWith('Retained draft')
+      expect(other).not.toHaveBeenCalled()
+      expect(view.onOpenProject).not.toHaveBeenCalled()
+      expect(input.value).toBe('Retained draft')
+      expect(view.container.querySelector('.resolver-row.active')).toBe(highlighted)
+      expect(chip()).toHaveAttribute('aria-expanded', 'true')
+    } finally {
+      view.unmount()
+    }
+  }
+}
+
+it('KEYS-D27 project menu creation yields native composition', async () => {
+  await projectCreationComposition({ isComposing: true, keyCode: 0 })
+})
+
+it('KEYS-D28 project menu creation yields key code 229', async () => {
+  await projectCreationComposition({ isComposing: false, keyCode: 229 })
+})
+
+it('KEYS-D29 project menu arrows remain with creation inputs', () => {
+  for (const bootstrapState of ['unbound', 'bound']) {
+    const view = compositionProjectMenu(bootstrapState)
+    try {
+      const input = screen.getByLabelText(bootstrapState === 'unbound' ? 'Workspace name' : 'New project')
+      if (bootstrapState === 'bound') fireEvent.mouseEnter(view.container.querySelectorAll('.resolver-row')[1])
+      fireEvent.change(input, { target: { value: 'Retained draft' } })
+      input.focus()
+      const highlighted = view.container.querySelector('.resolver-row.active')
+      for (const key of ['ArrowDown', 'ArrowUp']) {
+        for (const marks of [{ isComposing: true, keyCode: 0 }, { isComposing: false, keyCode: 229 }]) {
+          const event = retainedKey(input, key, marks)
+          fireEvent(input, event)
+          expectYielded(event)
+          expect(input.value).toBe('Retained draft')
+          expect(input).toHaveFocus()
+          expect(view.container.querySelector('.resolver-row.active')).toBe(highlighted)
+          expect(view.onCreateOrg).not.toHaveBeenCalled()
+          expect(view.onCreateProject).not.toHaveBeenCalled()
+          expect(view.onOpenProject).not.toHaveBeenCalled()
+          const ordinary = retainedKey(input, key, { isComposing: false, keyCode: 0 })
+          fireEvent(input, ordinary)
+          expectYielded(ordinary)
+          expect(input.value).toBe('Retained draft')
+          expect(input).toHaveFocus()
+          expect(view.container.querySelector('.resolver-row.active')).toBe(highlighted)
+          expect(chip()).toHaveAttribute('aria-expanded', 'true')
+          expect(view.onCreateOrg).not.toHaveBeenCalled()
+          expect(view.onCreateProject).not.toHaveBeenCalled()
+          expect(view.onOpenProject).not.toHaveBeenCalled()
+        }
+      }
+    } finally {
+      view.unmount()
+    }
+  }
+})
+
+it('KEYS-D30 project menu navigation yields marked native events', () => {
+  for (const marks of [{ isComposing: true, keyCode: 0 }, { isComposing: false, keyCode: 229 }]) {
+    for (const key of ['ArrowDown', 'ArrowUp', 'Enter']) {
+      const view = compositionProjectMenu('bound')
+      try {
+        const rows = view.container.querySelectorAll('.resolver-row')
+        const seed = key === 'ArrowDown' ? 0 : 1
+        fireEvent.mouseEnter(rows[seed])
+        chip().focus()
+        const origin = document.activeElement
+        expect(rows[seed]).toHaveClass('active')
+        const event = retainedKey(document, key, marks)
+        fireEvent(document, event)
+        expectYielded(event)
+        expect(view.container.querySelector('.resolver-row.active')).toBe(rows[seed])
+        expect(chip()).toHaveAttribute('aria-expanded', 'true')
+        expect(document.activeElement).toBe(origin)
+        expect(view.onOpenProject).not.toHaveBeenCalled()
+        expect(view.onCreateOrg).not.toHaveBeenCalled()
+        expect(view.onCreateProject).not.toHaveBeenCalled()
+        const ordinary = retainedKey(document, key, { isComposing: false, keyCode: 0 })
+        fireEvent(document, ordinary)
+        expect(ordinary.defaultPrevented).toBe(true)
+        if (key === 'Enter') {
+          expect(view.onOpenProject).toHaveBeenCalledExactlyOnceWith('p2')
+          expect(chip()).toHaveAttribute('aria-expanded', 'false')
+        } else {
+          expect(view.container.querySelector('.resolver-row.active')).toBe(rows[1 - seed])
+          expect(view.onOpenProject).not.toHaveBeenCalled()
+          expect(chip()).toHaveAttribute('aria-expanded', 'true')
+        }
+      } finally {
+        view.unmount()
+      }
+    }
+  }
 })

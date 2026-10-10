@@ -3,6 +3,7 @@ import EscCap from './EscCap.jsx'
 import './popovers.css'
 import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 // Standardization slice 8c. Reuses ClaudeAccountPanel.jsx's isolated-field
 // discipline verbatim: single-purpose fields (a URL and a label, nothing
@@ -211,7 +212,10 @@ export default function LinkServiceDrawer({
                 type="text"
                 value={url}
                 onChange={(event) => setUrl(event.target.value)}
-                onKeyDown={(event) => { if (event.key === 'Enter') submit() }}
+                onKeyDown={(event) => {
+                  if (isCompositionKey(event)) return
+                  if (event.key === 'Enter') submit()
+                }}
                 placeholder="https://mcp.example.com/sse"
                 autoComplete="off"
                 spellCheck={false}

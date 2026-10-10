@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import ClaudeAccountPanel from './ClaudeAccountPanel.jsx'
 import { getClaudeGrant } from '../api.js'
 import { createPlatformTrustController } from '../controllers/platform/createPlatformTrustController.js'
@@ -66,4 +66,52 @@ describe('Claude account administrative status', () => {
     panel({ mock: true, grant: { linked: false } })
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
+})
+
+
+function retainedKey(target, key, marks, modifiers = {}) {
+  const event = createEvent.keyDown(target, {
+    key, bubbles: true, cancelable: true, ...modifiers, ...marks,
+  })
+  expect(event.isComposing).toBe(marks.isComposing)
+  expect(event.keyCode).toBe(marks.keyCode)
+  const stop = event.stopPropagation.bind(event)
+  event.stopPropagation = vi.fn(() => stop())
+  return event
+}
+
+function expectYielded(event) {
+  expect(event.defaultPrevented).toBe(false)
+  expect(event.stopPropagation).not.toHaveBeenCalled()
+}
+
+async function credentialComposition(marks) {
+  const onLink = vi.fn().mockResolvedValue(null)
+  panel({ grant: { linked: false }, onLink })
+  fireEvent.click(screen.getByRole('radio', { name: 'Anthropic API key' }))
+  const input = screen.getByLabelText('Anthropic API key')
+  fireEvent.change(input, { target: { value: 'draft-value' } })
+  input.focus()
+  expect(input).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Link API key' })).toBeEnabled()
+  const event = retainedKey(input, 'Enter', marks)
+  fireEvent(input, event)
+  expectYielded(event)
+  expect(onLink).not.toHaveBeenCalled()
+  expect(input.value).toBe('draft-value')
+  expect(input).toHaveFocus()
+  const ordinary = retainedKey(input, 'Enter', { isComposing: false, keyCode: 0 })
+  fireEvent(input, ordinary)
+  expect(ordinary.defaultPrevented).toBe(false)
+  expect(onLink).toHaveBeenCalledTimes(1)
+  expect(onLink).toHaveBeenCalledWith('draft-value', 'api_key', expect.any(String), undefined)
+  await waitFor(() => expect(input.value).toBe(''))
+}
+
+it('KEYS-D19 credential Enter yields native composition', async () => {
+  await credentialComposition({ isComposing: true, keyCode: 0 })
+})
+
+it('KEYS-D20 credential Enter yields key code 229', async () => {
+  await credentialComposition({ isComposing: false, keyCode: 229 })
 })

@@ -8,7 +8,8 @@
 // the console passes none of them, so the FIRST suite here is the console's
 // guarantee: the default render is byte-identical to the element sequence
 // captured from origin/main's PromptBox BEFORE this slice touched the file.
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useState } from 'react'
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import PromptBox from './PromptBox.jsx'
@@ -299,4 +300,170 @@ describe('mcpDiscoveryEnabled gates the /api/converse/mcp discovery fetch (BLOCK
       localStorage.removeItem('leaf.jwt')
     }
   })
+})
+
+
+function retainedKey(target, key, marks, modifiers = {}) {
+  const event = createEvent.keyDown(target, {
+    key, bubbles: true, cancelable: true, ...modifiers, ...marks,
+  })
+  expect(event.isComposing).toBe(marks.isComposing)
+  expect(event.keyCode).toBe(marks.keyCode)
+  const stop = event.stopPropagation.bind(event)
+  event.stopPropagation = vi.fn(() => stop())
+  return event
+}
+
+function expectYielded(event) {
+  expect(event.defaultPrevented).toBe(false)
+  expect(event.stopPropagation).not.toHaveBeenCalled()
+}
+
+function CompositionCommandPrompt({ initialValue, onChange, ...props }) {
+  const [value, setValue] = useState(initialValue)
+  return <PromptBox value={value} onChange={(next) => { onChange(next); setValue(next) }} {...props} />
+}
+
+function slashComposition(marks) {
+  const tools = [{ name: 'panel-cut', description: 'cuts panels' }, { name: 'panel-measure', description: 'measures panels' }]
+  for (const key of ['ArrowDown', 'ArrowUp', 'Tab', 'Enter']) {
+    const onChange = vi.fn()
+    const onDispatch = vi.fn()
+    const view = render(<CompositionCommandPrompt initialValue="/panel" onChange={onChange}
+      onDispatch={onDispatch} tools={tools} mcpDiscoveryEnabled={false} />)
+    try {
+      const input = screen.getByLabelText('Command bar')
+      const menu = screen.getByRole('listbox', { name: 'Tool commands' })
+      const rows = within(menu).getAllByRole('option')
+      expect(rows).toHaveLength(2)
+      const seed = key === 'ArrowDown' ? 0 : 1
+      fireEvent.mouseEnter(rows[seed])
+      input.focus()
+      input.setSelectionRange(input.value.length, input.value.length)
+      const selectedTool = rows[seed].querySelector('.route-tool').textContent
+      expect(input).toHaveAttribute('aria-activedescendant', rows[seed].id)
+      const event = retainedKey(input, key, marks)
+      fireEvent(input, event)
+      expectYielded(event)
+      expect(input).toHaveAttribute('aria-activedescendant', rows[seed].id)
+      expect(rows[seed]).toHaveAttribute('aria-selected', 'true')
+      expect(input).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.getByRole('listbox', { name: 'Tool commands' })).toBe(menu)
+      expect(input.value).toBe('/panel')
+      expect(input).toHaveFocus()
+      expect(onChange).not.toHaveBeenCalled()
+      expect(onDispatch).not.toHaveBeenCalled()
+      const ordinary = retainedKey(input, key, { isComposing: false, keyCode: 0 })
+      fireEvent(input, ordinary)
+      expect(ordinary.defaultPrevented).toBe(true)
+      if (key === 'ArrowDown' || key === 'ArrowUp') {
+        expect(input).toHaveAttribute('aria-activedescendant', rows[1 - seed].id)
+        expect(rows[1 - seed]).toHaveAttribute('aria-selected', 'true')
+        expect(input.value).toBe('/panel')
+        expect(onChange).not.toHaveBeenCalled()
+        expect(onDispatch).not.toHaveBeenCalled()
+      } else {
+        expect(onChange).toHaveBeenCalledExactlyOnceWith(selectedTool + ' ')
+        expect(input.value).toBe(selectedTool + ' ')
+        expect(input).toHaveAttribute('aria-expanded', 'false')
+        expect(screen.queryByRole('listbox', { name: 'Tool commands' })).toBeNull()
+        if (key === 'Enter') {
+          expect(onDispatch).toHaveBeenCalledExactlyOnceWith(selectedTool, { images: [], allowSecretOnce: false, context: [] })
+        } else {
+          expect(onDispatch).not.toHaveBeenCalled()
+        }
+      }
+    } finally {
+      view.unmount()
+    }
+  }
+}
+
+it('KEYS-D15 slash navigation and completion yield native composition keys', () => {
+  slashComposition({ isComposing: true, keyCode: 0 })
+})
+
+it('KEYS-D16 slash navigation and completion yield key code 229', () => {
+  slashComposition({ isComposing: false, keyCode: 229 })
+})
+
+async function commandComposition(marks) {
+  for (const kind of ['history-up', 'history-down', 'newline', 'submit', 'route']) {
+    const onChange = vi.fn()
+    const onDispatch = vi.fn()
+    const props = { onChange, onDispatch, initialValue: 'saved request', sessionId: 'composition-session', mcpDiscoveryEnabled: false }
+    const view = render(<CompositionCommandPrompt {...props} />)
+    try {
+      const input = screen.getByLabelText('Command bar')
+      input.focus()
+      fireEvent.keyDown(input, { key: 'Enter', isComposing: false, keyCode: 0 })
+      expect(onDispatch).toHaveBeenCalledTimes(1)
+      fireEvent.change(input, { target: { value: 'draft request' } })
+      if (kind === 'history-down') {
+        input.setSelectionRange(0, 0)
+        fireEvent.keyDown(input, { key: 'ArrowUp', isComposing: false, keyCode: 0 })
+        expect(input.value).toBe('saved request')
+        await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)) })
+      }
+      if (kind === 'route') view.rerender(<CompositionCommandPrompt {...props} routeActive />)
+      onChange.mockClear()
+      onDispatch.mockClear()
+      const key = kind === 'history-up' ? 'ArrowUp' : kind === 'history-down' ? 'ArrowDown' : kind === 'newline' ? 'j' : 'Enter'
+      const modifiers = kind === 'newline' ? { ctrlKey: true } : {}
+      if (kind === 'history-up') input.setSelectionRange(0, 0)
+      else if (kind === 'newline') input.setSelectionRange(2, 5)
+      else input.setSelectionRange(input.value.length, input.value.length)
+      const value = input.value
+      const start = input.selectionStart
+      const end = input.selectionEnd
+      const event = retainedKey(input, key, marks, modifiers)
+      fireEvent(input, event)
+      expectYielded(event)
+      expect(input.value).toBe(value)
+      expect(input.selectionStart).toBe(start)
+      expect(input.selectionEnd).toBe(end)
+      expect(input).toHaveFocus()
+      expect(onChange).not.toHaveBeenCalled()
+      expect(onDispatch).not.toHaveBeenCalled()
+      const ordinary = retainedKey(input, key, { isComposing: false, keyCode: 0 }, modifiers)
+      fireEvent(input, ordinary)
+      expect(ordinary.defaultPrevented).toBe(true)
+      if (kind === 'history-up' || kind === 'history-down') {
+        const recalled = kind === 'history-up' ? 'saved request' : 'draft request'
+        expect(input.value).toBe(recalled)
+        expect(onChange).toHaveBeenCalledExactlyOnceWith(recalled)
+        expect(onDispatch).not.toHaveBeenCalled()
+        await waitFor(() => {
+          expect(input.selectionStart).toBe(recalled.length)
+          expect(input.selectionEnd).toBe(recalled.length)
+        })
+      } else if (kind === 'newline') {
+        const inserted = value.slice(0, start) + '\n' + value.slice(end)
+        expect(input.value).toBe(inserted)
+        expect(onChange).toHaveBeenCalledExactlyOnceWith(inserted)
+        expect(onDispatch).not.toHaveBeenCalled()
+        await waitFor(() => {
+          expect(input.selectionStart).toBe(start + 1)
+          expect(input.selectionEnd).toBe(start + 1)
+        })
+      } else if (kind === 'submit') {
+        expect(onDispatch).toHaveBeenCalledExactlyOnceWith(undefined, { images: [], allowSecretOnce: false, context: [] })
+        expect(onChange).not.toHaveBeenCalled()
+      } else {
+        expect(onDispatch).not.toHaveBeenCalled()
+        expect(onChange).not.toHaveBeenCalled()
+        expect(input.value).toBe(value)
+      }
+    } finally {
+      view.unmount()
+    }
+  }
+}
+
+it('KEYS-D17 command editing and submission yield native composition keys', async () => {
+  await commandComposition({ isComposing: true, keyCode: 0 })
+})
+
+it('KEYS-D18 command editing and submission yield key code 229', async () => {
+  await commandComposition({ isComposing: false, keyCode: 229 })
 })

@@ -4,7 +4,8 @@
 // No new modal — Ctrl/Cmd+K still just focuses the ONE bar (untouched here);
 // these tests cover what picking the existing find/act scope chip rows now
 // resolves to.
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useState } from 'react'
+import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import PromptBox from './PromptBox.jsx'
@@ -163,4 +164,154 @@ describe('the shortcut sheet row (slice 10b)', () => {
     expect(screen.getByText('Keyboard shortcuts')).toBeTruthy()
     expect(screen.getByText('Shift+?')).toBeTruthy()
   })
+})
+
+
+function retainedKey(target, key, marks, modifiers = {}) {
+  const event = createEvent.keyDown(target, {
+    key, bubbles: true, cancelable: true, ...modifiers, ...marks,
+  })
+  expect(event.isComposing).toBe(marks.isComposing)
+  expect(event.keyCode).toBe(marks.keyCode)
+  const stop = event.stopPropagation.bind(event)
+  event.stopPropagation = vi.fn(() => stop())
+  return event
+}
+
+function expectYielded(event) {
+  expect(event.defaultPrevented).toBe(false)
+  expect(event.stopPropagation).not.toHaveBeenCalled()
+}
+
+function CompositionPalettePrompt({ initialValue = '', onChange, ...props }) {
+  const [value, setValue] = useState(initialValue)
+  return <PromptBox value={value} onChange={(next) => { onChange(next); setValue(next) }} {...props} />
+}
+
+function scopeComposition(marks) {
+  for (const key of ['ArrowDown', 'ArrowUp', 'Enter']) {
+    const onOpenAuthor = vi.fn()
+    const onDispatch = vi.fn()
+    const onChange = vi.fn()
+    const view = render(<CompositionPalettePrompt initialValue="draft-value" onChange={onChange}
+      onDispatch={onDispatch} onOpenAuthor={onOpenAuthor} mcpDiscoveryEnabled={false} />)
+    try {
+      fireEvent.click(view.container.querySelector('.bar-scope'))
+      const menu = screen.getByRole('listbox', { name: 'Scope' })
+      const rows = within(menu).getAllByRole('option')
+      const seed = key === 'Enter' ? 2 : 1
+      fireEvent.mouseEnter(rows[seed])
+      const input = screen.getByLabelText('Command bar')
+      input.focus()
+      expect(rows[seed]).toHaveAttribute('aria-selected', 'true')
+      const event = retainedKey(input, key, marks)
+      fireEvent(input, event)
+      expectYielded(event)
+      expect(within(menu).getByRole('option', { selected: true })).toBe(rows[seed])
+      expect(view.container.querySelector('.bar-scope')).toHaveAttribute('aria-expanded', 'true')
+      expect(input.value).toBe('draft-value')
+      expect(input).toHaveFocus()
+      expect(onChange).not.toHaveBeenCalled()
+      expect(onOpenAuthor).not.toHaveBeenCalled()
+      expect(onDispatch).not.toHaveBeenCalled()
+      const ordinary = retainedKey(input, key, { isComposing: false, keyCode: 0 })
+      fireEvent(input, ordinary)
+      expect(ordinary.defaultPrevented).toBe(true)
+      if (key === 'Enter') {
+        expect(onOpenAuthor).toHaveBeenCalledTimes(1)
+        expect(view.container.querySelector('.bar-scope')).toHaveAttribute('aria-expanded', 'false')
+        expect(screen.queryByRole('listbox', { name: 'Scope' })).toBeNull()
+      } else {
+        expect(within(menu).getByRole('option', { selected: true })).toBe(rows[key === 'ArrowDown' ? 2 : 0])
+        expect(onOpenAuthor).not.toHaveBeenCalled()
+      }
+      expect(onDispatch).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+    }
+  }
+}
+
+it('KEYS-D11 scope capture yields native composition keys', () => {
+  scopeComposition({ isComposing: true, keyCode: 0 })
+})
+
+it('KEYS-D12 scope capture yields key code 229', () => {
+  scopeComposition({ isComposing: false, keyCode: 229 })
+})
+
+async function paletteComposition(marks) {
+  for (const scope of ['act', 'find']) {
+    for (const key of ['ArrowDown', 'ArrowUp', 'Enter']) {
+      const actions = [
+        { id: 'panel-fit', label: 'panel fit', disabled: false, onSelect: vi.fn() },
+        { id: 'panel-inspect', label: 'panel inspect', disabled: false, onSelect: vi.fn() },
+      ]
+      const focus = vi.fn()
+      drawing.current = { index: { records: [
+        { id: 'h:0', name: 'panel object 0', path: 'drawing / panels', handles: [] },
+        { id: 'h:1', name: 'panel object 1', path: 'drawing / panels', handles: [] },
+      ] }, selectedHandles: [], focus }
+      const onChange = vi.fn()
+      const onDispatch = vi.fn()
+      const view = render(<CompositionPalettePrompt initialValue="panel" onChange={onChange}
+        onDispatch={onDispatch} paletteActions={actions} mcpDiscoveryEnabled={false} />)
+      try {
+        openScope(view.container, scope)
+        const label = scope === 'act' ? 'Actions and artifacts' : 'Search results'
+        await waitFor(() => expect(screen.getByRole('listbox', { name: label }).querySelectorAll('[role="option"]').length).toBeGreaterThanOrEqual(2))
+        const menu = screen.getByRole('listbox', { name: label })
+        const rows = within(menu).getAllByRole('option')
+        const seed = key === 'ArrowDown' ? 0 : 1
+        fireEvent.mouseEnter(rows[seed])
+        const input = screen.getByLabelText('Command bar')
+        input.focus()
+        expect(input).toHaveAttribute('aria-activedescendant', rows[seed].id)
+        const event = retainedKey(input, key, marks)
+        fireEvent(input, event)
+        expectYielded(event)
+        expect(input).toHaveAttribute('aria-activedescendant', rows[seed].id)
+        expect(rows[seed]).toHaveAttribute('aria-selected', 'true')
+        expect(input).toHaveAttribute('aria-expanded', 'true')
+        expect(input.value).toBe('panel')
+        expect(input).toHaveFocus()
+        expect(onChange).not.toHaveBeenCalled()
+        expect(onDispatch).not.toHaveBeenCalled()
+        expect(focus).not.toHaveBeenCalled()
+        for (const action of actions) expect(action.onSelect).not.toHaveBeenCalled()
+        const ordinary = retainedKey(input, key, { isComposing: false, keyCode: 0 })
+        fireEvent(input, ordinary)
+        expect(ordinary.defaultPrevented).toBe(true)
+        if (key === 'Enter') {
+          if (scope === 'act') {
+            expect(actions[1].onSelect).toHaveBeenCalledTimes(1)
+            expect(actions[0].onSelect).not.toHaveBeenCalled()
+            expect(onChange).toHaveBeenCalledExactlyOnceWith('')
+            expect(input.value).toBe('')
+            expect(input).toHaveAttribute('aria-expanded', 'false')
+          } else {
+            expect(focus).toHaveBeenCalledExactlyOnceWith('h:1')
+            expect(input.value).toBe('panel')
+          }
+        } else {
+          expect(input).toHaveAttribute('aria-activedescendant', rows[1 - seed].id)
+          expect(rows[1 - seed]).toHaveAttribute('aria-selected', 'true')
+          expect(focus).not.toHaveBeenCalled()
+          for (const action of actions) expect(action.onSelect).not.toHaveBeenCalled()
+        }
+        expect(onDispatch).not.toHaveBeenCalled()
+      } finally {
+        view.unmount()
+        drawing.current = null
+      }
+    }
+  }
+}
+
+it('KEYS-D13 act and find fields yield native composition keys', async () => {
+  await paletteComposition({ isComposing: true, keyCode: 0 })
+})
+
+it('KEYS-D14 act and find fields yield key code 229', async () => {
+  await paletteComposition({ isComposing: false, keyCode: 229 })
 })
