@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 from pathlib import Path
 import re
 import shutil
+import stat
 from typing import Any, Sequence
+import uuid
 import zipfile
 
 from platform_release_manifest import SERVICES, load_json, web_dist_digest
@@ -18,8 +22,12 @@ PROJECT_ID = "prj_tBxvYtXa47THZ8aF59gvRx8W0bBc"
 PROJECT_NAME = "leaf-platform-web"
 STABLE_URL = "https://leaf-platform-web.vercel.app"
 PRODUCTION_HOSTS = ("app.leafdesign.ai", "platform.leafdesign.ai")
-HANDOFF_SCHEMA = "leaf.production-handoff-candidate.v1"
-PREPARED_SCHEMA = "leaf.production-web-prepared.v1"
+HANDOFF_V1_SCHEMA = "leaf.production-handoff-candidate.v1"
+HANDOFF_V2_SCHEMA = "leaf.production-handoff-candidate.v2"
+HANDOFF_SCHEMA = HANDOFF_V1_SCHEMA
+PREPARED_V1_SCHEMA = "leaf.production-web-prepared.v1"
+PREPARED_V2_SCHEMA = "leaf.production-web-prepared.v2"
+PREPARED_SCHEMA = PREPARED_V1_SCHEMA
 RECEIPT_SCHEMA = "leaf.production-web-deployment.v1"
 APPROVAL_SCHEMA = "leaf.production-web-approval.v2"
 # The two approval modes the production deploy workflow can record. Closed set:
@@ -29,6 +37,12 @@ _APPROVAL_MODES = frozenset({"independent", "administrator-self-authorization"})
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_TRANSACTION = re.compile(r"^d10-[0-9a-f]{16}$")
+_CODEBUILD_ARN = re.compile(
+    r"^arn:aws:codebuild:us-east-1:807034087062:"
+    r"(?:project/[A-Za-z0-9_-]+|build/[A-Za-z0-9_-]+:"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
 _RUN_ID = re.compile(r"^[1-9][0-9]{5,19}$")
 _ATTEMPT = re.compile(r"^[1-9][0-9]*$")
 _DEPLOYMENT_ID = re.compile(r"^dpl_[A-Za-z0-9]{20,64}$")
@@ -51,6 +65,66 @@ def _positive(value: str, pattern: re.Pattern[str], label: str) -> int:
     if not pattern.fullmatch(value):
         raise ReleaseError(f"{label} is invalid")
     return int(value)
+
+
+def _canonical(value: dict[str, Any]) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _canonical_json(value: bytes, label: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError(f"{label} is unreadable") from exc
+    if not isinstance(parsed, dict) or _canonical(parsed) != value:
+        raise ReleaseError(f"{label} bytes are not canonical")
+    return parsed
+
+
+def _sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not _SHA256.fullmatch(value):
+        raise ReleaseError(f"{label} is invalid")
+    return value
+
+
+def _object_ref(value: Any, label: str, *, revision: bool = False) -> dict[str, Any]:
+    fields = {"bucket", "key", "version_id", "sha256"}
+    if revision:
+        fields.add("revision")
+    if not isinstance(value, dict):
+        raise ReleaseError(f"{label} is invalid")
+    _exact(value, fields, label)
+    if any(
+        not isinstance(value[field], str) or not value[field]
+        for field in ("bucket", "key", "version_id")
+    ):
+        raise ReleaseError(f"{label} is incomplete")
+    if value["version_id"] == "null":
+        raise ReleaseError(f"{label} is mutable")
+    _sha256(value["sha256"], f"{label} digest")
+    if revision and (type(value["revision"]) is not int or value["revision"] < 1):
+        raise ReleaseError(f"{label} revision is invalid")
+    return value
+
+
+def _build_identity(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ReleaseError(f"{label} is invalid")
+    _exact(value, {"project_arn", "build_arn", "build_number"}, label)
+    if not isinstance(value["project_arn"], str) or not _CODEBUILD_ARN.fullmatch(
+        value["project_arn"]
+    ):
+        raise ReleaseError(f"{label} project is invalid")
+    if not isinstance(value["build_arn"], str) or not _CODEBUILD_ARN.fullmatch(
+        value["build_arn"]
+    ):
+        raise ReleaseError(f"{label} build is invalid")
+    project = value["project_arn"].split("project/", 1)[-1]
+    if f"build/{project}:" not in value["build_arn"]:
+        raise ReleaseError(f"{label} build belongs to another project")
+    if type(value["build_number"]) is not int or value["build_number"] < 1:
+        raise ReleaseError(f"{label} build number is invalid")
+    return value
 
 
 def extract_artifact(archive: Path, destination: Path) -> None:
@@ -126,6 +200,393 @@ def _validate_service_set(handoff: dict[str, Any], source: str) -> dict[str, Any
     ):
         raise ReleaseError("canonical worker source provenance differs")
     return services
+
+
+def _validate_native_manifest(
+    manifest: dict[str, Any], handoff: dict[str, Any], source: str, tree: str
+) -> None:
+    _exact(
+        manifest,
+        {
+            "schema",
+            "provider",
+            "source_revision",
+            "source_tree",
+            "producer",
+            "services",
+            "solver",
+            "web",
+            "gate",
+        },
+        "native release manifest",
+    )
+    if (
+        manifest["schema"] != "leaf.native-release.v1"
+        or manifest["provider"] != "aws.codebuild"
+        or manifest["source_revision"] != source
+        or manifest["source_tree"] != tree
+    ):
+        raise ReleaseError("native release manifest identity differs")
+    release = handoff["release"]
+    if manifest["producer"] != release["producer"] or manifest["gate"] != release["gate"]:
+        raise ReleaseError("native release build identity differs from the handoff")
+    services = handoff["staging_supply_set_services"]
+    native_services = manifest["services"]
+    if not isinstance(native_services, dict) or set(native_services) != set(SERVICES):
+        raise ReleaseError("native release manifest service set differs")
+    producer = release["producer"]
+    for name in SERVICES:
+        row = native_services[name]
+        if not isinstance(row, dict):
+            raise ReleaseError(f"native {name} service evidence is invalid")
+        _exact(
+            row,
+            {"repository", "image_digest", "source_revision", "native_build_number"},
+            f"native {name} service evidence",
+        )
+        if row != {
+            "repository": services[name]["repository"],
+            "image_digest": services[name]["image_digest"],
+            "source_revision": source,
+            "native_build_number": producer["build_number"],
+        }:
+            raise ReleaseError(f"native {name} service differs from the handoff")
+    solver = manifest["solver"]
+    if not isinstance(solver, dict):
+        raise ReleaseError("native solver provenance is invalid")
+    _exact(solver, {"revision", "source_sha256"}, "native solver provenance")
+    expected_solver = services["canonical-worker"]["provenance"]
+    if solver != {
+        "revision": expected_solver["solver_source_revision"],
+        "source_sha256": expected_solver["solver_source_sha256"],
+    }:
+        raise ReleaseError("native solver provenance differs from the handoff")
+    native_web = manifest["web"]
+    if not isinstance(native_web, dict):
+        raise ReleaseError("native web evidence is invalid")
+    _exact(
+        native_web,
+        {"member", "artifact_sha256", "archive_sha256"},
+        "native web evidence",
+    )
+    if native_web != {
+        key: handoff["web"][key]
+        for key in ("member", "artifact_sha256", "archive_sha256")
+    }:
+        raise ReleaseError("native web evidence differs from the handoff")
+
+
+def _validate_native_semantic(
+    semantic: dict[str, Any], handoff: dict[str, Any], source: str, tree: str
+) -> None:
+    acceptance = handoff["staging_acceptance"]
+    _exact(
+        semantic,
+        {
+            "schema",
+            "transaction_id",
+            "settled",
+            "services",
+            "activity",
+            "source_revision",
+            "source_tree",
+            "repository",
+            "branch",
+        },
+        "semantic LIVE receipt",
+    )
+    if (
+        semantic["schema"] != "leaf.native-staging-semantic.v1"
+        or semantic["transaction_id"] != acceptance["transaction_id"]
+        or semantic["settled"] is not True
+        or semantic["source_revision"] != source
+        or semantic["source_tree"] != tree
+        or semantic["repository"] != acceptance["repository"]
+        or semantic["branch"] != "main"
+        or not isinstance(semantic["activity"], (dict, type(None)))
+    ):
+        raise ReleaseError("semantic LIVE receipt differs from the handoff")
+    observed = semantic["services"]
+    if not isinstance(observed, dict) or set(observed) != set(SERVICES):
+        raise ReleaseError("semantic LIVE receipt service set differs")
+    for name in SERVICES:
+        row = observed[name]
+        if not isinstance(row, dict):
+            raise ReleaseError(f"semantic {name} service evidence is invalid")
+        _exact(
+            row,
+            {"image", "config", "tags", "route", "evidence"},
+            f"semantic {name} service evidence",
+        )
+        if row["image"] != acceptance["images"][name]:
+            raise ReleaseError(f"semantic {name} image differs from the handoff")
+        _sha256(row["config"], f"semantic {name} config digest")
+        if not isinstance(row["tags"], dict) or not isinstance(row["route"], dict):
+            raise ReleaseError(f"semantic {name} metadata is invalid")
+        _object_ref(row["evidence"], f"semantic {name} evidence", revision=True)
+
+
+def validate_native_bundle(
+    bundle: dict[str, bytes], *, source: str
+) -> dict[str, Any]:
+    """Validate the closed Forge-native handoff bundle without writing files."""
+    if not isinstance(bundle, dict) or set(bundle) != {
+        "staging-supply-set.json",
+        "web-dist.zip",
+        "semantic-live.json",
+        "production-handoff-candidate.json",
+    } or any(not isinstance(value, bytes) for value in bundle.values()):
+        raise ReleaseError("Forge-native handoff bundle is incomplete or open-ended")
+    if not _SHA.fullmatch(source):
+        raise ReleaseError("source revision is invalid")
+    handoff_bytes = bundle["production-handoff-candidate.json"]
+    handoff = _canonical_json(handoff_bytes, "Forge-native production handoff")
+    _exact(
+        handoff,
+        {
+            "schema",
+            "provider",
+            "source_revision",
+            "source_tree",
+            "release",
+            "staging_acceptance",
+            "staging_supply_set_services",
+            "web",
+            "proof",
+        },
+        "Forge-native production handoff",
+    )
+    if (
+        handoff["schema"] != HANDOFF_V2_SCHEMA
+        or handoff["provider"] != "forge-native"
+        or handoff["source_revision"] != source
+    ):
+        raise ReleaseError("Forge-native handoff schema, provider, or source differs")
+    tree = handoff["source_tree"]
+    if not isinstance(tree, str) or not _SHA.fullmatch(tree):
+        raise ReleaseError("Forge-native handoff tree is invalid")
+
+    release = handoff["release"]
+    if not isinstance(release, dict):
+        raise ReleaseError("Forge-native release evidence is invalid")
+    _exact(
+        release,
+        {"transaction_id", "producer", "gate", "artifact", "manifest_sha256"},
+        "Forge-native release evidence",
+    )
+    transaction_id = release["transaction_id"]
+    if not isinstance(transaction_id, str) or not _TRANSACTION.fullmatch(transaction_id):
+        raise ReleaseError("Forge-native transaction ID is invalid")
+    producer = _build_identity(release["producer"], "Forge-native producer")
+    gate = release["gate"]
+    if not isinstance(gate, dict):
+        raise ReleaseError("Forge-native gate evidence is invalid")
+    _exact(
+        gate,
+        {"producer", "source_revision", "source_tree", "archive", "proof_sha256"},
+        "Forge-native gate evidence",
+    )
+    gate_producer = _build_identity(gate["producer"], "Forge-native gate producer")
+    if gate_producer["project_arn"] == producer["project_arn"]:
+        raise ReleaseError("Forge-native producer and gate are not separate")
+    if gate["source_revision"] != source or gate["source_tree"] != tree:
+        raise ReleaseError("Forge-native gate source differs")
+    _object_ref(gate["archive"], "Forge-native gate archive")
+    _sha256(gate["proof_sha256"], "Forge-native gate proof digest")
+    release_object = _object_ref(release["artifact"], "Forge-native release object")
+    _sha256(release["manifest_sha256"], "native release manifest digest")
+
+    services = _validate_service_set(handoff, source)
+    acceptance = handoff["staging_acceptance"]
+    if not isinstance(acceptance, dict):
+        raise ReleaseError("Forge-native staging acceptance is invalid")
+    _exact(
+        acceptance,
+        {
+            "schema",
+            "transaction_id",
+            "semantic_receipt",
+            "live_binding_revision",
+            "repository",
+            "branch",
+            "source_revision",
+            "source_tree",
+            "images",
+            "settled",
+        },
+        "Forge-native staging acceptance",
+    )
+    repository = acceptance["repository"]
+    if not isinstance(repository, dict):
+        raise ReleaseError("Forge-native staging repository is invalid")
+    _exact(repository, {"id", "full_name"}, "Forge-native staging repository")
+    if (
+        type(repository["id"]) is not int
+        or repository["id"] < 1
+        or not isinstance(repository["full_name"], str)
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository["full_name"])
+    ):
+        raise ReleaseError("Forge-native staging repository is invalid")
+    expected_images = {name: services[name]["image_digest"] for name in SERVICES}
+    if (
+        acceptance["schema"] != "leaf.native-staging-semantic.v1"
+        or acceptance["transaction_id"] != transaction_id
+        or acceptance["branch"] != "main"
+        or acceptance["source_revision"] != source
+        or acceptance["source_tree"] != tree
+        or acceptance["images"] != expected_images
+        or acceptance["settled"] is not True
+        or type(acceptance["live_binding_revision"]) is not int
+        or acceptance["live_binding_revision"] < 1
+    ):
+        raise ReleaseError("Forge-native staging acceptance differs")
+    semantic_ref = _object_ref(
+        acceptance["semantic_receipt"], "Forge-native semantic receipt"
+    )
+
+    web = handoff["web"]
+    if not isinstance(web, dict):
+        raise ReleaseError("Forge-native web evidence is invalid")
+    _exact(
+        web,
+        {"member", "artifact_sha256", "archive_sha256", "release_object"},
+        "Forge-native web evidence",
+    )
+    if web["member"] != "web-dist.zip" or web["release_object"] != release_object:
+        raise ReleaseError("Forge-native web object differs from the release")
+    web_artifact_sha = _sha256(web["artifact_sha256"], "web artifact digest")
+    if services["web"]["artifact_sha256"] != web_artifact_sha:
+        raise ReleaseError("Forge-native web content identity differs")
+    web_archive_sha = _sha256(web["archive_sha256"], "web archive digest")
+    if handoff["proof"] != {
+        "source_is_canonical_main": True,
+        "producer_and_gate_succeeded": True,
+        "staging_state_is_live": True,
+        "staging_digests_equal_release": True,
+        "web_archive_bytes_equal_release": True,
+    }:
+        raise ReleaseError("Forge-native handoff proof is incomplete")
+
+    manifest_bytes = bundle["staging-supply-set.json"]
+    if hashlib.sha256(manifest_bytes).hexdigest() != release["manifest_sha256"]:
+        raise ReleaseError("native release manifest digest differs from the handoff")
+    manifest = _canonical_json(manifest_bytes, "native release manifest")
+    _validate_native_manifest(manifest, handoff, source, tree)
+    semantic_bytes = bundle["semantic-live.json"]
+    if hashlib.sha256(semantic_bytes).hexdigest() != semantic_ref["sha256"]:
+        raise ReleaseError("semantic LIVE receipt digest differs from the handoff")
+    semantic = _canonical_json(semantic_bytes, "semantic LIVE receipt")
+    _validate_native_semantic(semantic, handoff, source, tree)
+    if hashlib.sha256(bundle["web-dist.zip"]).hexdigest() != web_archive_sha:
+        raise ReleaseError("web archive bytes differ from the Forge-native handoff")
+    return handoff
+
+
+def _prepare_web_output(
+    web_dist: Path,
+    output_root: Path,
+    *,
+    source: str,
+    expected_web_sha256: str,
+    require_native_engine: bool,
+) -> tuple[str, str]:
+    actual_hash = web_dist_digest(web_dist)
+    if actual_hash != expected_web_sha256:
+        raise ReleaseError("downloaded web artifact bytes differ from the handoff")
+    health = load_json(web_dist / "health.json")
+    if health != {
+        "ok": True,
+        "service": "leaf-platform-web",
+        "component": "frontend",
+        "source_sha": source,
+    }:
+        raise ReleaseError("web health identity differs from the release source")
+    index = (web_dist / "index.html").read_bytes()
+    entries = sorted(set(item.decode("ascii") for item in _ENTRY_ASSET.findall(index)))
+    if len(entries) != 1 or not (web_dist / entries[0]).is_file():
+        raise ReleaseError("web artifact does not contain one referenced entry asset")
+    config = load_json(web_dist / "vercel.json")
+    if (
+        set(config) != {"rewrites"}
+        or not isinstance(config["rewrites"], list)
+        or len(config["rewrites"]) != 1
+        or config["rewrites"][0].get("destination") != "/index.html"
+    ):
+        raise ReleaseError(
+            "web artifact does not contain the reviewed SPA route contract"
+        )
+    if require_native_engine:
+        build_config = load_json(web_dist / "build-config.json")
+        if build_config != {
+            "schema": "leaf.web-build-config.v1",
+            "vite_cad_edit": "1",
+        }:
+            raise ReleaseError("web artifact does not enable the reviewed CAD engine")
+        provenance = load_json(web_dist / "engine" / "PROVENANCE.json")
+        if not isinstance(provenance, dict):
+            raise ReleaseError("web engine provenance is invalid")
+        _exact(provenance, {"contract", "files"}, "web engine provenance")
+        if (
+            provenance["contract"] != "leaf.cad-engine-stage.v1"
+            or not isinstance(provenance["files"], dict)
+            or set(provenance["files"]) != {"engine.js", "engine_bg.wasm"}
+        ):
+            raise ReleaseError("web engine provenance differs")
+        for name in ("engine.js", "engine_bg.wasm"):
+            record = provenance["files"][name]
+            if not isinstance(record, dict):
+                raise ReleaseError(f"web engine provenance differs: {name}")
+            _exact(record, {"sha256", "bytes"}, f"{name} engine provenance")
+            path = web_dist / "engine" / name
+            content = path.read_bytes()
+            if (
+                not content
+                or type(record["bytes"]) is not int
+                or record["bytes"] != len(content)
+                or record["sha256"] != hashlib.sha256(content).hexdigest()
+            ):
+                raise ReleaseError(f"web engine provenance differs: {name}")
+
+    if output_root.exists():
+        raise ReleaseError("Vercel output root already exists")
+    static = output_root / "static"
+    static.mkdir(parents=True)
+    for path in sorted(web_dist.rglob("*")):
+        if path.is_symlink():
+            raise ReleaseError("web artifact contains a symbolic link")
+        if not path.is_file() or path == web_dist / "vercel.json":
+            continue
+        relative = path.relative_to(web_dist)
+        target = static / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+    output_config = {
+        "version": 3,
+        "routes": [
+            {
+                "src": "/health\\.json",
+                "headers": {
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Cache-Control": "no-store",
+                },
+                "continue": True,
+            },
+            {
+                "src": "/api(?:/.*)?",
+                "status": 404,
+                "headers": {
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Cache-Control": "no-store",
+                },
+            },
+            {"handle": "filesystem"},
+            {"src": "/.*", "dest": "/index.html"},
+        ],
+    }
+    (output_root / "config.json").write_text(
+        json.dumps(output_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return actual_hash, entries[0]
 
 
 def prepare(
@@ -228,78 +689,119 @@ def prepare(
     if services["web"]["artifact_sha256"] != expected_web_sha256:
         raise ReleaseError("handoff web artifact hash differs from the approved hash")
 
-    actual_hash = web_dist_digest(web_dist)
-    if actual_hash != expected_web_sha256:
-        raise ReleaseError("downloaded web artifact bytes differ from the handoff")
-    health = load_json(web_dist / "health.json")
-    if health != {
-        "ok": True,
-        "service": "leaf-platform-web",
-        "component": "frontend",
-        "source_sha": source,
-    }:
-        raise ReleaseError("web health identity differs from the release source")
-    index = (web_dist / "index.html").read_bytes()
-    entries = sorted(set(item.decode("ascii") for item in _ENTRY_ASSET.findall(index)))
-    if len(entries) != 1 or not (web_dist / entries[0]).is_file():
-        raise ReleaseError("web artifact does not contain one referenced entry asset")
-    config = load_json(web_dist / "vercel.json")
-    if (
-        set(config) != {"rewrites"}
-        or not isinstance(config["rewrites"], list)
-        or len(config["rewrites"]) != 1
-        or config["rewrites"][0].get("destination") != "/index.html"
-    ):
-        raise ReleaseError(
-            "web artifact does not contain the reviewed SPA route contract"
-        )
-
-    if output_root.exists():
-        raise ReleaseError("Vercel output root already exists")
-    static = output_root / "static"
-    static.mkdir(mode=0o700, parents=True)
-    for path in sorted(web_dist.rglob("*")):
-        if path.is_symlink():
-            raise ReleaseError("web artifact contains a symbolic link")
-        if not path.is_file() or path == web_dist / "vercel.json":
-            continue
-        relative = path.relative_to(web_dist)
-        target = static / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, target)
-    output_config = {
-        "version": 3,
-        "routes": [
-            {
-                "src": "/health\\.json",
-                "headers": {
-                    "Content-Type": "application/json; charset=utf-8",
-                    "Cache-Control": "no-store",
-                },
-                "continue": True,
-            },
-            {
-                "src": "/api(?:/.*)?",
-                "status": 404,
-                "headers": {
-                    "Content-Type": "application/json; charset=utf-8",
-                    "Cache-Control": "no-store",
-                },
-            },
-            {"handle": "filesystem"},
-            {"src": "/.*", "dest": "/index.html"},
-        ],
-    }
-    (output_root / "config.json").write_text(
-        json.dumps(output_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    actual_hash, entry = _prepare_web_output(
+        web_dist,
+        output_root,
+        source=source,
+        expected_web_sha256=expected_web_sha256,
+        require_native_engine=False,
     )
     return {
         "schema": PREPARED_SCHEMA,
         "source_revision": source,
         "web_artifact_sha256": actual_hash,
-        "entry_asset": entries[0],
+        "entry_asset": entry,
         "release_workflow_run_id": release_id,
         "release_workflow_run_attempt": attempt,
+        "api_boundary": "terminal-404",
+        "build_performed": False,
+    }
+
+
+def _native_web_members(archive: bytes) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
+            members = bundle.infolist()
+            names = [member.filename for member in members]
+            if not names or names != sorted(names) or len(names) != len(set(names)):
+                raise ReleaseError("native web archive paths are missing, reordered, or duplicate")
+            for member in members:
+                name = member.filename
+                mode = (member.external_attr >> 16) & 0o170000
+                parts = name.split("/")
+                if (
+                    member.is_dir()
+                    or not name.startswith("dist/")
+                    or name.startswith("/")
+                    or "\\" in name
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or mode not in {0, stat.S_IFREG}
+                ):
+                    raise ReleaseError("native web archive contains an unsupported path")
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        raise ReleaseError("native web archive is malformed") from exc
+
+
+def _read_native_bundle(bundle_root: Path) -> dict[str, bytes]:
+    expected = {
+        "staging-supply-set.json",
+        "web-dist.zip",
+        "semantic-live.json",
+        "production-handoff-candidate.json",
+    }
+    try:
+        members = list(bundle_root.iterdir())
+    except OSError as exc:
+        raise ReleaseError("Forge-native handoff bundle is unreadable") from exc
+    if set(path.name for path in members) != expected or any(
+        not path.is_file() or path.is_symlink() for path in members
+    ):
+        raise ReleaseError("Forge-native handoff bundle is incomplete or open-ended")
+    try:
+        return {path.name: path.read_bytes() for path in members}
+    except OSError as exc:
+        raise ReleaseError("Forge-native handoff bundle is unreadable") from exc
+
+
+def prepare_native(
+    bundle_root: Path,
+    output_root: Path,
+    *,
+    source: str,
+) -> dict[str, Any]:
+    """Prepare a verified Forge-native bundle without inventing workflow IDs."""
+    bundle = _read_native_bundle(bundle_root)
+    handoff = validate_native_bundle(bundle, source=source)
+    archive = bundle["web-dist.zip"]
+    _native_web_members(archive)
+    if output_root.exists():
+        raise ReleaseError("Vercel output root already exists")
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    temporary_root = output_root.parent / f".forge-native-web-{uuid.uuid4().hex}"
+    temporary_root.mkdir()
+    try:
+        extracted = temporary_root / "extracted"
+        extracted.mkdir()
+        with zipfile.ZipFile(io.BytesIO(archive)) as web_bundle:
+            web_bundle.extractall(extracted)
+        actual_hash, entry = _prepare_web_output(
+            extracted / "dist",
+            output_root,
+            source=source,
+            expected_web_sha256=handoff["web"]["artifact_sha256"],
+            require_native_engine=True,
+        )
+    finally:
+        shutil.rmtree(temporary_root)
+    release = handoff["release"]
+    acceptance = handoff["staging_acceptance"]
+    return {
+        "schema": PREPARED_V2_SCHEMA,
+        "provider": "forge-native",
+        "source_revision": source,
+        "source_tree": handoff["source_tree"],
+        "web_artifact_sha256": actual_hash,
+        "web_archive_sha256": handoff["web"]["archive_sha256"],
+        "entry_asset": entry,
+        "transaction_id": release["transaction_id"],
+        "release_object": release["artifact"],
+        "producer": release["producer"],
+        "gate": release["gate"],
+        "semantic_receipt": acceptance["semantic_receipt"],
+        "live_binding_revision": acceptance["live_binding_revision"],
+        "handoff_sha256": hashlib.sha256(
+            bundle["production-handoff-candidate.json"]
+        ).hexdigest(),
         "api_boundary": "terminal-404",
         "build_performed": False,
     }
@@ -493,6 +995,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     prepared.add_argument("--release-attempt", required=True)
     prepared.add_argument("--expected-web-sha256", required=True)
     prepared.add_argument("--proof-output", type=Path, required=True)
+    native = commands.add_parser("prepare-native")
+    native.add_argument("--bundle-root", type=Path, required=True)
+    native.add_argument("--output-root", type=Path, required=True)
+    native.add_argument("--source", required=True)
+    native.add_argument("--proof-output", type=Path, required=True)
     receipt = commands.add_parser("receipt")
     receipt.add_argument("--prepared", type=Path, required=True)
     receipt.add_argument("--baseline", type=Path, required=True)
@@ -519,6 +1026,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 release_run_id=args.release_run_id,
                 release_attempt=args.release_attempt,
                 expected_web_sha256=args.expected_web_sha256,
+            )
+            _write_new(args.proof_output, value)
+            return 0
+        if args.command == "prepare-native":
+            value = prepare_native(
+                args.bundle_root,
+                args.output_root,
+                source=args.source,
             )
             _write_new(args.proof_output, value)
             return 0

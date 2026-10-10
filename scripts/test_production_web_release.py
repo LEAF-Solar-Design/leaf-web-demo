@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 from pathlib import Path
+import shutil
+import stat
 import sys
+import uuid
 import zipfile
 
 import pytest
@@ -13,12 +18,15 @@ ROOT = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 
 from platform_release_manifest import web_dist_digest  # noqa: E402
+from forge_native_production_handoff import build_handoff_bundle  # noqa: E402
 from production_web_release import (  # noqa: E402
     PROJECT_ID,
     ReleaseError,
     deployment_receipt,
     extract_artifact,
     prepare,
+    prepare_native,
+    validate_native_bundle,
 )
 
 
@@ -31,6 +39,208 @@ DIGESTS = {
         ("app", "broker", "canonical-worker", "harness", "web"), start=1
     )
 }
+NATIVE_TREE = "b" * 40
+NATIVE_TX = "d10-1234567890abcdef"
+NATIVE_REPOSITORY = {"id": 46, "full_name": "LEAF-Solar-Design/leaf-web-demo"}
+
+
+def _native_identity(project: str, number: int) -> dict:
+    return {
+        "project_arn": f"arn:aws:codebuild:us-east-1:807034087062:project/{project}",
+        "build_arn": (
+            f"arn:aws:codebuild:us-east-1:807034087062:build/{project}:"
+            f"{number:08x}-1234-5678-9abc-1234567890ab"
+        ),
+        "build_number": number,
+    }
+
+
+def _native_ref(seed: str, transaction: str, *, revision: bool = False) -> dict:
+    value = {
+        "bucket": "leaf-native-staging-delivery-807034087062",
+        "key": f"delivery/v1/{transaction}/{seed}.json",
+        "version_id": f"version-{seed}",
+        "sha256": hashlib.sha256(seed.encode()).hexdigest(),
+    }
+    if revision:
+        value["revision"] = 1
+    return value
+
+
+def _web_entries_digest(entries: dict[str, bytes]) -> str:
+    digest = hashlib.sha256(b"leaf.web-dist.v1\0")
+    for name in sorted(entries):
+        relative = name.removeprefix("dist/").encode()
+        content = entries[name]
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def _native_web(source: str) -> tuple[bytes, str]:
+    engine = {
+        "engine.js": b"export default async function init() {}\n",
+        "engine_bg.wasm": b"\x00asm\x01\x00\x00\x00",
+    }
+    provenance = {
+        "contract": "leaf.cad-engine-stage.v1",
+        "files": {
+            name: {"sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content)}
+            for name, content in engine.items()
+        },
+    }
+    entries = {
+        "dist/assets/index-good.js": b"console.log('leaf')\n",
+        "dist/build-config.json": json.dumps(
+            {"schema": "leaf.web-build-config.v1", "vite_cad_edit": "1"}
+        ).encode(),
+        "dist/engine/PROVENANCE.json": json.dumps(provenance).encode(),
+        "dist/engine/engine.js": engine["engine.js"],
+        "dist/engine/engine_bg.wasm": engine["engine_bg.wasm"],
+        "dist/health.json": (
+            json.dumps(
+                {
+                    "ok": True,
+                    "service": "leaf-platform-web",
+                    "component": "frontend",
+                    "source_sha": source,
+                }
+            )
+            + "\n"
+        ).encode(),
+        "dist/index.html": b'<script type="module" src="/assets/index-good.js"></script>\n',
+        "dist/vercel.json": (
+            json.dumps(
+                {"rewrites": [{"source": "/:path*", "destination": "/index.html"}]}
+            )
+            + "\n"
+        ).encode(),
+    }
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name in sorted(entries):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3
+            info.external_attr = (stat.S_IFREG | 0o644) << 16
+            archive.writestr(info, entries[name])
+    return stream.getvalue(), _web_entries_digest(entries)
+
+
+def _native_bundle(
+    *, source: str = SOURCE, transaction: str = NATIVE_TX
+) -> dict[str, bytes]:
+    producer = _native_identity("leaf-forge-native-publisher", 42)
+    gate_identity = _native_identity("leaf-forge-native-gate", 41)
+    web_archive, web_artifact_sha = _native_web(source)
+    native = {
+        "schema": "leaf.native-release.v1",
+        "provider": "aws.codebuild",
+        "source_revision": source,
+        "source_tree": NATIVE_TREE,
+        "producer": producer,
+        "services": {
+            name: {
+                "repository": f"leaf-platform-{name}",
+                "image_digest": DIGESTS[name],
+                "source_revision": source,
+                "native_build_number": producer["build_number"],
+            }
+            for name in DIGESTS
+        },
+        "solver": {"revision": "c" * 40, "source_sha256": "d" * 64},
+        "web": {
+            "member": "web-dist.zip",
+            "artifact_sha256": web_artifact_sha,
+            "archive_sha256": hashlib.sha256(web_archive).hexdigest(),
+        },
+        "gate": {
+            "producer": gate_identity,
+            "source_revision": source,
+            "source_tree": NATIVE_TREE,
+            "archive": _native_ref("gate-archive", transaction),
+            "proof_sha256": "1" * 64,
+        },
+    }
+    semantic = {
+        "schema": "leaf.native-staging-semantic.v1",
+        "transaction_id": transaction,
+        "settled": True,
+        "services": {
+            name: {
+                "image": DIGESTS[name],
+                "config": f"{index + 5:064x}",
+                "tags": {"leaf:source": source},
+                "route": {"target": "staging"},
+                "evidence": _native_ref(
+                    f"{name}-readback", transaction, revision=True
+                ),
+            }
+            for index, name in enumerate(DIGESTS)
+        },
+        "activity": None,
+        "source_revision": source,
+        "source_tree": NATIVE_TREE,
+        "repository": NATIVE_REPOSITORY,
+        "branch": "main",
+    }
+    semantic_bytes = (
+        json.dumps(semantic, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    semantic_ref = _native_ref("semantic-live", transaction)
+    semantic_ref["sha256"] = hashlib.sha256(semantic_bytes).hexdigest()
+    binding = {
+        "schema": "leaf.native-staging-live-binding.v1",
+        "repository": NATIVE_REPOSITORY,
+        "branch": "main",
+        "transaction_id": transaction,
+        "source_revision": source,
+        "source_tree": NATIVE_TREE,
+        "semantic_receipt": semantic_ref,
+        "revision": 9,
+    }
+    transaction_readback = {
+        "schema": "leaf.native-staging-transaction.v1",
+        "transaction_id": transaction,
+        "state": "LIVE",
+        "commit": source,
+        "tree": NATIVE_TREE,
+        "semantic_receipt": semantic_ref,
+        "revision": 12,
+    }
+    release_stream = io.BytesIO()
+    with zipfile.ZipFile(
+        release_stream, "w", compression=zipfile.ZIP_STORED
+    ) as release_archive:
+        release_archive.writestr(
+            "staging-supply-set.json",
+            json.dumps(native, sort_keys=True, separators=(",", ":")) + "\n",
+        )
+        release_archive.writestr("web-dist.zip", web_archive)
+    release_bytes = release_stream.getvalue()
+    release_object = _native_ref("native-release", transaction)
+    release_object["sha256"] = hashlib.sha256(release_bytes).hexdigest()
+    return build_handoff_bundle(
+        release_object=release_object,
+        release_archive=release_bytes,
+        producer_readback={**producer, "status": "SUCCEEDED"},
+        gate_readback={**gate_identity, "status": "SUCCEEDED"},
+        semantic_live=semantic,
+        live_binding=binding,
+        transaction=transaction_readback,
+        forge_head={
+            "repository": NATIVE_REPOSITORY,
+            "branch": "main",
+            "commit": source,
+            "tree": NATIVE_TREE,
+        },
+    )
+
+
+def _canonical_json(value: dict) -> bytes:
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
 def _dist(root: Path) -> tuple[Path, str]:
@@ -227,6 +437,90 @@ def test_extract_rejects_path_traversal_and_preserves_destination_absence(
     with pytest.raises(ReleaseError):
         extract_artifact(archive, destination)
     assert not (tmp_path / "escape.txt").exists()
+
+
+def test_native_consumer_accepts_closed_provider_bound_bundle():
+    handoff = validate_native_bundle(_native_bundle(), source=SOURCE)
+
+    assert handoff["schema"] == "leaf.production-handoff-candidate.v2"
+    assert handoff["provider"] == "forge-native"
+    assert handoff["release"]["transaction_id"] == NATIVE_TX
+    assert set(handoff["staging_supply_set_services"]) == set(DIGESTS)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "provider",
+        "source",
+        "archive",
+        "producer identity",
+        "gate identity",
+        "semantic receipt",
+        "incomplete bundle",
+    ],
+)
+def test_native_consumer_rejects_forged_or_incomplete_evidence(failure: str):
+    bundle = _native_bundle()
+    source = SOURCE
+    if failure == "source":
+        source = "f" * 40
+    elif failure == "archive":
+        bundle["web-dist.zip"] += b"substituted"
+    elif failure == "semantic receipt":
+        semantic = json.loads(bundle["semantic-live.json"])
+        semantic["source_revision"] = "f" * 40
+        bundle["semantic-live.json"] = _canonical_json(semantic)
+    elif failure == "incomplete bundle":
+        bundle.pop("semantic-live.json")
+    else:
+        handoff = json.loads(bundle["production-handoff-candidate.json"])
+        if failure == "provider":
+            handoff["provider"] = "github-actions"
+        elif failure == "producer identity":
+            handoff["release"]["producer"]["build_number"] += 1
+        else:
+            handoff["release"]["gate"]["producer"]["build_number"] += 1
+        bundle["production-handoff-candidate.json"] = _canonical_json(handoff)
+
+    with pytest.raises(ReleaseError):
+        validate_native_bundle(bundle, source=source)
+
+
+def test_native_consumer_rejects_replayed_candidate_evidence():
+    current = _native_bundle()
+    replay = _native_bundle(transaction="d10-fedcba0987654321")
+    current["production-handoff-candidate.json"] = replay[
+        "production-handoff-candidate.json"
+    ]
+
+    with pytest.raises(ReleaseError):
+        validate_native_bundle(current, source=SOURCE)
+
+
+def test_prepare_native_reuses_engine_complete_bytes_without_workflow_ids():
+    bundle = _native_bundle()
+    root = ROOT / f".native-web-test-{uuid.uuid4().hex}"
+    root.mkdir()
+    try:
+        bundle_root = root / "bundle"
+        bundle_root.mkdir()
+        for name, value in bundle.items():
+            (bundle_root / name).write_bytes(value)
+        output = root / "deploy" / ".vercel" / "output"
+
+        prepared = prepare_native(bundle_root, output, source=SOURCE)
+
+        assert prepared["schema"] == "leaf.production-web-prepared.v2"
+        assert prepared["provider"] == "forge-native"
+        assert prepared["transaction_id"] == NATIVE_TX
+        assert prepared["build_performed"] is False
+        assert "release_workflow_run_id" not in prepared
+        assert (output / "static" / "engine" / "engine.js").is_file()
+        assert (output / "static" / "engine" / "engine_bg.wasm").is_file()
+        assert (output / "static" / "index.html").is_file()
+    finally:
+        shutil.rmtree(root)
 
 
 def test_receipt_binds_new_stable_deployment_and_all_workflow_attempts(tmp_path: Path):

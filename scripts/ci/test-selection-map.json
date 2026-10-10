@@ -67,6 +67,7 @@
     "da-scratch-key-collision",
     "da-store",
     "executor",
+    "forge-native-production-handoff",
     "gate-runner-selftest",
     "harness-audit-high",
     "harness-container-smoke",

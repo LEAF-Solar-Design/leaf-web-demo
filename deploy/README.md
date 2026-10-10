@@ -424,6 +424,31 @@ The release path is a staged, receipt-bound chain:
    It uploads a
    `leaf.production-handoff-candidate.v1` receipt. It does not rebuild, retag,
    or deploy an image.
+
+   The additive Forge-native path does not synthesize those GitHub workflow
+   fields. `scripts/forge_native_production_handoff.py` verifies the immutable
+   native release object, separate successful CodeBuild producer and gate
+   identities, exact Forge `main` source/tree, LIVE D10 transaction, semantic
+   staging receipt, and five accepted image digests. It emits a closed bundle
+   of exactly `staging-supply-set.json`, the unchanged `web-dist.zip`,
+   `semantic-live.json`, and a provider-discriminated
+   `leaf.production-handoff-candidate.v2` document.
+
+   `scripts/production_web_release.py prepare-native` consumes only that closed
+   bundle. It independently binds the manifest, build identities, semantic
+   receipt, immutable object versions, source/tree, transaction, web content
+   digest, and web archive digest; rejects non-`forge-native` v2 providers; and
+   verifies `build-config.json`, both CAD engine files, and
+   `engine/PROVENANCE.json` before writing a no-build Vercel output directory.
+   Its `leaf.production-web-prepared.v2` proof contains no fabricated workflow
+   IDs. Historical v1 preparation remains unchanged.
+
+   This consumer is not the native publisher and is not a production
+   authorization path. The protected release train must still publish and
+   read back the immutable four-file bundle, create an unaliased candidate,
+   and obtain a fresh approval bound to that exact candidate before any public
+   alias can move. Until those separately owned steps exist and pass, v2
+   preparation is evidence only and is not a deployable production candidate.
 4. **Deploy (terraform repo, not yet receipt-enabled)**: production must consume
    that handoff before it may change ECS or public traffic. Production app,
    broker, harness, and canonical-worker are OCI/ECS workloads. Production web
