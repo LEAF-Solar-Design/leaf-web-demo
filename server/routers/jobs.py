@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
 import json
 import os
 import time
@@ -35,6 +34,7 @@ import customization_service
 import solar_authored_graph
 import solar_project_admission
 from solar_design_graph import GraphValidationError
+from text_match import text_matches
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_obj, error_response, with_envelope_fields
 
 try:  # APS domain metrics (CloudWatch EMF); best-effort, optional — mirrors jobs.py
@@ -345,9 +345,8 @@ def _access_error(rec, tenant, job_id, *, write=False):
 
 
 def _catalog_digest_matches(candidate, current):
-    """Fails closed on any digest text: hmac refuses a non-ASCII string, so one never matches."""
-    return (isinstance(candidate, str) and candidate.isascii()
-            and hmac.compare_digest(candidate, current))
+    """Fails closed on any digest text: one that is not the current digest never matches."""
+    return text_matches(candidate, current)
 
 
 def _project_solar_admission(tool, tenant, req, org_header, project_header,
@@ -957,8 +956,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                             req.tool_manifest_sha256)):
                     raise ValueError(
                         "write approval is missing exact catalog generation pins")
-                if not hmac.compare_digest(
-                        req.tool_manifest_sha256 or "", current_catalog_digest):
+                if not text_matches(req.tool_manifest_sha256, current_catalog_digest):
                     raise ValueError(
                         "tool manifest changed after approval; refresh tools and confirm again")
                 current_pin = (
@@ -966,11 +964,9 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                     or deps.base_catalog_pin(deps.all_tools(str(tenant_id)))
                 )
                 if not (
-                    hmac.compare_digest(
-                        req.catalog_commit or "", current_pin["catalog_commit"]
-                    )
-                    and hmac.compare_digest(
-                        req.effective_catalog_digest or "",
+                    text_matches(req.catalog_commit, current_pin["catalog_commit"])
+                    and text_matches(
+                        req.effective_catalog_digest,
                         current_pin["effective_catalog_digest"],
                     )
                 ):
@@ -1131,7 +1127,7 @@ def terminal_callback(job_id: str, callback: TerminalCallback,
     if not secret:
         return error_response(ErrorCode.INTERNAL, "worker callbacks are disabled",
                               retryable=False, status_code=503)
-    if not hmac.compare_digest(x_broker_secret or "", secret):
+    if not text_matches(x_broker_secret, secret):
         return error_response(ErrorCode.BAD_PARAMS, "invalid worker callback credential",
                               retryable=False, status_code=401)
     rec = jobs.get_job(job_id)

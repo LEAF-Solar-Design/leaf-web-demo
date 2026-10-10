@@ -664,7 +664,8 @@
     "platform-sip-r4-jobs",
     "server-sip-r5-policy",
     "server-sip-r5-routes",
-    "platform-sip-r5-admission"
+    "platform-sip-r5-admission",
+    "server-text-match"
   ],
   "unresolved_mandatory": [],
   "mandatory_justification": "L4 web-demo mandatory table expanded against build_suites; every other declaration remains mandatory because no traced classification has been admitted. Workflow, web build and license checks also remain unconditional in ci.sh.",
