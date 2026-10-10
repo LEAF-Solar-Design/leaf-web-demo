@@ -344,11 +344,17 @@ def _access_error(rec, tenant, job_id, *, write=False):
     return None
 
 
+def _catalog_digest_matches(candidate, current):
+    """Fails closed on any digest text: hmac refuses a non-ASCII string, so one never matches."""
+    return (isinstance(candidate, str) and candidate.isascii()
+            and hmac.compare_digest(candidate, current))
+
+
 def _project_solar_admission(tool, tenant, req, org_header, project_header,
                              authorization, checkout_header, *, idempotency_key, preview):
     """Share transport pins between exact catalog previews and submissions."""
     digest = deps.catalog_tool_digest(tool)
-    if not isinstance(req.catalog_digest, str) or not hmac.compare_digest(req.catalog_digest, digest):
+    if not _catalog_digest_matches(req.catalog_digest, digest):
         return error_response(
             ErrorCode.BAD_PARAMS,
             "catalog tool changed or confirmation digest is missing; refresh tools and confirm again",
@@ -689,8 +695,7 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                               retryable=False, tool=req.tool)
     tool_view = deps.catalog_tool_view(tool)
     current_catalog_digest = tool_view["catalog_digest"]
-    if not isinstance(req.catalog_digest, str) or not hmac.compare_digest(
-            req.catalog_digest, current_catalog_digest):
+    if not _catalog_digest_matches(req.catalog_digest, current_catalog_digest):
         return error_response(
             ErrorCode.BAD_PARAMS,
             "catalog tool changed or confirmation digest is missing; refresh tools and confirm again",

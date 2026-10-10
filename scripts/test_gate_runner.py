@@ -97,7 +97,7 @@ def test_sip_r5_gate_registration():
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     for suite_id, directory, target, floor, database in (
             ("server-sip-r5-policy", "server", "tests/test_sip_r5_policy.py", 14, False),
-            ("server-sip-r5-routes", "server", "tests/test_sip_r5_routes.py", 16, False),
+            ("server-sip-r5-routes", "server", "tests/test_sip_r5_routes.py", 18, False),
             ("platform-sip-r5-admission", "platform", "tests/test_sip_r5_admission.py", 4, True)):
         suite = suites[suite_id]
         assert suite.id == suite_id

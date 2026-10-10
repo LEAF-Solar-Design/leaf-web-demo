@@ -130,6 +130,34 @@ def specimen(response):
         key: response.headers[key] for key in ("content-type", "cache-control") if key in response.headers}
 
 
+DIGEST_SENTENCE = "catalog tool changed or confirmation digest is missing; refresh tools and confirm again"
+# Text a digest can never be: one accented letter, a lone surrogate, a digest-length string with one
+# accented letter, and sixty-four full-width zeros.
+UNCOMPARABLE_DIGESTS = (chr(0xE9), chr(0xD800), "0" * 63 + chr(0xE9), chr(0xFF10) * 64)
+
+
+# Every ASCII character Python's str.strip() removes, then the two-character line ending and a NUL.
+NEAR_MISS_EDGES = (" ", "\t", "\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\r\n", "\x00")
+
+
+def near_miss_digests(digest):
+    # What a normalising comparison would wrongly accept: the digest with one edge character after it
+    # or before it, the bare hex without its scheme, and the scheme respelled (upper case, a space
+    # after the colon, a space before it). The list is finite, so it names the normalisations it
+    # covers and proves nothing about one it does not name.
+    scheme, colon, bare = digest.partition(":")
+    assert scheme == "sha256" and colon == ":" and len(bare) == 64
+    return (*(digest + edge for edge in NEAR_MISS_EDGES), *(edge + digest for edge in NEAR_MISS_EDGES),
+            bare, "SHA256:" + bare, "Sha256:" + bare, "sha256: " + bare, "sha256 :" + bare)
+
+
+def raw_run(lane, digest, request_headers):
+    # The body travels as ASCII JSON so a lone surrogate reaches the route as the client sent it.
+    payload = json.dumps({**body(lane), "catalog_digest": digest}).encode("ascii")
+    return lane.client.post("/api/run?wait=0", content=payload,
+                            headers={**request_headers, "content-type": "application/json"})
+
+
 def replay_row(lane, monkeypatch):
     params = policy_cases.r3a.prepare(lane.s).request["parameters"]
     s = lane.s
@@ -244,11 +272,25 @@ def test_sip_r5_binding_and_legacy_pins(lane, monkeypatch):
         assert "reason_code" not in response.json()["error"]
     assert not calls
     params = {"drawing_id": str(lane.s.drawing)}
-    assert run(lane, params).status_code == 202
+    sent = headers(lane, Authorization="Bearer t1")
+    assert run(lane, params, request_headers=sent).status_code == 202
     args, kwargs = calls[-1]
     assert args[0] == lane.tools["solar-settings"] and args[1] is lane.tenant
     assert kwargs["params"] == params and kwargs["preview"] is False
     assert kwargs["input_version_id"] == str(lane.s.parent.version_id)
+    forwarded = {"org_header": str(lane.s.org), "project_header": str(lane.s.project),
+        "authorization": "Bearer t1", "input_version_id": str(lane.s.parent.version_id),
+        "drawing_id": str(lane.s.drawing), "params": params,
+        "catalog_digest": deps.catalog_tool_digest(lane.tools["solar-settings"]),
+        "idempotency_key": "key", "checkout_capability": "cap"}
+    assert args == (lane.tools["solar-settings"], lane.tenant)
+    assert kwargs == {**forwarded, "preview": False}
+    before = len(calls)
+    assert preview(lane, params, request_headers=sent).status_code == 200
+    assert len(calls) == before + 1
+    args, kwargs = calls[-1]
+    assert args == (lane.tools["solar-settings"], lane.tenant)
+    assert kwargs == {**forwarded, "preview": True}
     req = route.RunRequest(**body(lane, {}))
     route._project_solar_admission(lane.tools[req.tool], lane.tenant, req,
         None, None, None, None, idempotency_key=None, preview=True)
@@ -407,7 +449,10 @@ def test_sip_r5_catalog_run_parity(lane, monkeypatch):
     assert compare()[0]["runnable"]
     nested = body(lane)["params"]
     nested["changes"]["surprise"] = 1
-    assert not compare(nested)[0]["runnable"]
+    state, response = compare(nested)
+    assert not state["runnable"]
+    refusal(response, "INVALID_SETTINGS_REQUEST", 409, "Canonical Solar request was refused.")
+    assert state["admission"]["error"] == response.json()["error"]
     entry = {"solar-settings": {"params": body(lane)["params"], "catalog_digest": "stale",
                                 "idempotency_key": "key"}}
     assert not compare(project_runs=json.dumps(entry))[0]["runnable"]
@@ -467,6 +512,49 @@ def test_sip_r5_catalog_request_validation(lane, monkeypatch):
     unsupported = {"solar-string-multi-add": good}
     assert not states(preview(lane, project_runs=json.dumps(unsupported)))["solar-string-multi-add"]["admission_checked"]
     assert not lane.a.events
+
+
+def test_sip_r5_uncomparable_digest_refused(lane, monkeypatch):
+    monkeypatch.setattr(policy, "project_tool_admission", policy_cases.r4.forbidden)
+    digest = deps.catalog_tool_digest(lane.tools["solar-settings"])
+    assert route._catalog_digest_matches(digest, digest)
+    near = near_miss_digests(digest)
+    assert len(set(near)) == 29 and digest not in near and all(isinstance(value, str) for value in near)
+    for value in (None, 1, True, digest.encode("ascii"), [digest], "", "stale", digest + "0",
+                  digest[:-1], digest.upper(), " " + digest, *UNCOMPARABLE_DIGESTS, *near):
+        assert route._catalog_digest_matches(value, digest) is False
+    entry = lambda value: json.dumps({"solar-settings": {
+        "params": body(lane)["params"], "catalog_digest": value, "idempotency_key": "key"}})
+    for enabled in (True, False):
+        if enabled:
+            monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
+        else:
+            monkeypatch.delenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", raising=False)
+        for request_headers in (headers(lane), {}):
+            stale = specimen(raw_run(lane, "stale", request_headers))
+            assert stale[0] == 409 and json.loads(stale[1])["error"]["message"] == DIGEST_SENTENCE
+            for value in (*UNCOMPARABLE_DIGESTS, *near):
+                assert specimen(raw_run(lane, value, request_headers)) == stale
+        if enabled:
+            stale = states(preview(lane, project_runs=entry("stale")))["solar-settings"]
+            assert not stale["runnable"] and stale["admission"]["status_code"] == 409
+            assert stale["admission"]["error"]["message"] == DIGEST_SENTENCE
+            for value in (*UNCOMPARABLE_DIGESTS, *near):
+                assert states(preview(lane, project_runs=entry(value)))["solar-settings"] == stale
+    assert not lane.a.accepted and not lane.a.events
+
+
+def test_sip_r5_preview_has_no_turn_gate(lane, monkeypatch):
+    # Declared boundary: the catalog route takes no conversational headers, so a preview does not model
+    # the run route's turn gate. A session header without its turn is refused by the run alone.
+    monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
+    sent = headers(lane, **{"X-Authority-Session-Id": "session"})
+    state = states(preview(lane, request_headers=sent))["solar-settings"]
+    assert state["runnable"] and state["admission"] == {"status_code": 200, "error": None}
+    response = run(lane, request_headers=sent)
+    assert response.status_code == 403 and response.json()["error"]["message"] == (
+        "active same-account turn authority is required for conversational runs")
+    assert not lane.a.accepted
 
 
 def test_sip_r5_wait_and_observation(lane, monkeypatch):
