@@ -468,5 +468,7 @@ def test_sip_r3a_additive_entrypoints_no_activation(memory, monkeypatch):
         "solar-size-strings", "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
         "solar-string-add", "solar-assign-equipment"}
     root = Path(local.__file__).parent
-    assert "solar_project_graph" not in (root / "canonical_worker.py").read_text(encoding="utf-8")
+    worker = (root / "canonical_worker.py").read_text(encoding="utf-8")
+    assert "if tool_name in solar_project_graph.SUPPORTED_TOOLS:" in worker
+    assert "return solar_project_jobs.run_once(owner, tool_name=tool_name, lease_seconds=lease_seconds)" in worker
     assert "canonical_only" not in solar_tools.trusted_record("solar-settings")
