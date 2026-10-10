@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import CostTransparencyPanel from './CostTransparencyPanel.jsx'
 import { config, getCost, getUsage } from '../api.js'
+import { registerEscapeOwner } from '../lib/useEscapeOwner.js'
+import { RibbonWidget } from '../site/DraftingRibbon.jsx'
 
 const title = 'What Leaf costs to operate'
 const copy = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
@@ -205,6 +207,101 @@ describe('cost transparency', () => {
     fireEvent.keyDown(screen.getByLabelText('Month'), { key: 'Escape' })
     expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: title })).toHaveFocus()
+  })
+
+  it('KEYS-B12 the open cost panel owns Escape from its own trigger and from the page, above a lower owner', async () => {
+    respond()
+    const below = vi.fn()
+    const later = vi.fn()
+    let unregisterLater = () => {}
+    // VersionHistory registers a global history-layer owner; the open panel is
+    // a menu-layer overlay above it wherever focus sits.
+    const unregister = registerEscapeOwner('version-history', below, { layer: 'history' })
+    try {
+      await openPanel()
+      const trigger = screen.getByRole('button', { name: title })
+      trigger.focus()
+      fireEvent.keyDown(trigger, { key: 'Escape' })
+      expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
+      expect(below).not.toHaveBeenCalled()
+      expect(trigger).toHaveFocus()
+      // Closed: the next press belongs to the owner below.
+      fireEvent.keyDown(trigger, { key: 'Escape' })
+      expect(below).toHaveBeenCalledTimes(1)
+      below.mockClear()
+      // Reopened, with the key coming from the page rather than the panel. A
+      // history-layer owner that opens AFTER the panel is newer on the stack, so
+      // the panel wins by its layer, never by being the most recent owner.
+      fireEvent.click(trigger)
+      await screen.findByRole('region', { name: title })
+      unregisterLater = registerEscapeOwner('version-history-later', later, { layer: 'history' })
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
+      expect(below).not.toHaveBeenCalled()
+      expect(later).not.toHaveBeenCalled()
+    } finally {
+      unregisterLater()
+      unregister()
+    }
+  })
+
+  it('KEYS-B15 Escape from a control outside the open panel closes it and leaves that control alone', async () => {
+    respond()
+    const applied = vi.fn()
+    // The ribbon's Color select buffers a keyboard walk and applies it on Enter or on blur (RibbonWidget).
+    render(<RibbonWidget widget={{ id: 'color', label: 'Color', value: 'ByLayer',
+      options: ['ByLayer', 'Red', 'Blue'], onChange: applied }} />)
+    await openPanel()
+    const select = document.querySelector('[data-widget="color"] select')
+    act(() => select.focus())
+    fireEvent.keyDown(select, { key: 'ArrowDown' })
+    fireEvent.change(select, { target: { value: 'Red' } })
+    expect(select).toHaveValue('Red')
+    // First press: the panel is the menu-layer owner and closes. Focus stays in the select, so its walk is
+    // neither committed by a blur nor discarded.
+    fireEvent.keyDown(select, { key: 'Escape' })
+    expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
+    expect(select).toHaveFocus()
+    expect(select).toHaveValue('Red')
+    expect(applied).not.toHaveBeenCalled()
+    // Second press: the select's own owner abandons the walk.
+    fireEvent.keyDown(select, { key: 'Escape' })
+    expect(select).toHaveValue('ByLayer')
+    expect(applied).not.toHaveBeenCalled()
+  })
+
+  it('KEYS-B16 the open panel is a menu-layer owner, and a close from nowhere returns focus to its trigger', async () => {
+    respond()
+    const sheet = vi.fn()
+    await openPanel()
+    const trigger = screen.getByRole('button', { name: title })
+    // A sheet opened after the panel is newer on the stack and one layer lower: it waits its turn.
+    const unregister = registerEscapeOwner('later-sheet', sheet, { layer: 'sheet' })
+    try {
+      act(() => document.activeElement.blur())
+      expect(document.activeElement).toBe(document.body)
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
+      expect(sheet).not.toHaveBeenCalled()
+      expect(trigger).toHaveFocus()
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      expect(sheet).toHaveBeenCalledTimes(1)
+    } finally {
+      unregister()
+    }
+  })
+
+  it('KEYS-B17 Escape with focus on a panel control other than Close returns focus to the trigger', async () => {
+    respond()
+    await openPanel()
+    const trigger = screen.getByRole('button', { name: title })
+    const month = screen.getByLabelText('Month')
+    // Opening focuses Close; this press comes from a different control inside the panel.
+    act(() => month.focus())
+    expect(month).toHaveFocus()
+    fireEvent.keyDown(month, { key: 'Escape' })
+    expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
   })
 
   it('shows three-month history with month states, cumulative rows and totals', async () => {

@@ -125,10 +125,20 @@ export default function CostTransparencyPanel({ mock = false }) {
     if (open) closeButton.current?.focus()
   }, [open])
 
-  const close = () => { setOpen(false); trigger.current?.focus() }
-  // S27: Escape from inside the open panel is the owner stack's (menu layer,
-  // scoped to the panel as the old section-level handler was).
-  useEscapeOwner('cost-panel', open && !mock, close, { layer: 'menu', scope: panelRef, scoped: true })
+  // KEYS-b: the owner below is not focus-scoped, so Escape can arrive while focus sits in a control outside
+  // the panel. Closing returns focus to the trigger only from inside the panel or from nowhere: taking it
+  // from a control that is mid-edit would blur that control and commit what the key should let it discard.
+  const close = () => {
+    setOpen(false)
+    const active = document.activeElement
+    if (!active || active === document.body || panelRef.current?.contains(active)) trigger.current?.focus()
+  }
+  // S27: Escape while the panel is open is the owner stack's (menu layer).
+  // KEYS-b: the owner is NOT focus-scoped. An open panel is a dismissible
+  // overlay, so it owns Escape wherever focus sits, its own trigger
+  // included; scoped, a key from the trigger fell to whatever was open
+  // below it. The scope still orders it against a nested owner.
+  useEscapeOwner('cost-panel', open && !mock, close, { layer: 'menu', scope: panelRef })
   if (mock) return null
   const resources = data?.resources || []
   const own = data?.own_use
