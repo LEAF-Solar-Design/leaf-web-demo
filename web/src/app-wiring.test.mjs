@@ -432,6 +432,203 @@ describe('S17 version-created toast Undo wiring', () => {
   })
 })
 
+import {
+  assertPublicationBindings, changePublicationProp, relaxDeclaration, wrapPublicationPanel, wrapPublicationReturn,
+} from './test-support/catalogPublicationWiring.mjs'
+
+describe('C4-1b publication shell bindings', () => {
+  const sources = {
+    studio: appSource,
+    toolcast: readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8'),
+  }
+  function owner() {
+    const calls = { refresh: [], claim: [], upsert: [], author: [] }
+    const value = {
+      state: { tools: [], catalog: { families: [] }, openFamilies: {} },
+      actions: {
+        refreshCatalog: (...args) => { calls.refresh.push(args) },
+        loadCatalog() {}, retryTools() {},
+        upsertTool: (...args) => { calls.upsert.push(args) },
+      },
+      controller: { consumeCatalogPublication: (...args) => { calls.claim.push(args); return true } },
+    }
+    const author = (...args) => { calls.author.push(args) }
+    return { value, calls, extra: { onPublishAuthor: author, publishAuthoredTool: author } }
+  }
+  // Both bindings are pinned with no conversation yet and with one turn already sent: the panel
+  // receives the history either way, and neither binding may depend on it.
+  const HISTORIES = [[], [{ turnId: 'turn-1', text: 'Publish a tool' }]]
+  function pin(shell, source = sources[shell], other = null) {
+    for (const history of HISTORIES) {
+      const o = owner()
+      const wiring = assertPublicationBindings(source, shell, o.value,
+        { ...o.extra, otherOwner: other, agentTurns: history, turns: history })
+      const publication = { sessionId: 'session-1', changeSetId: 'change-1', catalogDigest: 'digest-1' }
+      assert.equal(wiring.panel.sessionId, publication.sessionId)
+      assert.equal(wiring.panel.userTurns, history)
+      assert.equal(wiring.panel.consumeCatalogPublication(publication), true)
+      wiring.panel.onCatalogChanged(publication)
+      assert.deepEqual(o.calls.claim, [[publication]])
+      assert.deepEqual(o.calls.refresh, [[publication]])
+      assert.deepEqual(o.calls.upsert, [])
+      assert.deepEqual(o.calls.author, [])
+    }
+  }
+  function rejectsProp(shell, name, expression = null) {
+    pin(shell)
+    const other = owner().value
+    const mutated = changePublicationProp(sources[shell], name, expression)
+    assert.notEqual(mutated, sources[shell])
+    assert.throws(() => pin(shell, mutated, other))
+  }
+
+  it('C41B-01 Studio executes both publication bindings from its sole owner', () => {
+    pin('studio')
+  })
+  it('C41B-02 ToolCast executes both publication bindings from its sole owner', () => {
+    pin('toolcast')
+  })
+  it('C41B-03 removing the Studio refresh prop breaks the pin', () => {
+    rejectsProp('studio', 'onCatalogChanged')
+  })
+  it('C41B-04 removing the Studio claim prop breaks the pin', () => {
+    rejectsProp('studio', 'consumeCatalogPublication')
+  })
+  it('C41B-05 removing the ToolCast refresh prop breaks the pin', () => {
+    rejectsProp('toolcast', 'onCatalogChanged')
+  })
+  it('C41B-06 removing the ToolCast claim prop breaks the pin', () => {
+    rejectsProp('toolcast', 'consumeCatalogPublication')
+  })
+  it('C41B-07 commenting the Studio refresh declaration breaks the pin', () => {
+    pin('studio')
+    const needle = '    refreshCatalog,'
+    assert.equal(sources.studio.split(needle).length, 2)
+    const mutated = sources.studio.replace(needle, '    /* refreshCatalog, */')
+    assert.throws(() => pin('studio', mutated))
+  })
+  it('C41B-08 a foreign Studio claim breaks the pin', () => {
+    rejectsProp('studio', 'consumeCatalogPublication', 'otherOwner.controller.consumeCatalogPublication')
+  })
+  it('C41B-09 a foreign ToolCast claim breaks the pin', () => {
+    rejectsProp('toolcast', 'consumeCatalogPublication', 'otherOwner.controller.consumeCatalogPublication')
+  })
+  it('C41B-10 a no-op Studio refresh breaks the pin', () => {
+    rejectsProp('studio', 'onCatalogChanged', '() => {}')
+  })
+  it('C41B-11 a no-op ToolCast refresh breaks the pin', () => {
+    rejectsProp('toolcast', 'onCatalogChanged', '() => {}')
+  })
+  it('C41B-12 comments and strings cannot replace a live publication prop', () => {
+    pin('studio')
+    const removed = changePublicationProp(sources.studio, 'onCatalogChanged')
+    const decoys = '\n// onCatalogChanged={refreshCatalog}\nconst c41bDecoy = "onCatalogChanged={refreshCatalog}";\n'
+    assert.throws(() => pin('studio', removed + decoys))
+  })
+  it('C41B-20 a Studio binding that depends on shell state breaks the pin', () => {
+    rejectsProp('studio', 'onCatalogChanged', 'agentTurns.length ? undefined : refreshCatalog')
+    rejectsProp('studio', 'onCatalogChanged', 'writeLocked ? undefined : refreshCatalog')
+    rejectsProp('studio', 'consumeCatalogPublication',
+      'agentTurns.length ? undefined : catalogController.consumeCatalogPublication')
+    rejectsProp('studio', 'consumeCatalogPublication',
+      'engineDirty ? undefined : catalogController.consumeCatalogPublication')
+  })
+  it('C41B-21 a ToolCast binding that depends on shell state breaks the pin', () => {
+    rejectsProp('toolcast', 'onCatalogChanged', 'turns.length ? undefined : catalog.actions.refreshCatalog')
+    rejectsProp('toolcast', 'onCatalogChanged', 'busy ? undefined : catalog.actions.refreshCatalog')
+    rejectsProp('toolcast', 'consumeCatalogPublication',
+      'turns.length ? undefined : catalog.controller.consumeCatalogPublication')
+    rejectsProp('toolcast', 'consumeCatalogPublication',
+      'jobRunning ? undefined : catalog.controller.consumeCatalogPublication')
+  })
+  // The helper evaluates the two props in the component's own scope. A function between the
+  // component and the panel would give them another one, so the pin refuses it.
+  const FOREIGN = '{ actions: { refreshCatalog() {} }, controller: { consumeCatalogPublication: () => true } }'
+  it('C41B-22 a wrapper that rebinds the owner around the panel breaks the pin', () => {
+    for (const [shell, parameter, argument] of [
+      ['toolcast', 'catalog', FOREIGN],
+      ['studio', 'refreshCatalog', '() => {}'],
+      ['studio', 'catalogController', '{ consumeCatalogPublication: () => true }'],
+    ]) {
+      pin(shell)
+      const mutated = wrapPublicationPanel(sources[shell], `{((${parameter}) => (`, `))(${argument})}`)
+      assert.notEqual(mutated, sources[shell])
+      assert.throws(() => pin(shell, mutated), /between the shell component and its panel/)
+    }
+  })
+  it('C41B-23 a panel handed to a call instead of mounted breaks the pin', () => {
+    for (const shell of ['studio', 'toolcast']) {
+      pin(shell)
+      const mutated = wrapPublicationPanel(sources[shell], '{String(', ')}')
+      assert.notEqual(mutated, sources[shell])
+      assert.throws(() => pin(shell, mutated), /between the shell component and its panel/)
+    }
+  })
+  // The helper reads each owner name from its one declaration and runs no statement after it, so
+  // the pin refuses anything that could replace the name before the panel is returned.
+  const DROPPED = '{ ...catalog, actions: { ...catalog.actions, refreshCatalog: undefined } }'
+  it('C41B-24 an owner binding reassigned before the return breaks the pin', () => {
+    for (const [shell, name, statement] of [
+      ['studio', 'retryTools', 'refreshCatalog = undefined;'],
+      ['studio', 'retryTools', 'if (engineDirty) refreshCatalog = undefined;'],
+      ['toolcast', 'catalog', `catalog = ${DROPPED};`],
+      ['toolcast', 'catalog', `if (busy) { catalog = ${DROPPED}; }`],
+    ]) {
+      pin(shell)
+      const mutated = wrapPublicationReturn(relaxDeclaration(sources[shell], name), `${statement}\n`, '')
+      assert.throws(() => pin(shell, mutated))
+    }
+  })
+  it('C41B-25 an owner binding that is not const breaks the pin', () => {
+    for (const [shell, name] of [['studio', 'retryTools'], ['studio', 'catalogController'], ['toolcast', 'catalog']]) {
+      pin(shell)
+      const mutated = relaxDeclaration(sources[shell], name)
+      assert.notEqual(mutated, sources[shell])
+      assert.throws(() => pin(shell, mutated), /is declared const/)
+    }
+  })
+  it('C41B-26 a write through an owner binding breaks the pin', () => {
+    for (const [shell, statement] of [
+      ['studio', 'catalogController.consumeCatalogPublication = () => true;'],
+      ['studio', 'catalogActions.refreshCatalog = undefined;'],
+      ['studio', ';({ refreshCatalog } = { refreshCatalog: undefined });'],
+      ['studio', ';[refreshCatalog = undefined] = [];'],
+      ['studio', 'delete catalogController.consumeCatalogPublication;'],
+      ['toolcast', 'catalog.actions.refreshCatalog = undefined;'],
+      ['toolcast', 'catalog.controller = { consumeCatalogPublication: () => true };'],
+      ['toolcast', 'delete catalog.actions.refreshCatalog;'],
+      ['toolcast', 'for (catalog.actions.refreshCatalog of [undefined]) { /* written by the loop */ }'],
+    ]) {
+      pin(shell)
+      const mutated = wrapPublicationReturn(sources[shell], `${statement}\n`, '')
+      assert.notEqual(mutated, sources[shell])
+      assert.throws(() => pin(shell, mutated), /writes to a name the publication props are read through/)
+    }
+  })
+  it('C41B-27 a block that rebinds the owner around the return breaks the pin', () => {
+    for (const [shell, name] of [['studio', 'refreshCatalog'], ['studio', 'catalogController'], ['toolcast', 'catalog']]) {
+      pin(shell)
+      const mutated = wrapPublicationReturn(sources[shell], `{ const ${name} = undefined;\n`, '\n}')
+      assert.notEqual(mutated, sources[shell])
+      assert.throws(() => pin(shell, mutated), /only block around the panel/)
+    }
+  })
+  it('C41B-28 statements that leave the owner alone keep the pin', () => {
+    for (const shell of ['studio', 'toolcast']) {
+      for (const before of [
+        'const c41bLocal = { refreshCatalog: 1 };\nc41bLocal.refreshCatalog = 2;\n',
+        'let c41bCount = 0;\nc41bCount += 1;\n',
+        '{ const catalog = undefined, refreshCatalog = undefined, catalogController = undefined;\n'
+          + '  void [catalog, refreshCatalog, catalogController] }\n',
+      ]) {
+        const mutated = wrapPublicationReturn(sources[shell], before, '')
+        assert.notEqual(mutated, sources[shell])
+        pin(shell, mutated)
+      }
+    }
+  })
+})
+
 describe('project board live pane wiring', () => {
   const tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
   function elements(name) {
@@ -585,6 +782,7 @@ describe('project board live pane wiring', () => {
     assert.equal(panels.length, 1)
     for (const [name, value] of Object.entries({ sessionId: 'agentSessionId', userTurns: 'agentTurns',
       onAttachJob: 'onAttachAgentJob', onJobLinked: 'refreshJobs', engineDirty: 'engineDirty',
+      onCatalogChanged: 'refreshCatalog', consumeCatalogPublication: 'catalogController.consumeCatalogPublication',
       onBeforeWriteApproval: 'closeStartForChange' })) binding(panels[0], name, value)
     const seats = elements('PersistentSeat')
     assert.ok(seats.some((seat) => seat.children.includes(panels[0])))

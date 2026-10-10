@@ -1047,6 +1047,7 @@ export default function App() {
     // the flat runnable list the published-tool resolver needs.
     loadTools: loadCatalogTools,
     loadCatalog,
+    refreshCatalog,
     upsertTool,
     toggleFamily,
     setFamilyOpen,
@@ -5042,6 +5043,8 @@ export default function App() {
           <ConversePanel
             sessionId={agentSessionId}
             userTurns={agentTurns}
+            onCatalogChanged={refreshCatalog}
+            consumeCatalogPublication={catalogController.consumeCatalogPublication}
             onDismiss={() => { clearAgentMode(); if (boardConversation) setProjectPane(null) }}
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
