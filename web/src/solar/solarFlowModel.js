@@ -203,8 +203,7 @@ export function deriveProjectSolarFlowState({ steps, current, previousReady, pen
   const items = [...grouped.values()].slice(0, MAX_FLOW_STEPS).map((matching, index) => {
       const row = matching[0]
       const ready = matching.every((entry) => entry.catalog_digest === row.catalog_digest && projectStepReady(entry))
-      const view = row.availability
-    const reviewable = [PROJECT_EQUIPMENT_TOOL, 'solar-size-strings', 'solar-string-conductors'].includes(row.name) && matching.every((entry) => {
+    const reviewable = PROJECT_SOLAR_REVIEW_TOOLS.includes(row.name) && matching.every((entry) => {
         const availability = entry.availability
         return typeof entry.catalog_digest === 'string' && PROJECT_FLOW_DIGEST.test(entry.catalog_digest)
           && entry.catalog_digest === row.catalog_digest && availability?.implemented === true && availability.engine_ready === true
@@ -212,14 +211,21 @@ export function deriveProjectSolarFlowState({ steps, current, previousReady, pen
           && Array.isArray(availability.refusal_reasons) && availability.refusal_reasons.length === 1
           && availability.refusal_reasons[0] === 'project_request_required'
       })
-      const enabled = ready || reviewable || settingsOpenable(row, openSettingsForm)
-      const codes = Array.isArray(view?.refusal_reasons)
-        ? view.refusal_reasons.filter((code) => typeof code === 'string' && PROJECT_FLOW_CODE.test(code)).slice(0, MAX_REASON_CODES) : []
-      const nestedCode = view?.admission?.error?.reason_code
-      if (typeof nestedCode === 'string' && PROJECT_FLOW_CODE.test(nestedCode) && !codes.includes(nestedCode)) codes.push(nestedCode)
-      const graphRefusal = view?.admission_checked === true
-        && ((view.admission?.status_code === 409 && PROJECT_GRAPH_CODES.has(nestedCode))
-          || (view.admission?.status_code === 200 && view.admission.error === null && codes.some((code) => PROJECT_GRAPH_CODES.has(code))))
+      const enabled = ready || reviewable
+      const codes = []
+      let graphRefusal = false
+      for (const entry of matching) {
+        const availability = entry.availability
+        const rowCodes = Array.isArray(availability?.refusal_reasons)
+          ? availability.refusal_reasons.filter((code) => typeof code === 'string' && PROJECT_FLOW_CODE.test(code)).slice(0, MAX_REASON_CODES) : []
+        const nestedCode = availability?.admission?.error?.reason_code
+        if (typeof nestedCode === 'string' && PROJECT_FLOW_CODE.test(nestedCode) && !rowCodes.includes(nestedCode)) rowCodes.push(nestedCode)
+        for (const code of rowCodes) if (codes.length < MAX_REASON_CODES && !codes.includes(code)) codes.push(code)
+        graphRefusal ||= availability?.admission_checked === true
+          && ((availability.admission?.status_code === 409 && PROJECT_GRAPH_CODES.has(nestedCode))
+            || (availability.admission?.status_code === 200 && availability.admission.error === null
+              && rowCodes.some((code) => PROJECT_GRAPH_CODES.has(code))))
+      }
       const runOutcome = ownValue(runs, row.name) ?? null
       const sameRun = runOutcome?.authorityKey === authorityKey && sameSolarDrawingBinding(runOutcome?.binding, binding)
       const pendingHere = pending?.tool === row.name && pending.authorityKey === authorityKey && sameSolarDrawingBinding(pending.binding, binding)
@@ -232,6 +238,126 @@ export function deriveProjectSolarFlowState({ steps, current, previousReady, pen
         skip: ready && firstBlocked !== -1 && firstBlocked < index,
         invalidated: !enabled && previousReady?.[row.name] === true && graphRefusal }
     })
+  return { items, resumeIndex }
+}
+
+export const PROJECT_SOLAR_REVIEW_TOOLS = Object.freeze([
+  'solar-settings', 'solar-panels-from-drawing', 'solar-size-strings',
+  'solar-string-add', 'solar-string-multi-add', 'solar-string-conductors', 'solar-assign-equipment',
+])
+
+export const PROJECT_SOLAR_ROOFTOP_STAGES = Object.freeze([
+  flowStage('settings', 'Settings', ['solar-settings']),
+  flowStage('panels', 'Panel import', ['solar-panels-from-drawing']),
+  flowStage('sizing', 'Manual sizing', ['solar-size-strings']),
+  flowStage('strings', 'Strings', ['solar-string-add', 'solar-string-multi-add']),
+  flowStage('conductors', 'Conductors', ['solar-string-conductors']),
+  flowStage('equipment', 'Equipment', ['solar-assign-equipment']),
+  flowStage('routes', 'Routes', ['solar-homeruns', 'solar-feeders']),
+  flowStage('outputs', 'Outputs', ['solar-schedule', 'solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']),
+])
+
+export const PROJECT_SOLAR_RAIL_REASONS = Object.freeze({
+  binding_invalid: 'Open a project drawing version to review Solar steps.',
+  catalog_pending: 'Checking Solar steps for the selected project drawing version.',
+  stage_missing: 'This Solar step is not available in the current project catalog.',
+  stage_refused: 'This Solar step cannot run with the current project request.',
+  catalog_unreadable: 'The project Solar catalog could not be read. Refresh the tools and try again.',
+  form_unavailable: 'This tool has no project form in this view.',
+  run_in_progress: 'A run is in progress. Wait for it to finish.',
+  review_required: 'Review the inputs to check whether this step can run.',
+})
+
+export function projectSolarRailReason(code) {
+  switch (code) {
+    case 'binding_invalid': return PROJECT_SOLAR_RAIL_REASONS.binding_invalid
+    case 'catalog_pending': return PROJECT_SOLAR_RAIL_REASONS.catalog_pending
+    case 'stage_missing': return PROJECT_SOLAR_RAIL_REASONS.stage_missing
+    case 'stage_refused': return PROJECT_SOLAR_RAIL_REASONS.stage_refused
+    case 'catalog_unreadable': return PROJECT_SOLAR_RAIL_REASONS.catalog_unreadable
+    case 'form_unavailable': return PROJECT_SOLAR_RAIL_REASONS.form_unavailable
+    case 'run_in_progress': return PROJECT_SOLAR_RAIL_REASONS.run_in_progress
+    case 'review_required': return PROJECT_SOLAR_RAIL_REASONS.review_required
+    default: return null
+  }
+}
+
+// Count every catalog entry before filtering. The extra read detects overflow without
+// hiding a late duplicate behind standalone selection's first-row rule.
+export function projectSolarFlowSelect(families, flowId) {
+  const id = solarFlowId(flowId)
+  const flow = SOLAR_FLOWS.find((entry) => entry.id === id)
+  const stages = id === DEFAULT_SOLAR_FLOW ? PROJECT_SOLAR_ROOFTOP_STAGES : flow.stages
+  const grouped = new Map()
+  let visited = 0
+  let unreadable = false
+  try {
+    scan: for (const family of Array.isArray(families) ? families : []) {
+      for (const row of Array.isArray(family?.capabilities) ? family.capabilities : []) {
+        visited += 1
+        if (visited > MAX_CATALOG_ROWS) { unreadable = true; break scan }
+        if (!row || typeof row.name !== 'string') continue
+        if (!grouped.has(row.name)) grouped.set(row.name, [])
+        grouped.get(row.name).push(row)
+      }
+    }
+  } catch { unreadable = true }
+  const positions = stages.flatMap((stage) => {
+    const names = stage.capabilities.length ? stage.capabilities : [`project-stage-${stage.id}`]
+    return names.map((name) => {
+      const matching = unreadable ? [] : grouped.get(name) ?? []
+      let usable = false
+      try { usable = matching.length > 0 && matching.every((row) => solarView(row).state === 'valid') } catch {}
+      const label = matching[0]?.label
+      return { name, stage: stage.id, label: typeof label === 'string' && label ? label : names.length === 1 ? stage.label : name,
+        row: matching[0] ?? null, rows: matching, usable,
+        formUnavailable: stage.kind !== undefined || stage.capabilities.length === 0 }
+    })
+  }).slice(0, MAX_FLOW_STEPS)
+  const missing = stages.filter((stage) => positions.some((position) => position.stage === stage.id
+    && (!position.usable || position.formUnavailable))).map((stage) => stage.label)
+  return { flow: id, label: flow.label, maturity: flow.maturity, positions,
+    steps: unreadable ? [] : positions.flatMap((position) => position.rows),
+    available: !unreadable && missing.length === 0, missing,
+    reasonKey: unreadable ? 'catalog_unreadable' : null }
+}
+
+export function projectSolarFlowOptions(families) {
+  return SOLAR_FLOWS.map(({ id, label, maturity }) => ({ id, label, maturity,
+    available: projectSolarFlowSelect(families, id).available }))
+}
+
+// Display gaps are separate from capability rows. Scope and catalog failures never
+// acquire run history, readiness or admission through a placeholder.
+export function projectSolarFlowDisplay({ selection, current, binding, authorityKey, busy = false,
+  previousReady, pending, runs } = {}) {
+  const scope = projectSolarFlowScope(binding, authorityKey)
+  const active = current === true && !!scope && !!selection && selection.reasonKey !== 'catalog_unreadable'
+  const derived = deriveProjectSolarFlowState({ steps: active ? selection.steps : [], current: active,
+    binding, authorityKey, previousReady, pending, runs })
+  const byName = new Map(derived.items.map((item) => [item.name, item]))
+  const usableNames = new Set((selection?.positions ?? [])
+    .filter((position) => position.usable && !position.formUnavailable).map((position) => position.name))
+  const resumeName = [...derived.items].reverse().find((item) => item.enabled && usableNames.has(item.name))?.name
+  let gap = false
+  let resumeIndex = -1
+  const items = (selection?.positions ?? []).map((position, index) => {
+    const source = active && position.usable && !position.formUnavailable ? byName.get(position.name) : null
+    const item = source ? { ...source, label: position.label, skip: source.ready && gap } : {
+      name: position.name, label: position.label, row: position.row, ready: false, enabled: false,
+      status: 'blocked', codes: active ? byName.get(position.name)?.codes ?? [] : [],
+      runOutcome: null, skip: false, invalidated: false,
+    }
+    item.reasonKey = !scope ? 'binding_invalid' : current !== true ? 'catalog_pending'
+      : selection.reasonKey === 'catalog_unreadable' ? 'catalog_unreadable'
+        : position.formUnavailable ? 'form_unavailable' : !position.row ? 'stage_missing'
+          : !item.enabled ? 'stage_refused' : busy ? 'run_in_progress'
+            : item.status === 'review' ? 'review_required' : null
+    item.enabled = item.enabled && !busy && !!position.row
+    if (item.enabled && item.name === resumeName) resumeIndex = index
+    if (!item.ready) gap = true
+    return item
+  })
   return { items, resumeIndex }
 }
 

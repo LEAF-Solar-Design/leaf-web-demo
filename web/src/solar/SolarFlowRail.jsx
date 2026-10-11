@@ -3,7 +3,8 @@ import { solarRailReason } from '../lib/ribbonClusters.js'
 import {
   DEFAULT_SOLAR_FLOW, SOLAR_FLOW_MATURITY_NOTES, solarFlowId, solarFlowOptionLabel,
   solarFlowOptions, solarFlowReadyMap, solarFlowSelect, solarFlowState, solarFlowStepId,
-  deriveProjectSolarFlowState, projectSolarFlowScope, projectSolarFlowRunsFor, projectSolarFlowReason,
+  projectSolarFlowDisplay, projectSolarFlowSelect, projectSolarFlowOptions,
+  projectSolarFlowScope, projectSolarFlowRunsFor, projectSolarRailReason,
 } from './solarFlowModel.js'
 import { sameSolarDrawingBinding } from './solarDrawingBinding.js'
 import './solarFlow.css'
@@ -34,7 +35,7 @@ export default function SolarFlowRail(props) {
 }
 
 function ProjectSolarFlowRail({ solarBinding, authorityKey, projectClient, projectCatalog, projectRunMemory, projectPending,
-  openName = null, openSettingsForm, onOpenStep, onFlowChange, workspacePanelsByFlow = {} }) {
+  openName = null, busy = false, onOpenStep, onFlowChange }) {
   const [flowId, setFlowId] = useState(DEFAULT_SOLAR_FLOW)
   const [, refresh] = useState(0)
   useEffect(() => {
@@ -54,20 +55,16 @@ function ProjectSolarFlowRail({ solarBinding, authorityKey, projectClient, proje
   }
   const current = catalogCurrent()
   const families = current ? projectCatalog.families : []
-  const options = solarFlowOptions(families, undefined, workspacePanelsByFlow)
-  const selection = solarFlowSelect(families, flowId, undefined, workspacePanelsByFlow)
-  // Keep contradictory duplicates for project admission even though the legacy selector picks the first row.
-  const selectedNames = new Set(selection.steps.map((row) => row.name))
-  const duplicates = families.flatMap((family) => Array.isArray(family?.capabilities) ? family.capabilities : [])
-    .filter((row) => selectedNames.has(row?.name) && !selection.steps.includes(row))
+  const options = projectSolarFlowOptions(families)
+  const selection = projectSolarFlowSelect(families, flowId)
   const runs = projectSolarFlowRunsFor(projectRunMemory, solarBinding, authorityKey)
   const memory = useRef(null)
   if (!memory.current || memory.current.artifactKey !== scope?.artifactKey) {
     memory.current = { artifactKey: scope?.artifactKey, everReady: Object.create(null), runs, announcement: '' }
   }
   const saved = memory.current
-  const { items, resumeIndex } = deriveProjectSolarFlowState({ steps: [...selection.steps, ...duplicates], current,
-    previousReady: saved.everReady, pending: projectPending, runs, binding: solarBinding, authorityKey, openSettingsForm })
+  const { items, resumeIndex } = projectSolarFlowDisplay({ selection, current, busy,
+    previousReady: saved.everReady, pending: projectPending, runs, binding: solarBinding, authorityKey })
   const [, announce] = useState(0)
   useEffect(() => {
     if (memory.current !== saved || !catalogCurrent()) return
@@ -96,35 +93,33 @@ function ProjectSolarFlowRail({ solarBinding, authorityKey, projectClient, proje
       }}>
         {options.map((option) => <option key={option.id} value={option.id}>{solarFlowOptionLabel(option)}</option>)}
       </select>
-      {!scope ? <p role="status" data-testid="project-solar-flow-reason">{projectSolarFlowReason('binding_invalid')}</p>
-        : !current ? <p role="status" data-testid="project-solar-flow-reason">{projectSolarFlowReason('catalog_pending')}</p>
-        : <>
+      {!scope ? <p role="status" data-testid="project-solar-flow-reason">{projectSolarRailReason('binding_invalid')}</p>
+        : !current ? <p role="status" data-testid="project-solar-flow-reason">{projectSolarRailReason('catalog_pending')}</p>
+        : selection.reasonKey ? <p role="status" data-testid="project-solar-flow-reason">{projectSolarRailReason(selection.reasonKey)}</p> : null}
           {selection.maturity !== 'production' && <p className="solar-flow-maturity" data-testid="solar-flow-maturity">{SOLAR_FLOW_MATURITY_NOTES[selection.maturity]}</p>}
-          {selection.available ? <ol className="solar-flow-steps">
+          <ol className="solar-flow-steps">
             {items.map((item, index) => {
               const id = solarFlowStepId(item.name)
-              const reason = projectSolarFlowReason(item.status === 'review' ? 'review_required' : !item.enabled ? 'preview_refused' : null)
+              const reason = projectSolarRailReason(item.enabled && typeof onOpenStep !== 'function' ? 'form_unavailable' : item.reasonKey)
+              const actionable = item.enabled && !!item.row && !busy && typeof onOpenStep === 'function'
+              const resume = actionable && index === resumeIndex
               return <li key={item.name} className="solar-flow-step" data-status={item.status}
                 data-skip={item.skip ? 'true' : undefined} data-invalidated={item.invalidated ? 'true' : undefined}>
-                <button type="button" id={id} className="solar-flow-button" disabled={!item.enabled}
-                  aria-current={index === resumeIndex ? 'step' : undefined} aria-expanded={openName === item.name}
+                <button type="button" id={id} className="solar-flow-button" disabled={!actionable}
+                  aria-current={resume ? 'step' : undefined} aria-expanded={openName === item.name}
                   aria-describedby={reason ? `${id}-reason` : undefined}
-                  onClick={() => { if (item.enabled && catalogCurrent() && typeof onOpenStep === 'function') onOpenStep(item.row) }}>
+                  onClick={() => { if (actionable && catalogCurrent()) onOpenStep(item.row) }}>
                   <span className="solar-flow-label">{item.label}</span>
                   <span className="solar-flow-status">{item.status === 'review' ? 'Review inputs' : STATUS_TEXT[item.status]}</span>
-                  {index === resumeIndex && <span className="solar-flow-resume">Resume here</span>}
+                  {resume && <span className="solar-flow-resume">Resume here</span>}
                 </button>
                 {item.skip && <p className="solar-flow-note">An earlier step is not complete yet.</p>}
                 {reason && <p id={`${id}-reason`} className="solar-flow-reason">
-                  {item.invalidated && <span>Needs rerun: </span>}{reason}{item.codes[0] ? ` (${item.codes[0]})` : ''}
+                  {item.invalidated && <span>Needs rerun: </span>}{reason}{item.codes.length ? ` (${item.codes.join(', ')})` : ''}
                 </p>}
               </li>
             })}
-          </ol> : <div className="solar-flow-unavailable" data-testid="solar-flow-unavailable">
-            <p id="solar-flow-unavailable-reason">{selection.reason}</p>
-            {selection.missing.length > 0 && <ul aria-label="Unavailable stages">{selection.missing.map((label) => <li key={label}>{label}</li>)}</ul>}
-          </div>}
-        </>}
+          </ol>
       <p role="status" className="solar-flow-announce" data-testid="solar-flow-announce">{saved.announcement}</p>
     </nav>
   )

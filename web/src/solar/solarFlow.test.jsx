@@ -1,4 +1,7 @@
 import React from 'react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { createHash } from 'node:crypto'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { solarRailReason } from '../lib/ribbonClusters.js'
@@ -9,7 +12,9 @@ import ground from './__fixtures__/stringComposerGround.json'
 import rooftop from './__fixtures__/stringComposerRooftop.json'
 import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL, SOLAR_STRING_COMPOSER_REASONS, PROJECT_STRING_COMPOSER_REASONS,
   composeStringRequest, stringComposerView } from './solarStringComposerModel.js'
-import { SOLAR_FLOW_MATURITY_NOTES, SOLAR_FLOW_UNAVAILABLE_REASONS, solarFlowStepId } from './solarFlowModel.js'
+import { SOLAR_FLOW_MATURITY_NOTES, SOLAR_FLOW_UNAVAILABLE_REASONS, solarFlowStepId,
+  PROJECT_SOLAR_ROOFTOP_STAGES, PROJECT_SOLAR_REVIEW_TOOLS, PROJECT_SOLAR_RAIL_REASONS,
+  projectSolarRailReason, SOLAR_FLOWS } from './solarFlowModel.js'
 import { recordProjectSolarFlowRun, projectSolarFlowRunsFor, projectSolarFlowScope, projectSolarFlowReason } from './solarFlowModel.js'
 import { createSolarProjectClient } from './solarProjectClient.js'
 
@@ -166,7 +171,8 @@ it('R11-15 stale catalog provenance withdraws project actions resume and readine
   expect(h.props.onOpenStep).not.toHaveBeenCalled()
   view.rerender(<SolarFlowRail {...h.props} solarBinding={projectRailNext} />)
   expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('catalog_pending'))
-  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(screen.queryAllByRole('button')).toHaveLength(13)
+  expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
   expect(screen.queryByText('Resume here')).toBeNull()
   h.real.setScope(projectRailNext, 'epoch-1')
   h.families = projectRailFamilies({ runnable: false, refusal_reasons: ['GRAPH_NOT_EMBEDDED'],
@@ -174,12 +180,12 @@ it('R11-15 stale catalog provenance withdraws project actions resume and readine
   h.props = { ...h.props, solarBinding: projectRailNext, projectCatalog: await h.catalog() }
   view.rerender(<SolarFlowRail {...h.props} />)
   // The old V catalog was never recorded under W; actual artifact readiness recorded on V still survives.
-  expect(items()[0].getAttribute('data-invalidated')).toBe('true')
+  expect(document.getElementById(solarFlowStepId('solar-assign-equipment')).closest('li').getAttribute('data-invalidated')).toBe('true')
   h.families = projectRailFamilies({ runnable: false, input_ready: false, admission_checked: false,
     admission: null, refusal_reasons: ['project_request_required'] })
   h.props = { ...h.props, projectCatalog: await h.catalog() }
   view.rerender(<SolarFlowRail {...h.props} />)
-  expect(items()[0].getAttribute('data-invalidated')).toBeNull()
+  expect(document.getElementById(solarFlowStepId('solar-assign-equipment')).closest('li').getAttribute('data-invalidated')).toBeNull()
   expect(screen.getByText('Review inputs')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: new RegExp('^Assign equipment') }))
   expect(h.props.onOpenStep).toHaveBeenCalledTimes(1)
@@ -188,13 +194,15 @@ it('R11-15 stale catalog provenance withdraws project actions resume and readine
     { ...h.props.projectCatalog, binding: projectRailBinding }, { ...h.props.projectCatalog, client: {} },
     { ...h.props.projectCatalog, isCurrent: () => false }]) {
     view.rerender(<SolarFlowRail {...h.props} projectCatalog={projectCatalog} />)
-    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    expect(screen.queryAllByRole('button')).toHaveLength(13)
+  expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
     expect(screen.queryByText('Resume here')).toBeNull()
     expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('catalog_pending'))
   }
   view.rerender(<SolarFlowRail {...h.props} />)
   await act(async () => { await h.real.acquireCheckout() })
-  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(screen.queryAllByRole('button')).toHaveLength(13)
+  expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
   expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('catalog_pending'))
   expect(h.props.onOpenStep).toHaveBeenCalledTimes(1)
 })
@@ -205,8 +213,9 @@ it('R11-29 a rail given only a project id is project mode and refuses without a 
   const onOpenStep = vi.fn()
   const legacy = { families: [{ capabilities: [legacyReady] }], familiesDrawingId: 'dwg-1', drawingId: 'dwg-1', onOpenStep }
   const view = render(<SolarFlowRail {...legacy} projectId={projectRailBinding.project_id} />)
-  expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('binding_invalid'))
-  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarRailReason('binding_invalid'))
+  expect(screen.queryAllByRole('button')).toHaveLength(13)
+  expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
   expect(screen.queryByText('Resume here')).toBeNull()
   expect(onOpenStep).not.toHaveBeenCalled()
   // The same props with a null project id stay standalone, where the four legacy flags arm the step.
@@ -217,8 +226,9 @@ it('R11-29 a rail given only a project id is project mode and refuses without a 
   fireEvent.click(open)
   expect(onOpenStep).toHaveBeenCalledTimes(1)
   view.rerender(<SolarFlowRail {...legacy} projectId={projectRailBinding.project_id} />)
-  expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('binding_invalid'))
-  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarRailReason('binding_invalid'))
+  expect(screen.queryAllByRole('button')).toHaveLength(13)
+  expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
   expect(onOpenStep).toHaveBeenCalledTimes(1)
 })
 
@@ -996,3 +1006,461 @@ describe('SolarStepEditor', () => {
     expect(document.activeElement).toBe(button('Homeruns'))
   })
 })
+
+const R13D_RAIL_NAMES = PROJECT_SOLAR_ROOFTOP_STAGES.flatMap((stage) => stage.capabilities)
+const R13D_CORE_LABELS = ['Settings', 'Panel import', 'Manual sizing', 'Single strings', 'Multiple strings', 'Conductors', 'Equipment']
+function r13dRailRow(name, ready = false) {
+  const index = R13D_RAIL_NAMES.indexOf(name)
+  const candidate = { ...row(name, 999 - Math.max(index, 0), R13D_CORE_LABELS[index] || name,
+    { ...READY, runnable: ready, input_ready: ready, admission_checked: ready,
+      admission: ready ? { status_code: 200, error: null } : null,
+      refusal_reasons: ready ? [] : ['project_request_required'] }), catalog_digest: projectRailDigest }
+  candidate.solar.wave = index === 3 || index === 4 ? 2 : 5
+  if (name === 'solar-string-conductors') candidate.params = conductorDeclaration.record.params
+  if (name === 'solar-assign-equipment') candidate.params = { type: 'object', properties: {
+    equipment: { type: 'array', items: { type: 'object' } },
+    assignments: { type: 'array', items: { type: 'object' } },
+    cancel: { type: 'boolean', default: false }, preview: { type: 'boolean', default: false },
+  } }
+  return candidate
+}
+function r13dRailContext() {
+  const graph = structuredClone(ground)
+  graph.strings = [{ id: 'T1', circuit_tag: 'A1', wire_gauge: '', ordered_panel_refs: [] }]
+  return { context: { ...projectRailBinding, head_version_id: projectRailBinding.input_version_id,
+    is_head: true, intake_sha256: 'a'.repeat(64) },
+  intake: { solar_design_graph: graph, solar_design_graph_sha256: 'b'.repeat(64) } }
+}
+async function r13dRailHarness(names = R13D_RAIL_NAMES) {
+  const h = await projectRailHarness()
+  h.rows = names.map((name) => r13dRailRow(name))
+  h.families = [{ capabilities: [...h.rows].reverse() }]
+  h.props = { ...h.props, projectCatalog: await h.catalog(), catalogDigest: projectRailDigest,
+    newProjectIntentKey: vi.fn(() => 'r13d-intent'), onProjectSubmit: vi.fn(async () => ({
+      ok: true, status: 202, data: { status: 'submitted', job_id: '77777777-7777-7777-7777-777777777777' },
+    })), readIntake: vi.fn(), onSubmit: vi.fn(), onClose: vi.fn() }
+  h.client.readContext = vi.fn(h.real.readContext)
+  h.client.catalog = vi.fn(h.real.catalog)
+  h.context = r13dRailContext()
+  h.fetchImpl.mockImplementation(async (url) => {
+    if (url.endsWith('/checkout')) return { ok: true, status: 200, json: async () => ({
+      organization_id: projectRailBinding.organization_id, project_id: projectRailBinding.project_id,
+      drawing_id: projectRailBinding.drawing_id, acquired: true,
+      checkout: { holder: 'synthetic editor', acquired: '2026-01-01T00:00:00Z',
+        expires: '2099-01-01T00:00:00Z', fence: '1' }, checkout_capability: 'lco1.' + 'c'.repeat(64),
+    }) }
+    const data = url.includes('/context?') ? h.context : {
+      families: [{ capabilities: h.rows.map((entry) => ({ ...entry, availability: {
+        ...READY, runnable: true, admission_checked: true, admission: { status_code: 200, error: null },
+      } })) }],
+    }
+    return { ok: true, status: 200, json: async () => data }
+  })
+  return h
+}
+function r13dRailButton(name) { return document.getElementById(solarFlowStepId(name)) }
+function R13DOpenHost({ h }) {
+  const [opened, setOpened] = React.useState(null)
+  return <>
+    <SolarFlowRail {...h.props} onOpenStep={(entry) => { h.props.onOpenStep(entry); setOpened(entry) }} />
+    {opened && <SolarStepEditor {...h.props} row={opened} onClose={() => setOpened(null)} />}
+  </>
+}
+function r13dAssertHandoff(h, name) {
+  expect(h.props.onOpenStep).toHaveBeenCalledExactlyOnceWith(h.rows.find((entry) => entry.name === name))
+  expect(h.props.readIntake).not.toHaveBeenCalled()
+  expect(h.props.onSubmit).not.toHaveBeenCalled()
+  expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+}
+
+it('R13D-17 settings is the first reachable project step', async () => {
+  const h = await r13dRailHarness()
+  render(<SolarFlowRail {...h.props} />)
+  expect(items()[0].querySelector('button')).toBe(r13dRailButton('solar-settings'))
+  expect(r13dRailButton('solar-settings').disabled).toBe(false)
+  fireEvent.click(r13dRailButton('solar-settings'))
+  r13dAssertHandoff(h, 'solar-settings')
+})
+
+it('R13D-18 panel import is reachable before sizing', async () => {
+  const h = await r13dRailHarness()
+  render(<SolarFlowRail {...h.props} />)
+  expect(items()[1].querySelector('button')).toBe(r13dRailButton('solar-panels-from-drawing'))
+  expect(items()[2].querySelector('button')).toBe(r13dRailButton('solar-size-strings'))
+  fireEvent.click(r13dRailButton('solar-panels-from-drawing'))
+  r13dAssertHandoff(h, 'solar-panels-from-drawing')
+})
+
+it('R13D-19 manual sizing is reachable after panel import', async () => {
+  const h = await r13dRailHarness()
+  render(<R13DOpenHost h={h} />)
+  expect(items()[2].querySelector('button')).toBe(r13dRailButton('solar-size-strings'))
+  fireEvent.click(r13dRailButton('solar-size-strings'))
+  await waitFor(() => expect(screen.getByTestId('project-solar-sizing-form').getAttribute('data-mode')).toBe('edit'))
+  expect(screen.getByLabelText('Scope').value).toBe('manual-global')
+  r13dAssertHandoff(h, 'solar-size-strings')
+})
+
+it('R13D-20 single string composition is reachable', async () => {
+  const h = await r13dRailHarness()
+  render(<R13DOpenHost h={h} />)
+  expect(items()[3].querySelector('button')).toBe(r13dRailButton(STRING_ADD_TOOL))
+  fireEvent.click(r13dRailButton(STRING_ADD_TOOL))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Select row 1 Group 1' })).toBeTruthy())
+  expect(screen.getByRole('region', { name: 'Selection queue' })).toBeTruthy()
+  expect(screen.queryByLabelText('String length')).toBeNull()
+  r13dAssertHandoff(h, STRING_ADD_TOOL)
+})
+
+it('R13D-21 multiple string composition is reachable', async () => {
+  const h = await r13dRailHarness()
+  render(<R13DOpenHost h={h} />)
+  expect(items()[4].querySelector('button')).toBe(r13dRailButton(STRING_MULTI_ADD_TOOL))
+  fireEvent.click(r13dRailButton(STRING_MULTI_ADD_TOOL))
+  await waitFor(() => expect(screen.getByLabelText('String length')).toBeTruthy())
+  expect(screen.getByRole('region', { name: 'Selection queue' })).toBeTruthy()
+  r13dAssertHandoff(h, STRING_MULTI_ADD_TOOL)
+})
+
+it('R13D-22 conductors follow both string composers', async () => {
+  const h = await r13dRailHarness()
+  render(<R13DOpenHost h={h} />)
+  expect(items().slice(4, 7).map((item) => item.querySelector('button').id)).toEqual([
+    STRING_MULTI_ADD_TOOL, 'solar-string-conductors', 'solar-assign-equipment',
+  ].map(solarFlowStepId))
+  fireEvent.click(r13dRailButton('solar-string-conductors'))
+  await waitFor(() => expect(screen.getByLabelText('Select A1')).toBeTruthy())
+  expect(screen.getByLabelText('Conductor')).toBeTruthy()
+  r13dAssertHandoff(h, 'solar-string-conductors')
+})
+
+it('R13D-23 equipment remains reachable after conductors', async () => {
+  const h = await r13dRailHarness()
+  render(<R13DOpenHost h={h} />)
+  expect(items()[6].querySelector('button')).toBe(r13dRailButton('solar-assign-equipment'))
+  fireEvent.click(r13dRailButton('solar-assign-equipment'))
+  await waitFor(() => expect(screen.getByTestId('project-solar-equipment-form').getAttribute('data-mode')).toBe('edit'))
+  expect(screen.getByLabelText('Equipment')).toBeTruthy()
+  r13dAssertHandoff(h, 'solar-assign-equipment')
+})
+
+it('R13D-24 a refused stage shows its server reason', async () => {
+  const h = await r13dRailHarness()
+  const refused = r13dRailRow('solar-homeruns', true)
+  refused.availability = { ...refused.availability, runnable: false, refusal_reasons: ['capability_not_ready', 'capability_not_ready'],
+    admission: { status_code: 409, error: { reason_code: 'EQUIPMENT_ASSIGNMENT_REQUIRED', message: 'private envelope' } } }
+  h.props.projectCatalog = { ...h.props.projectCatalog, families: [{ capabilities: [refused] }] }
+  const view = render(<SolarFlowRail {...h.props} />)
+  const open = r13dRailButton('solar-homeruns')
+  expect(open.disabled).toBe(true)
+  expect(document.getElementById(open.getAttribute('aria-describedby')).textContent).toBe(
+    PROJECT_SOLAR_RAIL_REASONS.stage_refused + ' (capability_not_ready, EQUIPMENT_ASSIGNMENT_REQUIRED)')
+  expect(view.container.textContent).not.toContain('private envelope')
+  fireEvent.click(open)
+  expect(h.props.onOpenStep).not.toHaveBeenCalled()
+  expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+  expect(h.client.readContext).not.toHaveBeenCalled()
+})
+
+it('R13D-25 a missing stage stays visible with a sentence', async () => {
+  const h = await r13dRailHarness(R13D_RAIL_NAMES.filter((name) => name !== 'solar-panels-from-drawing'))
+  render(<SolarFlowRail {...h.props} />)
+  const missing = r13dRailButton('solar-panels-from-drawing')
+  expect(items()).toHaveLength(13)
+  expect(missing.disabled).toBe(true)
+  expect(document.getElementById(missing.getAttribute('aria-describedby')).textContent).toBe(PROJECT_SOLAR_RAIL_REASONS.stage_missing)
+  expect(r13dRailButton('solar-settings').disabled).toBe(false)
+  expect(r13dRailButton('solar-size-strings').disabled).toBe(false)
+  fireEvent.click(missing)
+  expect(h.props.onOpenStep).not.toHaveBeenCalled()
+})
+
+it('R13D-26 invalid or stale project scope retains disabled stages', async () => {
+  const h = await r13dRailHarness()
+  const view = render(<SolarFlowRail {...h.props} />)
+  for (const [changes, code] of [
+    [{ solarBinding: undefined, projectId: projectRailBinding.project_id }, 'binding_invalid'],
+    [{ solarBinding: undefined }, 'binding_invalid'],
+    [{ solarBinding: projectRailNext }, 'catalog_pending'],
+    [{ authorityKey: 'epoch-other' }, 'catalog_pending'],
+    [{ projectClient: {} }, 'catalog_pending'],
+    [{ projectCatalog: { ...h.props.projectCatalog, client: {} } }, 'catalog_pending'],
+    [{ projectCatalog: { ...h.props.projectCatalog, isCurrent: () => false } }, 'catalog_pending'],
+    [{ projectCatalog: { ...h.props.projectCatalog, isCurrent: () => { throw new Error('unreadable') } } }, 'catalog_pending'],
+  ]) {
+    view.rerender(<SolarFlowRail {...h.props} {...changes} />)
+    expect(items()).toHaveLength(13)
+    for (const item of items()) {
+      const open = item.querySelector('button')
+      expect(open.disabled).toBe(true)
+      expect(open.getAttribute('aria-current')).toBeNull()
+      expect(document.getElementById(open.getAttribute('aria-describedby')).textContent).toBe(projectSolarRailReason(code))
+      fireEvent.click(open)
+    }
+    expect(screen.queryByText('Resume here')).toBeNull()
+  }
+  const projectOnly = { ...h.props, projectId: projectRailBinding.project_id }
+  delete projectOnly.solarBinding
+  view.rerender(<SolarFlowRail {...projectOnly} />)
+  expect(items().every((item) => item.querySelector('button').disabled)).toBe(true)
+  view.rerender(<SolarFlowRail {...h.props} onOpenStep={undefined} />)
+  expect(items().every((item) => item.querySelector('button').disabled)).toBe(true)
+  expect(document.getElementById(r13dRailButton('solar-settings').getAttribute('aria-describedby')).textContent).toBe(PROJECT_SOLAR_RAIL_REASONS.form_unavailable)
+  view.rerender(<SolarFlowRail {...h.props} />)
+  await act(async () => { await h.real.acquireCheckout() })
+  expect(items()).toHaveLength(13)
+  expect(items().every((item) => item.querySelector('button').disabled)).toBe(true)
+  expect(h.props.onOpenStep).not.toHaveBeenCalled()
+})
+
+it('R13D-27 busy reaches every specialized project editor and clears', async () => {
+  for (const name of ['solar-size-strings', 'solar-string-conductors', STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL, 'solar-assign-equipment']) {
+    const h = await r13dRailHarness()
+    const candidate = h.rows.find((entry) => entry.name === name)
+    const withdrawsSubmit = ['solar-size-strings', 'solar-string-conductors'].includes(name)
+    for (const busy of [false, true, false]) {
+      const boundary = SolarStepEditor({ ...h.props, row: candidate, busy })
+      const child = React.Children.toArray(boundary.props.children).at(-1)
+      const forwarded = child.props.projectProps ?? child.props
+      expect(boundary.props.disabled).toBe(busy)
+      expect(forwarded.busy).toBe(busy)
+      expect(forwarded.onProjectSubmit).toBe(busy && withdrawsSubmit ? undefined : h.props.onProjectSubmit)
+    }
+    function Host() {
+      const [busy, setBusy] = React.useState(false)
+      return <>
+        <button onClick={() => setBusy((value) => !value)}>Toggle busy</button>
+        <SolarFlowRail {...h.props} busy={busy} />
+        <SolarStepEditor {...h.props} row={candidate} busy={busy} />
+      </>
+    }
+    render(<Host />)
+    let draftLabel = null, draftValue = null
+    if ([STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(name)) {
+      await waitFor(() => expect(screen.getByLabelText('Search rows')).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: 'Select row 1 Group 1' }))
+      fireEvent.change(screen.getByLabelText('First slot'), { target: { value: '1' } })
+      fireEvent.change(screen.getByLabelText('Last slot'), { target: { value: '3' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Add range' }))
+      if (name === STRING_MULTI_ADD_TOOL) fireEvent.change(screen.getByLabelText('String length'), { target: { value: '3' } })
+      draftLabel = 'Search rows'; draftValue = 'Group 1'
+    } else if (name === 'solar-string-conductors') {
+      await waitFor(() => expect(screen.getByLabelText('Select A1')).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: 'Select all' }))
+      draftLabel = 'Conductor'; draftValue = '10 AWG'
+    } else if (name === 'solar-assign-equipment') {
+      await waitFor(() => expect(screen.getByLabelText('Equipment')).toBeTruthy())
+      draftLabel = 'Equipment'; draftValue = '[{"id":"kept"}]'
+    } else await waitFor(() => expect(screen.getByLabelText('Scope')).toBeTruthy())
+    if (draftLabel) fireEvent.change(screen.getByLabelText(draftLabel), { target: { value: draftValue } })
+    const boundary = screen.getByTestId('project-solar-step-boundary')
+    const mountedEditor = boundary.querySelector('#solar-step-editor')
+    const draft = screen.getByLabelText(draftLabel ?? 'Scope')
+    const action = name === 'solar-string-conductors' ? 'Apply to selected strings' : 'Review & run'
+    await waitFor(() => expect(screen.getByRole('button', { name: action }).disabled).toBe(false))
+    expect(boundary.disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle busy' }))
+    expect(screen.getByTestId('project-solar-step-boundary')).toBe(boundary)
+    expect(boundary.disabled).toBe(true)
+    expect(document.getElementById(boundary.getAttribute('aria-describedby')).textContent).toBe(PROJECT_SOLAR_RAIL_REASONS.run_in_progress)
+    expect(items().every((item) => item.querySelector('button').disabled)).toBe(true)
+    expect(screen.queryByText('Resume here')).toBeNull()
+    expect(boundary.querySelector('#solar-step-editor')).toBe(mountedEditor)
+    if (draftLabel) {
+      expect(screen.getByLabelText(draftLabel)).toBe(draft)
+      expect(draft.value).toBe(draftValue)
+    }
+    if ([STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(name)) {
+      expect(screen.getByText('1 selections')).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Remove selection 1' })).toBeTruthy()
+      if (name === STRING_MULTI_ADD_TOOL) expect(screen.getByLabelText('String length').value).toBe('3')
+    }
+    fireEvent.click(screen.getByRole('button', { name: action }))
+    await act(async () => {})
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Toggle busy' }))
+    expect(boundary.disabled).toBe(false)
+    if (draftLabel) await waitFor(() => expect(screen.getByLabelText(draftLabel).value).toBe(draftValue))
+    else await waitFor(() => expect(screen.getByLabelText('Scope').value).toBe('manual-global'))
+    expect(boundary.querySelector('#solar-step-editor')).toBe(mountedEditor)
+    if (draftLabel) expect(screen.getByLabelText(draftLabel)).toBe(draft)
+    if (name === 'solar-string-conductors') await waitFor(() => expect(screen.getByLabelText('Select A1').getAttribute('aria-selected')).toBe('true'))
+    if ([STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(name)) {
+      expect(screen.getByText('1 selections')).toBeTruthy()
+      if (name === STRING_MULTI_ADD_TOOL) expect(screen.getByLabelText('String length').value).toBe('3')
+    }
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    expect(r13dRailButton(name).disabled).toBe(false)
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+    cleanup()
+  }
+}, 15000)
+
+it('R13D-28 pending status is scoped independently of admission', async () => {
+  const h = await r13dRailHarness()
+  const pending = { tool: 'solar-size-strings', binding: projectRailBinding, authorityKey: 'epoch-1' }
+  const view = render(<SolarFlowRail {...h.props} projectPending={pending} busy />)
+  const sizing = () => r13dRailButton(pending.tool)
+  expect(sizing().closest('li').getAttribute('data-status')).toBe('pending')
+  expect(within(sizing()).getByText('Running')).toBeTruthy()
+  expect(sizing().disabled).toBe(true)
+  expect(sizing().getAttribute('aria-current')).toBeNull()
+  expect(screen.getByTestId('solar-flow-announce').textContent).toBe('')
+  for (const foreign of [{ ...pending, binding: projectRailNext }, { ...pending, authorityKey: 'epoch-other' }]) {
+    view.rerender(<SolarFlowRail {...h.props} projectPending={foreign} busy />)
+    expect(sizing().closest('li').getAttribute('data-status')).toBe('review')
+    expect(sizing().disabled).toBe(true)
+  }
+  view.rerender(<SolarFlowRail {...h.props} projectPending={pending} busy={false} />)
+  expect(sizing().closest('li').getAttribute('data-status')).toBe('pending')
+  expect(sizing().disabled).toBe(false)
+  view.rerender(<SolarFlowRail {...h.props} busy={false} />)
+  expect(sizing().closest('li').getAttribute('data-status')).toBe('review')
+  expect(sizing().disabled).toBe(false)
+  expect(h.rows.find((entry) => entry.name === pending.tool).availability.runnable).toBe(false)
+})
+
+it('R13D-29 standalone rendering remains byte-identical', () => {
+  for (const [file, anchor, bytes, digest] of [
+    ['SolarFlowRail.jsx', 'function StandaloneSolarFlowRail(', 5471, '332d3d72ee4b2b5caf9240f54a57ba385b413afeb14789db266893c971fa96da'],
+    ['SolarStepEditor.jsx', 'function StandaloneSolarStepEditor(', 4601, '9d7dd3ef5cb3af31d33113f60cb7a24543c8a6404fdb772e48c8653e88d9c5fe'],
+  ]) {
+    const source = readFileSync(resolve(process.cwd(), 'src/solar', file))
+    const suffix = source.subarray(source.indexOf(Buffer.from(anchor)))
+    expect(suffix.length).toBe(bytes)
+    expect(createHash('sha256').update(suffix).digest('hex')).toBe(digest)
+  }
+  for (const catalog of [families([]), families(W1.map(([name]) => name)), LIVE, []]) {
+    const view = render(<SolarFlowRail families={catalog} drawingId="d1" onOpenStep={vi.fn()} busy={false} />)
+    const clear = view.container.innerHTML
+    view.rerender(<SolarFlowRail families={catalog} drawingId="d1" onOpenStep={vi.fn()} busy />)
+    expect(view.container.innerHTML).toBe(clear)
+    cleanup()
+  }
+  for (const status of [null, 'pending', 'failed']) {
+    const props = { row: row('solar-homeruns', 80, 'Homeruns', READY), drawingId: 'd1', status,
+      onSubmit: vi.fn(), onClose: vi.fn() }
+    const view = render(<SolarStepEditor {...props} busy={false} />)
+    const clear = view.container.innerHTML
+    view.rerender(<SolarStepEditor {...props} busy />)
+    expect(view.container.innerHTML).toBe(clear)
+    expect(screen.queryByTestId('project-solar-step-boundary')).toBeNull()
+    cleanup()
+  }
+})
+
+it('R13D-30 standalone interaction contracts remain unchanged', async () => {
+  const shown = families(['solar-settings', 'solar-size-strings'])
+  const onOpenStep = vi.fn(), onFlowChange = vi.fn(), onClose = vi.fn(), onSubmit = vi.fn()
+  const rail = render(<SolarFlowRail families={shown} drawingId="d1" familiesDrawingId="d1"
+    onOpenStep={onOpenStep} onFlowChange={onFlowChange} busy />)
+  expect(button('Size strings').getAttribute('aria-current')).toBe('step')
+  fireEvent.click(button('Size strings'))
+  expect(onOpenStep).toHaveBeenCalledExactlyOnceWith(shown[0].capabilities[1])
+  fireEvent.click(button('Homeruns'))
+  expect(onOpenStep).toHaveBeenCalledTimes(1)
+  changeFlow('solaredge-import')
+  expect(onFlowChange).toHaveBeenCalledExactlyOnceWith('solaredge-import')
+  expect(screen.getByTestId('solar-flow-unavailable')).toBeTruthy()
+  changeFlow('rooftop')
+  rail.rerender(<SolarFlowRail families={shown} drawingId="d1" familiesDrawingId="d1" onOpenStep={onOpenStep}
+    runs={{ 'solar-homeruns': { ok: false, code: 'STALE_GRAPH_REVISION' } }} />)
+  await waitFor(() => expect(screen.getByTestId('solar-flow-announce').textContent).toBe('Homeruns failed: STALE_GRAPH_REVISION'))
+  // The focus contract needs a focusable step button: re-render the rail with Homeruns runnable.
+  rail.rerender(<SolarFlowRail families={families(['solar-settings', 'solar-size-strings', 'solar-homeruns'])} drawingId="d1"
+    familiesDrawingId="d1" onOpenStep={onOpenStep} runs={{ 'solar-homeruns': { ok: false, code: 'STALE_GRAPH_REVISION' } }} />)
+  expect(button('Homeruns').disabled).toBe(false)
+  const editorProps = { row: shown[0].capabilities[7], drawingId: 'd1', status: 'failed',
+    failureCode: 'STALE_GRAPH_REVISION', onSubmit, onClose }
+  const editor = render(<SolarStepEditor {...editorProps} busy={false} />)
+  const clearMarkup = editor.container.innerHTML
+  editor.rerender(<SolarStepEditor {...editorProps} busy />)
+  expect(editor.container.innerHTML).toBe(clearMarkup)
+  fireEvent.change(screen.getByLabelText('Note'), { target: { value: 'kept' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  expect(onSubmit).toHaveBeenCalledExactlyOnceWith(shown[0].capabilities[7], { expected_rev: 0, note: 'kept' })
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+  expect(onClose).toHaveBeenCalledTimes(1)
+  expect(document.activeElement).toBe(button('Homeruns'))
+  fireEvent.keyDown(screen.getByLabelText('Note'), { key: 'Escape' })
+  expect(onClose).toHaveBeenCalledTimes(2)
+  expect(document.activeElement).toBe(button('Homeruns'))
+  cleanup()
+  render(<SolarFlowRail families={LIVE} drawingId="d1" onOpenStep={onOpenStep}
+    workspacePanelsByFlow={{ 'solaredge-import': ['solaredge-import'] }} />)
+  expect(items().map((item) => item.querySelector('button').id)).toEqual(ROOFTOP_LIVE.map(solarFlowStepId))
+})
+
+it('R13D-31 other project flows retain visible unavailable stages', async () => {
+  const h = await r13dRailHarness()
+  render(<SolarFlowRail {...h.props} workspacePanelsByFlow={{
+    'ground-physical': ['landxml', 'terrain', 'civil', 'physical-read'], 'solaredge-import': ['solaredge-import'],
+  }} />)
+  changeFlow('ground-electrical')
+  const expectedNames = SOLAR_FLOWS.find((flow) => flow.id === 'ground-electrical').stages.flatMap((stage) => stage.capabilities)
+  expect(items().map((item) => item.querySelector('button').id)).toEqual(expectedNames.map(solarFlowStepId))
+  const missingFeeder = r13dRailButton('solar-feeders')
+  // Feeders is present but unchecked in the complete Rooftop catalog; removing it leaves all neighbors visible.
+  cleanup()
+  const noFeeders = { ...h.props, projectCatalog: { ...h.props.projectCatalog,
+    families: [{ capabilities: h.rows.filter((entry) => entry.name !== 'solar-feeders') }] } }
+  render(<SolarFlowRail {...noFeeders} workspacePanelsByFlow={{
+    'ground-physical': ['landxml', 'terrain', 'civil', 'physical-read'], 'solaredge-import': ['solaredge-import'],
+  }} />)
+  changeFlow('ground-electrical')
+  expect(missingFeeder.disabled).toBe(true)
+  expect(items().map((item) => item.querySelector('button').id)).toEqual(expectedNames.map(solarFlowStepId))
+  expect(document.getElementById(r13dRailButton('solar-feeders').getAttribute('aria-describedby')).textContent).toBe(PROJECT_SOLAR_RAIL_REASONS.stage_missing)
+  for (const id of ['ground-physical', 'solaredge-import', 'pvcase-tutorial']) {
+    changeFlow(id)
+    const stages = SOLAR_FLOWS.find((flow) => flow.id === id).stages
+    expect(items().map((item) => item.querySelector('.solar-flow-label').textContent)).toEqual(stages.map((stage) => stage.label))
+    expect(items().every((item) => item.querySelector('button').disabled)).toBe(true)
+    for (const item of items()) {
+      const open = item.querySelector('button')
+      const description = document.getElementById(open.getAttribute('aria-describedby')).textContent
+      expect([PROJECT_SOLAR_RAIL_REASONS.form_unavailable, PROJECT_SOLAR_RAIL_REASONS.stage_missing]).toContain(description)
+      fireEvent.click(open)
+    }
+    expect(screen.getByTestId('solar-flow-maturity').textContent).toBe(id === 'pvcase-tutorial'
+      ? SOLAR_FLOW_MATURITY_NOTES.tutorial : SOLAR_FLOW_MATURITY_NOTES.preview)
+  }
+  expect(h.props.onOpenStep).not.toHaveBeenCalled()
+  expect(h.client.readContext).not.toHaveBeenCalled()
+})
+
+it('R13D-32 busy arriving during context recheck prevents handoff', async () => {
+  for (const name of ['solar-size-strings', 'solar-string-conductors']) {
+    const h = await r13dRailHarness()
+    const candidate = h.rows.find((entry) => entry.name === name)
+    const view = render(<SolarStepEditor {...h.props} row={candidate} busy={false} />)
+    if (name === 'solar-string-conductors') {
+      await waitFor(() => expect(screen.getByLabelText('Select A1')).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: 'Select all' }))
+      fireEvent.change(screen.getByLabelText('Conductor'), { target: { value: '10 AWG' } })
+    }
+    const action = name === 'solar-size-strings' ? 'Review & run' : 'Apply to selected strings'
+    await waitFor(() => expect(screen.getByRole('button', { name: action }).disabled).toBe(false))
+    let resolveContext
+    const contextRead = new Promise((done) => { resolveContext = done })
+    h.client.readContext.mockReturnValueOnce(contextRead)
+    const reads = h.client.readContext.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: action }))
+    expect(h.client.readContext).toHaveBeenCalledTimes(reads + 1)
+    view.rerender(<SolarStepEditor {...h.props} row={candidate} busy />)
+    await act(async () => { resolveContext({ ok: true, status: 200, data: h.context }) })
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    view.rerender(<SolarStepEditor {...h.props} row={candidate} busy={false} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: action }).disabled).toBe(false))
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    const freshIntent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+    fireEvent.click(screen.getByRole('button', { name: action }))
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledExactlyOnceWith(freshIntent, expect.objectContaining({
+      binding: projectRailBinding, authorityKey: 'epoch-1',
+    })))
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+    cleanup()
+  }
+}, 10000)
