@@ -721,4 +721,28 @@ describe('saved author stage recovery', () => {
     expect(snapshot(gone)).toEqual(snap)
     gone.unmount()
   })
+
+  it('C8C-46 a recovery stops when the saved key differs from its own only by case or white space', async () => {
+    // Another tab saves a request whose key differs from the one being recovered only by letter case or
+    // surrounding white space. Those are different requests, so the recovery mints, sends and writes nothing.
+    for (const key of ['SAVED-KEY', 'Saved-Key', 'saved-KEY', ' saved-key', 'saved-key ', 'saved-key\n', '\tsaved-key']) {
+      authorityProvider.mockClear()
+      let release
+      const held = () => new Promise((resolve) => { release = () => resolve(missing()) })
+      const f = fixture({ replies: [held, accepted(), polled()] })
+      await flush(); calls([R])
+      f.storage.setItem(INFLIGHT_AUTHOR_KEY, JSON.stringify(pointer(f.storage, { idempotency_key: key, description: 'Another tab request' })))
+      const bytes = f.storage.getItem(INFLIGHT_AUTHOR_KEY)
+      const snap = snapshot(f)
+      const writes = f.storage.setItem.mock.calls.length
+      await act(async () => { release() })
+      await flush(); await advance(10_000)
+      calls([R])
+      expect(authorityProvider, JSON.stringify(key)).not.toHaveBeenCalled()
+      expect(f.storage.getItem(INFLIGHT_AUTHOR_KEY), JSON.stringify(key)).toBe(bytes)
+      expect(f.storage.setItem, JSON.stringify(key)).toHaveBeenCalledTimes(writes)
+      expect(snapshot(f), JSON.stringify(key)).toEqual(snap)
+      f.unmount()
+    }
+  })
 })

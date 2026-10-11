@@ -84,6 +84,15 @@ describe('author stage recovery transport', () => {
       response(404, { contract: CONTRACT, status: 'found' }),
       response(404, { contract: CONTRACT, status: 'NOT_FOUND' }),
       response(404, { contract: CONTRACT, status: 'not_found ' }),
+      // White space or letters on either side of the status make it another status.
+      response(404, { contract: CONTRACT, status: ' not_found' }),
+      response(404, { contract: CONTRACT, status: '\tnot_found' }),
+      response(404, { contract: CONTRACT, status: '\nnot_found' }),
+      response(404, { contract: CONTRACT, status: 'not_found\n' }),
+      response(404, { contract: CONTRACT, status: ' not_found ' }),
+      response(404, { contract: CONTRACT, status: 'Not_found' }),
+      response(404, { contract: CONTRACT, status: 'xnot_found' }),
+      response(404, { contract: CONTRACT, status: 'not_foundx' }),
     ]) await rejectsRecovery(answer)
   })
 
