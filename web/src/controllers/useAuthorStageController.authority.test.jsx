@@ -144,8 +144,11 @@ describe('useAuthorStageController turn-authority provider', () => {
     const recoverAuthorStage = vi.fn(async () => ({ status: 'not_found' }))
     const authorityProvider = vi.fn(async () => ({ ...TURN_1 }))
     const stageAuthorTool = answerLostOnce()
+    // One store for the life of the hook, as window.localStorage is: a recovery reads the
+    // saved request back from storage before it repeats it.
+    const storage = memoryStorage()
     const { result } = renderHook(() => useAuthorStageController({
-      storage: memoryStorage(), stageAuthorTool, authorityProvider, recoverAuthorStage,
+      storage, stageAuthorTool, authorityProvider, recoverAuthorStage,
     }))
     await act(async () => { await result.current.stage('organize recipes') })
     expect(result.current.phase).toBe('interrupted')
@@ -176,8 +179,11 @@ describe('useAuthorStageController turn-authority provider', () => {
       return mints === 1 ? { ...TURN_1 } : null
     })
     const stageAuthorTool = answerLostOnce()
+    // One store for the life of the hook, as window.localStorage is: a recovery reads the
+    // saved request back from storage before it repeats it.
+    const storage = memoryStorage()
     const { result } = renderHook(() => useAuthorStageController({
-      storage: memoryStorage(), stageAuthorTool, authorityProvider, recoverAuthorStage,
+      storage, stageAuthorTool, authorityProvider, recoverAuthorStage,
     }))
     await act(async () => { await result.current.stage('organize recipes') })
     const saved = result.current.pointer.idempotency_key

@@ -192,6 +192,10 @@ export default function useAuthorStageController({
     const continuationValid = () => sequenceRef.current === sequence && !abortController.signal.aborted
       && enabledRef.current && authorAccountScope(config.tenant, storageRef.current) === runAccountScope
       && runAccountScope === initial.account_scope && pointerRef.current?.idempotency_key === initial.idempotency_key
+      // The saved request is read from storage, not only this controller's copy: once another
+      // tab saves a different request, or nothing is saved any more, this recovery is no longer
+      // the saved request's and must not mint, submit, poll or write it back.
+      && readInflightAuthor(storageRef.current)?.idempotency_key === initial.idempotency_key
     const currentRun = () => recoveryRun ? continuationValid() : sequenceRef.current === sequence
     const settleRecovery = (cause, waiting = false) => {
       if (!continuationValid()) return null

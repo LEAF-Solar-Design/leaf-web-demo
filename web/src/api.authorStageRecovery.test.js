@@ -77,6 +77,13 @@ describe('author stage recovery transport', () => {
       response(404, { contract: 'wrong', status: 'not_found' }),
       response(404, { contract: CONTRACT, status: 'found', job: J }),
       response(404, { contract: CONTRACT, status: 'not_found', error: { message: 'private' } }),
+      // A contracted 404 that names any other status is not an absence either.
+      response(404, { contract: CONTRACT }),
+      response(404, { contract: CONTRACT, status: 'admission_pending' }),
+      response(404, { contract: CONTRACT, status: 'admission_pending', retry_after_ms: 1000 }),
+      response(404, { contract: CONTRACT, status: 'found' }),
+      response(404, { contract: CONTRACT, status: 'NOT_FOUND' }),
+      response(404, { contract: CONTRACT, status: 'not_found ' }),
     ]) await rejectsRecovery(answer)
   })
 

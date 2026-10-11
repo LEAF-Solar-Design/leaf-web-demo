@@ -655,4 +655,70 @@ describe('saved author stage recovery', () => {
       f.unmount()
     }
   })
+  it('C8C-44 a recovery stops once another request is saved in its place', async () => {
+    const running = () => response(200, { status: 'running', change_set_id: J.change_set_id })
+    const replace = (f) => {
+      const next = pointer(f.storage, { idempotency_key: 'replacement-key', description: 'Another tab request' })
+      f.storage.setItem(INFLIGHT_AUTHOR_KEY, JSON.stringify(next))
+      f.rerender({ enabled: true })
+      return f.storage.getItem(INFLIGHT_AUTHOR_KEY)
+    }
+    // Each case pauses at one point, saves another request in its place, then lets the pause end.
+    for (const [label, replies, held, wait, after, minted] of [
+      ['while recovery is answering', [missing(), accepted(), polled()], 0, 0, [R], 0],
+      ['while the stage request is in flight', [missing(), accepted(), polled()], 1, 0, [R, S], 1],
+      ['while the last status read is in flight', [found(), polled()], 1, 250, [R, G], 0],
+      ['between status reads', [found(), running(), polled()], null, 250, [R, G], 0],
+    ]) {
+      authorityProvider.mockClear()
+      let release
+      const queued = replies.map((answer, index) => index === held
+        ? () => new Promise((resolve) => { release = () => resolve(answer) })
+        : answer)
+      const f = fixture({ replies: queued })
+      await flush()
+      if (wait) await advance(wait)
+      calls(after)
+      const bytes = replace(f)
+      await flush()
+      const snap = snapshot(f)
+      const writes = f.storage.setItem.mock.calls.length
+      if (held !== null) await act(async () => { release() })
+      await flush(); await advance(10_000)
+      calls(after)
+      expect(authorityProvider.mock.calls.length, label).toBe(minted)
+      expect(f.storage.getItem(INFLIGHT_AUTHOR_KEY), label).toBe(bytes)
+      expect(f.storage.setItem, label).toHaveBeenCalledTimes(writes)
+      expect(snapshot(f), label).toEqual(snap)
+      f.unmount()
+    }
+  })
+
+  it('C8C-45 a recovery continues while the same request stays saved, and stops once nothing is saved', async () => {
+    let release
+    const hold = (answer) => () => new Promise((resolve) => { release = () => resolve(answer) })
+    const same = fixture({ replies: [hold(missing()), accepted(), polled()] })
+    await flush(); calls([R])
+    // Another tab recovering the same request saves it again under the same key.
+    same.storage.setItem(INFLIGHT_AUTHOR_KEY, JSON.stringify({ ...same.P, description: 'Count panels again' }))
+    await act(async () => { release() })
+    await flush(); await advance(250)
+    calls([R, S, G]); expect(authorityProvider).toHaveBeenCalledTimes(1)
+    successful(same)
+    same.unmount()
+
+    authorityProvider.mockClear()
+    const gone = fixture({ replies: [hold(missing())] })
+    await flush(); calls([R])
+    gone.storage.removeItem(INFLIGHT_AUTHOR_KEY)
+    const snap = snapshot(gone)
+    const writes = gone.storage.setItem.mock.calls.length
+    await act(async () => { release() })
+    await flush(); await advance(10_000)
+    calls([R]); expect(authorityProvider).not.toHaveBeenCalled()
+    expect(gone.storage.getItem(INFLIGHT_AUTHOR_KEY)).toBeNull()
+    expect(gone.storage.setItem).toHaveBeenCalledTimes(writes)
+    expect(snapshot(gone)).toEqual(snap)
+    gone.unmount()
+  })
 })
