@@ -18,6 +18,7 @@ import {
 import { notificationBus } from '../../lib/notifications.js'
 import { solarView } from '../../solar/solarView.js'
 import { canInitializeSolarSettings } from '../../solar/solarSettingsWire.js'
+import { solarDrawingBindingKey, sameSolarDrawingBinding } from '../../solar/solarDrawingBinding.js'
 
 const DEFAULT_THRESHOLDS = { CHIP_ONLY: 0.8, RACE_MIN: 0.55 }
 const AVAILABILITY_KEYS = ['entitled', 'engine_ready', 'input_ready', 'implemented']
@@ -82,6 +83,26 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   // cannot dispatch authorises exactly nothing.
   let toolsRequest = 0
   let catalogRequest = 0
+  let catalogAbort = null
+  let acceptedPreview = null
+  let unsubscribeProject = null
+  const projectScope = () => Object.hasOwn(current, 'solarBinding') && current.solarBinding !== undefined
+  const sortedJson = (value) => {
+    if (Array.isArray(value)) return value.map(sortedJson)
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortedJson(value[key])]))
+    }
+    return value
+  }
+  const projectFingerprint = () => {
+    if (!projectScope()) return null
+    try {
+      return JSON.stringify([solarDrawingBindingKey(current.solarBinding), current.authorityKey,
+        services.projectSolarClient?.getSnapshot().leaseRevision,
+        sortedJson(current.projectIntents || [])])
+    } catch { return 'invalid-project-scope' }
+  }
+  let contextFingerprint = projectFingerprint()
   let snapshot = null
   const listeners = new Set()
   const learnedSolar = new Map()
@@ -114,6 +135,25 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     for (const listener of listeners) listener()
   }
 
+  const invalidateProject = () => {
+    catalogRequest += 1
+    catalogAbort?.abort()
+    acceptedPreview = null
+    adapters.dismissDecision?.()
+    publish({ catalog: { families: [], source: null }, route: null, routeError: null })
+  }
+  const subscribeProject = () => {
+    if (unsubscribeProject || !services.projectSolarClient) return
+    let previous = services.projectSolarClient.getSnapshot()
+    unsubscribeProject = services.projectSolarClient.subscribe(() => {
+      const next = services.projectSolarClient.getSnapshot()
+      if (projectScope() && (next.leaseRevision !== previous.leaseRevision ||
+          next.binding !== previous.binding || next.authorityKey !== previous.authorityKey)) invalidateProject()
+      previous = next
+    })
+  }
+  subscribeProject()
+
   const ensureDraft = () => {
     const storage = adapters.draftStorage === undefined ? composerDraftStorage() : adapters.draftStorage
     const accountScope = current.accountScope === undefined
@@ -145,6 +185,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const getSnapshot = () => {
+    if (projectScope() && acceptedPreview && acceptedPreview !== projectFingerprint()) invalidateProject()
     if (!snapshot) {
       const capabilities = (state.catalog.families || []).flatMap((family) => family.capabilities || [])
       const runnableCapabilities = runnableCatalogTools(capabilities, current.entitlements)
@@ -169,6 +210,22 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   const solarRefusal = (name, params) => {
     const entry = (state.catalog.families || [])
       .flatMap((family) => family.capabilities || []).find((tool) => tool.name === name)
+    if (projectScope()) {
+      const availability = entry?.availability
+      if (!entry || !acceptedPreview || acceptedPreview !== projectFingerprint()) return 'project_request_required'
+      if (availability?.admission_checked !== true || !availability.admission ||
+          !Number.isInteger(availability.admission.status_code) || availability.admission.status_code < 200 ||
+          availability.admission.status_code >= 300 || availability.admission.error) {
+        return availability?.admission?.error?.reason_code || 'project_request_required'
+      }
+      const intent = (current.projectIntents || []).find((item) => item.tool === name)
+      if (!intent) return 'project_request_required'
+      try {
+        const candidate = services.projectSolarClient.prepareRun({ ...intent, params: params === undefined ? intent.params : params })
+        if (JSON.stringify(sortedJson(candidate)) !== JSON.stringify(sortedJson(intent))) return 'project_request_required'
+      } catch { return 'project_request_required' }
+      if (!AVAILABILITY_KEYS.every((key) => availability[key] === true)) return 'capability_not_ready'
+    }
     let required
     if (entry) {
       const result = solarView(entry)
@@ -183,7 +240,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     if (!availability) return 'capability_availability_unavailable'
     if (!entitlementAllows(current.entitlements, required)) return 'entitlement_required'
     if (AVAILABILITY_KEYS.every((key) => availability[key] === true)) return null
-    if (current.solarSettingsFormEnabled === true && canInitializeSolarSettings(name, availability, params)) return null
+    if (!projectScope() && current.solarSettingsFormEnabled === true && canInitializeSolarSettings(name, availability, params)) return null
     const reasons = availability.refusal_reasons
     return Array.isArray(reasons) && reasons.length
       ? reasons.join('; ') : 'capability_not_ready'
@@ -202,7 +259,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
-    const reason = decision?.lane === 'run' && solarRefusal(decision.tool, decision.params)
+    const reason = decision?.lane === 'run' && solarRefusal(decision.tool, projectScope() ? decision.params ?? {} : decision.params)
     if (reason) {
       adapters.dismissDecision?.()
       publish({ route: null, routeError: reason })
@@ -239,14 +296,41 @@ export function createCatalogController({ services, adapters = {}, context = {} 
 
   const loadCatalog = async () => {
     const request = ++catalogRequest
+    const project = projectScope()
+    const fingerprint = projectFingerprint()
+    contextFingerprint = fingerprint
+    if (project) {
+      catalogAbort?.abort()
+      catalogAbort = new AbortController()
+      acceptedPreview = null
+      adapters.dismissDecision?.()
+      publish({ catalog: { families: [], source: null }, route: null, routeError: null })
+    }
     publish({ catalogError: null })
     try {
-      const catalog = await services.getCapabilities(current.mock, {
+      if (project) {
+        const clientScope = services.projectSolarClient?.getSnapshot?.()
+        if (!sameSolarDrawingBinding(current.solarBinding, clientScope?.binding) ||
+            typeof current.authorityKey !== 'string' || current.authorityKey !== clientScope?.authorityKey) {
+          const error = new Error('Project tools are unavailable.')
+          error.status = null
+          error.body = null
+          error.reason = 'SIP_R7_BINDING_INVALID'
+          throw error
+        }
+      }
+      const catalog = project ? await services.getCapabilities(current.mock, {
+        solarBinding: current.solarBinding,
+        authorityKey: current.authorityKey,
+        projectIntents: current.projectIntents || [],
+      }, { projectClient: services.projectSolarClient, signal: catalogAbort.signal }) : await services.getCapabilities(current.mock, {
         drawing_id: current.drawingId ?? current.drawing_id,
         project_id: current.projectId ?? current.project_id,
         drawing_version: current.drawingVersion ?? current.drawing_version ?? 'head',
       })
-      if (request !== catalogRequest) return catalog
+      if (request !== catalogRequest) return project ? undefined : catalog
+      if (project && fingerprint !== projectFingerprint()) return undefined
+      if (project) acceptedPreview = fingerprint
       const openFamilies = { ...state.openFamilies }
       for (const family of catalog.families || []) {
         if (!(family.family_id in openFamilies)) openFamilies[family.family_id] = false
@@ -256,13 +340,17 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         }
       }
       publish({ catalog, openFamilies })
+      if (project && (request !== catalogRequest || fingerprint !== projectFingerprint())) return undefined
       return catalog
     } catch (error) {
-      if (request !== catalogRequest) return undefined
+      // The error is formatted before the staleness check, so formatting cannot change what that check saw.
+      const message = humanizeError(error)
+      if (request !== catalogRequest || (project && fingerprint !== projectFingerprint())) return undefined
       publish({
         catalog: { families: [], source: null },
-        catalogError: humanizeError(error),
+        catalogError: message,
       })
+      if (project && (request !== catalogRequest || fingerprint !== projectFingerprint())) return undefined
       if (!current.mock && isUnauthorized(error)) adapters.onAuthRequired?.()
       return undefined
     }
@@ -506,6 +594,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     consumeCatalogPublication,
     start() {
       if (started) return
+      subscribeProject()
       started = true
       ensureDraft()
       const generation = draftGeneration
@@ -524,9 +613,15 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       draftGeneration += 1
       toolsRequest += 1
       catalogRequest += 1
+      catalogAbort?.abort()
+      acceptedPreview = null
+      unsubscribeProject?.()
+      unsubscribeProject = null
       listeners.clear()
     },
     setContext(next) {
+      const previousProject = projectScope()
+      const previousFingerprint = contextFingerprint
       const modeChanged = Object.prototype.hasOwnProperty.call(next, 'mock') && next.mock !== current.mock
       const drawingChanged = ['drawingId', 'drawing_id', 'projectId', 'project_id',
         'drawingVersion', 'drawing_version'].some((key) =>
@@ -534,12 +629,15 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const derivedChanged = Object.prototype.hasOwnProperty.call(next, 'entitlements') &&
         next.entitlements !== current.entitlements
       current = { ...current, ...next }
+      const projectChanged = (previousProject || projectScope()) && previousFingerprint !== projectFingerprint()
+      contextFingerprint = projectFingerprint()
       if (started) restoreDraft()
       if (drawingChanged) {
         catalogRequest += 1
         adapters.dismissDecision?.()
         publish({ catalog: { families: [], source: null }, route: null, routeError: null })
       }
+      if (projectChanged) invalidateProject()
       if (derivedChanged) {
         snapshot = null
         for (const listener of listeners) listener()
@@ -547,7 +645,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       if (started && modeChanged) {
         void loadTools()
         void loadCatalog()
-      } else if (started && (drawingChanged || derivedChanged)) {
+      } else if (started && (drawingChanged || derivedChanged || projectChanged)) {
         void loadCatalog()
       }
     },

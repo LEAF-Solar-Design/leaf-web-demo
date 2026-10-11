@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getCapabilities, runToolAsync } from './api.js'
 import { solarFlowRunOutcome } from './solar/solarFlowModel.js'
 import { SOLAR_SIZING_RUN_REASONS, solarSizingRunSentence } from './solar/solarSizingRunReasons.js'
+import { createSolarProjectClient } from './solar/solarProjectClient.js'
 
 const I = { schema_version: 1, source_intake_sha256: 'a'.repeat(64), units: { drawing_units: 'ft', wcs_to_ucs: [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1], elevation_datum: 'unknown', crs: null } }
 const P = { expected_rev: 0, changes: { panels_in_sequence: 3 }, initialize: I }
@@ -121,6 +122,113 @@ const sizingAliases = [
   ["APS_UNAVAILABLE","unknown","APS_UNAVAILABLE"],
 ]
 const error = { error_code: 'bad_params', message: 'invalid_seed_parent', retryable: false }
+
+const projectBinding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
+  project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
+  input_version_id: '44444444-4444-4444-4444-444444444444' }
+
+describe('project capabilities adapter boundary', () => {
+  it('R7-38 adapter refuses a catalog success that settles after its scope changes', async () => {
+    const fetch = stubResponse({ families: [] })
+    const client = createSolarProjectClient({ fetchImpl: fetch })
+    client.setScope(projectBinding, 'principal')
+    const catalog = vi.fn(async () => {
+      client.setScope(null, null)
+      return { ok: true, status: 200, data: { families: [{ family_id: 'old', capabilities: [] }] } }
+    })
+    const projectClient = { ...client, catalog }
+    try {
+      await expect(getCapabilities(false, {
+        solarBinding: projectBinding, authorityKey: 'principal', projectIntents: [],
+      }, { projectClient })).rejects.toMatchObject({ reason: 'SIP_R7_SCOPE_STALE', status: null, body: null })
+      expect(catalog).toHaveBeenCalledOnce()
+      expect(fetch).not.toHaveBeenCalled()
+    } finally { client.dispose() }
+  })
+  it('R7-54 a family read through the real client that signs out, or carries a custom prototype, never returns', async () => {
+    const context = { solarBinding: projectBinding, authorityKey: 'principal', projectIntents: [] }
+    let reads = 0
+    for (const [prototype, reason] of [[Object.prototype, 'SIP_R7_SCOPE_STALE'], [{}, 'SIP_R7_RESPONSE_INVALID']]) {
+      let client
+      const family = Object.assign(Object.create(prototype), { capabilities: [] })
+      Object.defineProperty(family, 'family_id', { enumerable: true, get() {
+        reads += 1
+        client.setScope(null, null)
+        return 'old'
+      } })
+      const fetch = stubResponse({ families: [family] })
+      client = createSolarProjectClient({ fetchImpl: fetch })
+      client.setScope(projectBinding, 'principal')
+      try {
+        await expect(getCapabilities(false, context, { projectClient: client }))
+          .rejects.toMatchObject({ reason, status: null, body: null })
+        expect(fetch).toHaveBeenCalledOnce()
+      } finally { client.dispose() }
+    }
+    // The plain family's getter runs once while the response is read; the custom prototype is refused unread.
+    expect(reads).toBe(1)
+  })
+  it('R7-55 a scope change while the adapter normalizes families is refused by its second check', async () => {
+    const fetch = stubResponse({ families: [] })
+    const client = createSolarProjectClient({ fetchImpl: fetch })
+    client.setScope(projectBinding, 'principal')
+    const family = { capabilities: [] }
+    Object.defineProperty(family, 'family_id', { enumerable: true, get() {
+      client.setScope(null, null)
+      return 'old'
+    } })
+    const catalog = vi.fn(async () => ({ ok: true, status: 200, data: { families: [family] } }))
+    const projectClient = { ...client, catalog }
+    try {
+      await expect(getCapabilities(false, {
+        solarBinding: projectBinding, authorityKey: 'principal', projectIntents: [],
+      }, { projectClient })).rejects.toMatchObject({ reason: 'SIP_R7_SCOPE_STALE', status: null, body: null })
+      expect(catalog).toHaveBeenCalledOnce()
+      expect(client.getSnapshot().binding).toBeNull()
+      expect(fetch).not.toHaveBeenCalled()
+    } finally { client.dispose() }
+  })
+  it('R7-02 canonical catalog sends the full binding and never drawing_version', async () => {
+    const fetch = stubResponse({ families: [] })
+    const client = createSolarProjectClient({ fetchImpl: fetch })
+    client.setScope(projectBinding, 'principal')
+    const context = { solarBinding: projectBinding, authorityKey: 'principal', projectIntents: [] }
+    await getCapabilities(false, context, { projectClient: client })
+    expect(pathAndQuery(fetch.mock.calls[0][0])).toBe(`/api/capabilities?drawing_id=${projectBinding.drawing_id}&project_id=${projectBinding.project_id}&input_version_id=${projectBinding.input_version_id}`)
+    expect(fetch.mock.calls[0][0]).not.toContain('drawing_version')
+    const before = fetch.mock.calls.length
+    await expect(getCapabilities(false, { ...context, solarBinding: null }, { projectClient: client })).rejects.toMatchObject({ reason: 'SIP_R7_BINDING_INVALID', status: null, body: null })
+    await expect(getCapabilities(false, context)).rejects.toMatchObject({ reason: 'SIP_R7_BINDING_INVALID' })
+    await expect(getCapabilities(false, { ...context, authorityKey: 'other' }, { projectClient: client })).rejects.toMatchObject({ reason: 'SIP_R7_BINDING_INVALID' })
+    expect(fetch.mock.calls.length).toBe(before)
+    client.dispose()
+  })
+
+  it('R7-34 standalone catalog and run carry no canonical project fields', async () => {
+    const fetch = stubResponse({ families: [] })
+    await getCapabilities(false, { drawing_id: 'standalone', drawing_version: 2 })
+    stubResponse({ error: { ...error, error_code: 'BAD_PARAMS' } }, 409)
+    const runFetch = globalThis.fetch
+    await runToolAsync({ name: 'solar-settings' }, P, 'standalone', { dwgVersion: 2 })
+    for (const [url, init] of [...fetch.mock.calls, ...runFetch.mock.calls]) {
+      expect(url).not.toContain('project_id')
+      expect(url).not.toContain('input_version_id')
+      expect(url).not.toContain('project_runs')
+      expect(init.headers).not.toHaveProperty('X-Org-Id')
+      expect(init.headers).not.toHaveProperty('X-Project-Id')
+      expect(init.body || '').not.toContain('project_id')
+      expect(init.body || '').not.toContain('input_version_id')
+    }
+  })
+
+  it('R7-36 legacy project_id without solarBinding preserves the existing request', async () => {
+    const fetch = stubResponse({ families: [] })
+    await getCapabilities(false, { drawing_id: 'd1', project_id: projectBinding.project_id, drawing_version: 3 })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(pathAndQuery(fetch.mock.calls[0][0])).toBe('/api/capabilities?drawing_id=d1&drawing_version=3')
+    expect(fetch.mock.calls[0][1].headers).not.toHaveProperty('X-Project-Id')
+  })
+})
 
 function stubResponse(body, status = 200) {
   const fetch = vi.fn().mockResolvedValue({ ok: status >= 200 && status < 300, status, json: async () => body })

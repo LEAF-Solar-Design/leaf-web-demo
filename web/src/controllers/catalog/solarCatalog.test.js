@@ -3,10 +3,144 @@ import { describe, expect, it, vi } from 'vitest'
 vi.mock('../../telemetry.js', () => ({ track: vi.fn() }))
 
 import { createCatalogController } from './createCatalogController.js'
+import { createSolarProjectClient } from '../../solar/solarProjectClient.js'
+import { getCapabilities } from '../../api.js'
 
 const A = { entitled: true, implemented: true, engine_ready: true, input_ready: false, refusal_reasons: ['graph_seed_required'] }
 const I = { schema_version: 1, source_intake_sha256: 'a'.repeat(64), units: { drawing_units: 'ft', wcs_to_ucs: [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1], elevation_datum: 'unknown', crs: null } }
 const P = { expected_rev: 0, changes: { panels_in_sequence: 3 }, initialize: I }
+
+const projectBinding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
+  project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
+  input_version_id: '44444444-4444-4444-4444-444444444444' }
+const projectDigest = 'sha256:' + 'a'.repeat(64)
+
+function projectSetup(availability = {}) {
+  const rows = fixture.map((row) => ({ ...row, availability: { entitled: true, implemented: true,
+    engine_ready: true, input_ready: true, admission_checked: true,
+    admission: { status_code: 200, error: null }, refusal_reasons: [], ...availability } }))
+  const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ families: [{ family_id: 'stringing', capabilities: rows }] }) }))
+  const client = createSolarProjectClient({ fetchImpl })
+  client.setScope(projectBinding, 'session-1')
+  const intent = client.prepareRun({ tool: 'solar-settings', params: P, catalogDigest: projectDigest, idempotencyKey: 'one' })
+  const adapters = { commitDecision: vi.fn((decision) => decision), dismissDecision: vi.fn() }
+  const services = { getTools: vi.fn(async () => rows), getCapabilities: vi.fn(getCapabilities), routePrompt: vi.fn(), projectSolarClient: client }
+  const controller = createCatalogController({ services, adapters, context: {
+    solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [intent],
+    solarSettingsFormEnabled: true, entitlements: { entitlements: { run_write: true } } } })
+  return { client, controller, adapters, services, intent }
+}
+
+describe('exact project catalog admission', () => {
+  it('R7-39 stale preview rejection never publishes its catalog error', async () => {
+    const run = projectSetup()
+    const projectIntents = [run.intent]
+    run.controller.setContext({ projectIntents })
+    let rejectOld
+    run.services.getCapabilities.mockImplementationOnce(() => new Promise((resolve, reject) => { rejectOld = reject }))
+    const publishedErrors = []
+    const unsubscribe = run.controller.subscribe(() => {
+      publishedErrors.push(run.controller.getState().catalogError)
+    })
+    try {
+      const pending = run.controller.actions.loadCatalog()
+      projectIntents.push(run.client.prepareRun({
+        ...run.intent, tool: 'solar-correct-string', idempotencyKey: 'two',
+      }))
+      const error = new Error('old preview refusal')
+      error.status = 409
+      rejectOld(error)
+      expect(await pending).toBeUndefined()
+      expect(run.controller.getState().catalogError).toBeNull()
+      expect(publishedErrors.every((value) => value === null)).toBe(true)
+    } finally {
+      unsubscribe()
+      run.controller.destroy()
+      run.client.dispose()
+    }
+  })
+  it('R7-56 an error whose message changes the project request is never published', async () => {
+    const run = projectSetup()
+    const projectIntents = [run.intent]
+    run.controller.setContext({ projectIntents })
+    let pushed = false
+    const error = new Error('placeholder')
+    Object.defineProperty(error, 'message', { configurable: true, get() {
+      if (!pushed) {
+        pushed = true
+        projectIntents.push(run.client.prepareRun({ ...run.intent, tool: 'solar-correct-string', idempotencyKey: 'two' }))
+      }
+      return 'stale error from getter'
+    } })
+    error.status = 409
+    run.services.getCapabilities.mockImplementationOnce(async () => { throw error })
+    const publishedErrors = []
+    const unsubscribe = run.controller.subscribe(() => {
+      publishedErrors.push(run.controller.getState().catalogError)
+    })
+    try {
+      expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+      expect(pushed).toBe(true)
+      expect(run.controller.getState().catalogError).toBeNull()
+      expect(publishedErrors.every((value) => value === null)).toBe(true)
+    } finally {
+      unsubscribe()
+      run.controller.destroy()
+      run.client.dispose()
+    }
+  })
+  it('R7-09 outer 200 keeps nested checkout denial and never arms the seed tool', async () => {
+    const error = { reason_code: 'SIP_R1_CHECKOUT_DENIED', retryable: false }
+    const run = projectSetup({ admission: { status_code: 403, error } })
+    await run.controller.actions.loadTools()
+    await run.controller.actions.loadCatalog()
+    expect(run.controller.getState().catalog.families[0].capabilities[0].availability.admission).toEqual({ status_code: 403, error })
+    run.controller.actions.commitDecision({ lane: 'run', tool: 'solar-settings', params: P })
+    expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+    expect(run.controller.getState().routeError).toBe('SIP_R1_CHECKOUT_DENIED')
+    expect(run.controller.getState().runnableCapabilityCount).toBe(0)
+    run.controller.destroy(); run.client.dispose()
+  })
+
+  it('R7-10 changed params digest or K cannot arm an accepted old preview', async () => {
+    for (const changes of [{ params: { expected_rev: 1 } }, { catalogDigest: 'sha256:' + 'b'.repeat(64) }, { idempotencyKey: 'two' }]) {
+      const run = projectSetup()
+      await run.controller.actions.loadCatalog()
+      run.controller.actions.commitDecision({ lane: 'run', tool: 'solar-settings', params: P })
+      expect(run.adapters.commitDecision).toHaveBeenCalledOnce()
+      const next = run.client.prepareRun({ ...run.intent, ...changes })
+      run.controller.setContext({ projectIntents: [next] })
+      expect(run.controller.getState().route).toBeNull()
+      expect(run.controller.getState().catalog.families).toEqual([])
+      run.controller.actions.commitDecision({ lane: 'run', tool: 'solar-settings', params: next.params })
+      expect(run.adapters.commitDecision).toHaveBeenCalledOnce()
+      expect(run.controller.getState().routeError).toBe('project_request_required')
+      run.controller.destroy(); run.client.dispose()
+    }
+  })
+
+  it('R7-11 O V or authority switch aborts a pending catalog and returns undefined', async () => {
+    for (const [binding, authorityKey] of [
+      [{ ...projectBinding, organization_id: projectBinding.project_id }, 'session-1'],
+      [{ ...projectBinding, input_version_id: projectBinding.project_id }, 'session-1'],
+      [projectBinding, 'session-2'],
+    ]) {
+      const run = projectSetup()
+      let resolveOld
+      run.services.getCapabilities.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
+      const pending = run.controller.actions.loadCatalog()
+      const signal = run.services.getCapabilities.mock.calls.at(-1)[2].signal
+      run.client.setScope(binding, authorityKey)
+      run.controller.setContext({ solarBinding: binding, authorityKey, projectIntents: [] })
+      expect(signal.aborted).toBe(true)
+      resolveOld({ families: [{ family_id: 'old', capabilities: [] }] })
+      expect(await pending).toBeUndefined()
+      expect(run.controller.getState().catalog.families).toEqual([])
+      expect(run.controller.getState().route).toBeNull()
+      run.controller.destroy(); run.client.dispose()
+    }
+  })
+})
 
 describe('Solar settings seed admission', () => {
   async function seedCase({ name = 'solar-settings', availability = A, params = P, context = {}, reason = null } = {}) {
