@@ -18,7 +18,8 @@ import {
 import { notificationBus } from '../../lib/notifications.js'
 import { solarView } from '../../solar/solarView.js'
 import { canInitializeSolarSettings } from '../../solar/solarSettingsWire.js'
-import { solarDrawingBindingKey, sameSolarDrawingBinding } from '../../solar/solarDrawingBinding.js'
+import { createSolarDrawingBinding, solarDrawingBindingKey, sameSolarDrawingBinding } from '../../solar/solarDrawingBinding.js'
+import { PROJECT_SOLAR_APP_REASONS } from '../../solar/solarProjectAppModel.js'
 
 const DEFAULT_THRESHOLDS = { CHIP_ONLY: 0.8, RACE_MIN: 0.55 }
 const AVAILABILITY_KEYS = ['entitled', 'engine_ready', 'input_ready', 'implemented']
@@ -86,6 +87,51 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   let catalogAbort = null
   let acceptedPreview = null
   let unsubscribeProject = null
+  const projectCatalogSnapshot = (catalog) => {
+    const secretField = new RegExp('authorization|capability|bearer|password|passwd|secret|api[_-]?key|credential|cookie|' +
+      'private[_-]?key|(?:access|refresh|id|session)[_-]?token|^token$', 'i')
+    const secretValue = new RegExp('lco1\\.[0-9a-f]{64}|\\bbearer\\s+\\S+|eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+', 'i')
+    // A key whose letters and digits end in "token" names a credential (X-Amz-Security-Token,
+    // authToken, apiToken). max_tokens and tokenizer do not end that way and stay accepted.
+    const keyNoise = new RegExp('[^a-z0-9]', 'g')
+    const tokenKey = (key) => key.toLowerCase().replace(keyNoise, '').endsWith('token')
+    const seen = new Set()
+    const refuse = () => { throw new TypeError('Project tools are unavailable.') }
+    const copy = (value, depth = 0) => {
+      if (value === null || typeof value === 'boolean') return value
+      if (typeof value === 'string') { if (secretValue.test(value)) refuse(); return value }
+      if (typeof value === 'number') { if (!Number.isFinite(value)) refuse(); return value }
+      const array = Array.isArray(value)
+      if (!value || typeof value !== 'object' || depth >= 128 || seen.has(value) ||
+          Object.getPrototypeOf(value) !== (array ? Array.prototype : Object.prototype)) refuse()
+      seen.add(value)
+      const result = array ? [] : {}
+      const keys = Reflect.ownKeys(value)
+      if (array) {
+        const length = value.length
+        if (keys.length !== length + 1) refuse()
+        for (let index = 0; index < length; index += 1) {
+          if (!Object.hasOwn(value, index)) refuse()
+          result.push(copy(value[index], depth + 1))
+        }
+      } else {
+        for (const key of keys) {
+          if (typeof key !== 'string' || secretField.test(key) || tokenKey(key) || secretValue.test(key) ||
+              !Object.getOwnPropertyDescriptor(value, key).enumerable) refuse()
+          Object.defineProperty(result, key, { value: copy(value[key], depth + 1), enumerable: true })
+        }
+      }
+      seen.delete(value)
+      return Object.freeze(result)
+    }
+    try {
+      const result = copy(catalog)
+      if (!result || !Array.isArray(result.families)) refuse()
+      return result
+    } catch { return refuse() }
+  }
+  const resetProjectCatalog = () => projectScope() || Object.hasOwn(state, 'projectCatalog')
+    ? { projectCatalog: null } : {}
   const projectScope = () => Object.hasOwn(current, 'solarBinding') && current.solarBinding !== undefined
   const sortedJson = (value) => {
     if (Array.isArray(value)) return value.map(sortedJson)
@@ -139,8 +185,10 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     catalogRequest += 1
     catalogAbort?.abort()
     acceptedPreview = null
+    state = { ...state, ...resetProjectCatalog() }
+    snapshot = null
     adapters.dismissDecision?.()
-    publish({ catalog: { families: [], source: null }, route: null, routeError: null })
+    publish({ catalog: { families: [], source: null }, route: null, routeError: null, ...resetProjectCatalog() })
   }
   const subscribeProject = () => {
     if (unsubscribeProject || !services.projectSolarClient) return
@@ -185,7 +233,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const getSnapshot = () => {
-    if (projectScope() && acceptedPreview && acceptedPreview !== projectFingerprint()) invalidateProject()
+    if ((projectScope() && acceptedPreview && acceptedPreview !== projectFingerprint()) ||
+        (state.projectCatalog && !state.projectCatalog.isCurrent())) invalidateProject()
     if (!snapshot) {
       const capabilities = (state.catalog.families || []).flatMap((family) => family.capabilities || [])
       const runnableCapabilities = runnableCatalogTools(capabilities, current.entitlements)
@@ -212,7 +261,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       .flatMap((family) => family.capabilities || []).find((tool) => tool.name === name)
     if (projectScope()) {
       const availability = entry?.availability
-      if (!entry || !acceptedPreview || acceptedPreview !== projectFingerprint()) return 'project_request_required'
+      if (!entry || !acceptedPreview || acceptedPreview !== projectFingerprint() ||
+          !state.projectCatalog?.isCurrent()) return 'project_request_required'
       if (availability?.admission_checked !== true || !availability.admission ||
           !Number.isInteger(availability.admission.status_code) || availability.admission.status_code < 200 ||
           availability.admission.status_code >= 300 || availability.admission.error) {
@@ -298,60 +348,115 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     const request = ++catalogRequest
     const project = projectScope()
     const fingerprint = projectFingerprint()
+    const mock = current.mock
+    const projectClient = services.projectSolarClient
+    const projectIntents = current.projectIntents || []
+    const requestIsCurrent = () => request === catalogRequest && project === projectScope() &&
+      mock === current.mock && fingerprint === projectFingerprint() &&
+      projectClient === services.projectSolarClient
+    let capturedBinding = null
+    let capturedAuthorityKey = null
+    let isCurrent = null
     contextFingerprint = fingerprint
     if (project) {
       catalogAbort?.abort()
       catalogAbort = new AbortController()
       acceptedPreview = null
+      state = { ...state, ...resetProjectCatalog() }
+      snapshot = null
       adapters.dismissDecision?.()
-      publish({ catalog: { families: [], source: null }, route: null, routeError: null })
+      publish({ catalog: { families: [], source: null }, route: null, routeError: null, ...resetProjectCatalog() })
+      // A subscriber may have started a newer load inside that publication; this
+      // one must not clear the newer load's error. Standalone keeps the base order.
+      if (request !== catalogRequest) return undefined
     }
     publish({ catalogError: null })
     try {
       if (project) {
-        const clientScope = services.projectSolarClient?.getSnapshot?.()
+        if (!requestIsCurrent()) return undefined
+        const clientScope = projectClient?.getSnapshot?.()
         if (!sameSolarDrawingBinding(current.solarBinding, clientScope?.binding) ||
-            typeof current.authorityKey !== 'string' || current.authorityKey !== clientScope?.authorityKey) {
-          const error = new Error('Project tools are unavailable.')
-          error.status = null
-          error.body = null
-          error.reason = 'SIP_R7_BINDING_INVALID'
-          throw error
+            typeof current.authorityKey !== 'string' || current.authorityKey !== clientScope?.authorityKey ||
+            typeof projectClient?.captureCatalogScope !== 'function') {
+          throw new Error('Project tools are unavailable.')
         }
+        capturedBinding = createSolarDrawingBinding(clientScope.binding)
+        capturedAuthorityKey = clientScope.authorityKey
+        const capturedScopeIsCurrent = projectClient.captureCatalogScope()
+        if (typeof capturedScopeIsCurrent !== 'function') throw new Error('Project tools are unavailable.')
+        let valid = true
+        isCurrent = () => {
+          const live = projectClient.getSnapshot()
+          valid = valid && requestIsCurrent() && capturedScopeIsCurrent() &&
+            sameSolarDrawingBinding(current.solarBinding, capturedBinding) &&
+            current.authorityKey === capturedAuthorityKey &&
+            sameSolarDrawingBinding(live.binding, capturedBinding) &&
+            live.authorityKey === capturedAuthorityKey
+          return valid
+        }
+        if (!isCurrent()) return undefined
       }
-      const catalog = project ? await services.getCapabilities(current.mock, {
-        solarBinding: current.solarBinding,
-        authorityKey: current.authorityKey,
-        projectIntents: current.projectIntents || [],
-      }, { projectClient: services.projectSolarClient, signal: catalogAbort.signal }) : await services.getCapabilities(current.mock, {
+      const catalog = project ? await services.getCapabilities(mock, {
+        solarBinding: capturedBinding,
+        authorityKey: capturedAuthorityKey,
+        projectIntents,
+      }, { projectClient, signal: catalogAbort.signal }) : await services.getCapabilities(current.mock, {
         drawing_id: current.drawingId ?? current.drawing_id,
         project_id: current.projectId ?? current.project_id,
         drawing_version: current.drawingVersion ?? current.drawing_version ?? 'head',
       })
       if (request !== catalogRequest) return project ? undefined : catalog
-      if (project && fingerprint !== projectFingerprint()) return undefined
-      if (project) acceptedPreview = fingerprint
+      if (project && !isCurrent()) return undefined
+      const projectCatalogData = project ? projectCatalogSnapshot(catalog) : null
+      if (project && !isCurrent()) return undefined
       const openFamilies = { ...state.openFamilies }
-      for (const family of catalog.families || []) {
+      const learned = new Map()
+      for (const family of (project ? projectCatalogData : catalog).families || []) {
         if (!(family.family_id in openFamilies)) openFamilies[family.family_id] = false
         for (const row of family.capabilities || []) {
           const result = solarView(row)
-          if (result.state === 'valid') learnedSolar.set(row.name, result.view.entitlement)
+          if (result.state === 'valid') {
+            if (project) learned.set(row.name, result.view.entitlement)
+            else learnedSolar.set(row.name, result.view.entitlement)
+          }
         }
       }
-      publish({ catalog, openFamilies })
-      if (project && (request !== catalogRequest || fingerprint !== projectFingerprint())) return undefined
+      if (project) {
+        if (!isCurrent()) return undefined
+        for (const [name, entitlement] of learned) learnedSolar.set(name, entitlement)
+        acceptedPreview = fingerprint
+        publish({
+          catalog: projectCatalogData,
+          openFamilies,
+          projectCatalog: Object.freeze({
+            binding: capturedBinding,
+            authorityKey: capturedAuthorityKey,
+            client: projectClient,
+            families: projectCatalogData.families,
+            isCurrent,
+          }),
+        })
+        if (!isCurrent()) return undefined
+        return projectCatalogData
+      } else {
+        publish({ catalog, openFamilies })
+      }
       return catalog
     } catch (error) {
       // The error is formatted before the staleness check, so formatting cannot change what that check saw.
       const message = humanizeError(error)
       if (request !== catalogRequest || (project && fingerprint !== projectFingerprint())) return undefined
+      if (project && !(isCurrent ? isCurrent() : requestIsCurrent())) return undefined
+      if (project) acceptedPreview = null
       publish({
         catalog: { families: [], source: null },
-        catalogError: message,
+        catalogError: project ? PROJECT_SOLAR_APP_REASONS.project_tools_unavailable : message,
+        ...resetProjectCatalog(),
       })
-      if (project && (request !== catalogRequest || fingerprint !== projectFingerprint())) return undefined
-      if (!current.mock && isUnauthorized(error)) adapters.onAuthRequired?.()
+      if (project && !(isCurrent ? isCurrent() : requestIsCurrent())) return undefined
+      const unauthorized = !current.mock && isUnauthorized(error)
+      if (project && !(isCurrent ? isCurrent() : requestIsCurrent())) return undefined
+      if (unauthorized) adapters.onAuthRequired?.()
       return undefined
     }
   }
@@ -615,6 +720,11 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       catalogRequest += 1
       catalogAbort?.abort()
       acceptedPreview = null
+      // Standalone keeps the base's destroy: its state object is never replaced.
+      if (projectScope() || Object.hasOwn(state, 'projectCatalog')) {
+        state = { ...state, ...resetProjectCatalog() }
+        snapshot = null
+      }
       unsubscribeProject?.()
       unsubscribeProject = null
       listeners.clear()
@@ -629,13 +739,14 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const derivedChanged = Object.prototype.hasOwnProperty.call(next, 'entitlements') &&
         next.entitlements !== current.entitlements
       current = { ...current, ...next }
-      const projectChanged = (previousProject || projectScope()) && previousFingerprint !== projectFingerprint()
+      const projectChanged = (previousProject || projectScope()) &&
+        (previousProject !== projectScope() || modeChanged || previousFingerprint !== projectFingerprint())
       contextFingerprint = projectFingerprint()
       if (started) restoreDraft()
       if (drawingChanged) {
         catalogRequest += 1
         adapters.dismissDecision?.()
-        publish({ catalog: { families: [], source: null }, route: null, routeError: null })
+        publish({ catalog: { families: [], source: null }, route: null, routeError: null, ...resetProjectCatalog() })
       }
       if (projectChanged) invalidateProject()
       if (derivedChanged) {

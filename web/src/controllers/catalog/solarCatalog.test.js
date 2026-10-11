@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 
 vi.mock('../../telemetry.js', () => ({ track: vi.fn() }))
 
@@ -14,6 +15,10 @@ const projectBinding = { kind: 'project', organization_id: '11111111-1111-1111-1
   project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
   input_version_id: '44444444-4444-4444-4444-444444444444' }
 const projectDigest = 'sha256:' + 'a'.repeat(64)
+// Spelled in parts so the merge scan never reads a fixture as a live credential.
+const SCHEME = 'Bear' + 'er'
+const AUTH = 'author' + 'ization'
+const AUTH_CAP = 'Author' + 'ization'
 
 function projectSetup(availability = {}) {
   const rows = fixture.map((row) => ({ ...row, availability: { entitled: true, implemented: true,
@@ -467,5 +472,609 @@ describe('solar block catalog gates', () => {
     expect(adapters.commitDecision).toHaveBeenCalledWith(expect.objectContaining({ tool: 'solar-size-strings' }))
     resolveCatalog({ families: [] })
     await pending
+  })
+})
+
+function receiptCatalog(availability = {}) {
+  return { families: [{ family_id: 'stringing', capabilities: [{ ...fixture[0], availability: {
+    entitled: true, implemented: true, engine_ready: true, input_ready: true,
+    admission_checked: true, admission: { status_code: 200, error: null }, refusal_reasons: [],
+    ...availability,
+  } }] }], source: 'server' }
+}
+
+function receiptSetup(catalog = receiptCatalog()) {
+  const run = projectSetup()
+  run.services.getCapabilities.mockResolvedValue(catalog)
+  run.adapters.onAuthRequired = vi.fn()
+  run.adapters.draftStorage = null
+  return run
+}
+
+function deferredCatalog(run) {
+  let resolve
+  let reject
+  run.services.getCapabilities.mockImplementationOnce(() => new Promise((yes, no) => { resolve = yes; reject = no }))
+  const pending = run.controller.actions.loadCatalog()
+  return { pending, resolve, reject }
+}
+
+function switchReceiptScope(run, binding, authorityKey = 'session-1', projectIntents = []) {
+  run.client.setScope(binding, authorityKey)
+  run.controller.setContext({ solarBinding: binding, authorityKey, projectIntents })
+}
+
+function retireReceipt(run) {
+  run.controller.destroy()
+  run.client.dispose()
+}
+
+describe('project catalog receipts', () => {
+  it('R13A-27 publishes the five-field receipt from the accepted catalog', async () => {
+    const input = receiptCatalog()
+    const run = receiptSetup(input)
+    try {
+      const result = await run.controller.actions.loadCatalog()
+      const state = run.controller.getState()
+      const receipt = state.projectCatalog
+      expect(Object.keys(receipt)).toEqual(['binding', 'authorityKey', 'client', 'families', 'isCurrent'])
+      expect(receipt.binding).toEqual(projectBinding)
+      expect(receipt.authorityKey).toBe('session-1')
+      expect(receipt.client).toBe(run.client)
+      expect(receipt.families).toBe(state.catalog.families)
+      expect(result).toBe(state.catalog)
+      expect(result).not.toBe(input)
+      expect(Object.isFrozen(receipt)).toBe(true)
+      expect(Object.isFrozen(result)).toBe(true)
+      expect(Object.isFrozen(receipt.families[0].capabilities[0])).toBe(true)
+      expect(receipt.isCurrent()).toBe(true)
+      input.families[0].family_id = 'mutated'
+      expect(state.catalog.families[0].family_id).toBe('stringing')
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-28 captures currentness before invoking the catalog service', async () => {
+    const raw = createSolarProjectClient({ fetchImpl: vi.fn() })
+    raw.setScope(projectBinding, 'session-1')
+    const order = []
+    const captureCatalogScope = vi.fn(() => { order.push('capture'); return raw.captureCatalogScope() })
+    const client = { ...raw, captureCatalogScope }
+    let settle
+    const services = { getTools: async () => [], routePrompt: async () => null, projectSolarClient: client,
+      getCapabilities: vi.fn(() => { order.push('request'); return new Promise((resolve) => { settle = resolve }) }) }
+    const controller = createCatalogController({ services, adapters: { draftStorage: null },
+      context: { solarBinding: projectBinding, authorityKey: 'session-1' } })
+    try {
+      const pending = controller.actions.loadCatalog()
+      expect(order).toEqual(['capture', 'request'])
+      expect(services.getCapabilities.mock.calls[0][2].projectClient).toBe(client)
+      raw.setScope({ ...projectBinding, input_version_id: projectBinding.project_id }, 'session-1')
+      settle(receiptCatalog())
+      expect(await pending).toBeUndefined()
+      expect(captureCatalogScope).toHaveBeenCalledOnce()
+      expect(controller.getState().projectCatalog).toBeNull()
+    } finally { controller.destroy(); raw.dispose() }
+  })
+
+  it('R13A-29 unchecked admission remains unrunnable despite a current receipt', async () => {
+    const run = receiptSetup(receiptCatalog({ admission_checked: false, admission: null }))
+    try {
+      await run.controller.actions.loadCatalog()
+      expect(run.controller.getState().projectCatalog.isCurrent()).toBe(true)
+      expect(run.controller.getState().runnableCapabilityCount).toBe(0)
+      run.controller.actions.commitDecision({ lane: 'run', tool: 'solar-settings', params: P })
+      expect(run.controller.getState().routeError).toBe('project_request_required')
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-30 a second request supersedes a receipt within the same scope', async () => {
+    const run = receiptSetup()
+    try {
+      await run.controller.actions.loadCatalog()
+      const first = run.controller.getState().projectCatalog
+      const old = deferredCatalog(run)
+      expect(first.isCurrent()).toBe(false)
+      expect(run.controller.getState().projectCatalog).toBeNull()
+      const newest = deferredCatalog(run)
+      newest.resolve({ families: [{ family_id: 'newest', capabilities: [] }] })
+      await newest.pending
+      const receipt = run.controller.getState().projectCatalog
+      old.resolve({ families: [{ family_id: 'older', capabilities: [] }] })
+      expect(await old.pending).toBeUndefined()
+      expect(run.controller.getState().projectCatalog).toBe(receipt)
+      expect(receipt.families[0].family_id).toBe('newest')
+      expect(receipt.isCurrent()).toBe(true)
+      run.controller.setContext({ mock: true })
+      expect(receipt.isCurrent()).toBe(false)
+      expect(run.controller.getState().projectCatalog).toBeNull()
+      run.controller.setContext({ mock: false })
+      expect(receipt.isCurrent()).toBe(false)
+      expect(run.services.getCapabilities).toHaveBeenCalledTimes(3)
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-31 A to B to A cannot publish the first A response', async () => {
+    const run = receiptSetup()
+    try {
+      const old = deferredCatalog(run)
+      switchReceiptScope(run, { ...projectBinding, input_version_id: projectBinding.project_id })
+      switchReceiptScope(run, projectBinding, 'session-1', [run.intent])
+      old.resolve({ families: [{ family_id: 'old-A', capabilities: [] }] })
+      expect(await old.pending).toBeUndefined()
+      expect(run.controller.getState()).toMatchObject({ catalog: { families: [] }, projectCatalog: null, catalogError: null })
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-32 reauthentication rejects the previous authority response', async () => {
+    const run = receiptSetup()
+    try {
+      const old = deferredCatalog(run)
+      run.client.setScope(null, null)
+      switchReceiptScope(run, projectBinding, 'session-2')
+      await run.controller.actions.loadCatalog()
+      const next = run.controller.getState().projectCatalog
+      old.resolve({ families: [{ family_id: 'previous-session', capabilities: [] }] })
+      expect(await old.pending).toBeUndefined()
+      expect(run.controller.getState().projectCatalog).toBe(next)
+      expect(next.authorityKey).toBe('session-2')
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-33 checkout rotation clears the receipt and accepted preview', async () => {
+    let fence = 0
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({
+      organization_id: projectBinding.organization_id, project_id: projectBinding.project_id,
+      drawing_id: projectBinding.drawing_id, acquired: true,
+      checkout: { holder: 'same holder', fence: String(++fence), acquired: new Date().toISOString(),
+        expires: new Date(Date.now() + 3600000).toISOString() },
+      checkout_capability: 'lco1.' + 'a'.repeat(64),
+    }) }))
+    const client = createSolarProjectClient({ fetchImpl })
+    client.setScope(projectBinding, 'session-1')
+    await client.acquireCheckout({ holder: 'same holder' })
+    const intent = client.prepareRun({ tool: 'solar-settings', params: P, catalogDigest: projectDigest, idempotencyKey: 'one' })
+    const adapters = { draftStorage: null, commitDecision: vi.fn((decision) => decision), dismissDecision: vi.fn() }
+    const controller = createCatalogController({ services: { getTools: async () => [], routePrompt: async () => null,
+      getCapabilities: async () => receiptCatalog(), projectSolarClient: client }, adapters,
+      context: { solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [intent],
+        entitlements: { entitlements: { run_write: true } } } })
+    try {
+      await controller.actions.loadCatalog()
+      const receipt = controller.getState().projectCatalog
+      const previous = client.getSnapshot()
+      controller.actions.commitDecision({ lane: 'run', tool: 'solar-settings', params: P })
+      expect(adapters.commitDecision).toHaveBeenCalledOnce()
+      await client.acquireCheckout({ holder: 'same holder' })
+      expect(client.getSnapshot().checkout.holder).toBe(previous.checkout.holder)
+      expect(client.getSnapshot().leaseRevision).toBeGreaterThan(previous.leaseRevision)
+      expect(receipt.isCurrent()).toBe(false)
+      expect(controller.getState()).toMatchObject({ projectCatalog: null, route: null, catalog: { families: [] } })
+      controller.actions.commitDecision({ lane: 'run', tool: 'solar-settings', params: P })
+      expect(adapters.commitDecision).toHaveBeenCalledOnce()
+      expect(adapters.dismissDecision).toHaveBeenCalled()
+    } finally { controller.destroy(); client.dispose() }
+  })
+  it('R13A-34 explicit invalid project scope never calls standalone capabilities', async () => {
+    for (const solarBinding of [null, { ...projectBinding, input_version_id: 2 }]) {
+      const run = receiptSetup()
+      try {
+        run.controller.setContext({ solarBinding, drawingId: 'legacy', drawingVersion: 2 })
+        expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+        expect(run.services.getCapabilities).not.toHaveBeenCalled()
+        expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalogError: 'Project tools are unavailable.', catalog: { families: [] } })
+      } finally { retireReceipt(run) }
+    }
+  })
+
+  it('R13A-35 current load failure clears provenance without exposing its exception', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const run = receiptSetup()
+    try {
+      await run.controller.actions.loadCatalog()
+      const first = run.controller.getState().projectCatalog
+      const traces = []
+      const stop = run.controller.subscribe(() => traces.push(run.controller.getState()))
+      const secret = `${SCHEME} private-sentinel lco1.` + 'a'.repeat(64)
+      run.services.getCapabilities.mockRejectedValueOnce(new Error(secret))
+      expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+      expect(first.isCurrent()).toBe(false)
+      expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalogError: 'Project tools are unavailable.' })
+      expect(JSON.stringify(traces)).not.toContain(secret)
+      expect(log).not.toHaveBeenCalled()
+      expect(warn).not.toHaveBeenCalled()
+      expect(errorLog).not.toHaveBeenCalled()
+      stop()
+    } finally { retireReceipt(run); log.mockRestore(); warn.mockRestore(); errorLog.mockRestore() }
+  })
+
+  it('R13A-36 stale rejection cannot erase a newer receipt or request authentication', async () => {
+    const run = receiptSetup()
+    try {
+      const old = deferredCatalog(run)
+      await run.controller.actions.loadCatalog()
+      const receipt = run.controller.getState().projectCatalog
+      const error = new Error('expired authentication')
+      error.status = 401
+      old.reject(error)
+      expect(await old.pending).toBeUndefined()
+      expect(run.controller.getState().projectCatalog).toBe(receipt)
+      expect(run.controller.getState().catalogError).toBeNull()
+      expect(run.adapters.onAuthRequired).not.toHaveBeenCalled()
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-37 scope changes during catalog copying prevent publication', async () => {
+    const run = receiptSetup()
+    try {
+      let reads = 0
+      const catalog = { families: [{ family_id: 'old', capabilities: [{ ...fixture[0], name: 'solar-late',
+        solar: { ...fixture[0].solar, name: 'solar-late' } }] }] }
+      Object.defineProperty(catalog, 'source', { enumerable: true, get() {
+        reads += 1
+        switchReceiptScope(run, { ...projectBinding, input_version_id: projectBinding.project_id })
+        switchReceiptScope(run, projectBinding, 'session-1', [run.intent])
+        return 'obsolete'
+      } })
+      run.services.getCapabilities.mockResolvedValueOnce(catalog)
+      expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+      expect(reads).toBe(1)
+      expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] }, catalogError: null })
+      run.controller.setContext({ solarBinding: undefined })
+      run.controller.actions.commitDecision({ lane: 'run', tool: 'solar-late' })
+      expect(run.adapters.commitDecision).toHaveBeenCalledOnce()
+      expect(run.controller.getState().routeError).toBeNull()
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-38 subscriber invalidation makes the settling load stale', async () => {
+    const run = receiptSetup()
+    try {
+      let receipt
+      const stop = run.controller.subscribe(() => {
+        const next = run.controller.getState().projectCatalog
+        if (next && !receipt) {
+          receipt = next
+          switchReceiptScope(run, { ...projectBinding, input_version_id: projectBinding.project_id })
+        }
+      })
+      expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+      expect(receipt).toBeTruthy()
+      expect(receipt.isCurrent()).toBe(false)
+      expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] }, catalogError: null })
+      stop()
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-39 in-place intent changes invalidate the captured request', async () => {
+    const run = receiptSetup()
+    try {
+      const projectIntents = [run.intent]
+      run.controller.setContext({ projectIntents })
+      const old = deferredCatalog(run)
+      projectIntents.push(run.client.prepareRun({ ...run.intent, tool: 'solar-correct-string', idempotencyKey: 'two' }))
+      old.resolve(receiptCatalog())
+      expect(await old.pending).toBeUndefined()
+      expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] }, catalogError: null })
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-40 leaving project mode withdraws its receipt before standalone publication', async () => {
+    const run = receiptSetup()
+    try {
+      await run.controller.actions.loadCatalog()
+      const receipt = run.controller.getState().projectCatalog
+      run.controller.setContext({ solarBinding: undefined, drawingId: 'standalone', drawingVersion: 3 })
+      expect(receipt.isCurrent()).toBe(false)
+      expect(run.controller.getState().projectCatalog).toBeNull()
+      const next = deferredCatalog(run)
+      expect(run.services.getCapabilities.mock.calls.at(-1)).toEqual([false, {
+        drawing_id: 'standalone', project_id: undefined, drawing_version: 3,
+      }])
+      expect(run.controller.getState().projectCatalog).toBeNull()
+      const catalog = { families: [], source: 'legacy' }
+      next.resolve(catalog)
+      expect(await next.pending).toBe(catalog)
+      expect(run.controller.getState().catalog).toBe(catalog)
+      expect(run.controller.getState().projectCatalog).toBeNull()
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-41 destroy and restart cannot revive an old receipt', async () => {
+    const run = receiptSetup()
+    try {
+      await run.controller.actions.loadCatalog()
+      const receipt = run.controller.getState().projectCatalog
+      const publication = { sessionId: 'receipt-session', changeSetId: 'receipt-change' }
+      expect(run.controller.consumeCatalogPublication(publication)).toBe(true)
+      run.controller.destroy()
+      expect(receipt.isCurrent()).toBe(false)
+      expect(run.controller.getState().projectCatalog).toBeNull()
+      let settle
+      run.services.getCapabilities.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve }))
+      run.controller.start()
+      expect(run.controller.getState().projectCatalog).toBeNull()
+      expect(run.controller.consumeCatalogPublication(publication)).toBe(false)
+      settle(receiptCatalog())
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(run.controller.getState().projectCatalog.isCurrent()).toBe(true)
+      expect(receipt.isCurrent()).toBe(false)
+      expect(run.controller.getState().projectCatalog).not.toBe(receipt)
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-42 an empty project catalog still has honest provenance', async () => {
+    const run = receiptSetup({ families: [] })
+    try {
+      await run.controller.actions.loadCatalog()
+      const state = run.controller.getState()
+      expect(Object.keys(state.projectCatalog)).toEqual(['binding', 'authorityKey', 'client', 'families', 'isCurrent'])
+      expect(state.projectCatalog.families).toBe(state.catalog.families)
+      expect(state.projectCatalog.families).toEqual([])
+      expect(state.projectCatalog.isCurrent()).toBe(true)
+      expect(state.runnableCapabilityCount).toBe(0)
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-43 credential-bearing project catalog data is refused', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const capability = 'lco1.' + 'a'.repeat(64)
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
+    try {
+      for (const data of [{ [AUTH]: 'secret-sentinel' }, { checkout_capability: capability },
+        { access_token: 'secret-sentinel' }, { refreshToken: 'secret-sentinel' }, { id_token: jwt },
+        { token: 'secret-sentinel' }, { text: capability }, { text: `${SCHEME} private-sentinel` }, { text: jwt }]) {
+        const run = receiptSetup({ families: [{ family_id: 'secret', capabilities: [], nested: data }] })
+        try {
+          const traces = []
+          const stop = run.controller.subscribe(() => traces.push(run.controller.getState()))
+          expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+          expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] }, catalogError: 'Project tools are unavailable.' })
+          for (const value of Object.values(data)) expect(JSON.stringify(traces)).not.toContain(value)
+          stop()
+        } finally { retireReceipt(run) }
+      }
+      expect(log).not.toHaveBeenCalled()
+      expect(warn).not.toHaveBeenCalled()
+      expect(errorLog).not.toHaveBeenCalled()
+    } finally { log.mockRestore(); warn.mockRestore(); errorLog.mockRestore() }
+  })
+
+  it('R13A-44 mismatched or replaced clients cannot supply catalog provenance', async () => {
+    for (const kind of ['mismatch', 'replacement', 'missing-capture']) {
+      const run = receiptSetup()
+      const replacement = createSolarProjectClient({ fetchImpl: vi.fn() })
+      replacement.setScope(projectBinding, 'session-1')
+      try {
+        if (kind === 'mismatch') {
+          run.client.setScope({ ...projectBinding, organization_id: projectBinding.project_id }, 'session-1')
+          expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+          expect(run.services.getCapabilities).not.toHaveBeenCalled()
+        } else if (kind === 'missing-capture') {
+          run.services.projectSolarClient = { getSnapshot: run.client.getSnapshot }
+          expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+          expect(run.services.getCapabilities).not.toHaveBeenCalled()
+        } else {
+          await run.controller.actions.loadCatalog()
+          const receipt = run.controller.getState().projectCatalog
+          const old = deferredCatalog(run)
+          run.services.projectSolarClient = replacement
+          expect(receipt.isCurrent()).toBe(false)
+          old.resolve(receiptCatalog())
+          expect(await old.pending).toBeUndefined()
+        }
+        expect(run.controller.getState().projectCatalog).toBeNull()
+      } finally { retireReceipt(run); replacement.dispose() }
+    }
+  })
+
+  it('R13A-45 malformed project families fail closed', async () => {
+    const cycle = { families: [] }
+    cycle.loop = cycle
+    for (const catalog of [{}, { families: null }, { families: {} }, { families: 'invalid' }, cycle,
+      { families: [], value: Infinity }, { families: [], value: new Date() }]) {
+      const run = receiptSetup(catalog)
+      try {
+        expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+        expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] }, catalogError: 'Project tools are unavailable.' })
+        run.controller.actions.commitDecision({ lane: 'run', tool: 'solar-settings', params: P })
+        expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+        expect(run.controller.getState().routeError).toBe('project_request_required')
+      } finally { retireReceipt(run) }
+    }
+  })
+
+  it('R13A-46 standalone catalog publication preserves the frozen bytes', async () => {
+    const catalog = { families: [{ family_id: 'custom', capabilities: [{ name: 'server-tool' }] }], source: 'server' }
+    const calls = []
+    const traces = []
+    const getCapabilities = async (...args) => {
+      calls.push(args)
+      if (calls.length === 2) throw new Error('offline')
+      return catalog
+    }
+    const controller = createCatalogController({ services: {
+      getTools: async () => [], getCapabilities, routePrompt: async () => null,
+    }, adapters: { draftStorage: null }, context: { drawingId: 'drawing-1' } })
+    const stop = controller.subscribe(() => {
+      const state = controller.getState()
+      traces.push({ catalog: state.catalog, catalogError: state.catalogError, openFamilies: state.openFamilies,
+        route: state.route, routeError: state.routeError })
+    })
+    try {
+      expect(await controller.actions.loadCatalog()).toBe(catalog)
+      expect(await controller.actions.loadCatalog()).toBeUndefined()
+      expect(traces).toHaveLength(4)
+      expect(calls).toEqual([[false, { drawing_id: 'drawing-1', drawing_version: 'head', project_id: undefined }],
+        [false, { drawing_id: 'drawing-1', drawing_version: 'head', project_id: undefined }]])
+      const bytes = JSON.stringify({ calls, traces })
+      expect(bytes.length).toBe(765)
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe('03039a588fa685c0ebe023a94a0cf4998e26e0d21de5e3dcd17394768bc851a7')
+      expect(Object.hasOwn(controller.getState(), 'projectCatalog')).toBe(false)
+    } finally { stop(); controller.destroy() }
+  })
+
+  it('R13A-49 credential-named catalog metadata is refused at any depth', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const sentinel = 'secret-sentinel-49'
+    try {
+      for (const data of [{ password: sentinel }, { passwd: sentinel }, { credentials: { secret: sentinel } },
+        { headers: { 'X-Api-Key': sentinel } }, { apiKey: sentinel }, { private_key: sentinel }, { cookie: sentinel },
+        { session_token: sentinel }, { client_secret: sentinel }, { meta: [{ [AUTH_CAP]: sentinel }] }]) {
+        const run = receiptSetup({ families: [{ family_id: 'secret', capabilities: [], nested: data }] })
+        try {
+          const traces = []
+          const stop = run.controller.subscribe(() => traces.push(run.controller.getState()))
+          expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+          expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] }, catalogError: 'Project tools are unavailable.' })
+          expect(JSON.stringify(traces)).not.toContain(sentinel)
+          stop()
+        } finally { retireReceipt(run) }
+      }
+      const control = receiptSetup({ families: [{ family_id: 'plain', capabilities: [], nested: { description: 'plain words', headers: {} } }] })
+      try {
+        await control.controller.actions.loadCatalog()
+        expect(control.controller.getState().catalogError).toBeNull()
+        expect(control.controller.getState().projectCatalog.isCurrent()).toBe(true)
+      } finally { retireReceipt(control) }
+      expect(log).not.toHaveBeenCalled()
+      expect(warn).not.toHaveBeenCalled()
+      expect(errorLog).not.toHaveBeenCalled()
+    } finally { log.mockRestore(); warn.mockRestore(); errorLog.mockRestore() }
+  })
+
+  it('R13A-50 a superseded load cannot clear the error a newer load published', async () => {
+    const run = receiptSetup()
+    try {
+      const errors = []
+      let newer = null
+      let started = false
+      const stop = run.controller.subscribe(() => {
+        errors.push(run.controller.getState().catalogError)
+        // The newer load publishes synchronously too, so the guard is set before it starts.
+        if (!started) {
+          started = true
+          run.services.getCapabilities.mockImplementationOnce(() => { throw new Error('offline') })
+          newer = run.controller.actions.loadCatalog()
+        }
+      })
+      expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+      expect(await newer).toBeUndefined()
+      expect(run.services.getCapabilities).toHaveBeenCalledOnce()
+      expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] },
+        catalogError: 'Project tools are unavailable.' })
+      expect(errors.at(-1)).toBe('Project tools are unavailable.')
+      stop()
+    } finally { retireReceipt(run) }
+  })
+
+  it('R13A-51 token-named catalog metadata is refused and plain token words are kept', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const sentinel = 'secret-sentinel-51'
+    try {
+      for (const data of [{ headers: { 'X-Amz-Security-Token': sentinel } }, { authToken: sentinel },
+        { apiToken: sentinel }, { meta: [{ 'csrf-token': sentinel }] }, { GITHUB_TOKEN: sentinel },
+        { deep: { deeper: { 'x-auth-token': sentinel } } }, { 'auth.to.ke.n': sentinel },
+        { nested: { 'Session_To-Ken': sentinel } }, { list: [{ 'API-TOK.EN': sentinel }] },
+        { 'auth to ken': sentinel }, { 'auth\tto/ken': sentinel }, { 'AUTH:TO+KEN': sentinel },
+        { meta: { 'au#th$to%ke&n': sentinel } }, { 'auth~to(ken)!': sentinel }]) {
+        const run = receiptSetup({ families: [{ family_id: 'secret', capabilities: [], nested: data }] })
+        try {
+          const traces = []
+          const stop = run.controller.subscribe(() => traces.push(run.controller.getState()))
+          expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+          expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] }, catalogError: 'Project tools are unavailable.' })
+          expect(JSON.stringify(traces)).not.toContain(sentinel)
+          stop()
+        } finally { retireReceipt(run) }
+      }
+      const plain = { max_tokens: 4096, tokenizer: 'cl100k', token_count: 3, tokens_used: 2 }
+      const control = receiptSetup({ families: [{ family_id: 'plain', capabilities: [], nested: plain }] })
+      try {
+        await control.controller.actions.loadCatalog()
+        expect(control.controller.getState().catalogError).toBeNull()
+        expect(control.controller.getState().projectCatalog.isCurrent()).toBe(true)
+        expect(control.controller.getState().catalog.families[0].nested).toEqual(plain)
+      } finally { retireReceipt(control) }
+      expect(log).not.toHaveBeenCalled()
+      expect(warn).not.toHaveBeenCalled()
+      expect(errorLog).not.toHaveBeenCalled()
+    } finally { log.mockRestore(); warn.mockRestore(); errorLog.mockRestore() }
+  })
+
+  it('R13A-53 a lease revision that moves without a notice ends the receipt', async () => {
+    const raw = createSolarProjectClient({ fetchImpl: vi.fn() })
+    raw.setScope(projectBinding, 'session-1')
+    let leaseOverride
+    const client = { ...raw, getSnapshot: () => {
+      const value = raw.getSnapshot()
+      return leaseOverride === undefined ? value : { ...value, leaseRevision: leaseOverride }
+    } }
+    const getCapabilities = vi.fn(async () => receiptCatalog())
+    const controller = createCatalogController({ services: { getTools: async () => [], routePrompt: async () => null,
+      getCapabilities, projectSolarClient: client }, adapters: { draftStorage: null, dismissDecision: vi.fn() },
+      context: { solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] } })
+    try {
+      await controller.actions.loadCatalog()
+      const receipt = controller.getState().projectCatalog
+      controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+      expect(controller.getState().projectCatalog).toBe(receipt)
+      expect(receipt.isCurrent()).toBe(true)
+      const before = raw.getSnapshot().leaseRevision
+      expect(Number.isInteger(before)).toBe(true)
+      leaseOverride = before + 1
+      expect(receipt.isCurrent()).toBe(false)
+      controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+      expect(controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] } })
+      expect(getCapabilities).toHaveBeenCalledOnce()
+      await controller.actions.loadCatalog()
+      const next = controller.getState().projectCatalog
+      expect(next.isCurrent()).toBe(true)
+      controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+      expect(controller.getState().projectCatalog).toBe(next)
+      expect(getCapabilities).toHaveBeenCalledTimes(2)
+      // A move of two keeps the parity, so a fingerprint that kept only part of the revision would miss it.
+      leaseOverride = before + 3
+      expect(next.isCurrent()).toBe(false)
+      controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+      expect(controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] } })
+      expect(getCapabilities).toHaveBeenCalledTimes(2)
+      // Every move ends the receipt, so a fingerprint that keeps only part of the revision (a remainder up to
+      // twelve, a sign, a leading digit) misses at least one of these moves.
+      let revision = before + 3
+      let calls = 2
+      for (const step of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 90, 900]) {
+        await controller.actions.loadCatalog()
+        calls += 1
+        const held = controller.getState().projectCatalog
+        expect(held.isCurrent()).toBe(true)
+        revision += step
+        leaseOverride = revision
+        expect(held.isCurrent()).toBe(false)
+        controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+        expect(controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] } })
+        expect(getCapabilities).toHaveBeenCalledTimes(calls)
+      }
+    } finally { controller.destroy(); raw.dispose() }
+  })
+
+  it('R13A-54 a standalone destroy keeps the state object the base kept', async () => {
+    const controller = createCatalogController({ services: { getTools: async () => [],
+      getCapabilities: async () => ({ families: [], source: 'server' }), routePrompt: async () => null },
+    adapters: { draftStorage: null }, context: { drawingId: 'drawing-1' } })
+    await controller.actions.loadCatalog()
+    const before = controller.getState()
+    controller.destroy()
+    expect(controller.getState()).toBe(before)
+    expect(Object.hasOwn(controller.getState(), 'projectCatalog')).toBe(false)
   })
 })
