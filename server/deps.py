@@ -10,7 +10,6 @@ Sibling-session ownership (see README.md): `auth0-identity-signup` owns
 from __future__ import annotations
 
 import hashlib
-import hmac
 import importlib.util
 import json
 import os
@@ -241,6 +240,7 @@ def _verified_tenant_fallback(tenant_id: str):
 # per-tenant surface-config overlay fold (standardization slice 7b)
 # --------------------------------------------------------------------------- #
 from _vendor.mushy_fold.surface_config import load_repo_surface_config, MAX_SURFACE_CONFIG_BYTES
+from text_match import text_matches
 
 # 30s: long enough that a route-matrix burst against one tenant folds the
 # file once, short enough that an author's just-committed surface-config.json
@@ -1115,7 +1115,7 @@ def _dispatch_secret_ok(presented: Optional[str]) -> bool:
     secret = os.environ.get("LEAF_APP_DISPATCH_SECRET", "").strip()
     if not secret or not presented:
         return False
-    return hmac.compare_digest(presented, secret)
+    return text_matches(presented, secret)
 
 
 def backedge_author_identity(tenant: Any, authority_session_id: Optional[str],

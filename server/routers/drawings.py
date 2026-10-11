@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -55,6 +54,7 @@ import solar_physical_state
 import solar_solaredge_report
 import write_loop
 from envelopes import ErrorCode, err_envelope, error_obj, error_response, with_envelope_fields
+from text_match import text_matches
 
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
@@ -1511,7 +1511,7 @@ def _receive_edited_dxf(file: UploadFile, source_digest: str):
                               "edited saves accept .dxf only",
                               retryable=False, status_code=400)
     actual_digest = hashlib.sha256(data).hexdigest()
-    if not hmac.compare_digest(actual_digest, str(source_digest or "").lower()):
+    if not text_matches(actual_digest, str(source_digest or "").lower()):
         return error_response(
             ErrorCode.BAD_PARAMS,
             "source_digest does not match the received bytes; refusing to "

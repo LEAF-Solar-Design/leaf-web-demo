@@ -65,6 +65,7 @@ import requests
 import broker_client
 import write_loop
 from write_loop import GUEST_TENANT_PREFIX
+from text_match import text_matches
 
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
@@ -283,7 +284,7 @@ def verify_guest_session(token: str) -> Optional[str]:
     except ValueError:
         return None
     expected = _sign(f"{tenant_id}.{exp}", secret)
-    if not hmac.compare_digest(sig, expected):
+    if not text_matches(sig, expected):
         return None
     if time.time() >= exp:
         return None
