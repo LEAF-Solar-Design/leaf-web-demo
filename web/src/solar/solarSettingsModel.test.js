@@ -1,12 +1,183 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   SETTINGS_FIELDS, SEED_SETTINGS, DRAWING_UNITS, IDENTITY_WCS_TO_UCS,
   SOLAR_SETTINGS_REASONS, L2_COLLECTORS_NOTE, deriveFormState, buildSettingsParams, parseField, pyStrip,
+  PROJECT_SETTINGS_REASONS, deriveProjectSettingsState, buildProjectSettingsRequest,
 } from './solarSettingsModel.js';
+import { createRunSubmissionRequest } from '../runIntent.js';
 
 const SHA = 'a'.repeat(64);
+// Synthetic canonical identifiers and digest, never a stored project's provenance.
+const PB = { kind: 'project', organization_id: '00000000-0000-0000-0000-000000000001',
+  project_id: '00000000-0000-0000-0000-000000000002', drawing_id: '00000000-0000-0000-0000-000000000003',
+  input_version_id: '00000000-0000-0000-0000-000000000004' };
+const PT = `sha256:${'d'.repeat(64)}`;
+
+function projectView(intake = IE.intake, changes = {}) {
+  return { context: { organization_id: PB.organization_id, project_id: PB.project_id,
+    drawing_id: PB.drawing_id, input_version_id: PB.input_version_id, head_version_id: PB.input_version_id,
+    is_head: true, intake_sha256: SHA, ...changes }, intake };
+}
+const projectState = (view = projectView()) => deriveProjectSettingsState({ binding: PB, contextView: view });
+const projectRequest = (overrides = {}) => buildProjectSettingsRequest({ binding: PB, state: projectState(),
+  drafts: { num_mppt: '4' }, catalogDigest: PT, idempotencyKey: 'synthetic-settings-key', ...overrides });
+
+describe('Canonical Solar settings model', () => {
+  it('R8-01 derives the exact current embedded edit state without an integer version', () => {
+    const view = projectView();
+    const before = JSON.stringify(view);
+    const state = projectState(view);
+    expect(state).toEqual({ mode: 'edit', binding: PB, intakeSha256: SHA, rev: 2, settings, project });
+    expect(Object.isFrozen(state.binding)).toBe(true);
+    expect(state.binding).not.toBe(PB);
+    expect(state.settings).not.toBe(view.intake.solar_design_graph.settings);
+    expect(state.project).not.toBe(view.intake.solar_design_graph.project);
+    expect(JSON.stringify(view)).toBe(before);
+    expect(state).not.toHaveProperty('drawingVersion');
+    expect(state).not.toHaveProperty('version');
+    expect(deriveFormState({ context: { ...C, drawingVersion: null, projectId: PB.project_id },
+      intakeView: IE, versionsView: V })).toEqual(refused('drawing_version_required'));
+  });
+  it('R8-02 derives a graphless seed from the exact intake digest', () => {
+    const view = projectView(IG.intake, { intake_sha256: 'e'.repeat(64) });
+    expect(projectState(view)).toEqual({ mode: 'initialize', binding: PB, intakeSha256: 'e'.repeat(64),
+      sourceIntakeSha256: 'e'.repeat(64), settings: SEED_SETTINGS,
+      project: { name: '', zip_code: '', latitude: null, longitude: null } });
+    expect(projectState(view).settings).not.toBe(SEED_SETTINGS);
+  });
+  it('R8-03 composes ordinary canonical request arguments with drawing identity once', () => {
+    expect(projectRequest()).toEqual({ ok: true, request: { tool: 'solar-settings',
+      params: { drawing_id: PB.drawing_id, expected_rev: 2, changes: { num_mppt: 4 } },
+      catalogDigest: PT, idempotencyKey: 'synthetic-settings-key' } });
+    expect(Object.keys(projectRequest().request.params)).toEqual(['drawing_id', 'expected_rev', 'changes']);
+  });
+  it('R8-04 composes the exact canonical seed params with revision zero', () => {
+    const actual = projectRequest({ state: projectState(projectView(IG.intake)), drafts: { panels_in_sequence: '3' }, units: U });
+    expect(actual.request.params).toEqual({ drawing_id: PB.drawing_id, ...seedRequest().params });
+    expect(Object.keys(actual.request.params)).toEqual(['drawing_id', 'expected_rev', 'changes', 'initialize']);
+  });
+  it('R8-34 keeps a non-empty CRS in the canonical seed', () => {
+    for (const crs of ['EPSG:4326', 'EPSG:2263']) {
+      const actual = projectRequest({ state: projectState(projectView(IG.intake)), drafts: { panels_in_sequence: '3' },
+        units: { ...U, crs } });
+      expect(actual.request.params).toEqual({ drawing_id: PB.drawing_id, ...seedRequest(crs).params });
+    }
+  });
+  it('R8-05 composes a project-only seed without a changes key', () => {
+    const result = projectRequest({ state: projectState(projectView(IG.intake)), drafts: {}, units: U,
+      projectDrafts: { name: ' Roof A ', zip_code: '44224' } });
+    expect(result.request.params).toEqual({ drawing_id: PB.drawing_id, expected_rev: 0,
+      project_changes: { name: 'Roof A', zip_code: '44224' }, initialize: seedRequest().params.initialize });
+    expect(result.request.params).not.toHaveProperty('changes');
+  });
+  it('R8-09 refuses missing and malformed canonical intake digests', () => {
+    for (const intake_sha256 of [undefined, null, SHA.toUpperCase(), 'short', 7]) {
+      expect(projectState(projectView(IG.intake, { intake_sha256 }))).toEqual(refused('version_digest_unavailable'));
+      expect(projectRequest({ state: projectState(projectView(IG.intake, { intake_sha256 })) }))
+        .toEqual({ ok: false, reason: 'version_digest_unavailable' });
+    }
+  });
+  it('R8-10 treats malformed companions and displayed fields as unreadable rather than graphless', () => {
+    const missing = { ...S };
+    delete missing.mppt_letter;
+    const bad = [
+      { solar_design_graph: G }, { solar_design_graph_sha256: SHA },
+      { solar_design_graph: null, solar_design_graph_sha256: SHA },
+      { solar_design_graph: G, solar_design_graph_sha256: SHA.toUpperCase() },
+      { ...IE.intake, solar_design_graph: { ...G, settings: missing } },
+      { ...IE.intake, solar_design_graph: { ...G, rev: '2' } },
+      { ...IE.intake, solar_design_graph: { ...G, project: { ...project, latitude: null } } },
+      { ...IE.intake, solar_design_graph: { ...G, project: { ...project, name: '\uD800' } } },
+    ];
+    for (const intake of bad) expect(projectState(projectView(intake))).toEqual(refused('graph_unreadable'));
+  });
+  it('R8-11 refuses malformed digest and key without constructing a request', () => {
+    for (const catalogDigest of [undefined, '', SHA, PT.toUpperCase(), 3]) {
+      expect(projectRequest({ catalogDigest })).toEqual({ ok: false, reason: 'catalog_digest_required' });
+    }
+    for (const idempotencyKey of [undefined, '', '   ', 'x'.repeat(257), 'é'.repeat(129), 4]) {
+      expect(projectRequest({ idempotencyKey })).toEqual({ ok: false, reason: 'idempotency_key_required' });
+    }
+    expect(projectRequest({ idempotencyKey: 'é'.repeat(128) }).ok).toBe(true);
+    expect(projectRequest({ binding: { ...PB, input_version_id: '00000000-0000-0000-0000-000000000005' } }))
+      .toEqual({ ok: false, reason: 'scope_stale' });
+  });
+  it('R8-12 preserves no-op and seed units refusals', () => {
+    expect(projectRequest({ drafts: {} })).toEqual({ ok: false, reason: 'no_changes' });
+    expect(projectRequest({ state: projectState(projectView(IG.intake)), drafts: { panels_in_sequence: '3' } }))
+      .toEqual({ ok: false, reason: 'units_required' });
+  });
+  it('R8-30 preserves all eight frozen standalone strings lengths and hashes', () => {
+    const fixture = JSON.parse(readFileSync(resolve(process.cwd(), 'src/solar/__fixtures__/solarSettingsStandalone.main-66759316.json'), 'utf8'));
+    expect(fixture.capturedAt).toBe('66759316');
+    expect(fixture.identicalOn).toBe('a021056e');
+    expect(fixture.baseCommit).toBe('667593161a1c419fec6ce7ac2f17428a30f2a978');
+    expect(fixture.sourceSha256).toBe('edc1a1105fdf1b1e7892d7fc84ad4997bd9e35b2bc0afa2410a2b519f68897e0');
+    const edit = buildSettingsParams(E, { num_mppt: '4' });
+    const seed = buildSettingsParams(I, { panels_in_sequence: '3' }, U);
+    const actual = { edit, seed,
+      projectSeed: buildSettingsParams(I, {}, U, { name: ' Roof A ', zip_code: '44224' }),
+      l2: buildSettingsParams(E, { use_l2_collectors: true, mppt_letter: 'B', num_mppt: '4' }),
+      noop: buildSettingsParams(E, {}),
+      units: buildSettingsParams(I, { panels_in_sequence: '3' }, { ...U, drawing_units: '' }),
+      editWire: createRunSubmissionRequest('solar-settings', edit.params, C.drawingId, { dwgVersion: C.drawingVersion }),
+      seedWire: createRunSubmissionRequest('solar-settings', seed.params, C.drawingId, { dwgVersion: C.drawingVersion }) };
+    expect(fixture.cases.map((row) => row.name)).toEqual(Object.keys(actual));
+    for (const capture of fixture.cases) {
+      const serialized = JSON.stringify(actual[capture.name]);
+      expect(serialized).toBe(capture.serialized);
+      expect(Buffer.byteLength(serialized, 'utf8')).toBe(capture.utf8Length);
+      expect(createHash('sha256').update(capture.serialized, 'utf8').digest('hex')).toBe(capture.sha256);
+      expect(createHash('sha256').update(serialized, 'utf8').digest('hex')).toBe(capture.sha256);
+      expect(typeof capture.input).toBe('string');
+    }
+  });
+  it('R8-31 preserves L2 project normalization Unicode and numeric boundaries canonically', () => {
+    expect(projectRequest({ drafts: { use_l2_collectors: true, mppt_letter: 'B', num_mppt: '4' } }).request.params.changes)
+      .toEqual({ num_mppt: 4, use_l2_collectors: true, mppt_letter: 'B' });
+    for (const value of [1, 0, 'true', null]) {
+      expect(projectRequest({ drafts: { use_l2_collectors: value } })).toEqual(invalid('use_l2_collectors'));
+    }
+    const text = '😀'.repeat(4096);
+    expect(projectRequest({ drafts: { mppt_letter: text } }).request.params.changes).toEqual({ mppt_letter: text });
+    expect(projectRequest({ drafts: { mppt_letter: text + 'x' } })).toEqual(invalid('mppt_letter'));
+    expect(projectRequest({ drafts: { panels_in_sequence: '1000000' } }).ok).toBe(true);
+    expect(projectRequest({ drafts: { panels_in_sequence: '1000001' } })).toEqual(invalid('panels_in_sequence'));
+    expect(projectRequest({ drafts: { optimizer_ratio: '1e3' } })).toEqual(invalid('optimizer_ratio'));
+    expect(projectRequest({ drafts: {}, projectDrafts: { name: '\u0085Roof B\u0085', zip_code: '37601' } })
+      .request.params.project_changes).toEqual({ name: 'Roof B', zip_code: '37601' });
+    expect(projectRequest({ projectDrafts: { latitude: '90', longitude: '-180' } }).request.params.project_changes)
+      .toEqual({ latitude: 90, longitude: -180 });
+    expect(projectRequest({ projectDrafts: { latitude: '' } }).reason).toBe('invalid_project_coordinates');
+    const servedRatio = projectState(projectView({ ...IE.intake, solar_design_graph: { ...G, settings: { ...S, optimizer_ratio: 5e-7 } } }));
+    expect(projectRequest({ state: servedRatio }).request.params.changes).toEqual({ num_mppt: 4 });
+  });
+  it('R8-32 adds exactly ten frozen plain project sentences and preserves the legacy map', () => {
+    expect(Object.isFrozen(PROJECT_SETTINGS_REASONS)).toBe(true);
+    expect(PROJECT_SETTINGS_REASONS).toEqual({
+      binding_invalid: 'Open a project drawing version before changing Solar settings.',
+      context_unreadable: 'This project drawing version could not be read. Reload it and try again.',
+      scope_stale: 'The drawing or session changed. Review the current settings before submitting.',
+      catalog_digest_required: 'Refresh the Solar tools before changing these settings.',
+      idempotency_key_required: 'This settings request could not be prepared. Try again.',
+      preview_required: 'Checking whether these settings can be applied to this drawing.',
+      preview_refused: 'These settings cannot be applied. Review the refusal and try again.',
+      graphless: 'This drawing has no Solar design yet. Choose the drawing units and start a Solar design.',
+      submit_unavailable: 'Project settings submission is not available in this view.',
+      request_invalid: 'This settings request could not be prepared. Review the inputs and try again.',
+    });
+    expect(Object.keys(SOLAR_SETTINGS_REASONS)).toHaveLength(18);
+    for (const sentence of Object.values(PROJECT_SETTINGS_REASONS)) {
+      expect(typeof sentence).toBe('string');
+      expect(sentence.length).toBeGreaterThanOrEqual(12);
+      expect(sentence.endsWith('.')).toBe(true);
+    }
+  });
+});
+
 const C = { drawingId: 'd1', drawingVersion: 3, projectId: null };
 const settings = {
   panel_layer_contains: 'Panel', panel_group_layer: 'Panel Group',

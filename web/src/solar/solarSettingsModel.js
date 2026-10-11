@@ -1,3 +1,5 @@
+import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js';
+
 export const SOLAR_SETTINGS_TOOL = 'solar-settings';
 
 export const SETTINGS_FIELDS = Object.freeze([
@@ -57,6 +59,20 @@ export const SOLAR_SETTINGS_REASONS = Object.freeze({
 });
 
 const owns = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+export const PROJECT_SETTINGS_REASONS = Object.freeze({
+  binding_invalid: 'Open a project drawing version before changing Solar settings.',
+  context_unreadable: 'This project drawing version could not be read. Reload it and try again.',
+  scope_stale: 'The drawing or session changed. Review the current settings before submitting.',
+  catalog_digest_required: 'Refresh the Solar tools before changing these settings.',
+  idempotency_key_required: 'This settings request could not be prepared. Try again.',
+  preview_required: 'Checking whether these settings can be applied to this drawing.',
+  preview_refused: 'These settings cannot be applied. Review the refusal and try again.',
+  graphless: 'This drawing has no Solar design yet. Choose the drawing units and start a Solar design.',
+  submit_unavailable: 'Project settings submission is not available in this view.',
+  request_invalid: 'This settings request could not be prepared. Review the inputs and try again.',
+});
+const PROJECT_HEX = new RegExp('^[0-9a-f]{64}$');
+const PROJECT_DIGEST = new RegExp('^sha256:[0-9a-f]{64}$');
 const PYTHON_WHITESPACE = String.raw`[\u0009-\u000D\u001C-\u001F\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]`;
 const PYTHON_STRIP = new RegExp(`^${PYTHON_WHITESPACE}+|${PYTHON_WHITESPACE}+$`, 'g');
 
@@ -222,4 +238,61 @@ export function buildSettingsParams(state, drafts = {}, units = {}, projectDraft
       },
     },
   };
+}
+
+export function deriveProjectSettingsState({ binding, contextView }) {
+  const refuse = (reason) => ({ mode: 'refused', reason });
+  let exact;
+  try { exact = createSolarDrawingBinding(binding); } catch { return refuse('binding_invalid'); }
+  const context = contextView?.context;
+  if (!plainObject(contextView) || !plainObject(context) || !plainObject(contextView.intake)) {
+    return refuse('context_unreadable');
+  }
+  let returned;
+  let head;
+  try {
+    returned = createSolarDrawingBinding({ kind: 'project', organization_id: context.organization_id,
+      project_id: context.project_id, drawing_id: context.drawing_id, input_version_id: context.input_version_id });
+    head = createSolarDrawingBinding({ ...exact, input_version_id: context.head_version_id });
+  } catch { return refuse('context_unreadable'); }
+  if (!sameSolarDrawingBinding(exact, returned) || typeof context.is_head !== 'boolean'
+      || context.is_head !== sameSolarDrawingBinding(exact, head)) return refuse('context_unreadable');
+  if (!context.is_head) return refuse('not_current_head');
+  if (typeof context.intake_sha256 !== 'string' || !PROJECT_HEX.test(context.intake_sha256)) {
+    return refuse('version_digest_unavailable');
+  }
+  const intake = contextView.intake;
+  const hasGraph = owns(intake, 'solar_design_graph');
+  const hasDigest = owns(intake, 'solar_design_graph_sha256');
+  if (hasGraph !== hasDigest) return refuse('graph_unreadable');
+  const identity = { binding: exact, intakeSha256: context.intake_sha256 };
+  if (!hasGraph) return { mode: 'initialize', ...identity, sourceIntakeSha256: context.intake_sha256,
+    settings: { ...SEED_SETTINGS }, project: { ...EMPTY_PROJECT } };
+  const graph = intake.solar_design_graph;
+  if (typeof intake.solar_design_graph_sha256 !== 'string' || !PROJECT_HEX.test(intake.solar_design_graph_sha256)
+      || !plainObject(graph) || !Number.isInteger(graph.rev) || graph.rev < 0 || !plainObject(graph.settings)
+      || !validProject(graph.project)
+      || SETTINGS_FIELDS.some(({ key, kind }) => !owns(graph.settings, key) || !validValue(kind, graph.settings[key]))) {
+    return refuse('graph_unreadable');
+  }
+  return { mode: 'edit', ...identity, rev: graph.rev,
+    settings: Object.fromEntries(SETTINGS_FIELDS.map(({ key }) => [key, graph.settings[key]])),
+    project: Object.fromEntries(PROJECT_KEYS.map((key) => [key, graph.project[key]])) };
+}
+
+export function buildProjectSettingsRequest({ binding, state, drafts = {}, units = {}, projectDrafts = {},
+  catalogDigest, idempotencyKey }) {
+  const fail = (reason) => ({ ok: false, reason });
+  let exact;
+  try { exact = createSolarDrawingBinding(binding); } catch { return fail('binding_invalid'); }
+  if (state?.mode === 'refused') return fail(state.reason);
+  if (!sameSolarDrawingBinding(exact, state?.binding)
+      || solarDrawingBindingKey(exact) !== solarDrawingBindingKey(state.binding)) return fail('scope_stale');
+  if (typeof catalogDigest !== 'string' || !PROJECT_DIGEST.test(catalogDigest)) return fail('catalog_digest_required');
+  if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim()
+      || new TextEncoder().encode(idempotencyKey).byteLength > 256) return fail('idempotency_key_required');
+  const result = buildSettingsParams(state, drafts, units, projectDrafts);
+  if (!result.ok) return result;
+  return { ok: true, request: { tool: SOLAR_SETTINGS_TOOL,
+    params: { drawing_id: exact.drawing_id, ...result.params }, catalogDigest, idempotencyKey } };
 }

@@ -1,13 +1,635 @@
-import React from 'react';
+import React, { StrictMode } from 'react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SolarSettingsForm from './SolarSettingsForm.jsx';
-import { L2_COLLECTORS_NOTE, SOLAR_SETTINGS_REASONS } from './solarSettingsModel.js';
+import { L2_COLLECTORS_NOTE, SOLAR_SETTINGS_REASONS, PROJECT_SETTINGS_REASONS, deriveProjectSettingsState } from './solarSettingsModel.js';
 import { solarSettingsRunFeedback } from './solarSettingsWire.js';
+import { createSolarProjectClient } from './solarProjectClient.js';
 
 const SHA = 'a'.repeat(64);
+
+const projectClients = [];
+afterEach(() => { cleanup(); for (const client of projectClients.splice(0)) client.dispose(); });
+const projectBinding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
+  project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
+  input_version_id: '44444444-4444-4444-4444-444444444444' };
+const projectDigest = 'sha256:' + 'd'.repeat(64); // Synthetic transport digest.
+const projectJob = '55555555-5555-5555-5555-555555555555';
+function canonicalView(binding = projectBinding, intake = IE.intake, context = {}) {
+  return { context: { organization_id: binding.organization_id, project_id: binding.project_id,
+    drawing_id: binding.drawing_id, input_version_id: binding.input_version_id,
+    head_version_id: binding.input_version_id, is_head: true, intake_sha256: SHA, ...context }, intake };
+}
+function previewRow(changes = {}, availability = {}) {
+  return { name: 'solar-settings', catalog_digest: projectDigest,
+    availability: { admission_checked: true, admission: { status_code: 200, error: null },
+      entitled: true, engine_ready: true, implemented: true, input_ready: true, runnable: true,
+      refusal_reasons: [], ...availability }, ...changes };
+}
+const previewData = (rows = [previewRow()]) => ({ families: [{ capabilities: rows }] });
+const projectResponse = (data, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => data });
+function projectHarness(overrides = {}) {
+  const harness = { contextResponses: [], previewResponses: [], submitResponses: [], intake: IE.intake,
+    contextChanges: {}, preview: previewData(), run: { job_id: projectJob, status: 'submitted' }, ...overrides };
+  const fetchImpl = vi.fn(async (url, options) => {
+    const binding = harness.real.getSnapshot().binding;
+    if (url.includes('/context?')) return harness.contextResponses.shift()
+      ?? projectResponse(canonicalView(binding, harness.intake, harness.contextChanges));
+    if (url.includes('/api/capabilities?')) return harness.previewResponses.shift() ?? projectResponse(harness.preview);
+    if (url.endsWith('/checkout')) {
+      const identity = { organization_id: binding.organization_id, project_id: binding.project_id, drawing_id: binding.drawing_id };
+      if (options.method === 'DELETE') return projectResponse({ ...identity, released: true, checkout: null });
+      return projectResponse({ ...identity, acquired: true, checkout: { holder: 'synthetic editor',
+        acquired: '2026-01-01T00:00:00Z', expires: '2099-01-01T00:00:00Z', fence: '1' },
+        checkout_capability: 'lco1.' + 'c'.repeat(64) });
+    }
+    if (url.endsWith('/api/run')) return harness.submitResponses.shift() ?? projectResponse(harness.run, 202);
+    throw new Error('Unexpected project request');
+  });
+  const real = createSolarProjectClient({ fetchImpl, authHeaders: () => ({ Authorization: 'Bearer synthetic-test' }) });
+  real.setScope(projectBinding, 'epoch-1');
+  projectClients.push(real);
+  harness.real = real;
+  harness.fetchImpl = fetchImpl;
+  const client = { ...real };
+  for (const name of ['readContext', 'prepareRun', 'catalog', 'submitRun', 'captureCatalogScope',
+    'setScope', 'dispose', 'acquireCheckout', 'releaseCheckout']) client[name] = vi.fn((...args) => real[name](...args));
+  harness.unsubscribes = [];
+  client.subscribe = vi.fn((listener) => {
+    const unsubscribe = vi.fn(real.subscribe(listener));
+    harness.unsubscribes.push(unsubscribe);
+    return unsubscribe;
+  });
+  harness.client = client;
+  let sequence = 0;
+  harness.props = props({ solarBinding: projectBinding, authorityKey: 'epoch-1', projectClient: client,
+    catalogDigest: projectDigest, newProjectIntentKey: vi.fn(() => 'synthetic-intent-' + ++sequence),
+    onProjectSubmit: vi.fn((intent, options) => real.submitRun(intent, { signal: options.signal })) });
+  return harness;
+}
+async function editProject(harness, label = 'MPPT count', value = '4') {
+  const view = render(<SolarSettingsForm {...harness.props} />);
+  await waitForMode(harness.intake === IG.intake ? 'initialize' : 'edit');
+  changeInput(label, value);
+  return view;
+}
+async function readyProject(label = 'Apply settings') {
+  await waitFor(() => expect(screen.getByRole('button', { name: label }).disabled).toBe(false));
+}
+async function settleProject() { await act(async () => { await Promise.resolve(); await Promise.resolve(); }); }
+function rerenderProject(view, harness, changes) {
+  harness.props = { ...harness.props, ...changes };
+  harness.real.setScope(harness.props.solarBinding, harness.props.authorityKey);
+  view.rerender(<SolarSettingsForm {...harness.props} />);
+}
+const previewCalls = (harness) => harness.fetchImpl.mock.calls.filter(([url]) => url.includes('/api/capabilities?'));
+
+describe('Canonical Solar settings form through the merged project client', () => {
+  it('R8-06 refuses invalid canonical bindings without client or legacy calls', async () => {
+    const accessor = { ...projectBinding };
+    const get = vi.fn(() => projectBinding.input_version_id);
+    Object.defineProperty(accessor, 'input_version_id', { enumerable: true, get });
+    const missing = { ...projectBinding };
+    delete missing.drawing_id;
+    for (const solarBinding of [undefined, null, missing, { ...projectBinding, input_version_id: 3 },
+      { ...projectBinding, extra: true }, accessor]) {
+      const h = projectHarness();
+      render(<SolarSettingsForm {...h.props} solarBinding={solarBinding} />);
+      await waitForMode('refused');
+      expect(screen.getByTestId('solar-settings-reason').textContent).toBe(PROJECT_SETTINGS_REASONS.binding_invalid);
+      expect(deriveProjectSettingsState({ binding: solarBinding, contextView: canonicalView() }))
+        .toEqual({ mode: 'refused', reason: 'binding_invalid' });
+      expect(h.fetchImpl).not.toHaveBeenCalled();
+      expect(h.props.readIntake).not.toHaveBeenCalled();
+      expect(h.props.readVersions).not.toHaveBeenCalled();
+      expect(h.client.prepareRun).not.toHaveBeenCalled();
+      cleanup();
+    }
+    expect(get).not.toHaveBeenCalled();
+  });
+  it('R8-07 rejects mismatched and malformed context at the R7 and model boundaries', async () => {
+    const other = '66666666-6666-6666-6666-666666666666';
+    for (const changes of [
+      { organization_id: other }, { project_id: other }, { drawing_id: other }, { input_version_id: other },
+      { head_version_id: 3 }, { is_head: 'true' }, { head_version_id: other, is_head: true },
+    ]) {
+      const h = projectHarness({ contextChanges: changes });
+      render(<SolarSettingsForm {...h.props} />);
+      await waitForMode('refused');
+      expect(screen.getByTestId('solar-settings-reason').textContent).toBe(PROJECT_SETTINGS_REASONS.context_unreadable);
+      expect(deriveProjectSettingsState({ binding: projectBinding, contextView: canonicalView(projectBinding, IE.intake, changes) }))
+        .toEqual({ mode: 'refused', reason: 'context_unreadable' });
+      const outcome = await h.client.readContext.mock.results[0].value;
+      if (!(changes.head_version_id === other && changes.is_head === true)) {
+        expect(outcome.reason).toBe('SIP_R7_RESPONSE_INVALID');
+      }
+      expect(h.client.prepareRun).not.toHaveBeenCalled();
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+      cleanup();
+    }
+  });
+  it('R8-08 refuses historical context before preview or handoff', async () => {
+    const h = projectHarness({ contextChanges: { head_version_id: '66666666-6666-6666-6666-666666666666', is_head: false } });
+    render(<SolarSettingsForm {...h.props} />);
+    await waitForMode('refused');
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(SOLAR_SETTINGS_REASONS.not_current_head);
+    expect(screen.queryByRole('button', { name: 'Apply settings' })).toBeNull();
+    expect(h.client.catalog).not.toHaveBeenCalled();
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+  it('R8-13 arms only the captured exact accepted preview and hands off the same frozen intent', async () => {
+    const pending = deferred();
+    const h = projectHarness({ previewResponses: [pending.promise] });
+    h.props.checkoutHeld = false;
+    await editProject(h);
+    await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(1));
+    expect(applyButton().disabled).toBe(true);
+    expect(screen.getByTestId('solar-settings-reason').textContent).toBe(PROJECT_SETTINGS_REASONS.preview_required);
+    const intent = h.client.catalog.mock.calls[0][0].intents[0];
+    expect(Object.isFrozen(intent)).toBe(true);
+    expect(Object.keys(intent)).toEqual(['binding', 'authorityKey', 'tool', 'params', 'catalogDigest', 'idempotencyKey']);
+    await act(async () => { pending.resolve(projectResponse(previewData())); });
+    await readyProject();
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1));
+    expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent);
+    const guard = h.props.onProjectSubmit.mock.calls[0][1];
+    expect(guard.binding).toEqual(projectBinding);
+    expect(guard.authorityKey).toBe('epoch-1');
+    expect(guard.signal.aborted).toBe(false);
+    expect(guard.isCurrent()).toBe(true);
+    expect(h.client.readContext).toHaveBeenCalledTimes(2);
+  });
+  it('R8-14 refuses outer success without exact admission or with contradictory matching rows', async () => {
+    const cases = [
+      [previewRow({}, { admission_checked: false })],
+      [previewRow({}, { admission: { status_code: 200 } })],
+      [previewRow({}, { admission: { status_code: 409, error: null } })],
+      [previewRow({}, { refusal_reasons: ['graph_seed_required'] })],
+      [previewRow({}, { refusal_reasons: ['project_request_required'] })],
+      [previewRow({ catalog_digest: 'sha256:' + 'e'.repeat(64) })],
+      [], [previewRow(), previewRow({}, { runnable: false })],
+      ...['entitled', 'engine_ready', 'implemented', 'input_ready', 'runnable'].map((key) => [previewRow({}, { [key]: false })]),
+    ];
+    for (const rows of cases) {
+      const h = projectHarness({ preview: previewData(rows) });
+      await editProject(h);
+      await waitFor(() => expect(screen.getByTestId('solar-settings-reason').textContent).toBe(PROJECT_SETTINGS_REASONS.preview_refused));
+      expect(applyButton().disabled).toBe(true);
+      fireEvent.click(applyButton());
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+      cleanup();
+    }
+  });
+  it('R8-15 preserves nested graph and L2 preview refusals in sanitized HTTP 200 data', async () => {
+    for (const code of ['INVALID_SEED_PARENT', 'GRAPH_NOT_EMBEDDED', 'GRAPH_ALREADY_EMBEDDED',
+      'SOURCE_HASH_MISMATCH', 'STALE_GRAPH_REVISION', 'DESIGN_PRESET_L2_EQUIPMENT_PRESENT', 'DUPLICATE_EQUIPMENT_NUMBER']) {
+      const admission = { status_code: 409, error: { reason_code: code, error_code: 'BAD_PARAMS',
+        message: 'Canonical Solar request was refused.', authorization: 'hidden transport field' } };
+      const h = projectHarness({ preview: previewData([previewRow({}, { admission, runnable: false })]) });
+      await editProject(h);
+      await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent)
+        .toBe(PROJECT_SETTINGS_REASONS.preview_refused + ' (' + code + ')'));
+      const outcome = await h.client.catalog.mock.results[0].value;
+      expect(outcome.status).toBe(200);
+      expect(outcome).not.toHaveProperty('reason');
+      const error = outcome.data.families[0].capabilities[0].availability.admission.error;
+      expect(outcome.data.families[0].capabilities[0].availability.admission.status_code).toBe(409);
+      expect(error.reason_code).toBe(code);
+      expect(error).not.toHaveProperty('authorization');
+      expect(Object.isFrozen(error)).toBe(true);
+      expect(applyButton().disabled).toBe(true);
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+      cleanup();
+    }
+  });
+  it('R8-16 keeps the R7 fallback transport reason and absent server reason for digest refusal', async () => {
+    const envelope = { error: { error_code: 'BAD_PARAMS',
+      message: 'catalog tool changed or confirmation digest is missing; refresh tools and confirm again',
+      authorization: 'hidden field' }, detail: { preserved: true } };
+    const h = projectHarness({ previewResponses: [projectResponse(envelope, 409)] });
+    await editProject(h);
+    await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toContain('(HTTP_ERROR)'));
+    const outcome = await h.client.catalog.mock.results[0].value;
+    expect(outcome).toEqual({ ok: false, status: 409, reason: 'HTTP_ERROR',
+      envelope: { error: { error_code: 'BAD_PARAMS', message: envelope.error.message }, detail: { preserved: true } } });
+    expect(outcome.envelope.error).not.toHaveProperty('reason_code');
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+  it('R8-17 preserves checkout and historical new-write refusal statuses and codes', async () => {
+    for (const [code, status] of [['SIP_R1_CHECKOUT_REQUIRED', 409], ['SIP_R1_CHECKOUT_EXPIRED', 409],
+      ['SIP_R1_CHECKOUT_DENIED', 403], ['SIP_R1_CHECKOUT_STALE', 409], ['SIP_R1_STALE_VERSION', 409]]) {
+      const envelope = { error: { reason_code: code, error_code: status === 403 ? 'FORBIDDEN' : 'BAD_PARAMS',
+        message: 'Project Solar admission unavailable.' }, detail: { preserved: true }, authorization: 'hidden' };
+      const h = projectHarness({ previewResponses: [projectResponse(envelope, status)] });
+      await editProject(h);
+      await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toContain('(' + code + ')'));
+      const outcome = await h.client.catalog.mock.results[0].value;
+      expect(outcome.status).toBe(status);
+      expect(outcome.reason).toBe(code);
+      expect(outcome.envelope.error).toEqual(envelope.error);
+      expect(outcome.envelope.detail).toEqual({ preserved: true });
+      expect(outcome.envelope).not.toHaveProperty('authorization');
+      expect(applyButton().disabled).toBe(true);
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+      cleanup();
+    }
+  });
+  it('R8-18 invalidates armed previews synchronously for params digest and key changes', async () => {
+    const h = projectHarness();
+    const view = await editProject(h);
+    await readyProject();
+    const first = h.client.catalog.mock.calls[0][0].intents[0];
+    const paramsPreview = deferred();
+    h.previewResponses.push(paramsPreview.promise);
+    changeInput('MPPT count', '5');
+    expect(applyButton().disabled).toBe(true);
+    fireEvent.click(applyButton());
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+    await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(2));
+    await act(async () => { paramsPreview.resolve(projectResponse(previewData())); });
+    await readyProject();
+    const second = h.client.catalog.mock.calls[1][0].intents[0];
+    expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+    const digestPreview = deferred();
+    h.previewResponses.push(digestPreview.promise);
+    const digest = 'sha256:' + 'e'.repeat(64);
+    view.rerender(<SolarSettingsForm {...h.props} catalogDigest={digest} />);
+    expect(applyButton().disabled).toBe(true);
+    await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(3));
+    await act(async () => { digestPreview.resolve(projectResponse(previewData([previewRow({ catalog_digest: digest })]))); });
+    await readyProject();
+    const third = h.client.catalog.mock.calls[2][0].intents[0];
+    expect(third.catalogDigest).toBe(digest);
+    expect(third.idempotencyKey).not.toBe(second.idempotencyKey);
+    // A new key factory alone is not a new candidate: two parent renders with fresh inline factories leave
+    // the armed preview in place and issue no catalog request.
+    view.rerender(<SolarSettingsForm {...h.props} catalogDigest={digest} newProjectIntentKey={() => 'replacement-key'} />);
+    view.rerender(<SolarSettingsForm {...h.props} catalogDigest={digest} newProjectIntentKey={() => 'replacement-key'} />);
+    expect(applyButton().disabled).toBe(false);
+    expect(h.client.catalog).toHaveBeenCalledTimes(3);
+    // The next candidate takes its key from the factory current at that moment.
+    const keyPreview = deferred();
+    h.previewResponses.push(keyPreview.promise);
+    changeInput('MPPT count', '6');
+    expect(applyButton().disabled).toBe(true);
+    await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(4));
+    expect(h.client.catalog.mock.calls[3][0].intents[0].idempotencyKey).toBe('replacement-key');
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+    await act(async () => { keyPreview.resolve(projectResponse(previewData([previewRow({ catalog_digest: digest })]))); });
+  });
+  it('R8-19 discards old context successes and failures across every binding epoch and client change', async () => {
+    const other = '66666666-6666-6666-6666-666666666666';
+    for (const kind of ['organization_id', 'project_id', 'drawing_id', 'input_version_id', 'authorityKey', 'client']) {
+      for (const failed of [false, true]) {
+        const late = deferred();
+        const h = projectHarness({ contextResponses: [late.promise] });
+        const view = render(<SolarSettingsForm {...h.props} />);
+        await waitFor(() => expect(h.client.readContext).toHaveBeenCalledTimes(1));
+        const next = projectHarness({ intake: { ...IE.intake, solar_design_graph: { rev: 7, settings: { ...S, num_mppt: 8 }, project: P } } });
+        const binding = kind in projectBinding ? { ...projectBinding, [kind]: other } : projectBinding;
+        const epoch = kind === 'authorityKey' ? 'epoch-2' : 'epoch-1';
+        next.real.setScope(binding, epoch);
+        const nextProps = { ...h.props, solarBinding: binding, authorityKey: epoch,
+          projectClient: kind === 'client' ? next.client : h.client };
+        if (kind !== 'client') {
+          h.intake = next.intake;
+          h.real.setScope(binding, epoch);
+        }
+        view.rerender(<SolarSettingsForm {...nextProps} />);
+        await waitForMode('edit');
+        expect(screen.getByText('Graph revision 7')).toBeTruthy();
+        const oldSignal = h.client.readContext.mock.calls[0][0].signal;
+        expect(oldSignal.aborted).toBe(true);
+        await act(async () => { late.resolve(projectResponse(failed ? { error: { reason_code: 'OLD_READ_FAILURE' } } : canonicalView(), failed ? 500 : 200)); });
+        expect(screen.getByLabelText('MPPT count').value).toBe('8');
+        expect(screen.queryByText('Graph revision 2')).toBeNull();
+        expect(screen.queryByTestId('solar-settings-run')).toBeNull();
+        cleanup();
+      }
+    }
+  });
+  it('R8-20 discards preview and submission settlements across scope changes including A to B to A', async () => {
+    const other = '66666666-6666-6666-6666-666666666666';
+    for (const stage of ['preview', 'submission']) {
+      for (const kind of ['organization_id', 'project_id', 'drawing_id', 'input_version_id', 'authorityKey', 'client', 'ABA']) {
+        for (const failed of [false, true]) {
+          const late = deferred();
+          const h = projectHarness(stage === 'preview' ? { previewResponses: [late.promise] } : {});
+          if (stage === 'submission') h.props.onProjectSubmit = vi.fn(() => late.promise);
+          const view = await editProject(h);
+          if (stage === 'preview') await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(1));
+          else {
+            await readyProject();
+            fireEvent.click(applyButton());
+            await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1));
+          }
+          const next = kind === 'client' ? projectHarness() : h;
+          const binding = kind in projectBinding || kind === 'ABA'
+            ? { ...projectBinding, [kind === 'ABA' ? 'input_version_id' : kind]: other } : projectBinding;
+          const epoch = kind === 'authorityKey' ? 'epoch-2' : 'epoch-1';
+          next.real.setScope(binding, epoch);
+          view.rerender(<SolarSettingsForm {...h.props} solarBinding={binding} authorityKey={epoch} projectClient={next.client} />);
+          await waitForMode('edit');
+          if (kind === 'ABA') {
+            h.real.setScope(projectBinding, 'epoch-1');
+            view.rerender(<SolarSettingsForm {...h.props} />);
+            await waitForMode('edit');
+          }
+          await act(async () => {
+            late.resolve(stage === 'preview' ? projectResponse(failed ? { error: { reason_code: 'OLD_PREVIEW_FAILURE' } } : previewData(), failed ? 409 : 200)
+              : failed ? { ok: false, status: 409, reason: 'OLD_SUBMIT_FAILURE', envelope: { error: { reason_code: 'OLD_SUBMIT_FAILURE' } } }
+                : { ok: true, status: 202, data: { job_id: projectJob, status: 'submitted' } });
+          });
+          expect(screen.getByLabelText('MPPT count').value).toBe('2');
+          expect(applyButton().disabled).toBe(true);
+          expect(screen.queryByTestId('solar-settings-run')).toBeNull();
+          expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(stage === 'submission' ? 1 : 0);
+          cleanup();
+        }
+      }
+    }
+  }, 20000);
+  it('R8-21 uses the R7 captured predicate after result production and before continuation', async () => {
+    for (const stage of ['context', 'preview']) {
+      const h = projectHarness();
+      let captured = false;
+      const method = stage === 'context' ? 'readContext' : 'catalog';
+      h.client[method].mockImplementationOnce(async (...args) => {
+        const outcome = await h.real[method](...args);
+        expect(outcome.ok).toBe(true);
+        h.real.setScope(null, null);
+        captured = true;
+        return outcome;
+      });
+      render(<SolarSettingsForm {...h.props} />);
+      if (stage === 'preview') {
+        await waitForMode('edit');
+        changeInput('MPPT count', '4');
+      }
+      await waitFor(() => expect(captured).toBe(true));
+      await settleProject();
+      expect(screen.queryByTestId('solar-settings-run')).toBeNull();
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+      if (stage === 'context') expect(screen.queryByLabelText('MPPT count')).toBeNull();
+      else expect(applyButton().disabled).toBe(true);
+      cleanup();
+    }
+  });
+  it('R8-33 restarts an initial context read that a checkout rotation aborted', async () => {
+    for (const failed of [false, true]) {
+      const late = deferred();
+      const h = projectHarness({ contextResponses: [late.promise] });
+      const view = render(<SolarSettingsForm {...h.props} />);
+      await waitFor(() => expect(h.client.readContext).toHaveBeenCalledTimes(1));
+      const first = h.client.readContext.mock.calls[0][0].signal;
+      expect(screen.getByTestId('solar-settings-form').getAttribute('data-mode')).toBe('loading');
+      await act(async () => { await h.real.acquireCheckout(); });
+      expect(first.aborted).toBe(true);
+      await waitForMode('edit');
+      const reads = h.client.readContext.mock.calls.length;
+      expect(reads).toBeGreaterThanOrEqual(2);
+      for (const [options] of h.client.readContext.mock.calls.slice(0, -1)) expect(options.signal.aborted).toBe(true);
+      await act(async () => {
+        late.resolve(failed ? projectResponse({ error: { error_code: 'SIP_R1_INTERNAL' } }, 500)
+          : projectResponse(canonicalView(projectBinding, IG.intake)));
+      });
+      view.rerender(<SolarSettingsForm {...h.props} />);
+      await settleProject();
+      expect(screen.getByTestId('solar-settings-form').getAttribute('data-mode')).toBe('edit');
+      expect(h.client.readContext).toHaveBeenCalledTimes(reads);
+      // Once the context has settled, a later rotation re-previews but never reads the context again.
+      changeInput('MPPT count', '4');
+      await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(1));
+      await act(async () => { await h.real.releaseCheckout(); });
+      await waitFor(() => expect(h.client.catalog.mock.calls.length).toBeGreaterThan(1));
+      expect(h.client.readContext).toHaveBeenCalledTimes(reads);
+      cleanup();
+    }
+  });
+  it('R8-22 clears checkout-stale previews and repreviews the unchanged intent and key', async () => {
+    for (const pending of [false, true]) {
+      const late = deferred();
+      const h = projectHarness(pending ? { previewResponses: [late.promise] } : {});
+      await editProject(h);
+      await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(1));
+      if (!pending) await readyProject();
+      const intent = h.client.catalog.mock.calls[0][0].intents[0];
+      const refreshed = deferred();
+      h.previewResponses.push(refreshed.promise);
+      await act(async () => { await h.real.acquireCheckout(); });
+      expect(applyButton().disabled).toBe(true);
+      await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(2));
+      expect(h.client.catalog.mock.calls[1][0].intents[0]).toBe(intent);
+      expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(1);
+      if (pending) await act(async () => { late.resolve(projectResponse(previewData())); });
+      expect(applyButton().disabled).toBe(true);
+      await act(async () => { refreshed.resolve(projectResponse(previewData())); });
+      await readyProject();
+      const calls = previewCalls(h);
+      const query = new URL(calls[1][0], 'https://synthetic.test').searchParams;
+      expect(JSON.parse(query.get('project_runs'))['solar-settings'].idempotency_key).toBe(intent.idempotencyKey);
+      cleanup();
+    }
+  });
+  it('R8-23 rereads head digest mode and revision before handoff without retargeting', async () => {
+    const moved = { head_version_id: '66666666-6666-6666-6666-666666666666', is_head: false };
+    for (const [view, reason] of [
+      [canonicalView(projectBinding, IE.intake, moved), 'not_current_head'],
+      [canonicalView(projectBinding, IE.intake, { intake_sha256: 'e'.repeat(64) }), 'scope_stale'],
+      [canonicalView(projectBinding, IG.intake), 'scope_stale'],
+      [canonicalView(projectBinding, { ...IE.intake, solar_design_graph: { rev: 3, settings: S, project: P } }), 'scope_stale'],
+    ]) {
+      const h = projectHarness();
+      await editProject(h);
+      await readyProject();
+      h.contextResponses.push(projectResponse(view));
+      fireEvent.click(applyButton());
+      await waitFor(() => expect(screen.getByTestId('solar-settings-reason').textContent)
+        .toBe(PROJECT_SETTINGS_REASONS[reason] ?? SOLAR_SETTINGS_REASONS[reason]));
+      expect(applyButton().disabled).toBe(true);
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+      expect(h.client.prepareRun).toHaveBeenCalledTimes(1);
+      cleanup();
+    }
+    const h = projectHarness();
+    await editProject(h);
+    await readyProject();
+    const envelope = { error: { reason_code: 'SIP_R1_INTAKE_DIGEST_MISMATCH', error_code: 'INTERNAL',
+      message: 'Project Solar admission unavailable.' } };
+    h.contextResponses.push(projectResponse(envelope, 500));
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toContain('SIP_R1_INTAKE_DIGEST_MISMATCH'));
+    const outcome = await h.client.readContext.mock.results[1].value;
+    expect(outcome.status).toBe(500);
+    expect(outcome.envelope).toEqual(envelope);
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+  it('R8-24 locks before render and stays locked through unrelated renders until callback settlement', async () => {
+    const pending = deferred();
+    const h = projectHarness();
+    h.props.onProjectSubmit = vi.fn(() => pending.promise);
+    const view = await editProject(h);
+    await readyProject();
+    const form = applyButton().closest('form');
+    act(() => { fireEvent.submit(form); fireEvent.submit(form); });
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1));
+    view.rerender(<SolarSettingsForm {...h.props} newProjectIntentKey={() => 'unused-key'}
+      runMessage={{ text: 'Uncorrelated legacy feedback' }} />);
+    fireEvent.submit(form);
+    expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1);
+    expect(applyButton().disabled).toBe(true);
+    expect(screen.queryByText('Uncorrelated legacy feedback')).toBeNull();
+    expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(1);
+    await act(async () => { pending.resolve(null); });
+    await readyProject();
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2));
+    expect(h.props.onProjectSubmit.mock.calls[1][0]).toBe(h.props.onProjectSubmit.mock.calls[0][0]);
+  });
+  it('R8-25 hands real R7 edit and seed intents to the canonical run transport', async () => {
+    for (const seed of [false, true]) {
+      const h = projectHarness({ intake: seed ? IG.intake : IE.intake });
+      await h.real.acquireCheckout();
+      await editProject(h, seed ? 'Panels in sequence' : 'MPPT count', seed ? '3' : '4');
+      if (seed) {
+        expect(screen.getByText(PROJECT_SETTINGS_REASONS.graphless)).toBeTruthy();
+        expect(screen.queryByRole('button', { name: 'Apply settings' })).toBeNull();
+        expect(screen.getByRole('button', { name: 'Start Solar design' }).disabled).toBe(true);
+        changeInput('Drawing units', 'ft');
+      }
+      await readyProject(seed ? 'Start Solar design' : 'Apply settings');
+      const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0];
+      fireEvent.click(screen.getByRole('button', { name: seed ? 'Start Solar design' : 'Apply settings' }));
+      await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toBe('Solar settings submitted.'));
+      expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent);
+      const call = h.fetchImpl.mock.calls.find(([url]) => url === '/api/run');
+      const request = JSON.parse(call[1].body);
+      expect(request).toEqual({ tool: 'solar-settings', params: intent.params,
+        dwg: projectBinding.input_version_id, catalog_digest: projectDigest });
+      expect(request.params.drawing_id).toBe(projectBinding.drawing_id);
+      expect(request.params.expected_rev).toBe(seed ? 0 : 2);
+      expect(request).not.toHaveProperty('dwg_version');
+      expect(request).not.toHaveProperty('expected_drawing_head');
+      expect(request.params).not.toHaveProperty('project_id');
+      expect(request.params).not.toHaveProperty('checkout_capability');
+      expect(call[1].headers).toMatchObject({ 'X-Org-Id': projectBinding.organization_id,
+        'X-Tenant-Id': projectBinding.organization_id, 'X-Project-Id': projectBinding.project_id,
+        'Idempotency-Key': intent.idempotencyKey, 'X-Checkout-Capability': 'lco1.' + 'c'.repeat(64) });
+      if (seed) expect(request.params.initialize.source_intake_sha256).toBe(SHA);
+      expect(h.props.onSubmit).not.toHaveBeenCalled();
+      cleanup();
+    }
+  });
+  it('R8-26 reports only R7-validated submitted outcomes and never claims applied settings', async () => {
+    for (const data of [{ job_id: projectJob, status: 'submitted' }, { job_id: projectJob },
+      { status: 'submitted' }, { job_id: 'not-a-uuid', status: 'submitted' }, { job_id: projectJob, status: 'completed' }]) {
+      const h = projectHarness({ run: data });
+      await editProject(h);
+      await readyProject();
+      fireEvent.click(applyButton());
+      await waitFor(() => expect(screen.getByTestId('solar-settings-run')).toBeTruthy());
+      const outcome = await h.props.onProjectSubmit.mock.results[0].value;
+      if (data.job_id === projectJob && data.status === 'submitted') {
+        expect(outcome.ok).toBe(true);
+        expect(screen.getByTestId('solar-settings-run').textContent).toBe('Solar settings submitted.');
+      } else {
+        expect(outcome).toEqual({ ok: false, status: null, reason: 'SIP_R7_RESPONSE_INVALID', envelope: null });
+        expect(screen.getByTestId('solar-settings-run').textContent).toContain('SIP_R7_RESPONSE_INVALID');
+      }
+      expect(screen.queryByText('Solar settings applied')).toBeNull();
+      expect(h.props.solarBinding.input_version_id).toBe(projectBinding.input_version_id);
+      cleanup();
+    }
+  });
+  it('R8-27 retains the exact retry intent and key after uncertainty and checkout loss', async () => {
+    const h = projectHarness();
+    await h.real.acquireCheckout();
+    const uncertain = deferred();
+    h.props.onProjectSubmit = vi.fn()
+      .mockImplementationOnce(() => uncertain.promise)
+      .mockImplementation((intent, options) => h.real.submitRun(intent, { signal: options.signal }));
+    await editProject(h);
+    await readyProject();
+    const intent = h.client.catalog.mock.calls[0][0].intents[0];
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1));
+    await act(async () => { uncertain.resolve({ ok: false, status: null, reason: 'SIP_R7_TIMEOUT', envelope: null }); });
+    await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toContain('SIP_R7_TIMEOUT'));
+    expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }));
+    await readyProject();
+    expect(h.client.catalog.mock.calls.at(-1)[0].intents[0]).toBe(intent);
+    await act(async () => { await h.real.releaseCheckout(); });
+    await readyProject();
+    expect(h.client.catalog.mock.calls.at(-1)[0].intents[0]).toBe(intent);
+    expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(1);
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toBe('Solar settings submitted.'));
+    expect(h.props.onProjectSubmit.mock.calls[1][0]).toBe(intent);
+    expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2);
+    const run = h.fetchImpl.mock.calls.find(([url]) => url === '/api/run');
+    expect(run[1].headers['Idempotency-Key']).toBe(intent.idempotencyKey);
+    expect(run[1].headers).not.toHaveProperty('X-Checkout-Capability');
+  });
+  it('R8-28 aborts and unsubscribes owned StrictMode work without owning the shared client', async () => {
+    const pending = deferred();
+    const h = projectHarness({ contextResponses: [pending.promise] });
+    const view = render(<StrictMode><SolarSettingsForm {...h.props} /></StrictMode>);
+    await waitForMode('edit');
+    const signals = h.client.readContext.mock.calls.map(([options]) => options.signal);
+    expect(signals.length).toBeGreaterThanOrEqual(2);
+    expect(signals[0].aborted).toBe(true);
+    view.unmount();
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(h.unsubscribes.every((unsubscribe) => unsubscribe.mock.calls.length === 1)).toBe(true);
+    await act(async () => { pending.resolve(projectResponse(canonicalView())); });
+    for (const method of ['setScope', 'dispose', 'acquireCheckout', 'releaseCheckout']) expect(h.client[method]).not.toHaveBeenCalled();
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+    render(<StrictMode><SolarSettingsForm {...h.props} /></StrictMode>);
+    await waitForMode('edit');
+    expect(screen.queryByTestId('solar-settings-run')).toBeNull();
+  });
+  it('R8-29 refuses missing canonical dependencies and never falls back to legacy loaders or submission', async () => {
+    for (const changes of [{ projectClient: undefined }, { newProjectIntentKey: undefined },
+      { onProjectSubmit: undefined }, { solarBinding: undefined, context: { ...C, projectId: projectBinding.project_id } }]) {
+      const h = projectHarness();
+      const supplied = { ...h.props, ...changes };
+      render(<SolarSettingsForm {...supplied} />);
+      await waitFor(() => expect(screen.getByTestId('solar-settings-reason').textContent)
+        .toBe(changes.solarBinding === undefined && Object.hasOwn(changes, 'solarBinding')
+          ? PROJECT_SETTINGS_REASONS.binding_invalid : PROJECT_SETTINGS_REASONS.submit_unavailable));
+      const button = screen.queryByRole('button', { name: 'Apply settings' });
+      if (button) { expect(button.disabled).toBe(true); fireEvent.click(button); }
+      expect(h.props.readIntake).not.toHaveBeenCalled();
+      expect(h.props.readVersions).not.toHaveBeenCalled();
+      expect(h.props.onSubmit).not.toHaveBeenCalled();
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+      expect(h.client.prepareRun).not.toHaveBeenCalled();
+      cleanup();
+    }
+    for (const [changes, reason] of [
+      [{ catalogDigest: undefined }, 'catalog_digest_required'],
+      [{ catalogDigest: 'not-a-digest' }, 'catalog_digest_required'],
+      [{ newProjectIntentKey: () => '' }, 'idempotency_key_required'],
+      [{ newProjectIntentKey: () => 'é'.repeat(129) }, 'idempotency_key_required'],
+    ]) {
+      const h = projectHarness();
+      h.props = { ...h.props, ...changes };
+      await editProject(h);
+      await waitFor(() => expect(screen.getByTestId('solar-settings-reason').textContent).toBe(PROJECT_SETTINGS_REASONS[reason]));
+      expect(applyButton().disabled).toBe(true);
+      expect(h.client.catalog).not.toHaveBeenCalled();
+      expect(h.client.prepareRun).not.toHaveBeenCalled();
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+      cleanup();
+    }
+  });
+});
+
+
 const C = { drawingId: 'd1', drawingVersion: 3, projectId: null };
 const P = { name: 'Roof A', zip_code: '44224', latitude: 41, longitude: -81 };
 const S = {
