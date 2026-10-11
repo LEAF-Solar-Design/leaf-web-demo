@@ -7,7 +7,7 @@ import SolarStepEditor from './SolarStepEditor.jsx'
 import conductorDeclaration from '../../../server/solar_tools/solar_string_conductors.json'
 import ground from './__fixtures__/stringComposerGround.json'
 import rooftop from './__fixtures__/stringComposerRooftop.json'
-import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL, SOLAR_STRING_COMPOSER_REASONS,
+import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL, SOLAR_STRING_COMPOSER_REASONS, PROJECT_STRING_COMPOSER_REASONS,
   composeStringRequest, stringComposerView } from './solarStringComposerModel.js'
 import { SOLAR_FLOW_MATURITY_NOTES, SOLAR_FLOW_UNAVAILABLE_REASONS, solarFlowStepId } from './solarFlowModel.js'
 import { recordProjectSolarFlowRun, projectSolarFlowRunsFor, projectSolarFlowScope, projectSolarFlowReason } from './solarFlowModel.js'
@@ -743,9 +743,13 @@ describe('SolarStepEditor', () => {
 
   it('H6 string scope refusals have one Cancel and perform no reads or submissions', async () => {
     for (const toolName of stringTools) {
-      for (const scope of [{ projectId: 'p1' }, { drawingId: '' }, { drawingVersion: null }]) {
+      // A project id without its canonical binding reaches R10's project composer, which refuses
+      // with the project sentence; the two standalone scopes keep the standalone sentence.
+      for (const [scope, reason] of [[{ projectId: 'p1' }, PROJECT_STRING_COMPOSER_REASONS.binding_invalid],
+        [{ drawingId: '' }, SOLAR_STRING_COMPOSER_REASONS.scope],
+        [{ drawingVersion: null }, SOLAR_STRING_COMPOSER_REASONS.scope]]) {
         const { props, container } = await mountString(toolName, ground, scope)
-        expect(screen.getByText(SOLAR_STRING_COMPOSER_REASONS.scope)).toBeTruthy()
+        expect(screen.getByText(reason)).toBeTruthy()
         expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1)
         expect(container.querySelector('input')).toBeNull()
         expect(props.readIntake).not.toHaveBeenCalled()

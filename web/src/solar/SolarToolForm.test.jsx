@@ -623,7 +623,15 @@ it('R11-28 project presets and other generic tools refuse without legacy reads o
     expect(h.props.readIntake).not.toHaveBeenCalled()
     expect(h.props.onSubmit).not.toHaveBeenCalled()
     expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
-    expect(h.fetchImpl).not.toHaveBeenCalled()
+    // R10: the two string tools read the project context through the project client, a canonical
+    // read and never a legacy one; no specialised host submits a run or takes a checkout on mount.
+    const urls = h.fetchImpl.mock.calls.map(([url]) => url)
+    if (name === 'solar-string-add' || name === 'solar-string-multi-add') {
+      expect(urls.length).toBeGreaterThan(0)
+      expect(urls.every((url) => url.includes('/context?'))).toBe(true)
+    } else {
+      expect(urls).toEqual([])
+    }
     cleanup()
   }
 })
