@@ -170,14 +170,20 @@ export function projectSolarScopeSnapshot(raw) {
         acquired: text(lease.acquired), expires: text(lease.expires) })
       : Object.freeze({})
     const error = raw?.error
+    // Each field is read exactly once, so an accessor cannot hand the check one value and the
+    // snapshot another.
+    const authorityKey = raw?.authorityKey
+    const ownsCheckout = raw?.ownsCheckout
+    const pending = raw?.pending
+    const leaseRevision = raw?.leaseRevision
     return Object.freeze({
       binding,
-      authorityKey: boundedKey(raw?.authorityKey) ? raw.authorityKey : null,
+      authorityKey: boundedKey(authorityKey) ? authorityKey : null,
       checkout,
-      ownsCheckout: typeof raw?.ownsCheckout === 'boolean' ? raw.ownsCheckout : undefined,
-      pending: typeof raw?.pending === 'boolean' ? raw.pending : undefined,
+      ownsCheckout: typeof ownsCheckout === 'boolean' ? ownsCheckout : undefined,
+      pending: typeof pending === 'boolean' ? pending : undefined,
       error: error === null ? null : text(error) ?? false,
-      leaseRevision: typeof raw?.leaseRevision === 'number' ? raw.leaseRevision : undefined,
+      leaseRevision: typeof leaseRevision === 'number' ? leaseRevision : undefined,
     })
   } catch {
     return Object.freeze({ binding: null, authorityKey: null, checkout: null, ownsCheckout: undefined,

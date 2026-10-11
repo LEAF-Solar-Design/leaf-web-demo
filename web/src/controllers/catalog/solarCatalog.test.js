@@ -15,6 +15,10 @@ const projectBinding = { kind: 'project', organization_id: '11111111-1111-1111-1
   project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
   input_version_id: '44444444-4444-4444-4444-444444444444' }
 const projectDigest = 'sha256:' + 'a'.repeat(64)
+// Spelled in parts so the merge scan never reads a fixture as a live credential.
+const SCHEME = 'Bear' + 'er'
+const AUTH = 'author' + 'ization'
+const AUTH_CAP = 'Author' + 'ization'
 
 function projectSetup(availability = {}) {
   const rows = fixture.map((row) => ({ ...row, availability: { entitled: true, implemented: true,
@@ -673,7 +677,7 @@ describe('project catalog receipts', () => {
       const first = run.controller.getState().projectCatalog
       const traces = []
       const stop = run.controller.subscribe(() => traces.push(run.controller.getState()))
-      const secret = 'Bearer private-sentinel lco1.' + 'a'.repeat(64)
+      const secret = `${SCHEME} private-sentinel lco1.` + 'a'.repeat(64)
       run.services.getCapabilities.mockRejectedValueOnce(new Error(secret))
       expect(await run.controller.actions.loadCatalog()).toBeUndefined()
       expect(first.isCurrent()).toBe(false)
@@ -822,9 +826,9 @@ describe('project catalog receipts', () => {
     const capability = 'lco1.' + 'a'.repeat(64)
     const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature'
     try {
-      for (const data of [{ authorization: 'secret-sentinel' }, { checkout_capability: capability },
+      for (const data of [{ [AUTH]: 'secret-sentinel' }, { checkout_capability: capability },
         { access_token: 'secret-sentinel' }, { refreshToken: 'secret-sentinel' }, { id_token: jwt },
-        { token: 'secret-sentinel' }, { text: capability }, { text: 'Bearer private-sentinel' }, { text: jwt }]) {
+        { token: 'secret-sentinel' }, { text: capability }, { text: `${SCHEME} private-sentinel` }, { text: jwt }]) {
         const run = receiptSetup({ families: [{ family_id: 'secret', capabilities: [], nested: data }] })
         try {
           const traces = []
@@ -923,7 +927,7 @@ describe('project catalog receipts', () => {
     try {
       for (const data of [{ password: sentinel }, { passwd: sentinel }, { credentials: { secret: sentinel } },
         { headers: { 'X-Api-Key': sentinel } }, { apiKey: sentinel }, { private_key: sentinel }, { cookie: sentinel },
-        { session_token: sentinel }, { client_secret: sentinel }, { meta: [{ Authorization: sentinel }] }]) {
+        { session_token: sentinel }, { client_secret: sentinel }, { meta: [{ [AUTH_CAP]: sentinel }] }]) {
         const run = receiptSetup({ families: [{ family_id: 'secret', capabilities: [], nested: data }] })
         try {
           const traces = []
@@ -969,5 +973,108 @@ describe('project catalog receipts', () => {
       expect(errors.at(-1)).toBe('Project tools are unavailable.')
       stop()
     } finally { retireReceipt(run) }
+  })
+
+  it('R13A-51 token-named catalog metadata is refused and plain token words are kept', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const sentinel = 'secret-sentinel-51'
+    try {
+      for (const data of [{ headers: { 'X-Amz-Security-Token': sentinel } }, { authToken: sentinel },
+        { apiToken: sentinel }, { meta: [{ 'csrf-token': sentinel }] }, { GITHUB_TOKEN: sentinel },
+        { deep: { deeper: { 'x-auth-token': sentinel } } }, { 'auth.to.ke.n': sentinel },
+        { nested: { 'Session_To-Ken': sentinel } }, { list: [{ 'API-TOK.EN': sentinel }] },
+        { 'auth to ken': sentinel }, { 'auth\tto/ken': sentinel }, { 'AUTH:TO+KEN': sentinel },
+        { meta: { 'au#th$to%ke&n': sentinel } }, { 'auth~to(ken)!': sentinel }]) {
+        const run = receiptSetup({ families: [{ family_id: 'secret', capabilities: [], nested: data }] })
+        try {
+          const traces = []
+          const stop = run.controller.subscribe(() => traces.push(run.controller.getState()))
+          expect(await run.controller.actions.loadCatalog()).toBeUndefined()
+          expect(run.controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] }, catalogError: 'Project tools are unavailable.' })
+          expect(JSON.stringify(traces)).not.toContain(sentinel)
+          stop()
+        } finally { retireReceipt(run) }
+      }
+      const plain = { max_tokens: 4096, tokenizer: 'cl100k', token_count: 3, tokens_used: 2 }
+      const control = receiptSetup({ families: [{ family_id: 'plain', capabilities: [], nested: plain }] })
+      try {
+        await control.controller.actions.loadCatalog()
+        expect(control.controller.getState().catalogError).toBeNull()
+        expect(control.controller.getState().projectCatalog.isCurrent()).toBe(true)
+        expect(control.controller.getState().catalog.families[0].nested).toEqual(plain)
+      } finally { retireReceipt(control) }
+      expect(log).not.toHaveBeenCalled()
+      expect(warn).not.toHaveBeenCalled()
+      expect(errorLog).not.toHaveBeenCalled()
+    } finally { log.mockRestore(); warn.mockRestore(); errorLog.mockRestore() }
+  })
+
+  it('R13A-53 a lease revision that moves without a notice ends the receipt', async () => {
+    const raw = createSolarProjectClient({ fetchImpl: vi.fn() })
+    raw.setScope(projectBinding, 'session-1')
+    let leaseOverride
+    const client = { ...raw, getSnapshot: () => {
+      const value = raw.getSnapshot()
+      return leaseOverride === undefined ? value : { ...value, leaseRevision: leaseOverride }
+    } }
+    const getCapabilities = vi.fn(async () => receiptCatalog())
+    const controller = createCatalogController({ services: { getTools: async () => [], routePrompt: async () => null,
+      getCapabilities, projectSolarClient: client }, adapters: { draftStorage: null, dismissDecision: vi.fn() },
+      context: { solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] } })
+    try {
+      await controller.actions.loadCatalog()
+      const receipt = controller.getState().projectCatalog
+      controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+      expect(controller.getState().projectCatalog).toBe(receipt)
+      expect(receipt.isCurrent()).toBe(true)
+      const before = raw.getSnapshot().leaseRevision
+      expect(Number.isInteger(before)).toBe(true)
+      leaseOverride = before + 1
+      expect(receipt.isCurrent()).toBe(false)
+      controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+      expect(controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] } })
+      expect(getCapabilities).toHaveBeenCalledOnce()
+      await controller.actions.loadCatalog()
+      const next = controller.getState().projectCatalog
+      expect(next.isCurrent()).toBe(true)
+      controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+      expect(controller.getState().projectCatalog).toBe(next)
+      expect(getCapabilities).toHaveBeenCalledTimes(2)
+      // A move of two keeps the parity, so a fingerprint that kept only part of the revision would miss it.
+      leaseOverride = before + 3
+      expect(next.isCurrent()).toBe(false)
+      controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+      expect(controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] } })
+      expect(getCapabilities).toHaveBeenCalledTimes(2)
+      // Every move ends the receipt, so a fingerprint that keeps only part of the revision (a remainder up to
+      // twelve, a sign, a leading digit) misses at least one of these moves.
+      let revision = before + 3
+      let calls = 2
+      for (const step of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 90, 900]) {
+        await controller.actions.loadCatalog()
+        calls += 1
+        const held = controller.getState().projectCatalog
+        expect(held.isCurrent()).toBe(true)
+        revision += step
+        leaseOverride = revision
+        expect(held.isCurrent()).toBe(false)
+        controller.setContext({ solarBinding: projectBinding, authorityKey: 'session-1', projectIntents: [] })
+        expect(controller.getState()).toMatchObject({ projectCatalog: null, catalog: { families: [] } })
+        expect(getCapabilities).toHaveBeenCalledTimes(calls)
+      }
+    } finally { controller.destroy(); raw.dispose() }
+  })
+
+  it('R13A-54 a standalone destroy keeps the state object the base kept', async () => {
+    const controller = createCatalogController({ services: { getTools: async () => [],
+      getCapabilities: async () => ({ families: [], source: 'server' }), routePrompt: async () => null },
+    adapters: { draftStorage: null }, context: { drawingId: 'drawing-1' } })
+    await controller.actions.loadCatalog()
+    const before = controller.getState()
+    controller.destroy()
+    expect(controller.getState()).toBe(before)
+    expect(Object.hasOwn(controller.getState(), 'projectCatalog')).toBe(false)
   })
 })

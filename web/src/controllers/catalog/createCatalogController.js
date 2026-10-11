@@ -91,6 +91,10 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     const secretField = new RegExp('authorization|capability|bearer|password|passwd|secret|api[_-]?key|credential|cookie|' +
       'private[_-]?key|(?:access|refresh|id|session)[_-]?token|^token$', 'i')
     const secretValue = new RegExp('lco1\\.[0-9a-f]{64}|\\bbearer\\s+\\S+|eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+', 'i')
+    // A key whose letters and digits end in "token" names a credential (X-Amz-Security-Token,
+    // authToken, apiToken). max_tokens and tokenizer do not end that way and stay accepted.
+    const keyNoise = new RegExp('[^a-z0-9]', 'g')
+    const tokenKey = (key) => key.toLowerCase().replace(keyNoise, '').endsWith('token')
     const seen = new Set()
     const refuse = () => { throw new TypeError('Project tools are unavailable.') }
     const copy = (value, depth = 0) => {
@@ -112,7 +116,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         }
       } else {
         for (const key of keys) {
-          if (typeof key !== 'string' || secretField.test(key) || secretValue.test(key) ||
+          if (typeof key !== 'string' || secretField.test(key) || tokenKey(key) || secretValue.test(key) ||
               !Object.getOwnPropertyDescriptor(value, key).enumerable) refuse()
           Object.defineProperty(result, key, { value: copy(value[key], depth + 1), enumerable: true })
         }
@@ -716,8 +720,11 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       catalogRequest += 1
       catalogAbort?.abort()
       acceptedPreview = null
-      state = { ...state, ...resetProjectCatalog() }
-      snapshot = null
+      // Standalone keeps the base's destroy: its state object is never replaced.
+      if (projectScope() || Object.hasOwn(state, 'projectCatalog')) {
+        state = { ...state, ...resetProjectCatalog() }
+        snapshot = null
+      }
       unsubscribeProject?.()
       unsubscribeProject = null
       listeners.clear()
