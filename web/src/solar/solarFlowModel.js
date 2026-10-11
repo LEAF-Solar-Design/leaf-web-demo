@@ -6,6 +6,234 @@
 // runs on a string longer than MAX_REASON_CODE_LENGTH.
 import { solarView } from './solarView.js'
 import { FLOW_PANELS } from './solarWorkspacePanels.js'
+import { createSolarDrawingBinding, sameSolarDrawingBinding, solarCheckoutBindingKey, solarDrawingBindingKey } from './solarDrawingBinding.js'
+import { deriveProjectSettingsState } from './solarSettingsModel.js'
+
+export const PROJECT_EQUIPMENT_TOOL = 'solar-assign-equipment'
+export const PROJECT_SOLAR_FLOW_REASONS = Object.freeze({
+  binding_invalid: 'Open a project drawing version before assigning equipment.',
+  context_unreadable: 'This project drawing version could not be read. Reload it and try again.',
+  graph_unreadable: 'The Solar design stored with this drawing cannot be read, so equipment cannot be changed.',
+  graphless: 'Start a Solar design in settings before assigning equipment.',
+  not_current_head: 'Equipment changes require the newest drawing version. Open the head version first.',
+  version_digest_unavailable: 'This drawing version has no recorded content digest. Reload it before assigning equipment.',
+  scope_stale: 'The drawing or session changed. Review the current equipment inputs before submitting.',
+  catalog_digest_required: 'Refresh the Solar tools before assigning equipment.',
+  idempotency_key_required: 'This equipment request could not be prepared. Try again.',
+  request_invalid: 'This equipment request could not be prepared. Review the inputs and try again.',
+  invalid_value: 'Correct the marked equipment input before reviewing this request.',
+  preview_required: 'Checking whether this equipment request can be applied to this drawing.',
+  preview_refused: 'This equipment request cannot be applied. Review the refusal and try again.',
+  submit_unavailable: 'Project equipment submission is not available in this view.',
+  tool_unsupported: 'This tool has no project form in this view.',
+  run_in_progress: 'A run is in progress. Wait for it to finish.',
+  catalog_pending: 'Checking Solar steps for the selected project drawing version.',
+  review_required: 'Review the equipment inputs to check whether this step can run.',
+})
+
+// Static members keep the sentence map readable by the honesty scanner.
+export function projectSolarFlowReason(reason) {
+  switch (reason) {
+    case 'binding_invalid': return PROJECT_SOLAR_FLOW_REASONS.binding_invalid
+    case 'context_unreadable': return PROJECT_SOLAR_FLOW_REASONS.context_unreadable
+    case 'graph_unreadable': return PROJECT_SOLAR_FLOW_REASONS.graph_unreadable
+    case 'graphless': return PROJECT_SOLAR_FLOW_REASONS.graphless
+    case 'not_current_head': return PROJECT_SOLAR_FLOW_REASONS.not_current_head
+    case 'version_digest_unavailable': return PROJECT_SOLAR_FLOW_REASONS.version_digest_unavailable
+    case 'scope_stale': return PROJECT_SOLAR_FLOW_REASONS.scope_stale
+    case 'catalog_digest_required': return PROJECT_SOLAR_FLOW_REASONS.catalog_digest_required
+    case 'idempotency_key_required': return PROJECT_SOLAR_FLOW_REASONS.idempotency_key_required
+    case 'request_invalid': return PROJECT_SOLAR_FLOW_REASONS.request_invalid
+    case 'invalid_value': return PROJECT_SOLAR_FLOW_REASONS.invalid_value
+    case 'preview_required': return PROJECT_SOLAR_FLOW_REASONS.preview_required
+    case 'preview_refused': return PROJECT_SOLAR_FLOW_REASONS.preview_refused
+    case 'submit_unavailable': return PROJECT_SOLAR_FLOW_REASONS.submit_unavailable
+    case 'tool_unsupported': return PROJECT_SOLAR_FLOW_REASONS.tool_unsupported
+    case 'run_in_progress': return PROJECT_SOLAR_FLOW_REASONS.run_in_progress
+    case 'catalog_pending': return PROJECT_SOLAR_FLOW_REASONS.catalog_pending
+    case 'review_required': return PROJECT_SOLAR_FLOW_REASONS.review_required
+    default: return null
+  }
+}
+
+const PROJECT_FLOW_DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
+const PROJECT_FLOW_CODE = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}$')
+const PROJECT_FLOW_TOOL = new RegExp('^[a-z0-9][a-z0-9-]{0,127}$')
+
+export function deriveProjectEquipmentState({ binding, contextView }) {
+  let state
+  try { state = deriveProjectSettingsState({ binding, contextView }) }
+  catch { return { mode: 'refused', reason: 'context_unreadable' } }
+  if (state.mode === 'refused') return state
+  if (state.mode === 'initialize') return { mode: 'refused', reason: 'graphless' }
+  if (!Number.isSafeInteger(state.rev) || state.rev < 0) return { mode: 'refused', reason: 'graph_unreadable' }
+  return { mode: 'edit', binding: state.binding, intakeSha256: state.intakeSha256, rev: state.rev }
+}
+
+// Descriptor reads reject accessors, sparse arrays, cycles and non-JSON values without invoking them.
+function equipmentJson(value, seen = new Set(), depth = 0) {
+  if (depth > 128) throw new TypeError('Invalid equipment values')
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if ((!Array.isArray(value) && !plainObject(value)) || seen.has(value)) throw new TypeError('Invalid equipment values')
+  seen.add(value)
+  const keys = Reflect.ownKeys(value)
+  const result = Array.isArray(value) ? [] : {}
+  if (Array.isArray(value)) {
+    if (keys.length !== value.length + 1) throw new TypeError('Invalid equipment array')
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new TypeError('Invalid equipment array')
+      result.push(equipmentJson(descriptor.value, seen, depth + 1))
+    }
+  } else {
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (typeof key !== 'string' || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+        throw new TypeError('Invalid equipment object')
+      }
+      Object.defineProperty(result, key, { enumerable: true, value: equipmentJson(descriptor.value, seen, depth + 1) })
+    }
+  }
+  seen.delete(value)
+  return Object.freeze(result)
+}
+
+export function buildProjectEquipmentRequest({ binding, state, values = {}, catalogDigest, idempotencyKey }) {
+  const fail = (reason) => ({ ok: false, reason })
+  let exact
+  try { exact = createSolarDrawingBinding(binding) } catch { return fail('binding_invalid') }
+  if (state?.mode === 'refused') return fail(state.reason)
+  if (!sameSolarDrawingBinding(exact, state?.binding)) return fail('scope_stale')
+  if (state?.mode !== 'edit' || !Number.isSafeInteger(state.rev) || state.rev < 0) return fail('request_invalid')
+  if (typeof catalogDigest !== 'string' || !PROJECT_FLOW_DIGEST.test(catalogDigest)) return fail('catalog_digest_required')
+  if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim()
+      || new TextEncoder().encode(idempotencyKey).byteLength > 256) return fail('idempotency_key_required')
+  let copied
+  try {
+    if (!plainObject(values) || Reflect.ownKeys(values).some((key) => !['equipment', 'assignments', 'cancel', 'preview'].includes(key))) {
+      return fail('request_invalid')
+    }
+    copied = equipmentJson(values)
+  } catch { return fail('request_invalid') }
+  return { ok: true, request: { tool: PROJECT_EQUIPMENT_TOOL,
+    params: { drawing_id: exact.drawing_id, expected_rev: state.rev, ...copied }, catalogDigest, idempotencyKey } }
+}
+
+function projectStepReady(row) {
+  const view = row?.availability
+  return typeof row?.catalog_digest === 'string' && PROJECT_FLOW_DIGEST.test(row.catalog_digest)
+    && view?.admission_checked === true && view.admission?.status_code === 200 && view.admission.error === null
+    && ['entitled', 'engine_ready', 'implemented', 'input_ready', 'runnable'].every((key) => view[key] === true)
+    && Array.isArray(view.refusal_reasons) && view.refusal_reasons.length === 0
+}
+
+export function exactProjectEquipmentPreview(outcome, catalogDigest) {
+  if (!outcome?.ok || !Array.isArray(outcome.data?.families)) return { accepted: false, admission: null }
+  const rows = outcome.data.families.flatMap((family) => Array.isArray(family?.capabilities) ? family.capabilities : [])
+    .filter((row) => row?.name === PROJECT_EQUIPMENT_TOOL)
+  const accepted = (row) => row.catalog_digest === catalogDigest && projectStepReady(row)
+  return { accepted: rows.length > 0 && rows.every(accepted),
+    admission: rows.find((row) => !accepted(row))?.availability?.admission ?? null }
+}
+
+export function projectSolarFlowScope(binding, authorityKey) {
+  try {
+    const exact = createSolarDrawingBinding(binding)
+    if (typeof authorityKey !== 'string' || !authorityKey.trim()
+        || new TextEncoder().encode(authorityKey).byteLength > 256) return null
+    return { artifactKey: JSON.stringify([solarCheckoutBindingKey(exact), authorityKey]), versionKey: solarDrawingBindingKey(exact) }
+  } catch { return null }
+}
+
+export function recordProjectSolarFlowRun(previous, run, settlement) {
+  try {
+    if (!plainObject(settlement) || Reflect.ownKeys(settlement).some((key) => !['terminal', 'ok', 'reason_code'].includes(key))) return previous
+    settlement = equipmentJson(settlement)
+  } catch { return previous }
+  // Each association field is read once: an accessor that answers differently on a second read
+  // can never key the run under one scope and store another binding beside it.
+  let binding
+  let authorityKey
+  let tool
+  try {
+    binding = createSolarDrawingBinding(run?.binding)
+    authorityKey = run?.authorityKey
+    tool = run?.tool
+  } catch { return previous }
+  const scope = projectSolarFlowScope(binding, authorityKey)
+  if (!scope || typeof tool !== 'string' || !PROJECT_FLOW_TOOL.test(tool)
+      || !plainObject(settlement) || settlement.terminal !== true || typeof settlement.ok !== 'boolean'
+      || (Object.hasOwn(settlement, 'reason_code') && (typeof settlement.reason_code !== 'string'
+        || !PROJECT_FLOW_CODE.test(settlement.reason_code)))) return previous
+  const base = plainObject(previous) && previous.artifactKey === scope.artifactKey && plainObject(previous.runs) ? previous.runs : {}
+  return { artifactKey: scope.artifactKey, runs: { ...base, [tool]: {
+    binding, authorityKey,
+    ok: settlement.ok, code: settlement.ok ? null : settlement.reason_code ?? null,
+  } } }
+}
+
+export function projectSolarFlowRunsFor(memory, binding, authorityKey) {
+  const scope = projectSolarFlowScope(binding, authorityKey)
+  return scope && plainObject(memory) && memory.artifactKey === scope.artifactKey && plainObject(memory.runs) ? memory.runs : NO_RUNS
+}
+
+const PROJECT_GRAPH_CODES = new Set([
+  'GRAPH_NOT_EMBEDDED', 'INVALID_SEED_PARENT', 'GRAPH_DIGEST_MISMATCH', 'STALE_GRAPH_REVISION',
+  'SIZING_CONFIRMATION_REQUIRED', 'UNRESOLVED_UNITS', 'INVALID_GRAPH_SCHEMA',
+  'EQUIPMENT_INPUT_CAPACITY_EXCEEDED', 'EQUIPMENT_UNASSIGNED', 'EQUIPMENT_EMPTY_STRING',
+  'EQUIPMENT_VOLTAGE_UNKNOWN', 'EQUIPMENT_POWER_UNKNOWN', 'EQUIPMENT_VOLTAGE_EXCEEDED', 'EQUIPMENT_POWER_EXCEEDED',
+  'valid_settings_required', 'sizing_confirmation_required', 'unresolved_units', 'equipment_required',
+])
+
+export function deriveProjectSolarFlowState({ steps, current, previousReady, pending, runs, binding, authorityKey, openSettingsForm } = {}) {
+  if (current !== true || !projectSolarFlowScope(binding, authorityKey)) return { items: [], resumeIndex: -1 }
+  let firstBlocked = -1
+  let resumeIndex = -1
+  const all = Array.isArray(steps) ? steps : []
+  // A catalog past the bound is refused whole: cutting it before rows are grouped by name could
+  // hide a later duplicate whose admission contradicts an accepted one.
+  if (all.length > MAX_CATALOG_ROWS) return { items: [], resumeIndex: -1 }
+  const rows = all.filter((row) => row && typeof row.name === 'string')
+  const grouped = new Map()
+  for (const row of rows) {
+    if (!grouped.has(row.name)) grouped.set(row.name, [])
+    grouped.get(row.name).push(row)
+  }
+  const items = [...grouped.values()].slice(0, MAX_FLOW_STEPS).map((matching, index) => {
+      const row = matching[0]
+      const ready = matching.every((entry) => entry.catalog_digest === row.catalog_digest && projectStepReady(entry))
+      const view = row.availability
+      const reviewable = row.name === PROJECT_EQUIPMENT_TOOL && matching.every((entry) => {
+        const availability = entry.availability
+        return typeof entry.catalog_digest === 'string' && PROJECT_FLOW_DIGEST.test(entry.catalog_digest)
+          && entry.catalog_digest === row.catalog_digest && availability?.implemented === true && availability.engine_ready === true
+          && availability.admission_checked === false && availability.admission === null
+          && Array.isArray(availability.refusal_reasons) && availability.refusal_reasons.length === 1
+          && availability.refusal_reasons[0] === 'project_request_required'
+      })
+      const enabled = ready || reviewable || settingsOpenable(row, openSettingsForm)
+      const codes = Array.isArray(view?.refusal_reasons)
+        ? view.refusal_reasons.filter((code) => typeof code === 'string' && PROJECT_FLOW_CODE.test(code)).slice(0, MAX_REASON_CODES) : []
+      const nestedCode = view?.admission?.error?.reason_code
+      if (typeof nestedCode === 'string' && PROJECT_FLOW_CODE.test(nestedCode) && !codes.includes(nestedCode)) codes.push(nestedCode)
+      const graphRefusal = view?.admission_checked === true
+        && ((view.admission?.status_code === 409 && PROJECT_GRAPH_CODES.has(nestedCode))
+          || (view.admission?.status_code === 200 && view.admission.error === null && codes.some((code) => PROJECT_GRAPH_CODES.has(code))))
+      const runOutcome = ownValue(runs, row.name) ?? null
+      const sameRun = runOutcome?.authorityKey === authorityKey && sameSolarDrawingBinding(runOutcome?.binding, binding)
+      const pendingHere = pending?.tool === row.name && pending.authorityKey === authorityKey && sameSolarDrawingBinding(pending.binding, binding)
+      const status = pendingHere ? 'pending' : sameRun && runOutcome.ok === false ? 'failed'
+        : ready ? 'ready' : enabled ? 'review' : 'blocked'
+      if (enabled) resumeIndex = index
+      if (!ready && firstBlocked === -1) firstBlocked = index
+      return { name: row.name, label: typeof row.label === 'string' && row.label ? row.label : row.name,
+        row, ready, enabled, status, codes: enabled ? [] : codes, runOutcome,
+        skip: ready && firstBlocked !== -1 && firstBlocked < index,
+        invalidated: !enabled && previousReady?.[row.name] === true && graphRefusal }
+    })
+  return { items, resumeIndex }
+}
 
 export const MAX_FLOW_STEPS = 64
 export const MAX_CATALOG_ROWS = 4096

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { createRunSubmissionRequest } from '../runIntent.js'
+import { SEED_SETTINGS } from './solarSettingsModel.js'
+import { PROJECT_EQUIPMENT_TOOL, deriveProjectEquipmentState, buildProjectEquipmentRequest,
+  exactProjectEquipmentPreview, projectSolarFlowScope, recordProjectSolarFlowRun,
+  projectSolarFlowRunsFor, deriveProjectSolarFlowState, projectSolarFlowReason } from './solarFlowModel.js'
 import ampacityDeclaration from '../../../server/solar_tools/solar_nec_ampacity_correction.json'
 import voltageDeclaration from '../../../server/solar_tools/solar_nec_ac_voltage_drop.json'
 import conduitDeclaration from '../../../server/solar_tools/solar_nec_conduit_fill.json'
@@ -22,6 +28,179 @@ const W1 = [
   ['solar-assign-equipment', 70], ['solar-homeruns', 80], ['solar-schedule', 90],
 ]
 const READY = Object.freeze({ entitled: true, implemented: true, engine_ready: true, input_ready: true, refusal_reasons: [] })
+
+const equipmentBinding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
+  project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
+  input_version_id: '44444444-4444-4444-4444-444444444444' }
+const equipmentSuccessor = { ...equipmentBinding, input_version_id: '55555555-5555-5555-5555-555555555555' }
+const equipmentDigest = 'sha256:' + 'd'.repeat(64)
+function equipmentContext(rev = 7) {
+  return { context: { ...equipmentBinding, head_version_id: equipmentBinding.input_version_id,
+    is_head: true, intake_sha256: 'a'.repeat(64) },
+  intake: { solar_design_graph: { rev, settings: { ...SEED_SETTINGS },
+    project: { name: 'Roof', zip_code: '44224', latitude: null, longitude: null } }, solar_design_graph_sha256: 'b'.repeat(64) } }
+}
+function equipmentRow(availability = {}) {
+  return { ...row(PROJECT_EQUIPMENT_TOOL, 70), catalog_digest: equipmentDigest,
+    availability: { ...READY, runnable: true, admission_checked: true,
+      admission: { status_code: 200, error: null }, ...availability } }
+}
+const equipmentFlow = (steps, extra = {}) => deriveProjectSolarFlowState({ steps, current: true,
+  binding: equipmentBinding, authorityKey: 'epoch-1', ...extra })
+
+it('R11-01 equipment takes the canonical embedded graph revision without a drawing sequence', () => {
+  const contextView = equipmentContext()
+  const before = JSON.stringify(contextView)
+  const state = deriveProjectEquipmentState({ binding: equipmentBinding, contextView })
+  expect(state).toEqual({ mode: 'edit', binding: equipmentBinding, intakeSha256: 'a'.repeat(64), rev: 7 })
+  expect(Object.isFrozen(state.binding)).toBe(true)
+  expect(Object.keys(state)).toEqual(['mode', 'binding', 'intakeSha256', 'rev'])
+  expect(buildProjectEquipmentRequest({ binding: equipmentBinding, state, values: { equipment: [], assignments: [] },
+    catalogDigest: equipmentDigest, idempotencyKey: 'equipment-key' })).toEqual({ ok: true, request: {
+    tool: PROJECT_EQUIPMENT_TOOL, params: { drawing_id: equipmentBinding.drawing_id, expected_rev: 7, equipment: [], assignments: [] },
+    catalogDigest: equipmentDigest, idempotencyKey: 'equipment-key' } })
+  expect(JSON.stringify(contextView)).toBe(before)
+  const wrong = { ...equipmentBinding, project_id: equipmentSuccessor.input_version_id }
+  expect(buildProjectEquipmentRequest({ binding: wrong, state, catalogDigest: equipmentDigest, idempotencyKey: 'key' }))
+    .toEqual({ ok: false, reason: 'scope_stale' })
+  expect(projectSolarFlowReason('unknown')).toBeNull()
+})
+
+it('R11-02 preserves safe standalone revision prefill including zero', () => {
+  const tool = { params: { properties: { expected_rev: { type: 'integer' } } } }
+  for (const [rev, expected] of [[7, { expected_rev: 7 }], [0, { expected_rev: 0 }],
+    [-1, {}], [1.5, {}], ['7', {}], [null, {}], [Number.MAX_SAFE_INTEGER + 1, {}]]) {
+    expect(solarFlowPrefill(tool, rev)).toEqual(expected)
+  }
+})
+
+it('R11-03 terminal equipment history follows the artifact while retaining its submitted version', () => {
+  const run = { binding: equipmentBinding, authorityKey: 'epoch-1', tool: PROJECT_EQUIPMENT_TOOL }
+  const first = recordProjectSolarFlowRun(null, run, { terminal: true, ok: true })
+  const entries = projectSolarFlowRunsFor(first, equipmentSuccessor, 'epoch-1')
+  expect(entries).toBe(first.runs)
+  expect(entries[PROJECT_EQUIPMENT_TOOL]).toEqual({ binding: equipmentBinding, authorityKey: 'epoch-1', ok: true, code: null })
+  expect(projectSolarFlowScope(equipmentBinding, 'epoch-1').artifactKey).toBe(projectSolarFlowScope(equipmentSuccessor, 'epoch-1').artifactKey)
+  expect(projectSolarFlowScope(equipmentBinding, 'epoch-1').versionKey).not.toBe(projectSolarFlowScope(equipmentSuccessor, 'epoch-1').versionKey)
+  const before = JSON.stringify(first)
+  const next = recordProjectSolarFlowRun(first, { ...run, tool: 'solar-settings' }, { terminal: true, ok: false, reason_code: 'UNRESOLVED_UNITS' })
+  expect(next.runs[PROJECT_EQUIPMENT_TOOL]).toBe(first.runs[PROJECT_EQUIPMENT_TOOL])
+  expect(JSON.stringify(first)).toBe(before)
+  for (const settlement of [{ ok: true, status: 202, data: { status: 'submitted' } }, { terminal: false, ok: true },
+    { terminal: true, ok: true, status: 202 }, { terminal: true, ok: 'true' }, { terminal: true, ok: false, reason_code: '<secret>' }, null]) {
+    expect(recordProjectSolarFlowRun(first, run, settlement)).toBe(first)
+  }
+  expect(recordProjectSolarFlowRun(first, { ...run, binding: null }, { terminal: true, ok: true })).toBe(first)
+})
+
+it('R11-13 legacy readiness flags cannot arm a project step', () => {
+  const unsafe = equipmentRow({ runnable: false, admission_checked: false, admission: null })
+  expect(solarFlowState({ steps: [unsafe] }).items[0].ready).toBe(true)
+  const item = equipmentFlow([unsafe]).items[0]
+  expect(item.ready).toBe(false)
+  expect(item.enabled).toBe(false)
+  expect(item.status).toBe('blocked')
+  expect(equipmentFlow([unsafe]).resumeIndex).toBe(-1)
+  expect(exactProjectEquipmentPreview({ ok: true, data: { families: [{ capabilities: [unsafe] }] } }, equipmentDigest).accepted).toBe(false)
+  expect(equipmentFlow([equipmentRow(), unsafe]).items[0].ready).toBe(false)
+  expect(equipmentFlow([equipmentRow(), unsafe]).items).toHaveLength(1)
+  expect(equipmentFlow([equipmentRow({ admission_checked: false, runnable: false,
+    admission: { status_code: 409, error: { reason_code: 'GRAPH_NOT_EMBEDDED' } } })],
+    { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0].invalidated).toBe(false)
+})
+
+it('R11-14 an ordinary equipment catalog row opens review without granting admission or invalidation', () => {
+  const review = equipmentRow({ runnable: false, input_ready: false, admission_checked: false,
+    admission: null, refusal_reasons: ['project_request_required'] })
+  const state = equipmentFlow([review], { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } })
+  expect(state.resumeIndex).toBe(0)
+  expect(state.items[0]).toMatchObject({ ready: false, enabled: true, status: 'review', invalidated: false })
+  for (const code of ['project_request_required', 'CHECKOUT_REQUIRED', 'CHECKOUT_EXPIRED', 'PROJECT_FORBIDDEN', 'HTTP_ERROR', 'capability_not_ready', 'NEW_UNKNOWN_CODE']) {
+    const blockedRow = equipmentRow({ runnable: false, admission: { status_code: 409, error: { reason_code: code } }, refusal_reasons: [code] })
+    expect(equipmentFlow([blockedRow], { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0].invalidated).toBe(false)
+  }
+  for (const code of ['GRAPH_NOT_EMBEDDED', 'SIZING_CONFIRMATION_REQUIRED', 'UNRESOLVED_UNITS', 'STALE_GRAPH_REVISION']) {
+    const invalid = equipmentRow({ runnable: false, admission: { status_code: 409, error: { reason_code: code } }, refusal_reasons: ['capability_not_ready'] })
+    expect(equipmentFlow([invalid], { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0].invalidated).toBe(true)
+  }
+  expect(equipmentFlow([equipmentRow({ runnable: false, refusal_reasons: ['GRAPH_NOT_EMBEDDED'],
+    admission: { status_code: 409, error: { reason_code: 'UNKNOWN_ADMISSION_CODE' } } })],
+    { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0].invalidated).toBe(false)
+})
+
+it('R11-25 terminal success preserves history while electrical invalidity keeps the current step blocked', () => {
+  const memory = recordProjectSolarFlowRun(null, { binding: equipmentBinding, authorityKey: 'epoch-1', tool: PROJECT_EQUIPMENT_TOOL },
+    { terminal: true, ok: true })
+  const runs = projectSolarFlowRunsFor(memory, equipmentSuccessor, 'epoch-1')
+  const blockedRow = equipmentRow({ runnable: false, refusal_reasons: ['EQUIPMENT_UNASSIGNED'],
+    admission: { status_code: 409, error: { reason_code: 'EQUIPMENT_UNASSIGNED' } } })
+  const older = equipmentFlow([blockedRow], { binding: equipmentSuccessor, runs,
+    pending: { binding: equipmentBinding, authorityKey: 'epoch-1', tool: PROJECT_EQUIPMENT_TOOL } }).items[0]
+  expect(older).toMatchObject({ ready: false, enabled: false, status: 'blocked', runOutcome: runs[PROJECT_EQUIPMENT_TOOL] })
+  const failed = recordProjectSolarFlowRun(memory, { binding: equipmentBinding, authorityKey: 'epoch-1', tool: PROJECT_EQUIPMENT_TOOL },
+    { terminal: true, ok: false, reason_code: 'STALE_GRAPH_REVISION' }).runs
+  expect(equipmentFlow([equipmentRow()], { binding: equipmentSuccessor, runs: failed }).items[0].status).toBe('ready')
+  expect(equipmentFlow([equipmentRow()], { runs: failed }).items[0].status).toBe('failed')
+  expect(equipmentFlow([blockedRow], { runs: failed, pending: { binding: equipmentBinding, authorityKey: 'epoch-1', tool: PROJECT_EQUIPMENT_TOOL } }).items[0].status).toBe('pending')
+})
+
+it('R11-31 a catalog past the row bound is refused whole instead of cut before grouping', () => {
+  const accepted = Array.from({ length: MAX_CATALOG_ROWS }, () => equipmentRow())
+  expect(equipmentFlow(accepted).items[0]).toMatchObject({ ready: true, status: 'ready' })
+  const contradicting = equipmentRow({ runnable: false, refusal_reasons: ['CHECKOUT_REQUIRED'],
+    admission: { status_code: 409, error: { reason_code: 'CHECKOUT_REQUIRED' } } })
+  expect(equipmentFlow([...accepted, contradicting])).toEqual({ items: [], resumeIndex: -1 })
+  expect(equipmentFlow([...accepted, equipmentRow()])).toEqual({ items: [], resumeIndex: -1 })
+  expect(exactProjectEquipmentPreview({ ok: true, data: { families: [{ capabilities: [...accepted, contradicting] }] } },
+    equipmentDigest).accepted).toBe(false)
+  // Inside the bound the same contradiction is grouped with the accepted rows and blocks the step.
+  const within = equipmentFlow([...accepted.slice(1), contradicting])
+  expect(within.items).toHaveLength(1)
+  expect(within.items[0]).toMatchObject({ ready: false, status: 'blocked' })
+})
+
+it('R11-32 a run association is read once so its scope and stored binding cannot disagree', () => {
+  const other = { ...equipmentBinding, project_id: '66666666-6666-6666-6666-666666666666' }
+  let reads = 0
+  const run = { authorityKey: 'epoch-1', tool: PROJECT_EQUIPMENT_TOOL,
+    get binding() { reads += 1; return reads === 1 ? equipmentBinding : other } }
+  const memory = recordProjectSolarFlowRun(null, run, { terminal: true, ok: true })
+  expect(reads).toBe(1)
+  expect(memory.artifactKey).toBe(projectSolarFlowScope(equipmentBinding, 'epoch-1').artifactKey)
+  expect(memory.runs[PROJECT_EQUIPMENT_TOOL]).toEqual({ binding: equipmentBinding, authorityKey: 'epoch-1', ok: true, code: null })
+  expect(Object.isFrozen(memory.runs[PROJECT_EQUIPMENT_TOOL].binding)).toBe(true)
+  expect(projectSolarFlowRunsFor(memory, other, 'epoch-1')).toEqual({})
+  let authorityReads = 0
+  let toolReads = 0
+  const accessors = { binding: equipmentBinding,
+    get authorityKey() { authorityReads += 1; return authorityReads === 1 ? 'epoch-1' : 'epoch-2' },
+    get tool() { toolReads += 1; return toolReads === 1 ? PROJECT_EQUIPMENT_TOOL : 'solar-settings' } }
+  const second = recordProjectSolarFlowRun(null, accessors, { terminal: true, ok: false, reason_code: 'STALE_GRAPH_REVISION' })
+  expect([authorityReads, toolReads]).toEqual([1, 1])
+  expect(Object.keys(second.runs)).toEqual([PROJECT_EQUIPMENT_TOOL])
+  expect(second.runs[PROJECT_EQUIPMENT_TOOL]).toEqual({ binding: equipmentBinding, authorityKey: 'epoch-1',
+    ok: false, code: 'STALE_GRAPH_REVISION' })
+  expect(second.artifactKey).toBe(projectSolarFlowScope(equipmentBinding, 'epoch-1').artifactKey)
+  const throwing = { authorityKey: 'epoch-1', tool: PROJECT_EQUIPMENT_TOOL, get binding() { throw new Error('unreadable') } }
+  expect(recordProjectSolarFlowRun(memory, throwing, { terminal: true, ok: true })).toBe(memory)
+})
+
+it('R11-27 standalone transport and history keep the frozen literal bytes and SHA-256', () => {
+  const requestLiteral = '{"headers":{},"body":{"tool":"solar-assign-equipment","params":{"expected_rev":7,"equipment":[],"assignments":[]},"dwg":"d1","dwg_version":3}}'
+  const flowLiteral = '{"prefill":{"expected_rev":7},"memory":{"drawingId":"d1","runs":{"solar-assign-equipment":{"ok":false,"code":"STALE_GRAPH_REVISION"}}}}'
+  const request = JSON.stringify(createRunSubmissionRequest('solar-assign-equipment', { expected_rev: 7, equipment: [], assignments: [] }, 'd1', { dwgVersion: 3 }))
+  expect(request).toBe(requestLiteral)
+  expect(Buffer.from(request, 'utf8').byteLength).toBe(142)
+  expect(createHash('sha256').update(Buffer.from(request, 'utf8')).digest('hex')).toBe('84f756a57e9cc46650dbcc4a7fa8d489e983d939f46c67673a90a4e1a6e107f0')
+  for (const envelope of [{ ok: false, reason_code: 'STALE_GRAPH_REVISION' }, { ok: false, error: { error_code: 'STALE_GRAPH_REVISION' } },
+    { ok: false, error: { reason_code: 'STALE_GRAPH_REVISION' } }]) {
+    const flow = JSON.stringify({ prefill: solarFlowPrefill({ params: { properties: { expected_rev: { type: 'integer' } } } }, 7),
+      memory: solarFlowRecordRun({}, { drawingId: 'd1', tool: 'solar-assign-equipment' }, envelope) })
+    expect(flow).toBe(flowLiteral)
+    expect(Buffer.from(flow, 'utf8').byteLength).toBe(135)
+    expect(createHash('sha256').update(Buffer.from(flow, 'utf8')).digest('hex')).toBe('ba930dac1b9e31936aca8068f382c8ac0b8382fea5694d7c4d44f37f8569b555')
+  }
+})
 
 it('FL14 closed params admit only their own selection overlay keys without mutation', () => {
   const overlays = { target_handle: 'AB', handle: 'AB' }

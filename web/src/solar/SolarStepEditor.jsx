@@ -6,6 +6,7 @@ import SolarStringComposer from './SolarStringComposer.jsx'
 import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL } from './solarStringComposerModel.js'
 import { solarFormKeys, solarView } from './solarView.js'
 import { solarFlowPrefill, solarFlowStepId } from './solarFlowModel.js'
+import { ProjectSolarEquipmentForm } from './SolarToolForm.jsx'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 function ownsKey(record, key) {
@@ -17,9 +18,23 @@ function ownsKey(record, key) {
 // inputs this step last submitted, so a failed run keeps what the drafter typed.
 // Review & run arms the confirm path and leaves the editor open; a failed run
 // offers Retry with the same values. Cancel returns focus to the step's rail button.
-export default function SolarStepEditor({
+export default function SolarStepEditor(props) {
+  const project = Object.prototype.hasOwnProperty.call(props, 'solarBinding') || props.projectId != null
+  if (project && !['solar-string-conductors', 'solar-size-strings', STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(props.row?.name)) {
+    return <ProjectSolarEquipmentForm {...props} tool={props.row} surface="step" />
+  }
+  const projectProps = project ? {
+    solarBinding: props.solarBinding, authorityKey: props.authorityKey, projectClient: props.projectClient,
+    catalogDigest: props.catalogDigest, newProjectIntentKey: props.newProjectIntentKey, onProjectSubmit: props.onProjectSubmit,
+  } : {}
+  // The existing specialised hosts still use projectId to refuse their legacy loaders.
+  // Keep that guard active when the caller supplies only the canonical project props.
+  return <StandaloneSolarStepEditor {...props} projectId={project ? props.projectId ?? true : props.projectId} projectProps={projectProps} />
+}
+
+function StandaloneSolarStepEditor({
   row, drawingId = null, drawingVersion = null, projectId = null, readIntake, retained = null,
-  status = null, failureCode = null, onSubmit, onClose,
+  status = null, failureCode = null, onSubmit, onClose, projectProps,
 }) {
   const { view } = solarView(row)
   const properties = row?.params?.properties || {}
@@ -78,13 +93,13 @@ export default function SolarStepEditor({
       <h3>{text}</h3>
       {row.name === 'solar-string-conductors' ? (
         <SolarConductorForm row={row} drawingId={drawingId} drawingVersion={drawingVersion} projectId={projectId}
-          readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} />
+          readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} {...projectProps} />
       ) : row.name === 'solar-size-strings' ? (
         <SolarSizingForm row={row} drawingId={drawingId} drawingVersion={drawingVersion} projectId={projectId}
-          readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} />
+          readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} {...projectProps} />
       ) : [STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(row.name) ? (
         <SolarStringComposer row={row} drawingId={drawingId} drawingVersion={drawingVersion} projectId={projectId}
-          readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} onClose={close} />
+          readIntake={readIntake} status={status} failureCode={failureCode} onSubmit={onSubmit} onClose={close} {...projectProps} />
       ) : <>
       <SchemaForm schema={schema} values={values} onChange={change} onValidityChange={setFormValid} />
       {pending && <p role="status" className="solar-step-note">This step is running. Confirm or wait for it to finish.</p>}
