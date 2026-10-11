@@ -7,7 +7,7 @@ import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 import SolarReadResult from '../solar/SolarReadResult.jsx'
-import { isSolarReadResult } from '../solar/solarReadResultModel.js'
+import { isSolarProjectReadResult, isSolarReadResult } from '../solar/solarReadResultModel.js'
 
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
 // key/value), overlay summary, timing + cost receipt, and a normalized error
@@ -108,9 +108,20 @@ function FileLinks({ files }) {
   )
 }
 
-function ResultBody({ result }) {
+function ResultBody({ result, solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save }) {
   const data = result?.result
   if (!data) return result?.overlay ? null : <p className="result-empty">Completed with no output.</p>
+  if (isSolarProjectReadResult(data)) {
+    return <SolarReadResult
+      data={data}
+      solarBinding={solarBinding}
+      authorityKey={authorityKey}
+      projectClient={projectClient}
+      catalogDigest={catalogDigest}
+      projectCurrent={projectCurrent}
+      save={save}
+    />
+  }
   if (isSolarReadResult(data)) return <SolarReadResult data={data} />
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
   if (data.table && typeof data.table === 'object') {
@@ -239,7 +250,8 @@ function ResultObjectLinks({ result, navigation, announce }) {
 // `notices` is the NR banner slot: ongoing-condition banners dock UNDER the
 // header of the pane they affect, so App passes them in and they render
 // immediately after the <h3> — never above the pane.
-export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation }) {
+export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation,
+  solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save }) {
   const [announcement, setAnnouncement] = useState('')
   const announcementFrame = useRef(null)
   useEffect(() => () => cancelAnimationFrame(announcementFrame.current), [])
@@ -311,7 +323,8 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
             )}
           </div>
 
-          {result.ok && <ResultBody result={result} />}
+          {result.ok && <ResultBody result={result} solarBinding={solarBinding} authorityKey={authorityKey}
+            projectClient={projectClient} catalogDigest={catalogDigest} projectCurrent={projectCurrent} save={save} />}
           {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}
           {!result.ok && !result.error && <p className="result-empty">The run failed without reporting a reason.</p>}
           {!result.overlay && <ResultObjectLinks result={result} navigation={navigation} announce={announce} />}
