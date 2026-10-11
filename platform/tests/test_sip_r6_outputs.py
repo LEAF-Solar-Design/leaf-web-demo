@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -208,7 +208,9 @@ def test_sip_r6_pg_membership_and_scope(world, http, monkeypatch):
     _refusal(_read(http, s, version), 404, "SIP_R1_CONTEXT_NOT_FOUND")
     _refusal(http.client.get(path), 404, "SIP_R1_CONTEXT_NOT_FOUND")
     assert (_census(s), _census(foreign), s.blobs.reads, foreign.blobs.reads) == before
-    outsider = pg.store.create_identity_binding(s.org, "auth0", "r6-nonmember", role="editor")
+    # A fresh subject each run: the gate runs this file twice on one database
+    # (its own suite, then the platform suite), and a subject stays bound to its org.
+    outsider = pg.store.create_identity_binding(s.org, "auth0", f"r6-nonmember-{uuid4()}", role="editor")
     s.actor = outsider.binding_id
     _bind(http, s)
     _refusal(_read(http, s, version), 403, "SIP_R1_PROJECT_FORBIDDEN")
