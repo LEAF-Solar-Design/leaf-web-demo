@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { exactProjectSizingConductorPreview } from './solarSizingModel.js'
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -107,6 +108,47 @@ it('R11-13 legacy readiness flags cannot arm a project step', () => {
   expect(equipmentFlow([equipmentRow({ admission_checked: false, runnable: false,
     admission: { status_code: 409, error: { reason_code: 'GRAPH_NOT_EMBEDDED' } } })],
     { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0].invalidated).toBe(false)
+})
+
+
+it('R9-40 ordinary canonical rail rows retain equipment review and exact admission boundaries', () => {
+  const review = equipmentRow({ runnable: false, input_ready: false, admission_checked: false,
+    admission: null, refusal_reasons: ['project_request_required'] })
+  expect(equipmentFlow([review]).items[0]).toMatchObject({ enabled: true, ready: false, status: 'review' })
+  for (const name of ['solar-size-strings', 'solar-string-conductors']) {
+    const candidate = { ...review, name }
+    expect(exactProjectSizingConductorPreview({ ok: true, status: 200,
+      data: { families: [{ capabilities: [candidate] }] } }, name, equipmentDigest).accepted).toBe(false)
+  }
+})
+
+it('R9-41 sizing and conductor rows open review while readiness still requires exact admission', () => {
+  for (const name of ['solar-size-strings', 'solar-string-conductors']) {
+    const review = { ...equipmentRow({ runnable: false, input_ready: false, admission_checked: false,
+      admission: null, refusal_reasons: ['project_request_required'] }), name }
+    const state = equipmentFlow([review], { previousReady: { [name]: true } })
+    expect(state.items[0]).toMatchObject({ enabled: true, ready: false, status: 'review', invalidated: false })
+    expect(state.resumeIndex).toBe(0)
+    expect(projectSolarFlowReason('review_required')).toBe('Review the inputs to check whether this step can run.')
+    expect(equipmentFlow([{ ...equipmentRow(), name }]).items[0]).toMatchObject({ enabled: true, ready: true, status: 'ready' })
+  }
+})
+
+it('R9-43 invalid provenance extra refusals mixed digests and unavailable engines block rail review', () => {
+  for (const name of ['solar-size-strings', 'solar-string-conductors']) {
+    const review = { ...equipmentRow({ runnable: false, input_ready: false, admission_checked: false,
+      admission: null, refusal_reasons: ['project_request_required'] }), name }
+    for (const variants of [
+      [{ ...review, catalog_digest: 'bad' }],
+      [{ ...review, availability: { ...review.availability, refusal_reasons: ['project_request_required', 'CHECKOUT_REQUIRED'] } }],
+      [review, { ...review, catalog_digest: 'sha256:' + 'e'.repeat(64) }],
+      [{ ...review, availability: { ...review.availability, engine_ready: false } }],
+      [{ ...review, availability: { ...review.availability, admission_checked: true } }],
+    ]) {
+      expect(equipmentFlow(variants).items[0]).toMatchObject({ enabled: false, ready: false, status: 'blocked' })
+    }
+    expect(equipmentFlow([review], { current: false }).items).toEqual([])
+  }
 })
 
 it('R11-14 an ordinary equipment catalog row opens review without granting admission or invalidation', () => {

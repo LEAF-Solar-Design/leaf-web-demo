@@ -28,7 +28,7 @@ export const PROJECT_SOLAR_FLOW_REASONS = Object.freeze({
   tool_unsupported: 'This tool has no project form in this view.',
   run_in_progress: 'A run is in progress. Wait for it to finish.',
   catalog_pending: 'Checking Solar steps for the selected project drawing version.',
-  review_required: 'Review the equipment inputs to check whether this step can run.',
+  review_required: 'Review the inputs to check whether this step can run.',
 })
 
 // Static members keep the sentence map readable by the honesty scanner.
@@ -204,7 +204,7 @@ export function deriveProjectSolarFlowState({ steps, current, previousReady, pen
       const row = matching[0]
       const ready = matching.every((entry) => entry.catalog_digest === row.catalog_digest && projectStepReady(entry))
       const view = row.availability
-      const reviewable = row.name === PROJECT_EQUIPMENT_TOOL && matching.every((entry) => {
+    const reviewable = [PROJECT_EQUIPMENT_TOOL, 'solar-size-strings', 'solar-string-conductors'].includes(row.name) && matching.every((entry) => {
         const availability = entry.availability
         return typeof entry.catalog_digest === 'string' && PROJECT_FLOW_DIGEST.test(entry.catalog_digest)
           && entry.catalog_digest === row.catalog_digest && availability?.implemented === true && availability.engine_ready === true

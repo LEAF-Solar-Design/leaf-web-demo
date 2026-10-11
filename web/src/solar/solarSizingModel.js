@@ -1,5 +1,6 @@
 import { pyStrip } from './solarSettingsModel.js'
 import { decodeGroundFrameSlots } from './solarGroundSlots.js'
+import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 
 export const SOLAR_SIZING_REASONS = Object.freeze({
   sizing_graph_unavailable: 'String sizing is unavailable for this drawing.',
@@ -64,6 +65,11 @@ export function sizingGraph(view, drawingVersion) {
   const unavailable = { ok: false, reason: 'sizing_graph_unavailable' }
   if (!plain(view) || view.version !== drawingVersion) return unavailable
   const graph = view.intake?.solar_design_graph
+  return sizingGraphFields(graph)
+}
+
+function sizingGraphFields(graph) {
+  const unavailable = { ok: false, reason: 'sizing_graph_unavailable' }
   if (!plain(graph) || !Number.isInteger(graph.rev) || graph.rev < 0 || graph.rev > 1000000 ||
       typeof graph.settings?.id !== 'string' || Array.from(graph.settings.id).length < 1 ||
       Array.from(graph.settings.id).length > 100 || typeof graph.project?.zip_code !== 'string' ||
@@ -170,4 +176,164 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
     ...(draft.use_module_parameters ? { module_parameters: { ...moduleParameters } } : {}),
   }]))
   return { ok: true, params: { expected_rev: graph.rev, mode, requests, grant_ref: draft.grant_ref, confirm: true } }
+}
+
+export const PROJECT_SIZING_CONDUCTOR_REASONS = Object.freeze({
+  binding_invalid: 'Open a project drawing version before changing Solar sizing or conductors.',
+  context_unreadable: 'This project drawing version could not be read. Reload it and try again.',
+  not_current_head: 'Select the current project drawing version before making this change.',
+  version_digest_unavailable: 'This project drawing version has no usable intake digest. Reload it and try again.',
+  graph_unreadable: 'The Solar design in this project drawing could not be read.',
+  graphless: 'Start a Solar design in Solar settings before sizing strings or choosing conductors.',
+  scope_stale: 'The drawing or session changed. Review the current inputs before submitting.',
+  catalog_digest_required: 'Refresh the Solar tools before preparing this change.',
+  idempotency_key_required: 'This request could not be prepared. Try again.',
+  preview_required: 'Checking whether this change can be applied to this project drawing.',
+  preview_refused: 'This change cannot be applied. Review the refusal and try again.',
+  submit_unavailable: 'Project Solar submission is not available in this view.',
+  request_invalid: 'This request could not be prepared. Review the inputs and try again.',
+  manual_only: 'Project string sizing supports the saved global length only.',
+  project_adapter_unavailable: 'Conductor changes are not available for project drawings on this server.',
+  checkout_required: 'The project checkout must be available before this new change can run.',
+  access_denied: 'Your current session cannot make this project drawing change.',
+  service_unavailable: 'Project Solar is unavailable. Try again when the service is available.',
+  request_timeout: 'The request timed out. Its submission status is uncertain; retry the same request.',
+  request_cancelled: 'The request stopped locally. Check its status before retrying.',
+})
+
+export function projectSizingConductorReason(reason) {
+  switch (reason) {
+    case 'binding_invalid': return PROJECT_SIZING_CONDUCTOR_REASONS.binding_invalid
+    case 'context_unreadable': return PROJECT_SIZING_CONDUCTOR_REASONS.context_unreadable
+    case 'not_current_head': return PROJECT_SIZING_CONDUCTOR_REASONS.not_current_head
+    case 'version_digest_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.version_digest_unavailable
+    case 'graph_unreadable': return PROJECT_SIZING_CONDUCTOR_REASONS.graph_unreadable
+    case 'graphless': return PROJECT_SIZING_CONDUCTOR_REASONS.graphless
+    case 'scope_stale': return PROJECT_SIZING_CONDUCTOR_REASONS.scope_stale
+    case 'catalog_digest_required': return PROJECT_SIZING_CONDUCTOR_REASONS.catalog_digest_required
+    case 'idempotency_key_required': return PROJECT_SIZING_CONDUCTOR_REASONS.idempotency_key_required
+    case 'preview_required': return PROJECT_SIZING_CONDUCTOR_REASONS.preview_required
+    case 'preview_refused': return PROJECT_SIZING_CONDUCTOR_REASONS.preview_refused
+    case 'submit_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.submit_unavailable
+    case 'request_invalid': return PROJECT_SIZING_CONDUCTOR_REASONS.request_invalid
+    case 'manual_only': return PROJECT_SIZING_CONDUCTOR_REASONS.manual_only
+    case 'project_adapter_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.project_adapter_unavailable
+    case 'checkout_required': return PROJECT_SIZING_CONDUCTOR_REASONS.checkout_required
+    case 'access_denied': return PROJECT_SIZING_CONDUCTOR_REASONS.access_denied
+    case 'service_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.service_unavailable
+    case 'request_timeout': return PROJECT_SIZING_CONDUCTOR_REASONS.request_timeout
+    case 'request_cancelled': return PROJECT_SIZING_CONDUCTOR_REASONS.request_cancelled
+    default: return null
+  }
+}
+
+const PROJECT_HEX = new RegExp('^[0-9a-f]{64}(?![\\s\\S])')
+const PROJECT_DIGEST = new RegExp('^sha256:[0-9a-f]{64}(?![\\s\\S])')
+
+export function createProjectSizingConductorBinding(value) {
+  const exact = createSolarDrawingBinding(value)
+  // R7 checks descriptors and UUID syntax; exact length also rejects a final newline accepted by a $ anchor.
+  if (!['organization_id', 'project_id', 'drawing_id', 'input_version_id'].every((key) => exact[key].length === 36)) {
+    throw new TypeError('Invalid Solar binding')
+  }
+  return exact
+}
+
+// Canonical context validation is shared by the two forms, without a legacy version envelope.
+export function projectSizingConductorContext({ binding, contextView }) {
+  const refuse = (reason) => ({ mode: 'refused', reason })
+  let exact
+  try { exact = createProjectSizingConductorBinding(binding) } catch { return refuse('binding_invalid') }
+  const context = contextView?.context
+  if (!plain(contextView) || !plain(context) || !plain(contextView.intake)) return refuse('context_unreadable')
+  let returned, head
+  try {
+    returned = createProjectSizingConductorBinding({ kind: 'project', organization_id: context.organization_id,
+      project_id: context.project_id, drawing_id: context.drawing_id, input_version_id: context.input_version_id })
+    head = createProjectSizingConductorBinding({ ...exact, input_version_id: context.head_version_id })
+  } catch { return refuse('context_unreadable') }
+  if (!sameSolarDrawingBinding(exact, returned) || typeof context.is_head !== 'boolean'
+      || context.is_head !== sameSolarDrawingBinding(exact, head)) return refuse('context_unreadable')
+  if (!context.is_head) return refuse('not_current_head')
+  if (typeof context.intake_sha256 !== 'string' || !PROJECT_HEX.test(context.intake_sha256)) {
+    return refuse('version_digest_unavailable')
+  }
+  const intake = contextView.intake
+  const hasGraph = Object.hasOwn(intake, 'solar_design_graph')
+  const hasDigest = Object.hasOwn(intake, 'solar_design_graph_sha256')
+  if (!hasGraph && !hasDigest) return refuse('graphless')
+  if (!hasGraph || !hasDigest || !plain(intake.solar_design_graph)
+      || typeof intake.solar_design_graph_sha256 !== 'string' || !PROJECT_HEX.test(intake.solar_design_graph_sha256)) {
+    return refuse('graph_unreadable')
+  }
+  return { mode: 'edit', binding: exact, intakeSha256: context.intake_sha256,
+    graphSha256: intake.solar_design_graph_sha256, sourceGraph: intake.solar_design_graph }
+}
+
+// Copy first: freezing a successful state must never freeze the caller's graph.
+export function freezeProjectSizingConductorState(value, seen = new Set()) {
+  if (value === null || typeof value !== 'object') return value
+  if (seen.has(value)) throw new TypeError('Invalid Solar graph')
+  seen.add(value)
+  const copy = Array.isArray(value) ? value.map((item) => freezeProjectSizingConductorState(item, seen))
+    : Object.fromEntries(Object.entries(value).map(([key, item]) => [key, freezeProjectSizingConductorState(item, seen)]))
+  seen.delete(value)
+  return Object.freeze(copy)
+}
+
+export function deriveProjectSizingState(args) {
+  const context = projectSizingConductorContext(args)
+  if (context.mode === 'refused') return context
+  const graph = sizingGraphFields(context.sourceGraph)
+  if (!graph.ok) return { mode: 'refused', reason: 'graph_unreadable' }
+  try {
+    return freezeProjectSizingConductorState({ mode: 'edit', binding: context.binding,
+      intakeSha256: context.intakeSha256, graphSha256: context.graphSha256, rev: graph.rev,
+      graph, savedZip: context.sourceGraph.project.zip_code })
+  } catch { return { mode: 'refused', reason: 'graph_unreadable' } }
+}
+
+export function projectSizingConductorRequestScope({ binding, state, catalogDigest, idempotencyKey }) {
+  let exact
+  try { exact = createProjectSizingConductorBinding(binding) } catch { return { ok: false, reason: 'binding_invalid' } }
+  if (state?.mode === 'refused') return { ok: false, reason: state.reason }
+  if (state?.mode !== 'edit') return { ok: false, reason: 'request_invalid' }
+  if (!sameSolarDrawingBinding(exact, state.binding)
+      || solarDrawingBindingKey(exact) !== solarDrawingBindingKey(state.binding)) return { ok: false, reason: 'scope_stale' }
+  if (typeof catalogDigest !== 'string' || !PROJECT_DIGEST.test(catalogDigest)) return { ok: false, reason: 'catalog_digest_required' }
+  if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim()
+      || new TextEncoder().encode(idempotencyKey).byteLength > 256) return { ok: false, reason: 'idempotency_key_required' }
+  return { ok: true, binding: exact }
+}
+
+export function buildProjectSizingRequest({ binding, state, mode = 'manual-global', catalogDigest, idempotencyKey }) {
+  if (mode !== 'manual-global') {
+    try { createProjectSizingConductorBinding(binding) } catch { return { ok: false, reason: 'binding_invalid' } }
+    if (state?.mode === 'refused') return { ok: false, reason: state.reason }
+    if (state?.mode !== 'edit') return { ok: false, reason: 'request_invalid' }
+    if (!sameSolarDrawingBinding(binding, state.binding)) return { ok: false, reason: 'scope_stale' }
+    return { ok: false, reason: 'manual_only' }
+  }
+  const scope = projectSizingConductorRequestScope({ binding, state, catalogDigest, idempotencyKey })
+  if (!scope.ok) return scope
+  const built = buildSizingParams({ graph: state.graph, mode })
+  if (!built.ok) return built
+  return { ok: true, request: { tool: 'solar-size-strings',
+    params: { drawing_id: scope.binding.drawing_id, ...built.params }, catalogDigest, idempotencyKey } }
+}
+
+export function exactProjectSizingConductorPreview(outcome, tool, catalogDigest) {
+  const rows = Array.isArray(outcome?.data?.families) ? outcome.data.families.flatMap((family) =>
+    Array.isArray(family?.capabilities) ? family.capabilities.filter((row) => row?.name === tool) : []) : []
+  const accepted = outcome?.ok === true && typeof catalogDigest === 'string' && PROJECT_DIGEST.test(catalogDigest)
+    && rows.length > 0 && rows.every((row) => {
+    const availability = row.availability
+    return row.catalog_digest === catalogDigest && availability?.admission_checked === true
+      && availability.admission?.status_code === 200 && availability.admission.error === null
+      && availability.entitled === true && availability.engine_ready === true && availability.implemented === true
+      && availability.input_ready === true && availability.runnable === true
+      && Array.isArray(availability.refusal_reasons) && availability.refusal_reasons.length === 0
+  })
+  return { accepted, admission: rows.find((row) => row.availability?.admission?.error)?.availability.admission
+    ?? rows[0]?.availability?.admission ?? null }
 }

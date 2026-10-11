@@ -615,7 +615,7 @@ it('R11-28 project presets and other generic tools refuse without legacy reads o
       cleanup()
     }
   }
-  for (const name of ['solar-size-strings', 'solar-string-conductors', 'solar-string-add', 'solar-string-multi-add']) {
+    for (const name of ['solar-string-add', 'solar-string-multi-add']) {
     const h = equipmentHarness()
     const specialised = { ...projectEquipmentTool, name }
     render(<SolarStepEditor {...h.props} row={specialised} drawingId="d1" drawingVersion={3} />)
