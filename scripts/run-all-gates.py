@@ -1935,7 +1935,7 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r6-artifacts", "server project Solar artifacts",
               "pytest", SERVER, _py_pytest("tests/test_sip_r6_artifacts.py"), 6),
         Suite("server-sip-r6-routes", "server project Solar output routes",
-              "pytest", SERVER, _py_pytest("tests/test_sip_r6_routes.py"), 11),
+              "pytest", SERVER, _py_pytest("tests/test_sip_r6_routes.py"), 15),
         Suite("platform-sip-r6-outputs", "platform project Solar output authority",
               "pytest", REPO / "platform", _py_pytest("tests/test_sip_r6_outputs.py"), 4,
               uses_database=True, db_gated=True,
