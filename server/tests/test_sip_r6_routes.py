@@ -492,3 +492,56 @@ def test_sip_r6_route_refuses_before_service(http, monkeypatch):
     assert args[1:] == (UUID(str(http.s.project)), UUID(str(http.s.drawing)), UUID(str(http.s.head)),
                         reads.CALC, reads.NEC[reads.CALC])
     assert kwargs == {"catalog_digest": body()["catalog_digest"], "current": False}
+
+
+# R6 follow-up rows (#345): the three coverage gaps R6's last read named, plus the full-header
+# comparison of R1's neighbouring responses. Each fails under the mutation named in its comment.
+
+
+def test_sip_r6f_all_headers(http, monkeypatch):
+    # Every response header, duplicates included, not only the stable subset `specimen` keeps:
+    # a route that adds any header to R1's neighbouring responses fails here.
+    monkeypatch.setitem(globals(), "specimen", lambda r:
+        (r.status_code, r.content, sorted(r.headers.multi_items())))
+    for state in _r1_specimens(http, monkeypatch):
+        for (status, content, headers), (want, digest, pinned) in zip(state, _R1_ON_MAIN):
+            assert (status, sha256(content).hexdigest(), headers) == (
+                want, digest, sorted({**pinned, "content-length": str(len(content))}.items()))
+
+
+def test_sip_r6f_integer_bound():
+    # An integer past 64 bits is refused by the read's own JSON bound, before any graph is read.
+    with pytest.raises(GraphValidationError) as exc:
+        read._parameters(UUID(int=1), UUID(int=2), UUID(int=3),
+                         reads.CALC, {"value": 18446744073709551616}, "d" * 64, False)
+    assert exc.value.code == "SIP_R6_INVALID_REQUEST"
+
+
+def test_sip_r6f_drawing_type(monkeypatch):
+    # The drawing id must be an exact str. The JSON bound would refuse a subclass first, so it is
+    # switched off here to isolate the type clause.
+    class Text(str):
+        pass
+    monkeypatch.setattr(read, "_bounded_json", lambda value: None)
+    with pytest.raises(GraphValidationError) as exc:
+        read._parameters(UUID(int=1), UUID(int=2), UUID(int=3),
+                         reads.CALC, {"drawing_id": Text(str(UUID(int=2)))}, "d" * 64, False)
+    assert exc.value.code == "SIP_R6_INVALID_REQUEST"
+
+
+def test_sip_r6f_float_before_service(http, monkeypatch):
+    # A non-finite float in the request body is refused before the read service is called; an
+    # ordinary request through the same spy then reaches it once.
+    monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
+    calls = []
+    real = read.run_project_read
+    def spy(*args, **kwargs):
+        calls.append(True)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(read, "run_project_read", spy)
+    response = http.client.post(read_path(http), content=
+        b'{"tool":"solar-nec-ampacity-correction","catalog_digest":"d","params":{"value":1e999}}')
+    refusal(response, "SIP_R6_INVALID_REQUEST", 400)
+    assert calls == []
+    assert post(http).status_code == 200
+    assert calls == [True]

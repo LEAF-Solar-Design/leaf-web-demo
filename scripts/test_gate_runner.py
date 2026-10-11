@@ -98,7 +98,7 @@ def test_sip_r6_gate_registration():
     for suite_id, directory, target, floor, database in (
             ("server-sip-r6-read", "server", "tests/test_sip_r6_read.py", 6, False),
             ("server-sip-r6-artifacts", "server", "tests/test_sip_r6_artifacts.py", 6, False),
-            ("server-sip-r6-routes", "server", "tests/test_sip_r6_routes.py", 11, False),
+            ("server-sip-r6-routes", "server", "tests/test_sip_r6_routes.py", 15, False),
             ("platform-sip-r6-outputs", "platform", "tests/test_sip_r6_outputs.py", 4, True)):
         suite = suites[suite_id]
         assert suite.id == suite_id
