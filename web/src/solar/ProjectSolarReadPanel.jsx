@@ -40,6 +40,8 @@ const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-ca
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const REASON_CODE = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}$')
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
+// SchemaForm renders a property's title and description as text, so either one must be a string when present.
+const textField = (value) => value === undefined || typeof value === 'string'
 const current = (predicate) => {
   try { return typeof predicate === 'function' && predicate() === true } catch { return false }
 }
@@ -66,7 +68,8 @@ function declaredSchema(row) {
   const normalized = row.params
   const schema = copyJson(wire === undefined ? normalized : wire)
   if (!plain(schema) || schema.type !== 'object' || !plain(schema.properties) ||
-      Object.values(schema.properties).some((property) => !plain(property)) ||
+      Object.values(schema.properties).some((property) => !plain(property) ||
+        !textField(property.title) || !textField(property.description)) ||
       (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.some((key) => typeof key !== 'string')))) {
     throw new TypeError('Invalid read schema')
   }

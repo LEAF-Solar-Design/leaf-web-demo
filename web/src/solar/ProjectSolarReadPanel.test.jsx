@@ -321,6 +321,44 @@ describe('project Solar read ownership', () => {
     }
   })
 
+  it('R13E-45 a catalog property whose title or description is not text refuses before the form renders', async () => {
+    for (const [key, value] of [['title', 42], ['title', { private: 'text' }], ['title', ['A']], ['title', true],
+      ['description', { private: 'text' }], ['description', [{ a: 1 }]], ['description', 7], ['description', false]]) {
+      const schema = { type: 'object', properties: { project_location: { type: 'string', default: '', [key]: value } } }
+      const h = harness({ name: 'solar-cable-export', schema })
+      render(<ProjectSolarReadPanel {...h.props} />)
+      expect(screen.getByRole('status')).toHaveTextContent(PROJECT_SOLAR_WORKSPACE_REASONS.catalog_unavailable)
+      expect(button()).toBeDisabled()
+      clickRead()
+      await act(async () => { await flush() })
+      expect(h.projectClient.readSolar).not.toHaveBeenCalled()
+      assertNoOutput(h)
+      assertNoRuns(h.projectClient)
+      cleanup()
+    }
+    // A text title and description still render as the field's label and its description.
+    const schema = { type: 'object', properties: { project_location: { type: 'string', default: '',
+      title: 'Site name', description: 'Printed on the export.' } } }
+    const h = harness({ name: 'solar-cable-export', schema })
+    render(<ProjectSolarReadPanel {...h.props} />)
+    expect(screen.getByRole('textbox', { name: 'Site name' })).toBeInTheDocument()
+    expect(screen.getByText('Printed on the export.')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent(PROJECT_SOLAR_WORKSPACE_REASONS.idle)
+  })
+
+  it('R13E-47 a lowercase or mixed-case server refusal code is displayed exactly', async () => {
+    for (const code of ['a_0', 'Ab_9', 'z']) {
+      const h = harness({ read: async () => refusal(code) })
+      render(<ProjectSolarReadPanel {...h.props} />)
+      clickRead()
+      await waitFor(() => expect(screen.getByText(code)).toBeInTheDocument())
+      expect(screen.getByRole('status')).toHaveTextContent(PROJECT_SOLAR_WORKSPACE_REASONS.read_refused)
+      expect(screen.queryByText('HTTP_ERROR')).toBeNull()
+      assertNoOutput(h)
+      cleanup()
+    }
+  })
+
   it('R13E-24 a scope change mid-read never publishes the old scope view', async () => {
     for (const kind of ['binding', 'authority', 'receipt', 'parent', 'snapshot', 'captured']) {
       for (const outcome of [success(), refusal()]) {

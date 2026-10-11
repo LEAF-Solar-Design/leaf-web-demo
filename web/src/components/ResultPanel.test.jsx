@@ -195,6 +195,24 @@ describe('ResultPanel canonical project Solar dispatch', () => {
     }
   })
 
+  it('R13E-46 every canonical project read tool takes the canonical branch', () => {
+    for (const tool of ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']) {
+      const h = resultHarness()
+      const result = resultFor(tool)
+      expect(isSolarProjectReadResult(result)).toBe(true)
+      SolarReadResult.mockClear()
+      const view = render(<ResultPanel {...h.props} result={{ ok: true, result }} />)
+      expect(SolarReadResult.mock.calls.at(-1)[0].data).toBe(result)
+      expect(SolarReadResult.mock.calls.at(-1)[0].projectClient).toBe(h.projectClient)
+      expect(screen.getByTestId('solar-read-result')).toBeInTheDocument()
+      expect(view.container.querySelector('.result-card > table.kv')).toBeNull()
+      for (const metadata of ['private-graph-project', B.project_id, 'leaf.solar-project-read.v1']) {
+        expect(view.container.textContent).not.toContain(metadata)
+      }
+      cleanup()
+    }
+  })
+
   it('R13E-12 forwards every R12 project prop without changing identity', () => {
     const h = resultHarness()
     const data = { ...resultFor(), is_head: false, head_version_id: B.organization_id, current_required: false }
