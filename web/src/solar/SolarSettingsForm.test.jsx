@@ -48,7 +48,7 @@ function projectHarness(overrides = {}) {
     if (url.endsWith('/api/run')) return harness.submitResponses.shift() ?? projectResponse(harness.run, 202);
     throw new Error('Unexpected project request');
   });
-  const real = createSolarProjectClient({ fetchImpl, authHeaders: () => ({ Authorization: 'Bearer synthetic-test' }) });
+  const real = createSolarProjectClient({ fetchImpl, authHeaders: () => ({ Authorization: 'Bearer fake' }) });
   real.setScope(projectBinding, 'epoch-1');
   projectClients.push(real);
   harness.real = real;
@@ -222,7 +222,7 @@ describe('Canonical Solar settings form through the merged project client', () =
     for (const [code, status] of [['SIP_R1_CHECKOUT_REQUIRED', 409], ['SIP_R1_CHECKOUT_EXPIRED', 409],
       ['SIP_R1_CHECKOUT_DENIED', 403], ['SIP_R1_CHECKOUT_STALE', 409], ['SIP_R1_STALE_VERSION', 409]]) {
       const envelope = { error: { reason_code: code, error_code: status === 403 ? 'FORBIDDEN' : 'BAD_PARAMS',
-        message: 'Project Solar admission unavailable.' }, detail: { preserved: true }, authorization: 'hidden' };
+        message: 'Project Solar admission unavailable.' }, detail: { preserved: true }, authorization: 'hidden x' };
       const h = projectHarness({ previewResponses: [projectResponse(envelope, status)] });
       await editProject(h);
       await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toContain('(' + code + ')'));
