@@ -27,6 +27,8 @@ import { track, trackErrorShown } from './telemetry.js'
 // refuse identically — and throws SecretRefusedError instead of sending. See
 // lib/secretGuardTransport.js for why the guard is here and not in a composer.
 import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
+import { createSolarProjectClient } from './solar/solarProjectClient.js'
+import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 
 // A deployed static bundle talks to the app through the same public origin.
 // Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
@@ -360,7 +362,43 @@ const normalizeFamilies = (families) =>
     capabilities: (f.capabilities || []).map(normalizeCap),
   }))
 
-export async function getCapabilities(mock, context) {
+export function createProjectSolarClient(options = {}) {
+  return createSolarProjectClient({
+    apiBase: API_BASE,
+    fetchImpl: (...args) => globalThis.fetch(...args),
+    authHeaders,
+    onUnauthorized: (response, sentAuth) => noteUnauthorized(response, 'project-solar', sentAuth),
+    ...options,
+  })
+}
+
+export async function getCapabilities(mock, context, options = {}) {
+  if (context && Object.hasOwn(context, 'solarBinding') && context.solarBinding !== undefined) {
+    const client = options.projectClient
+    const snapshot = client?.getSnapshot?.()
+    const stale = { ok: false, status: null, reason: 'SIP_R7_SCOPE_STALE', envelope: null }
+    const unavailable = (outcome) => {
+      const error = new Error('Project tools are unavailable.')
+      error.status = outcome.status
+      error.body = outcome.envelope
+      error.reason = outcome.reason
+      return error
+    }
+    if (typeof client?.catalog !== 'function' || typeof context.authorityKey !== 'string' ||
+        !sameSolarDrawingBinding(context.solarBinding, snapshot?.binding) ||
+        context.authorityKey !== snapshot?.authorityKey) {
+      throw unavailable({ ok: false, status: null, reason: 'SIP_R7_BINDING_INVALID', envelope: null })
+    }
+    const stillCurrent = client.captureCatalogScope()
+    const outcome = await client.catalog({ intents: context.projectIntents || [], signal: options.signal })
+    if (!stillCurrent()) throw unavailable(stale)
+    if (!outcome.ok) throw unavailable(outcome)
+    const result = { ...outcome.data, families: (outcome.data.families || []).map((family) =>
+      ({ ...family, ...normalizeFamilies([family])[0] })), source: 'endpoint' }
+    // Normalization reads the caller's data, so the scope is checked again once it is done.
+    if (!stillCurrent()) throw unavailable(stale)
+    return result
+  }
   if (mock) {
     await nap(150)
     const tools = listMockCatalogTools()

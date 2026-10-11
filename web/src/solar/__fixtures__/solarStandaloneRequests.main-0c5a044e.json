@@ -1,0 +1,736 @@
+{
+  "schema": "leaf.r7-standalone-request-capture.v1",
+  "base": "0c5a044ef71afff41e42b7c517494ea66dcc338a",
+  "config": {
+    "apiBase": "",
+    "tenant": "demo-tenant"
+  },
+  "synthetic": {
+    "token": "r7-tok",
+    "capability": "lco1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "job": "3f1c2b4a-1d2e-4f5a-8b9c-0d1e2f3a4b5c",
+    "idempotencyKey": "r7-idem-key-0001"
+  },
+  "cases": [
+    {
+      "name": "getCapabilities.bare.noauth",
+      "input": {
+        "mock": false,
+        "context": null
+      },
+      "auth": false,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/capabilities",
+          "method_field": "<absent>",
+          "headers": [],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": true,
+          "init_keys": [
+            "headers",
+            "signal"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getCapabilities.bare",
+      "input": {
+        "mock": false,
+        "context": null
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/capabilities",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": true,
+          "init_keys": [
+            "headers",
+            "signal"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getCapabilities.emptyDrawing",
+      "input": {
+        "context": {
+          "drawing_id": ""
+        }
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/capabilities",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": true,
+          "init_keys": [
+            "headers",
+            "signal"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getCapabilities.drawingHead",
+      "input": {
+        "context": {
+          "drawing_id": "rooftop_demo"
+        }
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/capabilities?drawing_id=rooftop_demo&drawing_version=head",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": true,
+          "init_keys": [
+            "headers",
+            "signal"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getCapabilities.drawingVersion",
+      "input": {
+        "context": {
+          "drawing_id": "rooftop_demo",
+          "drawing_version": 7
+        }
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/capabilities?drawing_id=rooftop_demo&drawing_version=7",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": true,
+          "init_keys": [
+            "headers",
+            "signal"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getCapabilities.encodedDrawing",
+      "input": {
+        "context": {
+          "drawing_id": "a b/c?d&e"
+        }
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/capabilities?drawing_id=a%20b%2Fc%3Fd%26e&drawing_version=head",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": true,
+          "init_keys": [
+            "headers",
+            "signal"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getCapabilities.legacy404Fallback",
+      "input": {
+        "context": {
+          "drawing_id": "legacy-fallback"
+        }
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/capabilities?drawing_id=legacy-fallback&drawing_version=head",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": true,
+          "init_keys": [
+            "headers",
+            "signal"
+          ]
+        },
+        {
+          "url": "/api/tools",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": true,
+          "init_keys": [
+            "headers",
+            "signal"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getDrawingIntake.head",
+      "input": {
+        "drawingId": "rooftop_demo"
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/drawings/rooftop_demo/intake?version=head",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "headers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getDrawingIntake.version",
+      "input": {
+        "drawingId": "rooftop_demo",
+        "version": 7
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/drawings/rooftop_demo/intake?version=7",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "headers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getDrawingVersions.default",
+      "input": {
+        "drawingId": "rooftop_demo"
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/drawings/rooftop_demo/versions",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "headers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getDrawingVersions.deltas",
+      "input": {
+        "drawingId": "rooftop_demo",
+        "includeDeltas": true
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/drawings/rooftop_demo/versions?include_deltas=1",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "headers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "takeCheckout.omitted",
+      "input": {
+        "drawingId": "rooftop_demo"
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/drawings/rooftop_demo/checkout",
+          "method_field": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": true,
+          "body": "{}",
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "body",
+            "headers",
+            "method"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "takeCheckout.holderTtl",
+      "input": {
+        "drawingId": "rooftop_demo",
+        "holder": "holder-a",
+        "ttlS": 600
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/drawings/rooftop_demo/checkout",
+          "method_field": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": true,
+          "body": "{\"holder\":\"holder-a\",\"ttl_s\":600}",
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "body",
+            "headers",
+            "method"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "takeCheckout.renewCapability",
+      "input": {
+        "drawingId": "rooftop_demo",
+        "capability": "lco1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/drawings/rooftop_demo/checkout",
+          "method_field": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "X-Checkout-Capability",
+              "lco1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": true,
+          "body": "{}",
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "body",
+            "headers",
+            "method"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "releaseCheckout.noCapability",
+      "input": {
+        "drawingId": "rooftop_demo"
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/drawings/rooftop_demo/checkout",
+          "method_field": "DELETE",
+          "headers": [
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "headers",
+            "method"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "releaseCheckout.capability",
+      "input": {
+        "drawingId": "rooftop_demo",
+        "capability": "lco1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/drawings/rooftop_demo/checkout",
+          "method_field": "DELETE",
+          "headers": [
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "X-Checkout-Capability",
+              "lco1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "headers",
+            "method"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "createRunSubmissionRequest.read",
+      "input": {
+        "tool": "count-by-layer",
+        "params": {
+          "drawing_id": "rooftop_demo",
+          "zip": "80301"
+        },
+        "dwg": "rooftop_demo",
+        "opts": {
+          "catalogDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "auth": false,
+      "outcome": "pure",
+      "pure": {
+        "headers": [],
+        "body": "{\"tool\":\"count-by-layer\",\"params\":{\"drawing_id\":\"rooftop_demo\",\"zip\":\"80301\"},\"dwg\":\"rooftop_demo\",\"catalog_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}"
+      }
+    },
+    {
+      "name": "createRunSubmissionRequest.write",
+      "input": {
+        "tool": "solar-settings",
+        "params": {
+          "drawing_id": "rooftop_demo",
+          "zip": "80301"
+        },
+        "dwg": "rooftop_demo",
+        "opts": {
+          "catalogDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "dwgVersion": 7,
+          "checkoutCapability": "lco1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "idempotencyKey": "r7-idem-key-0001"
+        }
+      },
+      "auth": false,
+      "outcome": "pure",
+      "pure": {
+        "headers": [
+          [
+            "Idempotency-Key",
+            "r7-idem-key-0001"
+          ],
+          [
+            "X-Checkout-Capability",
+            "lco1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          ]
+        ],
+        "body": "{\"tool\":\"solar-settings\",\"params\":{\"drawing_id\":\"rooftop_demo\",\"zip\":\"80301\"},\"dwg\":\"rooftop_demo\",\"catalog_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"dwg_version\":7}"
+      }
+    },
+    {
+      "name": "runToolAsync.read",
+      "input": {
+        "tool": "count-by-layer",
+        "params": {
+          "drawing_id": "rooftop_demo",
+          "zip": "80301"
+        },
+        "dwg": "rooftop_demo",
+        "opts": {
+          "catalogDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/run",
+          "method_field": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": true,
+          "body": "{\"tool\":\"count-by-layer\",\"params\":{\"drawing_id\":\"rooftop_demo\",\"zip\":\"80301\"},\"dwg\":\"rooftop_demo\",\"catalog_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "body",
+            "headers",
+            "method"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "runToolAsync.write",
+      "input": {
+        "tool": "solar-settings",
+        "params": {
+          "drawing_id": "rooftop_demo",
+          "zip": "80301"
+        },
+        "dwg": "rooftop_demo",
+        "opts": {
+          "catalogDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "dwgVersion": 7,
+          "checkoutCapability": "lco1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "idempotencyKey": "r7-idem-key-0001"
+        }
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/run",
+          "method_field": "POST",
+          "headers": [
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Idempotency-Key",
+              "r7-idem-key-0001"
+            ],
+            [
+              "X-Checkout-Capability",
+              "lco1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": true,
+          "body": "{\"tool\":\"solar-settings\",\"params\":{\"drawing_id\":\"rooftop_demo\",\"zip\":\"80301\"},\"dwg\":\"rooftop_demo\",\"catalog_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"dwg_version\":7}",
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "body",
+            "headers",
+            "method"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "getJob.authenticated",
+      "input": {
+        "jobId": "3f1c2b4a-1d2e-4f5a-8b9c-0d1e2f3a4b5c"
+      },
+      "auth": true,
+      "outcome": "resolved",
+      "requests": [
+        {
+          "url": "/api/jobs/3f1c2b4a-1d2e-4f5a-8b9c-0d1e2f3a4b5c",
+          "method_field": "<absent>",
+          "headers": [
+            [
+              "X-Tenant-Id",
+              "demo-tenant"
+            ],
+            [
+              "Authorization",
+              "Bearer r7-tok"
+            ]
+          ],
+          "body_key_present": false,
+          "body": null,
+          "cache": "<absent>",
+          "has_signal": false,
+          "init_keys": [
+            "headers"
+          ]
+        }
+      ]
+    }
+  ]
+}
