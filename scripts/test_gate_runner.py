@@ -84,10 +84,32 @@ def test_sip_r1_gate_registration():
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
-    assert suites["platform"].expected == 312
-    assert suites["gate-runner-selftest"].expected == 99
+    assert suites["platform"].expected == 316  # 2026-10-10: sip-r6 adds four PostgreSQL rows.
+    assert suites["gate-runner-selftest"].expected == 100  # 2026-10-10: sip-r6 registration row.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
+    assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_sip_r6_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suite_id, directory, target, floor, database in (
+            ("server-sip-r6-read", "server", "tests/test_sip_r6_read.py", 6, False),
+            ("server-sip-r6-artifacts", "server", "tests/test_sip_r6_artifacts.py", 6, False),
+            ("server-sip-r6-routes", "server", "tests/test_sip_r6_routes.py", 11, False),
+            ("platform-sip-r6-outputs", "platform", "tests/test_sip_r6_outputs.py", 4, True)):
+        suite = suites[suite_id]
+        assert suite.id == suite_id
+        assert suite.kind == "pytest" and suite.cwd == REPO / directory
+        assert suite.argv == runner._py_pytest(target)
+        assert suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert suite.allowed_skip_reasons == ()
+        assert suite.database_skip_reasons == (
+            (r"PostgreSQL integration test requires DATABASE_URL",) if database else ())
+        assert selection["mandatory_suite_ids"].count(suite_id) == 1
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
 
 

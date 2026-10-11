@@ -17,7 +17,8 @@ from envelopes import ErrorCode, err_envelope, with_envelope_fields
 router = APIRouter()
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
-    r"^/api/projects/[^/]+/(?:drawing-versions/[^/]+/context|drawings/[^/]+/checkout)/?$")
+    r"^/api/projects/[^/]+/(?:drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
+    r"drawings/[^/]+/versions/[^/]+/solar-reads|drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "SIP_R1_INVALID_BINDING": (400, False), "SIP_R1_CONTEXT_NOT_FOUND": (404, False),
     "SIP_R1_PROJECT_FORBIDDEN": (403, False), "SIP_R1_CANONICAL_AUTHORITY_REQUIRED": (409, False),
@@ -157,3 +158,141 @@ def release_route(project_id: UUID, drawing_id: UUID, tenant=Depends(deps.requir
             checkout_capability_token=x_checkout_capability)
         return {**_identity(tenant, project_id, drawing_id), "released": released, "checkout": None}
     return _dispatch(operation)
+
+
+# These output endpoints share only the existing context and response helpers.
+import json
+from starlette.responses import Response
+import solar_project_admission as output_policy
+import solar_project_artifacts as output_artifacts
+import solar_project_read as output_reads
+from solar_design_graph import GraphValidationError
+
+_OUTPUT_FAILURES = {
+    "project_execution_disabled": (409, "Project Solar outputs are not enabled on this server."),
+    "SIP_R6_INVALID_REQUEST": (400, "Project Solar read request is invalid."),
+    "SIP_R6_REQUEST_TOO_LARGE": (413, "Project Solar read request is too large."),
+    "SIP_R6_TOOL_UNSUPPORTED": (409, "This Solar read has no connected project adapter."),
+    "SIP_R6_TOOL_MANIFEST_MISMATCH": (409, "The Solar tool changed. Refresh the tools and try again."),
+    "SIP_R6_STALE_CURRENT": (409, "The drawing changed. Select the current version and run the tool again."),
+    "ARTIFACT_STALE": (409, "The drawing changed after this file was made. Select the current version and run the tool again."),
+    "ARTIFACT_ID_INVALID": (400, "The project artifact reference is invalid."),
+    "ARTIFACT_NOT_FOUND": (404, "The project artifact was not found."),
+    "ARTIFACT_CORRUPT": (500, "The stored project artifact failed its integrity check."),
+    "SIP_R6_ARTIFACT_SOURCE_MISMATCH": (500, "The project artifact does not match its source version."),
+    "ARTIFACT_CONFLICT": (409, "The project artifact conflicts with an existing immutable file."),
+    "ARTIFACT_STORE_UNAVAILABLE": (503, "Project artifact storage is unavailable."),
+    "ARTIFACT_WRITES_DRAINED": (503, "Project artifact creation is temporarily unavailable."),
+    "READ_OUTPUT_LIMIT_EXCEEDED": (500, "The Solar read result exceeds the response limit."),
+    "READ_OUTPUT_INVALID": (500, "The Solar read produced an invalid result."),
+    "ARTIFACT_REFERENCE_RESERVED": (500, "The Solar read produced an invalid result."),
+    "SIP_R6_INTERNAL": (500, "Project Solar output is unavailable."),
+}
+_INVALID_ARTIFACT = frozenset(("ARTIFACT_TOO_LARGE", "ARTIFACT_FILENAME_INVALID",
+    "ARTIFACT_CONTENT_MISMATCH", "ARTIFACT_INVALID", "ARTIFACT_MEDIA_TYPE_REFUSED"))
+
+
+def _output_failure(reason):
+    if reason in _INVALID_ARTIFACT:
+        status, message = 500, "The Solar read produced an invalid artifact."
+    elif reason in _OUTPUT_FAILURES:
+        status, message = _OUTPUT_FAILURES[reason]
+    else:
+        status, message = 409, "The Solar read was refused for this version."
+    code = ErrorCode.INTERNAL if status >= 500 else ErrorCode.BAD_PARAMS
+    retry = reason in ("ARTIFACT_STORE_UNAVAILABLE", "ARTIFACT_WRITES_DRAINED")
+    body = err_envelope(code, message, retry)
+    body["error"]["reason_code"] = reason
+    return JSONResponse(content=body, status_code=status, headers=_NO_STORE)
+
+
+def _output_dispatch(operation):
+    try:
+        result = operation()
+        return result if isinstance(result, Response) else JSONResponse(content=result, headers=_NO_STORE)
+    except service.ProjectContextError as exc:
+        if exc.reason_code in _FAILURES:
+            def refusal():
+                raise exc
+            return _dispatch(refusal)
+        return _output_failure("SIP_R6_INTERNAL")
+    except GraphValidationError as exc:
+        return _output_failure(exc.code)
+    except Exception:
+        return _output_failure("SIP_R6_INTERNAL")
+
+
+def _output_scope(tenant, project_id, drawing_id, org_header, project_header, version_id=None):
+    try:
+        proj, drawing = UUID(project_id), UUID(drawing_id)
+        version = None if version_id is None else UUID(version_id)
+        org = None if org_header is None else UUID(org_header)
+        header_project = None if project_header is None else UUID(project_header)
+    except (ValueError, TypeError, AttributeError):
+        raise GraphValidationError("SIP_R6_INVALID_REQUEST") from None
+    _headers(tenant, proj, org, header_project)
+    return proj, drawing, version
+
+
+async def _solar_read_body(request: Request):
+    if not output_policy.project_runs_enabled():
+        return GraphValidationError("project_execution_disabled")
+    raw = bytearray()
+    try:
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > output_reads.MAX_REQUEST_BYTES:
+                return GraphValidationError("SIP_R6_REQUEST_TOO_LARGE")
+            raw.extend(chunk)
+        body = json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=service._object_pairs,
+                          parse_constant=service._nonfinite, parse_float=service._json_float)
+        if (type(body) is not dict or set(body) - {"tool", "params", "catalog_digest", "current"}
+                or type(body.get("tool")) is not str or not body["tool"]
+                or type(body.get("catalog_digest")) is not str or not body["catalog_digest"]
+                or type(body.get("params", {})) is not dict
+                or type(body.get("current", False)) is not bool):
+            raise ValueError()
+        return body
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return GraphValidationError("SIP_R6_INVALID_REQUEST")
+
+
+@router.post("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-reads")
+def solar_read_route(project_id: str, drawing_id: str, input_version_id: str,
+                     body=Depends(_solar_read_body), tenant=Depends(deps.require_active_tenant),
+                     x_org_id: Optional[str] = Header(default=None),
+                     x_project_id: Optional[str] = Header(default=None)):
+    def operation():
+        if not output_policy.project_runs_enabled():
+            raise GraphValidationError("project_execution_disabled")
+        if isinstance(body, GraphValidationError):
+            raise body
+        proj, drawing, version = _output_scope(tenant, project_id, drawing_id,
+            x_org_id, x_project_id, input_version_id)
+        return output_reads.run_project_read(tenant, proj, drawing, version, body["tool"],
+            body.get("params", {}), catalog_digest=body["catalog_digest"], current=body.get("current", False))
+    return _output_dispatch(operation)
+
+
+@router.get("/api/projects/{project_id}/drawings/{drawing_id}/solar-artifacts/{artifact_id}")
+def solar_artifact_route(project_id: str, drawing_id: str, artifact_id: str, current: str = "false",
+                         tenant=Depends(deps.require_active_tenant),
+                         x_org_id: Optional[str] = Header(default=None),
+                         x_project_id: Optional[str] = Header(default=None),
+                         if_none_match: Optional[str] = Header(default=None)):
+    def operation():
+        if not output_policy.project_runs_enabled():
+            raise GraphValidationError("project_execution_disabled")
+        proj, drawing, _version = _output_scope(tenant, project_id, drawing_id, x_org_id, x_project_id)
+        if current not in ("true", "false"):
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST")
+        meta, content = output_artifacts.read_project_artifact(
+            tenant, proj, drawing, artifact_id, current=current == "true")
+        etag = '"' + meta["content_sha256"] + '"'
+        headers = {**_NO_STORE, "ETag": etag, "X-Leaf-Artifact-Id": meta["artifact_id"],
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": 'attachment; filename="' + meta["filename"] + '"'}
+        if if_none_match is not None and any(value.strip() in (etag, "W/" + etag, "*")
+                                            for value in if_none_match.split(",")):
+            return Response(content=b"", status_code=304, headers=headers)
+        return Response(content=content, media_type=meta["media_type"], headers=headers)
+    return _output_dispatch(operation)
