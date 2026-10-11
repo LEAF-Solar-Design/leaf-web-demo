@@ -841,7 +841,7 @@ describe('canonical SolarStringComposer', () => {
         ? acceptedCatalog({ tool: STRING_ADD_TOOL, catalogDigest: canonicalDigest }).data : submittedOutcome().data
       return { ok: true, status: url === '/api/run' ? 202 : 200, json: async () => data }
     })
-    const client = createSolarProjectClient({ fetchImpl, authHeaders: () => ({ Authorization: 'test-auth' }) })
+    const client = createSolarProjectClient({ fetchImpl, authHeaders: () => ({ Authorization: 'tok' }) })
     client.setScope(canonicalBinding, 'session')
     const harness = projectHarness()
     const props = harness.props({ projectClient: client, onProjectSubmit: vi.fn((intent, options) => client.submitRun(intent, options)) })
