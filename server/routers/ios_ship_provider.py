@@ -12,6 +12,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
 from ios_ship_provider import ProviderConfig, ProviderConfigurationError
+from text_match import text_matches
 
 
 router = APIRouter()
@@ -62,7 +63,7 @@ def _authorized(authorization: Optional[str], provider_identity: Optional[str]) 
     supplied = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
     if not hmac.compare_digest(supplied.encode(), expected.encode()):
         return _failure(401, "provider_unauthorized", "provider authentication failed")
-    if not provider_identity or not hmac.compare_digest(provider_identity, _CONFIG.provider_id):
+    if not provider_identity or not text_matches(provider_identity, _CONFIG.provider_id):
         return _failure(401, "provider_unauthorized", "provider authentication failed")
     return None
 

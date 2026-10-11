@@ -18,6 +18,7 @@ import glug_adoption
 from glug_executor import GlugExecutor, GlugExecutorError
 from glug_jobs import GlugJobService, GlugJobStore
 from glug_live_adapters import SQLiteApprovalStore
+from text_match import text_matches
 
 
 router = APIRouter()
@@ -154,7 +155,7 @@ async def require_control_actor(
         f"{request.url.path}\n{body_digest}"
     ).encode("utf-8")
     expected = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, board_signature or ""):
+    if not text_matches(board_signature or "", expected):
         raise HTTPException(status_code=403, detail={"code": "control_authority_denied"})
     return board_actor or control_subject
 
