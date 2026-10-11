@@ -2275,7 +2275,8 @@ def build_suites() -> List[Suite]:
               # sip-r3b-2 adds six deterministic creation rows.
               # sip-r5b adds four Solar HTTP admission rows.
               # 2026-10-10: sip-r6 adds four canonical Solar output rows (312 -> 316).
-              _py_pytest(f"{repo_name}/platform/tests"), 316, db_gated=True,
+              # 2026-10-11: sip-r3c adds six multi-add PostgreSQL rows (316 -> 322).
+              _py_pytest(f"{repo_name}/platform/tests"), 322, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -2988,7 +2989,8 @@ def build_suites() -> List[Suite]:
               # sip-r3b-2 adds the deterministic creation registration row.
               # +1 (2026-10-10): canonical Solar admission policy registration.
               # 2026-10-10: sip-r6 adds one registration row (99 -> 100).
-              ["test_studio_walk_regression_gate.py"], 100),
+              # 2026-10-11: sip-r3c adds one registration row (100 -> 101).
+              ["test_studio_walk_regression_gate.py"], 101),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -3517,6 +3519,16 @@ def build_suites() -> List[Suite]:
         Suite("studio-walk-regressions", "studio walk strict regressions", "script",
               REPO, ["node", "web/e2e/regressions/runGate.mjs"], None,
               timeout_s=720),
+        # 2026-10-11: sip-r3c deterministic multi-add acceptance floor: 12 server rows.
+        Suite("server-sip-r3c-multi-add", "server canonical Solar deterministic multi-add",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r3c_multi_add.py"), 12),
+        # 2026-10-11: sip-r3c PostgreSQL acceptance floor: six rows, executed in CI.
+        Suite("platform-sip-r3c-multi-add", "platform canonical Solar deterministic multi-add",
+              "pytest", REPO / "platform", _py_pytest("tests/test_sip_r3c_multi_add.py"), 6,
+              uses_database=True, db_gated=True,
+              database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",
+              )),
     ]
     return suites
 

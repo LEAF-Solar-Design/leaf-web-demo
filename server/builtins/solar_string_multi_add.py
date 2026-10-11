@@ -19,7 +19,7 @@ import math
 from pathlib import Path
 
 import solar_string_combo as combo
-from solar_design_graph import GraphValidationError, _bounded_json, new_id
+from solar_design_graph import GraphValidationError, _bounded_json, entities, new_id
 from solar_sizing_client import checked_graph
 from solar_solve_results import finish_mutation, invalidate_dependents, sync_assignments
 
@@ -74,15 +74,20 @@ def _sizes(string_length, count):
     return sizes
 
 
-def _new_strings(graph, chunks, tables):
+def _new_strings(graph, chunks, tables, *, _creation=None):
     """Build and append circuits on the private copy, sharing maps and timestamp; `tables` are
     the slot tables of the graph it was copied from."""
     panels = single.find_panels(graph, [ref for refs in chunks for ref in refs], tables)
     tags = {string["circuit_tag"] for string in graph["strings"]}
     number = int(graph["settings"]["string_number"])
-    stamp = datetime.now(timezone.utc).isoformat()
+    if _creation is None:
+        stamp = datetime.now(timezone.utc).isoformat()
+    else:
+        stamp = _creation["created_at"]
+        occupied = {entity["id"] for entity in entities(graph)}
+        occupied.update(ref for table in tables.values() for ref in table.ids)
     strings = []
-    for refs in chunks:
+    for index, refs in enumerate(chunks):
         while f"S{number}" in tags:
             number += 1
         if number >= single.MAX_STRING_NUMBER:
@@ -93,8 +98,13 @@ def _new_strings(graph, chunks, tables):
         points = [copy.deepcopy(panels[ref]["centre"]) for ref in refs]
         length_m = sum(math.dist(a + [0] * (3 - len(a)), b + [0] * (3 - len(b)))
                        for a, b in zip(points, points[1:]))
+        if _creation is None:
+            string_id = new_id("string")
+        else:
+            string_id = _creation["new_id"]("string", index, occupied)
+            occupied.add(string_id)
         string = {
-            "id": new_id("string"), "kind": "string", "rev": graph["rev"],
+            "id": string_id, "kind": "string", "rev": graph["rev"],
             "validity": {"state": "valid", "reasons": []},
             "provenance": {"created_by": TOOL, "created_at": stamp,
                            "last_writer": TOOL, "source_rev": graph["rev"],
@@ -125,7 +135,7 @@ def _new_strings(graph, chunks, tables):
     return strings
 
 
-def add_strings(graph, params):
+def add_strings(graph, params, *, _creation=None):
     _bounded_json(params)
     if not _valid_request(params):
         raise GraphValidationError("INVALID_STRING_MULTI_ADD_REQUEST")
@@ -152,7 +162,10 @@ def add_strings(graph, params):
         chunks.append(refs[offset:offset + size])
         offset += size
     result = copy.deepcopy(before)
-    strings = _new_strings(result, chunks, tables)
+    if _creation is None:
+        strings = _new_strings(result, chunks, tables)
+    else:
+        strings = _new_strings(result, chunks, tables, _creation=_creation)
     new_ids = [string["id"] for string in strings]
     sync_assignments(result)
     invalidate_dependents(before, result, [*new_ids, *refs], solved_ids=set(new_ids))
@@ -165,10 +178,12 @@ def add_strings(graph, params):
 OPERATIONS = {"add-strings": add_strings}
 
 
-def run(intake, params):
+def run(intake, params, *, _creation=None):
     _bounded_json(params)
     if (type(params) is not dict or type(params.get("operation")) is not str
             or params["operation"] not in OPERATIONS):
         raise GraphValidationError("INVALID_STRING_MULTI_ADD_REQUEST")
     request = {key: value for key, value in params.items() if key != "operation"}
-    return OPERATIONS[params["operation"]](intake, request)["graph"]
+    if _creation is None:
+        return OPERATIONS[params["operation"]](intake, request)["graph"]
+    return OPERATIONS[params["operation"]](intake, request, _creation=_creation)["graph"]

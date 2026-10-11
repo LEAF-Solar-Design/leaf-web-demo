@@ -671,7 +671,9 @@
     "server-sip-r6-read",
     "server-sip-r6-artifacts",
     "server-sip-r6-routes",
-    "platform-sip-r6-outputs"
+    "platform-sip-r6-outputs",
+    "server-sip-r3c-multi-add",
+    "platform-sip-r3c-multi-add"
   ],
   "unresolved_mandatory": [],
   "mandatory_justification": "L4 web-demo mandatory table expanded against build_suites; every other declaration remains mandatory because no traced classification has been admitted. Workflow, web build and license checks also remain unconditional in ci.sh.",

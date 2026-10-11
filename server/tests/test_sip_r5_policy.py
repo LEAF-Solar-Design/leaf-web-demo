@@ -27,10 +27,10 @@ import test_sip_r4_jobs as r4
 import test_w1_design_graph as w1
 
 
-NINE = frozenset((
+TEN = frozenset((
     "solar-assign-equipment", "solar-combiners", "solar-feeders", "solar-homeruns",
     "solar-panels-from-drawing", "solar-schedule", "solar-settings",
-    "solar-size-strings", "solar-string-add",
+    "solar-size-strings", "solar-string-add", "solar-string-multi-add",
 ))
 
 
@@ -111,11 +111,11 @@ def test_sip_r5_flag_defaults_off(monkeypatch):
 
 def test_sip_r5_exact_supported_identity(monkeypatch):
     a = setup(monkeypatch)
-    assert graph.SUPPORTED_TOOLS == NINE and len(solar_tools.entries()) == 53
+    assert graph.SUPPORTED_TOOLS == TEN and len(solar_tools.entries()) == 53
     calls = []
     monkeypatch.setattr(service, "submit_project_graph_job", lambda *args, **kwargs:
         calls.append((args, kwargs)) or {"admissible": True, "replay": False})
-    for name in sorted(NINE):
+    for name in sorted(TEN):
         tool = solar_tools.trusted_record(name)
         assert entitlements.tool_required_capability(tool) == "run_write"
         before = deepcopy(tool)
@@ -127,16 +127,17 @@ def test_sip_r5_exact_supported_identity(monkeypatch):
         assert_refusal(request(a, {}, tool_name=name, tool=tool,
             catalog_digest=deps.catalog_tool_digest(tool)), "SIP_R3_TOOL_MANIFEST_MISMATCH",
             message="Project Solar admission unavailable.")
-    for name in ("solar-string-multi-add", "solar-pvcase-convert", "solar-commit-solve"):
+    for name in ("solar-assign-strings", "solar-pvcase-convert", "solar-commit-solve"):
         assert_refusal(request(a, {}, tool_name=name), "SIP_R3_TOOL_UNSUPPORTED",
             message="Project Solar admission unavailable.")
-    assert len(calls) == 9
-    r3a.refused("SIP_R3_TOOL_UNSUPPORTED", lambda: graph._tool("solar-string-multi-add", "x"))
+    assert len(calls) == 10
+    r3a.refused("SIP_R3_TOOL_UNSUPPORTED", lambda: graph._tool("solar-assign-strings", "x"))
+    r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-string-multi-add", "x"))
     r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-settings", "x"))
     result = request(a, {}, tenant=str(UUID(int=999)))
-    assert result["status_code"] == 409 and len(calls) == 9
+    assert result["status_code"] == 409 and len(calls) == 10
     monkeypatch.setattr(deps, "auth_live", lambda: True)
-    assert request(a, {})["status_code"] == 409 and len(calls) == 9
+    assert request(a, {})["status_code"] == 409 and len(calls) == 10
     tenant = deps.TenantContext(str(a.s.org), subject="verified-subject")
     assert request(a, {}, tenant=tenant)["status_code"] == 200
     assert calls[-1][0][0] is tenant
@@ -457,10 +458,24 @@ def test_sip_r5_catalog_states(monkeypatch):
         stored.policy_unavailable_response(None, "run").body)}
     untrusted = deepcopy(tool)
     untrusted["description"] = "Changed record"
+    ctx = r3b.chain(a.s)[-1][2]
+    r4.at(a, monkeypatch, ctx, "solar-string-multi-add")
+    multi_accepted = request(a, deepcopy(r4.M), tool_name="solar-string-multi-add",
+                             input_version_id=ctx.parent_version_id)
+    multi_invalid = request(a, {**r4.M, "expected_rev": 3}, tool_name="solar-string-multi-add",
+                            input_version_id=ctx.parent_version_id)
+    assert multi_accepted["status_code"] == 200
+    assert_refusal(multi_invalid, "STALE_GRAPH_REVISION")
     for record, enabled, result, engine, ready, entitled, checked, reason, ent_reason in (
             (tool, False, accepted, False, False, False, False, "project_execution_disabled", None),
-            (solar_tools.trusted_record("solar-string-multi-add"), True, None, False, False,
+            (solar_tools.trusted_record("solar-assign-strings"), True, None, False, False,
              False, False, "project_adapter_unavailable", None),
+            (solar_tools.trusted_record("solar-string-multi-add"), True, None, True, False,
+             False, False, "project_request_required", None),
+            (solar_tools.trusted_record("solar-string-multi-add"), True, multi_accepted, True, True,
+             True, True, None, None),
+            (solar_tools.trusted_record("solar-string-multi-add"), True, multi_invalid, True, False,
+             False, True, "capability_not_ready", None),
             (untrusted, True, None, False, False, False, False, "project_adapter_unavailable", None),
             (tool, True, None, True, False, False, False, "project_request_required", None),
             (tool, True, accepted, True, True, True, True, None, None),
