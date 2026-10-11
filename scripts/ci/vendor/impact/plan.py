@@ -57,6 +57,15 @@ def rows_for_scope(result, manifest, digest, added_reason=None):
         for concern, entries in groups.items():
             rows.append(record.new_row(concern, f"companion:{companion_subject(path)}", digest,
                                        reason="moves with " + ", ".join(entries)))
+    for path, refs in getattr(result, "external_companions", []):
+        subject = f"companion:{companion_subject(path)}"
+        existing = next((row for row in rows
+                         if row["concern"] == "contracts" and row["subject"] == subject), None)
+        detail = ", ".join(refs) + " (outside this repository; confirm by hand)"
+        if existing is not None:
+            existing["reason"] += "; also moves with " + detail
+        else:
+            rows.append(record.new_row("contracts", subject, digest, reason="moves with " + detail))
     for name in CONCERNS:
         if not any(row["concern"] == name for row in rows):
             rows.append(record.new_row(name, "-", digest, required=False,
@@ -89,6 +98,8 @@ def render(data, families, result=None):
         for path, missing in result.companions:
             if missing:
                 lines.append(f"companions: {path} moves with {', '.join(missing)} (not in the owned set)")
+        for path, refs in getattr(result, "external_companions", []):
+            lines.append(f"companions: {path} moves with {', '.join(refs)} (outside this repository; confirm by hand)")
     for item in data["carried"]:
         lines.append(f"carried forward (unresolved in earlier records): {item['row']} from {item['from_change_id']}")
     return "\n".join(lines)
@@ -97,11 +108,11 @@ def render(data, families, result=None):
 def carried_rows(repository, change_id):
     from heapq import nsmallest
     entries = (
-        {"row": row["id"], "from_change_id": previous["change_id"], "outcome": "unresolved"}
-        for _, previous in record.prior_records()
-        if previous["repository"] == repository and previous["change_id"] != change_id
-        for row in previous["rows"]
-        if row["required"] and row["outcome"] == "unresolved" and row["superseded_by"] is None
+        {"row": row_id, "from_change_id": entry["change_id"], "outcome": "unresolved"}
+        for _, entry in record.unresolved_index()
+        if entry["repository"] == repository and entry["change_id"] != change_id
+        for row_id, required, open in entry["unresolved"]
+        if required and open
     )
     return nsmallest(200, entries, key=lambda item: (item["from_change_id"], item["row"]))
 

@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -271,8 +272,12 @@ def test_ci_job_shape_and_shell_syntax():
     assert lines.count(marker) == 1
     assert lines.index('echo "=== job test-gate ==="') < lines.index(marker) < len(lines) - 1
     assert lines[-1] == 'exit "$gate_status"'
-    assert lines[lines.index(marker) - 1] == "fi"
-    result = subprocess.run(["bash", "-n", ".codebuild/ci.sh"], cwd=ROOT,
+    at = lines.index(marker)
+    assert lines[at - 1].startswith('echo "LEAF_T start change-impact ')
+    assert lines[at - 2].startswith('if [[ "${CI_SHARD_MODE:-all}" == all ')
+    assert lines[at - 3] == "fi"
+    # shutil.which, not a bare "bash": on Windows CreateProcess finds the WSL launcher in System32 first.
+    result = subprocess.run([shutil.which("bash") or "bash", "-n", ".codebuild/ci.sh"], cwd=ROOT,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
 
