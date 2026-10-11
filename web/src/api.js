@@ -1723,7 +1723,15 @@ async function pollAuthorStage(accepted, opts = {}) {
       headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
       signal: opts.signal,
     }, pollUrl)
-    const body = await res.json().catch(() => null)
+    let body = null
+    try {
+      body = await res.json()
+    } catch (readError) {
+      // A status body that cannot be read says nothing about the request: an
+      // interrupted read (a reload, a dropped connection) or a page that is not
+      // JSON keeps the request saved for Resume. A refused status keeps its code.
+      if (res.ok) throw readError
+    }
     if (!res.ok) throw customizationError('GET', pollUrl, res.status, body)
     const status = String(body?.status || '').toLowerCase()
     if (body?.change_set_id !== acceptedId) {
