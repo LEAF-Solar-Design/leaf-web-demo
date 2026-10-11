@@ -44,7 +44,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('author stage recovery transport', () => {
   it('C8C-01 recovery sends only the stored key with normal authentication', async () => {
-    localStorage.setItem('leaf.jwt', 'account-token')
+    localStorage.setItem('leaf.jwt', 'acct-tok')
     localStorage.setItem('leaf.guest_session', 'guest-token')
     writeSpy.mockClear()
     // jsdom's Storage.setItem schedules one timer per write; only the call's own timers count.
@@ -56,7 +56,7 @@ describe('author stage recovery transport', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     expect(fetchSpy).toHaveBeenCalledWith(R, {
       method: 'POST', signal,
-      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': config.tenant, Authorization: 'Bearer account-token' },
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': config.tenant, Authorization: 'Bearer acct-tok' },
       body: JSON.stringify({ idempotency_key: 'saved-key' }),
     })
     expect(answer.json).toHaveBeenCalledTimes(1)
