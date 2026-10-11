@@ -98,7 +98,7 @@ function r9Harness() {
     } else if (url.endsWith('/api/run')) { data = r9Submitted().data; status = 202 }
     return { ok: true, status, json: async () => data }
   })
-  h.real = createSolarProjectClient({ fetchImpl: h.fetchImpl, authHeaders: () => ({ Authorization: 'synthetic-session' }) })
+  h.real = createSolarProjectClient({ fetchImpl: h.fetchImpl, authHeaders: () => ({ Authorization: 'tok' }) })
   h.real.setScope(r9Binding, 'epoch-1')
   r9Clients.push(h.real)
   h.client = { ...h.real,
@@ -580,7 +580,7 @@ describe('SolarSizingForm', () => {
     expect(JSON.parse(submitted.body)).toEqual({ tool: r9Tool,
       params: { drawing_id: r9Binding.drawing_id, expected_rev: 7, mode: 'manual-global', confirm: true },
       dwg: r9Binding.input_version_id, catalog_digest: r9Digest })
-    expect(submitted.headers).toMatchObject({ Authorization: 'synthetic-session', 'X-Org-Id': r9Binding.organization_id,
+    expect(submitted.headers).toMatchObject({ Authorization: 'tok', 'X-Org-Id': r9Binding.organization_id,
       'X-Project-Id': r9Binding.project_id, 'X-Tenant-Id': r9Binding.organization_id,
       'Idempotency-Key': 'r9-key-1', 'X-Checkout-Capability': 'lco1.' + 'c'.repeat(64) })
     expect(h.client.setScope).not.toHaveBeenCalled()

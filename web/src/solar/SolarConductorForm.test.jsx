@@ -89,7 +89,7 @@ function r9Harness() {
     } else if (url.endsWith('/api/run')) { data = r9Submitted().data; status = 202 }
     return { ok: true, status, json: async () => data }
   })
-  h.real = createSolarProjectClient({ fetchImpl: h.fetchImpl, authHeaders: () => ({ Authorization: 'synthetic-session' }) })
+  h.real = createSolarProjectClient({ fetchImpl: h.fetchImpl, authHeaders: () => ({ Authorization: 'tok' }) })
   h.real.setScope(r9Binding, 'epoch-1')
   r9Clients.push(h.real)
   h.client = { ...h.real,
