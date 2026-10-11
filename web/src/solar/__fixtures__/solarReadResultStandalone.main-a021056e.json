@@ -1,0 +1,256 @@
+{
+  "schema": "leaf.solar-read-result-standalone-oracle.v1",
+  "capturedAt": "a021056e",
+  "capturedOn": "a021056e68896332d308529f5d1a60665a587fef",
+  "sourceSha256": {
+    "web/src/solar/solarReadResultModel.js": "9e12005cb0dcb7c6bf8f9ccd0f968cbecde3f061c08e10845ce857def40ebdba",
+    "web/src/solar/SolarReadResult.jsx": "be309663e5bdc672278b98cb7a98dfe4d816683e4825952f10fb8b1fb8c01881"
+  },
+  "renderer": "vitest jsdom; @testing-library/react render(<SolarReadResult data={input} />) then container.innerHTML; view is JSON.stringify(readResultView(input))",
+  "cases": {
+    "ampacity": {
+      "input": {
+        "adapter": "local-graph-read",
+        "drawing_changed": false,
+        "drawing_id": "solar",
+        "graph_sha256": "67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3",
+        "job_id": "job-g6r-1",
+        "output": {
+          "article": "NEC 310.16",
+          "formula": "I_corrected = I_base × temp_factor × conduit_factor = 100 × 0.82 × 0.7",
+          "inputs": {
+            "I_base": 100,
+            "conduit_factor": 0.7,
+            "temp_factor": 0.82
+          },
+          "one_liner": "NEC 310.16 — Conductor ampacity with temperature and conduit-fill correction: I_corrected = I_base × temp_factor × conduit_factor = 100 × 0.82 × 0.7 = 57.4 A",
+          "rejected_alternatives": [
+            {
+              "description": "I_base with no temperature correction",
+              "why_rejected": "Required when ambient exceeds 30°C.",
+              "would_have_resulted_in": 70
+            }
+          ],
+          "result": 57.4,
+          "short_description": "Conductor ampacity with temperature and conduit-fill correction",
+          "source_url": "https://www.nfpa.org/codes-and-standards/nfpa-70",
+          "units": "A"
+        },
+        "output_bytes": 743,
+        "output_sha256": "8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2",
+        "project_id": "leaf:project:00000000-0000-4000-8000-000000000001",
+        "representation": "intake",
+        "request_sha256": "ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e",
+        "schema_version": "leaf.solar-graph-read.v1",
+        "source_version": 1,
+        "tenant_id": "fixture-tenant",
+        "tool": "solar-nec-ampacity-correction"
+      },
+      "view": "{\"tool\":\"solar-nec-ampacity-correction\",\"drawingId\":\"solar\",\"headline\":\"57.4 A\",\"oneLiner\":\"NEC 310.16 — Conductor ampacity with temperature and conduit-fill correction: I_corrected = I_base × temp_factor × conduit_factor = 100 × 0.82 × 0.7 = 57.4 A\",\"fields\":[{\"key\":\"article\",\"label\":\"Article\",\"text\":\"NEC 310.16\"},{\"key\":\"formula\",\"label\":\"Formula\",\"text\":\"I_corrected = I_base × temp_factor × conduit_factor = 100 × 0.82 × 0.7\"},{\"key\":\"short_description\",\"label\":\"Short description\",\"text\":\"Conductor ampacity with temperature and conduit-fill correction\"},{\"key\":\"source_url\",\"label\":\"Source url\",\"text\":\"https://www.nfpa.org/codes-and-standards/nfpa-70\"}],\"omittedFields\":0,\"sections\":[{\"key\":\"inputs\",\"label\":\"Inputs\",\"fields\":[{\"key\":\"I_base\",\"label\":\"I base\",\"text\":\"100\"},{\"key\":\"conduit_factor\",\"label\":\"Conduit factor\",\"text\":\"0.7\"},{\"key\":\"temp_factor\",\"label\":\"Temp factor\",\"text\":\"0.82\"}],\"tables\":[]}],\"tables\":[{\"key\":\"rejected_alternatives\",\"label\":\"Rejected alternatives\",\"columns\":[{\"key\":\"description\",\"label\":\"Description\"},{\"key\":\"why_rejected\",\"label\":\"Why rejected\"},{\"key\":\"would_have_resulted_in\",\"label\":\"Would have resulted in\"}],\"rows\":[[\"I_base with no temperature correction\",\"Required when ambient exceeds 30°C.\",\"70\"]],\"omittedRows\":0,\"omittedColumns\":0}],\"artifact\":null,\"details\":[{\"label\":\"Tool\",\"text\":\"solar-nec-ampacity-correction\"},{\"label\":\"Drawing\",\"text\":\"solar\"},{\"label\":\"Version\",\"text\":\"1\"},{\"label\":\"Representation\",\"text\":\"intake\"},{\"label\":\"Graph\",\"text\":\"67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3\"},{\"label\":\"Output\",\"text\":\"8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2\"},{\"label\":\"Request\",\"text\":\"ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e\"},{\"label\":\"Job\",\"text\":\"job-g6r-1\"}],\"refusal\":null}",
+      "viewBytes": 1824,
+      "viewSha256": "7e0c60c0352b5eb81fa128bba9dca423262708e5bbea281b616f072bd06b87ae",
+      "html": "<div class=\"solar-read-result\" data-testid=\"solar-read-result\" data-tool=\"solar-nec-ampacity-correction\"><p class=\"solar-read-headline\" data-testid=\"solar-read-headline\">57.4 A</p><p class=\"solar-read-summary\">NEC 310.16 — Conductor ampacity with temperature and conduit-fill correction: I_corrected = I_base × temp_factor × conduit_factor = 100 × 0.82 × 0.7 = 57.4 A</p><table class=\"kv solar-read-fields\"><tbody><tr><th scope=\"row\">Article</th><td>NEC 310.16</td></tr><tr><th scope=\"row\">Formula</th><td>I_corrected = I_base × temp_factor × conduit_factor = 100 × 0.82 × 0.7</td></tr><tr><th scope=\"row\">Short description</th><td>Conductor ampacity with temperature and conduit-fill correction</td></tr><tr><th scope=\"row\">Source url</th><td>https://www.nfpa.org/codes-and-standards/nfpa-70</td></tr></tbody></table><section class=\"solar-read-table\" aria-label=\"Rejected alternatives\"><h4>Rejected alternatives</h4><table class=\"counts grid\"><thead><tr><th scope=\"col\">Description</th><th scope=\"col\">Why rejected</th><th scope=\"col\">Would have resulted in</th></tr></thead><tbody><tr><td>I_base with no temperature correction</td><td>Required when ambient exceeds 30°C.</td><td>70</td></tr></tbody></table></section><section class=\"solar-read-section\" aria-label=\"Inputs\"><h4>Inputs</h4><table class=\"kv solar-read-fields\"><tbody><tr><th scope=\"row\">I base</th><td>100</td></tr><tr><th scope=\"row\">Conduit factor</th><td>0.7</td></tr><tr><th scope=\"row\">Temp factor</th><td>0.82</td></tr></tbody></table></section><details class=\"solar-read-details\"><summary>Read details</summary><table class=\"kv\"><tbody><tr><th scope=\"row\">Tool</th><td>solar-nec-ampacity-correction</td></tr><tr><th scope=\"row\">Drawing</th><td>solar</td></tr><tr><th scope=\"row\">Version</th><td>1</td></tr><tr><th scope=\"row\">Representation</th><td>intake</td></tr><tr><th scope=\"row\">Graph</th><td>67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3</td></tr><tr><th scope=\"row\">Output</th><td>8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2</td></tr><tr><th scope=\"row\">Request</th><td>ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e</td></tr><tr><th scope=\"row\">Job</th><td>job-g6r-1</td></tr></tbody></table></details></div>",
+      "htmlBytes": 2259,
+      "htmlSha256": "1ba895f5ffa6858e6bfa702fb80ab0eb18d43f44680479d4c424ebe1ce2d00e7"
+    },
+    "acDrop": {
+      "input": {
+        "adapter": "local-graph-read",
+        "drawing_changed": false,
+        "drawing_id": "solar",
+        "graph_sha256": "67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3",
+        "job_id": "job-g6r-2",
+        "output": {
+          "article": "NEC 210.19(A)(4) Informational Note 4 (AC)",
+          "formula": "VD% = (2 × I × (R·cosφ + X·sinφ) × L / 1000) / V × 100 = (2 × 10 × (0.5·1 + 0.1·0.000) × 100 / 1000) / 240 × 100",
+          "inputs": {
+            "I": 10,
+            "L_ft": 100,
+            "R_ohm_per_1000ft": 0.5,
+            "V_source": 240,
+            "X_ohm_per_1000ft": 0.1,
+            "phase": 1,
+            "powerFactor": 1
+          },
+          "one_liner": "NEC 210.19(A)(4) Informational Note 4 (AC) — AC voltage drop (1-phase, recommended <= 3% for inverter output): VD% = (2 × I × (R·cosφ + X·sinφ) × L / 1000) / V × 100 = (2 × 10 × (0.5·1 + 0.1·0.000) × 100 / 1000) / 240 × 100 = 0.416667 % (3% recommended max)",
+          "rejected_alternatives": [],
+          "result": 0.4166666666666667,
+          "short_description": "AC voltage drop (1-phase, recommended <= 3% for inverter output)",
+          "source_url": "https://www.nfpa.org/codes-and-standards/nfpa-70",
+          "units": "% (3% recommended max)"
+        },
+        "output_bytes": 743,
+        "output_sha256": "8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2",
+        "project_id": "leaf:project:00000000-0000-4000-8000-000000000001",
+        "representation": "intake",
+        "request_sha256": "ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e",
+        "schema_version": "leaf.solar-graph-read.v1",
+        "source_version": 1,
+        "tenant_id": "fixture-tenant",
+        "tool": "solar-nec-ac-voltage-drop"
+      },
+      "view": "{\"tool\":\"solar-nec-ac-voltage-drop\",\"drawingId\":\"solar\",\"headline\":\"0.416667 % (3% recommended max)\",\"oneLiner\":\"NEC 210.19(A)(4) Informational Note 4 (AC) — AC voltage drop (1-phase, recommended <= 3% for inverter output): VD% = (2 × I × (R·cosφ + X·sinφ) × L / 1000) / V × 100 = (2 × 10 × (0.5·1 + 0.1·0.000) × 100 / 1000) / 240 × 100 = 0.416667 % (3% recommended max)\",\"fields\":[{\"key\":\"article\",\"label\":\"Article\",\"text\":\"NEC 210.19(A)(4) Informational Note 4 (AC)\"},{\"key\":\"formula\",\"label\":\"Formula\",\"text\":\"VD% = (2 × I × (R·cosφ + X·sinφ) × L / 1000) / V × 100 = (2 × 10 × (0.5·1 + 0.1·0.000) × 100 / 1000) / 240 × 100\"},{\"key\":\"rejected_alternatives\",\"label\":\"Rejected alternatives\",\"text\":\"none\"},{\"key\":\"short_description\",\"label\":\"Short description\",\"text\":\"AC voltage drop (1-phase, recommended <= 3% for inverter output)\"},{\"key\":\"source_url\",\"label\":\"Source url\",\"text\":\"https://www.nfpa.org/codes-and-standards/nfpa-70\"}],\"omittedFields\":0,\"sections\":[{\"key\":\"inputs\",\"label\":\"Inputs\",\"fields\":[{\"key\":\"I\",\"label\":\"I\",\"text\":\"10\"},{\"key\":\"L_ft\",\"label\":\"L ft\",\"text\":\"100\"},{\"key\":\"R_ohm_per_1000ft\",\"label\":\"R ohm per 1000ft\",\"text\":\"0.5\"},{\"key\":\"V_source\",\"label\":\"V source\",\"text\":\"240\"},{\"key\":\"X_ohm_per_1000ft\",\"label\":\"X ohm per 1000ft\",\"text\":\"0.1\"},{\"key\":\"phase\",\"label\":\"Phase\",\"text\":\"1\"},{\"key\":\"powerFactor\",\"label\":\"PowerFactor\",\"text\":\"1\"}],\"tables\":[]}],\"tables\":[],\"artifact\":null,\"details\":[{\"label\":\"Tool\",\"text\":\"solar-nec-ac-voltage-drop\"},{\"label\":\"Drawing\",\"text\":\"solar\"},{\"label\":\"Version\",\"text\":\"1\"},{\"label\":\"Representation\",\"text\":\"intake\"},{\"label\":\"Graph\",\"text\":\"67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3\"},{\"label\":\"Output\",\"text\":\"8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2\"},{\"label\":\"Request\",\"text\":\"ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e\"},{\"label\":\"Job\",\"text\":\"job-g6r-2\"}],\"refusal\":null}",
+      "viewBytes": 1947,
+      "viewSha256": "f7d0848dd792a55da3b6f8b3b3313e733f3588a5b66c9005116601044b921471",
+      "html": "<div class=\"solar-read-result\" data-testid=\"solar-read-result\" data-tool=\"solar-nec-ac-voltage-drop\"><p class=\"solar-read-headline\" data-testid=\"solar-read-headline\">0.416667 % (3% recommended max)</p><p class=\"solar-read-summary\">NEC 210.19(A)(4) Informational Note 4 (AC) — AC voltage drop (1-phase, recommended &lt;= 3% for inverter output): VD% = (2 × I × (R·cosφ + X·sinφ) × L / 1000) / V × 100 = (2 × 10 × (0.5·1 + 0.1·0.000) × 100 / 1000) / 240 × 100 = 0.416667 % (3% recommended max)</p><table class=\"kv solar-read-fields\"><tbody><tr><th scope=\"row\">Article</th><td>NEC 210.19(A)(4) Informational Note 4 (AC)</td></tr><tr><th scope=\"row\">Formula</th><td>VD% = (2 × I × (R·cosφ + X·sinφ) × L / 1000) / V × 100 = (2 × 10 × (0.5·1 + 0.1·0.000) × 100 / 1000) / 240 × 100</td></tr><tr><th scope=\"row\">Rejected alternatives</th><td>none</td></tr><tr><th scope=\"row\">Short description</th><td>AC voltage drop (1-phase, recommended &lt;= 3% for inverter output)</td></tr><tr><th scope=\"row\">Source url</th><td>https://www.nfpa.org/codes-and-standards/nfpa-70</td></tr></tbody></table><section class=\"solar-read-section\" aria-label=\"Inputs\"><h4>Inputs</h4><table class=\"kv solar-read-fields\"><tbody><tr><th scope=\"row\">I</th><td>10</td></tr><tr><th scope=\"row\">L ft</th><td>100</td></tr><tr><th scope=\"row\">R ohm per 1000ft</th><td>0.5</td></tr><tr><th scope=\"row\">V source</th><td>240</td></tr><tr><th scope=\"row\">X ohm per 1000ft</th><td>0.1</td></tr><tr><th scope=\"row\">Phase</th><td>1</td></tr><tr><th scope=\"row\">PowerFactor</th><td>1</td></tr></tbody></table></section><details class=\"solar-read-details\"><summary>Read details</summary><table class=\"kv\"><tbody><tr><th scope=\"row\">Tool</th><td>solar-nec-ac-voltage-drop</td></tr><tr><th scope=\"row\">Drawing</th><td>solar</td></tr><tr><th scope=\"row\">Version</th><td>1</td></tr><tr><th scope=\"row\">Representation</th><td>intake</td></tr><tr><th scope=\"row\">Graph</th><td>67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3</td></tr><tr><th scope=\"row\">Output</th><td>8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2</td></tr><tr><th scope=\"row\">Request</th><td>ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e</td></tr><tr><th scope=\"row\">Job</th><td>job-g6r-2</td></tr></tbody></table></details></div>",
+      "htmlBytes": 2331,
+      "htmlSha256": "cdf1bbbdf9537e406342bc6595332982e804421a0d368eb0e144f31dc5860c0e"
+    },
+    "conduit": {
+      "input": {
+        "adapter": "local-graph-read",
+        "drawing_changed": false,
+        "drawing_id": "solar",
+        "graph_sha256": "67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3",
+        "job_id": "job-g6r-3",
+        "output": {
+          "conductor_area_sq_in": 0.0528,
+          "conductors": [
+            {
+              "area_sq_in": 0.0211,
+              "count": 2,
+              "gauge": "10",
+              "insulation": "THWN2",
+              "role": "current-carrying",
+              "unit": "AWG"
+            },
+            {
+              "area_sq_in": 0.0106,
+              "count": 1,
+              "gauge": "10",
+              "insulation": "Bare",
+              "role": "egc",
+              "unit": "AWG"
+            }
+          ],
+          "conduit_area_sq_in": 0.285,
+          "conduit_table": [
+            {
+              "area_sq_in": 0.285,
+              "trade_size": "1/2"
+            },
+            {
+              "area_sq_in": 0.508,
+              "trade_size": "3/4"
+            },
+            {
+              "area_sq_in": 0.832,
+              "trade_size": "1"
+            },
+            {
+              "area_sq_in": 1.453,
+              "trade_size": "1-1/4"
+            },
+            {
+              "area_sq_in": 1.986,
+              "trade_size": "1-1/2"
+            },
+            {
+              "area_sq_in": 3.291,
+              "trade_size": "2"
+            },
+            {
+              "area_sq_in": 4.695,
+              "trade_size": "2-1/2"
+            },
+            {
+              "area_sq_in": 7.268,
+              "trade_size": "3"
+            },
+            {
+              "area_sq_in": 9.737,
+              "trade_size": "3-1/2"
+            },
+            {
+              "area_sq_in": 12.554,
+              "trade_size": "4"
+            }
+          ],
+          "conduit_type": "PvcSch40",
+          "conduit_type_label": "PVC Sch 40",
+          "failure_reason": null,
+          "fill_pct": 18.526315789473685,
+          "max_fill_fraction": 0.4,
+          "max_fill_pct": 40,
+          "note": "NEC Ch9 T1/T4 - 3 conductors in 1/2\" PVC Sch 40: fill 18.5% ≤ 40% max",
+          "success": true,
+          "total_conductors": 3,
+          "trade_size": "1/2"
+        },
+        "output_bytes": 743,
+        "output_sha256": "8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2",
+        "project_id": "leaf:project:00000000-0000-4000-8000-000000000001",
+        "representation": "intake",
+        "request_sha256": "ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e",
+        "schema_version": "leaf.solar-graph-read.v1",
+        "source_version": 1,
+        "tenant_id": "fixture-tenant",
+        "tool": "solar-nec-conduit-fill"
+      },
+      "view": "{\"tool\":\"solar-nec-conduit-fill\",\"drawingId\":\"solar\",\"headline\":null,\"oneLiner\":null,\"fields\":[{\"key\":\"conductor_area_sq_in\",\"label\":\"Conductor area sq in\",\"text\":\"0.0528\"},{\"key\":\"conduit_area_sq_in\",\"label\":\"Conduit area sq in\",\"text\":\"0.285\"},{\"key\":\"conduit_type\",\"label\":\"Conduit type\",\"text\":\"PvcSch40\"},{\"key\":\"conduit_type_label\",\"label\":\"Conduit type label\",\"text\":\"PVC Sch 40\"},{\"key\":\"failure_reason\",\"label\":\"Failure reason\",\"text\":\"none\"},{\"key\":\"fill_pct\",\"label\":\"Fill pct\",\"text\":\"18.5263\"},{\"key\":\"max_fill_fraction\",\"label\":\"Max fill fraction\",\"text\":\"0.4\"},{\"key\":\"max_fill_pct\",\"label\":\"Max fill pct\",\"text\":\"40\"},{\"key\":\"note\",\"label\":\"Note\",\"text\":\"NEC Ch9 T1/T4 - 3 conductors in 1/2\\\" PVC Sch 40: fill 18.5% ≤ 40% max\"},{\"key\":\"success\",\"label\":\"Success\",\"text\":\"yes\"},{\"key\":\"total_conductors\",\"label\":\"Total conductors\",\"text\":\"3\"},{\"key\":\"trade_size\",\"label\":\"Trade size\",\"text\":\"1/2\"}],\"omittedFields\":0,\"sections\":[],\"tables\":[{\"key\":\"conductors\",\"label\":\"Conductors\",\"columns\":[{\"key\":\"area_sq_in\",\"label\":\"Area sq in\"},{\"key\":\"count\",\"label\":\"Count\"},{\"key\":\"gauge\",\"label\":\"Gauge\"},{\"key\":\"insulation\",\"label\":\"Insulation\"},{\"key\":\"role\",\"label\":\"Role\"},{\"key\":\"unit\",\"label\":\"Unit\"}],\"rows\":[[\"0.0211\",\"2\",\"10\",\"THWN2\",\"current-carrying\",\"AWG\"],[\"0.0106\",\"1\",\"10\",\"Bare\",\"egc\",\"AWG\"]],\"omittedRows\":0,\"omittedColumns\":0},{\"key\":\"conduit_table\",\"label\":\"Conduit table\",\"columns\":[{\"key\":\"area_sq_in\",\"label\":\"Area sq in\"},{\"key\":\"trade_size\",\"label\":\"Trade size\"}],\"rows\":[[\"0.285\",\"1/2\"],[\"0.508\",\"3/4\"],[\"0.832\",\"1\"],[\"1.453\",\"1-1/4\"],[\"1.986\",\"1-1/2\"],[\"3.291\",\"2\"],[\"4.695\",\"2-1/2\"],[\"7.268\",\"3\"],[\"9.737\",\"3-1/2\"],[\"12.554\",\"4\"]],\"omittedRows\":0,\"omittedColumns\":0}],\"artifact\":null,\"details\":[{\"label\":\"Tool\",\"text\":\"solar-nec-conduit-fill\"},{\"label\":\"Drawing\",\"text\":\"solar\"},{\"label\":\"Version\",\"text\":\"1\"},{\"label\":\"Representation\",\"text\":\"intake\"},{\"label\":\"Graph\",\"text\":\"67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3\"},{\"label\":\"Output\",\"text\":\"8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2\"},{\"label\":\"Request\",\"text\":\"ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e\"},{\"label\":\"Job\",\"text\":\"job-g6r-3\"}],\"refusal\":null}",
+      "viewBytes": 2221,
+      "viewSha256": "4db0ae68e7050d7e07913539af1d8d590ee59b4a13c5b5f0c91d23473dc13819",
+      "html": "<div class=\"solar-read-result\" data-testid=\"solar-read-result\" data-tool=\"solar-nec-conduit-fill\"><table class=\"kv solar-read-fields\"><tbody><tr><th scope=\"row\">Conductor area sq in</th><td>0.0528</td></tr><tr><th scope=\"row\">Conduit area sq in</th><td>0.285</td></tr><tr><th scope=\"row\">Conduit type</th><td>PvcSch40</td></tr><tr><th scope=\"row\">Conduit type label</th><td>PVC Sch 40</td></tr><tr><th scope=\"row\">Failure reason</th><td>none</td></tr><tr><th scope=\"row\">Fill pct</th><td>18.5263</td></tr><tr><th scope=\"row\">Max fill fraction</th><td>0.4</td></tr><tr><th scope=\"row\">Max fill pct</th><td>40</td></tr><tr><th scope=\"row\">Note</th><td>NEC Ch9 T1/T4 - 3 conductors in 1/2\" PVC Sch 40: fill 18.5% ≤ 40% max</td></tr><tr><th scope=\"row\">Success</th><td>yes</td></tr><tr><th scope=\"row\">Total conductors</th><td>3</td></tr><tr><th scope=\"row\">Trade size</th><td>1/2</td></tr></tbody></table><section class=\"solar-read-table\" aria-label=\"Conductors\"><h4>Conductors</h4><table class=\"counts grid\"><thead><tr><th scope=\"col\">Area sq in</th><th scope=\"col\">Count</th><th scope=\"col\">Gauge</th><th scope=\"col\">Insulation</th><th scope=\"col\">Role</th><th scope=\"col\">Unit</th></tr></thead><tbody><tr><td>0.0211</td><td>2</td><td>10</td><td>THWN2</td><td>current-carrying</td><td>AWG</td></tr><tr><td>0.0106</td><td>1</td><td>10</td><td>Bare</td><td>egc</td><td>AWG</td></tr></tbody></table></section><section class=\"solar-read-table\" aria-label=\"Conduit table\"><h4>Conduit table</h4><table class=\"counts grid\"><thead><tr><th scope=\"col\">Area sq in</th><th scope=\"col\">Trade size</th></tr></thead><tbody><tr><td>0.285</td><td>1/2</td></tr><tr><td>0.508</td><td>3/4</td></tr><tr><td>0.832</td><td>1</td></tr><tr><td>1.453</td><td>1-1/4</td></tr><tr><td>1.986</td><td>1-1/2</td></tr><tr><td>3.291</td><td>2</td></tr><tr><td>4.695</td><td>2-1/2</td></tr><tr><td>7.268</td><td>3</td></tr><tr><td>9.737</td><td>3-1/2</td></tr><tr><td>12.554</td><td>4</td></tr></tbody></table></section><details class=\"solar-read-details\"><summary>Read details</summary><table class=\"kv\"><tbody><tr><th scope=\"row\">Tool</th><td>solar-nec-conduit-fill</td></tr><tr><th scope=\"row\">Drawing</th><td>solar</td></tr><tr><th scope=\"row\">Version</th><td>1</td></tr><tr><th scope=\"row\">Representation</th><td>intake</td></tr><tr><th scope=\"row\">Graph</th><td>67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3</td></tr><tr><th scope=\"row\">Output</th><td>8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2</td></tr><tr><th scope=\"row\">Request</th><td>ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e</td></tr><tr><th scope=\"row\">Job</th><td>job-g6r-3</td></tr></tbody></table></details></div>",
+      "htmlBytes": 2711,
+      "htmlSha256": "2b66cb6b720f5e60cf802d925598ad70f520202a0c484a5ff4f06677103bdeec"
+    },
+    "cable": {
+      "input": {
+        "adapter": "local-graph-read",
+        "drawing_changed": false,
+        "drawing_id": "solar",
+        "graph_sha256": "67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3",
+        "job_id": "dfe84971-84b5-45de-804e-d4da02c4c787",
+        "output": {
+          "artifact": {
+            "artifact_id": "e3c082e905ff821f63b27ce25902f93396ae1bed958f21257cfd35e06c079e06",
+            "byte_length": 4421,
+            "content_sha256": "475c7c55ac1ee7eff28cc8d7a0bbf9d63b9d988d94624231f6077e39012be6e2",
+            "download": "/api/drawings/solar/artifacts/e3c082e905ff821f63b27ce25902f93396ae1bed958f21257cfd35e06c079e06",
+            "filename": "CableExport.xlsx",
+            "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "schema": "leaf.solar-artifact-ref.v1",
+            "source_version": 1
+          },
+          "summary": {
+            "circuit_source": "topology",
+            "feeders": 0,
+            "inverter_record": "caller",
+            "module_catalog": "unresolved",
+            "modules": 3,
+            "rows": [
+              4,
+              17,
+              7,
+              8
+            ],
+            "sheets": [
+              "Homeruns",
+              "Equipment Schedule",
+              "Inverter Schedule",
+              "String Schedule"
+            ],
+            "sizing": "absent",
+            "status": "written",
+            "strings": 2
+          }
+        },
+        "output_bytes": 743,
+        "output_sha256": "8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2",
+        "project_id": "leaf:project:00000000-0000-4000-8000-000000000001",
+        "representation": "intake",
+        "request_sha256": "ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e",
+        "schema_version": "leaf.solar-graph-read.v1",
+        "source_version": 1,
+        "tenant_id": "fixture-tenant",
+        "tool": "solar-cable-export"
+      },
+      "view": "{\"tool\":\"solar-cable-export\",\"drawingId\":\"solar\",\"headline\":null,\"oneLiner\":null,\"fields\":[],\"omittedFields\":0,\"sections\":[{\"key\":\"summary\",\"label\":\"Summary\",\"fields\":[{\"key\":\"circuit_source\",\"label\":\"Circuit source\",\"text\":\"topology\"},{\"key\":\"feeders\",\"label\":\"Feeders\",\"text\":\"0\"},{\"key\":\"inverter_record\",\"label\":\"Inverter record\",\"text\":\"caller\"},{\"key\":\"module_catalog\",\"label\":\"Module catalog\",\"text\":\"unresolved\"},{\"key\":\"modules\",\"label\":\"Modules\",\"text\":\"3\"},{\"key\":\"rows\",\"label\":\"Rows\",\"text\":\"4, 17, 7, 8\"},{\"key\":\"sheets\",\"label\":\"Sheets\",\"text\":\"Homeruns, Equipment Schedule, Inverter Schedule, String Schedule\"},{\"key\":\"sizing\",\"label\":\"Sizing\",\"text\":\"absent\"},{\"key\":\"status\",\"label\":\"Status\",\"text\":\"written\"},{\"key\":\"strings\",\"label\":\"Strings\",\"text\":\"2\"}],\"tables\":[]}],\"tables\":[],\"artifact\":{\"state\":\"ready\",\"ref\":{\"artifact_id\":\"e3c082e905ff821f63b27ce25902f93396ae1bed958f21257cfd35e06c079e06\",\"byte_length\":4421,\"content_sha256\":\"475c7c55ac1ee7eff28cc8d7a0bbf9d63b9d988d94624231f6077e39012be6e2\",\"download\":\"/api/drawings/solar/artifacts/e3c082e905ff821f63b27ce25902f93396ae1bed958f21257cfd35e06c079e06\",\"filename\":\"CableExport.xlsx\",\"media_type\":\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\",\"schema\":\"leaf.solar-artifact-ref.v1\",\"source_version\":1},\"filename\":\"CableExport.xlsx\",\"sizeText\":\"4.3 KB\"},\"details\":[{\"label\":\"Tool\",\"text\":\"solar-cable-export\"},{\"label\":\"Drawing\",\"text\":\"solar\"},{\"label\":\"Version\",\"text\":\"1\"},{\"label\":\"Representation\",\"text\":\"intake\"},{\"label\":\"Graph\",\"text\":\"67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3\"},{\"label\":\"Output\",\"text\":\"8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2\"},{\"label\":\"Request\",\"text\":\"ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e\"},{\"label\":\"Job\",\"text\":\"dfe84971-84b5-45de-804e-d4da02c4c787\"}],\"refusal\":null}",
+      "viewBytes": 1871,
+      "viewSha256": "cdf9d47d16caf02ea9548ba21b85caaa25f6be3bea8e15165f2c51560489da83",
+      "html": "<div class=\"solar-read-result\" data-testid=\"solar-read-result\" data-tool=\"solar-cable-export\"><section class=\"solar-read-section\" aria-label=\"Summary\"><h4>Summary</h4><table class=\"kv solar-read-fields\"><tbody><tr><th scope=\"row\">Circuit source</th><td>topology</td></tr><tr><th scope=\"row\">Feeders</th><td>0</td></tr><tr><th scope=\"row\">Inverter record</th><td>caller</td></tr><tr><th scope=\"row\">Module catalog</th><td>unresolved</td></tr><tr><th scope=\"row\">Modules</th><td>3</td></tr><tr><th scope=\"row\">Rows</th><td>4, 17, 7, 8</td></tr><tr><th scope=\"row\">Sheets</th><td>Homeruns, Equipment Schedule, Inverter Schedule, String Schedule</td></tr><tr><th scope=\"row\">Sizing</th><td>absent</td></tr><tr><th scope=\"row\">Status</th><td>written</td></tr><tr><th scope=\"row\">Strings</th><td>2</td></tr></tbody></table></section><button type=\"button\" class=\"btn ghost\" data-testid=\"solar-read-download\">Download CableExport.xlsx (4.3 KB)</button><details class=\"solar-read-details\"><summary>Read details</summary><table class=\"kv\"><tbody><tr><th scope=\"row\">Tool</th><td>solar-cable-export</td></tr><tr><th scope=\"row\">Drawing</th><td>solar</td></tr><tr><th scope=\"row\">Version</th><td>1</td></tr><tr><th scope=\"row\">Representation</th><td>intake</td></tr><tr><th scope=\"row\">Graph</th><td>67ab25efcda14a69da65a4184cf5d362ac19a85dcf266f722a9528f5881737c3</td></tr><tr><th scope=\"row\">Output</th><td>8e74a3c4458786952c3d1ef54af45f7716abc16a31708fa0f5476ed518a0a9b2</td></tr><tr><th scope=\"row\">Request</th><td>ea27a372187309ff800cc8841bf16b4524c4f0b118da101d5f703c1d92897d6e</td></tr><tr><th scope=\"row\">Job</th><td>dfe84971-84b5-45de-804e-d4da02c4c787</td></tr></tbody></table></details></div>",
+      "htmlBytes": 1691,
+      "htmlSha256": "a3b27cb9019c0fa2f4663633a8a70e1199199edfff272a9975c199ec8a2f375f"
+    }
+  }
+}

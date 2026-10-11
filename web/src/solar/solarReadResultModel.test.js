@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { validateSolarArtifactRef } from './solarImportClient.js'
+import { createSolarProjectArtifactClient } from './solarProjectArtifactClient.js'
+import { deriveProjectReadResultState, isSolarProjectReadResult, projectReadReason,
+  PROJECT_READ_REASONS, SOLAR_PROJECT_READ_RESULT_SCHEMA, SOLAR_PROJECT_READ_ADAPTER } from './solarReadResultModel.js'
 import {
   ARTIFACT_UNVERIFIED, DOWNLOAD_REASONS, MAX_CELL_TEXT, MAX_COLUMNS, MAX_FIELDS, MAX_LABEL, MAX_TABLE_ROWS, MAX_TEXT, PRIVATE_KEYS,
   READ_RESULT_UNREADABLE, SOLAR_READ_ADAPTER, SOLAR_READ_RESULT_SCHEMA,
@@ -433,5 +440,240 @@ describe('Solar read result model', () => {
     expect(view.sections[0].fields.map(({ key, text }) => [key, text])).toEqual([['__proto__', '5'], ['a', '1']])
     expect(view.tables[0].columns.map(({ key }) => key)).toEqual(['__proto__', 'b'])
     expect(view.tables[0].rows).toEqual([['7', '2']])
+  })
+})
+
+const projectBinding = Object.freeze({
+  kind: 'project',
+  organization_id: '11111111-1111-4111-8111-111111111111',
+  project_id: '22222222-2222-4222-8222-222222222222',
+  drawing_id: '33333333-3333-4333-8333-333333333333',
+  input_version_id: '44444444-4444-4444-8444-444444444444',
+})
+const bodyHash = '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'
+const intakeHash = 'a'.repeat(64)
+const graphHash = 'b'.repeat(64)
+const catalogDigest = 'sha256:' + 'c'.repeat(64)
+function projectRef(overrides = {}) {
+  const artifactId = 'd'.repeat(64)
+  return { organization_id: projectBinding.organization_id, project_id: projectBinding.project_id,
+    drawing_id: projectBinding.drawing_id, source_version_id: projectBinding.input_version_id,
+    source_intake_sha256: intakeHash, graph_sha256: graphHash, artifact_id: artifactId,
+    media_type: 'application/json', filename: 'ElectricalSchedules.json', byte_length: 2,
+    content_sha256: bodyHash, schema: 'leaf.solar-project-artifact-ref.v1',
+    download: `/api/projects/${projectBinding.project_id}/drawings/${projectBinding.drawing_id}/solar-artifacts/${artifactId}`,
+    ...overrides }
+}
+function projectResult(overrides = {}) {
+  return { schema: 'leaf.solar-project-read.v1', adapter: 'project-local-graph-read',
+    organization_id: projectBinding.organization_id, project_id: projectBinding.project_id,
+    drawing_id: projectBinding.drawing_id, input_version_id: projectBinding.input_version_id,
+    input_intake_sha256: intakeHash, graph_sha256: graphHash, tool: 'solar-electrical-schedules',
+    tool_manifest_sha256: catalogDigest, graph_project_id: 'private-graph-project',
+    head_version_id: projectBinding.input_version_id, is_head: true, current_required: true,
+    request_sha256: 'e'.repeat(64), output_sha256: 'f'.repeat(64), output_bytes: 200,
+    drawing_changed: false, output: { result: 57.4, units: 'A', artifact: projectRef() },
+    ...overrides }
+}
+
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
+const projectState = (data = projectResult(), options = {}) => deriveProjectReadResultState({
+  binding: projectBinding, data, catalogDigest, ...options,
+})
+
+describe('canonical project read presentation', () => {
+  it('R12-01 presents a completed result for the exact project version', () => {
+    const data = projectResult()
+    const state = projectState(data)
+    expect(isSolarProjectReadResult(data)).toBe(true)
+    expect(isSolarReadResult(data)).toBe(false)
+    expect([SOLAR_PROJECT_READ_RESULT_SCHEMA, SOLAR_PROJECT_READ_ADAPTER]).toEqual([
+      'leaf.solar-project-read.v1', 'project-local-graph-read'])
+    expect(state).toMatchObject({ mode: 'ready', binding: projectBinding, current: true,
+      inputIntakeSha256: intakeHash, graphSha256: graphHash })
+    expect(state.view.headline).toBe('57.4 A')
+    expect(state.view.details.map(({ label }) => label)).toEqual(['Tool', 'Drawing', 'Version', 'Graph', 'Output', 'Request'])
+    expect(state.view.details[2].text).toBe(projectBinding.input_version_id)
+    expect(state.view.artifact).toMatchObject({ state: 'ready', filename: 'ElectricalSchedules.json', sizeText: '2 bytes' })
+    expect(state.view.details.some(({ label }) => ['Job', 'Representation'].includes(label))).toBe(false)
+    expect(JSON.stringify(state.view.details)).not.toContain('private-graph-project')
+  })
+
+  it('R12-02 keeps canonical references and UUID versions outside the legacy validator', () => {
+    expect(validateSolarArtifactRef(projectRef(), projectBinding.drawing_id)).toBe(false)
+    expect(validateSolarArtifactRef({ ...cable.output.artifact, source_version: projectBinding.input_version_id }, cable.drawing_id)).toBe(false)
+  })
+
+  it('R12-07 leaves mismatched source hashes as an unverified opaque artifact', async () => {
+    for (const key of ['source_intake_sha256', 'graph_sha256']) {
+      const ref = projectRef({ [key]: '0'.repeat(64) })
+      const state = projectState(projectResult({ output: { artifact: ref, count: 4 } }))
+      expect(state.mode).toBe('ready')
+      expect(state.view.artifact).toEqual({ state: 'unverified' })
+      expect(state.view.fields).toEqual([{ key: 'count', label: 'Count', text: '4' }])
+      const downloadArtifact = vi.fn()
+      const projectClient = { downloadArtifact, getSnapshot: () => ({ binding: projectBinding, authorityKey: 'a' }),
+        subscribe: () => () => {}, captureCatalogScope: () => () => true }
+      const wrapper = createSolarProjectArtifactClient({ projectClient })
+      expect((await wrapper.downloadArtifact({ binding: projectBinding, authorityKey: 'a', ref,
+        inputIntakeSha256: intakeHash, graphSha256: graphHash, isCurrent: () => true })).reason).toBe('SIP_R12_ARTIFACT_REF_INVALID')
+      expect(downloadArtifact).not.toHaveBeenCalled()
+    }
+  })
+
+  it('R12-20 refuses invalid canonical metadata JSON and head claims before presentation', () => {
+    const bad = [
+      { project_id: projectBinding.organization_id }, { input_version_id: projectBinding.organization_id },
+      { head_version_id: 'bad' }, { is_head: false }, { is_head: 1 }, { current_required: 'true' },
+      { tool_manifest_sha256: 'sha256:' + '0'.repeat(64) }, { adapter: 'local-graph-read' },
+      { schema: 'wrong' }, { drawing_changed: true }, { tool: '../tool' }, { graph_project_id: '' },
+      { input_intake_sha256: intakeHash.toUpperCase() }, { request_sha256: 'x' },
+      { graph_sha256: 'x' }, { output_sha256: 'not-a-hash' },
+      // A 64-character value that is not lower-case hex: a length-only check accepts these.
+      { request_sha256: 'g'.repeat(64) }, { request_sha256: 'B'.repeat(64) },
+      { graph_sha256: 'g'.repeat(64) }, { graph_sha256: 'B'.repeat(64) },
+      { output_sha256: 'g'.repeat(64) }, { output_sha256: 'B'.repeat(64) },
+      { input_intake_sha256: 'g'.repeat(64) },
+      { output_bytes: 0 }, { output_bytes: 1048577 }, { output: null }, { output: [] },
+      { output: { value: Infinity } }, { output: { value: undefined } },
+      { output: { value: 'x'.repeat(1048577) } }, { output: { value: new Date() } },
+    ]
+    const cycle = {}; cycle.self = cycle; bad.push({ output: cycle })
+    for (const change of bad) expect(projectState(projectResult(change))).toEqual({
+      mode: 'refused', reason: 'SIP_R12_RESULT_INVALID' })
+    expect(projectState(undefined, { binding: {} }).reason).toBe('SIP_R12_BINDING_INVALID')
+    for (const digest of [null, '', 'sha256:ABC']) expect(projectState(undefined, { catalogDigest: digest }).reason).toBe('SIP_R12_CATALOG_DIGEST_REQUIRED')
+    const accessor = vi.fn()
+    const hostile = projectResult()
+    Object.defineProperty(hostile, 'output', { get: accessor })
+    expect(projectState(hostile).reason).toBe('SIP_R12_RESULT_INVALID')
+    expect(accessor).not.toHaveBeenCalled()
+    expect(isSolarProjectReadResult(new Proxy({}, { getPrototypeOf() { throw new Error() } }))).toBe(false)
+  })
+
+  it('R12-33 validates and bounds every artifact subtree before presentation', () => {
+    for (const output of [
+      { count: 4, nested: { artifact: 'x'.repeat(1048577) } },
+      { count: 4, nested: { artifact: Infinity } },
+      { count: 4, nested: { artifact: { at: new Date() } } },
+      { count: 4, artifact: { ...projectRef(), extra: Infinity } },
+    ]) expect(projectState(projectResult({ output }))).toEqual({ mode: 'refused', reason: 'SIP_R12_RESULT_INVALID' })
+    const nested = projectState(projectResult({ output: { count: 4, nested: { artifact: 'kept-out-of-view' } } }))
+    expect(nested.mode).toBe('ready')
+    expect(JSON.stringify(nested.view)).not.toContain('kept-out-of-view')
+    expect(projectState(projectResult()).mode).toBe('ready')
+  })
+
+  it('R12-21 refuses historical results under the default current policy', () => {
+    const data = projectResult({ is_head: false, head_version_id: projectBinding.organization_id, current_required: false })
+    expect(projectState(data)).toEqual({ mode: 'refused', reason: 'SIP_R12_STALE_CURRENT' })
+    expect(projectState(data, { current: false }).mode).toBe('ready')
+    expect(projectState(projectResult(), { current: false }).reason).toBe('SIP_R12_RESULT_INVALID')
+  })
+
+  it('R12-26 presents successful no-schedules and no-export results without manufacturing a failure', () => {
+    for (const [tool, status, reason] of [['solar-electrical-schedules', 'no-schedules', 'no-schedule-data'],
+      ['solar-cable-export', 'no-export', 'no-homeruns']]) {
+      const state = projectState(projectResult({ tool, output: { status, reason } }))
+      expect(state.mode).toBe('ready')
+      expect(state.view.artifact).toBeNull()
+      expect(state.view.refusal).toBeNull()
+      expect(state.view.fields.map(({ text }) => text)).toEqual([status, reason])
+    }
+  })
+
+  it('R12-27 removes canonical private keys at every presentation depth', () => {
+    const privateRow = { organization_id: 'hidden-org', project_id: 'hidden-project',
+      tenant_id: 'hidden-tenant', graph_project_id: 'hidden-graph', n: 3 }
+    const output = { ...privateRow, group: { ...privateRow, nested: privateRow },
+      rows: [privateRow], cells: [{ value: privateRow }], list: [[privateRow]] }
+    const frozen = JSON.stringify(output)
+    const view = projectState(projectResult({ output })).view
+    for (const hidden of ['hidden-org', 'hidden-project', 'hidden-tenant', 'hidden-graph',
+      'organization_id', 'project_id', 'tenant_id', 'graph_project_id']) expect(JSON.stringify(view)).not.toContain(hidden)
+    expect(view.tables.find(({ key }) => key === 'rows').rows).toEqual([['3']])
+    expect(view.tables.find(({ key }) => key === 'cells').rows).toEqual([['{"n":3}']])
+    expect(JSON.stringify(output)).toBe(frozen)
+    expect(PRIVATE_KEYS).toEqual(['tenant_id', 'project_id'])
+  })
+
+  it('R12-30 matches the planner frozen standalone model strings bytes and hashes', () => {
+    const raw = readFileSync(process.cwd() + '/src/solar/__fixtures__/solarReadResultStandalone.main-a021056e.json', 'utf8')
+    expect(createHash('sha256').update(raw).digest('hex')).toBe('e3c8dafa5a78cd21c7ef21f07e3a17dab34fb8ae852b972a6992302ae5ca3ae9')
+    const oracle = JSON.parse(raw)
+    expect(oracle.capturedOn).toBe('a021056e68896332d308529f5d1a60665a587fef')
+    expect(Object.keys(oracle.cases)).toEqual(['ampacity', 'acDrop', 'conduit', 'cable'])
+    for (const entry of Object.values(oracle.cases)) {
+      const actual = JSON.stringify(readResultView(entry.input))
+      expect(actual).toBe(entry.view)
+      expect(Buffer.byteLength(actual, 'utf8')).toBe(entry.viewBytes)
+      expect(createHash('sha256').update(actual).digest('hex')).toBe(entry.viewSha256)
+    }
+  })
+
+  it('R12-32 uses a frozen literal sentence map and safe static classification', () => {
+    expect(Object.isFrozen(PROJECT_READ_REASONS)).toBe(true)
+    expect(Object.keys(PROJECT_READ_REASONS)).toHaveLength(24)
+    expect(PROJECT_READ_REASONS).toEqual({
+      binding_invalid: 'Open a project drawing version before viewing this result.',
+      result_unreadable: 'This project result does not match the selected drawing version.',
+      artifact_unverified: 'This result names a file that could not be verified, so no download is offered.',
+      scope_stale: 'The drawing or session changed, so the download was discarded.',
+      client_unavailable: 'Project downloads are not available in this view.',
+      catalog_digest_required: 'Refresh the Solar tools before viewing this project result.',
+      request_invalid: 'This project output request could not be prepared.',
+      response_invalid: 'The server did not return a complete verified file.',
+      artifact_mismatch: 'The downloaded file did not match its record, so it was discarded.',
+      digest_unavailable: 'This browser could not check the downloaded file, so it was discarded.',
+      timeout: 'The download took too long, so try again.',
+      aborted: 'The download was cancelled.',
+      unauthenticated: 'Sign in again to download this file.',
+      forbidden: 'You do not have access to this file.',
+      not_found: 'This file or its source version is no longer available.',
+      stale: 'The drawing changed after this file was made, so run the tool again.',
+      unavailable: 'Project output storage is unavailable right now, so try again shortly.',
+      disabled: 'Project Solar outputs are not enabled on this server.',
+      unsupported: 'This Solar tool has no connected project output adapter.',
+      tool_changed: 'The Solar tool changed, so refresh the tools and run it again.',
+      entitlement: 'Your plan does not currently permit this project output.',
+      output_refused: 'This Solar output is unavailable for the selected drawing version.',
+      save_failed: 'The file downloaded but the browser could not save it.',
+      fallback: 'The download failed, so try again.',
+    })
+    for (const code of ['toString', '__proto__', 'constructor', 'unknown', 'credential /path', null, undefined]) {
+      expect(projectReadReason(code, 500)).toBe(PROJECT_READ_REASONS.fallback)
+      expect(projectReadReason(code, 401)).toBe(PROJECT_READ_REASONS.unauthenticated)
+      expect(projectReadReason(code, 403)).toBe(PROJECT_READ_REASONS.forbidden)
+      expect(projectReadReason(code, 404)).toBe(PROJECT_READ_REASONS.not_found)
+    }
+    for (const [code, sentence] of [
+      ['SIP_R12_BINDING_INVALID', PROJECT_READ_REASONS.binding_invalid],
+      ['SIP_R12_RESULT_INVALID', PROJECT_READ_REASONS.result_unreadable],
+      ['SIP_R12_ARTIFACT_REF_INVALID', PROJECT_READ_REASONS.artifact_unverified],
+      ['SIP_R12_SCOPE_STALE', PROJECT_READ_REASONS.scope_stale],
+      ['SIP_R12_CLIENT_UNAVAILABLE', PROJECT_READ_REASONS.client_unavailable],
+      ['SIP_R12_CATALOG_DIGEST_REQUIRED', PROJECT_READ_REASONS.catalog_digest_required],
+      ['SIP_R12_REQUEST_INVALID', PROJECT_READ_REASONS.request_invalid],
+      ['SIP_R12_RESPONSE_INVALID', PROJECT_READ_REASONS.response_invalid],
+      ['SIP_R12_ARTIFACT_MISMATCH', PROJECT_READ_REASONS.artifact_mismatch],
+      ['SIP_R12_DIGEST_UNAVAILABLE', PROJECT_READ_REASONS.digest_unavailable],
+      ['SIP_R12_TIMEOUT', PROJECT_READ_REASONS.timeout],
+      ['SIP_R12_ABORTED', PROJECT_READ_REASONS.aborted],
+      ['SIP_R12_STALE_CURRENT', PROJECT_READ_REASONS.stale],
+      ['SIP_R12_SAVE_FAILED', PROJECT_READ_REASONS.save_failed],
+      ['ARTIFACT_CORRUPT', PROJECT_READ_REASONS.artifact_mismatch],
+      ['SIP_R6_ARTIFACT_SOURCE_MISMATCH', PROJECT_READ_REASONS.artifact_mismatch],
+      ['ARTIFACT_NOT_FOUND', PROJECT_READ_REASONS.not_found],
+      ['project_execution_disabled', PROJECT_READ_REASONS.disabled],
+      ['ARTIFACT_STORE_UNAVAILABLE', PROJECT_READ_REASONS.unavailable],
+      ['ARTIFACT_WRITES_DRAINED', PROJECT_READ_REASONS.unavailable],
+      ['SIP_R6_TOOL_UNSUPPORTED', PROJECT_READ_REASONS.unsupported],
+      ['SIP_R6_TOOL_MANIFEST_MISMATCH', PROJECT_READ_REASONS.tool_changed],
+      ['ENTITLEMENT_POLICY_UNAVAILABLE', PROJECT_READ_REASONS.entitlement],
+      ['SCHEDULES_KERNEL_REFUSED', PROJECT_READ_REASONS.output_refused],
+      ['SIP_R7_TRANSPORT_FAILED', PROJECT_READ_REASONS.fallback],
+    ]) expect(projectReadReason(code, 500)).toBe(sentence)
+    const source = readFileSync(process.cwd() + '/src/solar/solarReadResultModel.js', 'utf8')
+    expect(source).not.toContain('PROJECT_READ_REASONS[')
   })
 })
