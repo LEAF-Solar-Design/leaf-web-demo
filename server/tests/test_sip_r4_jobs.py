@@ -23,7 +23,7 @@ from leaf_platform import canonical_jobs as jobs, entitlements
 from solar_design_graph import GraphValidationError
 from test_sip_r3a_graph import UNITS, prepare as seed, publish, refused
 from test_sip_r3b_tools import chain, memory, manifest, prepare  # noqa: F401
-from test_sip_r3b_chain import TEN, S, E, PANELS, rev4, commit, through_string
+from test_sip_r3b_chain import ELEVEN, S, E, PANELS, rev4, commit, through_string
 from test_w1_design_graph import graph as graph_fixture  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
 from test_w2_string_add import free_panels, solved  # noqa: F401
@@ -40,6 +40,8 @@ CLEAN = {
                                                        "max_ac_power_kw": 100}},
     "solar-string-add": S,
     "solar-string-multi-add": M,
+    "solar-string-conductors": {"operation": "set-conductors", "expected_rev": 1,
+        "assignments": [{"string_ref": "missing", "wire_gauge": "10 AWG"}]},
 }
 
 
@@ -127,7 +129,7 @@ def submit(a, **changes):
 
 
 def test_sip_r4_membership_and_worker_choice(monkeypatch):
-    assert graph.SUPPORTED_TOOLS == TEN
+    assert graph.SUPPORTED_TOOLS == ELEVEN
     assert set(worker.ADAPTERS) == {worker.autofill.TOOL_NAME, worker.arlo_design.TOOL_NAME}
     assert inspect.signature(worker.run_once).parameters["tool_name"].default == worker.autofill.TOOL_NAME
     source = inspect.getsource(worker.main)
@@ -143,11 +145,11 @@ def test_sip_r4_membership_and_worker_choice(monkeypatch):
             worker.main()
         assert exc.value.code == 0
     choice = next(action for action in parsers[0]._actions if action.dest == "tool")
-    assert choice.choices == sorted(set(worker.ADAPTERS) | TEN)
+    assert choice.choices == sorted(set(worker.ADAPTERS) | ELEVEN)
     assert choice.default == worker.autofill.TOOL_NAME
     calls = []
     monkeypatch.setattr(service, "run_once", lambda *a, **k: calls.append((a, k)) or False)
-    for tool in TEN:
+    for tool in ELEVEN:
         assert worker.run_once("owner", tool_name=tool) is False
         assert calls[-1][1]["tool_name"] == tool
     with pytest.raises(ValueError, match="no canonical solver adapter"):
@@ -211,8 +213,8 @@ def test_sip_r4_submission_no_secrets(admission, monkeypatch):
         calls.append(args[1])
         return original(*args, **kwargs)
     monkeypatch.setattr(service, "_validate_new_project_graph_params", spy)
-    assert set(CLEAN) == TEN
-    for name in sorted(TEN):
+    assert set(CLEAN) == ELEVEN
+    for name in sorted(ELEVEN):
         clean = deepcopy(CLEAN[name])
         assert not tool_validate.validate_params(solar_tools.trusted_record(name), clean)
         inserts, entitlements_read, preparations = (
@@ -333,12 +335,17 @@ def test_sip_r4_valid_admission_preparation(admission, monkeypatch):
     check_admitted(a, deepcopy(S), **at(a, monkeypatch, rev4(s), "solar-string-add"))
     ctx4 = rev4(s)
     check_admitted(a, deepcopy(M), **at(a, monkeypatch, ctx4, "solar-string-multi-add"))
-    assert len(a.accepted) == a.events.count("insert") == a.events.count("entitlement") == 6
+    conductor = {"operation": "set-conductors", "expected_rev": ctx5.graph["rev"],
+        "assignments": [{"string_ref": ctx5.graph["strings"][0]["id"], "wire_gauge": "10 AWG"}]}
+    check_admitted(a, conductor, **at(a, monkeypatch, ctx5, "solar-string-conductors"))
+    assert len(a.accepted) == a.events.count("insert") == a.events.count("entitlement") == 7
     for real, zero in ((seed(s), seed(s, job_id=UUID(int=0))),
                        (prepare(s, "solar-size-strings", sizing, ctx),
                         prepare(s, "solar-size-strings", sizing, ctx, job_id=UUID(int=0))),
                        (prepare(s, "solar-string-multi-add", M, ctx4),
-                        prepare(s, "solar-string-multi-add", M, ctx4, job_id=UUID(int=0)))):
+                        prepare(s, "solar-string-multi-add", M, ctx4, job_id=UUID(int=0))),
+                       (prepare(s, "solar-string-conductors", conductor, ctx5),
+                        prepare(s, "solar-string-conductors", conductor, ctx5, job_id=UUID(int=0)))):
         assert real.output_intake_bytes == zero.output_intake_bytes
         assert real.request["parameters"] == zero.request["parameters"]
 
@@ -370,13 +377,13 @@ def test_sip_r4_seed_parameter_admission(admission, monkeypatch):
 
 def test_sip_r4_every_tool_prepared_at_admission(admission, monkeypatch):
     # No tool reaches the job table without the worker's own preparation: with schema-valid parameters each
-    # of the ten refuses a graphless parent and a stale revision before the insert.
+    # of the eleven refuses a graphless parent and a stale revision before the insert.
     a = admission
-    for tool in sorted(TEN):
+    for tool in sorted(ELEVEN):
         check_admission_refusal(a, "GRAPH_NOT_EMBEDDED", deepcopy(CLEAN[tool]), tool_name=tool,
                                 tool_manifest_sha256=manifest(tool))
     ctx = chain(a.s, 1)[-1][2]
-    for tool in sorted(TEN):
+    for tool in sorted(ELEVEN):
         params = deepcopy(CLEAN[tool])
         params["expected_rev"] = 97
         check_admission_refusal(a, "STALE_GRAPH_REVISION", params, **at(a, monkeypatch, ctx, tool))
@@ -389,12 +396,13 @@ PREREQUISITE_REFUSALS = {
     "solar-schedule": "INVALID_ROUTE_POINT", "solar-size-strings": "MISSING_PANEL",
     "solar-string-add": "MISSING_PANEL",
     "solar-string-multi-add": "MISSING_PANEL",
+    "solar-string-conductors": "MISSING_STRING",
 }
 
 
 def test_sip_r4_prerequisite_refusals_at_admission(admission, monkeypatch):
     # On a seeded parent at the right revision the tool's own preparation decides admission, not only the
-    # context and revision checks: eight tools refuse with the worker's own code before the insert and the
+    # context and revision checks: nine tools refuse with the worker's own code before the insert and the
     # entitlement read, and the two with no unmet prerequisite are admitted.
     a = admission
     ctx = chain(a.s, 1)[-1][2]
@@ -403,7 +411,7 @@ def test_sip_r4_prerequisite_refusals_at_admission(admission, monkeypatch):
         params["expected_rev"] = 1
         check_admission_refusal(a, f"^{code}:", params, **at(a, monkeypatch, ctx, tool))
     assert not a.accepted and a.events.count("insert") == a.events.count("entitlement") == 0
-    for tool in sorted(set(TEN) - set(PREREQUISITE_REFUSALS)):
+    for tool in sorted(set(ELEVEN) - set(PREREQUISITE_REFUSALS)):
         params = deepcopy(CLEAN[tool])
         params["expected_rev"] = 1
         check_admitted(a, params, **at(a, monkeypatch, ctx, tool))
@@ -752,7 +760,7 @@ def test_sip_r4_no_http_activation(monkeypatch):
     monkeypatch.setattr(router.deps, "backedge_run_identity", lambda tenant, *a: tenant)
     monkeypatch.setattr(router.entitlements, "resolve_tier", lambda *a: "demo")
     monkeypatch.setattr(router, "_checkout_identity", lambda *a: ("Editor", 1))
-    for name in TEN:
+    for name in ELEVEN:
         tool = solar_tools.trusted_record(name)
         monkeypatch.setattr(router.deps, "find_tool", lambda *a: tool)
         response = router.run(router.RunRequest(tool=name, params={"expected_rev": 0},
@@ -768,7 +776,7 @@ def test_sip_r4_no_http_activation(monkeypatch):
         assert "submit_canonical_graph" not in source and "submit_project_graph_job" not in source
     for path in root.rglob("*broker*.py"):
         assert "submit_canonical_graph" not in path.read_text(encoding="utf-8")
-    for name in TEN:
+    for name in ELEVEN:
         assert "canonical_only" not in solar_tools.trusted_record(name)
 
 

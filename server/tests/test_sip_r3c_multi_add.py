@@ -20,7 +20,7 @@ from leaf_platform import canonical_jobs as jobs
 from test_sip_r3a_graph import publish, proof, refused
 from test_sip_r3b_tools import (chain, commit, embedded, forbidden, manifest, memory,  # noqa: F401
                                 output, prepare)
-from test_sip_r3b_chain import (TEN, PANELS, PARENT_INTAKE, PARENT_VERSION, PARENT_TIME,
+from test_sip_r3b_chain import (ELEVEN, PANELS, PARENT_INTAKE, PARENT_VERSION, PARENT_TIME,
                                 CONFIG, UNKNOWN, S, ORACLE, created, forge, rev4)
 import test_sip_r4_jobs as r4
 import test_sip_r5_policy as policy_cases
@@ -75,7 +75,7 @@ def job_proof(s, result, prepared, monkeypatch):
 
 
 def test_sip_r3c_multi_add_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == TEN and len(TEN) == 10
+    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 11
     assert adapter.CREATION_TOOLS == {"solar-string-add", "solar-assign-equipment", TOOL}
     assert adapter._tool(TOOL, manifest(TOOL)) == solar_tools.get(TOOL)
     refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: adapter._tool(TOOL, "x"))

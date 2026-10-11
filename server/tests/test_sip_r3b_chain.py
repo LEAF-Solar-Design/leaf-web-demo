@@ -22,9 +22,9 @@ from test_w2_string_add import free_panels, solved  # noqa: F401
 
 STRING = "solar-string-add"
 EQUIPMENT = "solar-assign-equipment"
-TEN = {"solar-settings", "solar-panels-from-drawing", "solar-size-strings",
+ELEVEN = {"solar-settings", "solar-panels-from-drawing", "solar-size-strings",
         "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
-        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add"}
+        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors"}
 # Measured on the R3b-1 chain: the rev-4 parent and its ordered panels.
 PARENT_VERSION = UUID("00000000-0000-0000-0000-00000000000c")
 PARENT_INTAKE = "aaffa0f67f4a30d0d1fb8bb6b07980d10e2cc5aceb5922ff227e9d598ad2c73b"
@@ -145,7 +145,7 @@ def derived(ctx, tool, params, kind, index):
 
 
 def test_sip_r3b_chain_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == TEN
+    assert adapter.SUPPORTED_TOOLS == ELEVEN
     for tool in ("solar-assign-strings", "solar-commit-solve",
                  "solar-pvcase-convert", "solar-solaredge-accept", "solar-trackers-to-panel-groups",
                  "solar-string-delete", "solar-correct-string"):

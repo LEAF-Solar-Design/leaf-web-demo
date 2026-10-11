@@ -27,10 +27,10 @@ import test_sip_r4_jobs as r4
 import test_w1_design_graph as w1
 
 
-TEN = frozenset((
+ELEVEN = frozenset((
     "solar-assign-equipment", "solar-combiners", "solar-feeders", "solar-homeruns",
     "solar-panels-from-drawing", "solar-schedule", "solar-settings",
-    "solar-size-strings", "solar-string-add", "solar-string-multi-add",
+    "solar-size-strings", "solar-string-add", "solar-string-multi-add", "solar-string-conductors",
 ))
 
 
@@ -111,11 +111,11 @@ def test_sip_r5_flag_defaults_off(monkeypatch):
 
 def test_sip_r5_exact_supported_identity(monkeypatch):
     a = setup(monkeypatch)
-    assert graph.SUPPORTED_TOOLS == TEN and len(solar_tools.entries()) == 53
+    assert graph.SUPPORTED_TOOLS == ELEVEN and len(solar_tools.entries()) == 53
     calls = []
     monkeypatch.setattr(service, "submit_project_graph_job", lambda *args, **kwargs:
         calls.append((args, kwargs)) or {"admissible": True, "replay": False})
-    for name in sorted(TEN):
+    for name in sorted(ELEVEN):
         tool = solar_tools.trusted_record(name)
         assert entitlements.tool_required_capability(tool) == "run_write"
         before = deepcopy(tool)
@@ -130,14 +130,14 @@ def test_sip_r5_exact_supported_identity(monkeypatch):
     for name in ("solar-assign-strings", "solar-pvcase-convert", "solar-commit-solve"):
         assert_refusal(request(a, {}, tool_name=name), "SIP_R3_TOOL_UNSUPPORTED",
             message="Project Solar admission unavailable.")
-    assert len(calls) == 10
+    assert len(calls) == 11
     r3a.refused("SIP_R3_TOOL_UNSUPPORTED", lambda: graph._tool("solar-assign-strings", "x"))
     r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-string-multi-add", "x"))
     r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-settings", "x"))
     result = request(a, {}, tenant=str(UUID(int=999)))
-    assert result["status_code"] == 409 and len(calls) == 10
+    assert result["status_code"] == 409 and len(calls) == 11
     monkeypatch.setattr(deps, "auth_live", lambda: True)
-    assert request(a, {})["status_code"] == 409 and len(calls) == 10
+    assert request(a, {})["status_code"] == 409 and len(calls) == 11
     tenant = deps.TenantContext(str(a.s.org), subject="verified-subject")
     assert request(a, {}, tenant=tenant)["status_code"] == 200
     assert calls[-1][0][0] is tenant
@@ -464,6 +464,16 @@ def test_sip_r5_catalog_states(monkeypatch):
                              input_version_id=ctx.parent_version_id)
     multi_invalid = request(a, {**r4.M, "expected_rev": 3}, tool_name="solar-string-multi-add",
                             input_version_id=ctx.parent_version_id)
+    _, _, strung = r4.through_string(a.s)
+    r4.at(a, monkeypatch, strung, "solar-string-conductors")
+    conductor = {"operation": "set-conductors", "expected_rev": strung.graph["rev"],
+        "assignments": [{"string_ref": strung.graph["strings"][0]["id"], "wire_gauge": "8 AWG"}]}
+    conductor_accepted = request(a, conductor, tool_name="solar-string-conductors",
+                                 input_version_id=strung.parent_version_id)
+    conductor_invalid = request(a, {**conductor, "expected_rev": strung.graph["rev"] - 1},
+                                tool_name="solar-string-conductors", input_version_id=strung.parent_version_id)
+    assert conductor_accepted["status_code"] == 200
+    assert_refusal(conductor_invalid, "STALE_GRAPH_REVISION")
     assert multi_accepted["status_code"] == 200
     assert_refusal(multi_invalid, "STALE_GRAPH_REVISION")
     for record, enabled, result, engine, ready, entitled, checked, reason, ent_reason in (
@@ -475,6 +485,12 @@ def test_sip_r5_catalog_states(monkeypatch):
             (solar_tools.trusted_record("solar-string-multi-add"), True, multi_accepted, True, True,
              True, True, None, None),
             (solar_tools.trusted_record("solar-string-multi-add"), True, multi_invalid, True, False,
+             False, True, "capability_not_ready", None),
+            (solar_tools.trusted_record("solar-string-conductors"), True, None, True, False,
+             False, False, "project_request_required", None),
+            (solar_tools.trusted_record("solar-string-conductors"), True, conductor_accepted, True, True,
+             True, True, None, None),
+            (solar_tools.trusted_record("solar-string-conductors"), True, conductor_invalid, True, False,
              False, True, "capability_not_ready", None),
             (untrusted, True, None, False, False, False, False, "project_adapter_unavailable", None),
             (tool, True, None, True, False, False, False, "project_request_required", None),

@@ -241,7 +241,7 @@ def test_sip_r5_supported_tools(lane, monkeypatch):
     calls = []
     monkeypatch.setattr(service, "submit_project_graph_job", lambda *args, **kwargs:
         calls.append((args, kwargs)) or {"job_id": str(lane.s.job)})
-    for name in sorted(policy_cases.TEN):
+    for name in sorted(policy_cases.ELEVEN):
         before = deepcopy(lane.tools[name])
         assert run(lane, {}, name).status_code == 202
         assert calls[-1][0][4] == name and calls[-1][0][0] is lane.tenant
@@ -250,7 +250,7 @@ def test_sip_r5_supported_tools(lane, monkeypatch):
         refusal(run(lane, {}, name), "SIP_R3_TOOL_UNSUPPORTED")
     lane.tools["solar-settings"]["description"] = "Changed record"
     refusal(run(lane, {}), "SIP_R3_TOOL_MANIFEST_MISMATCH")
-    assert len(calls) == 10
+    assert len(calls) == 11
 
 
 def test_sip_r5_binding_and_legacy_pins(lane, monkeypatch):
@@ -391,10 +391,11 @@ def test_sip_r5_catalog_unchecked(lane, monkeypatch):
     monkeypatch.setattr(project, "verify_at_admission", policy_cases.r4.forbidden)
     response = lane.client.get("/api/capabilities", params={"project_id": str(lane.s.project)})
     rows = states(response)
-    for name in policy_cases.TEN:
+    for name in policy_cases.ELEVEN:
         assert rows[name] == policy.project_catalog_availability(lane.tools[name], enabled=True)
         assert rows[name]["engine_ready"] and not rows[name]["admission_checked"]
     assert rows["solar-string-multi-add"]["refusal_reasons"] == ["project_request_required"]
+    assert rows["solar-string-conductors"]["refusal_reasons"] == ["project_request_required"]
     lane.tools["solar-settings"]["description"] = "Changed record"
     assert states(preview(lane))["solar-settings"]["refusal_reasons"] == ["project_adapter_unavailable"]
     assert not lane.a.events
@@ -426,10 +427,10 @@ def test_sip_r5_catalog_preview(lane, monkeypatch):
     monkeypatch.setattr(service, "submit_project_graph_job", lambda *args, **kwargs:
         {"admissible": True, "replay": False})
     entries = {name: {"params": {}, "catalog_digest": deps.catalog_tool_digest(lane.tools[name]),
-                      "idempotency_key": "key"} for name in policy_cases.TEN}
+                      "idempotency_key": "key"} for name in policy_cases.ELEVEN}
     response = preview(lane, project_runs=json.dumps(entries))
-    assert all(states(response)[name]["runnable"] for name in policy_cases.TEN)
-    assert len(calls) == 10 and len({name for name, _ in calls}) == 10
+    assert all(states(response)[name]["runnable"] for name in policy_cases.ELEVEN)
+    assert len(calls) == 11 and len({name for name, _ in calls}) == 11
     missing = states(preview(lane, input_version_id=""))["solar-settings"]
     assert missing["admission"]["status_code"] == 400
     assert missing["admission"]["error"]["message"] == "a canonical drawing version UUID is required"
@@ -484,6 +485,24 @@ def test_sip_r5_catalog_run_parity(lane, monkeypatch):
                 ({"ordered_panel_refs": [params["ordered_panel_refs"][0]] * 2},
                  "DUPLICATE_PANEL_MEMBERSHIP")):
             state, response = compare({**params, **changes}, "solar-string-multi-add",
+                                      input_version_id=str(ctx.parent_version_id))
+            assert not state["runnable"] and state["admission_checked"]
+            refusal(response, code, message="Canonical Solar request was refused.")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(canonical_jobs, "get_project_graph_job_by_key", lambda *args, **kwargs: None)
+        _, _, ctx = policy_cases.r4.through_string(lane.s)
+        policy_cases.r4.at(lane.a, patch, ctx, "solar-string-conductors")
+        params = {"operation": "set-conductors", "expected_rev": ctx.graph["rev"],
+            "assignments": [{"string_ref": ctx.graph["strings"][0]["id"], "wire_gauge": "8 AWG"}]}
+        state, response = compare(params, "solar-string-conductors",
+                                  input_version_id=str(ctx.parent_version_id))
+        assert state["runnable"] and response.status_code == 202
+        for changes, code in (({"expected_rev": ctx.graph["rev"] - 1}, "STALE_GRAPH_REVISION"),
+                ({"assignments": [{"string_ref": "missing", "wire_gauge": "8 AWG"}]}, "MISSING_STRING"),
+                ({"assignments": params["assignments"] * 2}, "DUPLICATE_STRING_ASSIGNMENT"),
+                ({"assignments": [{"string_ref": "missing", "wire_gauge": "9 AWG"}]}, "INVALID_SETTINGS_REQUEST")):
+            state, response = compare({**params, **changes}, "solar-string-conductors",
                                       input_version_id=str(ctx.parent_version_id))
             assert not state["runnable"] and state["admission_checked"]
             refusal(response, code, message="Canonical Solar request was refused.")
