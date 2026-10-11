@@ -32,6 +32,7 @@ SUPPORTED_TOOLS = frozenset((
     "solar-string-add",
     "solar-assign-equipment",
     "solar-string-multi-add",
+    "solar-string-conductors",
 ))
 # Sizing runs only its pure manual-global branch here; every other mode needs stored
 # service evidence this path does not have and is refused before the builtin loads.

@@ -84,8 +84,8 @@ def test_sip_r1_gate_registration():
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
-    assert suites["platform"].expected == 322  # 2026-10-11: sip-r3c adds six PostgreSQL rows.
-    assert suites["gate-runner-selftest"].expected == 101  # 2026-10-11: sip-r3c registration row.
+    assert suites["platform"].expected == 328  # 2026-10-11: sip-r3d adds six PostgreSQL rows.
+    assert suites["gate-runner-selftest"].expected == 102  # 2026-10-11: sip-r3d registration row.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4124,6 +4124,26 @@ def test_sip_r3c_multi_add_gate_registration():
         assert suite.id == suite_id
         assert suite.cwd == REPO / directory
         assert suite.argv == runner._py_pytest("tests/test_sip_r3c_multi_add.py")
+        assert suite.kind == "pytest" and suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert suite.allowed_skip_reasons == ()
+        assert suite.database_skip_reasons == (
+            (r"PostgreSQL integration test requires DATABASE_URL",) if database else ())
+        assert selection["mandatory_suite_ids"].count(suite_id) == 1
+    assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_sip_r3d_conductors_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suite_id, directory, floor, database in (
+            ("server-sip-r3d-conductors", "server", 12, False),
+            ("platform-sip-r3d-conductors", "platform", 6, True)):
+        suite = suites[suite_id]
+        assert suite.id == suite_id
+        assert suite.cwd == REPO / directory
+        assert suite.argv == runner._py_pytest("tests/test_sip_r3d_conductors.py")
         assert suite.kind == "pytest" and suite.expected == floor
         assert suite.uses_database is database and suite.db_gated is database
         assert suite.allowed_skip_reasons == ()
