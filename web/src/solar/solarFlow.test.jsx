@@ -91,6 +91,68 @@ it('R11-04 artifact history and announcements cannot cross project artifact or a
   expect(h.unsubscribes.every((unsubscribe) => unsubscribe.mock.calls.length === 1)).toBe(true)
 })
 
+
+it('R9-42 project rail opens each specialized form for canonical context and same-intent handoff', async () => {
+  for (const name of ['solar-size-strings', 'solar-string-conductors']) {
+    const h = await projectRailHarness()
+    const review = { ...READY, input_ready: false, runnable: false, admission_checked: false,
+      admission: null, refusal_reasons: ['project_request_required'] }
+    const label = name === 'solar-size-strings' ? 'Size strings' : 'String conductors'
+    const step = { ...row(name, 20, label, review), catalog_digest: projectRailDigest }
+    if (name === 'solar-string-conductors') step.params = conductorDeclaration.record.params
+    h.families = [{ capabilities: [step] }]
+    const graph = { rev: 7, settings: { id: 'S', panels_in_sequence: 3, extra: {} },
+      project: { zip_code: '' }, panels: [{ id: 'P1' }], electrical_zones: [],
+      strings: [{ id: 'T1', circuit_tag: 'A1', wire_gauge: '' }] }
+    const context = { context: { ...projectRailBinding, head_version_id: projectRailBinding.input_version_id,
+      is_head: true, intake_sha256: 'a'.repeat(64) },
+    intake: { solar_design_graph: graph, solar_design_graph_sha256: 'b'.repeat(64) } }
+    h.fetchImpl.mockImplementation(async (url) => {
+      const data = url.includes('/context?') ? context : { families: h.families }
+      return { ok: true, status: 200, json: async () => data }
+    })
+    h.client.readContext = vi.fn(h.real.readContext)
+    h.client.catalog = vi.fn(h.real.catalog)
+    h.props = { ...h.props, projectCatalog: await h.catalog(), catalogDigest: projectRailDigest,
+      newProjectIntentKey: vi.fn(() => 'r9-rail-key'), onProjectSubmit: vi.fn(async () => ({
+        ok: true, status: 202, data: { status: 'submitted', job_id: '77777777-7777-7777-7777-777777777777' },
+      })), readIntake: vi.fn(), onSubmit: vi.fn() }
+    function Host() {
+      const [opened, setOpened] = React.useState(null)
+      return <>
+        <SolarFlowRail {...h.props} onOpenStep={(next) => { h.props.onOpenStep(next); setOpened(next) }} />
+        {opened && <SolarStepEditor {...h.props} row={opened} onClose={() => setOpened(null)} />}
+      </>
+    }
+    render(<Host />)
+    const open = screen.getByRole('button', { name: new RegExp('^' + label) })
+    expect(open.disabled).toBe(false)
+    expect(open.closest('li').getAttribute('data-status')).toBe('review')
+    const admitted = { ...step, availability: { ...READY, runnable: true, admission_checked: true,
+      admission: { status_code: 200, error: null } } }
+    h.families = [{ capabilities: [admitted] }]
+    fireEvent.click(open)
+    if (name === 'solar-string-conductors') {
+      await waitFor(() => expect(screen.getByLabelText('Select A1')).toBeTruthy())
+      fireEvent.click(screen.getByRole('button', { name: 'Select all' }))
+      fireEvent.change(screen.getByLabelText('Conductor'), { target: { value: '10 AWG' } })
+    }
+    const action = name === 'solar-size-strings' ? 'Review & run' : 'Apply to selected strings'
+    await waitFor(() => expect(screen.getByRole('button', { name: action }).disabled).toBe(false))
+    const intent = h.client.catalog.mock.calls[0][0].intents[0]
+    fireEvent.click(screen.getByRole('button', { name: action }))
+    await waitFor(() => expect(screen.getByText('Request submitted.')).toBeTruthy())
+    expect(h.props.onOpenStep).toHaveBeenCalledExactlyOnceWith(step)
+    expect(h.client.readContext).toHaveBeenCalledTimes(2)
+    expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent)
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+    expect(open.closest('li').getAttribute('data-status')).toBe('review')
+    expect(screen.getByTestId('solar-flow-announce').textContent).toBe('')
+    cleanup()
+  }
+})
+
 it('R11-15 stale catalog provenance withdraws project actions resume and readiness at render and click time', async () => {
   const h = await projectRailHarness()
   const catalogV = h.props.projectCatalog

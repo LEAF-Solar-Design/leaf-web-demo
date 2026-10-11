@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import declaration from '../../../server/solar_tools/solar_string_conductors.json'
 import SolarConductorForm from './SolarConductorForm.jsx'
+import { PROJECT_SIZING_CONDUCTOR_REASONS, projectSizingConductorReason } from './solarSizingModel.js'
+import { createSolarProjectClient } from './solarProjectClient.js'
 
 afterEach(() => { cleanup(); vi.useRealTimers() })
 const row = declaration.record
@@ -41,7 +43,320 @@ async function setup(overrides = {}) {
   return { ...view, props }
 }
 
+
+const R9Form = SolarConductorForm
+const r9Tool = 'solar-string-conductors'
+const r9Row = () => ({ ...row, catalog_digest: r9Digest })
+const r9Graph = () => fixture().intake.solar_design_graph
+const r9Button = apply
+
+const r9Binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
+  project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
+  input_version_id: '44444444-4444-4444-4444-444444444444' }
+const r9Next = { ...r9Binding, input_version_id: '55555555-5555-5555-5555-555555555555' }
+const r9Digest = 'sha256:' + 'd'.repeat(64)
+const r9Job = '77777777-7777-7777-7777-777777777777'
+const r9Clients = []
+afterEach(() => { for (const client of r9Clients.splice(0)) client.dispose() })
+const r9Deferred = () => {
+  let resolve, reject
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+const r9Submitted = () => ({ ok: true, status: 202, data: { status: 'submitted', job_id: r9Job } })
+function r9Preview(tool, digest = r9Digest, availability = {}) {
+  return { ok: true, status: 200, data: { families: [{ capabilities: [{ name: tool,
+    catalog_digest: digest, availability: { entitled: true, engine_ready: true, implemented: true,
+      input_ready: true, runnable: true, admission_checked: true, admission: { status_code: 200, error: null },
+      refusal_reasons: [], ...availability } }] }] } }
+}
+function r9Context(graph = r9Graph(), binding = r9Binding) {
+  return { context: { ...binding, head_version_id: binding.input_version_id,
+    is_head: true, intake_sha256: 'a'.repeat(64) },
+  intake: { solar_design_graph: graph, solar_design_graph_sha256: 'b'.repeat(64) } }
+}
+function r9Harness() {
+  const h = { context: r9Context(), contextQueue: [], previewQueue: [], unsubscribes: [],
+    preview: r9Preview(r9Tool) }
+  h.fetchImpl = vi.fn(async (url, options) => {
+    let data = h.context, status = 200
+    if (url.includes('/api/capabilities?')) data = h.preview.data
+    else if (url.endsWith('/checkout')) {
+      const b = h.real.getSnapshot().binding
+      data = { organization_id: b.organization_id, project_id: b.project_id, drawing_id: b.drawing_id,
+        acquired: true, checkout: { holder: 'synthetic editor', acquired: '2026-01-01T00:00:00Z',
+          expires: '2099-01-01T00:00:00Z', fence: '1' }, checkout_capability: 'lco1.' + 'c'.repeat(64) }
+    } else if (url.endsWith('/api/run')) { data = r9Submitted().data; status = 202 }
+    return { ok: true, status, json: async () => data }
+  })
+  h.real = createSolarProjectClient({ fetchImpl: h.fetchImpl, authHeaders: () => ({ Authorization: 'synthetic-session' }) })
+  h.real.setScope(r9Binding, 'epoch-1')
+  r9Clients.push(h.real)
+  h.client = { ...h.real,
+    readContext: vi.fn((options) => h.contextQueue.length ? Promise.resolve(h.contextQueue.shift()) : h.real.readContext(options)),
+    catalog: vi.fn((options) => h.previewQueue.length ? Promise.resolve(h.previewQueue.shift()) : h.real.catalog(options)),
+    prepareRun: vi.fn(h.real.prepareRun),
+    subscribe: vi.fn((listener) => {
+      const unsubscribe = vi.fn(h.real.subscribe(listener)); h.unsubscribes.push(unsubscribe); return unsubscribe
+    }), dispose: vi.fn(h.real.dispose), acquireCheckout: vi.fn(h.real.acquireCheckout), releaseCheckout: vi.fn(h.real.releaseCheckout),
+    setScope: vi.fn(h.real.setScope),
+  }
+  h.props = { row: r9Row(), solarBinding: r9Binding, authorityKey: 'epoch-1', projectClient: h.client,
+    catalogDigest: r9Digest, newProjectIntentKey: vi.fn(() => 'r9-key-' + (h.client.prepareRun.mock.calls.length + 1)),
+    onProjectSubmit: vi.fn(async () => r9Submitted()), onSubmit: vi.fn(), readIntake: vi.fn(), onClose: vi.fn() }
+  return h
+}
+const r9Settle = async () => { await act(async () => {}) }
+async function r9Ready() { await waitFor(() => expect(r9Button().disabled).toBe(false)) }
+function r9Rebind(view, h, changes) {
+  h.props = { ...h.props, ...changes }
+  h.context = r9Context(r9Graph(), h.props.solarBinding)
+  act(() => h.real.setScope(h.props.solarBinding, h.props.authorityKey))
+  view.rerender(<R9Form {...h.props} />)
+}
+const r9Sentences = {
+  "binding_invalid": "Open a project drawing version before changing Solar sizing or conductors.",
+  "context_unreadable": "This project drawing version could not be read. Reload it and try again.",
+  "not_current_head": "Select the current project drawing version before making this change.",
+  "version_digest_unavailable": "This project drawing version has no usable intake digest. Reload it and try again.",
+  "graph_unreadable": "The Solar design in this project drawing could not be read.",
+  "graphless": "Start a Solar design in Solar settings before sizing strings or choosing conductors.",
+  "scope_stale": "The drawing or session changed. Review the current inputs before submitting.",
+  "catalog_digest_required": "Refresh the Solar tools before preparing this change.",
+  "idempotency_key_required": "This request could not be prepared. Try again.",
+  "preview_required": "Checking whether this change can be applied to this project drawing.",
+  "preview_refused": "This change cannot be applied. Review the refusal and try again.",
+  "submit_unavailable": "Project Solar submission is not available in this view.",
+  "request_invalid": "This request could not be prepared. Review the inputs and try again.",
+  "manual_only": "Project string sizing supports the saved global length only.",
+  "project_adapter_unavailable": "Conductor changes are not available for project drawings on this server.",
+  "checkout_required": "The project checkout must be available before this new change can run.",
+  "access_denied": "Your current session cannot make this project drawing change.",
+  "service_unavailable": "Project Solar is unavailable. Try again when the service is available.",
+  "request_timeout": "The request timed out. Its submission status is uncertain; retry the same request.",
+  "request_cancelled": "The request stopped locally. Check its status before retrying."
+}
+
 describe('SolarConductorForm', () => {
+  it('R9-47 a conflicting project id refuses before context preview or handoff', async () => {
+    const h = r9Harness()
+    render(<SolarConductorForm {...h.props} projectId="99999999-9999-9999-9999-999999999999" />)
+    await r9Settle()
+    expect(screen.getByText(PROJECT_SIZING_CONDUCTOR_REASONS.binding_invalid)).toBeTruthy()
+    expect(apply().disabled).toBe(true)
+    fireEvent.click(apply())
+    expect(h.client.readContext).not.toHaveBeenCalled()
+    expect(h.client.catalog).not.toHaveBeenCalled()
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('R9-50 a bare successful conductor 202 shows invalid feedback and offers retry', async () => {
+    const h = r9Harness()
+    h.props.onProjectSubmit.mockResolvedValue({ ok: true, status: 202 })
+    render(<SolarConductorForm {...h.props} />)
+    await waitFor(() => expect(stringRow('A1')).toBeTruthy())
+    choose()
+    await r9Ready()
+    fireEvent.click(apply())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy())
+    expect(screen.getByTestId('project-solar-conductor-feedback').textContent)
+      .toBe(PROJECT_SIZING_CONDUCTOR_REASONS.request_invalid)
+    expect(screen.queryByText('Request submitted.')).toBeNull()
+    expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1)
+  })
+
+  it('R9-55 the step editor project marker true admits the canonical binding through the handoff', async () => {
+    const h = r9Harness()
+    render(<SolarConductorForm {...h.props} projectId />)
+    await waitFor(() => expect(stringRow('A1')).toBeTruthy())
+    choose()
+    await r9Ready()
+    fireEvent.click(apply())
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1))
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+    for (const projectId of [false, 1, {}, '']) {
+      cleanup()
+      const refused = r9Harness()
+      render(<SolarConductorForm {...refused.props} projectId={projectId} />)
+      await r9Settle()
+      expect(screen.getByText(PROJECT_SIZING_CONDUCTOR_REASONS.binding_invalid)).toBeTruthy()
+      expect(refused.client.readContext).not.toHaveBeenCalled()
+      expect(refused.client.catalog).not.toHaveBeenCalled()
+      expect(refused.props.onProjectSubmit).not.toHaveBeenCalled()
+    }
+  })
+
+
+  it('R9-19 ordinary unchecked conductor catalogs open review but cannot arm a run', async () => {
+    const h = r9Harness()
+    h.preview = r9Preview(r9Tool, r9Digest, { input_ready: false, runnable: false,
+      admission_checked: false, admission: null, refusal_reasons: ['project_request_required'] })
+    render(<SolarConductorForm {...h.props} />)
+    await waitFor(() => expect(stringRows()).toHaveLength(2))
+    expect(selectedIds()).toEqual([])
+    expect(screen.getByLabelText('Conductor').value).toBe('')
+    choose()
+    await waitFor(() => expect(screen.getByTestId('project-solar-conductor-feedback')).toBeTruthy())
+    expect(apply().disabled).toBe(true)
+    fireEvent.click(apply())
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+  })
+
+  it('R9-20 synthetic exact conductor admission arms the canonical intent and handoff', async () => {
+    const h = r9Harness()
+    h.props.onProjectSubmit = vi.fn((intent, options) => h.real.submitRun(intent, { signal: options.signal }))
+    render(<SolarConductorForm {...h.props} />)
+    await waitFor(() => expect(stringRows()).toHaveLength(2))
+    choose()
+    await r9Ready()
+    const intent = h.client.catalog.mock.calls[0][0].intents[0]
+    expect(intent.params).toEqual({ drawing_id: r9Binding.drawing_id, ...expected })
+    fireEvent.click(apply())
+    await waitFor(() => expect(screen.getByText('Request submitted.')).toBeTruthy())
+    expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent)
+    const wire = h.fetchImpl.mock.calls.find(([url]) => url.endsWith('/api/run'))[1]
+    expect(JSON.parse(wire.body)).toEqual({ tool: r9Tool, params: intent.params,
+      dwg: r9Binding.input_version_id, catalog_digest: r9Digest })
+    expect(selectedIds()).toEqual(['T1', 'T2'])
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+  })
+
+  it('R9-21 nested builtin conductor refusals preserve their safe codes and never hand off', async () => {
+    for (const code of ['STALE_GRAPH_REVISION', 'DUPLICATE_STRING_ASSIGNMENT', 'MISSING_STRING']) {
+      const h = r9Harness()
+      h.preview = r9Preview(r9Tool, r9Digest, { runnable: false, admission: { status_code: 409,
+        error: { reason_code: code } }, refusal_reasons: [code] })
+      render(<SolarConductorForm {...h.props} />)
+      await waitFor(() => expect(stringRows()).toHaveLength(2))
+      choose()
+      await waitFor(() => expect(screen.getByTestId('project-solar-conductor-feedback').textContent)
+        .toBe(PROJECT_SIZING_CONDUCTOR_REASONS.preview_refused + ' (' + code + ')'))
+      expect(apply().disabled).toBe(true)
+      fireEvent.click(apply())
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
+
+  it('R9-22 schema admission refusals show INVALID_SETTINGS_REQUEST without promising builtin codes', async () => {
+    for (const invalid of [
+      { assignments: [{ string_ref: 'T1', wire_gauge: 'invalid' }] },
+      { assignments: [] }, { operation: 'wrong' },
+      { assignments: [{ string_ref: 'T1', wire_gauge: '10 AWG', extra: true }] },
+    ]) {
+      const h = r9Harness()
+      h.preview = r9Preview(r9Tool, r9Digest, { runnable: false, admission: { status_code: 422,
+        error: { reason_code: 'INVALID_SETTINGS_REQUEST', details: invalid } }, refusal_reasons: ['INVALID_SETTINGS_REQUEST'] })
+      render(<SolarConductorForm {...h.props} />)
+      await waitFor(() => expect(stringRows()).toHaveLength(2))
+      choose()
+      await waitFor(() => expect(screen.getByTestId('project-solar-conductor-feedback').textContent)
+        .toBe(PROJECT_SIZING_CONDUCTOR_REASONS.preview_refused + ' (INVALID_SETTINGS_REQUEST)'))
+      expect(apply().disabled).toBe(true)
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
+
+  it('R9-39 StrictMode unmount and scope invalidation cancel owned work and delayed touch selection', async () => {
+    const h = r9Harness()
+    const view = render(<React.StrictMode><SolarConductorForm {...h.props} /></React.StrictMode>)
+    await waitFor(() => expect(stringRows()).toHaveLength(2))
+    expect(h.unsubscribes[0]).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers()
+    pointer(stringRow('A1'), 'pointerdown')
+    const old = stringRow('A1')
+    h.props = { ...h.props, solarBinding: r9Next }
+    h.context = r9Context(r9Graph(), r9Next)
+    act(() => h.real.setScope(r9Next, 'epoch-1'))
+    view.rerender(<React.StrictMode><SolarConductorForm {...h.props} /></React.StrictMode>)
+    await r9Settle()
+    act(() => vi.advanceTimersByTime(1000))
+    expect(selectedIds()).toEqual([])
+    fireEvent.click(old)
+    expect(selectedIds()).toEqual([])
+    vi.useRealTimers()
+    await waitFor(() => expect(stringRows()).toHaveLength(2))
+    const late = r9Deferred(); h.previewQueue.push(late.promise)
+    choose()
+    await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(1))
+    const signal = h.client.catalog.mock.calls[0][0].signal
+    view.unmount()
+    expect(signal.aborted).toBe(true)
+    expect(h.unsubscribes.every((unsubscribe) => unsubscribe.mock.calls.length === 1)).toBe(true)
+    await act(async () => late.resolve(r9Preview(r9Tool)))
+    expect(h.client.dispose).not.toHaveBeenCalled()
+    expect(h.client.setScope).not.toHaveBeenCalled()
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+  })
+
+  it('R9-45 fixed sentence maps and project mouse range keyboard touch and focus semantics survive', async () => {
+    expect(Object.isFrozen(PROJECT_SIZING_CONDUCTOR_REASONS)).toBe(true)
+    expect(PROJECT_SIZING_CONDUCTOR_REASONS).toEqual(r9Sentences)
+    for (const [key, sentence] of Object.entries(r9Sentences)) expect(projectSizingConductorReason(key)).toBe(sentence)
+    expect(projectSizingConductorReason('unknown')).toBeNull()
+    const h = r9Harness()
+    h.context = r9Context(four().intake.solar_design_graph)
+    const view = render(<SolarConductorForm {...h.props} />)
+    await waitFor(() => expect(stringRows()).toHaveLength(4))
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(stringRows().every((item) => item.tabIndex === 0)).toBe(true)
+    fireEvent.click(stringRow('A1'))
+    fireEvent.click(stringRow('A3'), { shiftKey: true })
+    expect(selectedIds()).toEqual(['T1', 'T2', 'T3'])
+    fireEvent.click(stringRow('A2'), { ctrlKey: true })
+    expect(selectedIds()).toEqual(['T1', 'T3'])
+    fireEvent.click(stringRow('A4'), { metaKey: true })
+    expect(selectedIds()).toEqual(['T1', 'T3', 'T4'])
+    stringRow('A1').focus()
+    fireEvent.keyDown(stringRow('A1'), { key: 'ArrowDown' })
+    expect(stringRow('A2')).toHaveFocus()
+    fireEvent.keyDown(stringRow('A2'), { key: 'x' })
+    expect(selectedIds()).toEqual(['T1', 'T2', 'T3', 'T4'])
+    fireEvent.keyDown(stringRow('A3'), { key: 'Enter' })
+    expect(selectedIds()).toEqual(['T3'])
+    fireEvent.keyDown(stringRow('A4'), { key: ' ', shiftKey: true })
+    expect(selectedIds()).toEqual(['T3', 'T4'])
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }))
+    vi.useFakeTimers()
+    pointer(stringRow('A1'), 'pointerdown')
+    act(() => vi.advanceTimersByTime(500))
+    pointer(stringRow('A1'), 'pointerup'); fireEvent.click(stringRow('A1'))
+    expect(selectedIds()).toEqual(['T1'])
+    tap(stringRow('A2'))
+    expect(selectedIds()).toEqual(['T1', 'T2'])
+    vi.useRealTimers()
+    fireEvent.change(screen.getByLabelText('Conductor'), { target: { value: '10 AWG' } })
+    await r9Ready()
+    const oldIntent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+    const previewCalls = h.client.catalog.mock.calls.length
+    fireEvent.click(stringRow('A2'), { ctrlKey: true })
+    fireEvent.click(stringRow('A2'), { ctrlKey: true })
+    await r9Ready()
+    const roundTripIntent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+    expect(roundTripIntent.idempotencyKey).not.toBe(oldIntent.idempotencyKey)
+    fireEvent.change(screen.getByLabelText('Conductor'), { target: { value: '10 AWG' } })
+    await r9Settle()
+    expect(h.client.catalog.mock.calls.length).toBeGreaterThan(previewCalls)
+    expect(h.client.catalog.mock.calls.at(-1)[0].intents[0]).toBe(roundTripIntent)
+    fireEvent.change(screen.getByLabelText('Conductor'), { target: { value: '8 AWG' } })
+    expect(apply().disabled).toBe(true)
+    await r9Ready()
+    const inputIntent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+    expect(inputIntent.idempotencyKey).not.toBe(oldIntent.idempotencyKey)
+    const nextRow = JSON.parse(JSON.stringify(h.props.row))
+    nextRow.params.properties.assignments.items.properties.wire_gauge.enum.reverse()
+    h.props = { ...h.props, row: nextRow }
+    view.rerender(<SolarConductorForm {...h.props} />)
+    expect(apply().disabled).toBe(true)
+    await r9Ready()
+    expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].idempotencyKey).not.toBe(inputIntent.idempotencyKey)
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+  })
   it('CF1 displays stored choices with no implicit selection or conductor', async () => {
     await setup()
     const table = screen.getByRole('table', { name: 'String conductors' })
@@ -205,17 +520,26 @@ describe('SolarConductorForm', () => {
     expect(props.onSubmit.mock.calls[1][1]).toEqual({ ...expected, expected_rev: 8 })
   })
 
-  it('CF8 refuses project scope and absent drawings without reading intake', async () => {
-    for (const override of [{ projectId: 'p1' }, { drawingId: null }]) {
-      const { props } = await setup(override)
-      expect(screen.getByText('This form supports standalone drawings only.')).toBeTruthy()
-      expect(apply().disabled).toBe(true)
-      expect(stringRows()).toHaveLength(0)
-      expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
-      expect(screen.getByLabelText('Conductor').disabled).toBe(true)
-      expect(props.readIntake).not.toHaveBeenCalled()
-      cleanup()
-    }
+  it('CF8a incomplete project intent refuses with binding_invalid before any reader', async () => {
+    const readContext = vi.fn()
+    const onProjectSubmit = vi.fn()
+    const { props } = await setup({ projectId: 'p1', projectClient: { readContext }, onProjectSubmit })
+    expect(screen.getByText('Open a project drawing version before changing Solar sizing or conductors.')).toBeTruthy()
+    expect(apply().disabled).toBe(true)
+    expect(props.readIntake).not.toHaveBeenCalled()
+    expect(readContext).not.toHaveBeenCalled()
+    expect(props.onSubmit).not.toHaveBeenCalled()
+    expect(onProjectSubmit).not.toHaveBeenCalled()
+  })
+
+  it('CF8b an absent standalone drawing keeps its sentence and disabled controls without reading intake', async () => {
+    const { props } = await setup({ drawingId: null })
+    expect(screen.getByText('This form supports standalone drawings only.')).toBeTruthy()
+    expect(apply().disabled).toBe(true)
+    expect(stringRows()).toHaveLength(0)
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(screen.getByLabelText('Conductor').disabled).toBe(true)
+    expect(props.readIntake).not.toHaveBeenCalled()
   })
 
   it('CF9 invalid graph envelopes produce no string rows', async () => {

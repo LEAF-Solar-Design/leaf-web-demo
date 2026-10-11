@@ -1,4 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { createRunSubmissionRequest } from '../runIntent.js'
+import r9Declaration from '../../../server/solar_tools/solar_string_conductors.json'
+import { deriveProjectSizingState, buildProjectSizingRequest } from './solarSizingModel.js'
+import { conductorRows, conductorGaugeOptions, buildConductorParams, deriveProjectConductorState } from './solarConductorModel.js'
 import { buildSizingParams, MODULE_PARAMETER_KEYS, sizingGraph, sizingResponseValid, sizingTargets, SOLAR_SIZING_REASONS } from './solarSizingModel.js'
 
 const MIN = { cells: 81, voc: 52.58, isc: 13.9965, pmp: 595.5, vmp: 44.64, imp: 13.33,
@@ -17,7 +23,171 @@ const draft = () => ({ module_name: 'Module', full_inverter_name: 'Inverter', bi
   max_voltage: '1500', thermal_model_type: 'close mount glass glass', open_circuit_rise: false, grant_ref: 'grant_1' })
 const build = (changes = {}, graph = read(), mode = 'global') => buildSizingParams({ graph, mode, draft: { ...draft(), ...changes } })
 
+const r9Binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
+  project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
+  input_version_id: '44444444-4444-4444-4444-444444444444' }
+const r9Digest = 'sha256:' + 'd'.repeat(64)
+const r9Context = (graph) => ({ context: { ...r9Binding, head_version_id: r9Binding.input_version_id,
+  is_head: true, intake_sha256: 'a'.repeat(64) }, intake: { solar_design_graph: graph,
+  solar_design_graph_sha256: 'b'.repeat(64) } })
+const r9Oracle = JSON.parse(readFileSync(`${process.cwd()}/src/solar/__fixtures__/solarSizingConductorStandalone.main-f139ceba.json`, 'utf8'))
+const r9Manual = () => ({ ...raw(), settings: { ...raw().settings, panels_in_sequence: 3 }, project: { zip_code: '' }, electrical_zones: [] })
+
 describe('solarSizingModel', () => {
+
+  it('R9-01 canonical context cannot pass either legacy version envelope', () => {
+    const context = r9Context(raw())
+    expect(sizingGraph(context, null)).toEqual({ ok: false, reason: 'sizing_graph_unavailable' })
+    expect(conductorRows(context, null)).toEqual({ ok: false, reason: 'conductor_graph_unavailable' })
+  })
+
+  it('R9-02 sizing state copies and deeply freezes exact canonical identities and graph fields', () => {
+    const source = r9Context(raw())
+    const before = JSON.stringify(source)
+    const state = deriveProjectSizingState({ binding: r9Binding, contextView: source })
+    expect(state).toEqual({ mode: 'edit', binding: r9Binding, intakeSha256: 'a'.repeat(64),
+      graphSha256: 'b'.repeat(64), rev: 7, graph: read(), savedZip: '44224-1234' })
+    const frozen = (value) => {
+      if (value && typeof value === 'object') {
+        expect(Object.isFrozen(value)).toBe(true)
+        Object.values(value).forEach(frozen)
+      }
+    }
+    frozen(state)
+    expect(Object.isFrozen(source.intake.solar_design_graph.panels)).toBe(false)
+    expect(JSON.stringify(source)).toBe(before)
+    source.intake.solar_design_graph.panels[0].id = 'changed'
+    expect(state.graph.panels[0].id).toBe('P1')
+  })
+
+  it('R9-04 binding shape and data descriptors reject incomplete extra accessor and noncanonical IDs', () => {
+    const accessor = { ...r9Binding }
+    Object.defineProperty(accessor, 'drawing_id', { get() { throw new Error('must not read') }, enumerable: true })
+    for (const binding of [null, { ...r9Binding, extra: true }, { ...r9Binding, kind: undefined },
+      Object.fromEntries(Object.entries(r9Binding).filter(([key]) => key !== 'drawing_id')), accessor,
+      { ...r9Binding, drawing_id: 'ABCDEFAB-1111-1111-1111-111111111111' }, { ...r9Binding, drawing_id: 'd1' },
+      { ...r9Binding, drawing_id: r9Binding.drawing_id + '\n' }]) {
+      expect(deriveProjectSizingState({ binding, contextView: r9Context(raw()) })).toEqual({ mode: 'refused', reason: 'binding_invalid' })
+      expect(deriveProjectConductorState({ binding, contextView: r9Context(raw()) }).reason).toBe('binding_invalid')
+    }
+  })
+
+  it('R9-06 context identity head UUID and strict head agreement are checked before graph fields', () => {
+    const variants = [null, [], { ...r9Context(raw()), intake: null }]
+    for (const key of ['organization_id', 'project_id', 'drawing_id', 'input_version_id']) {
+      const context = r9Context(raw())
+      context.context[key] = '66666666-6666-6666-6666-666666666666'
+      variants.push(context)
+    }
+    for (const changes of [{ head_version_id: 'bad' }, { is_head: 1 }, { is_head: false },
+      { is_head: true, head_version_id: '66666666-6666-6666-6666-666666666666' }]) {
+      const context = r9Context(raw()); Object.assign(context.context, changes); variants.push(context)
+    }
+    for (const contextView of variants) {
+      expect(deriveProjectSizingState({ binding: r9Binding, contextView }).reason).toBe('context_unreadable')
+    }
+  })
+
+  it('R9-07 historical contexts refuse without retargeting their binding', () => {
+    const contextView = r9Context(raw())
+    contextView.context.head_version_id = '66666666-6666-6666-6666-666666666666'
+    contextView.context.is_head = false
+    const state = deriveProjectSizingState({ binding: r9Binding, contextView })
+    expect(state).toEqual({ mode: 'refused', reason: 'not_current_head' })
+    expect(buildProjectSizingRequest({ binding: r9Binding, state }).reason).toBe('not_current_head')
+  })
+
+  it('R9-08 intake digests require exactly lowercase 64 hex characters', () => {
+    for (const digest of [undefined, null, '', 'A'.repeat(64), 'a'.repeat(63), 'a'.repeat(64) + '\n']) {
+      const contextView = r9Context(raw()); contextView.context.intake_sha256 = digest
+      expect(deriveProjectSizingState({ binding: r9Binding, contextView }).reason).toBe('version_digest_unavailable')
+    }
+  })
+
+  it('R9-09 absent companions are graphless and partial null or malformed companions refuse', () => {
+    for (const [intake, reason] of [[{}, 'graphless'], [{ solar_design_graph: raw() }, 'graph_unreadable'],
+      [{ solar_design_graph_sha256: 'b'.repeat(64) }, 'graph_unreadable'],
+      [{ solar_design_graph: null, solar_design_graph_sha256: 'b'.repeat(64) }, 'graph_unreadable'],
+      [{ solar_design_graph: raw(), solar_design_graph_sha256: 'B'.repeat(64) }, 'graph_unreadable'],
+      [{ solar_design_graph: { ...raw(), rev: -1 }, solar_design_graph_sha256: 'b'.repeat(64) }, 'graph_unreadable']]) {
+      const contextView = { ...r9Context(raw()), intake }
+      expect(deriveProjectSizingState({ binding: r9Binding, contextView })).toEqual({ mode: 'refused', reason })
+    }
+  })
+
+  it('R9-10 manual standalone success no panels and invalid length equal the immutable oracle', () => {
+    const graph = r9Manual()
+    for (const [name, changes] of [['manual', {}], ['manualNoPanels', { panels: [] }],
+      ['manualInvalidLength', { settings: { ...graph.settings, panels_in_sequence: '3' } }]]) {
+      expect(JSON.stringify(buildSizingParams({ graph: read({ ...graph, ...changes }), mode: 'manual-global' }))).toBe(r9Oracle.captures[name].json)
+    }
+  })
+
+  it('R9-11 canonical manual sizing adds only drawing ID without ZIP or zone coverage', () => {
+    const state = deriveProjectSizingState({ binding: r9Binding, contextView: r9Context(r9Manual()) })
+    expect(buildProjectSizingRequest({ binding: r9Binding, state, catalogDigest: r9Digest, idempotencyKey: 'key' }))
+      .toEqual({ ok: true, request: { tool: 'solar-size-strings', params: {
+        drawing_id: r9Binding.drawing_id, expected_rev: 7, mode: 'manual-global', confirm: true,
+      }, catalogDigest: r9Digest, idempotencyKey: 'key' } })
+  })
+
+  it('R9-12 compact slot panels support manual sizing and malformed slots refuse', () => {
+    const graph = r9Manual()
+    graph.panels = []
+    graph.frames = [{ ground_slots: { codec: 'leaf.solar-ground-slots.v1', count: 1,
+      panel_ids: 'pOJc3Wd1QD2eDCdUAGmTCA==', centres: 'A'.repeat(22) + '==', angle: 0,
+      panel: { rev: 0, provenance: {}, validity: {}, extra: {} } } }]
+    const state = deriveProjectSizingState({ binding: r9Binding, contextView: r9Context(graph) })
+    expect(buildProjectSizingRequest({ binding: r9Binding, state, catalogDigest: r9Digest, idempotencyKey: 'key' }).ok).toBe(true)
+    graph.frames[0].ground_slots.count = 2
+    expect(deriveProjectSizingState({ binding: r9Binding, contextView: r9Context(graph) }).reason).toBe('graph_unreadable')
+  })
+
+  it('R9-13 project global and zones modes refuse with manual_only', () => {
+    const state = deriveProjectSizingState({ binding: r9Binding, contextView: r9Context(r9Manual()) })
+    for (const mode of ['global', 'zones']) {
+      expect(buildProjectSizingRequest({ binding: r9Binding, state, mode, catalogDigest: r9Digest, idempotencyKey: 'key' }).reason).toBe('manual_only')
+      expect(buildProjectSizingRequest({ binding: r9Binding, state, mode }).reason).toBe('manual_only')
+    }
+  })
+
+  it('R9-18 malformed digest or UTF8 key refuses before preparation', () => {
+    const state = deriveProjectSizingState({ binding: r9Binding, contextView: r9Context(r9Manual()) })
+    for (const catalogDigest of [undefined, null, '', 'd'.repeat(64), 'sha256:' + 'D'.repeat(64), r9Digest + '\n']) {
+      expect(buildProjectSizingRequest({ binding: r9Binding, state, catalogDigest, idempotencyKey: 'key' }).reason).toBe('catalog_digest_required')
+    }
+    for (const idempotencyKey of [undefined, null, '', ' ', '🌞'.repeat(65)]) {
+      expect(buildProjectSizingRequest({ binding: r9Binding, state, catalogDigest: r9Digest, idempotencyKey }).reason).toBe('idempotency_key_required')
+    }
+    expect(buildProjectSizingRequest({ binding: r9Binding, state, catalogDigest: r9Digest, idempotencyKey: '🌞'.repeat(64) }).ok).toBe(true)
+  })
+
+  it('R9-44 all ten standalone captures retain exact serialized strings byte lengths and hashes', () => {
+    const manual = buildSizingParams({ graph: read(r9Manual()), mode: 'manual-global' })
+    const conductorGraph = conductorRows({ version: 3, intake: { solar_design_graph: { rev: 7, strings: [
+      { id: 'T1', circuit_tag: 'A1', wire_gauge: '' }, { id: 'T2', circuit_tag: 'A2', wire_gauge: '8 AWG' },
+    ] } } }, 3)
+    const base = { rev: 7, rows: conductorGraph.rows, selected: new Set(['T2', 'T1']),
+      gauge: '10 AWG', options: conductorGaugeOptions(r9Declaration.record) }
+    const conductors = buildConductorParams(base)
+    const captures = { manual,
+      manualNoPanels: buildSizingParams({ graph: read({ ...r9Manual(), panels: [] }), mode: 'manual-global' }),
+      manualInvalidLength: buildSizingParams({ graph: read({ ...r9Manual(), settings: { ...r9Manual().settings, panels_in_sequence: '3' } }), mode: 'manual-global' }),
+      conductors, conductorsEmptySelection: buildConductorParams({ ...base, selected: new Set() }),
+      conductorsLowercaseGauge: buildConductorParams({ ...base, gauge: '10 awg' }),
+      manualWire: createRunSubmissionRequest('solar-size-strings', manual.params, 'd1', { dwgVersion: 3 }),
+      conductorWire: createRunSubmissionRequest('solar-string-conductors', conductors.params, 'd1', { dwgVersion: 3 }),
+      globalCloudSizing: buildSizingParams({ graph: read(), mode: 'global', draft: draft() }),
+      zoneCloudSizing: buildSizingParams({ graph: read(), mode: 'zones', draft: draft() }),
+    }
+    expect(Object.keys(captures)).toEqual(Object.keys(r9Oracle.captures))
+    for (const [name, value] of Object.entries(captures)) {
+      const serialized = JSON.stringify(value)
+      expect(serialized).toBe(r9Oracle.captures[name].json)
+      expect(Buffer.byteLength(serialized, 'utf8')).toBe(r9Oracle.captures[name].bytes)
+      expect(createHash('sha256').update(serialized).digest('hex')).toBe(r9Oracle.captures[name].sha256)
+    }
+  })
   it('W21C2-manual-saved-length', () => {
     const source = raw()
     source.settings.panels_in_sequence = 3

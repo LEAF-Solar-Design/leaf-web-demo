@@ -1,0 +1,76 @@
+{
+  "schema": "leaf.solar-sizing-conductor-standalone-oracle.v1",
+  "source": {
+    "commit": "f139ceba6daea69b6e1570e3dc6c808712328fb9",
+    "tree": "b113f2bf8f167ece78b590b56239d58a3db35a5d",
+    "files": {
+      "web/src/solar/solarSizingModel.js": "dec8271489abaa2678325bc50ce3633f237a7d0666945876e94b5707ad30906b",
+      "web/src/solar/solarConductorModel.js": "988b190388fdb1878f45d6140c563e210756f57259ab7815196a5bcbf1061845",
+      "web/src/runIntent.js": "7e7d0bd1a7f8d874cd4dd17623ddc803caa848915c1870b6435ebe305fcbe75c",
+      "server/solar_tools/solar_string_conductors.json": "bfd11cacb76d31a25f9bb2dec51aae5495a423ff1df7f3a13ae322c57f3ab58b"
+    }
+  },
+  "note": "UTF-8 JSON.stringify bytes of the standalone sizing and conductor models and the run builder at the commit above, captured before R9. Tests compare exact strings, byte lengths and SHA-256; never derive these from the edited implementation.",
+  "captures": {
+    "manual": {
+      "inputs": "raw() with settings.panels_in_sequence 3, project.zip_code '' and electrical_zones []; buildSizingParams mode manual-global",
+      "json": "{\"ok\":true,\"params\":{\"expected_rev\":7,\"mode\":\"manual-global\",\"confirm\":true}}",
+      "bytes": 77,
+      "sha256": "12f16041e6be127a8c468b7b33ebdbf84dbc2c084f96119ea1fc1ef79e53cb21"
+    },
+    "manualNoPanels": {
+      "inputs": "the manual source with panels []",
+      "json": "{\"ok\":false,\"reason\":\"sizing_panels_required\",\"invalid\":[]}",
+      "bytes": 59,
+      "sha256": "dd540e58e1f0ea391079b9f4e0ec31e077f588f4e2acab91bafcf5620f44424d"
+    },
+    "manualInvalidLength": {
+      "inputs": "the manual source with settings.panels_in_sequence '3' (a string)",
+      "json": "{\"ok\":false,\"reason\":\"sizing_manual_length_required\",\"invalid\":[]}",
+      "bytes": 66,
+      "sha256": "4ad7b814c505c57510c4ed7eabd8cf2d7c044e5da978df71338d1d885647fe9c"
+    },
+    "conductors": {
+      "inputs": "conductorRows(envelope(), 3).rows over strings T1/T2 at rev 7; selected new Set(['T2','T1']); gauge '10 AWG'; options conductorGaugeOptions(declaration.record)",
+      "json": "{\"ok\":true,\"params\":{\"operation\":\"set-conductors\",\"expected_rev\":7,\"assignments\":[{\"string_ref\":\"T1\",\"wire_gauge\":\"10 AWG\"},{\"string_ref\":\"T2\",\"wire_gauge\":\"10 AWG\"}]}}",
+      "bytes": 168,
+      "sha256": "673a447566f63bf4cfe349ff08624784175f607d02043fd99a7065d73dcf906f"
+    },
+    "conductorsEmptySelection": {
+      "inputs": "the conductor inputs with selected new Set()",
+      "json": "{\"ok\":false,\"reason\":\"conductor_selection_required\"}",
+      "bytes": 52,
+      "sha256": "ea125650531d881ea0d8e093d72877d2581f85fadc772cf8e62b136ef6882e26"
+    },
+    "conductorsLowercaseGauge": {
+      "inputs": "the conductor inputs with gauge '10 awg'",
+      "json": "{\"ok\":false,\"reason\":\"conductor_gauge_required\"}",
+      "bytes": 48,
+      "sha256": "8f693e559aa48ba61a07d254aa3cfdf846a1f4d97f211ea55ae8ad8257d10777"
+    },
+    "manualWire": {
+      "inputs": "createRunSubmissionRequest('solar-size-strings', manual.params, 'd1', { dwgVersion: 3 })",
+      "json": "{\"headers\":{},\"body\":{\"tool\":\"solar-size-strings\",\"params\":{\"expected_rev\":7,\"mode\":\"manual-global\",\"confirm\":true},\"dwg\":\"d1\",\"dwg_version\":3}}",
+      "bytes": 144,
+      "sha256": "268d5feb5745a7eb6650545037f528fe1d6109e101a6af505e4d894d52c78e82"
+    },
+    "conductorWire": {
+      "inputs": "createRunSubmissionRequest('solar-string-conductors', conductors.params, 'd1', { dwgVersion: 3 })",
+      "json": "{\"headers\":{},\"body\":{\"tool\":\"solar-string-conductors\",\"params\":{\"operation\":\"set-conductors\",\"expected_rev\":7,\"assignments\":[{\"string_ref\":\"T1\",\"wire_gauge\":\"10 AWG\"},{\"string_ref\":\"T2\",\"wire_gauge\":\"10 AWG\"}]},\"dwg\":\"d1\",\"dwg_version\":3}}",
+      "bytes": 240,
+      "sha256": "7d90042ea71a2c29f49d592381d81bb818274ae62351303719be69d807c0695a"
+    },
+    "globalCloudSizing": {
+      "inputs": "buildSizingParams({ graph: read(), mode: 'global', draft: draft() })",
+      "json": "{\"ok\":true,\"params\":{\"expected_rev\":7,\"mode\":\"global\",\"requests\":{\"S\":{\"module_name\":\"Module\",\"full_inverter_name\":\"Inverter\",\"bifacial\":false,\"bifacial_coefficient\":\".7\",\"racking_params\":{\"racking_type\":\"fixed_tilt\",\"surface_tilt\":\"5\",\"surface_azimuth\":\"180\",\"albedo\":\".25\"},\"max_voltage\":\"1500\",\"thermal_model_type\":\"close mount glass glass\",\"open_circuit_rise\":false,\"zip_code\":\"44224\"}},\"grant_ref\":\"grant_1\",\"confirm\":true}}",
+      "bytes": 429,
+      "sha256": "d4c0e2fc7277d6bd2fc2a7e5444857dc1c7400d69abec1442fdb710d3b4e3866"
+    },
+    "zoneCloudSizing": {
+      "inputs": "buildSizingParams({ graph: read(), mode: 'zones', draft: draft() })",
+      "json": "{\"ok\":true,\"params\":{\"expected_rev\":7,\"mode\":\"zones\",\"requests\":{\"ZA\":{\"module_name\":\"Module A\",\"full_inverter_name\":\"Inverter A\",\"bifacial\":false,\"bifacial_coefficient\":\".7\",\"racking_params\":{\"racking_type\":\"fixed_tilt\",\"surface_tilt\":\"5\",\"surface_azimuth\":\"180\",\"albedo\":\".25\"},\"max_voltage\":\"1500\",\"thermal_model_type\":\"close mount glass glass\",\"open_circuit_rise\":false,\"zip_code\":\"44224\"},\"ZB\":{\"module_name\":\"Module B\",\"full_inverter_name\":\"Inverter B\",\"bifacial\":false,\"bifacial_coefficient\":\".7\",\"racking_params\":{\"racking_type\":\"fixed_tilt\",\"surface_tilt\":\"5\",\"surface_azimuth\":\"180\",\"albedo\":\".25\"},\"max_voltage\":\"1500\",\"thermal_model_type\":\"close mount glass glass\",\"open_circuit_rise\":false,\"zip_code\":\"44224\"}},\"grant_ref\":\"grant_1\",\"confirm\":true}}",
+      "bytes": 762,
+      "sha256": "34d0c7512270e75290fa09fe5b2742d85718d218758cf34b3c3bdfe3f43d3669"
+    }
+  }
+}
