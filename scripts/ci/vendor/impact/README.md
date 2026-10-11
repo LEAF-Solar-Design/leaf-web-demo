@@ -98,7 +98,7 @@ and prints a `## Impact` markdown block for the pair driver, or the record as
 JSON. All twelve concerns appear. Required rows come from touched contracts,
 component facets, targets, monitor obligations, and companion suggestions.
 Companions outside the owned paths remain visible as obligations. External
-`EXTERNAL: ` and `repo:` companion references are not local-file suggestions.
+`EXTERNAL: ` and `repo:` companion references are never suggested as files to own, but a touched companion that carries one still raises a contracts row and a `companions:` line marked outside this repository.
 Monitor obligations without an evidence reference begin unresolved.
 
 Both verbs call `scope.impact_scope(paths, manifest, families)`. It returns a

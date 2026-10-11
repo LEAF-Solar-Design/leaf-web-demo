@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 import time
 
@@ -23,6 +24,9 @@ except ImportError:
                           ManifestError, choice, mapping, sequence, string)
 
 MAX_BYTES = 8 * 1024 * 1024
+MAX_RECORDS = 50_000
+CARRY_CACHE_SCHEMA = 1
+CARRY_CACHE_MAX_BYTES = 64 * 1024 * 1024
 CHANGE_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
 SUBJECT = r"[A-Za-z0-9._/@+:-]{1,200}"
 ROW_ID = rf"(?:{'|'.join(CONCERNS)}):{SUBJECT}@[0-9a-f]{{12}}"
@@ -191,10 +195,10 @@ def load_record(path):
     return _parse_record(_read_raw(path))
 
 
-def atomic_write(path, text):
+def atomic_write(path, text, max_bytes=MAX_BYTES):
     # A same-directory temporary file guarantees readers see a complete replacement.
-    if len(text.encode("utf-8")) > MAX_BYTES:
-        raise ManifestError("output exceeds 8 MiB limit")
+    if len(text.encode("utf-8")) > max_bytes:
+        raise ManifestError(f"output exceeds {max_bytes // (1024 * 1024)} MiB limit")
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -222,15 +226,41 @@ def write_receipt(path, receipt):
     atomic_write(str(path) + ".meta.json", json.dumps(meta, sort_keys=True, indent=1) + "\n")
 
 
+def carry_cache_path():
+    return home_path() / "state" / "impact-carry-cache.json"
+
+
+def record_paths():
+    root = home_path() / "pair-runs"
+    candidates = []
+    try:
+        with os.scandir(root) as directories:
+            for directory in directories:
+                try:
+                    if directory.is_dir():
+                        candidates.append(Path(directory.path) / "impact" / "record.yaml")
+                except OSError:
+                    continue
+    except FileNotFoundError:
+        return []
+    paths = []
+    for path in sorted(candidates):
+        if len(paths) >= MAX_RECORDS:
+            break
+        try:
+            if path.is_file():
+                paths.append(path)
+        except OSError:
+            continue
+    return paths
+
+
 def prior_records(needle=None, select=None):
-    # Bounded to 5,000 sorted records; unreadable ones are skipped. With a needle,
+    # Bounded to MAX_RECORDS sorted records; unreadable ones are skipped. With a needle,
     # a record is parsed only when its raw bytes contain it, and select(raw) may
     # veto the parse, so a row lookup costs one read per record plus one parse
     # per record that carries the row in a state the caller acts on.
-    from itertools import islice
-    root = home_path() / "pair-runs"
-    paths = sorted(islice(root.glob("*/impact/record.yaml"), 5000))
-    for path in paths:
+    for path in record_paths():
         try:
             raw = _read_raw(path)
             if needle is not None and needle not in raw:
@@ -240,6 +270,96 @@ def prior_records(needle=None, select=None):
             yield path, _parse_record(raw)
         except (OSError, ValueError, yaml.YAMLError, RecursionError):
             continue
+
+
+def _load_carry_cache():
+    # Check the complete shape before trusting any cached validation result.
+    try:
+        with carry_cache_path().open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if size > CARRY_CACHE_MAX_BYTES:
+                return {}
+            raw = stream.read(size + 1)
+        if len(raw) > CARRY_CACHE_MAX_BYTES:
+            return {}
+        cache = json.loads(raw)
+        if (not isinstance(cache, dict) or set(cache) != {"schema", "entries"}
+                or type(cache["schema"]) is not int or cache["schema"] != CARRY_CACHE_SCHEMA
+                or not isinstance(cache["entries"], dict)):
+            return {}
+        for path, entry in cache["entries"].items():
+            if not isinstance(path, str) or not isinstance(entry, dict):
+                return {}
+            sig = entry.get("sig")
+            if not isinstance(sig, list) or len(sig) != 3 or any(type(value) is not int for value in sig):
+                return {}
+            if set(entry) == {"sig", "invalid"} and entry["invalid"] is True:
+                continue
+            if set(entry) != {"sig", "repository", "change_id", "unresolved"}:
+                return {}
+            string(entry["repository"], "cache.repository", 201, REPOSITORY_PATTERN)
+            string(entry["change_id"], "cache.change_id", 128, CHANGE_ID)
+            for row in sequence(entry["unresolved"], "cache.unresolved", 0, 500):
+                if not isinstance(row, list) or len(row) != 3:
+                    return {}
+                string(row[0], "cache.row", 256, ROW_ID)
+                if type(row[1]) is not bool or type(row[2]) is not bool:
+                    return {}
+        return cache["entries"]
+    except (OSError, ValueError, RecursionError):
+        return {}
+
+
+def unresolved_index():
+    root = home_path() / "pair-runs"
+    candidates = []
+    try:
+        with os.scandir(root) as directories:
+            for directory in directories:
+                try:
+                    if directory.is_dir():
+                        candidates.append(Path(directory.path) / "impact" / "record.yaml")
+                except OSError:
+                    continue
+    except FileNotFoundError:
+        pass
+    cached = _load_carry_cache()
+    entries = {}
+    result = []
+    considered = 0
+    for path in sorted(candidates):
+        if considered >= MAX_RECORDS:
+            break
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        considered += 1
+        sig = [st.st_ino, st.st_mtime_ns, st.st_size]
+        key = str(path)
+        entry = cached.get(key)
+        if entry is None or entry["sig"] != sig:
+            try:
+                data = _parse_record(_read_raw(path))
+                entry = {"sig": sig, "repository": data["repository"],
+                         "change_id": data["change_id"],
+                         "unresolved": [[row["id"], row["required"], row["superseded_by"] is None]
+                                        for row in data["rows"] if row["outcome"] == "unresolved"]}
+            except (OSError, ValueError, yaml.YAMLError, RecursionError):
+                entry = {"sig": sig, "invalid": True}
+        entries[key] = entry
+        if not entry.get("invalid"):
+            result.append((path, {field: entry[field] for field in ("repository", "change_id", "unresolved")}))
+    if entries != cached:
+        try:
+            atomic_write(carry_cache_path(), json.dumps({"schema": CARRY_CACHE_SCHEMA, "entries": entries},
+                                                       ensure_ascii=True, separators=(",", ":")),
+                         max_bytes=CARRY_CACHE_MAX_BYTES)
+        except (OSError, ManifestError):
+            pass
+    return result
 
 
 def _may_hold_unresolved(row_id):
@@ -328,7 +448,6 @@ def _dispose_locked(args):
                                  "by": os.environ.get("CLAUDE_CODE_SESSION_ID", "unknown"),
                                  "at": datetime.now(timezone.utc).isoformat(), "detail": detail})
     save_record(args.record, data)
-    # Only records whose bytes carry the row, still unresolved, are parsed or rewritten.
     for path, previous in prior_records(needle=args.row.encode("ascii"), select=_may_hold_unresolved(args.row)):
         if (path.resolve() == Path(args.record).resolve() or previous["repository"] != data["repository"]
                 or previous["change_id"] == data["change_id"]):

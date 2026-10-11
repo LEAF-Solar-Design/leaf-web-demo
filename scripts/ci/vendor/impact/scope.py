@@ -23,6 +23,7 @@ class Scope:
     contracts_consumer: list[str] = field(default_factory=list)
     targets: list[str] = field(default_factory=list)
     companions: list[tuple[str, list[str]]] = field(default_factory=list)
+    external_companions: list[tuple[str, list[str]]] = field(default_factory=list)
     required: list[RequiredRow] = field(default_factory=list)
     manifest_changed: bool = False
 
@@ -100,6 +101,11 @@ def impact_scope(paths, manifest, families):
         companions=sorted((item["path"], sorted(set(value for value in item["moves_with"]
                                if not value.startswith(("EXTERNAL: ", "repo:")) and value not in paths)))
                           for item in manifest["companions"] if hit([item["path"]])),
+        external_companions=sorted((item["path"], sorted(set(value for value in item["moves_with"]
+                                        if value.startswith(("EXTERNAL: ", "repo:")))))
+                                   for item in manifest["companions"] if hit([item["path"]])
+                                   and any(value.startswith(("EXTERNAL: ", "repo:"))
+                                           for value in item["moves_with"])),
     )
     result.required = _required(result, paths, manifest, families)
     return result
