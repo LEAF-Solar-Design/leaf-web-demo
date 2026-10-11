@@ -141,10 +141,11 @@ describe('useAuthorStageController turn-authority provider', () => {
   }
 
   it('C8B-22 a repeat of a request whose answer was lost carries the authority it was first sent with', async () => {
+    const recoverAuthorStage = vi.fn(async () => ({ status: 'not_found' }))
     const authorityProvider = vi.fn(async () => ({ ...TURN_1 }))
     const stageAuthorTool = answerLostOnce()
     const { result } = renderHook(() => useAuthorStageController({
-      storage: memoryStorage(), stageAuthorTool, authorityProvider,
+      storage: memoryStorage(), stageAuthorTool, authorityProvider, recoverAuthorStage,
     }))
     await act(async () => { await result.current.stage('organize recipes') })
     expect(result.current.phase).toBe('interrupted')
@@ -160,9 +161,13 @@ describe('useAuthorStageController turn-authority provider', () => {
     expect(repeat.idempotencyKey).toBe(sent.idempotencyKey)
     expect(repeat.pollUrl).toBeNull()
     expect(result.current.phase).toBe('succeeded')
+    expect(recoverAuthorStage.mock.invocationCallOrder[0]).toBeGreaterThan(stageAuthorTool.mock.invocationCallOrder[0])
+    expect(recoverAuthorStage.mock.invocationCallOrder[0]).toBeLessThan(stageAuthorTool.mock.invocationCallOrder[1])
+    expect(recoverAuthorStage).toHaveBeenCalledTimes(1)
   })
 
   it('C8B-23 the repeat goes out while the conversation is still busy with that turn', async () => {
+    const recoverAuthorStage = vi.fn(async () => ({ status: 'not_found' }))
     // What both shells answer once the first turn is active: no authority. A
     // controller that asked again would end the request here and forget it.
     let mints = 0
@@ -172,7 +177,7 @@ describe('useAuthorStageController turn-authority provider', () => {
     })
     const stageAuthorTool = answerLostOnce()
     const { result } = renderHook(() => useAuthorStageController({
-      storage: memoryStorage(), stageAuthorTool, authorityProvider,
+      storage: memoryStorage(), stageAuthorTool, authorityProvider, recoverAuthorStage,
     }))
     await act(async () => { await result.current.stage('organize recipes') })
     const saved = result.current.pointer.idempotency_key
@@ -186,6 +191,7 @@ describe('useAuthorStageController turn-authority provider', () => {
     expect(result.current.error).toBeNull()
     expect(result.current.phase).toBe('succeeded')
     expect(result.current.pointer.idempotency_key).toBe(saved)
+    expect(recoverAuthorStage).toHaveBeenCalledTimes(1)
   })
 
   it('C8B-24 a request made after a refusal starts its own turn under its own key', async () => {
@@ -238,6 +244,7 @@ describe('useAuthorStageController turn-authority provider', () => {
   }
 
   it('C8B-25 an authority that arrives for a superseded run never replaces the one a newer run sent', async () => {
+    const recoverAuthorStage = vi.fn(async () => ({ status: 'not_found' }))
     const storage = memoryStorage()
     const saved = await savedUnanswered(storage)
     let releaseResume
@@ -249,8 +256,9 @@ describe('useAuthorStageController turn-authority provider', () => {
     })
     const stageAuthorTool = answerLostOnce()
     const { result } = renderHook(() => useAuthorStageController({
-      storage, stageAuthorTool, authorityProvider,
+      storage, stageAuthorTool, authorityProvider, recoverAuthorStage,
     }))
+    await waitFor(() => expect(authorityProvider).toHaveBeenCalledTimes(1))
     // The reload's own resume is still starting its turn when the drafter
     // submits again: the newer run mints, sends, and loses its answer.
     await act(async () => { await result.current.stage('organize recipes') })
@@ -260,6 +268,7 @@ describe('useAuthorStageController turn-authority provider', () => {
 
     await act(async () => { await result.current.resume() })
 
+    expect(recoverAuthorStage).toHaveBeenCalledTimes(3)
     expect(authorityProvider).toHaveBeenCalledTimes(2)
     expect(stageAuthorTool).toHaveBeenCalledTimes(2)
     const [sent, repeat] = stageAuthorTool.mock.calls.map((call) => call[3])
@@ -270,30 +279,39 @@ describe('useAuthorStageController turn-authority provider', () => {
     expect(result.current.phase).toBe('succeeded')
   })
 
-  it('C8B-26 a controller that did not send the request holds nothing for it', async () => {
-    // After a reload the first authority is gone with the page that minted it,
-    // so the saved request is repeated the only way left: with a new turn.
+  it('C8B-26 a reloaded controller recovers an admitted request without minting', async () => {
     const storage = memoryStorage()
     const saved = await savedUnanswered(storage)
     const authorityProvider = vi.fn(async () => ({ sessionId: 'session-1', turnId: 'turn-after-reload' }))
+    const recoverAuthorStage = vi.fn(async () => ({
+      status: 'found',
+      job: { contract: 'leaf.customization-stage-job.v1', status: 'queued', change_set_id: 'cs-1', poll_url: '/api/author/stages/cs-1', retry_after_ms: 250 },
+    }))
     const stageAuthorTool = vi.fn(async () => staged())
     const { result } = renderHook(() => useAuthorStageController({
-      storage, stageAuthorTool, authorityProvider,
+      storage, stageAuthorTool, authorityProvider, recoverAuthorStage,
     }))
     await waitFor(() => expect(result.current.phase).toBe('succeeded'))
-    expect(authorityProvider).toHaveBeenCalledTimes(1)
-    expect(authorityProvider).toHaveBeenCalledWith('organize recipes', { allowSecretOnce: false })
+    expect(authorityProvider).not.toHaveBeenCalled()
+    expect(recoverAuthorStage).toHaveBeenCalledTimes(1)
+    expect(recoverAuthorStage.mock.calls[0][0]).toBe(saved)
     expect(stageAuthorTool).toHaveBeenCalledTimes(1)
     expect(stageAuthorTool.mock.calls[0][3].idempotencyKey).toBe(saved)
-    expect(stageAuthorTool.mock.calls[0][3].authority).toEqual({ sessionId: 'session-1', turnId: 'turn-after-reload' })
+    expect(stageAuthorTool.mock.calls[0][3].authority).toBeNull()
+    expect(stageAuthorTool.mock.calls[0][3].pollUrl).toBe('/api/author/stages/cs-1')
+    expect(stageAuthorTool.mock.calls[0][3].changeSetId).toBe('cs-1')
+    expect(JSON.parse(storage.getItem(INFLIGHT_AUTHOR_KEY))).toMatchObject({
+      idempotency_key: saved, change_set_id: 'cs-1', poll_url: '/api/author/stages/cs-1',
+    })
   })
 
   it('C8B-28 only an authority this controller minted is held: a request first sent with no provider mints when one arrives', async () => {
+    const recoverAuthorStage = vi.fn(async () => ({ status: 'not_found' }))
     const authorityProvider = vi.fn(async () => ({ ...TURN_1 }))
     const stageAuthorTool = answerLostOnce()
     const storage = memoryStorage()
     const { result, rerender } = renderHook(
-      ({ provider }) => useAuthorStageController({ storage, stageAuthorTool, authorityProvider: provider }),
+      ({ provider }) => useAuthorStageController({ storage, stageAuthorTool, recoverAuthorStage, authorityProvider: provider }),
       { initialProps: { provider: undefined } },
     )
     await act(async () => { await result.current.stage('organize recipes') })
@@ -311,9 +329,12 @@ describe('useAuthorStageController turn-authority provider', () => {
     expect(repeat.idempotencyKey).toBe(sent.idempotencyKey)
     expect(repeat.authority).toEqual(TURN_1)
     expect(result.current.phase).toBe('succeeded')
+    expect(recoverAuthorStage.mock.invocationCallOrder[0]).toBeLessThan(authorityProvider.mock.invocationCallOrder[0])
+    expect(recoverAuthorStage).toHaveBeenCalledTimes(1)
   })
 
   it('C8B-32 the held authority lives in memory only: no storage write ever carries it', async () => {
+    const recoverAuthorStage = vi.fn(async () => ({ status: 'not_found' }))
     const HELD = { sessionId: 'session-held-7f3a', turnId: 'turn-held-9c1e' }
     const store = memoryStorage()
     const writes = []
@@ -325,7 +346,7 @@ describe('useAuthorStageController turn-authority provider', () => {
     const authorityProvider = vi.fn(async () => ({ ...HELD }))
     const stageAuthorTool = answerLostOnce()
     const { result } = renderHook(() => useAuthorStageController({
-      mock: false, storage, stageAuthorTool, authorityProvider,
+      mock: false, storage, stageAuthorTool, authorityProvider, recoverAuthorStage,
     }))
     await act(async () => { await result.current.stage('organize recipes') })
     expect(result.current.phase).toBe('interrupted')
@@ -343,6 +364,7 @@ describe('useAuthorStageController turn-authority provider', () => {
       expect(`${key} ${value}`).not.toMatch(/session-held-7f3a|turn-held-9c1e/)
     }
     expect(storage.getItem(INFLIGHT_AUTHOR_KEY) || '').not.toMatch(/session-held-7f3a|turn-held-9c1e/)
+    expect(recoverAuthorStage).toHaveBeenCalledTimes(1)
   })
 
   it('is absent-safe: byte-identical behavior with no provider supplied', async () => {
@@ -374,6 +396,7 @@ describe('useAuthorStageController turn-authority provider', () => {
   const FAKE_GENERIC = `api_key: ${'x'.repeat(24)}`
 
   it('forwards allowSecretOnce on the re-run of a valid pointer that never got its poll_url', async () => {
+    const recoverAuthorStage = vi.fn(async () => ({ status: 'not_found' }))
     // stage() re-runs a persisted pointer whose first POST may not have landed
     // (no poll_url). The controller that minted for it repeats the request
     // with that same authority, so no second turn starts; the override still
@@ -387,7 +410,7 @@ describe('useAuthorStageController turn-authority provider', () => {
     })
     const storage = memoryStorage()
     const { result } = renderHook(() => useAuthorStageController({
-      mock: false, storage, stageAuthorTool, authorityProvider,
+      mock: false, storage, stageAuthorTool, authorityProvider, recoverAuthorStage,
     }))
     await act(async () => {
       await result.current.stage(FAKE_GENERIC, null, { allowSecretOnce: true }).catch(() => null)
@@ -402,9 +425,11 @@ describe('useAuthorStageController turn-authority provider', () => {
     expect(repeat.allowSecretOnce).toBe(true)
     expect(repeat.authority).toEqual({ sessionId: 'session-1', turnId: 'turn-1' })
     expect(repeat.idempotencyKey).toBe(stageAuthorTool.mock.calls[0][3].idempotencyKey)
+    expect(recoverAuthorStage).toHaveBeenCalledTimes(1)
   })
 
   it('C8B-27 the override reaches the mint when a re-run has nothing held', async () => {
+    const recoverAuthorStage = vi.fn(async () => ({ status: 'not_found' }))
     // After a reload nothing is held, so a re-run of the saved request mints.
     // Send anyway pressed while the reload's own resume is still starting its
     // turn supersedes that resume: the mint it makes must carry the override.
@@ -428,13 +453,17 @@ describe('useAuthorStageController turn-authority provider', () => {
     })
     const stageAuthorTool = vi.fn(async () => staged())
     const { result } = renderHook(() => useAuthorStageController({
-      mock: false, storage, stageAuthorTool, authorityProvider,
+      mock: false, storage, stageAuthorTool, authorityProvider, recoverAuthorStage,
     }))
-    expect(authorityProvider).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(authorityProvider).toHaveBeenCalledTimes(1))
     await act(async () => {
       await result.current.stage(FAKE_GENERIC, null, { allowSecretOnce: true })
     })
     await act(async () => { releaseResume({ sessionId: 'session-late', turnId: 'turn-late' }) })
+    expect(recoverAuthorStage).toHaveBeenCalledTimes(2)
+    for (let index = 0; index < 2; index += 1) {
+      expect(recoverAuthorStage.mock.invocationCallOrder[index]).toBeLessThan(authorityProvider.mock.invocationCallOrder[index])
+    }
     expect(authorityProvider.mock.calls).toEqual([
       [FAKE_GENERIC, { allowSecretOnce: false }],
       [FAKE_GENERIC, { allowSecretOnce: true }],
