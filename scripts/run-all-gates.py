@@ -1930,6 +1930,18 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",
               )),
+        Suite("server-sip-r6-read", "server project Solar reads",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r6_read.py"), 6),
+        Suite("server-sip-r6-artifacts", "server project Solar artifacts",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r6_artifacts.py"), 6),
+        Suite("server-sip-r6-routes", "server project Solar output routes",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r6_routes.py"), 11),
+        Suite("platform-sip-r6-outputs", "platform project Solar output authority",
+              "pytest", REPO / "platform", _py_pytest("tests/test_sip_r6_outputs.py"), 4,
+              uses_database=True, db_gated=True,
+              database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",
+              )),
         Suite("platform-sip-r4-jobs", "platform atomic Solar graph jobs",
               "pytest", REPO / "platform", _py_pytest("tests/test_sip_r4_jobs.py"), 14,
               uses_database=True, db_gated=True,
@@ -2262,7 +2274,8 @@ def build_suites() -> List[Suite]:
               # sip-r3b-1 adds seven canonical Solar publication rows.
               # sip-r3b-2 adds six deterministic creation rows.
               # sip-r5b adds four Solar HTTP admission rows.
-              _py_pytest(f"{repo_name}/platform/tests"), 312, db_gated=True,
+              # 2026-10-10: sip-r6 adds four canonical Solar output rows (312 -> 316).
+              _py_pytest(f"{repo_name}/platform/tests"), 316, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -2974,7 +2987,8 @@ def build_suites() -> List[Suite]:
               # sip-r3b-1 adds the canonical Solar tool registration row.
               # sip-r3b-2 adds the deterministic creation registration row.
               # +1 (2026-10-10): canonical Solar admission policy registration.
-              ["test_studio_walk_regression_gate.py"], 99),
+              # 2026-10-10: sip-r6 adds one registration row (99 -> 100).
+              ["test_studio_walk_regression_gate.py"], 100),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
