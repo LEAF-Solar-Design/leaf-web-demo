@@ -56,6 +56,7 @@ import secrets
 import sys
 from hashlib import sha256
 from typing import Any, Dict, Optional, Tuple
+from text_match import text_matches
 
 CAPABILITY_HEADER = "X-Checkout-Capability"
 
@@ -316,7 +317,7 @@ def verify(presented: Optional[str], tenant: Any, drawing_id: str,
             f"this drawing is checked out; a {CAPABILITY_HEADER} header from "
             f"POST /api/drawings/{{id}}/checkout is required to change it")
     expected = mint(tenant, drawing_id, int(fence))
-    if not hmac.compare_digest(presented.strip(), expected):
+    if not text_matches(presented.strip(), expected):
         raise CapabilityRejected(
             "the presented checkout capability does not match this drawing's "
             "active checkout; re-acquire it to get a current one")

@@ -63,6 +63,7 @@ import platform_link
 import session_store
 import turn_runner
 from envelopes import ErrorCode, error_response, with_envelope_fields
+from text_match import text_matches
 
 router = APIRouter()
 
@@ -81,7 +82,7 @@ def _require_dispatch(presented: Optional[str]) -> Optional[JSONResponse]:
     Unset secret => back-edge DISABLED => 401 (never an open fallback: this
     endpoint hands out allow decisions, not reads)."""
     secret = _dispatch_secret()
-    if secret is None or not hmac.compare_digest(presented or "", secret):
+    if secret is None or not text_matches(presented or "", secret):
         return error_response(ErrorCode.BAD_PARAMS,
                               "valid X-Dispatch-Secret required for /internal/agent/gate",
                               retryable=False, status_code=401)

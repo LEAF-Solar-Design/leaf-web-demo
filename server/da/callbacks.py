@@ -157,7 +157,9 @@ def _max_age_s() -> float:
 
 def _canonical_payload(body: bytes, timestamp: str, nonce: str) -> bytes:
     """Length-prefix every signed field so distinct fields cannot concatenate alike."""
-    fields = (timestamp.encode("utf-8"), nonce.encode("utf-8"), body)
+    # str.encode reads the characters themselves: a str subclass cannot substitute
+    # other bytes through an encode() override.
+    fields = (str.encode(timestamp, "utf-8"), str.encode(nonce, "utf-8"), body)
     return b"".join(str(len(field)).encode("ascii") + b":" + field for field in fields)
 
 
@@ -175,10 +177,21 @@ def verify_signature(body: bytes, timestamp: Optional[str], nonce: Optional[str]
                      signature: Optional[str], secret: Optional[bytes] = None) -> bool:
     """Verify the complete callback request in constant time, failing closed."""
     key = secret if secret is not None else _secret()
-    if not key or not signature or not isinstance(timestamp, str) or not isinstance(nonce, str):
+    # type() reads the real type: isinstance() would consult a caller-built object's
+    # __class__. The emptiness test reads the characters through str.__len__, so a str
+    # subclass's own __bool__ or __len__ never runs.
+    if not key or not issubclass(type(signature), str) or not str.__len__(signature):
         return False
-    expected = sign_payload(body, timestamp, nonce, key)
-    return hmac.compare_digest(expected, signature)
+    if not issubclass(type(timestamp), str) or not issubclass(type(nonce), str):
+        return False
+    try:
+        presented = str.encode(signature, "utf-8")
+        expected = sign_payload(body, timestamp, nonce, key)
+    except UnicodeEncodeError:
+        return False
+    # Bytes, never str: compare_digest raises TypeError on a non-ASCII str, and the
+    # signature is a request header the caller controls.
+    return hmac.compare_digest(expected.encode("ascii"), presented)
 
 
 def _callback_job_id(payload: Dict[str, Any]) -> Optional[str]:
