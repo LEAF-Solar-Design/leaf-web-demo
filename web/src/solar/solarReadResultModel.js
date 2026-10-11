@@ -1,4 +1,6 @@
 import { validateSolarArtifactRef } from './solarImportClient.js'
+import { createSolarDrawingBinding } from './solarDrawingBinding.js'
+import { validateSolarProjectArtifactRef } from './solarProjectArtifactClient.js'
 
 export const SOLAR_READ_RESULT_SCHEMA = 'leaf.solar-graph-read.v1'
 export const SOLAR_READ_ADAPTER = 'local-graph-read'
@@ -161,4 +163,173 @@ export function readResultView(data) {
     else addEntry(view, key, withoutPrivate(output[key], 1), true)
   }
   return view
+}
+
+export const SOLAR_PROJECT_READ_RESULT_SCHEMA = 'leaf.solar-project-read.v1'
+export const SOLAR_PROJECT_READ_ADAPTER = 'project-local-graph-read'
+
+export const PROJECT_READ_REASONS = Object.freeze({
+  binding_invalid: 'Open a project drawing version before viewing this result.',
+  result_unreadable: 'This project result does not match the selected drawing version.',
+  artifact_unverified: 'This result names a file that could not be verified, so no download is offered.',
+  scope_stale: 'The drawing or session changed, so the download was discarded.',
+  client_unavailable: 'Project downloads are not available in this view.',
+  catalog_digest_required: 'Refresh the Solar tools before viewing this project result.',
+  request_invalid: 'This project output request could not be prepared.',
+  response_invalid: 'The server did not return a complete verified file.',
+  artifact_mismatch: 'The downloaded file did not match its record, so it was discarded.',
+  digest_unavailable: 'This browser could not check the downloaded file, so it was discarded.',
+  timeout: 'The download took too long, so try again.',
+  aborted: 'The download was cancelled.',
+  unauthenticated: 'Sign in again to download this file.',
+  forbidden: 'You do not have access to this file.',
+  not_found: 'This file or its source version is no longer available.',
+  stale: 'The drawing changed after this file was made, so run the tool again.',
+  unavailable: 'Project output storage is unavailable right now, so try again shortly.',
+  disabled: 'Project Solar outputs are not enabled on this server.',
+  unsupported: 'This Solar tool has no connected project output adapter.',
+  tool_changed: 'The Solar tool changed, so refresh the tools and run it again.',
+  entitlement: 'Your plan does not currently permit this project output.',
+  output_refused: 'This Solar output is unavailable for the selected drawing version.',
+  save_failed: 'The file downloaded but the browser could not save it.',
+  fallback: 'The download failed, so try again.',
+})
+
+const PROJECT_HEX = new RegExp('^[0-9a-f]{64}$')
+const PROJECT_DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
+const PROJECT_UUID = new RegExp('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+const PROJECT_TOOL = new RegExp('^[a-z0-9][a-z0-9-]{0,127}$')
+const PROJECT_CODE = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}$')
+const PROJECT_PRIVATE = new Set(['organization_id', 'project_id', 'tenant_id', 'graph_project_id'])
+const projectHash = (value) => typeof value === 'string' && PROJECT_HEX.test(value)
+
+function ownValue(value, key) {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key)
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new TypeError('Invalid project result')
+  return descriptor.value
+}
+
+export function isSolarProjectReadResult(data) {
+  try {
+    return isPlainObject(data) && ownValue(data, 'schema') === SOLAR_PROJECT_READ_RESULT_SCHEMA &&
+      ownValue(data, 'adapter') === SOLAR_PROJECT_READ_ADAPTER
+  } catch { return false }
+}
+
+// Bound and copy JSON before presentation. Files are opaque references, never table data.
+function projectOutput(value, budget, depth = 0) {
+  if (++budget.nodes > 100000 || depth > MAX_DEPTH) throw new TypeError('Large project result')
+  if (value === null || typeof value === 'boolean' || typeof value === 'string' ||
+      (typeof value === 'number' && Number.isFinite(value))) {
+    budget.bytes += new TextEncoder().encode(JSON.stringify(value)).byteLength
+    if (budget.bytes > 1_048_576) throw new TypeError('Large project result')
+    return value
+  }
+  if (!Array.isArray(value) && !isPlainObject(value)) throw new TypeError('Invalid project output')
+  const keys = Reflect.ownKeys(value)
+  budget.bytes += 2 + Math.max(0, keys.length - (Array.isArray(value) ? 2 : 1))
+  if (budget.bytes > 1_048_576) throw new TypeError('Large project result')
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype || keys.length !== value.length + 1) throw new TypeError('Invalid project array')
+    return Array.from({ length: value.length }, (_, index) => projectOutput(ownValue(value, String(index)), budget, depth + 1))
+  }
+  const result = {}
+  for (const key of keys) {
+    if (typeof key !== 'string') throw new TypeError('Invalid project key')
+    budget.bytes += new TextEncoder().encode(JSON.stringify(key)).byteLength + 1
+    if (budget.bytes > 1_048_576) throw new TypeError('Large project result')
+    // Every subtree is validated and counted against the bounds; artifact references and private keys
+    // are then left out of what is presented.
+    const child = projectOutput(ownValue(value, key), budget, depth + 1)
+    if (key !== 'artifact' && !PROJECT_PRIVATE.has(key)) Object.defineProperty(result, key, { value: child, enumerable: true })
+  }
+  return result
+}
+
+export function deriveProjectReadResultState(options) {
+  const refused = (reason) => ({ mode: 'refused', reason })
+  try {
+    const { binding: suppliedBinding, data, catalogDigest, current = true } = options
+    let binding
+    try { binding = createSolarDrawingBinding(suppliedBinding) }
+    catch { return refused('SIP_R12_BINDING_INVALID') }
+    if (typeof catalogDigest !== 'string' || !PROJECT_DIGEST.test(catalogDigest)) return refused('SIP_R12_CATALOG_DIGEST_REQUIRED')
+    if (!isSolarProjectReadResult(data)) return refused('SIP_R12_RESULT_INVALID')
+    const meta = {}
+    for (const key of ['organization_id', 'project_id', 'drawing_id', 'input_version_id', 'tool',
+      'tool_manifest_sha256', 'input_intake_sha256', 'graph_sha256', 'request_sha256', 'output_sha256',
+      'graph_project_id', 'head_version_id', 'is_head', 'current_required', 'drawing_changed', 'output_bytes', 'output']) {
+      meta[key] = ownValue(data, key)
+    }
+    if (['organization_id', 'project_id', 'drawing_id', 'input_version_id'].some((key) => meta[key] !== binding[key]) ||
+        typeof meta.tool !== 'string' || !PROJECT_TOOL.test(meta.tool) || meta.tool_manifest_sha256 !== catalogDigest ||
+        !['input_intake_sha256', 'graph_sha256', 'request_sha256', 'output_sha256'].every((key) => projectHash(meta[key])) ||
+        typeof meta.head_version_id !== 'string' || !PROJECT_UUID.test(meta.head_version_id) ||
+        typeof meta.is_head !== 'boolean' || meta.is_head !== (meta.head_version_id === binding.input_version_id) ||
+        typeof meta.current_required !== 'boolean' || typeof current !== 'boolean' || meta.drawing_changed !== false ||
+        typeof meta.graph_project_id !== 'string' || !meta.graph_project_id.trim() ||
+        !Number.isInteger(meta.output_bytes) || meta.output_bytes < 1 || meta.output_bytes > 1_048_576 || !isPlainObject(meta.output)) return refused('SIP_R12_RESULT_INVALID')
+    if (current && !meta.is_head) return refused('SIP_R12_STALE_CURRENT')
+    if (meta.current_required !== current) return refused('SIP_R12_RESULT_INVALID')
+    const output = projectOutput(meta.output, { nodes: 0, bytes: 0 })
+    if (new TextEncoder().encode(JSON.stringify(output)).byteLength > 1_048_576) return refused('SIP_R12_RESULT_INVALID')
+    const view = readResultView({ schema_version: SOLAR_READ_RESULT_SCHEMA, adapter: SOLAR_READ_ADAPTER,
+      drawing_id: binding.drawing_id, tool: meta.tool, output })
+    view.details = [['tool', 'Tool'], ['drawing_id', 'Drawing'], ['input_version_id', 'Version'],
+      ['graph_sha256', 'Graph'], ['output_sha256', 'Output'], ['request_sha256', 'Request']]
+      .map(([key, label]) => ({ label, text: formatValue(meta[key]) }))
+    if (Object.hasOwn(meta.output, 'artifact')) {
+      let ref
+      try { ref = ownValue(meta.output, 'artifact') } catch { ref = null }
+      const hashes = { inputIntakeSha256: meta.input_intake_sha256, graphSha256: meta.graph_sha256 }
+      if (validateSolarProjectArtifactRef(ref, binding, hashes)) {
+        const copiedRef = {}
+        for (const key of Reflect.ownKeys(ref)) Object.defineProperty(copiedRef, key, { value: ownValue(ref, key), enumerable: true })
+        Object.freeze(copiedRef)
+        view.artifact = { state: 'ready', ref: copiedRef, filename: copiedRef.filename, sizeText: formatBytes(copiedRef.byte_length) }
+      } else view.artifact = { state: 'unverified' }
+    }
+    return { mode: 'ready', binding, current, inputIntakeSha256: meta.input_intake_sha256, graphSha256: meta.graph_sha256, view }
+  } catch { return refused('SIP_R12_RESULT_INVALID') }
+}
+
+export function projectReadReason(reason, status) {
+  const code = typeof reason === 'string' && PROJECT_CODE.test(reason) ? reason : 'HTTP_ERROR'
+  switch (code) {
+    case 'SIP_R12_BINDING_INVALID': case 'SIP_R7_BINDING_INVALID': return PROJECT_READ_REASONS.binding_invalid
+    case 'SIP_R12_RESULT_INVALID': return PROJECT_READ_REASONS.result_unreadable
+    case 'SIP_R12_ARTIFACT_REF_INVALID': case 'ARTIFACT_ID_INVALID': return PROJECT_READ_REASONS.artifact_unverified
+    case 'SIP_R12_SCOPE_STALE': case 'SIP_R7_SCOPE_STALE': return PROJECT_READ_REASONS.scope_stale
+    case 'SIP_R12_CLIENT_UNAVAILABLE': return PROJECT_READ_REASONS.client_unavailable
+    case 'SIP_R12_CATALOG_DIGEST_REQUIRED': return PROJECT_READ_REASONS.catalog_digest_required
+    case 'SIP_R12_REQUEST_INVALID': case 'SIP_R7_REQUEST_INVALID': case 'SIP_R6_INVALID_REQUEST':
+    case 'SIP_R6_REQUEST_TOO_LARGE': case 'INVALID_SCHEDULES_REQUEST': case 'INVALID_CABLE_EXPORT_REQUEST': return PROJECT_READ_REASONS.request_invalid
+    case 'SIP_R12_RESPONSE_INVALID': case 'SIP_R7_RESPONSE_INVALID': return PROJECT_READ_REASONS.response_invalid
+    case 'SIP_R12_ARTIFACT_MISMATCH': case 'ARTIFACT_CORRUPT': case 'SIP_R6_ARTIFACT_SOURCE_MISMATCH': return PROJECT_READ_REASONS.artifact_mismatch
+    case 'SIP_R12_DIGEST_UNAVAILABLE': return PROJECT_READ_REASONS.digest_unavailable
+    case 'SIP_R12_TIMEOUT': case 'SIP_R7_TIMEOUT': return PROJECT_READ_REASONS.timeout
+    case 'SIP_R12_ABORTED': case 'SIP_R7_ABORTED': return PROJECT_READ_REASONS.aborted
+    case 'UNAUTHENTICATED': return PROJECT_READ_REASONS.unauthenticated
+    case 'FORBIDDEN': return PROJECT_READ_REASONS.forbidden
+    case 'ARTIFACT_NOT_FOUND': return PROJECT_READ_REASONS.not_found
+    case 'SIP_R12_STALE_CURRENT': case 'SIP_R6_STALE_CURRENT': case 'ARTIFACT_STALE':
+    case 'SOLAR_OUTPUT_NOT_CURRENT': case 'ARTIFACT_CONFLICT': return PROJECT_READ_REASONS.stale
+    case 'ARTIFACT_STORE_UNAVAILABLE': case 'ARTIFACT_WRITES_DRAINED': return PROJECT_READ_REASONS.unavailable
+    case 'project_execution_disabled': return PROJECT_READ_REASONS.disabled
+    case 'SIP_R6_TOOL_UNSUPPORTED': case 'project_adapter_unavailable': return PROJECT_READ_REASONS.unsupported
+    case 'SIP_R6_TOOL_MANIFEST_MISMATCH': return PROJECT_READ_REASONS.tool_changed
+    case 'ENTITLEMENT_REQUIRED': case 'ENTITLEMENT_DENIED': case 'ENTITLEMENT_UNAVAILABLE':
+    case 'ENTITLEMENT_POLICY_UNAVAILABLE': case 'entitlement_required': case 'entitlement_policy_unavailable': return PROJECT_READ_REASONS.entitlement
+    case 'UNRESOLVED_UNITS': case 'SIZING_CONFIRMATION_REQUIRED': case 'SCHEDULES_OPTIMIZERS_UNSUPPORTED':
+    case 'SCHEDULES_ZONE_SIZING_UNSUPPORTED': case 'SCHEDULES_MAPPING_FAILED': case 'SCHEDULES_KERNEL_REFUSED':
+    case 'READ_OUTPUT_LIMIT_EXCEEDED': case 'READ_OUTPUT_INVALID': case 'ARTIFACT_REFERENCE_RESERVED':
+    case 'SIP_R6_INTERNAL': return PROJECT_READ_REASONS.output_refused
+    case 'SIP_R12_SAVE_FAILED': return PROJECT_READ_REASONS.save_failed
+    case 'SIP_R7_TRANSPORT_FAILED': return PROJECT_READ_REASONS.fallback
+    default: break
+  }
+  if (status === 401) return PROJECT_READ_REASONS.unauthenticated
+  if (status === 403) return PROJECT_READ_REASONS.forbidden
+  if (status === 404) return PROJECT_READ_REASONS.not_found
+  return PROJECT_READ_REASONS.fallback
 }
