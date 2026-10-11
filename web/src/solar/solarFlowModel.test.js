@@ -1350,9 +1350,12 @@ it('R13D-06 every review predicate remains mandatory', () => {
     const variants = [
       [{ ...candidate, catalog_digest: 'invalid' }],
       [candidate, { ...candidate, catalog_digest: 'sha256:' + 'e'.repeat(64) }],
+      [{ ...candidate, catalog_digest: [candidate.catalog_digest] }],
       ...[{ engine_ready: false }, { implemented: false }, { admission_checked: true },
         { admission: { status_code: 200, error: null } }, { refusal_reasons: [] },
-        { refusal_reasons: ['project_request_required', 'CHECKOUT_REQUIRED'] }]
+        { refusal_reasons: ['CHECKOUT_REQUIRED'] }, { refusal_reasons: ['capability_not_ready'] },
+        { refusal_reasons: ['project_request_required', 'CHECKOUT_REQUIRED'] },
+        { refusal_reasons: { 0: 'project_request_required', length: 1 } }]
         .map((availability) => [{ ...candidate, availability: { ...candidate.availability, ...availability } }]),
     ]
     for (const entries of variants) expect(equipmentFlow(entries).items[0])
@@ -1414,6 +1417,32 @@ it('R13D-11 duplicate refusal codes retain the server reason', () => {
   const extra = { ...later, availability: { ...later.availability,
     refusal_reasons: Array.from({ length: 12 }, (_, index) => `SERVER_${index}`) } }
   expect(equipmentFlow([first, later, extra]).items[0].codes).toHaveLength(8)
+})
+
+it('R13D-33 distinct refusal codes are kept before the eight-code bound', () => {
+  const first = r13dRow(PROJECT_EQUIPMENT_TOOL, true)
+  const repeated = { ...first, availability: { ...first.availability, runnable: false,
+    refusal_reasons: [...Array.from({ length: 8 }, () => 'capability_not_ready'), 'EQUIPMENT_ASSIGNMENT_REQUIRED'],
+    admission: { status_code: 409, error: { reason_code: 'CHECKOUT_REQUIRED', message: 'private envelope' } } } }
+  const expected = ['capability_not_ready', 'EQUIPMENT_ASSIGNMENT_REQUIRED', 'CHECKOUT_REQUIRED']
+  expect(equipmentFlow([repeated]).items[0].codes).toEqual(expected)
+  expect(equipmentFlow([first, repeated]).items[0].codes).toEqual(expected)
+  const many = { ...repeated, availability: { ...repeated.availability,
+    refusal_reasons: [...Array.from({ length: 20 }, () => 'capability_not_ready'),
+      ...Array.from({ length: 12 }, (_, index) => `SERVER_${index}`)] } }
+  expect(equipmentFlow([many]).items[0].codes).toEqual([
+    'capability_not_ready', ...Array.from({ length: 7 }, (_, index) => `SERVER_${index}`),
+  ])
+})
+
+it('R13D-34 a graph code after repeated codes still marks the step invalidated', () => {
+  const candidate = equipmentRow({ runnable: false,
+    refusal_reasons: [...Array.from({ length: 8 }, () => 'capability_not_ready'), 'STALE_GRAPH_REVISION'] })
+  const item = equipmentFlow([candidate], { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0]
+  expect(item).toMatchObject({ ready: false, enabled: false, status: 'blocked', invalidated: true })
+  expect(item.codes).toEqual(['capability_not_ready', 'STALE_GRAPH_REVISION'])
+  const plain = equipmentRow({ runnable: false, refusal_reasons: Array.from({ length: 9 }, () => 'capability_not_ready') })
+  expect(equipmentFlow([plain], { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0].invalidated).toBe(false)
 })
 
 it('R13D-12 display projection never invents readiness', () => {

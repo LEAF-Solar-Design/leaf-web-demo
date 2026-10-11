@@ -216,8 +216,15 @@ export function deriveProjectSolarFlowState({ steps, current, previousReady, pen
       let graphRefusal = false
       for (const entry of matching) {
         const availability = entry.availability
-        const rowCodes = Array.isArray(availability?.refusal_reasons)
-          ? availability.refusal_reasons.filter((code) => typeof code === 'string' && PROJECT_FLOW_CODE.test(code)).slice(0, MAX_REASON_CODES) : []
+        // Distinct codes are collected before the bound, so a repeated code never uses up the
+        // slots and a later distinct code, a graph code among them, is still seen.
+        const rowCodes = []
+        if (Array.isArray(availability?.refusal_reasons)) {
+          for (const code of availability.refusal_reasons) {
+            if (rowCodes.length >= MAX_REASON_CODES) break
+            if (typeof code === 'string' && PROJECT_FLOW_CODE.test(code) && !rowCodes.includes(code)) rowCodes.push(code)
+          }
+        }
         const nestedCode = availability?.admission?.error?.reason_code
         if (typeof nestedCode === 'string' && PROJECT_FLOW_CODE.test(nestedCode) && !rowCodes.includes(nestedCode)) rowCodes.push(nestedCode)
         for (const code of rowCodes) if (codes.length < MAX_REASON_CODES && !codes.includes(code)) codes.push(code)

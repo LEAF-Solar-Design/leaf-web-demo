@@ -1400,7 +1400,6 @@ it('R13D-31 other project flows retain visible unavailable stages', async () => 
   changeFlow('ground-electrical')
   const expectedNames = SOLAR_FLOWS.find((flow) => flow.id === 'ground-electrical').stages.flatMap((stage) => stage.capabilities)
   expect(items().map((item) => item.querySelector('button').id)).toEqual(expectedNames.map(solarFlowStepId))
-  const missingFeeder = r13dRailButton('solar-feeders')
   // Feeders is present but unchecked in the complete Rooftop catalog; removing it leaves all neighbors visible.
   cleanup()
   const noFeeders = { ...h.props, projectCatalog: { ...h.props.projectCatalog,
@@ -1409,7 +1408,11 @@ it('R13D-31 other project flows retain visible unavailable stages', async () => 
     'ground-physical': ['landxml', 'terrain', 'civil', 'physical-read'], 'solaredge-import': ['solaredge-import'],
   }} />)
   changeFlow('ground-electrical')
+  // The live button is read again after the re-render: an element saved earlier is the detached one.
+  const missingFeeder = r13dRailButton('solar-feeders')
+  expect(missingFeeder.isConnected).toBe(true)
   expect(missingFeeder.disabled).toBe(true)
+  fireEvent.click(missingFeeder)
   expect(items().map((item) => item.querySelector('button').id)).toEqual(expectedNames.map(solarFlowStepId))
   expect(document.getElementById(r13dRailButton('solar-feeders').getAttribute('aria-describedby')).textContent).toBe(PROJECT_SOLAR_RAIL_REASONS.stage_missing)
   for (const id of ['ground-physical', 'solaredge-import', 'pvcase-tutorial']) {
