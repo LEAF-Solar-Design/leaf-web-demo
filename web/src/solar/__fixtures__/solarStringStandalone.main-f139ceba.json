@@ -1,0 +1,56 @@
+{
+  "schema": "leaf.solar-string-standalone-oracle.v1",
+  "source": {
+    "commit": "f139ceba6daea69b6e1570e3dc6c808712328fb9",
+    "tree": "b113f2bf8f167ece78b590b56239d58a3db35a5d",
+    "files": {
+      "web/src/solar/solarStringComposerModel.js": "45e286b3dad51ce6cfc406240e3cc91cc9994c1b67b6e31c16169ffb804b9c72",
+      "web/src/solar/__fixtures__/stringComposerGround.json": "1ab3e1901efbf497e8ac4dbd13bb0fd8501d6a2b07623032cfedc8eef845881c",
+      "web/src/solar/__fixtures__/stringComposerRooftop.json": "295cd82cd98272acae37feb08b3eb97931ece63a6762c7c75d18541e397e88b6",
+      "web/src/runIntent.js": "7e7d0bd1a7f8d874cd4dd17623ddc803caa848915c1870b6435ebe305fcbe75c"
+    }
+  },
+  "note": "UTF-8 JSON.stringify bytes of the standalone string composer and run builder at the commit above, captured before R10. Tests compare exact strings, byte lengths and SHA-256; never derive these from the edited implementation.",
+  "captures": {
+    "single": {
+      "json": "{\"ok\":true,\"params\":{\"operation\":\"add-string\",\"expected_rev\":2,\"ordered_panel_refs\":[\"leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308\",\"leaf:panel:670bc2b0-4640-458e-b12e-7d2f664a6766\",\"leaf:panel:a53ced07-0ab7-4dca-8ec1-c8f1982e1fc8\"]},\"preview\":{\"ids\":[\"leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308\",\"leaf:panel:670bc2b0-4640-458e-b12e-7d2f664a6766\",\"leaf:panel:a53ced07-0ab7-4dca-8ec1-c8f1982e1fc8\"],\"sizes\":[3]}}",
+      "bytes": 419,
+      "sha256": "4bc4193510b33d6aa37fb22b3413773144b97e67c1dc93510136d2774c6d206f"
+    },
+    "multi": {
+      "json": "{\"ok\":true,\"params\":{\"operation\":\"add-strings\",\"expected_rev\":2,\"string_length\":3,\"ordered_panel_refs\":[\"leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308\",\"leaf:panel:670bc2b0-4640-458e-b12e-7d2f664a6766\",\"leaf:panel:a53ced07-0ab7-4dca-8ec1-c8f1982e1fc8\",\"leaf:panel:a89fade1-f331-4578-9d71-332417337b99\",\"leaf:panel:ce43e26e-a661-420b-824d-de3ff7a0be01\"]},\"preview\":{\"ids\":[\"leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308\",\"leaf:panel:670bc2b0-4640-458e-b12e-7d2f664a6766\",\"leaf:panel:a53ced07-0ab7-4dca-8ec1-c8f1982e1fc8\",\"leaf:panel:a89fade1-f331-4578-9d71-332417337b99\",\"leaf:panel:ce43e26e-a661-420b-824d-de3ff7a0be01\"],\"sizes\":[3,2]}}",
+      "bytes": 640,
+      "sha256": "f96db84ea28230a332896cfe6231fe019fbd453ef4698f986b22377ef12d6928"
+    },
+    "descending": {
+      "json": "{\"ok\":true,\"params\":{\"operation\":\"add-string\",\"expected_rev\":2,\"ordered_panel_refs\":[\"leaf:panel:a53ced07-0ab7-4dca-8ec1-c8f1982e1fc8\",\"leaf:panel:670bc2b0-4640-458e-b12e-7d2f664a6766\",\"leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308\"]},\"preview\":{\"ids\":[\"leaf:panel:a53ced07-0ab7-4dca-8ec1-c8f1982e1fc8\",\"leaf:panel:670bc2b0-4640-458e-b12e-7d2f664a6766\",\"leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308\"],\"sizes\":[3]}}",
+      "bytes": 419,
+      "sha256": "10af8c790c42b820aa1c9a82598024c667b3ea2eaf760c18552640266764ed7a"
+    },
+    "roof": {
+      "json": "{\"ok\":true,\"params\":{\"operation\":\"add-strings\",\"expected_rev\":0,\"string_length\":3,\"ordered_panel_refs\":[\"leaf:panel:00000000-0000-4000-8000-000000000101\",\"leaf:panel:00000000-0000-4000-8000-000000000102\",\"leaf:panel:00000000-0000-4000-8000-000000000103\"]},\"preview\":{\"ids\":[\"leaf:panel:00000000-0000-4000-8000-000000000101\",\"leaf:panel:00000000-0000-4000-8000-000000000102\",\"leaf:panel:00000000-0000-4000-8000-000000000103\"],\"sizes\":[3]}}",
+      "bytes": 438,
+      "sha256": "8baad6905b7ad550792765eb579159dcfa9804d53e0c618e1d8b5c29391b707e"
+    },
+    "empty": {
+      "json": "{\"ok\":false,\"code\":\"empty\",\"reason\":\"Choose at least one panel.\"}",
+      "bytes": 65,
+      "sha256": "04104e79d3c5544f74139f1429b38f80ff9d9d6925eeb9ebbd32ea90bd0dceeb"
+    },
+    "duplicate": {
+      "json": "{\"ok\":false,\"code\":\"duplicate\",\"reason\":\"A panel appears more than once. Remove the repeated selection.\"}",
+      "bytes": 105,
+      "sha256": "134b7758075952ffc3aa4a3baa323e605f4bdbf5a2b0664881d3efd3cfb09c3c"
+    },
+    "singleWire": {
+      "json": "{\"headers\":{},\"body\":{\"tool\":\"solar-string-add\",\"params\":{\"operation\":\"add-string\",\"expected_rev\":2,\"ordered_panel_refs\":[\"leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308\",\"leaf:panel:670bc2b0-4640-458e-b12e-7d2f664a6766\",\"leaf:panel:a53ced07-0ab7-4dca-8ec1-c8f1982e1fc8\"]},\"dwg\":\"d1\",\"dwg_version\":7}}",
+      "bytes": 302,
+      "sha256": "37b345a81bf87512d5fec0c84ed3e74533d40effaa5482b47ed3c1e5bf50d5e5"
+    },
+    "multiWire": {
+      "json": "{\"headers\":{},\"body\":{\"tool\":\"solar-string-multi-add\",\"params\":{\"operation\":\"add-strings\",\"expected_rev\":2,\"string_length\":3,\"ordered_panel_refs\":[\"leaf:panel:a4e25cdd-6775-403d-9e0c-275400699308\",\"leaf:panel:670bc2b0-4640-458e-b12e-7d2f664a6766\",\"leaf:panel:a53ced07-0ab7-4dca-8ec1-c8f1982e1fc8\",\"leaf:panel:a89fade1-f331-4578-9d71-332417337b99\",\"leaf:panel:ce43e26e-a661-420b-824d-de3ff7a0be01\"]},\"dwg\":\"d1\",\"dwg_version\":7}}",
+      "bytes": 427,
+      "sha256": "e14f3fc3d9f07494e1969fb2b7cdb0f7f9bd014d6c65c1262cd0e024dcfb72e8"
+    }
+  }
+}
