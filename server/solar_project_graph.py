@@ -31,6 +31,7 @@ SUPPORTED_TOOLS = frozenset((
     "solar-schedule",
     "solar-string-add",
     "solar-assign-equipment",
+    "solar-string-multi-add",
 ))
 # Sizing runs only its pure manual-global branch here; every other mode needs stored
 # service evidence this path does not have and is refused before the builtin loads.
@@ -40,7 +41,7 @@ MANUAL_SIZING_MODE = "manual-global"
 # and normalized request, so preparation, publication and proof regenerate equal bytes.
 STRING_TOOL = "solar-string-add"
 STRING_OPERATION = "add-string"
-CREATION_TOOLS = frozenset((STRING_TOOL, "solar-assign-equipment"))
+CREATION_TOOLS = frozenset((STRING_TOOL, "solar-assign-equipment", "solar-string-multi-add"))
 CREATION_SCHEMA = "leaf.solar-project-creation.v1"
 
 
@@ -231,7 +232,7 @@ def _run_builtin(context, tool, graph, params, trusted, job_id):
         return local._load_builtin(tool).run_bound(
             graph, params, tenant_id=str(context.organization_id), job_id=str(job_id))
     if tool in CREATION_TOOLS:
-        # Only the single add is admitted here; any other string operation stays unsupported.
+        # Single-add needs its operation guard here; multi-add validates its own operation.
         if tool == STRING_TOOL and (type(params) is not dict
                                     or params.get("operation") != STRING_OPERATION):
             raise GraphValidationError("INVALID_STRING_ADD_REQUEST")
