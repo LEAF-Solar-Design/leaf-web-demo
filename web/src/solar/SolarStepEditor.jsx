@@ -5,7 +5,7 @@ import SolarSizingForm from './SolarSizingForm.jsx'
 import SolarStringComposer from './SolarStringComposer.jsx'
 import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL } from './solarStringComposerModel.js'
 import { solarFormKeys, solarView } from './solarView.js'
-import { solarFlowPrefill, solarFlowStepId } from './solarFlowModel.js'
+import { solarFlowPrefill, solarFlowStepId, projectSolarRailReason } from './solarFlowModel.js'
 import { ProjectSolarEquipmentForm } from './SolarToolForm.jsx'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 
@@ -20,13 +20,21 @@ function ownsKey(record, key) {
 // offers Retry with the same values. Cancel returns focus to the step's rail button.
 export default function SolarStepEditor(props) {
   const project = Object.prototype.hasOwnProperty.call(props, 'solarBinding') || props.projectId != null
-  if (project && !['solar-string-conductors', 'solar-size-strings', STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(props.row?.name)) {
-    return <ProjectSolarEquipmentForm {...props} tool={props.row} surface="step" />
-  }
   const projectProps = project ? {
     solarBinding: props.solarBinding, authorityKey: props.authorityKey, projectClient: props.projectClient,
-    catalogDigest: props.catalogDigest, newProjectIntentKey: props.newProjectIntentKey, onProjectSubmit: props.onProjectSubmit,
+    catalogDigest: props.catalogDigest, newProjectIntentKey: props.newProjectIntentKey, busy: props.busy ?? false,
+    onProjectSubmit: props.busy && ['solar-size-strings', 'solar-string-conductors'].includes(props.row?.name)
+      ? undefined : props.onProjectSubmit,
   } : {}
+  if (project) {
+    return <fieldset disabled={props.busy ?? false} data-testid="project-solar-step-boundary"
+      aria-describedby={props.busy ? 'project-solar-step-busy' : undefined}>
+      {props.busy && <p id="project-solar-step-busy" role="status">{projectSolarRailReason('run_in_progress')}</p>}
+      {!['solar-string-conductors', 'solar-size-strings', STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(props.row?.name)
+        ? <ProjectSolarEquipmentForm {...props} {...projectProps} tool={props.row} surface="step" />
+        : <StandaloneSolarStepEditor {...props} projectId={props.projectId ?? true} projectProps={projectProps} />}
+    </fieldset>
+  }
   // The existing specialised hosts still use projectId to refuse their legacy loaders.
   // Keep that guard active when the caller supplies only the canonical project props.
   return <StandaloneSolarStepEditor {...props} projectId={project ? props.projectId ?? true : props.projectId} projectProps={projectProps} />

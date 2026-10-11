@@ -3,11 +3,14 @@ import { exactProjectSizingConductorPreview } from './solarSizingModel.js'
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createHash } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 import { createRunSubmissionRequest } from '../runIntent.js'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 import { PROJECT_EQUIPMENT_TOOL, deriveProjectEquipmentState, buildProjectEquipmentRequest,
   exactProjectEquipmentPreview, projectSolarFlowScope, recordProjectSolarFlowRun,
-  projectSolarFlowRunsFor, deriveProjectSolarFlowState, projectSolarFlowReason } from './solarFlowModel.js'
+  projectSolarFlowRunsFor, deriveProjectSolarFlowState, projectSolarFlowReason,
+  PROJECT_SOLAR_REVIEW_TOOLS, PROJECT_SOLAR_ROOFTOP_STAGES, PROJECT_SOLAR_RAIL_REASONS,
+  projectSolarFlowSelect, projectSolarFlowOptions, projectSolarFlowDisplay, projectSolarRailReason } from './solarFlowModel.js'
 import ampacityDeclaration from '../../../server/solar_tools/solar_nec_ampacity_correction.json'
 import voltageDeclaration from '../../../server/solar_tools/solar_nec_ac_voltage_drop.json'
 import conduitDeclaration from '../../../server/solar_tools/solar_nec_conduit_fill.json'
@@ -1265,4 +1268,252 @@ describe('run memory', () => {
     expect(solarFlowStepId('solar-settings')).toBe('solar-step-solar-settings')
     expect(solarFlowStepId('a b"c')).toBe('solar-step-a-b-c')
   })
+})
+
+const R13D_NAMES = [
+  'solar-settings', 'solar-panels-from-drawing', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
+  'solar-string-conductors', 'solar-assign-equipment', 'solar-homeruns', 'solar-feeders',
+  'solar-schedule', 'solar-string-data', 'solar-electrical-schedules', 'solar-cable-export',
+]
+function r13dRow(name, ready = false) {
+  return { ...row(name, 900, { wave: 5 }), catalog_digest: equipmentDigest,
+    availability: ready ? { ...READY, runnable: true, admission_checked: true, admission: { status_code: 200, error: null } }
+      : { ...READY, input_ready: false, runnable: false, admission_checked: false, admission: null,
+        refusal_reasons: ['project_request_required'] } }
+}
+function r13dDisplay(selection, extra = {}) {
+  return projectSolarFlowDisplay({ selection, current: true, binding: equipmentBinding, authorityKey: 'epoch-1', ...extra })
+}
+
+it('R13D-01 project selection follows the manual chain', () => {
+  const rows = R13D_NAMES.map((name) => r13dRow(name))
+  const selection = projectSolarFlowSelect([{ capabilities: [...rows].reverse() }], 'rooftop')
+  expect(selection.positions.map((position) => position.name)).toEqual(R13D_NAMES)
+  expect(selection.steps.map((entry) => entry.name)).toEqual(R13D_NAMES)
+  selection.steps.forEach((entry, index) => expect(entry).toBe(rows[index]))
+  expect(PROJECT_SOLAR_ROOFTOP_STAGES.map((stage) => stage.label)).toEqual([
+    'Settings', 'Panel import', 'Manual sizing', 'Strings', 'Conductors', 'Equipment', 'Routes', 'Outputs',
+  ])
+  expect(projectSolarFlowOptions([{ capabilities: rows }]).map((option) => option.id)).toEqual(SOLAR_FLOWS.map((flow) => flow.id))
+  expect(Object.isFrozen(PROJECT_SOLAR_ROOFTOP_STAGES)).toBe(true)
+})
+
+it('R13D-02 missing stages preserve neighboring project stages', () => {
+  const settings = r13dRow(R13D_NAMES[0]), sizing = r13dRow(R13D_NAMES[2])
+  const selection = projectSolarFlowSelect([{ capabilities: [sizing, settings] }], 'rooftop')
+  expect(selection.positions[0].row).toBe(settings)
+  expect(selection.positions[1]).toMatchObject({ name: 'solar-panels-from-drawing', row: null, rows: [] })
+  expect(selection.positions[2].row).toBe(sizing)
+  expect(selection.steps).toEqual([settings, sizing])
+  const malformed = { ...settings, solar: null }
+  const duplicate = projectSolarFlowSelect([{ capabilities: [settings, malformed, sizing] }], 'rooftop')
+  expect(duplicate.positions[0].rows).toEqual([settings, malformed])
+  expect(duplicate.positions[0].usable).toBe(false)
+  expect(r13dDisplay(duplicate).items[0]).toMatchObject({ ready: false, enabled: false, reasonKey: 'stage_refused' })
+  expect(r13dDisplay(duplicate).items[2].enabled).toBe(true)
+})
+
+it('R13D-03 selection refuses catalog overflow before filtering', () => {
+  const first = r13dRow('solar-settings', true)
+  const entries = [first, ...Array.from({ length: 4095 }, (_, index) => index % 2 ? null : { name: 'unselected' })]
+  expect(projectSolarFlowSelect([{ capabilities: entries }], 'rooftop').positions[0].row).toBe(first)
+  const final = { ...first, availability: { ...first.availability, runnable: false } }
+  const selection = projectSolarFlowSelect([{ capabilities: entries }, { capabilities: [final] }], 'rooftop')
+  expect(selection.steps).toEqual([])
+  expect(selection.reasonKey).toBe('catalog_unreadable')
+  expect(selection.positions).toHaveLength(13)
+  expect(selection.positions.every((position) => position.row === null)).toBe(true)
+  expect(r13dDisplay(selection).items.every((item) => !item.ready && !item.enabled)).toBe(true)
+})
+
+it('R13D-04 all seven ordinary rows permit review only', () => {
+  expect(PROJECT_SOLAR_REVIEW_TOOLS).toEqual(R13D_NAMES.slice(0, 7))
+  expect(Object.isFrozen(PROJECT_SOLAR_REVIEW_TOOLS)).toBe(true)
+  for (const name of PROJECT_SOLAR_REVIEW_TOOLS) {
+    const candidate = r13dRow(name)
+    const before = JSON.stringify(candidate)
+    expect(equipmentFlow([candidate], { previousReady: { [name]: true } }).items[0])
+      .toMatchObject({ ready: false, enabled: true, status: 'review', invalidated: false })
+    expect(JSON.stringify(candidate)).toBe(before)
+  }
+})
+
+it('R13D-05 checked admission remains the readiness boundary', () => {
+  for (const name of PROJECT_SOLAR_REVIEW_TOOLS) {
+    expect(equipmentFlow([r13dRow(name, true)]).items[0]).toMatchObject({ ready: true, enabled: true, status: 'ready' })
+  }
+})
+
+it('R13D-06 every review predicate remains mandatory', () => {
+  for (const name of PROJECT_SOLAR_REVIEW_TOOLS) {
+    const candidate = r13dRow(name)
+    const variants = [
+      [{ ...candidate, catalog_digest: 'invalid' }],
+      [candidate, { ...candidate, catalog_digest: 'sha256:' + 'e'.repeat(64) }],
+      [{ ...candidate, catalog_digest: [candidate.catalog_digest] }],
+      ...[{ engine_ready: false }, { implemented: false }, { admission_checked: true },
+        { admission: { status_code: 200, error: null } }, { refusal_reasons: [] },
+        { refusal_reasons: ['CHECKOUT_REQUIRED'] }, { refusal_reasons: ['capability_not_ready'] },
+        { refusal_reasons: ['project_request_required', 'CHECKOUT_REQUIRED'] },
+        { refusal_reasons: { 0: 'project_request_required', length: 1 } }]
+        .map((availability) => [{ ...candidate, availability: { ...candidate.availability, ...availability } }]),
+    ]
+    for (const entries of variants) expect(equipmentFlow(entries).items[0])
+      .toMatchObject({ ready: false, enabled: false, status: 'blocked' })
+  }
+})
+
+it('R13D-07 contradictory duplicates refuse in either order', () => {
+  for (const name of PROJECT_SOLAR_REVIEW_TOOLS) {
+    const review = r13dRow(name), ready = r13dRow(name, true)
+    for (const entries of [[review, ready], [ready, review]]) {
+      const state = equipmentFlow(entries)
+      expect(state.items).toHaveLength(1)
+      expect(state.items[0]).toMatchObject({ ready: false, enabled: false, status: 'blocked' })
+      expect(state.resumeIndex).toBe(-1)
+    }
+  }
+})
+
+it('R13D-08 downstream selection does not grant review or reads', () => {
+  const entries = R13D_NAMES.slice(7).map((name) => r13dRow(name))
+  const before = JSON.stringify(entries)
+  const selection = projectSolarFlowSelect([{ capabilities: entries }], 'rooftop')
+  expect(selection.steps).toEqual(entries)
+  for (const item of equipmentFlow(selection.steps).items) expect(item).toMatchObject({ enabled: false, ready: false })
+  expect(JSON.stringify(entries)).toBe(before)
+})
+
+it('R13D-09 the legacy settings opener cannot bypass project refusal', () => {
+  const bad = { ...r13dRow('solar-settings'), catalog_digest: 'invalid' }
+  const openSettingsForm = () => true
+  for (const entries of [[bad], [r13dRow('solar-settings', true), bad]]) {
+    expect(equipmentFlow(entries, { openSettingsForm }).items[0]).toMatchObject({ enabled: false, ready: false })
+  }
+})
+
+it('R13D-10 graph invalidation and historical success remain separate', () => {
+  const memory = recordProjectSolarFlowRun(null,
+    { binding: equipmentBinding, authorityKey: 'epoch-1', tool: PROJECT_EQUIPMENT_TOOL }, { terminal: true, ok: true })
+  const runs = projectSolarFlowRunsFor(memory, equipmentSuccessor, 'epoch-1')
+  for (const code of ['GRAPH_NOT_EMBEDDED', 'STALE_GRAPH_REVISION', 'CHECKOUT_REQUIRED', 'PROJECT_FORBIDDEN']) {
+    const candidate = equipmentRow({ runnable: false, refusal_reasons: ['capability_not_ready'],
+      admission: { status_code: 409, error: { reason_code: code } } })
+    const item = equipmentFlow([candidate], { binding: equipmentSuccessor, runs,
+      previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0]
+    expect(item).toMatchObject({ ready: false, enabled: false, status: 'blocked', runOutcome: runs[PROJECT_EQUIPMENT_TOOL],
+      invalidated: ['GRAPH_NOT_EMBEDDED', 'STALE_GRAPH_REVISION'].includes(code) })
+  }
+})
+
+it('R13D-11 duplicate refusal codes retain the server reason', () => {
+  const first = r13dRow(PROJECT_EQUIPMENT_TOOL, true)
+  const later = { ...first, availability: { ...first.availability, runnable: false,
+    refusal_reasons: ['capability_not_ready', 'capability_not_ready', '<raw>', 'CHECKOUT_REQUIRED'],
+    admission: { status_code: 409, error: { reason_code: 'EQUIPMENT_ASSIGNMENT_REQUIRED', message: 'private envelope' } } } }
+  expect(equipmentFlow([first, later]).items[0].codes).toEqual([
+    'capability_not_ready', 'CHECKOUT_REQUIRED', 'EQUIPMENT_ASSIGNMENT_REQUIRED',
+  ])
+  const extra = { ...later, availability: { ...later.availability,
+    refusal_reasons: Array.from({ length: 12 }, (_, index) => `SERVER_${index}`) } }
+  expect(equipmentFlow([first, later, extra]).items[0].codes).toHaveLength(8)
+})
+
+it('R13D-33 distinct refusal codes are kept before the eight-code bound', () => {
+  const first = r13dRow(PROJECT_EQUIPMENT_TOOL, true)
+  const repeated = { ...first, availability: { ...first.availability, runnable: false,
+    refusal_reasons: [...Array.from({ length: 8 }, () => 'capability_not_ready'), 'EQUIPMENT_ASSIGNMENT_REQUIRED'],
+    admission: { status_code: 409, error: { reason_code: 'CHECKOUT_REQUIRED', message: 'private envelope' } } } }
+  const expected = ['capability_not_ready', 'EQUIPMENT_ASSIGNMENT_REQUIRED', 'CHECKOUT_REQUIRED']
+  expect(equipmentFlow([repeated]).items[0].codes).toEqual(expected)
+  expect(equipmentFlow([first, repeated]).items[0].codes).toEqual(expected)
+  const many = { ...repeated, availability: { ...repeated.availability,
+    refusal_reasons: [...Array.from({ length: 20 }, () => 'capability_not_ready'),
+      ...Array.from({ length: 12 }, (_, index) => `SERVER_${index}`)] } }
+  expect(equipmentFlow([many]).items[0].codes).toEqual([
+    'capability_not_ready', ...Array.from({ length: 7 }, (_, index) => `SERVER_${index}`),
+  ])
+})
+
+it('R13D-34 a graph code after repeated codes still marks the step invalidated', () => {
+  const candidate = equipmentRow({ runnable: false,
+    refusal_reasons: [...Array.from({ length: 8 }, () => 'capability_not_ready'), 'STALE_GRAPH_REVISION'] })
+  const item = equipmentFlow([candidate], { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0]
+  expect(item).toMatchObject({ ready: false, enabled: false, status: 'blocked', invalidated: true })
+  expect(item.codes).toEqual(['capability_not_ready', 'STALE_GRAPH_REVISION'])
+  const plain = equipmentRow({ runnable: false, refusal_reasons: Array.from({ length: 9 }, () => 'capability_not_ready') })
+  expect(equipmentFlow([plain], { previousReady: { [PROJECT_EQUIPMENT_TOOL]: true } }).items[0].invalidated).toBe(false)
+})
+
+it('R13D-12 display projection never invents readiness', () => {
+  const sizing = r13dRow('solar-size-strings', true)
+  const selection = projectSolarFlowSelect([{ capabilities: [sizing] }], 'rooftop')
+  const visible = r13dDisplay(selection)
+  expect(visible.items[0]).toMatchObject({ row: null, ready: false, enabled: false, skip: false, invalidated: false, runOutcome: null })
+  expect(visible.items[2]).toMatchObject({ row: sizing, ready: true, skip: true })
+  expect(visible.resumeIndex).toBe(2)
+  for (const extra of [{ current: false }, { binding: null }]) {
+    const state = r13dDisplay(selection, { ...extra, previousReady: { 'solar-settings': true, 'solar-size-strings': true } })
+    expect(state.resumeIndex).toBe(-1)
+    expect(state.items.every((item) => !item.ready && !item.enabled && !item.skip && !item.invalidated && item.runOutcome === null)).toBe(true)
+  }
+  const busy = r13dDisplay(selection, { busy: true })
+  expect(busy.resumeIndex).toBe(-1)
+  expect(busy.items[2]).toMatchObject({ ready: true, enabled: false, row: sizing, reasonKey: 'run_in_progress' })
+  expect(busy.items[0].row).toBeNull()
+  const malformedEquipment = { ...r13dRow('solar-assign-equipment', true), solar: null }
+  const lastRefused = r13dDisplay(projectSolarFlowSelect([{ capabilities: [sizing, malformedEquipment] }], 'rooftop'))
+  expect(lastRefused.items[6]).toMatchObject({ enabled: false, ready: false, invalidated: false })
+  expect(lastRefused.resumeIndex).toBe(2)
+})
+
+it('R13D-13 standalone model source and fixture outputs remain frozen', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/solar/solarFlowModel.js'))
+  const suffix = source.subarray(source.indexOf(Buffer.from('export const MAX_FLOW_STEPS')))
+  expect(suffix.length).toBe(17330)
+  expect(createHash('sha256').update(suffix).digest('hex')).toBe('62690d35699e568fa464231abd08c22ebc0c29b305efd31b716f8b85e6a063bb')
+  const fixture = steps(['solar-settings', 'solar-size-strings'])
+  expect(solarFlowSelect([{ capabilities: fixture }], 'rooftop').steps).toEqual(fixture)
+  expect(JSON.parse(JSON.stringify(solarFlowState({ steps: fixture }))).items.map((item) => [item.name, item.ready, item.enabled, item.status]))
+    .toEqual(W1.map(([name], index) => [name, index < 2, index < 2, index < 2 ? 'ready' : 'blocked']))
+})
+
+it('R13D-14 every new sentence passes strict copy extraction', async () => {
+  const { scanSource } = await import(/* @vite-ignore */ pathToFileURL(resolve(process.cwd(), 'scripts/check_user_facing_copy.mjs')).href)
+  expect(Object.values(PROJECT_SOLAR_RAIL_REASONS)).toHaveLength(8)
+  for (const sentence of Object.values(PROJECT_SOLAR_RAIL_REASONS)) {
+    expect(sentence.length).toBeGreaterThanOrEqual(12)
+    expect(scanSource(`const text = ${JSON.stringify(sentence)}`, 'src/solar/solarFlowModel.js', { strict: true })).toEqual([])
+  }
+})
+
+it('R13D-15 direct derivation retains whole-catalog refusal', () => {
+  const first = r13dRow('solar-settings', true)
+  const contradiction = r13dRow('solar-settings')
+  const within = Array(4095).fill(first).concat(contradiction)
+  expect(equipmentFlow(within).items[0]).toMatchObject({ ready: false, enabled: false })
+  expect(equipmentFlow(within.concat(first))).toEqual({ items: [], resumeIndex: -1 })
+})
+
+it('R13D-16 ownership and frozen reason selection are explicit', () => {
+  for (const file of ['solarFlowModel.js', 'SolarFlowRail.jsx', 'SolarStepEditor.jsx']) {
+    const source = readFileSync(resolve(process.cwd(), 'src/solar', file), 'utf8')
+    for (const name of ['solarProjectAppModel', 'useProjectSolarScope', 'createProjectSolarRunController', 'solarProjectCompletion']) {
+      expect(source).not.toMatch(new RegExp('import[^\\n]*' + name))
+    }
+  }
+  const expected = {
+    binding_invalid: 'Open a project drawing version to review Solar steps.',
+    catalog_pending: 'Checking Solar steps for the selected project drawing version.',
+    stage_missing: 'This Solar step is not available in the current project catalog.',
+    stage_refused: 'This Solar step cannot run with the current project request.',
+    catalog_unreadable: 'The project Solar catalog could not be read. Refresh the tools and try again.',
+    form_unavailable: 'This tool has no project form in this view.',
+    run_in_progress: 'A run is in progress. Wait for it to finish.',
+    review_required: 'Review the inputs to check whether this step can run.',
+  }
+  expect(Object.isFrozen(PROJECT_SOLAR_RAIL_REASONS)).toBe(true)
+  expect(PROJECT_SOLAR_RAIL_REASONS).toEqual(expected)
+  for (const [code, sentence] of Object.entries(expected)) expect(projectSolarRailReason(code)).toBe(sentence)
+  expect(projectSolarRailReason('unknown')).toBeNull()
 })
