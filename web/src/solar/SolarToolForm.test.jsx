@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { StrictMode } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import SolarToolForm from './SolarToolForm.jsx'
@@ -7,8 +7,270 @@ import declaration from '../../../server/solar_tools/solar_design_presets.json'
 import listDeclaration from '../../../server/solar_tools/solar_design_presets_list.json'
 import conversionDeclaration from '../../../server/solar_tools/solar_trackers_to_panel_groups.json'
 import snapshot from '../../../docs/parity/evidence/ground/generate/profile-settings.json'
+import writeTools from '../../../server/write_tools.json'
+import SolarStepEditor from './SolarStepEditor.jsx'
+import { createSolarProjectClient } from './solarProjectClient.js'
+import { SEED_SETTINGS } from './solarSettingsModel.js'
+import { PROJECT_EQUIPMENT_TOOL, deriveProjectEquipmentState, buildProjectEquipmentRequest,
+  exactProjectEquipmentPreview, projectSolarFlowReason, solarFlowStepId } from './solarFlowModel.js'
 
 afterEach(cleanup)
+
+const equipmentClients = []
+afterEach(() => { cleanup(); for (const client of equipmentClients.splice(0)) client.dispose() })
+const projectEquipmentBinding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
+  project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
+  input_version_id: '44444444-4444-4444-4444-444444444444' }
+const projectEquipmentNext = { ...projectEquipmentBinding, input_version_id: '66666666-6666-6666-6666-666666666666' }
+const projectEquipmentDigest = 'sha256:' + 'd'.repeat(64)
+const projectEquipmentJob = '55555555-5555-5555-5555-555555555555'
+const projectEquipmentTool = { ...writeTools.tools.find((entry) => entry.name === PROJECT_EQUIPMENT_TOOL), label: 'Assign equipment',
+  solar: { schema: 'leaf.solar-tool-view.v1', name: PROJECT_EQUIPMENT_TOOL, family: 'stringing',
+    wave: 1, order: 70, entitlement: 'run_write', interaction: { mode: 'form' } } }
+function projectEquipmentIntake(rev = 7) {
+  return { solar_design_graph: { rev, settings: { ...SEED_SETTINGS },
+    project: { name: 'Roof', zip_code: '44224', latitude: null, longitude: null } }, solar_design_graph_sha256: 'b'.repeat(64) }
+}
+function projectEquipmentContext(binding = projectEquipmentBinding, intake = projectEquipmentIntake(), changes = {}) {
+  return { context: { organization_id: binding.organization_id, project_id: binding.project_id, drawing_id: binding.drawing_id,
+    input_version_id: binding.input_version_id, head_version_id: binding.input_version_id, is_head: true,
+    intake_sha256: 'a'.repeat(64), ...changes }, intake }
+}
+function projectEquipmentPreviewRow(changes = {}, availability = {}) {
+  return { name: PROJECT_EQUIPMENT_TOOL, catalog_digest: projectEquipmentDigest,
+    availability: { admission_checked: true, admission: { status_code: 200, error: null },
+      entitled: true, engine_ready: true, implemented: true, input_ready: true, runnable: true,
+      refusal_reasons: [], ...availability }, ...changes }
+}
+const projectEquipmentPreview = (rows = [projectEquipmentPreviewRow()]) => ({ families: [{ capabilities: rows }] })
+const equipmentResponse = (data, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => data })
+function equipmentDeferred() {
+  let resolve, reject
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+function equipmentHarness(overrides = {}) {
+  const h = { contextResponses: [], previewResponses: [], submitResponses: [], intake: projectEquipmentIntake(),
+    contextChanges: {}, preview: projectEquipmentPreview(), run: { job_id: projectEquipmentJob, status: 'submitted' }, ...overrides }
+  h.fetchImpl = vi.fn(async (url, options) => {
+    const binding = h.real.getSnapshot().binding
+    if (url.includes('/context?')) return h.contextResponses.shift() ?? equipmentResponse(projectEquipmentContext(binding, h.intake, h.contextChanges))
+    if (url.includes('/api/capabilities?')) return h.previewResponses.shift() ?? equipmentResponse(h.preview)
+    if (url.endsWith('/api/run')) return h.submitResponses.shift() ?? equipmentResponse(h.run, 202)
+    if (url.endsWith('/checkout')) {
+      const identity = { organization_id: binding.organization_id, project_id: binding.project_id, drawing_id: binding.drawing_id }
+      if (options.method === 'DELETE') return equipmentResponse({ ...identity, released: true, checkout: null })
+      return equipmentResponse({ ...identity, acquired: true, checkout: { holder: 'synthetic editor',
+        acquired: '2026-01-01T00:00:00Z', expires: '2099-01-01T00:00:00Z', fence: '1' },
+        checkout_capability: 'lco1.' + 'c'.repeat(64) })
+    }
+    throw new Error('Unexpected equipment request')
+  })
+  h.real = createSolarProjectClient({ fetchImpl: h.fetchImpl, authHeaders: () => ({ Authorization: 'Bearer synthetic' }) })
+  h.real.setScope(projectEquipmentBinding, 'epoch-1')
+  equipmentClients.push(h.real)
+  h.client = { ...h.real }
+  for (const name of ['readContext', 'prepareRun', 'catalog', 'submitRun', 'captureCatalogScope', 'setScope', 'dispose', 'acquireCheckout', 'releaseCheckout']) {
+    h.client[name] = vi.fn((...args) => h.real[name](...args))
+  }
+  h.unsubscribes = []
+  h.client.subscribe = vi.fn((listener) => {
+    const unsubscribe = vi.fn(h.real.subscribe(listener))
+    h.unsubscribes.push(unsubscribe)
+    return unsubscribe
+  })
+  let sequence = 0
+  h.props = { tool: projectEquipmentTool, solarBinding: projectEquipmentBinding, authorityKey: 'epoch-1', projectClient: h.client,
+    catalogDigest: projectEquipmentDigest, newProjectIntentKey: vi.fn(() => 'equipment-intent-' + ++sequence),
+    onProjectSubmit: vi.fn((intent, options) => h.real.submitRun(intent, { signal: options.signal })),
+    readIntake: vi.fn(), onSubmit: vi.fn(), onClose: vi.fn() }
+  return h
+}
+const equipmentPreviewCalls = (h) => h.fetchImpl.mock.calls.filter(([url]) => url.includes('/api/capabilities?'))
+const equipmentRunCalls = (h) => h.fetchImpl.mock.calls.filter(([url]) => url.endsWith('/api/run'))
+const equipmentReview = () => screen.getByRole('button', { name: 'Review & run' })
+const equipmentRefresh = () => fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }))
+const equipmentChange = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } })
+const equipmentReason = () => screen.getByTestId('project-solar-equipment-reason').textContent
+async function equipmentReady() { await waitFor(() => expect(equipmentReview().disabled).toBe(false)) }
+async function equipmentSettle() { await act(async () => { await Promise.resolve(); await Promise.resolve() }) }
+async function equipmentMount(h = equipmentHarness()) {
+  const view = render(<SolarToolForm {...h.props} />)
+  await equipmentReady()
+  return { h, view }
+}
+function equipmentRebind(view, h, changes) {
+  h.props = { ...h.props, ...changes }
+  h.real.setScope(h.props.solarBinding, h.props.authorityKey)
+  view.rerender(<SolarToolForm {...h.props} />)
+}
+
+it('R11-05 invalid or absent project bindings refuse before any legacy or client read', async () => {
+  const accessor = { ...projectEquipmentBinding }
+  const get = vi.fn(() => projectEquipmentBinding.input_version_id)
+  Object.defineProperty(accessor, 'input_version_id', { enumerable: true, get })
+  const missing = { ...projectEquipmentBinding }
+  delete missing.drawing_id
+  for (const solarBinding of [undefined, null, missing, accessor, { ...projectEquipmentBinding, extra: true },
+    { ...projectEquipmentBinding, input_version_id: 3 }]) {
+    const h = equipmentHarness()
+    render(<SolarToolForm {...h.props} solarBinding={solarBinding} />)
+    await waitFor(() => expect(equipmentReason()).toBe(projectSolarFlowReason('binding_invalid')))
+    expect(h.fetchImpl).not.toHaveBeenCalled()
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+    expect(h.client.prepareRun).not.toHaveBeenCalled()
+    cleanup()
+  }
+  const h = equipmentHarness()
+  const props = { ...h.props, projectId: projectEquipmentBinding.project_id }
+  delete props.solarBinding
+  render(<SolarToolForm {...props} />)
+  expect(equipmentReason()).toBe(projectSolarFlowReason('binding_invalid'))
+  expect(h.fetchImpl).not.toHaveBeenCalled()
+  expect(get).not.toHaveBeenCalled()
+})
+
+it('R11-06 missing project dependencies refuse without legacy handoff', async () => {
+  for (const key of ['projectClient', 'newProjectIntentKey', 'onProjectSubmit']) {
+    const h = equipmentHarness()
+    render(<SolarToolForm {...h.props} {...{ [key]: undefined }} />)
+    expect(equipmentReason()).toBe(projectSolarFlowReason('submit_unavailable'))
+    expect(h.fetchImpl).not.toHaveBeenCalled()
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+    cleanup()
+  }
+  const h = equipmentHarness()
+  h.real.setScope(projectEquipmentNext, 'epoch-1')
+  render(<SolarToolForm {...h.props} />)
+  await waitFor(() => expect(equipmentReason()).toBe(projectSolarFlowReason('binding_invalid')))
+  expect(h.fetchImpl).not.toHaveBeenCalled()
+})
+
+it('R11-07 foreign or inconsistent canonical context cannot create a candidate', async () => {
+  for (const contextChanges of [{ project_id: projectEquipmentNext.input_version_id },
+    { input_version_id: projectEquipmentNext.input_version_id }, { organization_id: projectEquipmentNext.input_version_id },
+    { drawing_id: projectEquipmentNext.input_version_id }, { head_version_id: projectEquipmentNext.input_version_id, is_head: true },
+    { is_head: 'true' }]) {
+    const h = equipmentHarness({ contextChanges })
+    render(<SolarToolForm {...h.props} />)
+    await waitFor(() => expect(equipmentReason()).toBe(projectSolarFlowReason('context_unreadable')))
+    expect(h.client.prepareRun).not.toHaveBeenCalled()
+    expect(equipmentPreviewCalls(h)).toHaveLength(0)
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    cleanup()
+  }
+})
+
+it('R11-08 historical project context requires the head before preview', async () => {
+  const h = equipmentHarness({ contextChanges: { head_version_id: projectEquipmentNext.input_version_id, is_head: false } })
+  render(<SolarToolForm {...h.props} />)
+  await waitFor(() => expect(equipmentReason()).toBe(projectSolarFlowReason('not_current_head')))
+  expect(equipmentPreviewCalls(h)).toHaveLength(0)
+  expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+it('R11-09 graphless broken companions and unsafe revisions cannot seed equipment', async () => {
+  const broken = projectEquipmentIntake()
+  delete broken.solar_design_graph_sha256
+  for (const [intake, reason] of [[{}, 'graphless'], [broken, 'graph_unreadable'],
+    [projectEquipmentIntake(Number.MAX_SAFE_INTEGER + 1), 'graph_unreadable'], [projectEquipmentIntake(-1), 'graph_unreadable']]) {
+    const h = equipmentHarness({ intake })
+    render(<SolarToolForm {...h.props} />)
+    await waitFor(() => expect(equipmentReason()).toBe(projectSolarFlowReason(reason)))
+    expect(equipmentPreviewCalls(h)).toHaveLength(0)
+    expect(h.client.prepareRun).not.toHaveBeenCalled()
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    cleanup()
+  }
+})
+
+it('R11-10 digest and UTF-8 intent key validation precede equipment preview', async () => {
+  for (const [change, reason] of [[{ catalogDigest: undefined }, 'catalog_digest_required'],
+    [{ catalogDigest: 'sha256:bad' }, 'catalog_digest_required'],
+    [{ newProjectIntentKey: vi.fn(() => ' ') }, 'idempotency_key_required'],
+    [{ newProjectIntentKey: vi.fn(() => 'é'.repeat(129)) }, 'idempotency_key_required']]) {
+    const h = equipmentHarness()
+    render(<SolarToolForm {...h.props} {...change} />)
+    await waitFor(() => expect(equipmentReason()).toBe(projectSolarFlowReason(reason)))
+    expect(equipmentPreviewCalls(h)).toHaveLength(0)
+    expect(h.client.prepareRun).not.toHaveBeenCalled()
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    cleanup()
+  }
+})
+
+it('R11-11 both project hosts preview and hand off one frozen R7 intent on the canonical wire', async () => {
+  for (const surface of ['tool', 'step']) {
+    const h = equipmentHarness()
+    await h.real.acquireCheckout()
+    const view = render(surface === 'tool' ? <SolarToolForm {...h.props} />
+      : <SolarStepEditor {...h.props} row={projectEquipmentTool} retained={{ expected_rev: 999 }} status="failed" failureCode="LEGACY" />)
+    await equipmentReady()
+    expect(screen.getByText('Graph revision 7')).toBeTruthy()
+    expect(screen.queryByLabelText('Expected rev')).toBeNull()
+    expect(screen.queryByLabelText('Drawing id')).toBeNull()
+    expect(screen.getByLabelText('Equipment').value).toBe('')
+    for (const label of ['Equipment', 'Assignments', 'Cancel', 'Preview']) expect(screen.getByLabelText(label)).toBeTruthy()
+    equipmentChange('Equipment', '[]'); equipmentChange('Assignments', '[]')
+    await equipmentReady()
+    const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+    expect(Object.keys(intent)).toEqual(['binding', 'authorityKey', 'tool', 'params', 'catalogDigest', 'idempotencyKey'])
+    expect(Object.isFrozen(intent)).toBe(true)
+    expect(Object.isFrozen(intent.params)).toBe(true)
+    expect(intent.params).toEqual({ drawing_id: projectEquipmentBinding.drawing_id, expected_rev: 7, equipment: [], assignments: [] })
+    const [url, options] = equipmentPreviewCalls(h).at(-1)
+    const b = projectEquipmentBinding
+    const query = `drawing_id=${b.drawing_id}&project_id=${b.project_id}&input_version_id=${b.input_version_id}`
+    const packed = JSON.stringify({ [PROJECT_EQUIPMENT_TOOL]: { params: intent.params,
+      catalog_digest: projectEquipmentDigest, idempotency_key: intent.idempotencyKey } })
+    expect(url).toBe('/api/capabilities?' + query + '&project_runs=' + encodeURIComponent(packed))
+    expect(options.headers).toMatchObject({ Authorization: 'Bearer synthetic', 'X-Org-Id': b.organization_id,
+      'X-Tenant-Id': b.organization_id, 'X-Project-Id': b.project_id, 'X-Checkout-Capability': 'lco1.' + 'c'.repeat(64) })
+    expect(h.fetchImpl.mock.calls.find(([path]) => path.includes('/context?'))[0])
+      .toBe(`/api/projects/${b.project_id}/drawing-versions/${b.input_version_id}/context?drawing_id=${b.drawing_id}`)
+    fireEvent.click(equipmentReview())
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1))
+    expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent)
+    const handoff = h.props.onProjectSubmit.mock.calls[0][1]
+    expect(handoff.binding).toEqual(b)
+    expect(handoff.authorityKey).toBe('epoch-1')
+    expect(handoff.signal.aborted).toBe(false)
+    expect(handoff.isCurrent()).toBe(true)
+    await waitFor(() => expect(screen.getByTestId('project-solar-equipment-feedback').textContent).toBe('Equipment request submitted.'))
+    const [, runOptions] = equipmentRunCalls(h)[0]
+    expect(JSON.parse(runOptions.body)).toEqual({ tool: PROJECT_EQUIPMENT_TOOL, params: intent.params, dwg: b.input_version_id, catalog_digest: projectEquipmentDigest })
+    expect(runOptions.headers['Idempotency-Key']).toBe(intent.idempotencyKey)
+    expect(runOptions.headers['X-Checkout-Capability']).toBe('lco1.' + 'c'.repeat(64))
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+    expect(h.props.onClose).not.toHaveBeenCalled()
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+    view.unmount()
+  }
+})
+
+it('R11-12 successful HTTP catalogs must satisfy every exact equipment admission condition', async () => {
+  const omitted = { status_code: 200 }
+  const badRows = [[], [projectEquipmentPreviewRow({ catalog_digest: 'sha256:' + 'e'.repeat(64) })],
+    [projectEquipmentPreviewRow({}, { admission_checked: false })], [projectEquipmentPreviewRow({}, { admission: omitted })],
+    [projectEquipmentPreviewRow({}, { refusal_reasons: ['project_request_required'] })],
+    [projectEquipmentPreviewRow(), projectEquipmentPreviewRow({}, { admission: { status_code: 409, error: { reason_code: 'INVALID_EQUIPMENT_CAPACITY' } } })],
+    ...['entitled', 'engine_ready', 'implemented', 'input_ready', 'runnable'].map((key) => [projectEquipmentPreviewRow({}, { [key]: false })])]
+  for (const rows of badRows) {
+    const h = equipmentHarness({ preview: projectEquipmentPreview(rows) })
+    render(<SolarToolForm {...h.props} />)
+    await waitFor(() => expect(equipmentReason()).toBe(projectSolarFlowReason('preview_refused')))
+    expect(equipmentReview().disabled).toBe(true)
+    fireEvent.click(equipmentReview())
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    const outcome = await h.client.catalog.mock.results[0].value
+    expect(outcome.ok).toBe(true)
+    expect(outcome.status).toBe(200)
+    expect(exactProjectEquipmentPreview(outcome, projectEquipmentDigest).accepted).toBe(false)
+    cleanup()
+  }
+})
 
 const presetTool = {
   name: 'solar-design-presets', label: 'Design presets', capabilities: ['drawing.write'],
@@ -36,6 +298,335 @@ const tool = {
     initialize: { type: ['object', 'null'], default: null },
   } },
 }
+
+it('R11-16 edits digests and ABA scope changes synchronously invalidate old preview success and failure', async () => {
+  for (const settlement of ['success', 'failure']) {
+    const late = equipmentDeferred()
+    const h = equipmentHarness({ previewResponses: [late.promise] })
+    const view = render(<SolarToolForm {...h.props} />)
+    await waitFor(() => expect(equipmentPreviewCalls(h)).toHaveLength(1))
+    const signal = h.client.catalog.mock.calls[0][0].signal
+    equipmentChange('Equipment', '[{"id":""}]')
+    expect(signal.aborted).toBe(true)
+    await equipmentReady()
+    const draftIntent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+    const validCalls = equipmentPreviewCalls(h).length
+    equipmentChange('Equipment', '[')
+    await waitFor(() => expect(equipmentReason()).toBe(projectSolarFlowReason('invalid_value')))
+    expect(equipmentReview().disabled).toBe(true)
+    expect(equipmentPreviewCalls(h)).toHaveLength(validCalls)
+    fireEvent.click(equipmentReview())
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    equipmentChange('Equipment', '[{"id":""}]')
+    await equipmentReady()
+    const factory = vi.fn(() => 'replacement-key')
+    h.props = { ...h.props, newProjectIntentKey: factory }
+    const calls = equipmentPreviewCalls(h).length
+    view.rerender(<SolarToolForm {...h.props} />)
+    await equipmentSettle()
+    expect(factory).not.toHaveBeenCalled()
+    expect(equipmentPreviewCalls(h)).toHaveLength(calls)
+    const digestLate = equipmentDeferred()
+    h.previewResponses.push(digestLate.promise)
+    h.props = { ...h.props, catalogDigest: 'sha256:' + 'e'.repeat(64) }
+    view.rerender(<SolarToolForm {...h.props} />)
+    expect(equipmentReview().disabled).toBe(true)
+    await waitFor(() => expect(equipmentPreviewCalls(h)).toHaveLength(calls + 1))
+    const digestSignal = h.client.catalog.mock.calls.at(-1)[0].signal
+    equipmentRebind(view, h, { solarBinding: projectEquipmentNext })
+    equipmentRebind(view, h, { solarBinding: projectEquipmentBinding, catalogDigest: projectEquipmentDigest })
+    await equipmentReady()
+    expect(digestSignal.aborted).toBe(true)
+    expect(screen.getByLabelText('Equipment').value).toBe('')
+    expect(h.client.catalog.mock.calls.at(-1)[0].intents[0]).not.toBe(draftIntent)
+    await act(async () => {
+      if (settlement === 'success') late.resolve(equipmentResponse(projectEquipmentPreview()))
+      else late.reject(new Error('late old request'))
+      digestLate.resolve(equipmentResponse(projectEquipmentPreview()))
+    })
+    expect(screen.queryByTestId('project-solar-equipment-feedback')).toBeNull()
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    const authorityLate = equipmentDeferred()
+    h.previewResponses.push(authorityLate.promise)
+    equipmentRefresh()
+    await waitFor(() => expect(h.client.catalog.mock.calls.at(-1)[0].signal.aborted).toBe(false))
+    const oldAuthority = h.client.catalog.mock.calls.at(-1)[0].signal
+    equipmentRebind(view, h, { authorityKey: 'epoch-2' })
+    await equipmentReady()
+    expect(oldAuthority.aborted).toBe(true)
+    const replacement = equipmentHarness()
+    view.rerender(<SolarToolForm {...replacement.props} />)
+    await equipmentReady()
+    await act(async () => authorityLate.reject(new Error('old authority')))
+    expect(screen.queryByTestId('project-solar-equipment-feedback')).toBeNull()
+    expect(h.unsubscribes.every((unsubscribe) => unsubscribe.mock.calls.length === 1)).toBe(true)
+    view.unmount()
+  }
+})
+
+it('R11-17 checkout rotation aborts and restarts an unsettled initial context read', async () => {
+  const late = equipmentDeferred()
+  const h = equipmentHarness({ contextResponses: [late.promise] })
+  render(<SolarToolForm {...h.props} />)
+  await waitFor(() => expect(h.client.readContext).toHaveBeenCalledTimes(1))
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  await act(async () => { await h.real.acquireCheckout() })
+  await equipmentReady()
+  expect(signal.aborted).toBe(true)
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  await act(async () => late.resolve(equipmentResponse(projectEquipmentContext(projectEquipmentBinding, projectEquipmentIntake(99)))))
+  expect(screen.getByText('Graph revision 7')).toBeTruthy()
+  expect(screen.queryByText('Graph revision 99')).toBeNull()
+  expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+it('R11-30 a client scope that leaves and returns during the initial read restarts it and settles', async () => {
+  const late = equipmentDeferred()
+  const h = equipmentHarness({ contextResponses: [late.promise] })
+  render(<SolarToolForm {...h.props} />)
+  await waitFor(() => expect(h.client.readContext).toHaveBeenCalledTimes(1))
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  act(() => {
+    h.real.setScope(projectEquipmentNext, 'epoch-1')
+    h.real.setScope(projectEquipmentBinding, 'epoch-1')
+  })
+  expect(signal.aborted).toBe(true)
+  await equipmentReady()
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  await act(async () => late.resolve(equipmentResponse(projectEquipmentContext(projectEquipmentBinding, projectEquipmentIntake(99)))))
+  expect(screen.getByText('Graph revision 7')).toBeTruthy()
+  expect(screen.queryByText('Graph revision 99')).toBeNull()
+  expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+  // Once the context has settled a further leave and return restarts nothing.
+  act(() => {
+    h.real.setScope(projectEquipmentNext, 'epoch-1')
+    h.real.setScope(projectEquipmentBinding, 'epoch-1')
+  })
+  await equipmentSettle()
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+})
+
+it('R11-18 checkout rotation disarms and previews the same frozen candidate and intent key', async () => {
+  const { h } = await equipmentMount()
+  const intent = h.client.catalog.mock.calls[0][0].intents[0]
+  const late = equipmentDeferred()
+  h.previewResponses.push(late.promise)
+  await act(async () => { await h.real.acquireCheckout() })
+  await waitFor(() => expect(equipmentPreviewCalls(h)).toHaveLength(2))
+  expect(equipmentReview().disabled).toBe(true)
+  expect(h.client.catalog.mock.calls[1][0].intents[0]).toBe(intent)
+  expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(1)
+  fireEvent.click(equipmentReview())
+  expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+  await act(async () => late.resolve(equipmentResponse(projectEquipmentPreview())))
+  await equipmentReady()
+  expect(equipmentPreviewCalls(h)[1][1].headers['X-Checkout-Capability']).toBe('lco1.' + 'c'.repeat(64))
+})
+
+it('R11-19 final context reread refuses a moved head digest or revision without retargeting', async () => {
+  for (const reason of ['head', 'digest', 'rev']) {
+    const { h, view } = await equipmentMount()
+    const candidate = h.client.catalog.mock.calls[0][0].intents[0]
+    if (reason === 'head') h.contextChanges = { head_version_id: projectEquipmentNext.input_version_id, is_head: false }
+    if (reason === 'digest') h.contextChanges = { intake_sha256: 'f'.repeat(64) }
+    if (reason === 'rev') h.intake = projectEquipmentIntake(8)
+    fireEvent.click(equipmentReview())
+    await waitFor(() => expect(equipmentReason()).toBe(projectSolarFlowReason(reason === 'head' ? 'not_current_head' : 'scope_stale')))
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    expect(equipmentRunCalls(h)).toHaveLength(0)
+    expect(h.client.prepareRun).toHaveBeenCalledTimes(1)
+    expect(candidate.params.expected_rev).toBe(7)
+    view.unmount()
+  }
+})
+
+it('R11-20 same tick submission locks survive unrelated renders until callback settlement', async () => {
+  const pending = equipmentDeferred()
+  const h = equipmentHarness()
+  h.props.onProjectSubmit = vi.fn(() => pending.promise)
+  const { view } = await equipmentMount(h)
+  const run = equipmentReview()
+  act(() => { fireEvent.click(run); fireEvent.click(run) })
+  await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1))
+  const intent = h.props.onProjectSubmit.mock.calls[0][0]
+  view.rerender(<SolarToolForm {...h.props} onClose={vi.fn()} />)
+  expect(equipmentReview().disabled).toBe(true)
+  fireEvent.click(equipmentReview())
+  expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1)
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  await act(async () => pending.resolve({ ok: true, status: 202, data: { status: 'submitted', job_id: projectEquipmentJob } }))
+  await equipmentReady()
+  expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent)
+  expect(h.props.onClose).not.toHaveBeenCalled()
+})
+
+it('R11-21 uncertain submission waits for explicit retry and keeps candidate identity across refresh', async () => {
+  const { h } = await equipmentMount()
+  h.client.submitRun.mockImplementationOnce(async () => ({ ok: false, status: null, reason: 'SIP_R7_TIMEOUT', envelope: null }))
+  h.props.onProjectSubmit.mockImplementation((intent, options) => h.client.submitRun(intent, { signal: options.signal }))
+  fireEvent.click(equipmentReview())
+  await waitFor(() => expect(screen.getByTestId('project-solar-equipment-feedback').textContent).toContain('SIP_R7_TIMEOUT'))
+  await equipmentSettle()
+  expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1)
+  const intent = h.props.onProjectSubmit.mock.calls[0][0]
+  expect(screen.getByRole('button', { name: 'Retry' }).disabled).toBe(false)
+  equipmentRefresh()
+  await equipmentReady()
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0]).toBe(intent)
+  expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('button', { name: 'Retry' }).disabled).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2))
+  expect(h.props.onProjectSubmit.mock.calls[1][0]).toBe(intent)
+  await waitFor(() => expect(screen.getByTestId('project-solar-equipment-feedback').textContent).toBe('Equipment request submitted.'))
+  expect(h.props.onClose).not.toHaveBeenCalled()
+})
+
+it('R11-22 a current 202 reports submission without claiming applied finished or ready', async () => {
+  const { h } = await equipmentMount()
+  fireEvent.click(equipmentReview())
+  await waitFor(() => expect(screen.getByTestId('project-solar-equipment-feedback').textContent).toBe('Equipment request submitted.'))
+  expect(screen.getByTestId('project-solar-equipment-form').getAttribute('data-mode')).toBe('edit')
+  expect(h.props.onClose).not.toHaveBeenCalled()
+  expect(h.props.onSubmit).not.toHaveBeenCalled()
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  expect(equipmentRunCalls(h)).toHaveLength(1)
+  for (const text of ['Equipment applied', 'Equipment finished', 'Equipment ready']) expect(screen.queryByText(text)).toBeNull()
+})
+
+it('R11-23 feedback keeps exact outcomes and safe nested outer and fallback codes without server prose', async () => {
+  const nested = { status_code: 409, error: { reason_code: 'INVALID_EQUIPMENT_CAPACITY', message: 'private nested prose' } }
+  const h = equipmentHarness({ preview: projectEquipmentPreview([projectEquipmentPreviewRow({}, { admission: nested, runnable: false })]) })
+  render(<SolarToolForm {...h.props} />)
+  await waitFor(() => expect(screen.getByTestId('project-solar-equipment-feedback').textContent)
+    .toBe(projectSolarFlowReason('preview_refused') + ' (INVALID_EQUIPMENT_CAPACITY)'))
+  const preview = await h.client.catalog.mock.results[0].value
+  expect(exactProjectEquipmentPreview(preview, projectEquipmentDigest).admission).toEqual(nested)
+  expect(preview.status).toBe(200)
+  expect(screen.getByTestId('project-solar-equipment-form').textContent).not.toContain('private nested prose')
+  cleanup()
+  for (const [envelope, status, code] of [[{ error: { reason_code: 'CHECKOUT_EXPIRED', message: 'private transport prose' } }, 409, 'CHECKOUT_EXPIRED'],
+    [{ error: { message: 'private missing reason' } }, 409, 'HTTP_ERROR'],
+    [{ error: { reason_code: 'bad code <secret>', message: 'private unsafe reason' } }, 403, 'HTTP_ERROR']]) {
+    const next = equipmentHarness({ previewResponses: [equipmentResponse(envelope, status)] })
+    render(<SolarToolForm {...next.props} />)
+    await waitFor(() => expect(screen.getByTestId('project-solar-equipment-feedback').textContent)
+      .toBe(projectSolarFlowReason('preview_refused') + ` (${code})`))
+    const outcome = await next.client.catalog.mock.results[0].value
+    expect(outcome.status).toBe(status)
+    expect(outcome.reason).toBe(code)
+    expect(outcome.envelope).toEqual(envelope)
+    expect(screen.getByTestId('project-solar-equipment-form').textContent).not.toContain('private')
+    expect(screen.getByTestId('project-solar-equipment-form').textContent).not.toContain('<secret>')
+    expect(next.props.onProjectSubmit).not.toHaveBeenCalled()
+    cleanup()
+  }
+})
+
+it('R11-24 empty equipment IDs and array order survive preparation preview and identical explicit retry', async () => {
+  const { h } = await equipmentMount()
+  const equipment = [{ id: '', number: 2, model: 'second' }, { id: '', number: 1, model: 'first' }]
+  const assignments = [{ string_ref: 's2', inverter_ref: '', mppt_letter: 'B', input_number: 0 },
+    { string_ref: 's1', inverter_ref: '', mppt_letter: 'A', input_number: 1 }]
+  equipmentChange('Equipment', JSON.stringify(equipment))
+  equipmentChange('Assignments', JSON.stringify(assignments))
+  await equipmentReady()
+  const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+  expect(intent.params.equipment).toEqual(equipment)
+  expect(intent.params.assignments).toEqual(assignments)
+  const state = deriveProjectEquipmentState({ binding: projectEquipmentBinding, contextView: projectEquipmentContext() })
+  const build = (values) => buildProjectEquipmentRequest({ binding: projectEquipmentBinding, state, values,
+    catalogDigest: projectEquipmentDigest, idempotencyKey: 'key' })
+  expect(build({ equipment, assignments, cancel: false, preview: false }).request.params)
+    .toEqual({ drawing_id: projectEquipmentBinding.drawing_id, expected_rev: 7, equipment, assignments, cancel: false, preview: false })
+  const accessor = {}
+  const get = vi.fn(() => equipment)
+  Object.defineProperty(accessor, 'equipment', { enumerable: true, get })
+  const circular = []; circular.push(circular)
+  for (const values of [{ expected_rev: 99 }, { drawing_id: 'foreign' }, { project_id: 'foreign' },
+    { equipment: [undefined] }, { equipment: circular }, { equipment: [NaN] }, accessor]) {
+    expect(build(values)).toEqual({ ok: false, reason: 'request_invalid' })
+  }
+  expect(get).not.toHaveBeenCalled()
+  h.props.onProjectSubmit.mockResolvedValue({ ok: false, status: null, reason: 'SIP_R7_TIMEOUT', envelope: null })
+  fireEvent.click(equipmentReview())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' }).disabled).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2))
+  expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent)
+  expect(h.props.onProjectSubmit.mock.calls[1][0]).toBe(intent)
+  const packed = JSON.parse(new URL('https://synthetic.invalid' + equipmentPreviewCalls(h).at(-1)[0]).searchParams.get('project_runs'))
+  expect(packed[PROJECT_EQUIPMENT_TOOL].params.equipment).toEqual(equipment)
+  expect(Object.keys(packed[PROJECT_EQUIPMENT_TOOL].params).sort()).toEqual(['assignments', 'drawing_id', 'equipment', 'expected_rev'])
+  // This is transport preservation; no server creation or execution is inferred from the fixture.
+})
+
+it('R11-26 StrictMode unmount and late settlement abort and unsubscribe without managing the shared client', async () => {
+  for (const stage of ['context', 'preview', 'submit']) {
+    const late = equipmentDeferred()
+    const h = equipmentHarness(stage === 'context' ? { contextResponses: [late.promise] }
+      : stage === 'preview' ? { previewResponses: [late.promise] } : {})
+    if (stage === 'submit') h.props.onProjectSubmit.mockImplementation(() => late.promise)
+    const view = render(<StrictMode><SolarToolForm {...h.props} /></StrictMode>)
+    if (stage === 'submit') { await equipmentReady(); fireEvent.click(equipmentReview()); await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1)) }
+    else await waitFor(() => expect(stage === 'context' ? h.client.readContext.mock.calls.length : h.client.catalog.mock.calls.length).toBeGreaterThan(0))
+    const calls = stage === 'context' ? h.client.readContext.mock.calls : stage === 'preview' ? h.client.catalog.mock.calls : h.props.onProjectSubmit.mock.calls.map((call) => [call[1]])
+    view.unmount()
+    expect(calls.every(([options]) => options.signal.aborted)).toBe(true)
+    await act(async () => late.resolve(stage === 'submit' ? { ok: true, status: 202, data: { status: 'submitted', job_id: projectEquipmentJob } }
+      : equipmentResponse(stage === 'context' ? projectEquipmentContext() : projectEquipmentPreview())))
+    expect(h.unsubscribes.every((unsubscribe) => unsubscribe.mock.calls.length === 1)).toBe(true)
+    for (const name of ['setScope', 'dispose', 'acquireCheckout', 'releaseCheckout']) expect(h.client[name]).not.toHaveBeenCalled()
+    expect(h.props.onClose).not.toHaveBeenCalled()
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+  }
+  for (const surface of ['tool', 'step']) {
+    const h = equipmentHarness()
+    const view = render(<>
+      <button type="button" data-tool={PROJECT_EQUIPMENT_TOOL} id={solarFlowStepId(PROJECT_EQUIPMENT_TOOL)}>Equipment opener</button>
+      {surface === 'tool' ? <SolarToolForm {...h.props} /> : <SolarStepEditor {...h.props} row={projectEquipmentTool} />}
+    </>)
+    await equipmentReady()
+    expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(h.props.onClose).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Equipment opener' }))
+    screen.getByLabelText('Equipment').focus()
+    fireEvent.keyDown(screen.getByLabelText('Equipment'), { key: 'Escape' })
+    expect(h.props.onClose).toHaveBeenCalledTimes(2)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Equipment opener' }))
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    view.unmount()
+  }
+})
+
+it('R11-28 project presets and other generic tools refuse without legacy reads or submissions', async () => {
+  for (const host of ['tool', 'step']) {
+    for (const name of ['solar-design-presets', 'solar-design-presets-list', 'solar-homeruns']) {
+      const h = equipmentHarness()
+      const unsupported = { ...projectEquipmentTool, name }
+      render(host === 'tool' ? <SolarToolForm {...h.props} tool={unsupported} />
+        : <SolarStepEditor {...h.props} row={unsupported} projectId={projectEquipmentBinding.project_id} />)
+      expect(equipmentReason()).toBe(projectSolarFlowReason('tool_unsupported'))
+      expect(h.fetchImpl).not.toHaveBeenCalled()
+      expect(h.props.readIntake).not.toHaveBeenCalled()
+      expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+      expect(h.props.onSubmit).not.toHaveBeenCalled()
+      cleanup()
+    }
+  }
+  for (const name of ['solar-size-strings', 'solar-string-conductors', 'solar-string-add', 'solar-string-multi-add']) {
+    const h = equipmentHarness()
+    const specialised = { ...projectEquipmentTool, name }
+    render(<SolarStepEditor {...h.props} row={specialised} drawingId="d1" drawingVersion={3} />)
+    await equipmentSettle()
+    expect(h.props.readIntake).not.toHaveBeenCalled()
+    expect(h.props.onSubmit).not.toHaveBeenCalled()
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    expect(h.fetchImpl).not.toHaveBeenCalled()
+    cleanup()
+  }
+})
 
 it('SolarToolForm renders only the visible keys', () => {
   const { container } = render(<SolarToolForm tool={tool} onSubmit={vi.fn()} onClose={vi.fn()} />)

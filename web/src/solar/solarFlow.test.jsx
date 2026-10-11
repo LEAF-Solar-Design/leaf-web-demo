@@ -10,8 +10,155 @@ import rooftop from './__fixtures__/stringComposerRooftop.json'
 import { STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL, SOLAR_STRING_COMPOSER_REASONS,
   composeStringRequest, stringComposerView } from './solarStringComposerModel.js'
 import { SOLAR_FLOW_MATURITY_NOTES, SOLAR_FLOW_UNAVAILABLE_REASONS, solarFlowStepId } from './solarFlowModel.js'
+import { recordProjectSolarFlowRun, projectSolarFlowRunsFor, projectSolarFlowScope, projectSolarFlowReason } from './solarFlowModel.js'
+import { createSolarProjectClient } from './solarProjectClient.js'
 
 afterEach(cleanup)
+
+const projectRailClients = []
+afterEach(() => { cleanup(); for (const client of projectRailClients.splice(0)) client.dispose() })
+const projectRailBinding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
+  project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
+  input_version_id: '44444444-4444-4444-4444-444444444444' }
+const projectRailNext = { ...projectRailBinding, input_version_id: '55555555-5555-5555-5555-555555555555' }
+const projectRailDigest = 'sha256:' + 'd'.repeat(64)
+function projectRailFamilies(availability = {}) {
+  return [{ capabilities: [{ ...row('solar-assign-equipment', 70, 'Assign equipment',
+    { ...READY, runnable: true, admission_checked: true, admission: { status_code: 200, error: null }, ...availability }),
+    catalog_digest: projectRailDigest }] }]
+}
+async function projectRailHarness() {
+  const h = { families: projectRailFamilies(), unsubscribes: [] }
+  h.fetchImpl = vi.fn(async (url) => {
+    let data = { families: h.families }
+    if (url.endsWith('/checkout')) {
+      const binding = h.real.getSnapshot().binding
+      data = { organization_id: binding.organization_id, project_id: binding.project_id, drawing_id: binding.drawing_id,
+        acquired: true, checkout: { holder: 'synthetic editor', acquired: '2026-01-01T00:00:00Z',
+          expires: '2099-01-01T00:00:00Z', fence: '1' }, checkout_capability: 'lco1.' + 'c'.repeat(64) }
+    }
+    return { ok: true, status: 200, json: async () => data }
+  })
+  h.real = createSolarProjectClient({ fetchImpl: h.fetchImpl })
+  h.real.setScope(projectRailBinding, 'epoch-1')
+  projectRailClients.push(h.real)
+  h.client = { ...h.real, subscribe: vi.fn((listener) => {
+    const unsubscribe = vi.fn(h.real.subscribe(listener))
+    h.unsubscribes.push(unsubscribe)
+    return unsubscribe
+  }) }
+  h.catalog = async () => {
+    const snapshot = h.real.getSnapshot()
+    const isCurrent = h.real.captureCatalogScope()
+    const outcome = await h.real.catalog()
+    expect(outcome.ok).toBe(true)
+    return { binding: snapshot.binding, authorityKey: snapshot.authorityKey,
+      client: h.client, families: outcome.data.families, isCurrent }
+  }
+  h.props = { solarBinding: projectRailBinding, authorityKey: 'epoch-1', projectClient: h.client,
+    projectCatalog: await h.catalog(), onOpenStep: vi.fn() }
+  return h
+}
+
+it('R11-04 artifact history and announcements cannot cross project artifact or authority boundaries', async () => {
+  const h = await projectRailHarness()
+  const run = { binding: projectRailBinding, authorityKey: 'epoch-1', tool: 'solar-assign-equipment' }
+  const memory = recordProjectSolarFlowRun(null, run, { terminal: true, ok: true })
+  const view = render(<SolarFlowRail {...h.props} projectRunMemory={memory} />)
+  expect(screen.getByTestId('solar-flow-announce').textContent).toBe('')
+  h.real.setScope(projectRailNext, 'epoch-1')
+  h.props = { ...h.props, solarBinding: projectRailNext, projectCatalog: await h.catalog(), projectRunMemory: memory }
+  view.rerender(<SolarFlowRail {...h.props} />)
+  expect(projectSolarFlowRunsFor(memory, projectRailNext, 'epoch-1')).toBe(memory.runs)
+  expect(screen.getByTestId('solar-flow-announce').textContent).toBe('')
+  const failed = recordProjectSolarFlowRun(memory, { ...run, binding: projectRailNext }, { terminal: true, ok: false, reason_code: 'STALE_GRAPH_REVISION' })
+  view.rerender(<SolarFlowRail {...h.props} projectRunMemory={failed} />)
+  await waitFor(() => expect(screen.getByTestId('solar-flow-announce').textContent).toBe('Assign equipment failed: STALE_GRAPH_REVISION'))
+  for (const [binding, authorityKey] of [[projectRailNext, 'epoch-2'],
+    [{ ...projectRailNext, project_id: '66666666-6666-6666-6666-666666666666' }, 'epoch-1'],
+    [{ ...projectRailNext, drawing_id: '66666666-6666-6666-6666-666666666666' }, 'epoch-1'],
+    [{ ...projectRailNext, organization_id: '66666666-6666-6666-6666-666666666666' }, 'epoch-1']]) {
+    h.real.setScope(binding, authorityKey)
+    view.rerender(<SolarFlowRail {...h.props} solarBinding={binding} authorityKey={authorityKey}
+      projectCatalog={await h.catalog()} projectRunMemory={failed} />)
+    expect(projectSolarFlowRunsFor(failed, binding, authorityKey)).toEqual({})
+    expect(Object.isFrozen(projectSolarFlowRunsFor(failed, binding, authorityKey))).toBe(true)
+    expect(screen.getByTestId('solar-flow-announce').textContent).toBe('')
+  }
+  for (const authority of [null, '', ' ', 'x'.repeat(257)]) expect(projectSolarFlowScope(projectRailBinding, authority)).toBeNull()
+  expect(projectSolarFlowScope(null, 'epoch-1')).toBeNull()
+  view.unmount()
+  expect(h.unsubscribes.every((unsubscribe) => unsubscribe.mock.calls.length === 1)).toBe(true)
+})
+
+it('R11-15 stale catalog provenance withdraws project actions resume and readiness at render and click time', async () => {
+  const h = await projectRailHarness()
+  const catalogV = h.props.projectCatalog
+  const view = render(<SolarFlowRail {...h.props} />)
+  const open = screen.getByRole('button', { name: new RegExp('^Assign equipment') })
+  expect(open.getAttribute('aria-current')).toBe('step')
+  let live = true
+  view.rerender(<SolarFlowRail {...h.props} projectCatalog={{ ...catalogV, isCurrent: () => live && catalogV.isCurrent() }} />)
+  live = false
+  fireEvent.click(screen.getByRole('button', { name: new RegExp('^Assign equipment') }))
+  expect(h.props.onOpenStep).not.toHaveBeenCalled()
+  view.rerender(<SolarFlowRail {...h.props} solarBinding={projectRailNext} />)
+  expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('catalog_pending'))
+  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(screen.queryByText('Resume here')).toBeNull()
+  h.real.setScope(projectRailNext, 'epoch-1')
+  h.families = projectRailFamilies({ runnable: false, refusal_reasons: ['GRAPH_NOT_EMBEDDED'],
+    admission: { status_code: 409, error: { reason_code: 'GRAPH_NOT_EMBEDDED' } } })
+  h.props = { ...h.props, solarBinding: projectRailNext, projectCatalog: await h.catalog() }
+  view.rerender(<SolarFlowRail {...h.props} />)
+  // The old V catalog was never recorded under W; actual artifact readiness recorded on V still survives.
+  expect(items()[0].getAttribute('data-invalidated')).toBe('true')
+  h.families = projectRailFamilies({ runnable: false, input_ready: false, admission_checked: false,
+    admission: null, refusal_reasons: ['project_request_required'] })
+  h.props = { ...h.props, projectCatalog: await h.catalog() }
+  view.rerender(<SolarFlowRail {...h.props} />)
+  expect(items()[0].getAttribute('data-invalidated')).toBeNull()
+  expect(screen.getByText('Review inputs')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: new RegExp('^Assign equipment') }))
+  expect(h.props.onOpenStep).toHaveBeenCalledTimes(1)
+  expect(h.props.onOpenStep.mock.calls[0][0]).toBe(h.props.projectCatalog.families[0].capabilities[0])
+  for (const projectCatalog of [undefined, { ...h.props.projectCatalog, authorityKey: 'epoch-old' },
+    { ...h.props.projectCatalog, binding: projectRailBinding }, { ...h.props.projectCatalog, client: {} },
+    { ...h.props.projectCatalog, isCurrent: () => false }]) {
+    view.rerender(<SolarFlowRail {...h.props} projectCatalog={projectCatalog} />)
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    expect(screen.queryByText('Resume here')).toBeNull()
+    expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('catalog_pending'))
+  }
+  view.rerender(<SolarFlowRail {...h.props} />)
+  await act(async () => { await h.real.acquireCheckout() })
+  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('catalog_pending'))
+  expect(h.props.onOpenStep).toHaveBeenCalledTimes(1)
+})
+
+it('R11-29 a rail given only a project id is project mode and refuses without a binding', () => {
+  const legacyReady = { ...row('solar-assign-equipment', 70, 'Assign equipment',
+    { ...READY, runnable: false, admission_checked: false, admission: null }), catalog_digest: projectRailDigest }
+  const onOpenStep = vi.fn()
+  const legacy = { families: [{ capabilities: [legacyReady] }], familiesDrawingId: 'dwg-1', drawingId: 'dwg-1', onOpenStep }
+  const view = render(<SolarFlowRail {...legacy} projectId={projectRailBinding.project_id} />)
+  expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('binding_invalid'))
+  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(screen.queryByText('Resume here')).toBeNull()
+  expect(onOpenStep).not.toHaveBeenCalled()
+  // The same props with a null project id stay standalone, where the four legacy flags arm the step.
+  view.rerender(<SolarFlowRail {...legacy} projectId={null} />)
+  expect(screen.queryByTestId('project-solar-flow-reason')).toBeNull()
+  const open = screen.getByRole('button', { name: new RegExp('^Assign equipment') })
+  expect(open.disabled).toBe(false)
+  fireEvent.click(open)
+  expect(onOpenStep).toHaveBeenCalledTimes(1)
+  view.rerender(<SolarFlowRail {...legacy} projectId={projectRailBinding.project_id} />)
+  expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('binding_invalid'))
+  expect(screen.queryAllByRole('button')).toHaveLength(0)
+  expect(onOpenStep).toHaveBeenCalledTimes(1)
+})
 
 const W1 = [
   ['solar-settings', 10, 'Solar settings'], ['solar-size-strings', 20, 'Size strings'],
