@@ -281,7 +281,7 @@ describe('project Solar transport and lifecycle', () => {
     const { client, fetchImpl } = setup()
     const accessor = {}; Object.defineProperty(accessor, 'value', { enumerable: true, get: () => 1 })
     const cycle = {}; cycle.child = cycle
-    for (const params of [accessor, cycle, { value: undefined }, { value: Infinity }, { authorization: 'private' }, { drawing_id: J }]) {
+    for (const params of [accessor, cycle, { value: undefined }, { value: Infinity }, { authorization: 'x' }, { drawing_id: J }]) {
       expect(() => client.prepareRun({ tool: 'solar-settings', params, catalogDigest: digest, idempotencyKey: 'one' })).toThrow(TypeError)
     }
     for (const promise of [client.readContext(null), client.catalog(null), client.acquireCheckout({ ttlS: true }),
