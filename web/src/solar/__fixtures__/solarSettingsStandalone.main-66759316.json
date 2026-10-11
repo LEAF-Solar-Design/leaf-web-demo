@@ -1,0 +1,65 @@
+{
+  "capturedAt": "66759316",
+  "identicalOn": "a021056e",
+  "baseCommit": "667593161a1c419fec6ce7ac2f17428a30f2a978",
+  "sourceSha256": "edc1a1105fdf1b1e7892d7fc84ad4997bd9e35b2bc0afa2410a2b519f68897e0",
+  "digestNote": "The repeated a digest is synthetic and comes from the unchanged test fixture.",
+  "cases": [
+    {
+      "name": "edit",
+      "input": "buildSettingsParams(E,{num_mppt:'4'})",
+      "serialized": "{\"ok\":true,\"params\":{\"expected_rev\":2,\"changes\":{\"num_mppt\":4}}}",
+      "utf8Length": 64,
+      "sha256": "e7ff1da73275cc381819159028dce0f8c429ba8b3a82c7f7111b8a16e7719c36"
+    },
+    {
+      "name": "seed",
+      "input": "buildSettingsParams(I,{panels_in_sequence:'3'},U)",
+      "serialized": "{\"ok\":true,\"params\":{\"expected_rev\":0,\"changes\":{\"panels_in_sequence\":3},\"initialize\":{\"schema_version\":1,\"source_intake_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"units\":{\"drawing_units\":\"ft\",\"wcs_to_ucs\":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],\"elevation_datum\":\"unknown\",\"crs\":null}}}}",
+      "utf8Length": 315,
+      "sha256": "fc3efa1f97141d1e10314148bbca6f4e5bfee6d84dea51bdd677db27724877d1"
+    },
+    {
+      "name": "projectSeed",
+      "input": "buildSettingsParams(I,{},U,{name:' Roof A ',zip_code:'44224'})",
+      "serialized": "{\"ok\":true,\"params\":{\"expected_rev\":0,\"project_changes\":{\"name\":\"Roof A\",\"zip_code\":\"44224\"},\"initialize\":{\"schema_version\":1,\"source_intake_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"units\":{\"drawing_units\":\"ft\",\"wcs_to_ucs\":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],\"elevation_datum\":\"unknown\",\"crs\":null}}}}",
+      "utf8Length": 335,
+      "sha256": "525bf9f40cd6e359caa928a61cdc7caa49b2c46876f320046b5d722a67e3a59d"
+    },
+    {
+      "name": "l2",
+      "input": "buildSettingsParams(E,{use_l2_collectors:true,mppt_letter:'B',num_mppt:'4'})",
+      "serialized": "{\"ok\":true,\"params\":{\"expected_rev\":2,\"changes\":{\"num_mppt\":4,\"use_l2_collectors\":true,\"mppt_letter\":\"B\"}}}",
+      "utf8Length": 107,
+      "sha256": "f61f090e9898522dc47dce9f92182122e633ab8c09fc4f1a3f5ea083bb739c68"
+    },
+    {
+      "name": "noop",
+      "input": "buildSettingsParams(E,{})",
+      "serialized": "{\"ok\":false,\"reason\":\"no_changes\"}",
+      "utf8Length": 34,
+      "sha256": "86d2b3ae4ab77d4495518259c016646866c772f7e2f001e5a10e493cce28c03e"
+    },
+    {
+      "name": "units",
+      "input": "buildSettingsParams(I,{panels_in_sequence:'3'},{...U,drawing_units:''})",
+      "serialized": "{\"ok\":false,\"reason\":\"units_required\"}",
+      "utf8Length": 38,
+      "sha256": "059245a7b87279569dde74d80a9aef8b659ceb2d6fe2ebe6c79a5ff57aed9d4d"
+    },
+    {
+      "name": "editWire",
+      "input": "createRunSubmissionRequest('solar-settings',edit.params,C.drawingId,{dwgVersion:C.drawingVersion})",
+      "serialized": "{\"headers\":{},\"body\":{\"tool\":\"solar-settings\",\"params\":{\"expected_rev\":2,\"changes\":{\"num_mppt\":4}},\"dwg\":\"d1\",\"dwg_version\":3}}",
+      "utf8Length": 127,
+      "sha256": "f32f5b5dd7073b41447dfa5793ab8d691be2b5b1991cad0f23e7140f8aa8a246"
+    },
+    {
+      "name": "seedWire",
+      "input": "createRunSubmissionRequest('solar-settings',seed.params,C.drawingId,{dwgVersion:C.drawingVersion})",
+      "serialized": "{\"headers\":{},\"body\":{\"tool\":\"solar-settings\",\"params\":{\"expected_rev\":0,\"changes\":{\"panels_in_sequence\":3},\"initialize\":{\"schema_version\":1,\"source_intake_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"units\":{\"drawing_units\":\"ft\",\"wcs_to_ucs\":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],\"elevation_datum\":\"unknown\",\"crs\":null}}},\"dwg\":\"d1\",\"dwg_version\":3}}",
+      "utf8Length": 378,
+      "sha256": "62683c4247472fa84425a4e2e5216772ea21b63b1123bcfe00914b008d7ef275"
+    }
+  ]
+}
