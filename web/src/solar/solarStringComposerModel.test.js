@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import { createRunSubmissionRequest } from '../runIntent.js'
+import { createSolarProjectClient } from './solarProjectClient.js'
 import ground from './__fixtures__/stringComposerGround.json'
 import rooftop from './__fixtures__/stringComposerRooftop.json'
 import { decodeGroundFrameSlots, GROUND_SLOT_CODEC } from './solarGroundSlots.js'
@@ -8,6 +11,8 @@ import {
   MAX_SINGLE_REFS, MAX_MULTI_REFS, MAX_STRING_LENGTH, MAX_GRAPH_REV, MAX_COMBO_PANELS,
   stringComboSequences, stringComboSizes, savedStringLimit, stringComposerView,
   composeStringRequest, checkStringFreshness, stringRunRefusal,
+  PROJECT_STRING_COMPOSER_REASONS, projectStringComposerView, composeProjectStringRequest,
+  checkProjectStringFreshness, projectStringPreviewResult,
 } from './solarStringComposerModel.js'
 
 vi.mock('./solarGroundSlots.js', async (importOriginal) => {
@@ -506,5 +511,408 @@ describe('pure Solar string composer', () => {
     expect(stringComboSequences(14, 27)).toEqual([14, 13, 1, 1])
     expect(stringComboSizes(14, 27)).toEqual([14, 13])
     expect(stringComboSizes(5, 0)).not.toBe(stringComboSizes(5, 0))
+  })
+})
+
+const projectBinding = Object.freeze({ kind: 'project',
+  organization_id: '00000000-0000-4000-8000-000000000001',
+  project_id: '00000000-0000-4000-8000-000000000002',
+  drawing_id: '00000000-0000-4000-8000-000000000003',
+  input_version_id: '00000000-0000-4000-8000-000000000004' })
+const otherVersion = '00000000-0000-4000-8000-000000000005'
+const digest = 'sha256:' + 'a'.repeat(64)
+const contextView = (graph = ground, edits = {}) => ({
+  context: { ...projectBinding, head_version_id: projectBinding.input_version_id,
+    is_head: true, intake_sha256: 'b'.repeat(64), ...edits },
+  intake: { solar_design_graph: structuredClone(graph), solar_design_graph_sha256: 'c'.repeat(64) },
+})
+const projectView = (graph = ground) => projectStringComposerView({ binding: projectBinding, contextView: contextView(graph) })
+const projectCompose = (queue = [range(0, 1, 3)], graph = ground, multi = false, stringLength = 3, overrides = {}) =>
+  composeProjectStringRequest({ binding: projectBinding, view: projectView(graph),
+    toolName: multi ? STRING_MULTI_ADD_TOOL : STRING_ADD_TOOL, queue, stringLength,
+    catalogDigest: digest, idempotencyKey: 'strings-1', ...overrides })
+const projectRejected = (result, code) => {
+  expect(result).toEqual({ ok: false, code, reason: PROJECT_STRING_COMPOSER_REASONS[code] })
+  expect(Object.isFrozen(result)).toBe(true)
+}
+const capabilityRow = (tool = STRING_MULTI_ADD_TOOL) => ({ name: tool, catalog_digest: digest,
+  availability: { admission_checked: true, admission: { status_code: 200, error: null },
+    entitled: true, engine_ready: true, implemented: true, input_ready: true, runnable: true, refusal_reasons: [] } })
+const catalogOutcome = (rows = [capabilityRow()]) => ({ ok: true, status: 200,
+  data: { families: [{ capabilities: rows }] } })
+const previewIntent = { tool: STRING_MULTI_ADD_TOOL, catalogDigest: digest }
+
+describe('project Solar string composer', () => {
+  it('R10-01 Legacy API refuses canonical scope with the exact legacy sentence', () => {
+    expect(stringComposerView({ envelope: contextView(), drawingId: projectBinding.drawing_id,
+      drawingVersion: projectBinding.input_version_id, projectId: projectBinding.project_id }))
+      .toEqual({ ok: false, code: 'scope', reason: 'Open a saved standalone drawing before creating strings.' })
+  })
+  it('R10-02 Ground projection preserves canonical identity and freezes public containers', () => {
+    const view = projectView()
+    expect(view).toEqual({ ok: true, binding: projectBinding, rev: 2,
+      intakeSha256: 'b'.repeat(64), graphSha256: 'c'.repeat(64), design: 'Ground', savedLimit: 27,
+      rows: [{ frameIndex: 0, frameId: ground.frames[0].id, name: 'Group 1', slotCount: 3, panelIds: P.slice(0, 3) },
+        { frameIndex: 1, frameId: ground.frames[1].id, name: 'Group 2', slotCount: 2, panelIds: P.slice(3) }],
+      panels: [], assignedCount: 0 })
+    for (const value of [view, view.binding, view.rows, view.panels, ...view.rows, ...view.rows.map((row) => row.panelIds)]) {
+      expect(Object.isFrozen(value)).toBe(true)
+    }
+    expect(view.binding.project_id).not.toBe(ground.project.id)
+  })
+  it('R10-03 Roof projection preserves explicit panels and saved limit', () => {
+    const view = projectView(rooftop)
+    expect([view.rev, view.savedLimit, view.panels.length, view.assignedCount]).toEqual([0, 14, 30, 3])
+    expect(view.panels.map((item) => item.id)).toEqual(rooftop.panels.map((item) => item.id))
+    expect(view.panels[3].frameName).toBe('Multi group')
+    expect(view.rows).toEqual([])
+    expect(view.panels.every(Object.isFrozen)).toBe(true)
+  })
+  it('R10-04 Closed canonical bindings reject missing extra accessor and integer version fields', () => {
+    const getter = vi.fn(() => projectBinding.input_version_id)
+    const accessor = { ...projectBinding }
+    Object.defineProperty(accessor, 'input_version_id', { get: getter })
+    const missing = { ...projectBinding }; delete missing.drawing_id
+    for (const binding of [null, undefined, missing, { ...projectBinding, extra: true },
+      { ...projectBinding, input_version_id: 7 }, accessor]) {
+      projectRejected(projectStringComposerView({ binding, contextView: contextView() }), 'binding_invalid')
+    }
+    expect(getter).not.toHaveBeenCalled()
+  })
+  it('R10-05 Context identity and head consistency are checked before digests', () => {
+    for (const field of ['organization_id', 'project_id', 'drawing_id', 'input_version_id']) {
+      projectRejected(projectStringComposerView({ binding: projectBinding,
+        contextView: contextView(ground, { [field]: otherVersion }) }), 'context_unreadable')
+    }
+    for (const edits of [{ head_version_id: 7 }, { head_version_id: otherVersion },
+      { is_head: false }, { is_head: 1 }, { intake_sha256: 'A'.repeat(64) }]) {
+      projectRejected(projectStringComposerView({ binding: projectBinding, contextView: contextView(ground, edits) }), 'context_unreadable')
+    }
+    for (const data of [null, {}, { context: contextView().context, intake: [] }]) {
+      projectRejected(projectStringComposerView({ binding: projectBinding, contextView: data }), 'context_unreadable')
+    }
+  })
+  it('R10-06 A consistent historical context refuses before malformed digests', () => {
+    projectRejected(projectStringComposerView({ binding: projectBinding,
+      contextView: contextView(ground, { head_version_id: otherVersion, is_head: false, intake_sha256: null }) }), 'not_current_head')
+  })
+  it('R10-07 Missing graph pair and malformed companion pairs refuse distinctly', () => {
+    const data = contextView()
+    data.intake = {}
+    projectRejected(projectStringComposerView({ binding: projectBinding, contextView: data }), 'noPanels')
+    for (const intake of [{ solar_design_graph: ground }, { solar_design_graph_sha256: 'c'.repeat(64) },
+      { solar_design_graph: null, solar_design_graph_sha256: 'c'.repeat(64) },
+      { solar_design_graph: [], solar_design_graph_sha256: 'c'.repeat(64) },
+      { solar_design_graph: ground, solar_design_graph_sha256: 'C'.repeat(64) },
+      { solar_design_graph: { ...ground, rev: MAX_GRAPH_REV + 1 }, solar_design_graph_sha256: 'c'.repeat(64) }]) {
+      projectRejected(projectStringComposerView({ binding: projectBinding, contextView: { ...contextView(), intake } }), 'malformed')
+    }
+    projectRejected(projectView(changed(ground, (g) => { g.panels = [{}] })), 'representation')
+    projectRejected(projectView(changed(ground, (g) => { g.frames[0].ground_slots.count = 4 })), 'malformed')
+  })
+  it('R10-08 Ground single includes D and revision with independently frozen ordered refs', () => {
+    const result = projectCompose()
+    expect(result.request).toEqual({ tool: STRING_ADD_TOOL, params: { drawing_id: projectBinding.drawing_id,
+      operation: 'add-string', expected_rev: 2, ordered_panel_refs: P.slice(0, 3) },
+    catalogDigest: digest, idempotencyKey: 'strings-1' })
+    expect(result.preview).toEqual({ ids: P.slice(0, 3), sizes: [3] })
+    expect(result.preview.ids).not.toBe(result.request.params.ordered_panel_refs)
+    for (const value of [result, result.request, result.request.params, result.request.params.ordered_panel_refs,
+      result.preview, result.preview.ids, result.preview.sizes]) expect(Object.isFrozen(value)).toBe(true)
+  })
+  it('R10-09 Ground multi prepares one canonical request with all chunks', () => {
+    const result = projectCompose([range(0, 1, 3), range(1, 1, 2)], ground, true)
+    expect(result.request.params).toEqual({ drawing_id: projectBinding.drawing_id,
+      operation: 'add-strings', expected_rev: 2, string_length: 3, ordered_panel_refs: P })
+    expect(result.preview).toEqual({ ids: P, sizes: [3, 2] })
+    const client = createSolarProjectClient({ fetchImpl: vi.fn() })
+    client.setScope(projectBinding, 'session')
+    const intent = client.prepareRun(result.request)
+    expect(intent.params).toEqual(result.request.params)
+    expect(intent.binding).toEqual(projectBinding)
+    expect(intent.authorityKey).toBe('session')
+    client.dispose()
+  })
+  it('R10-10 Server source registers canonical multi creation and requires exact ordinary admission', () => {
+    const source = fs.readFileSync(process.cwd() + '/../server/solar_project_graph.py', 'utf8')
+    const supported = source.match(new RegExp('SUPPORTED_TOOLS = frozenset\\(\\(([\\s\\S]*?)\\)\\)'))[1]
+    expect(supported).toContain('"solar-string-multi-add"')
+    expect(source).toContain('CREATION_TOOLS = frozenset((STRING_TOOL, "solar-assign-equipment", "solar-string-multi-add"))')
+    const admission = fs.readFileSync(process.cwd() + '/../server/solar_project_admission.py', 'utf8')
+    expect(admission).toContain('reason = "project_request_required"')
+    const declaration = JSON.parse(fs.readFileSync(process.cwd() + '/../server/solar_tools/solar_string_multi_add.json', 'utf8'))
+    expect(declaration.adapter).toBe('local-graph-commit')
+    expect(declaration.seedable).toBe(false)
+    expect(declaration.requires_persisted_graph).toBe(true)
+    const ordinary = capabilityRow()
+    ordinary.availability.admission_checked = false
+    ordinary.availability.refusal_reasons = ['project_request_required']
+    projectRejected(projectStringPreviewResult({ outcome: catalogOutcome([ordinary]), intent: previewIntent }), 'preview_refused')
+  })
+  it('R10-13 Descending ranges and reversed queue retain electrical ordering', () => {
+    expect(projectCompose([range(0, 3, 1)]).preview.ids).toEqual(P.slice(0, 3).reverse())
+    expect(projectCompose([range(1, 2, 1), range(0, 3, 1)], ground, true).preview.ids).toEqual(P.slice().reverse())
+  })
+  it('R10-14 Project queue refusals retain the legacy validation precedence', () => {
+    const cases = [
+      [[], ground, false, 3, 'empty'], [[range(), range(), range(7)], ground, false, 3, 'missing'],
+      [[range(0, 1, 3), range()], capped(2), false, 3, 'duplicate'],
+      [[range(0, 1, 3)], capped(2, P.slice(0, 3)), false, 3, 'tooLong'],
+      [[range()], capped(0, [P[0]]), false, 3, 'notSized'],
+      [[], ground, true, 0, 'length'],
+      [[panel(Q[0]), panel(rooftop.panels[0].id)], rooftop, true, 14, 'assigned'],
+      [[panel(Q[0])], rooftop, true, 14, 'infeasible'],
+      [[range(0, 1, 4)], ground, false, 3, 'range'],
+    ]
+    for (const [queue, graph, multi, length, code] of cases) projectRejected(projectCompose(queue, graph, multi, length), code)
+  })
+  it('R10-15 Canonical count and length boundaries match the declarations', () => {
+    const graph = changed(ground, (g) => {
+      g.frames = [{ ...g.frames[0], ground_slots: block(5000) }]
+      g.settings.panels_in_sequence = 4096
+    })
+    expect(projectCompose([range(0, 1, 4096)], graph).request.params.ordered_panel_refs).toHaveLength(4096)
+    projectRejected(projectCompose([range(0, 1, 4097)], graph), 'singleLimit')
+    expect(projectCompose([range(0, 1, 900)], graph, true, 900).preview.sizes).toEqual([900])
+    projectRejected(projectCompose([range(0, 1, 901)], graph, true, 900), 'multiLimit')
+    projectRejected(projectCompose([range()], graph, true, 901), 'length')
+  })
+  it('R10-16 Invalid digest and unsafe key refuse before any prepared preview', () => {
+    for (const catalogDigest of [undefined, '', 'a'.repeat(64), 'sha256:' + 'A'.repeat(64)]) {
+      projectRejected(projectCompose(undefined, ground, false, 3, { catalogDigest }), 'catalog_digest_required')
+    }
+    for (const idempotencyKey of [undefined, '', ' ', 'x'.repeat(257), 'é'.repeat(129), 'prefix-lco1.' + 'a'.repeat(64)]) {
+      projectRejected(projectCompose(undefined, ground, false, 3, { idempotencyKey }), 'idempotency_key_required')
+    }
+    projectRejected(projectCompose([], ground, false, 3, { catalogDigest: '' }), 'empty')
+    projectRejected(projectCompose(undefined, ground, false, 3, { binding: { ...projectBinding, input_version_id: otherVersion } }), 'scope_stale')
+  })
+  it('R10-17 Exact admitted rows and identical duplicates are accepted', () => {
+    for (const rows of [[capabilityRow()], [capabilityRow(), capabilityRow()]]) {
+      const result = projectStringPreviewResult({ outcome: catalogOutcome(rows), intent: previewIntent })
+      expect(result).toEqual({ ok: true })
+      expect(Object.isFrozen(result)).toBe(true)
+    }
+  })
+  it('R10-18 Missing unchecked malformed and contradictory rows cannot arm a preview', () => {
+    const edits = [
+      (r) => { r.catalog_digest = 'sha256:' + 'd'.repeat(64) },
+      (r) => { r.availability = null },
+      (r) => { r.availability.admission_checked = false },
+      (r) => { r.availability.admission.status_code = 202 },
+      (r) => { r.availability.admission.error = {} },
+      (r) => { r.availability.refusal_reasons = null },
+      (r) => { r.availability.refusal_reasons = ['project_request_required'] },
+      ...['entitled', 'engine_ready', 'implemented', 'input_ready', 'runnable'].map((key) =>
+        (r) => { r.availability[key] = false }),
+    ]
+    for (const edit of edits) {
+      const bad = capabilityRow(); edit(bad)
+      for (const rows of [[bad], [capabilityRow(), bad]]) {
+        projectRejected(projectStringPreviewResult({ outcome: catalogOutcome(rows), intent: previewIntent }), 'preview_refused')
+      }
+    }
+    for (const outcome of [catalogOutcome([]), { ok: true, status: 200, data: {} },
+      { ok: true, status: 200, data: { families: [] } }, catalogOutcome([capabilityRow(STRING_ADD_TOOL)])]) {
+      projectRejected(projectStringPreviewResult({ outcome, intent: previewIntent }), 'preview_refused')
+    }
+  })
+  it('R10-19 Known nested refusals use fixed semantics and unknown evidence stays unchanged', () => {
+    for (const [code, expected] of [...serverMappings, ...malformedCodes.map((code) => [code, 'malformed']),
+      ['SIP_R1_STALE_VERSION', 'not_current_head'], ['SIP_R7_SCOPE_STALE', 'scope_stale'],
+      ['project_adapter_unavailable', 'adapter_unavailable']]) {
+      const row = capabilityRow()
+      row.availability.admission = { status_code: 409, error: { reason_code: code, message: 'never render me' } }
+      projectRejected(projectStringPreviewResult({ outcome: catalogOutcome([row]), intent: previewIntent }), expected)
+    }
+    const outcome = { ok: false, status: 409, reason: 'HTTP_ERROR', envelope: { error: { message: 'private details' } } }
+    const before = structuredClone(outcome)
+    projectRejected(projectStringPreviewResult({ outcome, intent: previewIntent }), 'preview_refused')
+    expect(outcome).toEqual(before)
+  })
+  it('R10-20 Freshness checks version head revision and digests without decoding or retargeting', () => {
+    decodeGroundFrameSlots.mockClear()
+    const view = projectView()
+    const request = projectCompose()
+    decodeGroundFrameSlots.mockClear()
+    const check = (data, binding = projectBinding) => checkProjectStringFreshness({ binding, view, contextView: data })
+    expect(check(contextView())).toEqual({ ok: true })
+    expect(Object.isFrozen(check(contextView()))).toBe(true)
+    projectRejected(check(contextView(), { ...projectBinding, input_version_id: otherVersion }), 'scope_stale')
+    projectRejected(check(contextView(ground, { input_version_id: otherVersion })), 'context_unreadable')
+    projectRejected(check(contextView(ground, { head_version_id: otherVersion, is_head: false })), 'not_current_head')
+    projectRejected(check(contextView(ground, { head_version_id: otherVersion })), 'context_unreadable')
+    projectRejected(check(contextView(ground, { intake_sha256: 'd'.repeat(64) })), 'scope_stale')
+    const data = contextView(); data.intake.solar_design_graph_sha256 = 'e'.repeat(64)
+    projectRejected(check(data), 'scope_stale')
+    const revised = contextView(); revised.intake.solar_design_graph.rev += 1
+    projectRejected(check(revised), 'scope_stale')
+    const malformed = contextView(); malformed.intake.solar_design_graph = null
+    projectRejected(check(malformed), 'malformed')
+    expect(decodeGroundFrameSlots).not.toHaveBeenCalled()
+    expect(request.request.params.expected_rev).toBe(2)
+    expect(view.binding.input_version_id).toBe(projectBinding.input_version_id)
+  })
+  it('R10-32 R7 snapshots each getter once and freezes responses and prepared params', async () => {
+    const getter = vi.fn(() => contextView().intake)
+    const data = { context: contextView().context, get intake() { return getter() } }
+    const client = createSolarProjectClient({ fetchImpl: vi.fn(async () => ({ ok: true, status: 200,
+      json: async () => data })) })
+    client.setScope(projectBinding, 'session')
+    const outcome = await client.readContext()
+    expect(outcome.ok).toBe(true)
+    expect(getter).toHaveBeenCalledTimes(1)
+    expect(Object.isFrozen(outcome.data.intake.solar_design_graph.frames[0])).toBe(true)
+    const intent = client.prepareRun(projectCompose().request)
+    expect(Object.isFrozen(intent.params)).toBe(true)
+    expect(Object.isFrozen(intent.params.ordered_panel_refs)).toBe(true)
+    client.dispose()
+  })
+  it('R10-34 Eight standalone results match the independently frozen byte oracle', () => {
+    const oracle = JSON.parse(fs.readFileSync(process.cwd() + '/src/solar/__fixtures__/solarStringStandalone.main-f139ceba.json', 'utf8'))
+    expect(oracle.source.commit).toBe('f139ceba6daea69b6e1570e3dc6c808712328fb9')
+    const captures = {
+      single: compose([range(0, 1, 3)]),
+      multi: compose([range(0, 1, 3), range(1, 1, 2)], ground, true),
+      descending: compose([range(0, 3, 1)]),
+      roof: compose(rooftop.panels.slice(3, 6).map((p) => panel(p.id)), rooftop, true),
+      empty: compose([]), duplicate: compose([range(), range()]),
+    }
+    captures.singleWire = createRunSubmissionRequest(STRING_ADD_TOOL, captures.single.params, 'd1', { dwgVersion: 7 })
+    captures.multiWire = createRunSubmissionRequest(STRING_MULTI_ADD_TOOL, captures.multi.params, 'd1', { dwgVersion: 7 })
+    expect(Object.keys(captures)).toEqual(Object.keys(oracle.captures))
+    for (const [name, value] of Object.entries(captures)) {
+      const json = JSON.stringify(value)
+      expect(json, name).toBe(oracle.captures[name].json)
+      expect(Buffer.byteLength(json), name).toBe(oracle.captures[name].bytes)
+      expect(createHash('sha256').update(json).digest('hex'), name).toBe(oracle.captures[name].sha256)
+    }
+  })
+  it('R10-35 Standalone params and independent preview IDs retain their measured mutability', () => {
+    for (const multi of [false, true]) {
+      const result = compose([range(0, 1, 3)], ground, multi)
+      expect(Object.isFrozen(result)).toBe(true)
+      expect(Object.isFrozen(result.params)).toBe(false)
+      expect(Object.isFrozen(result.preview.ids)).toBe(false)
+      expect(Object.isFrozen(result.preview.sizes)).toBe(true)
+      result.params.operation = 'changed'
+      result.params.ordered_panel_refs.push('extra')
+      result.preview.ids.reverse()
+      expect(compose([range(0, 1, 3)], ground, multi).preview.ids).toEqual(P.slice(0, 3))
+    }
+  })
+  it('R10-37 Inherited canonical binding fields are refused', () => {
+    projectRejected(projectStringComposerView({ binding: Object.create(projectBinding),
+      contextView: contextView() }), 'binding_invalid')
+  })
+  it('R10-38 Both context digests require exactly 64 hex characters', () => {
+    const shortIntake = contextView()
+    shortIntake.context.intake_sha256 = 'b'.repeat(63)
+    projectRejected(projectStringComposerView({ binding: projectBinding,
+      contextView: shortIntake }), 'context_unreadable')
+    const shortGraph = contextView()
+    shortGraph.intake.solar_design_graph_sha256 = 'c'.repeat(63)
+    projectRejected(projectStringComposerView({ binding: projectBinding,
+      contextView: shortGraph }), 'malformed')
+  })
+  it('R10-39 A 256-byte idempotency key is accepted unchanged', () => {
+    const idempotencyKey = 'x'.repeat(256)
+    const result = projectCompose(undefined, ground, false, 3, { idempotencyKey })
+    expect(result.ok).toBe(true)
+    expect(result.request.idempotencyKey).toBe(idempotencyKey)
+  })
+  it('R10-40 A failed catalog outcome cannot admit accepted rows', () => {
+    projectRejected(projectStringPreviewResult({ outcome: { ...catalogOutcome(), ok: false },
+      intent: previewIntent }), 'preview_refused')
+  })
+  it('R10-41 An unknown server code keeps generic preview refusal', () => {
+    projectRejected(projectStringPreviewResult({ outcome: { ok: false, status: 409, reason: 'NEW_SERVER_CODE' },
+      intent: previewIntent }), 'preview_refused')
+  })
+  it('R10-48 Standalone revision getter retains the base result bytes', () => {
+    const graph = structuredClone(ground)
+    let reads = 0
+    Object.defineProperty(graph, 'rev', { enumerable: true, get: () => ++reads })
+    const view = makeView(graph)
+    const result = composeStringRequest({ view, toolName: STRING_ADD_TOOL, queue: [range(0, 1, 3)] })
+    expect(reads).toBe(4)
+    expect(view.binding.rev).toBe(4)
+    expect(JSON.stringify(result)).toBe(JSON.stringify({
+      ok: true,
+      params: {
+        operation: 'add-string',
+        expected_rev: 4,
+        ordered_panel_refs: P.slice(0, 3)
+      },
+      preview: {
+        ids: P.slice(0, 3),
+        sizes: [3]
+      }
+    }))
+  })
+  it('R10-49 Standalone revision getter reading NaN or undefined keeps the base result bytes', () => {
+    for (const values of [[1, NaN, 2, 4], [1, 0, NaN, 4], [1, undefined, 2, 4], [1, 0, undefined, 4]]) {
+      const graph = structuredClone(ground)
+      let reads = 0
+      Object.defineProperty(graph, 'rev', { enumerable: true, get: () => values[reads++] })
+      const view = makeView(graph)
+      const result = composeStringRequest({ view, toolName: STRING_ADD_TOOL, queue: [range(0, 1, 3)] })
+      expect(reads).toBe(4)
+      expect(view.binding.rev).toBe(4)
+      expect(JSON.stringify(result)).toBe(JSON.stringify({
+        ok: true,
+        params: {
+          operation: 'add-string',
+          expected_rev: 4,
+          ordered_panel_refs: P.slice(0, 3)
+        },
+        preview: {
+          ids: P.slice(0, 3),
+          sizes: [3]
+        }
+      }))
+    }
+  })
+  it('R10-36 Project reason map has exactly the specified frozen product sentences', () => {
+    const expectedMap = {
+      binding_invalid: 'Open a project drawing version before creating strings.',
+      context_unreadable: 'This project drawing version could not be read. Reload it and try again.',
+      not_current_head: 'This is an older drawing version. Open the current version before creating strings.',
+      scope_stale: 'The drawing or session changed. Reload it and choose the panels again.',
+      catalog_digest_required: 'Refresh the Solar tools before creating strings.',
+      idempotency_key_required: 'This string request could not be prepared. Try again.',
+      preview_required: 'Checking whether these strings can be created in this drawing.',
+      preview_refused: 'These strings cannot be created. Review the refusal and try again.',
+      adapter_unavailable: 'This string tool is not available for project drawings.',
+      submit_unavailable: 'Project string submission is not available in this view.',
+      request_invalid: 'This string request could not be prepared. Review the inputs and try again.',
+      submission_uncertain: 'The submission result is unknown. Retry the same request to check it.',
+      loading: 'Reading the current drawing.',
+      unavailable: 'The current drawing could not be read. Reload it and try again.',
+      malformed: 'The saved panel data cannot be read. Reload the drawing before creating strings.',
+      representation: 'This saved panel layout is not supported by this string form.',
+      noPanels: 'This drawing has no panels available for stringing.',
+      empty: 'Choose at least one panel.',
+      range: 'Enter whole slot numbers within this row.',
+      missing: 'A selected panel is no longer available. Reload the drawing and choose again.',
+      duplicate: 'A panel appears more than once. Remove the repeated selection.',
+      assigned: 'A selected panel already belongs to a string. Choose unassigned panels.',
+      singleLimit: 'Choose at most 4096 panels for one string.',
+      multiLimit: 'Choose at most 900 panels for this run.',
+      length: 'Enter a whole string length from 1 to 900.',
+      notSized: 'Set a positive string length in Solar settings or complete string sizing first.',
+      tooLong: 'The requested string length exceeds the saved limit.',
+      infeasible: 'This panel count cannot form strings at the requested length. Change the count or length.',
+      units: 'Resolve the drawing units before creating strings.',
+      numberExhausted: 'The drawing has no available string numbers. Change the starting string number before trying again.',
+      request: 'These string inputs cannot be submitted. Review the selection and try again.',
+      stale: 'The drawing changed. Reload it and choose the panels again.',
+      checking: 'Checking the current drawing before review.',
+      pending: 'This step is running. Confirm or wait for it to finish.',
+      failed: 'Strings were not created. Your inputs are kept.',
+      submitted: 'String creation was submitted.',
+    }
+    expect(PROJECT_STRING_COMPOSER_REASONS).toEqual(expectedMap)
+    expect(Object.isFrozen(PROJECT_STRING_COMPOSER_REASONS)).toBe(true)
   })
 })

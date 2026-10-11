@@ -1,4 +1,5 @@
 import { decodeGroundFrameSlots } from './solarGroundSlots.js'
+import { createSolarDrawingBinding, sameSolarDrawingBinding } from './solarDrawingBinding.js'
 
 export const SOLAR_STRING_COMPOSER_REASONS = Object.freeze({
   scope: 'Open a saved standalone drawing before creating strings.',
@@ -66,6 +67,141 @@ const plain = (value) => value !== null && typeof value === 'object' &&
   [Object.prototype, null].includes(Object.getPrototypeOf(value))
 const positive = (value) => Number.isInteger(value) && value > 0
 
+export const PROJECT_STRING_COMPOSER_REASONS = Object.freeze({
+  binding_invalid: 'Open a project drawing version before creating strings.',
+  context_unreadable: 'This project drawing version could not be read. Reload it and try again.',
+  not_current_head: 'This is an older drawing version. Open the current version before creating strings.',
+  scope_stale: 'The drawing or session changed. Reload it and choose the panels again.',
+  catalog_digest_required: 'Refresh the Solar tools before creating strings.',
+  idempotency_key_required: 'This string request could not be prepared. Try again.',
+  preview_required: 'Checking whether these strings can be created in this drawing.',
+  preview_refused: 'These strings cannot be created. Review the refusal and try again.',
+  adapter_unavailable: 'This string tool is not available for project drawings.',
+  submit_unavailable: 'Project string submission is not available in this view.',
+  request_invalid: 'This string request could not be prepared. Review the inputs and try again.',
+  submission_uncertain: 'The submission result is unknown. Retry the same request to check it.',
+  loading: 'Reading the current drawing.',
+  unavailable: 'The current drawing could not be read. Reload it and try again.',
+  malformed: 'The saved panel data cannot be read. Reload the drawing before creating strings.',
+  representation: 'This saved panel layout is not supported by this string form.',
+  noPanels: 'This drawing has no panels available for stringing.',
+  empty: 'Choose at least one panel.',
+  range: 'Enter whole slot numbers within this row.',
+  missing: 'A selected panel is no longer available. Reload the drawing and choose again.',
+  duplicate: 'A panel appears more than once. Remove the repeated selection.',
+  assigned: 'A selected panel already belongs to a string. Choose unassigned panels.',
+  singleLimit: 'Choose at most 4096 panels for one string.',
+  multiLimit: 'Choose at most 900 panels for this run.',
+  length: 'Enter a whole string length from 1 to 900.',
+  notSized: 'Set a positive string length in Solar settings or complete string sizing first.',
+  tooLong: 'The requested string length exceeds the saved limit.',
+  infeasible: 'This panel count cannot form strings at the requested length. Change the count or length.',
+  units: 'Resolve the drawing units before creating strings.',
+  numberExhausted: 'The drawing has no available string numbers. Change the starting string number before trying again.',
+  request: 'These string inputs cannot be submitted. Review the selection and try again.',
+  stale: 'The drawing changed. Reload it and choose the panels again.',
+  checking: 'Checking the current drawing before review.',
+  pending: 'This step is running. Confirm or wait for it to finish.',
+  failed: 'Strings were not created. Your inputs are kept.',
+  submitted: 'String creation was submitted.'
+})
+
+const projectRefusal = (code) => Object.freeze({ ok: false, code, reason: PROJECT_STRING_COMPOSER_REASONS[code] })
+const projectHex = new RegExp('^[0-9a-f]{64}$')
+const projectDigest = new RegExp('^sha256:[0-9a-f]{64}$')
+const projectCapability = new RegExp('lco1\\.[0-9a-f]{64}')
+
+// Context identity and companion checks are shared with freshness; neither decodes slots.
+function projectContext(binding, contextView) {
+  let exact
+  try { exact = createSolarDrawingBinding(binding) } catch { return projectRefusal('binding_invalid') }
+  const context = contextView?.context
+  if (!plain(contextView) || !plain(context) || !plain(contextView.intake)) return projectRefusal('context_unreadable')
+  let returned, head
+  try {
+    returned = createSolarDrawingBinding({ kind: 'project', organization_id: context.organization_id,
+      project_id: context.project_id, drawing_id: context.drawing_id, input_version_id: context.input_version_id })
+    head = createSolarDrawingBinding({ ...exact, input_version_id: context.head_version_id })
+  } catch { return projectRefusal('context_unreadable') }
+  if (!sameSolarDrawingBinding(exact, returned) || typeof context.is_head !== 'boolean' ||
+      context.is_head !== sameSolarDrawingBinding(exact, head)) return projectRefusal('context_unreadable')
+  if (!context.is_head) return projectRefusal('not_current_head')
+  if (typeof context.intake_sha256 !== 'string' || !projectHex.test(context.intake_sha256)) return projectRefusal('context_unreadable')
+  const intake = contextView.intake
+  const hasGraph = Object.hasOwn(intake, 'solar_design_graph')
+  const hasDigest = Object.hasOwn(intake, 'solar_design_graph_sha256')
+  if (!hasGraph && !hasDigest) return projectRefusal('noPanels')
+  if (hasGraph !== hasDigest || !validGraphHeader(intake.solar_design_graph) ||
+      typeof intake.solar_design_graph_sha256 !== 'string' || !projectHex.test(intake.solar_design_graph_sha256)) {
+    return projectRefusal('malformed')
+  }
+  return { ok: true, binding: exact, graph: intake.solar_design_graph,
+    intakeSha256: context.intake_sha256, graphSha256: intake.solar_design_graph_sha256 }
+}
+
+export function projectStringComposerView({ binding, contextView }) {
+  const checked = projectContext(binding, contextView)
+  if (!checked.ok) return checked
+  const result = projectGraphProjection(checked.graph, { binding: checked.binding, rev: checked.graph.rev,
+    intakeSha256: checked.intakeSha256, graphSha256: checked.graphSha256 })
+  return result.ok ? result : projectRefusal(result.code)
+}
+
+export function composeProjectStringRequest({ binding, view, toolName, queue, stringLength,
+  catalogDigest, idempotencyKey }) {
+  if (!sameSolarDrawingBinding(binding, view?.binding)) return projectRefusal('scope_stale')
+  // Use the registered view itself so the private index remains the sole selection authority.
+  const composed = composeStringRequest({ view, toolName, queue, stringLength })
+  if (!composed.ok) return projectRefusal(composed.code)
+  if (typeof catalogDigest !== 'string' || !projectDigest.test(catalogDigest)) return projectRefusal('catalog_digest_required')
+  if (typeof idempotencyKey !== 'string' || !idempotencyKey.trim() ||
+      new TextEncoder().encode(idempotencyKey).byteLength > 256 || projectCapability.test(idempotencyKey)) {
+    return projectRefusal('idempotency_key_required')
+  }
+  const params = Object.freeze({ drawing_id: view.binding.drawing_id, ...composed.params,
+    ordered_panel_refs: Object.freeze(composed.params.ordered_panel_refs) })
+  return Object.freeze({ ok: true,
+    request: Object.freeze({ tool: toolName, params, catalogDigest, idempotencyKey }),
+    preview: Object.freeze({ ids: Object.freeze(composed.preview.ids), sizes: composed.preview.sizes }) })
+}
+
+export function checkProjectStringFreshness({ binding, view, contextView }) {
+  if (!sameSolarDrawingBinding(binding, view?.binding)) return projectRefusal('scope_stale')
+  const checked = projectContext(binding, contextView)
+  if (!checked.ok) return checked.code === 'noPanels' ? projectRefusal('malformed') : checked
+  if (checked.intakeSha256 !== view.intakeSha256 || checked.graphSha256 !== view.graphSha256 ||
+      checked.graph.rev !== view.rev) return projectRefusal('scope_stale')
+  return FRESH
+}
+
+function projectOutcomeRefusal(outcome, row = null) {
+  const code = row?.availability?.admission?.error?.reason_code ?? outcome?.envelope?.error?.reason_code ??
+    outcome?.envelope?.reason_code ?? outcome?.reason ?? row?.availability?.refusal_reasons?.[0]
+  if (code === 'SIP_R1_STALE_VERSION') return projectRefusal('not_current_head')
+  if (code === 'SIP_R7_SCOPE_STALE') return projectRefusal('scope_stale')
+  if (code === 'project_adapter_unavailable') return projectRefusal('adapter_unavailable')
+  const legacy = stringRunRefusal(code)
+  return projectRefusal(legacy.code === 'failed' ? 'preview_refused' : legacy.code)
+}
+
+export function projectStringPreviewResult({ outcome, intent }) {
+  if (outcome?.ok !== true || !Array.isArray(outcome.data?.families)) return projectOutcomeRefusal(outcome)
+  if (!plain(intent) || (intent.tool !== STRING_ADD_TOOL && intent.tool !== STRING_MULTI_ADD_TOOL) ||
+      typeof intent.catalogDigest !== 'string' || !projectDigest.test(intent.catalogDigest)) return projectRefusal('preview_refused')
+  const rows = outcome.data.families.flatMap((family) => Array.isArray(family?.capabilities) ? family.capabilities : [])
+    .filter((row) => row?.name === intent?.tool)
+  const accepted = (row) => {
+    const availability = row.availability
+    return plain(row) && row.catalog_digest === intent?.catalogDigest && plain(availability) &&
+      availability.admission_checked === true && plain(availability.admission) && availability.admission.status_code === 200 &&
+      availability.admission.error === null &&
+      ['entitled', 'engine_ready', 'implemented', 'input_ready', 'runnable'].every((key) => availability[key] === true) &&
+      Array.isArray(availability.refusal_reasons) && availability.refusal_reasons.length === 0
+  }
+  const refused = rows.find((row) => !accepted(row))
+  return rows.length && !refused ? FRESH : projectOutcomeRefusal(outcome, refused)
+}
+
 export function stringComboSequences(target, count) {
   if (!Number.isInteger(target) || target < 1 || target > MAX_STRING_LENGTH ||
       !Number.isInteger(count) || count < 0 || count > MAX_COMBO_PANELS) return null
@@ -113,11 +249,22 @@ export function stringComposerView({ envelope, drawingId, drawingVersion, projec
   const graph = envelope.intake.solar_design_graph
   if (graph === undefined || graph === null) return REFUSAL.noPanels
   if (!plain(graph)) return REFUSAL.malformed
-  if (!Number.isInteger(graph.rev) || graph.rev < 0 || graph.rev > MAX_GRAPH_REV ||
-      !plain(graph.settings) || !Array.isArray(graph.electrical_zones) ||
-      !Array.isArray(graph.frames) || !Array.isArray(graph.panels) || !Array.isArray(graph.strings) ||
-      !graph.strings.every((string) => plain(string) && Array.isArray(string.ordered_panel_refs) &&
-        string.ordered_panel_refs.every((ref) => typeof ref === 'string'))) return REFUSAL.malformed
+  return projectGraphProjection(graph, () => ({ binding: Object.freeze({ drawingId, drawingVersion, rev: graph.rev }) }))
+}
+
+// Main's rejection form, read for read: a revision behind an accessor is read in the same order and
+// the same number of times as on main, so NaN or undefined on one read decides the same way (R10-49).
+function validGraphHeader(graph) {
+  return !(!plain(graph) || !Number.isInteger(graph.rev) || graph.rev < 0 || graph.rev > MAX_GRAPH_REV ||
+    !plain(graph.settings) || !Array.isArray(graph.electrical_zones) ||
+    !Array.isArray(graph.frames) || !Array.isArray(graph.panels) || !Array.isArray(graph.strings) ||
+    !graph.strings.every((string) => plain(string) && Array.isArray(string.ordered_panel_refs) &&
+      string.ordered_panel_refs.every((ref) => typeof ref === 'string')))
+}
+
+function projectGraphProjection(graph, identity) {
+  if (!plain(graph)) return REFUSAL.malformed
+  if (!validGraphHeader(graph)) return REFUSAL.malformed
   const design = graph.project?.installation_design
   if (design !== 'Ground' && design !== 'Roof') return REFUSAL.representation
   const rows = []
@@ -151,11 +298,11 @@ export function stringComposerView({ envelope, drawingId, drawingVersion, projec
     }
   }
   const assigned = new Set(graph.strings.flatMap((string) => string.ordered_panel_refs))
-  const view = Object.freeze({ ok: true, binding: Object.freeze({ drawingId, drawingVersion, rev: graph.rev }),
+  const view = Object.freeze({ ok: true, ...(typeof identity === 'function' ? identity() : identity),
     design, savedLimit: savedStringLimit(graph), rows: Object.freeze(rows), panels: Object.freeze(panels),
     assignedCount: assigned.size })
   indexes.set(view, { rows: new Map(rows.map((row) => [row.frameIndex, row])),
-    panels: new Set(panels.map((panel) => panel.id)), assigned })
+    panels: new Set(panels.map((panel) => panel.id)), assigned, rev: view.rev ?? view.binding.rev })
   return view
 }
 
@@ -211,9 +358,9 @@ export function composeStringRequest({ view, toolName, queue, stringLength }) {
   const sizes = multi ? stringComboSizes(stringLength, count) : [count]
   if (sizes === null) return REFUSAL.infeasible
   const params = multi
-    ? { operation: 'add-strings', expected_rev: view.binding.rev, string_length: stringLength,
+    ? { operation: 'add-strings', expected_rev: index.rev, string_length: stringLength,
       ordered_panel_refs: ids }
-    : { operation: 'add-string', expected_rev: view.binding.rev, ordered_panel_refs: ids }
+    : { operation: 'add-string', expected_rev: index.rev, ordered_panel_refs: ids }
   return Object.freeze({ ok: true, params,
     preview: Object.freeze({ ids: ids.slice(), sizes: Object.freeze(sizes) }) })
 }
