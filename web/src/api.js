@@ -1633,8 +1633,12 @@ function authorPollUrl(pollUrl, changeSetId) {
   }
 }
 
-function authorPollSleep(delay, signal) {
+export function authorPollSleep(delay, signal) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason || new DOMException('Aborted', 'AbortError'))
+      return
+    }
     const onAbort = () => {
       clearTimeout(timer)
       reject(signal.reason || new DOMException('Aborted', 'AbortError'))
@@ -1647,7 +1651,7 @@ function authorPollSleep(delay, signal) {
   })
 }
 
-function authorRetryDelay(value) {
+export function authorRetryDelay(value) {
   const delay = Number(value)
   return Number.isFinite(delay) ? Math.min(5000, Math.max(250, delay)) : 1000
 }
@@ -1671,6 +1675,12 @@ async function pollAuthorStage(accepted, opts = {}) {
   while (Date.now() - started < 20 * 60 * 1000) {
     if (opts.signal?.aborted) throw opts.signal.reason || new DOMException('Aborted', 'AbortError')
     await authorPollSleep(delay, opts.signal)
+    // A caller that has moved on (another account, another request, a disabled
+    // panel) sends no further status read: checked after every wait, right
+    // before the read, so no request leaves under credentials it no longer holds.
+    if (typeof opts.isCurrent === 'function' && !opts.isCurrent()) {
+      throw new DOMException('Aborted', 'AbortError')
+    }
     const res = await apiFetch(pollUrl, {
       headers: { 'X-Tenant-Id': TENANT, ...authHeaders() },
       signal: opts.signal,
@@ -1712,6 +1722,70 @@ async function pollAuthorStage(accepted, opts = {}) {
     delay = authorRetryDelay(body?.retry_after_ms || delay)
   }
   throw new Error('Authoring is still running. Resume this request to keep checking it.')
+}
+
+function authorRecoveryError(status) {
+  const error = new Error('Could not check the saved request. Try Resume again.')
+  error.code = 'author_recovery_failed'
+  error.authorRecovery = true
+  error.authorTerminal = false
+  if (status !== undefined) error.status = status
+  return error
+}
+
+const recoveryObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+const recoveryString = (value) => typeof value === 'string' && value.trim().length > 0
+
+// One lookup only. The controller owns admission waits and decides whether a
+// validated absence permits submission of the saved request.
+export async function recoverAuthorStage(idempotencyKey, { signal, changeSetId = null, targetToolName = null } = {}) {
+  if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
+  if (!recoveryString(idempotencyKey) || idempotencyKey.length > 200) throw authorRecoveryError()
+  let status
+  try {
+    const path = '/api/author/stage/recover'
+    const res = await apiFetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      signal,
+    }, path)
+    status = res.status
+    const body = await res.json()
+    if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
+    if (!recoveryObject(body) || body.contract !== 'leaf.customization-stage-recovery.v1' || 'error' in body) {
+      throw authorRecoveryError(status)
+    }
+    if (status === 200 && body.status === 'found') {
+      const job = body.job
+      if (!recoveryObject(job) || job.contract !== 'leaf.customization-stage-job.v1'
+        || !['queued', 'running', 'staged', 'failed'].includes(job.status)
+        || !recoveryString(job.change_set_id) || !recoveryString(job.poll_url)
+        || (changeSetId !== null && job.change_set_id !== changeSetId)
+        || (targetToolName !== null && job.target_tool_name !== targetToolName)) {
+        throw authorRecoveryError(status)
+      }
+      for (const container of [job, job.result, job.staged]) {
+        if (container && typeof container === 'object' && 'receipt' in container
+          && (!recoveryObject(container.receipt) || container.receipt.change_set_id !== job.change_set_id)) {
+          throw authorRecoveryError(status)
+        }
+      }
+      authorPollUrl(job.poll_url, job.change_set_id)
+      return { status: 'found', job }
+    }
+    if (status === 202 && body.status === 'admission_pending' && !('job' in body)) {
+      if ('retry_after_ms' in body && (typeof body.retry_after_ms !== 'number'
+        || !Number.isFinite(body.retry_after_ms) || body.retry_after_ms < 0)) throw authorRecoveryError(status)
+      return { status: 'admission_pending', retry_after_ms: body.retry_after_ms ?? 1000 }
+    }
+    if (status === 404 && body.status === 'not_found' && !('job' in body)) return { status: 'not_found' }
+    throw authorRecoveryError(status)
+  } catch (cause) {
+    if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
+    if (cause?.name === 'AbortError') throw cause
+    throw authorRecoveryError(status)
+  }
 }
 
 // R5: stage only. The server resolves base and policy fields, while this client

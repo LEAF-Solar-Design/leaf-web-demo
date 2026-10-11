@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { config, stageAuthorTool as defaultStageAuthorTool } from '../api.js'
+import { config, stageAuthorTool as defaultStageAuthorTool, recoverAuthorStage as defaultRecoverAuthorStage, authorRetryDelay, authorPollSleep } from '../api.js'
 import { SecretRefusedError, guardedText } from '../lib/secretGuardTransport.js'
 import {
   AUTHOR_POINTER_TTL_MS,
@@ -109,17 +109,33 @@ function restoredFailure(pointer) {
   return error
 }
 
+const RECOVERY_WAITING = 'Waiting for the saved request to finish admission.'
+
+function recoveryFailure(cause) {
+  const error = new Error('Could not check the saved request. Try Resume again.')
+  error.code = 'author_recovery_failed'
+  error.authorRecovery = true
+  error.authorTerminal = false
+  // A status that cannot be read is left off; the recovery failure still settles.
+  let status
+  try { status = cause?.status } catch { status = undefined }
+  if (status !== undefined) error.status = status
+  return error
+}
+
 export default function useAuthorStageController({
   mock = false,
   enabled = true,
   storage,
   stageAuthorTool = defaultStageAuthorTool,
+  recoverAuthorStage = defaultRecoverAuthorStage,
   // Optional turn-authority provider: async () => ({ sessionId, turnId } | null).
   // Called once per initial stage submission (never on a poll/reconnect, which
   // sends no new POST). When supplied, it must resolve a real turn before POST.
   authorityProvider,
 } = {}) {
   const storageRef = useRef(storage)
+  const enabledRef = useRef(enabled)
   const accountScope = authorAccountScope(config.tenant, storage)
   const initialPointer = mock ? null : readInflightAuthor(storage)
   const validInitialPointer = authorPointerValid(initialPointer, accountScope) ? initialPointer : null
@@ -144,6 +160,7 @@ export default function useAuthorStageController({
   // replaces it. It lives in memory only: after a reload nothing is held.
   const heldAuthorityRef = useRef(null)
   storageRef.current = storage
+  enabledRef.current = enabled
 
   const updatePointer = useCallback((next) => {
     pointerRef.current = next
@@ -170,6 +187,39 @@ export default function useAuthorStageController({
     const abortController = new AbortController()
     abortRef.current = abortController
     const sequence = ++sequenceRef.current
+    const runAccountScope = authorAccountScope(config.tenant, storageRef.current)
+    let recoveryRun = !mock && reconnecting && !initial.poll_url
+    const continuationValid = () => sequenceRef.current === sequence && !abortController.signal.aborted
+      && enabledRef.current && authorAccountScope(config.tenant, storageRef.current) === runAccountScope
+      && runAccountScope === initial.account_scope && pointerRef.current?.idempotency_key === initial.idempotency_key
+      // The saved request is read from storage, not only this controller's copy: once another
+      // tab saves a different request, or nothing is saved any more, this recovery is no longer
+      // the saved request's and must not mint, submit, poll or write it back.
+      && readInflightAuthor(storageRef.current)?.idempotency_key === initial.idempotency_key
+    const currentRun = () => recoveryRun ? continuationValid() : sequenceRef.current === sequence
+    const settleRecovery = (cause, waiting = false) => {
+      if (!continuationValid()) return null
+      setPhase('interrupted')
+      setProgress(waiting ? RECOVERY_WAITING : 'connection interrupted')
+      setError(waiting ? new Error(RECOVERY_WAITING) : recoveryFailure(cause))
+      return null
+    }
+    const recover = () => recoverAuthorStage(initial.idempotency_key, {
+      signal: abortController.signal,
+      changeSetId: initial.change_set_id || null,
+      targetToolName: initial.target_tool_name || null,
+    })
+    const accept = (accepted) => {
+      if (!currentRun()) return
+      acceptedPointer = {
+        ...initial,
+        change_set_id: accepted.change_set_id,
+        poll_url: accepted.poll_url,
+        retry_after_ms: accepted.retry_after_ms,
+      }
+      if (mock) updatePointer(acceptedPointer)
+      else persist(acceptedPointer)
+    }
     runningRef.current = true
     setResult(null)
     setError(null)
@@ -188,19 +238,44 @@ export default function useAuthorStageController({
         setError(restoredFailure(initial))
         return null
       }
+      if (recoveryRun) {
+        try {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            if (!continuationValid()) return null
+            const recovered = await recover()
+            if (!continuationValid()) return null
+            if (recovered.status === 'found') {
+              accept(recovered.job)
+              break
+            }
+            if (recovered.status === 'not_found') break
+            if (recovered.status !== 'admission_pending') return settleRecovery()
+            if (attempt === 2) return settleRecovery(null, true)
+            setPhase('reconnecting')
+            setProgress(RECOVERY_WAITING)
+            await authorPollSleep(authorRetryDelay(recovered.retry_after_ms), abortController.signal)
+            if (!continuationValid()) return null
+          }
+        } catch (cause) {
+          if (!continuationValid()) return null
+          return settleRecovery(cause)
+        }
+      }
       // Only the initial POST carries authority; a poll/reconnect (poll_url
       // already set) never re-submits, so skip minting/reusing a turn for it.
       let authority = null
       let minted = false
       const held = heldAuthorityRef.current
-      if (authorityProvider && !initial.poll_url && held?.key === initial.idempotency_key) {
+      if (recoveryRun && !continuationValid()) return null
+      if (authorityProvider && !acceptedPointer.poll_url && held?.key === initial.idempotency_key) {
         // A repeat of a request this controller already minted for (its first
         // POST may or may not have landed): the same authority, no new turn.
         authority = held.authority
-      } else if (authorityProvider && !initial.poll_url) {
+      } else if (authorityProvider && !acceptedPointer.poll_url) {
         try {
           // The one-call credential override also applies to the turn start.
           authority = (await authorityProvider(initial.description, { allowSecretOnce, ...(initial.prior_staged ? { forceFresh: true } : {}) })) || null
+          if (recoveryRun && !continuationValid()) return null
           if (!authority?.sessionId || !authority?.turnId) {
             const failure = new Error(mock
               ? 'Tool building is unavailable in this signed-out demo.'
@@ -210,6 +285,7 @@ export default function useAuthorStageController({
           }
           minted = true
         } catch (cause) {
+          if (recoveryRun && !continuationValid()) return null
           // No stage POST has happened, so do not retain a pointer that would
           // silently start another turn on reconnect. A new click may retry.
           const failure = cause instanceof Error ? cause : new Error(String(cause))
@@ -218,41 +294,61 @@ export default function useAuthorStageController({
           throw failure
         }
       }
-      if (sequenceRef.current !== sequence || abortController.signal.aborted) return null
+      if (!currentRun() || abortController.signal.aborted) return null
       // Held only by the run that is still current: an authority that arrives
       // for a superseded run must not replace the one a newer run already sent.
       if (minted) heldAuthorityRef.current = { key: initial.idempotency_key, authority }
-      const staged = await stageAuthorTool(
+      const invokeStage = () => stageAuthorTool(
         mock,
         initial.description,
         initial.target_tool_name || null,
         {
           allowSecretOnce,
           idempotencyKey: initial.idempotency_key,
-          pollUrl: initial.poll_url || null,
-          changeSetId: initial.change_set_id || null,
-          retryAfterMs: initial.retry_after_ms || null,
-          authority,
+          pollUrl: acceptedPointer.poll_url || null,
+          changeSetId: acceptedPointer.change_set_id || null,
+          retryAfterMs: acceptedPointer.retry_after_ms || null,
+          authority: acceptedPointer.poll_url ? null : authority,
           signal: abortController.signal,
-          onAccepted: (accepted) => {
-            if (sequenceRef.current !== sequence) return
-            acceptedPointer = {
-              ...initial,
-              change_set_id: accepted.change_set_id,
-              poll_url: accepted.poll_url,
-              retry_after_ms: accepted.retry_after_ms,
-            }
-            if (mock) updatePointer(acceptedPointer)
-            else persist(acceptedPointer)
-          },
+          isCurrent: currentRun,
+          onAccepted: accept,
           onStatus: (update) => {
-            if (sequenceRef.current !== sequence) return
+            if (!currentRun()) return
             setPhase(String(update?.status || 'running').toLowerCase())
             setProgress(update?.progress || update?.status || 'authoring')
           },
         },
       )
-      if (sequenceRef.current !== sequence) return null
+      const submission = !acceptedPointer.poll_url
+      let staged
+      try {
+        staged = await invokeStage()
+      } catch (cause) {
+        if (!currentRun()) return null
+        // A replay is recognized only from fields that can be read. A failure whose
+        // fields throw is rethrown unchanged and settles as it always did.
+        let replay = false
+        try {
+          replay = !mock && submission && !acceptedPointer.poll_url && cause?.status === 409
+            && cause?.body?.reason_code === 'idempotency_replay'
+        } catch { replay = false }
+        if (!replay) throw cause
+        recoveryRun = true
+        try {
+          if (!continuationValid()) return null
+          const recovered = await recover()
+          if (!continuationValid()) return null
+          if (recovered.status === 'admission_pending') return settleRecovery(null, true)
+          if (recovered.status !== 'found') return settleRecovery()
+          accept(recovered.job)
+        } catch (recoveryCause) {
+          if (!continuationValid()) return null
+          return settleRecovery(recoveryCause)
+        }
+        if (!continuationValid()) return null
+        staged = await invokeStage()
+      }
+      if (!currentRun()) return null
       if (initial.target_tool_name && staged?.tool?.name !== initial.target_tool_name) {
         const mismatch = new Error(`The staged revision did not match ${initial.target_tool_name}. It was not made publishable.`)
         throw mismatch
@@ -265,7 +361,7 @@ export default function useAuthorStageController({
       setResult(staged)
       return staged
     } catch (cause) {
-      if (sequenceRef.current !== sequence) return null
+      if (!currentRun()) return null
       // Only a request that never reached a durable job is a start failure. Any
       // record from an earlier throw of this same object is dropped first.
       // Classifying never decides how the request settles: a failure whose
@@ -279,17 +375,29 @@ export default function useAuthorStageController({
           if (startFailure) authorStartFailures.set(failure, startFailure)
         }
       } catch { /* left unclassified */ }
-      const terminal = !!cause?.authorTerminal
-      if (terminal) {
-        const acceptedFailure = acceptedPointer.change_set_id && acceptedPointer.poll_url
+      // Fields that cannot be read prove nothing about the request, so such a
+      // failure is never terminal: the request stays saved for Resume.
+      let terminal = false
+      let acceptedFailure = false
+      try {
+        terminal = !!cause?.authorTerminal
+        acceptedFailure = terminal && !!(acceptedPointer.change_set_id && acceptedPointer.poll_url
           && cause?.body?.change_set_id === acceptedPointer.change_set_id
-          && ['failed', 'error'].includes(String(cause?.body?.status || '').toLowerCase())
+          && ['failed', 'error'].includes(String(cause?.body?.status || '').toLowerCase()))
+      } catch {
+        terminal = false
+        acceptedFailure = false
+      }
+      if (terminal) {
         if (acceptedFailure) {
+          // The job failed; a status or reason that cannot be read is recorded as unknown.
+          let failureRecord
+          try { failureRecord = boundedAuthorFailure(cause) } catch { failureRecord = boundedAuthorFailure(null) }
           const failedPointer = {
             ...acceptedPointer,
             terminal_failed: true,
             failed_at: acceptedPointer.failed_at || Date.now(),
-            failure: boundedAuthorFailure(cause),
+            failure: failureRecord,
           }
           if (mock) updatePointer(failedPointer)
           else persist(failedPointer)
@@ -320,7 +428,7 @@ export default function useAuthorStageController({
     } finally {
       if (sequenceRef.current === sequence) runningRef.current = false
     }
-  }, [accountScope, authorityProvider, mock, persist, stageAuthorTool, updatePointer])
+  }, [accountScope, authorityProvider, mock, persist, recoverAuthorStage, stageAuthorTool, updatePointer])
 
   const stage = useCallback((description, targetToolName = null, { allowSecretOnce = false, newAttempt = false } = {}) => {
     if (!enabled) return Promise.resolve(null)
@@ -349,13 +457,10 @@ export default function useAuthorStageController({
       return coalesced
     }
     if (validCurrent && !(current.terminal_failed && newAttempt)) {
-      // A valid pointer that never got its poll_url (its first POST may not
-      // have landed) is re-run here with the authority this controller minted
-      // for it. When nothing is held (after a reload) its mint runs again, and
-      // the caller's live override rides along, or a Send-anyway re-stage
-      // would be refused at the mint and swallowed into a null authority. The
-      // mount-time resumes below carry no override on purpose: nobody
-      // consented on that call.
+      // A saved request without a poll address recovers before consulting
+      // held authority or minting. Only validated not_found permits another
+      // submission with its existing key and the caller's live override.
+      // Mount-time resumes carry no override: nobody consented on that call.
       return runPointer(current, { reconnecting: true, allowSecretOnce })
     }
     if (!mock && current && !validCurrent) clearInflightAuthor(null, storageRef.current)

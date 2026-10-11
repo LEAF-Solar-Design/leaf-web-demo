@@ -201,10 +201,12 @@ for (const surface of SURFACES) {
   })
 }
 
-test('a lost acceptance response replays the exact idempotent revision request', async ({ page }) => {
+test('a lost acceptance response recovers the exact revision without resubmitting', async ({ page }) => {
   const proofState = makeCatProofState()
   proofState.authorPublished = true
   const submissions = []
+  const recoveries = []
+  const recoverySequence = []
   const saved = {
     idempotency_key: 'lost-response-key-0001',
     description: 'repair the existing tool after a lost response',
@@ -230,21 +232,31 @@ test('a lost acceptance response replays the exact idempotent revision request',
     const headers = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' }
     if (url.pathname === '/api/author/stage' && request.method() === 'POST') {
       submissions.push(body)
+    }
+    if (url.pathname === '/api/author/stage/recover' && request.method() === 'POST') {
+      recoveries.push(body)
+      recoverySequence.push('recover')
       await route.fulfill({
-        status: 202,
+        status: 200,
         contentType: 'application/json',
         headers,
         body: JSON.stringify({
-          contract: 'leaf.customization.v1',
-          change_set_id: 'recovered-change-0001',
-          status: 'accepted',
-          poll_url: '/api/author/stages/recovered-change-0001',
-          retry_after_ms: 250,
+          contract: 'leaf.customization-stage-recovery.v1',
+          status: 'found',
+          job: {
+            contract: 'leaf.customization-stage-job.v1',
+            status: 'queued',
+            change_set_id: 'recovered-change-0001',
+            poll_url: '/api/author/stages/recovered-change-0001',
+            retry_after_ms: 250,
+            target_tool_name: AUTHORED_TOOL.name,
+          },
         }),
       })
       return
     }
     if (url.pathname === '/api/author/stages/recovered-change-0001') {
+      recoverySequence.push('poll')
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -275,15 +287,18 @@ test('a lost acceptance response replays the exact idempotent revision request',
 
   await page.goto('/try?proof=1')
   await expect(page.locator('.authored')).toContainText('Recovered the accepted revision', { timeout: 15_000 })
-  expect(submissions).toHaveLength(1)
-  expect(submissions[0]).toMatchObject({
+  expect(submissions).toHaveLength(0)
+  expect(recoveries).toEqual([{ idempotency_key: saved.idempotency_key }])
+  expect(recoverySequence).toEqual(['recover', 'poll'])
+  await expect(page.getByLabel('Tool to revise')).toHaveValue(AUTHORED_TOOL.name)
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).not.toBeNull()
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('leaf.inflightAuthor.v1')))).toMatchObject({
     idempotency_key: saved.idempotency_key,
     description: saved.description,
     target_tool_name: saved.target_tool_name,
-    mode: 'build',
+    change_set_id: 'recovered-change-0001',
+    poll_url: '/api/author/stages/recovered-change-0001',
   })
-  await expect(page.getByLabel('Tool to revise')).toHaveValue(AUTHORED_TOOL.name)
-  await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.inflightAuthor.v1'))).not.toBeNull()
 })
 
 test('a bounded failed poll preserves its identity across reload without staging or resubmitting', async ({ page }) => {
