@@ -857,15 +857,13 @@ export default function App() {
     retryUnreadableHead: retryUnreadableHeadRaw,
   } = drawingActions
   const onRetryViewerRefresh = useCallback((...args) => {
-    if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return null
     closeStartForChange()
     return onRetryViewerRefreshRaw(...args)
-  }, [onRetryViewerRefreshRaw, closeStartForChange, refuseProjectSolar])
+  }, [onRetryViewerRefreshRaw, closeStartForChange])
   const retryUnreadableHead = useCallback((...args) => {
-    if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return null
     closeStartForChange()
     return retryUnreadableHeadRaw(...args)
-  }, [retryUnreadableHeadRaw, closeStartForChange, refuseProjectSolar])
+  }, [retryUnreadableHeadRaw, closeStartForChange])
   const platform = usePlatformTrustController({ mock })
   const {
     usage,
@@ -1549,10 +1547,7 @@ export default function App() {
     // recovery, both of which RE-VERIFY instead of guessing.
     onAuthRequired: (required) => { if (required) sessionActions.requireAuth('jobs') },
     onNotice: ({ text }) => showToast({ text, action: { label: 'View', onClick: viewResult } }),
-    onCompleteVersion: (...args) => {
-      if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return false
-      return completedVersionRef.current?.(...args)
-    },
+    onCompleteVersion: (...args) => completedVersionRef.current?.(...args),
   })
   drawingErrorRef.current = setRunErr
 

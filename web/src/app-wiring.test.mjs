@@ -517,59 +517,6 @@ describe('R13F project Solar execution and form ingresses', () => {
       assert.equal(kept.calls('toast').length, 1)
     }
   })
-
-  it('R13F-18b job completion refuses project mode before the legacy head reader', () => {
-    const job = r13One((node) => node.type === 'CallExpression' && node.callee.name === 'useJobController')
-    const completion = r13One((node) => node.type === 'ObjectProperty' && node.key.name === 'onCompleteVersion', job.arguments[0]).value
-    const h = r13Fixture()
-    const args = [h.envelope.result.new_version, h.envelope, { quiet: true }]
-    assert.equal(r13Evaluate(completion, h.env)(...args), false)
-    r13Refused(h)
-    const standalone = r13Fixture({ project: false })
-    const complete = r13Evaluate(completion, standalone.env)
-    assert.equal(complete(...args), standalone.envelope)
-    assert.deepEqual(standalone.calls('completion')[0].args, args)
-    args.forEach((arg, index) => assert.equal(standalone.calls('completion')[0].args[index], arg))
-    const before = standalone.work.slice()
-    standalone.env.projectModeRef.current = true
-    assert.equal(complete(...args), false)
-    assert.deepEqual(standalone.work, before)
-    assert.deepEqual(standalone.errors, [projectSolarAppReason('project_unavailable')])
-  })
-
-  it('R13F-18c viewer refresh retry refuses project mode before recovery', () => {
-    const h = r13Fixture()
-    assert.equal(h.callback('onRetryViewerRefresh')({ retry: true }), null)
-    r13Refused(h)
-    const standalone = r13Fixture({ project: false })
-    const retry = standalone.callback('onRetryViewerRefresh')
-    const args = [{ retry: true }, 'head']
-    assert.equal(retry(...args), standalone.envelope)
-    assert.deepEqual(standalone.work.map((entry) => entry.name), ['closeStart', 'recovery', 'head'])
-    assert.equal(standalone.calls('recovery')[0].args[0], args[0])
-    const before = standalone.work.slice()
-    standalone.env.projectModeRef.current = true
-    assert.equal(retry(...args), null)
-    assert.deepEqual(standalone.work, before)
-    assert.deepEqual(standalone.errors, [projectSolarAppReason('project_unavailable')])
-  })
-
-  it('R13F-18d unreadable-head retry refuses project mode before recovery', () => {
-    const h = r13Fixture()
-    assert.equal(h.callback('retryUnreadableHead')({ retry: true }), null)
-    r13Refused(h)
-    const standalone = r13Fixture({ project: false })
-    const retry = standalone.callback('retryUnreadableHead')
-    const args = [{ retry: true }, 'head']
-    assert.equal(retry(...args), standalone.envelope)
-    assert.deepEqual(standalone.work.map((entry) => entry.name), ['closeStart', 'recovery', 'head'])
-    assert.equal(standalone.calls('recovery')[0].args[0], args[0])
-    const before = standalone.work.slice()
-    standalone.env.projectModeRef.current = true
-    assert.equal(retry(...args), null)
-    assert.deepEqual(standalone.work, before)
-    assert.deepEqual(standalone.errors, [projectSolarAppReason('project_unavailable')])
-  })
 })
 
 describe('R13F project Solar catalog attachment', () => {
@@ -621,7 +568,7 @@ describe('R13F project Solar catalog attachment', () => {
     assert.equal(helper[0].init.callee.name, 'useCallback')
     assert.equal(source(helper[0].init.arguments[1]), '[]')
     const expectedSites = {
-      onRetryViewerRefresh: 1, retryUnreadableHead: 1, armDecision: 1,
+      armDecision: 1,
       onRequestCatalogRun: 1, onRun: 2, onConfirmCatalogRun: 2,
       onRetry: 1, onRetryJob: 1, onOpenSolarFlowStep: 1, onOpenSolarForm: 1,
       onRunCombinerPlacement: 1, onSubmitSolarFlowStep: 1, onResumePendingRun: 2,
@@ -633,8 +580,8 @@ describe('R13F project Solar catalog attachment', () => {
       assert.equal(refusalCalls.filter((node) => node.start > callback.start && node.end < callback.end).length, count, name)
     }
     const job = calls('useJobController')[0]
-    assert.equal(refusalCalls.filter((node) => node.start > job.start && node.end < job.end).length, 1)
-    assert.equal(refusalCalls.length, 21, 'only the F2b-1 ingress sites')
+    assert.equal(refusalCalls.filter((node) => node.start > job.start && node.end < job.end).length, 0)
+    assert.equal(refusalCalls.length, 18, 'only the F2b-1 ingress sites')
   })
 
   it('R13F-06 catalog context branches on project mode and explicitly restores standalone scope', () => {
@@ -3949,10 +3896,7 @@ describe('Start is a view inside the current workspace profile', () => {
       const callback = appNoComments.slice(start, end + 2)
       assert.match(callback, new RegExp('closeStartForChange\\(\\)\\s+return '
         + name + 'Raw\\(\\.\\.\\.args\\)'))
-      assert.match(callback, new RegExp('\\[' + name + 'Raw, closeStartForChange, refuseProjectSolar\\]'))
-      const settingsGuard = callback.indexOf('refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)')
-      assert.notEqual(settingsGuard, -1)
-      assert.ok(settingsGuard < callback.indexOf('closeStartForChange()'))
+      assert.match(callback, new RegExp('\\[' + name + 'Raw, closeStartForChange\\]'))
     }
   })
   it('shows the Run and Build gloss beside the shared prompt for every visible board', () => {
