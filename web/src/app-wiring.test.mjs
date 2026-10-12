@@ -37,7 +37,7 @@ describe('R13F project Solar catalog attachment', () => {
   const calls = (name) => find((node) => node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === name)
   const source = (node) => appSource.slice(node.start, node.end)
 
-  it('R13F-01 App owns one project scope before the catalog without mounting project surfaces', () => {
+  it('R13F-01 App owns one project scope before the catalog and admits only project checkout controls', () => {
     const owner = calls('useProjectSolarScope')
     assert.equal(owner.length, 1)
     assert.equal(calls('createCatalogRunContext').length, 1)
@@ -48,15 +48,29 @@ describe('R13F project Solar catalog attachment', () => {
     assert.equal(source(owner[0].arguments[1]), '{ createClient: createProjectSolarScopeClient }')
     assert.equal(calls('createProjectSolarScopeClient').length, 0, 'only the scope hook invokes the factory')
     assert.equal(calls('createProjectSolarClient').length, 1)
-    assert.equal(calls('useProjectCheckoutController').length, 0)
+    const controls = find((node) => node.type === 'FunctionDeclaration' && node.id.name === 'ProjectSolarCheckoutControls')
+    assert.equal(controls.length, 1)
+    const projectCheckout = calls('useProjectCheckoutController')
+    assert.equal(projectCheckout.length, 1)
+    assert.ok(projectCheckout[0].start > controls[0].body.start && projectCheckout[0].end < controls[0].body.end)
     const services = find((node) => node.type === 'VariableDeclarator' && node.id.name === 'catalogServices')[0]
     assert.match(source(services), /get projectSolarClient\(\) \{ return projectSolarClientRef\.current \}/)
     const intents = find((node) => node.type === 'VariableDeclarator' && node.id.name === 'PROJECT_SOLAR_INTENTS')[0]
     assert.equal(source(intents.init), 'Object.freeze([])')
     const imports = find((node) => node.type === 'ImportDeclaration').map((node) => node.source.value)
-    assert.ok(!imports.some((path) => /solarProjectDrawingModel|ProjectSolarReadPanel|ProjectSolarWorkspaceHost|useProjectCheckoutController|useProjectRunController/.test(path)))
+    assert.ok(!imports.some((path) => /solarProjectDrawingModel|ProjectSolarReadPanel|ProjectSolarWorkspaceHost|useProjectRunController/.test(path)))
+    const checkoutImports = find((node) => node.type === 'ImportDeclaration'
+      && (/useProjectCheckoutController/.test(node.source.value)
+        || node.specifiers.some((specifier) => specifier.local.name === 'useProjectCheckoutController')))
+    assert.equal(checkoutImports.length, 1)
+    assert.equal(checkoutImports[0].source.value, './controllers/useProjectCheckoutController.js')
+    assert.equal(checkoutImports[0].specifiers.length, 1)
+    assert.equal(checkoutImports[0].specifiers[0].type, 'ImportSpecifier')
+    assert.equal(checkoutImports[0].specifiers[0].imported.name, 'useProjectCheckoutController')
+    assert.equal(checkoutImports[0].specifiers[0].local.name, 'useProjectCheckoutController')
     const mounts = find((node) => node.type === 'JSXOpeningElement').map((node) => source(node.name))
-    assert.ok(!mounts.some((name) => /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
+    assert.equal(mounts.filter((name) => name === 'ProjectSolarCheckoutControls').length, 1)
+    assert.ok(!mounts.some((name) => name !== 'ProjectSolarCheckoutControls' && /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
     assert.equal(calls('refuseProjectSolar').length, 0)
   })
 

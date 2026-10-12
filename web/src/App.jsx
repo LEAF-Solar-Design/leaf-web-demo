@@ -192,6 +192,9 @@ import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
 import useCheckoutController from './controllers/checkout/useCheckoutController.js'
+import { useProjectCheckoutController } from './controllers/useProjectCheckoutController.js'
+import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
+import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { useProjectSolarScope } from './solar/useProjectSolarScope.js'
 import { createProjectSolarClient } from './api.js'
 import { composerDraftAccountScope } from './lib/composerDraft.js'
@@ -309,6 +312,44 @@ function SignedOutGate({ onDemo, onSignIn }) {
 
 const SOLAR_SETTINGS_LOADERS = ENV_SOLAR_SETTINGS_FORM ? solarSettingsLoaders({ getDrawingIntake, getDrawingVersions }) : null
 const PROJECT_SOLAR_INTENTS = Object.freeze([])
+
+function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
+  const { actions } = useProjectCheckoutController(projectClient)
+
+  useEffect(() => {
+    actions.refresh()
+  }, [actions])
+
+  return React.createElement('div',
+    { role: 'group', 'aria-label': 'Project checkout' },
+    React.createElement('p', { role: 'status' },
+      projectSolarAppReason(checkout.reason)),
+    React.createElement('button', {
+      type: 'button',
+      disabled: !checkout.canTake,
+      onClick: () => {
+        if (!isCurrent() || !checkout.canTake) return
+        return actions.take()
+      },
+    }, 'Take'),
+    React.createElement('button', {
+      type: 'button',
+      disabled: !checkout.canRelease,
+      onClick: () => {
+        if (!isCurrent() || !checkout.canRelease) return
+        return actions.release()
+      },
+    }, 'Release'),
+    React.createElement('button', {
+      type: 'button',
+      disabled: checkout.pending,
+      onClick: () => {
+        if (!isCurrent() || checkout.pending) return
+        return actions.refresh()
+      },
+    }, 'Retry'),
+  )
+}
 
 // Mount the upload controller only on the live material pane. Its policy
 // request must not run when the drawing profiles or offline demo boot.
@@ -978,6 +1019,12 @@ export default function App() {
       generation = next.generation
     })
   }, [session.controller, mock])
+  const projectSolarLoginRef = useRef(null)
+  projectSolarLoginRef.current = {
+    projectSolar,
+    generation: session.generation,
+    controller: session.controller,
+  }
   const catalogServices = useMemo(() => ({
     getTools,
     getCapabilities,
@@ -1160,7 +1207,7 @@ export default function App() {
     // switch voids the identity and the scope goes with it — see
     // checkoutScopeDrawingId for why abandoning beats releasing.
     drawingId: checkoutScopeDrawingId({
-      identityDrawingId: REQUESTED_DRAWING_ID,
+      identityDrawingId: projectMode ? null : REQUESTED_DRAWING_ID,
       drawingState,
       requestedDrawingId: REQUESTED_DRAWING_ID,
     }),
@@ -1169,7 +1216,7 @@ export default function App() {
     // mode unconditionally), so the handoff is bootstrapped in the render phase
     // and the claim deferral is decided before the first effect runs — the
     // ordering the retired block got from its own render-phase bootstrap.
-    bootDrawingId: REQUESTED_DRAWING_ID,
+    bootDrawingId: projectMode ? null : REQUESTED_DRAWING_ID,
     deferForAuthCallback: isAuthRedirectCallback(),
     onHolderRemint: setOwnHolder,
   })
@@ -1366,6 +1413,46 @@ export default function App() {
   // on the way to sign-in lands unknown + read-failed, which is fail-closed.
   // Byte-identical to /try's signInWithCheckoutRelease.
   const onLogin = useCallback(async () => {
+    if (projectModeRef.current) {
+      const captured = projectSolarLoginRef.current
+      const owner = captured.projectSolar
+      const client = owner.projectClient
+      // The client publishes a new binding object on every scope change and
+      // keeps that object across a checkout release, so identity records the
+      // history a value comparison cannot: a scope that moved and came back
+      // (A, B, A) holds a different binding object than the one seen here.
+      const clientBinding = owner.ready ? client.getSnapshot().binding : null
+
+      const stillCurrent = () => {
+        const current = projectSolarLoginRef.current
+        const next = current.projectSolar
+
+        if (!projectModeRef.current
+          || current.controller !== captured.controller
+          || current.generation !== captured.generation
+          || captured.controller.getSnapshot().generation !== captured.generation
+          || next.ready !== owner.ready
+          || next.projectClient !== client
+          || next.scope.authorityKey !== owner.scope.authorityKey) return false
+
+        if (!owner.ready) return next.scope.binding === owner.scope.binding
+
+        const snapshot = client.getSnapshot()
+        return sameSolarDrawingBinding(next.scope.binding, owner.scope.binding)
+          && snapshot.binding === clientBinding
+          && sameSolarDrawingBinding(snapshot.binding, owner.scope.binding)
+          && snapshot.authorityKey === owner.scope.authorityKey
+      }
+
+      if (!stillCurrent()) return
+      if (owner.ready && owner.checkout.canRelease) {
+        await client.releaseCheckout()
+      }
+      if (!stillCurrent()) return
+      await login()
+      return
+    }
+
     if (checkout.actions.getCapability()) await checkout.actions.release()
     await login()
   }, [checkout.actions])
@@ -4723,20 +4810,34 @@ export default function App() {
                 <span className="version-note readonly">viewing v{previewing.version} · read-only</span>
               )}
               {!mock && (
-                <CheckoutControls
-                  lockedByOther={otherHeldCheckout}
-                  staleByOther={lock.staleByOther}
-                  legacyByOther={lock.legacyByOther}
-                  canTake={lock.canTake}
-                  heldByUs={heldByUs}
-                  unknown={lock.unknown}
-                  readFailed={checkout.readFailed}
-                  failure={checkout.failure}
-                  busy={checkout.busy}
-                  onTake={checkout.actions.take}
-                  onRelease={checkout.actions.release}
-                  onRetry={checkout.actions.refresh}
-                />
+                projectMode ? (
+                  projectSolar.ready ? (
+                    <ProjectSolarCheckoutControls
+                      projectClient={projectSolar.projectClient}
+                      checkout={projectSolar.checkout}
+                      isCurrent={projectSolar.isCurrent}
+                    />
+                  ) : (
+                    <p role="status">
+                      {projectSolarAppReason(projectSolar.scope.reason || 'scope_pending')}
+                    </p>
+                  )
+                ) : (
+                  <CheckoutControls
+                    lockedByOther={otherHeldCheckout}
+                    staleByOther={lock.staleByOther}
+                    legacyByOther={lock.legacyByOther}
+                    canTake={lock.canTake}
+                    heldByUs={heldByUs}
+                    unknown={lock.unknown}
+                    readFailed={checkout.readFailed}
+                    failure={checkout.failure}
+                    busy={checkout.busy}
+                    onTake={checkout.actions.take}
+                    onRelease={checkout.actions.release}
+                    onRetry={checkout.actions.refresh}
+                  />
+                )
               )}
               {drawingState && (
                 <>

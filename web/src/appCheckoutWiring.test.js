@@ -24,7 +24,11 @@
 // growing a second copy of it — which is the exact defect class W2c retires.
 
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { parse } from '@babel/parser'
+import { checkoutScopeDrawingId } from './controllers/checkout/createCheckoutController.js'
+import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
+import { createSolarProjectClient } from './solar/solarProjectClient.js'
 
 import esbuild from 'esbuild'
 
@@ -42,6 +46,28 @@ const strip = (source) => esbuild.transformSync(source, { loader: 'jsx' }).code
   .replace(/^[ \t]*\/\/.*$/gm, '')
 
 const stripped = strip(appSource)
+
+const appTree = parse(appSource, { sourceType: 'module', plugins: ['jsx'] })
+function appNodes(predicate) {
+  const found = []
+  const walk = (node) => {
+    if (!node || typeof node.type !== 'string') return
+    if (predicate(node)) found.push(node)
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(walk)
+      else if (value && typeof value.type === 'string') walk(value)
+    }
+  }
+  walk(appTree)
+  return found
+}
+const appText = (node) => appSource.slice(node.start, node.end)
+function loginCallback() {
+  const declarations = appNodes((node) => node.type === 'VariableDeclarator' && node.id.name === 'onLogin')
+  expect(declarations).toHaveLength(1)
+  expect(declarations[0].init.callee.name).toBe('useCallback')
+  return declarations[0].init.arguments[0]
+}
 
 // The hand-rolled block, identifier by identifier. Each one was a piece of
 // state or protocol the controller owns now; a survivor is a second answer.
@@ -88,7 +114,7 @@ describe('App.jsx checkout controller adoption', () => {
     // on a tenant switch; the identity does. Reading the chain alone kept
     // addressing the previous tenant's drawing with its bearer capability.
     expect(stripped).toMatch(
-      /drawingId: checkoutScopeDrawingId\(\{\s*identityDrawingId: REQUESTED_DRAWING_ID,\s*drawingState,\s*requestedDrawingId: REQUESTED_DRAWING_ID\s*\}\)/,
+      new RegExp('drawingId: checkoutScopeDrawingId\\(\\{\\s*identityDrawingId: projectMode \\? null : REQUESTED_DRAWING_ID,\\s*drawingState,\\s*requestedDrawingId: REQUESTED_DRAWING_ID\\s*\\}\\)'),
     )
   })
 
@@ -98,7 +124,7 @@ describe('App.jsx checkout controller adoption', () => {
     // effect runs — the ordering the retired block got from its own
     // render-phase bootstrap. `onHolderRemint` is how a refused redemption
     // reaches this shell's holder state.
-    expect(stripped).toMatch(/bootDrawingId: REQUESTED_DRAWING_ID/)
+    expect(stripped).toMatch(/bootDrawingId: projectMode \? null : REQUESTED_DRAWING_ID/)
     expect(stripped).toMatch(/deferForAuthCallback: isAuthRedirectCallback\(\)/)
     expect(stripped).toMatch(/onHolderRemint: setOwnHolder/)
   })
@@ -136,9 +162,222 @@ describe('App.jsx checkout controller adoption', () => {
     // release re-reads /versions, so a read that 401s on the way to sign-in
     // lands unknown + readFailed — fail closed — instead of leaving a stale
     // "You hold the edit lock" behind a dead capability.
-    expect(stripped).toMatch(
-      /const onLogin = useCallback\(async \(\) => \{\s*if \(checkout\.actions\.getCapability\(\)\) await checkout\.actions\.release\(\);\s*await login\(\);/,
-    )
+    const statements = loginCallback().body.body
+    expect(statements[0].type).toBe('IfStatement')
+    expect(appText(statements[0].test)).toBe('projectModeRef.current')
+    expect(statements[0].consequent.body.at(-1).type).toBe('ReturnStatement')
+    expect(statements[0].consequent.body.at(-1).argument).toBeNull()
+    expect(statements).toHaveLength(3)
+    expect(appText(statements[1])).toBe('if (checkout.actions.getCapability()) await checkout.actions.release()')
+    expect(appText(statements[2])).toBe('await login()')
+  })
+
+  it('R13F-07 project mode deactivates both legacy checkout inputs and preserves standalone inputs', () => {
+    const calls = appNodes((node) => node.type === 'CallExpression' && node.callee.name === 'useCheckoutController')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].arguments).toHaveLength(1)
+    expect(calls[0].arguments[0].type).toBe('ObjectExpression')
+    const options = Function('projectMode', 'REQUESTED_DRAWING_ID', 'drawingState', 'mock',
+      'ownHolder', 'isAuthRedirectCallback', 'setOwnHolder', 'checkoutScopeDrawingId',
+      `return (${appText(calls[0].arguments[0])})`)
+    const holder = { sentinel: 'holder' }
+    const remint = vi.fn()
+    for (const projectMode of [true, false]) {
+      for (const identity of ['boot-drawing', null]) {
+        for (const drawingState of [{ drawing_id: 'chain-drawing', version: 7 }, null]) {
+          for (const mock of [true, false]) {
+            for (const deferred of [true, false]) {
+              const authCallback = vi.fn(() => deferred)
+              const actual = options(projectMode, identity, drawingState, mock, holder,
+                authCallback, remint, checkoutScopeDrawingId)
+              expect(actual).toEqual({ mock,
+                drawingId: projectMode ? null : checkoutScopeDrawingId({
+                  identityDrawingId: identity, drawingState, requestedDrawingId: identity }),
+                holder, bootDrawingId: projectMode ? null : identity,
+                deferForAuthCallback: deferred, onHolderRemint: remint })
+              expect(actual.holder).toBe(holder)
+              expect(actual.onHolderRemint).toBe(remint)
+              expect(authCallback).toHaveBeenCalledExactlyOnceWith()
+            }
+          }
+        }
+      }
+    }
+    expect(remint).not.toHaveBeenCalled()
+  })
+
+  it('R13F-09 project login releases through its captured client and refuses changed scope or session', async () => {
+    const projectModeRef = { current: true }
+    const projectSolarLoginRef = { current: null }
+    const sequence = []
+    const legacyRelease = vi.fn(async () => { sequence.push('legacy release') })
+    const capability = vi.fn(() => 'legacy capability')
+    const checkout = { actions: { getCapability: capability, release: legacyRelease } }
+    const login = vi.fn(async () => { sequence.push('login') })
+    const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
+      'sameSolarDrawingBinding', `return (${appText(loginCallback())})`)(
+      projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding)
+    const binding = { kind: 'project',
+      organization_id: '11111111-1111-1111-1111-111111111111',
+      project_id: '22222222-2222-2222-2222-222222222222',
+      drawing_id: '33333333-3333-3333-3333-333333333333',
+      input_version_id: '44444444-4444-4444-4444-444444444444' }
+    const changedBinding = { ...binding, input_version_id: '55555555-5555-5555-5555-555555555555' }
+    function fixture({ ready = true, canRelease = true } = {}) {
+      let settle
+      const release = new Promise((resolve) => { settle = resolve })
+      const snapshot = { binding: { ...binding }, authorityKey: 'authority', leaseRevision: 1 }
+      const live = { generation: 7 }
+      const controller = { getSnapshot: () => live }
+      const client = { getSnapshot: () => snapshot,
+        releaseCheckout: vi.fn(() => { sequence.push('project release'); return release }) }
+      const owner = { ready, projectClient: ready ? client : null,
+        scope: { binding: ready ? { ...binding } : null, authorityKey: ready ? 'authority' : null },
+        checkout: { canRelease } }
+      const captured = { projectSolar: owner, generation: 7, controller }
+      // Each render installs a fresh current-value record; the callback above
+      // is retained across all fixtures and must consult these refs at invocation.
+      projectModeRef.current = true
+      projectSolarLoginRef.current = captured
+      sequence.length = 0
+      login.mockClear()
+      return { client, owner, captured, snapshot, live, settle,
+        replaceOwner(patch) {
+          projectSolarLoginRef.current = { ...captured, projectSolar: { ...owner, ...patch } }
+        } }
+    }
+    const unchanged = fixture()
+    const leaving = onLogin()
+    expect(unchanged.client.releaseCheckout).toHaveBeenCalledExactlyOnceWith()
+    expect(sequence).toEqual(['project release'])
+    expect(login).not.toHaveBeenCalled()
+    unchanged.snapshot.leaseRevision += 1
+    unchanged.replaceOwner({ scope: { ...unchanged.owner.scope, binding: { ...binding } } })
+    unchanged.settle()
+    await leaving
+    expect(sequence).toEqual(['project release', 'login'])
+    expect(login).toHaveBeenCalledExactlyOnceWith()
+
+    const drifts = [
+      ['mode', () => { projectModeRef.current = false }],
+      ['binding', (run) => run.replaceOwner({ scope: { ...run.owner.scope, binding: changedBinding } })],
+      ['returned binding', (run) => {
+        // A, B, A: the client re-binds and publishes a new object equal to the first.
+        run.snapshot.binding = { ...binding }
+        run.replaceOwner({ scope: { ...run.owner.scope, binding: { ...binding } } })
+      }],
+      ['authority', (run) => run.replaceOwner({ scope: { ...run.owner.scope, authorityKey: 'other authority' } })],
+      ['client', (run) => run.replaceOwner({ projectClient: { ...run.client } })],
+      ['readiness', (run) => run.replaceOwner({ ready: false })],
+      ['controller', (run) => { projectSolarLoginRef.current = { ...run.captured, controller: { getSnapshot: () => run.live } } }],
+      ['rendered generation', (run) => { projectSolarLoginRef.current = { ...run.captured, generation: 8 } }],
+      ['live generation', (run) => { run.live.generation = 8 }],
+      ['snapshot binding', (run) => { run.snapshot.binding = changedBinding }],
+      ['snapshot authority', (run) => { run.snapshot.authorityKey = 'other authority' }],
+    ]
+    for (const [name, drift] of drifts) {
+      const run = fixture()
+      const pending = onLogin()
+      expect(run.client.releaseCheckout, name).toHaveBeenCalledExactlyOnceWith()
+      drift(run)
+      run.settle()
+      await pending
+      expect(login, name).not.toHaveBeenCalled()
+      expect(sequence, name).toEqual(['project release'])
+    }
+    // Already invalid at invocation: neither release nor login is permitted.
+    for (const invalidate of [
+      (run) => { run.live.generation = 8 },
+      (run) => { run.snapshot.binding = changedBinding },
+      (run) => { run.snapshot.authorityKey = 'other authority' },
+    ]) {
+      const run = fixture()
+      invalidate(run)
+      await onLogin()
+      expect(run.client.releaseCheckout).not.toHaveBeenCalled()
+      expect(login).not.toHaveBeenCalled()
+    }
+    for (const inputs of [{ ready: true, canRelease: false }, { ready: false, canRelease: true }]) {
+      const run = fixture(inputs)
+      await onLogin()
+      expect(run.client.releaseCheckout).not.toHaveBeenCalled()
+      expect(sequence).toEqual(['login'])
+    }
+    expect(capability).not.toHaveBeenCalled()
+    expect(legacyRelease).not.toHaveBeenCalled()
+
+    for (const held of [true, false]) {
+      fixture()
+      projectModeRef.current = false
+      capability.mockClear()
+      capability.mockImplementation(() => {
+        sequence.push('legacy capability')
+        return held ? 'legacy capability' : null
+      })
+      let settle
+      const release = new Promise((resolve) => { settle = resolve })
+      legacyRelease.mockImplementationOnce(() => { sequence.push('legacy release'); return release })
+      const pending = onLogin()
+      expect(capability).toHaveBeenCalledExactlyOnceWith()
+      if (held) {
+        expect(sequence).toEqual(['legacy capability', 'legacy release'])
+        expect(login).not.toHaveBeenCalled()
+        settle()
+      }
+      await pending
+      expect(sequence).toEqual(held ? ['legacy capability', 'legacy release', 'login'] : ['legacy capability', 'login'])
+    }
+    expect(legacyRelease).toHaveBeenCalledExactlyOnceWith()
+  })
+
+  it('R13F-24 project login refuses a scope that changed and returned while the release was pending', async () => {
+    const O = '11111111-1111-1111-1111-111111111111'
+    const P = '22222222-2222-2222-2222-222222222222'
+    const D = '33333333-3333-3333-3333-333333333333'
+    const binding = { kind: 'project', organization_id: O, project_id: P, drawing_id: D,
+      input_version_id: '44444444-4444-4444-4444-444444444444' }
+    const otherVersion = { ...binding, input_version_id: '55555555-5555-5555-5555-555555555555' }
+    const lease = { holder: 'editor', acquired: '2026-01-01T00:00:00Z', expires: '2099-01-01T00:00:00Z',
+      fence: '9007199254740993' }
+    const respond = (data) => ({ ok: true, status: 200, json: async () => data })
+    const identity = { organization_id: O, project_id: P, drawing_id: D }
+    for (const roundTrip of [true, false]) {
+      let settle = null
+      const fetchImpl = vi.fn(async (url, init) => (init.method === 'POST'
+        ? respond({ ...identity, acquired: true, checkout: lease, checkout_capability: 'lco1.' + 'b'.repeat(64) })
+        : new Promise((resolve) => { settle = () => resolve(respond({ ...identity, released: true, checkout: null })) })))
+      // The production client: it publishes a new binding object on every scope
+      // change and keeps it across the release, which is what the login guard reads.
+      const client = createSolarProjectClient({ fetchImpl })
+      client.setScope(binding, 'authority')
+      expect((await client.acquireCheckout()).ok, String(roundTrip)).toBe(true)
+      const projectModeRef = { current: true }
+      const controller = { getSnapshot: () => ({ generation: 7 }) }
+      const owner = { ready: true, projectClient: client,
+        scope: { binding: { ...binding }, authorityKey: 'authority' }, checkout: { canRelease: true } }
+      const projectSolarLoginRef = { current: { projectSolar: owner, generation: 7, controller } }
+      const login = vi.fn(async () => {})
+      const checkout = { actions: { getCapability: vi.fn(() => null), release: vi.fn(async () => {}) } }
+      const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
+        'sameSolarDrawingBinding', `return (${appText(loginCallback())})`)(
+        projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding)
+      const pending = onLogin()
+      await vi.waitFor(() => expect(settle).toBeTypeOf('function'))
+      if (roundTrip) {
+        // Another version of the same drawing keeps the checkout, so the release survives it.
+        client.setScope(otherVersion, 'authority')
+        client.setScope(binding, 'authority')
+        projectSolarLoginRef.current = { ...projectSolarLoginRef.current,
+          projectSolar: { ...owner, scope: { binding: { ...binding }, authorityKey: 'authority' } } }
+      }
+      settle()
+      await pending
+      expect(client.getSnapshot().ownsCheckout, String(roundTrip)).toBe(false)
+      expect(fetchImpl.mock.calls.map(([, init]) => init.method), String(roundTrip)).toEqual(['POST', 'DELETE'])
+      expect(login, String(roundTrip)).toHaveBeenCalledTimes(roundTrip ? 0 : 1)
+      expect(checkout.actions.getCapability, String(roundTrip)).not.toHaveBeenCalled()
+      client.dispose()
+    }
   })
 
   it('refreshes the lock after a run, where a write can change who holds it', () => {

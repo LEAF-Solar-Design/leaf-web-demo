@@ -11,6 +11,7 @@ import useCatalogController from './controllers/catalog/useCatalogController.js'
 import { useProjectCheckoutController } from './controllers/useProjectCheckoutController.js'
 import { createSessionController } from './controllers/session/createSessionController.js'
 import { solarSettingsScope } from './solar/solarSettingsWire.js'
+import { projectSolarAppReason, projectSolarCheckoutState, projectSolarScopeSnapshot } from './solar/solarProjectAppModel.js'
 
 vi.mock('./telemetry.js', () => ({ track: vi.fn() }))
 
@@ -146,6 +147,199 @@ async function receipt(hook) {
 }
 
 describe('App project Solar scope ownership', () => {
+  it('R13F-08 App mounts canonical checkout controls only for a ready project and uses sanitized eligibility', async () => {
+    const components = nodes((node) => node.type === 'FunctionDeclaration' && node.id.name === 'ProjectSolarCheckoutControls')
+    expect(components).toHaveLength(1)
+    const projectHook = vi.fn((client) => useProjectCheckoutController(client))
+    const Controls = Function('React', 'useEffect', 'useProjectCheckoutController', 'projectSolarAppReason',
+      `${text(components[0].node)}; return ProjectSolarCheckoutControls`)(
+      React, React.useEffect, projectHook, projectSolarAppReason)
+    const branches = nodes((node) => node.type === 'LogicalExpression' && node.operator === '&&'
+      && text(node.left) === '!mock' && text(node.right).includes('<CheckoutControls'))
+    expect(branches).toHaveLength(1)
+    const standalone = vi.fn(() => React.createElement('div', { 'data-testid': 'standalone-checkout' }))
+    let controlProps
+    let handlers
+    function ProjectProbe(props) {
+      controlProps = props
+      // Call the extracted production component with real React hooks; keep
+      // its element's callbacks to exercise both disabled and retained handlers.
+      const element = Controls(props)
+      handlers = Object.fromEntries(element.props.children.filter((child) => child.type === 'button')
+        .map((child) => [child.props.children, child.props.onClick]))
+      return element
+    }
+    const evaluate = (node, inputs) => Function(...Object.keys(inputs),
+      `return (${text(node)})`)(...Object.values(inputs))
+    // Interpret only the extracted checkout expression's actual AST. No JSX
+    // transform is loaded in jsdom and no handwritten mode ternary substitutes
+    // for App's conditions or props.
+    function element(node, inputs) {
+      if (node.type === 'LogicalExpression') {
+        expect(node.operator).toBe('&&')
+        return evaluate(node.left, inputs) && element(node.right, inputs)
+      }
+      if (node.type === 'ConditionalExpression') {
+        return element(evaluate(node.test, inputs) ? node.consequent : node.alternate, inputs)
+      }
+      if (node.type === 'JSXExpressionContainer') return evaluate(node.expression, inputs)
+      if (node.type === 'JSXText') return node.value.trim() || null
+      expect(node.type).toBe('JSXElement')
+      const name = node.openingElement.name.name
+      const component = name === 'ProjectSolarCheckoutControls' ? ProjectProbe :
+        name === 'CheckoutControls' ? standalone : name
+      const props = {}
+      for (const attribute of node.openingElement.attributes) {
+        expect(attribute.type).toBe('JSXAttribute')
+        props[attribute.name.name] = attribute.value === null ? true :
+          attribute.value.type === 'JSXExpressionContainer' ? evaluate(attribute.value.expression, inputs) : attribute.value.value
+      }
+      return React.createElement(component, props, ...node.children.map((child) => element(child, inputs)).filter((child) => child !== null))
+    }
+    const legacyActions = { take: vi.fn(), release: vi.fn(), refresh: vi.fn() }
+    const lock = { staleByOther: { stale: true }, legacyByOther: { legacy: true },
+      canTake: true, unknown: { unknown: true } }
+    const legacy = { actions: legacyActions, readFailed: { failed: true },
+      failure: { code: 'legacy failure' }, busy: { busy: true } }
+    const legacyInputs = { lock, checkout: legacy, otherHeldCheckout: { holder: 'other' },
+      heldByUs: { held: true }, projectSolarAppReason }
+    const renderBranch = (inputs) => element(branches[0].node, { ...legacyInputs, ...inputs })
+    const variants = [
+      { name: 'available', fields: { checkout: null, ownsCheckout: false }, take: true, release: false, retry: true, reason: 'checkout_required' },
+      { name: 'owned', fields: { ownsCheckout: true }, take: false, release: true, retry: true, reason: null },
+      { name: 'foreign', fields: { ownsCheckout: false }, take: false, release: false, retry: true, reason: 'checkout_held' },
+      { name: 'expired', expired: true, fields: { ownsCheckout: true }, take: true, release: false, retry: true, reason: 'checkout_expired' },
+      { name: 'pending', fields: { ownsCheckout: true, pending: true }, take: false, release: false, retry: false, reason: 'checkout_pending' },
+      { name: 'unavailable', fields: { error: 'fixture_error' }, take: false, release: false, retry: true, reason: 'checkout_unavailable' },
+    ]
+    for (const variant of variants) {
+      const run = setup()
+      const now = Date.now()
+      const lease = { holder: 'fixture holder', fence: '1',
+        acquired: new Date(now - 3600000).toISOString(), expires: new Date(now + 3600000).toISOString() }
+      let serverLease = lease
+      run.fetchImpl.mockImplementation(async (url, options = {}) => {
+        if (String(url).includes('/api/capabilities?')) return response(catalogData())
+        const data = { organization_id: O, project_id: P, drawing_id: D }
+        if (options.method === 'DELETE') {
+          serverLease = null
+          return response({ ...data, released: true, checkout: null })
+        }
+        if (options.method === 'POST') {
+          serverLease = lease
+          return response({ ...data, acquired: true, checkout: lease,
+            checkout_capability: 'lco1.' + 'a'.repeat(64) })
+        }
+        return response({ ...data, checkout: serverLease })
+      })
+      const hook = mount(run)
+      await receipt(hook)
+      const client = hook.result.current.projectSolar.projectClient
+      const release = vi.spyOn(client, 'releaseCheckout')
+      await act(async () => { await client.acquireCheckout({ holder: 'fixture holder' }) })
+      expect(client.getSnapshot().ownsCheckout).toBe(true)
+      const owner = hook.result.current.projectSolar
+      const projectedLease = variant.expired ? { ...lease, expires: new Date(now - 1).toISOString() } : lease
+      const projection = projectSolarCheckoutState({ scope: owner.scope, now,
+        snapshot: projectSolarScopeSnapshot({ ...client.getSnapshot(), checkout: projectedLease, ...variant.fields }) })
+      expect(projection).toMatchObject({ canTake: variant.take, canRelease: variant.release, reason: variant.reason })
+      if (variant.name === 'foreign') {
+        expect(projection.checkout.holder).toBe(client.getSnapshot().checkout.holder)
+        expect(projection.ownsCheckout).toBe(false)
+      }
+      client.readCheckout.mockClear()
+      client.acquireCheckout.mockClear()
+      projectHook.mockClear()
+      const inputs = () => ({ mock: false, projectMode: true,
+        projectSolar: { ...hook.result.current.projectSolar, checkout: projection } })
+      const view = render(renderBranch(inputs()))
+      await act(async () => {})
+      expect(client.readCheckout).toHaveBeenCalledExactlyOnceWith(undefined)
+      expect(controlProps.projectClient).toBe(client)
+      expect(controlProps.checkout).toBe(projection)
+      expect(projectHook.mock.calls.length).toBeGreaterThan(0)
+      expect(projectHook.mock.calls.every(([value]) => value === client)).toBe(true)
+      expect(view.getByRole('group', { name: 'Project checkout' })).toBeTruthy()
+      expect(view.getByRole('status').textContent).toBe(projectSolarAppReason(variant.reason) || '')
+      expect(standalone).not.toHaveBeenCalled()
+      const event = { type: 'click', currentTarget: { sentinel: 'event' } }
+      for (const [label, action, enabled] of [
+        ['Take', client.acquireCheckout, variant.take],
+        ['Release', release, variant.release],
+        ['Retry', client.readCheckout, variant.retry],
+      ]) {
+        view.rerender(renderBranch(inputs()))
+        expect(controlProps.isCurrent).toBe(hook.result.current.projectSolar.isCurrent)
+        expect(controlProps.isCurrent()).toBe(true)
+        expect(view.getByRole('button', { name: label }).disabled).toBe(!enabled)
+        const counts = [client.acquireCheckout.mock.calls.length, release.mock.calls.length, client.readCheckout.mock.calls.length]
+        const before = action.mock.calls.length
+        await act(async () => { await handlers[label](event) })
+        expect(action.mock.calls.length, variant.name + ' ' + label).toBe(before + (enabled ? 1 : 0))
+        if (enabled) expect(action.mock.calls.at(-1)).toEqual([undefined])
+        const after = [client.acquireCheckout.mock.calls.length, release.mock.calls.length, client.readCheckout.mock.calls.length]
+        const selected = label === 'Take' ? 0 : label === 'Release' ? 1 : 2
+        expect(after).toEqual(counts.map((count, index) => count + (index === selected && enabled ? 1 : 0)))
+      }
+      view.rerender(renderBranch(inputs()))
+      const retained = { ...handlers }
+      act(() => { client.setScope(null, null) })
+      const requests = run.fetchImpl.mock.calls.length
+      const counts = [client.acquireCheckout.mock.calls.length, release.mock.calls.length, client.readCheckout.mock.calls.length]
+      await act(async () => {
+        await retained.Take(event)
+        await retained.Release(event)
+        await retained.Retry(event)
+      })
+      expect(run.fetchImpl.mock.calls.length).toBe(requests)
+      expect([client.acquireCheckout.mock.calls.length, release.mock.calls.length, client.readCheckout.mock.calls.length]).toEqual(counts)
+      expect(legacyActions.take).not.toHaveBeenCalled()
+      expect(legacyActions.release).not.toHaveBeenCalled()
+      expect(legacyActions.refresh).not.toHaveBeenCalled()
+      expect(run.legacyFetch).not.toHaveBeenCalled()
+      view.unmount()
+      hook.unmount()
+      release.mockRestore()
+    }
+
+    const run = setup({ canonicalVersionId: null })
+    const hook = mount(run)
+    expect(hook.result.current.projectSolar.ready).toBe(false)
+    const reads = run.fetchImpl.mock.calls.length
+    for (const reason of ['sign_in_required', 'binding_invalid', null, undefined]) {
+      projectHook.mockClear()
+      const view = render(renderBranch({ mock: false, projectMode: true,
+        projectSolar: { ...hook.result.current.projectSolar, scope: { ...hook.result.current.projectSolar.scope, reason } } }))
+      expect(view.getByRole('status').textContent).toBe(projectSolarAppReason(reason || 'scope_pending'))
+      expect(view.queryByRole('group', { name: 'Project checkout' })).toBeNull()
+      expect(projectHook).not.toHaveBeenCalled()
+      expect(standalone).not.toHaveBeenCalled()
+      expect(run.fetchImpl.mock.calls.length).toBe(reads)
+      view.unmount()
+    }
+    hook.unmount()
+    projectHook.mockClear()
+    const view = render(renderBranch({ mock: false, projectMode: false, projectSolar: {} }))
+    expect(standalone).toHaveBeenCalledOnce()
+    const props = standalone.mock.calls[0][0]
+    const expected = { lockedByOther: legacyInputs.otherHeldCheckout, staleByOther: lock.staleByOther,
+      legacyByOther: lock.legacyByOther, canTake: lock.canTake, heldByUs: legacyInputs.heldByUs,
+      unknown: lock.unknown, readFailed: legacy.readFailed, failure: legacy.failure, busy: legacy.busy,
+      onTake: legacyActions.take, onRelease: legacyActions.release, onRetry: legacyActions.refresh }
+    expect(props).toEqual(expected)
+    for (const key of Object.keys(expected)) expect(props[key]).toBe(expected[key])
+    expect(projectHook).not.toHaveBeenCalled()
+    view.unmount()
+    standalone.mockClear()
+    for (const projectMode of [true, false]) {
+      const mockView = render(renderBranch({ mock: true, projectMode, projectSolar: { ready: true } }))
+      expect(mockView.container.textContent).toBe('')
+      expect(projectHook).not.toHaveBeenCalled()
+      expect(standalone).not.toHaveBeenCalled()
+      mockView.unmount()
+    }
+  })
+
   it('R13F-02 StrictMode gives catalog and checkout one live owner and disposes every subscription', async () => {
     const run = setup()
     const observations = []
