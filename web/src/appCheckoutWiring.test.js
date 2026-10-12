@@ -162,14 +162,16 @@ describe('App.jsx checkout controller adoption', () => {
     // release re-reads /versions, so a read that 401s on the way to sign-in
     // lands unknown + readFailed — fail closed — instead of leaving a stale
     // "You hold the edit lock" behind a dead capability.
+    // ONE sign-in path: the project branch ends at its last currency check and the
+    // standalone path releases in the else, so the single login follows both.
     const statements = loginCallback().body.body
+    expect(statements).toHaveLength(2)
     expect(statements[0].type).toBe('IfStatement')
     expect(appText(statements[0].test)).toBe('projectModeRef.current')
-    expect(statements[0].consequent.body.at(-1).type).toBe('ReturnStatement')
-    expect(statements[0].consequent.body.at(-1).argument).toBeNull()
-    expect(statements).toHaveLength(3)
-    expect(appText(statements[1])).toBe('if (checkout.actions.getCapability()) await checkout.actions.release()')
-    expect(appText(statements[2])).toBe('await login()')
+    expect(appText(statements[0].consequent.body.at(-1))).toBe('if (!stillCurrent()) return')
+    expect(appText(statements[0].consequent)).not.toContain('login(')
+    expect(appText(statements[0].alternate)).toBe('if (checkout.actions.getCapability()) await checkout.actions.release()')
+    expect(appText(statements[1])).toBe('await login()')
   })
 
   it('R13F-07 project mode deactivates both legacy checkout inputs and preserves standalone inputs', () => {

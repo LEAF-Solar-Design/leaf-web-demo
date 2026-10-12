@@ -1449,11 +1449,9 @@ export default function App() {
         await client.releaseCheckout()
       }
       if (!stillCurrent()) return
-      await login()
-      return
-    }
+    } else if (checkout.actions.getCapability()) await checkout.actions.release()
 
-    if (checkout.actions.getCapability()) await checkout.actions.release()
+    // ONE sign-in path: both branches end their checkout authority above, then log in here.
     await login()
   }, [checkout.actions])
 
