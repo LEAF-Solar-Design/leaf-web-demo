@@ -2105,7 +2105,9 @@ describe('W20-07b combiner workspace wiring', () => {
     const stage = body.indexOf("return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })?.runIntent?.intentId)")
     assert.ok(absent >= 0 && message > absent && refusal > message && stage > refusal)
     assert.ok(body.includes('[onRequestCatalogRun, tools, refuseProjectSolar]'))
-    assert.ok(body.indexOf("if (refuseProjectSolar('solar-combiners')) return false") < body.indexOf('tools.find('))
+    const combinerGuard = body.indexOf("if (refuseProjectSolar('solar-combiners')) return false")
+    assert.notEqual(combinerGuard, -1)
+    assert.ok(combinerGuard < body.indexOf('tools.find('))
     assert.equal(body.includes('onSubmitSolarFlowStep('), false)
   })
 
@@ -3948,7 +3950,9 @@ describe('Start is a view inside the current workspace profile', () => {
       assert.match(callback, new RegExp('closeStartForChange\\(\\)\\s+return '
         + name + 'Raw\\(\\.\\.\\.args\\)'))
       assert.match(callback, new RegExp('\\[' + name + 'Raw, closeStartForChange, refuseProjectSolar\\]'))
-      assert.ok(callback.indexOf('refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)') < callback.indexOf('closeStartForChange()'))
+      const settingsGuard = callback.indexOf('refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)')
+      assert.notEqual(settingsGuard, -1)
+      assert.ok(settingsGuard < callback.indexOf('closeStartForChange()'))
     }
   })
   it('shows the Run and Build gloss beside the shared prompt for every visible board', () => {
