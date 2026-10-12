@@ -10,7 +10,8 @@ import { useProjectSolarScope } from './solar/useProjectSolarScope.js'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import { useProjectCheckoutController } from './controllers/useProjectCheckoutController.js'
 import { createSessionController } from './controllers/session/createSessionController.js'
-import { solarSettingsScope } from './solar/solarSettingsWire.js'
+import { canOpenSolarSettingsForm, solarSettingsFormChoice, solarSettingsRunFeedback, solarSettingsScope } from './solar/solarSettingsWire.js'
+import { solarFlowRunsFor, solarFlowRunStatus } from './solar/solarFlowModel.js'
 import { projectSolarAppReason, projectSolarCheckoutState, projectSolarScopeSnapshot } from './solar/solarProjectAppModel.js'
 
 vi.mock('./telemetry.js', () => ({ track: vi.fn() }))
@@ -38,6 +39,49 @@ function nodes(predicate) {
   return found
 }
 const text = (node) => source.slice(node.start, node.end)
+const evaluate = (node, inputs) => Function(...Object.keys(inputs),
+  `return (${text(node)})`)(...Object.values(inputs))
+// Interpret the actual App AST, selecting branches before reading their JSX
+// or props. Component bindings are supplied explicitly by each rendered row.
+function element(node, inputs, components = {}) {
+  const bindings = { ...inputs, ...components }
+  if (node.type === 'LogicalExpression') {
+    const left = element(node.left, inputs, components)
+    if (node.operator === '&&') return left && element(node.right, inputs, components)
+    if (node.operator === '||') return left || element(node.right, inputs, components)
+    if (node.operator === '??') return left ?? element(node.right, inputs, components)
+    throw new Error('Unsupported logical operator: ' + node.operator)
+  }
+  if (node.type === 'ConditionalExpression') {
+    return element(evaluate(node.test, bindings) ? node.consequent : node.alternate, inputs, components)
+  }
+  if (node.type === 'JSXExpressionContainer') {
+    if (node.expression.type === 'JSXEmptyExpression') return null
+    return element(node.expression, inputs, components)
+  }
+  if (node.type === 'JSXText') return node.value.trim() || null
+  if (node.type === 'JSXFragment') {
+    return React.createElement(React.Fragment, null, ...node.children.map((child) => element(child, inputs, components)))
+  }
+  if (node.type !== 'JSXElement') {
+    if (node.type.startsWith('JSX')) throw new Error('Unsupported JSX form: ' + node.type)
+    return evaluate(node, bindings)
+  }
+  if (node.openingElement.name.type !== 'JSXIdentifier') throw new Error('Unsupported JSX name')
+  const name = node.openingElement.name.name
+  const component = components[name] ?? (name[0] === name[0].toLowerCase() ? name : null)
+  if (!component) throw new Error('Missing component binding: ' + name)
+  const props = {}
+  for (const attribute of node.openingElement.attributes) {
+    if (attribute.type !== 'JSXAttribute' || attribute.name.type !== 'JSXIdentifier') throw new Error('Unsupported JSX attribute')
+    if (attribute.value !== null && !['JSXExpressionContainer', 'StringLiteral'].includes(attribute.value.type)) {
+      throw new Error('Unsupported JSX attribute value: ' + attribute.value.type)
+    }
+    props[attribute.name.name] = attribute.value === null ? true :
+      attribute.value.type === 'JSXExpressionContainer' ? evaluate(attribute.value.expression, bindings) : attribute.value.value
+  }
+  return React.createElement(component, props, ...node.children.map((child) => element(child, inputs, components)).filter((child) => child !== null))
+}
 const declaration = (name) => nodes((node) => node.type === 'VariableDeclarator' && node.id.name === name)[0]
 const catalogCall = nodes((node) => node.type === 'CallExpression' && node.callee.name === 'useCatalogController')[0]
 const initialContext = catalogCall.node.arguments[0].properties.find((prop) => prop.key.name === 'context').value
@@ -147,6 +191,182 @@ async function receipt(hook) {
 }
 
 describe('App project Solar scope ownership', () => {
+  it('R13F-15b project mode renders refusal instead of legacy Solar hosts', () => {
+    const seats = nodes((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'SolarFlowSeat')
+    expect(seats).toHaveLength(1)
+    const expressions = seats[0].node.children.filter((node) => node.type === 'JSXExpressionContainer')
+    expect(expressions).toHaveLength(2)
+    expect(text(expressions[0].expression.left)).toBe('solarOverlayStatus')
+    const branch = expressions[1].expression
+    expect(branch.type).toBe('ConditionalExpression')
+    expect(branch.alternate.type).toBe('JSXFragment')
+    expect(expressions[0].end).toBeLessThan(branch.start)
+    const loaders = { readIntake: vi.fn(), readVersions: vi.fn() }
+    const components = Object.fromEntries(['SolarSettingsForm', 'SolarToolForm', 'SolarStepEditor', 'SolarFlowRail', 'SolarWorkspaceTools'].map((name) => [name,
+      vi.fn((props) => {
+        props.readIntake?.(props.drawingId ?? props.context?.drawingId, props.drawingVersion ?? props.context?.drawingVersion)
+        props.readVersions?.(props.context?.drawingId)
+        return React.createElement('div', { 'data-testid': name })
+      })]))
+    const registry = { panels: 'registry' }
+    components.SolarWorkspaceTools.workspacePanelsByFlow = registry
+    const context = { drawingId: 'standalone-drawing', drawingVersion: 7, projectId: null }
+    const form = { name: 'solar-settings' }, flowEditor = { name: 'solar-size-strings' }
+    const families = [{ family_id: 'family' }], retained = { spacing: 12 }
+    const runs = { [flowEditor.name]: { ok: false, code: 'fixture-failure' } }
+    const inputs = {
+      projectMode: false, projectSolar: { ready: true }, running: false, routeErr: null,
+      ENV_CAD_EDIT: true, ENV_SOLAR_SETTINGS_FORM: true, ENV_SOLAR_FLOW_RAIL: false,
+      drafting: true, surfaceSlots: { toolbar: { profile: 'solar' } }, mock: false,
+      solarFormTool: form, solarFlowEditor: flowEditor, catalogRunContext: context,
+      solarSettingsFormChoice, solarSettingsRunFeedback, SOLAR_SETTINGS_LOADERS: loaders,
+      solarSettingsFormRef: { current: null }, heldByUs: { held: true }, settingsRunResult: null,
+      settingsRunRef: { current: null }, onRequestCatalogRun: vi.fn(() => ({ runIntent: { intentId: 'intent' } })),
+      RIBBON_RATIONALE: 'Ribbon', setSettingsRunResult: vi.fn(), setSolarFormTool: vi.fn(),
+      catalog: { families }, solarFlowFamiliesDrawingId: 'families-drawing', canOpenSolarSettingsForm,
+      solarFlowPending: 'other-tool', solarFlowRuns: { drawingId: context.drawingId, runs },
+      solarFlowRunsFor, solarFlowRunStatus, onOpenSolarFlowStep: vi.fn(), onSolarFlowChange: vi.fn(),
+      solarFlow: { flow: 'layout' }, checkoutCapabilityRef: { current: vi.fn(() => 'capability') },
+      refuseProjectSolar: vi.fn(() => false), SOLAR_SETTINGS_TOOL_NAME: 'solar-settings',
+      loadCatalog: vi.fn(), seatCompletedVersion: vi.fn(), onRunCombinerPlacement: vi.fn(), catalogDigestOf: vi.fn(),
+      solarFlowRetainedRef: { current: new Map([[flowEditor.name, { drawingId: context.drawingId, values: retained }]]) },
+      onSubmitSolarFlowStep: vi.fn(), onCloseSolarFlowStep: vi.fn(), projectSolarAppReason,
+    }
+    const reset = () => {
+      Object.values(components).forEach((probe) => probe.mockClear())
+      Object.values(loaders).forEach((loader) => loader.mockClear())
+    }
+    // A separate route-error paragraph deliberately carries the same reason.
+    // Only the subtree produced by P can satisfy the project refusal check.
+    for (const ready of [true, false]) {
+      for (const running of [true, false]) {
+        for (const routeErr of [null, projectSolarAppReason('project_unavailable')]) {
+          for (const profile of ['solar', 'cad']) {
+            for (const ENV_CAD_EDIT of [true, false]) {
+              for (const ENV_SOLAR_SETTINGS_FORM of [true, false]) {
+                for (const ENV_SOLAR_FLOW_RAIL of [true, false]) {
+                  reset()
+                  const variant = { ...inputs, projectMode: true, projectSolar: { ready }, running, routeErr,
+                    surfaceSlots: { toolbar: { profile } }, ENV_CAD_EDIT, ENV_SOLAR_SETTINGS_FORM, ENV_SOLAR_FLOW_RAIL }
+                  const view = render(React.createElement(React.Fragment, null,
+                    React.createElement('p', { role: 'status' }, routeErr),
+                    React.createElement('section', { 'data-testid': 'project-host-branch' }, element(branch, variant, components))))
+                  const subtree = view.getByTestId('project-host-branch')
+                  const statuses = subtree.querySelectorAll('p[role="status"]')
+                  expect(statuses).toHaveLength(1)
+                  expect(statuses[0].textContent).toBe(projectSolarAppReason('project_unavailable'))
+                  expect(statuses[0].getAttribute('aria-live')).toBe('polite')
+                  expect(subtree.textContent).toBe(projectSolarAppReason('project_unavailable'))
+                  Object.values(components).forEach((probe) => expect(probe).not.toHaveBeenCalled())
+                  Object.values(loaders).forEach((loader) => expect(loader).not.toHaveBeenCalled())
+                  view.unmount()
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(text(branch.test)).toBe('projectMode')
+    for (const [name, expected] of [['solar-settings', 'SolarSettingsForm'], ['solar-size-strings', 'SolarStepEditor'], ['solar-other', 'SolarToolForm']]) {
+      reset()
+      const tool = { name }
+      const view = render(element(branch, { ...inputs, running: true, solarFormTool: tool }, components))
+      expect(view.queryByRole('status')).toBeNull()
+      expect(components[expected]).toHaveBeenCalledOnce()
+      for (const [component, probe] of Object.entries(components)) if (component !== expected) expect(probe).not.toHaveBeenCalled()
+      const props = components[expected].mock.calls[0][0]
+      expect(props.readIntake).toBe(loaders.readIntake)
+      if (expected === 'SolarSettingsForm') {
+        expect(props.context).toBe(context)
+        expect(props.readVersions).toBe(loaders.readVersions)
+        expect(props.checkoutHeld).toBe(inputs.heldByUs)
+        expect(props.busy).toBe(true)
+        expect(props.runMessage).toBeNull()
+        const params = { params: 'typed' }
+        props.onSubmit(params)
+        expect(inputs.onRequestCatalogRun).toHaveBeenLastCalledWith(tool, params, 'Ribbon', 'ribbon', { complete: true })
+        expect(inputs.settingsRunRef.current).toEqual({ intentId: 'intent', drawingId: context.drawingId, drawingVersion: context.drawingVersion })
+        props.onClose()
+        expect(inputs.settingsRunRef.current).toBeNull()
+        expect(inputs.setSettingsRunResult).toHaveBeenLastCalledWith(null)
+      } else {
+        expect(props[expected === 'SolarStepEditor' ? 'row' : 'tool']).toBe(tool)
+        expect(props.drawingId).toBe(context.drawingId)
+        expect(props.drawingVersion).toBe(context.drawingVersion)
+        if (expected === 'SolarStepEditor') expect(props.projectId).toBeNull()
+        const params = { params: 'editor' }
+        props.onSubmit(tool, params)
+        expect(inputs.onRequestCatalogRun).toHaveBeenLastCalledWith(tool, params, 'Ribbon', 'ribbon', { complete: true })
+        props.onClose()
+      }
+      expect(inputs.setSolarFormTool).toHaveBeenLastCalledWith(null)
+      expect(loaders.readIntake).toHaveBeenCalledOnce()
+      expect(loaders.readVersions.mock.calls.length).toBe(expected === 'SolarSettingsForm' ? 1 : 0)
+      view.unmount()
+    }
+    for (const mock of [false, true]) {
+      reset()
+      const view = render(element(branch, { ...inputs, mock, running: true, ENV_SOLAR_FLOW_RAIL: true, solarFormTool: null }, components))
+      expect(components.SolarFlowRail).toHaveBeenCalledOnce()
+      expect(components.SolarStepEditor).toHaveBeenCalledOnce()
+      expect(components.SolarSettingsForm).not.toHaveBeenCalled()
+      expect(components.SolarToolForm).not.toHaveBeenCalled()
+      const rail = components.SolarFlowRail.mock.calls[0][0]
+      expect(rail.families).toBe(families)
+      expect(rail.familiesDrawingId).toBe(inputs.solarFlowFamiliesDrawingId)
+      expect(rail.workspacePanelsByFlow).toBe(mock ? undefined : registry)
+      expect(rail.drawingId).toBe(context.drawingId)
+      expect(rail.openSettingsForm).toBe(mock ? undefined : canOpenSolarSettingsForm)
+      expect(rail.pendingTool).toBe(inputs.solarFlowPending)
+      expect(rail.runs).toBe(runs)
+      expect(rail.openName).toBe(flowEditor.name)
+      expect(rail.onOpenStep).toBe(inputs.onOpenSolarFlowStep)
+      expect(rail.onFlowChange).toBe(inputs.onSolarFlowChange)
+      const editor = components.SolarStepEditor.mock.calls[0][0]
+      expect(editor.row).toBe(flowEditor)
+      expect(editor.drawingId).toBe(context.drawingId)
+      expect(editor.drawingVersion).toBe(context.drawingVersion)
+      expect(editor.projectId).toBeNull()
+      expect(editor.readIntake).toBe(loaders.readIntake)
+      expect(editor.retained).toBe(retained)
+      expect(editor.status).toBe('failed')
+      expect(editor.failureCode).toBe('fixture-failure')
+      expect(editor.onSubmit).toBe(inputs.onSubmitSolarFlowStep)
+      expect(editor.onClose).toBe(inputs.onCloseSolarFlowStep)
+      expect(components.SolarWorkspaceTools.mock.calls.length).toBe(mock ? 0 : 1)
+      if (!mock) {
+        const workspace = components.SolarWorkspaceTools.mock.calls[0][0]
+        for (const [key, value] of Object.entries({ drawingId: context.drawingId, projectId: null,
+          drawingVersion: context.drawingVersion, flow: inputs.solarFlow, checkoutHeld: inputs.heldByUs,
+          busy: true, onRunPlacement: inputs.onRunCombinerPlacement, catalogDigestOf: inputs.catalogDigestOf })) expect(workspace[key]).toBe(value)
+        expect(workspace.getCheckoutCapability()).toBe('capability')
+        expect(inputs.checkoutCapabilityRef.current).toHaveBeenCalledOnce()
+        workspace.onPhysicalHeadChanged()
+        expect(inputs.loadCatalog).toHaveBeenCalledOnce()
+        const options = { announce: false }
+        workspace.onDrawingVersionChanged(context, runs, options)
+        expect(inputs.seatCompletedVersion).toHaveBeenCalledExactlyOnceWith(context, runs, options)
+      }
+      view.unmount()
+    }
+    for (const overrides of [{ ENV_CAD_EDIT: false }, { drafting: false }, { surfaceSlots: { toolbar: { profile: 'cad' } } }]) {
+      reset()
+      const view = render(element(branch, { ...inputs, ENV_SOLAR_FLOW_RAIL: true, ...overrides }, components))
+      expect(view.container.textContent).toBe('')
+      Object.values(components).forEach((probe) => expect(probe).not.toHaveBeenCalled())
+      Object.values(loaders).forEach((loader) => expect(loader).not.toHaveBeenCalled())
+      view.unmount()
+    }
+    reset()
+    const genericView = render(element(branch, { ...inputs, ENV_SOLAR_SETTINGS_FORM: false, ENV_SOLAR_FLOW_RAIL: true }, components))
+    expect(components.SolarToolForm).toHaveBeenCalledOnce()
+    expect(components.SolarFlowRail).not.toHaveBeenCalled()
+    expect(components.SolarWorkspaceTools).not.toHaveBeenCalled()
+    expect(components.SolarStepEditor).not.toHaveBeenCalled()
+    genericView.unmount()
+  })
+
   it('R13F-08 App mounts canonical checkout controls only for a ready project and uses sanitized eligibility', async () => {
     const components = nodes((node) => node.type === 'FunctionDeclaration' && node.id.name === 'ProjectSolarCheckoutControls')
     expect(components).toHaveLength(1)
@@ -169,33 +389,6 @@ describe('App project Solar scope ownership', () => {
         .map((child) => [child.props.children, child.props.onClick]))
       return element
     }
-    const evaluate = (node, inputs) => Function(...Object.keys(inputs),
-      `return (${text(node)})`)(...Object.values(inputs))
-    // Interpret only the extracted checkout expression's actual AST. No JSX
-    // transform is loaded in jsdom and no handwritten mode ternary substitutes
-    // for App's conditions or props.
-    function element(node, inputs) {
-      if (node.type === 'LogicalExpression') {
-        expect(node.operator).toBe('&&')
-        return evaluate(node.left, inputs) && element(node.right, inputs)
-      }
-      if (node.type === 'ConditionalExpression') {
-        return element(evaluate(node.test, inputs) ? node.consequent : node.alternate, inputs)
-      }
-      if (node.type === 'JSXExpressionContainer') return evaluate(node.expression, inputs)
-      if (node.type === 'JSXText') return node.value.trim() || null
-      expect(node.type).toBe('JSXElement')
-      const name = node.openingElement.name.name
-      const component = name === 'ProjectSolarCheckoutControls' ? ProjectProbe :
-        name === 'CheckoutControls' ? standalone : name
-      const props = {}
-      for (const attribute of node.openingElement.attributes) {
-        expect(attribute.type).toBe('JSXAttribute')
-        props[attribute.name.name] = attribute.value === null ? true :
-          attribute.value.type === 'JSXExpressionContainer' ? evaluate(attribute.value.expression, inputs) : attribute.value.value
-      }
-      return React.createElement(component, props, ...node.children.map((child) => element(child, inputs)).filter((child) => child !== null))
-    }
     const legacyActions = { take: vi.fn(), release: vi.fn(), refresh: vi.fn() }
     const lock = { staleByOther: { stale: true }, legacyByOther: { legacy: true },
       canTake: true, unknown: { unknown: true } }
@@ -203,7 +396,8 @@ describe('App project Solar scope ownership', () => {
       failure: { code: 'legacy failure' }, busy: { busy: true } }
     const legacyInputs = { lock, checkout: legacy, otherHeldCheckout: { holder: 'other' },
       heldByUs: { held: true }, projectSolarAppReason }
-    const renderBranch = (inputs) => element(branches[0].node, { ...legacyInputs, ...inputs })
+    const renderBranch = (inputs) => element(branches[0].node, { ...legacyInputs, ...inputs },
+      { ProjectSolarCheckoutControls: ProjectProbe, CheckoutControls: standalone })
     const variants = [
       { name: 'available', fields: { checkout: null, ownsCheckout: false }, take: true, release: false, retry: true, reason: 'checkout_required' },
       { name: 'owned', fields: { ownsCheckout: true }, take: false, release: true, retry: true, reason: null },
