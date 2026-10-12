@@ -750,6 +750,13 @@ export default function App() {
     if (viewer) setSolarStarterViewerMounted(true)
   }, [])
   const drawingErrorRef = useRef(null)
+  const refuseProjectSolar = useCallback((name, context = null) => {
+    if (typeof name !== 'string'
+      || !name.trim().toLowerCase().startsWith('solar-')
+      || !(projectModeRef.current || context?.projectId != null)) return false
+    drawingErrorRef.current?.(projectSolarAppReason('project_unavailable'))
+    return true
+  }, [])
   const catalogUiRef = useRef({})
   const authorSectionRef = useRef(null)
   const authorPendingRef = useRef(false)
@@ -850,13 +857,15 @@ export default function App() {
     retryUnreadableHead: retryUnreadableHeadRaw,
   } = drawingActions
   const onRetryViewerRefresh = useCallback((...args) => {
+    if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return null
     closeStartForChange()
     return onRetryViewerRefreshRaw(...args)
-  }, [onRetryViewerRefreshRaw, closeStartForChange])
+  }, [onRetryViewerRefreshRaw, closeStartForChange, refuseProjectSolar])
   const retryUnreadableHead = useCallback((...args) => {
+    if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return null
     closeStartForChange()
     return retryUnreadableHeadRaw(...args)
-  }, [retryUnreadableHeadRaw, closeStartForChange])
+  }, [retryUnreadableHeadRaw, closeStartForChange, refuseProjectSolar])
   const platform = usePlatformTrustController({ mock })
   const {
     usage,
@@ -1540,7 +1549,10 @@ export default function App() {
     // recovery, both of which RE-VERIFY instead of guessing.
     onAuthRequired: (required) => { if (required) sessionActions.requireAuth('jobs') },
     onNotice: ({ text }) => showToast({ text, action: { label: 'View', onClick: viewResult } }),
-    onCompleteVersion: (...args) => completedVersionRef.current?.(...args),
+    onCompleteVersion: (...args) => {
+      if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return false
+      return completedVersionRef.current?.(...args)
+    },
   })
   drawingErrorRef.current = setRunErr
 
@@ -1923,6 +1935,10 @@ export default function App() {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
       return decision
     }
+    if (refuseProjectSolar(decision.tool, catalogRunContextRef.current)) {
+      runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+      return
+    }
     // Family catalog entries are presentation-normalized. Resolve the canonical
     // flat-catalog record before snapshotting so confirmation compares the same
     // server-sourced definition that RoutePanel will execute.
@@ -2002,11 +2018,12 @@ export default function App() {
       })
     }
     return armed
-  }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty])
+  }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty, refuseProjectSolar])
   catalogUiRef.current = { armDecision, startAgentTurn, running }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog', { complete = false } = {}) => {
     if (!tool) return
+    if (refuseProjectSolar(tool.name, catalogRunContextRef.current)) return
     return commitCatalogDecision({
       lane: 'run', tool: tool.name, params, confidence: 1,
       paramsComplete: complete === true,
@@ -2014,7 +2031,7 @@ export default function App() {
       alternatives: [],
       source, // P2: run.confirm_shown attribution (catalog by default, tour from the tour beat)
     })
-  }, [commitCatalogDecision])
+  }, [commitCatalogDecision, refuseProjectSolar])
 
   /* Legacy inline run lifecycle is disabled; useJobController owns it.
   const onRun = useCallback(async (tool, params, {
@@ -2128,6 +2145,7 @@ export default function App() {
   const onRun = useCallback(async (tool, params, {
     intentConfirmed = false, runContext = null, idempotencyKey = null,
   } = {}) => {
+    if (refuseProjectSolar(tool?.name, runContext || catalogRunContextRef.current)) return null
     if (previewing) return null
     const isWrite = isWriteTool(tool)
     if (writeLocked && isWrite) return null
@@ -2171,6 +2189,8 @@ export default function App() {
         })),
     })
 
+    if (refuseProjectSolar(tool?.name, runContext || catalogRunContextRef.current)) return null
+
     if (!mock) {
       loadUsage(); checkout.actions.refresh()
       if (openProjectId) rehydrate()
@@ -2178,14 +2198,26 @@ export default function App() {
     return envelope
   }, [agentMode, catalogRunContext, checkout.actions, clearAgentMode, dismissRoute, loadUsage, mock,
     health?.aps_live, openProjectId, prepareRunParams, markRefreshFailure, previewing, rehydrate, runJob,
-    shown, writeLocked, closeStartForChange])
+    shown, writeLocked, closeStartForChange, refuseProjectSolar])
 
   const onConfirmCatalogRun = useCallback(async (intent, tool, params) => {
+    if (refuseProjectSolar(intent?.toolName || tool?.name, intent?.context)) {
+      runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
+      dismissRoute({ outcome: 'invalidated' })
+      if (ENV_SOLAR_FLOW_RAIL) clearSolarFlowStaged(intent?.intentId ?? null)
+      return
+    }
     let currentTool = tool
     let toolSnapshot
     try {
       if (!mock) {
         const latestTools = await getTools(false)
+        if (refuseProjectSolar(intent?.toolName || tool?.name, intent?.context)) {
+          runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
+          dismissRoute({ outcome: 'invalidated' })
+          if (ENV_SOLAR_FLOW_RAIL) clearSolarFlowStaged(intent?.intentId ?? null)
+          return
+        }
         currentTool = latestTools.find((candidate) => candidate.name === intent?.toolName) || null
       }
       toolSnapshot = createCatalogToolSnapshot(currentTool)
@@ -2262,13 +2294,14 @@ export default function App() {
         runPromise.then(settle, () => settle(null))
       }
     }
-  }, [dismissRoute, mock, onRun])
+  }, [dismissRoute, mock, onRun, refuseProjectSolar, clearSolarFlowStaged])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
     const last = lastRunRef.current
+    if (refuseProjectSolar(last?.tool?.name)) return
     if (last) onRequestCatalogRun(last.tool, last.params, null, 'catalog', { complete: true })
-  }, [onRequestCatalogRun])
+  }, [onRequestCatalogRun, refuseProjectSolar])
 
   // S20: a failed job row's Retry in the rail re-dispatches that job's tool
   // through the same confirm path as onRetry (never a silent run). The row
@@ -2276,6 +2309,7 @@ export default function App() {
   // tool with its defaults, because the jobs list carries no params.
   const onRetryJob = useCallback((job) => {
     if (!job || job.status !== 'failed' || typeof job.tool !== 'string') return
+    if (refuseProjectSolar(job.tool)) return
     const last = lastRunRef.current
     const sameRun = !!last && last.tool?.name === job.tool && currentJob?.job_id === job.job_id
     const tool = sameRun ? last.tool : tools.find((candidate) => candidate.name === job.tool)
@@ -2284,11 +2318,12 @@ export default function App() {
       return
     }
     onRequestCatalogRun(tool, sameRun ? last.params : {}, null, 'catalog', { complete: sameRun })
-  }, [currentJob, onRequestCatalogRun, setRunErr, tools])
+  }, [currentJob, onRequestCatalogRun, setRunErr, tools, refuseProjectSolar])
 
   // Guided Solar step rail: Solar settings opens its typed form; every other step opens the step editor.
   const onOpenSolarFlowStep = useCallback((row) => {
     if (!row || typeof row.name !== 'string') return
+    if (refuseProjectSolar(row.name)) return
     if (row.name === SOLAR_SETTINGS_TOOL_NAME) {
       setSolarFlowEditor(null)
       setSolarFormTool(row)
@@ -2296,7 +2331,12 @@ export default function App() {
     }
     setSolarFormTool(null)
     setSolarFlowEditor(row)
-  }, [])
+  }, [refuseProjectSolar])
+
+  const onOpenSolarForm = useCallback((row) => {
+    if (refuseProjectSolar(row?.name || SOLAR_SETTINGS_TOOL_NAME)) return
+    setSolarFormTool(row)
+  }, [refuseProjectSolar])
 
   // A step submit arms the same confirm path as the ribbon; the rail never runs a tool itself.
   const catalogDigestOf = useCallback((name) => {
@@ -2305,15 +2345,17 @@ export default function App() {
     try { return createCatalogToolSnapshot(row).catalogDigest } catch { return null }
   }, [tools])
   const onRunCombinerPlacement = useCallback((params) => {
+    if (refuseProjectSolar('solar-combiners')) return false
     const row = tools.find((tool) => tool.name === 'solar-combiners')
     if (!row) {
       setRunErr('Combiner placement is not in this catalog.')
       return false
     }
     return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })?.runIntent?.intentId)
-  }, [onRequestCatalogRun, tools])
+  }, [onRequestCatalogRun, tools, refuseProjectSolar])
 
   const onSubmitSolarFlowStep = useCallback((row, params) => {
+    if (refuseProjectSolar(row?.name || SOLAR_SETTINGS_TOOL_NAME)) return
     const drawingId = catalogRunContextRef.current?.drawingId ?? null
     const retained = solarFlowRetainedRef.current
     if (!retained.has(row.name) && retained.size >= MAX_FLOW_STEPS) retained.delete(retained.keys().next().value)
@@ -2323,7 +2365,7 @@ export default function App() {
     if (!intentId) return
     solarFlowRunRef.current = { intentId, tool: row.name, drawingId }
     setSolarFlowPending(row.name)
-  }, [onRequestCatalogRun])
+  }, [onRequestCatalogRun, refuseProjectSolar])
 
   // Closing the editor before the confirm clears the pending mark; a later confirm of that intent restores it.
   const onCloseSolarFlowStep = useCallback(() => {
@@ -2356,6 +2398,9 @@ export default function App() {
   // catalog loads before the run is taken, so a failed load keeps the inputs.
   const onResumePendingRun = useCallback(async () => {
     if (mock) return
+    // Refuse a saved project Solar run before preparing it: preparation takes
+    // the run out of storage, and a refusal must keep the saved inputs.
+    if (refuseProjectSolar(pendingRun?.tool)) return
     let prepared
     try {
       prepared = await preparePendingRun(() => getTools(false))
@@ -2365,9 +2410,10 @@ export default function App() {
     }
     if (!prepared) return
     const { pending, tool } = prepared
+    if (refuseProjectSolar(tool?.name || pending.tool)) return
     if (tool) onRequestCatalogRun(tool, pending.params, null, 'catalog', { complete: true })
     else setRunErr(`${pending.tool} is no longer in your catalog. Your saved inputs were discarded.`)
-  }, [mock, onRequestCatalogRun, preparePendingRun, setRunErr])
+  }, [mock, onRequestCatalogRun, pendingRun, preparePendingRun, setRunErr, refuseProjectSolar])
 
   // An agent-dispatched job (job_linked event) -> the SAME §7 attach
   // affordance the tab-close re-attach uses: subscribe to the job, stream
@@ -2422,11 +2468,15 @@ export default function App() {
 
   const onAttachAgentJob = useCallback(async (jobId, toolName) => {
     if (!jobId || mock) return null
+    if (refuseProjectSolar(toolName)) return null
     // P2 wave C-2: agent-to-deterministic-run conversion, at the one seam
     // where a chat-dispatched job enters the run pane.
     track('agent.job_linked', { tool: toolName || 'job' })
     setSelectedTool({ name: toolName || 'job' })
     const envelope = await attachSharedJob(jobId, { toolName: toolName || 'job', persist: true })
+    // An agent link may carry no tool name, or a wrong one: the envelope names
+    // the job's own tool, so a project Solar job is refused here as well.
+    if (refuseProjectSolar(toolName) || refuseProjectSolar(envelope?.tool)) return null
     // S23 agent checkpoints: an agent turn whose job committed a drawing
     // version raises one keyed notice (S1 keyed push, so a second checkpoint
     // updates it in place) whose Undo is the ribbon's own onUndo.
@@ -2438,7 +2488,7 @@ export default function App() {
       })
     }
     return envelope
-  }, [attachSharedJob, mock, onUndo, showToast])
+  }, [attachSharedJob, mock, onUndo, showToast, refuseProjectSolar])
 
   // X1 Retry for a failed post-write viewer refresh — re-fetch head and seat it.
   const onAuthor = useCallback(async (description, targetToolName = null, opts = {}) => {
@@ -2668,9 +2718,12 @@ export default function App() {
   // arming something. The `running` short-circuit above is exactly the
   // short-circuit that stranded round 2's latch; with a parameter it is safe.
   const onDispatch = useCallback((override, options) => {
+    const text = (typeof override === 'string' ? override : prompt).trim()
+    const name = text.startsWith('/') ? text.slice(1).split(new RegExp('\\s+'))[0] : null
+    if (refuseProjectSolar(name)) return undefined
     if (running) return undefined
     return catalogActions.dispatch(override, options)
-  }, [catalogActions, running])
+  }, [catalogActions, running, prompt, refuseProjectSolar])
 
   const onOpenAuthor = useCallback(() => {
     if (!authorPendingRef.current) setAuthorTargetTool(null)
@@ -3604,7 +3657,7 @@ export default function App() {
       families: railFamilies,
       solar: { status: solarRoutesStatus, shown: showSolarStrings, onToggle: () => setShowSolarStrings((shown) => !shown) },
       solarRail: ENV_CAD_EDIT && drafting ? {
-        families: catalog.families, openName: solarFormTool?.name ?? null, onOpenForm: setSolarFormTool,
+        families: catalog.families, openName: solarFormTool?.name ?? null, onOpenForm: onOpenSolarForm,
       } : null,
       solarTypedForm: ENV_SOLAR_SETTINGS_FORM && !mock && catalogRunContext?.projectId === null ? canOpenSolarSettingsForm : undefined,
       selectedHandle, onClearSelection: () => setSelectedHandle(null),
@@ -3633,7 +3686,7 @@ export default function App() {
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, openProjectId, standalonePolicyReady, projectBusy, agentDisabled, routing, clearAgentSession,
     openAgentMode, jobs.length, ship, setNavExpanded, setJobRailExpanded,
-    solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool, catalogRunContext?.projectId])
+    solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool, catalogRunContext?.projectId, onOpenSolarForm])
   const previousRibbonProfile = useRef(null)
   const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
   const activeRibbonTab = profileTabs.some((tab) => tab.id === entryRibbonTab)
