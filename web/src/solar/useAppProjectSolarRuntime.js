@@ -218,9 +218,9 @@ export function useAppProjectSolarRuntime(inputs) {
     m.request = controller
     const valid = () => !controller.signal.aborted && epoch === m.epoch &&
       ownerCurrent(owner) && current(a.isCurrent)
-    // A capture rotation alone keeps the owner, so it never unlocks an uncertain submission; only
+    // A capture rotation alone keeps the owner, so it never unlocks a pending or uncertain submission; only
     // a new owner (client, authority, binding, mode), a new identity or unmount releases it.
-    const staleRun = m.run && !(m.run.uncertain && m.run.owner === m.owner) && !m.run.current() &&
+    const staleRun = m.run && !((m.run.submitting || m.run.uncertain) && m.run.owner === m.owner) && !m.run.current() &&
       (!m.transition || m.transition.phase === 'done')
     if (staleRun) m.run = null
     publish(valid, { context: null, openTool: null, ...(staleRun
@@ -269,21 +269,25 @@ export function useAppProjectSolarRuntime(inputs) {
         !sameSolarDrawingBinding(options?.binding, binding) || options?.authorityKey !== a.scope.authorityKey ||
         !sameSolarDrawingBinding(prepared?.binding, binding) || prepared?.authorityKey !== a.scope.authorityKey ||
         !rows.some(row => row?.name === prepared?.tool && row.catalog_digest === prepared?.catalogDigest)) return refusal('SIP_R7_SCOPE_STALE')
-    const run = { owner, binding, authorityKey: a.scope.authorityKey, tool: prepared.tool, terminal: false,
+    const run = { owner, binding, authorityKey: a.scope.authorityKey, tool: prepared.tool, terminal: false, submitting: true,
       current: () => ownerCurrent(owner) && current(a.isCurrent) && current(options.isCurrent) && !options.signal?.aborted }
     m.run = run
     publish(run.current, { busy: true, notice: null, projectOutcome: null,
       projectPending: { binding, authorityKey: run.authorityKey, tool: run.tool } })
     const outcome = await owner.controller.onProjectSubmit(prepared, { ...options,
       signal: owner.abort.signal, isCurrent: run.current })
-    // The submission's own answer decides uncertainty even when its notification was not delivered.
-    if (outcome?.reason === 'SIP_R13B_OUTCOME_UNKNOWN' && m.run === run) run.uncertain = true
+    run.submitting = false
+    const accepted = outcome.ok === true && outcome.status === 202
+    // B's stale/aborted answers can follow a lost request. Only its definite refusals prove safety.
+    const refused = outcome.reason === 'SIP_R7_REQUEST_INVALID' || outcome.reason === 'SIP_R13B_RUN_IN_PROGRESS' ||
+      (outcome.status >= 400 && outcome.status < 500)
+    if (!accepted && !refused && m.run === run) run.uncertain = true
     if (run.current() && m.run === run && !run.terminal) {
-      const accepted = outcome.ok === true && outcome.status === 202
       publish(run.current, { busy: accepted, projectPending: accepted
         ? { binding, authorityKey: run.authorityKey, tool: run.tool } : null })
-      if (!accepted && outcome.reason !== 'SIP_R13B_OUTCOME_UNKNOWN') m.run = null
     }
+    // A never-sent refusal must also release a run whose capture rotated before this continuation.
+    if (!accepted && refused && m.run === run) m.run = null
     return outcome
   }
   function complete(outcome, meta) {

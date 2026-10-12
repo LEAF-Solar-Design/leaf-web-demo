@@ -588,3 +588,82 @@ it('R13G-18 a completion whose scope left during a hung readback settles as lost
     h.unmount()
   } finally { cleanup(); vi.useRealTimers() }
 })
+
+it('R13G-19 an in-flight replay keeps the lock across capture rotation and a stale answer', async () => {
+  const h = await setup(), replay = deferred()
+  h.client.submitRun.mockResolvedValueOnce(local('SIP_R7_TRANSPORT_FAILED')).mockReturnValueOnce(replay.promise)
+  let first
+  await act(async () => { first = h.result.current.onProjectSubmit(h.prepared, h.options); await drain() })
+  expect(h.client.submitRun).toHaveBeenCalledTimes(2)
+  const bridge = bridges.at(-1)
+  // Flush the rotated capture's effect while the submission continuation is still pending.
+  act(() => {
+    h.invalidate()
+    const a = { ...h.props.projectSolar, isCurrent: () => true }
+    h.rerender({ ...h.props, projectSolar: a, projectCatalog: { ...h.props.projectCatalog, isCurrent: a.isCurrent } })
+    h.client.change({ binding: B })
+  })
+  await act(drain)
+  expect(bridges.at(-1)).toBe(bridge)
+  expect((await submitWith(h, fresh(h, 'fresh-2'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  await act(async () => { replay.resolve(local('SIP_R7_TRANSPORT_FAILED')); await drain() })
+  expect(await first).toEqual(local('SIP_R7_SCOPE_STALE'))
+  expect((await submitWith(h, fresh(h, 'fresh-3'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  await h.install(V)
+  expect((await submitWith(h, fresh(h, 'fresh-4'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1', 'intent-1'])
+})
+
+it('R13G-20 a never-sent invalid request releases its lock when the capture rotates before settlement', async () => {
+  const h = await setup()
+  let first
+  // B rejects the empty key before transport; rotate before the runtime awaits that answer.
+  act(() => {
+    first = h.result.current.onProjectSubmit(fresh(h, ''), h.options)
+    h.invalidate()
+    const a = { ...h.props.projectSolar, isCurrent: () => true }
+    h.rerender({ ...h.props, projectSolar: a, projectCatalog: { ...h.props.projectCatalog, isCurrent: a.isCurrent } })
+  })
+  await act(drain)
+  expect(await first).toEqual(local('SIP_R7_REQUEST_INVALID'))
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  expect(await submitWith(h, fresh(h, 'fresh-2'))).toEqual(accepted)
+  expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['fresh-2'])
+})
+
+it('R13G-21 deadline loss invalidates context and releases the lock before retry settlement callbacks', async () => {
+  vi.useFakeTimers()
+  try {
+    const h = await setup()
+    h.ws.rehydrate.mockReturnValueOnce(new Promise(() => {}))
+    await h.submit(); await h.finish()
+    const done = await h.complete()
+    let observed
+    const retry = h.result.current.retryReadback().then(async value => {
+      const contextCurrent = h.result.current.contextCurrent()
+      const submission = await h.result.current.onProjectSubmit(fresh(h, 'fresh-2'), h.options)
+      observed = { value, contextCurrent, reason: submission.reason }
+    })
+    await act(async () => { h.client.change({ authorityKey: 'foreign' }); h.client.change({ authorityKey: 'session-1' }); await drain() })
+    await act(async () => { await vi.advanceTimersByTimeAsync(bridgeModule.PROJECT_SOLAR_RUN_BUDGET_MS); await drain() })
+    await retry
+    expect(observed).toEqual({ value: false, contextCurrent: false, reason: 'SIP_R7_REQUEST_INVALID' })
+    expect(await done.promise).toBe(false)
+    expect(h.client.submitRun).toHaveBeenCalledOnce()
+    h.unmount()
+  } finally { cleanup(); vi.useRealTimers() }
+}, 15000)
+
+it('R13G-22 loss before selection clears visible layers after an authority round trip', async () => {
+  const h = await setup(), gate = deferred()
+  act(() => h.result.current.setVisibleLayers({ panels: false }))
+  expect(h.result.current.visibleLayers).toEqual({ panels: false })
+  h.ws.rehydrate.mockReturnValueOnce(gate.promise)
+  await h.submit(); await h.finish()
+  const done = await h.complete()
+  await act(async () => { h.client.change({ authorityKey: 'foreign' }); h.client.change({ authorityKey: 'session-1' }); await drain() })
+  await act(async () => { const value = workspace(); h.ws.change({ workspace: value }); gate.resolve(value); await drain() })
+  expect(await done.promise).toBe(false)
+  expect(h.ws.selectCanonicalVersion).not.toHaveBeenCalled()
+  expect(h.result.current.visibleLayers).toEqual({})
+})
