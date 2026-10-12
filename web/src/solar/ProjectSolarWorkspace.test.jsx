@@ -824,6 +824,47 @@ describe('Project Solar workspace composition', () => {
     h.view.unmount()
   })
 
+  it('R13E-52 a reopen requested while the workspace commits starts a fresh editor and refuses the kept submit', async () => {
+    // open() advances the generation during the commit while that commit's view still carries the
+    // old one; the workspace keeps the larger, so the earlier editor is replaced and the submit it
+    // kept no longer passes for the editor that replaced it.
+    const h = fixture('solar-string-add')
+    let mounts = 0
+    let reopen = false
+    function ReopeningRail(props) {
+      h.rails.push(props)
+      useLayoutEffect(() => {
+        if (!reopen) return
+        reopen = false
+        props.onOpenStep?.(h.row)
+      })
+      return <nav data-testid="recorded-rail" />
+    }
+    function CountingEditor(props) {
+      h.steps.push(props)
+      useLayoutEffect(() => { mounts += 1 }, [])
+      return <section data-testid="recorded-step" />
+    }
+    const opened = vi.fn()
+    const options = () => ({ binding: B, authorityKey: 'epoch-1', signal: new AbortController().signal,
+      isCurrent: () => true })
+    h.mount({ openTool: h.row, FlowRail: ReopeningRail, StepEditor: CountingEditor, onOpenTool: opened })
+    expect(mounts).toBe(1)
+    const retained = h.steps[0].onProjectSubmit
+    reopen = true
+    h.update({})
+    expect(reopen).toBe(false)
+    expect(opened).toHaveBeenCalledTimes(1)
+    expect(opened).toHaveBeenCalledWith(h.row)
+    expect(mounts).toBe(2)
+    expect(screen.getAllByTestId('recorded-step')).toHaveLength(1)
+    expect(retained(h.intent(), options())).toBeUndefined()
+    expect(h.submit).not.toHaveBeenCalled()
+    expect(await last(h.steps).onProjectSubmit(h.intent(), options())).toBe(h.outcome)
+    expect(h.submit).toHaveBeenCalledTimes(1)
+    h.view.unmount()
+  })
+
   it('R13E-48 aborting the scope signal ends an accepted run, mounted or not', async () => {
     for (const unmountFirst of [false, true]) {
       const h = fixture('solar-string-add')
