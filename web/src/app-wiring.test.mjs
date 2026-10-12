@@ -50,6 +50,97 @@ function r13Evaluate(node, env) {
 }
 const r13Text = (node) => appSource.slice(node.start, node.end).replace(/\r\n/g, '\n')
 const r13Hash = (value) => createHash('sha256').update(value).digest('hex')
+
+it('R13G-01 App owns one runtime beside the existing scope owner', () => {
+  function inspect(source) {
+    const tree = parseJs(source, { sourceType: 'module', plugins: ['jsx'] })
+    const one = (predicate) => r13One(predicate, tree)
+    const calls = (name) => r13Find((node) => node.type === 'CallExpression' && node.callee.name === name, tree)
+    const imported = one((node) => node.type === 'ImportDeclaration'
+      && node.source.value === './solar/useAppProjectSolarRuntime.js')
+    assert.deepEqual(imported.specifiers.map((node) => [node.type, node.imported?.name, node.local.name]),
+      [['ImportSpecifier', 'useAppProjectSolarRuntime', 'useAppProjectSolarRuntime']])
+    assert.equal(calls('useAppProjectSolarRuntime').length, 1)
+    assert.equal(calls('useProjectSolarScope').length, 1)
+    assert.equal(calls('useSurfaceContract').length, 1)
+    const app = one((node) => node.type === 'FunctionDeclaration' && node.id?.name === 'App')
+    const declaration = (name) => {
+      const matches = app.body.body.filter((node) => node.type === 'VariableDeclaration'
+        && node.declarations.some((decl) => decl.id.name === name))
+      assert.equal(matches.length, 1, name + ' is declared at App body top level')
+      return matches[0]
+    }
+    const runtime = declaration('projectSolarRuntime')
+    const owner = declaration('projectSolar')
+    const surface = declaration('surfaceSlots')
+    const call = calls('useAppProjectSolarRuntime')[0]
+    assert.equal(runtime.declarations.find((node) => node.id.name === 'projectSolarRuntime').init, call)
+    assert.equal(owner.declarations.find((node) => node.id.name === 'projectSolar').init, calls('useProjectSolarScope')[0])
+    assert.equal(surface.declarations.find((node) => node.id.name === 'surfaceSlots').init, calls('useSurfaceContract')[0])
+    assert.ok(owner.end < runtime.start)
+    assert.ok(surface.end < runtime.start)
+    assert.equal(call.arguments.length, 1)
+    const argument = call.arguments[0]
+    assert.equal(argument.type, 'ObjectExpression')
+    const keys = ['projectMode', 'projectSolar', 'projectCatalog', 'workspaceController', 'sessionController',
+      'completedVersionRef', 'hostEnabled', 'externalBusy', 'writeBlockedReason']
+    assert.deepEqual(argument.properties.map((node) => node.key.name), keys)
+    const env = {
+      projectMode: { mode: 'project' }, projectSolar: { scope: 'owner' },
+      catalogState: { projectCatalog: { catalog: 'project' } }, workspaceController: { workspace: 'controller' },
+      session: { controller: { session: 'controller' } }, completedVersionRef: { current: 'completion' },
+      ENV_SOLAR_FLOW_RAIL: 'rail-on', ENV_CAD_EDIT: 'edit-on', ENV_SOLAR_SETTINGS_FORM: 'form-on',
+      surfaceSlots: { chrome: { cockpit: 'cockpit-on' }, toolbar: { profile: 'solar' } },
+      running: null, projectBusy: false, wsLoading: false, versionBusy: false,
+      engineDirty: false, previewing: null, drawingMutationsBlocked: 0, canRunWrite: 'write-allowed',
+      REASONS: { unsavedEngineEdits: { reason: 'engine' }, previewing: { reason: 'preview' },
+        writeLocked: { reason: 'locked' }, writeUnentitled: { reason: 'entitlement' } },
+    }
+    const verify = (overrides, hostEnabled, externalBusy, writeBlockedReason) => {
+      const input = { ...env, ...overrides }
+      const actual = formBEvaluate(source, argument, input)
+      const expected = { projectMode: input.projectMode, projectSolar: input.projectSolar,
+        projectCatalog: input.catalogState.projectCatalog, workspaceController: input.workspaceController,
+        sessionController: input.session.controller, completedVersionRef: input.completedVersionRef,
+        hostEnabled, externalBusy, writeBlockedReason }
+      assert.deepEqual(Object.keys(actual), keys)
+      for (const key of keys) assert.equal(actual[key], expected[key], key)
+    }
+    // Enabled Solar host, disabled host flags, and another surface profile.
+    verify({}, true, false, null)
+    for (const flag of ['ENV_SOLAR_FLOW_RAIL', 'ENV_CAD_EDIT', 'ENV_SOLAR_SETTINGS_FORM']) {
+      verify({ [flag]: false }, false, false, null)
+    }
+    verify({ surfaceSlots: { chrome: { cockpit: false }, toolbar: { profile: 'solar' } } }, false, false, null)
+    verify({ surfaceSlots: { chrome: { cockpit: true }, toolbar: { profile: 'cad' } } }, false, false, null)
+    for (const busy of ['running', 'projectBusy', 'wsLoading', 'versionBusy']) {
+      const sentinel = busy + '-busy'
+      verify({ [busy]: sentinel }, true, busy === 'running' ? true : sentinel, null)
+    }
+    verify({ engineDirty: 'dirty', previewing: 'preview', drawingMutationsBlocked: 'blocked', canRunWrite: false },
+      true, false, env.REASONS.unsavedEngineEdits)
+    verify({ previewing: 'preview', drawingMutationsBlocked: 'blocked', canRunWrite: false },
+      true, false, env.REASONS.previewing)
+    verify({ drawingMutationsBlocked: 'blocked', canRunWrite: false }, true, false, env.REASONS.writeLocked)
+    verify({ canRunWrite: false }, true, false, env.REASONS.writeUnentitled)
+    return { runtime, owner }
+  }
+  const { runtime, owner } = inspect(appSource)
+  const statement = appSource.slice(runtime.start, runtime.end)
+  const replace = (value) => appSource.slice(0, runtime.start) + value + appSource.slice(runtime.end)
+  const mutations = [
+    replace(statement + '\n' + statement.replace('const projectSolarRuntime =', 'const duplicateSolarRuntime =')),
+    replace('if (projectMode) {\n' + statement + '\n}'),
+    replace('function nestedRuntime() {\n' + statement + '\n}'),
+    appSource.slice(0, owner.start) + statement + '\n' + appSource.slice(owner.start, runtime.start)
+      + appSource.slice(runtime.end),
+  ]
+  for (const mutation of mutations) {
+    assert.notEqual(mutation, appSource)
+    assert.throws(() => inspect(mutation))
+  }
+})
+
 function r13Workspace() {
   return r13One((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'SolarWorkspaceTools')
 }
@@ -263,7 +354,44 @@ describe('R13F project Solar execution and form ingresses', () => {
       return value.replace(/\r\n/g, '\n')
     })
     assert.equal(r13Hash(JSON.stringify(predecessor)), 'fa1611facf1ad69d468a8c5107f6ec86d8336984805e232837ea685c17bc19aa')
-    assert.equal(r13Hash(r13Text(r13Callback('seatCompletedVersion'))), 'bf6d53e7bd0aeb8e28201f06753dc0fcb93ae9f6665294fe419651438a032d30')
+    const callback = r13Callback('seatCompletedVersion')
+    const arrow = r13Text(callback)
+    const header = appSource.slice(callback.start, callback.body.start + 1).replace(/\r\n/g, '\n')
+    assert.equal(header, 'async (newVersion, envelope, options) => {')
+    const legacyAt = arrow.indexOf('\n    const scopeCurrent = isScopeCurrent')
+    assert.ok(legacyAt > header.length)
+    assert.equal(arrow.slice(header.length, legacyAt), [
+      '',
+      '    let canonical = false',
+      '    try {',
+      "      canonical = Object.prototype.hasOwnProperty.call(options ?? {}, 'projectSolarCompletion')",
+      '    } catch {',
+      '      canonical = false',
+      '    }',
+      '    if (canonical) {',
+      '      if (!projectModeRef.current) return false',
+      '      let metadata',
+      '      try {',
+      '        metadata = options.projectSolarCompletion',
+      '      } catch {',
+      '        return false',
+      '      }',
+      '      return projectSolarRuntime.complete(envelope, metadata)',
+      '    }',
+      '    if (projectModeRef.current) {',
+      '      const solarIdentity = [() => envelope?.tool, () => envelope?.result?.tool].some((read) => {',
+      '        try {',
+      '          const value = read()',
+      "          return typeof value === 'string' && Boolean(value.trim())",
+      "            && value.trim().toLowerCase().startsWith('solar-')",
+      '        } catch {',
+      '          return false',
+      '        }',
+      '      })',
+      '      if (solarIdentity) return false',
+      '    }',
+    ].join('\n'))
+    assert.equal(r13Hash(header + arrow.slice(legacyAt)), 'bf6d53e7bd0aeb8e28201f06753dc0fcb93ae9f6665294fe419651438a032d30')
     for (const confirmed of [true, false]) {
       for (const explicit of [true, false]) {
         for (const snapshotDigest of ['snapshot-digest', null]) {
@@ -2347,7 +2475,7 @@ describe('W20-07b combiner workspace wiring', () => {
     const read = body.indexOf("await getDrawingIntake(mock, newVersion.drawing_id, 'head')")
     assert.ok(body.includes('const scopeCurrent = isScopeCurrent'))
     assert.match(body, /const current = \(\) => scopeCurrent\(\)\s+&& \(typeof options\?\.isCurrent !== 'function' \|\| options\.isCurrent\(\)\)/)
-    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast]'))
+    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast, projectSolarRuntime.complete]'))
     const guard = 'if (!current()) return false'
     const entryGuard = body.indexOf(guard)
     assert.ok(entryGuard > body.indexOf('const current =') && entryGuard < body.indexOf('let version ='))

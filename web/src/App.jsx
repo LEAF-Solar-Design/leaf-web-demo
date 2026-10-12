@@ -196,6 +196,7 @@ import { useProjectCheckoutController } from './controllers/useProjectCheckoutCo
 import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { useProjectSolarScope } from './solar/useProjectSolarScope.js'
+import { useAppProjectSolarRuntime } from './solar/useAppProjectSolarRuntime.js'
 import { createProjectSolarClient } from './api.js'
 import { composerDraftAccountScope } from './lib/composerDraft.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
@@ -1550,6 +1551,23 @@ export default function App() {
     onCompleteVersion: (...args) => completedVersionRef.current?.(...args),
   })
   drawingErrorRef.current = setRunErr
+  const surfaceSlots = useSurfaceContract(activeSurface, mock)
+  const projectSolarRuntime = useAppProjectSolarRuntime({
+    projectMode,
+    projectSolar,
+    projectCatalog: catalogState.projectCatalog,
+    workspaceController,
+    sessionController: session.controller,
+    completedVersionRef,
+    hostEnabled: ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM
+      && surfaceSlots.chrome.cockpit && surfaceSlots.toolbar.profile === 'solar',
+    externalBusy: !!running || projectBusy || wsLoading || versionBusy,
+    writeBlockedReason: engineDirty ? REASONS.unsavedEngineEdits
+      : previewing ? REASONS.previewing
+      : drawingMutationsBlocked ? REASONS.writeLocked
+      : !canRunWrite ? REASONS.writeUnentitled
+      : null,
+  })
 
   // Turn-authority provider for the author panel's stage POST (server fail-
   // closes without it: X-Authority-Session-Id/-Turn-Id naming an ACTIVE turn
@@ -1813,6 +1831,34 @@ export default function App() {
   }, [onUndo, seatDrawingVersion, showToast])
 
   const seatCompletedVersion = useCallback(async (newVersion, envelope, options) => {
+    let canonical = false
+    try {
+      canonical = Object.prototype.hasOwnProperty.call(options ?? {}, 'projectSolarCompletion')
+    } catch {
+      canonical = false
+    }
+    if (canonical) {
+      if (!projectModeRef.current) return false
+      let metadata
+      try {
+        metadata = options.projectSolarCompletion
+      } catch {
+        return false
+      }
+      return projectSolarRuntime.complete(envelope, metadata)
+    }
+    if (projectModeRef.current) {
+      const solarIdentity = [() => envelope?.tool, () => envelope?.result?.tool].some((read) => {
+        try {
+          const value = read()
+          return typeof value === 'string' && Boolean(value.trim())
+            && value.trim().toLowerCase().startsWith('solar-')
+        } catch {
+          return false
+        }
+      })
+      if (solarIdentity) return false
+    }
     const scopeCurrent = isScopeCurrent
     const current = () => scopeCurrent()
       && (typeof options?.isCurrent !== 'function' || options.isCurrent())
@@ -1847,7 +1893,7 @@ export default function App() {
       markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
       return false
     }
-  }, [intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast])
+  }, [intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast, projectSolarRuntime.complete])
   completedVersionRef.current = seatCompletedVersion
 
   // P2 wave C-2: engagement depth (real CAD work). ONE event for the four
@@ -3242,7 +3288,6 @@ export default function App() {
   // Slice 7b: reads the tenant's surface-config overlay through the hook
   // instead of the bare contract; byte-identical to `surfaceContract(id)`
   // for a tenant with no overlay (useSurfaceContract's own contract).
-  const surfaceSlots = useSurfaceContract(activeSurface, mock)
   const standaloneMounted = !!studioGround && surfaceSlots.ground === 'board' && !mock && !openProjectId
   const standaloneToken = useMemo(() => standaloneMounted ? {} : null, [standaloneMounted, studioGround])
   const standaloneSelection = useMemo(() => ({}), [REQUESTED_DRAWING_ID, DRAWING_SOURCE])
