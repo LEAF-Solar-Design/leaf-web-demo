@@ -220,11 +220,14 @@ export function useAppProjectSolarRuntime(inputs) {
       ownerCurrent(owner) && current(a.isCurrent)
     // A capture rotation alone keeps the owner, so it never unlocks a pending or uncertain submission; only
     // a new owner (client, authority, binding, mode), a new identity or unmount releases it.
-    const staleRun = m.run && !((m.run.submitting || m.run.uncertain) && m.run.owner === m.owner) && !m.run.current() &&
+    const staleRun = m.run && !((m.run.submitting || m.run.uncertain || (m.run.accepted && !m.run.terminal)) && m.run.owner === m.owner) && !m.run.current() &&
       (!m.transition || m.transition.phase === 'done')
     if (staleRun) m.run = null
+    // The old capture can no longer follow or complete an accepted job; retain its lock as unknown.
+    if (m.run?.owner === owner && m.run.accepted && !m.run.terminal && !m.run.current()) m.run.uncertain = true
     publish(valid, { context: null, openTool: null, ...(staleRun
-      ? { projectPending: null, projectOutcome: null, busy: false, notice: null } : {}) })
+      ? { projectPending: null, projectOutcome: null, busy: false, notice: null } : {}),
+      ...(m.run?.uncertain ? { projectPending: null, busy: false, notice: PROJECT_SOLAR_RUN_REASONS.outcome_unknown } : {}) })
     async function read() {
       let response
       try { response = await a.projectClient.readContext({ signal: controller.signal }) } catch { response = null }
@@ -235,10 +238,13 @@ export function useAppProjectSolarRuntime(inputs) {
       const t = m.transition
       if (response?.ok !== true || view.mode !== 'ready') {
         if (t && transitionCurrent(t)) unreadable(t)
-        else publish(valid, { notice: projectSolarAppReason('scope_pending') })
+        // An uncertain run keeps its lock, so a failed read must not hide why the next submit is refused.
+        else publish(valid, { notice: m.run?.uncertain ? PROJECT_SOLAR_RUN_REASONS.outcome_unknown
+          : projectSolarAppReason('scope_pending') })
         return
       }
-      publish(valid, { context: { data: response.data, current: valid }, notice: null })
+      publish(valid, { context: { data: response.data, current: valid },
+        notice: m.run?.uncertain ? PROJECT_SOLAR_RUN_REASONS.outcome_unknown : null })
       if (t?.selected && transitionCurrent(t) && sameSolarDrawingBinding(t.output, a.scope.binding)) {
         t.phase = 'done'
         t.pending = false
@@ -278,8 +284,10 @@ export function useAppProjectSolarRuntime(inputs) {
       signal: owner.abort.signal, isCurrent: run.current })
     run.submitting = false
     const accepted = outcome.ok === true && outcome.status === 202
-    // B's stale/aborted answers can follow a lost request. Only its definite refusals prove safety.
-    const refused = outcome.reason === 'SIP_R7_REQUEST_INVALID' || outcome.reason === 'SIP_R13B_RUN_IN_PROGRESS' ||
+    run.accepted = accepted
+    // Since R13-B2, SCOPE_STALE and ABORTED answers from B mean the submit request was never made.
+    const refused = outcome.reason === 'SIP_R7_SCOPE_STALE' || outcome.reason === 'SIP_R7_ABORTED' ||
+      outcome.reason === 'SIP_R7_REQUEST_INVALID' || outcome.reason === 'SIP_R13B_RUN_IN_PROGRESS' ||
       (outcome.status >= 400 && outcome.status < 500)
     if (!accepted && !refused && m.run === run) run.uncertain = true
     if (run.current() && m.run === run && !run.terminal) {

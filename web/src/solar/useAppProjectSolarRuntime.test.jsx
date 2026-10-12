@@ -4,6 +4,7 @@ import { act, cleanup, renderHook } from '@testing-library/react'
 import * as bridgeModule from './createProjectSolarRunController.js'
 import { useAppProjectSolarRuntime } from './useAppProjectSolarRuntime.js'
 import { projectSolarAppReason } from './solarProjectAppModel.js'
+import { PROJECT_SOLAR_RUN_REASONS } from './solarProjectCompletion.js'
 import { getDrawingIntake } from '../api.js'
 
 vi.mock('../api.js', () => ({ getDrawingIntake: vi.fn(async () => null) }))
@@ -589,7 +590,7 @@ it('R13G-18 a completion whose scope left during a hung readback settles as lost
   } finally { cleanup(); vi.useRealTimers() }
 })
 
-it('R13G-19 an in-flight replay keeps the lock across capture rotation and a stale answer', async () => {
+it('R13G-19 an in-flight replay keeps the lock across capture rotation and an unknown answer', async () => {
   const h = await setup(), replay = deferred()
   h.client.submitRun.mockResolvedValueOnce(local('SIP_R7_TRANSPORT_FAILED')).mockReturnValueOnce(replay.promise)
   let first
@@ -607,7 +608,7 @@ it('R13G-19 an in-flight replay keeps the lock across capture rotation and a sta
   expect(bridges.at(-1)).toBe(bridge)
   expect((await submitWith(h, fresh(h, 'fresh-2'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
   await act(async () => { replay.resolve(local('SIP_R7_TRANSPORT_FAILED')); await drain() })
-  expect(await first).toEqual(local('SIP_R7_SCOPE_STALE'))
+  expect(await first).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
   expect((await submitWith(h, fresh(h, 'fresh-3'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
   await h.install(V)
   expect((await submitWith(h, fresh(h, 'fresh-4'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
@@ -666,4 +667,145 @@ it('R13G-22 loss before selection clears visible layers after an authority round
   expect(await done.promise).toBe(false)
   expect(h.ws.selectCanonicalVersion).not.toHaveBeenCalled()
   expect(h.result.current.visibleLayers).toEqual({})
+})
+
+it('R13G-23 a never-sent stale submission releases its lock across same-owner rotations', async () => {
+  vi.useFakeTimers()
+  try {
+    const h = await setup(), bridge = bridges.at(-1)
+    let first
+    act(() => {
+      first = h.result.current.onProjectSubmit(h.prepared, h.options)
+      h.invalidate()
+      const a = { ...h.props.projectSolar, isCurrent: () => true }
+      h.rerender({ ...h.props, projectSolar: a, projectCatalog: { ...h.props.projectCatalog, isCurrent: a.isCurrent } })
+    })
+    await act(drain)
+    expect(await first).toEqual(local('SIP_R7_SCOPE_STALE'))
+    expect(await bridge.onProjectSubmit.mock.results[0].value).toEqual(local('SIP_R7_SCOPE_STALE'))
+    expect(h.client.submitRun).not.toHaveBeenCalled()
+    await h.install(V)
+    await h.install(V)
+    await act(async () => { await vi.advanceTimersByTimeAsync(120001); await drain() })
+    expect(bridges.at(-1)).toBe(bridge)
+    expect(await submitWith(h, fresh(h, 'fresh-2'))).toEqual(accepted)
+    expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['fresh-2'])
+  } finally { cleanup(); vi.useRealTimers() }
+})
+
+it('R13G-24 a never-sent aborted submission releases its lock across same-owner rotations', async () => {
+  vi.useFakeTimers()
+  try {
+    // The runtime passes its owner signal to B; caller abort is a stale predicate, while owner abort
+    // retires the owner. Stub the existing controller spy for the same-owner never-sent ABORTED case.
+    vi.mocked(bridgeModule.createProjectSolarRunController).mockImplementationOnce(options => {
+      const real = realCreate(options)
+      const bridge = { ...real, onProjectSubmit: vi.fn(real.onProjectSubmit)
+        .mockResolvedValueOnce(local('SIP_R7_ABORTED')) }
+      bridges.push(bridge)
+      return bridge
+    })
+    const h = await setup(), bridge = bridges.at(-1)
+    let first
+    act(() => {
+      first = h.result.current.onProjectSubmit(h.prepared, h.options)
+      h.invalidate()
+      const a = { ...h.props.projectSolar, isCurrent: () => true }
+      h.rerender({ ...h.props, projectSolar: a, projectCatalog: { ...h.props.projectCatalog, isCurrent: a.isCurrent } })
+    })
+    await act(drain)
+    expect(await first).toEqual(local('SIP_R7_ABORTED'))
+    expect(await bridge.onProjectSubmit.mock.results[0].value).toEqual(local('SIP_R7_ABORTED'))
+    expect(h.client.submitRun).not.toHaveBeenCalled()
+    await h.install(V)
+    await h.install(V)
+    await act(async () => { await vi.advanceTimersByTimeAsync(120001); await drain() })
+    expect(bridges.at(-1)).toBe(bridge)
+    expect(await submitWith(h, fresh(h, 'fresh-2'))).toEqual(accepted)
+    expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['fresh-2'])
+  } finally { cleanup(); vi.useRealTimers() }
+})
+
+it('R13G-25 an accepted non-terminal run keeps its lock and explains lost observation after rotation', async () => {
+  vi.useFakeTimers()
+  try {
+    const h = await setup(), bridge = bridges.at(-1)
+    expect(await h.submit()).toEqual(accepted)
+    expect(h.client.readJob).toHaveBeenCalledOnce()
+    await h.install(V)
+    expect(bridges.at(-1)).toBe(bridge)
+    expect(h.result.current.contextCurrent()).toBe(true)
+    expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+    expect(h.result.current.busy).toBe(false)
+    expect(h.result.current.projectPending).toBeNull()
+    expect((await submitWith(h, fresh(h, 'fresh-2'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+    // Even a late success cannot dispatch completion from the obsolete capture.
+    await h.finish()
+    expect(h.props.completedVersionRef.current).not.toHaveBeenCalled()
+    expect(h.result.current.projectOutcome).toBeNull()
+    await h.install(V)
+    await act(async () => { await vi.advanceTimersByTimeAsync(120001); await drain() })
+    expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+    expect((await submitWith(h, fresh(h, 'fresh-2'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+    expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1'])
+  } finally { cleanup(); vi.useRealTimers() }
+})
+
+it('R13G-26 an authority change releases an accepted run held after same-owner rotation', async () => {
+  const h = await setup(), bridge = bridges.at(-1)
+  expect(await h.submit()).toEqual(accepted)
+  await h.install(V)
+  expect((await submitWith(h, fresh(h, 'fresh-2'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1'])
+  await h.install(V, 'foreign')
+  expect(bridges.at(-1)).not.toBe(bridge)
+  expect(h.result.current.notice).toBeNull()
+  expect(await submitWith(h, fresh(h, 'fresh-3', 'foreign'), { ...h.options, authorityKey: 'foreign' })).toEqual(accepted)
+  expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1', 'fresh-3'])
+})
+
+it('R13G-27 a transport ABORTED answer becomes unknown in B2 and keeps the runtime lock after rotation', async () => {
+  const h = await setup()
+  h.client.submitRun.mockResolvedValueOnce(local('SIP_R7_ABORTED'))
+  expect(await h.submit()).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+  expect(await bridges.at(-1).onProjectSubmit.mock.results[0].value).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+  expect(h.result.current.projectOutcome).toBeNull()
+  await h.install(V)
+  expect((await submitWith(h, fresh(h, 'fresh-2'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1'])
+})
+
+it('R13G-28 a failed context read after a same-owner rotation keeps the unknown notice and the lock', async () => {
+  const h = await setup()
+  expect(await h.submit()).toEqual(accepted)
+  const read = deferred()
+  h.client.readContext.mockImplementationOnce(() => read.promise)
+  await h.install(V)
+  expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  await act(async () => { read.resolve(local('SIP_R7_TRANSPORT_FAILED')); await drain() })
+  expect(h.result.current.contextCurrent()).toBe(false)
+  expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  expect(h.result.current.busy).toBe(false)
+  expect(h.result.current.projectPending).toBeNull()
+  expect((await submitWith(h, fresh(h, 'fresh-2'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1'])
+})
+
+it('R13G-29 an equal binding copy while the capture stays current keeps the accepted run followable', async () => {
+  const h = await setup(), bridge = bridges.at(-1)
+  expect(await h.submit()).toEqual(accepted)
+  const reads = h.client.readContext.mock.calls.length
+  const copy = { ...B }
+  const a = { ...h.props.projectSolar, scope: { ...h.props.projectSolar.scope, binding: copy } }
+  await h.update({ projectSolar: a, projectCatalog: { ...h.props.projectCatalog, binding: copy } })
+  expect(bridges.at(-1)).toBe(bridge)
+  expect(h.client.readContext.mock.calls.length).toBe(reads + 1)
+  expect(h.result.current.notice).toBeNull()
+  expect(h.result.current.busy).toBe(true)
+  expect(h.result.current.projectPending).not.toBeNull()
+  expect(h.result.current.contextCurrent()).toBe(true)
+  await h.finish()
+  expect(h.result.current.projectOutcome?.outcome.state).toBe('succeeded')
+  expect(h.props.completedVersionRef.current).toHaveBeenCalledOnce()
 })
