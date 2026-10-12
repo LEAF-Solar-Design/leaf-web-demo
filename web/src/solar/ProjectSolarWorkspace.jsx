@@ -168,7 +168,12 @@ export default function ProjectSolarWorkspace(props) {
       if (scopeRef.current) scopeRef.current.alive = false
       scopeRef.current = scope
     }
+    // A close requested while this commit mounted its editor (a child's layout effect runs first)
+    // keeps the row this commit shows, so the next render does not reopen it, and the generation
+    // never goes back, so a callback the closed editor kept cannot pass for a later editor.
     if (presentation.current === base) presentation.current = view
+    else presentation.current = { ...presentation.current, row: view.row,
+      generation: Math.max(presentation.current.generation, view.generation) }
     const queued = notifications.current.splice(0)
     for (const notify of queued) notify()
   })

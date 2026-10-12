@@ -763,6 +763,67 @@ describe('Project Solar workspace composition', () => {
     h.view.unmount()
   })
 
+  it('R13E-50 an editor that closes itself as the workspace opens it stays closed until opened again', () => {
+    // Opened from no selection, the commit that shows the new row also carries the child's close;
+    // the next render keeps both, so the workspace neither reopens the editor nor loops.
+    for (const everyMount of [false, true]) {
+      const h = fixture('solar-string-add')
+      let mounts = 0
+      function ClosingEditor(props) {
+        h.steps.push(props)
+        useLayoutEffect(() => {
+          mounts += 1
+          if (everyMount || mounts === 1) props.onClose()
+        }, [])
+        return <section data-testid="recorded-step" />
+      }
+      h.mount({ StepEditor: ClosingEditor })
+      expect(screen.queryByTestId('recorded-step')).toBeNull()
+      h.open()
+      expect(mounts).toBe(1)
+      expect(h.close).toHaveBeenCalledTimes(1)
+      expect(h.props.openTool).toBe(h.row)
+      expect(screen.queryByTestId('recorded-step')).toBeNull()
+      h.open()
+      expect(mounts).toBe(2)
+      expect(h.close).toHaveBeenCalledTimes(everyMount ? 2 : 1)
+      if (everyMount) expect(screen.queryByTestId('recorded-step')).toBeNull()
+      else expect(screen.getAllByTestId('recorded-step')).toHaveLength(1)
+      h.view.unmount()
+    }
+  })
+
+  it('R13E-51 a submit kept by an editor that closed itself during a scope change is refused after a reopen', async () => {
+    // The close and a scope change land in one commit; the presentation keeps the newer
+    // generation, so the closed editor's retained submit never passes for the reopened editor.
+    const h = fixture('solar-string-add')
+    let mounts = 0
+    function ClosingEditor(props) {
+      h.steps.push(props)
+      useLayoutEffect(() => {
+        mounts += 1
+        if (mounts === 1) props.onClose()
+      }, [])
+      return <section data-testid="recorded-step" />
+    }
+    const options = () => ({ binding: B, authorityKey: 'epoch-1', signal: new AbortController().signal,
+      isCurrent: () => true })
+    h.mount({ StepEditor: ClosingEditor })
+    h.update({ isCurrent: () => h.current, openTool: h.row })
+    expect(mounts).toBe(1)
+    expect(h.close).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('recorded-step')).toBeNull()
+    const retained = h.steps[0].onProjectSubmit
+    h.open()
+    expect(mounts).toBe(2)
+    expect(screen.getAllByTestId('recorded-step')).toHaveLength(1)
+    expect(retained(h.intent(), options())).toBeUndefined()
+    expect(h.submit).not.toHaveBeenCalled()
+    expect(await last(h.steps).onProjectSubmit(h.intent(), options())).toBe(h.outcome)
+    expect(h.submit).toHaveBeenCalledTimes(1)
+    h.view.unmount()
+  })
+
   it('R13E-48 aborting the scope signal ends an accepted run, mounted or not', async () => {
     for (const unmountFirst of [false, true]) {
       const h = fixture('solar-string-add')
