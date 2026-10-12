@@ -12,6 +12,7 @@
 // is a direct, cheap answer. Verified to fail on the exact commit where the
 // declaration sat inside that block.
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
@@ -46,6 +47,48 @@ function r13Callback(name) {
 }
 function r13Evaluate(node, env) {
   return formBEvaluate(appSource, node, env)
+}
+const r13Text = (node) => appSource.slice(node.start, node.end).replace(/\r\n/g, '\n')
+const r13Hash = (value) => createHash('sha256').update(value).digest('hex')
+function r13Workspace() {
+  return r13One((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'SolarWorkspaceTools')
+}
+function r13WorkspaceProp(name) {
+  const attribute = r13Workspace().openingElement.attributes.find((node) => node.name?.name === name)
+  assert.ok(attribute, name)
+  return attribute.value.expression
+}
+function r13WorkspaceGuard(name) {
+  const callback = r13WorkspaceProp(name)
+  assert.equal(callback.type, 'ArrowFunctionExpression')
+  assert.equal(callback.body.type, 'BlockStatement')
+  assert.equal(callback.body.body.length, 2)
+  if (name === 'getCheckoutCapability') {
+    assert.equal(callback.params.length, 0)
+    assert.equal(r13Text(callback.body.body[0]), 'if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return undefined')
+    assert.equal(r13Text(callback.body.body[1]), 'return checkoutCapabilityRef.current?.()')
+  } else {
+    assert.equal(callback.params.length, 1)
+    assert.equal(callback.params[0].type, 'RestElement')
+    assert.equal(callback.params[0].argument.name, 'args')
+    assert.equal(r13Text(callback.body.body[0]), 'if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return false')
+    assert.equal(r13Text(callback.body.body[1]), 'return seatCompletedVersion(...args)')
+  }
+  return callback
+}
+function r13ProjectHosts() {
+  const seat = r13One((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'SolarFlowSeat')
+  const expressions = seat.children.filter((node) => node.type === 'JSXExpressionContainer')
+  assert.equal(expressions.length, 2)
+  assert.equal(expressions[0].expression.type, 'LogicalExpression')
+  assert.equal(r13Text(expressions[0].expression.left), 'solarOverlayStatus')
+  const branch = expressions[1].expression
+  assert.equal(branch.type, 'ConditionalExpression')
+  assert.equal(r13Text(branch.test), 'projectMode')
+  assert.equal(branch.alternate.type, 'JSXFragment')
+  const hosts = branch.alternate.children.filter((node) => node.type === 'JSXExpressionContainer')
+  assert.equal(hosts.length, 2)
+  return { seat, branch, hosts }
 }
 function r13StandaloneGuard() {
   const env = { projectModeRef: { current: false }, drawingErrorRef: { current: null }, projectSolarAppReason }
@@ -146,6 +189,219 @@ function r13Intent(h, context = h.standalone) {
 }
 
 describe('R13F project Solar execution and form ingresses', () => {
+  it('R13F-18g retained workspace capability refuses project mode before access', () => {
+    const callback = r13WorkspaceProp('getCheckoutCapability')
+    const h = r13Fixture({ project: false })
+    const first = { capability: 'first' }, second = { capability: 'second' }
+    h.env.checkoutCapabilityRef = { current: () => { h.work.push({ name: 'capability' }); return first } }
+    const retained = r13Evaluate(callback, h.env)
+    h.env.projectModeRef.current = true
+    assert.equal(retained(), undefined)
+    r13Refused(h)
+    h.env.projectModeRef.current = false
+    assert.equal(retained(), first)
+    h.env.checkoutCapabilityRef.current = () => { h.work.push({ name: 'capability' }); return second }
+    assert.equal(retained(), second)
+    assert.equal(h.calls('capability').length, 2)
+    h.env.checkoutCapabilityRef.current = undefined
+    assert.equal(retained(), undefined)
+    assert.equal(h.calls('capability').length, 2)
+    h.env.projectModeRef.current = true
+    h.errors.length = 0
+    const previous = h.work.slice()
+    assert.equal(retained(), undefined)
+    r13Refused(h, [], previous)
+  })
+
+  it('R13F-18h retained workspace completion refuses project mode before forwarding', () => {
+    const callback = r13WorkspaceProp('onDrawingVersionChanged')
+    const h = r13Fixture({ project: false })
+    let result = { seated: true }
+    h.env.seatCompletedVersion = (...args) => {
+      h.work.push({ name: 'seating', args })
+      h.env.getDrawingIntake(...args)
+      return result
+    }
+    const retained = r13Evaluate(callback, h.env)
+    const version = { version: 9 }, envelope = { result: {} }, options = { announce: false }
+    h.env.projectModeRef.current = true
+    assert.equal(retained(version, envelope, options), false)
+    r13Refused(h)
+    h.env.projectModeRef.current = false
+    assert.equal(retained(version, envelope, options), result)
+    const forwarded = h.calls('seating')[0].args
+    assert.equal(forwarded.length, 3)
+    assert.equal(forwarded[0], version)
+    assert.equal(forwarded[1], envelope)
+    assert.equal(forwarded[2], options)
+    result = Promise.resolve({ seated: 'later' })
+    assert.equal(retained(version, envelope), result, 'promise is returned without wrapping')
+    assert.deepEqual(h.calls('seating')[1].args, [version, envelope])
+    assert.equal(h.calls('head').length, 2)
+    h.env.projectModeRef.current = true
+    h.errors.length = 0
+    const previous = h.work.slice()
+    assert.equal(retained(version, envelope, options), false)
+    r13Refused(h, [], previous)
+  })
+
+  it('R13F-19 standalone behavior survives the new project exclusion', async () => {
+    const { hosts } = r13ProjectHosts()
+    const capability = r13WorkspaceGuard('getCheckoutCapability')
+    const completion = r13WorkspaceGuard('onDrawingVersionChanged')
+    const replacements = [
+      { node: capability, value: '() => checkoutCapabilityRef.current?.()' },
+      { node: completion, value: 'seatCompletedVersion' },
+    ].sort((a, b) => b.node.start - a.node.start)
+    const predecessor = hosts.map((host) => {
+      let value = appSource.slice(host.start, host.end)
+      for (const replacement of replacements) {
+        if (replacement.node.start < host.start || replacement.node.end > host.end) continue
+        const start = replacement.node.start - host.start, end = replacement.node.end - host.start
+        value = value.slice(0, start) + replacement.value + value.slice(end)
+      }
+      return value.replace(/\r\n/g, '\n')
+    })
+    assert.equal(r13Hash(JSON.stringify(predecessor)), 'fa1611facf1ad69d468a8c5107f6ec86d8336984805e232837ea685c17bc19aa')
+    assert.equal(r13Hash(r13Text(r13Callback('seatCompletedVersion'))), 'bf6d53e7bd0aeb8e28201f06753dc0fcb93ae9f6665294fe419651438a032d30')
+    for (const confirmed of [true, false]) {
+      for (const explicit of [true, false]) {
+        for (const snapshotDigest of ['snapshot-digest', null]) {
+          const h = r13Fixture({ project: false })
+          const prepared = { prepared: true }, version = { dwg: 'version' }
+          const onSubmit = () => {}, onStatus = () => {}
+          const fallback = { ...h.standalone, toolSnapshot: { catalogDigest: 'fallback-context-digest' } }
+          const supplied = { ...h.standalone, drawingId: 'explicit-drawing', drawingVersion: 12,
+            orgId: 'explicit-org', toolSnapshot: { catalogDigest: snapshotDigest } }
+          const context = explicit ? supplied : fallback
+          h.env.catalogRunContext = fallback
+          h.env.openProjectId = 'refresh-project'
+          h.env.prepareRunParams = (...args) => { h.work.push({ name: 'prepare', args }); return prepared }
+          h.env.drawingVersionForRun = (...args) => { h.work.push({ name: 'version', args }); return version }
+          h.env.createCatalogToolSnapshot = (...args) => {
+            h.work.push({ name: 'snapshot', args }); return { catalogDigest: 'tool-digest' }
+          }
+          h.env.runJob = async (job) => {
+            h.work.push({ name: 'job', args: [job] })
+            assert.equal(await job.execute({ onSubmit, onStatus }), h.envelope)
+            h.work.push({ name: 'settled', args: [h.envelope] })
+            return h.envelope
+          }
+          const merged = confirmed ? h.params : prepared
+          const runContext = explicit ? context : null
+          const key = { idempotency: true }
+          assert.equal(await h.callback('onRun')(h.tool, h.params, {
+            intentConfirmed: confirmed, runContext, idempotencyKey: key,
+          }), h.envelope)
+          assert.equal(h.calls('prepare').length, confirmed ? 0 : 1)
+          if (!confirmed) {
+            assert.equal(h.calls('prepare')[0].args[0], h.tool)
+            assert.equal(h.calls('prepare')[0].args[1], h.params)
+          }
+          const job = h.calls('job')[0].args[0]
+          assert.equal(job.toolName, h.tool.name)
+          assert.equal(job.submission.params, merged)
+          const [tool, params, drawing, options] = h.calls('runToolAsync')[0].args
+          assert.equal(tool, h.tool)
+          assert.equal(params, merged)
+          assert.equal(drawing, context.drawingId)
+          assert.equal(options.dwgVersion, version)
+          assert.equal(options.orgId, context.orgId)
+          assert.equal(options.projectId, undefined)
+          assert.equal(options.idempotencyKey, key)
+          assert.equal(options.catalogDigest, explicit && snapshotDigest ? snapshotDigest : 'tool-digest')
+          assert.equal(h.calls('snapshot').length, explicit && snapshotDigest ? 0 : 1)
+          if (h.calls('snapshot').length) assert.equal(h.calls('snapshot')[0].args[0], h.tool)
+          assert.equal(options.checkoutCapability, 'standalone-capability')
+          assert.equal(options.onSubmit, onSubmit)
+          assert.equal(options.onStatus, onStatus)
+          assert.equal(h.calls('version')[0].args[0], h.tool)
+          assert.equal(h.calls('version')[0].args[1], context)
+          assert.equal(h.calls('version')[0].args[2], h.env.health.aps_live)
+          assert.equal(h.env.lastRunRef.current.tool, h.tool)
+          assert.equal(h.env.lastRunRef.current.params, merged)
+          for (const name of ['usage', 'checkoutRefresh', 'rehydrate']) assert.equal(h.calls(name).length, 1, name)
+          const settled = h.work.findIndex((entry) => entry.name === 'settled')
+          assert.deepEqual(h.work.slice(settled + 1).map((entry) => entry.name), ['usage', 'checkoutRefresh', 'rehydrate'])
+          assert.deepEqual(h.errors, [])
+        }
+      }
+    }
+    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), '93fbf477681a27b7e29670e6ff658b17b6c40906d9ad3eea96d6d66b6b2a509c')
+  })
+
+  it('R13F-20 App owns one refusal helper and no project execution host', () => {
+    const { branch, hosts } = r13ProjectHosts()
+    const paragraph = branch.consequent
+    assert.equal(paragraph.type, 'JSXElement')
+    assert.equal(paragraph.openingElement.name.name, 'p')
+    assert.deepEqual(paragraph.openingElement.attributes.map((node) => [node.name.name, node.value.value]),
+      [['role', 'status'], ['aria-live', 'polite']])
+    const contents = paragraph.children.filter((node) => node.type !== 'JSXText' || node.value.trim())
+    assert.equal(contents.length, 1, 'project status contains only the existing reason')
+    assert.equal(contents[0].type, 'JSXExpressionContainer')
+    assert.equal(r13Text(contents[0].expression), "projectSolarAppReason('project_unavailable')")
+    assert.equal(r13Find((node) => node.type === 'JSXOpeningElement', paragraph).length, 1)
+    const legacy = ['SolarSettingsForm', 'SolarToolForm', 'SolarStepEditor', 'SolarFlowRail', 'SolarWorkspaceTools']
+    const all = r13Find((node) => node.type === 'JSXElement' && legacy.includes(node.openingElement.name.name))
+    assert.equal(all.length, 6)
+    assert.deepEqual(all, r13Find((node) => node.type === 'JSXElement' && legacy.includes(node.openingElement.name.name), branch.alternate))
+    assert.ok(r13Text(hosts[0]).startsWith("{ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && ("))
+    assert.ok(r13Text(hosts[1]).startsWith("{ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar' && ("))
+    r13WorkspaceGuard('getCheckoutCapability')
+    r13WorkspaceGuard('onDrawingVersionChanged')
+    const helper = r13Callback('refuseProjectSolar')
+    assert.equal(r13Find((node) => node.type === 'VariableDeclarator' && node.id.name === 'refuseProjectSolar').length, 1)
+    assert.equal(r13Text(helper), `(name, context = null) => {
+    if (typeof name !== 'string'
+      || !name.trim().toLowerCase().startsWith('solar-')
+      || !(projectModeRef.current || context?.projectId != null)) return false
+    drawingErrorRef.current?.(projectSolarAppReason('project_unavailable'))
+    return true
+  }`)
+    for (const project of [true, false]) {
+      for (const context of [null, { projectId: 'project' }]) {
+        const h = r13Fixture({ project })
+        assert.equal(h.env.refuseProjectSolar('solar-settings', context), project || context !== null)
+        assert.equal(h.env.refuseProjectSolar('cad-read', context), false)
+        assert.equal(h.env.refuseProjectSolar(null, context), false)
+        assert.deepEqual(h.errors, project || context !== null ? [projectSolarAppReason('project_unavailable')] : [])
+      }
+    }
+    const sites = { armDecision: 1, onRequestCatalogRun: 1, onRun: 2, onConfirmCatalogRun: 2,
+      onRetry: 1, onRetryJob: 1, onOpenSolarFlowStep: 1, onOpenSolarForm: 1,
+      onRunCombinerPlacement: 1, onSubmitSolarFlowStep: 1, onResumePendingRun: 2,
+      onAttachAgentJob: 3, onDispatch: 1 }
+    const refusal = (node) => node.type === 'CallExpression' && node.callee.name === 'refuseProjectSolar'
+    for (const [name, count] of Object.entries(sites)) assert.equal(r13Find(refusal, r13Callback(name)).length, count, name)
+    assert.equal(r13Find(refusal).length, 20)
+    for (const [name, hash] of Object.entries({
+      engineSaveTarget: '26a17ccb4d7be496f12ac3a83d049b6e4b46c03351bc788bd3d132cc8919835d',
+      onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
+      onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
+      retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
+    })) {
+      const declaration = r13One((node) => node.type === 'VariableDeclarator' && node.id.name === name)
+      assert.equal(r13Hash(r13Text(declaration.init)), hash, name + ' remains unchanged')
+    }
+    const job = r13One((node) => node.type === 'CallExpression' && node.callee.name === 'useJobController')
+    assert.equal(r13Hash(r13Text(job)), '24c5eac98f2d89b5cecd2f475afd5db80b327e47cb5510d97a71eb54660efbcb')
+    for (const name of ['useProjectSolarScope', 'useCatalogController', 'useProjectCheckoutController']) {
+      assert.equal(r13Find((node) => node.type === 'CallExpression' && node.callee.name === name).length, 1, name)
+    }
+    const mounts = r13Find((node) => node.type === 'JSXOpeningElement').map((node) => r13Text(node.name))
+    assert.equal(mounts.filter((name) => name === 'ProjectSolarCheckoutControls').length, 1)
+    assert.ok(!mounts.some((name) => name !== 'ProjectSolarCheckoutControls' && /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
+    const imports = r13Find((node) => node.type === 'ImportDeclaration').map((node) => node.source.value)
+    assert.ok(!imports.some((path) => /solarProjectDrawingModel|ProjectSolarReadPanel|ProjectSolarWorkspaceHost|useProjectRunController/.test(path)))
+    const publication = r13One((node) => node.type === 'JSXAttribute' && node.name.name === 'consumeCatalogPublication')
+    assert.equal(r13Text(publication.value.expression), 'catalogController.consumeCatalogPublication')
+    const services = r13One((node) => node.type === 'VariableDeclarator' && node.id.name === 'catalogServices')
+    assert.ok(r13Text(services).includes('get projectSolarClient() { return projectSolarClientRef.current }'))
+    const intents = r13One((node) => node.type === 'VariableDeclarator' && node.id.name === 'PROJECT_SOLAR_INTENTS')
+    assert.equal(r13Text(intents.init), 'Object.freeze([])')
+  })
+
   it('R13F-10a catalog requests refuse project Solar before commit', () => {
     for (const capabilities of [[], ['drawing.write']]) {
       for (const context of [null, { projectId: 'project-1' }]) {
@@ -581,7 +837,11 @@ describe('R13F project Solar catalog attachment', () => {
     }
     const job = calls('useJobController')[0]
     assert.equal(refusalCalls.filter((node) => node.start > job.start && node.end < job.end).length, 0)
-    assert.equal(refusalCalls.length, 18, 'only the F2b-1 ingress sites')
+    for (const name of ['getCheckoutCapability', 'onDrawingVersionChanged']) {
+      const callback = r13WorkspaceProp(name)
+      assert.equal(refusalCalls.filter((node) => node.start > callback.start && node.end < callback.end).length, 1, name)
+    }
+    assert.equal(refusalCalls.length, 20, 'existing ingresses plus the two Solar workspace props')
   })
 
   it('R13F-06 catalog context branches on project mode and explicitly restores standalone scope', () => {
@@ -837,7 +1097,27 @@ describe('A1b-2 stored Solar graph wiring', () => {
     assert.equal(text(property('activeIntake').arguments[1]), text(propExpression(viewer(), 'intake')))
     const completed = nodes(tree, node => node.type === 'JSXAttribute' && node.name.name === 'onDrawingVersionChanged')
     assert.ok(completed.length > 0)
-    assert.ok(completed.every(node => node.value.expression.name === 'seatCompletedVersion'))
+    const workspaces = nodes(tree, node => node.type === 'JSXElement'
+      && node.openingElement.name.name === 'SolarWorkspaceTools')
+    assert.equal(workspaces.length, 1)
+    const attribute = workspaces[0].openingElement.attributes.find(
+      node => node.type === 'JSXAttribute'
+        && node.name.name === 'onDrawingVersionChanged')
+    assert.ok(attribute)
+    assert.equal(completed.length, 1)
+    assert.equal(completed[0], attribute)
+
+    const forwarding = attribute.value.expression
+    assert.equal(forwarding.type, 'ArrowFunctionExpression')
+    assert.equal(forwarding.params.length, 1)
+    assert.equal(forwarding.params[0].type, 'RestElement')
+    assert.equal(forwarding.params[0].argument.name, 'args')
+    assert.equal(forwarding.body.type, 'BlockStatement')
+    assert.equal(forwarding.body.body.length, 2)
+    assert.equal(text(forwarding.body.body[0]),
+      'if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return false')
+    assert.equal(text(forwarding.body.body[1]),
+      'return seatCompletedVersion(...args)')
     const providers = nodes(tree, node => node.type === 'JSXElement'
       && node.openingElement.attributes.some(attr => attr.name?.name === 'onDocumentChange'))
     assert.ok(providers.some(provider => text(propExpression(provider, 'onDocumentChange')) === 'setEngineDocument'
@@ -2037,7 +2317,7 @@ describe('W20-07b combiner workspace wiring', () => {
     assert.ok(start >= 0)
     const mount = appNoComments.slice(start, appNoComments.indexOf('/>', start))
     assert.ok(mount.includes('onRunPlacement={onRunCombinerPlacement}'))
-    assert.ok(mount.includes('onDrawingVersionChanged={seatCompletedVersion}'))
+    r13WorkspaceGuard('onDrawingVersionChanged')
   })
 
   it('W20-07b resolves the catalog row and stages through the confirm strip without the rail', () => {
@@ -2565,10 +2845,12 @@ describe('Solar step rail wiring', () => {
       'projectId={catalogRunContext?.projectId ?? null}',
       'drawingVersion={catalogRunContext?.drawingVersion ?? null}',
       'flow={solarFlow}', 'checkoutHeld={heldByUs}', 'busy={!!running}',
-      'getCheckoutCapability={() => checkoutCapabilityRef.current?.()}',
       'onPhysicalHeadChanged={() => loadCatalog()}',
-      'onDrawingVersionChanged={seatCompletedVersion}',
     ]) assert.ok(props.includes(binding), binding)
+    r13WorkspaceGuard('getCheckoutCapability')
+    r13WorkspaceGuard('onDrawingVersionChanged')
+    const { branch } = r13ProjectHosts()
+    assert.ok(r13Find((node) => node === r13Workspace(), branch.alternate).length === 1)
   })
 
   it('GP5-17 live drawing rail receives the original guarded workspace registry', () => {

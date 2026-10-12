@@ -4574,6 +4574,12 @@ export default function App() {
               {solarOverlayStatus}
             </p>
           )}
+          {projectMode ? (
+            <p role="status" aria-live="polite">
+              {projectSolarAppReason('project_unavailable')}
+            </p>
+          ) : (
+            <>
           {ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (
             ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext }) === 'typed' ? (
               <div id="solar-tool-form" key={solarFormTool.name} ref={solarSettingsFormRef}>
@@ -4649,9 +4655,15 @@ export default function App() {
                   flow={solarFlow}
                   checkoutHeld={heldByUs}
                   busy={!!running}
-                  getCheckoutCapability={() => checkoutCapabilityRef.current?.()}
+                  getCheckoutCapability={() => {
+                    if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return undefined
+                    return checkoutCapabilityRef.current?.()
+                  }}
                   onPhysicalHeadChanged={() => loadCatalog()}
-                  onDrawingVersionChanged={seatCompletedVersion}
+                  onDrawingVersionChanged={(...args) => {
+                    if (refuseProjectSolar(SOLAR_SETTINGS_TOOL_NAME)) return false
+                    return seatCompletedVersion(...args)
+                  }}
                   onRunPlacement={onRunCombinerPlacement}
                   catalogDigestOf={catalogDigestOf}
                 />
@@ -4673,6 +4685,8 @@ export default function App() {
                 />
               )}
             </div>
+          )}
+            </>
           )}
           </SolarFlowSeat>
           {/* W4c-V1: the drafting ribbon — the drawing window's command
