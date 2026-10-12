@@ -3534,6 +3534,8 @@ def build_suites() -> List[Suite]:
         # 2026-10-11: sip-r3d conductor acceptance floor: twelve server rows.
         Suite("server-sip-r3d-conductors", "server canonical Solar conductors",
               "pytest", SERVER, _py_pytest("tests/test_sip_r3d_conductors.py"), 12),
+        Suite("server-sip-r14-evidence", "server canonical Solar pure sizing evidence",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r14_evidence.py"), 28),
         # 2026-10-11: sip-r3d PostgreSQL acceptance floor: six conductor rows.
         Suite("platform-sip-r3d-conductors", "platform canonical Solar conductors",
               "pytest", REPO / "platform", _py_pytest("tests/test_sip_r3d_conductors.py"), 6,
