@@ -323,6 +323,17 @@ describe('App project Solar scope ownership', () => {
     })).toBe(false)
   })
 
+  it('R13F-23 the catalog context effect is one top-level statement of App beside the catalog hook', () => {
+    const matches = nodes((node) => node.type === 'CallExpression' && node.callee.name === 'useEffect'
+      && text(node.arguments[0]).includes('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({'))
+    expect(matches).toHaveLength(1)
+    expect(matches[0].node).toBe(contextEffect)
+    expect(matches[0].parent.type).toBe('ExpressionStatement')
+    const blocks = nodes((node) => node.type === 'BlockStatement' && node.body.includes(catalogDeclaration))
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0].node.body.includes(matches[0].parent)).toBe(true)
+  })
+
   it('R13F-05 scope switches and lease rotation reject deferred receipts and expire accepted captures', async () => {
     const run = setup()
     const hook = mount(run)

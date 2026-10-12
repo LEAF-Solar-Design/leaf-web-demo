@@ -65,6 +65,16 @@ describe('R13F project Solar catalog attachment', () => {
     const contextEffect = effects.find((node) => source(node.arguments[0]).includes('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({'))
     const familiesEffect = effects.find((node) => source(node.arguments[0]).includes('setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)'))
     assert.ok(contextEffect && familiesEffect)
+    // The effect exists exactly once and runs: it is a top-level statement of
+    // the block that declares the catalog hook, never duplicated, guarded by
+    // an expression, or nested inside a branch.
+    assert.equal(effects.filter((node) => source(node.arguments[0]).includes('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({')).length, 1)
+    const catalogBlocks = find((node) => node.type === 'BlockStatement'
+      && node.body.some((stmt) => stmt.type === 'ExpressionStatement' && stmt.expression === contextEffect)
+      && node.body.some((stmt) => stmt.type === 'VariableDeclaration' && stmt.declarations.some((decl) =>
+        decl.init && decl.init.type === 'CallExpression' && decl.init.callee.type === 'Identifier'
+        && decl.init.callee.name === 'useCatalogController')))
+    assert.equal(catalogBlocks.length, 1, 'the context effect is a statement beside the catalog hook')
     for (const name of ['projectMode', 'projectSolar.ready', 'projectSolar.scope.binding', 'projectSolar.scope.authorityKey']) {
       assert.ok(source(contextEffect.arguments[1]).includes(name), 'context dependency ' + name)
     }
@@ -1765,6 +1775,7 @@ describe('Solar settings form wiring', () => {
     assert.match(appSource, new RegExp('catalogController\\.setContext\\(\\{\\s*solarBinding: undefined,\\s*authorityKey: undefined,\\s*projectIntents: undefined,\\s*\\.\\.\\.\\(ENV_SOLAR_SETTINGS_FORM \\? solarSettingsScope\\(\\{\\s*enabled: ENV_SOLAR_SETTINGS_FORM,\\s*mock,\\s*profile: surfaceSlots\\.toolbar\\.profile,\\s*context: catalogRunContext\\s*\\}\\) : \\{\\}\\),\\s*\\}\\)'))
     assert.match(appSource, new RegExp('if \\(projectMode\\) \\{\\s+catalogController\\.setContext\\(\\{\\s+solarBinding: projectSolar\\.ready \\? projectSolar\\.scope\\.binding : null,\\s+authorityKey: projectSolar\\.ready \\? projectSolar\\.scope\\.authorityKey : null,\\s+projectIntents: PROJECT_SOLAR_INTENTS,'))
     assert.ok(!appSource.includes('catalogController.setContext(solarSettingsScope('))
+    assert.equal(appSource.split('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({').length - 1, 1)
   })
 
   it('SF2 wiring a settings submit ties the run to its own intent and drawing', () => {
@@ -1946,6 +1957,7 @@ describe('Solar step rail wiring', () => {
     const record = appSource.indexOf('setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)')
     const scope = appSource.lastIndexOf('const scope = solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext })', record)
     const handed = appSource.indexOf('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({')
+    assert.equal(appSource.indexOf('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({', handed + 1), -1)
     assert.ok(handed >= 0 && scope > handed && record > scope)
     assert.match(appSource.slice(handed, record), new RegExp('if \\(projectMode\\) \\{\\s+setSolarFlowFamiliesDrawingId\\(null\\)\\s+return'))
     assert.ok(appSource.includes('solarBinding: projectSolar.ready ? projectSolar.scope.binding : null'))
