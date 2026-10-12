@@ -207,12 +207,7 @@ def validate_response(value):
         raise CloudError("cloud_response_invalid", 502) from None
 
 
-def size(params, tenant_id, job_id):
-    parsed = validate_params(params)
-    if any(type(value) is not str or not 1 <= len(value) <= 256 for value in (tenant_id, job_id)):
-        raise CloudError("cloud_request_invalid", 400)
-    grant = resolve_grant(parsed.grant_ref, tenant_id)
-    raw = post_string_length(parsed.request, grant)
+def parse_response_bytes(raw: bytes) -> dict:
     try:
         if type(raw) is not bytes or len(raw) > MAX_RESPONSE_BYTES:
             raise ValueError()
@@ -230,11 +225,108 @@ def size(params, tenant_id, job_id):
         response_sha256 = digest(response)
     except (ValueError, TypeError, RecursionError):
         raise CloudError("cloud_response_invalid", 502) from None
-    request = parsed.request.wire()
+    return {"wire_bytes": raw, "response": response, "sizing": sizing,
+            "wire_sha256": hashlib.sha256(raw).hexdigest(),
+            "canonical_sha256": response_sha256}
+
+
+def sizing_record(request: SizingRequest, parsed_response: dict, tenant_id: str,
+                  job_id: str) -> dict:
+    request = request.wire()
+    response = copy.deepcopy(parsed_response["response"])
+    sizing = copy.deepcopy(parsed_response["sizing"])
     return {"endpoint": SIZING_URL, "adapter_version": ADAPTER_VERSION, "tenant_id": tenant_id,
             "job_id": job_id, "request": request, "response": response, "sizing": sizing,
-            "request_sha256": digest(request), "response_sha256": response_sha256,
-            "wire_response_sha256": hashlib.sha256(raw).hexdigest()}
+            "request_sha256": digest(request), "response_sha256": parsed_response["canonical_sha256"],
+            "wire_response_sha256": parsed_response["wire_sha256"]}
+
+
+def size(params, tenant_id, job_id):
+    parsed = validate_params(params)
+    if any(type(value) is not str or not 1 <= len(value) <= 256 for value in (tenant_id, job_id)):
+        raise CloudError("cloud_request_invalid", 400)
+    grant = resolve_grant(parsed.grant_ref, tenant_id)
+    raw = post_string_length(parsed.request, grant)
+    response = parse_response_bytes(raw)
+    return sizing_record(parsed.request, response, tenant_id, job_id)
+
+
+def prepare_graph_sizing(graph: dict, params: dict) -> dict:
+    _bounded_json(params)
+    if (type(params) is not dict
+            or set(params) - {"expected_rev", "mode", "requests", "grant_ref", "confirm", "cancel"}
+            or type(params.get("cancel", False)) is not bool
+            or type(params.get("confirm", False)) is not bool):
+        raise GraphValidationError("INVALID_SIZING_REQUEST")
+    result = checked_graph(graph, params.get("expected_rev"))
+    if params.get("cancel", False):
+        return {"graph": result, "cancelled": True}
+    mode = params.get("mode")
+    # One decode serves targets, basis and frame members; sizing never changes a block.
+    slots = compact_slot_tables(result)
+    targets = sizing_targets(result, mode, slots)
+    requests = params.get("requests")
+    if type(requests) is not dict or set(requests) != set(targets):
+        raise GraphValidationError("INVALID_SIZING_COVERAGE")
+    validated = {}
+    for target_id, target in targets.items():
+        parsed = validate_params({"grant_ref": params.get("grant_ref"),
+                                  "request": requests[target_id]})
+        if mode == "zones" and (parsed.request.module_name != target["module_model"]
+                                or parsed.request.full_inverter_name != target["inverter_model_a"]):
+            raise GraphValidationError("SIZING_MODEL_MISMATCH")
+        validated[target_id] = {"grant_ref": parsed.grant_ref, "request": parsed.request.wire()}
+    project_zip = result["project"]["zip_code"].strip()[:5]
+    if not project_zip or any(request["request"]["zip_code"] != project_zip
+                              for request in validated.values()):
+        raise GraphValidationError("SIZING_PROJECT_MISMATCH")
+    return {"graph": result, "cancelled": False, "mode": mode, "slots": slots,
+            "targets": targets, "validated": validated}
+
+
+def apply_sizing_records(prepared: dict, records: dict) -> dict:
+    from solar_sizing_power import frame_module_power, record_module_power
+
+    result, targets, records = copy.deepcopy(
+        (prepared["graph"], prepared["targets"], records)
+    )
+    mode, slots = prepared["mode"], prepared["slots"]
+    if any(not record["sizing"]["voc_cold"]["passes"] for record in records.values()):
+        raise GraphValidationError("COLD_VOLTAGE_FAILED")
+    try:
+        for record in records.values():
+            record_module_power(record)
+    except GraphValidationError:
+        raise GraphValidationError("CLOUD_RESPONSE_INVALID") from None
+    for target_id, target in targets.items():
+        target.update(copy.deepcopy(records[target_id]["sizing"]))
+    settings = result["settings"]
+    settings["global_string_sizing_confirmed"] = mode == "global"
+    settings["extra"]["string_sizing"] = {
+        "mode": mode, "basis_sha256": sizing_basis(result, slots), "records": records}
+    changed = list(targets.values())
+    if mode != "global":
+        changed.append(settings)
+    # Compact Ground slot ids are the panel_refs of the frame's expansion.
+    zone_members = ({zone["id"]: set(zone["panel_refs"]) for zone in result["electrical_zones"]}
+                    if mode == "zones" else {})
+    for frame in result["frames"]:
+        zone_ref = frame["electrical_zone_ref"]
+        table = slots.get(frame["id"])
+        members = frame["panel_refs"] if table is None else list(table.ids)
+        if mode == "zones":
+            covering = [zone_id for zone_id, refs in zone_members.items() if refs.issuperset(members)]
+            # Existing frames may span zones after switching from global sizing.
+            power = (frame_module_power(result, members, covering[0])
+                     if len(covering) == 1 else 0.0)
+        else:
+            power = frame_module_power(result, members, zone_ref)
+        if frame["module_power_watts"] != power:
+            frame["module_power_watts"] = power
+            changed.append(frame)
+    result = advance(result, changed, "solar-size-strings")
+    require_sizing(result)
+    return {"graph": result, "confirmed": True, "records": copy.deepcopy(records)}
 
 
 def digest(value):

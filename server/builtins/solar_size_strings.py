@@ -44,76 +44,16 @@ def manual_size_strings(graph, params):
 def size_strings(graph, params, *, tenant_id, job_id):
     if type(params) is dict and params.get("mode") == "manual-global":
         return manual_size_strings(graph, params)
-    _bounded_json(params)
-    if (type(params) is not dict
-            or set(params) - {"expected_rev", "mode", "requests", "grant_ref", "confirm", "cancel"}
-            or type(params.get("cancel", False)) is not bool
-            or type(params.get("confirm", False)) is not bool):
-        raise GraphValidationError("INVALID_SIZING_REQUEST")
-    result = cloud.checked_graph(graph, params.get("expected_rev"))
-    if params.get("cancel", False):
-        return {"graph": result, "confirmed": False, "records": {}}
-    mode = params.get("mode")
-    # One decode of the compact Ground slot blocks (codec leaf.solar-ground-slots.v1) serves the
-    # targets, the basis and the frame members below; sizing never changes a block.
-    slots = cloud.compact_slot_tables(result)
-    targets = cloud.sizing_targets(result, mode, slots)
-    requests = params.get("requests")
-    if type(requests) is not dict or set(requests) != set(targets):
-        raise GraphValidationError("INVALID_SIZING_COVERAGE")
-    validated = {}
-    for target_id, target in targets.items():
-        parsed = cloud.validate_params({"grant_ref": params.get("grant_ref"),
-                                        "request": requests[target_id]})
-        if mode == "zones" and (parsed.request.module_name != target["module_model"]
-                                or parsed.request.full_inverter_name != target["inverter_model_a"]):
-            raise GraphValidationError("SIZING_MODEL_MISMATCH")
-        validated[target_id] = {"grant_ref": parsed.grant_ref, "request": parsed.request.wire()}
-    project_zip = result["project"]["zip_code"].strip()[:5]
-    if not project_zip or any(request["request"]["zip_code"] != project_zip
-                              for request in validated.values()):
-        raise GraphValidationError("SIZING_PROJECT_MISMATCH")
-    records = {target_id: cloud.size(request, tenant_id, job_id)
-               for target_id, request in validated.items()}
+    prepared = cloud.prepare_graph_sizing(graph, params)
+    if prepared["cancelled"]:
+        return {"graph": prepared["graph"], "confirmed": False, "records": {}}
+    records = {
+        target_id: cloud.size(request, tenant_id, job_id)
+        for target_id, request in prepared["validated"].items()
+    }
     if not params.get("confirm", False):
-        return {"graph": result, "confirmed": False, "records": records}
-    if any(not record["sizing"]["voc_cold"]["passes"] for record in records.values()):
-        raise GraphValidationError("COLD_VOLTAGE_FAILED")
-    try:
-        for record in records.values():
-            record_module_power(record)
-    except GraphValidationError:
-        raise GraphValidationError("CLOUD_RESPONSE_INVALID") from None
-    for target_id, target in targets.items():
-        target.update(copy.deepcopy(records[target_id]["sizing"]))
-    settings = result["settings"]
-    settings["global_string_sizing_confirmed"] = mode == "global"
-    settings["extra"]["string_sizing"] = {
-        "mode": mode, "basis_sha256": cloud.sizing_basis(result, slots), "records": records}
-    changed = list(targets.values())
-    if mode != "global":
-        changed.append(settings)
-    # A compact Ground frame stores no panel_refs: its slot panel ids are its members, exactly
-    # the panel_refs of its expansion.
-    zone_members = ({zone["id"]: set(zone["panel_refs"]) for zone in result["electrical_zones"]}
-                    if mode == "zones" else {})
-    for frame in result["frames"]:
-        zone_ref = frame["electrical_zone_ref"]
-        table = slots.get(frame["id"])
-        members = frame["panel_refs"] if table is None else list(table.ids)
-        if mode == "zones":
-            covering = [zone_id for zone_id, refs in zone_members.items() if refs.issuperset(members)]
-            # Existing frames may span zones after switching from global sizing.
-            power = (frame_module_power(result, members, covering[0])
-                     if len(covering) == 1 else 0.0)
-        else:
-            power = frame_module_power(result, members, zone_ref)
-        if frame["module_power_watts"] != power:
-            frame["module_power_watts"] = power
-            changed.append(frame)
-    result = cloud.advance(result, changed, "solar-size-strings")
-    cloud.require_sizing(result)
-    return {"graph": result, "confirmed": True, "records": copy.deepcopy(records)}
+        return {"graph": prepared["graph"], "confirmed": False, "records": records}
+    return cloud.apply_sizing_records(prepared, records)
 
 
 def run_bound(graph, params, *, tenant_id, job_id):
