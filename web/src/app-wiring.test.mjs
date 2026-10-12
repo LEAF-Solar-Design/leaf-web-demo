@@ -24,8 +24,500 @@ import {
 import { slashDecision, alternativeDecision } from './controllers/catalog/catalogRouting.js'
 import { createWorkspaceController } from './controllers/workspace/createWorkspaceController.js'
 import { solarSettingsScope } from './solar/solarSettingsWire.js'
+import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
+import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
 
-const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+
+const r13Tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
+function r13Find(predicate, tree = r13Tree) {
+  const found = []
+  csuWalk(tree, (node) => { if (predicate(node)) found.push(node) })
+  return found
+}
+function r13One(predicate, tree = r13Tree) {
+  const found = r13Find(predicate, tree)
+  assert.equal(found.length, 1, 'one executable production expression')
+  return found[0]
+}
+function r13Callback(name) {
+  return r13One((node) => node.type === 'VariableDeclarator' && node.id.name === name
+    && node.init?.callee?.name === 'useCallback').init.arguments[0]
+}
+function r13Evaluate(node, env) {
+  return formBEvaluate(appSource, node, env)
+}
+function r13StandaloneGuard() {
+  const env = { projectModeRef: { current: false }, drawingErrorRef: { current: null }, projectSolarAppReason }
+  return { refuseProjectSolar: r13Evaluate(r13Callback('refuseProjectSolar'), env), SOLAR_SETTINGS_TOOL_NAME }
+}
+function r13Deferred() {
+  let resolve
+  const promise = new Promise((settle) => { resolve = settle })
+  return { promise, resolve }
+}
+function r13Fixture({ project = true, context = null, rows = null } = {}) {
+  const work = [], errors = [], cleanup = []
+  const tool = { name: SOLAR_SETTINGS_TOOL_NAME, capabilities: [], catalog_digest: 'catalog-1', params: {} }
+  const params = { voltage: 480 }
+  const record = (name, result = undefined) => (...args) => { work.push({ name, args }); return result }
+  const standalone = { tenantId: 'tenant-1', drawingId: 'drawing-1', drawingVersion: 7, projectId: null }
+  const catalogRows = rows ?? [tool]
+  const envelope = { ok: true, result: { new_version: { drawing_id: 'drawing-1', version: 8 } } }
+  const env = {
+    projectModeRef: { current: project }, drawingErrorRef: { current: null }, projectSolarAppReason,
+    SOLAR_SETTINGS_TOOL_NAME, catalogRunContextRef: { current: context },
+    catalogRunContext: context ?? standalone, mock: false, session: { status: 'active' },
+    running: false, previewing: false, writeLocked: false, canRunWrite: true, engineDirty: false,
+    engineDirtyRef: { current: false }, agentMode: 'leaf', openProjectId: null, health: { aps_live: true },
+    tools: { find: (...args) => { work.push({ name: 'lookup', args }); return catalogRows.find(...args) } },
+    runIntentStateRef: { current: createRunIntentState('r13') }, runIntentSessionRef: { current: 'r13' },
+    runIntentSeqRef: { current: 0 }, confirmEmitRef: { current: null }, tourDispatchRef: { current: false },
+    lastRunRef: { current: { tool, params } }, currentJob: { job_id: 'job-1' },
+    settingsRunRef: { current: null }, solarFlowRunRef: { current: null },
+    solarFlowRetainedRef: { current: new Map() }, MAX_FLOW_STEPS: 20, RIBBON_RATIONALE: 'Ribbon',
+    ENV_SOLAR_FLOW_RAIL: true, ENV_SOLAR_SETTINGS_FORM: true, shown: { id: 'shown' },
+    isWriteTool: (row) => row.capabilities?.includes('drawing.write') === true,
+    prepareRunParams: record('prepare', params), createCatalogToolSnapshot, stageRunIntent, dismissRunIntent,
+    confirmRunIntent: (...args) => { work.push({ name: 'confirm', args }); return confirmRunIntent(...args) },
+    commitCatalogDecision: record('commit', 'committed'),
+    onRequestCatalogRun: record('request', { runIntent: { intentId: 'standalone-intent' } }),
+    onRun: record('run', Promise.resolve(envelope)),
+    setRunErr: (message) => errors.push(message),
+    dismissRoute: (...args) => cleanup.push({ name: 'route', args }),
+    clearSolarFlowStaged: (...args) => cleanup.push({ name: 'staging', args }),
+    closeStartForChange: record('closeStart'), clearAgentMode: record('clearAgent'),
+    setSelectedTool: record('selectedTool'), setOverlayStale: record('overlay'), markRefreshFailure: record('refreshFailure'),
+    setSolarFormTool: record('form'), setSolarFlowEditor: record('editor'), setSolarFlowPending: record('pending'),
+    setSettingsRunResult: record('settingsResult'), setSolarFlowRuns: record('flowRuns'),
+    solarFlowRunOutcome: (value) => ({ ok: value?.ok === true }), solarFlowRecordRun: record('recordRun'),
+    track: record('track'), showToast: record('toast'), onUndo: record('undo'),
+    loadUsage: record('usage'), rehydrate: record('rehydrate'),
+    runToolAsync: record('runToolAsync', envelope), runTool: record('runTool', envelope),
+    getDrawingIntake: record('head', envelope), saveEditedDrawingVersion: record('saveEdited'),
+    saveDrawingVersionPlan: record('savePlan'),
+    checkout: { actions: { getCapability: record('capability', 'standalone-capability'), refresh: record('checkoutRefresh') } },
+    drawingVersionForRun: (_tool, runContext) => runContext.drawingVersion,
+    getTools: record('getTools', Promise.resolve(catalogRows)),
+    attachSharedJob: record('attach', Promise.resolve(envelope)),
+    preparePendingRun: record('preparePending', Promise.resolve({ tool, pending: { tool: tool.name, params } })),
+    pendingRun: { tool: tool.name, params },
+    catalogActions: { dispatch: record('dispatch', 'dispatched') }, prompt: '/solar-missing',
+  }
+  env.runJob = (...args) => {
+    work.push({ name: 'job', args })
+    return Promise.resolve(args[0].execute({ onSubmit: record('submit'), onStatus: record('status') }))
+  }
+  env.completedVersionRef = { current: (...args) => {
+    work.push({ name: 'completion', args })
+    return env.getDrawingIntake(...args)
+  } }
+  env.onRetryViewerRefreshRaw = (...args) => { work.push({ name: 'recovery', args }); return env.getDrawingIntake(...args) }
+  env.retryUnreadableHeadRaw = env.onRetryViewerRefreshRaw
+  // Bind exactly the setter App publishes, rather than installing a test-only error path.
+  const binding = r13One((node) => node.type === 'AssignmentExpression'
+    && node.left.type === 'MemberExpression' && node.left.object.name === 'drawingErrorRef'
+    && node.left.property.name === 'current')
+  assert.equal(binding.right.name, 'setRunErr')
+  r13Evaluate(binding, env)
+  env.refuseProjectSolar = r13Evaluate(r13Callback('refuseProjectSolar'), env)
+  return { env, work, errors, cleanup, tool, params, envelope, standalone,
+    callback: (name) => r13Evaluate(r13Callback(name), env),
+    calls: (name) => work.filter((entry) => entry.name === name),
+  }
+}
+function r13Refused(h, allowed = [], previous = []) {
+  assert.deepEqual(h.errors, ['Project Solar runs are unavailable in this view.'])
+  assert.equal(h.errors[0], projectSolarAppReason('project_unavailable'))
+  const additional = h.work.slice(previous.length)
+  assert.deepEqual(additional.filter((entry) => !allowed.includes(entry.name)), [], 'no independent delegate or legacy sink')
+  for (const sink of ['runToolAsync', 'capability', 'head', 'saveEdited', 'savePlan']) {
+    assert.equal(additional.filter((entry) => entry.name === sink).length, 0, sink)
+  }
+}
+function r13Intent(h, context = h.standalone) {
+  h.env.catalogRunContextRef.current = h.standalone
+  const staged = stageRunIntent(h.env.runIntentStateRef.current, {
+    intentId: 'r13:1', toolName: h.tool.name, params: h.params, context,
+    toolSnapshot: createCatalogToolSnapshot(h.tool),
+  })
+  h.env.runIntentStateRef.current = staged.state
+  return staged.intent
+}
+
+describe('R13F project Solar execution and form ingresses', () => {
+  it('R13F-10a catalog requests refuse project Solar before commit', () => {
+    for (const capabilities of [[], ['drawing.write']]) {
+      for (const context of [null, { projectId: 'project-1' }]) {
+        const h = r13Fixture({ context })
+        h.callback('onRequestCatalogRun')({ ...h.tool, capabilities }, h.params)
+        r13Refused(h)
+      }
+    }
+    const retained = r13Fixture({ project: false, context: { projectId: 'project-1' } })
+    retained.callback('onRequestCatalogRun')(retained.tool, retained.params)
+    r13Refused(retained)
+    const standalone = r13Fixture({ project: false })
+    const request = standalone.callback('onRequestCatalogRun')
+    assert.equal(request(standalone.tool, standalone.params, 'why', 'ribbon', { complete: true }), 'committed')
+    assert.deepEqual(standalone.calls('commit')[0].args, [{ lane: 'run', tool: standalone.tool.name,
+      params: standalone.params, confidence: 1, paramsComplete: true, rationale: 'why', alternatives: [], source: 'ribbon' }])
+    assert.equal(standalone.calls('commit')[0].args[0].params, standalone.params)
+    standalone.env.projectModeRef.current = true
+    request(standalone.tool, standalone.params)
+    assert.deepEqual(standalone.errors, [projectSolarAppReason('project_unavailable')])
+    assert.equal(standalone.calls('commit').length, 1)
+    const other = r13Fixture()
+    other.callback('onRequestCatalogRun')({ name: 'cad-read' }, other.params)
+    assert.equal(other.calls('commit').length, 1)
+    assert.deepEqual(other.errors, [])
+    const anchor = '{!running && (runErr || routeErr) && ('
+    assert.equal(appSource.split(anchor).length - 1, 1)
+    const strip = r13One((node) => node.type === 'LogicalExpression' && node.operator === '&&'
+      && node.right.type === 'JSXElement' && appSource.slice(node.start, node.end).startsWith('!running && (runErr || routeErr)'))
+    const sentence = r13One((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'span'
+      && node.openingElement.attributes.some((attr) => attr.name?.name === 'className' && attr.value?.value === 'strip-sentence'), strip.right)
+    const text = sentence.children.find((node) => node.type === 'JSXExpressionContainer').expression
+    assert.ok(r13Find((node) => node.type === 'Identifier' && node.name === 'runErr', text).length > 0)
+    assert.ok(r13Evaluate(text, { routeErr: null, selectedTool: standalone.tool, runErr: standalone.errors[0] }).includes(standalone.errors[0]))
+  })
+
+  it('R13F-10b routed decisions refuse project Solar before preparation', () => {
+    for (const rows of [[], null]) {
+      const h = r13Fixture({ rows })
+      const intent = r13Intent(h)
+      assert.equal(h.callback('armDecision')({ lane: 'run', tool: h.tool.name, params: h.params }), undefined)
+      assert.equal(h.env.runIntentStateRef.current.pending, null)
+      assert.ok(intent)
+      r13Refused(h)
+    }
+    const retained = r13Fixture({ project: false, context: { projectId: 'project-1' } })
+    retained.callback('armDecision')({ lane: 'run', tool: 'solar-missing' })
+    r13Refused(retained)
+    const h = r13Fixture({ project: false, context: { tenantId: 'tenant-1', drawingId: 'drawing-1', drawingVersion: 7, projectId: null } })
+    const arm = h.callback('armDecision')
+    const decision = { lane: 'build', tool: 'solar-missing' }
+    assert.equal(arm(decision), decision)
+    const armed = arm({ lane: 'run', tool: h.tool.name, params: h.params })
+    assert.equal(armed.tool, h.tool.name)
+    assert.deepEqual(armed.params, h.params)
+    assert.equal(h.calls('lookup').length, 1)
+    assert.equal(h.calls('prepare').length, 1)
+    assert.deepEqual(h.errors, [])
+    const other = r13Fixture({ rows: [] })
+    const missing = { lane: 'run', tool: 'cad-missing' }
+    assert.equal(other.callback('armDecision')(missing), missing)
+    assert.equal(other.calls('lookup').length, 1)
+    assert.deepEqual(other.errors, [])
+  })
+
+  it('R13F-11 slash dispatch refuses project Solar before routing', () => {
+    for (const running of [true, false]) {
+      for (const override of ['  /SoLaR-missing\targ  ', { type: 'click' }]) {
+        const h = r13Fixture()
+        Object.assign(h.env, { running, prompt: '  /SoLaR-missing arg ' })
+        assert.equal(h.callback('onDispatch')(override, { sentinel: true }), undefined)
+        r13Refused(h)
+      }
+    }
+    for (const override of ['/solar-missing arg', { type: 'click' }, '/cad-read', 'ordinary prompt']) {
+      const h = r13Fixture({ project: false })
+      const options = { sentinel: true }
+      assert.equal(h.callback('onDispatch')(override, options), 'dispatched')
+      assert.equal(h.calls('dispatch')[0].args[0], override)
+      assert.equal(h.calls('dispatch')[0].args[1], options)
+      assert.deepEqual(h.errors, [])
+    }
+    const other = r13Fixture()
+    assert.equal(other.callback('onDispatch')('/cad-read'), 'dispatched')
+    assert.deepEqual(other.errors, [])
+  })
+
+  it('R13F-12 confirmation refuses project Solar at entry and after catalog loading', async () => {
+    for (const retained of [false, true]) {
+      const h = r13Fixture({ project: !retained })
+      const intent = r13Intent(h, retained ? { ...h.standalone, projectId: 'project-1' } : h.standalone)
+      await h.callback('onConfirmCatalogRun')(intent, h.tool, h.params)
+      r13Refused(h)
+      assert.equal(h.env.runIntentStateRef.current.pending, null)
+      assert.deepEqual(h.cleanup, [{ name: 'route', args: [{ outcome: 'invalidated' }] }, { name: 'staging', args: [intent.intentId] }])
+    }
+    const h = r13Fixture({ project: false })
+    const intent = r13Intent(h)
+    const deferred = r13Deferred()
+    h.env.getTools = (...args) => { h.work.push({ name: 'getTools', args }); return deferred.promise }
+    h.env.createCatalogToolSnapshot = (...args) => { h.work.push({ name: 'snapshot', args }); return createCatalogToolSnapshot(...args) }
+    const confirm = h.callback('onConfirmCatalogRun')
+    const pending = confirm(intent, h.tool, h.params)
+    assert.equal(h.calls('getTools').length, 1)
+    h.env.projectModeRef.current = true
+    deferred.resolve([h.tool])
+    await pending
+    r13Refused(h, ['getTools'])
+    assert.equal(h.env.runIntentStateRef.current.pending, null)
+    assert.deepEqual(h.cleanup, [{ name: 'route', args: [{ outcome: 'invalidated' }] }, { name: 'staging', args: [intent.intentId] }])
+    const standalone = r13Fixture({ project: false })
+    const standaloneIntent = r13Intent(standalone)
+    await standalone.callback('onConfirmCatalogRun')(standaloneIntent, standalone.tool, standalone.params)
+    assert.equal(standalone.calls('getTools').length, 1)
+    assert.equal(standalone.calls('confirm').length, 1)
+    assert.equal(standalone.calls('run').length, 1)
+    assert.deepEqual(standalone.calls('run')[0].args[1], standalone.params)
+    assert.deepEqual(standalone.errors, [])
+  })
+
+  it('R13F-13 execution refuses project Solar before legacy submission and refresh', async () => {
+    for (const capabilities of [[], ['drawing.write']]) {
+      for (const previewing of [false, true]) {
+        for (const writeLocked of [false, true]) {
+          const h = r13Fixture()
+          Object.assign(h.env, { previewing, writeLocked })
+          assert.equal(await h.callback('onRun')({ ...h.tool, capabilities }, h.params), null)
+          r13Refused(h)
+        }
+      }
+    }
+    const retained = r13Fixture({ project: false })
+    assert.equal(await retained.callback('onRun')(retained.tool, retained.params, { runContext: { projectId: 'project-1' } }), null)
+    r13Refused(retained)
+    const h = r13Fixture({ project: false })
+    const deferred = r13Deferred()
+    h.env.runJob = (...args) => {
+      h.work.push({ name: 'job', args })
+      args[0].execute({ onSubmit: () => {}, onStatus: () => {} })
+      return deferred.promise
+    }
+    const run = h.callback('onRun')
+    const pending = run(h.tool, h.params)
+    const before = h.work.slice()
+    assert.equal(h.calls('runToolAsync').length, 1)
+    assert.equal(h.calls('capability').length, 1)
+    h.env.projectModeRef.current = true
+    deferred.resolve(h.envelope)
+    assert.equal(await pending, null)
+    assert.deepEqual(h.work, before, 'no additional work after settlement in project mode')
+    r13Refused(h, [], before)
+    const standalone = r13Fixture({ project: false })
+    assert.equal(await standalone.callback('onRun')(standalone.tool, standalone.params, { intentConfirmed: true }), standalone.envelope)
+    const submission = standalone.calls('runToolAsync')[0].args
+    assert.equal(submission[0], standalone.tool)
+    assert.equal(submission[1], standalone.params)
+    assert.equal(submission[2], standalone.standalone.drawingId)
+    assert.equal(submission[3].checkoutCapability, 'standalone-capability')
+    assert.equal(standalone.calls('usage').length, 1)
+    assert.equal(standalone.calls('checkoutRefresh').length, 1)
+    assert.deepEqual(standalone.errors, [])
+  })
+
+  it('R13F-14a flow opening refuses project Solar before changing forms', () => {
+    for (const name of [SOLAR_SETTINGS_TOOL_NAME, 'solar-homeruns']) {
+      const h = r13Fixture()
+      h.callback('onOpenSolarFlowStep')({ name })
+      r13Refused(h)
+      const standalone = r13Fixture({ project: false })
+      const row = { name }
+      const open = standalone.callback('onOpenSolarFlowStep')
+      open(row)
+      assert.deepEqual(standalone.work, name === SOLAR_SETTINGS_TOOL_NAME
+        ? [{ name: 'editor', args: [null] }, { name: 'form', args: [row] }]
+        : [{ name: 'form', args: [null] }, { name: 'editor', args: [row] }])
+      const before = standalone.work.slice()
+      standalone.env.projectModeRef.current = true
+      open(row)
+      assert.deepEqual(standalone.work, before)
+      assert.deepEqual(standalone.errors, [projectSolarAppReason('project_unavailable')])
+    }
+  })
+
+  it('R13F-14b flow submission refuses project Solar before retaining inputs', () => {
+    const h = r13Fixture()
+    const retained = new Map([['sentinel', { values: { kept: true } }]])
+    h.env.solarFlowRetainedRef.current = new Proxy(retained, {
+      get(target, key) { h.work.push({ name: 'retainedAccess', args: [key] }); const value = Reflect.get(target, key, target); return typeof value === 'function' ? value.bind(target) : value },
+    })
+    h.callback('onSubmitSolarFlowStep')(h.tool, h.params)
+    r13Refused(h)
+    assert.deepEqual([...retained.keys()], ['sentinel'])
+    assert.equal(h.env.solarFlowRunRef.current, null)
+    const standalone = r13Fixture({ project: false, context: { drawingId: 'standalone-drawing' } })
+    standalone.callback('onSubmitSolarFlowStep')(standalone.tool, standalone.params)
+    assert.equal(standalone.env.solarFlowRetainedRef.current.get(standalone.tool.name).values, standalone.params)
+    assert.deepEqual(standalone.env.solarFlowRunRef.current, { intentId: 'standalone-intent', tool: standalone.tool.name, drawingId: 'standalone-drawing' })
+    assert.deepEqual(standalone.calls('request')[0].args, [standalone.tool, standalone.params, 'Ribbon', 'ribbon', { complete: true }])
+    assert.deepEqual(standalone.calls('pending')[0].args, [standalone.tool.name])
+    assert.deepEqual(standalone.errors, [])
+  })
+
+  it('R13F-15a ribbon opening refuses project Solar before setting the form', () => {
+    const profile = r13One((node) => node.type === 'VariableDeclarator' && node.id.name === 'profileTabs')
+    const binding = r13One((node) => node.type === 'ObjectProperty' && node.key.name === 'onOpenForm', profile.init.arguments[0])
+    assert.equal(binding.value.type, 'Identifier')
+    assert.equal(binding.value.name, 'onOpenSolarForm')
+    assert.ok(profile.init.arguments[1].elements.some((node) => node.name === 'onOpenSolarForm'))
+    const h = r13Fixture()
+    r13Evaluate(binding.value, { onOpenSolarForm: h.callback('onOpenSolarForm') })(h.tool)
+    r13Refused(h)
+    const standalone = r13Fixture({ project: false })
+    const open = r13Evaluate(binding.value, { onOpenSolarForm: standalone.callback('onOpenSolarForm') })
+    open(standalone.tool)
+    open(null)
+    assert.deepEqual(standalone.calls('form').map((entry) => entry.args), [[standalone.tool], [null]])
+    standalone.env.projectModeRef.current = true
+    open(standalone.tool)
+    assert.equal(standalone.calls('form').length, 2)
+    assert.deepEqual(standalone.errors, [projectSolarAppReason('project_unavailable')])
+  })
+
+  it('R13F-16a last-run retry refuses project Solar before requesting', () => {
+    const h = r13Fixture()
+    h.callback('onRetry')()
+    r13Refused(h)
+    const standalone = r13Fixture({ project: false })
+    const retry = standalone.callback('onRetry')
+    retry()
+    assert.deepEqual(standalone.calls('request')[0].args, [standalone.tool, standalone.params, null, 'catalog', { complete: true }])
+    assert.equal(standalone.calls('request')[0].args[1], standalone.params)
+    standalone.env.projectModeRef.current = true
+    retry()
+    assert.equal(standalone.calls('request').length, 1)
+    assert.deepEqual(standalone.errors, [projectSolarAppReason('project_unavailable')])
+  })
+
+  it('R13F-16b failed-job retry refuses project Solar before catalog lookup', () => {
+    for (const rows of [[], null]) {
+      const h = r13Fixture({ rows })
+      h.env.lastRunRef.current = null
+      h.callback('onRetryJob')({ status: 'failed', tool: h.tool.name, job_id: 'other-job' })
+      r13Refused(h)
+    }
+    const standalone = r13Fixture({ project: false })
+    standalone.callback('onRetryJob')({ status: 'failed', tool: standalone.tool.name, job_id: 'job-1' })
+    assert.deepEqual(standalone.calls('request')[0].args, [standalone.tool, standalone.params, null, 'catalog', { complete: true }])
+    assert.deepEqual(standalone.errors, [])
+    const absent = r13Fixture({ project: false, rows: [] })
+    absent.env.lastRunRef.current = null
+    absent.callback('onRetryJob')({ status: 'failed', tool: absent.tool.name })
+    assert.deepEqual(absent.errors, [`${absent.tool.name} cannot be retried: it is no longer in the catalog.`])
+    assert.equal(absent.calls('lookup').length, 1)
+  })
+
+  it('R13F-16c saved-run resume refuses project Solar before missing-row handling', async () => {
+    for (const present of [true, false]) {
+      const h = r13Fixture()
+      h.env.preparePendingRun = (...args) => { h.work.push({ name: 'preparePending', args }); return Promise.resolve({ tool: present ? h.tool : null, pending: { tool: h.tool.name, params: h.params } }) }
+      await h.callback('onResumePendingRun')()
+      r13Refused(h)
+      assert.equal(h.calls('preparePending').length, 0)
+    }
+    const h = r13Fixture({ project: false })
+    const deferred = r13Deferred()
+    h.env.preparePendingRun = (...args) => { h.work.push({ name: 'preparePending', args }); return deferred.promise }
+    const pending = h.callback('onResumePendingRun')()
+    h.env.projectModeRef.current = true
+    deferred.resolve({ tool: null, pending: { tool: h.tool.name, params: h.params } })
+    await pending
+    r13Refused(h, ['preparePending'])
+    const standalone = r13Fixture({ project: false })
+    await standalone.callback('onResumePendingRun')()
+    assert.deepEqual(standalone.calls('request')[0].args, [standalone.tool, standalone.params, null, 'catalog', { complete: true }])
+    assert.deepEqual(standalone.errors, [])
+    const failed = r13Fixture({ project: false })
+    const kept = failed.env.lastRunRef.current
+    failed.env.preparePendingRun = async () => { throw new Error('catalog unavailable') }
+    await failed.callback('onResumePendingRun')()
+    assert.equal(failed.env.lastRunRef.current, kept)
+    assert.deepEqual(failed.errors, ['The saved run could not be prepared, so your inputs were kept.'])
+    assert.deepEqual(failed.work, [])
+    const blocked = r13Fixture()
+    let prepares = 0
+    blocked.env.preparePendingRun = async () => { prepares += 1; throw new Error('catalog unavailable') }
+    await blocked.callback('onResumePendingRun')()
+    assert.equal(prepares, 0)
+    r13Refused(blocked)
+    // A project-mode saved run whose state has not loaded is still refused
+    // after preparation names its tool.
+    const late = r13Fixture()
+    late.env.pendingRun = null
+    await late.callback('onResumePendingRun')()
+    r13Refused(late, ['preparePending'])
+    // A saved run for a tool that is not Solar is prepared and requested in project mode.
+    const other = r13Fixture()
+    const otherTool = { name: 'count-by-layer', capabilities: [], catalog_digest: 'catalog-2', params: {} }
+    other.env.pendingRun = { tool: otherTool.name, params: other.params }
+    other.env.preparePendingRun = (...args) => { other.work.push({ name: 'preparePending', args }); return Promise.resolve({ tool: otherTool, pending: { tool: otherTool.name, params: other.params } }) }
+    await other.callback('onResumePendingRun')()
+    assert.deepEqual(other.errors, [])
+    assert.equal(other.calls('preparePending').length, 1)
+    assert.deepEqual(other.calls('request')[0].args, [otherTool, other.params, null, 'catalog', { complete: true }])
+  })
+
+  it('R13F-17 combiner placement refuses project mode before catalog lookup', () => {
+    const h = r13Fixture({ rows: [] })
+    assert.equal(h.callback('onRunCombinerPlacement')(h.params), false)
+    r13Refused(h)
+    const row = { name: 'solar-combiners' }
+    const standalone = r13Fixture({ project: false, rows: [row] })
+    assert.equal(standalone.callback('onRunCombinerPlacement')(standalone.params), true)
+    assert.deepEqual(standalone.calls('request')[0].args, [row, standalone.params, 'Ribbon', 'ribbon', { complete: true }])
+    assert.deepEqual(standalone.errors, [])
+    const absent = r13Fixture({ project: false, rows: [] })
+    assert.equal(absent.callback('onRunCombinerPlacement')(absent.params), false)
+    assert.deepEqual(absent.errors, ['Combiner placement is not in this catalog.'])
+    assert.equal(absent.calls('request').length, 0)
+  })
+
+  it('R13F-18a agent attachment refuses project Solar and suppresses late checkpoints', async () => {
+    const h = r13Fixture()
+    assert.equal(await h.callback('onAttachAgentJob')('job-1', h.tool.name), null)
+    r13Refused(h)
+    const late = r13Fixture({ project: false })
+    const deferred = r13Deferred()
+    late.env.attachSharedJob = (...args) => { late.work.push({ name: 'attach', args }); return deferred.promise }
+    const attach = late.callback('onAttachAgentJob')
+    const pending = attach('job-1', late.tool.name)
+    const before = late.work.slice()
+    late.env.projectModeRef.current = true
+    deferred.resolve(late.envelope)
+    assert.equal(await pending, null)
+    assert.deepEqual(late.work, before)
+    r13Refused(late, ['track', 'selectedTool', 'attach'])
+    const standalone = r13Fixture({ project: false })
+    assert.equal(await standalone.callback('onAttachAgentJob')('job-1', standalone.tool.name), standalone.envelope)
+    assert.deepEqual(standalone.calls('attach')[0].args, ['job-1', { toolName: standalone.tool.name, persist: true }])
+    assert.equal(standalone.calls('toast').length, 1)
+    assert.equal(standalone.calls('toast')[0].args[0].text, 'Checkpoint saved')
+    assert.deepEqual(standalone.errors, [])
+    // An agent link with no tool name, or a wrong one, is refused once the
+    // envelope names a project Solar tool. The link is attached by then,
+    // exactly as for a project switch during an attachment.
+    const solarEnvelope = (fixture) => ({ ...fixture.envelope, tool: fixture.tool.name })
+    for (const given of [null, undefined, '', 'count-by-layer']) {
+      const unnamed = r13Fixture()
+      unnamed.env.attachSharedJob = (...args) => { unnamed.work.push({ name: 'attach', args }); return Promise.resolve(solarEnvelope(unnamed)) }
+      assert.equal(await unnamed.callback('onAttachAgentJob')('solar-job-1', given), null, String(given))
+      r13Refused(unnamed, ['track', 'selectedTool', 'attach'])
+      assert.deepEqual(unnamed.calls('attach')[0].args, ['solar-job-1', { toolName: given || 'job', persist: true }])
+      assert.equal(unnamed.calls('toast').length, 0)
+    }
+    const switched = r13Fixture({ project: false })
+    const later = r13Deferred()
+    switched.env.attachSharedJob = (...args) => { switched.work.push({ name: 'attach', args }); return later.promise }
+    const linking = switched.callback('onAttachAgentJob')('solar-job-1', null)
+    switched.env.projectModeRef.current = true
+    later.resolve(solarEnvelope(switched))
+    assert.equal(await linking, null)
+    r13Refused(switched, ['track', 'selectedTool', 'attach'])
+    // A project job that is not Solar, and a standalone Solar job, still attach.
+    for (const project of [true, false]) {
+      const kept = r13Fixture({ project })
+      const envelope = project ? { ...kept.envelope, tool: 'count-by-layer' } : solarEnvelope(kept)
+      kept.env.attachSharedJob = (...args) => { kept.work.push({ name: 'attach', args }); return Promise.resolve(envelope) }
+      assert.equal(await kept.callback('onAttachAgentJob')('job-2', null), envelope)
+      assert.deepEqual(kept.errors, [])
+      assert.equal(kept.calls('toast').length, 1)
+    }
+  })
+})
 
 describe('R13F project Solar catalog attachment', () => {
   const tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
@@ -71,7 +563,25 @@ describe('R13F project Solar catalog attachment', () => {
     const mounts = find((node) => node.type === 'JSXOpeningElement').map((node) => source(node.name))
     assert.equal(mounts.filter((name) => name === 'ProjectSolarCheckoutControls').length, 1)
     assert.ok(!mounts.some((name) => name !== 'ProjectSolarCheckoutControls' && /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
-    assert.equal(calls('refuseProjectSolar').length, 0)
+    const helper = find((node) => node.type === 'VariableDeclarator' && node.id.name === 'refuseProjectSolar')
+    assert.equal(helper.length, 1)
+    assert.equal(helper[0].init.callee.name, 'useCallback')
+    assert.equal(source(helper[0].init.arguments[1]), '[]')
+    const expectedSites = {
+      armDecision: 1,
+      onRequestCatalogRun: 1, onRun: 2, onConfirmCatalogRun: 2,
+      onRetry: 1, onRetryJob: 1, onOpenSolarFlowStep: 1, onOpenSolarForm: 1,
+      onRunCombinerPlacement: 1, onSubmitSolarFlowStep: 1, onResumePendingRun: 2,
+      onAttachAgentJob: 3, onDispatch: 1,
+    }
+    const refusalCalls = calls('refuseProjectSolar')
+    for (const [name, count] of Object.entries(expectedSites)) {
+      const callback = formBHookNode(appSource, name)
+      assert.equal(refusalCalls.filter((node) => node.start > callback.start && node.end < callback.end).length, count, name)
+    }
+    const job = calls('useJobController')[0]
+    assert.equal(refusalCalls.filter((node) => node.start > job.start && node.end < job.end).length, 0)
+    assert.equal(refusalCalls.length, 18, 'only the F2b-1 ingress sites')
   })
 
   it('R13F-06 catalog context branches on project mode and explicitly restores standalone scope', () => {
@@ -1348,7 +1858,10 @@ function formBHarness(shell) {
     setError: (message) => assert.fail(message),
     setSelectedCatalogTool: () => {}, setLeftView: () => {},
   }
-  if (shell === 'App') env.prepareRunParams = formBHook(source, 'prepareRunParams', env)
+  if (shell === 'App') {
+    Object.assign(env, r13StandaloneGuard())
+    env.prepareRunParams = formBHook(source, 'prepareRunParams', env)
+  }
   const arm = formBHook(source, shell === 'App' ? 'armDecision' : 'armCatalogDecision', env)
   let lastArmed
   const commit = (decision) => {
@@ -1478,6 +1991,7 @@ describe('complete submission provenance', () => {
       Object.assign(h.env, {
         lastRunRef: { current: { tool: formBTool, params: previous.params } },
         lastConfirmedRunRef: { current: { tool: formBTool, params: previous.params } },
+        pendingRun: { tool: 'f', params: previous.params },
         preparePendingRun: async (load) => ({
           tool: (await load()).find((tool) => tool.name === 'f'),
           pending: { params: previous.params },
@@ -1537,7 +2051,10 @@ describe('W20-07b combiner workspace wiring', () => {
     const refusal = body.indexOf('return false', absent)
     const stage = body.indexOf("return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })?.runIntent?.intentId)")
     assert.ok(absent >= 0 && message > absent && refusal > message && stage > refusal)
-    assert.ok(body.includes('[onRequestCatalogRun, tools]'))
+    assert.ok(body.includes('[onRequestCatalogRun, tools, refuseProjectSolar]'))
+    const combinerGuard = body.indexOf("if (refuseProjectSolar('solar-combiners')) return false")
+    assert.notEqual(combinerGuard, -1)
+    assert.ok(combinerGuard < body.indexOf('tools.find('))
     assert.equal(body.includes('onSubmitSolarFlowStep('), false)
   })
 
@@ -1878,10 +2395,8 @@ describe('Solar settings form wiring', () => {
   })
 
   it('SF2 wiring a confirmed settings run records its result for the form', () => {
-    const start = appSource.indexOf('const onConfirmCatalogRun = useCallback')
-    const end = appSource.indexOf('}, [dismissRoute, mock, onRun])', start)
-    assert.ok(start >= 0 && end > start)
-    const body = appSource.slice(start, end)
+    const node = formBHookNode(appSource, 'onConfirmCatalogRun')
+    const body = appSource.slice(node.start, node.end)
     assert.ok(body.includes('settingsRunRef.current?.intentId === confirmed.execution.intentId'))
     assert.ok(body.includes('setSettingsRunResult('))
   })
@@ -1889,10 +2404,10 @@ describe('Solar settings form wiring', () => {
 
 describe('solar-ui-rail wiring', () => {
   it('passes the solar rail only under the engine flag on a drafting surface', () => {
-    assert.match(appSource, /solarRail: ENV_CAD_EDIT && drafting \? \{\s*families: catalog\.families, openName: solarFormTool\?\.name \?\? null, onOpenForm: setSolarFormTool,?\s*\} : null/)
+    assert.match(appSource, new RegExp('solarRail: ENV_CAD_EDIT && drafting \\? \\{\\s*families: catalog\\.families, openName: solarFormTool\\?\\.name \\?\\? null, onOpenForm: onOpenSolarForm,?\\s*\\} : null'))
     const memo = appSource.slice(appSource.indexOf('const profileTabs = useMemo'), appSource.indexOf('const previousRibbonProfile'))
     const deps = memo.slice(memo.lastIndexOf('}, ['))
-    for (const dependency of ['catalog.families', 'solarFormTool', 'drafting']) assert.ok(deps.includes(dependency))
+    for (const dependency of ['catalog.families', 'solarFormTool', 'drafting', 'onOpenSolarForm']) assert.ok(deps.includes(dependency))
     assert.ok(memo.includes('solar: { status: solarRoutesStatus, shown: showSolarStrings'))
   })
 
@@ -1941,20 +2456,16 @@ describe('Solar step rail wiring', () => {
   })
 
   it('FR wiring a step submit arms through the catalog run path and never runs a tool', () => {
-    const start = appSource.indexOf('const onSubmitSolarFlowStep = useCallback')
-    const end = appSource.indexOf('}, [onRequestCatalogRun])', start)
-    assert.ok(start >= 0 && end > start)
-    const body = appSource.slice(start, end)
+    const node = formBHookNode(appSource, 'onSubmitSolarFlowStep')
+    const body = appSource.slice(node.start, node.end)
     assert.ok(body.includes("onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })"))
     assert.ok(!/\brunTool(Async)?\(/.test(body))
   })
 
   it('FR wiring a confirmed step run records its outcome from its own settle, under the rail flag', () => {
-    const start = appSource.indexOf('const onConfirmCatalogRun = useCallback')
-    const end = appSource.indexOf('}, [dismissRoute, mock, onRun])', start)
-    assert.ok(start >= 0 && end > start)
-    const body = appSource.slice(start, end)
-    const fence = body.indexOf('if (ENV_SOLAR_FLOW_RAIL) {')
+    const node = formBHookNode(appSource, 'onConfirmCatalogRun')
+    const body = appSource.slice(node.start, node.end)
+    const fence = body.indexOf('if (ENV_SOLAR_FLOW_RAIL) {', body.indexOf('const runPromise = onRun('))
     assert.ok(fence > body.indexOf('const runPromise = onRun('))
     assert.ok(body.indexOf('staged?.intentId === intentId', fence) > fence)
     assert.ok(body.indexOf('solarFlowRecordRun(previous, flowRun, envelope)', fence) > fence)
@@ -2002,12 +2513,21 @@ describe('Solar step rail wiring', () => {
     assert.ok(dismiss.indexOf('clearSolarFlowStaged()') >= 0 && dismiss.indexOf('dismissRoute()') > dismiss.indexOf('clearSolarFlowStaged()'))
     assert.ok(appSource.includes('onDismiss={ENV_SOLAR_FLOW_RAIL ? onDismissSolarFlowRoute : dismissRoute}'))
     assert.ok(appSource.includes('onDismissRoute: () => (ENV_SOLAR_FLOW_RAIL ? onDismissSolarFlowRoute() : dismissRoute()),'))
-    const confirmStart = appSource.indexOf('const onConfirmCatalogRun = useCallback')
-    const body = appSource.slice(confirmStart, appSource.indexOf('}, [dismissRoute, mock, onRun])', confirmStart))
+    const confirmNode = formBHookNode(appSource, 'onConfirmCatalogRun')
+    const body = appSource.slice(confirmNode.start, confirmNode.end)
     const fence = body.indexOf('if (ENV_SOLAR_FLOW_RAIL) {')
-    const clears = [...body.matchAll(/if \(ENV_SOLAR_FLOW_RAIL\) clearSolarFlowStaged\(intent\?\.intentId \?\? null\)\r?\n\s*return\r?\n/g)]
+    const standaloneFailures = body.slice(body.indexOf('toolSnapshot = createCatalogToolSnapshot(currentTool)'))
+    const clears = [...standaloneFailures.matchAll(/if \(ENV_SOLAR_FLOW_RAIL\) clearSolarFlowStaged\(intent\?\.intentId \?\? null\)\r?\n\s*return\r?\n/g)]
     assert.equal(clears.length, 2)
-    assert.ok(clears.every((match) => match.index < fence))
+    assert.ok(clears.every((match) => match.index + body.indexOf('toolSnapshot = createCatalogToolSnapshot(currentTool)') < fence))
+    const guards = r13Find((node) => node.type === 'IfStatement' && node.test.type === 'CallExpression'
+      && node.test.callee.name === 'refuseProjectSolar', confirmNode)
+    assert.equal(guards.length, 2)
+    for (const guard of guards) {
+      const branch = appSource.slice(guard.start, guard.end)
+      assert.ok(branch.includes("dismissRoute({ outcome: 'invalidated' })"))
+      assert.ok(branch.includes('clearSolarFlowStaged(intent?.intentId ?? null)'))
+    }
     const effect = appSource.slice(appSource.indexOf('const onDismissSolarFlowRoute = useCallback'))
     assert.ok(effect.includes("route?.runIntent?.intentId !== staged.intentId) clearSolarFlowStaged(staged.intentId)"))
   })
@@ -4126,6 +4646,7 @@ describe('S23 agent checkpoint toast', () => {
     }
     const context = {
       useCallback: (callback) => callback,
+      ...r13StandaloneGuard(),
       mock,
       track: (...args) => h.tracked.push(args),
       setSelectedTool: (value) => h.selected.push(value),
@@ -4176,7 +4697,7 @@ describe('S23 agent checkpoint toast', () => {
   })
 
   it('S23-A4 the handler lists what it reads and onUndo is declared before it', () => {
-    assert.match(appHandler, new RegExp('\\' + RB + ', \\[attachSharedJob, mock, onUndo, showToast\\]\\)'))
+    assert.match(appHandler, new RegExp('\\' + RB + ', \\[attachSharedJob, mock, onUndo, showToast, refuseProjectSolar\\]\\)'))
     const undoAt = appNoComments.indexOf('const onUndo = useCallback')
     assert.ok(undoAt >= 0 && undoAt < appNoComments.indexOf('const onAttachAgentJob = useCallback'))
     assert.ok(stripped.includes('key: "agent-checkpoint"'), 'the keyed notice survives the transform')
