@@ -50,6 +50,14 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "project_sizing_exchanges": {
+        "job_id", "org_id", "project_id", "drawing_id", "actor_binding_id",
+        "target_settings_id", "admitted_tenant", "grant_ref", "classification",
+        "state", "request_bytes", "request_sha256", "response_bytes",
+        "response_sha256", "evidence_bytes", "evidence_sha256",
+        "sender_worker", "sender_attempt", "refusal_code", "output_version_id",
+        "published_worker", "published_attempt", "created_at", "updated_at",
+    },
     "project_drawing_checkouts": {
         "org_id", "project_id", "drawing_id", "holder", "holder_binding_id",
         "acquired_at", "expires_at", "fence", "updated_at",
@@ -676,6 +684,73 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "project_sizing_exchanges_pkey": _catalog_contract(
+        "project_sizing_exchanges", "PRIMARY KEY (job_id)"),
+    "project_sizing_exchanges_job_fk": _catalog_contract(
+        "project_sizing_exchanges", "FOREIGN KEY (org_id, project_id, job_id)",
+        "REFERENCES jobs(org_id, project_id, job_id)", "ON DELETE CASCADE"),
+    "project_sizing_exchanges_artifact_fk": _catalog_contract(
+        "project_sizing_exchanges", "FOREIGN KEY (drawing_id, project_id, org_id)",
+        "REFERENCES drawing_artifacts(drawing_id, project_id, org_id)",
+        "ON DELETE CASCADE"),
+    "project_sizing_exchanges_actor_fk": _catalog_contract(
+        "project_sizing_exchanges", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_sizing_exchanges_output_fk": _catalog_contract(
+        "project_sizing_exchanges", "FOREIGN KEY (output_version_id)",
+        "REFERENCES drawing_versions(version_id)"),
+    "project_sizing_exchanges_grant_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK",
+        "grant_ref ~ '^[a-zA-Z0-9_-]{1,64}$'"),
+    "project_sizing_exchanges_tenant_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK", "admitted_tenant = org_id"),
+    "project_sizing_exchanges_target_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK",
+        "char_length(target_settings_id) <= 128",
+        "target_settings_id ~ "
+        "'^leaf:[a-z][a-z0-9-]*:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'"),
+    # Readiness checks these helper calls, not the worker helper's body.
+    "project_sizing_exchanges_worker_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK",
+        "project_sizing_exchange_worker_ok(sender_worker)",
+        "project_sizing_exchange_worker_ok(published_worker)"),
+    "project_sizing_exchanges_classification_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK", "'live'", "'synthetic'"),
+    "project_sizing_exchanges_request_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK",
+        "octet_length(request_bytes) >= 1",
+        "octet_length(request_bytes) <= 65536"),
+    "project_sizing_exchanges_response_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK", "response_bytes IS NULL",
+        "octet_length(response_bytes) >= 1",
+        "octet_length(response_bytes) <= 65536"),
+    "project_sizing_exchanges_evidence_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK", "evidence_bytes IS NULL",
+        "octet_length(evidence_bytes) >= 1",
+        "octet_length(evidence_bytes) <= 262144"),
+    "project_sizing_exchanges_digest_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK",
+        "request_sha256 = encode(sha256(request_bytes), 'hex')",
+        "response_sha256 = encode(sha256(response_bytes), 'hex')",
+        "evidence_sha256 = encode(sha256(evidence_bytes), 'hex')"),
+    "project_sizing_exchanges_state_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK",
+        "'prepared'", "'send_started'", "'response_stored'",
+        "'published'", "'refused'", "'outcome_unknown'"),
+    "project_sizing_exchanges_shape_check": _catalog_contract(
+        "project_sizing_exchanges", "CHECK",
+        "response_bytes IS NULL", "response_sha256 IS NULL",
+        "evidence_bytes IS NULL", "evidence_sha256 IS NULL",
+        "sender_worker IS NULL", "sender_attempt IS NULL",
+        "sender_attempt > 0", "response_bytes IS NOT NULL",
+        "evidence_bytes IS NOT NULL", "refusal_code IS NULL",
+        "refusal_code IS NOT NULL", "'SIZING_OUTCOME_UNKNOWN'",
+        "'cloud_request_invalid'", "'cloud_auth_missing'",
+        "'cloud_tenant_unauthorized'", "'cloud_upstream_failure'",
+        "'cloud_response_invalid'", "output_version_id IS NULL",
+        "output_version_id IS NOT NULL", "published_worker IS NULL",
+        "published_worker IS NOT NULL", "published_attempt IS NULL",
+        "published_attempt IS NOT NULL", "published_attempt > 0"),
     "project_drawing_checkouts_pkey": _catalog_contract(
         "project_drawing_checkouts", "PRIMARY KEY (org_id, project_id, drawing_id)"),
     "project_drawing_checkouts_artifact_fk": _catalog_contract(
@@ -836,6 +911,9 @@ _REQUIRED_CONSTRAINTS = {
 }
 
 _REQUIRED_INDEXES = {
+    "idx_project_sizing_exchanges_scope": _catalog_contract(
+        "project_sizing_exchanges",
+        "(org_id, project_id, drawing_id, job_id)"),
     "engine_change_cards_newest": _catalog_contract(
         "engine_change_cards", "(created_at DESC, card_id DESC)"),
     "campaign_host_operations_poll_idx": _catalog_contract(
@@ -873,6 +951,19 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "project_sizing_exchange_completion": _catalog_contract(
+        "project_sizing_exchanges", "AFTER INSERT OR UPDATE",
+        "DEFERRABLE INITIALLY DEFERRED", "FOR EACH ROW",
+        "WHEN (new.state = 'published')",
+        "EXECUTE FUNCTION check_project_sizing_exchange_completion()"),
+    "jobs_sizing_exchange_completion": _catalog_contract(
+        "jobs", "AFTER UPDATE", "DEFERRABLE INITIALLY DEFERRED", "FOR EACH ROW",
+        "WHEN (old.status IS DISTINCT FROM new.status OR "
+        "old.output_version_id IS DISTINCT FROM new.output_version_id)",
+        "EXECUTE FUNCTION check_project_sizing_exchange_completion()"),
+    "project_sizing_exchanges_guard": _catalog_contract(
+        "project_sizing_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION guard_project_sizing_exchange()"),
     "project_drawing_checkouts_guard": _catalog_contract(
         "project_drawing_checkouts", "BEFORE UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION guard_project_drawing_checkout()"),

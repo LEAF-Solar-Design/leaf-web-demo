@@ -84,8 +84,8 @@ def test_sip_r1_gate_registration():
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
-    assert suites["platform"].expected == 328  # 2026-10-11: sip-r3d adds six PostgreSQL rows.
-    assert suites["gate-runner-selftest"].expected == 102  # 2026-10-11: sip-r3d registration row.
+    assert suites["platform"].expected == 359  # R14-B adds 31 PostgreSQL rows.
+    assert suites["gate-runner-selftest"].expected == 103  # R14-B registration row.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4151,3 +4151,22 @@ def test_sip_r3d_conductors_gate_registration():
             (r"PostgreSQL integration test requires DATABASE_URL",) if database else ())
         assert selection["mandatory_suite_ids"].count(suite_id) == 1
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_sip_r14_exchange_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads(
+        (SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    suite = suites["platform-sip-r14-exchange"]
+    assert suite.cwd == REPO / "platform"
+    assert suite.argv == runner._py_pytest("tests/test_sip_r14_exchange.py")
+    assert suite.kind == "pytest" and suite.expected == 31
+    assert suite.uses_database is True and suite.db_gated is True
+    assert suite.allowed_skip_reasons == ()
+    assert suite.database_skip_reasons == (
+        r"PostgreSQL integration test requires DATABASE_URL",)
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1
+    assert selection["mandatory_suite_ids"][-1] == suite.id
+    assert selection["selection_enabled"] is False
+    assert selection["phase"] == "shadow"

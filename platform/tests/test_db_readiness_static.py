@@ -37,21 +37,63 @@ def test_sip_r1_schema_contract_complete():
     sql = (db._PKG_DIR / "migrations/0073_project_drawing_checkouts.sql").read_text(encoding="utf-8")
     assert expected == set(re.findall(r"CONSTRAINT (project_drawing_checkouts_\w+)", sql))
     assert "anonymous:unnamed-writer" in sql
+    assert db._REQUIRED_COLUMNS["project_sizing_exchanges"] == {
+        "job_id", "org_id", "project_id", "drawing_id", "actor_binding_id",
+        "target_settings_id", "admitted_tenant", "grant_ref", "classification",
+        "state", "request_bytes", "request_sha256", "response_bytes",
+        "response_sha256", "evidence_bytes", "evidence_sha256",
+        "sender_worker", "sender_attempt", "refusal_code", "output_version_id",
+        "published_worker", "published_attempt", "created_at", "updated_at",
+    }
+    exchange_constraints = {"project_sizing_exchanges_" + suffix for suffix in (
+        "pkey", "job_fk", "artifact_fk", "actor_fk", "output_fk",
+        "grant_check", "tenant_check", "target_check", "worker_check",
+        "classification_check", "request_check", "response_check",
+        "evidence_check", "digest_check", "state_check", "shape_check")}
+    assert exchange_constraints <= set(catalog["constraints"])
+    assert all(
+        catalog["constraints"][name]["relation"] == "project_sizing_exchanges"
+        for name in exchange_constraints
+    )
+    assert catalog["indexes"]["idx_project_sizing_exchanges_scope"] == db._catalog_contract(
+        "project_sizing_exchanges", "(org_id, project_id, drawing_id, job_id)")
+    assert catalog["triggers"]["project_sizing_exchanges_guard"] == db._catalog_contract(
+        "project_sizing_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION guard_project_sizing_exchange()")
+    assert catalog["constraints"]["project_sizing_exchanges_worker_check"] == db._catalog_contract(
+        "project_sizing_exchanges", "CHECK",
+        "project_sizing_exchange_worker_ok(sender_worker)",
+        "project_sizing_exchange_worker_ok(published_worker)")
+    assert catalog["triggers"]["project_sizing_exchange_completion"] == db._catalog_contract(
+        "project_sizing_exchanges", "AFTER INSERT OR UPDATE",
+        "DEFERRABLE INITIALLY DEFERRED", "FOR EACH ROW",
+        "WHEN (new.state = 'published')",
+        "EXECUTE FUNCTION check_project_sizing_exchange_completion()")
+    assert catalog["triggers"]["jobs_sizing_exchange_completion"] == db._catalog_contract(
+        "jobs", "AFTER UPDATE", "DEFERRABLE INITIALLY DEFERRED", "FOR EACH ROW",
+        "WHEN (old.status IS DISTINCT FROM new.status OR "
+        "old.output_version_id IS DISTINCT FROM new.output_version_id)",
+        "EXECUTE FUNCTION check_project_sizing_exchange_completion()")
+    sql = (db._PKG_DIR / "migrations/0074_project_sizing_exchanges.sql").read_text(
+        encoding="utf-8")
+    assert exchange_constraints == set(re.findall(
+        r"CONSTRAINT (project_sizing_exchanges_\w+)", sql))
 
 
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 74)]
+    ids = [f"{n:04d}" for n in range(1, 75)]
     assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0073_project_drawing_checkouts.sql"
+    assert db.migration_manifest()[-1]["name"] == "0074_project_sizing_exchanges.sql"
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
+    assert "project_sizing_exchanges" in ledger["postgres_tables"]
     for name in ("test_conversation_model.py", "test_template_store.py",
                  "test_postgres_authority_inventory_contract.py"):
         source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 74)" in source
-        assert "range(1, 73)" not in source
+        assert "range(1, 75)" in source
+        assert "range(1, 74)" not in source
 
 
 def test_sip_r1_expand_only_migration():
@@ -63,6 +105,8 @@ def test_sip_r1_expand_only_migration():
     assert (db._PKG_DIR / "migrations/0073_project_drawing_checkouts.sql").is_file()
     violations = checker.check_migrations(db._PKG_DIR / "migrations")
     assert not any("0073" in violation for violation in violations), violations
+    assert (db._PKG_DIR / "migrations/0074_project_sizing_exchanges.sql").is_file()
+    assert not any("0074" in violation for violation in violations), violations
 
 
 def _assert_closed_world_pin(actual, expected, remediation):
@@ -164,12 +208,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0073_project_drawing_checkouts.sql",
+        manifest_names[-1], "0074_project_sizing_exchanges.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0073",
+        inventory["scope"]["migration_ids"][-1], "0074",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )
