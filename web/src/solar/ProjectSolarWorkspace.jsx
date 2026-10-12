@@ -129,38 +129,46 @@ function hostFor(row, props) {
   return 'unsupported'
 }
 
+// A scope token answers for the props of the render that made it; a later committed scope
+// retires it. Render writes nothing a later commit depends on: a render React abandons (a
+// suspended transition) leaves the committed token, its accepted runs, the props handlers read
+// and the presentation exactly as they were.
+function scopeToken(owner, renderProps) {
+  const token = { owner, alive: true, isCurrent: null }
+  token.isCurrent = () => {
+    if (!token.alive || owner.reason || !sameScope(owner, describeScope(renderProps))) {
+      token.alive = false
+      return false
+    }
+    return true
+  }
+  return token
+}
+
 export default function ProjectSolarWorkspace(props) {
   const { FlowRail, StepEditor, GraphForm, openTool = null, busy = false, newProjectIntentKey,
     projectRunMemory = null, projectPending = null, projectOutcome = null, submissionSignal } = props
   const latest = useRef(props)
-  latest.current = props
   const owner = describeScope(props)
   const scopeRef = useRef(null)
   const presentation = useRef({ row: openTool, retired: false, generation: 0 })
   const [, repaint] = useState(0)
   const notifications = useRef([])
-  if (!sameScope(scopeRef.current?.owner, owner) || !scopeRef.current?.alive) {
-    if (scopeRef.current) {
-      scopeRef.current.alive = false
-      presentation.current.retired = true
-      presentation.current.generation += 1
-    }
-    const token = { owner, alive: true, isCurrent: null }
-    token.isCurrent = () => {
-      if (!token.alive || owner.reason || !sameScope(owner, describeScope(latest.current))) {
-        token.alive = false
-        return false
-      }
-      return true
-    }
-    scopeRef.current = token
-  }
-  const scope = scopeRef.current
-  if (presentation.current.row !== openTool) {
-    presentation.current = { row: openTool, retired: false, generation: presentation.current.generation + 1 }
-  }
-  const generation = presentation.current.generation
+  const committed = scopeRef.current
+  const replacing = !committed || !committed.alive || !sameScope(committed.owner, owner)
+  const scope = replacing ? scopeToken(owner, props) : committed
+  const base = presentation.current
+  let view = base
+  if (replacing && committed) view = { ...view, retired: true, generation: view.generation + 1 }
+  if (view.row !== openTool) view = { row: openTool, retired: false, generation: view.generation + 1 }
+  const generation = view.generation
   useLayoutEffect(() => {
+    latest.current = props
+    if (scopeRef.current !== scope) {
+      if (scopeRef.current) scopeRef.current.alive = false
+      scopeRef.current = scope
+    }
+    if (presentation.current === base) presentation.current = view
     const queued = notifications.current.splice(0)
     for (const notify of queued) notify()
   })
@@ -174,8 +182,7 @@ export default function ProjectSolarWorkspace(props) {
   }, [props.projectClient])
 
   function retire(flow, changingFlow = false) {
-    presentation.current.retired = true
-    presentation.current.generation += 1
+    presentation.current = { ...presentation.current, retired: true, generation: presentation.current.generation + 1 }
     const close = latest.current.onClose, change = latest.current.onFlowChange
     notifications.current.push(() => {
       close?.()
@@ -190,12 +197,11 @@ export default function ProjectSolarWorkspace(props) {
   }
   function open(row) {
     if (latest.current.busy || typeof latest.current.onOpenTool !== 'function' || !admitted(row)) return
-    presentation.current.retired = false
-    presentation.current.generation += 1
+    presentation.current = { ...presentation.current, retired: false, generation: presentation.current.generation + 1 }
     latest.current.onOpenTool(row)
     repaint((value) => value + 1)
   }
-  const selected = presentation.current.retired ? null : openTool
+  const selected = view.retired ? null : openTool
   let reason = owner.reason || (!FlowRail ? 'host_unavailable' : null)
   let host = null
   if (!reason && selected) {

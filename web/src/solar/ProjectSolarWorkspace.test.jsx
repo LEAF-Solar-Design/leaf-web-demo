@@ -1,6 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { readFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import ProjectSolarWorkspace from './ProjectSolarWorkspace.jsx'
@@ -706,6 +705,79 @@ describe('Project Solar workspace composition', () => {
     expect(last(dense.graphs).tool).toBe(dense.row)
   })
 
+  it('R13E-47 a render React abandons leaves the committed scope and its accepted run current', async () => {
+    // A transition renders new props, a sibling suspends so nothing it rendered commits, and an urgent
+    // update returns to the committed props. Only committed renders may retire a scope.
+    const h = fixture('solar-string-add')
+    const never = new Promise(() => {})
+    function Blocker({ hold }) { if (hold) throw never; return null }
+    let setFrame
+    function Host() {
+      const [frame, set] = useState({ props: { ...h.props, openTool: h.row }, hold: false })
+      setFrame = set
+      return <React.Suspense fallback={<p>Suspended fixture</p>}>
+        <ProjectSolarWorkspace {...frame.props} />
+        <Blocker hold={frame.hold} />
+      </React.Suspense>
+    }
+    h.props = { ...h.props, openTool: h.row }
+    h.view = render(<Host />)
+    expect(await last(h.steps).onProjectSubmit(h.intent(), optionsFor(h))).toBe(h.outcome)
+    const options = h.submit.mock.calls[0][1]
+    expect(options.isCurrent()).toBe(true)
+    const rendered = h.rails.length
+    act(() => { React.startTransition(() => setFrame((frame) => ({ props: { ...frame.props, authorityKey: 'epoch-2' }, hold: true }))) })
+    expect(h.rails.length).toBeGreaterThan(rendered)
+    expect(screen.queryByText('Suspended fixture')).toBeNull()
+    expect(screen.getAllByTestId('recorded-step')).toHaveLength(1)
+    expect(options.isCurrent()).toBe(true)
+    // The committed editor still writes while the transition is suspended: its handlers read committed props.
+    expect(await last(h.steps).onProjectSubmit(h.intent(), optionsFor(h))).toBe(h.outcome)
+    expect(h.submit).toHaveBeenCalledTimes(2)
+    act(() => { setFrame((frame) => ({ props: { ...frame.props, authorityKey: 'epoch-1' }, hold: false })) })
+    expect(screen.getAllByTestId('recorded-step')).toHaveLength(1)
+    expect(options.isCurrent()).toBe(true)
+    expect(await last(h.steps).onProjectSubmit(h.intent(), optionsFor(h))).toBe(h.outcome)
+    expect(h.submit).toHaveBeenCalledTimes(3)
+    // A committed change of authority still retires the scope and the run that followed it.
+    act(() => { setFrame((frame) => ({ props: { ...frame.props, authorityKey: 'epoch-2' }, hold: false })) })
+    expect(options.isCurrent()).toBe(false)
+    expect(screen.queryByTestId('recorded-step')).toBeNull()
+    h.view.unmount()
+  })
+
+  it('R13E-49 an editor that closes itself while it mounts stays closed', () => {
+    // A child's layout effect runs before the workspace's own, so a close requested during the
+    // commit that opened the editor must not be overwritten by that commit's presentation.
+    const h = fixture('solar-string-add')
+    const closes = []
+    function ClosingEditor(props) {
+      h.steps.push(props)
+      useLayoutEffect(() => { closes.push(true); props.onClose() }, [])
+      return <section data-testid="recorded-step" />
+    }
+    h.mount({ openTool: h.row, StepEditor: ClosingEditor })
+    expect(closes).toHaveLength(1)
+    expect(screen.queryByTestId('recorded-step')).toBeNull()
+    expect(h.close).toHaveBeenCalledTimes(1)
+    h.view.unmount()
+  })
+
+  it('R13E-48 aborting the scope signal ends an accepted run, mounted or not', async () => {
+    for (const unmountFirst of [false, true]) {
+      const h = fixture('solar-string-add')
+      h.mount({ openTool: h.row })
+      expect(await last(h.steps).onProjectSubmit(h.intent(), optionsFor(h))).toBe(h.outcome)
+      const options = h.submit.mock.calls[0][1]
+      expect(options.signal).toBe(h.scopeController.signal)
+      expect(options.isCurrent()).toBe(true)
+      if (unmountFirst) h.view.unmount()
+      h.scopeController.abort()
+      expect(options.isCurrent()).toBe(false)
+      if (!unmountFirst) h.view.unmount()
+    }
+  })
+
   it('R13E-44 composition owns no Viewer or App mount and all new sentences use the frozen map', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
@@ -718,8 +790,8 @@ describe('Project Solar workspace composition', () => {
     expect(source.endsWith('\n')).toBe(true)
     expect(source.endsWith('\n\n')).toBe(false)
     const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+    // App mounts no workspace; its bytes are not pinned, because unrelated App records move them.
     expect(app).not.toContain('ProjectSolarWorkspace')
-    expect(createHash('sha256').update(app).digest('hex')).toBe('520917ae72267b3991827d7e8650c5e0daeaaa560fc343d0a484b7425aecb9b4')
     for (const [reason, changes] of [
       ['binding_invalid', { solarBinding: null }], ['scope_stale', { isCurrent: () => false }],
       ['client_unavailable', { projectClient: null }], ['catalog_unavailable', { projectCatalog: null }],
