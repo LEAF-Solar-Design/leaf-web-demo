@@ -100,7 +100,7 @@ export function useAppProjectSolarRuntime(inputs) {
           (t.selected && sameSolarDrawingBinding(a.scope.binding, t.output)))))
   }
   function unreadable(t) {
-    if (!transitionCurrent(t)) return false
+    if (t.phase === 'done' || !transitionCurrent(t)) return false
     t.phase = t.selected ? 'context' : 'selection'
     t.pending = false
     settle(t, false)
@@ -177,11 +177,12 @@ export function useAppProjectSolarRuntime(inputs) {
             ? projectSolarAppReason(outcome.reasonCode) : null }))
     if (outcome.state === 'succeeded') {
       // Dispatch only; App's explicit completion channel calls complete below.
+      const completionFailed = () => { const t = m.transition; if (t && t.outcome === outcome) unreadable(t) }
       try {
         Promise.resolve(latest.current.completedVersionRef.current?.(null, outcome, {
           projectSolarCompletion: meta,
-        })).catch(() => { if (m.transition) unreadable(m.transition) })
-      } catch { if (m.transition) unreadable(m.transition) }
+        })).catch(completionFailed)
+      } catch { completionFailed() }
     } else if (outcome.state === 'failed' || outcome.state === 'refused') m.run = null
   }
   const a = inputs.projectSolar
@@ -237,7 +238,7 @@ export function useAppProjectSolarRuntime(inputs) {
       if (!valid()) return
       const t = m.transition
       if (response?.ok !== true || view.mode !== 'ready') {
-        if (t && transitionCurrent(t)) unreadable(t)
+        if (t && t.phase !== 'done' && transitionCurrent(t)) unreadable(t)
         // An uncertain run keeps its lock, so a failed read must not hide why the next submit is refused.
         else publish(valid, { notice: m.run?.uncertain ? PROJECT_SOLAR_RUN_REASONS.outcome_unknown
           : projectSolarAppReason('scope_pending') })
@@ -245,7 +246,7 @@ export function useAppProjectSolarRuntime(inputs) {
       }
       publish(valid, { context: { data: response.data, current: valid },
         notice: m.run?.uncertain ? PROJECT_SOLAR_RUN_REASONS.outcome_unknown : null })
-      if (t?.selected && transitionCurrent(t) && sameSolarDrawingBinding(t.output, a.scope.binding)) {
+      if (t?.selected && t.phase !== 'done' && transitionCurrent(t) && sameSolarDrawingBinding(t.output, a.scope.binding)) {
         t.phase = 'done'
         t.pending = false
         publish(() => valid() && transitionCurrent(t), { busy: false })
@@ -285,6 +286,18 @@ export function useAppProjectSolarRuntime(inputs) {
     run.submitting = false
     const accepted = outcome.ok === true && outcome.status === 202
     run.accepted = accepted
+    if (accepted) {
+      try {
+        const settlement = owner.controller.whenSettled?.(binding, run.authorityKey)
+        if (settlement != null) Promise.resolve(settlement).then(result => {
+          const observing = () => m.alive && m.run === run && !run.terminal
+          if (result == null || !observing()) return
+          run.uncertain = true
+          publish(observing, { projectPending: null, busy: false,
+            notice: PROJECT_SOLAR_RUN_REASONS.outcome_unknown })
+        }).catch(() => {})
+      } catch { /* A bridge without a settlement observer keeps its existing behavior. */ }
+    }
     // Since R13-B2, SCOPE_STALE and ABORTED answers from B mean the submit request was never made.
     const refused = outcome.reason === 'SIP_R7_SCOPE_STALE' || outcome.reason === 'SIP_R7_ABORTED' ||
       outcome.reason === 'SIP_R7_REQUEST_INVALID' || outcome.reason === 'SIP_R13B_RUN_IN_PROGRESS' ||

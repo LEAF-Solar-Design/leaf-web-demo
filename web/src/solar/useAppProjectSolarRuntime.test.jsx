@@ -132,7 +132,7 @@ it('R13G-02 project submission preserves the prepared object and bridge outcome'
   expect(bridge.onProjectSubmit.mock.calls[0][0]).toBe(h.prepared)
   expect(value).toBe(await bridge.onProjectSubmit.mock.results[0].value)
   expect(value).toEqual(accepted)
-  expect(bridge.whenSettled).not.toHaveBeenCalled()
+  expect(bridge.whenSettled).toHaveBeenCalledExactlyOnceWith(B, 'session-1')
   expect(h.client.readSolar).not.toHaveBeenCalled()
   expect(h.client.downloadArtifact).not.toHaveBeenCalled()
 })
@@ -808,4 +808,289 @@ it('R13G-29 an equal binding copy while the capture stays current keeps the acce
   await h.finish()
   expect(h.result.current.projectOutcome?.outcome.state).toBe('succeeded')
   expect(h.props.completedVersionRef.current).toHaveBeenCalledOnce()
+})
+
+
+it('R13G-30 a done transition cannot replace a later unknown run notice on failed context', async () => {
+  const h = await setup()
+  await h.submit(); await h.finish()
+  const done = await h.complete()
+  await h.install(W)
+  expect(await done.promise).toBe(true)
+  const binding = h.props.projectSolar.scope.binding
+  const prepared = { ...fresh(h, 'run-two'), binding }
+  const options = { ...h.options, binding }
+  h.client.readJob.mockReturnValue(deferred().promise)
+  expect(await submitWith(h, prepared, options)).toEqual(accepted)
+  const read = deferred()
+  h.client.readContext.mockReturnValueOnce(read.promise)
+  await h.install(W)
+  await act(async () => { read.resolve(local('SIP_R7_TRANSPORT_FAILED')); await drain() })
+  expect.soft(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  expect.soft(h.result.current.busy).toBe(false)
+  expect.soft(h.result.current.projectPending).toBeNull()
+  expect.soft((await submitWith(h, { ...prepared, idempotencyKey: 'run-three' }, options)).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect.soft(h.client.submitRun).toHaveBeenCalledTimes(2)
+})
+
+it('R13G-31 a done transition cannot release a later run lock on successful context', async () => {
+  const h = await setup()
+  await h.submit(); await h.finish()
+  const done = await h.complete()
+  await h.install(W)
+  expect(await done.promise).toBe(true)
+  const binding = h.props.projectSolar.scope.binding
+  const prepared = { ...fresh(h, 'run-two'), binding }
+  const options = { ...h.options, binding }
+  h.client.readJob.mockReturnValue(deferred().promise)
+  expect(await submitWith(h, prepared, options)).toEqual(accepted)
+  const read = deferred()
+  h.client.readContext.mockReturnValueOnce(read.promise)
+  await h.install(W)
+  await act(async () => { read.resolve(response(context(W))); await drain() })
+  expect.soft(h.result.current.busy).toBe(false)
+  expect.soft(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  expect.soft((await submitWith(h, { ...prepared, idempotencyKey: 'run-three' }, options)).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect.soft(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1', 'run-two'])
+  expect.soft(h.result.current.busy).toBe(false)
+  expect.soft(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+})
+
+it('R13G-32 a bridge-aborted follow retains an explained lock until authority changes', async () => {
+  const h = await setup(), bridge = bridges.at(-1)
+  expect(await h.submit()).toEqual(accepted)
+  const settlement = bridge.whenSettled(B, 'session-1')
+  await act(async () => { h.pendingJob.resolve(local('SIP_R7_ABORTED')); await drain() })
+  expect((await settlement).state).toBe('aborted')
+  const copy = { ...B }
+  const a = { ...h.props.projectSolar, scope: { ...h.props.projectSolar.scope, binding: copy } }
+  await h.update({ projectSolar: a, projectCatalog: { ...h.props.projectCatalog, binding: copy } })
+  expect(bridges.at(-1)).toBe(bridge)
+  expect(a.isCurrent()).toBe(true)
+  expect.soft(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  expect.soft(h.result.current.busy).toBe(false)
+  expect.soft(h.result.current.projectPending).toBeNull()
+  expect.soft((await submitWith(h, fresh(h, 'run-two'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect.soft(h.client.submitRun).toHaveBeenCalledOnce()
+  await h.install(V, 'foreign')
+  h.client.readJob.mockReturnValue(deferred().promise)
+  expect(await submitWith(h, fresh(h, 'fresh-owner', 'foreign'), { ...h.options, authorityKey: 'foreign' })).toEqual(accepted)
+  expect(h.client.submitRun).toHaveBeenCalledTimes(2)
+})
+
+it('R13G-33 an initial failed context read explains scope pending without a run', async () => {
+  const read = deferred(), h = await setup({ initialContext: read })
+  await act(async () => { read.resolve(local('SIP_R7_TRANSPORT_FAILED')); await drain() })
+  expect(h.result.current.notice).toBe(projectSolarAppReason('scope_pending'))
+  expect(h.result.current.notice).toBe('Project Solar is preparing this drawing version.')
+  expect(h.result.current.busy).toBe(false)
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+})
+
+it('R13G-34 a done transition stays done after a failed same-owner context rotation', async () => {
+  const h = await setup()
+  await h.submit(); await h.finish()
+  const done = await h.complete()
+  await h.install(W)
+  expect(await done.promise).toBe(true)
+  const read = deferred()
+  h.client.readContext.mockReturnValueOnce(read.promise)
+  await h.install(W)
+  await act(async () => { read.resolve(local('SIP_R7_TRANSPORT_FAILED')); await drain() })
+  const binding = h.props.projectSolar.scope.binding
+  const prepared = { ...fresh(h, 'run-two'), binding }
+  const options = { ...h.options, binding }
+  expect.soft(h.result.current.notice).toBe(projectSolarAppReason('scope_pending'))
+  expect.soft((await submitWith(h, prepared, options)).reason).toBe('SIP_R7_REQUEST_INVALID')
+  await h.install(W)
+  h.client.readJob.mockReturnValue(deferred().promise)
+  expect(await submitWith(h, prepared, options)).toEqual(accepted)
+  expect(h.client.submitRun).toHaveBeenCalledTimes(2)
+})
+
+
+it('R13G-35 an old settlement cannot overwrite a new owner run', async () => {
+  const h = await setup(), bridge = bridges.at(-1), delivery = deferred()
+  const observeSettlement = bridge.whenSettled.getMockImplementation()
+  let settlement
+  // Keep the real bridge settlement, but deliver it after the replacement run starts.
+  bridge.whenSettled.mockImplementationOnce((...args) => {
+    settlement = observeSettlement(...args)
+    return delivery.promise
+  })
+  expect(await h.submit()).toEqual(accepted)
+  await h.install(V, 'foreign')
+  const stopped = await settlement
+  expect(stopped.state).toBe('stale')
+  expect(await submitWith(h, fresh(h, 'new-owner', 'foreign'), { ...h.options, authorityKey: 'foreign' })).toEqual(accepted)
+  expect(h.result.current.busy).toBe(true)
+  await act(async () => { delivery.resolve(stopped); await drain() })
+  expect.soft(h.result.current.busy).toBe(true)
+  expect.soft(h.result.current.notice).toBeNull()
+  expect.soft(h.result.current.projectPending).toMatchObject({ authorityKey: 'foreign' })
+  expect((await submitWith(h, fresh(h, 'blocked', 'foreign'), { ...h.options, authorityKey: 'foreign' })).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1', 'new-owner'])
+})
+
+it('R13G-36 settlement is captured before an authority round trip in the next microtask', async () => {
+  const h = await setup(), bridge = bridges.at(-1)
+  const submit = bridge.onProjectSubmit.getMockImplementation()
+  bridge.onProjectSubmit.mockImplementationOnce((...args) => submit(...args).then(answer => {
+    // The runtime acceptance continuation runs between these two microtasks. An extra await
+    // lets the real bridge discard its association before the runtime can capture it.
+    queueMicrotask(() => queueMicrotask(() => {
+      h.client.change({ authorityKey: 'foreign' })
+      h.client.change({ authorityKey: 'session-1' })
+    }))
+    return answer
+  }))
+  expect(await h.submit()).toEqual(accepted)
+  expect(h.props.projectSolar.isCurrent()).toBe(true)
+  expect(h.client.getSnapshot().authorityKey).toBe('session-1')
+  expect.soft(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  expect.soft(h.result.current.busy).toBe(false)
+  expect.soft(h.result.current.projectPending).toBeNull()
+  expect((await submitWith(h, fresh(h, 'blocked'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect(h.client.submitRun).toHaveBeenCalledOnce()
+})
+
+it("R13G-37 a late rejection of an earlier run's completion callback never reopens its done transition or releases a later uncertain run", async () => {
+  const h = await setup(), tail = deferred()
+  let completion
+  h.props.completedVersionRef.current = (_, outcome, options) => {
+    completion = h.result.current.complete(outcome, options.projectSolarCompletion)
+    return completion.then(() => tail.promise)
+  }
+  await h.submit(); await h.finish()
+  await h.install(W)
+  expect(await completion).toBe(true)
+  const binding = h.props.projectSolar.scope.binding
+  const prepared = { ...fresh(h, 'run-two'), binding }
+  const options = { ...h.options, binding }
+  h.client.readJob.mockResolvedValue(local('SIP_R7_TRANSPORT_FAILED'))
+  expect(await submitWith(h, prepared, options)).toEqual(accepted)
+  expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  expect(h.client.submitRun).toHaveBeenCalledTimes(2)
+  await act(async () => { tail.reject(new Error('late completion failure')); await drain() })
+  expect.soft(h.result.current.notice).not.toBe(projectSolarAppReason('output_unreadable'))
+  expect.soft(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  await h.install(W)
+  expect(h.result.current.contextCurrent()).toBe(true)
+  expect.soft((await submitWith(h, { ...prepared, idempotencyKey: 'run-three' }, options)).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect.soft(h.client.submitRun).toHaveBeenCalledTimes(2)
+  expect.soft(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1', 'run-two'])
+})
+
+it("R13G-38 a completion callback failure for one outcome never touches another outcome's live transition", async () => {
+  const h = await setup(), tail = deferred(), rehydrate = deferred()
+  let completion
+  h.props.completedVersionRef.current = (_, outcome, options) => {
+    completion = h.result.current.complete(outcome, options.projectSolarCompletion)
+    return completion.then(() => tail.promise)
+  }
+  await h.submit(); await h.finish()
+  await h.install(W)
+  expect(await completion).toBe(true)
+  h.props.completedVersionRef.current = (_, outcome, options) => {
+    completion = h.result.current.complete(outcome, options.projectSolarCompletion)
+    return completion
+  }
+  h.ws.rehydrate.mockReturnValueOnce(rehydrate.promise)
+  h.client.readJob.mockResolvedValue(response(job({ input_version_id: W, output_version_id: X,
+    result: { output_version_id: X, graph_commit: { output_version_id: X } } })))
+  const binding = h.props.projectSolar.scope.binding
+  expect(await submitWith(h, { ...fresh(h, 'run-two'), binding }, { ...h.options, binding })).toEqual(accepted)
+  expect(h.result.current.projectOutcome?.outcome.state).toBe('succeeded')
+  expect(h.result.current.publishedVersionId).toBe(X)
+  expect(h.ws.rehydrate).toHaveBeenCalledTimes(2)
+  expect(h.ws.getSnapshot().canonicalVersionId).toBe(W)
+  expect(h.result.current.busy).toBe(true)
+  await act(async () => { tail.reject(new Error('earlier completion failure')); await drain() })
+  expect.soft(h.result.current.notice).not.toBe(projectSolarAppReason('output_unreadable'))
+  expect.soft(h.result.current.notice).toBeNull()
+  expect.soft(h.result.current.busy).toBe(true)
+  await act(async () => {
+    const value = workspace([row({ version_id: X })])
+    h.ws.change({ workspace: value }); rehydrate.resolve(value); await drain()
+  })
+  await h.install(X)
+  expect.soft(await completion).toBe(true)
+  expect.soft(h.ws.getSnapshot().canonicalVersionId).toBe(X)
+  expect.soft(h.result.current.contextCurrent()).toBe(true)
+  expect.soft(h.result.current.notice).toBeNull()
+  expect.soft(h.result.current.busy).toBe(false)
+  expect(h.client.submitRun).toHaveBeenCalledTimes(2)
+})
+
+it('R13G-39 a settlement observer that resolves null leaves an accepted run following', async () => {
+  for (const result of [null, undefined]) {
+    const h = await setup(), bridge = bridges.at(-1)
+    bridge.whenSettled.mockReturnValueOnce(Promise.resolve(result))
+    expect(await h.submit()).toEqual(accepted)
+    await act(drain)
+    expect(bridge.whenSettled).toHaveBeenCalledWith(B, 'session-1')
+    expect.soft(h.result.current.busy).toBe(true)
+    expect.soft(h.result.current.projectPending).toMatchObject({ binding: B, authorityKey: 'session-1', tool: T })
+    expect.soft(h.result.current.notice).toBeNull()
+    expect.soft((await submitWith(h, fresh(h, 'blocked'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+    expect.soft(h.client.submitRun).toHaveBeenCalledOnce()
+    h.unmount()
+  }
+})
+
+it('R13G-40 a completion callback failure for its own live transition shows the unreadable sentence', async () => {
+  for (const fail of ['reject', 'throw']) {
+    const h = await setup(), rehydrate = deferred()
+    let completion
+    h.ws.rehydrate.mockReturnValueOnce(rehydrate.promise)
+    h.props.completedVersionRef.current = (_, outcome, options) => {
+      completion = h.result.current.complete(outcome, options.projectSolarCompletion)
+      if (fail === 'throw') throw new Error('callback failure')
+      return Promise.reject(new Error('callback failure'))
+    }
+    await h.submit(); await h.finish()
+    await act(drain)
+    expect.soft(await completion).toBe(false)
+    expect.soft(h.result.current.notice).toBe(projectSolarAppReason('output_unreadable'))
+    expect.soft(h.result.current.busy).toBe(false)
+    expect.soft(h.result.current.publishedVersionId).toBe(W)
+    h.unmount()
+  }
+})
+
+it('R13G-41 a settlement observer that resolves anything but null or undefined marks an accepted run uncertain', async () => {
+  for (const result of [false, 0, '']) {
+    const h = await setup(), bridge = bridges.at(-1)
+    bridge.whenSettled.mockReturnValueOnce(Promise.resolve(result))
+    expect(await h.submit()).toEqual(accepted)
+    await act(drain)
+    expect(bridge.whenSettled).toHaveBeenCalledWith(B, 'session-1')
+    expect.soft(h.result.current.busy).toBe(false)
+    expect.soft(h.result.current.projectPending).toBeNull()
+    expect.soft(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+    expect.soft((await submitWith(h, fresh(h, 'blocked'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+    expect.soft(h.client.submitRun).toHaveBeenCalledOnce()
+    h.unmount()
+  }
+})
+
+it('R13G-42 a completion callback failure after the output is selected and before its context read settles shows the unreadable sentence', async () => {
+  const h = await setup(), tail = deferred(), held = deferred()
+  let completion
+  h.props.completedVersionRef.current = (_, outcome, options) => {
+    completion = h.result.current.complete(outcome, options.projectSolarCompletion)
+    return tail.promise
+  }
+  await h.submit(); await h.finish()
+  expect(h.ws.getSnapshot().canonicalVersionId).toBe(W)
+  h.client.readContext.mockImplementation(() => held.promise)
+  await h.install(W)
+  expect(h.result.current.busy).toBe(true)
+  expect(h.result.current.notice).toBeNull()
+  await act(async () => { tail.reject(new Error('current completion failure')); await drain() })
+  expect.soft(await completion).toBe(false)
+  expect.soft(h.result.current.notice).toBe(projectSolarAppReason('output_unreadable'))
+  expect.soft(h.result.current.busy).toBe(false)
+  expect.soft(h.result.current.publishedVersionId).toBe(W)
+  expect(h.client.submitRun).toHaveBeenCalledOnce()
 })
