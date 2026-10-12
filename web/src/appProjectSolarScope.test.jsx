@@ -42,7 +42,7 @@ const catalogCall = nodes((node) => node.type === 'CallExpression' && node.calle
 const initialContext = catalogCall.node.arguments[0].properties.find((prop) => prop.key.name === 'context').value
 const catalogDeclaration = nodes((node) => node.type === 'VariableDeclarator' && node.init === catalogCall.node)[0].parent
 const contextEffect = nodes((node) => node.type === 'CallExpression' && node.callee.name === 'useEffect'
-  && text(node.arguments[0]).includes('catalogController.setContext(solarSettingsScope('))[0].node
+  && text(node.arguments[0]).includes('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({'))[0].node
 const ownerSource = source.slice(declaration('catalogRunContext').parent.start, declaration('catalogServices').parent.end)
 const intents = Function(`return ${text(declaration('PROJECT_SOLAR_INTENTS').node.init)}`)()
 
@@ -60,7 +60,7 @@ const useAppScope = Function('React', 'createCatalogRunContext', 'composerDraftA
     const { getTools, getCapabilities, routePrompt: nlPrompt, createClient: createProjectSolarClient } = services
     const config = { tenant: 'fallback-tenant' }
     const REQUESTED_DRAWING_ID = 'standalone-drawing'
-    const entitlements = null
+    const entitlements = input.entitlements === undefined ? null : input.entitlements
     const agentDisabled = true
     const catalogAdapters = { draftStorage: null }
     ${text(declaration('projectModeRef').parent)}
@@ -281,6 +281,46 @@ describe('App project Solar scope ownership', () => {
     expect(Object.isFrozen(intents)).toBe(true)
     expect(run.fetchImpl.mock.calls.every(([url]) => String(url).includes(`input_version_id=${V}`))).toBe(true)
     expect(run.legacyFetch).not.toHaveBeenCalled()
+  })
+
+  it('R13F-21 an entitlement change keeps a ready project catalog bound', async () => {
+    const run = setup()
+    const hook = mount(run)
+    await receipt(hook)
+    hook.rerender({ ...run.input, entitlements: { plan: 'pro' } })
+    await act(async () => {})
+    await waitFor(() => {
+      expect(hook.result.current.projectSolar.ready).toBe(true)
+      expect(hook.result.current.catalogState.projectCatalog).toBeTruthy()
+      expect(run.legacyFetch).not.toHaveBeenCalled()
+    })
+  })
+
+  it('R13F-22 leaving a project restores standalone scope in one write and never requests the previous drawing', async () => {
+    const run = setup({ openProjectId: null, drawingState: { drawing_id: 'A', version: 1 } })
+    const hook = mount(run)
+    await waitFor(() => expect(hook.result.current.catalogState.catalog.source).toBe('endpoint'))
+    await act(async () => {})
+    expect(run.legacyFetch.mock.calls.some(([url]) => {
+      const query = new URL(String(url), 'http://localhost').searchParams
+      return query.get('drawing_id') === 'A' && query.get('drawing_version') === '1'
+    })).toBe(true)
+    hook.rerender({ ...run.input, openProjectId: P, drawingState: null })
+    await receipt(hook)
+    const closedAt = run.legacyFetch.mock.calls.length
+    hook.rerender({ ...run.input, drawingState: { drawing_id: 'C', version: 2 } })
+    await act(async () => {})
+    await waitFor(() => expect(hook.result.current.catalogState.catalog.source).toBe('endpoint'))
+    const requests = run.legacyFetch.mock.calls.slice(closedAt)
+    expect(requests).toHaveLength(1)
+    const request = new URL(String(requests[0][0]), 'http://localhost')
+    expect(request.pathname).toBe('/api/capabilities')
+    expect(request.searchParams.get('drawing_id')).toBe('C')
+    expect(request.searchParams.get('drawing_version')).toBe('2')
+    expect(requests.some(([url]) => {
+      const query = new URL(String(url), 'http://localhost').searchParams
+      return query.get('drawing_id') === 'A' && query.get('drawing_version') === '1'
+    })).toBe(false)
   })
 
   it('R13F-05 scope switches and lease rotation reject deferred receipts and expire accepted captures', async () => {

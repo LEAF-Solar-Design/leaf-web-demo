@@ -62,7 +62,7 @@ describe('R13F project Solar catalog attachment', () => {
 
   it('R13F-06 catalog context branches on project mode and explicitly restores standalone scope', () => {
     const effects = calls('useEffect')
-    const contextEffect = effects.find((node) => source(node.arguments[0]).includes('catalogController.setContext(solarSettingsScope('))
+    const contextEffect = effects.find((node) => source(node.arguments[0]).includes('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({'))
     const familiesEffect = effects.find((node) => source(node.arguments[0]).includes('setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)'))
     assert.ok(contextEffect && familiesEffect)
     for (const name of ['projectMode', 'projectSolar.ready', 'projectSolar.scope.binding', 'projectSolar.scope.authorityKey']) {
@@ -97,10 +97,10 @@ describe('R13F project Solar catalog attachment', () => {
             catalogController: { setContext: (value) => writes.push(value) }, setSolarFlowFamiliesDrawingId: (id) => families.push(id) }
           invoke(contextEffect, inputs)
           invoke(familiesEffect, inputs)
-          assert.deepEqual(writes[0], { solarBinding: undefined, authorityKey: undefined, projectIntents: undefined })
-          assert.ok(Object.hasOwn(writes[0], 'solarBinding'))
+          assert.equal(writes.length, 1)
           const expected = solarSettingsScope({ enabled, mock, profile, context })
-          assert.deepEqual(writes.slice(1), enabled ? [expected] : [])
+          assert.deepEqual(writes[0], { solarBinding: undefined, authorityKey: undefined, projectIntents: undefined, ...(enabled ? expected : {}) })
+          assert.ok(Object.hasOwn(writes[0], 'solarBinding'))
           assert.deepEqual(families, [expected.drawingId ?? null])
         }
       }
@@ -1762,9 +1762,9 @@ describe('Solar settings form wiring', () => {
   })
 
   it('SF2 wiring the catalog controller context follows solarSettingsScope', () => {
-    assert.ok(appSource.includes('catalogController.setContext(solarSettingsScope('))
+    assert.match(appSource, new RegExp('catalogController\\.setContext\\(\\{\\s*solarBinding: undefined,\\s*authorityKey: undefined,\\s*projectIntents: undefined,\\s*\\.\\.\\.\\(ENV_SOLAR_SETTINGS_FORM \\? solarSettingsScope\\(\\{\\s*enabled: ENV_SOLAR_SETTINGS_FORM,\\s*mock,\\s*profile: surfaceSlots\\.toolbar\\.profile,\\s*context: catalogRunContext\\s*\\}\\) : \\{\\}\\),\\s*\\}\\)'))
     assert.match(appSource, new RegExp('if \\(projectMode\\) \\{\\s+catalogController\\.setContext\\(\\{\\s+solarBinding: projectSolar\\.ready \\? projectSolar\\.scope\\.binding : null,\\s+authorityKey: projectSolar\\.ready \\? projectSolar\\.scope\\.authorityKey : null,\\s+projectIntents: PROJECT_SOLAR_INTENTS,'))
-    assert.ok(appSource.includes('catalogController.setContext({ solarBinding: undefined, authorityKey: undefined, projectIntents: undefined })'))
+    assert.ok(!appSource.includes('catalogController.setContext(solarSettingsScope('))
   })
 
   it('SF2 wiring a settings submit ties the run to its own intent and drawing', () => {
@@ -1945,7 +1945,7 @@ describe('Solar step rail wiring', () => {
     assert.ok(props.includes('familiesDrawingId={solarFlowFamiliesDrawingId}'))
     const record = appSource.indexOf('setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)')
     const scope = appSource.lastIndexOf('const scope = solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext })', record)
-    const handed = appSource.indexOf('catalogController.setContext(solarSettingsScope(')
+    const handed = appSource.indexOf('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({')
     assert.ok(handed >= 0 && scope > handed && record > scope)
     assert.match(appSource.slice(handed, record), new RegExp('if \\(projectMode\\) \\{\\s+setSolarFlowFamiliesDrawingId\\(null\\)\\s+return'))
     assert.ok(appSource.includes('solarBinding: projectSolar.ready ? projectSolar.scope.binding : null'))

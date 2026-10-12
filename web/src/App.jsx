@@ -1064,7 +1064,11 @@ export default function App() {
     services: catalogServices,
     adapters: catalogAdapters,
     context: { mock, entitlements, running: false, agentDisabled,
-      ...(projectMode ? { solarBinding: null, authorityKey: null, projectIntents: PROJECT_SOLAR_INTENTS } : {}),
+      ...(projectMode ? {
+        solarBinding: projectSolar.ready ? projectSolar.scope.binding : null,
+        authorityKey: projectSolar.ready ? projectSolar.scope.authorityKey : null,
+        projectIntents: PROJECT_SOLAR_INTENTS,
+      } : {}),
     },
   })
   const {
@@ -3136,9 +3140,14 @@ export default function App() {
       })
       return
     }
-    catalogController.setContext({ solarBinding: undefined, authorityKey: undefined, projectIntents: undefined })
-    if (!ENV_SOLAR_SETTINGS_FORM) return
-    catalogController.setContext(solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext }))
+    // Leaving a project restores standalone scope in one write, so the controller never loads the
+    // previous drawing's catalog between clearing the binding and naming the new drawing.
+    catalogController.setContext({
+      solarBinding: undefined,
+      authorityKey: undefined,
+      projectIntents: undefined,
+      ...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext }) : {}),
+    })
   }, [catalogController, projectMode, projectSolar.ready, projectSolar.scope.binding, projectSolar.scope.authorityKey, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   // Guided Solar step rail: record the drawing the effect above just handed the catalog controller, so the
   // rail knows which drawing its families belong to and never files one drawing's readiness under another.
