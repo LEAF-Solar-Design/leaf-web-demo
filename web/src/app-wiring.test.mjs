@@ -23,8 +23,100 @@ import {
 } from './runIntent.js'
 import { slashDecision, alternativeDecision } from './controllers/catalog/catalogRouting.js'
 import { createWorkspaceController } from './controllers/workspace/createWorkspaceController.js'
+import { solarSettingsScope } from './solar/solarSettingsWire.js'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+
+describe('R13F project Solar catalog attachment', () => {
+  const tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
+  const find = (predicate) => {
+    const found = []
+    csuWalk(tree, (node) => { if (predicate(node)) found.push(node) })
+    return found
+  }
+  const calls = (name) => find((node) => node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === name)
+  const source = (node) => appSource.slice(node.start, node.end)
+
+  it('R13F-01 App owns one project scope before the catalog without mounting project surfaces', () => {
+    const owner = calls('useProjectSolarScope')
+    assert.equal(owner.length, 1)
+    assert.equal(calls('createCatalogRunContext').length, 1)
+    assert.equal(find((node) => node.type === 'VariableDeclarator' && node.id.name === 'catalogRunContextRef').length, 1)
+    const catalog = calls('useCatalogController')
+    assert.equal(catalog.length, 1)
+    assert.ok(calls('createCatalogRunContext')[0].start < owner[0].start && owner[0].start < catalog[0].start)
+    assert.equal(source(owner[0].arguments[1]), '{ createClient: createProjectSolarScopeClient }')
+    assert.equal(calls('createProjectSolarScopeClient').length, 0, 'only the scope hook invokes the factory')
+    assert.equal(calls('createProjectSolarClient').length, 1)
+    assert.equal(calls('useProjectCheckoutController').length, 0)
+    const services = find((node) => node.type === 'VariableDeclarator' && node.id.name === 'catalogServices')[0]
+    assert.match(source(services), /get projectSolarClient\(\) \{ return projectSolarClientRef\.current \}/)
+    const intents = find((node) => node.type === 'VariableDeclarator' && node.id.name === 'PROJECT_SOLAR_INTENTS')[0]
+    assert.equal(source(intents.init), 'Object.freeze([])')
+    const imports = find((node) => node.type === 'ImportDeclaration').map((node) => node.source.value)
+    assert.ok(!imports.some((path) => /solarProjectDrawingModel|ProjectSolarReadPanel|ProjectSolarWorkspaceHost|useProjectCheckoutController|useProjectRunController/.test(path)))
+    const mounts = find((node) => node.type === 'JSXOpeningElement').map((node) => source(node.name))
+    assert.ok(!mounts.some((name) => /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
+    assert.equal(calls('refuseProjectSolar').length, 0)
+  })
+
+  it('R13F-06 catalog context branches on project mode and explicitly restores standalone scope', () => {
+    const effects = calls('useEffect')
+    const contextEffect = effects.find((node) => source(node.arguments[0]).includes('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({'))
+    const familiesEffect = effects.find((node) => source(node.arguments[0]).includes('setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)'))
+    assert.ok(contextEffect && familiesEffect)
+    // The effect exists exactly once and runs: it is a top-level statement of
+    // the block that declares the catalog hook, never duplicated, guarded by
+    // an expression, or nested inside a branch.
+    assert.equal(effects.filter((node) => source(node.arguments[0]).includes('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({')).length, 1)
+    const catalogBlocks = find((node) => node.type === 'BlockStatement'
+      && node.body.some((stmt) => stmt.type === 'ExpressionStatement' && stmt.expression === contextEffect)
+      && node.body.some((stmt) => stmt.type === 'VariableDeclaration' && stmt.declarations.some((decl) =>
+        decl.init && decl.init.type === 'CallExpression' && decl.init.callee.type === 'Identifier'
+        && decl.init.callee.name === 'useCatalogController')))
+    assert.equal(catalogBlocks.length, 1, 'the context effect is a statement beside the catalog hook')
+    for (const name of ['projectMode', 'projectSolar.ready', 'projectSolar.scope.binding', 'projectSolar.scope.authorityKey']) {
+      assert.ok(source(contextEffect.arguments[1]).includes(name), 'context dependency ' + name)
+    }
+    assert.ok(source(familiesEffect.arguments[1]).includes('projectMode'))
+    const invoke = (effect, inputs) => Function(...Object.keys(inputs), 'return (' + source(effect.arguments[0]) + ')()')(...Object.values(inputs))
+    const intents = Object.freeze([])
+    const binding = { drawing_id: 'canonical-artifact', input_version_id: 'canonical-version' }
+    for (const enabled of [true, false]) {
+      for (const profile of ['solar', 'cad']) {
+        for (const ready of [true, false]) {
+          const writes = []
+          const families = []
+          const inputs = { projectMode: true, projectSolar: { ready, scope: { binding, authorityKey: 'authority' } },
+            PROJECT_SOLAR_INTENTS: intents, ENV_SOLAR_SETTINGS_FORM: enabled, ENV_SOLAR_FLOW_RAIL: enabled,
+            mock: false, surfaceSlots: { toolbar: { profile } }, catalogRunContext: null, solarSettingsScope,
+            catalogController: { setContext: (context) => writes.push(context) },
+            setSolarFlowFamiliesDrawingId: (id) => families.push(id) }
+          invoke(contextEffect, inputs)
+          invoke(familiesEffect, inputs)
+          assert.deepEqual(writes, [{ solarBinding: ready ? binding : null, authorityKey: ready ? 'authority' : null, projectIntents: intents }])
+          assert.deepEqual(families, [null])
+        }
+        for (const mock of [true, false]) {
+          const writes = []
+          const families = []
+          const context = { drawingId: 'standalone', drawingVersion: 7, projectId: null }
+          const inputs = { projectMode: false, projectSolar: { ready: false, scope: {} }, PROJECT_SOLAR_INTENTS: intents,
+            ENV_SOLAR_SETTINGS_FORM: enabled, ENV_SOLAR_FLOW_RAIL: true, mock,
+            surfaceSlots: { toolbar: { profile } }, catalogRunContext: context, solarSettingsScope,
+            catalogController: { setContext: (value) => writes.push(value) }, setSolarFlowFamiliesDrawingId: (id) => families.push(id) }
+          invoke(contextEffect, inputs)
+          invoke(familiesEffect, inputs)
+          assert.equal(writes.length, 1)
+          const expected = solarSettingsScope({ enabled, mock, profile, context })
+          assert.deepEqual(writes[0], { solarBinding: undefined, authorityKey: undefined, projectIntents: undefined, ...(enabled ? expected : {}) })
+          assert.ok(Object.hasOwn(writes[0], 'solarBinding'))
+          assert.deepEqual(families, [expected.drawingId ?? null])
+        }
+      }
+    }
+  })
+})
 
 describe('A1b-2 stored Solar graph wiring', () => {
   const tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
@@ -1680,7 +1772,10 @@ describe('Solar settings form wiring', () => {
   })
 
   it('SF2 wiring the catalog controller context follows solarSettingsScope', () => {
-    assert.ok(appSource.includes('catalogController.setContext(solarSettingsScope('))
+    assert.match(appSource, new RegExp('catalogController\\.setContext\\(\\{\\s*solarBinding: undefined,\\s*authorityKey: undefined,\\s*projectIntents: undefined,\\s*\\.\\.\\.\\(ENV_SOLAR_SETTINGS_FORM \\? solarSettingsScope\\(\\{\\s*enabled: ENV_SOLAR_SETTINGS_FORM,\\s*mock,\\s*profile: surfaceSlots\\.toolbar\\.profile,\\s*context: catalogRunContext\\s*\\}\\) : \\{\\}\\),\\s*\\}\\)'))
+    assert.match(appSource, new RegExp('if \\(projectMode\\) \\{\\s+catalogController\\.setContext\\(\\{\\s+solarBinding: projectSolar\\.ready \\? projectSolar\\.scope\\.binding : null,\\s+authorityKey: projectSolar\\.ready \\? projectSolar\\.scope\\.authorityKey : null,\\s+projectIntents: PROJECT_SOLAR_INTENTS,'))
+    assert.ok(!appSource.includes('catalogController.setContext(solarSettingsScope('))
+    assert.equal(appSource.split('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({').length - 1, 1)
   })
 
   it('SF2 wiring a settings submit ties the run to its own intent and drawing', () => {
@@ -1861,8 +1956,12 @@ describe('Solar step rail wiring', () => {
     assert.ok(props.includes('familiesDrawingId={solarFlowFamiliesDrawingId}'))
     const record = appSource.indexOf('setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)')
     const scope = appSource.lastIndexOf('const scope = solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext })', record)
-    const handed = appSource.indexOf('catalogController.setContext(solarSettingsScope(')
+    const handed = appSource.indexOf('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({')
+    assert.equal(appSource.indexOf('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({', handed + 1), -1)
     assert.ok(handed >= 0 && scope > handed && record > scope)
+    assert.match(appSource.slice(handed, record), new RegExp('if \\(projectMode\\) \\{\\s+setSolarFlowFamiliesDrawingId\\(null\\)\\s+return'))
+    assert.ok(appSource.includes('solarBinding: projectSolar.ready ? projectSolar.scope.binding : null'))
+    assert.ok(appSource.includes('authorityKey: projectSolar.ready ? projectSolar.scope.authorityKey : null'))
   })
 
   it('CORR1 wiring the dismiss path and the refused confirms clear solarFlowPending', () => {

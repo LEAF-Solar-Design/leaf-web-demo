@@ -192,6 +192,9 @@ import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
 import useCheckoutController from './controllers/checkout/useCheckoutController.js'
+import { useProjectSolarScope } from './solar/useProjectSolarScope.js'
+import { createProjectSolarClient } from './api.js'
+import { composerDraftAccountScope } from './lib/composerDraft.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
 import { useDrawingIdentity, useDrawingScopeReset } from './drawing/DrawingIdentityProvider.jsx'
 import { hasDrawingSelection } from './drawing/drawingIdentity.js'
@@ -305,6 +308,7 @@ function SignedOutGate({ onDemo, onSignIn }) {
 
 
 const SOLAR_SETTINGS_LOADERS = ENV_SOLAR_SETTINGS_FORM ? solarSettingsLoaders({ getDrawingIntake, getDrawingVersions }) : null
+const PROJECT_SOLAR_INTENTS = Object.freeze([])
 
 // Mount the upload controller only on the live material pane. Its policy
 // request must not run when the drawing profiles or offline demo boot.
@@ -463,6 +467,7 @@ export default function App() {
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [solarFormTool, setSolarFormTool] = useState(null)
+  const projectModeRef = useRef(false)
   const settingsRunRef = useRef(null)
   const [settingsRunResult, setSettingsRunResult] = useState(null)
   // The settings run result belongs to one open form: any change of the open Solar form (a close from the ribbon,
@@ -933,10 +938,51 @@ export default function App() {
   // (unknown/undeployed policy resolves permissive, like every other gate).
   const canConverse = entOf('converse')
   const agentDisabled = mock || !canConverse
+  const catalogRunContext = useMemo(() => createCatalogRunContext({
+    tenantId: tenant || config.tenant,
+    orgId,
+    projectId: openProjectId || null,
+    workspace,
+    selectedVersionId: canonicalVersionId,
+    drawingState,
+    fallbackDrawingId: REQUESTED_DRAWING_ID,
+  }), [tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState])
+  const catalogRunContextRef = useRef(catalogRunContext)
+  catalogRunContextRef.current = catalogRunContext
+  const projectMode = !mock && !!openProjectId
+  projectModeRef.current = projectMode
+  const projectSolarAccountScope = composerDraftAccountScope()
+  const projectSolarSession = {
+    authenticated: !mock && session.status === 'active',
+    actorId: projectSolarAccountScope && projectSolarAccountScope !== 'guest' ? projectSolarAccountScope : null,
+    generation: session.generation,
+  }
+  const projectSolarClientRef = useRef(null)
+  const createProjectSolarScopeClient = useCallback(() => {
+    const client = createProjectSolarClient()
+    projectSolarClientRef.current = client
+    return client
+  }, [])
+  const projectSolar = useProjectSolarScope(
+    { projectMode, runContext: catalogRunContext, session: projectSolarSession },
+    { createClient: createProjectSolarScopeClient },
+  )
+  useEffect(() => {
+    const controller = session.controller
+    let generation = controller.getSnapshot().generation
+    return controller.subscribe(() => {
+      const next = controller.getSnapshot()
+      if (mock || next.status !== 'active' || next.generation !== generation) {
+        projectSolarClientRef.current?.setScope(null, null)
+      }
+      generation = next.generation
+    })
+  }, [session.controller, mock])
   const catalogServices = useMemo(() => ({
     getTools,
     getCapabilities,
     routePrompt: nlPrompt,
+    get projectSolarClient() { return projectSolarClientRef.current },
   }), [])
   const catalogAdapters = useMemo(() => ({
     humanizeError,
@@ -1017,7 +1063,13 @@ export default function App() {
   const { state: catalogState, actions: catalogActions, controller: catalogController } = useCatalogController({
     services: catalogServices,
     adapters: catalogAdapters,
-    context: { mock, entitlements, running: false, agentDisabled },
+    context: { mock, entitlements, running: false, agentDisabled,
+      ...(projectMode ? {
+        solarBinding: projectSolar.ready ? projectSolar.scope.binding : null,
+        authorityKey: projectSolar.ready ? projectSolar.scope.authorityKey : null,
+        projectIntents: PROJECT_SOLAR_INTENTS,
+      } : {}),
+    },
   })
   const {
     tools,
@@ -1764,18 +1816,6 @@ export default function App() {
     if (typeof givenName !== 'string' || !givenName.trim()) return
     return createWorkspaceProject(givenName)
   }, [createWorkspaceProject])
-
-  const catalogRunContext = useMemo(() => createCatalogRunContext({
-    tenantId: tenant || config.tenant,
-    orgId,
-    projectId: openProjectId || null,
-    workspace,
-    selectedVersionId: canonicalVersionId,
-    drawingState,
-    fallbackDrawingId: REQUESTED_DRAWING_ID,
-  }), [tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState])
-  const catalogRunContextRef = useRef(catalogRunContext)
-  catalogRunContextRef.current = catalogRunContext
 
   const prepareRunParams = useCallback((tool, params, options) => {
     const isWrite = (tool.capabilities || []).includes('drawing.write')
@@ -3092,16 +3132,34 @@ export default function App() {
   // Guest-upload policy fails closed for every standalone caller, including signed-in accounts.
   const standalonePolicyReady = standaloneToken !== null && standalonePolicy?.token === standaloneToken && standalonePolicy.ready === true
   useEffect(() => {
-    if (!ENV_SOLAR_SETTINGS_FORM) return
-    catalogController.setContext(solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext }))
-  }, [catalogController, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
+    if (projectMode) {
+      catalogController.setContext({
+        solarBinding: projectSolar.ready ? projectSolar.scope.binding : null,
+        authorityKey: projectSolar.ready ? projectSolar.scope.authorityKey : null,
+        projectIntents: PROJECT_SOLAR_INTENTS,
+      })
+      return
+    }
+    // Leaving a project restores standalone scope in one write, so the controller never loads the
+    // previous drawing's catalog between clearing the binding and naming the new drawing.
+    catalogController.setContext({
+      solarBinding: undefined,
+      authorityKey: undefined,
+      projectIntents: undefined,
+      ...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext }) : {}),
+    })
+  }, [catalogController, projectMode, projectSolar.ready, projectSolar.scope.binding, projectSolar.scope.authorityKey, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   // Guided Solar step rail: record the drawing the effect above just handed the catalog controller, so the
   // rail knows which drawing its families belong to and never files one drawing's readiness under another.
   useEffect(() => {
+    if (projectMode) {
+      setSolarFlowFamiliesDrawingId(null)
+      return
+    }
     if (!ENV_SOLAR_FLOW_RAIL) return
     const scope = solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext })
     setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)
-  }, [mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
+  }, [projectMode, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   // The Browser board's panel slot hosts the project panels; CAD and Solar Start keep them inline because they pass no panel.
   const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'

@@ -95,7 +95,7 @@ export function shellWiring(source, shell, owner, extra = {}) {
     agentSessionId: 'session-1', sessionId: 'session-1', agentTurns: [], turns: [],
     boardConversation: false, setProjectPane: noop, setClaudeOpen: noop, setRightView: noop,
     onAttachAgentJob: noop, refreshJobs: noop, closeStartForChange: noop, attachJob: noop,
-    engineDirty: false, writeLocked: false,
+    engineDirty: false, writeLocked: false, projectMode: false,
     ...extra,
   }
   const bind = (node) => {
