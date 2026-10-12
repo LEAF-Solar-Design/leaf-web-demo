@@ -182,9 +182,12 @@ export function createProjectSolarRunController({ projectClient, onOutcome = () 
     return result
   }
   async function request(run, submitting) {
-    const result = await wait(run, () => submitting
-      ? projectClient.submitRun(run.preparedIntent, { signal: run.controller.signal })
-      : projectClient.readJob(run.jobId, { tool: run.tool, signal: run.controller.signal }))
+    const result = await wait(run, () => {
+      if (!submitting) return projectClient.readJob(run.jobId, { tool: run.tool, signal: run.controller.signal })
+      // From here the request may reach the server, so no interruption can answer that nothing happened.
+      run.sent = true
+      return projectClient.submitRun(run.preparedIntent, { signal: run.controller.signal })
+    })
     const parsed = result.lost ? { kind: 'lost' } : transport(result.value, submitting)
     const stopped = check(run)
     if (stopped) throw stopped
@@ -244,8 +247,9 @@ export function createProjectSolarRunController({ projectClient, onOutcome = () 
       }
     } catch (state) {
       const interruption = ['stale', 'aborted', 'outcome_unknown'].includes(state) ? state : 'outcome_unknown'
-      run.submission.resolve(local(interruption === 'stale' ? 'SIP_R7_SCOPE_STALE' :
-        interruption === 'aborted' ? 'SIP_R7_ABORTED' : 'SIP_R13B_OUTCOME_UNKNOWN'))
+      // A scope change or abort answers that nothing happened only when no submit request was ever made.
+      run.submission.resolve(local(run.sent || interruption === 'outcome_unknown' ? 'SIP_R13B_OUTCOME_UNKNOWN' :
+        interruption === 'stale' ? 'SIP_R7_SCOPE_STALE' : 'SIP_R7_ABORTED'))
       finish(run, interruption === 'outcome_unknown' ? unknown(run.jobId) : outcome(interruption, run.jobId))
     }
   }
@@ -280,7 +284,7 @@ export function createProjectSolarRunController({ projectClient, onOutcome = () 
       if (!run.interruption && matches(run, binding, authorityKey)) return Promise.resolve(local('SIP_R13B_RUN_IN_PROGRESS'))
     }
     const run = { ...probe, tool, preparedIntent, callerSignal: signal, jobId: null,
-      deadline: Date.now() + PROJECT_SOLAR_RUN_BUDGET_MS, recovered: false, done: false,
+      deadline: Date.now() + PROJECT_SOLAR_RUN_BUDGET_MS, recovered: false, sent: false, done: false,
       interruption: null, cancel: deferred(), submission: deferred(), settlement: deferred() }
     active.add(run)
     association = run

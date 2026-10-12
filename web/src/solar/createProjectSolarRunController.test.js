@@ -634,4 +634,152 @@ describe('bounded project Solar run controller', () => {
     const client = realClient(vi.fn(async () => http(job({ input_version_id: X }))))
     expect(await client.readJob(J, { tool: T })).toEqual(local('SIP_R7_RESPONSE_INVALID'))
   })
+  it('R13B-52 answers outcome unknown when the scope changes after the submit request starts', async () => {
+    for (const change of ['binding', 'authority', 'current']) {
+      let current = true
+      const run = setup({ isCurrent: () => current })
+      const sending = deferred()
+      run.projectClient.submitRun.mockReturnValueOnce(sending.promise)
+      const submitted = run.start()
+      const settled = run.settled()
+      await drain()
+      expect(run.projectClient.submitRun).toHaveBeenCalledOnce()
+      if (change === 'binding') run.change({ ...B, input_version_id: X })
+      else if (change === 'authority') run.change(B, 'session-2')
+      else {
+        current = false
+        await vi.advanceTimersByTimeAsync(PROJECT_SOLAR_RUN_POLL_MS)
+      }
+      expect(await submitted).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+      expect(await settled).toEqual(interrupted('stale', null))
+      expect(run.projectClient.submitRun.mock.calls[0][1].signal.aborted).toBe(true)
+      sending.resolve(accepted)
+      await drain()
+      expect(run.projectClient.submitRun).toHaveBeenCalledOnce()
+      expect(run.projectClient.readJob).not.toHaveBeenCalled()
+      expect(run.onOutcome).not.toHaveBeenCalled()
+      run.controller.dispose()
+    }
+  })
+  it('R13B-53 answers outcome unknown when the caller aborts or disposes after the submit request starts', async () => {
+    for (const stop of ['abort', 'dispose']) {
+      const abort = new AbortController()
+      const run = setup({ signal: abort.signal })
+      const sending = deferred()
+      run.projectClient.submitRun.mockReturnValueOnce(sending.promise)
+      const submitted = run.start()
+      const settled = run.settled()
+      await drain()
+      expect(run.projectClient.submitRun).toHaveBeenCalledOnce()
+      if (stop === 'abort') abort.abort()
+      else run.controller.dispose()
+      expect(await submitted).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+      expect(await settled).toEqual(interrupted('aborted', null))
+      expect(run.projectClient.submitRun.mock.calls[0][1].signal.aborted).toBe(true)
+      sending.resolve(accepted)
+      await drain()
+      expect(run.projectClient.submitRun).toHaveBeenCalledOnce()
+      expect(run.projectClient.readJob).not.toHaveBeenCalled()
+      expect(run.onOutcome).not.toHaveBeenCalled()
+      run.controller.dispose()
+    }
+  })
+  it('R13B-54 reads a sent request the transport answered stale or aborted as outcome unknown', async () => {
+    for (const [reason, state] of [['SIP_R7_SCOPE_STALE', 'stale'], ['SIP_R7_ABORTED', 'aborted']]) {
+      const run = setup()
+      run.projectClient.submitRun.mockResolvedValueOnce(local(reason))
+      const submitted = run.start()
+      const settled = run.settled()
+      expect(await submitted).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+      expect(await settled).toEqual(interrupted(state, null))
+      await drain()
+      expect(run.projectClient.submitRun).toHaveBeenCalledOnce()
+      expect(run.projectClient.readJob).not.toHaveBeenCalled()
+      expect(run.onOutcome).not.toHaveBeenCalled()
+      run.controller.dispose()
+    }
+  })
+  it('R13B-55 keeps the nothing-happened answer when no submit request was made', async () => {
+    for (const stop of ['binding', 'abort', 'dispose']) {
+      const abort = new AbortController()
+      const run = setup({ signal: abort.signal })
+      const submitted = run.start()
+      const settled = run.settled()
+      if (stop === 'binding') run.change({ ...B, input_version_id: X })
+      else if (stop === 'abort') abort.abort()
+      else run.controller.dispose()
+      expect(await submitted).toEqual(local(stop === 'binding' ? 'SIP_R7_SCOPE_STALE' : 'SIP_R7_ABORTED'))
+      expect(await settled).toEqual(interrupted(stop === 'binding' ? 'stale' : 'aborted', null))
+      await drain()
+      expect(run.projectClient.submitRun).not.toHaveBeenCalled()
+      expect(run.projectClient.readJob).not.toHaveBeenCalled()
+      expect(run.onOutcome).not.toHaveBeenCalled()
+      run.controller.dispose()
+    }
+  })
+  it('R13B-56 keeps outcome unknown when the scope changes or the caller stops during submit recovery', async () => {
+    for (const stop of ['binding', 'abort', 'dispose']) {
+      const abort = new AbortController()
+      const run = setup({ signal: abort.signal })
+      const recovering = deferred()
+      run.projectClient.submitRun.mockResolvedValueOnce(loss).mockReturnValueOnce(recovering.promise)
+      const submitted = run.start()
+      let answered = false
+      submitted.then(() => { answered = true })
+      const settled = run.settled()
+      await drain()
+      expect(run.projectClient.submitRun).toHaveBeenCalledTimes(2)
+      // The stop must land while the submission is still pending, or the row proves nothing.
+      expect(answered).toBe(false)
+      if (stop === 'binding') run.change({ ...B, input_version_id: X })
+      else if (stop === 'abort') abort.abort()
+      else run.controller.dispose()
+      expect(await submitted).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+      expect(await settled).toEqual(interrupted(stop === 'binding' ? 'stale' : 'aborted', null))
+      recovering.resolve(accepted)
+      await drain()
+      expect(run.projectClient.submitRun).toHaveBeenCalledTimes(2)
+      expect(run.projectClient.readJob).not.toHaveBeenCalled()
+      expect(run.onOutcome).not.toHaveBeenCalled()
+      run.controller.dispose()
+    }
+  })
+  it('R13B-57 keeps outcome unknown at every point between the first answer and the recovery submit', async () => {
+    for (const stop of ['binding', 'abort', 'dispose']) {
+      const reached = new Set()
+      for (let offset = 0; offset <= 24; offset += 1) {
+        const abort = new AbortController()
+        const run = setup({ signal: abort.signal })
+        const first = deferred()
+        const recovering = deferred()
+        run.projectClient.submitRun.mockReturnValueOnce(first.promise).mockReturnValueOnce(recovering.promise)
+        const submitted = run.start()
+        let answered = false
+        submitted.then(() => { answered = true })
+        const settled = run.settled()
+        await drain()
+        expect(run.projectClient.submitRun).toHaveBeenCalledTimes(1)
+        first.resolve(loss)
+        for (let i = 0; i < offset; i += 1) await Promise.resolve()
+        const callsAtStop = run.projectClient.submitRun.mock.calls.length
+        const answeredAtStop = answered
+        reached.add(callsAtStop)
+        if (stop === 'binding') run.change({ ...B, input_version_id: X })
+        else if (stop === 'abort') abort.abort()
+        else run.controller.dispose()
+        // The first request was made, so no stop after it may answer that nothing happened.
+        expect(answeredAtStop).toBe(false)
+        expect(await submitted).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+        expect(await settled).toEqual(interrupted(stop === 'binding' ? 'stale' : 'aborted', null))
+        recovering.resolve(accepted)
+        await drain()
+        expect(run.projectClient.submitRun.mock.calls.length).toBe(callsAtStop)
+        expect(run.projectClient.readJob).not.toHaveBeenCalled()
+        expect(run.onOutcome).not.toHaveBeenCalled()
+        run.controller.dispose()
+      }
+      // The sweep began before the recovery submit and ran past it, so it covered the whole interval.
+      expect([...reached].sort()).toEqual([1, 2])
+    }
+  })
 })
