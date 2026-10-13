@@ -2387,7 +2387,7 @@ def build_suites() -> List[Suite]:
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
         Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 17),
+              SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 34),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for

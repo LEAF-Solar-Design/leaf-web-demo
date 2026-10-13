@@ -112,9 +112,35 @@ def _password_file(password):
         path.unlink(missing_ok=True)
 
 
+@contextmanager
+def _start_lock(run_id):
+    # Keep the inode: deleting a lock path could give contenders different locks.
+    path = Path(tempfile.gettempdir()) / ("leafproof-" + run_id + ".lock")
+    with open(path, "a+b") as stream:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise RuntimeError("run already exists") from None
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
 def _inventory(run_id, docker):
     selected = {"containers": [], "networks": []}
     prefix = "leafproof-" + run_id
+    names = {"containers": {prefix + "-pg", prefix + "-relay"}, "networks": {prefix}}
     for kind, command in (("containers", ["ps", "-a"]), ("networks", ["network", "ls"])):
         common = ["--format", "{{json .}}"]
         owned = docker([*command, "--filter", f"label={RUN_LABEL}={run_id}",
@@ -125,9 +151,9 @@ def _inventory(run_id, docker):
             name = row.get("Names", row.get("Name", ""))
             labels = dict(item.split("=", 1) for item in row.get("Labels", "").split(",") if "=" in item)
             matches = labels.get(RUN_LABEL) == run_id and labels.get(OWNER_LABEL) == OWNER
-            if name.startswith(prefix) and not matches:
+            if name in names[kind] and not matches:
                 raise RuntimeError("refusing cleanup: run name has foreign ownership labels")
-            if matches and name.startswith(prefix) and row["ID"] not in selected[kind]:
+            if matches and name in names[kind] and row["ID"] not in selected[kind]:
                 selected[kind].append(row["ID"])
     return selected
 
@@ -177,6 +203,7 @@ class PgAuthority:
         self._closing = threading.Event()
         self._transport_process = None
         self._transport_channel = None
+        self._created = {"containers": [], "networks": []}
 
     @classmethod
     def start(cls, run_id, **seams):
@@ -186,41 +213,55 @@ class PgAuthority:
         because the managed host relay uses multiprocessing's spawn context.
         """
         authority = cls(run_id, **seams)
+        with _start_lock(run_id):
+            return authority._start()
+
+    def _start(self):
         # A collision must not lead to adopting or deleting a pre-existing run.
         try:
-            existing = _inventory(run_id, authority._docker)
-            if any(existing.values()):
-                raise RuntimeError("run already exists")
+            existing = _inventory(self.run_id, self._docker)
         except Exception:
             raise RuntimeError("proof database run unavailable") from None
+        if any(existing.values()):
+            raise RuntimeError("run already exists")
         try:
-            authority._provision()
-            authority._start_transport()
+            self._provision()
+            self._start_transport()
             deadline = time.monotonic() + 60
             while True:
                 try:
-                    authority.readiness()
-                    return authority
+                    self.readiness()
+                    return self
                 except RuntimeError:
                     if time.monotonic() >= deadline:
                         raise RuntimeError("proof database readiness timed out") from None
                     time.sleep(0.2)
         except BaseException:
             try:
-                authority.stop()
+                self._stop_transport()
+                self._cleanup_created()
             except Exception:
                 raise RuntimeError("proof database start and cleanup failed") from None
             raise RuntimeError("proof database start failed") from None
 
     def _provision(self):
         labels = ["--label", f"{RUN_LABEL}={self.run_id}", "--label", f"{OWNER_LABEL}={OWNER}"]
-        self._docker(["network", "create", "--internal", *labels, self.name])
+        resource = self._docker(["network", "create", "--internal", *labels, self.name]).strip()
+        self._created["networks"].append(resource or self.name)
         with _password_file(self._password) as envfile:
-            self._docker(["run", "-d", "--name", self.name + "-pg", *labels,
+            resource = self._docker(["run", "-d", "--name", self.name + "-pg", *labels,
                           "--network", self.name, "--tmpfs", "/var/lib/postgresql/data:rw",
-                          "--env-file", envfile, "--env", "POSTGRES_DB=leaf", "postgres:16"])
-        self._docker(["run", "-d", "--name", self.name + "-relay", *labels,
-                      "--network", self.name, "python:3.12", "sleep", "infinity"])
+                          "--env-file", envfile, "--env", "POSTGRES_DB=leaf", "postgres:16"]).strip()
+            self._created["containers"].append(resource or self.name + "-pg")
+        resource = self._docker(["run", "-d", "--name", self.name + "-relay", *labels,
+                      "--network", self.name, "python:3.12", "sleep", "infinity"]).strip()
+        self._created["containers"].append(resource or self.name + "-relay")
+
+    def _cleanup_created(self):
+        for kind, command in (("containers", ["rm", "-f"]), ("networks", ["network", "rm"])):
+            for resource in list(self._created[kind]):
+                self._docker([*command, resource])
+                self._created[kind].remove(resource)
 
     def _listen(self):
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -319,8 +360,13 @@ class PgAuthority:
                     self._connections.discard(pair)
 
     def dsn(self):
-        return (f"postgresql://postgres:{quote(self._password, safe='')}@127.0.0.1:{self.address[1]}"
-                "/leaf?sslmode=disable&connect_timeout=5")
+        return (f"postgresql://postgres:{quote(self._password, safe='')}@{self.address[0]}:{self.address[1]}"
+                f"/leaf?hostaddr={self.address[0]}&sslmode=disable&gssencmode=disable&connect_timeout=5")
+
+    def _connect_args(self):
+        return {"host": self.address[0], "hostaddr": self.address[0], "port": self.address[1],
+                "dbname": "leaf", "user": "postgres", "password": self._password,
+                "sslmode": "disable", "gssencmode": "disable", "connect_timeout": 5}
 
     def redacted_dsn(self):
         return self.dsn().replace(quote(self._password, safe=""), "***")
@@ -329,7 +375,7 @@ class PgAuthority:
         try:
             import psycopg
             payload = bytes(range(256))
-            with psycopg.connect(self.dsn()) as conn:
+            with psycopg.connect(**self._connect_args()) as conn:
                 with conn.transaction():
                     actual, version = conn.execute(
                         "SELECT %s::bytea, current_setting('server_version')", (payload,)).fetchone()
@@ -382,7 +428,7 @@ def smoke(run_id):
         barrier = threading.Barrier(4)
         def transaction(index):
             begin = time.perf_counter()
-            with psycopg.connect(authority.dsn()) as conn:
+            with psycopg.connect(**authority._connect_args()) as conn:
                 with conn.transaction():
                     barrier.wait(timeout=20)
                     value = conn.execute("SELECT %s::int", (index,)).fetchone()[0]
@@ -394,14 +440,14 @@ def smoke(run_id):
         result["timings_s"]["four_connections"] = time.perf_counter() - begin
         begin = time.perf_counter()
         payload = secrets.token_bytes(1024 * 1024)
-        with psycopg.connect(authority.dsn()) as conn:
+        with psycopg.connect(**authority._connect_args()) as conn:
             with conn.transaction():
                 conn.execute("CREATE TABLE proof_binary (payload bytea NOT NULL)")
                 conn.execute("INSERT INTO proof_binary VALUES (%s)", (payload,))
                 assert bytes(conn.execute("SELECT payload FROM proof_binary").fetchone()[0]) == payload
         result["round_trip_bytes"] = len(payload)
         result["timings_s"]["one_mib"] = time.perf_counter() - begin
-        with psycopg.connect(authority.dsn()) as conn:
+        with psycopg.connect(**authority._connect_args()) as conn:
             outcome = {}
             def sleeper():
                 begin = time.perf_counter()
@@ -413,7 +459,7 @@ def smoke(run_id):
             thread = threading.Thread(target=sleeper)
             thread.start()
             # Observe the sleep on the server before cancelling it from this thread.
-            with psycopg.connect(authority.dsn()) as observer:
+            with psycopg.connect(**authority._connect_args()) as observer:
                 deadline = time.monotonic() + 15
                 while True:
                     observer.commit()
