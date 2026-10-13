@@ -191,7 +191,7 @@ async function receipt(hook) {
 }
 
 describe('App project Solar scope ownership', () => {
-  it('R13F-15b project mode renders refusal instead of legacy Solar hosts', () => {
+  it('R13F-15b project mode admits the workspace under the complete Solar fence', () => {
     const seats = nodes((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'SolarFlowSeat')
     expect(seats).toHaveLength(1)
     const expressions = seats[0].node.children.filter((node) => node.type === 'JSXExpressionContainer')
@@ -208,6 +208,8 @@ describe('App project Solar scope ownership', () => {
         props.readVersions?.(props.context?.drawingId)
         return React.createElement('div', { 'data-testid': name })
       })]))
+    const workspaceProbe = vi.fn(() => React.createElement('div', { 'data-testid': 'project-workspace' }))
+    const projectComponents = { ...components, ProjectSolarWorkspace: workspaceProbe, ProjectSolarGraphForm: () => null }
     const registry = { panels: 'registry' }
     components.SolarWorkspaceTools.workspacePanelsByFlow = registry
     const context = { drawingId: 'standalone-drawing', drawingVersion: 7, projectId: null }
@@ -233,11 +235,11 @@ describe('App project Solar scope ownership', () => {
       onSubmitSolarFlowStep: vi.fn(), onCloseSolarFlowStep: vi.fn(), projectSolarAppReason,
     }
     const reset = () => {
+      workspaceProbe.mockClear()
       Object.values(components).forEach((probe) => probe.mockClear())
       Object.values(loaders).forEach((loader) => loader.mockClear())
     }
-    // A separate route-error paragraph deliberately carries the same reason.
-    // Only the subtree produced by P can satisfy the project refusal check.
+    // Scope readiness is owned by the workspace; App owns the complete host fence.
     for (const ready of [true, false]) {
       for (const running of [true, false]) {
         for (const routeErr of [null, projectSolarAppReason('project_unavailable')]) {
@@ -246,17 +248,25 @@ describe('App project Solar scope ownership', () => {
               for (const ENV_SOLAR_SETTINGS_FORM of [true, false]) {
                 for (const ENV_SOLAR_FLOW_RAIL of [true, false]) {
                   reset()
-                  const variant = { ...inputs, projectMode: true, projectSolar: { ready }, running, routeErr,
+                  const solarFlowSeated = ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && ENV_SOLAR_FLOW_RAIL && profile === 'solar'
+                  const variant = { ...inputs, projectMode: true, solarFlowSeated, projectSolar: { ready, scope: { authorityKey: 'test', binding: null } },
+                    projectSolarWorkspaceRef: { current: null }, phoneViewport: false, catalogState: {}, projectSolarRuntime: {},
+                    mintCorrelationId: vi.fn(), onOpenProjectSolarTool: vi.fn(), onCloseProjectSolarTool: vi.fn(), running, routeErr,
                     surfaceSlots: { toolbar: { profile } }, ENV_CAD_EDIT, ENV_SOLAR_SETTINGS_FORM, ENV_SOLAR_FLOW_RAIL }
                   const view = render(React.createElement(React.Fragment, null,
                     React.createElement('p', { role: 'status' }, routeErr),
-                    React.createElement('section', { 'data-testid': 'project-host-branch' }, element(branch, variant, components))))
+                    React.createElement('section', { 'data-testid': 'project-host-branch' }, element(branch, variant, projectComponents))))
                   const subtree = view.getByTestId('project-host-branch')
                   const statuses = subtree.querySelectorAll('p[role="status"]')
-                  expect(statuses).toHaveLength(1)
-                  expect(statuses[0].textContent).toBe(projectSolarAppReason('project_unavailable'))
-                  expect(statuses[0].getAttribute('aria-live')).toBe('polite')
-                  expect(subtree.textContent).toBe(projectSolarAppReason('project_unavailable'))
+                  expect(statuses).toHaveLength(solarFlowSeated ? 0 : 1)
+                  if (solarFlowSeated) {
+                    expect(workspaceProbe).toHaveBeenCalledOnce()
+                    expect(subtree.querySelector('[data-testid="project-workspace"]')).not.toBeNull()
+                  } else {
+                    expect(workspaceProbe).not.toHaveBeenCalled()
+                    expect(statuses[0].textContent).toBe(projectSolarAppReason('project_unavailable'))
+                    expect(statuses[0].getAttribute('aria-live')).toBe('polite')
+                  }
                   Object.values(components).forEach((probe) => expect(probe).not.toHaveBeenCalled())
                   Object.values(loaders).forEach((loader) => expect(loader).not.toHaveBeenCalled())
                   view.unmount()

@@ -193,11 +193,13 @@ import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
 import useCheckoutController from './controllers/checkout/useCheckoutController.js'
 import { useProjectCheckoutController } from './controllers/useProjectCheckoutController.js'
-import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
+import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason } from './solar/solarProjectAppModel.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { useProjectSolarScope } from './solar/useProjectSolarScope.js'
 import { useAppProjectSolarRuntime } from './solar/useAppProjectSolarRuntime.js'
 import { projectSolarDrawingView } from './solar/solarProjectDrawingModel.js'
+import ProjectSolarWorkspace from './solar/ProjectSolarWorkspace.jsx'
+import ProjectSolarGraphForm from './solar/ProjectSolarGraphForm.jsx'
 import { createProjectSolarClient } from './api.js'
 import { composerDraftAccountScope } from './lib/composerDraft.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
@@ -430,6 +432,13 @@ function StandaloneMaterialUpload({ token, pane, selection, getContext, onPolicy
 // The engine view mounts one layout pass after the standalone Viewer does. A standalone Viewer mount
 // (the first render, or a project closing) clears any override in its first effect, so an engine
 // document already parsed is applied after that clear instead of before it (R13-G2a read, finding 1).
+const PROJECT_SOLAR_SUPPORTED_TOOLS = new Set([
+  'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
+  'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing',
+  'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
+  'solar-electrical-schedules', 'solar-cable-export',
+])
+
 function useEngineViewArmed(projectMode) {
   const [armed, setArmed] = useState(false)
   useLayoutEffect(() => { setArmed(!projectMode) }, [projectMode])
@@ -3444,6 +3453,47 @@ export default function App() {
       : null)
     : solarOverlayStatusOf(solarOverlayReason)
   const solarFlowSeated = ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar'
+  const projectSolarHostEnabled = projectMode && solarFlowSeated
+  const projectSolarWorkspaceRef = useRef(null)
+  const projectSolarOpenerRef = useRef(null)
+  const projectSolarRows = (() => {
+    const receipt = catalogState.projectCatalog
+    try {
+      if (!projectMode || !projectSolar.ready || !projectSolar.isCurrent()
+        || receipt?.client !== projectSolar.projectClient
+        || receipt?.authorityKey !== projectSolar.scope.authorityKey
+        || !sameSolarDrawingBinding(receipt?.binding, projectSolar.scope.binding)
+        || receipt.isCurrent() !== true) return []
+      return receipt.families.flatMap(family => family.capabilities)
+        .filter(row => typeof row?.name === 'string' && row.name.startsWith('solar-'))
+        .filter((row, index, rows) => rows.findIndex(item => item.name === row.name) === index)
+    } catch { return [] }
+  })()
+  function onOpenProjectSolarTool(row) {
+    if (!projectSolarHostEnabled || !projectModeRef.current
+      || !projectSolarRows.includes(row) || !PROJECT_SOLAR_SUPPORTED_TOOLS.has(row.name)
+      || !projectSolarRuntime.onOpenTool(row)) return false
+    projectSolarOpenerRef.current = document.activeElement
+    returnToDrawing()
+    if (phoneViewport) setStudioDrawer('none')
+    return true
+  }
+  function onCloseProjectSolarTool() {
+    if (!projectSolarHostEnabled || !projectSolar.isCurrent()) return
+    projectSolarRuntime.onClose()
+    const opener = projectSolarOpenerRef.current
+    projectSolarOpenerRef.current = null
+    if (opener?.isConnected) opener.focus()
+    else projectSolarWorkspaceRef.current?.focus()
+  }
+  useLayoutEffect(() => {
+    if (!projectSolarHostEnabled || !projectSolarRuntime.openTool) return
+    const host = projectSolarWorkspaceRef.current
+    const field = host?.querySelector('.project-solar-workspace-editor input:not([disabled]), .project-solar-workspace-editor select:not([disabled]), .project-solar-workspace-editor textarea:not([disabled]), .project-solar-workspace-editor button:not([disabled])')
+    ;(field || host)?.focus()
+  }, [projectSolarHostEnabled, projectSolarRuntime.openTool])
+  useEscapeOwner('project-solar-form', projectSolarHostEnabled && !!projectSolarRuntime.openTool,
+    onCloseProjectSolarTool, { layer: 'edit', scope: projectSolarWorkspaceRef, scoped: true })
   useEffect(() => {
     if (!(ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar')) {
       setSolarFlow(DEFAULT_SOLAR_FLOW)
@@ -3962,7 +4012,43 @@ export default function App() {
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
     pushViewSnapshot, lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
-  const ribbonClusters = ribbon.clusters
+  const ribbonClusters = (() => {
+    if (!projectMode) return ribbon.clusters
+    const presented = new Set()
+    const projectTool = (row, fallback) => {
+      const tool = { ...fallback, id: row?.name || fallback.id,
+        label: row?.label || fallback.label, text: row?.label || fallback.text,
+        controls: 'solar-tool-form', expanded: !!row && projectSolarRuntime.openTool === row,
+        onClick: undefined }
+      if (!row) return { ...tool, disabled: true, reason: PROJECT_SOLAR_APP_REASONS.project_tools_unavailable }
+      if (!PROJECT_SOLAR_SUPPORTED_TOOLS.has(row.name)) {
+        return { ...tool, disabled: true, reason: PROJECT_SOLAR_APP_REASONS.unsupported_form }
+      }
+      if (!projectSolarHostEnabled) {
+        return { ...tool, disabled: true, reason: PROJECT_SOLAR_APP_REASONS.project_unavailable }
+      }
+      if (projectSolarRuntime.busy) return { ...tool, disabled: true, reason: REASONS.running }
+      return { ...tool, disabled: false, reason: '', onClick: () => onOpenProjectSolarTool(row) }
+    }
+    const clusters = ribbon.clusters.map(cluster => ({ ...cluster,
+      tools: (cluster.tools || []).filter(tool => tool.id !== 'solar-strings').map(tool => {
+        if (typeof tool.id !== 'string' || !tool.id.startsWith('solar-')
+          || tool.id === 'solar-clear-selection') return tool
+        const row = projectSolarRows.find(item => item.name === tool.id)
+        if (row) presented.add(row.name)
+        return projectTool(row, tool)
+      }),
+    }))
+    if (projectSolarHostEnabled && activeRibbonTab === 'solar') {
+      const missing = projectSolarRows.filter(row => !presented.has(row.name))
+      if (missing.length) clusters.push({ id: 'project-solar-tools', label: 'Solar', kind: 'group',
+        tools: missing.map(row => projectTool(row, {
+          id: row.name, label: row.name, text: row.label || row.name, size: 'small',
+        })),
+      })
+    }
+    return clusters
+  })()
 
   // Slice 10b: the palette's action rows, read straight off `ribbon`'s own
   // view/version/rail/author fields — NOT a second ctx or a second reason
@@ -4668,7 +4754,32 @@ export default function App() {
             </p>
           )}
           {projectMode ? (
-            <p role="status" aria-live="polite">
+            solarFlowSeated ? (
+              <div id="solar-tool-form" ref={projectSolarWorkspaceRef} tabIndex={-1}
+                style={phoneViewport ? { maxHeight: '40dvh', overflowY: 'auto', flexShrink: 0 } : undefined}>
+                <ProjectSolarWorkspace
+                  key={JSON.stringify([projectSolar.scope.authorityKey, projectSolar.scope.binding])}
+                  solarBinding={projectSolar.scope.binding}
+                  authorityKey={projectSolar.scope.authorityKey}
+                  projectClient={projectSolar.projectClient}
+                  projectCatalog={catalogState.projectCatalog}
+                  isCurrent={projectSolar.isCurrent}
+                  FlowRail={SolarFlowRail}
+                  StepEditor={SolarStepEditor}
+                  GraphForm={ProjectSolarGraphForm}
+                  newProjectIntentKey={mintCorrelationId}
+                  onProjectSubmit={projectSolarRuntime.onProjectSubmit}
+                  submissionSignal={projectSolarRuntime.submissionSignal}
+                  openTool={projectSolarRuntime.openTool}
+                  onOpenTool={onOpenProjectSolarTool}
+                  onClose={onCloseProjectSolarTool}
+                  busy={projectSolarRuntime.busy}
+                  projectRunMemory={projectSolarRuntime.projectRunMemory}
+                  projectPending={projectSolarRuntime.projectPending}
+                  projectOutcome={projectSolarRuntime.projectOutcome}
+                />
+              </div>
+            ) : <p role="status" aria-live="polite">
               {projectSolarAppReason('project_unavailable')}
             </p>
           ) : (
