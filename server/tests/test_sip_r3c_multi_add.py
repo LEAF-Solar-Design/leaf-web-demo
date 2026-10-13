@@ -346,8 +346,15 @@ def test_sip_r3c_multi_add_refusals(memory, graph, monkeypatch):
         malformed.update(changes)
         refused(code, lambda: prepare(memory, TOOL, M, altered(ctx, malformed)))
     assert (ctx.intake, memory.versions, memory.blobs, memory.head) == before
+    # A manual sizing record that no longer matches the graph it labels is refused as
+    # rejected custody before the tool loads (R14-C); an honestly unsized graph has no record.
+    inconsistent = ctx.graph
+    inconsistent["settings"]["panels_in_sequence"] = 0
+    refused("SIP_R3_PROOF_REJECTED", lambda: prepare(memory, TOOL, M, altered(ctx, inconsistent)))
     unsized = ctx.graph
     unsized["settings"]["panels_in_sequence"] = 0
+    unsized["settings"]["global_string_sizing_confirmed"] = False
+    del unsized["settings"]["extra"]["string_sizing"]
     refused("STRING_LENGTH_NOT_SIZED", lambda: prepare(memory, TOOL, M, altered(ctx, unsized)))
     exhausted = ctx.graph
     exhausted["settings"]["string_number"] = 1_000_000

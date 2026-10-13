@@ -174,7 +174,7 @@ def validate_params(params):
         raise CloudError("cloud_request_invalid", 400) from None
 
 
-def post_string_length(request, grant):
+def post_string_length(request, grant, *, preserve_uncertainty=False):
     try:
         deadline = time.monotonic() + 50
         with requests.post(
@@ -196,6 +196,8 @@ def post_string_length(request, grant):
                     raise CloudError("cloud_response_invalid", 502)
             return bytes(raw)
     except requests.RequestException:
+        if preserve_uncertainty:
+            raise CloudError("sizing_outcome_unknown", 502) from None
         raise CloudError("cloud_upstream_failure", 502) from None
 
 

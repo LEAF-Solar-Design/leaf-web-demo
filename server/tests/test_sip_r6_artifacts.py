@@ -29,6 +29,7 @@ def lane(monkeypatch):
 
 
 def immutable(s, monkeypatch):
+    monkeypatch.setattr(s, "custody_patch", monkeypatch, raising=False)
     def put(key, content):
         s.writes.append(key)
         if key in s.blobs and s.blobs[key] != content:
@@ -40,19 +41,20 @@ def immutable(s, monkeypatch):
 def string_source(s):
     ctx = reads.tools_cases.assigned_parent(s,
         equipment_cases.case.__wrapped__(design_cases.graph.__wrapped__()))
-    ctx = reads.tools_cases.commit(s, "solar-homeruns", {"expected_rev": 1}, ctx)[2]
+    ctx = reads.tools_cases.canonical_custody(s, s.custody_patch, ctx.graph)
+    ctx = reads.tools_cases.commit(s, "solar-homeruns", {"expected_rev": ctx.graph["rev"]}, ctx)[2]
     s.ctx = reads.tools_cases.commit(s, "solar-schedule",
-        {"expected_rev": 2, "insertion_point": [0, 0, 0]}, ctx)[2]
+        {"expected_rev": ctx.graph["rev"], "insertion_point": [0, 0, 0]}, ctx)[2]
     return s.ctx
 
 
 def global_source(s, monkeypatch):
     recorded = sizing_cases.passing.__wrapped__()
-    sizing_cases.service.__wrapped__(monkeypatch, recorded)
-    original = schedules_cases.build_i7(design_cases.graph.__wrapped__(), recorded)
-    s.set_parent(reads.tools_cases.embedded(original))
-    ctx = reads.graph_adapter.resolve_project_graph_context(s.context())
-    s.ctx = reads.tools_cases.commit(s, "solar-settings", {"expected_rev": original["rev"],
+    with monkeypatch.context() as patch:
+        sizing_cases.service.__wrapped__(patch, recorded)
+        original = schedules_cases.build_i7(design_cases.graph.__wrapped__(), recorded)
+    ctx = reads.tools_cases.canonical_custody(s, monkeypatch, original)
+    s.ctx = reads.tools_cases.commit(s, "solar-settings", {"expected_rev": ctx.graph["rev"],
         "project_changes": {"name": original["project"]["name"]}}, ctx)[2]
     return s.ctx
 

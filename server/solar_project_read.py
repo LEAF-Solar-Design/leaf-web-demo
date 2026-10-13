@@ -113,6 +113,7 @@ def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name
         "input_intake_sha256": context.intake_sha256, "graph_sha256": context.graph_sha256,
         "tool": tool_name, "tool_manifest_sha256": catalog_digest, "parameters": normalized}
     request_sha = sha256(canonical_bytes(request)).hexdigest()
+    graph_adapter.require_project_sizing(context)
     sink = artifacts.ProjectArtifactSink(None, artifacts.project_artifact_binding(
         context, tool_name, catalog_digest, request_sha))
     output, data = local._read_output(tool_name, context.graph, normalized, sink)

@@ -2999,7 +2999,7 @@ def build_suites() -> List[Suite]:
               # 2026-10-10: sip-r6 adds one registration row (99 -> 100).
               # 2026-10-11: sip-r3c adds one registration row (100 -> 101).
               # 2026-10-11: sip-r3d adds one registration row (101 -> 102).
-              ["test_studio_walk_regression_gate.py"], 103),
+              ["test_studio_walk_regression_gate.py"], 232),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -3543,6 +3543,12 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_sip_r3d_conductors.py"), 12),
         Suite("server-sip-r14-evidence", "server canonical Solar pure sizing evidence",
               "pytest", SERVER, _py_pytest("tests/test_sip_r14_evidence.py"), 28),
+        Suite("server-sip-r14-admission", "server canonical Solar sizing admission",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r14_admission.py"), 8),
+        Suite("server-sip-r14-worker", "server canonical Solar sizing worker",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r14_worker.py"), 17),
+        Suite("server-sip-r14-proof", "server canonical Solar sizing custody proof",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r14_proof.py"), 23),
         # 2026-10-11: sip-r3d PostgreSQL acceptance floor: six conductor rows.
         Suite("platform-sip-r3d-conductors", "platform canonical Solar conductors",
               "pytest", REPO / "platform", _py_pytest("tests/test_sip_r3d_conductors.py"), 6,

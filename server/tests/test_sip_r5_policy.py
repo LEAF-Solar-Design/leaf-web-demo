@@ -232,14 +232,13 @@ def test_sip_r5_preview_manual_sizing(monkeypatch):
     result = request(a, params, tool_name="solar-size-strings", input_version_id=context.parent_version_id)
     assert result["status_code"] == 200 and result["content"]["admissible"] is True
     assert_refusal(request(a, {**params, "mode": "global"}, tool_name="solar-size-strings",
-        input_version_id=context.parent_version_id), "SIP_R3_SERVICE_EVIDENCE_REQUIRED",
-        message="Project Solar admission unavailable.")
+        input_version_id=context.parent_version_id), "INVALID_SIZING_COVERAGE")
     assert not a.accepted and a.events.count("entitlement") == 1
-    with pytest.raises(project.ProjectContextError) as caught:
+    with pytest.raises(GraphValidationError) as caught:
         service._validate_new_project_graph_params(context, "solar-size-strings",
             {**params, "mode": "global"}, checkout=a.s.lease,
             tool_manifest_sha256=r3b.manifest("solar-size-strings"))
-    assert str(caught.value) == "SIP_R3_SERVICE_EVIDENCE_REQUIRED"
+    assert caught.value.code == "INVALID_SIZING_COVERAGE"
 
 
 def test_sip_r5_preview_replay(monkeypatch):

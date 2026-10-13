@@ -127,6 +127,39 @@ def forbidden(*args, **kwargs):
     pytest.fail("unexpected content IO, builtin or outbound execution")
 
 
+def canonical_custody(s, monkeypatch, value):
+    """Publish a fresh canonical job/exchange via R14-B's real API at the SQL double."""
+    from test_sip_r14_worker import World
+    from test_sip_r14_evidence import SMALL
+    from uuid import uuid4
+    # Preserve existing historical versions while giving the new source its own import identity.
+    s.parent = deepcopy(s.parent)
+    s.parent.version_id = uuid4()
+    w = World(monkeypatch, memory=s, parent_graph=value)
+    monkeypatch.setattr(s, "cursor", w.cursor)
+    refused("SIP_R3_SERVICE_EVIDENCE_REQUIRED",
+            lambda: adapter.require_project_sizing(w.context, conn=w))
+    old = value["settings"]["extra"]["string_sizing"]["records"]
+    record = next(iter(old.values()))
+    if record["adapter_version"] == sizing.ADAPTER_VERSION:
+        request, response = deepcopy(record["request"]), deepcopy(record["response"])
+    else:
+        request = next(iter(w.params["requests"].values()))
+        response = deepcopy(SMALL)
+        response.update(voc=50, bvoc=0)
+        response["simulation_results"]["standard"]["string_length"] = value["settings"]["panels_in_sequence"]
+    w.params["requests"] = {value["settings"]["id"]: request}
+    w.raw = local.canonical_bytes(response)
+    w.run()
+    result = w.completed()
+    ctx = output(s, result)
+    # Legacy callers import another version through set_parent; never overwrite the proved parent.
+    s.parent = deepcopy(s.parent)
+    s.parent.version_id = uuid4()
+    s.set_parent(ctx.intake)
+    return adapter.resolve_project_graph_context(s.context())
+
+
 def test_sip_r3b_membership(memory):
     assert adapter.SUPPORTED_TOOLS == TOOLS
     for tool in ("solar-commit-solve", "solar-trackers-to-panel-groups", "solar-solaredge-accept",
@@ -271,8 +304,9 @@ def test_sip_r3b_feeders(memory):
     assert r["after_rev"] == 2
 
 
-def test_sip_r3b_homeruns(memory, case):
+def test_sip_r3b_homeruns(memory, case, monkeypatch):
     ctx = assigned_parent(memory, case)
+    ctx = canonical_custody(memory, monkeypatch, ctx.graph)
     params = {"expected_rev": ctx.graph["rev"]}
     expected = direct(ctx, "solar-homeruns", params)
     p = prepare(memory, "solar-homeruns", params, ctx)
@@ -282,8 +316,9 @@ def test_sip_r3b_homeruns(memory, case):
     assert r["after_rev"] == ctx.graph["rev"] + 1
 
 
-def test_sip_r3b_schedule(memory, case):
+def test_sip_r3b_schedule(memory, case, monkeypatch):
     ctx = assigned_parent(memory, case)
+    ctx = canonical_custody(memory, monkeypatch, ctx.graph)
     missing = ctx.intake
     missing["solar_design_graph"]["routes"] = []
     missing["solar_design_graph_sha256"] = local.digest(missing["solar_design_graph"])

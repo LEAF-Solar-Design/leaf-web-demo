@@ -462,7 +462,7 @@ def test_sip_r3b_chain_manual_power_boundary(memory):
     assert (len(memory.versions), memory.head) == before
 
 
-def test_sip_r3b_chain_refusals(memory, case):
+def test_sip_r3b_chain_refusals(memory, case, monkeypatch):
     ctx4 = rev4(memory)
     for operation in ("add", "multi-add", None, 5, ["add-string"]):
         params = {key: value for key, value in S.items() if key != "operation"}
@@ -504,6 +504,11 @@ def test_sip_r3b_chain_refusals(memory, case):
     placed = assigned_parent(memory, case)
     configs = [{key: item[key] for key in FIELDS} for item in placed.graph["inverters"]]
     configs[0]["position"] = [9, 9, 9]
+    refused("SIP_R3_SERVICE_EVIDENCE_REQUIRED", lambda: prepare(memory, EQUIPMENT, {
+        "expected_rev": placed.graph["rev"], "equipment": configs,
+        "assignments": placed.graph["extra"]["equipment"]["assignment_requests"]}, placed))
+    from test_sip_r3b_tools import canonical_custody
+    placed = canonical_custody(memory, monkeypatch, placed.graph)
     refused("EQUIPMENT_TRANSFORM_EDIT_UNSUPPORTED", lambda: prepare(memory, EQUIPMENT, {
         "expected_rev": placed.graph["rev"], "equipment": configs,
         "assignments": placed.graph["extra"]["equipment"]["assignment_requests"]}, placed))

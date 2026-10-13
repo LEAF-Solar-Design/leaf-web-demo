@@ -85,7 +85,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
     assert suites["platform"].expected == 359  # R14-B adds 31 PostgreSQL rows.
-    assert suites["gate-runner-selftest"].expected == 103  # R14-B registration row.
+    assert suites["gate-runner-selftest"].expected == 232  # Measured registered suite with R14C-32.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4151,6 +4151,29 @@ def test_sip_r3d_conductors_gate_registration():
             (r"PostgreSQL integration test requires DATABASE_URL",) if database else ())
         assert selection["mandatory_suite_ids"].count(suite_id) == 1
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_R14C_32_mandatory_registration():
+    """R14C-32 Exact mandatory IDs, paths, measured floors, placement and no skips."""
+    runner = _load_runner()
+    rows = runner.build_suites()
+    ids = [suite.id for suite in rows]
+    suites = {suite.id: suite for suite in rows}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    wanted = ["server-sip-r14-" + name for name in ("admission", "worker", "proof")]
+    for name, floor in zip(wanted, (8, 17, 23)):
+        suite = suites[name]
+        assert ids.count(name) == selection["mandatory_suite_ids"].count(name) == 1
+        assert suite.cwd == REPO / "server"
+        assert suite.argv == runner._py_pytest("tests/test_sip_r14_" + name.rsplit("-", 1)[1] + ".py")
+        assert suite.kind == "pytest" and suite.expected == floor
+        assert not suite.db_gated and not suite.uses_database
+        assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
+    for ordered in (ids, selection["mandatory_suite_ids"]):
+        start = ordered.index("server-sip-r14-evidence") + 1
+        assert ordered[start:start + 3] == wanted
+    assert selection["mandatory_suite_ids"][-1] == "platform-sip-r14-exchange"
+    assert suites["gate-runner-selftest"].expected == 232
 
 
 def test_sip_r14_exchange_gate_registration():

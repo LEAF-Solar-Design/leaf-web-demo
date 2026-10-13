@@ -23,6 +23,7 @@ import solar_tools
 from envelopes import ErrorCode, err_envelope, with_envelope_fields
 from leaf_platform.entitlements import EntitlementDenied
 from solar_design_graph import GraphValidationError
+from leaf_cloud_grants import CloudError
 
 
 _FAILURES = {
@@ -166,6 +167,13 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
         return _response(exc.response)
     except GraphValidationError as exc:
         return _refusal(exc.code, message="Canonical Solar request was refused.")
+    except CloudError as exc:
+        statuses = {"cloud_request_invalid": 400, "cloud_auth_missing": 401,
+                    "cloud_tenant_unauthorized": 403, "cloud_upstream_failure": 502,
+                    "cloud_response_invalid": 502}
+        reason = exc.classification if exc.classification in statuses else "cloud_upstream_failure"
+        return _refusal(reason.upper(), status=statuses[reason],
+                        message="Canonical Solar cloud sizing was refused.")
     except project.ProjectContextError as exc:
         reason = exc.reason_code if exc.reason_code in _FAILURES else "SIP_R1_INTERNAL"
         status, retryable = _FAILURES[reason]

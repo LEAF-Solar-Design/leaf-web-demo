@@ -15,6 +15,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import deps
 import solar_local_graph as local
 import solar_project_context as project
+import solar_project_sizing as sizing
+import solar_sizing_client as cloud
 import solar_tools
 from solar_design_graph import GraphValidationError, _bounded_json, validate_graph
 from solar_graph_seed import new_empty_graph, validate_seed_request
@@ -242,7 +244,7 @@ def _run_builtin(context, tool, graph, params, trusted, job_id):
     return local._load_builtin(tool).run(graph, params, **trusted)
 
 
-def _candidate(context, tool, params, initialized, job_id):
+def _candidate(context, tool, params, initialized, job_id, *, conn=None):
     before = _companion(context.intake)
     builtin_params = copy.deepcopy(params)
     base = None
@@ -263,8 +265,13 @@ def _candidate(context, tool, params, initialized, job_id):
     trusted = {}
     if "source_intake" in solar_tools.get(tool)["trusted_inputs"]:
         trusted["source_intake"] = _canonical_source_intake(context)
-    after = _run_builtin(context, tool, copy.deepcopy(base if initialized else before),
-                         builtin_params, trusted, job_id)
+    if not initialized and tool not in ("solar-settings", "solar-panels-from-drawing", SIZING_TOOL):
+        require_project_sizing(context, conn=conn)
+    if _global_sizing(tool, params) and conn is not None:
+        after = _stored_sizing_graph(context, job_id, conn)
+    else:
+        after = _run_builtin(context, tool, copy.deepcopy(base if initialized else before),
+                             builtin_params, trusted, job_id)
     if builtin_params.get("cancel") is True:
         raise GraphValidationError("GRAPH_COMMIT_CANCELLED")
     output = local.canonical_bytes(local.version_companion(context.intake, before, after))
@@ -272,7 +279,7 @@ def _candidate(context, tool, params, initialized, job_id):
 
 
 def _prepare(context, tool, params, *, checkout, job_id, attempt, tool_manifest_sha256,
-             initialized):
+             initialized, conn=None):
     if isinstance(context, project.VerifiedProjectContext):
         context = resolve_project_graph_context(context)
     if not isinstance(context, ProjectGraphContext):
@@ -286,7 +293,7 @@ def _prepare(context, tool, params, *, checkout, job_id, attempt, tool_manifest_
             or not isinstance(job_id, UUID) or type(attempt) is not int or attempt < 1):
         _reject()
     parameters = _parameters(context, params)
-    before, after, base, output = _candidate(context, tool, parameters, initialized, job_id)
+    before, after, base, output = _candidate(context, tool, parameters, initialized, job_id, conn=conn)
     request = {"schema": SCHEMA, "organization_id": str(context.organization_id),
         "project_id": str(context.project_id), "drawing_id": str(context.drawing_id),
         "parent_version_id": str(context.parent_version_id),
@@ -296,6 +303,10 @@ def _prepare(context, tool, params, *, checkout, job_id, attempt, tool_manifest_
         "parent_intake_sha256": context.intake_sha256,
         "before_graph_sha256": None if before is None else local.digest(before),
         "graph_project_id": after["project"]["id"], "initialized": initialized}
+    if _global_sizing(tool, parameters):
+        request["sizing_exchange"] = after["settings"]["extra"]["string_sizing"]["project_exchange"]
+        project.platform_link._canonical_jobs_module()._validate_graph_request(
+            _stored_job(job_id, conn), request)
     raw = local.canonical_bytes(request)
     request_sha256 = _sha(raw)
     receipt = {**request, "adapter": ADAPTER_KIND,
@@ -308,14 +319,16 @@ def _prepare(context, tool, params, *, checkout, job_id, attempt, tool_manifest_
     return PreparedProjectGraphCommit(raw, output, local.canonical_bytes(receipt))
 
 
-def prepare_project_graph_seed(context, params, *, checkout, job_id, attempt, tool_manifest_sha256):
+def prepare_project_graph_seed(context, params, *, checkout, job_id, attempt, tool_manifest_sha256,
+                               conn=None):
     return _prepare(context, "solar-settings", params, checkout=checkout, job_id=job_id,
-                    attempt=attempt, tool_manifest_sha256=tool_manifest_sha256, initialized=True)
+                    attempt=attempt, tool_manifest_sha256=tool_manifest_sha256, initialized=True, conn=conn)
 
 
-def prepare_project_graph_commit(context, tool, params, *, checkout, job_id, attempt, tool_manifest_sha256):
+def prepare_project_graph_commit(context, tool, params, *, checkout, job_id, attempt, tool_manifest_sha256,
+                                 conn=None):
     return _prepare(context, tool, params, checkout=checkout, job_id=job_id,
-                    attempt=attempt, tool_manifest_sha256=tool_manifest_sha256, initialized=False)
+                    attempt=attempt, tool_manifest_sha256=tool_manifest_sha256, initialized=False, conn=conn)
 
 
 def _stored_context(request, version_id, conn):
@@ -325,7 +338,156 @@ def _stored_context(request, version_id, conn):
     return resolve_project_graph_context(project._read_intake(binding)), binding.version
 
 
-def _reprepare(context, request):
+def _global_sizing(tool, params):
+    return tool == SIZING_TOOL and type(params) is dict and params.get("mode") == "global"
+
+
+def _exchanges():
+    from leaf_platform import project_sizing_store
+    return project_sizing_store
+
+
+def _stored_job(job_id, conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL", (job_id,))
+        row = cur.fetchone()
+    if row is None:
+        _reject()
+    return row
+
+
+def _exchange_authority(row):
+    jobs = project.platform_link._canonical_jobs_module()
+    org, proj, parent, job_id, drawing, actor = jobs._graph_ids(row)
+    if not _global_sizing(row["tool_name"], row["params"]):
+        _reject()
+    targets = row["params"].get("requests")
+    if type(targets) is not dict or len(targets) != 1:
+        _reject()
+    worker = (row.get("lease_owner") if row["status"] == "running"
+              else (row.get("provenance") or {}).get("worker_id"))
+    return (_exchanges().ExchangeScope(org, proj, drawing, job_id, actor,
+                next(iter(targets)), row["request_tenant_id"]),
+            _exchanges().JobAttempt(worker, row["attempt"]))
+
+
+def _sizing_expected(row, context, exchange):
+    scope, _ = _exchange_authority(row)
+    if ((scope.org_id, scope.project_id, scope.drawing_id, UUID(str(row["input_version_id"])))
+            != (context.organization_id, context.project_id, context.drawing_id, context.parent_version_id)
+            or row["execution_context"]["parent_intake_sha256"] != context.intake_sha256):
+        _reject()
+    return {"identity": {"organization_id": str(scope.org_id), "project_id": str(scope.project_id),
+                "drawing_id": str(scope.drawing_id), "job_id": str(scope.job_id),
+                "actor_id": str(scope.actor_binding_id), "target_settings_id": scope.target_settings_id},
+            "parent_version_id": str(context.parent_version_id),
+            "parent_intake_sha256": context.intake_sha256, "parameters": row["params"],
+            "tool_manifest_sha256": row["execution_context"]["tool_manifest_sha256"],
+            "producer": {"adapter_version": cloud.ADAPTER_VERSION, "service_identity": cloud.SIZING_URL,
+                         "http_status": 200, "worker_id": exchange["sender_worker"],
+                         "attempt": exchange["sender_attempt"]},
+            "classification": exchange["classification"], "evidence_sha256": exchange["evidence_sha256"]}
+
+
+def _stored_sizing_graph(context, job_id, conn):
+    row = _stored_job(job_id, conn)
+    scope, lease = _exchange_authority(row)
+    exchange = _exchanges().get_exchange(scope, lease, conn=conn)
+    if exchange is None or exchange["state"] not in ("response_stored", "published"):
+        _reject()
+    expected = _sizing_expected(row, context, exchange)
+    if (exchange["request_sha256"] != _sha(exchange["request_bytes"])
+            or exchange["response_sha256"] != _sha(exchange["response_bytes"])
+            or exchange["evidence_sha256"] != _sha(exchange["evidence_bytes"])):
+        _reject()
+    proved = sizing.prove_sizing_evidence(json.loads(exchange["evidence_bytes"]),
+        exchange["request_bytes"], exchange["response_bytes"], context.graph, expected=expected)
+    after = proved["graph"]
+    after["settings"]["extra"]["string_sizing"]["project_exchange"] = {
+        "job_id": str(job_id), "evidence_sha256": exchange["evidence_sha256"]}
+    return after
+
+
+def _prove_exchange_state(request, result, conn, *, pending=False):
+    if not _global_sizing(request["tool"], request["parameters"]):
+        return
+    row = _stored_job(UUID(request["job_id"]), conn)
+    jobs = project.platform_link._canonical_jobs_module()
+    jobs._validate_graph_request(row, request)
+    jobs._graph_scope(row, conn)
+    scope, lease = _exchange_authority(row)
+    exchange = _exchanges().get_exchange(scope, lease, conn=conn)
+    if exchange is None or request.get("sizing_exchange") != {
+            "job_id": str(scope.job_id), "evidence_sha256": exchange["evidence_sha256"]}:
+        _reject()
+    if pending and row["status"] == "running" and exchange["state"] == "response_stored":
+        _exchanges()._lock(conn, _exchanges()._parameters(scope, lease))
+        return
+    if (row["status"] != "succeeded" or exchange["state"] != "published"
+            or str(row["output_version_id"]) != result["output_version_id"]
+            or str(exchange["output_version_id"]) != result["output_version_id"]
+            or exchange["published_worker"] != lease.worker_id
+            or exchange["published_attempt"] != lease.attempt
+            or (row.get("result") or {}).get("graph_commit") != result):
+        _reject()
+
+
+def require_project_sizing(context, *, conn=None):
+    """Prove origin and current electrical values while permitting later graph revisions."""
+    current = context.graph
+    evidence = (current or {}).get("settings", {}).get("extra", {}).get("string_sizing")
+    if not evidence:
+        return
+    if evidence.get("mode") == MANUAL_SIZING_MODE:
+        # A manual label is only an exemption once its evidence is the exact manual record with
+        # an unknown electrical boundary; anything else is refused like forged cloud evidence.
+        try:
+            cloud.require_sizing(current)
+        except (ValueError, TypeError, KeyError, AttributeError, GraphValidationError):
+            _reject()
+        return
+    ref = evidence.get("project_exchange")
+    if type(ref) is not dict or set(ref) != {"job_id", "evidence_sha256"}:
+        raise project.ProjectContextError("SIP_R3_SERVICE_EVIDENCE_REQUIRED")
+    if conn is None:
+        return project.platform_link.platform_db().run_transaction(
+            lambda connection: require_project_sizing(context, conn=connection))
+    try:
+        row = _stored_job(UUID(ref["job_id"]), conn)
+        scope, _ = _exchange_authority(row)
+        if (scope.org_id, scope.project_id, scope.drawing_id) != (
+                context.organization_id, context.project_id, context.drawing_id):
+            _reject()
+        parent, _ = _stored_context({"organization_id": str(scope.org_id),
+            "project_id": str(scope.project_id), "drawing_id": str(scope.drawing_id)},
+            UUID(str(row["input_version_id"])), conn)
+        from solar_project_jobs import prepare_project_graph_job
+        prepared = prepare_project_graph_job(row, conn=conn)
+        project_graph_job_provenance(scope.job_id, row["result"]["graph_commit"], expected=prepared, conn=conn)
+        original = json.loads(prepared.output_intake_bytes)["solar_design_graph"]
+        cloud.require_sizing(current)
+        old = original["settings"]
+        if (evidence != old["extra"]["string_sizing"]
+                or any(current["settings"][key] != old[key] for key in (
+                    "panels_in_sequence", "voc_cold", "global_string_sizing_confirmed"))):
+            _reject()
+        from solar_sizing_power import frame_module_power
+        for frame in current["frames"]:
+            if frame["module_power_watts"] != frame_module_power(
+                    current, frame["panel_refs"], frame["electrical_zone_ref"]):
+                _reject()
+    except (ValueError, TypeError, KeyError, AttributeError, GraphValidationError):
+        _reject()
+    except project.ProjectContextError as exc:
+        # Only the plain refusal carries a public reason. Every subclass (today only the
+        # exchange store's SizingExchangeError family) may hold custody detail, so it maps to
+        # the fixed refusal. Type identity needs no lookup, so this classification cannot raise.
+        if type(exc) is not project.ProjectContextError:
+            _reject()
+        raise
+
+
+def _reprepare(context, request, conn=None):
     # No lease lookup: these are the original trusted publication identities.
     lease = project.CheckoutLease(context.organization_id, context.project_id, context.drawing_id,
         "Stored publication", UUID(request["actor_binding_id"]), None, None,
@@ -334,7 +496,7 @@ def _reprepare(context, request):
         _reject()
     prepared = _prepare(context, request["tool"], request["parameters"], checkout=lease,
         job_id=UUID(request["job_id"]), attempt=request["attempt"],
-        tool_manifest_sha256=request["tool_manifest_sha256"], initialized=request["initialized"])
+        tool_manifest_sha256=request["tool_manifest_sha256"], initialized=request["initialized"], conn=conn)
     if prepared.request_bytes != local.canonical_bytes(request):
         _reject()
     return prepared
@@ -371,7 +533,7 @@ def publish_project_graph_commit(prepared, *, actor_binding_id, conn):
     def publish_immutable_intake():
         try:
             context, _version = _stored_context(request, parent, conn)
-            rebuilt = _reprepare(context, request)
+            rebuilt = _reprepare(context, request, conn)
             if rebuilt != prepared:
                 _reject()
         except project.ProjectContextError as exc:
@@ -412,6 +574,14 @@ def project_graph_commit_provenance(tenant, result, *, expected, conn=None):
 
 
 def project_graph_job_provenance(job_id, result, *, expected, conn):
+    return _job_provenance(job_id, result, expected=expected, conn=conn, pending=False)
+
+
+def _pending_project_graph_job_provenance(job_id, result, *, expected, conn):
+    return _job_provenance(job_id, result, expected=expected, conn=conn, pending=True)
+
+
+def _job_provenance(job_id, result, *, expected, conn, pending):
     """Prove from a freshly loaded job's stored editor, never request identity."""
     jobs = project.platform_link._canonical_jobs_module()
     if not isinstance(job_id, UUID):
@@ -425,10 +595,10 @@ def project_graph_job_provenance(job_id, result, *, expected, conn):
     jobs._validate_graph_request(row, request)
     jobs._graph_scope(row, conn)
     return _project_graph_provenance(result, expected=expected, conn=conn,
-                                    authorize=lambda request: UUID(str(row["org_id"])))
+                                    authorize=lambda request: UUID(str(row["org_id"])), pending=pending)
 
 
-def _project_graph_provenance(result, *, expected, conn, authorize):
+def _project_graph_provenance(result, *, expected, conn, authorize, pending=False):
     """Shared historical byte reconstruction with authority supplied internally."""
     try:
         request = expected.request if isinstance(expected, PreparedProjectGraphCommit) else copy.deepcopy(expected)
@@ -443,6 +613,7 @@ def _project_graph_provenance(result, *, expected, conn, authorize):
                 != local.canonical_bytes(request)):
             _reject()
         org = authorize(request)
+        _prove_exchange_state(request, result, conn, pending=pending)
         parent, parent_version = _stored_context(request, UUID(request["parent_version_id"]), conn)
         _publication_fingerprint(parent_version, conn)
         try:
@@ -451,7 +622,7 @@ def _project_graph_provenance(result, *, expected, conn, authorize):
             if exc.reason_code == "SIP_R1_CONTEXT_NOT_FOUND":
                 _reject()
             raise
-        prepared = _reprepare(parent, request)
+        prepared = _reprepare(parent, request, conn)
         if (local.canonical_bytes(result) != local.canonical_bytes(_receipt(prepared, output_version))
                 or output.intake_bytes != prepared.output_intake_bytes):
             _reject()

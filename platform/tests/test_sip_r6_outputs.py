@@ -84,12 +84,15 @@ def _commit(http, s, tool, params, version, key):
             "dwg": str(version), "catalog_digest": pg.manifest(tool)}
     response = http.client.post("/api/run", json=body, headers=_headers(s, key))
     assert response.status_code == 202, response.text
-    result = admission._settle(s, response.json()["job_id"])
+    job_id = response.json()["job_id"]
+    row = pg.claim(s, {**pg.load(job_id), "job_id": job_id}, owner="r6-" + uuid4().hex)
+    outcome, result = pg.complete(row, pg.prepared(row))
+    assert outcome == "applied"
     return UUID(result["output_version_id"])
 
 
 def _seed(http, s):
-    return _commit(http, s, "solar-settings", pg.seed_params(s), s.parent, "r6-seed")
+    return _commit(http, s, "solar-settings", pg.seed_params(s), s.parent, str(uuid4()))
 
 
 def _string_source(http, s):
@@ -97,10 +100,11 @@ def _string_source(http, s):
     helpers = chain.commit.__globals__
     ctx = helpers["assigned_parent"](s,
         equipment_cases.case.__wrapped__(design_cases.graph.__wrapped__()))
+    ctx = helpers["canonical_custody"](s, ctx)
     first = _commit(http, s, "solar-homeruns", {"expected_rev": ctx.graph["rev"]},
-                    s.parent, "r6-homeruns")
+                    ctx.parent_version_id, str(uuid4()))
     return _commit(http, s, "solar-schedule",
-        {"expected_rev": ctx.graph["rev"] + 1, "insertion_point": [0, 0, 0]}, first, "r6-schedule")
+        {"expected_rev": ctx.graph["rev"] + 1, "insertion_point": [0, 0, 0]}, first, str(uuid4()))
 
 
 def _read_path(s, version):
@@ -259,8 +263,9 @@ def test_sip_r6_pg_historical_and_current(world, http, monkeypatch):
     path = ref["download"]
     original = http.client.get(path + "?current=true")
     assert original.status_code == 200 and len(original.content) == 973
-    successor = _commit(http, s, "solar-settings", {"expected_rev": 3,
-        "project_changes": {"name": "Successor"}}, version, "r6-successor")
+    current = pg.adapter.resolve_project_graph_context(pg.context(s, version))
+    successor = _commit(http, s, "solar-settings", {"expected_rev": current.graph["rev"],
+        "project_changes": {"name": "Successor"}}, version, str(uuid4()))
     assert successor != version
     before = _census(s), deepcopy(s.blobs.data), list(s.blobs.writes)
     historical = _read(http, s, version, tool="solar-string-data", params={})
