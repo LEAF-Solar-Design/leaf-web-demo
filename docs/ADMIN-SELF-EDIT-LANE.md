@@ -259,4 +259,196 @@ remove the `leaf_admin` flag · the standing agent kill file
   (#422 Phase 1), the review verdict is observed (#422 Phase 2), and merge
   exists behind a fresh operator approval of the exact commit (#422 Phase 3)
   — but nothing in this lane merges without that approval, and nothing here
-  deploys, ever. The staged-rollout stage (#422 Phase 4) is not designed yet.
+  deploys, ever. The staged-rollout stage (#422 Phase 4) is specified below
+  as a future design, not activated.
+
+## Phase 4 — staged rollout specification (not activated)
+
+This specification answers Forge issue #6 / original GitHub #422's round-2
+operator decision: "Write a phase 4 spec only." Every behavior below is a
+future requirement, not an implemented capability or an activation runbook.
+
+### Authorization boundary
+
+Deployment is outside the self-edit lane until a separate operator decision. This specification does not authorize implementation, credentials, activation, or deployment; live activation requires its own explicit operator yes.
+
+Any future implementation must preserve branch-only, SHA-pinned, never-forced
+writes, fundamental-path co-sign, fresh always-confirm approvals, and all
+existing merge controls, including exact-head review, fresh merge approval,
+the merge kill switch, and independent credentials. Specification approval
+does not widen any of those controls or permissions.
+
+Only after separate authorization may the future lane request and observe
+the standing protected release machinery. It must not introduce direct ECS
+calls, a parallel deployment runner, approval by the assistant, or deployment
+authority inferred from an admin session or credential possession. The
+production handoff remains an artifact until authorized protected consumers
+revalidate it, as documented in `deploy/README.md:413–436`.
+
+### Staging receipt
+
+A proposed aggregate receipt must link the change ID, reviewed PR head,
+actual merge commit and tree, build/supply provenance, and staging acceptance
+evidence. The reviewed head and the resulting squash-merge commit are distinct
+identities: neither may substitute for the other. Provenance must demonstrate
+how the reviewed change maps to the actual release source and artifacts.
+
+The aggregate receipt must require:
+
+* Producer/workflow identity, workflow revision, run ID and attempt, artifact
+  ID/name, content digest, and timestamps.
+* Full release source commit and tree; supply-set version and digest; immutable
+  digests for web, app, broker, harness, and canonical-worker.
+* Each stage's candidate and observed terminal digest, terminal task-definition
+  revision where applicable, previous rollback identity, completion state,
+  verification result, and mutation/idempotency identity.
+* Health-check and authored-CAD acceptance results bound to the same release
+  source and all five staging digests.
+* Alias/coherence checks, activation/deactivation and authored-execution off/on
+  observations, migration/snapshot evidence, and terminal deployment identity.
+
+The existing `contract/platform-release-stage-receipt.v1.schema.json:7–35`
+and `:54–78` already require source, provenance, terminal identity, rollback
+identity, mutation, verification, and failure fields. This specification
+references that schema without modifying or silently extending it. Additional
+aggregate fields above are proposed requirements for a later implementation.
+
+Future advancement must be serial through the protected staging train under
+its shared concurrency control, with no batch dispatch. The local train
+enumerates build, five services (web, app, broker, harness, canonical-worker),
+and a final identity stage (`scripts/platform_release_train.py:25–27`). Only
+successful, complete, coherent evidence may allow the next stage or an offer
+of production approval. Missing, unreadable, stale, conflicting, or failed
+evidence must block advancement; dispatch acknowledgment is not acceptance.
+
+### Exact deployment identity
+
+The future approval payload must be an immutable, canonical identity containing
+environment, provider, account/region, cluster/service targets, full source
+commit/tree, receipt digests, exact task-definition ARN/revision for every
+affected ECS workload, immutable image digests, configuration/migration
+identity, and exact rollback targets. A commit SHA or mutable image tag alone
+is insufficient.
+
+The documented production topology (`deploy/README.md:427–436`) is four OCI/ECS
+workloads (app, broker, harness, canonical-worker) plus production web's exact
+Vercel deployment ID and matching web artifact SHA-256. The staging web image
+is insufficient production proof. Protected infrastructure and Vercel
+consumers must revalidate the production handoff and final identity.
+
+The operator must see the exact identity and its canonical digest before
+approval. Authorized protected machinery must resolve and register candidate
+identities before presenting the execution gate; unknown revisions block the
+card. Immediately before mutation, that machinery must revalidate the approved
+identity, live baseline, receipt chain, and rollback targets. Any drift
+invalidates approval. No task-definition revisions, live identities, provider
+configuration, or approved outage estimate are established by this design.
+
+### Inline operator gates
+
+There must be separate future staging-execution and production-execution gates,
+approved by the operator through the existing drawer/approvals-chip interaction
+pattern. The current panel offers fresh exact-commit merge confirmation and
+states that nothing deploys from it; these proposed cards do not change that
+current contract (`web/src/components/CustomizePanel.jsx:212–219`, `:247`,
+and `:399–403`).
+
+Each future card must show stage, target environment, exact candidate identity
+and canonical digest, receipt/provenance links, health status, migration/snapshot
+posture, expected interruption, rollback identity, expiry, and explicit
+approve/deny controls. Unknown interruption posture must be resolved before
+execution approval, not replaced with an invented estimate.
+
+The future backend must independently verify authenticated operator authority.
+Each stage requires fresh approval with exact-artifact binding, expiry, atomic
+one-shot consumption, and durable audit of approve/deny and execution
+transitions. There may be no inherited Land/merge approval, assistant approval,
+secret-only approval, tier bypass, external comment choreography, or separate
+console.
+
+Production approval may appear only after verified staging success. Denial,
+expiry, identity movement, missing permissions/configuration, or unreadable
+authority must leave execution blocked. A retry after invalidation requires
+a fresh operator decision.
+
+### Recovery
+
+Proposed states are `awaiting_staging_approval`, `staging_running`,
+`staging_failed`, `awaiting_production_approval`, `production_running`,
+`production_failed`, `completed`, `recovery_required`, and `rolled_back`.
+These are design labels, not current API additions. Completion must require
+verified terminal evidence rather than merely a successful request.
+
+Future execution must durably record stage intent, approval consumption,
+external execution identity, and append-only transition evidence. After an
+interruption, it must reconcile actual external state against that evidence
+before acting. An existing execution may be reused only when its exact
+identity and result are proven; never blindly redispatch or treat uncertainty
+as success. Lost/unreadable outcome evidence must enter `recovery_required`,
+block promotion, and require reconciliation. Recovery cannot mint or replay
+approval; any new execution outside the consumed approval's proven scope
+requires a fresh operator decision.
+
+### Rollback
+
+Before mutation, future machinery must record exact previous ECS
+task-definition revisions and production web rollback identity. The existing
+lane names the previous ECS task-definition revision as its rollback baseline
+in the landing-path contract above; the future envelope must identify all
+affected targets, including the exact previous Vercel deployment and artifact.
+
+On failure, stop subsequent stages and leave authored execution safely off
+when coherence is unproven. Invoke only a verified rollback covered by the
+original operator-approved recovery envelope. Otherwise require a fresh
+operator rollback gate through the same inline approval pattern. Verify
+rollback health, service coherence, web identity, and migration compatibility
+before recording `rolled_back`; a request acknowledgment alone is insufficient.
+Unproven recovery outcomes must remain blocked in `recovery_required`.
+
+Expand-contract constraints remain mandatory: task-definition rollback does
+not undo a database migration or restore a snapshot automatically. As the
+existing migration gate explains, incompatible contract changes break the
+old/new task overlap and foreclose task-definition rollback. Snapshot restore
+or other recovery mutations need verified compatibility and explicit coverage
+in the recovery envelope, or a fresh operator gate.
+
+### Both UI copies
+
+Future UI ownership belongs to LEAF-Solar-Design/leaf-web-demo for the console
+at `web/src/components/CustomizePanel.jsx`, and to
+LEAF-Solar-Design/leaf_website for its `/try` console port. The concrete
+leaf_website file location has not been inspected here; current port parity
+is not asserted.
+
+Both copies must present identical operator cards, pending counts, identity
+details, blocked/failed/recovery states, denial/expiry handling, receipt links,
+and rollback outcomes. A later implementation cannot claim completion until
+both repository owners supply parity evidence for their surfaces.
+
+### Open decisions before implementation or activation
+
+The following activation prerequisites remain unresolved:
+
+* Authoritative provider and protected infrastructure/Vercel consumers.
+* Live deployment identities, permissions, operator authentication, and
+  UI-port location/parity.
+* Current serial-train concurrency and alias/coherence choreography.
+* Effective snapshot limits and overflow policy, migration compatibility,
+  health criteria, soak duration, and rollback authorization.
+* Actual production topology and interruption window.
+
+The historical issue's reported snapshot ceiling of 10 and zero-healthy-task
+outage estimate are historical inputs requiring revalidation, not verified
+current policy or an approved interruption window. Local evidence differs:
+`scripts/platform_release_train.py:28–31` sets `SNAPSHOT_LIMIT = 5` and an
+explicit snapshot-overflow acknowledgment prefix; `:692–695` stops app
+advancement above that threshold unless the exact fresh overflow authority
+matches. The threshold-of-5 discrepancy must be settled against current
+protected policy, without inventing a reconciliation or weakening that guard.
+
+These operational facts cannot be determined from this worktree. A sanitized
+operator-approved release packet, protected infrastructure policy, and current
+deployment receipts must settle them before implementation or activation.
+They do not block this specification-only slice. This document creates no
+runtime feature, credential, permission, configuration, schema, workflow,
+activation, staging mutation, production deployment, or rollback execution.

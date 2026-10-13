@@ -1203,6 +1203,8 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"symlink unavailable on this host: .+",)),
         Suite("server-grant-admin-authority", "server tests/test_grant_admin_authority.py",
               "pytest", SERVER, _py_pytest("tests/test_grant_admin_authority.py"), 9),
+        Suite("server-admin-self-edit-phase4-docs", "server tests/test_admin_self_edit_phase4_docs.py",
+              "pytest", SERVER, _py_pytest("tests/test_admin_self_edit_phase4_docs.py"), 3),
         Suite("server-microvm", "server tests/test_hardening_2c_microvm.py", "pytest", SERVER,
               _py_pytest("tests/test_hardening_2c_microvm.py"), 20),
         Suite("server-broker-tenant-state", "server tests/test_broker_tenant_state.py", "pytest",
