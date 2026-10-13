@@ -116,7 +116,7 @@ describe('App portal wiring', () => {
     // so the old shell's DOM stays byte-for-byte.
     expect((src.match(/<ViewCluster/g) || [])).toHaveLength(1)
     expect((src.match(/<CockpitStatus/g) || [])).toHaveLength(1)
-    expect(src).toMatch(/\{studioGround && intake && groundShowsDrawing\(activeSurface\) && \(\s*\n?\s*<ViewCluster/)
+    expect(src).toMatch(/\{studioGround && \(projectMode \? projectDrawing.mode === 'ready' : intake\) && groundShowsDrawing\(activeSurface\) && \(\s*\n?\s*<ViewCluster/)
     expect(src).toMatch(/\{studioGround && groundShowsDrawing\(activeSurface\) && \(\s*\n?\s*<CockpitStatus/)
     // (`data-tour="shell"` after it is slice 4b's console tour anchor; the
     // surface attribute's gate is what this pin guards.)
