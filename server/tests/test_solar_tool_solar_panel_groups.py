@@ -2,10 +2,12 @@
 import copy
 import hashlib
 import importlib.util
+import inspect
 import json
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -21,6 +23,7 @@ import product_capability_availability as availability
 import solar_design_graph
 import solar_local_graph as local
 import solar_panel_group_kernel as kernel
+import solar_project_graph as adapter
 import solar_tools
 import store
 import write_loop
@@ -635,3 +638,251 @@ def test_parity_receipt_replays_through_studio_path(passing, service, tmp_path, 
         result, request, TENANT, "pg-rooftop-replay", TOOL, 1, backend=backend)
     assert proof["source_version"] == 1 and proof["new_version"] == 2
     require_sizing(stored)
+
+
+# R3e-1: the canonical project path's private creation channel (`_creation`).
+PARENT_TIME = "2026-01-01T00:00:00Z"
+FRESH = "leaf:frame:00000000-0000-4000-8000-0000000000ff"
+
+
+def creation_context(**changes):
+    values = {
+        "organization_id": "org-r3e", "project_id": "project-r3e", "drawing_id": "drawing-r3e",
+        "parent_version_id": "version-r3e", "intake_sha256": "ab" * 32,
+        "created_at": PARENT_TIME,
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def derived_frame(ctx, request, index):
+    # Independently serialize the frozen creation object, without the adapter's helpers.
+    raw = json.dumps({
+        "schema": "leaf.solar-project-creation.v1",
+        "organization_id": str(ctx.organization_id), "project_id": str(ctx.project_id),
+        "drawing_id": str(ctx.drawing_id), "parent_version_id": str(ctx.parent_version_id),
+        "parent_intake_sha256": ctx.intake_sha256, "created_at": ctx.created_at,
+        "tool": TOOL, "parameters": request, "kind": "frame", "index": index,
+    }, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("ascii")
+    return "leaf:frame:" + str(UUID(bytes=hashlib.sha256(raw).digest()[:16], version=4))
+
+
+@pytest.fixture
+def two_groups(graph, passing, service):
+    """Two groups over four sized panels, in request order G1 then G2."""
+    value = copy.deepcopy(graph)
+    value["frames"] = []
+    for panel, centre, handle in zip(value["panels"], ((1, 0), (2, 0), (3, 0)),
+                                     ("A1", "A2", "A3")):
+        panel.update(frame_ref=None, matrix_cell=None, angle=0, centre=list(centre))
+        panel["provenance"]["source_handle"] = handle
+    p4 = app_id("panel", 4)
+    panel4 = copy.deepcopy(next(panel for panel in value["panels"] if panel["id"] == P3))
+    panel4.update(id=p4, centre=[4, 0])
+    panel4["provenance"]["source_handle"] = "A4"
+    panel4["assignment"]["seq"] = 1
+    value["panels"].append(panel4)
+    string2 = next(string for string in value["strings"] if string["id"] == S2)
+    string2["ordered_panel_refs"].append(p4)
+    string2["module_count"] = len(string2["ordered_panel_refs"])
+    for zone in value["electrical_zones"]:
+        if P3 in zone["panel_refs"]:
+            zone["panel_refs"].append(p4)
+    request = {"expected_rev": 1, "groups": [
+        {"name": name, "panel_refs": refs, "alignment_tolerance": 0.5,
+         "module_width_along_row": 1, "module_height_across_row": 2}
+        for name, refs in (("G1", [P1, P2]), ("G2", [P3, p4]))
+    ]}
+    return _sized(value, passing, "global"), request
+
+
+def test_group_creation_private_contract(u):
+    # The channel is keyword-only and never a request field.
+    parameter = inspect.signature(builtin().run).parameters["_creation"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.default is None
+    source = u()
+    before = copy.deepcopy(source)
+    channel = adapter._creation(creation_context(), TOOL, params())
+    with pytest.raises(TypeError):
+        builtin().run(source, params(), channel)
+    for key in ("_creation", "creation"):
+        for supplied in (None, channel):
+            with pytest.raises(GraphValidationError) as error:
+                builtin().run(source, {**params(), key: {}}, _creation=supplied)
+            assert error.value.code == INVALID
+    assert source == before
+
+
+def test_group_creation_slots(two_groups):
+    # Frame i takes the derived id for slot ("frame", i), in request group order.
+    source, request = two_groups
+    before = copy.deepcopy((source, request))
+    ctx = creation_context()
+    result = builtin().run(source, request, _creation=adapter._creation(ctx, TOOL, request))
+    assert (source, request) == before
+    expected = [adapter._creation_id(ctx, TOOL, request, "frame", index) for index in (0, 1)]
+    assert expected == [derived_frame(ctx, request, index) for index in (0, 1)]
+    assert len(set(expected)) == 2
+    assert [frame["id"] for frame in result["frames"]] == expected
+    assert [frame["name"] for frame in result["frames"]] == ["G1", "G2"]
+    panels = {panel["id"]: panel for panel in result["panels"]}
+    for frame in result["frames"]:
+        assert frame["provenance"]["created_at"] == PARENT_TIME
+        assert {panels[ref]["frame_ref"] for ref in frame["panel_refs"]} == {frame["id"]}
+    validate_graph(result)
+    other = creation_context(parent_version_id="version-r3e-other")
+    moved = builtin().run(source, request, _creation=adapter._creation(other, TOOL, request))
+    assert [frame["id"] for frame in moved["frames"]] == [
+        derived_frame(other, request, index) for index in (0, 1)]
+    assert set(frame["id"] for frame in moved["frames"]).isdisjoint(expected)
+
+
+def test_group_creation_parent_timestamp(u):
+    # The canonical frame carries the parent's stored time, never a member panel's.
+    source = u()
+    panel_time = source["panels"][0]["provenance"]["created_at"]
+    assert panel_time != PARENT_TIME
+    first = builtin().run(source, params(), _creation=adapter._creation(
+        creation_context(), TOOL, params()))["frames"][0]
+    assert first["provenance"]["created_at"] == PARENT_TIME
+    later = creation_context(created_at="2026-03-04T05:06:07Z")
+    second = builtin().run(source, params(), _creation=adapter._creation(
+        later, TOOL, params()))["frames"][0]
+    assert second["provenance"]["created_at"] == "2026-03-04T05:06:07Z"
+    assert second["id"] == derived_frame(later, params(), 0) != first["id"]
+
+
+def test_group_creation_existing_collision(u, monkeypatch):
+    # A derived id equal to any stored entity id is refused before anything is written.
+    source = u()
+    before = copy.deepcopy(source)
+    original = adapter._creation_id
+    for ref in (P1, S1, INV, Z1):
+        seen = []
+
+        def collision(*args, ref=ref, seen=seen):
+            seen.append(args[-1])
+            return ref
+        with monkeypatch.context() as patch:
+            patch.setattr(adapter, "_creation_id", collision)
+            channel = adapter._creation(creation_context(), TOOL, params())
+            with pytest.raises(GraphValidationError) as error:
+                builtin().run(source, params(), _creation=channel)
+        assert error.value.code == "DUPLICATE_APPLICATION_ID"
+        assert seen == [0]
+        assert adapter._creation_id is original
+    assert source == before
+
+
+def test_group_creation_candidate_collision(two_groups, monkeypatch):
+    # A derived id equal to one allocated earlier in this run is refused at the later slot.
+    source, request = two_groups
+    before = copy.deepcopy((source, request))
+    seen = []
+
+    def collision(*args):
+        seen.append(args[-1])
+        return FRESH
+    monkeypatch.setattr(adapter, "_creation_id", collision)
+    with pytest.raises(GraphValidationError) as error:
+        builtin().run(source, request, _creation=adapter._creation(
+            creation_context(), TOOL, request))
+    assert error.value.code == "DUPLICATE_APPLICATION_ID"
+    assert seen == [0, 1]
+    assert (source, request) == before
+
+
+def test_group_creation_duplicate_not_masked(two_groups, monkeypatch):
+    # The builtin refuses an occupied id itself, at its slot, so a later limit cannot mask it.
+    source, request = two_groups
+    before = copy.deepcopy((source, request))
+    module = builtin()
+    monkeypatch.setattr(module, "_MAX_MATRIX_CELLS", 3)
+    for taken in (P1, S1, INV, Z1):
+        calls = []
+
+        def new_id(kind, index, occupied, taken=taken, calls=calls):
+            calls.append((kind, index))
+            return taken
+        with pytest.raises(GraphValidationError) as error:
+            module.run(source, request, _creation={"created_at": PARENT_TIME, "new_id": new_id})
+        assert error.value.code == "DUPLICATE_APPLICATION_ID"
+        assert calls == [("frame", 0)]
+    repeated = []
+
+    def same(kind, index, occupied):
+        repeated.append(index)
+        return FRESH
+    monkeypatch.setattr(module, "_MAX_MATRIX_CELLS", 4)
+    with pytest.raises(GraphValidationError) as error:
+        module.run(source, request, _creation={"created_at": PARENT_TIME, "new_id": same})
+    assert error.value.code == "DUPLICATE_APPLICATION_ID"
+    assert repeated == [0, 1]
+    assert (source, request) == before
+
+
+def test_group_creation_standalone_unchanged(u, two_groups):
+    # Without the channel the legacy ids and member timestamps are unchanged.
+    source = u()
+    plain = builtin().run(source, params())
+    frame = plain["frames"][0]
+    assert frame["id"] == frame_id(source, [P3, P2, P1])
+    assert frame["provenance"]["created_at"] == source["panels"][0]["provenance"]["created_at"]
+    canonical = builtin().run(source, params(), _creation=adapter._creation(
+        creation_context(), TOOL, params()))
+    new_id = canonical["frames"][0]["id"]
+    assert new_id != frame["id"]
+    # Apart from the id and its time, the canonical result equals the standalone one.
+    for panel in canonical["panels"]:
+        if panel["frame_ref"] == new_id:
+            panel["frame_ref"] = frame["id"]
+    canonical["frames"][0]["id"] = frame["id"]
+    canonical["frames"][0]["provenance"]["created_at"] = frame["provenance"]["created_at"]
+    assert canonical == plain
+    pair, request = two_groups
+    legacy = builtin().run(pair, request)
+    assert [item["id"] for item in legacy["frames"]] == [
+        frame_id(pair, group["panel_refs"]) for group in request["groups"]]
+
+
+def test_group_creation_atomic_refusal(two_groups):
+    # Any refusal raised by the channel propagates and leaves the source graph untouched.
+    source, request = two_groups
+    before = copy.deepcopy((source, request))
+    calls = []
+
+    def new_id(kind, index, occupied):
+        calls.append((kind, index, P1 in occupied, FRESH in occupied))
+        if index == 1:
+            raise GraphValidationError("GRAPH_LIMIT_EXCEEDED")
+        return FRESH
+    with pytest.raises(GraphValidationError) as error:
+        builtin().run(source, request, _creation={"created_at": PARENT_TIME, "new_id": new_id})
+    assert error.value.code == "GRAPH_LIMIT_EXCEEDED"
+    assert calls == [("frame", 0, True, False), ("frame", 1, True, True)]
+    assert (source, request) == before
+    assert all(panel["frame_ref"] is None for panel in source["panels"])
+
+
+def test_group_creation_power(u):
+    # Module power on the canonical path is the standalone frame's.
+    source = u()
+    plain = builtin().run(source, params())["frames"][0]
+    canonical = builtin().run(source, params(), _creation=adapter._creation(
+        creation_context(), TOOL, params()))["frames"][0]
+    assert canonical["module_power_watts"] == plain["module_power_watts"] == 595.0
+
+
+def test_group_creation_cancel(u):
+    # A cancel returns the graph unchanged and allocates nothing.
+    source = u()
+    before = copy.deepcopy(source)
+
+    def new_id(kind, index, occupied):
+        raise AssertionError("cancel must not allocate")
+    for request in ({"expected_rev": 1, "cancel": True}, {**params(), "cancel": True}):
+        result = builtin().run(source, request,
+                               _creation={"created_at": PARENT_TIME, "new_id": new_id})
+        assert result == validate_graph(source)
+        assert result["frames"] == []
+    assert source == before

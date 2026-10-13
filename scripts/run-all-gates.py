@@ -419,7 +419,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_w1_panel_group_kernel.py"), 38),
         # Intake panel groups: kernel matrices, deterministic commits, and Studio receipt replay.
         Suite("server-solar-tool-panel-groups", "server tests/test_solar_tool_solar_panel_groups.py", "pytest", SERVER,
-              _py_pytest("tests/test_solar_tool_solar_panel_groups.py"), 79),
+              _py_pytest("tests/test_solar_tool_solar_panel_groups.py"), 89),
         # S16 electrical zones (2026-09-22): the create/assign builtin and the
         # partition the plugin keeps. Hermetic (a graph seeded in the test, no
         # network, no fixture), so the floor is the exact count on every runner:
@@ -2999,7 +2999,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-10: sip-r6 adds one registration row (99 -> 100).
               # 2026-10-11: sip-r3c adds one registration row (100 -> 101).
               # 2026-10-11: sip-r3d adds one registration row (101 -> 102).
-              ["test_studio_walk_regression_gate.py"], 232),
+              # 2026-10-13: sip-r3e-1 adds one registration row (232 -> 233).
+              ["test_studio_walk_regression_gate.py"], 233),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

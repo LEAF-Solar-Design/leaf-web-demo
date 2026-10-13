@@ -85,7 +85,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
     assert suites["platform"].expected == 359  # R14-B adds 31 PostgreSQL rows.
-    assert suites["gate-runner-selftest"].expected == 232  # Measured registered suite with R14C-32.
+    assert suites["gate-runner-selftest"].expected == 233  # Measured registered suite with R14C-32; 233 with sip-r3e-1.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4173,7 +4173,7 @@ def test_R14C_32_mandatory_registration():
         start = ordered.index("server-sip-r14-evidence") + 1
         assert ordered[start:start + 3] == wanted
     assert selection["mandatory_suite_ids"][-1] == "platform-sip-r14-exchange"
-    assert suites["gate-runner-selftest"].expected == 232
+    assert suites["gate-runner-selftest"].expected == 233
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4193,3 +4193,16 @@ def test_sip_r14_exchange_gate_registration():
     assert selection["mandatory_suite_ids"][-1] == suite.id
     assert selection["selection_enabled"] is False
     assert selection["phase"] == "shadow"
+
+
+def test_sip_r3e_creation_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    suite = suites["server-solar-tool-panel-groups"]
+    # 79 -> 88 for sip-r3e-1: the nine test_group_creation_* rows, measured by the planner.
+    # 88 -> 89 for its correction: test_group_creation_duplicate_not_masked.
+    assert suite.id == "server-solar-tool-panel-groups"
+    assert suite.cwd == REPO / "server"
+    assert suite.argv == runner._py_pytest("tests/test_solar_tool_solar_panel_groups.py")
+    assert suite.kind == "pytest" and suite.expected == 89
+    assert suite.allowed_skip_reasons == ()
