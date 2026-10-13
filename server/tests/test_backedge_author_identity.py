@@ -821,3 +821,173 @@ def test_live_auth_refuses_unbound_grants(monkeypatch):
 def test_auth_off_keeps_the_open_demo_behaviour(monkeypatch):
     monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
     assert agent_gate._subject_bound_grants_required(None) is False
+
+
+@pytest.fixture()
+def author_stage_service(tmp_path, monkeypatch):
+    """Exercise service reservations and recovery against the durable store."""
+    from types import SimpleNamespace
+
+    import customization_service as service_module
+    from customization_authority import TenantBinding
+    from customization_store import SQLiteCustomizationStore
+
+    store = SQLiteCustomizationStore(tmp_path / "author-stages.db")
+    store.initialize()
+    service = service_module.CustomizationService(store)
+    monkeypatch.delenv("LEAF_TENANT_MCP_BROKER_URL", raising=False)
+    monkeypatch.setattr(service_module, "enabled", lambda *_args: True)
+    monkeypatch.setattr(
+        service_module, "_binding",
+        lambda tenant: TenantBinding("tenant-a", tenant.subject, "owner", True),
+    )
+    monkeypatch.setattr(service_module.entitlements, "resolve_tier", lambda _: "hosted_pro")
+    monkeypatch.setattr(service_module.entitlements, "resolve_roles", lambda _: ([], False))
+    monkeypatch.setattr(
+        service_module.entitlements, "entitlements_for", lambda *_args: {"build": True},
+    )
+    monkeypatch.setattr(
+        service, "_authority",
+        lambda: SimpleNamespace(authorize_stage=lambda **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        service, "_release",
+        lambda: SimpleNamespace(release_id="release-a", workspace_contract_sha256="b" * 64),
+    )
+    monkeypatch.setattr(service_module, "_ensure_bare_repo", lambda _: tmp_path)
+    monkeypatch.setattr(service_module, "_git", lambda *_args: "a" * 40)
+    monkeypatch.setattr(service_module, "_harness_misconfigured", lambda: False)
+    monkeypatch.setattr(service_module.author_quota, "enforce", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_harness_stage", lambda *_args: {})
+    monkeypatch.setattr(
+        service, "_reconcile_staging", lambda change, _body: service.stage_status_change(change),
+    )
+    return service
+
+
+def _reserve_author_stage(service, method, subject, key="shared-stage"):
+    return getattr(service, method)(
+        tenant=deps.TenantContext("tenant-a", subject=subject),
+        description="build a deterministic sphere drape", mode="build",
+        idempotency_key=key,
+    )
+
+
+@pytest.mark.parametrize("method", ["stage", "enqueue_stage"])
+def test_stage_reservations_and_recovery_are_scoped_to_verified_author(
+    author_stage_service, method,
+):
+    service = author_stage_service
+    alice = _reserve_author_stage(service, method, ALICE)
+    mallory = _reserve_author_stage(service, method, MALLORY)
+
+    assert alice["change_set_id"] != mallory["change_set_id"]
+    for subject, original in [(ALICE, alice), (MALLORY, mallory)]:
+        retry = _reserve_author_stage(service, method, subject)
+        assert retry["change_set_id"] == original["change_set_id"]
+        recovery = service.recover_stage(
+            tenant=deps.TenantContext("tenant-a", subject=subject),
+            idempotency_key="shared-stage",
+        )
+        assert recovery["status"] == "found"
+        assert recovery["job"]["change_set_id"] == original["change_set_id"]
+
+
+@pytest.mark.parametrize("method", ["stage", "enqueue_stage"])
+def test_legacy_stage_key_is_reused_only_by_its_verified_author(
+    author_stage_service, method,
+):
+    import hashlib
+
+    service = author_stage_service
+    description = "build a deterministic sphere drape"
+    legacy, _ = service.store.reserve_stage(
+        tenant_id="tenant-a", idempotency_key="shared-stage",
+        base_commit="a" * 40, desired_platform_release="release-a",
+        workspace_contract_digest="b" * 64, author_subject=ALICE,
+        request_description=description,
+        request_fingerprint=hashlib.sha256(description.encode("utf-8")).hexdigest(),
+    )
+    assert service.recover_stage(
+        tenant=deps.TenantContext("tenant-a", subject=MALLORY),
+        idempotency_key="shared-stage",
+    )["status"] == "not_found"
+    assert service.recover_stage(
+        tenant=deps.TenantContext("tenant-a", subject=ALICE),
+        idempotency_key="shared-stage",
+    )["status"] == "admission_pending"
+
+    mallory = _reserve_author_stage(service, method, MALLORY)
+    alice = _reserve_author_stage(service, method, ALICE)
+    assert alice["change_set_id"] == legacy.change_set_id
+    assert mallory["change_set_id"] != legacy.change_set_id
+    assert _reserve_author_stage(service, method, ALICE)["change_set_id"] == legacy.change_set_id
+    assert service.recover_stage(
+        tenant=deps.TenantContext("tenant-a", subject=MALLORY),
+        idempotency_key="shared-stage",
+    )["job"]["change_set_id"] == mallory["change_set_id"]
+
+
+@pytest.mark.parametrize("method", ["stage", "enqueue_stage", "recover_stage"])
+@pytest.mark.parametrize("subject", [None, "", "   "])
+def test_stage_reservation_refuses_missing_verified_subject(
+    author_stage_service, monkeypatch, method, subject,
+):
+    from customization_service import CustomizationServiceError
+
+    service = author_stage_service
+    monkeypatch.setattr(
+        service.store, "get_change_set_by_idempotency",
+        lambda **_kwargs: pytest.fail("subjectless request read a reservation"),
+    )
+    monkeypatch.setattr(
+        service.store, "reserve_stage",
+        lambda **_kwargs: pytest.fail("subjectless request created a reservation"),
+    )
+    with pytest.raises(CustomizationServiceError) as exc:
+        if method == "recover_stage":
+            service.recover_stage(
+                tenant=deps.TenantContext("tenant-a", subject=subject),
+                idempotency_key="shared-stage",
+            )
+        else:
+            _reserve_author_stage(service, method, subject)
+    assert exc.value.code == "tenant_identity_binding_unavailable"
+    assert exc.value.status_code == 403
+
+
+def test_stage_key_uses_binding_subject_and_prefers_scoped_row(
+    author_stage_service, monkeypatch,
+):
+    import hashlib
+
+    import customization_service
+    from customization_authority import TenantBinding
+
+    service = author_stage_service
+    monkeypatch.setattr(
+        customization_service, "_binding",
+        lambda _tenant: TenantBinding("tenant-a", ALICE, "owner", True),
+    )
+    original = _reserve_author_stage(service, "enqueue_stage", MALLORY)
+    description = "build a deterministic sphere drape"
+    legacy, _ = service.store.reserve_stage(
+        tenant_id="tenant-a", idempotency_key="shared-stage",
+        base_commit="a" * 40, desired_platform_release="release-a",
+        workspace_contract_digest="b" * 64, author_subject=ALICE,
+        request_description=description,
+        request_fingerprint=hashlib.sha256(description.encode("utf-8")).hexdigest(),
+    )
+
+    retry = _reserve_author_stage(service, "enqueue_stage", ALICE)
+    assert retry["change_set_id"] == original["change_set_id"]
+    assert retry["change_set_id"] != legacy.change_set_id
+    change = service.store.get_change_set(
+        tenant_id="tenant-a", change_set_id=original["change_set_id"],
+    )
+    assert change.author_subject == ALICE
+    recovery = service.recover_stage(
+        tenant=deps.TenantContext("tenant-a", subject=MALLORY),
+        idempotency_key="shared-stage",
+    )
+    assert recovery["job"]["change_set_id"] == original["change_set_id"]
