@@ -327,8 +327,11 @@ def test_capabilities_degrades_to_batch_only_when_provenance_fails(
     )
     assert body["error"] is None
     assert projected["aps_live"] is False
-    # Loud, never silent: the degrade names the failure on stderr.
-    assert "tool provenance unavailable" in capsys.readouterr().err
+    # The degrade identifies the branch and type without exposing the message.
+    stderr = capsys.readouterr().err
+    assert "diagnostic_code=catalog_provenance_unavailable" in stderr
+    assert f"exception_type={type(provenance_error).__name__}" in stderr
+    assert str(provenance_error) not in stderr
 
 
 def test_flat_tools_uses_only_safe_base_for_tenant_without_pin(
@@ -385,15 +388,18 @@ def test_capabilities_maps_pin_lookup_error_to_intended_status(monkeypatch):
 
 
 def test_pin_lookup_normalizes_store_failure_without_exposing_detail(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, caplog, capsys
 ):
     database = tmp_path / "customization.db"
     database.touch()
     monkeypatch.setenv("LEAF_CUSTOMIZATION_STORE", "sqlite")
     monkeypatch.setattr(customization_service, "database_path", lambda: database)
 
+    marker = "private-database-marker-9f3a"
+    failure = sqlite3.DatabaseError(marker)
+
     def fail_lookup(*, tenant_id):
-        raise sqlite3.DatabaseError(f"corrupt authority for {tenant_id}")
+        raise failure
 
     monkeypatch.setattr(
         customization_service.CustomizationService,
@@ -409,7 +415,38 @@ def test_pin_lookup_normalizes_store_failure_without_exposing_detail(
     ) as caught:
         customization_service.effective_catalog_pin("tenant-a")
 
-    assert "corrupt authority" in caught.value.detail
+    error = caught.value
+    assert error.code == "effective_catalog_unavailable"
+    assert error.status_code == 503
+    assert error.diagnostic_code == "catalog_pin_lookup_failed"
+    assert error.exception_type == "DatabaseError"
+    assert error.detail == error.diagnostic_code
+    assert error.__cause__ is failure
+    from routers import author as author_router
+
+    author_response = author_router._customization_error(error)
+    catalog_response = capabilities_router._catalog_error(error)
+    assert author_response.status_code == catalog_response.status_code == 503
+    assert json.loads(author_response.body) == {
+        "error": {
+            "error_code": "BAD_PARAMS",
+            "message": "Protected tool authoring could not complete. The approved request was not executed.",
+            "retryable": False, "retry_class": "after_action", "actor": "user",
+            "next_action": "Review the inputs, correct them, and submit again.",
+        },
+        "reason_code": "effective_catalog_unavailable", "degraded_mode": False,
+    }
+    assert json.loads(catalog_response.body) == {
+        "error": {
+            "error_code": "INTERNAL",
+            "message": "The catalog authority is temporarily unavailable.",
+            "retryable": True, "retry_class": "backoff", "actor": "service",
+            "next_action": "Wait a short time, then retry the request.",
+        },
+        "reason_code": "effective_catalog_unavailable", "degraded_mode": False,
+    }
+    assert marker not in repr((error.detail, error.diagnostic_code, error.exception_type))
+    assert marker not in caplog.text + capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

@@ -234,7 +234,10 @@ def test_bad_json_fails_closed_to_empty_with_one_warning(monkeypatch, tmp_path, 
     monkeypatch.delenv("LEAF_TENANT_REPO", raising=False)
 
     assert deps.effective_surface_config("t1") == {}
-    assert "bad tenant surface-config.json" in capsys.readouterr().err
+    stderr = capsys.readouterr().err
+    assert "diagnostic_code=tenant_surface_config_load_failed" in stderr
+    assert "exception_type=JSONDecodeError" in stderr
+    assert "bad tenant surface-config.json" not in stderr
 
     # cache TTL still applies (bounded, see below), so bypass it here to prove
     # the warning fires only ONCE per tenant per process, not once per read.
@@ -401,7 +404,10 @@ def test_symlinked_surface_config_is_refused_by_the_fold(monkeypatch, tmp_path, 
     monkeypatch.delenv("LEAF_TENANT_REPO", raising=False)
 
     assert deps.effective_surface_config("t1") == {}
-    assert "resolves outside the tenant repo" in capsys.readouterr().err
+    stderr = capsys.readouterr().err
+    assert "diagnostic_code=tenant_surface_config_load_failed" in stderr
+    assert "exception_type=ValueError" in stderr
+    assert "resolves outside the tenant repo" not in stderr
 
 
 def test_symlinked_surface_config_has_no_source(monkeypatch, tmp_path):

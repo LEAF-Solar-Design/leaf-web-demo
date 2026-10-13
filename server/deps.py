@@ -83,7 +83,7 @@ def _load_module_from(path: Path, mod_name: str):
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
         return mod
     except Exception as exc:  # pragma: no cover - defensive
-        print(f"[leaf-demo] could not import {path}: {exc}", file=sys.stderr)
+        print(f"[leaf-demo] diagnostic_code=dependency_import_failed exception_type={type(exc).__name__}", file=sys.stderr)
         return None
 
 
@@ -119,7 +119,7 @@ def load_engine_registry_tools() -> List[Dict[str, Any]]:
             if isinstance(tools, list) and tools:
                 return tools
         except Exception as exc:  # pragma: no cover
-            print(f"[leaf-demo] bad engine/registry.json: {exc}", file=sys.stderr)
+            print(f"[leaf-demo] diagnostic_code=engine_registry_load_failed exception_type={type(exc).__name__}", file=sys.stderr)
     return list(fb.DEFAULT_TOOLS)
 
 
@@ -142,7 +142,7 @@ def load_seed_write_tools() -> List[Dict[str, Any]]:
             tools = json.loads(WRITE_TOOLS_STORE.read_text(encoding="utf-8")).get("tools", [])
             write_tools = [t for t in tools if isinstance(t, dict) and t.get("name")]
         except Exception as exc:  # pragma: no cover - defensive
-            print(f"[leaf-demo] bad write_tools.json: {exc}", file=sys.stderr)
+            print(f"[leaf-demo] diagnostic_code=write_tools_load_failed exception_type={type(exc).__name__}", file=sys.stderr)
     records = solar_tools.registry_records()
     if records:
         _check_registry_record_collisions(
@@ -161,7 +161,7 @@ def load_seed_catalog_tools() -> List[Dict[str, Any]]:
             tools = json.loads(CATALOG_TOOLS_STORE.read_text(encoding="utf-8")).get("tools", [])
             return [t for t in tools if isinstance(t, dict) and t.get("name")]
         except Exception as exc:  # pragma: no cover - defensive
-            print(f"[leaf-demo] bad catalog_tools.json: {exc}", file=sys.stderr)
+            print(f"[leaf-demo] diagnostic_code=catalog_tools_load_failed exception_type={type(exc).__name__}", file=sys.stderr)
     return []
 
 
@@ -207,7 +207,7 @@ def load_tenant_repo_tools(tenant_id: str = _DEFAULT_TENANT) -> List[Dict[str, A
         return authoritative
 
     def _bad_registry(reg: Path, exc: Exception) -> None:
-        print(f"[leaf-demo] bad tenant registry.json at {reg}: {exc}", file=sys.stderr)
+        print(f"[leaf-demo] diagnostic_code=tenant_registry_load_failed exception_type={type(exc).__name__}", file=sys.stderr)
 
     tenant_root, authoritative = _verified_tenant_fallback(tenant_id)
     if authoritative is not None:
@@ -230,7 +230,7 @@ def _verified_tenant_fallback(tenant_id: str):
         if authoritative is None:
             raise CustomizationServiceError(
                 "effective_catalog_unavailable", 503,
-                detail="effective authority appeared during fallback; retry catalog load",
+                diagnostic_code="catalog_authority_appeared",
             )
         return None, authoritative
     return tenant_root, None
@@ -336,7 +336,7 @@ def _load_effective_surface_config(tenant_id: str) -> Dict[str, Any]:
         if (tenant_key not in _surface_config_warned_tenants
                 and len(_surface_config_warned_tenants) < _MAX_SURFACE_CONFIG_WARNED_TENANTS):
             _surface_config_warned_tenants.add(tenant_key)
-            print(f"[leaf-demo] bad tenant surface-config.json at {cfg}: {exc}",
+            print(f"[leaf-demo] diagnostic_code=tenant_surface_config_load_failed exception_type={type(exc).__name__}",
                   file=sys.stderr)
 
     root = _contained_tenant_root(tenant_id)

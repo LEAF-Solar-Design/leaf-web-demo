@@ -74,15 +74,69 @@ _REPOSITORY_VISIBILITY_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 _HARNESS_PUBLISH_LOST = frozenset({"publish_conflict", "publish_not_accepted"})
 
 
+_DIAGNOSTIC_CODES = frozenset({
+    "customization_refused",
+    "git_failed",
+    "git_show_failed",
+    "git_dir_unset",
+    "path_unresolvable",
+    "head_missing",
+    "harness_unconfigured",
+    "harness_provision_failed",
+    "provision_response_malformed",
+    "provision_response_tenant_mismatch",
+    "provision_response_commit_malformed",
+    "provision_ref_not_visible",
+    "platform_store_unavailable",
+    "binding_resolution_failed",
+    "harness_remove_failed",
+    "harness_stage_job_failed",
+    "harness_stage_failed",
+    "staged_receipt_not_a_mapping",
+    "stale_base",
+    "harness_publish_lost",
+    "harness_publish_failed",
+    "publish_commit_not_a_string",
+    "catalog_process_lock_timeout",
+    "catalog_worker_lock_timeout",
+    "catalog_worktree_add_failed",
+    "catalog_head_probe_failed",
+    "catalog_head_pending",
+    "catalog_commit_mismatch",
+    "catalog_digest_mismatch",
+    "catalog_worktree_verification_failed",
+    "catalog_symlink_rejected",
+    "catalog_containment_rejected",
+    "catalog_pin_missing",
+    "catalog_authority_disappeared",
+    "catalog_authority_changed",
+    "catalog_authority_unavailable",
+    "catalog_directory_failed",
+    "catalog_pin_lookup_failed",
+    "catalog_authority_appeared",
+    "author_quota_store_failed",
+    "missing_authority_tuple",
+    "authority_tuple_rejected",
+    "customization_unexpected_failure",
+    "change_set_not_found",
+})
+
+
 class CustomizationServiceError(RuntimeError):
-    def __init__(self, code: str, status_code: int = 409, detail: str = "") -> None:
+    def __init__(
+        self, code: str, status_code: int = 409, detail: str = "", *,
+        diagnostic_code: str | None = None, cause: BaseException | None = None,
+    ) -> None:
         super().__init__(code)
         self.code, self.status_code = code, status_code
-        # `code` is the ONLY client-visible part: routers/author.py copies it
-        # into the response body as `reason_code`. `detail` carries operator
-        # diagnostics (git stderr, absolute tenant paths) and must never be
-        # serialized into a response. It is for logs and test assertions.
-        self.detail = str(detail)
+        selected = detail if diagnostic_code is None else diagnostic_code
+        self.diagnostic_code = (
+            selected if type(selected) is str and selected in _DIAGNOSTIC_CODES
+            else "customization_refused"
+        )
+        self.exception_type = type(cause).__name__ if isinstance(cause, BaseException) else None
+        # Legacy readers receive the validated branch code only.
+        self.detail = self.diagnostic_code
 
 
 _SCHEMA_IDENTITY_MAX_DEPTH = 128
@@ -339,12 +393,9 @@ def _git(bare: Path, *args: str) -> str:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        # stderr goes into `detail` (operator-only), never into the response.
-        stderr = str(getattr(exc, "stderr", "") or "").strip()
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            f"git_failed: {' '.join(args)} in {bare} ({type(exc).__name__})"
-            + (f": {stderr}" if stderr else ""),
+            diagnostic_code="git_failed", cause=exc,
         ) from exc
     return result.stdout.strip()
 
@@ -357,13 +408,9 @@ def _git_blob(bare: Path, object_name: str) -> bytes:
             timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        stderr = getattr(exc, "stderr", b"") or b""
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", "replace")
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            f"git_show_failed: {object_name} in {bare} ({type(exc).__name__})"
-            + (f": {stderr.strip()}" if stderr.strip() else ""),
+            diagnostic_code="git_show_failed", cause=exc,
         ) from exc
     return result.stdout
 
@@ -377,7 +424,7 @@ def _bare_repo(tenant_id: str) -> Path:
     if not base:
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            "git_dir_unset: neither LEAF_TENANT_GIT_DIR nor LEAF_TENANT_BARE_BASE is set",
+            diagnostic_code="git_dir_unset",
         )
     candidate = Path(base) / f"{tenant_id}.git"
     try:
@@ -387,11 +434,11 @@ def _bare_repo(tenant_id: str) -> Path:
     except (OSError, ValueError) as exc:
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            f"path_unresolvable: {candidate} under {base} ({type(exc).__name__})",
+            diagnostic_code="path_unresolvable", cause=exc,
         ) from exc
     if not (resolved / "HEAD").is_file():
         raise CustomizationServiceError(
-            "tenant_repository_unavailable", 503, f"head_missing: {resolved}/HEAD",
+            "tenant_repository_unavailable", 503, diagnostic_code="head_missing",
         )
     return resolved
 
@@ -408,10 +455,10 @@ def _ensure_bare_repo(tenant_id: str) -> Path:
     url = os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").rstrip("/")
     secret = os.environ.get("LEAF_HARNESS_SECRET", "").strip()
     if not url or not secret:
-        # Never log the secret itself, only whether the deployment supplied one.
+        # Configuration values never enter operator diagnostics.
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            f"harness_unconfigured: url_set={bool(url)} secret_set={bool(secret)}",
+            diagnostic_code="harness_unconfigured",
         )
     try:
         import requests
@@ -423,21 +470,19 @@ def _ensure_bare_repo(tenant_id: str) -> Path:
         response.raise_for_status()
         body = response.json()
     except Exception as exc:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            f"harness_provision_failed: {url}/author/repository "
-            f"status={status} {type(exc).__name__}",
+            diagnostic_code="harness_provision_failed", cause=exc,
         ) from exc
     if not isinstance(body, Mapping):
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            f"provision_response_malformed: {type(body).__name__}",
+            diagnostic_code="provision_response_malformed",
         )
     if body.get("tenant_id") != tenant_id:
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            "provision_response_tenant_mismatch",
+            diagnostic_code="provision_response_tenant_mismatch",
         )
     expected = body.get("base_commit")
     if (
@@ -447,14 +492,14 @@ def _ensure_bare_repo(tenant_id: str) -> Path:
     ):
         raise CustomizationServiceError(
             "tenant_repository_unavailable", 503,
-            "provision_response_commit_malformed",
+            diagnostic_code="provision_response_commit_malformed",
         )
 
     # App and harness are separate NFS clients. EFS can retain a negative
     # directory entry for refs/heads/main after the harness creates it. Retry
     # only local verification, never the provisioning write, until the bounded
     # visibility window expires.
-    last_detail = "main_ref_not_observed"
+    last_cause = None
     for delay in _REPOSITORY_VISIBILITY_DELAYS:
         if delay:
             time.sleep(delay)
@@ -464,17 +509,14 @@ def _ensure_bare_repo(tenant_id: str) -> Path:
         except CustomizationServiceError as exc:
             if exc.code != "tenant_repository_unavailable":
                 raise
-            last_detail = exc.detail or exc.code
+            last_cause = exc.__cause__
             continue
         if observed == expected:
             return bare
-        last_detail = (
-            f"provision_base_commit_mismatch: harness={expected} observed={observed}"
-        )
+        last_cause = None
     raise CustomizationServiceError(
         "tenant_repository_unavailable", 503,
-        "provision_ref_not_visible: "
-        f"attempts={len(_REPOSITORY_VISIBILITY_DELAYS)} last={last_detail}",
+        diagnostic_code="provision_ref_not_visible", cause=last_cause,
     )
 
 
@@ -492,7 +534,7 @@ def _binding(tenant: Any) -> TenantBinding:
         except (ImportError, OSError, RuntimeError) as exc:
             raise CustomizationServiceError(
                 "tenant_identity_binding_unavailable", 503,
-                f"platform_store_unavailable: {type(exc).__name__}",
+                diagnostic_code="platform_store_unavailable", cause=exc,
             ) from exc
         try:
             binding = platform_store.resolve_active_identity_binding("auth0", subject)
@@ -510,7 +552,7 @@ def _binding(tenant: Any) -> TenantBinding:
         except (PostgresError, OSError, RuntimeError, ValueError) as exc:
             raise CustomizationServiceError(
                 "tenant_identity_binding_unavailable", 503,
-                f"binding_resolution_failed: {type(exc).__name__}",
+                diagnostic_code="binding_resolution_failed", cause=exc,
             ) from exc
     if os.environ.get("LEAF_CUSTOMIZATION_ALLOW_STATIC_BINDINGS", "") == "1":
         raw = os.environ.get("LEAF_CUSTOMIZATION_TENANT_BINDINGS", "")
@@ -1253,7 +1295,7 @@ class CustomizationService:
         except Exception as exc:
             raise CustomizationServiceError(
                 "customization_harness_unavailable", 503,
-                f"harness_remove_failed: status={getattr(getattr(exc, 'response', None), 'status_code', None)}",
+                diagnostic_code="harness_remove_failed", cause=exc,
             ) from exc
         if not isinstance(body, Mapping):
             raise CustomizationServiceError("invalid_staged_receipt", 502)
@@ -1653,7 +1695,6 @@ class CustomizationService:
             body = response.json()
         except Exception as exc:
             response = getattr(exc, "response", None)
-            status = getattr(response, "status_code", None)
             # Class-qualified: _harness_stage is also exercised unbound
             # (self=None), a convention test_customization_refusal_observability
             # pins, so no attribute lookup may go through self.
@@ -1670,20 +1711,18 @@ class CustomizationService:
                 # stage status to surface.
                 error = CustomizationServiceError(
                     "customization_author_job_failed", 502,
-                    f"harness_stage_job_failed: {url}/author/stage "
-                    f"status={status}",
+                    diagnostic_code="harness_stage_job_failed", cause=exc,
                 )
                 error.harness_reason = reason
                 raise error from exc
             raise CustomizationServiceError(
                 "customization_harness_unavailable", 503,
-                f"harness_stage_failed: {url}/author/stage status={status} "
-                f"{type(exc).__name__}",
+                diagnostic_code="harness_stage_failed", cause=exc,
             ) from exc
         if not isinstance(body, Mapping):
             raise CustomizationServiceError(
                 "invalid_staged_receipt", 502,
-                f"staged_receipt_not_a_mapping: {type(body).__name__}",
+                diagnostic_code="staged_receipt_not_a_mapping",
             )
         return body
 
@@ -2281,8 +2320,7 @@ class CustomizationService:
         if not hmac.compare_digest(change.base_commit, effective.catalog_commit):
             raise CustomizationServiceError(
                 "stale_base", 409,
-                f"stale_base: change_set={change.change_set_id} "
-                f"base={change.base_commit} effective={effective.catalog_commit}",
+                diagnostic_code="stale_base",
             )
 
     def _harness_publish(self, change: ChangeSet) -> str:
@@ -2308,18 +2346,17 @@ class CustomizationService:
             if lost is not None:
                 raise CustomizationServiceError(
                     lost, 409,
-                    f"harness_publish_lost: {url}/author/publish status={status} {lost}",
+                    diagnostic_code="harness_publish_lost", cause=exc,
                 ) from exc
             raise CustomizationServiceError(
                 "customization_publish_incomplete", 503,
-                f"harness_publish_failed: {url}/author/publish status={status} "
-                f"{type(exc).__name__}",
+                diagnostic_code="harness_publish_failed", cause=exc,
             ) from exc
         commit = body.get("commit") if isinstance(body, Mapping) else None
         if not isinstance(commit, str):
             raise CustomizationServiceError(
                 "customization_publish_incomplete", 502,
-                f"publish_commit_not_a_string: {type(commit).__name__}",
+                diagnostic_code="publish_commit_not_a_string",
             )
         return commit
 
@@ -2598,11 +2635,6 @@ _worktree_guard = threading.Lock()
 _worktree_locks: dict[str, threading.Lock] = {}
 
 
-def _git_stderr(result: subprocess.CompletedProcess) -> str:
-    """Collapse git's stderr to one bounded line fit for a log record."""
-    return " ".join((result.stderr or "").split())[:500]
-
-
 def _harness_publish_lost_code(response: Any) -> str | None:
     """The harness's closed code for a publish that lost for good, else None.
 
@@ -2619,10 +2651,19 @@ def _harness_publish_lost_code(response: Any) -> str | None:
     return code if isinstance(code, str) and code in _HARNESS_PUBLISH_LOST else None
 
 
-def _unavailable(detail: str) -> CustomizationServiceError:
-    """Log the operator-facing cause, return the client-safe 503."""
-    _LOG.warning("effective_catalog_unavailable: %s", detail)
-    return CustomizationServiceError("effective_catalog_unavailable", 503, detail=detail)
+def _unavailable(
+    diagnostic_code: str, *, cause: BaseException | None = None,
+) -> CustomizationServiceError:
+    """Construct safe diagnostics before logging the client-safe 503."""
+    error = CustomizationServiceError(
+        "effective_catalog_unavailable", 503,
+        diagnostic_code=diagnostic_code, cause=cause,
+    )
+    _LOG.warning(
+        "effective_catalog_unavailable: detail=%s exception_type=%s",
+        error.diagnostic_code, error.exception_type,
+    )
+    return error
 
 
 def _tenant_worktree_lock(bare: Path) -> threading.Lock:
@@ -2706,8 +2747,7 @@ def _exclusive_materialize(bare: Path, lock_path: Path):
     lock = _tenant_worktree_lock(bare)
     if not lock.acquire(timeout=_MATERIALIZE_LOCK_TIMEOUT):
         raise _unavailable(
-            f"in-process materialization lock busy past "
-            f"{_MATERIALIZE_LOCK_TIMEOUT}s: {lock_path}"
+            "catalog_process_lock_timeout"
         )
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2715,8 +2755,7 @@ def _exclusive_materialize(bare: Path, lock_path: Path):
             while not _try_os_lock(handle):
                 if time.monotonic() >= deadline:
                     raise _unavailable(
-                        f"materialization lock held by another worker past "
-                        f"{_MATERIALIZE_LOCK_TIMEOUT}s: {lock_path}"
+                        "catalog_worker_lock_timeout"
                     )
                 time.sleep(0.05)
             # Closing the handle releases the OS lock on every exit path,
@@ -2727,11 +2766,7 @@ def _exclusive_materialize(bare: Path, lock_path: Path):
 
 
 def _worktree_add(bare: Path, target: Path, commit: str) -> subprocess.CompletedProcess:
-    """Add the detached worktree, CAPTURING stderr.
-
-    The previous DEVNULL here is why three CI failures produced nothing but a
-    generic 503: git's actual complaint was thrown away at the point of failure.
-    """
+    """Add the detached worktree, capturing output without logging it."""
     return subprocess.run(
         ["git", "-c", "core.autocrlf=false", *_git_trust(bare, target),
          "--git-dir", str(bare),
@@ -2774,9 +2809,11 @@ def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
     with _exclusive_materialize(bare, lock_path):
         if target.exists():
             return  # another holder materialized it while we waited
+        add_cause = None
         try:
             first = _worktree_add(bare, target, commit)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            add_cause = exc
             first = _discard_timed_out_add(target)
         if first.returncode == 0 or target.exists():
             return
@@ -2788,16 +2825,14 @@ def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
         )
         try:
             retry = _worktree_add(bare, target, commit)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            add_cause = exc
             # Twice over budget is a real environment problem, not a blip. Discard
             # so no torn tree is left for the next caller to find, then 503.
             retry = _discard_timed_out_add(target)
         if retry.returncode != 0 and not target.exists():
             raise _unavailable(
-                f"git worktree add {target} @ {commit}: rc={first.returncode} "
-                f"{_git_stderr(first)!r}; prune rc={prune.returncode} "
-                f"{_git_stderr(prune)!r}; retry rc={retry.returncode} "
-                f"{_git_stderr(retry)!r}"
+                "catalog_worktree_add_failed", cause=add_cause,
             )
 
 
@@ -2815,7 +2850,8 @@ def _verified_worktree(bare: Path, target: Path, commit: str, digest: str) -> No
     Retrying is safe for the tamper case too: a tampered registry simply fails
     every attempt and still raises `effective_catalog_digest_mismatch`.
     """
-    detail = "no attempt completed"
+    diagnostic_code = "catalog_worktree_verification_failed"
+    diagnostic_cause = None
     observed = ""
     for attempt in range(_MATERIALIZE_ATTEMPTS):
         # Attempt 0 fast-paths a settled worktree without taking the lock.
@@ -2823,40 +2859,41 @@ def _verified_worktree(bare: Path, target: Path, commit: str, digest: str) -> No
         # blocks until the builder finishes instead of re-reading torn state.
         if attempt or not target.exists():
             _materialize_worktree(bare, target, commit)
+        diagnostic_cause = None
         try:
             probe = subprocess.run(
                 ["git", *_git_trust(target), "-C", str(target), "rev-parse", "HEAD"],
                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
             )
             if probe.returncode != 0:
-                detail = f"git rev-parse HEAD rc={probe.returncode}: {_git_stderr(probe)!r}"
+                diagnostic_code = "catalog_head_probe_failed"
             else:
                 observed = probe.stdout.strip()
                 if observed == _NULL_OID:
-                    detail = f"{target} is still being built (HEAD is the null OID)"
+                    diagnostic_code = "catalog_head_pending"
                 elif observed != commit:
-                    detail = f"{target} HEAD {observed!r} != pinned {commit!r}"
+                    diagnostic_code = "catalog_commit_mismatch"
                 elif hashlib.sha256(
                     (target / "registry.json").read_bytes()
                 ).hexdigest() != digest:
-                    detail = f"{target}/registry.json does not match the pinned digest"
+                    diagnostic_code = "catalog_digest_mismatch"
                 else:
                     return
         except (OSError, subprocess.SubprocessError) as exc:
-            detail = f"{type(exc).__name__}: {exc}"
+            diagnostic_code = "catalog_worktree_verification_failed"
+            diagnostic_cause = exc
         if attempt + 1 < _MATERIALIZE_ATTEMPTS:
             time.sleep(0.05 * (attempt + 1))
     # Settled and still wrong: report which invariant the worktree broke.
     if observed and observed not in (commit, _NULL_OID):
         raise CustomizationServiceError(
-            "effective_catalog_commit_mismatch", 503, detail=detail
+            "effective_catalog_commit_mismatch", 503, diagnostic_code=diagnostic_code, cause=diagnostic_cause
         )
     if observed == commit:
         raise CustomizationServiceError(
-            "effective_catalog_digest_mismatch", 503, detail=detail
+            "effective_catalog_digest_mismatch", 503, diagnostic_code=diagnostic_code, cause=diagnostic_cause
         )
-    raise _unavailable(f"{target} @ {commit} unverifiable after "
-                       f"{_MATERIALIZE_ATTEMPTS} attempts: {detail}")
+    raise _unavailable(diagnostic_code, cause=diagnostic_cause)
 
 
 def effective_catalog_dir(tenant_id: str) -> Path | None:
@@ -2913,19 +2950,19 @@ def effective_catalog_dir(tenant_id: str) -> Path | None:
         target = root / tenant_id / pin.catalog_commit
         resolved_root = root.resolve(strict=True)
         if target.is_symlink():
-            raise _unavailable(f"refusing symlinked catalog target {target}")
+            raise _unavailable("catalog_symlink_rejected")
         if not _path_within(target, resolved_root):
-            raise _unavailable(f"catalog target {target} escapes {resolved_root}")
+            raise _unavailable("catalog_containment_rejected")
         _verified_worktree(bare, target, pin.catalog_commit, pin.catalog_digest)
         return target
     except ChangeSetNotFoundError:
         if enabled(5, tenant_id) or enabled(6, tenant_id):
-            raise _unavailable(f"no effective catalog pinned for tenant {tenant_id}")
+            raise _unavailable("catalog_pin_missing")
         return None
     except CustomizationServiceError:
         raise
     except (OSError, sqlite3.DatabaseError, subprocess.SubprocessError) as exc:
-        raise _unavailable(f"{type(exc).__name__}: {exc}") from exc
+        raise _unavailable("catalog_directory_failed", cause=exc) from exc
 
 
 def load_authoritative_tenant_tools(tenant_id: str) -> list[dict[str, Any]] | None:
@@ -2953,7 +2990,7 @@ def load_authoritative_tenant_tools(tenant_id: str) -> list[dict[str, Any]] | No
                 # resolution stays legacy (which still materializes through
                 # effective_catalog_dir and never falls back to mutable main).
                 return None
-            raise _unavailable("effective authority disappeared during catalog load")
+            raise _unavailable("catalog_authority_disappeared")
         failure = None
         joined = None
         try:
@@ -2989,11 +3026,11 @@ def load_authoritative_tenant_tools(tenant_id: str) -> list[dict[str, Any]] | No
         if service._pin_identity(service._record_fields_pin(tenant_id)) != service._pin_identity(pin):
             if attempt == 0:
                 continue
-            raise _unavailable("effective authority changed during both catalog loads")
+            raise _unavailable("catalog_authority_changed")
         if failure is not None:
             raise failure
         return joined
-    raise _unavailable("effective authority unavailable during catalog load")
+    raise _unavailable("catalog_authority_unavailable")
 
 
 def effective_catalog_pin(tenant_id: str) -> dict[str, str] | None:
@@ -3028,7 +3065,7 @@ def effective_catalog_pin(tenant_id: str) -> dict[str, str] | None:
     except CustomizationServiceError:
         raise
     except (OSError, sqlite3.DatabaseError, PostgresError, RuntimeError) as exc:
-        raise _unavailable(f"{type(exc).__name__}: {exc}") from exc
+        raise _unavailable("catalog_pin_lookup_failed", cause=exc) from exc
     return {
         "catalog_commit": pin.catalog_commit,
         "effective_catalog_digest": pin.catalog_digest,
