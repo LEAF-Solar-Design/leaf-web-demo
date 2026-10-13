@@ -125,8 +125,13 @@ function deferred() {
 const seat = nodes(n => n.type === 'JSXElement' && n.openingElement.name.name === 'SolarFlowSeat')[0].node
 const hostBranch = seat.children.filter(n => n.type === 'JSXExpressionContainer')[1].expression
 const hostStatus = seat.children.find(n => n.type === 'JSXExpressionContainer')
+// The refusal is a record bound to the scope it was raised in, and a value derived from it during
+// render. Both declarations are required: a missing one fails the harness instead of hiding it.
 const refusalState = nodes(n => n.type === 'VariableDeclaration' && n.declarations.some(d =>
-  d.id.type === 'ArrayPattern' && d.id.elements[0]?.name === 'projectSolarRefusal'))[0]?.node
+  d.id.type === 'ArrayPattern' && d.id.elements[0]?.name === 'projectSolarRefusalRecord'))[0]?.node
+const refusalDerived = nodes(n => n.type === 'VariableDeclaration' && n.declarations.some(d =>
+  d.id.type === 'Identifier' && d.id.name === 'projectSolarRefusal'))[0]?.node
+if (!refusalState || !refusalDerived) throw new Error('App.jsx must declare the refusal record and its derived value')
 const solarOverlayStatusOf = Function('SOLAR_OVERLAY_REASONS',
   `${text(nodes(n => n.type === 'FunctionDeclaration' && n.id?.name === 'solarOverlayStatusOf')[0].node)}; return solarOverlayStatusOf`)(SOLAR_OVERLAY_REASONS)
 const adapterSource = source.slice(declaration('solarFlowSeated').parent.start,
@@ -139,7 +144,8 @@ const useAdapter = Function('React', 'sameSolarDrawingBinding', 'useEscapeOwner'
       ENV_SOLAR_FLOW_RAIL, ENV_CAD_EDIT, ENV_SOLAR_SETTINGS_FORM, drafting, surfaceSlots,
       phoneViewport, setStudioDrawer, returnToDrawing, ribbon, activeRibbonTab,
       onCloseSolarFlowStep, setSolarFormTool } = input
-    ${refusalState ? text(refusalState) : ''}
+    ${text(refusalState)}
+    ${text(refusalDerived)}
     ${adapterSource}
     ${text(declaration('ribbonClusters').parent)}
     return { ribbonClusters, solarFlowSeated, projectSolarHostEnabled, projectSolarRows,
@@ -481,7 +487,7 @@ it('R13G2B-24 a receipt that expires before activation is refused with a visible
 })
 
 it('R13G2B-25 the refusal sentence clears on the next successful open and on a scope or receipt change', async () => {
-  for (const change of ['success', 'scope', 'authority', 'binding', 'receipt', 'client', 'project-mode']) {
+  for (const change of ['success', 'authority', 'binding', 'receipt', 'client', 'project-mode']) {
     const h = await setup()
     h.receiptToken.live = false
     fireEvent.click(screen.getByTestId('ribbon-solar-settings')); await act(drain)
@@ -504,13 +510,39 @@ it('R13G2B-25 the refusal sentence clears on the next successful open and on a s
       await h.update({ projectSolar: { ...h.owner, projectClient: { ...h.client } } })
     } else {
       // Change each dependency independently; authority/binding also cover an in-place scope update.
-      if (change === 'scope') h.owner = { ...h.owner, scope: { ...h.owner.scope } }
       if (change === 'authority') h.owner.scope.authorityKey = 'epoch-2'
       if (change === 'binding') h.owner.scope.binding = { ...B, input_version_id: OUTPUT }
       await h.update({ projectSolar: h.owner })
     }
     expect(status()).toBeNull()
     expect(h.adapter.projectSolarRefusal).toBeNull()
+    h.view.unmount()
+  }
+})
+
+it('R13G2B-28 a refusal survives a scope object rebuilt with the same authority and binding', async () => {
+  // useProjectSolarScope builds a new scope (and binding) object on every render while the owner is
+  // not installed. Clearing the refusal on that identity took part in a render loop in the browser
+  // (R13-G2b CI); the refusal now follows authority, binding, client and receipt, never identity.
+  const sentence = projectSolarAppReason('project_tools_unavailable')
+  // 'copied' rebuilds the scope once; 'rebuilt-every-render' hands every render a fresh scope and binding,
+  // as useProjectSolarScope does while its owner is not installed. A scope that changes within one render
+  // is not modelled: the hook returns the installed scope object whenever it reports ready.
+  for (const shape of ['copied', 'rebuilt-every-render']) {
+    const h = await setup()
+    const status = () => screen.queryByText(sentence, { selector: '[role="status"]' })
+    h.receiptToken.live = false
+    fireEvent.click(screen.getByTestId('ribbon-solar-settings')); await act(drain)
+    expect(status()).toBeVisible()
+    const rebuild = () => { h.owner = { ...h.owner, scope: { binding: { ...B }, authorityKey: 'epoch-1' } } }
+    rebuild()
+    await h.update({ projectSolar: h.owner })
+    for (let i = 0; i < 3; i++) {
+      if (shape === 'rebuilt-every-render') rebuild()
+      await h.update({ projectSolar: h.owner, phoneViewport: i % 2 === 0 })
+    }
+    expect(status()).toBeVisible()
+    expect(h.adapter.projectSolarRefusal).toEqual({ reason: sentence })
     h.view.unmount()
   }
 })

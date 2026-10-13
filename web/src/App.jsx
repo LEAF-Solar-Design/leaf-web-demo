@@ -3446,7 +3446,18 @@ export default function App() {
     activeVersion: drawing.activeVersion,
     requestedDrawingId: REQUESTED_DRAWING_ID ?? null,
   })
-  const [projectSolarRefusal, setProjectSolarRefusal] = useState(null)
+  // A refusal belongs to the project scope it was raised in. It shows only while that scope, its
+  // client and its catalog receipt are still the ones on screen, so a scope or receipt change
+  // retires it during render. Clearing it from a layout effect keyed on render-time objects took
+  // part in a nested-update loop when a project opened (R13-G2b CI, "Maximum update depth").
+  const [projectSolarRefusalRecord, setProjectSolarRefusalRecord] = useState(null)
+  const projectSolarRefusal = projectMode && projectSolarRefusalRecord
+    && projectSolarRefusalRecord.authorityKey === projectSolar.scope.authorityKey
+    && projectSolarRefusalRecord.client === projectSolar.projectClient
+    && projectSolarRefusalRecord.catalog === catalogState.projectCatalog
+    && (projectSolarRefusalRecord.binding === projectSolar.scope.binding
+      || sameSolarDrawingBinding(projectSolarRefusalRecord.binding, projectSolar.scope.binding))
+    ? projectSolarRefusalRecord.refusal : null
   const solarOverlayStatus = projectMode
     ? projectSolarRefusal?.reason || solarOverlayStatusOf(projectDrawing.reason === 'INVALID_SCALE' ? 'invalid_scale'
       : projectDrawing.reason === 'OVERLAY_LIMIT' ? 'overlay_limit'
@@ -3458,10 +3469,6 @@ export default function App() {
   const projectSolarWorkspaceRef = useRef(null)
   const projectSolarOpenerRef = useRef(null)
   const [projectSolarFocusRequest, setProjectSolarFocusRequest] = useState(0)
-  useLayoutEffect(() => {
-    setProjectSolarRefusal(null)
-  }, [projectMode, projectSolar.scope, projectSolar.scope.authorityKey,
-    projectSolar.scope.binding, projectSolar.projectClient, catalogState.projectCatalog])
   const projectSolarRows = (() => {
     const receipt = catalogState.projectCatalog
     try {
@@ -3480,13 +3487,15 @@ export default function App() {
       || !projectSolarRows.includes(row) || !PROJECT_SOLAR_SUPPORTED_TOOLS.has(row.name)
       || !projectSolarRuntime.onOpenTool(row)) {
       if (projectSolarHostEnabled && projectModeRef.current) {
-        setProjectSolarRefusal({ reason: projectSolarAppReason('project_tools_unavailable') })
+        setProjectSolarRefusalRecord({ refusal: { reason: projectSolarAppReason('project_tools_unavailable') },
+          authorityKey: projectSolar.scope.authorityKey, binding: projectSolar.scope.binding,
+          client: projectSolar.projectClient, catalog: catalogState.projectCatalog })
       }
       return false
     }
     projectSolarOpenerRef.current = document.activeElement
     setProjectSolarFocusRequest(value => value + 1)
-    setProjectSolarRefusal(null)
+    setProjectSolarRefusalRecord(null)
     returnToDrawing()
     if (phoneViewport) setStudioDrawer('none')
     return true
