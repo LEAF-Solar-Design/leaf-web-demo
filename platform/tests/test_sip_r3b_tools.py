@@ -83,6 +83,70 @@ def assigned_parent(s, case):
     return set_parent(s, embed(assigned, {**deepcopy(INTAKE), **intake}))
 
 
+def canonical_custody(s, ctx):
+    """Publish proved sizing through the real job and R14-B stores, without HTTP."""
+    from leaf_platform import canonical_jobs as jobs, entitlements, project_sizing_store as exchanges
+    import solar_project_jobs as service
+    import solar_project_sizing as sizing
+    import solar_sizing_client as cloud
+    from test_sip_r14_evidence import SMALL
+
+    refused("SIP_R3_SERVICE_EVIDENCE_REQUIRED", lambda: adapter.require_project_sizing(ctx))
+    request = {"module_name": "M", "full_inverter_name": "I", "bifacial": False,
+        "bifacial_coefficient": "0", "racking_params": {"racking_type": "fixed_tilt",
+            "surface_tilt": "20", "surface_azimuth": "180", "albedo": "0.2"},
+        "max_voltage": "600", "thermal_model_type": "sapm", "open_circuit_rise": False,
+        "zip_code": ctx.graph["project"]["zip_code"][:5]}
+    params = {"expected_rev": ctx.graph["rev"], "mode": "global", "confirm": True,
+        "grant_ref": "g1", "requests": {ctx.graph["settings"]["id"]: request}}
+    manifest = deps.catalog_tool_digest(solar_tools.trusted_record("solar-size-strings"))
+    plan = sizing.plan_sizing_request(params, ctx.graph, ctx.intake_sha256, manifest)
+    execution = {"schema": jobs.PROJECT_GRAPH_JOB_SCHEMA,
+        "authority_mode": "postgres_canonical", "execution_path": "local",
+        "drawing_id": str(s.drawing), "actor_binding_id": str(s.actor),
+        "checkout_fence": str(s.lease.fence), "tool_manifest_sha256": manifest,
+        "parent_intake_sha256": ctx.intake_sha256, "initialized": False}
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(cloud, "resolve_grant", forbidden)
+        patch.setattr(cloud, "post_string_length", forbidden)
+        patch.setattr(cloud.requests, "post", forbidden)
+        denial, org = entitlements.stored_job_entitlement_verdict(s.org, "run")
+        assert denial is None
+        job = db.run_transaction(lambda conn: jobs.submit_project_graph_job(
+            s.org, s.project, str(s.org), "solar-size-strings", plan["normalized_params"],
+            str(uuid4()), input_version_id=ctx.parent_version_id, execution_context=execution,
+            submission_fingerprint=jobs._fingerprint("r14c-fixture", {"nonce": str(uuid4())}),
+            pinned_tier=org.tier, conn=conn))
+        row = jobs.claim_project_graph_job("r14c-" + uuid4().hex,
+            tool_name="solar-size-strings", lease_seconds=120)
+        assert row is not None and row["job_id"] == job["job_id"]
+        scope, lease = adapter._exchange_authority(row)
+        exchanges.prepare_exchange(scope, lease, request_bytes=plan["wire_bytes"],
+            request_sha256=plan["wire_sha256"], grant_ref="g1", classification="live")
+        assert exchanges.begin_send(scope, lease)
+        response = deepcopy(SMALL)
+        response.update(voc=50, bvoc=0)
+        response["simulation_results"]["standard"]["string_length"] = ctx.graph["settings"]["panels_in_sequence"]
+        raw = local.canonical_bytes(response)
+        assert exchanges.capture_response(scope, lease, response_bytes=raw,
+            response_sha256=sha256(raw).hexdigest()) == "stored"
+        expected = adapter._sizing_expected(row, ctx, exchanges.get_exchange(scope, lease))
+        evidence = sizing.build_sizing_evidence(row["params"], ctx.graph, ctx.intake_sha256,
+            manifest, raw, identity=expected["identity"], parent_version_id=str(ctx.parent_version_id),
+            producer=expected["producer"], classification="live")
+        raw = local.canonical_bytes(evidence)
+        assert exchanges.attach_evidence(scope, lease, evidence_bytes=raw,
+            evidence_sha256=sha256(raw).hexdigest()) == "stored"
+        prepared = db.run_transaction(lambda conn: service.prepare_project_graph_job(row, conn=conn))
+        outcome, result = service.complete_project_graph_job(scope.job_id, lease.worker_id,
+                                                             lease.attempt, prepared)
+        assert outcome == "applied"
+        assert exchanges.get_exchange(scope, lease)["state"] == "published"
+        ctx = output(s, result["graph_commit"])
+        adapter.require_project_sizing(ctx)
+        return ctx
+
+
 def prepare(s, tool, params, ctx, **changes):
     args = dict(checkout=s.lease, job_id=s.job, attempt=1,
                 tool_manifest_sha256=deps.catalog_tool_digest(solar_tools.trusted_record(tool)))
@@ -138,7 +202,7 @@ def test_sip_r3b_pg_combiners_feeders(scope):
 
 
 def test_sip_r3b_pg_homeruns_schedule(scope, case):
-    ctx = assigned_parent(scope, case)
+    ctx = canonical_custody(scope, assigned_parent(scope, case))
     rev = ctx.graph["rev"]
     params = {"expected_rev": rev}
     expected = direct(ctx, "solar-homeruns", params)
@@ -150,7 +214,7 @@ def test_sip_r3b_pg_homeruns_schedule(scope, case):
     p, r, ctx = commit(scope, "solar-schedule", params, ctx)
     assert r["after_rev"] == rev + 2 and ctx.graph == expected
     assert prove(scope, r, p)["graph_sha256"] == local.digest(expected)
-    assert count(scope) == 3
+    assert count(scope) == 4  # imported parent, proved sizing, homeruns, schedule
 
 
 def test_sip_r3b_pg_historical_replay(scope, monkeypatch):

@@ -409,12 +409,12 @@ class ConnectionFault:
 def test_sip_r4_pg_rollback(world, monkeypatch):
     for phase in ("publication", "proof", "history", "settlement"):
         s = world()
-        row = claim(s, submit(s))
+        row = claim(s, submit(s, key=str(uuid4())), owner="r4-" + uuid4().hex)
         p = prepared(row)
         before = census(s)
         with monkeypatch.context() as patch:
             if phase in {"publication", "proof"}:
-                name = ("publish_project_graph_commit" if phase == "publication" else "project_graph_job_provenance")
+                name = ("publish_project_graph_commit" if phase == "publication" else "_pending_project_graph_job_provenance")
                 original = getattr(adapter, name)
                 def fault(*a, **k):
                     original(*a, **k)
@@ -664,10 +664,10 @@ def test_sip_r4_pg_legacy_nested_replay(world, monkeypatch):
 
 def test_sip_r4_pg_final_clock(world, monkeypatch):
     s = world()
-    row = claim(s, submit(s), seconds=3)
+    row = claim(s, submit(s, key=str(uuid4())), owner="r4-" + uuid4().hex, seconds=3)
     p = prepared(row)
     before = census(s)
-    original = adapter.project_graph_job_provenance
+    original = adapter._pending_project_graph_job_provenance
     proof_ran = []
     def expire_during_proof(*a, **k):
         result = original(*a, **k)
@@ -675,7 +675,7 @@ def test_sip_r4_pg_final_clock(world, monkeypatch):
         k["conn"].execute("SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM "
             "(%s::timestamptz - clock_timestamp()))) + 0.05)", (load(row["job_id"])["lease_expires_at"],))
         return result
-    monkeypatch.setattr(adapter, "project_graph_job_provenance", expire_during_proof)
+    monkeypatch.setattr(adapter, "_pending_project_graph_job_provenance", expire_during_proof)
     monkeypatch.setattr(jobs, "_now", lambda *a: (_ for _ in ()).throw(AssertionError("host clock used")))
     assert complete(row, p) == ("not_owner", None)
     assert proof_ran == [True] and census(s) == before

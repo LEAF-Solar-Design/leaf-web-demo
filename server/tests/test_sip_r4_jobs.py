@@ -315,10 +315,10 @@ def test_sip_r4_request_value_parity(admission, monkeypatch):
     check_admission_refusal(a, "INVALID_SIZING_REQUEST", {**sizing, "requests": {}}, **kw)
     check_admission_refusal(a, "INVALID_SIZING_REQUEST", {
         "expected_rev": 3, "mode": "manual-global"}, **kw)
-    check_admission_refusal(a, "SIP_R3_SERVICE_EVIDENCE_REQUIRED", {
+    check_admission_refusal(a, "CLOUD_REQUEST_INVALID", {
         "expected_rev": 3, "mode": "global", "confirm": True,
         "requests": {"surprise": 1}, "grant_ref": "g1"},
-        error=project.ProjectContextError, **kw)
+        error=GraphValidationError, **kw)
 
 
 def test_sip_r4_valid_admission_preparation(admission, monkeypatch):
@@ -376,8 +376,8 @@ def test_sip_r4_seed_parameter_admission(admission, monkeypatch):
 
 
 def test_sip_r4_every_tool_prepared_at_admission(admission, monkeypatch):
-    # No tool reaches the job table without the worker's own preparation: with schema-valid parameters each
-    # of the eleven refuses a graphless parent and a stale revision before the insert.
+    # Ordinary/manual requests use worker output preparation; global sizing uses pure planning.
+    # These eleven ordinary/manual cases refuse graphless and stale parents before insertion.
     a = admission
     for tool in sorted(ELEVEN):
         check_admission_refusal(a, "GRAPH_NOT_EMBEDDED", deepcopy(CLEAN[tool]), tool_name=tool,

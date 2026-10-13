@@ -9,6 +9,8 @@ from uuid import UUID
 import platform_link
 import solar_project_context as project
 import solar_project_graph as graph
+import solar_project_sizing as sizing
+import solar_sizing_client as cloud
 import solar_tools
 import tool_validate
 from solar_design_graph import GraphValidationError
@@ -40,6 +42,11 @@ def _validate_new_project_graph_params(context, tool_name, params, *, checkout,
     """
     args = {"checkout": checkout, "job_id": UUID(int=0), "attempt": 1,
             "tool_manifest_sha256": tool_manifest_sha256}
+    if graph._global_sizing(tool_name, params):
+        plan = sizing.plan_sizing_request(params, context.graph, context.intake_sha256,
+                                         tool_manifest_sha256)
+        cloud.resolve_grant(plan["normalized_params"]["grant_ref"], str(context.organization_id))
+        return plan["normalized_params"]
     if "initialize" in params:
         prepared = graph.prepare_project_graph_seed(context, params, **args)
     else:
@@ -65,6 +72,20 @@ def submit_project_graph_job(
         if existing.get("deleted_at") is not None:
             project.refuse("CONTEXT_NOT_FOUND")
         normalized = graph._parameters(SimpleNamespace(drawing_id=drawing_id), params)
+        if graph._global_sizing(tool_name, normalized):
+            requests = normalized.get("requests")
+            if type(requests) is dict and len(requests) == 1:
+                target = next(iter(requests))
+                try:
+                    parsed = cloud.SizingParams.model_validate({
+                        "grant_ref": normalized.get("grant_ref"), "request": requests[target]})
+                except (ValueError, TypeError):
+                    pass  # Invalid intent cannot match the admitted fingerprint.
+                else:
+                    # Match pure planning's representation without grant, parent or checkout IO.
+                    normalized = {**normalized, "grant_ref": parsed.grant_ref,
+                        "requests": {target: parsed.request.wire()},
+                        "cancel": normalized.get("cancel", False)}
         fingerprint = _submission_fingerprint(org, project_id, drawing_id, input_version_id,
             tenant, actor, tool_name, normalized, tool_manifest_sha256)
         return jobs._graph_replay(existing, fingerprint)
@@ -109,7 +130,7 @@ def submit_project_graph_job(
                 pinned_tier=stored_org.tier if stored_org is not None else None, conn=conn))
 
 
-def prepare_project_graph_job(job, *, conn):
+def _job_context(job, conn):
     jobs = _jobs()
     org, proj, parent, job_id, drawing, actor = jobs._graph_ids(job)
     if job["attempt"] < 1:
@@ -121,10 +142,18 @@ def prepare_project_graph_job(job, *, conn):
     execution = job["execution_context"]
     if context.intake_sha256 != execution["parent_intake_sha256"]:
         jobs._graph_binding_error()
+    return context
+
+
+def prepare_project_graph_job(job, *, conn):
+    jobs = _jobs()
+    org, proj, parent, job_id, drawing, actor = jobs._graph_ids(job)
+    context = _job_context(job, conn)
+    execution = job["execution_context"]
     checkout = project.CheckoutLease(org, proj, drawing, "Stored job", actor, None, None,
                                      int(execution["checkout_fence"]))
     args = {"checkout": checkout, "job_id": job_id, "attempt": job["attempt"],
-            "tool_manifest_sha256": execution["tool_manifest_sha256"]}
+            "tool_manifest_sha256": execution["tool_manifest_sha256"], "conn": conn}
     if execution["initialized"]:
         prepared = graph.prepare_project_graph_seed(context, job["params"], **args)
     else:
@@ -144,16 +173,24 @@ def complete_project_graph_job(job_id, worker_id, attempt, prepared):
         jobs._validate_graph_request(row, prepared.request)
         receipt = graph.publish_project_graph_commit(prepared,
             actor_binding_id=UUID(row["execution_context"]["actor_binding_id"]), conn=conn)
-        graph.project_graph_job_provenance(job_id, receipt, expected=prepared, conn=conn)
+        graph._pending_project_graph_job_provenance(job_id, receipt, expected=prepared, conn=conn)
         return receipt
+
+    def complete(conn):
+        if graph._global_sizing(prepared.request["tool"], prepared.request["parameters"]):
+            row = graph._stored_job(job_id, conn)
+            scope, _ = graph._exchange_authority(row)
+            return graph._exchanges().complete_exchange(scope,
+                graph._exchanges().JobAttempt(worker_id, attempt), completion,
+                publish_and_prove=publish_and_prove, conn=conn)
+        return jobs.complete_project_graph_job(job_id, worker_id, attempt, completion,
+                                               publish_and_prove=publish_and_prove, conn=conn)
 
     try:
         with project.write_loop.drawing_mutation_refusal_guard() as refusal:
             if refusal is not None:
                 project.refuse("WRITES_DRAINED")
-            return platform_link.platform_db().run_transaction(lambda conn:
-                jobs.complete_project_graph_job(job_id, worker_id, attempt, completion,
-                                                publish_and_prove=publish_and_prove, conn=conn))
+            return platform_link.platform_db().run_transaction(complete)
     except jobs._GraphLeaseLost:
         return "not_owner", None
 
@@ -214,6 +251,13 @@ def _transport_caused(exc):
 
 def _preparation_error(exc):
     reason = getattr(exc, "reason_code", getattr(exc, "code", None))
+    if isinstance(exc, cloud.CloudError):
+        allowed = {"cloud_request_invalid", "cloud_auth_missing", "cloud_tenant_unauthorized",
+                   "cloud_upstream_failure", "cloud_response_invalid", "sizing_outcome_unknown"}
+        reason = (exc.classification if exc.classification in allowed
+                  else "cloud_upstream_failure").upper()
+    if isinstance(reason, str) and reason.startswith("SIP_R14_EXCHANGE_"):
+        reason = "SIP_R14_EVIDENCE_REJECTED"
     retryable = isinstance(exc, _TRANSPORT_FAILURES) or reason in {
         "SIP_R1_STORE_UNAVAILABLE", "SIP_R1_CHECKOUT_UNAVAILABLE"} or (
         reason == "SIP_R1_INTAKE_UNAVAILABLE" and _transport_caused(exc))
@@ -222,6 +266,87 @@ def _preparation_error(exc):
     if isinstance(reason, str):
         error["reason_code"] = reason
     return error
+
+
+def _cloud_prepare(job, guard):
+    """Only committed send ownership permits transport; uncertain writes await reclaim."""
+    store = graph._exchanges()
+    db = platform_link.platform_db()
+    context = db.run_transaction(lambda conn: _job_context(job, conn))
+    plan = sizing.plan_sizing_request(job["params"], context.graph, context.intake_sha256,
+                                     job["execution_context"]["tool_manifest_sha256"])
+    scope, lease = graph._exchange_authority(job)
+    reservation = {"request_bytes": plan["wire_bytes"], "request_sha256": plan["wire_sha256"],
+                   "grant_ref": plan["normalized_params"]["grant_ref"], "classification": "live"}
+    exchange = store.get_exchange(scope, lease)
+    if exchange is None:
+        store.prepare_exchange(scope, lease, **reservation)
+    elif any(exchange[key] != value for key, value in reservation.items()):
+        raise store.ExchangeConflict()
+    resume = store.resume_exchange(scope, lease)
+    if resume.action == "awaiting_response":
+        return None
+    if resume.action == "outcome_unknown":
+        raise cloud.CloudError("sizing_outcome_unknown", 502)
+    if resume.action == "refused":
+        raise cloud.CloudError(resume.exchange["refusal_code"], 502)
+    if resume.action == "published":
+        db.run_transaction(lambda conn: graph.project_graph_job_provenance(
+            scope.job_id, job["result"]["graph_commit"],
+            expected=prepare_project_graph_job(job, conn=conn), conn=conn))
+        return None
+    if resume.action == "send_ready":
+        try:
+            grant = cloud.resolve_grant(plan["normalized_params"]["grant_ref"], str(context.organization_id))
+        except cloud.CloudError as exc:
+            store.refuse_exchange(scope, lease, reason_code=exc.classification)
+            raise
+        if guard.lost or not store.begin_send(scope, lease):
+            return None
+        try:
+            raw = cloud.post_string_length(cloud.SizingRequest.model_validate(plan["normalized_request"]),
+                                           grant, preserve_uncertainty=True)
+        except cloud.CloudError as exc:
+            if guard.lost:
+                return None
+            if exc.classification == "sizing_outcome_unknown":
+                store.record_outcome_unknown(scope, lease)
+            else:
+                store.refuse_exchange(scope, lease, reason_code=exc.classification)
+            raise
+        except Exception:
+            # Send intent is durable. An unexpected transport failure is not a resend permit.
+            return None
+        if guard.lost:
+            return None
+        if type(raw) is not bytes or not raw or len(raw) > store.MAX_RESPONSE_BYTES:
+            # A complete answer the store cannot hold (empty or oversized) is a known invalid
+            # response, never an uncertain delivery.
+            store.refuse_exchange(scope, lease, reason_code="cloud_response_invalid")
+            raise cloud.CloudError("cloud_response_invalid", 502)
+        try:
+            store.capture_response(scope, lease, response_bytes=raw, response_sha256=graph._sha(raw))
+        except Exception:
+            return None
+    if guard.lost:
+        return None
+    exchange = store.get_exchange(scope, lease)
+    if exchange["evidence_bytes"] is None:
+        try:
+            expected = graph._sizing_expected(job, context, exchange)
+            evidence = sizing.build_sizing_evidence(job["params"], context.graph,
+                context.intake_sha256, expected["tool_manifest_sha256"], exchange["response_bytes"],
+                identity=expected["identity"], parent_version_id=expected["parent_version_id"],
+                producer=expected["producer"], classification="live")
+        except GraphValidationError:
+            store.refuse_exchange(scope, lease, reason_code="cloud_response_invalid")
+            raise cloud.CloudError("cloud_response_invalid", 502) from None
+        raw = graph.local.canonical_bytes(evidence)
+        try:
+            store.attach_evidence(scope, lease, evidence_bytes=raw, evidence_sha256=graph._sha(raw))
+        except Exception:
+            return None
+    return db.run_transaction(lambda conn: prepare_project_graph_job(job, conn=conn))
 
 
 def run_once(owner, *, tool_name, lease_seconds=30.0):
@@ -235,8 +360,11 @@ def run_once(owner, *, tool_name, lease_seconds=30.0):
     guard = GraphLeaseGuard(jobs, job_id, owner, attempt, lease_seconds)
     guard.start()
     try:
-        prepared = platform_link.platform_db().run_transaction(
-            lambda conn: prepare_project_graph_job(job, conn=conn))
+        if graph._global_sizing(tool_name, job.get("params")):
+            prepared = _cloud_prepare(job, guard)
+        else:
+            prepared = platform_link.platform_db().run_transaction(
+                lambda conn: prepare_project_graph_job(job, conn=conn))
     except Exception as exc:
         guard.close()
         if not guard.lost:
@@ -247,7 +375,7 @@ def run_once(owner, *, tool_name, lease_seconds=30.0):
                 pass
         return True
     guard.close()
-    if guard.lost:
+    if guard.lost or prepared is None:
         return True
     try:
         complete_project_graph_job(job_id, owner, attempt, prepared)

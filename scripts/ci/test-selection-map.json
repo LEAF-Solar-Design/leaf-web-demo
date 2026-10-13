@@ -677,6 +677,9 @@
     "server-sip-r3d-conductors",
     "platform-sip-r3d-conductors",
     "server-sip-r14-evidence",
+    "server-sip-r14-admission",
+    "server-sip-r14-worker",
+    "server-sip-r14-proof",
     "platform-sip-r14-exchange"
   ],
   "unresolved_mandatory": [],
