@@ -85,7 +85,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
     assert suites["platform"].expected == 359  # R14-B adds 31 PostgreSQL rows.
-    assert suites["gate-runner-selftest"].expected == 233  # Measured registered suite with R14C-32; 233 with sip-r3e-1.
+    assert suites["gate-runner-selftest"].expected == 234  # Measured registered suite with R14C-32; 233 with sip-r3e-1; 234 with PP-1.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4173,7 +4173,7 @@ def test_R14C_32_mandatory_registration():
         start = ordered.index("server-sip-r14-evidence") + 1
         assert ordered[start:start + 3] == wanted
     assert selection["mandatory_suite_ids"][-1] == "platform-sip-r14-exchange"
-    assert suites["gate-runner-selftest"].expected == 233
+    assert suites["gate-runner-selftest"].expected == 234
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4206,3 +4206,18 @@ def test_sip_r3e_creation_gate_registration():
     assert suite.argv == runner._py_pytest("tests/test_solar_tool_solar_panel_groups.py")
     assert suite.kind == "pytest" and suite.expected == 89
     assert suite.allowed_skip_reasons == ()
+
+
+def test_pp1_project_proof_identity_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    suite = suites["server-project-proof-identity"]
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    assert suite.cwd == REPO / "server"
+    assert suite.argv == runner._py_pytest("tests/test_project_proof_identity.py")
+    assert suite.kind == "pytest" and suite.expected == 69
+    assert suite.uses_database is True and suite.db_gated is False
+    assert suite.allowed_skip_reasons == ()
+    assert suite.database_skip_reasons == (r"PostgreSQL integration test requires DATABASE_URL",)
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1
+    assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
