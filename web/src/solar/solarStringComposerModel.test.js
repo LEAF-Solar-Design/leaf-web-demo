@@ -637,7 +637,7 @@ describe('project Solar string composer', () => {
     const source = fs.readFileSync(process.cwd() + '/../server/solar_project_graph.py', 'utf8')
     const supported = source.match(new RegExp('SUPPORTED_TOOLS = frozenset\\(\\(([\\s\\S]*?)\\)\\)'))[1]
     expect(supported).toContain('"solar-string-multi-add"')
-    expect(source).toContain('CREATION_TOOLS = frozenset((STRING_TOOL, "solar-assign-equipment", "solar-string-multi-add"))')
+    expect(source).toContain('CREATION_TOOLS = frozenset((STRING_TOOL, "solar-assign-equipment", "solar-string-multi-add", "solar-panel-groups"))')
     const admission = fs.readFileSync(process.cwd() + '/../server/solar_project_admission.py', 'utf8')
     expect(admission).toContain('reason = "project_request_required"')
     const declaration = JSON.parse(fs.readFileSync(process.cwd() + '/../server/solar_tools/solar_string_multi_add.json', 'utf8'))

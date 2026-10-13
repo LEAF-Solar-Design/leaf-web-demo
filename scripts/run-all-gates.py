@@ -2288,7 +2288,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-10: sip-r6 adds four canonical Solar output rows (312 -> 316).
               # 2026-10-11: sip-r3c adds six multi-add PostgreSQL rows (316 -> 322).
               # 2026-10-11: sip-r3d adds six conductor PostgreSQL rows (322 -> 328).
-              _py_pytest(f"{repo_name}/platform/tests"), 359, db_gated=True,
+              # 2026-10-13: R3e-2 adds six to the measured 1162-row PostgreSQL baseline.
+              _py_pytest(f"{repo_name}/platform/tests"), 1168, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -3008,8 +3009,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-11: sip-r3d adds one registration row (101 -> 102).
               # 2026-10-13: sip-r3e-1 adds one registration row (232 -> 233).
               # 2026-10-13: PP-1 adds one registration row (233 -> 234).
-              # 2026-10-13: PP-2 adds one registration row (234 -> 235).
-              ["test_studio_walk_regression_gate.py"], 235),
+              # 2026-10-13: PP-2 adds one registration row (234 -> 235); R3e-2 one more (235 -> 236).
+              ["test_studio_walk_regression_gate.py"], 236),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -3551,6 +3552,15 @@ def build_suites() -> List[Suite]:
         # 2026-10-11: sip-r3d conductor acceptance floor: twelve server rows.
         Suite("server-sip-r3d-conductors", "server canonical Solar conductors",
               "pytest", SERVER, _py_pytest("tests/test_sip_r3d_conductors.py"), 12),
+        # 2026-10-13: R3e-2 canonical grouping acceptance: twelve server and six PostgreSQL rows.
+        Suite("server-sip-r3e-groups", "server canonical Solar grouping",
+              "pytest", SERVER, _py_pytest("tests/test_sip_r3e_groups.py"), 12),
+        Suite("platform-sip-r3e-groups", "platform canonical Solar grouping",
+              "pytest", REPO / "platform", _py_pytest("tests/test_sip_r3e_groups.py"), 6,
+              uses_database=True, db_gated=True,
+              database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",
+              )),
         Suite("server-sip-r14-evidence", "server canonical Solar pure sizing evidence",
               "pytest", SERVER, _py_pytest("tests/test_sip_r14_evidence.py"), 28),
         Suite("server-sip-r14-admission", "server canonical Solar sizing admission",

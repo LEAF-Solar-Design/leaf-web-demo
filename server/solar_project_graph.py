@@ -35,6 +35,7 @@ SUPPORTED_TOOLS = frozenset((
     "solar-assign-equipment",
     "solar-string-multi-add",
     "solar-string-conductors",
+    "solar-panel-groups",
 ))
 # Sizing runs only its pure manual-global branch here; every other mode needs stored
 # service evidence this path does not have and is refused before the builtin loads.
@@ -44,7 +45,7 @@ MANUAL_SIZING_MODE = "manual-global"
 # and normalized request, so preparation, publication and proof regenerate equal bytes.
 STRING_TOOL = "solar-string-add"
 STRING_OPERATION = "add-string"
-CREATION_TOOLS = frozenset((STRING_TOOL, "solar-assign-equipment", "solar-string-multi-add"))
+CREATION_TOOLS = frozenset((STRING_TOOL, "solar-assign-equipment", "solar-string-multi-add", "solar-panel-groups"))
 CREATION_SCHEMA = "leaf.solar-project-creation.v1"
 
 

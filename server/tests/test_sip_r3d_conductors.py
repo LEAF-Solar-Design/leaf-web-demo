@@ -67,10 +67,11 @@ def identities(g):
     return [(entity["id"], entity["provenance"]["created_at"]) for entity in design.entities(g)]
 
 
+# 2026-10-13: R3e-2 adds canonical grouping; twelve supported tools, four creation tools.
 def test_sip_r3d_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 11
+    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 12
     assert adapter.CREATION_TOOLS == {
-        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add"}
+        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-panel-groups"}
     assert TOOL not in adapter.CREATION_TOOLS
     assert adapter._tool(TOOL, manifest(TOOL)) == solar_tools.get(TOOL)
     refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: adapter._tool(TOOL, "x"))

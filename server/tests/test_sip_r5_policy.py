@@ -27,10 +27,11 @@ import test_sip_r4_jobs as r4
 import test_w1_design_graph as w1
 
 
+# 2026-10-13: R3e-2 adds canonical grouping; twelve supported tools, four creation tools.
 ELEVEN = frozenset((
     "solar-assign-equipment", "solar-combiners", "solar-feeders", "solar-homeruns",
     "solar-panels-from-drawing", "solar-schedule", "solar-settings",
-    "solar-size-strings", "solar-string-add", "solar-string-multi-add", "solar-string-conductors",
+    "solar-size-strings", "solar-string-add", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups",
 ))
 
 
@@ -130,14 +131,14 @@ def test_sip_r5_exact_supported_identity(monkeypatch):
     for name in ("solar-assign-strings", "solar-pvcase-convert", "solar-commit-solve"):
         assert_refusal(request(a, {}, tool_name=name), "SIP_R3_TOOL_UNSUPPORTED",
             message="Project Solar admission unavailable.")
-    assert len(calls) == 11
+    assert len(calls) == 12
     r3a.refused("SIP_R3_TOOL_UNSUPPORTED", lambda: graph._tool("solar-assign-strings", "x"))
     r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-string-multi-add", "x"))
     r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-settings", "x"))
     result = request(a, {}, tenant=str(UUID(int=999)))
-    assert result["status_code"] == 409 and len(calls) == 11
+    assert result["status_code"] == 409 and len(calls) == 12
     monkeypatch.setattr(deps, "auth_live", lambda: True)
-    assert request(a, {})["status_code"] == 409 and len(calls) == 11
+    assert request(a, {})["status_code"] == 409 and len(calls) == 12
     tenant = deps.TenantContext(str(a.s.org), subject="verified-subject")
     assert request(a, {}, tenant=tenant)["status_code"] == 200
     assert calls[-1][0][0] is tenant
