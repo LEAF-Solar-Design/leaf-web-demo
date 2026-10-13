@@ -465,12 +465,8 @@ def _published_pin(tmp_path, monkeypatch):
     return bare_base / "tenant-a.git", effective, base
 
 
-def test_worktree_add_failure_surfaces_git_stderr(tmp_path, monkeypatch):
-    """git's own words must reach the operator.
-
-    These subprocesses used to run with stderr=DEVNULL, so a failure in CI
-    produced a bare 503 and nothing to diagnose it with.
-    """
+def test_worktree_add_failure_uses_safe_diagnostics(tmp_path, monkeypatch, caplog, capsys):
+    """Failed materialization carries only the stable branch code."""
     bare, effective, _base = _published_pin(tmp_path, monkeypatch)
     missing = "0" * 40
 
@@ -481,8 +477,13 @@ def test_worktree_add_failure_surfaces_git_stderr(tmp_path, monkeypatch):
     assert caught.value.code == "effective_catalog_unavailable"
     assert caught.value.status_code == 503
     # ...while the operator gets what git actually said.
-    assert "invalid reference" in caught.value.detail
-    assert missing in caught.value.detail
+    assert caught.value.diagnostic_code == "catalog_worktree_add_failed"
+    assert caught.value.detail == "catalog_worktree_add_failed"
+    assert caught.value.exception_type is None
+    emitted = caplog.text + capsys.readouterr().err
+    assert "invalid reference" not in emitted
+    assert missing not in emitted
+    assert missing not in caught.value.detail
 
 
 def test_slow_but_complete_worktree_add_is_not_a_false_503(tmp_path, monkeypatch):

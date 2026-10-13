@@ -219,6 +219,22 @@ Auth-off demo mode may retain the legacy direct authoring path for compatibility
 but its response MUST identify the legacy mode and it is never production
 evidence.
 
+### Operator diagnostics
+
+Exception types and validated, source-defined stable diagnostic codes are the
+complete operator diagnostic payload. Raw legacy detail, exception messages,
+subprocess output, request values, paths, URLs, and rendered tracebacks MUST NOT
+enter customization logs or diagnostic stderr. An exception type is obtained
+from the actual exception object; it is absent when no exception caused the
+refusal. Unknown diagnostic inputs use the fixed `customization_refused` code.
+
+`CustomizationServiceError.detail` is a compatibility alias for the validated
+`diagnostic_code` only. Legacy detail selects a code only on an exact allowed
+match; prefixes, suffixes, and apparent type names are never parsed or retained.
+Logs retain `detail=` for branch readers and report `exception_type=` separately.
+The HTTP contract remains unchanged: status, reason code, fixed safe message,
+envelope fields, and retryability never include operator diagnostic fields.
+
 ## 8. Feature flags
 
 - `LEAF_CUSTOMIZATION_R5_MODE`: `off`, `internal`, or `all`

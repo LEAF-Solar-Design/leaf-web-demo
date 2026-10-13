@@ -44,20 +44,22 @@ def _clear_repo_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def test_missing_git_dir_names_the_unset_variable():
+def test_missing_git_dir_uses_stable_code():
     with pytest.raises(CustomizationServiceError) as caught:
         _bare_repo("11111111-1111-4111-8111-111111111111")
     assert caught.value.code == "tenant_repository_unavailable"
     assert "git_dir_unset" in caught.value.detail
-    assert "LEAF_TENANT_GIT_DIR" in caught.value.detail
+    assert caught.value.detail == "git_dir_unset"
+    assert caught.value.exception_type is None
 
 
-def test_absent_repo_names_the_path_it_looked_for(tmp_path, monkeypatch):
+def test_absent_repo_uses_code_and_exception_type(tmp_path, monkeypatch):
     monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(tmp_path))
     with pytest.raises(CustomizationServiceError) as caught:
         _bare_repo("22222222-2222-4222-8222-222222222222")
     assert "path_unresolvable" in caught.value.detail
-    assert "22222222-2222-4222-8222-222222222222.git" in caught.value.detail
+    assert caught.value.detail == "path_unresolvable"
+    assert caught.value.exception_type == "FileNotFoundError"
 
 
 def test_repo_without_head_is_distinguished_from_an_absent_one(tmp_path, monkeypatch):
@@ -69,15 +71,15 @@ def test_repo_without_head_is_distinguished_from_an_absent_one(tmp_path, monkeyp
     assert "head_missing" in caught.value.detail
 
 
-def test_unconfigured_harness_says_which_half_is_missing(tmp_path, monkeypatch):
+def test_unconfigured_harness_uses_stable_code(tmp_path, monkeypatch):
     """The staging failure mode: provisioning cannot even be attempted."""
     monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(tmp_path))
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
     with pytest.raises(CustomizationServiceError) as caught:
         _ensure_bare_repo("44444444-4444-4444-8444-444444444444")
     assert "harness_unconfigured" in caught.value.detail
-    assert "url_set=True" in caught.value.detail
-    assert "secret_set=False" in caught.value.detail
+    assert caught.value.detail == "harness_unconfigured"
+    assert caught.value.exception_type is None
 
 
 def test_secret_value_is_never_placed_in_the_detail(tmp_path, monkeypatch):
@@ -89,11 +91,11 @@ def test_secret_value_is_never_placed_in_the_detail(tmp_path, monkeypatch):
     # Assert the detail SAYS something first, so this cannot pass vacuously on an
     # empty string the way it would if the branch simply stopped setting detail.
     assert "harness_unconfigured" in detail
-    assert "url_set=False" in detail
+    assert detail == "harness_unconfigured"
     assert "s3cret-harness-token" not in detail
 
 
-def test_failed_provision_call_records_status_and_exception_type(tmp_path, monkeypatch):
+def test_failed_provision_call_records_code_and_exception_type(tmp_path, monkeypatch):
     monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(tmp_path))
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
     monkeypatch.setenv("LEAF_HARNESS_SECRET", "unused-by-the-stub")
@@ -114,14 +116,13 @@ def test_failed_provision_call_records_status_and_exception_type(tmp_path, monke
         _ensure_bare_repo("66666666-6666-4666-8666-666666666666")
     detail = caught.value.detail
     assert "harness_provision_failed" in detail
-    assert "HTTPError" in detail
-    assert "/author/repository" in detail
-    # Parse the token and compare it exactly. Substring matching would accept
-    # status=5030, so it proved nothing about the recorded value.
-    assert _status_token(detail) == "503"
+    assert caught.value.exception_type == "HTTPError"
+    assert detail == "harness_provision_failed"
+    # HTTP status metadata is excluded from operator diagnostics.
+    assert _status_token(detail) is None
 
 
-def test_a_transport_failure_with_no_response_records_no_status(monkeypatch, tmp_path):
+def test_a_transport_failure_records_only_code_and_type(monkeypatch, tmp_path):
     """The other half: a refused connection has no HTTP status to report."""
     monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(tmp_path))
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
@@ -138,26 +139,27 @@ def test_a_transport_failure_with_no_response_records_no_status(monkeypatch, tmp
     monkeypatch.setattr(requests, "post", _explode)
     with pytest.raises(CustomizationServiceError) as caught:
         _ensure_bare_repo("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-    assert _status_token(caught.value.detail) == "None"
-    assert "_Boom" in caught.value.detail
+    assert caught.value.detail == "harness_provision_failed"
+    assert caught.value.exception_type == "_Boom"
 
 
-def test_git_failure_carries_stderr(tmp_path):
-    """`detail` is documented to carry git stderr. Prove it actually does."""
+def test_git_failure_omits_stderr(tmp_path):
+    """Git diagnostics identify the operation and type without stderr."""
     with pytest.raises(CustomizationServiceError) as caught:
         customization_service._git(tmp_path / "not-a-repo.git", "rev-parse", "HEAD")
     assert caught.value.code == "tenant_repository_unavailable"
     assert "git_failed" in caught.value.detail
-    assert "rev-parse HEAD" in caught.value.detail
-    # git's own words, so discarding stderr again fails here rather than silently.
-    assert "not a git repository" in caught.value.detail
+    assert caught.value.detail == "git_failed"
+    assert caught.value.exception_type == "CalledProcessError"
+    # Captured Git output is excluded from operator diagnostics.
+    assert "not a git repository" not in caught.value.detail
 
 
 def test_refusal_is_logged_with_its_cause(caplog):
     caplog.set_level(logging.WARNING, logger=author_router._LOG.name)
     author_router._customization_error(
         CustomizationServiceError(
-            "tenant_repository_unavailable", 503, "head_missing: /data/tenant-git/x.git/HEAD"
+            "tenant_repository_unavailable", 503, diagnostic_code="head_missing"
         )
     )
     logged = "\n".join(r.getMessage() for r in caplog.records)
@@ -166,7 +168,7 @@ def test_refusal_is_logged_with_its_cause(caplog):
 
 
 def test_detail_never_reaches_the_response_body():
-    """The whole point of `detail`: operators see it, tenants never do."""
+    """Diagnostic fields never enter the client response."""
     secret_ish = "/data/tenant-git/9999.git/HEAD"
     response = author_router._customization_error(
         CustomizationServiceError("tenant_repository_unavailable", 503, f"head_missing: {secret_ish}")
@@ -300,7 +302,7 @@ def test_every_tenant_route_reports_its_unexpected_failure(
     assert "RuntimeError" in errors[0].getMessage()
 
 
-def test_a_real_route_logs_the_frames_of_an_unexpected_failure(caplog, monkeypatch):
+def test_a_real_route_logs_only_the_type_of_an_unexpected_failure(caplog, monkeypatch):
     """The sixth handoff, on a route that authenticates from headers.
 
     Covers /internal/customization/authorize-publish; the five tenant routes are
@@ -318,7 +320,8 @@ def test_a_real_route_logs_the_frames_of_an_unexpected_failure(caplog, monkeypat
     assert errors, "an unexpected route failure must log at ERROR"
     message = errors[0].getMessage()
     assert "RuntimeError" in message, "the exception type identifies the fault"
-    assert "author.py" in message, "the frames must say where it broke"
+    assert "author.py" not in message
+    assert "detail=customization_unexpected_failure exception_type=RuntimeError" in message
 
 
 def test_the_exception_message_is_never_logged(caplog, monkeypatch):
@@ -371,7 +374,7 @@ def test_a_detail_carrying_refusal_still_warns(caplog):
     caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
     author_router._customization_error(
         CustomizationServiceError(
-            "tenant_repository_unavailable", 503, "head_missing: /data/tenant-git/x.git/HEAD"
+            "tenant_repository_unavailable", 503, diagnostic_code="head_missing"
         )
     )
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -389,7 +392,7 @@ def test_the_source_line_at_the_raise_site_is_never_echoed(
     """traceback.format_tb renders each frame's SOURCE, not just its location.
 
     So a literal at the raise site is reproduced verbatim in the log. Only a
-    location-only rendering (extract_tb, filename:lineno:function) is safe. This
+    type-only rendering is safe. This
     fails if format_tb, str(cause) or exc_info comes back.
     """
     caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
@@ -406,8 +409,8 @@ def test_the_source_line_at_the_raise_site_is_never_echoed(
     )
     assert "literal-secret-in-source-9f3a" not in rendered
     assert "password=" not in rendered
-    # It must still say where the fault was, or the log is useless.
-    assert "_raise_with_secret_in_source" in rendered
+    # The exception type identifies the failure without frame locations.
+    assert "_raise_with_secret_in_source" not in rendered
     assert "RuntimeError" in rendered
 
 
@@ -521,7 +524,7 @@ def test_the_dual_use_codes_split_on_status():
     )) < logging.WARNING
     assert max(_levels_for(
         CustomizationServiceError("tenant_identity_binding_unavailable", 503,
-                                  "binding_resolution_failed: Error")
+                                  diagnostic_code="binding_resolution_failed")
     )) >= logging.WARNING
     assert max(_levels_for(
         CustomizationServiceError("invalid_staged_receipt", 422)
@@ -679,7 +682,7 @@ def test_platform_store_failure_names_itself(monkeypatch):
         customization_service._binding(_Tenant(TENANT))
     assert caught.value.code == "tenant_identity_binding_unavailable"
     assert "platform_store_unavailable" in caught.value.detail
-    assert "RuntimeError" in caught.value.detail
+    assert caught.value.exception_type == "RuntimeError"
 
 
 def _change_set():
@@ -693,7 +696,7 @@ def _change_set():
     )
 
 
-def test_harness_stage_failure_records_the_real_status(monkeypatch):
+def test_harness_stage_failure_records_code_and_type(monkeypatch):
     """Previously asserted by reading the source, which `from exc` removal survived.
 
     This calls the production method. `_harness_stage` never touches `self`, so it
@@ -732,13 +735,13 @@ def test_harness_stage_failure_records_the_real_status(monkeypatch):
         )
     assert caught.value.code == "customization_harness_unavailable"
     assert "harness_stage_failed" in caught.value.detail
-    assert _status_token(caught.value.detail) == "502"
-    assert "HTTPError" in caught.value.detail
+    assert caught.value.detail == "harness_stage_failed"
+    assert caught.value.exception_type == "HTTPError"
     # `from exc` must survive: the chain is what a traceback-free log relies on.
     assert isinstance(caught.value.__cause__, requests.HTTPError)
 
 
-def test_harness_publish_failure_records_the_real_status(monkeypatch):
+def test_harness_publish_failure_records_code_and_type(monkeypatch):
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal:8150")
     import requests
 
@@ -754,7 +757,8 @@ def test_harness_publish_failure_records_the_real_status(monkeypatch):
         customization_service.CustomizationService._harness_publish(service, _change_set())
     assert caught.value.code == "customization_publish_incomplete"
     assert "harness_publish_failed" in caught.value.detail
-    assert _status_token(caught.value.detail) == "504"
+    assert caught.value.detail == "harness_publish_failed"
+    assert caught.value.exception_type == "HTTPError"
     assert isinstance(caught.value.__cause__, requests.HTTPError)
 
 
@@ -802,6 +806,351 @@ def test_the_legacy_author_path_does_not_emit_exception_text(caplog, capsys, mon
     assert "author_harness_unreachable" in emitted
     assert "hunter2-should-never-be-logged" not in emitted
     assert SENTINEL not in emitted
+
+
+@pytest.mark.parametrize("operation,diagnostic,public_code", [
+    ("provision", "harness_provision_failed", "tenant_repository_unavailable"),
+    ("stage", "harness_stage_failed", "customization_harness_unavailable"),
+    ("publish", "harness_publish_failed", "customization_publish_incomplete"),
+])
+def test_harness_diagnostics_discard_endpoint_status_and_message(
+    operation, diagnostic, public_code, monkeypatch, caplog, capsys
+):
+    import requests
+
+    endpoint_marker = "private-endpoint-marker-9f3a"
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", f"http://{endpoint_marker}:8150")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "unused-secret")
+    failure = requests.HTTPError(SENTINEL)
+    def fail(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(requests, "post", fail)
+    monkeypatch.setattr(customization_service.deps, "active_stage_author_subject",
+                        lambda *args: AUTHOR_SUBJECT)
+    with pytest.raises(CustomizationServiceError) as caught:
+        if operation == "provision":
+            customization_service._ensure_bare_repo(TENANT)
+        elif operation == "stage":
+            customization_service.CustomizationService._harness_stage(
+                None, TENANT, "count panels", _change_set(),
+            )
+        else:
+            service = SimpleNamespace(_raw_receipt=lambda change: {})
+            customization_service.CustomizationService._harness_publish(service, _change_set())
+    _assert_safe_failure(caught.value, diagnostic, "HTTPError", caplog, capsys,
+                         public_code=public_code)
+    assert caught.value.__cause__ is failure
+    assert endpoint_marker not in repr(vars(caught.value)) + caplog.text
+
+
+def test_unavailable_validates_before_logging(caplog, capsys):
+    failure = OSError(SENTINEL)
+    error = customization_service._unavailable(SENTINEL, cause=failure)
+    _assert_safe_failure(error, "customization_refused", "OSError", caplog, capsys)
+
+
+def test_unexpected_cause_never_renders_chained_messages(caplog, capsys):
+    caplog.set_level(logging.DEBUG, logger=author_router._LOG.name)
+    try:
+        try:
+            raise ValueError(SENTINEL)
+        except ValueError as inner:
+            raise RuntimeError("private-chained-message-marker-9f3a") from inner
+    except RuntimeError as failure:
+        author_router._customization_error(
+            CustomizationServiceError("customization_stage_failed", 503),
+            cause=failure,
+        )
+    assert caplog.records[-1].levelno == logging.ERROR
+    assert caplog.records[-1].getMessage() == (
+        "customization_refused: code=customization_stage_failed "
+        "detail=customization_unexpected_failure exception_type=RuntimeError"
+    )
+    emitted = caplog.text + capsys.readouterr().err
+    assert SENTINEL not in emitted
+    assert "private-chained-message-marker-9f3a" not in emitted
+    assert "test_unexpected_cause_never_renders_chained_messages" not in emitted
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.parametrize("kwargs,expected", [
+    ({"detail": SENTINEL}, "customization_refused"),
+    ({"detail": "git_failed: " + SENTINEL}, "customization_refused"),
+    ({"detail": "git_failed"}, "git_failed"),
+    ({"diagnostic_code": SENTINEL}, "customization_refused"),
+    ({"diagnostic_code": []}, "customization_refused"),
+    ({"detail": "git_failed", "diagnostic_code": "unknown"}, "customization_refused"),
+])
+def test_diagnostic_constructor_validates_exact_codes(kwargs, expected, caplog, capsys):
+    error = CustomizationServiceError("tenant_repository_unavailable", 503, **kwargs)
+    assert str(error) == "tenant_repository_unavailable"
+    assert error.code == "tenant_repository_unavailable"
+    assert error.status_code == 503
+    assert error.diagnostic_code == error.detail == expected
+    assert error.exception_type is None
+    author_router._customization_error(error)
+    assert SENTINEL not in repr(vars(error)) + caplog.text + capsys.readouterr().err
+    assert caplog.records[-1].getMessage() == (
+        f"customization_refused: code=tenant_repository_unavailable "
+        f"detail={expected} exception_type=None"
+    )
+
+
+def test_legacy_positional_detail_and_actual_exception_are_safe(caplog, capsys):
+    failure = RuntimeError(SENTINEL)
+    error = CustomizationServiceError(
+        "tenant_repository_unavailable", 503, SENTINEL, cause=failure,
+    )
+    assert error.diagnostic_code == error.detail == "customization_refused"
+    assert error.exception_type == "RuntimeError"
+    author_router._customization_error(error)
+    assert caplog.records[-1].getMessage() == (
+        "customization_refused: code=tenant_repository_unavailable "
+        "detail=customization_refused exception_type=RuntimeError"
+    )
+    assert SENTINEL not in repr(vars(error)) + caplog.text + capsys.readouterr().err
+
+
+def _assert_safe_failure(error, diagnostic, exception_type, caplog, capsys,
+                         public_code="effective_catalog_unavailable"):
+    assert error.code == public_code
+    assert error.status_code == 503
+    assert error.diagnostic_code == error.detail == diagnostic
+    assert error.exception_type == exception_type
+    author_router._customization_error(error)
+    emitted = caplog.text + capsys.readouterr().err
+    assert SENTINEL not in emitted + repr(vars(error))
+    assert all(record.exc_info is None for record in caplog.records)
+    assert f"detail={diagnostic} exception_type={exception_type}" in emitted
+
+
+@pytest.mark.parametrize("operation,diagnostic", [
+    ("_git", "git_failed"), ("_git_blob", "git_show_failed"),
+])
+def test_git_helpers_discard_marked_output(
+    operation, diagnostic, tmp_path, monkeypatch, caplog, capsys
+):
+    import subprocess
+
+    failure = subprocess.CalledProcessError(
+        128, ["git", SENTINEL], output=SENTINEL, stderr=SENTINEL,
+    )
+    def fail(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(customization_service.subprocess, "run", fail)
+    with pytest.raises(CustomizationServiceError) as caught:
+        getattr(customization_service, operation)(tmp_path / SENTINEL, SENTINEL)
+    _assert_safe_failure(caught.value, diagnostic, "CalledProcessError", caplog, capsys,
+                         public_code="tenant_repository_unavailable")
+    assert caught.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("operation,exception_class,diagnostic", [
+    ("effective_catalog_dir", OSError, "catalog_directory_failed"),
+    ("effective_catalog_pin", RuntimeError, "catalog_pin_lookup_failed"),
+])
+def test_catalog_store_failures_are_safe(
+    operation, exception_class, diagnostic, tmp_path, monkeypatch, caplog, capsys
+):
+    database = tmp_path / "customization.db"
+    database.touch()
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STORE", "sqlite")
+    monkeypatch.setattr(customization_service, "database_path", lambda: database)
+    failure = exception_class(SENTINEL)
+    def fail(*args, **kwargs):
+        raise failure
+    if operation == "effective_catalog_dir":
+        monkeypatch.setattr(
+            customization_service.CustomizationService, "configured",
+            lambda: SimpleNamespace(store=SimpleNamespace(
+                get_effective_catalog=lambda **kwargs: SimpleNamespace(
+                    catalog_commit="a" * 40, catalog_digest="b" * 64,
+                ),
+            )),
+        )
+        monkeypatch.setattr(customization_service, "_bare_repo", fail)
+    else:
+        monkeypatch.setattr(
+            customization_service.CustomizationService, "configured",
+            lambda: SimpleNamespace(store=SimpleNamespace(get_effective_catalog=fail)),
+        )
+    with pytest.raises(CustomizationServiceError) as caught:
+        getattr(customization_service, operation)(TENANT)
+    _assert_safe_failure(caught.value, diagnostic, exception_class.__name__, caplog, capsys)
+    assert caught.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("branch,diagnostic,exception_type,public_code", [
+    ("exception", "catalog_worktree_verification_failed", "TimeoutExpired",
+     "effective_catalog_unavailable"),
+    ("probe", "catalog_head_probe_failed", None, "effective_catalog_unavailable"),
+    ("pending", "catalog_head_pending", None, "effective_catalog_unavailable"),
+    ("commit", "catalog_commit_mismatch", None, "effective_catalog_commit_mismatch"),
+    ("digest", "catalog_digest_mismatch", None, "effective_catalog_digest_mismatch"),
+])
+def test_worktree_verification_diagnostics(
+    branch, diagnostic, exception_type, public_code,
+    tmp_path, monkeypatch, caplog, capsys
+):
+    import subprocess
+
+    commit = "a" * 40
+    target = tmp_path / "worktree"
+    target.mkdir()
+    (target / "registry.json").write_bytes(b"{}")
+    monkeypatch.setattr(customization_service, "_MATERIALIZE_ATTEMPTS", 1)
+    def probe(*args, **kwargs):
+        if branch == "exception":
+            raise subprocess.TimeoutExpired(SENTINEL, 10, output=SENTINEL, stderr=SENTINEL)
+        observed = {
+            "probe": "", "pending": "0" * 40, "commit": "b" * 40, "digest": commit,
+        }[branch]
+        return SimpleNamespace(returncode=1 if branch == "probe" else 0,
+                               stdout=observed, stderr=SENTINEL)
+    monkeypatch.setattr(customization_service.subprocess, "run", probe)
+    with pytest.raises(CustomizationServiceError) as caught:
+        customization_service._verified_worktree(tmp_path, target, commit, "c" * 64)
+    _assert_safe_failure(caught.value, diagnostic, exception_type, caplog, capsys,
+                         public_code=public_code)
+
+
+def test_materialization_results_do_not_become_diagnostic_text(
+    tmp_path, monkeypatch, caplog, capsys
+):
+    calls = []
+    def result(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=128, stdout=SENTINEL, stderr=SENTINEL)
+    monkeypatch.setattr(customization_service.subprocess, "run", result)
+    with pytest.raises(CustomizationServiceError) as caught:
+        customization_service._materialize_worktree(
+            tmp_path / "bare", tmp_path / "catalog" / "target", "a" * 40,
+        )
+    assert len(calls) == 3  # add, prune, retry
+    _assert_safe_failure(caught.value, "catalog_worktree_add_failed", None, caplog, capsys)
+
+
+@pytest.mark.parametrize("branch,diagnostic", [
+    ("import", "dependency_import_failed"),
+    ("engine", "engine_registry_load_failed"),
+    ("write", "write_tools_load_failed"),
+    ("catalog", "catalog_tools_load_failed"),
+    ("tenant", "tenant_registry_load_failed"),
+    ("surface", "tenant_surface_config_load_failed"),
+])
+def test_dependency_diagnostics_omit_messages_and_paths(
+    branch, diagnostic, tmp_path, monkeypatch, caplog, capsys
+):
+    import deps
+    from _vendor.mushy_fold import registry
+
+    marked = tmp_path / "private-path-marker-9f3a"
+    marked.mkdir()
+    failure = RuntimeError(SENTINEL)
+    def fail(*args, **kwargs):
+        raise failure
+    def callback_loader(root, *, on_error):
+        on_error(marked, failure)
+        return [] if branch == "tenant" else {}
+
+    if branch == "import":
+        source = marked / "module.py"
+        source.touch()
+        monkeypatch.setattr(deps.importlib.util, "spec_from_file_location", fail)
+        assert deps._load_module_from(source, "test_diagnostic_import") is None
+    elif branch in {"engine", "write", "catalog"}:
+        source = marked / "registry.json"
+        source.touch()
+        attribute, loader = {
+            "engine": ("ENGINE_REGISTRY", deps.load_engine_registry_tools),
+            "write": ("WRITE_TOOLS_STORE", deps.load_seed_write_tools),
+            "catalog": ("CATALOG_TOOLS_STORE", deps.load_seed_catalog_tools),
+        }[branch]
+        monkeypatch.setattr(deps, attribute, source)
+        monkeypatch.setattr(type(source), "read_text", fail)
+        monkeypatch.setattr(deps.solar_tools, "registry_records", lambda: [])
+        assert loader() == (list(deps.fb.DEFAULT_TOOLS) if branch == "engine" else [])
+    elif branch == "tenant":
+        monkeypatch.setattr(customization_service, "load_authoritative_tenant_tools",
+                            lambda tenant: None)
+        monkeypatch.setattr(deps, "_verified_tenant_fallback", lambda tenant: (marked, None))
+        monkeypatch.setattr(registry, "load_repo_registry_tools", callback_loader)
+        assert deps.load_tenant_repo_tools(TENANT) == []
+    else:
+        monkeypatch.setattr(deps, "_surface_config_cache", {})
+        monkeypatch.setattr(deps, "_surface_config_warned_tenants", set())
+        monkeypatch.setattr(deps, "_contained_tenant_root", lambda tenant: str(marked))
+        monkeypatch.setattr(deps, "_contained_surface_config_path",
+                            lambda root: str(marked / "surface-config.json"))
+        monkeypatch.setattr(deps, "load_repo_surface_config", callback_loader)
+        assert deps.effective_surface_config(TENANT) == {}
+        # Expire the cache but retain the existing once-per-tenant suppression.
+        deps._surface_config_cache.clear()
+        assert deps.effective_surface_config(TENANT) == {}
+    captured = capsys.readouterr()
+    assert captured.err.count(f"diagnostic_code={diagnostic} exception_type=RuntimeError") == 1
+    assert SENTINEL not in caplog.text + captured.err
+    assert str(marked) not in caplog.text + captured.err
+
+
+@pytest.mark.parametrize("branch", ["provenance", "collision", "picker"])
+def test_capabilities_stderr_uses_codes_and_types(
+    branch, monkeypatch, caplog, capsys
+):
+    from routers import capabilities as capabilities_router
+    deps = capabilities_router.deps
+    exception_class = {
+        "provenance": deps.ToolCatalogProvenanceError,
+        "collision": deps.ToolCatalogCollisionError,
+        "picker": RuntimeError,
+    }[branch]
+    def fail(*args, **kwargs):
+        raise exception_class(SENTINEL)
+    if branch == "picker":
+        monkeypatch.setattr(deps, "all_tools", fail)
+        captured_tools = []
+        monkeypatch.setattr(
+            capabilities_router.converse_registry, "build_registry",
+            lambda *, tools, skills: captured_tools.append(tools) or {"commands": [], "tools": []},
+        )
+        assert capabilities_router.converse_registry_route(tenant=TENANT) == {
+            "commands": [], "tools": [], "error": None, "degraded_mode": False,
+        }
+        assert captured_tools == [[]]
+        diagnostic = "tool_catalog_unavailable"
+    else:
+        tool = {"name": "diagnostic-reader", "version": "1.0.0", "aps_live": True,
+                "capabilities": ["drawing.read"], "params": {"type": "object"},
+                "entry": "tools/diagnostic-reader/tool.py"}
+        monkeypatch.setattr(deps, "effective_tools_with_provenance", fail)
+        monkeypatch.setattr(deps, "TOOL_SOURCE_OPERATOR_OWNED_ENGINE", "operator_owned_engine")
+        monkeypatch.setattr(deps, "all_tools", lambda tenant: [tool])
+        monkeypatch.setattr(deps, "load_engine_registry_tools", lambda: [tool])
+        monkeypatch.setattr(deps, "APS_LIVE", True)
+        monkeypatch.setattr(customization_service, "effective_catalog_pin", lambda tenant: None)
+        monkeypatch.setattr(capabilities_router.mcp_tool_projection, "projected_tools",
+                            lambda tenant: [])
+        monkeypatch.setattr(
+            capabilities_router.catalog, "build_catalog",
+            lambda tools, **kwargs: [{"capabilities": [
+                capabilities_router.catalog._capability_entry(row) for row in tools]}],
+        )
+        monkeypatch.setattr(capabilities_router.availability, "annotate_w1_availability",
+                            lambda families, *args, **kwargs: families)
+        response = capabilities_router.capabilities(
+            tenant=TENANT, x_internal_role=None, x_ops_secret=None,
+            project_id=None, x_project_id=None,
+        )
+        assert response["error"] is None
+        rows = response["families"][0]["capabilities"]
+        assert len(rows) == 1
+        assert rows[0]["name"] == tool["name"]
+        assert rows[0]["aps_live"] is False
+        diagnostic = "catalog_provenance_unavailable"
+    captured = capsys.readouterr()
+    assert f"diagnostic_code={diagnostic} exception_type={exception_class.__name__}" in captured.err
+    assert SENTINEL not in caplog.text + captured.err
+
 
 
 def test_the_legacy_response_catch_also_hides_exception_text(caplog, capsys, monkeypatch):

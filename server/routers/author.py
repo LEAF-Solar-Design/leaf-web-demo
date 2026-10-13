@@ -15,7 +15,6 @@ import logging
 import os
 import re
 import subprocess
-import traceback
 from pathlib import Path
 from typing import Any, Dict, Literal
 
@@ -590,36 +589,32 @@ def _customization_error(
     The response deliberately tells a tenant nothing about the deployment, so
     this is the only place an operator learns the cause. `cause` is for the
     handlers that would otherwise discard an unexpected exception whole: pass it
-    and the traceback is logged instead of lost.
+    and only its exception type is logged.
     """
+    diagnostic = CustomizationServiceError(
+        exc.code, exc.status_code, diagnostic_code=exc.diagnostic_code,
+        cause=cause,
+    )
+    exception_type = diagnostic.exception_type if cause is not None else exc.exception_type
     if isinstance(cause, ChangeSetNotFoundError):
-        # The change-set id comes straight from the request body, and
-        # /api/author/confirmations loads it before checking the caller's
-        # authority, so any tenant member can name arbitrary ids. That is a caller
-        # error, not an operator event: it must not cost one ERROR per request.
-        # The response is unchanged.
-        _LOG.debug("customization_refused: code=%s cause=change_set_not_found", exc.code)
-    elif cause is not None:
-        # Location only: file, line and function, never `exc_info`, never
-        # str(cause), and never the rendered source line. A traceback carries the
-        # exception message and every chained cause, and format_tb additionally
-        # echoes the source text of each frame, so a literal at the raise site
-        # would be reproduced verbatim. Where it broke is the diagnostic; nothing
-        # about the payload is.
-        frames = " | ".join(
-            f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}"
-            for f in traceback.extract_tb(cause.__traceback__)
+        level = logging.DEBUG
+        diagnostic = CustomizationServiceError(
+            exc.code, exc.status_code, diagnostic_code="change_set_not_found", cause=cause,
         )
-        _LOG.error(
-            "customization_refused: code=%s cause=%s at %s",
-            exc.code, type(cause).__name__, frames or "<no frames>",
+    elif cause is not None:
+        level = logging.ERROR
+        diagnostic = CustomizationServiceError(
+            exc.code, exc.status_code,
+            diagnostic_code="customization_unexpected_failure", cause=cause,
         )
     elif _is_caller_driven(exc, from_authority=from_authority):
-        # Reachable per request by a caller, and carrying no per-request operator
-        # signal, so these must not cost a WARNING each.
-        _LOG.debug("customization_refused: code=%s", exc.code)
+        level = logging.DEBUG
     else:
-        _LOG.warning("customization_refused: code=%s detail=%s", exc.code, exc.detail or "-")
+        level = logging.WARNING
+    _LOG.log(
+        level, "customization_refused: code=%s detail=%s exception_type=%s",
+        exc.code, diagnostic.diagnostic_code, exception_type,
+    )
     message = _CUSTOMIZATION_ERROR_MESSAGES.get(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
@@ -664,7 +659,8 @@ def _quota_store_error(exc: author_quota.AuthorQuotaStoreError) -> JSONResponse:
     in the log: a store error message can carry a connection string, and the code
     is absent from _CALLER_DRIVEN_CODES on purpose, so this warns."""
     return _customization_error(CustomizationServiceError(
-        "author_quota_unavailable", 503, f"cause={type(exc).__name__}"))
+        "author_quota_unavailable", 503,
+        diagnostic_code="author_quota_store_failed", cause=exc))
 
 
 def _legacy_quota_denied(tenant: Any) -> JSONResponse | None:
@@ -796,7 +792,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         return _customization_error(
             CustomizationServiceError(
                 "stage_authority_invalid", 409,
-                detail=_stage_authority_refusal_detail(
+                diagnostic_code=_stage_authority_refusal_detail(
                     authority_session_id, authority_turn_id),
             )
         )
@@ -881,7 +877,7 @@ def stage(
         return _customization_error(
             CustomizationServiceError(
                 "stage_authority_invalid", 409,
-                detail=_stage_authority_refusal_detail(
+                diagnostic_code=_stage_authority_refusal_detail(
                     authority_session_id, authority_turn_id),
             )
         )

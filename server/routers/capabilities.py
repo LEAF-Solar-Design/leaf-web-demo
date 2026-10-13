@@ -122,9 +122,8 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
                 # (None sources below) while the catalog itself stays available
                 # through the same forgiving read this route has always served.
                 print(
-                    f"[leaf-catalog] tool provenance unavailable "
-                    f"({type(exc).__name__}: {exc}); live APS fails closed to "
-                    f"batch for this response",
+                    f"[leaf-catalog] diagnostic_code=catalog_provenance_unavailable "
+                    f"exception_type={type(exc).__name__}",
                     file=sys.stderr, flush=True,
                 )
         if effective_rows is not None:
@@ -342,7 +341,7 @@ def converse_registry_route(tenant=Depends(deps.require_tenant)) -> Any:
         # Degrade to commands-only, but never SILENTLY: an unexpected failure
         # here is a defect, and a quiet empty catalog looks identical to a
         # tenant who simply has no tools.
-        print(f"[leaf-registry] tool catalog unavailable: {type(exc).__name__}: {exc}",
+        print(f"[leaf-registry] diagnostic_code=tool_catalog_unavailable exception_type={type(exc).__name__}",
               file=sys.stderr, flush=True)
         tools = []
     # Skills stay empty until the curated per-tier bundle ships (build plan
