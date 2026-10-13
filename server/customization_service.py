@@ -1406,15 +1406,19 @@ class CustomizationService:
         not_found = {
             "contract": "leaf.customization-stage-recovery.v1", "status": "not_found",
         }
-        idempotency_key = self._author_stage_key(
-            tenant_id, idempotency_key, binding.subject
-        )
         try:
+            idempotency_key = self._author_stage_key(
+                tenant_id, idempotency_key, binding.subject
+            )
             change = self.store.get_change_set_by_idempotency(
                 tenant_id=tenant_id, idempotency_key=idempotency_key
             )
         except ChangeSetNotFoundError:
             return not_found
+        except CustomizationServiceError as exc:
+            if exc.code == "record_fields_read_failed":
+                raise CustomizationServiceError("customization_stage_failed", 503) from exc.__cause__
+            raise
         except ToolRecordFieldError as exc:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
         except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:

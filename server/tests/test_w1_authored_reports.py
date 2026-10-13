@@ -725,6 +725,18 @@ def ag2b_controlled(tmp_path, monkeypatch):
     return lane, client, headers
 
 
+def _ag2b_reserved_change(lane, response, key):
+    change = lane.store.get_change_set(
+        tenant_id=str(lane.tenant), change_set_id=response.json()["change_set_id"],
+    )
+    expected_key = "author-stage:" + hashlib.sha256(
+        json.dumps([key, lane.tenant.subject], separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert change.idempotency_key == expected_key
+    assert change.author_subject == lane.tenant.subject
+    return change
+
+
 def test_ag2b_author_admits_graph(ag2b_controlled):
     lane, client, headers = ag2b_controlled
     headers = {**headers, "Idempotency-Key": "author-graph"}
@@ -733,10 +745,10 @@ def test_ag2b_author_admits_graph(ag2b_controlled):
     })
     assert response.status_code == 202, response.text
     scoped = author_router._subject_scoped_key("author-graph", lane.tenant)
-    change = lane.change(scoped)
+    change = _ag2b_reserved_change(lane, response, scoped)
     assert change.request_graph_input == GRAPH_INPUT
     assert change.author_subject == lane.tenant.subject
-    assert change.idempotency_key == scoped and scoped != "author-graph"
+    assert change.idempotency_key != scoped and scoped != "author-graph"
     assert response.json()["change_set_id"] == change.change_set_id
     assert response.json()["contract"] == "leaf.customization-stage-job.v1"
     assert change.authority_session_id == headers["X-Authority-Session-Id"]
@@ -752,7 +764,7 @@ def test_ag2b_stage_admits_graph(ag2b_controlled):
         "idempotency_key": "stage-graph", "graph_input": GRAPH_INPUT,
     })
     assert response.status_code == 202, response.text
-    change = lane.change("stage-graph")
+    change = _ag2b_reserved_change(lane, response, "stage-graph")
     assert change.request_graph_input == GRAPH_INPUT
     assert response.json()["change_set_id"] == change.change_set_id
     assert response.json()["contract"] == "leaf.customization-stage-job.v1"
@@ -769,11 +781,11 @@ def test_ag2b_author_replay_precedes_graph_validation(ag2b_controlled):
     first = client.post("/api/author", headers=headers, json=body)
     assert first.status_code == 202, first.text
     scoped = author_router._subject_scoped_key("author-replay", lane.tenant)
-    reserved = lane.change(scoped)
+    reserved = _ag2b_reserved_change(lane, first, scoped)
     replay = client.post("/api/author", headers=headers, json={**body, "graph_input": "other"})
     assert replay.status_code == 409, replay.text
     assert replay.json()["reason_code"] == "idempotency_replay"
-    assert lane.change(scoped) == reserved
+    assert _ag2b_reserved_change(lane, first, scoped) == reserved
     assert len(lane.charges) == 1 and lane.calls == []
 
 
@@ -783,11 +795,11 @@ def test_ag2b_stage_replay_precedes_graph_validation(ag2b_controlled):
             "idempotency_key": "stage-replay", "graph_input": GRAPH_INPUT}
     first = client.post("/api/author/stage", headers=headers, json=body)
     assert first.status_code == 202, first.text
-    reserved = lane.change("stage-replay")
+    reserved = _ag2b_reserved_change(lane, first, "stage-replay")
     replay = client.post("/api/author/stage", headers=headers, json={**body, "graph_input": "other"})
     assert replay.status_code == 409, replay.text
     assert replay.json()["reason_code"] == "idempotency_replay"
-    assert lane.change("stage-replay") == reserved
+    assert _ag2b_reserved_change(lane, first, "stage-replay") == reserved
     assert len(lane.charges) == 1 and lane.calls == []
 
 
