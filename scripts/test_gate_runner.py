@@ -4161,7 +4161,7 @@ def test_R14C_32_mandatory_registration():
     suites = {suite.id: suite for suite in rows}
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     wanted = ["server-sip-r14-" + name for name in ("admission", "worker", "proof")]
-    for name, floor in zip(wanted, (8, 17, 23)):
+    for name, floor in zip(wanted, (8, 34, 36)):
         suite = suites[name]
         assert ids.count(name) == selection["mandatory_suite_ids"].count(name) == 1
         assert suite.cwd == REPO / "server"
