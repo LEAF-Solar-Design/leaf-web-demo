@@ -676,7 +676,8 @@
     "platform-sip-r3c-multi-add",
     "server-sip-r3d-conductors",
     "platform-sip-r3d-conductors",
-    "server-sip-r14-evidence"
+    "server-sip-r14-evidence",
+    "platform-sip-r14-exchange"
   ],
   "unresolved_mandatory": [],
   "mandatory_justification": "L4 web-demo mandatory table expanded against build_suites; every other declaration remains mandatory because no traced classification has been admitted. Workflow, web build and license checks also remain unconditional in ci.sh.",
