@@ -2275,6 +2275,129 @@ def test_the_image_build_never_selects_a_stage_other_than_the_last():
     )
 
 
+def _validate_git_launch_trust(call: ast.Call, source_path: str) -> set[str]:
+    """Bind explicit trust paths to positional operands, without data-flow guesses."""
+    required: dict[str, str] = {}
+    declared: dict[str, str] = {}
+    declaration_expressions: list[str] = []
+
+    def fail(reason: str):
+        raise AssertionError(
+            f"{source_path}:{call.lineno}: {reason}; "
+            f"required={sorted(required.values())}, "
+            f"declared={sorted(declared.values()) or declaration_expressions}"
+        )
+
+    def literal(node):
+        return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+    def path(node, paths):
+        # Only the current explicit conversion is transparent, not arbitrary calls.
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "str" and len(node.args) == 1 and not node.keywords):
+            node = node.args[0]
+        root = node
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if not isinstance(root, ast.Name):
+            fail(f"unrecognized path expression {ast.unparse(node)}")
+        paths[ast.dump(node, include_attributes=False)] = ast.unparse(node)
+
+    if not call.args or not isinstance(call.args[0], ast.List):
+        fail("git command must be a literal list")
+    elements = call.args[0].elts
+    if not elements or literal(elements[0]) != "git":
+        fail("expected a literal git launch")
+    operands = []
+    trusts = []
+    for element in elements[1:]:
+        if (isinstance(element, ast.Starred) and isinstance(element.value, ast.Call)
+                and isinstance(element.value.func, ast.Name)
+                and element.value.func.id == "_git_trust"):
+            trusts.append(element.value)
+        else:
+            operands.append(element)
+    declaration_expressions = [ast.unparse(trust) for trust in trusts]
+
+    # Parse only supported global options before the command. A dynamic tail
+    # (*args in the bare helper) is never repository evidence.
+    index = 0
+    selectors = 0
+    while index < len(operands):
+        option = literal(operands[index])
+        if option in {"--git-dir", "-C"}:
+            if index + 1 >= len(operands):
+                fail(f"missing {option} operand")
+            selectors += 1
+            if selectors != 1:
+                fail("multiple repository selectors are unsupported")
+            path(operands[index + 1], required)
+            index += 2
+        elif option == "-c":
+            if index + 1 >= len(operands):
+                fail("missing configuration operand")
+            config = literal(operands[index + 1])
+            if config is None or config.split("=", 1)[0] != "core.autocrlf":
+                fail("unsupported configuration operand")
+            index += 2
+        else:
+            break
+    if selectors != 1:
+        fail("missing or unsupported repository selector")
+    tail = operands[index:]
+    if not tail:
+        fail("missing git command")
+    command = literal(tail[0])
+    if command == "worktree":
+        if len(tail) < 2:
+            fail("missing worktree action")
+        action = literal(tail[1])
+        if action == "add":
+            destination = 2
+            while destination < len(tail) and literal(tail[destination]) == "--detach":
+                destination += 1
+            # Exactly a destination and optional commit; unknown options or
+            # expansions cannot establish where git will create the worktree.
+            if len(tail) - destination not in {1, 2}:
+                fail("ambiguous or missing worktree destination")
+            path(tail[destination], required)
+            if len(tail) - destination == 2 and isinstance(tail[-1], ast.Starred):
+                fail("ambiguous worktree commit expansion")
+        elif action != "prune" or len(tail) != 2:
+            fail("unsupported worktree action or options")
+    elif command not in {"show", "rev-parse"}:
+        if not (len(tail) == 1 and isinstance(tail[0], ast.Starred)
+                and isinstance(tail[0].value, ast.Name) and tail[0].value.id == "args"):
+            fail("unsupported git command or repository selector")
+    for operand in tail:
+        value = literal(operand)
+        if value is not None and (value in {"--git-dir", "-C", "--work-tree"}
+                                  or value.startswith(("--git-dir=", "--work-tree=", "-C"))):
+            fail("unsupported repository selector position or form")
+
+    if not trusts:
+        fail("missing _git_trust declaration")
+    for trust in trusts:
+        if not trust.args or trust.keywords or any(isinstance(arg, ast.Starred) for arg in trust.args):
+            fail(f"trust declaration needs explicit positional paths: {ast.unparse(trust)}")
+        for arg in trust.args:
+            path(arg, declared)
+    if required.keys() != declared.keys():
+        fail("trust paths must equal repository and worktree operands")
+    return set(required.values())
+
+
+def _validate_git_launches(calls, unreadable, source_path):
+    assert calls, (
+        f"{source_path}: premise: expected at least one literal git command list"
+    )
+    assert not unreadable, (
+        f"{source_path}:" + ", ".join(str(node.lineno) for node in unreadable)
+        + ": unreadable subprocess command; keep launches literal or extend the checker"
+    )
+    return [_validate_git_launch_trust(call, source_path) for call in sorted(calls, key=lambda call: call.lineno)]
+
+
 def test_every_git_launch_declares_the_repository_safe():
     """Installing git is necessary and not sufficient.
 
@@ -2285,52 +2408,124 @@ def test_every_git_launch_declares_the_repository_safe():
     and broker would still have answered 503 with git installed.
     """
     calls, unreadable = _subprocess_launches("server/customization_service.py")
-    assert calls, (
-        "premise: the service launches git through subprocess with a literal command "
-        "list. If that changed, this contract needs rewriting, not skipping."
+    assert _validate_git_launches(calls, unreadable, "server/customization_service.py") == [
+        {"bare"}, {"bare"}, {"bare", "target"}, {"bare"}, {"target"},
+    ]
+
+
+def _old_git_trust_accepts(call: ast.Call) -> bool:
+    """Frozen name-intersection behavior, used only to witness false positives."""
+    elements = call.args[0].elts
+    trusted = [
+        el for el in elements
+        if isinstance(el, ast.Starred) and isinstance(el.value, ast.Call)
+        and isinstance(el.value.func, ast.Name) and el.value.func.id == "_git_trust"
+    ]
+    operands = {
+        node.id for el in elements if el not in trusted
+        for node in ast.walk(el) if isinstance(node, ast.Name)
+    }
+    return bool(trusted) and all(
+        starred.value.args and {
+            node.id for arg in starred.value.args for node in ast.walk(arg)
+            if isinstance(node, ast.Name)
+        } & operands
+        for starred in trusted
     )
-    assert not unreadable, (
-        "customization_service.py:"
-        + ", ".join(str(node.lineno) for node in unreadable)
-        + ": a subprocess command built in a variable is invisible to this check. "
-        "Keep git launches literal, or extend the checker."
-    )
-    for call in calls:
-        elements = call.args[0].elts
-        trusted = [
-            el for el in elements
-            if isinstance(el, ast.Starred)
-            and isinstance(el.value, ast.Call)
-            and isinstance(el.value.func, ast.Name)
-            and el.value.func.id == "_git_trust"
-        ]
-        assert trusted, (
-            f"customization_service.py:{call.lineno}: this git launch does not pass "
-            "_git_trust(...), so an EFS-owned repo will be refused as dubious"
-        )
-        # Which paths, not merely that some argument exists. `_git_trust()` with no
-        # arguments emits no flags, and `_git_trust(Path.cwd())` emits a flag for the
-        # wrong directory: both passed an earlier version of this assertion, and the
-        # second recreates the exact 503 it is here to prevent.
-        operands: set[str] = set()
-        for element in elements:
-            if element in trusted:
-                continue  # the trust flags themselves are not operands
-            operands.update(
-                node.id for node in ast.walk(element) if isinstance(node, ast.Name)
-            )
-        for starred in trusted:
-            args = starred.value.args
-            assert args, (
-                f"customization_service.py:{call.lineno}: _git_trust() was called with "
-                "no paths, so it produces no safe.directory flags at all"
-            )
-            names = {n.id for a in args for n in ast.walk(a) if isinstance(n, ast.Name)}
-            assert names & operands, (
-                f"customization_service.py:{call.lineno}: _git_trust{tuple(sorted(names))} "
-                f"trusts nothing this command touches {tuple(sorted(operands))}. "
-                "Trusting the wrong path leaves the real repository refused."
-            )
+
+
+def _fixture_git_launches(monkeypatch, command: str):
+    source = f"subprocess.run({command})"
+    monkeypatch.setitem(_subprocess_launches.__globals__, "_read", lambda _: source)
+    return _subprocess_launches("trust_fixture.py")
+
+
+@pytest.mark.parametrize("command,old_accepts", [
+    # Wrong paths masked by object names, commits, and unrelated arguments.
+    ('["git", *_git_trust(target), "--git-dir", str(bare), "show", target]', True),
+    ('["git", *_git_trust(bare), "-C", str(target), "rev-parse", bare]', True),
+    ('["git", *_git_trust(target.parent), "-C", str(target), "rev-parse", "HEAD"]', True),
+    ('["git", *_git_trust(bare, target), "--git-dir", str(bare), "show", target]', True),
+    ('["git", *_git_trust(bare, unrelated), "--git-dir", str(bare), "show", object_name]', True),
+    ('["git", *_git_trust(commit), "--git-dir", str(bare), "worktree", "add", "--detach", str(target), commit]', True),
+    ('["git", *_git_trust(args), "--git-dir", str(bare), *args]', True),
+    ('["git", "-c", config(target), *_git_trust(target), "--git-dir", str(bare), "show", object_name]', True),
+    # Malformed selectors retaining a shared name somewhere in the command.
+    ('["git", *_git_trust(bare), "show", bare, "--git-dir"]', True),
+    ('["git", *_git_trust(bare), "--git-dir"]', False),
+    ('["git", *_git_trust(bare), "--git-dir", "show", bare]', True),
+    ('["git", *_git_trust(bare), "--git-dir=repo", "show", bare]', True),
+    ('["git", *_git_trust(target), "-Ctarget", "rev-parse", target]', True),
+    ('["git", *_git_trust(bare), "--work-tree", str(bare), "show", bare]', True),
+    ('["git", *_git_trust(bare), "--git-dir", str(bare), "-C", str(target), "show", bare]', True),
+    ('["git", *_git_trust(bare), "--git-dir", resolve(bare), "show", bare]', True),
+    ('["git", *_git_trust(bare), "--git-dir", *bare, "show", bare]', True),
+    # Unknown worktree options, expanded or missing destinations fail closed.
+    ('["git", *_git_trust(bare, target), "--git-dir", str(bare), "worktree", "add", *target, commit]', True),
+    ('["git", *_git_trust(bare), "--git-dir", str(bare), "worktree", "add", "--detach"]', True),
+    ('["git", *_git_trust(bare, target), "--git-dir", str(bare), "worktree", "add", "--unknown", str(target), commit]', True),
+    ('["git", *_git_trust(bare, target), "--git-dir", str(bare), "worktree", "add", str(target), commit, extra]', True),
+    ('["git", *_git_trust(bare, target), "--git-dir", str(bare), "worktree", "add", str(target), *commit]', True),
+    # Trust calls themselves must declare explicit paths.
+    ('["git", *_git_trust(), "--git-dir", str(bare), "show", object_name]', False),
+    ('["git", *_git_trust(*bare), "--git-dir", str(bare), "show", object_name]', True),
+    ('["git", *_git_trust(bare, path=target), "--git-dir", str(bare), "show", object_name]', True),
+    ('["git", *_git_trust(path=bare), "--git-dir", str(bare), "show", object_name]', False),
+    ('["git", *_git_trust(bare.resolve()), "--git-dir", str(bare), "show", object_name]', True),
+    ('["git", "--git-dir", str(bare), "show", object_name]', False),
+])
+def test_git_trust_rejects_wrong_or_unreadable_operands(monkeypatch, command, old_accepts):
+    calls, unreadable = _fixture_git_launches(monkeypatch, command)
+    assert len(calls) == 1 and not unreadable
+    # This proves the invalid fixtures exercised the old hole before requiring
+    # rejection by the validator also used for the production source.
+    assert _old_git_trust_accepts(calls[0]) == old_accepts
+    with pytest.raises(AssertionError, match=r"trust_fixture.py:1:.*required=.*declared="):
+        _validate_git_launches(calls, unreadable, "trust_fixture.py")
+
+
+@pytest.mark.parametrize("trusted_path", ["bare", "target"])
+def test_git_worktree_add_requires_both_current_operands(trusted_path):
+    calls, unreadable = _subprocess_launches("server/customization_service.py")
+    assert not unreadable
+    adds = [call for call in calls if any(
+        isinstance(el, ast.Constant) and el.value == "add" for el in call.args[0].elts
+    )]
+    assert len(adds) == 1
+    call = adds[0]
+    trust = next(el.value for el in call.args[0].elts if isinstance(el, ast.Starred))
+    trust.args = [ast.Name(id=trusted_path, ctx=ast.Load())]
+    assert _old_git_trust_accepts(call)
+    with pytest.raises(AssertionError, match="trust paths must equal"):
+        _validate_git_launches([call], [], "server/customization_service.py")
+
+
+@pytest.mark.parametrize("command,required", [
+    ('["git", *_git_trust(bare), "--git-dir", str(bare), *args]', {"bare"}),
+    ('["git", *_git_trust(bare), "--git-dir", str(bare), "show", object_name]', {"bare"}),
+    ('["git", "-c", "core.autocrlf=false", *_git_trust(bare, target), "--git-dir", str(bare), "worktree", "add", "--detach", str(target), commit]', {"bare", "target"}),
+    ('["git", *_git_trust(target, bare), "--git-dir", str(bare), "worktree", "add", "--detach", str(target), commit]', {"bare", "target"}),
+    ('["git", *_git_trust(bare, target, bare), *_git_trust(target), "--git-dir", str(bare), "worktree", "add", "--detach", str(target), commit]', {"bare", "target"}),
+    ('["git", *_git_trust(bare), "--git-dir", str(bare), "worktree", "prune"]', {"bare"}),
+    ('["git", *_git_trust(target), "-C", str(target), "rev-parse", "HEAD"]', {"target"}),
+    ('["git", *_git_trust(str(target)), "-C", str(target), "rev-parse", "HEAD"]', {"target"}),
+    ('["git", *_git_trust(target.parent), "-C", str(target.parent), "rev-parse", "HEAD"]', {"target.parent"}),
+])
+def test_git_trust_accepts_exact_path_sets(monkeypatch, command, required):
+    calls, unreadable = _fixture_git_launches(monkeypatch, command)
+    assert _validate_git_launches(calls, unreadable, "trust_fixture.py") == [required]
+
+
+@pytest.mark.parametrize("source", [
+    'command = ["git", *_git_trust(bare), "--git-dir", str(bare), "show", object_name]\nsubprocess.run(command)',
+    'subprocess.run(["git", *_git_trust(bare), "--git-dir", str(bare), *args])\nsubprocess.Popen(command)',
+    'record_requirement(["git"])',
+])
+def test_git_trust_preserves_scanner_guards(monkeypatch, source):
+    monkeypatch.setitem(_subprocess_launches.__globals__, "_read", lambda _: source)
+    calls, unreadable = _subprocess_launches("trust_fixture.py")
+    with pytest.raises(AssertionError, match="trust_fixture.py:"):
+        _validate_git_launches(calls, unreadable, "trust_fixture.py")
 
 
 def test_every_image_whose_process_requires_git_installs_git():
