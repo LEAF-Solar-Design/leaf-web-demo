@@ -23,11 +23,14 @@ import json
 import pathlib
 import tempfile
 import time
+import uuid
 
 import jwt
 import pytest
 
 import leaf_platform.store as platform_store
+import leaf_platform.api as platform_api
+import leaf_platform.db as platform_db
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
@@ -52,14 +55,14 @@ _JWKS_FILE.write_text(json.dumps({"keys": [_jwk]}), encoding="utf-8")
 
 
 def _mint(org_id: str, *, tenant_id: str = "tenant-1b", with_org: bool = True,
-          subject: str = "auth0|1b") -> str:
+          subject: str = "auth0|1b", claim_namespace: str = NS) -> str:
     now = int(time.time())
     payload = {
         "iss": ISS, "aud": AUD, "iat": now, "exp": now + 3600, "sub": subject,
         NS + "tenant_id": tenant_id,
     }
     if with_org:
-        payload[NS + "org_id"] = org_id
+        payload[claim_namespace + "org_id"] = org_id
     return jwt.encode(payload, _priv_pem, algorithm="RS256", headers={"kid": KID})
 
 
@@ -168,18 +171,184 @@ def test_live_auth_post_orgs_unauthenticated_is_rejected(client, live_auth):
 
 def test_live_auth_post_orgs_with_valid_session_succeeds(client, live_auth):
     """A verified caller may still bootstrap an org (org claim not required to mint)."""
-    tok = _mint("unused", with_org=False, subject="auth0|1b-bootstrap")
-    r = client.post("/api/orgs", json={"name": "legit org"},
+    name = "Legit org " + str(uuid.uuid4())
+    subject = "auth0|1b-bootstrap-" + str(uuid.uuid4())
+    tok = _mint("unused", with_org=False, subject=subject)
+    r = client.post("/api/orgs", json={"name": name},
                     headers={"Authorization": "Bearer " + tok})
     assert r.status_code == 200, r.text
-    assert r.json()["org"]["name"] == "legit org"
+    assert r.json()["org"]["name"] == name
     assert r.json()["created"] is True
 
-    replay = client.post("/api/orgs", json={"name": "  LEGIT ORG  "},
+    replay = client.post("/api/orgs", json={"name": "  " + name.upper() + "  "},
                          headers={"Authorization": "Bearer " + tok})
     assert replay.status_code == 200, replay.text
     assert replay.json()["created"] is False
     assert replay.json()["org"]["org_id"] == r.json()["org"]["org_id"]
+    orgs, bindings = _bootstrap_state([name], subject)
+    assert len(orgs) == len(bindings) == 1
+
+
+PROVISIONING_REQUIRED = (
+    "This identity requires authorized workspace provisioning. Contact your workspace "
+    "administrator to complete provisioning, then sign in again."
+)
+ACCESS_RECOVERY = (
+    "This identity is already assigned to a workspace. Contact your workspace "
+    "administrator for authorized provisioning or access recovery."
+)
+
+
+def _bootstrap_state(names, subject):
+    """Scope state proofs to this test's names/subject for shared databases."""
+    with platform_db.cursor() as cur:
+        cur.execute("SELECT * FROM orgs WHERE name = ANY(%(names)s) ORDER BY org_id",
+                    {"names": names})
+        orgs = cur.fetchall()
+        cur.execute("SELECT * FROM identity_bindings WHERE external_authority = 'auth0' "
+                    "AND external_subject = %(subject)s ORDER BY binding_id",
+                    {"subject": subject})
+        return orgs, cur.fetchall()
+
+
+def _forbid_bootstrap_mints(monkeypatch):
+    calls, events = [], []
+
+    def forbidden(*args, **kwargs):
+        calls.append((args, kwargs))
+        pytest.fail("bootstrap refusal must precede minting")
+
+    for name in ("create_org_with_identity", "create_org"):
+        monkeypatch.setattr(platform_store, name, forbidden)
+    monkeypatch.setattr(platform_api, "_emit_org_event", lambda *args: events.append(args))
+    return calls, events
+
+
+@pytest.mark.parametrize("claim_kind", ["active", "unknown", "inactive", "malformed", "empty", "null"])
+@pytest.mark.parametrize("namespace", [NS, "https://custom.example/claims/"])
+def test_claim_only_bootstrap_refuses_before_minting(
+    client, make_org, live_auth, monkeypatch, claim_kind, namespace,
+):
+    subject = "auth0|claim-only-" + str(uuid.uuid4())
+    name = "Claim bootstrap " + str(uuid.uuid4())
+    claimed = make_org("Claim target " + str(uuid.uuid4()))
+    if claim_kind == "inactive":
+        with platform_db.cursor() as cur:
+            cur.execute("UPDATE orgs SET status = 'offboarding' WHERE org_id = %(id)s",
+                        {"id": claimed.org_id})
+    value = {"active": str(claimed.org_id), "unknown": str(uuid.uuid4()),
+             "inactive": str(claimed.org_id), "malformed": {"org_id": "bad"},
+             "empty": "", "null": None}[claim_kind]
+    # The configured namespace is deliberately missing its slash.
+    monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", namespace.rstrip("/"))
+    headers = _bearer(value, subject=subject, claim_namespace=namespace)
+    names = [name, claimed.name]
+    before = _bootstrap_state(names, subject)
+    calls, events = _forbid_bootstrap_mints(monkeypatch)
+    monkeypatch.setattr(platform_store, "ensure_org_with_identity",
+                        lambda *args, **kwargs: pytest.fail("preflight must precede ensure"))
+    for _ in range(2):
+        response = client.post("/api/orgs", json={"name": name}, headers=headers)
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == PROVISIONING_REQUIRED
+        assert _bootstrap_state(names, subject) == before
+        assert platform_store.resolve_active_identity_binding("auth0", subject) is None
+    assert calls == events == []
+
+
+def test_bound_bootstrap_conflict_preserves_workspace_and_role(
+    client, make_org, live_auth, monkeypatch,
+):
+    subject = "auth0|bound-conflict-" + str(uuid.uuid4())
+    org = make_org("Assigned " + str(uuid.uuid4()))
+    name = "Different " + str(uuid.uuid4())
+    _bind_as(org, subject, "read_only")
+    before = _bootstrap_state([org.name, name], subject)
+    calls, events = _forbid_bootstrap_mints(monkeypatch)
+    headers = _bearer(str(uuid.uuid4()), subject=subject)
+    for _ in range(2):
+        response = client.post("/api/orgs", json={"name": name}, headers=headers)
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == ACCESS_RECOVERY
+        assert _bootstrap_state([org.name, name], subject) == before
+    assert calls == events == []
+
+
+def test_claim_only_membership_requires_explicit_trusted_provisioning(
+    client, make_org, live_auth, monkeypatch,
+):
+    subject = "auth0|provisioned-" + str(uuid.uuid4())
+    org = make_org("Provisioned " + str(uuid.uuid4()))
+    headers = _bearer(str(org.org_id), subject=subject)
+    for path in ("/api/projects", f"/api/orgs/{org.org_id}"):
+        response = client.get(path, headers=headers)
+        assert response.status_code == 403, response.text
+    assert platform_store.resolve_active_identity_binding("auth0", subject) is None
+    # Trusted setup selects the active org and role independently of the token.
+    binding = platform_store.create_identity_binding(org.org_id, "auth0", subject,
+                                                     role="read_only")
+    before = _bootstrap_state([org.name], subject)
+    calls, events = _forbid_bootstrap_mints(monkeypatch)
+    for path in ("/api/projects", f"/api/orgs/{org.org_id}"):
+        response = client.get(path, headers=headers)
+        assert response.status_code == 200, response.text
+    replay = client.post("/api/orgs", json={"name": "  " + org.name.upper() + "  "},
+                         headers=headers)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["created"] is False
+    assert replay.json()["org"]["org_id"] == str(org.org_id)
+    assert platform_store.active_identity_role(org.org_id, binding.binding_id) == "read_only"
+    assert _bootstrap_state([org.name], subject) == before
+    assert calls == events == []
+
+
+def test_binding_overrides_other_org_claim(client, make_org, live_auth, monkeypatch):
+    subject = "auth0|claim-override-" + str(uuid.uuid4())
+    org_a = make_org("Durable A " + str(uuid.uuid4()))
+    org_b = make_org("Hint B " + str(uuid.uuid4()))
+    binding = platform_store.create_identity_binding(org_a.org_id, "auth0", subject, role="editor")
+    project_a = platform_store.create_project(org_a.org_id, "Project A " + str(uuid.uuid4()))
+    project_b = platform_store.create_project(org_b.org_id, "Project B " + str(uuid.uuid4()))
+    headers = _bearer(str(org_b.org_id), subject=subject)
+    before = _bootstrap_state([org_a.name, org_b.name], subject)
+    calls, events = _forbid_bootstrap_mints(monkeypatch)
+    assert client.get(f"/api/orgs/{org_a.org_id}", headers=headers).status_code == 200
+    assert client.get(f"/api/orgs/{org_b.org_id}", headers=headers).status_code == 404
+    assert client.get(f"/api/projects/{project_a.project_id}", headers=headers).status_code == 200
+    assert client.get(f"/api/projects/{project_b.project_id}", headers=headers).status_code == 404
+    projects = client.get("/api/projects", headers=headers)
+    assert projects.status_code == 200, projects.text
+    assert [p["project_id"] for p in projects.json()["projects"]] == [str(project_a.project_id)]
+    replay = client.post("/api/orgs", json={"name": org_a.name}, headers=headers)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["created"] is False
+    assert replay.json()["org"]["org_id"] == str(org_a.org_id)
+    assert platform_store.active_identity_role(org_a.org_id, binding.binding_id) == "editor"
+    assert _bootstrap_state([org_a.name, org_b.name], subject) == before
+    assert calls == events == []
+
+
+def test_custom_namespace_does_not_treat_default_claim_as_assignment(client, live_auth, monkeypatch):
+    monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", "https://custom.example/claims")
+    subject = "auth0|custom-bootstrap-" + str(uuid.uuid4())
+    name = "Fresh workspace " + str(uuid.uuid4())
+    headers = _bearer(str(uuid.uuid4()), subject=subject)
+    first = client.post("/api/orgs", json={"name": name}, headers=headers)
+    assert first.status_code == 200, first.text
+    assert first.json()["created"] is True
+    replay = client.post("/api/orgs", json={"name": "  " + name.upper() + "  "}, headers=headers)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["created"] is False
+    assert replay.json()["org"]["org_id"] == first.json()["org"]["org_id"]
+    orgs, bindings = _bootstrap_state([name], subject)
+    assert len(orgs) == len(bindings) == 1
+
+
+def test_live_bootstrap_rejects_body_subject(client, live_auth):
+    headers = _bearer("unused", with_org=False, subject="auth0|body-" + str(uuid.uuid4()))
+    response = client.post("/api/orgs", json={"name": "Body " + str(uuid.uuid4()),
+                                            "external_subject": "auth0|forged"}, headers=headers)
+    assert response.status_code == 422, response.text
 
 
 def test_live_auth_project_create_replays_same_uuid(client, live_auth):

@@ -201,6 +201,14 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
         subject = _auth.get("sub")
         if not subject:
             raise HTTPException(status_code=403, detail="verified token has no external subject")
+        binding = store.resolve_active_identity_binding("auth0", str(subject))
+        if binding is None and platform_deps._server_auth().claim_ns() + "org_id" in _auth:
+            raise HTTPException(
+                status_code=409,
+                detail="This identity requires authorized workspace provisioning. "
+                       "Contact your workspace administrator to complete provisioning, "
+                       "then sign in again.",
+            )
         try:
             org, created = store.ensure_org_with_identity(
                 body.name, "auth0", str(subject),

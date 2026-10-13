@@ -356,7 +356,7 @@ def ensure_org_with_identity(
     if existing is not None:
         org = get_org(existing.platform_tenant_id)
         if org is None or org.status != "active" or org.name.strip().casefold() != requested:
-            raise ValueError("verified subject is bound to a different workspace organization")
+            raise ValueError("This identity is already assigned to a workspace. Contact your workspace administrator for authorized provisioning or access recovery.")
         return org, False
     try:
         return create_org_with_identity(
@@ -368,7 +368,7 @@ def ensure_org_with_identity(
             raise
         org = get_org(existing.platform_tenant_id)
         if org is None or org.status != "active" or org.name.strip().casefold() != requested:
-            raise ValueError("verified subject is bound to a different workspace organization")
+            raise ValueError("This identity is already assigned to a workspace. Contact your workspace administrator for authorized provisioning or access recovery.")
         return org, False
 
 
@@ -609,8 +609,9 @@ def create_identity_binding(org_id: uuid.UUID, external_authority: str, external
                             role: str = "owner") -> IdentityBinding:
     """Bind a verified external subject to one platform tenant/user.
 
-    The caller supplies this only from server-verified authentication code; there
-    is intentionally no browser-facing binding API.
+    Trusted server-side callers must independently establish authorization and
+    the intended active organization and role; a token's org hint grants no
+    authority. There is intentionally no browser-facing binding API.
     """
     if not external_authority or not external_subject:
         raise ValueError("external authority and subject are required")

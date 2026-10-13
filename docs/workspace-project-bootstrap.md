@@ -5,8 +5,8 @@ tenant and project identity that every app profile, including iOS, binds to.
 
 ## Contract
 
-1. Sign in through Leaf Platform. The verified identity is the only tenant
-   selector in live mode.
+1. Sign in through Leaf Platform. The verified subject's active durable
+   identity binding selects the tenant in live mode; an org claim does not.
 2. `POST /api/orgs` with the workspace display name. A replay for the same
    identity and normalized name returns the same `org_id`. A different bound
    org name returns `409`. Never search all tenants by display name.
@@ -23,6 +23,42 @@ tenant and project identity that every app profile, including iOS, binds to.
 The two POSTs are safe to retry after a lost response. They are not a license to
 create a second tenant or project. In live mode the server derives tenancy from
 the verified session and ignores client-supplied tenant identity.
+
+## Authorized provisioning handoff
+
+Live bootstrap checks the verified subject's active durable binding first. An
+already-bound member reuses that workspace on normalized-name replay, even if
+the token's org claim differs. A different or unavailable workspace returns
+HTTP 409 with this string `detail`:
+
+> This identity is already assigned to a workspace. Contact your workspace administrator for authorized provisioning or access recovery.
+
+Use the existing workspace. If access needs recovery, contact its administrator;
+bootstrap never moves a binding, changes its role, or renames the workspace.
+
+An unbound identity with the configured namespaced `org_id` key receives HTTP
+409 with this string `detail`, before any workspace or binding is created:
+
+> This identity requires authorized workspace provisioning. Contact your workspace administrator to complete provisioning, then sign in again.
+
+Key presence is sufficient, including null, empty, malformed, unknown, and
+inactive organization values. The namespace comes from `LEAF_TENANT_CLAIM_NS`
+and is normalized with a trailing slash. The hint neither selects an
+organization nor authorizes membership. An administrator must establish the
+durable membership through authorized provisioning before the member signs in
+again and retries access. Bootstrap never invokes provisioning automatically.
+An unbound identity without that key can still bootstrap its first workspace.
+Both refusals retain string `detail` responses so the workspace controller's
+existing 409 handling can surface these instructions.
+
+`platform.store.create_identity_binding` is a trusted server-side writer, not
+an enrollment endpoint. Its caller must independently establish authorization,
+the intended active organization, and the permitted role; a sign-in token's
+org hint cannot supply that authority. There is no browser-facing binding API.
+The protected `POST /api/operator/identity-bindings/pair` route has a narrower
+scope: exactly two distinct Auth0 subjects in two distinct tenants, both with
+`read_only` roles, under its operator and environment checks. It is not a generic
+single-user onboarding API.
 
 ## iOS source and approval
 

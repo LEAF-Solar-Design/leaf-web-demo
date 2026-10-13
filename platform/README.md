@@ -146,10 +146,41 @@ replay with the same normalized name returns the same `org_id`; a different
 name for an already-bound identity returns 409. It never searches tenants by a
 display name.
 
+Live bootstrap resolves the verified subject's active durable binding first;
+the binding remains authoritative even if the token claims another org. A
+bound member should use the existing workspace. A different or unavailable
+workspace returns HTTP 409 with string `detail`:
+
+> This identity is already assigned to a workspace. Contact your workspace administrator for authorized provisioning or access recovery.
+
+An unbound subject carrying the configured namespaced `org_id` key is refused
+before minting, with HTTP 409 and string `detail`:
+
+> This identity requires authorized workspace provisioning. Contact your workspace administrator to complete provisioning, then sign in again.
+
+The namespace is `LEAF_TENANT_CLAIM_NS`, trailing-slash normalized by
+`server/auth.py:claim_ns()`. Presence alone triggers this refusal, including
+empty, null, malformed, unknown, and inactive values; the claim is never
+resolved to select an organization or grant membership. An administrator must
+establish authorized durable membership separately before the member signs in
+again and retries access. Bootstrap does not invoke provisioning automatically,
+move bindings, change roles, or rename organizations. An unbound subject without
+that key retains first-workspace bootstrap. String `detail` responses let the
+current workspace controller surface the handoff through its existing 409 path.
+
+`store.create_identity_binding` is a trusted server-side writer, not an
+enrollment endpoint. Its caller must establish authorization and the intended
+active organization and role independently of the sign-in token's org hint.
+There is no browser-facing binding API. The protected
+`POST /api/operator/identity-bindings/pair` route is restricted to exactly two
+distinct Auth0 subjects and two distinct tenants, both with `read_only` roles,
+under operator and environment checks. It is not a generic single-user
+onboarding API. See `docs/workspace-project-bootstrap.md` for the handoff.
+
 **This endpoint is intentionally OPEN in dev** (no auth gate) to solve the
 bootstrap chicken/egg: you cannot present an `X-Org-Id` you do not yet have.
 **In production it MUST be gated behind the auth/identity layer** — org creation
-becomes a side effect of first login / provisioning, and a client-supplied
+becomes a side effect of eligible first-workspace bootstrap, and a client-supplied
 identity is never trusted here (same seam as `deps.get_org_id`). `tier` is
 optional and, when supplied, validated against `models.TIERS` (else 422);
 omitted → the store default (`hosted_starter`).

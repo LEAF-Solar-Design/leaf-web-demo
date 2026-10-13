@@ -9,8 +9,8 @@ the SAME env toggle the server uses (server/deps.py ``auth_live``):
   ON  (=1)      -> the caller's org is derived from the VERIFIED Auth0 RS256
       session (server/auth.py's RS256-pinned verifier), NOT the header. A
       client-supplied ``X-Org-Id`` is IGNORED, so it can never name another
-      tenant's org (F6). No/invalid token -> 401; a verified token that carries
-      no org claim -> 403.
+      tenant's org (F6). No/invalid token -> 401; a verified subject without an
+      active durable binding -> 403. Org claims grant no platform membership.
 
 Isolating that swap here keeps store.py and api.py org-scoped by construction.
 """
@@ -72,10 +72,9 @@ def _server_auth():
 def _verified_identity(authorization: Optional[str]) -> Any:
     """Derive the canonical org UUID from a verified subject binding.
 
-    401 on absent/invalid token (server/auth.py). A verified token whose
-    namespaced ``org_id`` claim is absent or is not a UUID -> 403 (authenticated
-    but not provisioned for a Leaf org) — mirrors the server's verified-but-no-
-    tenant-claim posture.
+    Verify the token (401 on absent/invalid token), then resolve its subject's
+    active durable binding. An unbound subject is refused with 403. An org
+    claim neither grants membership nor overrides the durable binding.
     """
     auth = _server_auth()
     payload = auth.verify_platform_token(authorization)   # -> 401 on bad/absent token
@@ -237,9 +236,9 @@ def require_auth_when_live(
          which is required for the chicken/egg first-org mint.
     ON:  the caller MUST present a VERIFIED Auth0 session (401 otherwise); org
          creation becomes a side effect of a real authenticated identity and a
-         client-supplied identity is never trusted. The org claim need NOT yet
-         exist (provisioning the first org is exactly this call), so only the
-         signature/audience/issuer/expiry are required here.
+         client-supplied identity is never trusted. Only token verification is
+         required here; the route checks durable membership and an org hint
+         before allowing first-workspace bootstrap or returning a handoff.
     """
     if not auth_live():
         return None
