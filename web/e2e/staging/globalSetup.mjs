@@ -1,5 +1,5 @@
 import { rmSync } from 'node:fs'
-import { assertAllowedStagingHost, resolveStagingBaseURL, STAGING_OUTPUT_ROOT } from './stagingConfig.mjs'
+import { assertAllowedStagingHost, assertStagingTokenIdentity, resolveStagingBaseURL, STAGING_OUTPUT_ROOT } from './stagingConfig.mjs'
 
 // Runs once before any staging spec. Two jobs, both mandatory:
 // 1. Refuse to proceed unless the resolved base URL is an allowed staging
@@ -12,4 +12,6 @@ export default async function globalSetup() {
   rmSync(STAGING_OUTPUT_ROOT, { recursive: true, force: true })
   const baseURL = resolveStagingBaseURL()
   assertAllowedStagingHost(baseURL)
+  const token = process.env.LEAF_E2E_STAGING_JWT
+  if (token) assertStagingTokenIdentity(token, process.env)
 }

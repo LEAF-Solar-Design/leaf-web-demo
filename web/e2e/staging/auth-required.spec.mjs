@@ -4,6 +4,7 @@ import {
   allowedStagingOrigins,
   assertPageOnAllowedOrigin,
   assertResponseOnAllowedOrigin,
+  assertStagingTokenIdentity,
   collectBearerLeaks,
   stagingProofPath,
 } from './stagingConfig.mjs'
@@ -32,6 +33,7 @@ import { writeProofReceipt } from '../proofReceipt.mjs'
 // STAGING_PROVEN evidence -- do not merge a green run of this file on trust
 // alone the first time real credentials are supplied.
 const STAGING_JWT = process.env.LEAF_E2E_STAGING_JWT || ''
+if (STAGING_JWT) assertStagingTokenIdentity(STAGING_JWT, process.env)
 
 async function primeAuthenticatedPage(page) {
   // Full ORIGIN, not hostname: a page served from an allowed hostname on a
