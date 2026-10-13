@@ -2386,8 +2386,9 @@ def build_suites() -> List[Suite]:
         # Proves labelled sizing replay isolation; opens loopback sockets and short-lived child Pythons only.
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
+        # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets.
         Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 34),
+              SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 49),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for

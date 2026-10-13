@@ -6,11 +6,13 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 
@@ -663,3 +665,301 @@ def test_pp2_readiness_rejects_byte_mismatch(monkeypatch):
     monkeypatch.setattr(psycopg, "connect", lambda *args, **kwargs: Connection())
     with pytest.raises(RuntimeError, match="readiness failed"):
         authority.readiness()
+
+
+# Independent pin of PostgreSQL 18 section 32.15 (2026-10-13), not derived from
+# the implementation tuple: omitting a variable must fail these rows too.
+LIBPQ_ENV_NAMES = tuple("""
+PGHOST PGSSLNEGOTIATION PGHOSTADDR PGPORT PGDATABASE PGUSER PGPASSWORD PGPASSFILE
+PGREQUIREAUTH PGCHANNELBINDING PGSERVICE PGSERVICEFILE PGOPTIONS PGAPPNAME PGSSLMODE
+PGREQUIRESSL PGSSLCOMPRESSION PGSSLCERT PGSSLKEY PGSSLCERTMODE PGSSLROOTCERT PGSSLCRL
+PGSSLCRLDIR PGSSLSNI PGREQUIREPEER PGSSLMINPROTOCOLVERSION PGSSLMAXPROTOCOLVERSION
+PGGSSENCMODE PGKRBSRVNAME PGGSSLIB PGGSSDELEGATION PGCONNECT_TIMEOUT PGCLIENTENCODING
+PGTARGETSESSIONATTRS PGLOADBALANCEHOSTS PGMINPROTOCOLVERSION PGMAXPROTOCOLVERSION
+PGDATESTYLE PGTZ PGGEQO PGSYSCONFDIR PGLOCALEDIR
+""".split())
+# Measured with psycopg 3.3.4 / libpq 180003 and every above variable absent.
+CLEAN_STARTUP = {"user": "postgres", "database": "leaf"}
+
+
+@pytest.fixture
+def clean_pg_env(monkeypatch):
+    for name in LIBPQ_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+@contextmanager
+def startup_listener(host="127.0.0.1", response="close"):
+    """Capture real protocol-3 startup frames, never credentials or SQL.
+
+    Closing (or sending an ErrorResponse) deliberately makes connect fail.
+    Packet evidence, not connection success, is the oracle.
+    """
+    packets, snapshots, errors = [], [], []
+    closing = threading.Event()
+    with socket.socket() as listener:
+        listener.bind((host, 0))
+        listener.listen(8)
+        listener.settimeout(0.05)
+        def serve():
+            try:
+                while not closing.is_set():
+                    try:
+                        client, _ = listener.accept()
+                    except socket.timeout:
+                        continue
+                    with client:
+                        client.settimeout(2)
+                        def read_exact(count):
+                            data = b""
+                            while len(data) < count:
+                                part = client.recv(count - len(data))
+                                if not part:
+                                    raise AssertionError("truncated startup packet")
+                                data += part
+                            return data
+                        size, = struct.unpack("!I", read_exact(4))
+                        assert 8 <= size <= 65536
+                        body = read_exact(size - 4)
+                        assert struct.unpack("!I", body[:4]) == (196608,)
+                        assert body.endswith(b"\0\0")
+                        fields = body[4:-2].split(b"\0")
+                        assert len(fields) % 2 == 0
+                        keys = [value.decode("utf-8") for value in fields[::2]]
+                        assert len(keys) == len(set(keys))
+                        packets.append(dict(zip(keys, (v.decode("utf-8") for v in fields[1::2]))))
+                        snapshots.append(tuple(name for name in LIBPQ_ENV_NAMES if name in os.environ))
+                        if response == "reject":
+                            error = b"SFATAL\0C08006\0Mpp2d listener refused\0\0"
+                            client.sendall(b"E" + struct.pack("!I", len(error) + 4) + error)
+            except BaseException as exc:
+                errors.append(exc)
+        thread = threading.Thread(target=serve)
+        thread.start()
+        try:
+            yield SimpleNamespace(address=listener.getsockname(), packets=packets, snapshots=snapshots)
+        finally:
+            closing.set()
+            thread.join(timeout=3)
+            assert not thread.is_alive(), "startup listener did not stop"
+            assert not errors, "startup listener failed to decode a packet"
+
+
+def packet_authority(address):
+    authority = pg.PgAuthority(RUN, docker=FakeDocker())
+    authority.address = address
+    return authority
+
+
+def test_pp2d_r1_missing_service(clean_pg_env, monkeypatch, tmp_path):
+    missing = tmp_path / "absent.conf"
+    assert not missing.exists()
+    monkeypatch.setenv("PGSERVICE", "missing")
+    monkeypatch.setenv("PGSERVICEFILE", str(missing))
+    with startup_listener() as genuine:
+        with pytest.raises(RuntimeError, match="readiness failed"):
+            packet_authority(genuine.address).readiness()
+    assert genuine.packets == [CLEAN_STARTUP]
+
+
+def test_pp2d_r2_real_service(clean_pg_env, monkeypatch, tmp_path):
+    # 127.0.0.2 was bindable on the measurement host; no skip or fallback needed.
+    with startup_listener("127.0.0.2") as foreign, startup_listener() as genuine:
+        service = tmp_path / "pg_service.conf"
+        service.write_text("[redirect]\nhost=127.0.0.2\nhostaddr=127.0.0.2\n"
+                           f"port={foreign.address[1]}\napplication_name=service-injected\n",
+                           encoding="utf-8", newline="\n")
+        monkeypatch.setenv("PGSERVICE", "redirect")
+        monkeypatch.setenv("PGSERVICEFILE", str(service))
+        with pytest.raises(RuntimeError, match="readiness failed"):
+            packet_authority(genuine.address).readiness()
+    assert foreign.packets == []
+    # Explicit host parameters already defeat service redirection on the baseline;
+    # the service's unpinned application_name is the measured regression oracle.
+    assert genuine.packets == [CLEAN_STARTUP]
+
+
+@pytest.mark.parametrize("form", ["readiness", "dsn"])
+def test_pp2d_r3_options(clean_pg_env, monkeypatch, form):
+    import psycopg
+    monkeypatch.setenv("PGOPTIONS", "-c default_transaction_read_only=on -c statement_timeout=1")
+    with startup_listener() as genuine:
+        authority = packet_authority(genuine.address)
+        if form == "readiness":
+            with pytest.raises(RuntimeError, match="readiness failed"):
+                authority.readiness()
+        else:
+            with pytest.raises(psycopg.OperationalError):
+                psycopg.connect(authority.dsn())
+    assert len(genuine.packets) == 1
+    assert "options" not in genuine.packets[0]
+    assert genuine.packets == [CLEAN_STARTUP]
+
+
+def test_pp2d_r4_exact_startup(clean_pg_env, monkeypatch):
+    with startup_listener() as clean:
+        with pytest.raises(RuntimeError, match="readiness failed"):
+            packet_authority(clean.address).readiness()
+    assert clean.packets == [CLEAN_STARTUP]
+    hostile = {
+        "PGAPPNAME": "ambient-app", "PGCLIENTENCODING": "LATIN1",
+        "PGDATESTYLE": "SQL, DMY", "PGTZ": "Pacific/Honolulu", "PGUSER": "foreign",
+        "PGDATABASE": "foreign", "PGPORT": "1", "PGHOST": "outside.invalid",
+        "PGHOSTADDR": "127.0.0.2", "PGPASSWORD": secrets.token_urlsafe(32),
+        "PGSSLMODE": "require", "PGCONNECT_TIMEOUT": "1", "PGTARGETSESSIONATTRS": "read-only",
+    }
+    for name, value in hostile.items():
+        monkeypatch.setenv(name, value)
+    with startup_listener() as genuine:
+        with pytest.raises(RuntimeError, match="readiness failed"):
+            packet_authority(genuine.address).readiness()
+    assert genuine.packets == [CLEAN_STARTUP]
+
+
+@pytest.mark.parametrize("response", ["close", "reject"])
+def test_pp2d_r5_environment_restored(clean_pg_env, monkeypatch, response):
+    monkeypatch.setenv("PGOPTIONS", "-c statement_timeout=1")
+    monkeypatch.setenv("PGAPPNAME", "restore-exact-\u00e9")
+    monkeypatch.delenv("PGSERVICEFILE", raising=False)
+    before = dict(os.environ)
+    with startup_listener(response=response) as genuine:
+        with pytest.raises(RuntimeError, match="readiness failed"):
+            packet_authority(genuine.address).readiness()
+    restored = dict(os.environ) == before
+    assert restored, "environment mapping changed (values withheld)"
+    assert genuine.packets == [CLEAN_STARTUP]
+    assert genuine.snapshots == [()]
+
+
+def test_pp2d_r6_pre_network_exception(clean_pg_env, monkeypatch):
+    import psycopg
+    original_connect = psycopg.connect
+    snapshots, raised = [], []
+    def connect(*args, **kwargs):
+        snapshots.append(tuple(name for name in LIBPQ_ENV_NAMES if name in os.environ))
+        try:
+            return original_connect(*args, **kwargs)
+        except psycopg.OperationalError as exc:
+            raised.append(exc)
+            raise
+    monkeypatch.setattr(psycopg, "connect", connect)
+    monkeypatch.setenv("PGAPPNAME", "restore-before-network")
+    before = dict(os.environ)
+    authority = packet_authority(("127.0.0.1", "invalid-port"))
+    with pytest.raises(psycopg.OperationalError, match="invalid integer value") as error:
+        authority._connect()
+    assert len(raised) == 1 and error.value is raised[0]
+    restored = dict(os.environ) == before
+    assert restored, "environment mapping changed (values withheld)"
+    assert snapshots == [()]
+
+
+def test_pp2d_r7_clean_environment():
+    from types import MappingProxyType
+    assert isinstance(pg._LIBPQ_ENV, tuple)
+    assert len(pg._LIBPQ_ENV) == len(set(pg._LIBPQ_ENV))
+    assert set(pg._LIBPQ_ENV) == set(LIBPQ_ENV_NAMES)
+    kept = {"PATH": "unchanged", "PG_NOT_A_LIBPQ_SETTING": "keep", "OTHER": "\u00e9\n"}
+    source = dict(kept, **{name: "ambient" for name in LIBPQ_ENV_NAMES})
+    before = dict(source)
+    assert pg.clean_libpq_environment(source) == kept
+    assert source == before
+    assert pg.clean_libpq_environment(MappingProxyType(source)) == kept
+    empty_of_pg = pg.clean_libpq_environment(kept)
+    assert empty_of_pg == kept and empty_of_pg is not kept
+    assert pg.clean_libpq_environment({}) == {}
+
+
+def test_pp2d_r8_single_connect_site():
+    source = Path(pg.__file__).read_text(encoding="utf-8")
+    assert source.count("psycopg.connect(") == 1
+
+
+@pytest.mark.parametrize("entry", ["readiness", "smoke"])
+def test_pp2d_r9_all_callers_isolated(monkeypatch, entry):
+    import psycopg
+    snapshots = []
+    sleeping, cancelled = threading.Event(), threading.Event()
+    class QueryCanceled(Exception):
+        pass
+    class Connection:
+        info = SimpleNamespace(backend_pid=42)
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def transaction(self): return self
+        def commit(self): pass
+        def rollback(self): pass
+        def cancel(self): cancelled.set()
+        def execute(self, sql, params=None):
+            value = None
+            if sql.startswith("SELECT %s::bytea"):
+                value = (params[0], "18.fake")
+            elif sql == "SELECT %s::int":
+                value = (params[0],)
+            elif sql.startswith("INSERT"):
+                self.payload = params[0]
+            elif sql == "SELECT payload FROM proof_binary":
+                value = (self.payload,)
+            elif sql == "SELECT pg_sleep(30)":
+                sleeping.set()
+                assert cancelled.wait(3), "fake cancellation did not arrive"
+                raise QueryCanceled()
+            elif sql.startswith("SELECT wait_event"):
+                assert sleeping.wait(3), "fake sleeper did not start"
+                value = ("PgSleep",)
+            return SimpleNamespace(fetchone=lambda: value)
+    def connect(*args, **kwargs):
+        snapshots.append(tuple(name for name in LIBPQ_ENV_NAMES if name in os.environ))
+        return Connection()
+    for name in LIBPQ_ENV_NAMES:
+        monkeypatch.setenv(name, "ambient")
+    before = dict(os.environ)
+    monkeypatch.setattr(psycopg, "connect", connect)
+    authority = packet_authority(("127.0.0.1", 12345))
+    monkeypatch.setattr(pg.PgAuthority, "start", lambda run: authority)
+    monkeypatch.setattr(authority, "stop", lambda: {})
+    if entry == "readiness":
+        assert authority.readiness()["ok"]
+        expected = 1
+    else:
+        assert pg.smoke(RUN)["ok"]
+        expected = 8  # readiness, four transactions, binary, sleeper, observer
+    restored = dict(os.environ) == before
+    assert restored, "environment mapping changed (values withheld)"
+    assert snapshots == [()] * expected
+
+
+def test_pp2d_dsn_strings():
+    authority = packet_authority(("127.0.0.1", 12345))
+    suffix = "/leaf?hostaddr=127.0.0.1&sslmode=disable&gssencmode=disable&connect_timeout=5&options="
+    expected = f"postgresql://postgres:{quote(authority._password, safe='')}@127.0.0.1:12345{suffix}"
+    matches = authority.dsn() == expected
+    assert matches, "DSN contract changed (credential withheld)"
+    assert authority.redacted_dsn() == f"postgresql://postgres:***@127.0.0.1:12345{suffix}"
+
+
+def test_pp2d_r10_clean_environment_any_case():
+    kept = {"PATH": "unchanged", "OTHER": "keep", "PG_NOT_A_LIBPQ_SETTING": "keep", 7: "non-text key"}
+    source = dict(kept)
+    for name in LIBPQ_ENV_NAMES:
+        source[name.lower()] = "lower"
+        source[name.title()] = "title"
+        source[name[:2].lower() + name[2:]] = "mixed"
+    source["pGsErViCe"] = "alternating"
+    before = dict(source)
+    cleaned = pg.clean_libpq_environment(source)
+    assert cleaned == kept and cleaned is not kept
+    assert source == before
+
+
+def test_pp2d_r11_child_environment_has_no_libpq_name():
+    names = set(LIBPQ_ENV_NAMES)
+    base = {k: v for k, v in os.environ.items() if k.upper() not in names}
+    base.update({"pgservice": "review-missing", "PgServiceFile": "C:/review-does-not-exist/service.conf",
+                 "pghost": "ambient-host", "pgOptions": "-c search_path=ambient"})
+    code = ("import json, os, sys; names = set(json.loads(sys.argv[1]));"
+            " print(json.dumps(sorted(k for k in os.environ if k.upper() in names)))")
+    child = subprocess.run([sys.executable, "-c", code, json.dumps(sorted(names))],
+                           env=pg.clean_libpq_environment(base), capture_output=True, text=True,
+                           timeout=60, check=True)
+    assert json.loads(child.stdout) == []

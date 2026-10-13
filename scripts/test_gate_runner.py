@@ -54,7 +54,7 @@ def test_pp2_gate_registration():
     assert suite.cwd == SCRIPTS
     assert suite.argv == runner._py_pytest("test_proof_project_pg.py")
     assert suite.label == "scripts test_proof_project_pg.py"
-    assert suite.kind == "pytest" and suite.expected == 34
+    assert suite.kind == "pytest" and suite.expected == 49  # Measured 2026-10-13: PP-2d isolation, any-case names.
     assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
     assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))

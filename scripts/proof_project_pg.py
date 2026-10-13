@@ -25,6 +25,21 @@ OWNER = "proof_project_pg"
 RUN_LABEL = "leaf.proof-project.run"
 OWNER_LABEL = "leaf.proof-project.owner"
 MAX_CONNECTIONS = 32
+# PostgreSQL 18, section 32.15: https://www.postgresql.org/docs/18/libpq-envars.html
+# Include session and internal settings as well as connection defaults.
+_LIBPQ_ENV = (
+    "PGHOST", "PGSSLNEGOTIATION", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGUSER",
+    "PGPASSWORD", "PGPASSFILE", "PGREQUIREAUTH", "PGCHANNELBINDING", "PGSERVICE",
+    "PGSERVICEFILE", "PGOPTIONS", "PGAPPNAME", "PGSSLMODE", "PGREQUIRESSL",
+    "PGSSLCOMPRESSION", "PGSSLCERT", "PGSSLKEY", "PGSSLCERTMODE", "PGSSLROOTCERT",
+    "PGSSLCRL", "PGSSLCRLDIR", "PGSSLSNI", "PGREQUIREPEER", "PGSSLMINPROTOCOLVERSION",
+    "PGSSLMAXPROTOCOLVERSION", "PGGSSENCMODE", "PGKRBSRVNAME", "PGGSSLIB",
+    "PGGSSDELEGATION", "PGCONNECT_TIMEOUT", "PGCLIENTENCODING", "PGTARGETSESSIONATTRS",
+    "PGLOADBALANCEHOSTS", "PGMINPROTOCOLVERSION", "PGMAXPROTOCOLVERSION",
+    "PGDATESTYLE", "PGTZ", "PGGEQO", "PGSYSCONFDIR", "PGLOCALEDIR",
+)
+_LIBPQ_ENV_SET = frozenset(_LIBPQ_ENV)
+_CONNECT_LOCK = threading.Lock()
 RELAY_CODE = r'''
 import os, socket, sys, threading
 s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=10)
@@ -47,6 +62,19 @@ try:
 finally:
     os._exit(0)
 '''
+
+
+def clean_libpq_environment(environ):
+    """Copy a consumer's environment without libpq's documented ambient inputs.
+
+    Names compare without regard to case: a Windows child reads ``pgservice``
+    as ``PGSERVICE``, and POSIX libpq never reads a lowercase name, so dropping
+    one changes nothing libpq reads. A key that is not text is kept.
+    """
+    return {
+        name: value for name, value in environ.items()
+        if not (isinstance(name, str) and name.upper() in _LIBPQ_ENV_SET)
+    }
 
 
 def _validate(run_id):
@@ -360,22 +388,43 @@ class PgAuthority:
                     self._connections.discard(pair)
 
     def dsn(self):
+        """Explicit authority for consumers in other processes.
+
+        Supervisors must pass clean_libpq_environment(environ) as the child
+        environment: a DSN alone cannot suppress all ambient libpq settings.
+        """
         return (f"postgresql://postgres:{quote(self._password, safe='')}@{self.address[0]}:{self.address[1]}"
-                f"/leaf?hostaddr={self.address[0]}&sslmode=disable&gssencmode=disable&connect_timeout=5")
+                f"/leaf?hostaddr={self.address[0]}&sslmode=disable&gssencmode=disable&connect_timeout=5&options=")
 
     def _connect_args(self):
         return {"host": self.address[0], "hostaddr": self.address[0], "port": self.address[1],
                 "dbname": "leaf", "user": "postgres", "password": self._password,
                 "sslmode": "disable", "gssencmode": "disable", "connect_timeout": 5}
 
+    def _connect(self):
+        import psycopg
+        # This CLI helper has a single-threaded readiness path. Smoke also
+        # connects from worker threads, so serialize the process-wide environment
+        # change for just this call; transactions remain concurrent afterwards.
+        # Embedding alongside unrelated environment readers/writers is unsupported.
+        with _CONNECT_LOCK:
+            previous = {name: os.environ[name] for name in _LIBPQ_ENV if name in os.environ}
+            try:
+                for name in _LIBPQ_ENV:
+                    os.environ.pop(name, None)
+                return psycopg.connect(**self._connect_args())
+            finally:
+                for name in _LIBPQ_ENV:
+                    os.environ.pop(name, None)
+                os.environ.update(previous)
+
     def redacted_dsn(self):
         return self.dsn().replace(quote(self._password, safe=""), "***")
 
     def readiness(self):
         try:
-            import psycopg
             payload = bytes(range(256))
-            with psycopg.connect(**self._connect_args()) as conn:
+            with self._connect() as conn:
                 with conn.transaction():
                     actual, version = conn.execute(
                         "SELECT %s::bytea, current_setting('server_version')", (payload,)).fetchone()
@@ -416,7 +465,6 @@ class PgAuthority:
 
 def smoke(run_id):
     """Exercise real libpq cancellation and binary transactions; timings in seconds."""
-    import psycopg
     result = {"run_id": run_id, "timings_s": {}}
     started = time.perf_counter()
     authority = PgAuthority.start(run_id)
@@ -428,7 +476,7 @@ def smoke(run_id):
         barrier = threading.Barrier(4)
         def transaction(index):
             begin = time.perf_counter()
-            with psycopg.connect(**authority._connect_args()) as conn:
+            with authority._connect() as conn:
                 with conn.transaction():
                     barrier.wait(timeout=20)
                     value = conn.execute("SELECT %s::int", (index,)).fetchone()[0]
@@ -440,14 +488,14 @@ def smoke(run_id):
         result["timings_s"]["four_connections"] = time.perf_counter() - begin
         begin = time.perf_counter()
         payload = secrets.token_bytes(1024 * 1024)
-        with psycopg.connect(**authority._connect_args()) as conn:
+        with authority._connect() as conn:
             with conn.transaction():
                 conn.execute("CREATE TABLE proof_binary (payload bytea NOT NULL)")
                 conn.execute("INSERT INTO proof_binary VALUES (%s)", (payload,))
                 assert bytes(conn.execute("SELECT payload FROM proof_binary").fetchone()[0]) == payload
         result["round_trip_bytes"] = len(payload)
         result["timings_s"]["one_mib"] = time.perf_counter() - begin
-        with psycopg.connect(**authority._connect_args()) as conn:
+        with authority._connect() as conn:
             outcome = {}
             def sleeper():
                 begin = time.perf_counter()
@@ -459,7 +507,7 @@ def smoke(run_id):
             thread = threading.Thread(target=sleeper)
             thread.start()
             # Observe the sleep on the server before cancelling it from this thread.
-            with psycopg.connect(**authority._connect_args()) as observer:
+            with authority._connect() as observer:
                 deadline = time.monotonic() + 15
                 while True:
                     observer.commit()
