@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason, createProjectSolarAuthority,
   deriveProjectSolarAppScope, projectSolarCheckoutState, projectSolarScopeSnapshot } from './solarProjectAppModel.js'
 import { createSolarProjectClient } from './solarProjectClient.js'
+import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 
 const O = '11111111-1111-1111-1111-111111111111'
 const P = '22222222-2222-2222-2222-222222222222'
@@ -21,6 +22,24 @@ const snapshot = (extra = {}) => ({ binding, authorityKey: 'scope-1', checkout: 
 const project = (extra = {}) => deriveProjectSolarAppScope({ projectMode: true, runContext: context,
   authorityKey: 'scope-1', ...extra })
 const session = { authenticated: true, actorId: 'actor-alice', generation: 0 }
+
+it('R14D-09 projectSolarAppReason maps both spellings of the five cloud codes to static sentences', () => {
+  for (const [code, sentence] of [
+    ['CLOUD_AUTH_MISSING', SOLAR_SIZING_RUN_REASONS.grant_missing],
+    ['CLOUD_TENANT_UNAUTHORIZED', SOLAR_SIZING_RUN_REASONS.grant_scope],
+    ['CLOUD_UPSTREAM_FAILURE', SOLAR_SIZING_RUN_REASONS.cloud_unavailable],
+    ['CLOUD_RESPONSE_INVALID', SOLAR_SIZING_RUN_REASONS.cloud_response_invalid],
+    ['CLOUD_REQUEST_INVALID', SOLAR_SIZING_RUN_REASONS.request_invalid],
+  ]) {
+    expect(projectSolarAppReason(code)).toBe(sentence)
+    expect(projectSolarAppReason(code.toLowerCase())).toBe(sentence)
+  }
+  for (const code of ['CLOUD_SOMETHING_ELSE', 'cloud_something_else']) {
+    expect(projectSolarAppReason(code)).toBe(PROJECT_SOLAR_APP_REASONS.request_refused)
+  }
+  const source = readFileSync(resolve(process.cwd(), 'src/solar/solarProjectAppModel.js'), 'utf8')
+  expect(source).not.toMatch(/REASONS\s*\[/)
+})
 
 it('R13A-01 derives the artifact and input version from the canonical run context', () => {
   expect(scope).toEqual({ mode: 'project', binding, authorityKey: 'scope-1', reason: null })

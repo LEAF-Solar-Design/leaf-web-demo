@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { createRunSubmissionRequest } from '../runIntent.js'
 import r9Declaration from '../../../server/solar_tools/solar_string_conductors.json'
-import { deriveProjectSizingState, buildProjectSizingRequest } from './solarSizingModel.js'
+import { deriveProjectSizingState, buildProjectSizingRequest, PROJECT_SIZING_CLOUD_REASONS,
+  projectSizingCloudReason } from './solarSizingModel.js'
 import { conductorRows, conductorGaugeOptions, buildConductorParams, deriveProjectConductorState } from './solarConductorModel.js'
 import { buildSizingParams, MODULE_PARAMETER_KEYS, sizingGraph, sizingResponseValid, sizingTargets, SOLAR_SIZING_REASONS } from './solarSizingModel.js'
 
@@ -143,12 +144,43 @@ describe('solarSizingModel', () => {
     expect(deriveProjectSizingState({ binding: r9Binding, contextView: r9Context(graph) }).reason).toBe('graph_unreadable')
   })
 
-  it('R9-13 project global and zones modes refuse with manual_only', () => {
-    const state = deriveProjectSizingState({ binding: r9Binding, contextView: r9Context(r9Manual()) })
-    for (const mode of ['global', 'zones']) {
-      expect(buildProjectSizingRequest({ binding: r9Binding, state, mode, catalogDigest: r9Digest, idempotencyKey: 'key' }).reason).toBe('manual_only')
-      expect(buildProjectSizingRequest({ binding: r9Binding, state, mode }).reason).toBe('manual_only')
+  it('R9-13 project global builds the cloud request and zones refuse', () => {
+    const contextView = r9Context(raw()), input = draft()
+    const state = deriveProjectSizingState({ binding: r9Binding, contextView })
+    const args = { binding: r9Binding, state, mode: 'global', draft: input,
+      catalogDigest: r9Digest, idempotencyKey: 'cloud-key' }
+    const before = JSON.stringify({ contextView, state, input, binding: r9Binding })
+    expect(buildProjectSizingRequest(args)).toEqual({ ok: true, request: { tool: 'solar-size-strings',
+      params: { drawing_id: r9Binding.drawing_id, ...buildSizingParams({ graph: state.graph, mode: 'global', draft: input }).params },
+      catalogDigest: r9Digest, idempotencyKey: 'cloud-key' } })
+    expect(buildProjectSizingRequest({ ...args, mode: 'zones' })).toEqual({ ok: false, reason: 'zones_unsupported' })
+    for (const catalogDigest of [undefined, '', r9Digest + '\n']) {
+      expect(buildProjectSizingRequest({ ...args, catalogDigest }).reason).toBe('catalog_digest_required')
     }
+    for (const idempotencyKey of [undefined, '', '🌞'.repeat(65)]) {
+      expect(buildProjectSizingRequest({ ...args, idempotencyKey }).reason).toBe('idempotency_key_required')
+    }
+    expect(buildProjectSizingRequest({ ...args, binding: { ...r9Binding, drawing_id: 'bad' } }).reason).toBe('binding_invalid')
+    expect(buildProjectSizingRequest({ ...args, state: { ...state, binding: { ...r9Binding,
+      input_version_id: '55555555-5555-5555-5555-555555555555' } } }).reason).toBe('scope_stale')
+    expect(buildProjectSizingRequest({ ...args, draft: { ...input, grant_ref: '' } }).invalid).toContain('grant_ref')
+    expect(JSON.stringify({ contextView, state, input, binding: r9Binding })).toBe(before)
+  })
+
+  it('R14D-07 test_project_zones_remain_refused', () => {
+    const state = deriveProjectSizingState({ binding: r9Binding, contextView: r9Context(raw()) })
+    const args = { binding: r9Binding, state, mode: 'zones', draft: draft(), catalogDigest: r9Digest, idempotencyKey: 'key' }
+    expect(buildSizingParams({ graph: state.graph, mode: 'zones', draft: draft() }).ok).toBe(true)
+    for (const mode of ['zones', 'other', null]) {
+      expect(buildProjectSizingRequest({ ...args, mode })).toEqual({ ok: false, reason: 'zones_unsupported' })
+    }
+    expect(buildProjectSizingRequest({ ...args, binding: null })).toEqual({ ok: false, reason: 'binding_invalid' })
+    expect(buildProjectSizingRequest({ ...args, state: null }).reason).toBe('request_invalid')
+    expect(buildProjectSizingRequest({ ...args, catalogDigest: '' }).reason).toBe('catalog_digest_required')
+    expect(buildProjectSizingRequest({ ...args, idempotencyKey: '' }).reason).toBe('idempotency_key_required')
+    expect(Object.isFrozen(PROJECT_SIZING_CLOUD_REASONS)).toBe(true)
+    expect(projectSizingCloudReason('zones_unsupported')).toBe('Project string sizing does not support zones. Choose global cloud sizing or the saved global length.')
+    expect(projectSizingCloudReason('unknown')).toBeNull()
   })
 
   it('R9-18 malformed digest or UTF8 key refuses before preparation', () => {

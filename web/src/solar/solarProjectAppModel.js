@@ -1,4 +1,5 @@
 import { mintCorrelationId } from '../runIntent.js'
+import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 import { createSolarDrawingBinding, solarDrawingBindingFromRunContext, sameSolarDrawingBinding } from './solarDrawingBinding.js'
 
 export const PROJECT_SOLAR_APP_REASONS = Object.freeze({
@@ -57,6 +58,16 @@ export function projectSolarAppReason(code) {
     case 'unsupported_form': return PROJECT_SOLAR_APP_REASONS.unsupported_form
     case null:
     case undefined: return null
+    case 'CLOUD_AUTH_MISSING':
+    case 'cloud_auth_missing': return SOLAR_SIZING_RUN_REASONS.grant_missing
+    case 'CLOUD_TENANT_UNAUTHORIZED':
+    case 'cloud_tenant_unauthorized': return SOLAR_SIZING_RUN_REASONS.grant_scope
+    case 'CLOUD_UPSTREAM_FAILURE':
+    case 'cloud_upstream_failure': return SOLAR_SIZING_RUN_REASONS.cloud_unavailable
+    case 'CLOUD_RESPONSE_INVALID':
+    case 'cloud_response_invalid': return SOLAR_SIZING_RUN_REASONS.cloud_response_invalid
+    case 'CLOUD_REQUEST_INVALID':
+    case 'cloud_request_invalid': return SOLAR_SIZING_RUN_REASONS.request_invalid
     default: return PROJECT_SOLAR_APP_REASONS.request_refused
   }
 }

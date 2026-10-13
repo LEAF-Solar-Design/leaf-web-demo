@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { solarSizingRunSentence } from './solarSizingRunReasons.js'
+import { solarSizingRunSentence, SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 import { buildSizingParams, MODULE_PARAMETER_KEYS, sizingGraph, sizingTargets, SOLAR_SIZING_REASONS,
   deriveProjectSizingState, buildProjectSizingRequest, exactProjectSizingConductorPreview,
-  projectSizingConductorReason, createProjectSizingConductorBinding } from './solarSizingModel.js'
+  projectSizingConductorReason, projectSizingCloudReason, createProjectSizingConductorBinding } from './solarSizingModel.js'
 import { sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 
 const projectReasonCode = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}(?![\\s\\S])')
@@ -11,6 +11,24 @@ const projectJobId = new RegExp('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 export function projectSizingConductorFeedback(outcome, admission = null, phase = 'submission') {
   const code = [admission?.error?.reason_code, outcome?.envelope?.error?.reason_code, outcome?.reason]
     .find((value) => typeof value === 'string' && projectReasonCode.test(value)) ?? null
+  switch (code) {
+    case 'CLOUD_AUTH_MISSING':
+    case 'cloud_auth_missing': return { outcome, admission, reason: 'cloud_auth_missing',
+      text: SOLAR_SIZING_RUN_REASONS.grant_missing, code }
+    case 'CLOUD_TENANT_UNAUTHORIZED':
+    case 'cloud_tenant_unauthorized': return { outcome, admission, reason: 'cloud_tenant_unauthorized',
+      text: SOLAR_SIZING_RUN_REASONS.grant_scope, code }
+    case 'CLOUD_UPSTREAM_FAILURE':
+    case 'cloud_upstream_failure': return { outcome, admission, reason: 'cloud_upstream_failure',
+      text: SOLAR_SIZING_RUN_REASONS.cloud_unavailable, code }
+    case 'CLOUD_RESPONSE_INVALID':
+    case 'cloud_response_invalid': return { outcome, admission, reason: 'cloud_response_invalid',
+      text: SOLAR_SIZING_RUN_REASONS.cloud_response_invalid, code }
+    case 'CLOUD_REQUEST_INVALID':
+    case 'cloud_request_invalid': return { outcome, admission, reason: 'cloud_request_invalid',
+      text: SOLAR_SIZING_RUN_REASONS.request_invalid, code }
+    default: break
+  }
   let reason = 'preview_refused'
   if (code === 'project_adapter_unavailable' || code === 'SIP_R3_TOOL_UNSUPPORTED') reason = 'project_adapter_unavailable'
   else if (code === 'SIP_R3_SERVICE_EVIDENCE_REQUIRED') reason = 'manual_only'
@@ -307,22 +325,42 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
 }
 
 function ProjectSolarSizingForm(props) {
+  const [mode, setMode] = useState('manual-global')
+  const [draft, setDraft] = useState({})
+  const declarationIdentity = JSON.stringify([mode, ...[
+    'module_name', 'full_inverter_name', 'bifacial', 'bifacial_coefficient',
+    'racking_type', 'surface_tilt', 'surface_azimuth', 'albedo',
+    'axis_tilt', 'axis_azimuth', 'max_angle', 'gcr', 'backtrack',
+    'max_voltage', 'thermal_model_type', 'open_circuit_rise', 'grant_ref',
+    'use_module_parameters', ...MODULE_PARAMETER_KEYS,
+  ].map((key) => draft[key] ?? null)])
   const form = useProjectSizingConductor(props, { toolName: 'solar-size-strings',
-    deriveState: deriveProjectSizingState, buildRequest: buildProjectSizingRequest })
+    deriveState: deriveProjectSizingState, declarationIdentity,
+    buildRequest: (args) => buildProjectSizingRequest({ ...args, mode, draft }) })
   const { state, editable, reason, submitting, runMessage, retryAvailable, submit } = form
+  const built = editable ? buildSizingParams({ graph: state.graph, mode, draft }) : null
+  const invalid = new Set(built?.invalid || [])
+  const change = (key, value) => setDraft((previous) => ({ ...previous, [key]: value }))
   const sentence = projectSizingConductorReason(reason)
+    || projectSizingCloudReason(reason)
+    || (reason === 'sizing_zip_required' ? SOLAR_SIZING_REASONS.sizing_zip_required
+      : reason === 'sizing_fields_invalid' ? SOLAR_SIZING_REASONS.sizing_fields_invalid : null)
     || (reason === 'sizing_panels_required' ? SOLAR_SIZING_REASONS.sizing_panels_required
       : reason === 'sizing_manual_length_required' ? SOLAR_SIZING_REASONS.sizing_manual_length_required : null)
   return <div data-testid="project-solar-sizing-form" data-mode={state?.mode ?? 'loading'}>
     {state === null && <p role="status">Reading the drawing.</p>}
     {editable && <>
-      <label>Scope<select value="manual-global" disabled>
+      <label>Scope<select value={mode} disabled={submitting} onChange={(event) => setMode(event.target.value)}>
         <option value="manual-global">Saved global length</option>
+        <option value="global">Global cloud sizing</option>
       </select></label>
+      <p>Saved project ZIP: {state.savedZip}</p>
       {Number.isInteger(state.graph.savedLength) && state.graph.savedLength >= 1 && state.graph.savedLength <= 4096
         && <p>Saved global string length: {state.graph.savedLength}</p>}
       <p>Change the length in Solar settings.</p>
-      <p>Manual confirmation does not calculate voltage limits or module power.</p>
+      {mode === 'manual-global' && <p>Manual confirmation does not calculate voltage limits or module power.</p>}
+      {mode === 'global' && <SizingCloudFields mode={mode} draft={draft} change={change}
+        busy={submitting} invalid={invalid} />}
     </>}
     {sentence && <p role="status">{sentence}</p>}
     {runMessage && <p role="status" data-testid="project-solar-sizing-feedback">
@@ -341,6 +379,39 @@ export default function SolarSizingForm(props) {
     return <ProjectSolarSizingForm {...props} />
   }
   return <StandaloneSolarSizingForm {...props} />
+}
+
+function SizingCloudFields({ mode, draft, change, busy, invalid }) {
+  function input(key, label) {
+    return <label key={key}>{label}<input value={draft[key] ?? ''} disabled={busy}
+      aria-invalid={invalid.has(key) || undefined} onChange={(event) => change(key, event.target.value)} /></label>
+  }
+  function boolean(key, label) {
+    return <label>{label}<select value={draft[key] === undefined ? '' : String(draft[key])} disabled={busy}
+      aria-invalid={invalid.has(key) || undefined}
+      onChange={(event) => change(key, event.target.value === '' ? undefined : event.target.value === 'true')}>
+      <option value="">Choose</option><option value="true">Yes</option><option value="false">No</option>
+    </select></label>
+  }
+  return <>
+    {mode === 'global' && <>{input('module_name', 'Module')}{input('full_inverter_name', 'Inverter')}</>}
+    {boolean('bifacial', 'Bifacial')}
+    {input('bifacial_coefficient', 'Bifacial coefficient')}
+    <label>Racking<select value={draft.racking_type ?? ''} disabled={busy}
+      aria-invalid={invalid.has('racking_type') || undefined} onChange={(event) => change('racking_type', event.target.value)}>
+      <option value="">Choose</option><option value="fixed_tilt">Fixed tilt</option><option value="single_axis">Single axis</option>
+    </select></label>
+    {input('surface_tilt', 'Surface tilt')}{input('surface_azimuth', 'Surface azimuth')}{input('albedo', 'Albedo')}
+    {draft.racking_type === 'single_axis' && <>
+      {input('axis_tilt', 'Axis tilt')}{input('axis_azimuth', 'Axis azimuth')}
+      {input('max_angle', 'Max angle')}{input('gcr', 'Ground coverage ratio')}{boolean('backtrack', 'Backtrack')}
+    </>}
+    {input('max_voltage', 'Maximum voltage')}{input('thermal_model_type', 'Thermal model')}
+    {boolean('open_circuit_rise', 'Open circuit rise')}{input('grant_ref', 'Grant reference')}
+    <label><input type="checkbox" checked={draft.use_module_parameters === true} disabled={busy}
+      onChange={(event) => change('use_module_parameters', event.target.checked)} />Use module parameters</label>
+    {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, key))}
+  </>
 }
 
 function StandaloneSolarSizingForm({
@@ -384,17 +455,6 @@ function StandaloneSolarSizingForm({
   const busy = status === 'pending'
   const invalid = new Set(built.invalid || [])
   const change = (key, value) => setDraft((previous) => ({ ...previous, [key]: value }))
-  function input(key, label) {
-    return <label key={key}>{label}<input value={draft[key] ?? ''} disabled={busy}
-      aria-invalid={invalid.has(key) || undefined} onChange={(event) => change(key, event.target.value)} /></label>
-  }
-  function boolean(key, label) {
-    return <label>{label}<select value={draft[key] === undefined ? '' : String(draft[key])} disabled={busy}
-      aria-invalid={invalid.has(key) || undefined}
-      onChange={(event) => change(key, event.target.value === '' ? undefined : event.target.value === 'true')}>
-      <option value="">Choose</option><option value="true">Yes</option><option value="false">No</option>
-    </select></label>
-  }
   function submit() {
     if (lock.current || busy || !built.ok) return
     lock.current = true
@@ -418,23 +478,7 @@ function StandaloneSolarSizingForm({
       {mode === 'zones' && <p>Module: {graph.zones[index].module_model}; Inverter: {graph.zones[index].inverter_model_a}</p>}
       <p>{Object.hasOwn(graph.power, id) && graph.power[id] != null ? `Confirmed module power: ${graph.power[id]} W` : 'Confirmed module power is unavailable. Re-size strings.'}</p>
     </div>)}
-    {mode === 'global' && <>{input('module_name', 'Module')}{input('full_inverter_name', 'Inverter')}</>}
-    {boolean('bifacial', 'Bifacial')}
-    {input('bifacial_coefficient', 'Bifacial coefficient')}
-    <label>Racking<select value={draft.racking_type ?? ''} disabled={busy}
-      aria-invalid={invalid.has('racking_type') || undefined} onChange={(event) => change('racking_type', event.target.value)}>
-      <option value="">Choose</option><option value="fixed_tilt">Fixed tilt</option><option value="single_axis">Single axis</option>
-    </select></label>
-    {input('surface_tilt', 'Surface tilt')}{input('surface_azimuth', 'Surface azimuth')}{input('albedo', 'Albedo')}
-    {draft.racking_type === 'single_axis' && <>
-      {input('axis_tilt', 'Axis tilt')}{input('axis_azimuth', 'Axis azimuth')}
-      {input('max_angle', 'Max angle')}{input('gcr', 'Ground coverage ratio')}{boolean('backtrack', 'Backtrack')}
-    </>}
-    {input('max_voltage', 'Maximum voltage')}{input('thermal_model_type', 'Thermal model')}
-    {boolean('open_circuit_rise', 'Open circuit rise')}{input('grant_ref', 'Grant reference')}
-    <label><input type="checkbox" checked={draft.use_module_parameters === true} disabled={busy}
-      onChange={(event) => change('use_module_parameters', event.target.checked)} />Use module parameters</label>
-    {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, key))}
+    <SizingCloudFields mode={mode} draft={draft} change={change} busy={busy} invalid={invalid} />
     </>}
     {!built.ok && <p role="status">{SOLAR_SIZING_REASONS[built.reason]}</p>}
     {busy && <p role="status">This step is running. Confirm or wait for it to finish.</p>}

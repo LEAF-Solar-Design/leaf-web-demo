@@ -1,4 +1,5 @@
 import { SOLAR_REFUSAL_REASONS } from '../lib/ribbonClusters.js'
+import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 
 export const PROJECT_SOLAR_RUN_REASONS = Object.freeze({
   unreadable_output: 'This Solar run finished, but its output could not be read.',
@@ -35,6 +36,11 @@ export function projectSolarRunFailure(code) {
   }
   const key = code.toLowerCase()
   switch (key) {
+    case 'cloud_auth_missing': return Object.freeze({ reasonCode: key, message: SOLAR_SIZING_RUN_REASONS.grant_missing })
+    case 'cloud_tenant_unauthorized': return Object.freeze({ reasonCode: key, message: SOLAR_SIZING_RUN_REASONS.grant_scope })
+    case 'cloud_upstream_failure': return Object.freeze({ reasonCode: key, message: SOLAR_SIZING_RUN_REASONS.cloud_unavailable })
+    case 'cloud_response_invalid': return Object.freeze({ reasonCode: key, message: SOLAR_SIZING_RUN_REASONS.cloud_response_invalid })
+    case 'cloud_request_invalid': return Object.freeze({ reasonCode: key, message: SOLAR_SIZING_RUN_REASONS.request_invalid })
     case 'invalid_pvcase_convert_request': return Object.freeze({ reasonCode: key, message: SOLAR_REFUSAL_REASONS.invalid_pvcase_convert_request })
     case 'invalid_pvcase_solve_request': return Object.freeze({ reasonCode: key, message: SOLAR_REFUSAL_REASONS.invalid_pvcase_solve_request })
     case 'invalid_pvcase_export_request': return Object.freeze({ reasonCode: key, message: SOLAR_REFUSAL_REASONS.invalid_pvcase_export_request })
@@ -186,6 +192,9 @@ export function readProjectSolarCompletion(options = {}) {
     const result = field(job, 'result', false)
     const output = field(job, 'output_version_id', false)
     assert((!present(job, 'result') || result === null) && (!present(job, 'output_version_id') || output === null))
+    if ((reason === undefined ? code : reason).toLowerCase() === 'sizing_outcome_unknown') {
+      return completion('outcome_unknown', jobId, null, null, PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+    }
     const failure = projectSolarRunFailure(reason === undefined ? code : reason)
     return completion('failed', jobId, null, failure.reasonCode, failure.message)
   } catch { return unreadable() }
