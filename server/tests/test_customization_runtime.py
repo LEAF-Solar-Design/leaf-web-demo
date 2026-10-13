@@ -1346,7 +1346,9 @@ def _ag2b_publish(lane, change, approval=None):
         tenant=lane.tenant, request=request, confirmation_id=confirmation_id,
         idempotency_key="publish-" + change.idempotency_key,
     )
-    return lane.change(change.idempotency_key)
+    return lane.store.get_change_set(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+    )
 
 
 def _ag2b_loaders():
@@ -1395,6 +1397,21 @@ def _ag2b_remove(lane, key="remove"):
         idempotency_key=key,
     )
     return lane.change(key)
+
+
+def test_ag2b_removal_reservation_is_author_scoped(ag2b, monkeypatch):
+    _ag2b_publish(ag2b, _ag2b_stage(ag2b))
+    alice = _ag2b_remove(ag2b)
+    assert _ag2b_remove(ag2b).change_set_id == alice.change_set_id
+    monkeypatch.setattr(
+        customization_service, "_binding",
+        lambda _tenant: TenantBinding("tenant-a", "auth0|bob", "owner", True),
+    )
+    bob = _ag2b_remove(ag2b)
+    assert bob.change_set_id != alice.change_set_id
+    assert bob.idempotency_key != alice.idempotency_key
+    assert bob.author_subject == "auth0|bob"
+    assert _ag2b_remove(ag2b).change_set_id == bob.change_set_id
 
 
 def test_ag2b_three_publications(ag2b):

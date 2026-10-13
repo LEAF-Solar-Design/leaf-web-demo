@@ -1181,8 +1181,10 @@ class _AG2aCatalog:
         )
 
     def change(self, key="ag2a"):
+        binding = customization_service._binding(self.tenant)
+        key = self.service._author_stage_key(binding.tenant_id, key, binding.subject)
         return self.store.get_change_set_by_idempotency(
-            tenant_id="tenant-a", idempotency_key=key,
+            tenant_id=binding.tenant_id, idempotency_key=key,
         )
 
     def harness(self, _tenant, _description, change):

@@ -639,6 +639,33 @@ class CustomizationService:
             raise CustomizationServiceError("platform_release_ambiguous", 503)
         return next(iter(policy.releases.values()))
 
+    def _author_stage_key(self, tenant_id: str, key: str, subject: str | None) -> str:
+        """Prefer the author's reservation; reuse a legacy key only for its author."""
+        if not isinstance(subject, str) or not subject.strip():
+            raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
+        scoped = "author-stage:" + hashlib.sha256(
+            json.dumps([key, subject], separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        try:
+            for candidate in (scoped, key):
+                try:
+                    prior = self.store.get_change_set_by_idempotency(
+                        tenant_id=tenant_id, idempotency_key=candidate
+                    )
+                except ChangeSetNotFoundError:
+                    continue
+                if prior.author_subject == subject:
+                    return candidate
+                if candidate == scoped:
+                    raise CustomizationServiceError("idempotency_replay", 409)
+        except ToolRecordFieldError as exc:
+            raise CustomizationServiceError("record_fields_invalid", 503) from exc
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+            if isinstance(exc, CustomizationServiceError):
+                raise
+            raise CustomizationServiceError("record_fields_read_failed", 503) from exc
+        return scoped
+
     def _reserve_stage(self, **kwargs: Any) -> ChangeSet:
         try:
             change, _created = self.store.reserve_stage(**kwargs)
@@ -938,6 +965,9 @@ class CustomizationService:
             builder_entitlement=BuilderEntitlement(tenant_id, binding.subject, True, True),
         )
         release = self._release()
+        idempotency_key = self._author_stage_key(
+            tenant_id, idempotency_key, binding.subject
+        )
         base, predecessor = self._stage_admission_base(
             tenant_id, idempotency_key, graph_input, release
         )
@@ -1030,6 +1060,9 @@ class CustomizationService:
             ),
         )
         release = self._release()
+        idempotency_key = self._author_stage_key(
+            tenant_id, idempotency_key, binding.subject
+        )
         base, predecessor = self._stage_admission_base(
             tenant_id, idempotency_key, graph_input, release,
             check_harness=True,
@@ -1097,6 +1130,9 @@ class CustomizationService:
             raise ChangeSetNotFoundError("no effective catalog")
         if not hmac.compare_digest(current.catalog_digest, expected_catalog_digest):
             raise CustomizationServiceError("effective_catalog_digest_mismatch", 409)
+        idempotency_key = self._author_stage_key(
+            tenant_id, idempotency_key, binding.subject
+        )
         try:
             change = self.store.get_change_set_by_idempotency(
                 tenant_id=tenant_id, idempotency_key=idempotency_key
@@ -1374,11 +1410,18 @@ class CustomizationService:
             "contract": "leaf.customization-stage-recovery.v1", "status": "not_found",
         }
         try:
+            idempotency_key = self._author_stage_key(
+                tenant_id, idempotency_key, binding.subject
+            )
             change = self.store.get_change_set_by_idempotency(
                 tenant_id=tenant_id, idempotency_key=idempotency_key
             )
         except ChangeSetNotFoundError:
             return not_found
+        except CustomizationServiceError as exc:
+            if exc.code == "record_fields_read_failed":
+                raise CustomizationServiceError("customization_stage_failed", 503) from exc.__cause__
+            raise
         except ToolRecordFieldError as exc:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
         except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
