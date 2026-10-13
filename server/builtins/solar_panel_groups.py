@@ -10,7 +10,7 @@ import math
 from uuid import UUID
 
 from mutation_plan import emit_plan, plan_sha256, validate_mutations
-from solar_design_graph import MAX_NODES, GraphValidationError, _bounded_json
+from solar_design_graph import MAX_NODES, GraphValidationError, _bounded_json, entities
 import solar_panel_group_kernel as kernel
 from solar_sizing_client import advance, checked_graph, require_sizing
 from solar_sizing_power import frame_module_power
@@ -119,8 +119,15 @@ def create_groups(graph, params, *, drawing_intake, licensed_matrix=None):
             "plan_sha256": plan_sha256(plan), "cancelled": False}
 
 
-def run(graph, params):
-    """Commit deterministic frames on an intake-embedded graph."""
+def run(graph, params, *, _creation=None):
+    """Commit deterministic frames on an intake-embedded graph.
+
+    `_creation` is the canonical project path's private channel (never a request field): when
+    given, each frame id comes from `_creation["new_id"]("frame", group_index, occupied)` in
+    request group order, checked against every stored entity and every earlier allocation, and
+    each frame's `created_at` is `_creation["created_at"]`. Without it the standalone ids and
+    timestamps are unchanged.
+    """
     try:
         group_keys = {"name", "panel_refs", "alignment_tolerance",
                       "module_width_along_row", "module_height_across_row"}
@@ -198,6 +205,7 @@ def run(graph, params):
         zones = [(zone["id"], set(zone["panel_refs"])) for zone in result["electrical_zones"]]
         changed = []
         cells_used = 0
+        occupied = None if _creation is None else {entity["id"] for entity in entities(result)}
         for index, (group, members, angle_key, row_angle) in enumerate(prepared):
             refs = group["panel_refs"]
             by_handle = {panel["provenance"]["source_handle"]: panel for panel in members}
@@ -217,9 +225,17 @@ def run(graph, params):
             if result["settings"]["extra"]["string_sizing"]["mode"] == "zones" and zone_ref is None:
                 raise GraphValidationError("INVALID_ZONE_COVERAGE")
 
-            identity = str(result["rev"]) + ":" + ",".join(sorted(refs))
-            raw = hashlib.sha256((result["source_hash"] + ":frame:" + identity).encode("utf-8")).digest()[:16]
-            frame_id = f"leaf:frame:{UUID(bytes=raw, version=4)}"
+            if _creation is None:
+                identity = str(result["rev"]) + ":" + ",".join(sorted(refs))
+                raw = hashlib.sha256((result["source_hash"] + ":frame:" + identity).encode("utf-8")).digest()[:16]
+                frame_id = f"leaf:frame:{UUID(bytes=raw, version=4)}"
+                created_at = members[0]["provenance"]["created_at"]
+            else:
+                frame_id = _creation["new_id"]("frame", index, occupied)
+                if frame_id in occupied:
+                    raise GraphValidationError("DUPLICATE_APPLICATION_ID")
+                occupied.add(frame_id)
+                created_at = _creation["created_at"]
             matrix = []
             for row_number, row in enumerate(placed):
                 cells = []
@@ -261,7 +277,7 @@ def run(graph, params):
                 "sequences": sequences[index], "panel_assignments": assignments,
                 "provenance": {
                     "created_by": "solar-panel-groups", "last_writer": "solar-panel-groups",
-                    "created_at": members[0]["provenance"]["created_at"],
+                    "created_at": created_at,
                     "source_rev": result["rev"], "source_hash": result["source_hash"],
                     "kernel": "solar_panel_group_kernel", "angle_key": angle_key, "row_angle": row_angle,
                 },
