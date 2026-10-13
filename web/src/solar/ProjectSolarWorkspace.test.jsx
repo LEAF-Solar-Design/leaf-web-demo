@@ -880,7 +880,7 @@ describe('Project Solar workspace composition', () => {
     }
   })
 
-  it('R13E-44 composition owns no Viewer or App mount and all new sentences use the frozen map', () => {
+  it('R13E-44 composition owns no Viewer or runtime and all new sentences use the frozen map', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './ProjectSolarReadPanel.jsx'])
@@ -891,9 +891,6 @@ describe('Project Solar workspace composition', () => {
     expect(source).not.toContain('\r')
     expect(source.endsWith('\n')).toBe(true)
     expect(source.endsWith('\n\n')).toBe(false)
-    const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
-    // App mounts no workspace; its bytes are not pinned, because unrelated App records move them.
-    expect(app).not.toContain('ProjectSolarWorkspace')
     for (const [reason, changes] of [
       ['binding_invalid', { solarBinding: null }], ['scope_stale', { isCurrent: () => false }],
       ['client_unavailable', { projectClient: null }], ['catalog_unavailable', { projectCatalog: null }],

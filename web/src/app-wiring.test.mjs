@@ -51,6 +51,56 @@ function r13Evaluate(node, env) {
 const r13Text = (node) => appSource.slice(node.start, node.end).replace(/\r\n/g, '\n')
 const r13Hash = (value) => createHash('sha256').update(value).digest('hex')
 
+it('R13G2B-01 standalone ribbon and host keep their exact reference and bytes', () => {
+  const adapter = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'ribbonClusters')
+  const clusters = [{ tools: [{ id: 'solar-settings', onClick: () => {} }] }]
+  assert.equal(r13Evaluate(adapter.init, { projectMode: false, ribbon: { clusters } }), clusters)
+  assert.equal(r13Hash(r13Text(r13ProjectHosts().branch.alternate)), '31387a22caa385f902d0634aa48c95195c85dd5eb96318535ff2964257cf365d')
+  for (const [name, hash] of Object.entries({
+    'solarSettingsStandalone.main-66759316.json': 'b8c58800aa04c0d5dae638b51efb037a7bec36b229d6a13fde7430d48e684af3',
+    'solarStandaloneRequests.main-0c5a044e.json': '78777b38051c0c6bcd5da6973a81c8367bbeccbfc5a7893146e42e45696bb461',
+    'solarStringStandalone.main-f139ceba.json': '9a3c849d1a2dfe93e970cc4a97e641d4851ea5c6e65dfc52d7cb3ad61b0f75b8',
+    'solarReadResultStandalone.main-a021056e.json': 'e3c8dafa5a78cd21c7ef21f07e3a17dab34fb8ae852b972a6992302ae5ca3ae9',
+    'solarSizingConductorStandalone.main-f139ceba.json': '16aa78d0485629b7485619fc88862693ad5d80ff9b6c8742cd23fb3143e8b6de',
+  })) assert.equal(r13Hash(readFileSync(`${process.cwd()}/src/solar/__fixtures__/${name}`)), hash, name)
+})
+
+it('R13G2B-05 workspace props use the existing canonical owners', () => {
+  const mount = r13One(n => n.type === 'JSXOpeningElement' && n.name.name === 'ProjectSolarWorkspace')
+  const props = Object.fromEntries(mount.attributes.map(a => [a.name.name, r13Text(a.value.expression)]))
+  assert.deepEqual(props, {
+    key: 'JSON.stringify([projectSolar.scope.authorityKey, projectSolar.scope.binding])',
+    solarBinding: 'projectSolar.scope.binding', authorityKey: 'projectSolar.scope.authorityKey',
+    projectClient: 'projectSolar.projectClient', projectCatalog: 'catalogState.projectCatalog', isCurrent: 'projectSolar.isCurrent',
+    FlowRail: 'SolarFlowRail', StepEditor: 'SolarStepEditor', GraphForm: 'ProjectSolarGraphForm',
+    newProjectIntentKey: 'mintCorrelationId', onProjectSubmit: 'projectSolarRuntime.onProjectSubmit',
+    submissionSignal: 'projectSolarRuntime.submissionSignal', openTool: 'projectSolarRuntime.openTool',
+    onOpenTool: 'onOpenProjectSolarTool', onClose: 'onCloseProjectSolarTool', busy: 'projectSolarRuntime.busy',
+    projectRunMemory: 'projectSolarRuntime.projectRunMemory', projectPending: 'projectSolarRuntime.projectPending',
+    projectOutcome: 'projectSolarRuntime.projectOutcome',
+  })
+  for (const name of ['useProjectSolarScope', 'useAppProjectSolarRuntime', 'createProjectSolarClient', 'useCatalogController'])
+    assert.equal(r13Find(n => n.type === 'CallExpression' && n.callee.name === name).length, 1, name)
+  const supported = r13One(n => n.type === 'VariableDeclaration' && n.declarations.some(d => d.id.name === 'PROJECT_SOLAR_SUPPORTED_TOOLS'))
+  assert.ok(r13Tree.program.body.includes(supported), 'supported tools are module-level')
+})
+
+it('R13G2B-22 workspace stays in the existing Solar seat with one drawing owner', () => {
+  const seat = r13One(n => n.type === 'JSXElement' && n.openingElement.name.name === 'SolarFlowSeat')
+  const workspace = r13One(n => n.type === 'JSXElement' && n.openingElement.name.name === 'ProjectSolarWorkspace')
+  assert.ok(workspace.start > seat.start && workspace.end < seat.end)
+  const viewer = r13One(n => n.type === 'JSXElement' && n.openingElement.name.name === 'Viewer')
+  const ribbon = r13One(n => n.type === 'JSXElement' && n.openingElement.name.name === 'DraftingRibbon')
+  assert.ok(workspace.end < ribbon.start)
+  assert.ok(workspace.end < viewer.start)
+  assert.equal(r13Find(n => n.type === 'JSXOpeningElement' && n.name.name === 'CanvasPointPicker').length, 1)
+  const overlay = r13One(n => n.type === 'CallExpression' && n.callee.name === 'useSolarGraphOverlay')
+  assert.ok(r13Text(overlay).includes('!projectMode'))
+  const engine = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'engineViewArmed')
+  assert.equal(r13Text(engine.init), 'useEngineViewArmed(projectMode)')
+  assert.ok(appSource.includes('engineViewArmed &&'))
+})
+
 it('R13G-01 App owns one runtime beside the existing scope owner', () => {
   function inspect(source) {
     const tree = parseJs(source, { sourceType: 'module', plugins: ['jsx'] })
@@ -458,9 +508,13 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.equal(r13Hash(r13Text(r13Callback('onRun'))), '93fbf477681a27b7e29670e6ff658b17b6c40906d9ad3eea96d6d66b6b2a509c')
   })
 
-  it('R13F-20 App owns one refusal helper and no project execution host', () => {
+  it('R13F-20 App retains one refusal helper and admits the project workspace', () => {
     const { branch, hosts } = r13ProjectHosts()
-    const paragraph = branch.consequent
+    assert.equal(branch.consequent.type, 'ConditionalExpression')
+    assert.equal(r13Text(branch.consequent.test), 'solarFlowSeated')
+    const workspace = r13One(n => n.type === 'JSXElement' && n.openingElement.name.name === 'ProjectSolarWorkspace', branch.consequent.consequent)
+    assert.equal(r13Text(workspace.openingElement.attributes.find(a => a.name.name === 'projectCatalog').value.expression), 'catalogState.projectCatalog')
+    const paragraph = branch.consequent.alternate
     assert.equal(paragraph.type, 'JSXElement')
     assert.equal(paragraph.openingElement.name.name, 'p')
     assert.deepEqual(paragraph.openingElement.attributes.map((node) => [node.name.name, node.value.value]),
@@ -519,9 +573,9 @@ describe('R13F project Solar execution and form ingresses', () => {
     }
     const mounts = r13Find((node) => node.type === 'JSXOpeningElement').map((node) => r13Text(node.name))
     assert.equal(mounts.filter((name) => name === 'ProjectSolarCheckoutControls').length, 1)
-    assert.ok(!mounts.some((name) => name !== 'ProjectSolarCheckoutControls' && /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
+    assert.ok(!mounts.some((name) => !['ProjectSolarCheckoutControls', 'ProjectSolarWorkspace'].includes(name) && /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
     const imports = r13Find((node) => node.type === 'ImportDeclaration').map((node) => node.source.value)
-    assert.ok(!imports.some((path) => /ProjectSolarReadPanel|ProjectSolarWorkspace|useProjectRunController/.test(path)))
+    assert.ok(!imports.some((path) => /ProjectSolarReadPanel|useProjectRunController/.test(path)))
     const model = r13One(node => node.type === 'ImportDeclaration' && node.source.value === './solar/solarProjectDrawingModel.js')
     assert.deepEqual(model.specifiers.map(node => [node.imported.name, node.local.name]), [['projectSolarDrawingView', 'projectSolarDrawingView']])
     const publication = r13One((node) => node.type === 'JSXAttribute' && node.name.name === 'consumeCatalogPublication')
@@ -734,7 +788,7 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.deepEqual(standalone.errors, [])
   })
 
-  it('R13F-15a ribbon opening refuses project Solar before setting the form', () => {
+  it('R13F-15a retained legacy ribbon opener refuses project Solar before setting the form', () => {
     const profile = r13One((node) => node.type === 'VariableDeclarator' && node.id.name === 'profileTabs')
     const binding = r13One((node) => node.type === 'ObjectProperty' && node.key.name === 'onOpenForm', profile.init.arguments[0])
     assert.equal(binding.value.type, 'Identifier')
@@ -915,7 +969,7 @@ describe('R13F project Solar catalog attachment', () => {
   const calls = (name) => find((node) => node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === name)
   const source = (node) => appSource.slice(node.start, node.end)
 
-  it('R13F-01 App owns one project scope before the catalog and admits only project checkout controls', () => {
+  it('R13F-01 App owns one project scope before the catalog and admits checkout controls and workspace', () => {
     const owner = calls('useProjectSolarScope')
     assert.equal(owner.length, 1)
     assert.equal(calls('createCatalogRunContext').length, 1)
@@ -936,7 +990,7 @@ describe('R13F project Solar catalog attachment', () => {
     const intents = find((node) => node.type === 'VariableDeclarator' && node.id.name === 'PROJECT_SOLAR_INTENTS')[0]
     assert.equal(source(intents.init), 'Object.freeze([])')
     const imports = find((node) => node.type === 'ImportDeclaration').map((node) => node.source.value)
-    assert.ok(!imports.some((path) => /ProjectSolarReadPanel|ProjectSolarWorkspace|useProjectRunController/.test(path)))
+    assert.ok(!imports.some((path) => /ProjectSolarReadPanel|useProjectRunController/.test(path)))
     const model = r13One(node => node.type === 'ImportDeclaration' && node.source.value === './solar/solarProjectDrawingModel.js')
     assert.deepEqual(model.specifiers.map(node => [node.imported.name, node.local.name]), [['projectSolarDrawingView', 'projectSolarDrawingView']])
     const checkoutImports = find((node) => node.type === 'ImportDeclaration'
@@ -950,7 +1004,7 @@ describe('R13F project Solar catalog attachment', () => {
     assert.equal(checkoutImports[0].specifiers[0].local.name, 'useProjectCheckoutController')
     const mounts = find((node) => node.type === 'JSXOpeningElement').map((node) => source(node.name))
     assert.equal(mounts.filter((name) => name === 'ProjectSolarCheckoutControls').length, 1)
-    assert.ok(!mounts.some((name) => name !== 'ProjectSolarCheckoutControls' && /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
+    assert.ok(!mounts.some((name) => !['ProjectSolarCheckoutControls', 'ProjectSolarWorkspace'].includes(name) && /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
     const helper = find((node) => node.type === 'VariableDeclarator' && node.id.name === 'refuseProjectSolar')
     assert.equal(helper.length, 1)
     assert.equal(helper[0].init.callee.name, 'useCallback')
@@ -1103,7 +1157,8 @@ describe('A1b-2 stored Solar graph wiring', () => {
     assert.equal(normalized.activeVersion, version)
     const index = block.body.findIndex(statement => statement.type === 'VariableDeclaration' && statement.declarations.includes(declaration))
     assert.ok(text(block.body[index - 1]).includes('const drafting = surfaceSlots.chrome.cockpit'))
-    assert.ok(text(block.body[index + 1]).includes('solarOverlayStatusOf(solarOverlayReason)'))
+    assert.ok(text(block.body.slice(index + 1).find(statement => statement.type === 'VariableDeclaration'
+      && statement.declarations.some(item => item.id.name === 'solarOverlayStatus'))).includes('solarOverlayStatusOf(solarOverlayReason)'))
   })
 
   it('A1B2-W02 current scene requires matching seated scope', () => {
@@ -1190,7 +1245,8 @@ describe('A1b-2 stored Solar graph wiring', () => {
     for (const [reason, expected] of [['INVALID_SCALE', reasons.invalid_scale], ['OVERLAY_LIMIT', reasons.overlay_limit],
       ['GRAPH_PAIR_INVALID', reasons.invalid_graph], ['GRAPH_UNREADABLE', reasons.invalid_graph],
       ['INVALID_GRAPH', reasons.invalid_graph], ['GRAPHLESS', null], ['SCENE_PENDING', null]]) {
-      assert.equal(evaluate(declaration.init, { projectMode: true, projectDrawing: { reason }, solarOverlayStatusOf: statusOf }), expected)
+      assert.equal(evaluate(declaration.init, { projectMode: true, projectSolarRefusal: null,
+        projectDrawing: { reason }, solarOverlayStatusOf: statusOf }), expected)
     }
     for (const reason of ['refresh_pending', null, undefined, 'unknown', 'constructor', 'toString']) {
       assert.equal(statusOf(reason), null)
