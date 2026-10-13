@@ -5,6 +5,8 @@ import * as bridgeModule from './createProjectSolarRunController.js'
 import { useAppProjectSolarRuntime } from './useAppProjectSolarRuntime.js'
 import { projectSolarAppReason } from './solarProjectAppModel.js'
 import { PROJECT_SOLAR_RUN_REASONS } from './solarProjectCompletion.js'
+import { projectSizingConductorFeedback } from './SolarSizingForm.jsx'
+import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 import { getDrawingIntake } from '../api.js'
 
 vi.mock('../api.js', () => ({ getDrawingIntake: vi.fn(async () => null) }))
@@ -59,7 +61,7 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
-async function setup({ strict = false, initialContext, hostEnabled = true, ready = true } = {}) {
+async function setup({ strict = false, initialContext, hostEnabled = true, ready = true, toolName = T } = {}) {
   const ws = store({ orgId: O, openProjectId: P, canonicalVersionId: V, workspace: workspace() })
   ws.rehydrate = vi.fn(async () => { const value = workspace(); ws.change({ workspace: value }); return value })
   ws.selectCanonicalVersion = vi.fn(version => ws.change({ canonicalVersionId: version || null }))
@@ -78,7 +80,7 @@ async function setup({ strict = false, initialContext, hostEnabled = true, ready
     return { ready, projectClient: client, scope: { mode: 'project', binding, authorityKey: key },
       isCurrent: () => token.live, checkout: { ownsCheckout: true } }
   }
-  const tool = { name: T, catalog_digest: digest }
+  const tool = { name: toolName, catalog_digest: digest }
   const otherTool = { name: 'solar-settings', catalog_digest: digest }
   const receipt = (a) => ({ client, binding: a.scope.binding, authorityKey: a.scope.authorityKey,
     isCurrent: a.isCurrent, families: [{ capabilities: [tool, otherTool] }] })
@@ -89,7 +91,7 @@ async function setup({ strict = false, initialContext, hostEnabled = true, ready
   const hook = renderHook(value => useAppProjectSolarRuntime(value), { initialProps: props,
     ...(strict ? { wrapper: ({ children }) => <React.StrictMode>{children}</React.StrictMode> } : {}) })
   await act(drain)
-  const prepared = Object.freeze({ binding: B, authorityKey: 'session-1', tool: T,
+  const prepared = Object.freeze({ binding: B, authorityKey: 'session-1', tool: toolName,
     params: Object.freeze({ sentinel: 'same-object' }), catalogDigest: digest, idempotencyKey: 'intent-1' })
   const options = { binding: B, authorityKey: 'session-1', isCurrent: () => true }
   async function update(patch) { props = { ...props, ...patch }; await act(async () => { hook.rerender(props); await drain() }) }
@@ -123,6 +125,60 @@ async function setup({ strict = false, initialContext, hostEnabled = true, ready
   return { ...hook, client, ws, session, tool, otherTool, prepared, options, pendingJob, update, install,
     submit, finish, complete, invalidate: () => { capture.live = false }, get props() { return props } }
 }
+
+it('R14D-04 test_cloud_admission_and_terminal_sentences', async () => {
+  const cases = [
+    ['CLOUD_AUTH_MISSING', SOLAR_SIZING_RUN_REASONS.grant_missing],
+    ['CLOUD_TENANT_UNAUTHORIZED', SOLAR_SIZING_RUN_REASONS.grant_scope],
+    ['CLOUD_UPSTREAM_FAILURE', SOLAR_SIZING_RUN_REASONS.cloud_unavailable],
+    ['CLOUD_RESPONSE_INVALID', SOLAR_SIZING_RUN_REASONS.cloud_response_invalid],
+    ['CLOUD_REQUEST_INVALID', SOLAR_SIZING_RUN_REASONS.request_invalid],
+  ]
+  for (const [code, sentence] of cases) {
+    for (const spelling of [code, code.toLowerCase()]) {
+      for (const status of [401, 403, 503]) {
+        const error = { reason_code: spelling, message: 'hostile server prose' }
+        const outcome = { ok: false, status, envelope: { error } }
+        const admission = { status_code: status, error }
+        expect(projectSizingConductorFeedback(outcome)).toMatchObject({ reason: code.toLowerCase(), text: sentence, code: spelling })
+        expect(projectSizingConductorFeedback({ ok: true, status }, admission, 'preview'))
+          .toMatchObject({ reason: code.toLowerCase(), text: sentence, code: spelling })
+      }
+      const h = await setup({ toolName: 'solar-size-strings' })
+      expect(await h.submit()).toEqual(accepted)
+      await h.finish({ tool_name: 'solar-size-strings', status: 'failed', result: null, output_version_id: null,
+        error: { error_code: 'GRAPH_JOB_FAILED', reason_code: spelling, retryable: false, message: 'hostile server prose' } })
+      expect(h.result.current.projectOutcome.outcome).toMatchObject({ state: 'failed', reasonCode: code.toLowerCase(), message: sentence })
+      expect(h.result.current.notice).toBe(sentence)
+      expect(h.result.current.notice).not.toContain('hostile server prose')
+      expect(h.result.current.busy).toBe(false)
+      expect(h.props.completedVersionRef.current).not.toHaveBeenCalled()
+      h.client.readJob.mockReturnValue(deferred().promise)
+      expect(await submitWith(h, fresh(h, 'next-cloud'))).toEqual(accepted)
+      expect(h.client.submitRun).toHaveBeenCalledTimes(2)
+      h.unmount()
+    }
+  }
+})
+
+it('R14D-06 test_unknown_service_outcome_stops_resubmit', async () => {
+  const h = await setup({ toolName: 'solar-size-strings' })
+  expect(await h.submit()).toEqual(accepted)
+  await h.finish({ tool_name: 'solar-size-strings', status: 'failed', result: null, output_version_id: null,
+    error: { error_code: 'GRAPH_JOB_FAILED', reason_code: 'SIZING_OUTCOME_UNKNOWN', retryable: false, message: 'hostile server prose' } })
+  expect(h.result.current.projectOutcome.outcome).toEqual({ state: 'outcome_unknown', jobId: J,
+    outputVersionId: null, reasonCode: null, message: PROJECT_SOLAR_RUN_REASONS.outcome_unknown })
+  expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  expect(h.result.current.busy).toBe(false)
+  expect(h.result.current.publishedVersionId).toBeNull()
+  expect(h.props.completedVersionRef.current).not.toHaveBeenCalled()
+  expect(h.client.submitRun).toHaveBeenCalledOnce()
+  expect((await submitWith(h, fresh(h, 'forbidden-cloud'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  await h.install(V)
+  expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  expect((await submitWith(h, fresh(h, 'still-forbidden'))).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
+  expect(h.client.submitRun).toHaveBeenCalledOnce()
+})
 
 it('R13G-02 project submission preserves the prepared object and bridge outcome', async () => {
   const h = await setup()

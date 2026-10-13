@@ -1,9 +1,12 @@
 import React from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import SolarSizingForm from './SolarSizingForm.jsx'
-import { projectSizingConductorFeedback } from './SolarSizingForm.jsx'
-import { PROJECT_SIZING_CONDUCTOR_REASONS, projectSizingConductorReason } from './solarSizingModel.js'
+import { projectSizingConductorFeedback, useProjectSizingConductor } from './SolarSizingForm.jsx'
+import { PROJECT_SIZING_CONDUCTOR_REASONS, projectSizingConductorReason, MODULE_PARAMETER_KEYS,
+  deriveProjectSizingState, buildProjectSizingRequest } from './solarSizingModel.js'
 import { createSolarProjectClient } from './solarProjectClient.js'
 import { recordToEnvelope, runToolAsync } from '../api.js'
 import { solarFlowRunOutcome } from './solarFlowModel.js'
@@ -124,7 +127,235 @@ function r9Rebind(view, h, changes) {
   view.rerender(<R9Form {...h.props} />)
 }
 
+const r14Tracker = { 'Axis tilt': '0', 'Axis azimuth': '180', 'Max angle': '60',
+  'Ground coverage ratio': '.4', Backtrack: 'true' }
+function r14Fill({ tracker = false, parameters = false } = {}) {
+  change('Scope', 'global')
+  fill()
+  if (tracker) {
+    change('Racking', 'single_axis')
+    Object.entries(r14Tracker).forEach(([label, value]) => change(label, value))
+  }
+  if (parameters) {
+    fireEvent.click(screen.getByLabelText('Use module parameters'))
+    MODULE_PARAMETER_KEYS.forEach((key) => change(key, key === 'N_s' ? '72' : '1'))
+  }
+}
+function r14Harness() {
+  const h = r9Harness()
+  h.context.intake.solar_design_graph.project.zip_code = '44224-1234'
+  return h
+}
+
 describe('SolarSizingForm', () => {
+
+  it('R14D-01 test_project_global_cloud_intent', async () => {
+    for (const variant of [{}, { tracker: true }, { parameters: true }]) {
+      const h = r14Harness()
+      await h.real.acquireCheckout()
+      h.props.onProjectSubmit = vi.fn((intent, options) => h.real.submitRun(intent, { signal: options.signal }))
+      render(<SolarSizingForm {...h.props} />)
+      await r9Ready()
+      expect(screen.getByLabelText('Scope').value).toBe('manual-global')
+      expect(screen.getByLabelText('Scope').disabled).toBe(false)
+      expect(screen.queryByRole('option', { name: 'Zones' })).toBeNull()
+      expect(screen.getByRole('option', { name: 'Global cloud sizing' })).toBeTruthy()
+      r14Fill(variant)
+      await r9Ready()
+      const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+      const expected = { drawing_id: r9Binding.drawing_id, expected_rev: 7, mode: 'global',
+        requests: { [S]: { ...R, racking_params: variant.tracker ? { ...R.racking_params,
+          racking_type: 'single_axis', axis_tilt: '0', axis_azimuth: '180', max_angle: '60', gcr: '.4', backtrack: true }
+          : R.racking_params,
+        ...(variant.parameters ? { module_parameters: Object.fromEntries(MODULE_PARAMETER_KEYS.map(key => [key, key === 'N_s' ? 72 : 1])) } : {}) } },
+        grant_ref: 'grant_1', confirm: true }
+      expect(intent.params).toEqual(expected)
+      expect(intent.binding).toEqual(r9Binding)
+      expect(intent.catalogDigest).toBe(r9Digest)
+      expect(Object.isFrozen(intent)).toBe(true)
+      expect(screen.getByText('Saved project ZIP: 44224-1234')).toBeTruthy()
+      expect(screen.getByText('Saved global string length: 3')).toBeTruthy()
+      const catalog = h.fetchImpl.mock.calls.filter(([url]) => url.includes('/api/capabilities?')).at(-1)
+      const preview = JSON.parse(new URL(catalog[0], 'https://example.test').searchParams.get('project_runs'))
+      expect(preview[r9Tool]).toEqual({ params: expected, catalog_digest: r9Digest, idempotency_key: intent.idempotencyKey })
+      fireEvent.click(run())
+      await waitFor(() => expect(screen.getByText('Request submitted.')).toBeTruthy())
+      expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent)
+      const submitted = h.fetchImpl.mock.calls.find(([url]) => url.endsWith('/api/run'))[1]
+      expect(JSON.parse(submitted.body)).toEqual({ tool: r9Tool, params: expected,
+        dwg: r9Binding.input_version_id, catalog_digest: r9Digest })
+      expect(submitted.headers).toMatchObject({ 'Idempotency-Key': intent.idempotencyKey,
+        'X-Org-Id': r9Binding.organization_id, 'X-Project-Id': r9Binding.project_id })
+      expect(h.props.onSubmit).not.toHaveBeenCalled()
+      expect(h.props.readIntake).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
+
+  it('R14D-02 test_cloud_draft_edit_invalidates_preview', async () => {
+    const labels = [...Object.keys(fields), ...Object.keys(r14Tracker), 'Use module parameters', ...MODULE_PARAMETER_KEYS]
+    expect(labels).toHaveLength(28)
+    for (const mode of ['global', 'manual-global']) {
+      for (const label of labels) {
+        const h = r14Harness()
+        render(<SolarSizingForm {...h.props} />)
+        await r9Ready()
+        r14Fill({ tracker: true, parameters: true })
+        await r9Ready()
+        const old = r9Deferred(), current = r9Deferred()
+        h.client.catalog.mockReturnValueOnce(old.promise).mockReturnValue(current.promise)
+        fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }))
+        await r9Settle()
+        const oldIntent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+        const control = screen.getByLabelText(label)
+        const original = control.value
+        if (label === 'Use module parameters') {
+          fireEvent.click(control); fireEvent.click(control)
+        } else {
+          const replacement = control.tagName === 'SELECT'
+            ? (label === 'Racking' ? 'fixed_tilt' : original === 'true' ? 'false' : 'true')
+            : label === 'N_s' ? '73' : original + '2'
+          change(label, replacement)
+          change(label, original)
+        }
+        if (mode === 'manual-global') change('Scope', mode)
+        expect(run().disabled).toBe(true)
+        await act(async () => { old.resolve(r9Preview(r9Tool)); await Promise.resolve() })
+        expect(run().disabled).toBe(true)
+        fireEvent.click(run())
+        expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+        const nextIntent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+        expect(nextIntent).not.toBe(oldIntent)
+        expect(nextIntent.idempotencyKey).not.toBe(oldIntent.idempotencyKey)
+        await act(async () => current.resolve(r9Preview(r9Tool)))
+        await r9Ready()
+        cleanup()
+      }
+    }
+    // Hidden tracker and module fields remain part of the raw declaration, even in manual mode.
+    const source = readFileSync(resolve(process.cwd(), 'src/solar/SolarSizingForm.jsx'), 'utf8')
+    const declaration = source.slice(source.indexOf('const declarationIdentity ='), source.indexOf('const form = useProjectSizingConductor', source.indexOf('const declarationIdentity =')))
+    const keys = ['module_name', 'full_inverter_name', 'bifacial', 'bifacial_coefficient', 'racking_type',
+      'surface_tilt', 'surface_azimuth', 'albedo', 'axis_tilt', 'axis_azimuth', 'max_angle', 'gcr', 'backtrack',
+      'max_voltage', 'thermal_model_type', 'open_circuit_rise', 'grant_ref', 'use_module_parameters']
+    expect(declaration.match(/'[^']+'/g).map(value => value.slice(1, -1))).toEqual(keys)
+    expect(declaration).toContain('JSON.stringify([mode,')
+    expect(declaration).toContain('...MODULE_PARAMETER_KEYS')
+    expect(declaration).toContain('draft[key] ?? null')
+    // Exercise raw updates to currently hidden fields through the real lifecycle as well.
+    const rawDraft = { module_name: R.module_name, full_inverter_name: R.full_inverter_name,
+      bifacial: false, bifacial_coefficient: '.7', racking_type: 'fixed_tilt', surface_tilt: '5',
+      surface_azimuth: '180', albedo: '.25', axis_tilt: '0', axis_azimuth: '180', max_angle: '60',
+      gcr: '.4', backtrack: true, max_voltage: '1500', thermal_model_type: R.thermal_model_type,
+      open_circuit_rise: false, grant_ref: 'grant_1', use_module_parameters: false,
+      ...Object.fromEntries(MODULE_PARAMETER_KEYS.map(key => [key, key === 'N_s' ? '72' : '1'])) }
+    for (const mode of ['manual-global', 'global']) {
+      for (const key of [...keys, ...MODULE_PARAMETER_KEYS]) {
+        const h = r14Harness(), old = r9Deferred(), current = r9Deferred()
+        h.client.catalog.mockReturnValueOnce(old.promise).mockReturnValue(current.promise)
+        const hook = renderHook(({ draft }) => useProjectSizingConductor(h.props, {
+          toolName: r9Tool, deriveState: deriveProjectSizingState,
+          buildRequest: args => buildProjectSizingRequest({ ...args, mode, draft }),
+          declarationIdentity: JSON.stringify([mode, ...[...keys, ...MODULE_PARAMETER_KEYS].map(field => draft[field] ?? null)]),
+        }), { initialProps: { draft: rawDraft } })
+        await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(1))
+        const oldIntent = h.client.catalog.mock.calls[0][0].intents[0]
+        const value = rawDraft[key]
+        const next = typeof value === 'boolean' ? !value
+          : key === 'racking_type' ? 'single_axis' : key === 'N_s' ? '73' : value + '2'
+        act(() => hook.rerender({ draft: { ...rawDraft, [key]: next } }))
+        const hidden = mode === 'manual-global' || ['axis_tilt', 'axis_azimuth', 'max_angle', 'gcr', 'backtrack', ...MODULE_PARAMETER_KEYS].includes(key)
+        if (hidden) expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params).toEqual(oldIntent.params)
+        act(() => hook.rerender({ draft: rawDraft }))
+        await act(async () => old.resolve(r9Preview(r9Tool)))
+        expect(hook.result.current.armed).toBeFalsy()
+        await act(async () => hook.result.current.submit())
+        expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+        const nextIntent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+        expect(nextIntent.params).toEqual(oldIntent.params)
+        expect(nextIntent).not.toBe(oldIntent)
+        expect(nextIntent.idempotencyKey).not.toBe(oldIntent.idempotencyKey)
+        await act(async () => current.resolve(r9Preview(r9Tool)))
+        expect(hook.result.current.armed).toBeTruthy()
+        hook.unmount()
+      }
+    }
+  }, 30000)
+
+  it('R14D-03 test_missing_grant_keeps_cloud_mode', async () => {
+    for (const phase of ['preview', 'submission']) {
+      const h = r14Harness()
+      render(<SolarSizingForm {...h.props} />)
+      await r9Ready()
+      const refusal = { ok: false, status: 401, envelope: { error: {
+        reason_code: 'CLOUD_AUTH_MISSING', message: 'hostile server prose' } } }
+      if (phase === 'preview') {
+        h.client.catalog.mockResolvedValue(r9Preview(r9Tool, r9Digest, { runnable: false,
+          refusal_reasons: ['CLOUD_AUTH_MISSING'], admission: { status_code: 401, error: refusal.envelope.error } }))
+      } else h.props.onProjectSubmit.mockResolvedValue(refusal)
+      r14Fill()
+      change('Grant reference', 'unavailable_grant')
+      if (phase === 'submission') { await r9Ready(); fireEvent.click(run()) }
+      await waitFor(() => expect(screen.getByTestId('project-solar-sizing-feedback').textContent)
+        .toBe(SOLAR_SIZING_RUN_REASONS.grant_missing + ' (CLOUD_AUTH_MISSING)'))
+      expect(screen.getByLabelText('Scope').value).toBe('global')
+      for (const [label, value] of Object.entries(fields)) {
+        expect(screen.getByLabelText(label).value).toBe(label === 'Grant reference' ? 'unavailable_grant' : value)
+      }
+      expect(screen.queryByText('hostile server prose')).toBeNull()
+      if (phase === 'preview') {
+        expect(run().disabled).toBe(true)
+        fireEvent.click(run())
+        expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+      } else {
+        expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1)
+        expect(h.props.onProjectSubmit.mock.calls[0][0].params.mode).toBe('global')
+      }
+      expect(h.props.onSubmit).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
+
+  it('R14D-05 test_unknown_submission_reuses_intent', async () => {
+    for (const stale of [false, true]) {
+      const h = r14Harness()
+      h.props.onProjectSubmit.mockResolvedValueOnce({ ok: false, status: null, reason: 'SIP_R7_TIMEOUT', envelope: null })
+        .mockResolvedValueOnce(r9Submitted())
+      render(<SolarSizingForm {...h.props} />)
+      await r9Ready()
+      r14Fill()
+      await r9Ready()
+      const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
+      const allocations = h.props.newProjectIntentKey.mock.calls.length
+      const reads = h.client.readContext.mock.calls.length
+      fireEvent.click(run())
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy())
+      expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent)
+      expect(screen.getByLabelText('Scope').value).toBe('global')
+      for (const [label, value] of Object.entries(fields)) expect(screen.getByLabelText(label).value).toBe(value)
+      expect(screen.getByTestId('project-solar-sizing-feedback').textContent)
+        .toContain(PROJECT_SIZING_CONDUCTOR_REASONS.request_timeout)
+      if (stale) {
+        h.context.context.head_version_id = r9Next.input_version_id
+        h.context.context.is_head = false
+      }
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+      if (stale) {
+        await waitFor(() => expect(screen.getByText(PROJECT_SIZING_CONDUCTOR_REASONS.not_current_head)).toBeTruthy())
+        expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1)
+      } else {
+        await waitFor(() => expect(screen.getByText('Request submitted.')).toBeTruthy())
+        expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2)
+        expect(h.props.onProjectSubmit.mock.calls[1][0]).toBe(intent)
+        expect(h.props.onProjectSubmit.mock.calls[1][0].params).toBe(intent.params)
+        expect(h.props.onProjectSubmit.mock.calls[1][0].idempotencyKey).toBe(intent.idempotencyKey)
+      }
+      expect(h.client.readContext).toHaveBeenCalledTimes(reads + 2)
+      expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(allocations)
+      expect(h.props.onSubmit).not.toHaveBeenCalled()
+      cleanup()
+    }
+  })
 
   it('R9-46 a conflicting project id refuses before context preview or handoff', async () => {
     const h = r9Harness()

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { scanSource } from '../../scripts/check_user_facing_copy.mjs'
 import { SOLAR_REFUSAL_REASONS } from '../lib/ribbonClusters.js'
+import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 import { PROJECT_SOLAR_RUN_REASONS, projectSolarRunFailure, readProjectSolarCompletion } from './solarProjectCompletion.js'
 
 const O = '11111111-1111-1111-1111-111111111111'
@@ -28,6 +29,49 @@ const fallback = { state: 'failed', jobId: J, outputVersionId: null, reasonCode:
   message: 'The server refused this solar tool' }
 
 describe('exact project Solar completion', () => {
+  it('R14D-08 test_cloud_completion_preserves_envelope_guards', () => {
+    const cases = [
+      ['CLOUD_AUTH_MISSING', SOLAR_SIZING_RUN_REASONS.grant_missing],
+      ['CLOUD_TENANT_UNAUTHORIZED', SOLAR_SIZING_RUN_REASONS.grant_scope],
+      ['CLOUD_UPSTREAM_FAILURE', SOLAR_SIZING_RUN_REASONS.cloud_unavailable],
+      ['CLOUD_RESPONSE_INVALID', SOLAR_SIZING_RUN_REASONS.cloud_response_invalid],
+      ['CLOUD_REQUEST_INVALID', SOLAR_SIZING_RUN_REASONS.request_invalid],
+      ['SIZING_OUTCOME_UNKNOWN', PROJECT_SOLAR_RUN_REASONS.outcome_unknown],
+    ]
+    for (const [code, sentence] of cases) {
+      for (const reason of [code, code.toLowerCase()]) {
+        const error = { error_code: 'GRAPH_JOB_FAILED', reason_code: reason, retryable: false,
+          message: 'hostile server prose' }
+        const value = failed({ error })
+        const expected = { state: code === 'SIZING_OUTCOME_UNKNOWN' ? 'outcome_unknown' : 'failed',
+          jobId: J, outputVersionId: null, reasonCode: code === 'SIZING_OUTCOME_UNKNOWN' ? null : code.toLowerCase(), message: sentence }
+        expect(read(value)).toEqual(expected)
+        expect(read(failed({ status: 'cancelled', error }))).toEqual(expected)
+        expect(read(failed({ error: { error_code: reason, retryable: false } }))).toEqual(expected)
+        if (code !== 'SIZING_OUTCOME_UNKNOWN') {
+          expect(projectSolarRunFailure(reason)).toEqual({ reasonCode: code.toLowerCase(), message: sentence })
+        }
+        for (const changes of [{ job_id: X }, { org_id: X }, { project_id: X }, { input_version_id: X },
+          { tool_name: 'solar-other' }, { execution_context: { schema: 'leaf.solar-project-graph-job.v1', drawing_id: X } },
+          { output_version_id: W }, { result: {} }, { error: { ...error, retryable: 'false' } },
+          { error: { ...error, error_code: null } }, { error: { ...error, reason_code: 'unsafe.code' } }]) {
+          expect(read({ ...value, ...changes })).toEqual(unreadable)
+        }
+        let getters = 0
+        for (const key of ['error_code', 'reason_code', 'retryable']) {
+          const accessor = { ...error }
+          Object.defineProperty(accessor, key, { get() { getters += 1; return reason }, enumerable: true })
+          expect(read(failed({ error: accessor }))).toEqual(unreadable)
+        }
+        const accessorJob = { ...value }
+        Object.defineProperty(accessorJob, 'error', { get() { getters += 1; return error }, enumerable: true })
+        expect(read(accessorJob)).toEqual(unreadable)
+        expect(getters).toBe(0)
+      }
+    }
+    expect(read(failed()).state).toBe('failed')
+    expect(read(failed({ error: { error_code: 'GRAPH_JOB_FAILED', reason_code: 'CLOUD_SOMETHING_ELSE', retryable: false } }))).toEqual(fallback)
+  })
   it('R13B-01 selects the exact successful output', () => {
     expect(read(job())).toEqual(success)
   })

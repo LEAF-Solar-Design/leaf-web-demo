@@ -19,6 +19,17 @@ export const MODULE_PARAMETER_KEYS = Object.freeze([
   'V_oc_ref', 'I_sc_ref', 'V_mp_ref', 'I_mp_ref', 'alpha_sc', 'beta_oc', 'STC', 'gamma_r', 'T_NOCT', 'N_s',
 ])
 
+export const PROJECT_SIZING_CLOUD_REASONS = Object.freeze({
+  zones_unsupported: 'Project string sizing does not support zones. Choose global cloud sizing or the saved global length.',
+})
+
+export function projectSizingCloudReason(reason) {
+  switch (reason) {
+    case 'zones_unsupported': return PROJECT_SIZING_CLOUD_REASONS.zones_unsupported
+    default: return null
+  }
+}
+
 const plain = (value) => value !== null && typeof value === 'object' &&
   [Object.prototype, null].includes(Object.getPrototypeOf(value))
 const fail = (reason, invalid = []) => ({ ok: false, reason, invalid })
@@ -306,17 +317,11 @@ export function projectSizingConductorRequestScope({ binding, state, catalogDige
   return { ok: true, binding: exact }
 }
 
-export function buildProjectSizingRequest({ binding, state, mode = 'manual-global', catalogDigest, idempotencyKey }) {
-  if (mode !== 'manual-global') {
-    try { createProjectSizingConductorBinding(binding) } catch { return { ok: false, reason: 'binding_invalid' } }
-    if (state?.mode === 'refused') return { ok: false, reason: state.reason }
-    if (state?.mode !== 'edit') return { ok: false, reason: 'request_invalid' }
-    if (!sameSolarDrawingBinding(binding, state.binding)) return { ok: false, reason: 'scope_stale' }
-    return { ok: false, reason: 'manual_only' }
-  }
+export function buildProjectSizingRequest({ binding, state, mode = 'manual-global', draft, catalogDigest, idempotencyKey }) {
   const scope = projectSizingConductorRequestScope({ binding, state, catalogDigest, idempotencyKey })
   if (!scope.ok) return scope
-  const built = buildSizingParams({ graph: state.graph, mode })
+  if (mode !== 'manual-global' && mode !== 'global') return { ok: false, reason: 'zones_unsupported' }
+  const built = buildSizingParams({ graph: state.graph, mode, draft })
   if (!built.ok) return built
   return { ok: true, request: { tool: 'solar-size-strings',
     params: { drawing_id: scope.binding.drawing_id, ...built.params }, catalogDigest, idempotencyKey } }
