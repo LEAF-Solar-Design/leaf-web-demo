@@ -2386,6 +2386,8 @@ def build_suites() -> List[Suite]:
         # Proves labelled sizing replay isolation; opens loopback sockets and short-lived child Pythons only.
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
+        Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 17),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for
@@ -3005,7 +3007,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-11: sip-r3d adds one registration row (101 -> 102).
               # 2026-10-13: sip-r3e-1 adds one registration row (232 -> 233).
               # 2026-10-13: PP-1 adds one registration row (233 -> 234).
-              ["test_studio_walk_regression_gate.py"], 234),
+              # 2026-10-13: PP-2 adds one registration row (234 -> 235).
+              ["test_studio_walk_regression_gate.py"], 235),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

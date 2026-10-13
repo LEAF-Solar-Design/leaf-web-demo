@@ -94,6 +94,7 @@
     "reconcile-upload-authority",
     "scripts-native-release-producer",
     "scripts-proof-string-sizer",
+    "scripts-proof-project-pg",
     "scripts-solar-batch2-simple-evidence",
     "scripts-solar-design-profiles-evidence",
     "scripts-solar-evidence-shard",
