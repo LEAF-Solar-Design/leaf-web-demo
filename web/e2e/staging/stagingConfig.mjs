@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { TextDecoder } from 'node:util'
 
 // Shared, single-source-of-truth config for the staging proof suite: which
 // base URL to hit and which hosts that base URL is allowed to resolve to.
@@ -11,6 +13,12 @@ import { fileURLToPath } from 'node:url'
 // production while every receipt still claims evidence_tier "staging".
 export const STAGING_BASE_URL_ENV = 'LEAF_E2E_STAGING_BASE_URL'
 export const STAGING_ALLOW_HOST_ENV = 'LEAF_E2E_STAGING_ALLOW_HOST'
+export const STAGING_EXPECTED_SUBJECT_SHA256_ENV =
+  'LEAF_E2E_STAGING_EXPECTED_SUBJECT_SHA256'
+export const STAGING_EXPECTED_TENANT_SHA256_ENV =
+  'LEAF_E2E_STAGING_EXPECTED_TENANT_SHA256'
+export const STAGING_FORBIDDEN_SUBJECT_SHA256S_ENV =
+  'LEAF_E2E_STAGING_FORBIDDEN_SUBJECT_SHA256S'
 export const DEFAULT_STAGING_BASE_URL = 'https://platform-staging.leafdesign.ai'
 const ALLOWED_OVERRIDE_HOST = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.leafdesign\.ai$/i
 export const PRODUCTION_HOSTS = Object.freeze(['app.leafdesign.ai', 'platform.leafdesign.ai'])
@@ -18,6 +26,80 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const STAGING_OUTPUT_ROOT = resolve(HERE, '..', '..', '..', 'artifacts', 'unified-surface-proof', 'staging')
 
 export class StagingHostError extends Error {}
+
+export class StagingIdentityConfigError extends Error {
+  constructor(check, message) {
+    super(`${check}: ${message}`)
+    this.name = 'StagingIdentityConfigError'
+    this.check = check
+  }
+}
+
+/** Locally checks configured principal hashes; this does not verify JWT signatures. */
+export function assertStagingTokenIdentity(token, env = {}) {
+  if (token === undefined || token === null || token === '') return true
+
+  const expectedValue = env[STAGING_EXPECTED_SUBJECT_SHA256_ENV]
+  if (expectedValue === undefined || expectedValue === null ||
+      (typeof expectedValue === 'string' && !expectedValue.trim())) {
+    throw new StagingIdentityConfigError(
+      'expected_subject_unset', `${STAGING_EXPECTED_SUBJECT_SHA256_ENV} is required for a staging JWT`,
+    )
+  }
+  const readHashSetting = (variable) => {
+    const value = env[variable]
+    if (value === undefined || value === null) return ''
+    if (typeof value !== 'string') {
+      throw new StagingIdentityConfigError('identity_hash_config', `${variable} must contain lowercase SHA-256 hex`)
+    }
+    return value.trim()
+  }
+  const validateHash = (hash, variable) => {
+    if (!/^[0-9a-f]{64}$/.test(hash)) {
+      throw new StagingIdentityConfigError('identity_hash_config', `${variable} must contain lowercase SHA-256 hex`)
+    }
+    return hash
+  }
+  const expectedSubject = validateHash(readHashSetting(STAGING_EXPECTED_SUBJECT_SHA256_ENV), STAGING_EXPECTED_SUBJECT_SHA256_ENV)
+  const expectedTenant = readHashSetting(STAGING_EXPECTED_TENANT_SHA256_ENV)
+  if (expectedTenant) validateHash(expectedTenant, STAGING_EXPECTED_TENANT_SHA256_ENV)
+  const forbiddenSetting = readHashSetting(STAGING_FORBIDDEN_SUBJECT_SHA256S_ENV)
+  const forbidden = new Set(forbiddenSetting
+    ? forbiddenSetting.split(',').map((entry) => validateHash(entry.trim(), STAGING_FORBIDDEN_SUBJECT_SHA256S_ENV))
+    : [])
+
+  let payload
+  try {
+    if (typeof token !== 'string') throw new Error()
+    const segments = token.split('.')
+    if (segments.length !== 3 || !/^[A-Za-z0-9_-]+$/.test(segments[0]) ||
+        !/^[A-Za-z0-9_-]+$/.test(segments[1]) || !/^[A-Za-z0-9_-]*$/.test(segments[2])) {
+      throw new Error()
+    }
+    const bytes = Buffer.from(segments[1], 'base64url')
+    if (bytes.toString('base64url') !== segments[1]) throw new Error()
+    payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+        typeof payload.sub !== 'string' || !payload.sub) throw new Error()
+  } catch {
+    throw new StagingIdentityConfigError('malformed_token', 'staging JWT must have a valid compact payload and nonempty string sub claim')
+  }
+  const hashClaim = (value) => createHash('sha256').update(value, 'utf8').digest('hex')
+  const subjectHash = hashClaim(payload.sub)
+  if (forbidden.has(subjectHash)) {
+    throw new StagingIdentityConfigError('forbidden_subject', `staging JWT sub is excluded by ${STAGING_FORBIDDEN_SUBJECT_SHA256S_ENV}`)
+  }
+  if (subjectHash !== expectedSubject) {
+    throw new StagingIdentityConfigError('subject_hash_mismatch', `staging JWT subject does not match ${STAGING_EXPECTED_SUBJECT_SHA256_ENV}`)
+  }
+  if (expectedTenant) {
+    const tenant = payload['https://leafdesign.ai/tenant_id']
+    if (typeof tenant !== 'string' || !tenant || hashClaim(tenant) !== expectedTenant) {
+      throw new StagingIdentityConfigError('tenant_hash_mismatch', `staging JWT https://leafdesign.ai/tenant_id does not match ${STAGING_EXPECTED_TENANT_SHA256_ENV}`)
+    }
+  }
+  return true
+}
 
 export function resolveStagingBaseURL(env = process.env) {
   return env[STAGING_BASE_URL_ENV] || DEFAULT_STAGING_BASE_URL
