@@ -1,6 +1,27 @@
 # APS Design Automation — Flex concurrency-limit raise request
 
-> **Status: NOT YET DELIVERED TO THE APS TECHNICAL TEAM (corrected 2026-07-26).**
+> **Current status — Autodesk's written answer, September 9, 2026.**
+> **Autodesk confirmed there is no fixed concurrency limit for Design Automation WorkItems.**
+> A provider concurrency-raise request is therefore moot and will not be filed.
+> WorkItems queue while Autodesk scales service workers; the local
+> `APS_MAX_CONCURRENCY` cap in `da/queue.py` (default 1) is a separate product
+> setting. Changing that cap is a deployment decision, not a provider grant.
+> Answer correspondence: (message id removed); (thread id removed).
+>
+> **Historical follow-up context.** Autodesk canceled the September onboarding
+> call and answered in writing instead. Earlier advice from an Autodesk ADN
+> representative to use https://aps.autodesk.com/get-help is superseded;
+> the proposed filing was never made and is now moot. Correspondence:
+> (message id removed); (thread id removed).
+> Autodesk later confirmed ADN membership was active. (payment details removed)
+
+## Historical status and channel advice
+
+Everything in this section is retained as historical context and superseded by
+Autodesk's September 9 answer above. Its next steps, parked-request decision,
+provider-ceiling assumptions, and channel advice are no longer actionable.
+
+> **Historical status (superseded by the 2026-09-09 answer): NOT YET DELIVERED TO THE APS TECHNICAL TEAM (corrected 2026-07-26).**
 > The 2026-07-23 onboarding call connected us with Autodesk **sales** by accident.
 > We have never met the APS technical team, so this request has not been made to
 > anyone who can act on it. Do not record this as "awaiting Autodesk": the next
@@ -10,7 +31,7 @@
 > which is the queue that can actually action this, is in
 > `docs/adn-membership-reinstate-email-draft.md`.
 >
-> **Re-verified 2026-08-17** against this repo's own state: the ADN draft is still
+> **Historical re-verification 2026-08-17 (superseded by the September answer)** against this repo's own state: the ADN draft is still
 > headed "DRAFT ONLY ... nothing has been sent, nothing purchased", and no APS or
 > ADN doc has changed on `main` since `461c6074` (2026-07-26). So nothing has been
 > delivered in the interim and this status still holds. It rots only when the ADN
@@ -20,7 +41,7 @@
 > while `main` told readers the opposite, which is the failure this stamp exists to
 > prevent.
 >
-> **Operator decision 2026-08-17: one app, and the raise is PARKED, not dropped.**
+> **Historical operator decision 2026-08-17 (superseded by the September answer): one app, and the raise is PARKED, not dropped.**
 > All Design Automation runs stay on the existing single APS app named below, "at
 > least for now with minimal demo traffic". Two consequences, and they point in
 > opposite directions, so do not collapse them:
@@ -34,7 +55,7 @@
 >    urgent. It is PARKED. Revisit when concurrent demand actually exceeds the
 >    ceiling, which is the trigger, not a date.
 >
-> **Ceiling scope is UNCONFIRMED on the Autodesk side, and this document and the
+> **Historical ceiling assessment (superseded by the September answer): scope is UNCONFIRMED on the Autodesk side, and this document and the
 > code word it differently.** `da/queue.py` calls it the "account Flex cap ... across
 > ALL tenants" while the request text below calls it the "default per-app WorkItem
 > concurrency limit". Nobody here has confirmed which Autodesk actually enforces.
@@ -42,32 +63,33 @@
 > if it is per-app, funnelling every tenant through one app makes it bite harder.
 > Either way the raise is the only relief. Do not quote either wording as settled.
 >
-> **Before paying for ADN, use the free channel.** `docs/adn-purchase-walkthrough.md`
+> **Historical channel advice (superseded by the September answer): Before paying for ADN, use the free channel.** `docs/adn-purchase-walkthrough.md`
 > records a no-membership fallback: the "Ask the APS Expert" call, every other
 > Wednesday at 11 AM ET, where APS engineers can confirm whether a concurrency
 > change must go through ADN at all. That answers the one question the ADN purchase
 > is currently premised on, at zero cost. It cannot itself grant the raise.
 >
-> **History: submitted via APS onboarding fallback (2026-07-18).** Autodesk's
+> **Historical submission (superseded by the September answer): APS onboarding fallback (2026-07-18).** Autodesk's
 > logged-in Assistant confirmed that direct API tickets require an active ADN
 > membership, which this account does not have. The complete concurrency request
 > below was therefore submitted in the special-request field for an official APS
 > Onboarding call with Peter Schlipf on **Thursday, 2026-07-23 at 5:30 AM Central**.
 > Microsoft Bookings confirmed the appointment and will send the calendar receipt
-> to `ehaug@leafautomation.ai`. This path does not issue a support ticket number.
+> to `(email address removed)`. This path does not issue a support ticket number.
 > **App identity changed on 2026-07-19:** the clean-cutover app below replaced the
 > inaccessible legacy app as the target of this request. At the onboarding call,
 > ask Autodesk to apply any concurrency grant to the new client ID below, not the
 > legacy `iBZF...` app referenced in the original booking text.
 > **Updated request emailed 2026-07-19:** sent from
-> `ehaug@leafautomation.ai` to
-> `AutodeskPlatformServicesAPSSupport@autodesk.com`, requesting 25 concurrent
+> `(email address removed)` to
+> `(email address removed)`, requesting 25 concurrent
 > WorkItems (10 then 25 acceptable) for the new app and asking Autodesk to attach
 > it to the July 23 onboarding call. No reply and no reference number ever came
 > back, and the call itself reached sales, not the technical team.
 >
-> Send via: APS support ticket at https://aps.autodesk.com/en/support/get-help
-> (category: Design Automation API), or your Autodesk account/partner contact.
+> **Historical original request — superseded 2026-09-09.** Kept for the record;
+> this request is not actionable and must not be submitted. Its scheduler
+> description and requested concurrency below reflect the original proposal.
 
 ---
 
