@@ -29,6 +29,15 @@ def test_no_long_digit_runs():
     assert not re.search(r"[0-9]{12,}", read_document()), (
         "Long numeric identifiers must be removed"
     )
+    assert not re.search(r"[0-9](?:[ .-]*[0-9]){8,}", read_document()), (
+        "Numeric identifiers with nine or more digits must be removed, including formatted values"
+    )
+    assert not re.search(
+        r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{10,}\b", read_document(), re.IGNORECASE
+    ), "IBAN-like account identifiers must be removed"
+    assert not re.search(r"[0-9]{4}(?:[ .-]+[0-9]{4}){3}", read_document()), (
+        "Card-like digit groups must be removed"
+    )
 
 
 def test_no_email_addresses():
