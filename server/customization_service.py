@@ -1130,6 +1130,9 @@ class CustomizationService:
             raise ChangeSetNotFoundError("no effective catalog")
         if not hmac.compare_digest(current.catalog_digest, expected_catalog_digest):
             raise CustomizationServiceError("effective_catalog_digest_mismatch", 409)
+        idempotency_key = self._author_stage_key(
+            tenant_id, idempotency_key, binding.subject
+        )
         try:
             change = self.store.get_change_set_by_idempotency(
                 tenant_id=tenant_id, idempotency_key=idempotency_key
