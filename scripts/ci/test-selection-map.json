@@ -682,6 +682,8 @@
     "server-sip-r14-admission",
     "server-sip-r14-worker",
     "server-sip-r14-proof",
+    "server-sip-r3e-groups",
+    "platform-sip-r3e-groups",
     "platform-sip-r14-exchange"
   ],
   "unresolved_mandatory": [],

@@ -32,6 +32,20 @@ SIMPLE = {"expected_rev": 1}
 M = {"expected_rev": 4, "operation": "add-strings", "string_length": 2,
      "ordered_panel_refs": PANELS}
 CLEAN = {
+    # R3e-2: grouping joins ordinary admission; nested validation still runs in preparation.
+    "solar-panel-groups": {
+        "expected_rev": 1,
+        "groups": [{
+            "name": "Roof group",
+            "panel_refs": [
+                "leaf:panel:00000000-0000-4000-8000-000000000001",
+                "leaf:panel:00000000-0000-4000-8000-000000000002",
+            ],
+            "alignment_tolerance": 0.5,
+            "module_width_along_row": 77,
+            "module_height_across_row": 38.5,
+        }],
+    },
     "solar-assign-equipment": SIMPLE, "solar-feeders": SIMPLE, "solar-homeruns": SIMPLE,
     "solar-panels-from-drawing": SIMPLE, "solar-schedule": SIMPLE,
     "solar-settings": {"expected_rev": 1, "changes": {"num_mppt": 2}},
@@ -377,7 +391,7 @@ def test_sip_r4_seed_parameter_admission(admission, monkeypatch):
 
 def test_sip_r4_every_tool_prepared_at_admission(admission, monkeypatch):
     # Ordinary/manual requests use worker output preparation; global sizing uses pure planning.
-    # These eleven ordinary/manual cases refuse graphless and stale parents before insertion.
+    # These twelve ordinary/manual cases refuse graphless and stale parents before insertion.
     a = admission
     for tool in sorted(ELEVEN):
         check_admission_refusal(a, "GRAPH_NOT_EMBEDDED", deepcopy(CLEAN[tool]), tool_name=tool,
@@ -391,6 +405,7 @@ def test_sip_r4_every_tool_prepared_at_admission(admission, monkeypatch):
 
 
 PREREQUISITE_REFUSALS = {
+    "solar-panel-groups": "SIZING_CONFIRMATION_REQUIRED",
     "solar-assign-equipment": "SIZING_CONFIRMATION_REQUIRED", "solar-combiners": "VALID_SETTINGS_REQUIRED",
     "solar-feeders": "VALID_SETTINGS_REQUIRED", "solar-homeruns": "EQUIPMENT_ASSIGNMENT_REQUIRED",
     "solar-schedule": "INVALID_ROUTE_POINT", "solar-size-strings": "MISSING_PANEL",
@@ -402,7 +417,7 @@ PREREQUISITE_REFUSALS = {
 
 def test_sip_r4_prerequisite_refusals_at_admission(admission, monkeypatch):
     # On a seeded parent at the right revision the tool's own preparation decides admission, not only the
-    # context and revision checks: nine tools refuse with the worker's own code before the insert and the
+    # context and revision checks: ten tools refuse with the worker's own code before the insert and the
     # entitlement read, and the two with no unmet prerequisite are admitted.
     a = admission
     ctx = chain(a.s, 1)[-1][2]

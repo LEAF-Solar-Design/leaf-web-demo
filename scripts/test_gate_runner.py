@@ -99,8 +99,8 @@ def test_sip_r1_gate_registration():
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
-    assert suites["platform"].expected == 359  # R14-B adds 31 PostgreSQL rows.
-    assert suites["gate-runner-selftest"].expected == 235  # Measured registered suite with R14C-32; 233 with sip-r3e-1; 234 with PP-1; 235 with PP-2.
+    assert suites["platform"].expected == 1168  # 2026-10-13: R3e-2; measured 1162 + six.
+    assert suites["gate-runner-selftest"].expected == 236  # Measured registered suite with R14C-32; 233 with sip-r3e-1; 234 with PP-1; 235 with PP-2; 236 with R3e-2.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4188,7 +4188,7 @@ def test_R14C_32_mandatory_registration():
         start = ordered.index("server-sip-r14-evidence") + 1
         assert ordered[start:start + 3] == wanted
     assert selection["mandatory_suite_ids"][-1] == "platform-sip-r14-exchange"
-    assert suites["gate-runner-selftest"].expected == 235
+    assert suites["gate-runner-selftest"].expected == 236  # 2026-10-13: PP-1, PP-2 and R3e-2 each add one row.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4236,3 +4236,51 @@ def test_pp1_project_proof_identity_registration():
     assert suite.database_skip_reasons == (r"PostgreSQL integration test requires DATABASE_URL",)
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_sip_r3e_gate_registration():
+    """R3e-2-19 Exact registrations, measured floors and mandatory order."""
+    runner = _load_runner()
+    rows = runner.build_suites()
+    ids = [suite.id for suite in rows]
+    suites = {suite.id: suite for suite in rows}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suite_id, directory, floor, database in (
+            ("server-sip-r3e-groups", "server", 12, False),
+            ("platform-sip-r3e-groups", "platform", 6, True)):
+        suite = suites[suite_id]
+        assert ids.count(suite_id) == 1
+        assert suite.cwd == REPO / directory
+        assert suite.argv == runner._py_pytest("tests/test_sip_r3e_groups.py")
+        assert suite.kind == "pytest" and suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert suite.allowed_skip_reasons == ()
+        assert suite.database_skip_reasons == (
+            (r"PostgreSQL integration test requires DATABASE_URL",) if database else ())
+        assert selection["mandatory_suite_ids"].count(suite_id) == 1
+        # Neither row may be switched off: no opt-in flag, no deferred database proof.
+        assert suite.opt_in_env == "" and suite.db_deferred == ""
+    # Every field of both rows, so a disabled, retimed or relabelled row cannot pass.
+    assert suites["server-sip-r3e-groups"] == runner.Suite(
+        "server-sip-r3e-groups", "server canonical Solar grouping", "pytest",
+        REPO / "server", runner._py_pytest("tests/test_sip_r3e_groups.py"), 12)
+    assert suites["platform-sip-r3e-groups"] == runner.Suite(
+        "platform-sip-r3e-groups", "platform canonical Solar grouping", "pytest",
+        REPO / "platform", runner._py_pytest("tests/test_sip_r3e_groups.py"), 6,
+        uses_database=True, db_gated=True,
+        database_skip_reasons=(r"PostgreSQL integration test requires DATABASE_URL",))
+    # The runner's own order: the server row directly before the platform row, at their frozen place.
+    start = ids.index("server-sip-r3e-groups")
+    assert ids[start - 1:start + 3] == [
+        "server-sip-r3d-conductors", "server-sip-r3e-groups",
+        "platform-sip-r3e-groups", "server-sip-r14-evidence"]
+    assert selection["mandatory_suite_ids"][-3:] == [
+        "server-sip-r3e-groups", "platform-sip-r3e-groups", "platform-sip-r14-exchange"]
+    for ordered in (ids, selection["mandatory_suite_ids"]):
+        start = ordered.index("server-sip-r14-evidence")
+        assert ordered[start:start + 4] == [
+            "server-sip-r14-" + name for name in ("evidence", "admission", "worker", "proof")]
+    assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+    # 2026-10-13: measured baseline 1162 + six; registration adds one to 235 (PP-1 took 234, PP-2 235).
+    assert suites["platform"].expected == 1168
+    assert suites["gate-runner-selftest"].expected == 236
