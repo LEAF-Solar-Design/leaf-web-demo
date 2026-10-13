@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import replace
 import json
+import types
 from uuid import UUID, uuid4
 
 import pytest
@@ -271,6 +272,106 @@ def test_R14C_31_read_custody(monkeypatch):
         run(w.s.parent.version_id)
     assert caught.value.reason_code == "SIP_R3_SERVICE_EVIDENCE_REQUIRED" and w.s.writes == before
 
+@pytest.mark.parametrize("error_type, expected", (
+    (store.SizingExchangeError, "SIP_R3_PROOF_REJECTED"),
+    (store.ExchangeInputError, "SIP_R3_PROOF_REJECTED"),
+    (store.ExchangeNotFound, "SIP_R3_PROOF_REJECTED"),
+    (store.ExchangeConflict, "SIP_R3_PROOF_REJECTED"),
+    (store.ExchangeLeaseLost, "SIP_R3_PROOF_REJECTED"),
+    (store.ExchangeStateError, "SIP_R3_PROOF_REJECTED"),
+    (project.ProjectContextError, "SIP_R3_SERVICE_EVIDENCE_REQUIRED"),
+))
+def test_R14C_36_proof_sanitizes_exchange_errors(monkeypatch, error_type, expected):
+    """R14C-36 Exchange details are sanitized; other project refusals propagate."""
+    w, p, r = completed(monkeypatch)
+    ctx = output(w, p)
+    detail = "private exchange custody detail"
+    if error_type is project.ProjectContextError:
+        error = error_type(expected)
+    else:
+        # Exchange subclasses have fixed no-argument constructors; inject private detail
+        # through their shared base initializer while preserving the concrete type.
+        error = error_type(detail) if error_type is store.SizingExchangeError else error_type()
+        project.ProjectContextError.__init__(error, detail)
+    def refuse(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(graph, "_stored_job", refuse)
+    with pytest.raises(project.ProjectContextError) as caught:
+        graph.require_project_sizing(ctx, conn=w)
+    assert caught.value.reason_code == expected
+    assert caught.value.args == (expected,)
+    assert detail not in str(caught.value)
+    if error_type is project.ProjectContextError:
+        assert caught.value is error
+
+
+
+class _BrokenImport:
+    def __call__(self):
+        raise ImportError("private exchange import detail")
+
+
+@pytest.mark.parametrize("lookup", (
+    _BrokenImport(),
+    lambda: types.SimpleNamespace(),
+    lambda: types.SimpleNamespace(SizingExchangeError=ValueError),
+), ids=("import-fails", "family-missing", "family-wrong"))
+def test_R14C_38_classification_needs_no_lookup(monkeypatch, lookup):
+    """R14C-38 A broken exchange lookup neither raises nor decides the refusal class."""
+    w, p, r = completed(monkeypatch)
+    ctx = output(w, p)
+    monkeypatch.setattr(graph, "_exchanges", lookup)
+    plain = project.ProjectContextError("SIP_R3_SERVICE_EVIDENCE_REQUIRED")
+    leaked = store.SizingExchangeError("private custody detail")
+    for error in (plain, leaked):
+        def refuse(*args, _error=error, **kwargs):
+            raise _error
+        monkeypatch.setattr(graph, "_stored_job", refuse)
+        with pytest.raises(project.ProjectContextError) as caught:
+            graph.require_project_sizing(ctx, conn=w)
+        if error is plain:
+            assert caught.value is plain
+        else:
+            assert caught.value.reason_code == "SIP_R3_PROOF_REJECTED"
+            assert "private custody detail" not in str(caught.value)
+
+
+
+def _raise_on_class(self):
+    raise RuntimeError("private attribute custody detail")
+
+
+class _AttributeHostileExchangeError(store.SizingExchangeError):
+    """An exchange error whose ``__class__`` attribute lookup raises."""
+
+    __class__ = property(_raise_on_class)
+
+
+def test_R14C_39_classification_reads_the_type(monkeypatch):
+    """R14C-39 The refusal class comes from type(), so an error whose attribute lookup raises is still refused."""
+    w, p, r = completed(monkeypatch)
+    ctx = output(w, p)
+    error = _AttributeHostileExchangeError("private custody detail")
+
+    def refuse(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(graph, "_stored_job", refuse)
+    # Record the outcome and assert outside the except clauses, so a leaked error never
+    # chains the hostile exception into pytest's own report.
+    refused, leaked = None, None
+    try:
+        graph.require_project_sizing(ctx, conn=w)
+    except project.ProjectContextError as caught:
+        refused = caught
+    except Exception as other:
+        leaked = type(other).__name__
+    assert leaked is None, f"classification raised {leaked}"
+    assert type(refused) is project.ProjectContextError
+    assert refused.reason_code == "SIP_R3_PROOF_REJECTED"
+    assert refused.args == ("SIP_R3_PROOF_REJECTED",)
+    assert "private" not in str(refused)
+
 def test_R14C_35_forged_manual_label(monkeypatch):
     """R14C-35 A cloud-sized graph relabelled manual is refused by proof, read and mutation."""
     w, p, r = completed(monkeypatch)
@@ -308,4 +409,3 @@ def test_R14C_35_forged_manual_label(monkeypatch):
         with pytest.raises(project.ProjectContextError) as caught:
             b3.prepare(w.s, "solar-feeders", {"expected_rev": value["rev"]}, ctx)
         assert caught.value.reason_code == "SIP_R3_PROOF_REJECTED" and w.s.writes == before
-

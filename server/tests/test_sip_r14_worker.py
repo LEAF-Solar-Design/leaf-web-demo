@@ -452,6 +452,37 @@ def test_R14C_33_empty_success_response(monkeypatch):
     assert not w.history and len(w.s.versions) == 1
 
 
+class _B(bytes):
+    pass
+
+
+@pytest.mark.parametrize("response_type", (bytearray, memoryview, _B))
+def test_R14C_37_response_must_be_exact_bytes(monkeypatch, response_type):
+    """R14C-37 Bytes-like responses refuse before capture or publication."""
+    w = World(monkeypatch)
+    before = w.s.head
+    raw = response_type(w.raw)
+    monkeypatch.setattr(cloud, "post_string_length", lambda *args, **kwargs: raw)
+    errors = []
+    preparation_error = service._preparation_error
+    def record_error(exc):
+        assert isinstance(exc, CloudError)
+        assert exc.classification == "cloud_response_invalid" and exc.status == 502
+        errors.append(exc)
+        return preparation_error(exc)
+    monkeypatch.setattr(service, "_preparation_error", record_error)
+    w.run()
+    assert len(errors) == 1
+    assert w.row["status"] == "failed"
+    assert w.row["error"]["reason_code"] == "CLOUD_RESPONSE_INVALID"
+    assert w.row["error"]["retryable"] is False
+    assert w.exchange["state"] == "refused"
+    assert w.exchange["refusal_code"] == "cloud_response_invalid"
+    assert w.exchange["response_bytes"] is None
+    assert not w.history and len(w.s.versions) == 1
+    assert w.s.head == before
+
+
 EXCHANGE_ERRORS = ((store.ExchangeInputError, "SIP_R14_EXCHANGE_INPUT_INVALID"),
                    (store.ExchangeNotFound, "SIP_R14_EXCHANGE_NOT_FOUND"),
                    (store.ExchangeConflict, "SIP_R14_EXCHANGE_CONFLICT"),

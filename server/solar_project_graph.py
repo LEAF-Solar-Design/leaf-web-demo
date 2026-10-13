@@ -478,6 +478,13 @@ def require_project_sizing(context, *, conn=None):
                 _reject()
     except (ValueError, TypeError, KeyError, AttributeError, GraphValidationError):
         _reject()
+    except project.ProjectContextError as exc:
+        # Only the plain refusal carries a public reason. Every subclass (today only the
+        # exchange store's SizingExchangeError family) may hold custody detail, so it maps to
+        # the fixed refusal. Type identity needs no lookup, so this classification cannot raise.
+        if type(exc) is not project.ProjectContextError:
+            _reject()
+        raise
 
 
 def _reprepare(context, request, conn=None):
