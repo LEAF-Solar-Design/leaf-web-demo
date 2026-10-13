@@ -35,6 +35,7 @@ from typing import Any, Dict, Optional
 import jwt
 from fastapi import HTTPException, status
 from jwt import PyJWKClient, PyJWKSet
+from jwt.utils import base64url_decode
 
 # --------------------------------------------------------------------------- #
 # config — env with ROOT-ASSUMED DEFAULTS (see contract/AUTH.md operator section)
@@ -123,6 +124,31 @@ def _bearer(authorization: Optional[str]) -> str:
     return parts[1].strip()
 
 
+def _peek_unverified(token: str) -> "tuple[Dict[str, Any], Dict[str, Any]]":
+    """Read a token's header and payload without decoding its signature segment.
+
+    Classification only, never verification. PyJWT's unverified readers also
+    base64-decode the signature, so a corrupt signature used to hide a fixture
+    token from the fixture guard and send it to the ordinary key lookup. This
+    mirrors PyJWT's own split and decoder; a part that does not decode to a JSON
+    object reads as {}.
+    """
+    try:
+        signing_input, _signature = token.encode("utf-8").rsplit(b".", 1)
+        head, body = signing_input.split(b".", 1)
+    except (ValueError, UnicodeError):
+        return {}, {}
+
+    def part(segment: bytes) -> Dict[str, Any]:
+        try:
+            value = json.loads(base64url_decode(segment))
+        except Exception:  # noqa: BLE001 - classification fails closed to {}
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    return part(head), part(body)
+
+
 def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
     """Verify an Auth0 RS256 access token from a raw Authorization header value.
 
@@ -130,11 +156,7 @@ def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
     signature / audience / issuer / expiry / malformed-header failure.
     """
     token = _bearer(authorization)
-    try:
-        header = jwt.get_unverified_header(token)
-        peek = jwt.decode(token, options={"verify_signature": False})
-    except jwt.PyJWTError:
-        peek = {}
+    header, peek = _peek_unverified(token)
     fixture = any(isinstance(peek.get(name), str) and
                   peek[name].casefold().startswith(prefix)
                   for name, prefix in (("iss", ISSUER_PREFIX), ("sub", SUBJECT_PREFIX)))

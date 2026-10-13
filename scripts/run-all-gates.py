@@ -1396,7 +1396,7 @@ def build_suites() -> List[Suite]:
         Suite("server-jobs-reaper-start-race", "server tests/test_jobs_reaper_start_race.py",
               "pytest", SERVER, _py_pytest("tests/test_jobs_reaper_start_race.py"), 2),
         Suite("server-project-proof-identity", "server PP-1 project proof identity", "pytest", SERVER,
-              _py_pytest("tests/test_project_proof_identity.py"), 61,
+              _py_pytest("tests/test_project_proof_identity.py"), 69,
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("server-jobs-tenant-inflight-cap", "server tests/test_jobs_tenant_inflight_cap.py",

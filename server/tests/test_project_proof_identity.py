@@ -135,6 +135,37 @@ def test_pp1_p05_subject_without_prefix(proof, monkeypatch):
     refused(signed(proof, sub="ordinary|owner"), monkeypatch)
 
 
+def corrupt(token, signature):
+    head, body, _ = token.split(".")
+    return head + "." + body + "." + signature
+
+
+@pytest.mark.parametrize("signature", ["A", "AAAAA", "A=", "", "!!!!"])
+def test_pp1_p08_corrupt_signature_stays_fixture(proof, monkeypatch, signature):
+    # A signature PyJWT cannot base64-decode must not hide the fixture namespace.
+    refused(corrupt(proof.token, signature), monkeypatch)
+
+
+def test_pp1_p08_corrupt_signature_confined(proof, monkeypatch):
+    monkeypatch.setenv("LEAF_PROOF_PROFILE", "account")
+    refused(corrupt(proof.token, "A"), monkeypatch, "fixture identity is not permitted in this runtime")
+
+
+def test_pp1_p08_corrupt_header_stays_fixture(proof, monkeypatch):
+    _, body, signature = proof.token.split(".")
+    refused("A." + body + "." + signature, monkeypatch)
+
+
+def test_pp1_p08_ordinary_corrupt_signature_unchanged(proof, monkeypatch):
+    token = corrupt(signed(proof, iss="https://ordinary.invalid/", sub="ordinary|owner"), "A")
+    ordinary = Mock(side_effect=HTTPException(status_code=401, detail="ordinary lookup reached"))
+    monkeypatch.setattr(auth, "_signing_key", ordinary)
+    with pytest.raises(HTTPException) as caught:
+        auth.verify_platform_token("Bearer " + token)
+    assert (caught.value.status_code, caught.value.detail) == (401, "ordinary lookup reached")
+    ordinary.assert_called_once_with(token)
+
+
 def confinement(proof, monkeypatch, name, value):
     if value is None:
         monkeypatch.delenv(name, raising=False)

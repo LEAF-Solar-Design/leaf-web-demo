@@ -4215,7 +4215,7 @@ def test_pp1_project_proof_identity_registration():
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     assert suite.cwd == REPO / "server"
     assert suite.argv == runner._py_pytest("tests/test_project_proof_identity.py")
-    assert suite.kind == "pytest" and suite.expected == 61
+    assert suite.kind == "pytest" and suite.expected == 69
     assert suite.uses_database is True and suite.db_gated is False
     assert suite.allowed_skip_reasons == ()
     assert suite.database_skip_reasons == (r"PostgreSQL integration test requires DATABASE_URL",)
