@@ -46,6 +46,21 @@ def _load_runner():
     return mod
 
 
+def test_pp2_gate_registration():
+    runner = _load_runner()
+    suites = [s for s in runner.build_suites() if s.id == "scripts-proof-project-pg"]
+    assert len(suites) == 1
+    suite = suites[0]
+    assert suite.cwd == SCRIPTS
+    assert suite.argv == runner._py_pytest("test_proof_project_pg.py")
+    assert suite.label == "scripts test_proof_project_pg.py"
+    assert suite.kind == "pytest" and suite.expected == 49  # Measured 2026-10-13: PP-2d isolation, any-case names.
+    assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
+    assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1
+
+
 def test_sip_r2_gate_registration():
     runner = _load_runner()
     suites = {suite.id: suite for suite in runner.build_suites()}
@@ -85,7 +100,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
     assert suites["platform"].expected == 359  # R14-B adds 31 PostgreSQL rows.
-    assert suites["gate-runner-selftest"].expected == 234  # Measured registered suite with R14C-32; 233 with sip-r3e-1; 234 with PP-1.
+    assert suites["gate-runner-selftest"].expected == 235  # Measured registered suite with R14C-32; 233 with sip-r3e-1; 234 with PP-1; 235 with PP-2.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4173,7 +4188,7 @@ def test_R14C_32_mandatory_registration():
         start = ordered.index("server-sip-r14-evidence") + 1
         assert ordered[start:start + 3] == wanted
     assert selection["mandatory_suite_ids"][-1] == "platform-sip-r14-exchange"
-    assert suites["gate-runner-selftest"].expected == 234
+    assert suites["gate-runner-selftest"].expected == 235
 
 
 def test_sip_r14_exchange_gate_registration():
