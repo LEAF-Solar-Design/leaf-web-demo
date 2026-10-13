@@ -1395,6 +1395,10 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_job_migration_thread_race.py"), 1),
         Suite("server-jobs-reaper-start-race", "server tests/test_jobs_reaper_start_race.py",
               "pytest", SERVER, _py_pytest("tests/test_jobs_reaper_start_race.py"), 2),
+        Suite("server-project-proof-identity", "server PP-1 project proof identity", "pytest", SERVER,
+              _py_pytest("tests/test_project_proof_identity.py"), 61,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("server-jobs-tenant-inflight-cap", "server tests/test_jobs_tenant_inflight_cap.py",
               "pytest", SERVER, _py_pytest("tests/test_jobs_tenant_inflight_cap.py"), 18,
               uses_database=True, database_skip_reasons=(
@@ -3000,7 +3004,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-11: sip-r3c adds one registration row (100 -> 101).
               # 2026-10-11: sip-r3d adds one registration row (101 -> 102).
               # 2026-10-13: sip-r3e-1 adds one registration row (232 -> 233).
-              ["test_studio_walk_regression_gate.py"], 233),
+              # 2026-10-13: PP-1 adds one registration row (233 -> 234).
+              ["test_studio_walk_regression_gate.py"], 234),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

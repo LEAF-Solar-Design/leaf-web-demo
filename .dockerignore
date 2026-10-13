@@ -127,3 +127,12 @@ scripts/fixtures/string_sizer_replay_manifest.json
 scripts/fixtures/rooftop_string_sizer_replay_manifest.json
 scripts/fixtures/rooftop_solve_replay_manifest.json
 scripts/fixtures/rooftop_solve_replay.json
+
+# Managed project proof policy, helpers and generated public run material are host-only.
+scripts/proof_project*.py
+scripts/test_proof_project*.py
+.proof-project-runs/
+# Basename forms are also understood by the container-wiring subset matcher.
+**/proof_project*.py
+**/test_proof_project*.py
+**/.proof-project-runs

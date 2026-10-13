@@ -276,6 +276,7 @@
     "server-exact-write-pins",
     "server-export-style-fidelity",
     "server-g1a-canonical-e2e",
+    "server-project-proof-identity",
     "server-glug-adoption",
     "server-glug-executor",
     "server-glug-jobs",

@@ -26,6 +26,7 @@ no-op and does not require `pip install -r requirements-auth.txt`.
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -44,6 +45,8 @@ DEFAULT_ISSUER = "https://leafautomation.us.auth0.com/"
 DEFAULT_AUDIENCE = "https://api.leafdesign.ai"
 DEFAULT_JWKS_URL = "https://leafautomation.us.auth0.com/.well-known/jwks.json"
 DEFAULT_CLAIM_NS = "https://leafdesign.ai/"
+ISSUER_PREFIX = "https://proof-project.leaf.invalid/"
+SUBJECT_PREFIX = "leaf-proof-project|"
 
 
 def issuer() -> str:
@@ -127,6 +130,47 @@ def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
     signature / audience / issuer / expiry / malformed-header failure.
     """
     token = _bearer(authorization)
+    try:
+        header = jwt.get_unverified_header(token)
+        peek = jwt.decode(token, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        peek = {}
+    fixture = any(isinstance(peek.get(name), str) and
+                  peek[name].casefold().startswith(prefix)
+                  for name, prefix in (("iss", ISSUER_PREFIX), ("sub", SUBJECT_PREFIX)))
+    if fixture:
+        # Refuse before any policy/JWKS file access. This namespace never uses
+        # the ordinary issuer or key resolver, including on policy failures.
+        if (os.environ.get("LEAF_PROOF_PROFILE") != "project" or
+                os.environ.get("LEAF_RUNTIME_ENV", "").strip().lower() not in {"local", "test"}):
+            raise HTTPException(status_code=401, detail="fixture identity is not permitted in this runtime")
+        try:
+            policy_path = Path(__file__).resolve().parents[1] / "scripts" / "proof_project_identity.py"
+            if not policy_path.is_file():
+                raise FileNotFoundError
+            spec = importlib.util.spec_from_file_location("_leaf_project_proof_policy", policy_path)
+            if spec is None or spec.loader is None:
+                raise FileNotFoundError
+            policy = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(policy)
+        except Exception:
+            raise HTTPException(status_code=401, detail="fixture identity is not available in this runtime") from None
+        try:
+            verification = policy.fixture_verification(header, peek, os.environ)
+            payload = jwt.decode(
+                token, verification.public_key, algorithms=["RS256"],
+                issuer=verification.issuer, audience=verification.audience,
+                options={"require": ["exp", "iat", "sub", "iss", "aud"]}, leeway=0,
+            )
+            if (header.get("alg") != "RS256" or header.get("kid") != verification.kid or
+                    not isinstance(payload.get("sub"), str) or
+                    not payload["sub"].startswith(SUBJECT_PREFIX) or
+                    not all(type(payload[k]) is int for k in ("exp", "iat")) or
+                    payload["exp"] - payload["iat"] > policy.MAX_LIFETIME_S):
+                raise ValueError
+            return payload
+        except Exception:
+            raise HTTPException(status_code=401, detail="fixture identity verification failed") from None
     try:
         key = _signing_key(token)
         return jwt.decode(
