@@ -507,3 +507,79 @@ def test_R14C_34_exchange_refusals_sanitized(monkeypatch):
             assert w.row["error"]["reason_code"] == "SIP_R14_EVIDENCE_REJECTED"
             assert w.row["error"]["retryable"] is False
             assert raw_code not in json.dumps(w.row["error"]) and not w.history
+
+
+class _Label(str):
+    pass
+
+
+@pytest.mark.parametrize("label", ["live", "synthetic"])
+def test_R14E0_01_bootstrap_label_reaches_exchange_and_evidence(monkeypatch, label):
+    """R14E0-01 The bootstrap classification labels the reservation and the evidence alike."""
+    w = World(monkeypatch)
+    monkeypatch.setattr(cloud, "SIZING_CLASSIFICATION", label)
+    monkeypatch.setattr(graph, "SYNTHETIC_SIZING_PROOF_ACCEPTED", True)
+    w.run()
+    w.completed()
+    assert w.events.count("post") == 1
+    assert w.exchange["classification"] == label
+    assert json.loads(w.exchange["evidence_bytes"])["classification"] == label
+
+
+def test_R14E0_02_product_refuses_synthetic_custody(monkeypatch):
+    """R14E0-02 With acceptance at its product default, synthetic custody fails and never publishes."""
+    w = World(monkeypatch)
+    monkeypatch.setattr(cloud, "SIZING_CLASSIFICATION", "synthetic")
+    assert graph.SYNTHETIC_SIZING_PROOF_ACCEPTED is False
+    w.run()
+    assert w.row["status"] == "failed"
+    assert w.row["error"]["reason_code"] == "SIP_R14_SYNTHETIC_EVIDENCE_REFUSED"
+    assert w.row["error"]["retryable"] is False
+    assert w.row["output_version_id"] is None and not w.history
+    assert w.exchange["state"] != "published"
+    assert w.exchange["classification"] == "synthetic"
+    assert json.loads(w.exchange["evidence_bytes"])["classification"] == "synthetic"
+
+
+@pytest.mark.parametrize("label", ["Live", "", " live", "live ", "replay", None, 1, True,
+                                   b"live", _Label("live"), _Label("synthetic")],
+                         ids=["Live", "empty", "lead", "trail", "replay", "none", "one", "true",
+                              "bytes", "sub-live", "sub-synthetic"])
+def test_R14E0_03_invalid_bootstrap_label_refused_before_reservation(monkeypatch, label):
+    """R14E0-03 Any label other than exact str live or synthetic refuses before reserve, grant or send."""
+    w = World(monkeypatch)
+    monkeypatch.setattr(cloud, "SIZING_CLASSIFICATION", label)
+    w.run()
+    assert w.row["status"] == "failed"
+    assert w.row["error"]["reason_code"] == "SIP_R14_CLASSIFICATION_INVALID"
+    assert w.row["error"]["retryable"] is False
+    assert str(w.job_id) not in w.exchanges
+    assert "grant" not in w.events and "post_attempt" not in w.events and not w.history
+
+
+@pytest.mark.parametrize("reserved, label", [("live", "synthetic"), ("synthetic", "live")])
+def test_R14E0_04_reserved_label_is_bound(monkeypatch, reserved, label):
+    """R14E0-04 A reservation made under one label refuses a later attempt under the other."""
+    w = World(monkeypatch)
+    monkeypatch.setattr(graph, "SYNTHETIC_SIZING_PROOF_ACCEPTED", True)
+    w.reserve(reserved)
+    monkeypatch.setattr(cloud, "SIZING_CLASSIFICATION", label)
+    w.run()
+    assert w.row["status"] == "failed"
+    assert w.row["error"]["reason_code"] == "SIP_R14_EVIDENCE_REJECTED"
+    assert w.exchange["classification"] == reserved and w.exchange["state"] == "prepared"
+    assert "post_attempt" not in w.events and not w.history
+
+
+def test_R14E0_05_captured_synthetic_response_resumes_without_send(monkeypatch):
+    """R14E0-05 A synthetic exchange captured earlier publishes from storage with no second POST."""
+    w = World(monkeypatch)
+    monkeypatch.setattr(cloud, "SIZING_CLASSIFICATION", "synthetic")
+    monkeypatch.setattr(graph, "SYNTHETIC_SIZING_PROOF_ACCEPTED", True)
+    w.reserve("synthetic")
+    assert store.begin_send(*w.authority)
+    store.capture_response(*w.authority, response_bytes=w.raw, response_sha256=graph._sha(w.raw))
+    w.run()
+    w.completed()
+    assert "post_attempt" not in w.events
+    assert json.loads(w.exchange["evidence_bytes"])["classification"] == "synthetic"

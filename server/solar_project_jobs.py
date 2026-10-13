@@ -276,8 +276,12 @@ def _cloud_prepare(job, guard):
     plan = sizing.plan_sizing_request(job["params"], context.graph, context.intake_sha256,
                                      job["execution_context"]["tool_manifest_sha256"])
     scope, lease = graph._exchange_authority(job)
+    classification = cloud.SIZING_CLASSIFICATION
+    if type(classification) is not str or classification not in ("live", "synthetic"):
+        # A bootstrap fault, refused before anything is reserved or sent.
+        raise GraphValidationError("SIP_R14_CLASSIFICATION_INVALID")
     reservation = {"request_bytes": plan["wire_bytes"], "request_sha256": plan["wire_sha256"],
-                   "grant_ref": plan["normalized_params"]["grant_ref"], "classification": "live"}
+                   "grant_ref": plan["normalized_params"]["grant_ref"], "classification": classification}
     exchange = store.get_exchange(scope, lease)
     if exchange is None:
         store.prepare_exchange(scope, lease, **reservation)
@@ -337,7 +341,7 @@ def _cloud_prepare(job, guard):
             evidence = sizing.build_sizing_evidence(job["params"], context.graph,
                 context.intake_sha256, expected["tool_manifest_sha256"], exchange["response_bytes"],
                 identity=expected["identity"], parent_version_id=expected["parent_version_id"],
-                producer=expected["producer"], classification="live")
+                producer=expected["producer"], classification=exchange["classification"])
         except GraphValidationError:
             store.refuse_exchange(scope, lease, reason_code="cloud_response_invalid")
             raise cloud.CloudError("cloud_response_invalid", 502) from None

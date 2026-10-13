@@ -26,6 +26,10 @@ from leaf_cloud_grants import CloudError, resolve_grant
 from solar_design_graph import GraphValidationError, _bounded_json, require_revision, validate_graph
 
 SIZING_URL = "https://api.leafdesign.ai/string-length"
+# The label every canonical exchange sent to SIZING_URL carries. The product never changes it.
+# Only an in-process test or proof bootstrap that also points SIZING_URL at a labelled replay
+# of the String Sizer sets "synthetic"; no request, parameter or environment value reaches it.
+SIZING_CLASSIFICATION = "live"
 MAX_RESPONSE_BYTES = 65536
 ADAPTER_VERSION = "2.0.0"
 # Evidence written by the provisional pre-pin adapter; read on reopen, never produced.

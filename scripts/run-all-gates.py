@@ -3546,9 +3546,9 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r14-admission", "server canonical Solar sizing admission",
               "pytest", SERVER, _py_pytest("tests/test_sip_r14_admission.py"), 8),
         Suite("server-sip-r14-worker", "server canonical Solar sizing worker",
-              "pytest", SERVER, _py_pytest("tests/test_sip_r14_worker.py"), 17),
+              "pytest", SERVER, _py_pytest("tests/test_sip_r14_worker.py"), 34),
         Suite("server-sip-r14-proof", "server canonical Solar sizing custody proof",
-              "pytest", SERVER, _py_pytest("tests/test_sip_r14_proof.py"), 23),
+              "pytest", SERVER, _py_pytest("tests/test_sip_r14_proof.py"), 36),
         # 2026-10-11: sip-r3d PostgreSQL acceptance floor: six conductor rows.
         Suite("platform-sip-r3d-conductors", "platform canonical Solar conductors",
               "pytest", REPO / "platform", _py_pytest("tests/test_sip_r3d_conductors.py"), 6,

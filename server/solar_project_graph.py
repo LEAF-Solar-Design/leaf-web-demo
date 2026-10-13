@@ -389,6 +389,12 @@ def _sizing_expected(row, context, exchange):
             "classification": exchange["classification"], "evidence_sha256": exchange["evidence_sha256"]}
 
 
+# Synthetic sizing evidence (a labelled replay of the String Sizer) proves only where an in-process
+# test or proof bootstrap sets this True. The product never does; no request, parameter or
+# environment value reaches it, and product proof therefore refuses synthetic custody.
+SYNTHETIC_SIZING_PROOF_ACCEPTED = False
+
+
 def _stored_sizing_graph(context, job_id, conn):
     row = _stored_job(job_id, conn)
     scope, lease = _exchange_authority(row)
@@ -401,7 +407,8 @@ def _stored_sizing_graph(context, job_id, conn):
             or exchange["evidence_sha256"] != _sha(exchange["evidence_bytes"])):
         _reject()
     proved = sizing.prove_sizing_evidence(json.loads(exchange["evidence_bytes"]),
-        exchange["request_bytes"], exchange["response_bytes"], context.graph, expected=expected)
+        exchange["request_bytes"], exchange["response_bytes"], context.graph, expected=expected,
+        allow_synthetic_for_test=SYNTHETIC_SIZING_PROOF_ACCEPTED is True)
     after = proved["graph"]
     after["settings"]["extra"]["string_sizing"]["project_exchange"] = {
         "job_id": str(job_id), "evidence_sha256": exchange["evidence_sha256"]}

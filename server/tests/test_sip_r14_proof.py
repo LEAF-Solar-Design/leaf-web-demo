@@ -409,3 +409,83 @@ def test_R14C_35_forged_manual_label(monkeypatch):
         with pytest.raises(project.ProjectContextError) as caught:
             b3.prepare(w.s, "solar-feeders", {"expected_rev": value["rev"]}, ctx)
         assert caught.value.reason_code == "SIP_R3_PROOF_REJECTED" and w.s.writes == before
+
+
+def synthetic_completed(monkeypatch):
+    monkeypatch.setattr(cloud, "SIZING_CLASSIFICATION", "synthetic")
+    monkeypatch.setattr(graph, "SYNTHETIC_SIZING_PROOF_ACCEPTED", True)
+    w, p, r = completed(monkeypatch)
+    assert w.exchange["classification"] == "synthetic"
+    return w, p, r
+
+
+def test_R14E0_06_bootstrap_acceptance_gates_synthetic_proof(monkeypatch):
+    """R14E0-06 Stored synthetic custody proves only while the bootstrap acceptance is True."""
+    w, p, r = synthetic_completed(monkeypatch)
+    assert graph._stored_sizing_graph(w.context, w.job_id, w)["settings"]["panels_in_sequence"] == 10
+    monkeypatch.setattr(graph, "SYNTHETIC_SIZING_PROOF_ACCEPTED", False)
+    with pytest.raises(GraphValidationError) as caught:
+        graph._stored_sizing_graph(w.context, w.job_id, w)
+    assert caught.value.code == "SIP_R14_SYNTHETIC_EVIDENCE_REFUSED"
+
+
+@pytest.mark.parametrize("value", [1, 1.0, "True", "true", [True], object(), None],
+                         ids=["one", "float", "True-str", "true-str", "list", "object", "none"])
+def test_R14E0_07_only_identity_true_accepts(monkeypatch, value):
+    """R14E0-07 A truthy acceptance that is not the object True still refuses synthetic custody."""
+    w, p, r = synthetic_completed(monkeypatch)
+    monkeypatch.setattr(graph, "SYNTHETIC_SIZING_PROOF_ACCEPTED", value)
+    with pytest.raises(GraphValidationError) as caught:
+        graph._stored_sizing_graph(w.context, w.job_id, w)
+    assert caught.value.code == "SIP_R14_SYNTHETIC_EVIDENCE_REFUSED"
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_R14E0_08_live_custody_unaffected(monkeypatch, accepted):
+    """R14E0-08 Live custody proves the same graph whatever the bootstrap acceptance holds."""
+    w, p, r = completed(monkeypatch)
+    monkeypatch.setattr(graph, "SYNTHETIC_SIZING_PROOF_ACCEPTED", accepted)
+    assert w.exchange["classification"] == "live"
+    assert graph._stored_sizing_graph(w.context, w.job_id, w)["settings"]["panels_in_sequence"] == 10
+
+
+@pytest.mark.parametrize("stored, written", [("synthetic", "live"), ("live", "synthetic")])
+def test_R14E0_09_label_disagreement_rejected(monkeypatch, stored, written):
+    """R14E0-09 Evidence relabelled against its exchange refuses even with acceptance True."""
+    w, p, r = synthetic_completed(monkeypatch) if stored == "synthetic" else completed(monkeypatch)
+    monkeypatch.setattr(graph, "SYNTHETIC_SIZING_PROOF_ACCEPTED", True)
+    record = json.loads(w.exchange["evidence_bytes"])
+    record["classification"] = written
+    raw = graph.local.canonical_bytes(record)
+    w.exchange.update(evidence_bytes=raw, evidence_sha256=graph._sha(raw))
+    with pytest.raises(GraphValidationError) as caught:
+        graph._stored_sizing_graph(w.context, w.job_id, w)
+    assert caught.value.code == "SIP_R14_EVIDENCE_REJECTED"
+
+
+def test_R14E0_10_seam_lives_only_in_two_constants():
+    """R14E0-10 Product code sets the seam once each, never from a request, parameter or environment."""
+    import re
+    from pathlib import Path
+    server = Path(__file__).resolve().parents[1]
+    sources = {}
+    for path in sorted(server.rglob("*.py")):
+        rel = path.relative_to(server).as_posix()
+        if rel.startswith("tests/") or "/tests/" in rel or "__pycache__" in rel:
+            continue
+        sources[rel] = path.read_text(encoding="utf-8")
+    def where(pattern):
+        found = []
+        for rel, text in sources.items():
+            found += [rel] * len(re.findall(pattern, text, re.M))
+        return found
+    assert where(r"^SYNTHETIC_SIZING_PROOF_ACCEPTED = False$") == ["solar_project_graph.py"]
+    assert where(r"\bSYNTHETIC_SIZING_PROOF_ACCEPTED\s*=(?!=)") == ["solar_project_graph.py"]
+    assert where(r'^SIZING_CLASSIFICATION = "live"$') == ["solar_sizing_client.py"]
+    assert where(r"\bSIZING_CLASSIFICATION\s*=(?!=)") == ["solar_sizing_client.py"]
+    assert where(r"allow_synthetic_for_test=") == ["solar_project_graph.py"]
+    assert where(r"SYNTHETIC_SIZING_PROOF_ACCEPTED is True") == ["solar_project_graph.py"]
+    assert where(r"setattr\([^)]*(SYNTHETIC_SIZING_PROOF_ACCEPTED|SIZING_CLASSIFICATION)") == []
+    assert where(r"(environ|getenv)[^\n]*(SYNTHETIC_SIZING_PROOF_ACCEPTED|SIZING_CLASSIFICATION)") == []
+    assert where(r"proof_string_size[r]") == []
+    assert graph.SYNTHETIC_SIZING_PROOF_ACCEPTED is False and cloud.SIZING_CLASSIFICATION == "live"
