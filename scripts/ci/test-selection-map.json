@@ -137,6 +137,7 @@
     "server-adapter-autofill",
     "server-adapter-combiner",
     "server-adapter-inverter",
+    "server-admin-self-edit-phase4-docs",
     "server-agent-approvals",
     "server-engine-changes",
     "server-agent-e2e",
