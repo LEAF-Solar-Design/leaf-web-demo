@@ -57,17 +57,19 @@ it('A1B2-S01 stored graph surface admission', () => {
   expect(calls).toHaveLength(1)
   const enabled = calls[0].arguments[0].properties.find(prop => prop.key.name === 'enabled').value
   const expression = source.slice(enabled.start, enabled.end)
-  expect(expression).toBe("Boolean(studioGround && drafting && surfaceSlots.toolbar.profile === 'solar')")
-  const evaluate = Function('studioGround', 'drafting', 'surfaceSlots', 'return (' + expression + ')')
+  expect(expression).toBe("Boolean(!projectMode && studioGround && drafting && surfaceSlots.toolbar.profile === 'solar')")
+  const evaluate = Function('projectMode', 'studioGround', 'drafting', 'surfaceSlots', 'return (' + expression + ')')
   for (const id of SURFACE_IDS) {
     const slots = surfaceContract(id)
     for (const mock of [false, true]) {
       for (const flags of [false, true]) {
         const decorated = { ...slots, mock, railProgress: flags ? 10 : 0,
           selectedTool: flags ? 'run' : null, railEnabled: flags }
-        expect(evaluate(true, slots.chrome.cockpit, decorated)).toBe(id === 'solar')
-        expect(evaluate(false, slots.chrome.cockpit, decorated)).toBe(false)
-        expect(evaluate(true, false, decorated)).toBe(false)
+        expect(evaluate(false, true, slots.chrome.cockpit, decorated)).toBe(id === 'solar')
+        expect(evaluate(false, false, slots.chrome.cockpit, decorated)).toBe(false)
+        expect(evaluate(false, true, false, decorated)).toBe(false)
+        for (const ground of [true, false]) for (const cockpit of [true, false])
+          expect(evaluate(true, ground, cockpit, decorated)).toBe(false)
       }
     }
   }

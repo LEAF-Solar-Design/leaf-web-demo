@@ -197,6 +197,7 @@ import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { useProjectSolarScope } from './solar/useProjectSolarScope.js'
 import { useAppProjectSolarRuntime } from './solar/useAppProjectSolarRuntime.js'
+import { projectSolarDrawingView } from './solar/solarProjectDrawingModel.js'
 import { createProjectSolarClient } from './api.js'
 import { composerDraftAccountScope } from './lib/composerDraft.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
@@ -424,6 +425,15 @@ function StandaloneMaterialUpload({ token, pane, selection, getContext, onPolicy
       disabled={!policyReady || upload.busy} onUpload={start} onCancel={cancel}
       onEngineChange={upload.actions.setEngine} />
   </section>
+}
+
+// The engine view mounts one layout pass after the standalone Viewer does. A standalone Viewer mount
+// (the first render, or a project closing) clears any override in its first effect, so an engine
+// document already parsed is applied after that clear instead of before it (R13-G2a read, finding 1).
+function useEngineViewArmed(projectMode) {
+  const [armed, setArmed] = useState(false)
+  useLayoutEffect(() => { setArmed(!projectMode) }, [projectMode])
+  return armed
 }
 
 function ConsoleDrawingObjects({ index, selectedHandle }) {
@@ -794,7 +804,7 @@ export default function App() {
 
   const isEditFixture = mock && fixtureParam === 'edit'
   const applyDrawingIntake = useCallback((nextIntake) => {
-    viewerRef.current?.applyVersion(nextIntake)
+    if (!projectModeRef.current) viewerRef.current?.applyVersion(nextIntake)
   }, [])
   const resetDrawingSelection = useCallback(() => {
     setSelectedHandle(null)
@@ -822,7 +832,7 @@ export default function App() {
     intake,
     versionIntake,
     shown,
-    visibleLayers,
+    visibleLayers: standaloneVisibleLayers,
     drawingState,
     canUndo,
     canRedo,
@@ -842,7 +852,7 @@ export default function App() {
     reset: resetDrawing,
     seatIntake,
     seatVersion: seatDrawingVersion,
-    setVisibleLayers,
+    setVisibleLayers: setStandaloneVisibleLayers,
     setOverlayStale,
     undo: undoDrawingVersion,
     redo: redoDrawingVersion,
@@ -1039,6 +1049,7 @@ export default function App() {
     routePrompt: nlPrompt,
     get projectSolarClient() { return projectSolarClientRef.current },
   }), [])
+  const engineViewArmed = useEngineViewArmed(projectMode)
   const catalogAdapters = useMemo(() => ({
     humanizeError,
     isUnauthorized: (error) => error?.status === 401 || / -> 401$/.test(String(error?.message || '')),
@@ -1704,12 +1715,44 @@ export default function App() {
   // Count ALL entity kinds per layer (polylines + inserts + 3DFACEs) so
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
   // stop reading 0 in the legend.
-  const drawingIntake = activeIntake || shown
+  const projectScene = viewerRef.current?.getDrawingScene?.()
+  const projectDrawing = projectSolarDrawingView({
+    solarBinding: projectSolar.scope.binding,
+    contextView: projectSolarRuntime.contextView,
+    current: projectMode && projectSolarRuntime.contextCurrent(),
+    scene: projectScene ? {
+      intake: projectScene.intake,
+      drawingKey: projectScene.drawingKey,
+      current: projectScene.ready === true,
+    } : null,
+  })
+  const drawingIntake = projectMode ? projectDrawing.intake : activeIntake || shown
+  const projectDrawingName = projectDrawing.intake?.dwg || projectSolar.scope.binding?.drawing_id || ''
+  const visibleLayers = projectMode ? projectSolarRuntime.visibleLayers : standaloneVisibleLayers
+  const setVisibleLayers = projectMode ? projectSolarRuntime.setVisibleLayers : setStandaloneVisibleLayers
+  const previousProjectDrawing = useRef({ projectMode: false, drawingKey: null })
+  useLayoutEffect(() => {
+    const previous = previousProjectDrawing.current
+    if ((projectMode || previous.projectMode)
+      && (previous.projectMode !== projectMode || previous.drawingKey !== projectDrawing.drawingKey)) {
+      setSelectedHandle(null)
+      clearViewHistory()
+    }
+    previousProjectDrawing.current = { projectMode, drawingKey: projectDrawing.drawingKey }
+  }, [projectMode, projectDrawing.drawingKey, clearViewHistory])
   const consoleDrawingKey = `console:${drawingLoad.drawingId}`
-  const consoleObjectIndex = useMemo(() => intake && drawingLoad.drawingId === REQUESTED_DRAWING_ID ? buildDrawingObjectIndex({
+  const consoleObjectIndex = useMemo(() => projectMode
+    ? projectDrawing.mode === 'ready' ? buildDrawingObjectIndex({
+        drawingKey: projectDrawing.drawingKey, intake: projectDrawing.intake,
+        solarGraph: projectDrawing.intake.solar_design_graph ? {
+          drawingKey: projectDrawing.drawingKey, graph: projectDrawing.intake.solar_design_graph,
+        } : null,
+      }) : null
+    : intake && drawingLoad.drawingId === REQUESTED_DRAWING_ID ? buildDrawingObjectIndex({
     drawingKey: consoleDrawingKey, intake,
     solarGraph: intake.solar_design_graph ? { drawingKey: consoleDrawingKey, graph: intake.solar_design_graph } : null,
-  }) : null, [consoleDrawingKey, intake, drawingLoad.drawingId, REQUESTED_DRAWING_ID])
+  }) : null, [projectMode, projectDrawing.mode, projectDrawing.drawingKey, projectDrawing.intake,
+    consoleDrawingKey, intake, drawingLoad.drawingId, REQUESTED_DRAWING_ID])
   const layerCounts = useMemo(() => countEntitiesByLayer(drawingIntake), [drawingIntake])
 
   // resolve the picked handle to an entity descriptor for the readout
@@ -3032,8 +3075,8 @@ export default function App() {
   }, [])
 
   const toggleLayer = useCallback((layer) => {
-    setVisibleLayers((v) => ({ ...v, [layer]: !v[layer] }))
-  }, [])
+    setVisibleLayers((v) => ({ ...v, [layer]: projectMode ? v[layer] === false : !v[layer] }))
+  }, [projectMode, setVisibleLayers])
 
   const applyVersion = useCallback(() => {
     seatDrawingVersion({ intake: editFixtureV2 }, { source: 'fixture' })
@@ -3383,7 +3426,7 @@ export default function App() {
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
   const drafting = surfaceSlots.chrome.cockpit
   const { solarOverlay, reason: solarOverlayReason } = useSolarGraphOverlay({
-    enabled: Boolean(studioGround && drafting && surfaceSlots.toolbar.profile === 'solar'),
+    enabled: Boolean(!projectMode && studioGround && drafting && surfaceSlots.toolbar.profile === 'solar'),
     shown: shown ?? null,
     drawingKey: consoleDrawingKey,
     sceneCurrent: Boolean(isScopeCurrent() && drawingLoad.state === 'seated' && drawingLoad.drawingId === REQUESTED_DRAWING_ID),
@@ -3394,7 +3437,12 @@ export default function App() {
     activeVersion: drawing.activeVersion,
     requestedDrawingId: REQUESTED_DRAWING_ID ?? null,
   })
-  const solarOverlayStatus = solarOverlayStatusOf(solarOverlayReason)
+  const solarOverlayStatus = projectMode
+    ? solarOverlayStatusOf(projectDrawing.reason === 'INVALID_SCALE' ? 'invalid_scale'
+      : projectDrawing.reason === 'OVERLAY_LIMIT' ? 'overlay_limit'
+      : ['GRAPH_PAIR_INVALID', 'GRAPH_UNREADABLE', 'INVALID_GRAPH'].includes(projectDrawing.reason) ? 'invalid_graph'
+      : null)
+    : solarOverlayStatusOf(solarOverlayReason)
   const solarFlowSeated = ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar'
   useEffect(() => {
     if (!(ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar')) {
@@ -3750,7 +3798,7 @@ export default function App() {
         ], view: null, version: null, rail: [], author: null }
     }
     const view = viewCluster({
-      viewerRef, hasDrawing: !!shown, paneOpen: phoneViewport ? studioDrawer === 'plan' : paneOpen,
+      viewerRef, hasDrawing: projectMode ? projectDrawing.mode === 'ready' : !!shown, paneOpen: phoneViewport ? studioDrawer === 'plan' : paneOpen,
       onTogglePane: () => phoneViewport ? toggleStudioDrawer('plan') : setPaneOpen((open) => !open),
       onBeforeJump: pushViewSnapshot,
     })
@@ -3768,7 +3816,7 @@ export default function App() {
       onToggleHistory: onToggleHistoryTracked,
     })
     const layers = layersCluster({
-      layers: shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer, colorFor: colorForLayer,
+      layers: projectMode ? drawingIntake?.layers : shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer, colorFor: colorForLayer,
     })
     // Seating (Slice D): the tool rail hides behind the band on drafting
     // surfaces, so the band carries the rail's two affordances: `expand`
@@ -3909,7 +3957,7 @@ export default function App() {
         ] : []),
       ],
     }
-  }, [studioShell, drafting, profileTabs, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, phoneViewport, studioDrawer,
+  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, drafting, profileTabs, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, phoneViewport, studioDrawer,
     shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
@@ -3959,7 +4007,7 @@ export default function App() {
     const faces = Array.isArray(drawingIntake.faces3d) ? drawingIntake.faces3d.length : 0
     return {
       // Same gate and value as the document tab and the footer.
-      name: drawingPropertyName(shown ? `${projectName}.dwg` : '', activeIntake?.documentId),
+      name: projectMode ? projectDrawingName : drawingPropertyName(shown ? `${projectName}.dwg` : '', activeIntake?.documentId),
       entities: polylines + inserts + faces,
       polylines,
       inserts,
@@ -3967,10 +4015,10 @@ export default function App() {
       layers: layers.length,
       layersShown: layers.filter((l) => visibleLayers[l] !== false).length,
       extents: drawingExtents(drawingIntake.polylines),
-      source: activeIntake ? 'browser drawing' : mock ? 'sample data' : 'project drawing',
-      ...(activeIntake && engineHistory ? engineHistory : {}),
+      source: projectMode ? 'project drawing' : activeIntake ? 'browser drawing' : mock ? 'sample data' : 'project drawing',
+      ...(!projectMode && activeIntake && engineHistory ? engineHistory : {}),
     }
-  }, [studioGround, drafting, drawingIntake, activeIntake, engineHistory, shown, drawingName, projectName, visibleLayers, mock])
+  }, [projectMode, projectDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, shown, drawingName, projectName, visibleLayers, mock])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
@@ -4766,7 +4814,7 @@ export default function App() {
                   prompt's point steps; while a point command is live the
                   card carries data-cockpit-picking and the console's
                   click-to-select stands aside (the Viewer callback below). */}
-              {ENV_CAD_EDIT && drafting && (
+              {ENV_CAD_EDIT && drafting && !projectMode && (
                 <CanvasPointPicker
                   viewerRef={viewerRef}
                   ground={studioGround}
@@ -4785,8 +4833,8 @@ export default function App() {
               shows the ENGINE document through the viewer's own
               applyVersion seam (the console drawing returns on close);
               the card carries data-engine-document for the pins. */}
-          {ENV_CAD_EDIT && <EngineObjectBridge active={!!studioGround && groundShowsDrawing(activeSurface)} intake={activeIntake} />}
-          {ENV_CAD_EDIT && studioGround && (
+          {ENV_CAD_EDIT && <EngineObjectBridge active={!projectMode && !!studioGround && groundShowsDrawing(activeSurface)} intake={activeIntake} />}
+          {ENV_CAD_EDIT && studioGround && !projectMode && engineViewArmed && (
             <EngineDocumentView
               viewerRef={viewerRef}
               consoleIntake={intake}
@@ -4868,6 +4916,7 @@ export default function App() {
               <button type="button" className="doc-tab-start" onClick={onOpenStart}>Start</button>
             )}
             <div className="viewer-title">
+              {projectMode ? <>{projectDrawingName} <code>{projectSolar.scope.binding?.input_version_id}</code></> : <>
               {/* One loading voice per pane — the pulse-dot line in the viewer
                   announces loading; the title placeholder stays a muted dash. */}
               {shown ? `${projectName}.dwg` : <span className="dim">—</span>}
@@ -4879,6 +4928,7 @@ export default function App() {
                   {' · '}{shown.layers.length} layers
                 </span>
               )}
+              </>}
             </div>
             {studioGround && drafting && shown && (
               <button
@@ -5042,8 +5092,19 @@ export default function App() {
               rows render in both shells), the same way CadEditSurface above
               is. Portals into the cockpit-dock-properties-slot div rendered
               further down, wherever propertyRowsEl sits. */}
-          {ENV_CAD_EDIT && <EngineDockProperties />}
+          {ENV_CAD_EDIT && !projectMode && <EngineDockProperties />}
           <div className="viewer-wrap">
+            {projectMode ? (
+              <>
+                {(projectSolarRuntime.notice || projectDrawing.mode !== 'ready') && (
+                  <p role="status" aria-live="polite">
+                    {projectSolarRuntime.notice || projectSolarAppReason(projectSolar.scope.reason || 'scope_pending')}
+                    {projectSolarRuntime.publishedVersionId && <code>{projectSolarRuntime.publishedVersionId}</code>}
+                    {projectSolarRuntime.publishedVersionId && <button type="button" className="chip-act" disabled={projectSolarRuntime.busy} onClick={projectSolarRuntime.retryReadback}>Retry</button>}
+                  </p>
+                )}
+              </>
+            ) : <>
             {!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots.toolbar.profile === 'solar' && solarStarter === 'failed' && (
               <div className="loading-line dim" role="status">
                 <span>The rooftop starter could not be opened. Retry or import a DXF.</span>
@@ -5074,7 +5135,8 @@ export default function App() {
                 <span className="dot live pulse" aria-hidden="true" /> Loading drawing
               </div>
             )}
-            {(intake || solarStarter === 'open') && (() => {
+            </>}
+            {(projectMode ? projectDrawing.mode === 'ready' : (intake || solarStarter === 'open')) && (() => {
               // W3 one-shell: the console OWNS this element — every prop, the
               // ref, the version/undo/redo imperative path. The drawing
               // renders ONLY inside the ground layer (z0, under the floating
@@ -5086,34 +5148,35 @@ export default function App() {
               const viewerEl = (
                 <Suspense fallback={<ViewerSkeleton />}>
                 <Viewer
-                  ref={intake ? viewerRef : solarStarterViewerRef}
-                  intake={intake ?? SOLAR_STARTER_EMPTY_INTAKE}
-                  drawingKey={consoleDrawingKey}
-                  solarOverlay={solarOverlay}
+                  key={projectMode ? projectDrawing.drawingKey : 'standalone'}
+                  ref={projectMode ? viewerRef : intake ? viewerRef : solarStarterViewerRef}
+                  intake={projectMode ? projectDrawing.intake : intake ?? SOLAR_STARTER_EMPTY_INTAKE}
+                  drawingKey={projectMode ? projectDrawing.drawingKey : consoleDrawingKey}
+                  solarOverlay={projectMode ? projectDrawing.overlay : solarOverlay}
                   onIntakeOverride={onViewerIntakeOverride}
                   onSceneReady={onDrawingSceneReady}
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
                   paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
-                  stringRoutes={solarStringRoutes}
+                  stringRoutes={projectMode ? undefined : solarStringRoutes}
                   visibleLayers={visibleLayers}
-                  highlightHandles={overlay?.highlight_handles}
-                  markers={overlay?.markers}
-                  overlayPolylines={overlay?.polylines}
+                  highlightHandles={projectMode ? undefined : overlay?.highlight_handles}
+                  markers={projectMode ? undefined : overlay?.markers}
+                  overlayPolylines={projectMode ? undefined : overlay?.polylines}
                   selectedHandle={selectedHandle}
                   // W4f slice A1: a click that answers an armed point prompt
                   // is not a selection (the picker stamps the card while a
                   // point command is live).
                   onSelectEntity={(handle, gesture) => {
-                    if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
-                    if (canvasPickRef.current?.(handle, { additive: !!gesture?.additive })) return
+                    if (!projectMode && workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    if (!projectMode && canvasPickRef.current?.(handle, { additive: !!gesture?.additive })) return
                     setSelectedHandle(handle)
                   }}
-                  marqueeGate={() => typeof canvasMarqueeRef.current === 'function' && workspaceCardRef.current?.dataset.cockpitPicking !== '1'}
+                  marqueeGate={() => !projectMode && typeof canvasMarqueeRef.current === 'function' && workspaceCardRef.current?.dataset.cockpitPicking !== '1'}
                   onMarqueeSelect={(handles, gesture) => {
-                    if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    if (projectMode || workspaceCardRef.current?.dataset.cockpitPicking === '1') return
                     canvasMarqueeRef.current?.(handles, { additive: !!gesture?.additive })
                   }}
-                  pendingEdit={pendingEdit || writeGhost}
+                  pendingEdit={projectMode ? null : pendingEdit || writeGhost}
                   background={studioGround ? 'transparent' : undefined}
                   safeRect={studioGround ? drawingViewport : null}
                 />
@@ -5156,10 +5219,10 @@ export default function App() {
               // the console's server-drawing selection, which has none of
               // these three fields, so this slot sits beside it rather than
               // inside it.
-              const propertyRowsEl = ENV_CAD_EDIT
+              const propertyRowsEl = ENV_CAD_EDIT && !projectMode
                 ? <div id="cockpit-dock-properties-slot" className="dock-properties-slot" />
                 : null
-              const readoutEl = intake ? (
+              const readoutEl = (projectMode ? projectDrawing.mode === 'ready' : intake) ? (
                 <>
                   <SelectionReadout selection={selection} onDeselect={() => setSelectedHandle(null)} />
                   {propertyRowsEl}
@@ -5184,7 +5247,7 @@ export default function App() {
                     selection={readoutEl}
                     geometry={selectedEntityGeometry}
                     drawing={paneDrawingFacts}
-                    offscreenResult={offscreenResult}
+                    offscreenResult={projectMode ? null : offscreenResult}
                     onShowResult={showCreatedResult}
                     onClose={() => setPaneOpen(false)}
                     plan={<SurfaceFrame.Entitlement at="docked" />}
@@ -5196,7 +5259,7 @@ export default function App() {
             {/* W4b cockpit: view snaps on the drawing (studio only). */}
             <DrawingNavigationTools viewerRef={viewerRef} navigationSourceRef={navigationSourceRef} navigation={viewNavigation} />
             {studioGround && groundShowsDrawing(activeSurface) && <CadOverview viewerRef={viewerRef} />}
-            {studioGround && intake && groundShowsDrawing(activeSurface) && (
+            {studioGround && (projectMode ? projectDrawing.mode === 'ready' : intake) && groundShowsDrawing(activeSurface) && (
               <ViewCluster
                 viewerRef={viewerRef}
                 onFit={fitWithHistory}
@@ -5495,7 +5558,7 @@ export default function App() {
             the reference's Model tab, the drawing's name, and + (the project
             board). Every other surface: nothing here. */}
         {studioShell && (drafting ? (
-          <StatusTabs name={shown ? `${projectName}.dwg` : ''} onStart={onOpenStart} />
+          <StatusTabs name={projectMode ? projectDrawingName : shown ? `${projectName}.dwg` : ''} onStart={onOpenStart} />
         ) : (
           <span className="cockpit-status-tabs" data-testid="cockpit-status-tabs">
             <span className="foot-model-tab">{surfaceSlots.ground === 'device-stage' ? 'Revision' : 'Project'}</span>

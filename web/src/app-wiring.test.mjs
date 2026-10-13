@@ -521,7 +521,9 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.equal(mounts.filter((name) => name === 'ProjectSolarCheckoutControls').length, 1)
     assert.ok(!mounts.some((name) => name !== 'ProjectSolarCheckoutControls' && /ProjectSolar|ProjectRun|ProjectCheckout/.test(name)))
     const imports = r13Find((node) => node.type === 'ImportDeclaration').map((node) => node.source.value)
-    assert.ok(!imports.some((path) => /solarProjectDrawingModel|ProjectSolarReadPanel|ProjectSolarWorkspaceHost|useProjectRunController/.test(path)))
+    assert.ok(!imports.some((path) => /ProjectSolarReadPanel|ProjectSolarWorkspace|useProjectRunController/.test(path)))
+    const model = r13One(node => node.type === 'ImportDeclaration' && node.source.value === './solar/solarProjectDrawingModel.js')
+    assert.deepEqual(model.specifiers.map(node => [node.imported.name, node.local.name]), [['projectSolarDrawingView', 'projectSolarDrawingView']])
     const publication = r13One((node) => node.type === 'JSXAttribute' && node.name.name === 'consumeCatalogPublication')
     assert.equal(r13Text(publication.value.expression), 'catalogController.consumeCatalogPublication')
     const services = r13One((node) => node.type === 'VariableDeclarator' && node.id.name === 'catalogServices')
@@ -934,7 +936,9 @@ describe('R13F project Solar catalog attachment', () => {
     const intents = find((node) => node.type === 'VariableDeclarator' && node.id.name === 'PROJECT_SOLAR_INTENTS')[0]
     assert.equal(source(intents.init), 'Object.freeze([])')
     const imports = find((node) => node.type === 'ImportDeclaration').map((node) => node.source.value)
-    assert.ok(!imports.some((path) => /solarProjectDrawingModel|ProjectSolarReadPanel|ProjectSolarWorkspaceHost|useProjectRunController/.test(path)))
+    assert.ok(!imports.some((path) => /ProjectSolarReadPanel|ProjectSolarWorkspace|useProjectRunController/.test(path)))
+    const model = r13One(node => node.type === 'ImportDeclaration' && node.source.value === './solar/solarProjectDrawingModel.js')
+    assert.deepEqual(model.specifiers.map(node => [node.imported.name, node.local.name]), [['projectSolarDrawingView', 'projectSolarDrawingView']])
     const checkoutImports = find((node) => node.type === 'ImportDeclaration'
       && (/useProjectCheckoutController/.test(node.source.value)
         || node.specifiers.some((specifier) => specifier.local.name === 'useProjectCheckoutController')))
@@ -1080,7 +1084,7 @@ describe('A1b-2 stored Solar graph wiring', () => {
     const properties = call.arguments[0].properties
     assert.deepEqual(properties.map(csuKey), ['enabled', 'shown', 'drawingKey', 'sceneCurrent',
       'refreshPending', 'activeIntake', 'engineDocument', 'engineDirty', 'activeVersion', 'requestedDrawingId'])
-    const scope = defaults(), result = evaluate(call.arguments[0], scope)
+    const scope = { ...defaults(), projectMode: false }, result = evaluate(call.arguments[0], scope)
     assert.equal(result.shown, scope.shown)
     assert.equal(result.activeIntake, scope.intake)
     assert.equal(result.engineDocument, scope.engineDocument)
@@ -1088,6 +1092,7 @@ describe('A1b-2 stored Solar graph wiring', () => {
     assert.equal(result.activeVersion, 7)
     assert.equal(result.engineDirty, false)
     assert.equal(result.enabled, true)
+    assert.equal(evaluate(call.arguments[0], { ...scope, projectMode: true }).enabled, false)
     const version = { sentinel: 'uncoerced version' }
     const normalized = evaluate(call.arguments[0], { ...scope, shown: undefined, activeIntake: undefined,
       engineDocument: undefined, REQUESTED_DRAWING_ID: undefined, drawing: { activeVersion: version } })
@@ -1120,15 +1125,23 @@ describe('A1b-2 stored Solar graph wiring', () => {
 
   it('A1B2-W04 Viewer binding preserves independent results', () => {
     const element = viewer(), solarOverlay = {}, overlay = { highlight_handles: [], markers: [], polylines: [] }
-    const scope = { solarOverlay, overlay, consoleDrawingKey: 'console:D' }
+    const scope = { projectMode: false, solarOverlay, overlay, consoleDrawingKey: 'console:D' }
     assert.equal(evaluate(propExpression(element, 'solarOverlay'), scope), solarOverlay)
     assert.equal(evaluate(propExpression(element, 'drawingKey'), scope), scope.consoleDrawingKey)
     assert.equal(evaluate(propExpression(element, 'highlightHandles'), scope), overlay.highlight_handles)
     assert.equal(evaluate(propExpression(element, 'markers'), scope), overlay.markers)
     assert.equal(evaluate(propExpression(element, 'overlayPolylines'), scope), overlay.polylines)
-    assert.equal(text(propExpression(element, 'intake')), 'intake ?? SOLAR_STARTER_EMPTY_INTAKE')
-    assert.equal(text(propExpression(element, 'ref')), 'intake ? viewerRef : solarStarterViewerRef')
+    assert.equal(text(propExpression(element, 'intake').alternate), 'intake ?? SOLAR_STARTER_EMPTY_INTAKE')
+    assert.equal(text(propExpression(element, 'ref').alternate), 'intake ? viewerRef : solarStarterViewerRef')
     assert.equal(text(propExpression(element, 'onIntakeOverride')), 'onViewerIntakeOverride')
+    const projectDrawing = { intake: {}, drawingKey: 'project:canonical', overlay: {} }
+    const project = { ...scope, projectMode: true, projectDrawing }
+    for (const [prop, field] of [['intake', 'intake'], ['drawingKey', 'drawingKey'], ['solarOverlay', 'overlay'], ['key', 'drawingKey']])
+      assert.equal(evaluate(propExpression(element, prop), project), projectDrawing[field])
+    for (const prop of ['highlightHandles', 'markers', 'overlayPolylines', 'stringRoutes'])
+      assert.equal(evaluate(propExpression(element, prop), project), undefined)
+    assert.equal(evaluate(propExpression(element, 'pendingEdit'), project), null)
+    assert.equal(evaluate(propExpression(element, 'key'), scope), 'standalone')
   })
 
   it('A1B2-W05 status executes the production helper and JSX in both seats', () => {
@@ -1164,7 +1177,7 @@ describe('A1b-2 stored Solar graph wiring', () => {
       ['invalid_graph', reasons.invalid_graph], ['invalid_scale', reasons.invalid_scale],
       ['overlay_limit', reasons.overlay_limit], ['drawing_mismatch', reasons.drawing_mismatch],
     ]) {
-      const status = evaluate(declaration.init, { solarOverlayStatusOf: statusOf, solarOverlayReason: reason })
+      const status = evaluate(declaration.init, { projectMode: false, solarOverlayStatusOf: statusOf, solarOverlayReason: reason })
       assert.equal(status, expected)
       const rendered = renderStatus(h, status)
       assert.equal(rendered.type, 'p')
@@ -1173,6 +1186,11 @@ describe('A1b-2 stored Solar graph wiring', () => {
       assert.equal(rendered.children.join(''), status)
       assert.equal(renderSeat({ seated: false, children: rendered }), rendered)
       assert.equal(renderSeat({ seated: true, children: rendered }).children[0], rendered)
+    }
+    for (const [reason, expected] of [['INVALID_SCALE', reasons.invalid_scale], ['OVERLAY_LIMIT', reasons.overlay_limit],
+      ['GRAPH_PAIR_INVALID', reasons.invalid_graph], ['GRAPH_UNREADABLE', reasons.invalid_graph],
+      ['INVALID_GRAPH', reasons.invalid_graph], ['GRAPHLESS', null], ['SCENE_PENDING', null]]) {
+      assert.equal(evaluate(declaration.init, { projectMode: true, projectDrawing: { reason }, solarOverlayStatusOf: statusOf }), expected)
     }
     for (const reason of ['refresh_pending', null, undefined, 'unknown', 'constructor', 'toString']) {
       assert.equal(statusOf(reason), null)
@@ -1222,7 +1240,7 @@ describe('A1b-2 stored Solar graph wiring', () => {
     assert.equal(text(property('activeVersion')), 'drawing.activeVersion')
     assert.equal(text(property('activeIntake')),
       'solarOverlayCanvasIntake(viewerOverride, intake ?? SOLAR_STARTER_EMPTY_INTAKE)')
-    assert.equal(text(property('activeIntake').arguments[1]), text(propExpression(viewer(), 'intake')))
+    assert.equal(text(property('activeIntake').arguments[1]), text(propExpression(viewer(), 'intake').alternate))
     const completed = nodes(tree, node => node.type === 'JSXAttribute' && node.name.name === 'onDrawingVersionChanged')
     assert.ok(completed.length > 0)
     const workspaces = nodes(tree, node => node.type === 'JSXElement'
@@ -3875,9 +3893,9 @@ describe('Solar rooftop starter', () => {
     assert.match(appSource, /<SolarStarterOpener\s+enabled=\{!mock && drawingLoad.drawingId === REQUESTED_DRAWING_ID && drawingLoad.state === 'absent' && surfaceSlots\.toolbar\.profile === 'solar'\}\s+fetchDxf=\{fetchSampleDxf\}/)
   })
   it('row13 bootstraps only the Viewer with the empty starter intake', () => {
-    assert.match(appSource, /\(intake \|\| solarStarter === 'open'\) &&/)
-    assert.match(appSource, /<Viewer\s[\s\S]*?intake=\{intake \?\? SOLAR_STARTER_EMPTY_INTAKE\}/)
-    assert.match(appSource, /ref=\{intake \? viewerRef : solarStarterViewerRef\}/)
+    assert.match(appSource, /\(projectMode \? projectDrawing.mode === 'ready' : \(intake \|\| solarStarter === 'open'\)\) &&/)
+    assert.match(appSource, /<Viewer\s[\s\S]*?intake=\{projectMode \? projectDrawing.intake : intake \?\? SOLAR_STARTER_EMPTY_INTAKE\}/)
+    assert.match(appSource, /ref=\{projectMode \? viewerRef : intake \? viewerRef : solarStarterViewerRef\}/)
   })
   it('row16 drawingLoad distinguishes pending, seated, absent and failed session loads', () => {
     assert.ok(appSource.includes("useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })"))
@@ -4037,7 +4055,7 @@ describe('W4g bleed-2b: profile presentation preserves the engine document', () 
     const engine = appSource.indexOf('<EngineDocumentView')
     assert.ok(ribbonStart >= 0 && ribbonEnd > ribbonStart)
     assert.ok(engine > ribbonEnd)
-    assert.match(appSource.slice(ribbonEnd, engine), new RegExp('\\)\\}\\s*[\\s\\S]*?\\{ENV_CAD_EDIT && studioGround && \\(\\s*$'))
+    assert.match(appSource.slice(ribbonEnd, engine), new RegExp('\\)\\}\\s*[\\s\\S]*?\\{ENV_CAD_EDIT && studioGround && !projectMode && engineViewArmed && \\(\\s*$'))
     assert.equal(appSource.split('<EngineDocumentView').length - 1, 1)
   })
   it('closes Start before requesting a profile and commits the URL with the state', () => {
@@ -4460,7 +4478,7 @@ describe('App.jsx wiring', () => {
     // The engine paints the viewer while shown; the console intake remains
     // the exact fallback when the consumer closes or unmounts.
     it('binds selection, geometry, legend, dock totals and status to the active intake', () => {
-      assert.match(stripped, /const drawingIntake = activeIntake \|\| shown/)
+      assert.match(stripped, /const drawingIntake = projectMode \? projectDrawing.intake : activeIntake \|\| shown/)
       assert.match(stripped, /countEntitiesByLayer\(drawingIntake\)/)
       assert.match(stripped, /selectEntity\(drawingIntake, selectedHandle,/)
       assert.match(stripped, /drawingIntake\.polylines \|\| \[\]/)
@@ -4477,7 +4495,11 @@ describe('App.jsx wiring', () => {
       assert.match(appNoComments, new RegExp('if \\(intake && history\\?\\.createdResult\\?\\.documentId === intake.documentId\\)'))
     })
     it('passes the visibility result and viewer pose handler to the dock', () => {
-      assert.match(appNoComments, new RegExp('offscreenResult=\\{offscreenResult\\}\\s+onShowResult=\\{showCreatedResult\\}'))
+      assert.match(appNoComments, new RegExp('offscreenResult=\\{projectMode \\? null : offscreenResult\\}\\s+onShowResult=\\{showCreatedResult\\}'))
+      const prop = r13One(node => node.type === 'JSXAttribute' && node.name.name === 'offscreenResult').value.expression
+      const original = {}
+      assert.equal(r13Evaluate(prop, { projectMode: true, offscreenResult: original }), null)
+      assert.equal(r13Evaluate(prop, { projectMode: false, offscreenResult: original }), original)
       assert.match(stripped, new RegExp('viewer\\.setView\\(\\{\\s*center:'))
       assert.match(stripped, /pose\.zoom \* 0\.4 \/ span/)
     })
@@ -5272,4 +5294,117 @@ describe('KEYS-b the phone Studio drawer is an Escape owner', () => {
     const commented = "// usePhoneDrawerEscape({ studioShell, phoneViewport, studioDrawer }, () => setStudioDrawer('none'))"
     assert.equal(codeOnly(commented).includes('usePhoneDrawerEscape('), false)
   })
+})
+
+// Frozen predecessor values below were measured at e9f3628b. These rows execute
+// App AST sites, and keep the generic operation owners distinct from presentation.
+it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () => {
+  const hashes = {
+    onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
+    onRedo: '6061cdf05fef2e3119473e0e3639a1a6997c90e4d2b73c7b514508468853ecff',
+    engineSaveTarget: '26a17ccb4d7be496f12ac3a83d049b6e4b46c03351bc788bd3d132cc8919835d',
+    onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
+    onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
+    retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
+  }
+  for (const [name, hash] of Object.entries(hashes)) {
+    const node = r13One(node => node.type === 'VariableDeclarator' && node.id.name === name)
+    assert.equal(r13Hash(r13Text(node.init)), hash, name)
+  }
+  const job = r13One(node => node.type === 'CallExpression' && node.callee.name === 'useJobController')
+  assert.equal(r13Hash(r13Text(job)), '24c5eac98f2d89b5cecd2f475afd5db80b327e47cb5510d97a71eb54660efbcb')
+  const head = r13One(node => node.type === 'JSXElement' && node.openingElement.name.name === 'EngineHeadOpener')
+  assert.equal(r13Hash(r13Text(head)), 'b1af9fada6edf094064979f23f9c28513ac3f21ea7a23332fce00102917502f9')
+  let undo = 0, redo = 0
+  const projectModeRef = { current: true }
+  assert.equal(r13Evaluate(r13Callback('onUndo'), { projectModeRef, undoActionRef: { current: () => ++undo } })(), 1)
+  await r13Evaluate(r13Callback('onRedo'), { projectModeRef, redoDrawingVersion: async () => { redo++; return null } })()
+  assert.equal(redo, 1)
+  const calls = [], view = { intake: {} }, metadata = { canonical: true }, canonical = { outputVersionId: 'canonical' }
+  const env = { projectModeRef, isScopeCurrent: () => true, mock: false,
+    getDrawingIntake: async (...args) => { calls.push(['read', ...args]); return view },
+    seatVersion: (...args) => calls.push(['seat', ...args]),
+    projectSolarRuntime: { complete: (...args) => { calls.push(['canonical', ...args]); return 'published' } } }
+  const complete = r13Evaluate(r13Callback('seatCompletedVersion'), env)
+  const wrapper = r13One(node => node.type === 'ObjectProperty' && node.key.name === 'onCompleteVersion', job)
+  const forwarded = r13Evaluate(wrapper.value, { completedVersionRef: { current: complete } })
+  for (const envelope of [{ tool: 'cad-delete', result: {} }, { result: {} }]) {
+    calls.length = 0
+    assert.equal(await forwarded({ drawing_id: 'legacy', version: 8 }, envelope), true)
+    assert.deepEqual(calls, [['read', false, 'legacy', 'head'], ['seat', view, 'legacy', 'Version 8 created']])
+  }
+  calls.length = 0
+  assert.equal(await forwarded(null, canonical, { projectSolarCompletion: metadata }), 'published')
+  assert.deepEqual(calls, [['canonical', canonical, metadata]])
+  assert.equal(calls[0][1], canonical); assert.equal(calls[0][2], metadata)
+})
+
+it('R13G2A-11 standalone arms and captures retain their predecessor bytes', () => {
+  const viewer = r13One(node => node.type === 'JSXElement' && node.openingElement.name.name === 'Viewer')
+  const attribute = (node, name) => r13One(n => n.type === 'JSXAttribute' && n.name.name === name, node.openingElement).value.expression
+  const standalone = (node, expected) => {
+    assert.equal(node.type, 'ConditionalExpression')
+    assert.equal(r13Text(node.test), 'projectMode')
+    assert.equal(r13Text(node.alternate), expected)
+  }
+  for (const [name, predecessor] of Object.entries({
+    ref: 'intake ? viewerRef : solarStarterViewerRef', intake: 'intake ?? SOLAR_STARTER_EMPTY_INTAKE',
+    drawingKey: 'consoleDrawingKey', solarOverlay: 'solarOverlay', stringRoutes: 'solarStringRoutes',
+    highlightHandles: 'overlay?.highlight_handles', markers: 'overlay?.markers', overlayPolylines: 'overlay?.polylines',
+    pendingEdit: 'pendingEdit || writeGhost',
+  })) standalone(attribute(viewer, name), predecessor)
+  for (const [name, expected] of Object.entries({
+    drawingIntake: 'activeIntake || shown', visibleLayers: 'standaloneVisibleLayers',
+    setVisibleLayers: 'setStandaloneVisibleLayers', solarOverlayStatus: 'solarOverlayStatusOf(solarOverlayReason)',
+  })) standalone(r13One(n => n.type === 'VariableDeclarator' && n.id.name === name).init, expected)
+  const toggle = r13Callback('toggleLayer')
+  const value = r13One(n => n.type === 'ConditionalExpression', toggle)
+  standalone(value, '!v[layer]')
+  const mount = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode'
+    && r13Text(n.alternate) === "intake || solarStarter === 'open'")
+  assert.equal(r13Text(mount.consequent), "projectDrawing.mode === 'ready'")
+  const title = r13One(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-title'))
+  const titleBranch = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode', title)
+  const interior = fragment => appSource.slice(fragment.openingFragment.end, fragment.closingFragment.start).replace(/\r\n/g, '\n').trim()
+  assert.equal(r13Hash(interior(titleBranch.alternate)), 'd37ef2de2b3b6c413842e7fc8f117bb71a717de5571446fe23310acf3177cd9a')
+  const wrap = r13One(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-wrap'))
+  const status = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode' && n.consequent.type === 'JSXFragment', wrap)
+  assert.equal(r13Hash(interior(status.alternate)), 'a8dcf463cbb3c6fe50d2d60b43098b2bc7d5f5f8be736aa727afc841abf83bd5')
+  assert.equal(r13Text(attribute(viewer, 'onIntakeOverride')), 'onViewerIntakeOverride')
+  assert.equal(r13Text(attribute(viewer, 'onSceneReady')), 'onDrawingSceneReady')
+  const onSelect = r13Evaluate(attribute(viewer, 'onSelectEntity'), {
+    projectMode: false, workspaceCardRef: { current: { dataset: {} } },
+    canvasPickRef: { current: (...args) => { assert.deepEqual(args, ['AA', { additive: true }]); return true } },
+    setSelectedHandle: () => assert.fail('engine consumed the pick'),
+  })
+  onSelect('AA', { additive: true })
+  for (const [name, hash] of Object.entries({
+    'solarSettingsStandalone.main-66759316.json': 'b8c58800aa04c0d5dae638b51efb037a7bec36b229d6a13fde7430d48e684af3',
+    'solarStandaloneRequests.main-0c5a044e.json': '78777b38051c0c6bcd5da6973a81c8367bbeccbfc5a7893146e42e45696bb461',
+    'solarStringStandalone.main-f139ceba.json': '9a3c849d1a2dfe93e970cc4a97e641d4851ea5c6e65dfc52d7cb3ad61b0f75b8',
+    'solarReadResultStandalone.main-a021056e.json': 'e3c8dafa5a78cd21c7ef21f07e3a17dab34fb8ae852b972a6992302ae5ca3ae9',
+    'solarSizingConductorStandalone.main-f139ceba.json': '16aa78d0485629b7485619fc88862693ad5d80ff9b6c8742cd23fb3143e8b6de',
+  })) assert.equal(r13Hash(readFileSync(`${process.cwd()}/src/solar/__fixtures__/${name}`)), hash, name)
+})
+
+it('R13G2A-12 drawing activation retains one Viewer and the existing owners', () => {
+  for (const name of ['Viewer', 'EngineSessionProvider'])
+    assert.equal(r13Find(n => n.type === 'JSXOpeningElement' && n.name.name === name).length, 1, name)
+  for (const [name, count] of Object.entries({
+    useAppProjectSolarRuntime: 1, useProjectSolarScope: 1, useSurfaceContract: 1,
+    createProjectSolarClient: 1, createProjectSolarScopeClient: 0, useProjectCheckoutController: 1,
+    useCatalogController: 1, projectSolarDrawingView: 1, useEngineSession: 0,
+    createProjectSolarRunController: 0, useProjectRunController: 0,
+  })) assert.equal(r13Find(n => n.type === 'CallExpression' && n.callee.name === name).length, count, name)
+  for (const [name, count] of Object.entries({ readContext: 0, readJob: 0, subscribe: 1, observe: 2 }))
+    assert.equal(r13Find(n => n.type === 'CallExpression' && (n.callee.property?.name === name || n.callee.name === name)).length, count, name)
+  const subscription = r13One(n => n.type === 'CallExpression' && n.callee.property?.name === 'subscribe')
+  assert.equal(r13Text(subscription.callee), 'controller.subscribe')
+  assert.deepEqual(r13Find(n => n.type === 'CallExpression' && n.callee.property?.name === 'observe').map(r13Text), ['ro.observe(h)', 'ro.observe(f)'])
+  assert.equal(r13Find(n => n.type === 'NewExpression' && n.callee.name === 'ResizeObserver').length, 1)
+  assert.equal(r13Find(n => n.type === 'NewExpression' && ['WebGLRenderer', 'Worker', 'MutationObserver'].includes(n.callee.name || n.callee.property?.name)).length, 0)
+  const model = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'projectDrawing')
+  assert.equal(model.init.callee.name, 'projectSolarDrawingView')
+  const context = r13One(n => n.type === 'ObjectProperty' && n.key.name === 'contextView', model.init)
+  assert.equal(r13Text(context.value), 'projectSolarRuntime.contextView')
 })
