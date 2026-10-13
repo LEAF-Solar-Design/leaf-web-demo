@@ -10,9 +10,10 @@ import SolarFlowRail from './solar/SolarFlowRail.jsx'
 import { useAppProjectSolarRuntime } from './solar/useAppProjectSolarRuntime.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason } from './solar/solarProjectAppModel.js'
+import { SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
 import { REASONS } from './lib/ribbonClusters.js'
 import { SEED_SETTINGS } from './solar/solarSettingsModel.js'
-import useEscapeOwner from './lib/useEscapeOwner.js'
+import useEscapeOwner, { escapeOwnerStack } from './lib/useEscapeOwner.js'
 
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8').replace(/\r\n/g, '\n')
@@ -123,22 +124,29 @@ function deferred() {
 
 const seat = nodes(n => n.type === 'JSXElement' && n.openingElement.name.name === 'SolarFlowSeat')[0].node
 const hostBranch = seat.children.filter(n => n.type === 'JSXExpressionContainer')[1].expression
+const hostStatus = seat.children.find(n => n.type === 'JSXExpressionContainer')
+const refusalState = nodes(n => n.type === 'VariableDeclaration' && n.declarations.some(d =>
+  d.id.type === 'ArrayPattern' && d.id.elements[0]?.name === 'projectSolarRefusal'))[0]?.node
+const solarOverlayStatusOf = Function('SOLAR_OVERLAY_REASONS',
+  `${text(nodes(n => n.type === 'FunctionDeclaration' && n.id?.name === 'solarOverlayStatusOf')[0].node)}; return solarOverlayStatusOf`)(SOLAR_OVERLAY_REASONS)
 const adapterSource = source.slice(declaration('solarFlowSeated').parent.start,
   nodes(n => n.type === 'CallExpression' && n.callee.name === 'useEscapeOwner' && n.arguments[0]?.value === 'project-solar-form')[0].parent.end)
-const useAdapter = Function('React', 'sameSolarDrawingBinding', 'useEscapeOwner', 'PROJECT_SOLAR_APP_REASONS', 'REASONS', `
+const useAdapter = Function('React', 'sameSolarDrawingBinding', 'useEscapeOwner', 'PROJECT_SOLAR_APP_REASONS', 'REASONS', 'projectSolarAppReason', `
   const PROJECT_SOLAR_SUPPORTED_TOOLS = ${text(declaration('PROJECT_SOLAR_SUPPORTED_TOOLS').node.init)}
   return function useAdapter(input) {
-    const { useRef, useLayoutEffect } = React
+    const { useRef, useLayoutEffect, useState } = React
     const { projectMode, projectModeRef, projectSolar, projectSolarRuntime, catalogState,
       ENV_SOLAR_FLOW_RAIL, ENV_CAD_EDIT, ENV_SOLAR_SETTINGS_FORM, drafting, surfaceSlots,
       phoneViewport, setStudioDrawer, returnToDrawing, ribbon, activeRibbonTab,
       onCloseSolarFlowStep, setSolarFormTool } = input
+    ${refusalState ? text(refusalState) : ''}
     ${adapterSource}
     ${text(declaration('ribbonClusters').parent)}
     return { ribbonClusters, solarFlowSeated, projectSolarHostEnabled, projectSolarRows,
+      projectSolarRefusal: typeof projectSolarRefusal === 'undefined' ? null : projectSolarRefusal,
       projectSolarWorkspaceRef, projectSolarOpenerRef, onOpenProjectSolarTool, onCloseProjectSolarTool }
   }
-`)(React, sameSolarDrawingBinding, useEscapeOwner, PROJECT_SOLAR_APP_REASONS, REASONS)
+`)(React, sameSolarDrawingBinding, useEscapeOwner, PROJECT_SOLAR_APP_REASONS, REASONS, projectSolarAppReason)
 
 function store(initial) {
   let snapshot = initial
@@ -197,14 +205,18 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
     const adapter = useAdapter({ ...input, projectSolarRuntime: runtime, setStudioDrawer: setDrawer,
       returnToDrawing: h.returnToDrawing, onCloseSolarFlowStep: h.legacy.close, setSolarFormTool: h.legacy.form })
     h.runtime = runtime; h.adapter = adapter; h.drawer = drawer
-    const bindings = { ...input, ...adapter, projectSolarRuntime: runtime, mintCorrelationId: h.key,
-      projectSolarAppReason, onRequestCatalogRun: h.legacy.run, onSubmitSolarFlowStep: h.legacy.run,
+    const solarOverlayStatus = evaluate(declaration('solarOverlayStatus').node.init, {
+      projectMode: input.projectMode, projectSolarRefusal: adapter.projectSolarRefusal,
+      solarOverlayStatusOf, projectDrawing: { reason: null }, solarOverlayReason: null })
+    const bindings = { ...input, ...adapter, projectSolarRuntime: runtime, mintCorrelationId: h.key, solarOverlayStatus,
+      projectSolarAppReason, projectDrawing: { mode: 'ready' }, onRequestCatalogRun: h.legacy.run, onSubmitSolarFlowStep: h.legacy.run,
       onCloseSolarFlowStep: h.legacy.close, solarFormTool: null, solarFlowEditor: null,
       solarFlowPending: null, catalog: { families: [] }, solarFlowFamiliesDrawingId: null, mock: true,
       catalogRunContext: {}, canOpenSolarSettingsForm: () => false, solarFlowRunsFor: () => ({}),
       solarFlowRuns: {}, running: false, onOpenSolarFlowStep: h.legacy.run, onSolarFlowChange: h.legacy.flow }
     return <><div data-testid="seat">{element(hostBranch, bindings, { ProjectSolarWorkspace: Workspace,
       ProjectSolarGraphForm: Graph, SolarStepEditor: Step, SolarFlowRail: Rail })}</div>
+      {element(hostStatus, bindings)}
       <nav aria-label="Fixture ribbon">{adapter.ribbonClusters.flatMap(c => c.tools).map(tool =>
         <button key={tool.id} data-testid={'ribbon-' + tool.id} disabled={tool.disabled}
           aria-controls={tool.controls} aria-expanded={tool.expanded} onClick={tool.onClick}>{tool.label}</button>)}</nav></>
@@ -407,6 +419,11 @@ it('R13G2B-20 scoped Escape restores the opener or connected host fallback', asy
     host.focus(); fireEvent.keyDown(host, { key: 'Escape' }); await act(drain)
     expect(h.runtime.openTool).toBeNull()
     expect(document.activeElement).toBe(detached ? host : opener)
+    expect(escapeOwnerStack()).not.toContain('project-solar-form')
+    const closed = h.runtime.openTool
+    host.focus()
+    expect(fireEvent.keyDown(host, { key: 'Escape' })).toBe(true)
+    expect(h.runtime.openTool).toBe(closed)
     noLegacy(h); h.view.unmount()
   }
 })
@@ -419,4 +436,118 @@ it('R13G2B-21 rejected phone opening preserves drawer and focus', async () => {
   expect(document.activeElement).toBe(button)
   expect(h.runtime.openTool).toBeNull()
   expect(h.returnToDrawing).not.toHaveBeenCalled()
+})
+
+it('R13G2B-23 re-activating the open tool moves focus into the workspace', async () => {
+  const h = await setup()
+  const button = await h.open('solar-settings'), row = h.runtime.openTool
+  const host = document.getElementById('solar-tool-form')
+  expect(host.contains(document.activeElement)).toBe(true)
+  button.focus()
+  expect(document.activeElement).toBe(button)
+  fireEvent.click(button); await act(drain)
+  expect(h.runtime.openTool).toBe(row)
+  expect(host.contains(document.activeElement)).toBe(true)
+  expect(h.returnToDrawing).toHaveBeenCalledTimes(2)
+})
+
+it('R13G2B-24 a receipt that expires before activation is refused with a visible sentence', async () => {
+  const h = await setup({ phoneViewport: true })
+  const button = screen.getByTestId('ribbon-solar-settings')
+  expect(button.disabled).toBe(false)
+  expect(tool(h, 'solar-settings').reason).toBe('')
+  button.focus()
+  h.receiptToken.live = false // No render between expiry and the actual button click.
+  fireEvent.click(button); await act(drain)
+  expect(h.runtime.openTool).toBeNull()
+  expect(screen.queryByTestId('solar-settings-form')).toBeNull()
+  expect(screen.getByText(projectSolarAppReason('project_tools_unavailable'), { selector: '[role="status"]' })).toBeVisible()
+  expect(button.disabled).toBe(true)
+  expect(tool(h, 'solar-settings').reason).toBe(projectSolarAppReason('project_tools_unavailable'))
+  expect(document.activeElement).toBe(button)
+  expect(h.drawer).toBe('tools')
+  expect(h.returnToDrawing).not.toHaveBeenCalled()
+  noLegacy(h)
+  // The receipt can recover without changing identity; another refusal must still repaint.
+  h.receiptToken.live = true
+  await h.update({})
+  expect(button.disabled).toBe(false)
+  h.receiptToken.live = false
+  fireEvent.click(button); await act(drain)
+  expect(button.disabled).toBe(true)
+  expect(screen.getByTestId('solar-graph-overlay-status').textContent).toBe(projectSolarAppReason('project_tools_unavailable'))
+  expect(h.runtime.openTool).toBeNull()
+  expect(h.returnToDrawing).not.toHaveBeenCalled()
+})
+
+it('R13G2B-25 the refusal sentence clears on the next successful open and on a scope or receipt change', async () => {
+  for (const change of ['success', 'scope', 'authority', 'binding', 'receipt', 'client', 'project-mode']) {
+    const h = await setup()
+    h.receiptToken.live = false
+    fireEvent.click(screen.getByTestId('ribbon-solar-settings')); await act(drain)
+    const sentence = projectSolarAppReason('project_tools_unavailable')
+    const status = () => screen.queryByText(sentence, { selector: '[role="status"]' })
+    expect(status()).toBeVisible()
+    await h.update({ phoneViewport: true }) // An unrelated render must retain the explanation.
+    expect(status()).toBeVisible()
+    if (change === 'success') {
+      h.receiptToken.live = true
+      await h.update({})
+      expect(status()).toBeVisible()
+      await h.open('solar-settings')
+      expect(h.runtime.openTool).toBe(h.rows[0])
+    } else if (change === 'receipt') {
+      await h.update({ catalogState: { projectCatalog: { ...h.receipt } } })
+    } else if (change === 'project-mode') {
+      await h.update({ projectMode: false, projectModeRef: { current: false } })
+    } else if (change === 'client') {
+      await h.update({ projectSolar: { ...h.owner, projectClient: { ...h.client } } })
+    } else {
+      // Change each dependency independently; authority/binding also cover an in-place scope update.
+      if (change === 'scope') h.owner = { ...h.owner, scope: { ...h.owner.scope } }
+      if (change === 'authority') h.owner.scope.authorityKey = 'epoch-2'
+      if (change === 'binding') h.owner.scope.binding = { ...B, input_version_id: OUTPUT }
+      await h.update({ projectSolar: h.owner })
+    }
+    expect(status()).toBeNull()
+    expect(h.adapter.projectSolarRefusal).toBeNull()
+    h.view.unmount()
+  }
+})
+
+it('R13G2B-26 refusing an activation with an editor open preserves focus and drawer', async () => {
+  const h = await setup({ phoneViewport: true })
+  await h.open('solar-settings')
+  const row = h.runtime.openTool, button = screen.getByTestId('ribbon-cad-line')
+  const retained = tool(h, 'solar-settings').onClick
+  await h.update({ externalBusy: true })
+  button.focus()
+  // Busy fieldsets can ignore focus(). A refused activation must not request it either.
+  const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+  act(() => { expect(retained()).toBe(false) })
+  await act(drain)
+  expect(h.runtime.openTool).toBe(row)
+  expect(document.activeElement).toBe(button)
+  expect(focus).not.toHaveBeenCalled()
+  expect(h.returnToDrawing).toHaveBeenCalledOnce()
+  expect(h.drawer).toBe('none')
+  expect(h.adapter.projectSolarRefusal).toEqual({ reason: projectSolarAppReason('project_tools_unavailable') })
+})
+
+it('R13G2B-27 a disabled host or inactive project refuses silently', async () => {
+  for (const change of [{ ENV_CAD_EDIT: false }, { projectMode: false, projectModeRef: { current: false } },
+    { projectModeRef: { current: false } }]) {
+    const h = await setup({ phoneViewport: true, ...change })
+    const button = screen.getByTestId('ribbon-cad-line')
+    button.focus()
+    act(() => { expect(h.adapter.onOpenProjectSolarTool(h.rows[0])).toBe(false) })
+    await act(drain)
+    expect(h.adapter.projectSolarRefusal).toBeNull()
+    expect(screen.queryByText(projectSolarAppReason('project_tools_unavailable'), { selector: '[role="status"]' })).toBeNull()
+    expect(h.runtime.openTool).toBeNull()
+    expect(document.activeElement).toBe(button)
+    expect(h.drawer).toBe('tools')
+    expect(h.returnToDrawing).not.toHaveBeenCalled()
+    noLegacy(h); h.view.unmount()
+  }
 })

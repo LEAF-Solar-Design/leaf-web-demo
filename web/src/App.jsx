@@ -3446,8 +3446,9 @@ export default function App() {
     activeVersion: drawing.activeVersion,
     requestedDrawingId: REQUESTED_DRAWING_ID ?? null,
   })
+  const [projectSolarRefusal, setProjectSolarRefusal] = useState(null)
   const solarOverlayStatus = projectMode
-    ? solarOverlayStatusOf(projectDrawing.reason === 'INVALID_SCALE' ? 'invalid_scale'
+    ? projectSolarRefusal?.reason || solarOverlayStatusOf(projectDrawing.reason === 'INVALID_SCALE' ? 'invalid_scale'
       : projectDrawing.reason === 'OVERLAY_LIMIT' ? 'overlay_limit'
       : ['GRAPH_PAIR_INVALID', 'GRAPH_UNREADABLE', 'INVALID_GRAPH'].includes(projectDrawing.reason) ? 'invalid_graph'
       : null)
@@ -3456,6 +3457,11 @@ export default function App() {
   const projectSolarHostEnabled = projectMode && solarFlowSeated
   const projectSolarWorkspaceRef = useRef(null)
   const projectSolarOpenerRef = useRef(null)
+  const [projectSolarFocusRequest, setProjectSolarFocusRequest] = useState(0)
+  useLayoutEffect(() => {
+    setProjectSolarRefusal(null)
+  }, [projectMode, projectSolar.scope, projectSolar.scope.authorityKey,
+    projectSolar.scope.binding, projectSolar.projectClient, catalogState.projectCatalog])
   const projectSolarRows = (() => {
     const receipt = catalogState.projectCatalog
     try {
@@ -3472,8 +3478,15 @@ export default function App() {
   function onOpenProjectSolarTool(row) {
     if (!projectSolarHostEnabled || !projectModeRef.current
       || !projectSolarRows.includes(row) || !PROJECT_SOLAR_SUPPORTED_TOOLS.has(row.name)
-      || !projectSolarRuntime.onOpenTool(row)) return false
+      || !projectSolarRuntime.onOpenTool(row)) {
+      if (projectSolarHostEnabled && projectModeRef.current) {
+        setProjectSolarRefusal({ reason: projectSolarAppReason('project_tools_unavailable') })
+      }
+      return false
+    }
     projectSolarOpenerRef.current = document.activeElement
+    setProjectSolarFocusRequest(value => value + 1)
+    setProjectSolarRefusal(null)
     returnToDrawing()
     if (phoneViewport) setStudioDrawer('none')
     return true
@@ -3491,7 +3504,7 @@ export default function App() {
     const host = projectSolarWorkspaceRef.current
     const field = host?.querySelector('.project-solar-workspace-editor input:not([disabled]), .project-solar-workspace-editor select:not([disabled]), .project-solar-workspace-editor textarea:not([disabled]), .project-solar-workspace-editor button:not([disabled])')
     ;(field || host)?.focus()
-  }, [projectSolarHostEnabled, projectSolarRuntime.openTool])
+  }, [projectSolarHostEnabled, projectSolarRuntime.openTool, projectSolarFocusRequest])
   useEscapeOwner('project-solar-form', projectSolarHostEnabled && !!projectSolarRuntime.openTool,
     onCloseProjectSolarTool, { layer: 'edit', scope: projectSolarWorkspaceRef, scoped: true })
   useEffect(() => {

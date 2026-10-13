@@ -1157,7 +1157,8 @@ describe('A1b-2 stored Solar graph wiring', () => {
     assert.equal(normalized.activeVersion, version)
     const index = block.body.findIndex(statement => statement.type === 'VariableDeclaration' && statement.declarations.includes(declaration))
     assert.ok(text(block.body[index - 1]).includes('const drafting = surfaceSlots.chrome.cockpit'))
-    assert.ok(text(block.body[index + 1]).includes('solarOverlayStatusOf(solarOverlayReason)'))
+    assert.ok(text(block.body.slice(index + 1).find(statement => statement.type === 'VariableDeclaration'
+      && statement.declarations.some(item => item.id.name === 'solarOverlayStatus'))).includes('solarOverlayStatusOf(solarOverlayReason)'))
   })
 
   it('A1B2-W02 current scene requires matching seated scope', () => {
@@ -1244,7 +1245,8 @@ describe('A1b-2 stored Solar graph wiring', () => {
     for (const [reason, expected] of [['INVALID_SCALE', reasons.invalid_scale], ['OVERLAY_LIMIT', reasons.overlay_limit],
       ['GRAPH_PAIR_INVALID', reasons.invalid_graph], ['GRAPH_UNREADABLE', reasons.invalid_graph],
       ['INVALID_GRAPH', reasons.invalid_graph], ['GRAPHLESS', null], ['SCENE_PENDING', null]]) {
-      assert.equal(evaluate(declaration.init, { projectMode: true, projectDrawing: { reason }, solarOverlayStatusOf: statusOf }), expected)
+      assert.equal(evaluate(declaration.init, { projectMode: true, projectSolarRefusal: null,
+        projectDrawing: { reason }, solarOverlayStatusOf: statusOf }), expected)
     }
     for (const reason of ['refresh_pending', null, undefined, 'unknown', 'constructor', 'toString']) {
       assert.equal(statusOf(reason), null)
