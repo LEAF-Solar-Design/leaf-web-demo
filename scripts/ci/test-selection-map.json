@@ -155,6 +155,7 @@
     "server-approval-consume",
     "server-approval-policy",
     "server-aps-callback-adapter",
+    "server-aps-docs-redaction",
     "server-arlo-lab-inputs",
     "server-arlo-review",
     "server-auth",

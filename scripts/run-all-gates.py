@@ -3389,6 +3389,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_ios_surface_bridge.py"), 32),
         Suite("server-ios-surface-contract", "server tests/test_ios_surface_contract.py", "pytest", SERVER,
               _py_pytest("tests/test_ios_surface_contract.py"), 41),
+        Suite("server-aps-docs-redaction", "server tests/test_aps_docs_redaction.py", "pytest", SERVER,
+              _py_pytest("tests/test_aps_docs_redaction.py"), 6),
         Suite("server-ios-surface-e2e-harness", "server tests/test_ios_surface_e2e_harness.py", "pytest", SERVER,
               _py_pytest("tests/test_ios_surface_e2e_harness.py"), 5),
         Suite("server-mcp-gateway-telemetry", "server tests/test_mcp_gateway_telemetry.py", "pytest", SERVER,
