@@ -46,6 +46,26 @@ def _load_runner():
     return mod
 
 
+def test_pp3a_gate_registration():
+    runner = _load_runner()
+    catalog = runner.build_suites()
+    suite_ids = [s.id for s in catalog]
+    suites = [s for s in catalog if s.id == "scripts-proof-project"]
+    assert len(suites) == 1
+    assert suite_ids.index("scripts-proof-project") == suite_ids.index("scripts-proof-project-pg") + 1
+    suite = suites[0]
+    assert suite.cwd == SCRIPTS
+    assert suite.argv == runner._py_pytest("test_proof_project.py")
+    assert suite.label == "scripts test_proof_project.py"
+    assert suite.kind == "pytest" and suite.expected == 32
+    assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
+    assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1
+    mandatory = selection["mandatory_suite_ids"]
+    assert mandatory.index(suite.id) == mandatory.index("scripts-proof-project-pg") + 1
+
+
 def test_pp2_gate_registration():
     runner = _load_runner()
     suites = [s for s in runner.build_suites() if s.id == "scripts-proof-project-pg"]
@@ -100,7 +120,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
     assert suites["platform"].expected == 1178  # 2026-10-13: measured with ten R14-E rows.
-    assert suites["gate-runner-selftest"].expected == 237  # 2026-10-13: measured with R14-E registration.
+    assert suites["gate-runner-selftest"].expected == 238  # Measured with R14-E and PP-3 record A registrations.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4190,7 +4210,7 @@ def test_R14C_32_mandatory_registration():
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
     assert mandatory[-2:] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 237  # 2026-10-13: measured with R14-E registration.
+    assert suites["gate-runner-selftest"].expected == 238  # Measured with R14-E and PP-3 record A registrations.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4285,7 +4305,7 @@ def test_sip_r3e_gate_registration():
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
     # 2026-10-13: R14-E measured 1178 platform rows and 237 registration/selftest rows.
     assert suites["platform"].expected == 1178
-    assert suites["gate-runner-selftest"].expected == 237  # R14-E: measured registered suite.
+    assert suites["gate-runner-selftest"].expected == 238  # R14-E and PP-3 record A: measured registered suite.
 
 
 def test_sip_r14_sizing_gate_registration():

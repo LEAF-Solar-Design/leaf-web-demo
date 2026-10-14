@@ -2400,6 +2400,9 @@ def build_suites() -> List[Suite]:
         # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets.
         Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 49),
+        # Record A: measured 32 boundary/runtime rows, including production admission facts.
+        Suite("scripts-proof-project", "scripts test_proof_project.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 32),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for
@@ -3021,7 +3024,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-13: PP-1 adds one registration row (233 -> 234).
               # 2026-10-13: PP-2 adds one registration row (234 -> 235); R3e-2 one more (235 -> 236).
               # 2026-10-13: R14-E adds one registration row; measured 237 passing.
-              ["test_studio_walk_regression_gate.py"], 237),
+              # 2026-10-14: PP-3 record A adds one registration row (237 -> 238).
+              ["test_studio_walk_regression_gate.py"], 238),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
