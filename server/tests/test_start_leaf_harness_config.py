@@ -2,6 +2,9 @@
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 def _launcher_module():
@@ -11,6 +14,81 @@ def _launcher_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _fake_launcher(monkeypatch, argv, env):
+    launcher = _launcher_module()
+    spawned = []
+    monkeypatch.setattr(launcher.sys, "argv", ["start-leaf.py", "--no-web", *argv])
+    monkeypatch.setattr(launcher.os, "environ", env)
+    monkeypatch.setattr(launcher, "source_revision", lambda _: "a" * 40)
+    monkeypatch.setattr(launcher, "pick_port", lambda name, preferred, *a: preferred)
+    monkeypatch.setattr(launcher.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(launcher, "_make_win_job", lambda: None)
+    monkeypatch.setattr(launcher, "wait_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(launcher, "cleanup", lambda: None)
+    monkeypatch.setattr(launcher, "say", lambda *a: None)
+
+    def spawn(name, argv, cwd, child_env):
+        spawned.append((name, argv, cwd, dict(child_env)))
+        return SimpleNamespace(name=name, proc=SimpleNamespace(poll=lambda: None))
+
+    def stop(_):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(launcher, "spawn", spawn)
+    monkeypatch.setattr(launcher.time, "sleep", stop)
+    return launcher, spawned
+
+
+def test_launcher_project_worker_selection(monkeypatch):
+    for argv, env in (
+        (["--canonical-worker-tool", "solar-settings", "--canonical-worker-id", "w1"],
+         {"DATABASE_URL": "postgresql://local/leaf"}),
+        (["--canonical-worker-tool", "solar-settings"],
+         {"DATABASE_URL": "postgresql://local/leaf", "LEAF_CANONICAL_WORKER_TOOL": "solar-settings"}),
+        (["--canonical-worker-tool", "solar-settings", "--canonical-worker-id=-w1"],
+         {"DATABASE_URL": "postgresql://local/leaf"}),
+        ([], {"DATABASE_URL": "postgresql://local/leaf"}),
+    ):
+        with monkeypatch.context() as patch:
+            launcher, spawned = _fake_launcher(patch, argv, env)
+            assert launcher.main() == 0
+            assert [item[0] for item in spawned] == ["broker", "worker", "app"]
+            worker = next(item for item in spawned if item[0] == "worker")
+            expected = [launcher.sys.executable, "canonical_worker.py"]
+            if argv:
+                expected += ["--tool", "solar-settings", "--readiness"]
+                if "--canonical-worker-id" in argv:
+                    expected += ["--worker-id", "w1"]
+                if "--canonical-worker-id=-w1" in argv:
+                    expected += ["--worker-id=-w1"]
+                assert all(item[3]["LEAF_CANONICAL_WORKER_TOOL"] == "solar-settings" for item in spawned)
+            else:
+                assert all("LEAF_CANONICAL_WORKER_TOOL" not in item[3] for item in spawned)
+            assert worker[1] == expected
+
+
+def test_launcher_project_worker_refusals(monkeypatch, capsys):
+    configured = {"DATABASE_URL": "postgresql://local/leaf"}
+    for argv, env, message in (
+        (["--canonical-worker-tool", "solar-settings"], {}, "requires a platform database"),
+        (["--canonical-worker-tool", "solar-settings"],
+         {**configured, "LEAF_CANONICAL_WORKER_TOOL": "arlo-design"}, "conflicts"),
+        (["--canonical-worker-id", "w1"], configured, "requires --canonical-worker-tool"),
+        *[(["--canonical-worker-tool", tool], configured, "Invalid canonical worker tool")
+          for tool in ("", "Solar-settings", "bad tool", "a" * 65, "a\n")],
+        *[(["--canonical-worker-tool", "solar-settings", "--canonical-worker-id", value],
+           configured, "valid canonical worker id") for value in ("", "bad id", "a" * 129)],
+    ):
+        with monkeypatch.context() as patch:
+            launcher, spawned = _fake_launcher(patch, argv, env)
+            assert launcher.main() == 2
+            assert spawned == []
+            captured = capsys.readouterr()
+            assert captured.out == ""
+            assert len(captured.err.splitlines()) == 1
+            assert message in captured.err
 
 
 def test_with_harness_keeps_repo_mutation_off_without_writer_lease_database():

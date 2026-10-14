@@ -231,7 +231,9 @@ sys.exit(0 if out.get("ok") else 1)
 '''
 
 # The adapter's own declared tool set, read without importing the adapter into this process.
-_ADAPTER_SOURCE = (REPO / "server" / "solar_project_graph.py").read_text(encoding="utf-8")
+# 2026-10-13: PP-3A1 shares tool membership with the driver-free descriptor.
+_ADAPTER_SOURCE = (REPO / "server" / "solar_project_graph.py").read_text(encoding="utf-8") + (
+    REPO / "server" / "solar_project_tools.py").read_text(encoding="utf-8")
 
 
 def _probe_env() -> dict[str, str]:

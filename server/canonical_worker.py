@@ -6,21 +6,95 @@ jobs using the canonical Platform lease transaction.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+from pathlib import Path
+import re
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import uuid
 from typing import Any, Dict
 
 import platform_link
-import solar_project_graph
-import solar_project_jobs
+from solar_project_tools import SUPPORTED_TOOLS
 from solver_adapters import arlo_design, autofill
 
 ADAPTERS = {autofill.TOOL_NAME: autofill.run, arlo_design.TOOL_NAME: arlo_design.run}
 DEFAULT_LEASE_SECONDS = 30.0
+PROJECT_POSTURE_RUNTIMES = frozenset({"local", "test"})
+
+
+def project_posture_ok(environ=None) -> bool:
+    """The managed project proof's posture: a local or test runtime with project Solar runs on.
+
+    Mirrors solar_project_admission.project_runs_enabled() (exactly "1") without importing
+    that module, which pulls in the whole server.
+    """
+    env = os.environ if environ is None else environ
+    runtime = env.get("LEAF_RUNTIME_ENV", "")
+    return (runtime.strip().lower() in PROJECT_POSTURE_RUNTIMES
+            and env.get("LEAF_SOLAR_PROJECT_RUN_ENABLED", "0") == "1")
+
+# Frozen server-relative source scope. The selected declaration is added below.
+# Include the settings builtin and its direct helpers, not just the dispatcher.
+GRAPH_WORKER_MANIFEST = (
+    "builtins/solar_settings.py",
+    "canonical_worker.py",
+    "checkout_capability.py",
+    "deps.py",
+    "leaf_cloud_client.py",
+    "platform_link.py",
+    "solar_design_graph.py",
+    "solar_graph_context.py",
+    "solar_graph_seed.py",
+    "solar_local_graph.py",
+    "solar_preset_sync.py",
+    "solar_project.py",
+    "solar_project_context.py",
+    "solar_project_graph.py",
+    "solar_project_jobs.py",
+    "solar_project_sizing.py",
+    "solar_project_tools.py",
+    "solar_settings_invalidation.py",
+    "solar_sizing_client.py",
+    "solar_sizing_power.py",
+    "solar_solve_results.py",
+    "solar_tools/__init__.py",
+    "tenant_id_validator.py",
+    "tool_validate.py",
+    "write_loop.py",
+)
+
+
+def graph_worker_descriptor(tool_name: str, *, server_dir=None) -> Dict[str, str]:
+    """Fingerprint raw graph sources without importing a database driver or opening a DB."""
+    if tool_name not in SUPPORTED_TOOLS:
+        raise RuntimeError(f"unknown graph worker tool: {tool_name}")
+    root = Path(server_dir) if server_dir is not None else Path(__file__).resolve().parent
+    declaration = f"solar_tools/{tool_name.replace('-', '_')}.json"
+    digest = hashlib.sha256()
+    for relative in sorted((*GRAPH_WORKER_MANIFEST, declaration)):
+        path = root / relative
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(f"cannot read graph worker source: {path}") from exc
+        digest.update(relative.encode("utf-8") + b"\0" + str(len(raw)).encode("ascii") + b"\0")
+        digest.update(raw)
+    source_sha256 = digest.hexdigest()
+    return {"tool_name": tool_name,
+            "runtime": f"python-{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            "source_revision": "sha256:" + source_sha256, "source_sha256": source_sha256}
+
+
+def _worker_id_argument(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value):
+        raise argparse.ArgumentTypeError("worker id must be 1-128 ASCII letters, digits, or ._:-")
+    return value
 
 
 class LeaseGuard:
@@ -73,6 +147,9 @@ def worker_id() -> str:
 
 def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS,
              tool_name: str = autofill.TOOL_NAME) -> bool:
+    import solar_project_graph
+    import solar_project_jobs
+
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
     if tool_name in solar_project_graph.SUPPORTED_TOOLS:
@@ -142,11 +219,25 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS,
 
 def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SECONDS,
           once: bool = False, stop_event: threading.Event | None = None,
-          tool_name: str = autofill.TOOL_NAME) -> None:
-    owner = worker_id()
+          tool_name: str = autofill.TOOL_NAME, worker_id: str | None = None,
+          project_readiness: bool = False) -> None:
+    owner = worker_id if worker_id is not None else globals()["worker_id"]()
+    descriptor = graph_worker_descriptor(tool_name) if project_readiness else None
+    ready_printed = False
     stop = stop_event or threading.Event()
     while not stop.is_set():
+        if descriptor is not None:
+            platform_link._canonical_jobs_module().record_worker_heartbeat(
+                owner, descriptor["tool_name"], descriptor["runtime"],
+                descriptor["source_revision"], descriptor["source_sha256"])
         claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool_name)
+        # Ready only once one full cycle (heartbeat and claim) has completed.
+        if descriptor is not None and not ready_printed:
+            print("LEAF_CANONICAL_WORKER_READY " + json.dumps({
+                "worker_id": owner, "tool_name": descriptor["tool_name"],
+                "source_revision": descriptor["source_revision"]}, separators=(",", ":")),
+                flush=True)
+            ready_printed = True
         if once:
             return
         if not claimed:
@@ -154,13 +245,23 @@ def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SEC
 
 
 def main() -> None:
+    import solar_project_graph
+
     parser = argparse.ArgumentParser(description="Leaf canonical solve worker")
     parser.add_argument("--once", action="store_true")
+    # No prefix of this option is a prefix of a base option, so every abbreviation the base
+    # parser accepted (--p for --poll-seconds) still resolves to the same option.
+    parser.add_argument("--readiness", dest="project_readiness", action="store_true")
+    parser.add_argument("--worker-id", type=_worker_id_argument)
     parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS), default=autofill.TOOL_NAME)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--lease-seconds", type=float, default=float(
         os.environ.get("LEAF_CANONICAL_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)))
     args = parser.parse_args()
+    if args.project_readiness and args.tool not in solar_project_graph.SUPPORTED_TOOLS:
+        parser.error("--readiness requires a graph tool")
+    if args.project_readiness and not project_posture_ok():
+        parser.error("--readiness requires a local or test runtime with project Solar runs enabled")
     # A process that can only heartbeat against part of the expected schema is
     # not ready. Refuse to claim work until every required relation is present.
     platform_link._load_platform()[1].assert_schema_current()
@@ -169,7 +270,7 @@ def main() -> None:
         signal.signal(signum, lambda _signum, _frame: stop.set())
     serve(poll_seconds=max(args.poll_seconds, 0.05),
           lease_seconds=max(args.lease_seconds, 1.0), once=args.once, stop_event=stop,
-          tool_name=args.tool)
+          tool_name=args.tool, worker_id=args.worker_id, project_readiness=args.project_readiness)
 
 
 if __name__ == "__main__":

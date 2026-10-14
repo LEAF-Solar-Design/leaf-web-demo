@@ -1,5 +1,10 @@
 import uuid
+import builtins
+import hashlib
+import json
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -11,6 +16,378 @@ from routers import jobs as jobs_router
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _project_main(monkeypatch, argv, schema_check):
+    monkeypatch.setattr(sys, "argv", ["canonical_worker.py", *argv])
+    monkeypatch.setattr(canonical_worker.platform_link, "_load_platform", lambda: (
+        None, SimpleNamespace(assert_schema_current=schema_check), None))
+    monkeypatch.setattr(canonical_worker.signal, "signal", lambda *_: None)
+
+
+def _project_posture(monkeypatch, runtime="test", flag="1"):
+    for name, value in (("LEAF_RUNTIME_ENV", runtime), ("LEAF_SOLAR_PROJECT_RUN_ENABLED", flag)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
+def test_worker_project_schema_before_heartbeat(monkeypatch, capsys):
+    store = FakeCanonicalJobs()
+    calls = []
+
+    def schema_check():
+        calls.append("schema")
+        raise RuntimeError("schema out of date")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("descriptor or execution before schema check")
+
+    _project_posture(monkeypatch)
+    _project_main(monkeypatch, ["--tool", "solar-settings", "--readiness", "--once"], schema_check)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
+    monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", forbidden, raising=False)
+    monkeypatch.setattr(canonical_worker, "serve", forbidden)
+    # An uncaught main exception makes the entrypoint exit nonzero, without spawning it.
+    with pytest.raises(RuntimeError, match="schema out of date"):
+        canonical_worker.main()
+    assert calls == ["schema"]
+    assert store.heartbeats == []
+    assert capsys.readouterr().out == ""
+
+
+def test_worker_project_idle_heartbeat(monkeypatch, capsys):
+    import solar_project_jobs
+
+    store = FakeCanonicalJobs()
+    stop = Event()
+    events, descriptors, prints = [], [], []
+    expected = {"tool_name": "solar-settings", "runtime": "python-test",
+                "source_revision": "sha256:" + "c" * 64, "source_sha256": "c" * 64}
+
+    def descriptor(tool):
+        descriptors.append(tool)
+        assert events == ["schema"]
+        return expected
+
+    def heartbeat(*args):
+        events.append("heartbeat")
+        store.record_worker_heartbeat(*args)
+
+    def idle(owner, **kwargs):
+        assert owner == "w1"
+        assert kwargs == {"tool_name": "solar-settings", "lease_seconds": 30.0}
+        assert events[-1] == "heartbeat"
+        assert len(store.heartbeats) == events.count("delegate") + 1
+        events.append("delegate")
+        if events.count("delegate") == 2:
+            stop.set()
+        return False
+
+    real_print = builtins.print
+
+    def printed(*args, **kwargs):
+        prints.append(kwargs)
+        real_print(*args, **kwargs)
+
+    _project_posture(monkeypatch)
+    _project_main(monkeypatch, ["--tool", "solar-settings", "--readiness", "--worker-id", "w1"],
+                  lambda: events.append("schema"))
+    monkeypatch.setattr(canonical_worker.threading, "Event", lambda: stop)
+    monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", descriptor, raising=False)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=heartbeat))
+    monkeypatch.setattr(solar_project_jobs, "run_once", idle)
+    monkeypatch.setattr(builtins, "print", printed)
+    canonical_worker.main()
+    assert events == ["schema", "heartbeat", "delegate", "heartbeat", "delegate"]
+    assert descriptors == ["solar-settings"]
+    assert store.heartbeats == [("w1", *expected.values())] * 2
+    line = "LEAF_CANONICAL_WORKER_READY " + json.dumps({
+        "worker_id": "w1", "tool_name": "solar-settings", "source_revision": expected["source_revision"]},
+        separators=(",", ":")) + "\n"
+    assert capsys.readouterr().out == line
+    assert prints == [{"flush": True}]
+
+
+def test_worker_project_heartbeat_failure(monkeypatch, capsys):
+    import solar_project_jobs
+
+    delegated = []
+
+    def failed(*args):
+        raise ConnectionError("heartbeat failed")
+
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=failed))
+    monkeypatch.setattr(solar_project_jobs, "run_once", lambda *a, **k: delegated.append(a))
+    with pytest.raises(ConnectionError, match="heartbeat failed"):
+        canonical_worker.serve(tool_name="solar-settings", worker_id="w1", project_readiness=True, once=True)
+    assert delegated == []
+    assert capsys.readouterr().out == ""
+
+
+def test_worker_default_path_unchanged(monkeypatch, capsys):
+    import solar_project_jobs
+
+    store = FakeCanonicalJobs()
+    calls, identities = [], []
+    monkeypatch.setattr(canonical_worker, "worker_id", lambda: identities.append(1) or "generated")
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
+    monkeypatch.setattr(solar_project_jobs, "run_once", lambda *a, **k: calls.append((a, k)) or False)
+    canonical_worker.serve(tool_name="solar-settings", once=True, project_readiness=False)
+    assert calls == [(("generated",), {"tool_name": "solar-settings", "lease_seconds": 30.0})]
+    assert store.heartbeats == []
+    descriptor = {"tool_name": "string-autofill-opt", "runtime": "python-test",
+                  "source_revision": "abc1234", "source_sha256": "a" * 64}
+    monkeypatch.setattr(canonical_worker.autofill, "descriptor", lambda: descriptor)
+    canonical_worker.serve(once=True)
+    assert identities == [1, 1]
+    assert store.heartbeats == [("generated", *descriptor.values())]
+    assert store.claim_requests == [("generated", 30.0, "string-autofill-opt")]
+    assert capsys.readouterr().out == ""
+
+
+def test_worker_project_flag_requires_graph_tool(monkeypatch, capsys):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid arguments reached the database")
+
+    _project_main(monkeypatch, ["--tool", "string-autofill-opt", "--readiness"], forbidden)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 2
+    assert "--readiness requires a graph tool" in capsys.readouterr().err
+
+
+READY_PREFIX = "LEAF_CANONICAL_WORKER_READY "
+POSTURE_REFUSAL = "--readiness requires a local or test runtime with project Solar runs enabled"
+
+
+def _graph_descriptor():
+    return {"tool_name": "solar-settings", "runtime": "python-test",
+            "source_revision": "sha256:" + "d" * 64, "source_sha256": "d" * 64}
+
+
+def test_worker_project_ready_after_first_cycle(monkeypatch, capsys):
+    import solar_project_jobs
+
+    stop = Event()
+    events = []
+    real_print = builtins.print
+
+    def printed(*args, **kwargs):
+        if args and str(args[0]).startswith(READY_PREFIX):
+            events.append("ready")
+        real_print(*args, **kwargs)
+
+    def cycle(owner, **kwargs):
+        assert owner == "w1"
+        events.append("cycle")
+        if events.count("cycle") == 2:
+            stop.set()
+        return False
+
+    monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", lambda tool: _graph_descriptor())
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=lambda *args: events.append("heartbeat")))
+    monkeypatch.setattr(solar_project_jobs, "run_once", cycle)
+    monkeypatch.setattr(builtins, "print", printed)
+    canonical_worker.serve(tool_name="solar-settings", worker_id="w1", project_readiness=True,
+                           poll_seconds=0.05, stop_event=stop)
+    assert events == ["heartbeat", "cycle", "ready", "heartbeat", "cycle"]
+    assert capsys.readouterr().out.count(READY_PREFIX) == 1
+
+
+def test_worker_project_no_ready_when_first_cycle_fails(monkeypatch, capsys):
+    import solar_project_jobs
+
+    heartbeats = []
+
+    def failed(owner, **kwargs):
+        raise ConnectionError("claim failed")
+
+    monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", lambda tool: _graph_descriptor())
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=lambda *args: heartbeats.append(args)))
+    monkeypatch.setattr(solar_project_jobs, "run_once", failed)
+    for once in (True, False):
+        with pytest.raises(ConnectionError, match="claim failed"):
+            canonical_worker.serve(tool_name="solar-settings", worker_id="w1", project_readiness=True,
+                                   once=once, stop_event=Event())
+    assert len(heartbeats) == 2
+    assert capsys.readouterr().out == ""
+
+
+def test_worker_project_refuses_outside_project_posture(monkeypatch, capsys):
+    def forbidden(*args, **kwargs):
+        pytest.fail("a refused posture reached the schema, the database or the loop")
+
+    sentinel = "SENTINEL-RUNTIME-7f3a"
+    cases = [(None, "1"), ("", "1"), ("production", "1"), ("staging", "1"), ("dev", "1"),
+             ("localhost", "1"), (sentinel, "1"), ("test", None), ("test", "0"), ("test", "true"),
+             ("test", " 1"), ("test", "1 "), ("local", "yes"), ("production", None)]
+    for runtime, flag in cases:
+        _project_posture(monkeypatch, runtime, flag)
+        _project_main(monkeypatch, ["--tool", "solar-settings", "--readiness", "--once"], forbidden)
+        monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", forbidden, raising=False)
+        monkeypatch.setattr(canonical_worker, "serve", forbidden)
+        monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", forbidden)
+        with pytest.raises(SystemExit) as exc:
+            canonical_worker.main()
+        assert exc.value.code == 2, (runtime, flag)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert POSTURE_REFUSAL in captured.err, (runtime, flag)
+        assert sentinel not in captured.err
+
+
+def test_worker_project_accepts_local_and_test_posture(monkeypatch):
+    class Reached(Exception):
+        pass
+
+    def schema_check():
+        raise Reached()
+
+    for runtime in ("test", "local", " Local ", "TEST"):
+        _project_posture(monkeypatch, runtime, "1")
+        _project_main(monkeypatch, ["--tool", "solar-settings", "--readiness", "--once"], schema_check)
+        with pytest.raises(Reached):
+            canonical_worker.main()
+
+
+def test_project_posture_matches_admission_flag(monkeypatch):
+    import solar_project_admission
+
+    for flag in (None, "", "0", "1", " 1", "1 ", "true", "TRUE", "yes", "01"):
+        _project_posture(monkeypatch, "test", flag)
+        assert canonical_worker.project_posture_ok() is solar_project_admission.project_runs_enabled(), flag
+
+
+def test_worker_id_grammar(monkeypatch, capsys):
+    calls, schema = [], []
+    monkeypatch.setattr(canonical_worker, "serve", lambda **kwargs: calls.append(kwargs))
+    for valid in ("w1.A_b:c-d", "a" * 128, "-w1"):
+        _project_main(monkeypatch, ["--worker-id=" + valid], lambda: schema.append(1))
+        canonical_worker.main()
+        assert calls[-1]["worker_id"] == valid
+    for invalid in ("", "has space", "a" * 129, "w\n", "é"):
+        _project_main(monkeypatch, ["--worker-id", invalid], lambda: pytest.fail("database touched"))
+        with pytest.raises(SystemExit) as exc:
+            canonical_worker.main()
+        assert exc.value.code == 2
+    assert len(calls) == len(schema) == 3
+    assert capsys.readouterr().out == ""
+
+
+def test_worker_base_option_abbreviations_unchanged(monkeypatch):
+    # Every prefix the base parser accepted for its four options still resolves to that option.
+    calls = []
+    monkeypatch.setattr(canonical_worker, "serve", lambda **kwargs: calls.append(kwargs))
+    cases = (("--once", None, "once", True),
+             ("--tool", "solar-settings", "tool_name", "solar-settings"),
+             ("--poll-seconds", "0.2", "poll_seconds", 0.2),
+             ("--lease-seconds", "2.5", "lease_seconds", 2.5))
+    tried = 0
+    for full, value, key, expected in cases:
+        for end in range(3, len(full) + 1):
+            argv = [full[:end]] + ([value] if value is not None else [])
+            _project_main(monkeypatch, argv, lambda: None)
+            canonical_worker.main()
+            assert calls[-1][key] == expected, (argv, calls[-1])
+            tried += 1
+    assert tried == len(calls) == 4 + 4 + 12 + 13
+
+
+def test_worker_id_default_generator():
+    import os
+    import socket
+
+    prefix = f"{socket.gethostname()}:{os.getpid()}:"
+    first, second = canonical_worker.worker_id(), canonical_worker.worker_id()
+    for value in (first, second):
+        assert value.startswith(prefix)
+        assert uuid.UUID(value[len(prefix):]).version == 4
+    assert first != second
+
+
+def test_graph_worker_descriptor(monkeypatch, tmp_path):
+    import dependency_health
+    import solar_project_graph
+
+    # Independent scope oracle: dropping any source must change the expected digest.
+    manifest = (
+        "builtins/solar_settings.py", "canonical_worker.py", "checkout_capability.py", "deps.py",
+        "leaf_cloud_client.py", "platform_link.py", "solar_design_graph.py", "solar_graph_context.py",
+        "solar_graph_seed.py", "solar_local_graph.py", "solar_preset_sync.py", "solar_project.py",
+        "solar_project_context.py", "solar_project_graph.py", "solar_project_jobs.py",
+        "solar_project_sizing.py", "solar_project_tools.py", "solar_settings_invalidation.py",
+        "solar_sizing_client.py", "solar_sizing_power.py", "solar_solve_results.py",
+        "solar_tools/__init__.py", "tenant_id_validator.py", "tool_validate.py", "write_loop.py",
+    )
+    assert canonical_worker.GRAPH_WORKER_MANIFEST == manifest
+    assert canonical_worker.SUPPORTED_TOOLS == solar_project_graph.SUPPORTED_TOOLS
+    paths = sorted((*manifest, "solar_tools/solar_settings.json"))
+    for relative in paths:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO_ROOT / "server" / relative, target)
+    descriptor = canonical_worker.graph_worker_descriptor
+    first = descriptor("solar-settings", server_dir=tmp_path)
+    assert first == descriptor("solar-settings", server_dir=tmp_path)
+    assert first == descriptor("solar-settings")
+    digest = hashlib.sha256()
+    for relative in paths:
+        raw = (tmp_path / relative).read_bytes()
+        digest.update(relative.encode() + b"\0" + str(len(raw)).encode() + b"\0" + raw)
+    assert first == {"tool_name": "solar-settings", "source_sha256": digest.hexdigest(),
+                     "source_revision": "sha256:" + digest.hexdigest(),
+                     "runtime": "python-" + ".".join(map(str, sys.version_info[:3]))}
+    assert dependency_health._REVISION_RE.fullmatch(first["source_revision"])
+    for relative in paths:
+        path = tmp_path / relative
+        raw = path.read_bytes()
+        path.write_bytes(raw + b"\r\n")
+        assert descriptor("solar-settings", server_dir=tmp_path) != first
+        path.write_bytes(raw)
+    # Raw bytes, never normalized text: the LF and CRLF spellings of one file hash differently.
+    target = tmp_path / "solar_project_tools.py"
+    original = target.read_bytes()
+    lf = original.replace(b"\r\n", b"\n")
+    crlf = lf.replace(b"\n", b"\r\n")
+    assert lf != crlf
+    target.write_bytes(lf)
+    lf_descriptor = descriptor("solar-settings", server_dir=tmp_path)
+    target.write_bytes(crlf)
+    assert descriptor("solar-settings", server_dir=tmp_path) != lf_descriptor
+    target.write_bytes(original)
+    missing = tmp_path / "solar_project_jobs.py"
+    missing.unlink()
+    with pytest.raises(RuntimeError, match="solar_project_jobs.py"):
+        descriptor("solar-settings", server_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="unknown-tool"):
+        descriptor("unknown-tool")
+    # Fresh import as the supervisor would do it; catches eager driver imports too.
+    probe = '''
+import builtins
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name == "psycopg" or name.startswith("psycopg."):
+        raise AssertionError("descriptor imported psycopg")
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+from canonical_worker import graph_worker_descriptor
+import platform_link
+def forbidden(*args, **kwargs):
+    raise AssertionError("descriptor touched the database")
+platform_link._load_platform = forbidden
+platform_link._canonical_jobs_module = forbidden
+graph_worker_descriptor("solar-settings")
+'''
+    result = subprocess.run([sys.executable, "-B", "-c", probe], cwd=REPO_ROOT / "server",
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
 
 
 class FakeCanonicalJobs:

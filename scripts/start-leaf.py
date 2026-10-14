@@ -418,6 +418,8 @@ def main() -> int:
         description="Boot the Leaf platform for local dev (broker + app + web, APS_LIVE=0).",
     )
     ap.add_argument("--no-web", action="store_true", help="skip the Vite web dev server (backend only)")
+    ap.add_argument("--canonical-worker-tool", metavar="TOOL")
+    ap.add_argument("--canonical-worker-id", metavar="ID")
     ap.add_argument("--with-harness", action="store_true",
                     help="also boot the compiled Agent-SDK harness sidecar (Build lane)")
     ap.add_argument("--broker-port", type=int, default=int(os.environ.get("BROKER_PORT", DEFAULT_BROKER_PORT)))
@@ -431,8 +433,28 @@ def main() -> int:
     ap.add_argument("--print-child-env", action="store_true", help="print the base child environment as JSON and exit")
     args = ap.parse_args()
 
+    # Refuse explicit project-worker configuration before ports, files or children.
+    if args.canonical_worker_tool is not None and not re.fullmatch(
+            r"[a-z][a-z0-9-]{0,63}", args.canonical_worker_tool):
+        print("Invalid canonical worker tool.", file=sys.stderr)
+        return 2
+    if args.canonical_worker_id is not None and (
+            args.canonical_worker_tool is None or not re.fullmatch(
+                r"[A-Za-z0-9._:-]{1,128}", args.canonical_worker_id)):
+        print("A valid canonical worker id requires --canonical-worker-tool.", file=sys.stderr)
+        return 2
+
     operator_env = build_child_env(os.environ, args.env_allowlist)
     base_env = dict(operator_env, APS_LIVE="0")
+    if args.canonical_worker_tool is not None:
+        if not platform_database_configured(base_env):
+            print("Canonical worker selection requires a platform database.", file=sys.stderr)
+            return 2
+        if ("LEAF_CANONICAL_WORKER_TOOL" in base_env
+                and base_env["LEAF_CANONICAL_WORKER_TOOL"] != args.canonical_worker_tool):
+            print("Canonical worker tool conflicts with the child environment.", file=sys.stderr)
+            return 2
+        base_env["LEAF_CANONICAL_WORKER_TOOL"] = args.canonical_worker_tool
     if args.env_allowlist is not None:
         base_env["LEAF_AUTH_LIVE"] = "0"
     if args.print_child_env:
@@ -537,9 +559,19 @@ def main() -> int:
     worker_enabled = platform_database_configured(base_env)
     if worker_enabled:
         base_env.setdefault("LEAF_CANONICAL_WORKER_REQUIRED", "1")
+        worker_argv = [sys.executable, "canonical_worker.py"]
+        if args.canonical_worker_tool is not None:
+            worker_argv += ["--tool", args.canonical_worker_tool, "--readiness"]
+            if args.canonical_worker_id is not None:
+                # A leading hyphen is valid in an ID but argparse treats a
+                # separate token as an option. Bind that value with '='.
+                if args.canonical_worker_id.startswith("-"):
+                    worker_argv += ["--worker-id=" + args.canonical_worker_id]
+                else:
+                    worker_argv += ["--worker-id", args.canonical_worker_id]
         spawn(
             "worker",
-            [sys.executable, "canonical_worker.py"],
+            worker_argv,
             SERVER_DIR,
             base_env,
         )
