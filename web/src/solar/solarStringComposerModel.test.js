@@ -635,7 +635,9 @@ describe('project Solar string composer', () => {
   })
   it('R10-10 Server source registers canonical multi creation and requires exact ordinary admission', () => {
     const source = fs.readFileSync(process.cwd() + '/../server/solar_project_graph.py', 'utf8')
-    const supported = source.match(new RegExp('SUPPORTED_TOOLS = frozenset\\(\\(([\\s\\S]*?)\\)\\)'))[1]
+    const tools = fs.readFileSync(process.cwd() + '/../server/solar_project_tools.py', 'utf8')
+    expect(source).toContain('from solar_project_tools import SUPPORTED_TOOLS')
+    const supported = tools.match(new RegExp('SUPPORTED_TOOLS = frozenset\\(\\(([\\s\\S]*?)\\)\\)'))[1]
     expect(supported).toContain('"solar-string-multi-add"')
     expect(source).toContain('CREATION_TOOLS = frozenset((STRING_TOOL, "solar-assign-equipment", "solar-string-multi-add", "solar-panel-groups"))')
     const admission = fs.readFileSync(process.cwd() + '/../server/solar_project_admission.py', 'utf8')
