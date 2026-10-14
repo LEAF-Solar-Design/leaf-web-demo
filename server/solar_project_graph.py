@@ -20,23 +20,10 @@ import solar_sizing_client as cloud
 import solar_tools
 from solar_design_graph import GraphValidationError, _bounded_json, validate_graph
 from solar_graph_seed import new_empty_graph, validate_seed_request
+from solar_project_tools import SUPPORTED_TOOLS
 
 SCHEMA = "leaf.solar-project-graph-commit.v1"
 ADAPTER_KIND = "project-local-graph-commit"
-SUPPORTED_TOOLS = frozenset((
-    "solar-settings",
-    "solar-panels-from-drawing",
-    "solar-size-strings",
-    "solar-combiners",
-    "solar-feeders",
-    "solar-homeruns",
-    "solar-schedule",
-    "solar-string-add",
-    "solar-assign-equipment",
-    "solar-string-multi-add",
-    "solar-string-conductors",
-    "solar-panel-groups",
-))
 # Sizing runs only its pure manual-global branch here; every other mode needs stored
 # service evidence this path does not have and is refused before the builtin loads.
 SIZING_TOOL = "solar-size-strings"

@@ -218,6 +218,38 @@ def platform_database_configured(env: dict[str, str]) -> bool:
     return bool(env.get("DATABASE_URL", "").strip())
 
 
+# One grammar for a selectable worker tool: the option check and the table's members share it.
+CANONICAL_WORKER_TOOL_RE = re.compile(r"[a-z][a-z0-9-]{0,63}")
+
+
+def project_worker_tools() -> frozenset[str] | None:
+    """Read the worker's graph tool table; None when unreadable (callers fail closed).
+
+    The table's source is compiled and run in a private namespace, so no server
+    package, database driver, sys.path or sys.modules entry reaches the launcher
+    and no bytecode cache is written beside the table. Fails closed: every way of
+    leaving the table's code except an operator interrupt, and any member the
+    launcher itself could not select, reads as no table.
+    """
+    path = SERVER_DIR / "solar_project_tools.py"
+    try:
+        namespace: dict[str, object] = {"__name__": "_leaf_solar_project_tools"}
+        exec(compile(path.read_bytes(), str(path), "exec", dont_inherit=True), namespace)
+        tools = namespace.get("SUPPORTED_TOOLS")
+    except KeyboardInterrupt:
+        # An operator interrupt is never a table failure.
+        raise
+    except BaseException:
+        # Unreadable, uncompilable, failing or exiting in any way: the table is unavailable.
+        return None
+    if type(tools) is not frozenset or not tools:
+        return None
+    # Every member must be an exact str the launcher itself could select.
+    if not all(type(tool) is str and CANONICAL_WORKER_TOOL_RE.fullmatch(tool) for tool in tools):
+        return None
+    return tools
+
+
 def source_revision(env: dict[str, str]) -> str | None:
     """Resolve the checkout revision without overriding an operator value."""
     for name in (
@@ -418,6 +450,8 @@ def main() -> int:
         description="Boot the Leaf platform for local dev (broker + app + web, APS_LIVE=0).",
     )
     ap.add_argument("--no-web", action="store_true", help="skip the Vite web dev server (backend only)")
+    ap.add_argument("--canonical-worker-tool", metavar="TOOL")
+    ap.add_argument("--canonical-worker-id", metavar="ID")
     ap.add_argument("--with-harness", action="store_true",
                     help="also boot the compiled Agent-SDK harness sidecar (Build lane)")
     ap.add_argument("--broker-port", type=int, default=int(os.environ.get("BROKER_PORT", DEFAULT_BROKER_PORT)))
@@ -431,8 +465,37 @@ def main() -> int:
     ap.add_argument("--print-child-env", action="store_true", help="print the base child environment as JSON and exit")
     args = ap.parse_args()
 
+    # Refuse explicit project-worker configuration before ports, files or children.
+    if args.canonical_worker_tool is not None and not CANONICAL_WORKER_TOOL_RE.fullmatch(
+            args.canonical_worker_tool):
+        print("Invalid canonical worker tool.", file=sys.stderr)
+        return 2
+    if args.canonical_worker_tool is not None:
+        # The worker runs a selected tool with --readiness, which admits graph tools only.
+        supported = project_worker_tools()
+        if supported is None:
+            print("Canonical worker tool table is unavailable.", file=sys.stderr)
+            return 2
+        if args.canonical_worker_tool not in supported:
+            print("Unsupported canonical worker tool.", file=sys.stderr)
+            return 2
+    if args.canonical_worker_id is not None and (
+            args.canonical_worker_tool is None or not re.fullmatch(
+                r"[A-Za-z0-9._:-]{1,128}", args.canonical_worker_id)):
+        print("A valid canonical worker id requires --canonical-worker-tool.", file=sys.stderr)
+        return 2
+
     operator_env = build_child_env(os.environ, args.env_allowlist)
     base_env = dict(operator_env, APS_LIVE="0")
+    if args.canonical_worker_tool is not None:
+        if not platform_database_configured(base_env):
+            print("Canonical worker selection requires a platform database.", file=sys.stderr)
+            return 2
+        if ("LEAF_CANONICAL_WORKER_TOOL" in base_env
+                and base_env["LEAF_CANONICAL_WORKER_TOOL"] != args.canonical_worker_tool):
+            print("Canonical worker tool conflicts with the child environment.", file=sys.stderr)
+            return 2
+        base_env["LEAF_CANONICAL_WORKER_TOOL"] = args.canonical_worker_tool
     if args.env_allowlist is not None:
         base_env["LEAF_AUTH_LIVE"] = "0"
     if args.print_child_env:
@@ -537,9 +600,19 @@ def main() -> int:
     worker_enabled = platform_database_configured(base_env)
     if worker_enabled:
         base_env.setdefault("LEAF_CANONICAL_WORKER_REQUIRED", "1")
+        worker_argv = [sys.executable, "canonical_worker.py"]
+        if args.canonical_worker_tool is not None:
+            worker_argv += ["--tool", args.canonical_worker_tool, "--readiness"]
+            if args.canonical_worker_id is not None:
+                # A leading hyphen is valid in an ID but argparse treats a
+                # separate token as an option. Bind that value with '='.
+                if args.canonical_worker_id.startswith("-"):
+                    worker_argv += ["--worker-id=" + args.canonical_worker_id]
+                else:
+                    worker_argv += ["--worker-id", args.canonical_worker_id]
         spawn(
             "worker",
-            [sys.executable, "canonical_worker.py"],
+            worker_argv,
             SERVER_DIR,
             base_env,
         )
