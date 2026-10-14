@@ -1,7 +1,9 @@
-"""Record A boundary rows; only import subprocesses and bound loopback probes."""
+"""Records A/B; B uses only fake effects (no database, processes or listeners)."""
 from dataclasses import replace
 from datetime import datetime, timezone
 import importlib.util
+import io
+import json
 from pathlib import Path
 import socket
 import subprocess
@@ -140,7 +142,9 @@ class TestProjectBoundary:
             p.Failure("preflight", "PREFLIGHT")
         assert len(p.Stage) == 13
         assert {code.value for code in p.FailureCode} == {
-            "PREFLIGHT", "ENVIRONMENT", "SOURCE", "RUNTIME", "BROWSER_UNAVAILABLE"}
+            "PREFLIGHT", "ENVIRONMENT", "SOURCE", "RUNTIME", "BROWSER_UNAVAILABLE",
+            "ALLOCATION", "TRANSPORT", "MIGRATION_ENTRY", "MIGRATION_CORPUS", "MIGRATION_TIMEOUT",
+            "MIGRATION_EXIT", "MIGRATION_RESULT", "SCHEMA", "IDENTITY", "BINDING"}
 
     def test_deployed_posture(self):
         for facts in ({"posture": "production"}, {"legacy_posture": "staging"}, {"synthetic": True}):
@@ -231,8 +235,8 @@ class TestProjectBoundary:
         with pytest.raises(p.ProofRefused) as error:
             effects.browser_runner(None, scope=c.scope)
         assert error.value.failure == p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_UNAVAILABLE)
-        with pytest.raises(RuntimeError, match="record B"):
-            effects.authority_factory("run-test")
+        with pytest.raises(RuntimeError, match="record C"):
+            effects.readiness_probe(None)
 
     def test_unapproved_dotenv(self):
         c = case()
@@ -539,6 +543,426 @@ for attempt in range(2):
 
 
 SECRET_FLAGS = ("--token", "--password", "--secret", "--dsn", "--database-url", "--signing-key")
+
+
+def authority_case():
+    c = case()
+    c.plan = admitted(c)
+    c.events, c.mints, c.requests, c.stops = [], [], [], []
+    c.allocated, c.entry, c.exit_code, c.hang = False, True, 0, False
+    c.corpus, c.tracked = c.plan.migrations, c.plan.source.expected_migrations
+    c.status = dict(ok=True, database="leaf", schema="public", migration_count=1,
+        applied_migration_count=1, missing={}, missing_migrations=[], migration_hash_drift=[],
+        invalid_constraints=[], invalid_indexes=[], invalid_triggers=[])
+    c.migration_proof = p.MigrationProof("run-test", p._manifest_hash(c.plan.migrations), True, "leaf", "public", 1, 1)
+    c.binding = p.BindingProof("fakeorg", "fakebind", "leaf-proof-project|run-test", "hosted_pro", "auth0", "owner", "active")
+    c.ready = dict(ok=True, server_version="16.fake", round_trip_bytes=256)
+    c.published = set()
+    c.profile = profile(c)
+    c.db = SimpleNamespace(
+        apply_migration=lambda: c.events.append("apply"),
+        assert_schema_current=lambda: (c.events.append("assert-schema"), c.status)[1],
+        schema_status=lambda: c.status,
+        reset_pool=lambda: c.events.append("reset"))
+    c.org = SimpleNamespace(org_id="fakeorg", tier="hosted_pro", status="active")
+    c.row = SimpleNamespace(binding_id="fakebind", platform_tenant_id="fakeorg",
+        external_authority="auth0", external_subject=c.binding.subject, status="active")
+    c.seed_calls = []
+    def create(name, authority, subject, *, tier):
+        c.seed_calls.append((name, authority, subject, tier))
+        return c.org
+    c.store = SimpleNamespace(create_org_with_identity=create,
+        resolve_active_identity_binding=lambda authority, subject: c.row,
+        active_identity_role=lambda org, binding: "owner")
+    def load_db(environment):
+        c.events.append("db-import")
+        assert environment["DATABASE_URL"] == "fakedb"
+        return c.db
+    c.host.database_module = load_db
+    c.host.store_module = lambda: c.store
+    c.host.migration_entry_present = lambda: c.entry
+    def corpus():
+        c.events.append("corpus")
+        return c.corpus, c.tracked
+    c.host.migration_corpus = corpus
+    def inventory(run_id):
+        c.events.append("inventory")
+        name = "leafproof-" + run_id
+        return p.AuthorityOwnership(run_id, (name, name + "-pg", name + "-relay"),
+            (("leaf.proof-project.run", run_id), ("leaf.proof-project.owner", "proof_project_pg")),
+            ("a" * 12, "b" * 12) if c.allocated else (), ("c" * 12,) if c.allocated else ())
+    c.host.authority_inventory = inventory
+    c.host.cleanup_authority = lambda run_id: c.events.append("emergency-cleanup")
+    c.host.close_identity = lambda lease: object.__setattr__(lease, "issuer", None)
+    c.host.read_child_result = lambda path: p._proof_public(c.migration_proof) if path.name == "migration-result.json" else p._proof_public(c.binding)
+    def journal(path, value):
+        c.events.append(path.stem)
+        c.journals.append((path, value))
+    def allocate(run_id):
+        c.events.append("allocate")
+        c.allocated = True
+        return SimpleNamespace(dsn=lambda: "fakedb", readiness=lambda: c.ready,
+                               stop=lambda: c.events.append("stop-authority"))
+    def write_jwks(path):
+        c.events.append("jwks")
+        if path in c.published:
+            raise FileExistsError("fakekey")
+        c.published.add(path)
+    c.issuer = SimpleNamespace(run_id="run-test", issuer="https://proof-project.leaf.invalid/run-test/",
+        audience="leaf-proof-project:run-test", thumbprint="fakekey", write_public_jwks=write_jwks,
+        profile_env=lambda path: c.profile,
+        mint=lambda suffix, **kwargs: (c.mints.append((suffix, kwargs)), "faketok")[1])
+    def issue(run_id):
+        c.events.append("issuer")
+        return c.issuer
+    def launch(spec, *, scope):
+        c.events.append("launch:" + spec.role)
+        c.launches.append(spec)
+        return SimpleNamespace(poll=lambda: None if c.hang and c.effects.clock.now < 2 else c.exit_code,
+                               stop=lambda deadline: (c.stops.append(deadline), True)[1])
+    def migrate(request, *, scope):
+        c.requests.append(request)
+        return p._run_database_child(request, effects=c.effects, scope=scope)
+    def seed(request, *, scope):
+        c.requests.append(request)
+        return p._seed_child(request, effects=c.effects)
+    c.effects = replace(c.effects, authority_factory=allocate, issuer_factory=issue,
+        migration_runner=migrate, seed_operation=seed, process_launcher=launch,
+        receipt_writer=SimpleNamespace(ownership=journal))
+    def acquire(name, cleanup):
+        c.events.append("acquire:" + name.value)
+        c.scope.cleanups.append((name, cleanup))
+    c.scope.acquire = acquire
+    c.request = p.MigrationRequest("run-test", p.REPO / "platform/migrations", c.plan.migrations,
+        {"DATABASE_URL": "fakedb", "PGSERVICE": "badsvc"}, 1.0, ROOT / "migration-result.json")
+    return c
+
+
+def prepare(c):
+    return p.prepare_authority(c.plan, effects=c.effects, scope=c.scope)
+
+
+def authority_refused(c, code, operation=prepare):
+    with pytest.raises(p.ProofRefused) as error:
+        operation(c)
+    assert error.value.failure.fixed_code == code
+    assert all(spec.role in {"migration-child", "seed-child"} for spec in c.launches)
+    assert c.mints == []
+    return error.value
+
+
+class TestProjectAuthority:
+    def test_allocation_journal(self, monkeypatch):
+        c = authority_case()
+        prepared = prepare(c)
+        assert c.events.index("corpus") < c.events.index("acquire:authority") < c.events.index("authority-planned") < c.events.index("allocate")
+        assert c.events.index("allocate") < c.events.index("authority-observed") < c.events.index("launch:migration-child")
+        assert prepared.database.authority_run_id == "run-test"
+        assert prepared.database.ownership.containers == ("a" * 12, "b" * 12)
+        assert prepared.database.schema_status == c.migration_proof
+        assert prepared.database.migration_manifest == c.plan.migrations
+        assert prepared.database.migration_manifest_sha256 == p._manifest_hash(c.plan.migrations)
+        assert (prepared.database.allocation_seconds, prepared.database.relay_seconds, prepared.database.migration_seconds) == (0, 0, 0)
+        assert "fakedb" not in repr(prepared) and "faketok" not in repr(prepared.identity_lease)
+        assert "fakedb" not in repr(c.journals) and c.mints == []
+        c = authority_case()
+        def fail(run_id):
+            c.events.append("allocate")
+            raise RuntimeError("fakedb")
+        c.effects = replace(c.effects, authority_factory=fail)
+        error = authority_refused(c, p.FailureCode.ALLOCATION)
+        assert "fakedb" not in str(error)
+        c.scope.cleanups[0][1]()
+        assert c.events[-1] == "emergency-cleanup" and c.launches == []
+        c = authority_case()
+        original_inventory = c.host.authority_inventory
+        c.host.authority_inventory = lambda run_id: replace(original_inventory(run_id), run_id="run-else")
+        authority_refused(c, p.FailureCode.ALLOCATION)
+        assert "allocate" not in c.events
+        c = authority_case()
+        original_inventory = c.host.authority_inventory
+        c.host.authority_inventory = lambda run_id: replace(original_inventory(run_id), containers=())
+        authority_refused(c, p.FailureCode.ALLOCATION)
+        assert "allocate" in c.events and c.launches == []
+        # Production factory reuses PP-1, through its lazy seam, with no start here.
+        called = []
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(PgAuthority=SimpleNamespace(start=lambda run_id: called.append(run_id))))
+        p.production_effects().authority_factory("run-test")
+        assert called == ["run-test"]
+        for role, kind in (("migration-child", p.ResourceKind.MIGRATION_PROCESS), ("seed-child", p.ResourceKind.SEED_PROCESS)):
+            scope = fake_scope()
+            child = SimpleNamespace(start=lambda: called.append(len(scope.cleanups)), stop=lambda deadline: True)
+            monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: child)
+            spec = p.ProcessSpec(role, ("fake",), ROOT, {"DATABASE_URL": "fakedb"}, 1)
+            assert p._launch_runtime(spec, scope=scope) is child
+            assert scope.cleanups[0][0] == kind and called[-1] == 1
+
+    def test_transport_barrier(self):
+        c = authority_case()
+        c.ready["ok"] = False
+        authority_refused(c, p.FailureCode.TRANSPORT)
+        assert c.requests == [] and c.launches == [] and "issuer" not in c.events
+        for corruption in ({"round_trip_bytes": True}, {"round_trip_bytes": 255}, {"server_version": "fakedb://"}, {"unknown": "fakedb"}):
+            c = authority_case()
+            c.ready.update(corruption)
+            authority_refused(c, p.FailureCode.TRANSPORT)
+
+    def test_empty_dsn_before_import(self, monkeypatch, capsys):
+        for dsn in ("", "  ", None):
+            c = authority_case()
+            request = replace(c.request, environment={"DATABASE_URL": dsn})
+            authority_refused(c, p.FailureCode.ENVIRONMENT,
+                lambda c: p.migration_child(request, effects=c.effects))
+            assert c.events == [] and c.launches == []
+        c = authority_case()
+        original = c.effects.authority_factory
+        def empty_authority(run_id):
+            authority = original(run_id)
+            authority.dsn = lambda: ""
+            return authority
+        c.effects = replace(c.effects, authority_factory=empty_authority)
+        authority_refused(c, p.FailureCode.ENVIRONMENT)
+        assert c.launches == [] and "db-import" not in c.events
+        # The production entry refuses before the PG sibling (libpq cleaner) is loaded.
+        for dsn in (" " + chr(9) + chr(10), "", None):
+            c = authority_case()
+            loads = []
+            monkeypatch.setattr(p, "_libpq_cleaner", None)
+            monkeypatch.setattr(p, "_load_file", lambda *args, **kwargs:
+                loads.append(args) or SimpleNamespace(clean_libpq_environment=dict))
+            monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+            monkeypatch.setenv("LEAF_PROJECT_CHILD_REQUEST", json.dumps(p._request_public(c.request)))
+            if dsn is None:
+                monkeypatch.delenv("DATABASE_URL", raising=False)
+            else:
+                monkeypatch.setenv("DATABASE_URL", dsn)
+            assert p._database_child_entry() == 1
+            assert json.loads(capsys.readouterr().out) == {"failure": "ENVIRONMENT"}
+            assert loads == [] and c.events == [] and c.launches == []
+
+    def test_migration_entry_missing(self):
+        c = authority_case()
+        c.entry = False
+        authority_refused(c, p.FailureCode.MIGRATION_ENTRY)
+        assert "allocate" not in c.events and "db-import" not in c.events
+        authority_refused(c, p.FailureCode.MIGRATION_ENTRY, lambda c: p.migration_child(c.request, effects=c.effects))
+        c = authority_case()
+        c.db.apply_migration = None
+        authority_refused(c, p.FailureCode.MIGRATION_ENTRY, lambda c: p.migration_child(c.request, effects=c.effects))
+        assert c.events[-1] == "reset"
+
+    def test_migration_file_missing(self, monkeypatch):
+        c = authority_case()
+        c.corpus = ()
+        authority_refused(c, p.FailureCode.MIGRATION_CORPUS)
+        assert "allocate" not in c.events
+        c = authority_case()
+        original = c.effects.authority_factory
+        def allocate(run_id):
+            result = original(run_id)
+            c.corpus = ()
+            return result
+        c.effects = replace(c.effects, authority_factory=allocate)
+        authority_refused(c, p.FailureCode.MIGRATION_CORPUS)
+        assert c.launches == []
+        # The tracked oracle is independent of the surviving-file glob.
+        monkeypatch.setattr(p, "_git", lambda *args: b"platform/migrations/0001_fake.sql\n")
+        monkeypatch.setattr(Path, "glob", lambda *args: iter(()))
+        actual, tracked = p.production_effects().host.migration_corpus()
+        assert actual == () and tracked == ("platform/migrations/0001_fake.sql",)
+
+    def test_migration_file_unexpected(self):
+        c = authority_case()
+        c.corpus += (file("platform/migrations/9999_fake.sql"),)
+        authority_refused(c, p.FailureCode.MIGRATION_CORPUS)
+        assert "allocate" not in c.events
+        c = authority_case()
+        c.corpus = (replace(c.corpus[0], sha256=OTHER_HASH),)
+        authority_refused(c, p.FailureCode.MIGRATION_CORPUS,
+            lambda c: p.migration_child(c.request, effects=c.effects))
+        assert "db-import" not in c.events
+
+    def test_migration_nonzero(self):
+        c = authority_case()
+        c.exit_code = 1
+        authority_refused(c, p.FailureCode.MIGRATION_EXIT)
+        assert len(c.stops) == 1 and "issuer" not in c.events
+        spec = c.launches[0]
+        assert spec.cwd == p.REPO.parent and spec.argv[1:3] == ("-B", "-c")
+        assert "fakedb" not in repr(spec.argv) and "fakedb" not in repr(spec.environment)
+        assert spec.environment["DATABASE_URL"] == "fakedb" and "PGSERVICE" not in spec.environment
+        c = authority_case()
+        c.exit_code = 1
+        c.host.read_child_result = lambda path: {"failure": "SCHEMA"}
+        authority_refused(c, p.FailureCode.SCHEMA)
+
+    def test_migration_timeout(self):
+        c = authority_case()
+        c.hang = True
+        authority_refused(c, p.FailureCode.MIGRATION_TIMEOUT,
+            lambda c: p._run_database_child(c.request, effects=c.effects, scope=c.scope))
+        assert 1 <= c.effects.clock.now < 1.1 and len(c.stops) == 1
+        c = authority_case()
+        def late(request, *, scope):
+            c.effects.clock.now = request.deadline
+            return c.migration_proof
+        c.effects = replace(c.effects, migration_runner=late)
+        authority_refused(c, p.FailureCode.MIGRATION_TIMEOUT)
+        assert "issuer" not in c.events
+        # Stopping the child past the deadline is a timeout, even after a valid result.
+        c = authority_case()
+        def late_launch(spec, *, scope):
+            c.launches.append(spec)
+            def stop(deadline):
+                c.stops.append(deadline)
+                c.effects.clock.now = 2.0
+                return True
+            return SimpleNamespace(poll=lambda: 0, stop=stop)
+        c.effects = replace(c.effects, process_launcher=late_launch)
+        authority_refused(c, p.FailureCode.MIGRATION_TIMEOUT,
+            lambda c: p._run_database_child(c.request, effects=c.effects, scope=c.scope))
+        assert len(c.stops) == 1
+
+    def test_migration_result_binding(self, monkeypatch, capsys):
+        for corruption in ({"run_id": "run-else"}, {"manifest_sha256": OTHER_HASH}, {"ok": 1},
+                           {"database": "otherdb"}, {"schema": "other"}, {"migration_count": True},
+                           {"migration_count": 2}, {"applied_migration_count": 0},
+                           {"applied_migration_count": True}):
+            c = authority_case()
+            c.migration_proof = replace(c.migration_proof, **corruption)
+            authority_refused(c, p.FailureCode.MIGRATION_RESULT)
+            assert "issuer" not in c.events and len(c.stops) == 1
+        for payload in (None, {}, {"unknown": "fakedb"}):
+            c = authority_case()
+            c.host.read_child_result = lambda path: payload
+            authority_refused(c, p.FailureCode.MIGRATION_RESULT)
+        c = authority_case()
+        raw = dict(p._proof_public(c.migration_proof), extra="fake")
+        c.host.read_child_result = lambda path: raw
+        authority_refused(c, p.FailureCode.MIGRATION_RESULT)
+        # Exercise the production wire entry using fake environment, IO and DB.
+        c = authority_case()
+        monkeypatch.setenv("LEAF_PROJECT_CHILD_REQUEST", json.dumps(p._request_public(c.request)))
+        monkeypatch.setenv("DATABASE_URL", "fakedb")
+        monkeypatch.setattr(p, "open", lambda *args, **kwargs: io.StringIO(), raising=False)
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        c.db.apply_migration = lambda: print("fakedb")
+        assert p._database_child_entry() == 0
+        output = capsys.readouterr().out
+        assert json.loads(output) == p._proof_public(c.migration_proof) and "fakedb" not in output
+        monkeypatch.setattr(p, "_path_safe", lambda path: True)
+        monkeypatch.setattr(Path, "open", lambda *args, **kwargs: io.BytesIO(b'{"ok":true,"ok":false}'))
+        with pytest.raises(ValueError, match="duplicate"):
+            p._Host().read_child_result(ROOT / "migration-result.json")
+        monkeypatch.setattr(Path, "open", lambda *args, **kwargs: io.BytesIO(b"x" * (p.MAX_OUTPUT_BYTES + 1)))
+        with pytest.raises(RuntimeError, match="bound"):
+            p._Host().read_child_result(ROOT / "migration-result.json")
+
+    def test_schema_refusal(self):
+        c = authority_case()
+        def refuse():
+            c.events.append("assert-schema")
+            raise RuntimeError("fakedb")
+        c.db.assert_schema_current = refuse
+        authority_refused(c, p.FailureCode.SCHEMA, lambda c: p.migration_child(c.request, effects=c.effects))
+        assert c.events[-3:] == ["apply", "assert-schema", "reset"]
+        for key in ("missing", "missing_migrations", "migration_hash_drift", "invalid_constraints", "invalid_indexes", "invalid_triggers"):
+            c = authority_case()
+            c.status[key] = {"fake": ["fake"]} if key == "missing" else ["fake"]
+            authority_refused(c, p.FailureCode.SCHEMA, lambda c: p.migration_child(c.request, effects=c.effects))
+        c = authority_case()
+        assert p.migration_child(c.request, effects=c.effects) == c.migration_proof
+        assert c.events[-1] == "reset"
+
+    def test_migration_pool_finally(self):
+        c = authority_case()
+        def fail():
+            raise RuntimeError("fakedb")
+        c.db.apply_migration = fail
+        error = authority_refused(c, p.FailureCode.MIGRATION_EXIT, lambda c: p.migration_child(c.request, effects=c.effects))
+        assert c.events.count("reset") == 1 and "fakedb" not in str(error)
+        c = authority_case()
+        c.db.reset_pool = fail
+        authority_refused(c, p.FailureCode.MIGRATION_EXIT, lambda c: p.migration_child(c.request, effects=c.effects))
+        c = authority_case()
+        c.db.assert_schema_current = fail
+        c.db.reset_pool = fail
+        authority_refused(c, p.FailureCode.SCHEMA, lambda c: p.migration_child(c.request, effects=c.effects))
+        # A pool reset that outlives the deadline is a timeout, not a success.
+        c = authority_case()
+        def slow_reset():
+            c.events.append("reset")
+            c.effects.clock.now = 2.0
+        c.db.reset_pool = slow_reset
+        authority_refused(c, p.FailureCode.MIGRATION_TIMEOUT, lambda c: p.migration_child(c.request, effects=c.effects))
+        assert c.events.count("reset") == 1
+
+    def test_issuer_failure(self, monkeypatch):
+        c = authority_case()
+        def fail(run_id):
+            c.events.append("issuer-failure")
+            raise RuntimeError("fakekey")
+        c.effects = replace(c.effects, issuer_factory=fail)
+        error = authority_refused(c, p.FailureCode.IDENTITY)
+        assert "fakekey" not in str(error) and c.seed_calls == [] and c.published == set()
+        called = []
+        monkeypatch.setattr(p, "_load_file", lambda *args, **kwargs: SimpleNamespace(
+            FixtureIssuer=SimpleNamespace(create=lambda run_id: called.append(run_id))))
+        monkeypatch.delitem(sys.modules, "_leaf_project_fixture_identity", raising=False)
+        p.production_effects().issuer_factory("run-test")
+        assert called == ["run-test"]
+
+    def test_frozen_profile_jwks(self):
+        c = authority_case()
+        prepared = prepare(c)
+        assert c.published == {ROOT / "public-jwks.json"}
+        assert dict(prepared.identity_lease.profile) == profile(c)
+        with pytest.raises(TypeError):
+            prepared.identity_lease.profile["LEAF_PROOF_PROFILE"] = "other"
+        c.profile["LEAF_PROOF_PROFILE"] = "other"
+        assert prepared.identity_lease.profile["LEAF_PROOF_PROFILE"] == "project"
+        assert prepared.identity.public_key_thumbprint == "fakekey"
+        c = authority_case()
+        c.published.add(ROOT / "public-jwks.json")
+        authority_refused(c, p.FailureCode.IDENTITY)
+        assert c.seed_calls == []
+        for changed in ({"LEAF_PROOF_PROFILE": "other"}, {"LEAF_AUTH_LIVE": "0"}, {"LEAF_PROOF_PROJECT_RUN_ID": "run-else"}):
+            c = authority_case()
+            c.profile.update(changed)
+            authority_refused(c, p.FailureCode.IDENTITY)
+            assert c.seed_calls == []
+
+    def test_atomic_owner_binding(self):
+        c = authority_case()
+        result = prepare(c)
+        assert c.seed_calls == [("Project proof run-test", "auth0", "leaf-proof-project|run-test", "hosted_pro")]
+        assert result.binding == c.binding and c.events[-1] == "reset"
+        for attribute, value in (("external_authority", "other"), ("external_subject", "wrong"),
+                                 ("platform_tenant_id", "otherorg"), ("status", "revoked")):
+            c = authority_case()
+            setattr(c.row, attribute, value)
+            authority_refused(c, p.FailureCode.BINDING)
+            assert c.events[-1] == "reset"
+        c = authority_case()
+        c.store.active_identity_role = lambda org, binding: "viewer"
+        authority_refused(c, p.FailureCode.BINDING)
+        assert c.events[-1] == "reset"
+
+    def test_matching_subject_claims(self):
+        c = authority_case()
+        prepared = prepare(c)
+        assert c.mints == []
+        token = prepared.identity_lease.mint(now=123, lifetime_s=60)
+        assert token.reveal() == "faketok"
+        assert "faketok" not in repr(token) and "faketok" not in str(token) and "faketok" not in f"{token}"
+        assert c.mints == [("run-test", {"tenant_id": "fakeorg", "org_id": "fakeorg", "tier": "hosted_pro",
+            "claim_ns": "https://leafdesign.ai/", "lifetime_s": 60, "now": 123})]
+        assert prepared.identity.subject == prepared.binding.subject == "leaf-proof-project|run-test"
+        assert prepared.identity.organization_id == prepared.binding.organization_id == "fakeorg"
+        assert "faketok" not in repr(prepared) and "fakedb" not in repr(c.requests)
+        c = authority_case()
+        c.effects = replace(c.effects, seed_operation=lambda request, *, scope: replace(c.binding, subject="wrong"))
+        authority_refused(c, p.FailureCode.BINDING)
 
 
 def assert_redacted_mapping(mapping, values, capsys):

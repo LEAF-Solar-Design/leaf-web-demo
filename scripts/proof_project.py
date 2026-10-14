@@ -1,4 +1,4 @@
-"""Managed project proof, record A: boundaries and runtime preparation only.
+"""Managed project proof, records A and B: runtime and isolated authority.
 
 There is intentionally no CLI or success-receipt path. Later records implement
 the lifecycle against these seams. Importing this module performs no host work.
@@ -6,11 +6,13 @@ the lifecycle against these seams. Importing this module performs no host work.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -42,6 +44,7 @@ TOOLS = ("node", "cargo", "rustc", "wasm-pack")
 BUILD_TIMEOUT_S = 600.0  # Provisional bounded policy, not a measured build budget.
 VERSION_TIMEOUT_S = 15.0
 MAX_OUTPUT_BYTES = 4096
+MIGRATION_TIMEOUT_S = 300.0
 _IMPORT_LOCK = threading.RLock()
 
 
@@ -67,6 +70,16 @@ class FailureCode(str, Enum):
     SOURCE = "SOURCE"
     RUNTIME = "RUNTIME"
     BROWSER_UNAVAILABLE = "BROWSER_UNAVAILABLE"
+    ALLOCATION = "ALLOCATION"
+    TRANSPORT = "TRANSPORT"
+    MIGRATION_ENTRY = "MIGRATION_ENTRY"
+    MIGRATION_CORPUS = "MIGRATION_CORPUS"
+    MIGRATION_TIMEOUT = "MIGRATION_TIMEOUT"
+    MIGRATION_EXIT = "MIGRATION_EXIT"
+    MIGRATION_RESULT = "MIGRATION_RESULT"
+    SCHEMA = "SCHEMA"
+    IDENTITY = "IDENTITY"
+    BINDING = "BINDING"
 
 
 @dataclass(frozen=True)
@@ -214,6 +227,7 @@ class OwnershipJournal:
     run_root: Path
     artifact_root: Path
     created_at: datetime
+    authority: AuthorityOwnership | None = None
 
 
 @dataclass(frozen=True)
@@ -240,10 +254,14 @@ class RuntimeProof:
 
 class ResourceKind(str, Enum):
     RUNTIME_PROCESS = "runtime_process"
+    AUTHORITY = "authority"
+    MIGRATION_PROCESS = "migration_process"
+    SEED_PROCESS = "seed_process"
+    IDENTITY = "identity"
 
 
 class RunScope(Protocol):
-    """Record D supplies implementation; A only registers owned build children."""
+    """D supplies lifetime management; A/B synchronously register acquisitions."""
     def acquire(self, name: ResourceKind, cleanup: Callable[[], None]) -> None: ...
     def close(self) -> Any: ...
 
@@ -293,6 +311,14 @@ class Host(Protocol):
     def source_snapshot(self) -> SourceProof: ...
     def authority_inventory(self, run_id: str) -> Any: ...
     def scrub(self, reservation: Reservation, *, keep_safe: bool) -> bool: ...
+    # B's host operations keep imports, file reads and teardown behind a seam.
+    def migration_entry_present(self) -> bool: ...
+    def migration_corpus(self) -> tuple[tuple[FileProof, ...], tuple[str, ...]]: ...
+    def database_module(self, environment: Mapping[str, str]) -> Any: ...
+    def store_module(self) -> Any: ...
+    def cleanup_authority(self, run_id: str) -> Any: ...
+    def close_identity(self, lease: IdentityLease) -> None: ...
+    def read_child_result(self, path: Path) -> Any: ...
 
 
 class ReceiptWriter(Protocol):
@@ -554,6 +580,389 @@ def prepare_runtime(plan: Plan, *, effects: Effects, scope: RunScope) -> Runtime
         _refuse(FailureCode.RUNTIME, Stage.RUNTIME)
 
 
+@dataclass(frozen=True)
+class AuthorityOwnership:
+    run_id: str
+    names: tuple[str, ...]
+    labels: tuple[tuple[str, str], ...]
+    containers: tuple[str, ...] = ()
+    networks: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, repr=False)
+class MigrationRequest:
+    run_id: str
+    migration_root: Path
+    expected_manifest: tuple[FileProof, ...]
+    environment: Mapping[str, str] = field(repr=False)
+    deadline: float
+    result_path: Path
+
+    def __post_init__(self):
+        object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
+
+
+@dataclass(frozen=True)
+class MigrationProof:
+    run_id: str
+    manifest_sha256: str
+    ok: bool
+    database: str
+    schema: str
+    migration_count: int
+    applied_migration_count: int
+
+
+@dataclass(frozen=True, repr=False)
+class SeedRequest:
+    run_id: str
+    subject: str
+    environment: Mapping[str, str] = field(repr=False)
+    deadline: float
+    result_path: Path
+    authority: str = "auth0"
+    tier: str = TIER
+
+    def __post_init__(self):
+        object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
+
+
+@dataclass(frozen=True)
+class BindingProof:
+    organization_id: str
+    binding_id: str
+    subject: str
+    tier: str
+    authority: str
+    role: str
+    status: str
+
+
+@dataclass(frozen=True)
+class TransportProof:
+    ok: bool
+    server_version: str
+    round_trip_bytes: int
+
+
+@dataclass(frozen=True)
+class DatabaseProof:
+    authority_run_id: str
+    ownership: AuthorityOwnership
+    transport: str
+    readiness: TransportProof
+    migration_manifest: tuple[FileProof, ...]
+    migration_manifest_sha256: str
+    schema_status: MigrationProof
+    allocation_seconds: float
+    relay_seconds: float
+    migration_seconds: float
+
+
+@dataclass(frozen=True)
+class IdentityProof:
+    public_key_thumbprint: str
+    issuer: str
+    audience: str
+    organization_id: str
+    binding_id: str
+    subject: str
+    tier: str
+
+
+class _SecretToken:
+    """A minted token; repr, str and format never show its value."""
+    __slots__ = ("_value",)
+
+    def __init__(self, value):
+        if type(value) is not str or not value:
+            raise ValueError("token")
+        self._value = value
+
+    def reveal(self) -> str:
+        return self._value
+
+    def __repr__(self):
+        return "<redacted token>"
+
+    __str__ = __repr__
+
+
+@dataclass(frozen=True, repr=False)
+class IdentityLease:
+    """Only C decides when to mint; claims remain bound to B's verified row."""
+    issuer: Any = field(repr=False)
+    run_id: str
+    jwks_path: Path
+    profile: Mapping[str, str] = field(repr=False)
+    binding: BindingProof | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "profile", _RedactedEnvironment(self.profile))
+
+    def mint(self, *, now: int, lifetime_s: int = 900):
+        if self.issuer is None or self.binding is None:
+            _refuse(FailureCode.IDENTITY, Stage.IDENTITY)
+        binding = self.binding
+        if binding.subject != "leaf-proof-project|" + self.run_id:
+            _refuse(FailureCode.BINDING, Stage.BINDING)
+        try:
+            return _SecretToken(self.issuer.mint(self.run_id, tenant_id=binding.organization_id,
+                org_id=binding.organization_id, tier=binding.tier, claim_ns=CLAIM_NAMESPACE,
+                lifetime_s=lifetime_s, now=now))
+        except Exception:
+            _refuse(FailureCode.IDENTITY, Stage.IDENTITY)
+
+
+@dataclass(frozen=True, repr=False)
+class PreparedAuthority:
+    authority: Any = field(repr=False)
+    dsn: str = field(repr=False)
+    identity_lease: IdentityLease = field(repr=False)
+    database: DatabaseProof
+    identity: IdentityProof
+    binding: BindingProof
+
+
+def _manifest_hash(files):
+    return hashlib.sha256(json.dumps([(f.path, f.sha256, f.size) for f in files],
+                                    separators=(",", ":")).encode()).hexdigest()
+
+
+def _check_corpus(expected, *, effects):
+    try:
+        actual, tracked = effects.host.migration_corpus()
+        if (not _files_ok(expected) or tuple(sorted(expected, key=lambda f: f.path)) != expected
+                or any(re.fullmatch(r"platform/migrations/[0-9]{4}_[^/]+\.sql", f.path) is None for f in expected)
+                or tuple(f.path for f in expected) != tuple(tracked)
+                or actual != expected):
+            _refuse(FailureCode.MIGRATION_CORPUS, Stage.MIGRATION)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(FailureCode.MIGRATION_CORPUS, Stage.MIGRATION)
+
+
+def _check_entry(effects):
+    try:
+        present = effects.host.migration_entry_present()
+    except Exception:
+        present = False
+    if not present:
+        _refuse(FailureCode.MIGRATION_ENTRY, Stage.MIGRATION)
+
+
+def _nonempty_dsn(environment):
+    dsn = environment.get("DATABASE_URL")
+    if not isinstance(dsn, str) or not dsn.strip():
+        _refuse(FailureCode.ENVIRONMENT, Stage.MIGRATION)
+    return dsn
+
+
+def _check_deadline(request, effects):
+    if (type(request.deadline) not in {int, float} or not math.isfinite(request.deadline)
+            or effects.clock.monotonic() >= request.deadline):
+        _refuse(FailureCode.MIGRATION_TIMEOUT, Stage.MIGRATION)
+
+
+def _validate_migration(proof, request):
+    if (type(proof) is not MigrationProof or proof.run_id != request.run_id
+            or proof.manifest_sha256 != _manifest_hash(request.expected_manifest)
+            or proof.ok is not True or proof.database != "leaf" or proof.schema != "public"
+            or type(proof.migration_count) is not int or type(proof.applied_migration_count) is not int
+            or proof.migration_count != len(request.expected_manifest)
+            or proof.applied_migration_count != len(request.expected_manifest)):
+        _refuse(FailureCode.MIGRATION_RESULT, Stage.MIGRATION)
+    return proof
+
+
+def migration_child(request: MigrationRequest, *, effects: Effects) -> MigrationProof:
+    """Run only inside a fresh child in production; tests inject every DB effect."""
+    _nonempty_dsn(request.environment)  # Must precede even the database import seam.
+    _check_deadline(request, effects)
+    if request.migration_root != REPO / "platform/migrations":
+        _refuse(FailureCode.MIGRATION_CORPUS, Stage.MIGRATION)
+    _check_entry(effects)
+    _check_corpus(request.expected_manifest, effects=effects)
+    db = None
+    try:
+        try:
+            db = effects.host.database_module(request.environment)
+        except Exception:
+            _refuse(FailureCode.MIGRATION_ENTRY, Stage.MIGRATION)
+        if not all(callable(getattr(db, name, None)) for name in
+                   ("apply_migration", "assert_schema_current", "reset_pool")):
+            _refuse(FailureCode.MIGRATION_ENTRY, Stage.MIGRATION)
+        db.apply_migration()
+        try:
+            status = db.assert_schema_current()
+        except Exception:
+            _refuse(FailureCode.SCHEMA, Stage.MIGRATION)
+        empty_fields = {"missing": dict, "missing_migrations": list, "migration_hash_drift": list,
+                        "invalid_constraints": list, "invalid_indexes": list, "invalid_triggers": list}
+        if (type(status) is not dict or status.get("ok") is not True
+                or any(type(status.get(key)) is not kind or status[key] for key, kind in empty_fields.items())):
+            _refuse(FailureCode.SCHEMA, Stage.MIGRATION)
+        proof = MigrationProof(request.run_id, _manifest_hash(request.expected_manifest), status["ok"],
+            status["database"], status["schema"], status["migration_count"], status["applied_migration_count"])
+        _check_deadline(request, effects)
+        result = _validate_migration(proof, request)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(FailureCode.MIGRATION_EXIT, Stage.MIGRATION)
+    finally:
+        if db is not None:
+            failing = sys.exc_info()[0] is not None
+            try:
+                db.reset_pool()
+            except Exception:
+                # Preserve an existing refusal; never turn a failed close into success.
+                if not failing:
+                    _refuse(FailureCode.MIGRATION_EXIT, Stage.MIGRATION)
+    # A cleanup that outlives the deadline is a timeout, not a success.
+    _check_deadline(request, effects)
+    return result
+
+
+def _validate_binding(proof, request):
+    if (type(proof) is not BindingProof or proof.subject != request.subject
+            or proof.tier != TIER or proof.authority != "auth0"
+            or proof.role != "owner" or proof.status != "active"
+            or any(not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9-]{1,64}", value) is None
+                   for value in (proof.organization_id, proof.binding_id))):
+        _refuse(FailureCode.BINDING, Stage.BINDING)
+    return proof
+
+
+def _validate_ownership(owned, run_id, *, allocated):
+    name = "leafproof-" + run_id
+    if (type(owned) is not AuthorityOwnership or owned.run_id != run_id
+            or owned.names != (name, name + "-pg", name + "-relay")
+            or owned.labels != (("leaf.proof-project.run", run_id),
+                                ("leaf.proof-project.owner", "proof_project_pg"))
+            or type(owned.containers) is not tuple or type(owned.networks) is not tuple
+            or len(owned.containers) != (2 if allocated else 0)
+            or len(owned.networks) != (1 if allocated else 0)
+            or len(set(owned.containers + owned.networks)) != len(owned.containers + owned.networks)
+            or any(not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{12,64}", value) is None
+                   for value in owned.containers + owned.networks)):
+        _refuse(FailureCode.ALLOCATION, Stage.ALLOCATION)
+    return owned
+
+
+def _seed_child(request, *, effects):
+    _nonempty_dsn(request.environment)
+    _check_deadline(request, effects)
+    db = None
+    try:
+        if (request.authority != "auth0" or request.tier != TIER
+                or request.subject != "leaf-proof-project|" + request.run_id):
+            _refuse(FailureCode.BINDING, Stage.BINDING)
+        db = effects.host.database_module(request.environment)
+        store = effects.host.store_module()
+        org = store.create_org_with_identity("Project proof " + request.run_id, "auth0", request.subject, tier=TIER)
+        binding = store.resolve_active_identity_binding("auth0", request.subject)
+        if (org.status != "active" or org.tier != TIER or binding is None
+                or str(binding.platform_tenant_id) != str(org.org_id)
+                or binding.external_authority != "auth0" or binding.external_subject != request.subject):
+            _refuse(FailureCode.BINDING, Stage.BINDING)
+        role = store.active_identity_role(org.org_id, binding.binding_id)
+        proof = BindingProof(str(org.org_id), str(binding.binding_id), binding.external_subject,
+                             org.tier, binding.external_authority, role, binding.status)
+        _check_deadline(request, effects)
+        return _validate_binding(proof, request)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(FailureCode.BINDING, Stage.BINDING)
+    finally:
+        if db is not None:
+            failing = sys.exc_info()[0] is not None
+            try:
+                db.reset_pool()
+            except Exception:
+                if not failing:
+                    _refuse(FailureCode.BINDING, Stage.BINDING)
+
+
+def prepare_authority(plan: Plan, *, effects: Effects, scope: RunScope) -> PreparedAuthority:
+    """Journal allocation, prove migration, then bootstrap one active owner."""
+    stage, code = Stage.MIGRATION, FailureCode.MIGRATION_CORPUS
+    try:
+        if plan.reservation is None:
+            _refuse(FailureCode.ALLOCATION, Stage.ALLOCATION)
+        _check_entry(effects)
+        _check_corpus(plan.migrations, effects=effects)
+        run_id, root = plan.config.run_id, plan.config.run_root
+        stage, code = Stage.ALLOCATION, FailureCode.ALLOCATION
+        ownership = _validate_ownership(effects.host.authority_inventory(run_id), run_id, allocated=False)
+        authority = None
+        scope.acquire(ResourceKind.AUTHORITY, lambda: authority.stop() if authority is not None
+                      else effects.host.cleanup_authority(run_id))
+        effects.receipt_writer.ownership(root / "authority-planned.json", OwnershipJournal(
+            run_id, root, plan.config.artifact_root, effects.clock.utc_now(), ownership))
+        start = effects.clock.monotonic()
+        authority = effects.authority_factory(run_id)
+        ownership = _validate_ownership(effects.host.authority_inventory(run_id), run_id, allocated=True)
+        effects.receipt_writer.ownership(root / "authority-observed.json", OwnershipJournal(
+            run_id, root, plan.config.artifact_root, effects.clock.utc_now(), ownership))
+        allocated = effects.clock.monotonic()
+        stage, code = Stage.TRANSPORT, FailureCode.TRANSPORT
+        ready = authority.readiness()
+        if (type(ready) is not dict or set(ready) != {"ok", "server_version", "round_trip_bytes"}
+                or ready["ok"] is not True or type(ready["round_trip_bytes"]) is not int
+                or ready["round_trip_bytes"] != 256 or not isinstance(ready["server_version"], str)
+                or re.fullmatch(r"[0-9][A-Za-z0-9 .()+_-]{0,127}", ready["server_version"]) is None):
+            _refuse(code, stage)
+        transport = TransportProof(ready["ok"], ready["server_version"], ready["round_trip_bytes"])
+        relayed = effects.clock.monotonic()
+        dsn = authority.dsn()
+        env = _PrivateEnvironment(_clean_libpq(_essential_environment(plan.host.environment)))
+        env.update(DATABASE_URL=dsn, PYTHONDONTWRITEBYTECODE="1")
+        _nonempty_dsn(env)
+        stage, code = Stage.MIGRATION, FailureCode.MIGRATION_EXIT
+        request = MigrationRequest(run_id, REPO / "platform/migrations", plan.migrations,
+                                   env, relayed + MIGRATION_TIMEOUT_S, root / "migration-result.json")
+        _check_corpus(plan.migrations, effects=effects)
+        migration = effects.migration_runner(request, scope=scope)
+        _check_deadline(request, effects)
+        migration = _validate_migration(migration, request)
+        migrated = effects.clock.monotonic()
+        stage, code = Stage.IDENTITY, FailureCode.IDENTITY
+        issuer = effects.issuer_factory(run_id)
+        jwks_path = root / "public-jwks.json"
+        lease = IdentityLease(issuer, run_id, jwks_path, {})
+        scope.acquire(ResourceKind.IDENTITY, lambda: effects.host.close_identity(lease))
+        if (issuer.run_id != run_id or issuer.issuer != "https://proof-project.leaf.invalid/" + run_id + "/"
+                or issuer.audience != "leaf-proof-project:" + run_id
+                or not isinstance(issuer.thumbprint, str)
+                or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", issuer.thumbprint) is None):
+            _refuse(code, stage)
+        issuer.write_public_jwks(jwks_path)
+        profile_env = issuer.profile_env(jwks_path)
+        expected_profile = {"LEAF_PROOF_PROFILE": PROFILE, "LEAF_PROOF_PROJECT_RUN_ID": run_id,
+            "LEAF_PROOF_PROJECT_KEY_SHA256": issuer.thumbprint, "LEAF_PROOF_PROJECT_JWKS_FILE": str(jwks_path)}
+        if profile_env != expected_profile:
+            _refuse(code, stage)
+        object.__setattr__(lease, "profile", _RedactedEnvironment(profile_env))
+        stage, code = Stage.BINDING, FailureCode.BINDING
+        seed = SeedRequest(run_id, "leaf-proof-project|" + run_id, env,
+                           effects.clock.monotonic() + MIGRATION_TIMEOUT_S, root / "binding-result.json")
+        binding = _validate_binding(effects.seed_operation(seed, scope=scope), seed)
+        _check_deadline(seed, effects)
+        object.__setattr__(lease, "binding", binding)
+        database = DatabaseProof(run_id, ownership, "host-relay", transport, plan.migrations,
+            _manifest_hash(plan.migrations), migration, allocated - start, relayed - allocated, migrated - relayed)
+        identity = IdentityProof(issuer.thumbprint, issuer.issuer, issuer.audience, binding.organization_id,
+                                 binding.binding_id, binding.subject, binding.tier)
+        return PreparedAuthority(authority, dsn, lease, database, identity, binding)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(code, stage)
+
+
 def _later(record):
     def unavailable(*args, **kwargs):
         raise RuntimeError("record " + record + " adapter is not implemented")
@@ -654,8 +1063,83 @@ def _private_directory(path):
 
 
 class _Host:
-    authority_inventory = staticmethod(_later("B"))
     scrub = staticmethod(_later("D"))
+
+    @staticmethod
+    def migration_entry_present():
+        return all((REPO / name).is_file() and _path_safe(REPO / name)
+                   for name in ("platform/__init__.py", "platform/db.py"))
+
+    @staticmethod
+    def migration_corpus():
+        # HEAD plus index preserves deletions as missing and admits tracked additions.
+        tracked = set(_git("ls-tree", "-r", "--name-only", "HEAD", "platform/migrations").decode().splitlines())
+        tracked.update(_git("ls-files", "--cached", "platform/migrations").decode().splitlines())
+        expected = tuple(sorted(name for name in tracked
+            if re.fullmatch(r"platform/migrations/[0-9]{4}_[^/]+\.sql", name)))
+        paths = sorted((REPO / "platform/migrations").glob("[0-9][0-9][0-9][0-9]_*.sql"))
+        if any(not _path_safe(path) for path in paths):
+            raise RuntimeError("unsafe migration corpus")
+        return tuple(_file_proof(path, path.relative_to(REPO).as_posix()) for path in paths), expected
+
+    @staticmethod
+    def database_module(environment):
+        # This adapter runs in the dedicated interpreter, with the already scrubbed
+        # environment supplied at process creation. Never set a parent's DB policy.
+        dsn = _nonempty_dsn(environment)
+        if (os.environ.get("DATABASE_URL") != dsn
+                or _clean_libpq(os.environ) != dict(os.environ)):
+            raise RuntimeError("database child environment mismatch")
+        with _IMPORT_LOCK:
+            package = _load_file("leaf_platform", REPO / "platform/__init__.py", package=True)
+            db = _load_file("leaf_platform.db", REPO / "platform/db.py")
+            package.db = db
+            return db
+
+    @staticmethod
+    def store_module():
+        # Relative imports reuse exactly the child-local leaf_platform.db pool.
+        return importlib.import_module("leaf_platform.store")
+
+    @staticmethod
+    def authority_inventory(run_id):
+        pg = _pg_module()
+        pg._validate(run_id)
+        selected = pg._inventory(run_id, pg._docker)
+        if (set(selected) != {"containers", "networks"}
+                or any(not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{12,64}", value) is None
+                       for values in selected.values() for value in values)):
+            raise RuntimeError("authority inventory unavailable")
+        name = "leafproof-" + run_id
+        return AuthorityOwnership(run_id, (name, name + "-pg", name + "-relay"),
+            ((pg.RUN_LABEL, run_id), (pg.OWNER_LABEL, pg.OWNER)),
+            tuple(selected["containers"]), tuple(selected["networks"]))
+
+    @staticmethod
+    def cleanup_authority(run_id):
+        return _pg_module().cleanup(run_id)
+
+    @staticmethod
+    def close_identity(lease):
+        object.__setattr__(lease, "issuer", None)
+        lease.jwks_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def read_child_result(path):
+        if not _path_safe(path):
+            raise RuntimeError("unsafe child result")
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_OUTPUT_BYTES + 1)
+        if len(raw) > MAX_OUTPUT_BYTES:
+            raise RuntimeError("child result exceeded bound")
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate child result field")
+                result[key] = value
+            return result
+        return json.loads(raw, object_pairs_hook=unique)
 
     def inspect(self, config):
         root = config.run_root
@@ -774,6 +1258,10 @@ class _ReceiptWriter:
     def ownership(path, value):
         public = {"run_id": value.run_id, "run_root": str(value.run_root),
                   "artifact_root": str(value.artifact_root), "created_at": value.created_at.isoformat()}
+        if value.authority is not None:
+            owned = value.authority
+            public["authority"] = {"run_id": owned.run_id, "names": list(owned.names),
+                "labels": dict(owned.labels), "containers": list(owned.containers), "networks": list(owned.networks)}
         with path.open("x", encoding="utf-8", newline="\n") as stream:
             json.dump(public, stream, sort_keys=True)
             stream.write("\n")
@@ -846,7 +1334,7 @@ class _RuntimeProcess:
 
     def start(self):
         spec = self.spec
-        if spec.role not in {"runtime-version", "runtime-build"}:
+        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child"}:
             return _later("C")(spec)
         try:
             if spec.output_path is not None:
@@ -902,13 +1390,162 @@ class _RuntimeProcess:
 def _launch_runtime(spec, *, scope):
     process = _RuntimeProcess(spec)
     # Registration is synchronous and precedes the first possible child.
-    scope.acquire(ResourceKind.RUNTIME_PROCESS, lambda: process.stop(time.monotonic() + 5.0))
+    kind = {"migration-child": ResourceKind.MIGRATION_PROCESS,
+            "seed-child": ResourceKind.SEED_PROCESS}.get(spec.role, ResourceKind.RUNTIME_PROCESS)
+    scope.acquire(kind, lambda: process.stop(time.monotonic() + 5.0))
     process.start()
     return process
 
 
+def _pg_module():
+    with _IMPORT_LOCK:
+        name = "_leaf_project_pg_environment"
+        return sys.modules.get(name) or _load_file(name, REPO / "scripts/proof_project_pg.py")
+
+
+def _authority_factory(run_id):
+    return _pg_module().PgAuthority.start(run_id)
+
+
+def _issuer_factory(run_id):
+    with _IMPORT_LOCK:
+        name = "_leaf_project_fixture_identity"
+        module = sys.modules.get(name) or _load_file(name, REPO / "scripts/proof_project_identity.py")
+    return module.FixtureIssuer.create(run_id)
+
+
+# Fixed child entry, public path only in argv. Credentials travel only in env.
+_DATABASE_CHILD = """import importlib.util, sys
+spec = importlib.util.spec_from_file_location('_leaf_project_child', sys.argv[1])
+p = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = p
+spec.loader.exec_module(p)
+raise SystemExit(p._database_child_entry())
+"""
+
+
+def _request_public(request):
+    public = {"run_id": request.run_id, "deadline": request.deadline,
+              "result_path": str(request.result_path)}
+    if isinstance(request, MigrationRequest):
+        public.update(kind="migration", migration_root=str(request.migration_root),
+            expected_manifest=[{"path": f.path, "sha256": f.sha256, "size": f.size} for f in request.expected_manifest])
+    else:
+        public.update(kind="seed", subject=request.subject, authority=request.authority, tier=request.tier)
+    return public
+
+
+def _proof_public(proof):
+    if isinstance(proof, MigrationProof):
+        return {"run_id": proof.run_id, "manifest_sha256": proof.manifest_sha256, "ok": proof.ok,
+            "database": proof.database, "schema": proof.schema, "migration_count": proof.migration_count,
+            "applied_migration_count": proof.applied_migration_count}
+    return {"organization_id": proof.organization_id, "binding_id": proof.binding_id,
+        "subject": proof.subject, "tier": proof.tier, "authority": proof.authority,
+        "role": proof.role, "status": proof.status}
+
+
+def _database_child_entry():
+    """Production transport adapter, never a general supervisor CLI."""
+    try:
+        public = json.loads(os.environ["LEAF_PROJECT_CHILD_REQUEST"])
+        kind = public.pop("kind")
+        public["result_path"] = Path(public["result_path"])
+        dsn = _nonempty_dsn(os.environ)  # Must precede the libpq cleaner's import.
+        env = _PrivateEnvironment(_clean_libpq(_essential_environment(os.environ)))
+        env["DATABASE_URL"] = dsn
+        public["environment"] = env
+        if kind == "migration":
+            public["migration_root"] = Path(public["migration_root"])
+            public["expected_manifest"] = tuple(FileProof(**item) for item in public["expected_manifest"])
+            request = MigrationRequest(**public)
+            operation = migration_child
+        elif kind == "seed":
+            request, operation = SeedRequest(**public), _seed_child
+        else:
+            return 1
+        # Database libraries must not write diagnostics into the result channel.
+        with open(os.devnull, "w") as sink, redirect_stdout(sink):
+            proof = operation(request, effects=production_effects())
+        print(json.dumps(_proof_public(proof), sort_keys=True))
+        return 0
+    except ProofRefused as exc:
+        print(json.dumps({"failure": exc.failure.fixed_code.value}))
+        return 1
+    except BaseException:
+        return 1
+
+
+def _run_database_child(request, *, effects, scope):
+    _nonempty_dsn(request.environment)
+    _check_deadline(request, effects)
+    migration = isinstance(request, MigrationRequest)
+    code = FailureCode.MIGRATION_EXIT if migration else FailureCode.BINDING
+    stage = Stage.MIGRATION if migration else Stage.BINDING
+    env = _PrivateEnvironment(_clean_libpq(_essential_environment(request.environment)))
+    env.update(DATABASE_URL=request.environment["DATABASE_URL"], PYTHONDONTWRITEBYTECODE="1",
+               LEAF_PROJECT_CHILD_REQUEST=json.dumps(_request_public(request)))
+    spec = ProcessSpec("migration-child" if migration else "seed-child",
+        (sys.executable, "-B", "-c", _DATABASE_CHILD, str(REPO / "scripts/proof_project.py")),
+        REPO.parent, env, request.deadline, request.result_path)
+    process = None
+    try:
+        process = effects.process_launcher(spec, scope=scope)
+        while True:
+            _check_deadline(request, effects)
+            exit_code = process.poll()
+            if exit_code is not None:
+                break
+            effects.clock.wait(0.05)
+        _check_deadline(request, effects)
+        if exit_code != 0:
+            # The child reports only closed failure codes, never exception text.
+            try:
+                failure = effects.host.read_child_result(request.result_path)
+                allowed = {item.value: item for item in (FailureCode.MIGRATION_ENTRY, FailureCode.MIGRATION_CORPUS,
+                    FailureCode.MIGRATION_TIMEOUT, FailureCode.MIGRATION_EXIT, FailureCode.MIGRATION_RESULT,
+                    FailureCode.SCHEMA, FailureCode.BINDING, FailureCode.ENVIRONMENT)}
+                if type(failure) is dict and set(failure) == {"failure"} and failure["failure"] in allowed:
+                    code = allowed[failure["failure"]]
+            except Exception:
+                pass
+            _refuse(code, stage)
+        try:
+            raw = effects.host.read_child_result(request.result_path)
+            _check_deadline(request, effects)
+            if type(raw) is not dict:
+                raise ValueError
+            if migration:
+                result = _validate_migration(MigrationProof(**raw), request)
+            else:
+                result = _validate_binding(BindingProof(**raw), request)
+        except ProofRefused:
+            raise
+        except Exception:
+            _refuse(FailureCode.MIGRATION_RESULT if migration else FailureCode.BINDING, stage)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(code, stage)
+    finally:
+        failing = sys.exc_info()[0] is not None
+        if process is not None:
+            try:
+                stopped = process.stop(effects.clock.monotonic() + 5.0)
+            except Exception:
+                stopped = False
+            if not stopped and not failing:
+                _refuse(code, stage)
+    # Stopping the child must also finish inside the deadline.
+    _check_deadline(request, effects)
+    return result
+
+
 def production_effects() -> Effects:
     """Adapters are lazy: construction imports no worker and acquires nothing."""
-    return Effects(_later("B"), _later("B"), _later("B"), _later("B"),
+    effects = Effects(_authority_factory, _issuer_factory, None, None,
                    _launch_runtime, _later("C"), _browser_unavailable, _canonical_reader,
                    _Clock(), _Host(), _ReceiptWriter())
+    return replace(effects,
+        migration_runner=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope),
+        seed_operation=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope))
