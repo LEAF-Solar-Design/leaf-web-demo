@@ -218,6 +218,38 @@ def platform_database_configured(env: dict[str, str]) -> bool:
     return bool(env.get("DATABASE_URL", "").strip())
 
 
+# One grammar for a selectable worker tool: the option check and the table's members share it.
+CANONICAL_WORKER_TOOL_RE = re.compile(r"[a-z][a-z0-9-]{0,63}")
+
+
+def project_worker_tools() -> frozenset[str] | None:
+    """Read the worker's graph tool table; None when unreadable (callers fail closed).
+
+    The table's source is compiled and run in a private namespace, so no server
+    package, database driver, sys.path or sys.modules entry reaches the launcher
+    and no bytecode cache is written beside the table. Fails closed: every way of
+    leaving the table's code except an operator interrupt, and any member the
+    launcher itself could not select, reads as no table.
+    """
+    path = SERVER_DIR / "solar_project_tools.py"
+    try:
+        namespace: dict[str, object] = {"__name__": "_leaf_solar_project_tools"}
+        exec(compile(path.read_bytes(), str(path), "exec", dont_inherit=True), namespace)
+        tools = namespace.get("SUPPORTED_TOOLS")
+    except KeyboardInterrupt:
+        # An operator interrupt is never a table failure.
+        raise
+    except BaseException:
+        # Unreadable, uncompilable, failing or exiting in any way: the table is unavailable.
+        return None
+    if type(tools) is not frozenset or not tools:
+        return None
+    # Every member must be an exact str the launcher itself could select.
+    if not all(type(tool) is str and CANONICAL_WORKER_TOOL_RE.fullmatch(tool) for tool in tools):
+        return None
+    return tools
+
+
 def source_revision(env: dict[str, str]) -> str | None:
     """Resolve the checkout revision without overriding an operator value."""
     for name in (
@@ -434,10 +466,19 @@ def main() -> int:
     args = ap.parse_args()
 
     # Refuse explicit project-worker configuration before ports, files or children.
-    if args.canonical_worker_tool is not None and not re.fullmatch(
-            r"[a-z][a-z0-9-]{0,63}", args.canonical_worker_tool):
+    if args.canonical_worker_tool is not None and not CANONICAL_WORKER_TOOL_RE.fullmatch(
+            args.canonical_worker_tool):
         print("Invalid canonical worker tool.", file=sys.stderr)
         return 2
+    if args.canonical_worker_tool is not None:
+        # The worker runs a selected tool with --readiness, which admits graph tools only.
+        supported = project_worker_tools()
+        if supported is None:
+            print("Canonical worker tool table is unavailable.", file=sys.stderr)
+            return 2
+        if args.canonical_worker_tool not in supported:
+            print("Unsupported canonical worker tool.", file=sys.stderr)
+            return 2
     if args.canonical_worker_id is not None and (
             args.canonical_worker_tool is None or not re.fullmatch(
                 r"[A-Za-z0-9._:-]{1,128}", args.canonical_worker_id)):
