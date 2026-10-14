@@ -17,6 +17,159 @@ from ci.native_release_producer import image_build_command, SERVICES, FRESHNESS,
 from ci import native_release_producer as producer
 
 
+REAL_VERIFY_GIT_IMAGES = producer.verify_git_images
+
+
+@pytest.fixture(autouse=True)
+def git_smoke_calls(monkeypatch):
+    calls = []
+
+    def record(images):
+        calls.append(images)
+        return {}
+
+    monkeypatch.setattr(producer, "verify_git_images", record)
+    return calls
+
+
+@pytest.mark.parametrize("service", ["app", "broker", "harness"])
+def test_git_smoke_command_uses_exact_digest_and_runtime_user(service):
+    digest = "sha256:" + "a" * 64
+    assert producer.git_smoke_command(service, digest) == [
+        "docker", "run", "--rm", "--network", "none", "--entrypoint", "git",
+        f"{producer.REGISTRY}/leaf-platform-{service}@{digest}", "--version"]
+
+
+@pytest.mark.parametrize("service", ["web", "canonical-worker", "other"])
+def test_git_smoke_command_refuses_other_services(service):
+    with pytest.raises(ValueError, match="service"):
+        producer.git_smoke_command(service, "sha256:" + "a" * 64)
+
+
+@pytest.mark.parametrize("digest", ["sha256:" + "a" * 63, "sha256:" + "A" * 64,
+                                  "native-tag", "sha256:" + "a" * 64 + "\n", None])
+def test_git_smoke_command_refuses_malformed_digest(digest):
+    with pytest.raises(ValueError, match="app.*digest"):
+        producer.git_smoke_command("app", digest)
+
+
+def git_smoke_identities(services):
+    return {service: {"repository": f"leaf-platform-{service}",
+                      "image_digest": "sha256:" + str(index + 1) * 64}
+            for index, service in enumerate(services)}
+
+
+def test_git_smoke_checks_only_required_images_in_order(capsys):
+    images = git_smoke_identities(reversed(SERVICES))
+    original = copy.deepcopy(images)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=f"git version 2.43.{len(calls)}\nextra output\n")
+
+    versions = REAL_VERIFY_GIT_IMAGES(images, runner=run)
+    assert [command for command, _ in calls] == [
+        producer.git_smoke_command(service, images[service]["image_digest"])
+        for service in ("app", "broker", "harness")]
+    assert all(kwargs == {"capture_output": True, "text": True, "timeout": 600, "check": False}
+               for _, kwargs in calls)
+    assert versions == {"app": "git version 2.43.1", "broker": "git version 2.43.2",
+                        "harness": "git version 2.43.3"}
+    assert capsys.readouterr().out == "".join(
+        f"git smoke {service}: {version}\n" for service, version in versions.items())
+    assert images == original
+
+
+def test_git_smoke_harness_only():
+    images = git_smoke_identities(["harness"])
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="git version 2.39.5\n")
+
+    assert REAL_VERIFY_GIT_IMAGES(images, runner=run) == {"harness": "git version 2.39.5"}
+    assert calls == [producer.git_smoke_command("harness", images["harness"]["image_digest"])]
+
+
+@pytest.mark.parametrize("services", [[], ["web", "canonical-worker"]])
+def test_git_smoke_refuses_map_without_required_images(services):
+    with pytest.raises(ValueError, match="requires"):
+        REAL_VERIFY_GIT_IMAGES(git_smoke_identities(services),
+                               runner=lambda *a, **k: pytest.fail("no image should run"))
+
+
+def test_git_smoke_refuses_wrong_repository():
+    images = git_smoke_identities(["broker"])
+    images["broker"]["repository"] = "leaf-platform-app"
+    with pytest.raises(ValueError, match="broker.*repository"):
+        REAL_VERIFY_GIT_IMAGES(images, runner=lambda *a, **k: pytest.fail("repository must be checked first"))
+
+
+def test_git_smoke_reports_failed_return_code():
+    with pytest.raises(ValueError, match="harness.*127"):
+        REAL_VERIFY_GIT_IMAGES(git_smoke_identities(["harness"]), runner=lambda *a, **k:
+                               SimpleNamespace(returncode=127, stdout="git version 2.43.0\n"))
+
+
+def test_git_smoke_reports_timeout():
+    def run(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    with pytest.raises(ValueError, match="app.*timed out"):
+        REAL_VERIFY_GIT_IMAGES(git_smoke_identities(["app"]), runner=run)
+
+
+@pytest.mark.parametrize("stdout", ["not git\n", "", "\ngit version 2.43.0\n", "git version x.y\n"])
+def test_git_smoke_refuses_invalid_first_stdout_line(stdout):
+    with pytest.raises(ValueError, match="broker.*invalid version"):
+        REAL_VERIFY_GIT_IMAGES(git_smoke_identities(["broker"]), runner=lambda *a, **k:
+                               SimpleNamespace(returncode=0, stdout=stdout))
+
+
+@pytest.mark.parametrize("refuse", [False, True])
+def test_build_images_smokes_final_ordered_map_once_after_builds_settle(tmp_path, monkeypatch, refuse):
+    identities = git_smoke_identities(SERVICES)
+    settled = set()
+    lock = threading.Lock()
+    calls = []
+    failure = ValueError("git smoke harness refused")
+
+    def build(root, service, source, number, freshness, metadata, *, log_path=None, **kwargs):
+        assert root == tmp_path and source == "d" * 40 and number == 73
+        if log_path is not None:
+            log_path.write_text("build succeeded\n", encoding="utf-8")
+        with lock:
+            settled.add(service)
+        return identities[service]
+
+    def smoke(images):
+        assert settled == set(SERVICES)
+        assert list(images) == list(SERVICES)
+        assert images == identities
+        assert all(images[service] is identities[service] for service in SERVICES)
+        calls.append(images)
+        if refuse:
+            raise failure
+        return {}
+
+    monkeypatch.setattr(producer, "build_image", build)
+    monkeypatch.setattr(producer, "verify_git_images", smoke)
+
+    def run():
+        return producer._build_images(tmp_path, tuple(reversed(SERVICES)), "d" * 40, 73,
+                                      {service: {} for service in SERVICES}, tmp_path)
+
+    if refuse:
+        with pytest.raises(ValueError) as raised:
+            run()
+        assert raised.value is failure
+    else:
+        assert run() is calls[0]
+    assert len(calls) == 1
+
+
 def pin_race_case(tmp_path, monkeypatch, *, service="broker", markers=None,
                   error=None, unchanged=False, refresh_error=None, retry_error=None):
     freshness = {name: {pin: "a" * 64 for pin in FRESHNESS.get(name, TRIXIE)}

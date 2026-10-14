@@ -26,6 +26,8 @@ import zipfile
 
 SERVICES = ("app", "broker", "canonical-worker", "harness", "web")
 REGISTRY = "807034087062.dkr.ecr.us-east-1.amazonaws.com"
+GIT_IMAGES = ("app", "broker", "harness")
+GIT_SMOKE_TIMEOUT_S = 600
 BASE_IMAGES = (
     "nginx:alpine", "rust:1-slim", "node:20-slim", "node:22-bookworm",
     "node:22-slim", "python:3.12-slim",
@@ -341,6 +343,44 @@ def image_build_command(service: str, source: str, build_number: int,
         command += ["--push"]
     command += ["--tag", f"{REGISTRY}/leaf-platform-{service}:native-{build_number}-{source}", "."]
     return command
+
+
+def git_smoke_command(service: str, image_digest: str) -> list[str]:
+    """Run git as the image's runtime user against its exact pushed digest."""
+    if service not in GIT_IMAGES:
+        raise ValueError(f"invalid git smoke service: {service}")
+    if not isinstance(image_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest):
+        raise ValueError(f"invalid {service} git smoke digest")
+    return ["docker", "run", "--rm", "--network", "none", "--entrypoint", "git",
+            f"{REGISTRY}/leaf-platform-{service}@{image_digest}", "--version"]
+
+
+def verify_git_images(images: dict, *, runner=subprocess.run) -> dict[str, str]:
+    """Require working git in every selected release image that needs it."""
+    versions = {}
+    for service in GIT_IMAGES:
+        if service not in images:
+            continue
+        identity = images[service]
+        if identity.get("repository") != f"leaf-platform-{service}":
+            raise ValueError(f"invalid {service} git smoke repository")
+        command = git_smoke_command(service, identity.get("image_digest"))
+        try:
+            result = runner(command, capture_output=True, text=True,
+                            timeout=GIT_SMOKE_TIMEOUT_S, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError(f"git smoke {service} timed out") from exc
+        if result.returncode != 0:
+            raise ValueError(f"git smoke {service} failed with return code {result.returncode}")
+        lines = result.stdout.splitlines()
+        first_line = lines[0] if lines else ""
+        if not re.match(r"git version [0-9]+\.[0-9]+", first_line):
+            raise ValueError(f"git smoke {service} returned invalid version with return code {result.returncode}")
+        print(f"git smoke {service}: {first_line}", flush=True)
+        versions[service] = first_line
+    if not versions:
+        raise ValueError("git smoke requires an app, broker or harness image")
+    return versions
 
 
 def build_image(root: Path, service: str, source: str, build_number: int,
@@ -699,7 +739,9 @@ def _build_images(root: Path, services, source: str, build_number: int,
         error = errors[service]
         if error is not None:
             raise error
-    return {service: results[service] for service in ordered}
+    images = {service: results[service] for service in ordered}
+    verify_git_images(images)
+    return images
 
 
 def produce_release(root: Path, output: Path, request: dict, env: dict, codebuild, s3) -> dict:
