@@ -16,7 +16,7 @@ The staging controller injects the receipt after it validates the configuration
 baseline. `LEAF_RUNTIME_ENV=staging` binds the receipt to staging; the endpoint
 also preserves the staging default for older non-production task definitions.
 On the native staging rail the stamp comes from `.codebuild/deploy/native-five-service.py` in the
-runner package (terraform #2922), live from runner package 7da2395d since 2026-10-15.
+runner package (terraform #2922; readback fix #2925), live from runner package ccc03128 since 2026-10-15.
 
 ```json
 {
