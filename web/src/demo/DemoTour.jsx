@@ -241,6 +241,7 @@ export default function DemoTour({
   const rootRef = useRef(null)
   const restoreRef = useRef(null)
   const cardRef = useRef(null)
+  const skipRef = useRef(null)
   const recoverFocusAfterBackRef = useRef(false)
   const back = useCallback(() => {
     const nextIndex = Math.max(0, index - 1)
@@ -252,7 +253,7 @@ export default function DemoTour({
   useLayoutEffect(() => {
     if (!recoverFocusAfterBackRef.current) return
     recoverFocusAfterBackRef.current = false
-    rootRef.current?.focus()
+    skipRef.current?.focus()
   }, [index])
   useLayoutEffect(() => {
     const el = cardRef.current
@@ -394,7 +395,7 @@ export default function DemoTour({
           >
             Back
           </button>
-          <button type="button" className="chip-neutral" onClick={onExit}>Skip</button>
+          <button ref={skipRef} type="button" className="chip-neutral" onClick={onExit}>Skip</button>
           <span className="tour-spacer" />
           <button
             type="button"

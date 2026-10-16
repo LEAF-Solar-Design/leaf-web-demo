@@ -8,7 +8,7 @@ async function openTour(page, viewport) {
   return tour
 }
 
-test('the version toast Undo activates by pointer and restores the synthetic delete', async ({ page }) => {
+test('the version toast ignores a captured drag-away before Undo activates normally', async ({ page }) => {
   const tour = await openTour(page, { width: 1280, height: 800 })
   await tour.getByRole('button', { name: 'Skip', exact: true }).click()
 
@@ -20,27 +20,42 @@ test('the version toast Undo activates by pointer and restores the synthetic del
 
   const toast = page.locator('.toast[role="status"]')
   await expect(toast).toContainText('Version 2 created')
-  await toast.getByRole('button', { name: 'Undo', exact: true }).click()
+  const undo = toast.getByRole('button', { name: 'Undo', exact: true })
+  const box = await undo.boundingBox()
+  expect(box).not.toBeNull()
+  const x = box.x + box.width / 2
+  const y = box.y + box.height / 2
+  await page.mouse.move(x, y)
+  await page.mouse.down()
+  await page.mouse.move(x, Math.max(1, box.y - 80), { steps: 5 })
+  await page.mouse.up()
+
+  await expect(page.locator('body')).toContainText(/Entities\s*2,344/)
+  await expect(toast).toContainText('Version 2 created')
+  await undo.click()
 
   await expect(page.locator('body')).toContainText(/Entities\s*2,345/)
   await expect(page.locator('.toast[role="status"]')).toContainText('Reverted to version 1')
 })
 
-test('Back recovers phone tour focus to the dialog root before the next Tab', async ({ page }) => {
+test('Back recovers phone tour focus to visible Skip before the next Tab', async ({ page }) => {
   const tour = await openTour(page, { width: 390, height: 844 })
   await tour.getByRole('button', { name: 'More', exact: true }).click()
   await tour.getByRole('button', { name: 'Next', exact: true }).click()
   await expect(tour).toContainText('Step 2 of 9')
 
   const back = tour.getByRole('button', { name: 'Back', exact: true })
-  await back.click()
+  await back.focus()
+  await page.keyboard.press('Enter')
   await expect(tour).toContainText('Step 1 of 9')
   await expect(back).toBeDisabled()
-  await expect(tour).toBeFocused()
-  await page.keyboard.press('Tab')
-
-  expect(await page.evaluate(() => {
-    const active = document.activeElement
-    return !!active && !!active.closest('[role="dialog"][aria-label="Guided demo tour"]')
+  const skip = tour.getByRole('button', { name: 'Skip', exact: true })
+  await expect(skip).toBeFocused()
+  expect(await skip.evaluate((element) => {
+    const style = getComputedStyle(element)
+    return element.matches(':focus-visible')
+      && (style.outlineStyle !== 'none' || style.boxShadow !== 'none')
   })).toBe(true)
+  await page.keyboard.press('Tab')
+  await expect(tour.getByRole('button', { name: 'Next', exact: true })).toBeFocused()
 })
