@@ -241,7 +241,19 @@ export default function DemoTour({
   const rootRef = useRef(null)
   const restoreRef = useRef(null)
   const cardRef = useRef(null)
+  const recoverFocusAfterBackRef = useRef(false)
+  const back = useCallback(() => {
+    const nextIndex = Math.max(0, index - 1)
+    recoverFocusAfterBackRef.current = nextIndex === 0
+      && !!rootRef.current?.contains(document.activeElement)
+    setIndex(nextIndex)
+  }, [index, setIndex])
   const [cardH, setCardH] = useState(260)
+  useLayoutEffect(() => {
+    if (!recoverFocusAfterBackRef.current) return
+    recoverFocusAfterBackRef.current = false
+    rootRef.current?.focus()
+  }, [index])
   useLayoutEffect(() => {
     const el = cardRef.current
     if (!el) return
@@ -377,7 +389,7 @@ export default function DemoTour({
           <button
             type="button"
             className="chip-neutral"
-            onClick={() => setIndex(index - 1)}
+            onClick={back}
             disabled={index === 0}
           >
             Back

@@ -149,7 +149,7 @@ export default function Toast({ toast, onDone }) {
         if (event.button !== 0 || event.isPrimary === false) return
         suppressClickRef.current = false
         dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY }
-        event.currentTarget.setPointerCapture?.(event.pointerId)
+        event.target.setPointerCapture?.(event.pointerId)
       }}
       onPointerUp={finishDrag}
       onPointerCancel={() => { dragRef.current = null }}
