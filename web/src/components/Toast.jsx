@@ -122,6 +122,16 @@ export default function Toast({ toast, onDone }) {
     dragRef.current = null
     const dx = event.clientX - drag.x
     const dy = event.clientY - drag.y
+    if (drag.startedOnAction) {
+      const rect = actionRef.current?.getBoundingClientRect()
+      const releasedOutsideAction = !rect
+        || event.clientX < rect.left || event.clientX > rect.right
+        || event.clientY < rect.top || event.clientY > rect.bottom
+      if (releasedOutsideAction) {
+        suppressClickRef.current = true
+        event.preventDefault()
+      }
+    }
     if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy)) {
       suppressClickRef.current = true
       event.preventDefault()
@@ -148,8 +158,13 @@ export default function Toast({ toast, onDone }) {
       onPointerDown={(event) => {
         if (event.button !== 0 || event.isPrimary === false) return
         suppressClickRef.current = false
-        dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY }
-        event.currentTarget.setPointerCapture?.(event.pointerId)
+        dragRef.current = {
+          id: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          startedOnAction: !!actionRef.current?.contains(event.target),
+        }
+        event.target.setPointerCapture?.(event.pointerId)
       }}
       onPointerUp={finishDrag}
       onPointerCancel={() => { dragRef.current = null }}

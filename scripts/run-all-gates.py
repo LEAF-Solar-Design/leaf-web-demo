@@ -3518,11 +3518,12 @@ def build_suites() -> List[Suite]:
         # lifecycle panel, the iOS ship surface, the viewer grid toggle). One row
         # per Playwright config; every config derives its dev server port from
         # LEAF_NATIVE_GATE_WORKER, and the web-tree lock serialises them in a run.
-        Suite("web-studio-panels-proof", "web campaign, recovery, workspace-create and grid browser proofs",
+        Suite("web-studio-panels-proof", "web campaign, recovery, workspace-create, grid and Studio UX browser proofs",
               "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.config.mjs",
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
+               "e2e/studio-ux-regressions.spec.mjs",
                "--workers=1"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
