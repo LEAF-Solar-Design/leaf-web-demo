@@ -321,6 +321,7 @@ baseline (_ref 0e6ffdaf) totals 507,842, and the 169,952-byte difference is prod
    web/scripts/check_bundle_budget.mjs. Its total must be at or below the total of the build
    immediately before it (the deletion adds nothing), and the receipt records the delta against both
    the W0 freeze (337,890) and the current baseline. The baseline is not rewritten to make W7 pass.
+   Receipt: receipts/w7-bundle-receipt.md (measured 2026-10-16: deletion 508,767 gz against predecessor 508,791 gz; criterion met).
 4. The runtime smoke no longer reads /runtime-flags.js. Production and staging assert the rendered
    studio shell instead (one `.studio-shell` app scene holding one Drawing region), which holds before
    and after W7. The rail and its flag module are still removed in the deletion PR, as written.
