@@ -51,6 +51,32 @@ staging client against `/api/ready`. It requires explicit staging, readiness,
 no degraded mode, and exact source equality before and after the change.
 This is that endpoint's source readback, not independent image attestation.
 
+## Bridge (staging only)
+
+On `platform-staging.leafdesign.ai`, the shell installs
+`window.__leafSurfaceConfigProof` (version 1) with its existing `getSession`,
+`getSurfaceConfig`, and `submitSurfaceConfig` clients. The holder builds the
+transport with calls that resolve the bridge afresh in the authenticated page:
+
+```js
+const boundApplicationClients = {
+  getSession: (...a) => authenticatedPage.evaluate(
+    ([a]) => window.__leafSurfaceConfigProof.getSession(...a), [a]),
+  getSurfaceConfig: (...a) => authenticatedPage.evaluate(
+    ([a]) => window.__leafSurfaceConfigProof.getSurfaceConfig(...a), [a]),
+  submitSurfaceConfig: (...a) => authenticatedPage.evaluate(
+    ([a]) => window.__leafSurfaceConfigProof.submitSurfaceConfig(...a), [a]),
+}
+```
+
+Every call runs in the authenticated page context and resolves the new shell
+instance after reload. `page.evaluate` serialises arguments and results; use
+plain JSON values. The frozen bridge forwards to the current client functions
+at call time. It exists only on the staging hostname or with the exact Vite
+flag `VITE_LEAF_PROOF_BRIDGE=1` on another nonempty hostname. Production
+(`platform.leafdesign.ai`) exposes nothing, even with that flag; a missing or
+empty hostname is also always refused.
+
 ## Change and restoration
 
 The anchor proves the boolean `cad.authoring` slot, including false and true.

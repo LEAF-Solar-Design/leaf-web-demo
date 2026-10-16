@@ -28,6 +28,35 @@ import { solarSettingsScope } from './solar/solarSettingsWire.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
 
+it('main keeps telemetry first and installs the proof bridge once after render using the existing API clients', () => {
+  const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8')
+  const body = parseJs(source, { sourceType: 'module', plugins: ['jsx'] }).program.body
+  const imports = body.filter((node) => node.type === 'ImportDeclaration')
+  assert.equal(imports[0].source.value, './telemetry.js')
+  const bridgeImport = imports.find((node) => node.source.value === './proofBridge.js')
+  assert.ok(bridgeImport, 'main imports the proof bridge installer')
+  assert.deepEqual(bridgeImport.specifiers.map((node) => [node.imported?.name, node.local.name]), [
+    ['installSurfaceConfigProofBridge', 'installSurfaceConfigProofBridge'],
+  ])
+  const apiImport = imports.find((node) => node.source.value === './api.js')
+  assert.ok(apiImport, 'main imports the existing API clients')
+  assert.deepEqual(apiImport.specifiers.map((node) => [node.imported?.name, node.local.name]), [
+    ['getSession', 'getSession'], ['getSurfaceConfig', 'getSurfaceConfig'], ['submitSurfaceConfig', 'submitSurfaceConfig'],
+  ])
+  const calls = body.filter((node) => node.type === 'ExpressionStatement').map((node) => node.expression)
+  assert.equal(calls.length, 2)
+  assert.equal(calls[0].callee.property.name, 'render')
+  assert.equal(calls[1].callee.name, 'installSurfaceConfigProofBridge')
+  const text = (node) => source.slice(node.start, node.end)
+  assert.equal(calls[1].arguments.length, 2)
+  assert.equal(text(calls[1].arguments[0]), 'window')
+  const properties = calls[1].arguments[1].properties
+  assert.deepEqual(properties.map((node) => node.key.name), ['hostname', 'env', 'clients'])
+  assert.deepEqual(properties.map((node) => text(node.value)), [
+    'window.location.hostname', 'import.meta.env', '{ getSession, getSurfaceConfig, submitSurfaceConfig }',
+  ])
+})
+
 const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
 
 const r13Tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
