@@ -446,7 +446,7 @@ describe('JobRail notes', () => {
     const notes = container.querySelectorAll('[data-stale-job="job-a"]')
     expect(notes).toHaveLength(1)
     expect(notes[0].textContent).toContain(
-      'solar-schedule finished after a newer run started. Its result was not loaded into this view.',
+      'solar-schedule finished after this view changed. Its result was not loaded into this view.',
     )
     fireEvent.click(getByText('Dismiss'))
     expect(onDismissStale).toHaveBeenCalledTimes(1)

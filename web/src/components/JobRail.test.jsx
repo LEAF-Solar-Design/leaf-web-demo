@@ -173,6 +173,31 @@ describe('JobRail build-record reconciliation', () => {
   })
 })
 
+describe('JobRail stale result notes', () => {
+  it('describes any view-context change without claiming a newer run started', () => {
+    const onDismissStale = vi.fn()
+    const { container } = render(
+      <JobRail
+        mock
+        jobs={[]}
+        currentJob={null}
+        staleResults={[{ job_id: 'job-adopted', tool: 'solar-schedule' }]}
+        onDismissStale={onDismissStale}
+      />,
+    )
+
+    const note = container.querySelector('[data-stale-job="job-adopted"]')
+    expect(note?.textContent).toContain(
+      'solar-schedule finished after this view changed. Its result was not loaded into this view.',
+    )
+    expect(note?.textContent).not.toContain('newer run')
+
+    fireEvent.click(note.querySelector('button'))
+    expect(onDismissStale).toHaveBeenCalledOnce()
+    expect(onDismissStale).toHaveBeenCalledWith('job-adopted')
+  })
+})
+
 // W6-E01: the rail says when its builds feed is stale or paused by sign-in.
 // Queued and done only: a running card's elapsed tail reads the clock, which
 // would make two renders differ for a reason that is not the feed.
