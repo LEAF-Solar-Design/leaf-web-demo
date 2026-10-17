@@ -1,5 +1,5 @@
 import { chromium } from '@playwright/test'
-import { writeFile, rename, rm } from 'node:fs/promises'
+import { readFile, writeFile, rename, rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -10,10 +10,13 @@ import { runSurfaceConfigProof, surfaceConfigProofPage } from './verify_surface_
 export function parseArgs(argv, env = {}) {
   const options = { baseUrl: 'https://platform-staging.leafdesign.ai', tenantId: undefined,
     expectedSourceSha: undefined, out: undefined, jwtStdin: false, probe: false,
+    seedOverlay: undefined, seedForce: false,
     headed: false, timeoutMs: 90000, token: (env.LEAF_E2E_STAGING_JWT || '').trim() }
   const values = { '--base-url': 'baseUrl', '--tenant-id': 'tenantId',
-    '--expected-sha': 'expectedSourceSha', '--out': 'out', '--timeout-ms': 'timeoutMs' }
-  const flags = { '--jwt-stdin': 'jwtStdin', '--probe': 'probe', '--headed': 'headed' }
+    '--expected-sha': 'expectedSourceSha', '--out': 'out', '--timeout-ms': 'timeoutMs',
+    '--seed-overlay': 'seedOverlay' }
+  const flags = { '--jwt-stdin': 'jwtStdin', '--probe': 'probe', '--headed': 'headed',
+    '--seed-force': 'seedForce' }
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     if (Object.hasOwn(flags, flag)) options[flags[flag]] = true
@@ -22,10 +25,16 @@ export function parseArgs(argv, env = {}) {
       options[values[flag]] = argv[++i]
     } else throw new Error('Unknown option')
   }
+  if (options.seedOverlay !== undefined) {
+    if (!options.seedOverlay.trim()) throw new Error('--seed-overlay requires a path')
+    if (options.probe || options.out !== undefined) {
+      throw new Error('--seed-overlay is mutually exclusive with --probe and --out')
+    }
+  } else if (options.seedForce) throw new Error('--seed-force requires --seed-overlay')
   if (!options.probe) {
     if (!options.tenantId?.trim()) throw new Error('--tenant-id is required')
     if (!options.expectedSourceSha) throw new Error('--expected-sha is required')
-    if (!options.out?.trim()) throw new Error('--out is required')
+    if (!options.seedOverlay && !options.out?.trim()) throw new Error('--out is required')
   }
   if (options.expectedSourceSha !== undefined && !/^[a-f0-9]{40}$/.test(options.expectedSourceSha)) {
     throw new Error('--expected-sha must be 40 lowercase hex characters')
@@ -66,6 +75,44 @@ function scrub(value, token) {
 export function buildReceipt(receipt, { ranAt, baseUrl, expectedSourceSha, token = '' }) {
   return scrub({ ...receipt, ranAt, baseUrl, expectedSourceSha,
     driver: 'run_surface_config_proof_staging.mjs' }, token)
+}
+
+export async function runSeedOverlay({ page, tenantId, expectedSourceSha, seedOverlay,
+  seedForce = false, token = '', readOverlay = (path) => readFile(path, 'utf8') }) {
+  const result = (exitCode, output) => ({ exitCode, output: scrub(output, token) })
+  const refused = (reason) => result(1, { seeded: false, reason })
+  try {
+    const transport = makeTransport(page)
+    const session = await transport.getSession(false)
+    if (!session?.tenant || !session.org || !session.tier) return refused('authentication_required')
+    if (!tenantId || session.tenant !== tenantId) return refused('tenant_mismatch')
+    let deployment
+    try { deployment = await captureStagingIdentity(page.request) }
+    catch { return refused('deployment_mismatch') }
+    if (!/^[a-f0-9]{40}$/.test(expectedSourceSha)
+      || deployment.environment !== 'staging' || deployment.ready !== true
+      || deployment.degraded_mode !== false || deployment.source_revision !== expectedSourceSha) {
+      return refused('deployment_mismatch')
+    }
+    const current = await transport.getSurfaceConfig(false, { fresh: true })
+    if (current?.source && !seedForce) {
+      return result(5, { seeded: false, reason: 'overlay_exists' })
+    }
+    let overlay
+    try { overlay = JSON.parse(await readOverlay(seedOverlay)) }
+    catch { return refused('invalid_overlay') }
+    if (!overlay || typeof overlay !== 'object' || Array.isArray(overlay)
+      || typeof overlay.cad?.authoring !== 'boolean') return refused('invalid_overlay')
+    await transport.submitSurfaceConfig(overlay)
+    const readback = await transport.getSurfaceConfig(false, { fresh: true })
+    const sourcePresent = Boolean(readback?.source)
+    const authoring = readback?.surfaces?.cad?.authoring ?? null
+    const seeded = sourcePresent && authoring === overlay.cad.authoring
+    return result(seeded ? 0 : 1, { seeded, sourcePresent,
+      surfacesKeys: Object.keys(readback?.surfaces || {}), authoring })
+  } catch {
+    return refused('adapter_failure')
+  }
 }
 
 async function writeAtomic(path, receipt) {
@@ -118,6 +165,11 @@ async function main() {
         console.log(JSON.stringify(scrub({ tenant: session.tenant, tier: session.tier,
           surface: session.surface ?? null, sourceRevision: deployment.source_revision }, token)))
         return 0
+      }
+      if (options.seedOverlay) {
+        const result = await runSeedOverlay({ ...options, page, token })
+        console.log(JSON.stringify(result.output))
+        return result.exitCode
       }
       const proofPage = surfaceConfigProofPage(page, { transport, dedicatedTenantId: options.tenantId })
       const receipt = await runSurfaceConfigProof({ page: proofPage,
