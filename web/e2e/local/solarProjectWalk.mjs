@@ -319,7 +319,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const binding = { organization_id: ids[0], project_id: ids[1], drawing_id: ids[2], input_version_id: ids[3] }
   const digest = `sha256:${'a'.repeat(64)}`
   const params = { drawing_id: ids[2], mode: 'manual-global', expected_rev: 2 }
-  const headers = { 'x-org-id': ids[0], 'x-project-id': ids[1], authorization: 'Bearer fixture-only',
+  const headers = { 'x-org-id': ids[0], 'x-project-id': ids[1], authorization: 'Bearer test',
     'idempotency-key': 'intent-1', 'x-checkout-capability': `lco1.${'b'.repeat(64)}` }
   const request = (body = { tool: 'solar-size-strings', params, dwg: ids[3], catalog_digest: digest }, change = {}) => ({
     url: () => change.url || `${api}/api/run`, method: () => change.method || 'POST',
@@ -464,7 +464,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   test('public evidence projects allowlisted fields and refuses private values', () => {
     const step = { tool: 'solar-settings', job_id: ids[4], input_version_id: ids[3], output_version_id: ids[0],
       before_rev: 0, after_rev: 1, intake_sha256: 'a'.repeat(64), graph_sha256: 'b'.repeat(64), admission_status: 200, run_status: 202,
-      raw: { authorization: 'Bearer fixture-only' } }
+      raw: { authorization: 'Bearer test' } }
     const input = { binding, importedVersionId: ids[3], fence: '1', gauge: '10 AWG', steps: Array(6).fill(step),
       refusals: Array(2).fill({ tool: 'solar-homeruns', code: 'EQUIPMENT_ASSIGNMENT_REQUIRED', before_head: ids[3], after_head: ids[3], run_count_before: 6, run_count_after: 6 }),
       authenticatedImport: true, actorHeaderAbsent: true, headers }
