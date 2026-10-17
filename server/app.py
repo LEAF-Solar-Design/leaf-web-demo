@@ -545,9 +545,19 @@ def health() -> Dict[str, Any]:
     })
 
 
+def _ready_environment() -> str | None:
+    from deployment_identity import deployment_identity
+
+    try:
+        return deployment_identity(os.environ).get("environment")
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
 @app.get("/api/ready")
 def ready() -> JSONResponse:
     report = dependency_health.readiness_report()
+    report["environment"] = _ready_environment()
     return JSONResponse(
         status_code=200 if report["ready"] else 503,
         content=with_envelope_fields(report, degraded_mode=report["status"] != "ready"),

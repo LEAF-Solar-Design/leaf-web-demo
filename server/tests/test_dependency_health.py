@@ -7,6 +7,8 @@ import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 import dependency_health
 
 
@@ -552,6 +554,46 @@ def test_ready_route_is_separate_from_unchanged_liveness(monkeypatch):
     paths = set(app.app.openapi()["paths"])
     assert "/api/ready" in paths
     assert "/api/projects" in paths
+
+
+@pytest.mark.parametrize("identity_state", ["valid", "absent", "malformed"])
+def test_ready_route_reports_deployment_environment(monkeypatch, identity_state):
+    import app
+
+    # The parser binds non-production runtimes to staging; report the identity value.
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "preview")
+    monkeypatch.setenv("LEAF_DEPLOYMENT_ENVIRONMENT", "staging")
+    if identity_state == "valid":
+        revision = "f" * 40
+        monkeypatch.setenv("LEAF_DEPLOYMENT_IDENTITY", json.dumps({
+            "schema": "leaf.deployment-identity.v1",
+            "environment": "staging",
+            "source_revision": revision,
+            "services": {
+                name: {
+                    "image_digest": "sha256:" + "a" * 64,
+                    "source_revision": revision,
+                }
+                for name in ("app", "broker", "canonical-worker", "harness", "web")
+            },
+        }))
+    elif identity_state == "absent":
+        monkeypatch.delenv("LEAF_DEPLOYMENT_IDENTITY", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_DEPLOYMENT_IDENTITY", "{bad json")
+    monkeypatch.setattr(
+        app.dependency_health,
+        "readiness_report",
+        lambda: {"ok": True, "ready": True, "status": "ready"},
+    )
+
+    response = app.ready()
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert body["ready"] is True
+    assert body["degraded_mode"] is False
+    assert body["environment"] == ("staging" if identity_state == "valid" else None)
 
 
 def test_liveness_reports_exact_mutation_fence_state(tmp_path, monkeypatch):
