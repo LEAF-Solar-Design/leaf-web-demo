@@ -10,6 +10,8 @@ import ReactDOM from 'react-dom/client'
 import SiteRoot from './site/SiteRoot.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import './styles.css'
+import { installSurfaceConfigProofBridge } from './proofBridge.js'
+import { getSession, getSurfaceConfig, submitSurfaceConfig } from './api.js'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -18,3 +20,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     </ErrorBoundary>
   </React.StrictMode>,
 )
+
+installSurfaceConfigProofBridge(window, {
+  hostname: window.location.hostname,
+  env: import.meta.env,
+  clients: { getSession, getSurfaceConfig, submitSurfaceConfig },
+})
