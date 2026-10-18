@@ -1,0 +1,58 @@
+.widgets-view {
+  padding: 16px;
+  color: var(--foreground, #18181b);
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #d4d4d8);
+  border-radius: 12px;
+  min-width: 0;
+}
+.widgets-view[hidden] { display: none; }
+.widgets-layout { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 24px; }
+.widgets-editor, .widget-preview { min-width: 0; }
+.widgets-view h2, .widget-preview h3 { margin: 0 0 12px; }
+.widgets-view p, .widget-preview p { font-size: 13px; line-height: 1.5; }
+.widgets-fields { display: grid; gap: 8px; }
+.widgets-fields label { display: grid; gap: 6px; }
+.widgets-view button, .widgets-view input, .widgets-view textarea, .widgets-view select {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  font: inherit;
+  color: inherit;
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #a1a1aa);
+  border-radius: 6px;
+}
+.widgets-view textarea { width: 100%; resize: vertical; }
+.widgets-view button { cursor: pointer; overflow-wrap: anywhere; white-space: normal; }
+.widgets-view button:disabled { cursor: default; opacity: .6; }
+.widgets-view button[aria-pressed="true"] { border-color: var(--primary, #15803d); background: var(--accent-tint, #dcfce7); }
+.widgets-view :is(button, input, textarea, select):focus-visible { outline: 3px solid var(--primary, #15803d); outline-offset: 2px; }
+.widgets-view [aria-invalid="true"] { border-color: #b91c1c; }
+.widgets-view [role="alert"] { font-weight: 600; }
+.widgets-element-list { list-style: none; padding: 0; display: grid; gap: 6px; }
+.widgets-element-list button { width: 100%; text-align: left; }
+.widget-preview-canvas {
+  position: relative;
+  container-type: inline-size;
+  width: 100%;
+  max-width: 361px;
+  aspect-ratio: 361 / 160;
+  overflow: hidden;
+  border-radius: 22px;
+  background: #09090b;
+}
+.widget-preview-text {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+  white-space: nowrap;
+  line-height: 1;
+  font-family: -apple-system, system-ui, 'Segoe UI', sans-serif;
+}
+@media (max-width: 640px) {
+  .widgets-layout { grid-template-columns: minmax(0, 1fr); }
+}
