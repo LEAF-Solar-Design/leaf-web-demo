@@ -2018,6 +2018,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_store.py"), 34),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 10),
+        Suite("da-aps-concurrency-ramp", "da test_aps_concurrency_ramp.py", "pytest", DA,
+              _py_pytest("test_aps_concurrency_ramp.py"), 9),
         Suite("da-store-cross-tenant", "da test_store_cross_tenant.py", "pytest", DA,
               _py_pytest("test_store_cross_tenant.py"), 8),
         # The APS scratch-key collision guard. It shipped with the client.py fix
