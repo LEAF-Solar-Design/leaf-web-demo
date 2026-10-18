@@ -2,6 +2,8 @@
 
 Live mode spends money and is bounded by a spend cap. This tool never prints,
 logs or writes a credential value and fails closed on malformed input.
+The cap uses the first level's worst case and later levels' projections from
+observed runs. APS bounds each WorkItem by its processing limit.
 """
 
 import argparse
@@ -21,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ACTIVITY = "LeafTool_count_by_layer"
 TENANT = "aps-ramp"
 TIMES = ("timeQueued", "timeDownloadStarted", "timeInstructionsStarted",
-         "timeInstructionsEnded", "timeFinished")
+         "timeInstructionsEnded", "timeFinished", "timeUploadEnded")
 
 
 def _levels(value):
@@ -65,7 +67,9 @@ def _timing(status, rate):
     engine = delta("timeInstructionsEnded", "timeInstructionsStarted")
     return {**{k: v.isoformat() if v else None for k, v in stamps.items()},
             "queue_s": delta("timeInstructionsStarted", "timeQueued"),
-            "engine_s": engine, "total_s": delta("timeFinished", "timeQueued"),
+            "engine_s": engine, "total_s": delta(
+                "timeFinished" if stamps["timeFinished"] is not None else "timeUploadEnded",
+                "timeQueued"),
             "usd_est": None if engine is None else engine / 3600 * rate}
 
 
@@ -105,9 +109,10 @@ def _credentials(secret_id):
 
 def _write(path, document, forbidden=()):
     serialised = json.dumps(document, indent=2, allow_nan=False)
+    for value in sorted((value for value in forbidden if value), key=len, reverse=True):
+        serialised = serialised.replace(json.dumps(value)[1:-1], "<redacted>")
     if any(marker in serialised for marker in
-           ("client_secret", "X-Amz-", "Signature=", "AWSAccessKeyId", "https://", "http://", *forbidden)
-           if marker):
+           ("client_secret", "X-Amz-", "Signature=", "AWSAccessKeyId", "https://", "http://")):
         return False
     path.write_text(serialised + "\n", encoding="utf-8")
     return True
@@ -191,9 +196,12 @@ def main(argv=None, client_module=None, now=time.time):
         key = client.ephemeral_input_key(args.dwg.name, tenant_id=TENANT, nonce=nonce)
         client.upload_object(str(args.dwg), key)
         in_url = client.signed_download_url(key, minutes=60)
+        limit_s = client.workitem_processing_limit_s()
         highest = None
         for position, n in enumerate(args.levels):
-            if position == 0 and n * .01 > args.spend_cap_usd:
+            admission = (n * limit_s * rate / 3600 if position == 0 else
+                         n * max(2 * (highest if highest is not None else 0), .01))
+            if receipt["cumulative_usd_est"] + admission > args.spend_cap_usd:
                 receipt["stop_reason"] = "spend_cap"
                 break
             level = dict(n=n, submit_errors=[], workitems=[])
@@ -218,6 +226,7 @@ def main(argv=None, client_module=None, now=time.time):
                 except Exception as exc:
                     status = getattr(getattr(exc, "response", None), "status_code", None)
                     row["submit_error"] = status if isinstance(status, int) else None
+                    row["submit_error_detail"] = str(exc)[:300]
                 row["submit_wall_s"] = max(0., now() - start)
                 return row
 
@@ -225,6 +234,9 @@ def main(argv=None, client_module=None, now=time.time):
             with ThreadPoolExecutor(max_workers=n) as pool:
                 level["workitems"] = list(pool.map(submit, jobs))
             level["submit_errors"] = [r["submit_error"] for r in level["workitems"] if "submit_error" in r]
+            if level["submit_errors"]:
+                level["first_submit_error_detail"] = next(
+                    r["submit_error_detail"] for r in level["workitems"] if "submit_error" in r)
 
             def poll(row):
                 if "id" not in row:
@@ -247,17 +259,15 @@ def main(argv=None, client_module=None, now=time.time):
                 reason = "error_rate"
             elif level["queue_s"]["p95"] is not None and level["queue_s"]["p95"] > args.stop_queue_p95_s:
                 reason = "queue_p95"
-            elif (receipt["cumulative_usd_est"] +
-                  (args.levels[position + 1] * (highest if highest is not None else .01)
-                   if position + 1 < len(args.levels) else 0)) > args.spend_cap_usd:
-                reason = "spend_cap"
             if reason:
                 receipt["stop_reason"] = reason
                 break
         else:
             receipt["stop_reason"] = "completed"
-    except Exception:
+    except Exception as exc:
         code = 1 if began else 2
+        receipt["error_type"] = type(exc).__name__
+        receipt["error_detail"] = str(exc)[:300]
         # Preserve all rows collected before an unexpected polling/timing failure.
         for level in receipt["levels"]:
             _summarise(level)

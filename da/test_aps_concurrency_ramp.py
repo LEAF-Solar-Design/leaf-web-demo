@@ -1,4 +1,4 @@
-"""Nine offline contracts for the paid APS ramp, using only an injected client."""
+"""Thirteen offline contracts for the paid APS ramp, using only an injected client."""
 
 from datetime import datetime, timedelta, timezone
 import json
@@ -39,6 +39,9 @@ class FakeClient:
         self.calls.append("nonce")
         return "unique-nonce"
 
+    def workitem_processing_limit_s(self):
+        return 36
+
     def ephemeral_input_key(self, name, tenant_id, nonce):
         assert tenant_id == "aps-ramp" and nonce == "unique-nonce"
         return "t/aps-ramp/in/" + nonce + "_" + name
@@ -78,7 +81,7 @@ class FakeClient:
         status = self.statuses[index % len(self.statuses)]
         base = datetime(2026, 10, 18, tzinfo=timezone.utc)
         offsets = (0, 1, self.queue_s, self.queue_s + self.engine_s,
-                   self.queue_s + self.engine_s + 1)
+                   self.queue_s + self.engine_s + 1, self.queue_s + self.engine_s + 1)
         return {"id": identifier, "status": "pending" if status == "timeout" else status,
                 "_timeout": status == "timeout",
                 "reportUrl": "https://fake.invalid/report?X-Amz-Signature=report-secret",
@@ -225,9 +228,62 @@ def test_receipt_never_contains_urls_or_secrets(tmp_path, capsys):
         assert ramp._write(target, {"status": marker}) is False
         assert not target.exists()
     def broken_poll(identifier):
-        raise RuntimeError("offline-secret-value https://fake.invalid/?X-Amz-Secret")
+        raise RuntimeError("poll failed for offline-secret-value")
     client._poll_workitem = broken_poll
     code, partial = live(tmp_path, client)
     assert code == 1 and partial["stop_reason"] == "unexpected_error"
     assert partial["levels"][0]["submitted"] == 1
+    assert partial["error_type"] == "RuntimeError"
+    assert partial["error_detail"] == "poll failed for <redacted>"
     assert "offline-secret-value" not in (tmp_path / "receipt.json").read_text()
+
+
+def test_receipt_redacts_a_nickname_equal_to_client_id(tmp_path):
+    client = FakeClient()
+    client.activity_qualified = lambda name: "offline-client-value." + name + "+prod"
+    code, receipt = live(tmp_path, client)
+    assert code == 0
+    assert receipt["activity_id"] == "<redacted>.LeafTool_count_by_layer+prod"
+    assert "offline-client-value" not in (tmp_path / "receipt.json").read_text()
+
+
+def test_submit_error_detail_is_recorded_and_scrubbed(tmp_path):
+    client = FakeClient()
+    def rejected_submit(*args, **kwargs):
+        error = RuntimeError("HTTP 400 rejected offline-client-value")
+        error.response = SimpleNamespace(status_code=400)
+        raise error
+    client.submit_workitem = rejected_submit
+    code, receipt = live(tmp_path, client)
+    assert code == 0 and receipt["stop_reason"] == "submit_error"
+    level = receipt["levels"][0]
+    row = level["workitems"][0]
+    assert row["submit_error"] == 400
+    assert level["submit_errors"] == [400]
+    assert row["submit_error_detail"] == "HTTP 400 rejected <redacted>"
+    assert level["first_submit_error_detail"] == row["submit_error_detail"]
+    assert "offline-client-value" not in (tmp_path / "receipt.json").read_text()
+
+
+def test_total_s_falls_back_to_time_upload_ended(tmp_path):
+    client = FakeClient()
+    original_poll = client._poll_workitem
+    def poll_without_time_finished(identifier):
+        status = original_poll(identifier)
+        del status["stats"]["timeFinished"]
+        return status
+    client._poll_workitem = poll_without_time_finished
+    code, receipt = live(tmp_path, client)
+    assert code == 0
+    for level in receipt["levels"]:
+        assert level["total_s"] == {"p50": 39, "p95": 39}
+        assert all(row["total_s"] == 39 for row in level["workitems"])
+
+
+def test_first_level_worst_case_respects_a_small_cap(tmp_path):
+    client = FakeClient()
+    client.workitem_processing_limit_s = lambda: 600
+    code, receipt = live(tmp_path, client, "--levels", "1", "--spend-cap-usd", "0.02")
+    assert code == 0 and receipt["stop_reason"] == "spend_cap"
+    assert receipt["levels"] == [] and receipt["cumulative_usd_est"] == 0
+    assert client.arguments == []
