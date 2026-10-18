@@ -17,12 +17,14 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT / "server"))
+sys.path.append(str(PROJECT_ROOT / "engine"))
 
 from apply_lisp import build_apply_scr, build_apply_scr_v3
 from console import resolve_accoreconsole as _resolve_accoreconsole
 from intake_parse import o2w, parse
 from lisp import MUTATION_INSPECT_BLOCKS, build_scr
 from mutation_plan import emit_plan, validate_mutations, world_to_ocs
+from mutation_scope_diff import MutationScope, compare_scoped
 
 
 
@@ -102,11 +104,7 @@ def test_width_inspection_preserves_leafextract_digest_and_dimension_tail():
     assert '"DM|"' in MUTATION_INSPECT_BLOCKS[-1]
 
 
-@pytest.mark.skipif(
-    ACCORECONSOLE is None or not SOURCE_DWG.exists(),
-    reason=CONSOLE_SKIP_REASON,
-)
-def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
+def _fixed_plan(host):
     source_intake = json.loads(SOURCE_INTAKE.read_text(encoding="utf-8"))
     removed_handle = source_intake["polylines"][0]["handle"]
     transformed_source = source_intake["polylines"][1]
@@ -122,9 +120,6 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
         ",".join(format(value, ".12g") for value in point)
         for point in lowered_transform["points"]
     )
-    host = tmp_path / "host.dwg"
-    shutil.copyfile(SOURCE_DWG, host)
-
     plan = "\r\n".join([
         "LEAF_MUTATION_PLAN|1",
         f"BASE_SHA256|{hashlib.sha256(host.read_bytes()).hexdigest()}",
@@ -145,6 +140,136 @@ def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
         ),
         "",
     ])
+    layers = tuple(
+        line.split("|", 2)[1] for line in plan.splitlines()
+        if line.startswith("ADD|")
+    )
+    return plan, removed_handle, transformed_handle, transformed_target, layers
+
+
+@pytest.fixture(scope="module")
+def scoped_mutation(tmp_path_factory):
+    if ACCORECONSOLE is None or not SOURCE_DWG.exists():
+        pytest.skip(CONSOLE_SKIP_REASON)
+    work = tmp_path_factory.mktemp("scoped-mutation")
+    host = work / "host.dwg"
+    shutil.copyfile(SOURCE_DWG, host)
+    plan, removed_handle, transformed_handle, _, layers = _fixed_plan(host)
+    (work / "mutation-plan.txt").write_text(
+        plan, encoding="ascii", newline="",
+    )
+    (work / "apply.scr").write_text(
+        build_apply_scr(), encoding="ascii", newline="",
+    )
+
+    def export_dxf(dwg, name):
+        script = work / f"{name}.scr"
+        script.write_text(
+            '(setvar "CMDECHO" 0)\r\n'
+            '(setvar "FILEDIA" 0)\r\n'
+            f'(command "_.DXFOUT" "{name}.dxf" "16")\r\n',
+            encoding="ascii", newline="",
+        )
+        exported = subprocess.run(
+            [str(ACCORECONSOLE), "/i", str(dwg), "/s", str(script)],
+            cwd=work, capture_output=True, text=True, timeout=90, check=False,
+        )
+        assert exported.returncode == 0, exported.stdout + exported.stderr
+        dxf = work / f"{name}.dxf"
+        assert dxf.exists() and dxf.stat().st_size > 0, (
+            exported.stdout + exported.stderr
+        )
+        return dxf.read_bytes()
+
+    before = export_dxf(host, "before")
+    applied = subprocess.run(
+        [str(ACCORECONSOLE), "/i", str(host), "/s", str(work / "apply.scr")],
+        cwd=work, capture_output=True, text=True, timeout=90, check=False,
+    )
+    output = work / "output.dwg"
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert output.exists() and output.stat().st_size > 0, (
+        applied.stdout + applied.stderr
+    )
+    after = export_dxf(output, "after")
+    return {
+        "before": before, "after": after, "removed_handle": removed_handle,
+        "transformed_handle": transformed_handle, "layers": layers,
+    }
+
+
+@pytest.mark.skipif(
+    ACCORECONSOLE is None or not SOURCE_DWG.exists(),
+    reason=CONSOLE_SKIP_REASON,
+)
+def test_scoped_oracle_holds_on_the_real_mutation(scoped_mutation):
+    mutation = scoped_mutation
+    identity = compare_scoped(
+        mutation["before"], mutation["before"], MutationScope.from_iterables(),
+        source_name="rooftop_demo",
+    )
+    assert identity["ok"] is True, identity
+    result = compare_scoped(
+        mutation["before"], mutation["after"],
+        MutationScope.from_iterables(
+            touched=[mutation["transformed_handle"]],
+            removed=[mutation["removed_handle"]], added_layers=mutation["layers"],
+        ),
+        source_name="rooftop_demo",
+    )
+    assert result["ok"] is True, result
+    assert result["untouched_changed"] == []
+    assert result["unexpected_removed"] == []
+    assert result["unexpected_added"] == []
+    assert result["expected_removed_missing"] == []
+    assert result["touched_changed"] == [mutation["transformed_handle"].upper()]
+    assert result["blocks_changed"] == []
+    assert result["unsupported_changed"] is False
+    assert result["untouched_total"] == identity["untouched_total"] - 2
+    assert result["kind_counts_after"]["polylines"] == (
+        result["kind_counts_before"]["polylines"] - 1 + 6
+    )
+
+
+@pytest.mark.skipif(
+    ACCORECONSOLE is None or not SOURCE_DWG.exists(),
+    reason=CONSOLE_SKIP_REASON,
+)
+def test_scoped_oracle_catches_an_undeclared_change_on_the_real_mutation(scoped_mutation):
+    mutation = scoped_mutation
+    undeclared_transform = compare_scoped(
+        mutation["before"], mutation["after"],
+        MutationScope.from_iterables(
+            removed=[mutation["removed_handle"]], added_layers=mutation["layers"],
+        ),
+        source_name="rooftop_demo",
+    )
+    assert undeclared_transform["ok"] is False, undeclared_transform
+    assert undeclared_transform["untouched_changed"] == [
+        mutation["transformed_handle"].upper()
+    ]
+    undeclared_additions = compare_scoped(
+        mutation["before"], mutation["after"],
+        MutationScope.from_iterables(
+            touched=[mutation["transformed_handle"]],
+            removed=[mutation["removed_handle"]],
+        ),
+        source_name="rooftop_demo",
+    )
+    assert undeclared_additions["ok"] is False, undeclared_additions
+    assert len(undeclared_additions["unexpected_added"]) == 6
+
+
+@pytest.mark.skipif(
+    ACCORECONSOLE is None or not SOURCE_DWG.exists(),
+    reason=CONSOLE_SKIP_REASON,
+)
+def test_fixed_plan_removes_and_adds_then_reextracts(tmp_path):
+    source_intake = json.loads(SOURCE_INTAKE.read_text(encoding="utf-8"))
+    transformed_source = source_intake["polylines"][1]
+    host = tmp_path / "host.dwg"
+    shutil.copyfile(SOURCE_DWG, host)
+    plan, removed_handle, transformed_handle, transformed_target, _ = _fixed_plan(host)
     (tmp_path / "mutation-plan.txt").write_text(
         plan, encoding="ascii", newline="",
     )
