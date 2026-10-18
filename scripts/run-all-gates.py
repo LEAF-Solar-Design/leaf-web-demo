@@ -2018,6 +2018,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_store.py"), 34),
         Suite("da-multitenant", "da test_multitenant.py", "pytest", DA,
               _py_pytest("test_multitenant.py"), 10),
+        Suite("da-store-cross-tenant", "da test_store_cross_tenant.py", "pytest", DA,
+              _py_pytest("test_store_cross_tenant.py"), 8),
         # The APS scratch-key collision guard. It shipped with the client.py fix
         # but was NEVER registered here, so it gated nothing: the same defect
         # stayed live in both da/ drivers for as long as the suite "existed".
@@ -3370,6 +3372,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_engine_corpus_harness.py"), 24),
         Suite("server-broker-metering-crash-window", "server tests/test_broker_metering_crash_window.py", "pytest", SERVER,
               _py_pytest("tests/test_broker_metering_crash_window.py"), 9),
+        Suite("server-drawings-cross-tenant-canary", "server tests/test_drawings_cross_tenant_canary.py", "pytest", SERVER,
+              _py_pytest("tests/test_drawings_cross_tenant_canary.py"), 10),
         # Registered WITH the file, per the #29 fix-then-register rule. The
         # style receipt (colour, linetype, lineweight, block children) beside
         # the geometry receipt above; hermetic, identity adapter only, no
