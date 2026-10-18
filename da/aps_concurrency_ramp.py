@@ -2,8 +2,9 @@
 
 Live mode spends money and is bounded by a spend cap. This tool never prints,
 logs or writes a credential value and fails closed on malformed input.
-The cap uses the first level's worst case and later levels' projections from
-observed runs. APS bounds each WorkItem by its processing limit.
+The cap is a hard bound: each level's per WorkItem processing limit is set so
+that n times the limit at the rate fits the remaining budget. APS ends each
+WorkItem at its processing limit.
 """
 
 import argparse
@@ -66,7 +67,8 @@ def _timing(status, rate):
         return seconds
     engine = delta("timeInstructionsEnded", "timeInstructionsStarted")
     return {**{k: v.isoformat() if v else None for k, v in stamps.items()},
-            "queue_s": delta("timeInstructionsStarted", "timeQueued"),
+            "queue_s": delta("timeDownloadStarted", "timeQueued"),
+            "startup_s": delta("timeInstructionsStarted", "timeDownloadStarted"),
             "engine_s": engine, "total_s": delta(
                 "timeFinished" if stamps["timeFinished"] is not None else "timeUploadEnded",
                 "timeQueued"),
@@ -81,6 +83,7 @@ def _summarise(level):
                             and not r.get("poll_timeout") for r in rows),
                  poll_timeouts=sum(bool(r.get("poll_timeout")) for r in rows))
     for field, quantiles in (("queue_s", ("p50", "p95", "max")),
+                             ("startup_s", ("p50", "p95")),
                              ("total_s", ("p50", "p95"))):
         level[field] = {q: _percentile([r.get(field) for r in rows],
                                       {"p50": .5, "p95": .95, "max": 1}[q])
@@ -121,6 +124,7 @@ def _write(path, document, forbidden=()):
 def main(argv=None, client_module=None, now=time.time):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--levels", type=_levels, default="1,2,4,8,16,32")
+    parser.add_argument("--workload", choices=("count_by_layer", "extract"), default="count_by_layer")
     parser.add_argument("--spend-cap-usd", type=float, default=10.)
     parser.add_argument("--stop-error-rate", type=float, default=.10)
     parser.add_argument("--stop-queue-p95-s", type=float, default=300.)
@@ -150,8 +154,11 @@ def main(argv=None, client_module=None, now=time.time):
     os.environ["APS_MAX_CONCURRENCY"] = str(max(args.levels))
     os.environ["APS_POLL_BUDGET_PER_MIN"] = str(args.poll_budget_per_min)
     if not args.live:
-        activity = (client_module.activity_qualified(ACTIVITY) if client_module is not None
-                    else "<nickname-placeholder>.LeafTool_count_by_layer+prod")
+        activity_name = ACTIVITY
+        if args.workload == "extract":
+            activity_name = client_module.EXTRACT_ACTIVITY if client_module is not None else "LeafExtract"
+        activity = (client_module.activity_qualified(activity_name) if client_module is not None
+                    else "<nickname-placeholder>." + activity_name + "+prod")
         plan = dict(levels=args.levels, total_workitems=sum(args.levels),
                     estimated_cost_usd=sum(args.levels) * .008, activity_id=activity)
         try:
@@ -175,6 +182,7 @@ def main(argv=None, client_module=None, now=time.time):
                    ended_at=None, git_head=None, engine=None, activity_id=None,
                    levels_requested=args.levels, levels=[], stop_reason="unexpected_error",
                    cumulative_usd_est=0., spend_cap_usd=args.spend_cap_usd,
+                   workload=args.workload,
                    poll_budget_per_min=args.poll_budget_per_min)
     began = False
     code = 0
@@ -182,37 +190,40 @@ def main(argv=None, client_module=None, now=time.time):
         client = client_module if client_module is not None else importlib.import_module(
             ".client" if __package__ else "client", package=__package__)
         receipt["engine"] = client.ENGINE
-        receipt["activity_id"] = client.activity_qualified(ACTIVITY)
+        receipt["activity_id"] = client.activity_qualified(
+            client.EXTRACT_ACTIVITY if args.workload == "extract" else ACTIVITY)
         try:
             receipt["git_head"] = subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=ROOT, stderr=subprocess.DEVNULL,
                 text=True, timeout=5).strip()
         except (OSError, subprocess.SubprocessError):
             pass
-        registry = json.loads((ROOT / "da/registry_live.json").read_text(encoding="utf-8"))
-        tool = next(t for t in registry["tools"] if t["engine_op"] == "count_by_layer")
-        params = {k: v["default"] for k, v in tool["params"]["properties"].items() if "default" in v}
+        if args.workload == "count_by_layer":
+            registry = json.loads((ROOT / "da/registry_live.json").read_text(encoding="utf-8"))
+            tool = next(t for t in registry["tools"] if t["engine_op"] == "count_by_layer")
+            params = {k: v["default"] for k, v in tool["params"]["properties"].items() if "default" in v}
         nonce = client.run_nonce()
         key = client.ephemeral_input_key(args.dwg.name, tenant_id=TENANT, nonce=nonce)
         client.upload_object(str(args.dwg), key)
         in_url = client.signed_download_url(key, minutes=60)
-        limit_s = client.workitem_processing_limit_s()
-        highest = None
-        for position, n in enumerate(args.levels):
-            admission = (n * limit_s * rate / 3600 if position == 0 else
-                         n * max(2 * (highest if highest is not None else 0), .01))
-            if receipt["cumulative_usd_est"] + admission > args.spend_cap_usd:
+        for n in args.levels:
+            remaining = args.spend_cap_usd - receipt["cumulative_usd_est"]
+            limit_s = min(600, math.floor(remaining * 3600 / (n * rate)))
+            if limit_s < 60:
                 receipt["stop_reason"] = "spend_cap"
                 break
-            level = dict(n=n, submit_errors=[], workitems=[])
+            os.environ["APS_WORKITEM_PROCESSING_LIMIT_S"] = str(limit_s)
+            level = dict(n=n, processing_limit_s=limit_s, submit_errors=[], workitems=[])
             receipt["levels"].append(level)
             jobs = []
             for index in range(n):
                 _, out_url = client.signed_upload_url(
                     f"t/{TENANT}/out/{nonce}_{n}_{index}.json")
-                jobs.append(dict(HostDwg={"url": in_url, "verb": "get"},
-                                 Params={"url": "data:application/json," + json.dumps(params, separators=(",", ":"))},
-                                 Result={"url": out_url, "verb": "put"}))
+                job = dict(HostDwg={"url": in_url, "verb": "get"},
+                           Result={"url": out_url, "verb": "put"})
+                if args.workload == "count_by_layer":
+                    job["Params"] = {"url": "data:application/json," + json.dumps(params, separators=(",", ":"))}
+                jobs.append(job)
 
             ready = threading.Barrier(n)
 
@@ -249,9 +260,6 @@ def main(argv=None, client_module=None, now=time.time):
                 list(pool.map(poll, level["workitems"]))
             _summarise(level)
             receipt["cumulative_usd_est"] += level["usd_est"]
-            costs = [r["usd_est"] for r in level["workitems"] if r.get("usd_est") is not None]
-            if costs:
-                highest = max(costs + ([] if highest is None else [highest]))
             reason = None
             if level["submit_errors"]:
                 reason = "submit_error"

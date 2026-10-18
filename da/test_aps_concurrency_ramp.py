@@ -1,7 +1,8 @@
-"""Thirteen offline contracts for the paid APS ramp, using only an injected client."""
+"""Seventeen offline contracts for the paid APS ramp, using only an injected client."""
 
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -17,6 +18,7 @@ import aps_concurrency_ramp as ramp
 
 class FakeClient:
     ENGINE = "Autodesk.AutoCAD+26_0"
+    EXTRACT_ACTIVITY = "LeafExtract"
 
     def __init__(self, queue_s=2, engine_s=36, statuses=("success",), reject=False):
         self.queue_s = queue_s
@@ -25,6 +27,8 @@ class FakeClient:
         self.reject = reject
         self.calls = []
         self.arguments = []
+        self.processing_limits = []
+        self.workload = "count_by_layer"
         self.submit_threads = {}
         self.lock = threading.Lock()
         self.expected_env = None
@@ -60,13 +64,18 @@ class FakeClient:
         return "upload-key", "https://fake.invalid/" + key + "?X-Amz-Signature=output-secret"
 
     def submit_workitem(self, activity, arguments, poll, tenant_id):
-        assert activity == self.activity_qualified(ramp.ACTIVITY)
+        assert activity == self.activity_qualified(
+            self.EXTRACT_ACTIVITY if self.workload == "extract" else ramp.ACTIVITY)
         assert poll is False and tenant_id == "aps-ramp"
-        assert arguments["Params"] == {"url": "data:application/json,{}"}
+        if self.workload == "extract":
+            assert set(arguments) == {"HostDwg", "Result"}
+        else:
+            assert arguments["Params"] == {"url": "data:application/json,{}"}
         assert arguments["HostDwg"]["verb"] == "get"
         assert arguments["Result"]["verb"] == "put"
         with self.lock:
             self.arguments.append(arguments)
+            self.processing_limits.append(os.environ["APS_WORKITEM_PROCESSING_LIMIT_S"])
             level = arguments["Result"]["url"].split("unique-nonce_")[1].split("_")[0]
             self.submit_threads.setdefault(level, set()).add(threading.get_ident())
             index = len(self.arguments)
@@ -80,7 +89,7 @@ class FakeClient:
         index = int(identifier.split("-")[1]) - 1
         status = self.statuses[index % len(self.statuses)]
         base = datetime(2026, 10, 18, tzinfo=timezone.utc)
-        offsets = (0, 1, self.queue_s, self.queue_s + self.engine_s,
+        offsets = (0, self.queue_s, self.queue_s, self.queue_s + self.engine_s,
                    self.queue_s + self.engine_s + 1, self.queue_s + self.engine_s + 1)
         return {"id": identifier, "status": "pending" if status == "timeout" else status,
                 "_timeout": status == "timeout",
@@ -102,6 +111,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setenv("APS_USD_PER_HR", "10")
     monkeypatch.setenv("APS_MAX_CONCURRENCY", "1")
     monkeypatch.setenv("APS_POLL_BUDGET_PER_MIN", "1")
+    monkeypatch.setenv("APS_WORKITEM_PROCESSING_LIMIT_S", "600")
 
 
 def live(tmp_path, client, *flags):
@@ -206,9 +216,9 @@ def test_stops_on_queue_p95(tmp_path):
     assert len(client.arguments) == 1
 
 
-def test_stops_on_projected_spend_cap(tmp_path):
+def test_stops_on_spend_cap(tmp_path):
     client = FakeClient()
-    code, receipt = live(tmp_path, client, "--spend-cap-usd", ".15")
+    code, receipt = live(tmp_path, client, "--spend-cap-usd", ".2")
     assert code == 0 and receipt["stop_reason"] == "spend_cap"
     assert receipt["cumulative_usd_est"] == pytest.approx(.1)
     assert len(client.arguments) == 1
@@ -287,3 +297,57 @@ def test_first_level_worst_case_respects_a_small_cap(tmp_path):
     assert code == 0 and receipt["stop_reason"] == "spend_cap"
     assert receipt["levels"] == [] and receipt["cumulative_usd_est"] == 0
     assert client.arguments == []
+
+
+def test_hard_cap_sets_a_per_level_processing_limit(tmp_path):
+    client = FakeClient()
+    code, receipt = live(tmp_path, client, "--levels", "1,8", "--spend-cap-usd", "10")
+    assert code == 0 and receipt["stop_reason"] == "completed"
+    remaining = 10 - receipt["levels"][0]["usd_est"]
+    expected = min(600, math.floor(remaining * 3600 / (8 * 10)))
+    assert receipt["levels"][0]["processing_limit_s"] == 600
+    assert receipt["levels"][1]["processing_limit_s"] == expected
+    assert client.processing_limits == ["600"] + [str(expected)] * 8
+    assert receipt["levels"][1]["n"] * expected * 10 / 3600 <= remaining
+
+
+def test_hard_cap_stops_when_the_floor_exceeds_the_budget(tmp_path):
+    client = FakeClient()
+    code, receipt = live(tmp_path, client, "--levels", "1,8", "--spend-cap-usd", "1")
+    assert code == 0 and receipt["stop_reason"] == "spend_cap"
+    remaining = 1 - receipt["cumulative_usd_est"]
+    assert math.floor(remaining * 3600 / (8 * 10)) < 60
+    assert len(receipt["levels"]) == len(client.arguments) == 1
+    assert receipt["levels"][0]["processing_limit_s"] == 360
+
+
+def test_queue_is_queued_to_download_started_and_startup_is_reported(tmp_path):
+    client = FakeClient()
+    original_poll = client._poll_workitem
+    def poll_with_startup(identifier):
+        status = original_poll(identifier)
+        base = datetime(2026, 10, 18, tzinfo=timezone.utc)
+        offsets = (0, 3, 310, 346, 347, 347)
+        status["stats"] = {k: (base + timedelta(seconds=s)).isoformat()
+                           for k, s in zip(ramp.TIMES, offsets)}
+        return status
+    client._poll_workitem = poll_with_startup
+    code, receipt = live(tmp_path, client)
+    assert code == 0 and receipt["stop_reason"] == "completed"
+    for level in receipt["levels"]:
+        assert level["queue_s"] == {"p50": 3, "p95": 3, "max": 3}
+        assert level["startup_s"] == {"p50": 307, "p95": 307}
+        for row in level["workitems"]:
+            assert row["queue_s"] == 3 and row["startup_s"] == 307
+
+
+def test_extract_workload_uses_the_extract_activity_without_params(tmp_path):
+    client = FakeClient()
+    client.EXTRACT_ACTIVITY = "CustomExtract"
+    client.workload = "extract"
+    code, receipt = live(tmp_path, client, "--workload", "extract")
+    assert code == 0 and receipt["stop_reason"] == "completed"
+    assert receipt["workload"] == "extract"
+    assert receipt["activity_id"] == client.activity_qualified(client.EXTRACT_ACTIVITY)
+    assert len(client.arguments) == 7
+    assert all(set(arguments) == {"HostDwg", "Result"} for arguments in client.arguments)
