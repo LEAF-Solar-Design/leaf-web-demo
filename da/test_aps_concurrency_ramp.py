@@ -1,4 +1,4 @@
-"""Seventeen offline contracts for the paid APS ramp, using only an injected client."""
+"""Eighteen offline contracts for the paid APS ramp, using only an injected client."""
 
 from datetime import datetime, timedelta, timezone
 import json
@@ -222,6 +222,20 @@ def test_stops_on_spend_cap(tmp_path):
     assert code == 0 and receipt["stop_reason"] == "spend_cap"
     assert receipt["cumulative_usd_est"] == pytest.approx(.1)
     assert len(client.arguments) == 1
+
+
+def test_missing_timing_is_charged_at_the_processing_limit(tmp_path):
+    client = FakeClient()
+    client._poll_workitem = lambda identifier: {"id": identifier, "status": "success"}
+    code, receipt = live(tmp_path, client, "--levels", "1,2", "--spend-cap-usd", "1.0")
+    assert code == 0 and receipt["stop_reason"] == "spend_cap"
+    assert len(receipt["levels"]) == len(client.arguments) == 1
+    level = receipt["levels"][0]
+    charge = level["processing_limit_s"] * 10 / 3600
+    assert level["usd_est"] == pytest.approx(charge)
+    assert receipt["cumulative_usd_est"] == pytest.approx(charge)
+    assert level["workitems"][0]["usd_est"] == pytest.approx(charge)
+    assert level["workitems"][0]["usd_charged_worst_case"] is True
 
 
 def test_receipt_never_contains_urls_or_secrets(tmp_path, capsys):

@@ -75,8 +75,15 @@ def _timing(status, rate):
             "usd_est": None if engine is None else engine / 3600 * rate}
 
 
-def _summarise(level):
+def _summarise(level, rate):
     rows = level["workitems"]
+    for row in rows:
+        row["usd_charged_worst_case"] = (row.get("id") is not None
+                                         and row.get("engine_s") is None)
+        if row["usd_charged_worst_case"]:
+            row["usd_est"] = level["processing_limit_s"] * rate / 3600
+        elif row.get("id") is None:
+            row["usd_est"] = 0
     level.update(submitted=sum(r.get("id") is not None for r in rows),
                  succeeded=sum(r.get("status") == "success" and not r.get("poll_timeout") for r in rows),
                  failed=sum(r.get("id") is not None and r.get("status") != "success"
@@ -258,7 +265,7 @@ def main(argv=None, client_module=None, now=time.time):
 
             with ThreadPoolExecutor(max_workers=n) as pool:
                 list(pool.map(poll, level["workitems"]))
-            _summarise(level)
+            _summarise(level, rate)
             receipt["cumulative_usd_est"] += level["usd_est"]
             reason = None
             if level["submit_errors"]:
@@ -278,7 +285,7 @@ def main(argv=None, client_module=None, now=time.time):
         receipt["error_detail"] = str(exc)[:300]
         # Preserve all rows collected before an unexpected polling/timing failure.
         for level in receipt["levels"]:
-            _summarise(level)
+            _summarise(level, rate)
         receipt["cumulative_usd_est"] = sum(l["usd_est"] for l in receipt["levels"])
     receipt["ended_at"] = _stamp(now())
     try:
