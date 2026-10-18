@@ -3374,6 +3374,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_broker_metering_crash_window.py"), 9),
         Suite("server-drawings-cross-tenant-canary", "server tests/test_drawings_cross_tenant_canary.py", "pytest", SERVER,
               _py_pytest("tests/test_drawings_cross_tenant_canary.py"), 10),
+        Suite("server-mutation-scope-diff", "server tests/test_mutation_scope_diff.py", "pytest", SERVER,
+              _py_pytest("tests/test_mutation_scope_diff.py"), 20),
         # Registered WITH the file, per the #29 fix-then-register rule. The
         # style receipt (colour, linetype, lineweight, block children) beside
         # the geometry receipt above; hermetic, identity adapter only, no
