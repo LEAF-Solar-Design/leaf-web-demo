@@ -267,6 +267,7 @@
     "server-egress-guard-telemetry",
     "server-emf-metrics-stream",
     "server-engine-corpus-harness",
+    "server-broker-metering-crash-window",
     "server-engine-registry-scripts",
     "server-cost-internal",
     "server-engine-selector",
