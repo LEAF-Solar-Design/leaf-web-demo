@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, type TestContext } from "vitest";
 import { ForgePublicationError, ForgeRemoteAuthority } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 import type { ForgeRemoteAuthorityOptions } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
@@ -301,17 +302,36 @@ describe("Forge remote artifact authority", () => {
 
 it("retains only explicitly local tenant checkout during migration", isolated(async (root) => {
   const f = fixture(root);
+  const local = join(root, "local-tenant");
+  const bareBase = join(root, "local-bare");
   const provider = new TenantRepoProviderImpl({
-    locator: { repoRef: async () => f.seed }, remoteAuthority: f.authority,
+    locator: { repoRef: async () => local }, remoteAuthority: f.authority,
     isRemoteTenant: tenant => {
       if (tenant !== TENANT) throw new Error("unknown tenant refused");
       return false;
     },
-    inPlace: true, lease: false, authoringMode: "singleton",
+    inPlace: true, lease: false, authoringMode: "singleton", bareBase,
+    autoProvisionFrom: fileURLToPath(new URL("./fixtures/tenant-repo", import.meta.url)),
   });
-  expect((await provider.checkout(TENANT)).dir).toBe(f.seed);
+  expect(existsSync(local)).toBe(false);
+  const bare = await provider.bare(TENANT);
+  const seed = git(local, ["rev-parse", "main"]);
+  expect(git(bare.dir, ["rev-parse", "main"])).toBe(seed);
+  expect(git(local, ["rev-list", "--count", "main"])).toBe("1");
+  expect((await provider.checkout(TENANT)).dir).toBe(local);
+  writeFileSync(join(local, "preserved.txt"), "tenant authored\n");
+  git(local, ["add", "."]);
+  git(local, ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`, "commit", "-m", "authored"]);
+  const published = git(local, ["rev-parse", "main"]);
+  git(bare.dir, ["fetch", local, "main:refs/heads/main"]);
+  git(local, ["update-ref", "refs/heads/main", seed, published]);
+  expect((await provider.bare(TENANT)).dir).toBe(bare.dir);
+  expect(git(bare.dir, ["rev-parse", "main"])).toBe(published);
+  expect(git(local, ["rev-parse", "main"])).toBe(seed);
+  expect(readFileSync(join(local, "preserved.txt"), "utf8")).toBe("tenant authored\n");
   await expect(provider.checkout("unknown")).rejects.toThrow("unknown tenant refused");
   await expect(provider.bare("unknown")).rejects.toThrow("unknown tenant refused");
+  expect(existsSync(join(bareBase, "unknown.git"))).toBe(false);
 }));
 
 it("refuses remote checkout without a durable catalog pin before legacy clone", isolated(async () => {
@@ -324,6 +344,7 @@ it("refuses remote checkout without a durable catalog pin before legacy clone", 
   const provider = new TenantRepoProviderImpl({
     locator: { repoRef: async () => { locatorCalls += 1; return "https://forge.invalid/org/repo.git"; } },
     remoteAuthority: authority, inPlace: false, lease: false, authoringMode: "singleton",
+    autoProvisionFrom: fileURLToPath(new URL("./fixtures/tenant-repo", import.meta.url)),
   });
   await expect(provider.checkout(TENANT)).rejects.toThrow("durable effective catalog resolver");
   expect(locatorCalls).toBe(0);

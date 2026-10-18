@@ -240,7 +240,7 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     } : {}),
     inPlace: true,
     bareBase: TENANT_GIT_DIR,
-    ...(tenantForge ? {} : { autoProvisionFrom: TENANT_FIXTURE }),
+    autoProvisionFrom: TENANT_FIXTURE,
   });
   const broker = new BrokerApsClientHttp({ brokerUrl: BROKER_URL });
   // OPTIONAL platform-improvement capture. Constructed only when
