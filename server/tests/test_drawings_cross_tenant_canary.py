@@ -81,19 +81,51 @@ def test_other_tenant_read_bootstraps_its_own_copy_known_behaviour(client, tmp_p
 def test_other_tenant_versions_never_lists_owner_version(client, tmp_path):
     _seed(tmp_path)
     response = client.get("/api/drawings/canary-a/versions", headers=_h("tenant-b"))
+    assert response.status_code == 200
     assert MARKER not in response.content, response.status_code
     assert b"tenant-a" not in response.content, response.status_code
-    assert all(row["v"] != 2 for row in response.json().get("versions", [])), response.status_code
+    body = response.json()
+    assert body["head"] == body["latest"] == 1
+    assert len(body["versions"]) == 1
+    version = body["versions"][0]
+    demo_bytes = write_loop.DEMO_DWG_PATH.read_bytes()
+    assert version["v"] == 1
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    _, key = store.resolve_version(backend, "tenant-b", "canary-a", 1)
+    assert version["sha256"] == hashlib.sha256(backend.get(key)).hexdigest()
+    assert version["sha256"] != hashlib.sha256(demo_bytes + b"\n" + MARKER).hexdigest()
 
 
 def test_other_tenant_summary_graph_mapping_intake_never_carry_marker(client, tmp_path):
-    before = _seed(tmp_path)
-    responses = [client.get(f"/api/drawings/canary-a/{route}",
+    _seed(tmp_path)
+    owner = client.get("/api/drawings/canary-a/intake", params={"version": 1},
+                       headers=_h("tenant-a"))
+    assert owner.status_code == 200
+    owner_intake = owner.json()["intake"]
+    entity_total = sum(len(owner_intake.get(key) or [])
+                       for key in ("polylines", "inserts", "faces3d"))
+    assert entity_total > 0
+    before = _owner_hashes(tmp_path)
+    responses = {route: client.get(f"/api/drawings/canary-a/{route}",
                             params={"project_id": "canary-project"}, headers=_h("tenant-b"))
-                 for route in ("summary", "graph", "mapping", "intake")]
-    for response in responses:
+                 for route in ("summary", "graph", "mapping", "intake")}
+    for response in responses.values():
         assert MARKER not in response.content, response.status_code
         assert b"tenant-a" not in response.content, response.status_code
+    for route in ("summary", "intake"):
+        assert responses[route].status_code == 200
+        body = responses[route].json()
+        assert body["version"] == body["head"] == body["latest"] == 1
+    assert responses["summary"].json()["entity_total"] == entity_total
+    intake = responses["intake"].json()["intake"]
+    assert sum(len(intake.get(key) or [])
+               for key in ("polylines", "inserts", "faces3d")) == entity_total
+    assert intake == owner_intake
+    # Demo bootstrap versions have no solar-bundle note. read_graph_bundle
+    # refuses them; neither graph nor mapping has an entity total to compare.
+    for route in ("graph", "mapping"):
+        assert responses[route].status_code == 404
+        assert responses[route].json()["error"]["message"] == f"drawing {route} unavailable"
     assert _owner_hashes(tmp_path) == before
 
 
@@ -154,9 +186,25 @@ def test_traversal_tenant_headers_never_200_and_create_nothing(client, tmp_path)
     assert {path.name for path in tenants_root.iterdir() if path.is_dir()} == {"tenant-a"}
 
 
-def test_artifact_route_for_other_tenant_never_carries_marker(client, tmp_path):
+def test_artifact_seeded_for_owner_is_not_readable_by_other_tenant(client, tmp_path):
+    import solar_artifacts
+
     _seed(tmp_path)
-    artifact_id = "0" * 64  # Well-formed sha256 id, absent from this fresh store.
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    # Import routes require a Solar graph, absent from the demo bootstrap.
+    # ArtifactSink writes the metadata and blob read by drawings.get_artifact
+    # through solar_artifacts.read_artifact, under the owner's drawing prefix.
+    sink = solar_artifacts.ArtifactSink(
+        backend, "tenant-a", "canary-a",
+        {"project_id": "canary-project", "resolved_version": 2,
+         "graph_sha256": hashlib.sha256(b"canary-graph-binding").hexdigest()},
+        "cross-tenant-canary", hashlib.sha256(MARKER).hexdigest(), verify=False)
+    prepared = sink.prepare(solar_artifacts.ArtifactOutput(
+        {}, "text/csv", "canary.csv", b"marker\n" + MARKER + b"\n"))
+    artifact_id = sink.finish(prepared)["artifact_id"]
+    owner = client.get(f"/api/drawings/canary-a/artifacts/{artifact_id}", headers=_h("tenant-a"))
+    assert owner.status_code == 200
+    assert MARKER in owner.content
     response = client.get(f"/api/drawings/canary-a/artifacts/{artifact_id}", headers=_h("tenant-b"))
     assert response.status_code != 200
     assert MARKER not in response.content, response.status_code
