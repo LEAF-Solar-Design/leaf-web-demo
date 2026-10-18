@@ -1,4 +1,4 @@
-"""Eighteen offline contracts for the paid APS ramp, using only an injected client."""
+"""Nineteen offline contracts for the paid APS ramp, using only an injected client."""
 
 from datetime import datetime, timedelta, timezone
 import json
@@ -168,7 +168,7 @@ def test_completed_ramp_summarises_every_level(tmp_path):
     assert receipt["schema"] == "leaf.aps-concurrency-ramp.v1"
     assert receipt["engine"] == client.ENGINE
     assert receipt["levels_requested"] == [1, 2, 4]
-    assert receipt["cumulative_usd_est"] == pytest.approx(.7)
+    assert receipt["cumulative_usd_est"] == pytest.approx(37 * 7 * 10 / 3600)
     assert receipt["started_at"] == receipt["ended_at"]
     assert receipt["spend_cap_usd"] == 10 and receipt["poll_budget_per_min"] == 60
     for n, level in zip((1, 2, 4), receipt["levels"]):
@@ -177,10 +177,10 @@ def test_completed_ramp_summarises_every_level(tmp_path):
         assert level["submit_errors"] == []
         assert level["queue_s"] == {"p50": 2, "p95": 2, "max": 2}
         assert level["total_s"] == {"p50": 39, "p95": 39}
-        assert level["engine_s"] == 36 * n and level["usd_est"] == pytest.approx(.1 * n)
+        assert level["engine_s"] == 36 * n and level["usd_est"] == pytest.approx(37 * n * 10 / 3600)
         for row in level["workitems"]:
             assert (row["queue_s"], row["engine_s"], row["total_s"]) == (2, 36, 39)
-            assert row["usd_est"] == pytest.approx(.1)
+            assert row["usd_est"] == pytest.approx(37 * 10 / 3600)
             assert row["submit_wall_s"] == 0
     assert client.calls.count("upload") == client.calls.count("download-url") == 1
     assert len({a["HostDwg"]["url"] for a in client.arguments}) == 1
@@ -218,9 +218,9 @@ def test_stops_on_queue_p95(tmp_path):
 
 def test_stops_on_spend_cap(tmp_path):
     client = FakeClient()
-    code, receipt = live(tmp_path, client, "--spend-cap-usd", ".2")
+    code, receipt = live(tmp_path, client, "--spend-cap-usd", ".4")
     assert code == 0 and receipt["stop_reason"] == "spend_cap"
-    assert receipt["cumulative_usd_est"] == pytest.approx(.1)
+    assert receipt["cumulative_usd_est"] == pytest.approx(37 * 10 / 3600)
     assert len(client.arguments) == 1
 
 
@@ -231,11 +231,30 @@ def test_missing_timing_is_charged_at_the_processing_limit(tmp_path):
     assert code == 0 and receipt["stop_reason"] == "spend_cap"
     assert len(receipt["levels"]) == len(client.arguments) == 1
     level = receipt["levels"][0]
-    charge = level["processing_limit_s"] * 10 / 3600
+    assert level["processing_limit_s"] == 300
+    charge = (level["processing_limit_s"] + 60) * 10 / 3600
     assert level["usd_est"] == pytest.approx(charge)
     assert receipt["cumulative_usd_est"] == pytest.approx(charge)
     assert level["workitems"][0]["usd_est"] == pytest.approx(charge)
     assert level["workitems"][0]["usd_charged_worst_case"] is True
+
+
+def test_spend_counts_download_through_upload(tmp_path):
+    client = FakeClient()
+    def poll_with_long_startup(identifier):
+        base = datetime(2026, 10, 18, tzinfo=timezone.utc)
+        offsets = (0, 0, 300, 336, 340, 340)
+        return {"id": identifier, "status": "success",
+                "stats": {k: (base + timedelta(seconds=s)).isoformat()
+                          for k, s in zip(ramp.TIMES, offsets)}}
+    client._poll_workitem = poll_with_long_startup
+    code, receipt = live(tmp_path, client, "--levels", "1,2", "--spend-cap-usd", "1.0")
+    assert code == 0 and receipt["stop_reason"] == "spend_cap"
+    assert len(receipt["levels"]) == len(client.arguments) == 1
+    row = receipt["levels"][0]["workitems"][0]
+    assert row["billed_s"] == 340
+    assert row["usd_est"] == pytest.approx(340 * 10 / 3600)
+    assert row["engine_s"] == 36
 
 
 def test_receipt_never_contains_urls_or_secrets(tmp_path, capsys):
@@ -318,11 +337,11 @@ def test_hard_cap_sets_a_per_level_processing_limit(tmp_path):
     code, receipt = live(tmp_path, client, "--levels", "1,8", "--spend-cap-usd", "10")
     assert code == 0 and receipt["stop_reason"] == "completed"
     remaining = 10 - receipt["levels"][0]["usd_est"]
-    expected = min(600, math.floor(remaining * 3600 / (8 * 10)))
+    expected = min(600, math.floor(remaining * 3600 / (8 * 10)) - 60)
     assert receipt["levels"][0]["processing_limit_s"] == 600
     assert receipt["levels"][1]["processing_limit_s"] == expected
     assert client.processing_limits == ["600"] + [str(expected)] * 8
-    assert receipt["levels"][1]["n"] * expected * 10 / 3600 <= remaining
+    assert receipt["levels"][1]["n"] * (expected + 60) * 10 / 3600 <= remaining
 
 
 def test_hard_cap_stops_when_the_floor_exceeds_the_budget(tmp_path):
@@ -330,9 +349,9 @@ def test_hard_cap_stops_when_the_floor_exceeds_the_budget(tmp_path):
     code, receipt = live(tmp_path, client, "--levels", "1,8", "--spend-cap-usd", "1")
     assert code == 0 and receipt["stop_reason"] == "spend_cap"
     remaining = 1 - receipt["cumulative_usd_est"]
-    assert math.floor(remaining * 3600 / (8 * 10)) < 60
+    assert math.floor(remaining * 3600 / (8 * 10)) - 60 < 60
     assert len(receipt["levels"]) == len(client.arguments) == 1
-    assert receipt["levels"][0]["processing_limit_s"] == 360
+    assert receipt["levels"][0]["processing_limit_s"] == 300
 
 
 def test_queue_is_queued_to_download_started_and_startup_is_reported(tmp_path):

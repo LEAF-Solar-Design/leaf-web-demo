@@ -3,8 +3,8 @@
 Live mode spends money and is bounded by a spend cap. This tool never prints,
 logs or writes a credential value and fails closed on malformed input.
 The cap is a hard bound: each level's per WorkItem processing limit is set so
-that n times the limit at the rate fits the remaining budget. APS ends each
-WorkItem at its processing limit.
+that the limit plus the transfer allowance, times n, at the rate, fits the
+remaining budget. Spend is priced from download start to upload end.
 """
 
 import argparse
@@ -23,6 +23,8 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 ACTIVITY = "LeafTool_count_by_layer"
 TENANT = "aps-ramp"
+# APS bills timeDownloadStarted to timeUploadEnded, and the processing limit may not bound download and upload, so each WorkItem reserves this much on top of its limit.
+TRANSFER_ALLOWANCE_S = 60
 TIMES = ("timeQueued", "timeDownloadStarted", "timeInstructionsStarted",
          "timeInstructionsEnded", "timeFinished", "timeUploadEnded")
 
@@ -66,22 +68,23 @@ def _timing(status, rate):
             raise ValueError("invalid WorkItem timing")
         return seconds
     engine = delta("timeInstructionsEnded", "timeInstructionsStarted")
+    billed = delta("timeUploadEnded", "timeDownloadStarted")
     return {**{k: v.isoformat() if v else None for k, v in stamps.items()},
             "queue_s": delta("timeDownloadStarted", "timeQueued"),
             "startup_s": delta("timeInstructionsStarted", "timeDownloadStarted"),
-            "engine_s": engine, "total_s": delta(
+            "engine_s": engine, "billed_s": billed, "total_s": delta(
                 "timeFinished" if stamps["timeFinished"] is not None else "timeUploadEnded",
                 "timeQueued"),
-            "usd_est": None if engine is None else engine / 3600 * rate}
+            "usd_est": None if billed is None else billed / 3600 * rate}
 
 
 def _summarise(level, rate):
     rows = level["workitems"]
     for row in rows:
         row["usd_charged_worst_case"] = (row.get("id") is not None
-                                         and row.get("engine_s") is None)
+                                         and row.get("billed_s") is None)
         if row["usd_charged_worst_case"]:
-            row["usd_est"] = level["processing_limit_s"] * rate / 3600
+            row["usd_est"] = (level["processing_limit_s"] + TRANSFER_ALLOWANCE_S) * rate / 3600
         elif row.get("id") is None:
             row["usd_est"] = 0
     level.update(submitted=sum(r.get("id") is not None for r in rows),
@@ -95,7 +98,7 @@ def _summarise(level, rate):
         level[field] = {q: _percentile([r.get(field) for r in rows],
                                       {"p50": .5, "p95": .95, "max": 1}[q])
                         for q in quantiles}
-    for field in ("engine_s", "usd_est"):
+    for field in ("engine_s", "billed_s", "usd_est"):
         level[field] = sum(r.get(field) or 0 for r in rows)
 
 
@@ -215,7 +218,7 @@ def main(argv=None, client_module=None, now=time.time):
         in_url = client.signed_download_url(key, minutes=60)
         for n in args.levels:
             remaining = args.spend_cap_usd - receipt["cumulative_usd_est"]
-            limit_s = min(600, math.floor(remaining * 3600 / (n * rate)))
+            limit_s = min(600, math.floor(remaining * 3600 / (n * rate)) - TRANSFER_ALLOWANCE_S)
             if limit_s < 60:
                 receipt["stop_reason"] = "spend_cap"
                 break
