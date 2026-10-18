@@ -151,6 +151,10 @@ def test_reconcile_is_idempotent_on_second_pass(crashed_postgres, monkeypatch):
 
 
 def test_reconcile_success_alarms_and_writes_nothing(crashed_postgres, monkeypatch):
+    """Pin the pre-write poll-failure path with WorkItem correlation retained.
+
+    APS reports success during recovery, after the broker's poll failed.
+    """
     conn, store = crashed_postgres
     for _ in range(2):
         summary, alarms, client = _reconcile(monkeypatch, store, "success")
@@ -162,6 +166,58 @@ def test_reconcile_success_alarms_and_writes_nothing(crashed_postgres, monkeypat
         assert conn.ledger == {}
         assert conn.admissions[EVENT_KEY]["state"] == "executing"
         assert conn.admissions[EVENT_KEY]["reserved_usd"] == 0.02
+
+
+def test_success_then_crash_at_ledger_write_loses_correlation_known_residual(
+        pg_environment, offline_run, monkeypatch):
+    """Real product residual: a paid success cannot be auto-resolved today.
+
+    _broker_run_request calls broker_pg_store.PostgresBrokerStore.complete_run
+    at broker.py:3132 after closing the correlation at 3121-3122. A crash at
+    that writer leaves no WorkItem to query, so recovery alarms with
+    no_workitem_correlation, not aps_succeeded_needs_operator. The operator
+    resolve route at broker.py:2193-2330 is the recovery, not a passing property.
+    """
+    conn, store = pg_environment
+    aps = FakeAps({"status": "success"})
+
+    def execute_success(req, tool, engine_op, t0, entry, *, quota_reserved,
+                        admission, run_token):
+        broker._start_admitted_execution(req, admission)
+        broker._submission_recorder(req, run_token)(WORKITEM_ID)
+        assert aps.get_workitem_status(WORKITEM_ID)["status"] == "success"
+        entry.update(engine_seconds=1.0, usd_est=0.02)
+        return {"ok": True, "result": {}}, 200
+
+    def interrupted_write(event_key, tenant_id, lease_token, entry, result, status):
+        assert event_key == EVENT_KEY
+        assert entry["status"] == "ok"
+        assert result["ok"] is True and status == 200
+        raise SimulatedCrash("process lost before successful ledger write")
+
+    with monkeypatch.context() as crash_patch:
+        crash_patch.setattr(broker, "_execute", execute_success)
+        crash_patch.setattr(store, "complete_run", interrupted_write)
+        with pytest.raises(SimulatedCrash):
+            broker._broker_run(offline_run)
+
+    assert aps.calls == [WORKITEM_ID]
+    assert conn.admissions[EVENT_KEY]["state"] == "executing"
+    assert conn.admissions[EVENT_KEY]["reserved_usd"] == 0.02
+    assert conn.ledger == {}
+    assert JOB_ID not in reconciler.read_sidecar_correlations(broker.ACTIVE_WORKITEMS_PATH)
+    assert broker.active_workitem_for(JOB_ID) is None
+
+    summary, alarms, client = _reconcile(monkeypatch, store, "success")
+    assert summary["checked"] == 1
+    assert summary["resolved"] == []
+    assert [alarm["reason"] for alarm in alarms] == ["no_workitem_correlation"]
+    assert alarms[0]["event_key"] == EVENT_KEY
+    assert alarms[0]["tenant_id"] == TENANT
+    assert client.calls == []
+    assert conn.ledger == {}
+    assert conn.admissions[EVENT_KEY]["state"] == "executing"
+    assert conn.admissions[EVENT_KEY]["reserved_usd"] == 0.02
 
 
 def test_complete_run_duplicate_event_key_is_a_single_row(pg_environment):
