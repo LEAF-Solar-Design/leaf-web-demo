@@ -202,6 +202,10 @@ import ProjectSolarWorkspace from './solar/ProjectSolarWorkspace.jsx'
 import ProjectSolarGraphForm from './solar/ProjectSolarGraphForm.jsx'
 import { createProjectSolarClient } from './api.js'
 import { composerDraftAccountScope } from './lib/composerDraft.js'
+const LabWidgetsPreview = import.meta.env.DEV
+  ? React.lazy(() => import('./lab/LabWidgetsPreview.jsx'))
+  : null
+import { labPreviewEnabled } from './lab/labPreview.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
 import { useDrawingIdentity, useDrawingScopeReset } from './drawing/DrawingIdentityProvider.jsx'
 import { hasDrawingSelection } from './drawing/drawingIdentity.js'
@@ -943,6 +947,7 @@ export default function App() {
   const [authorDestination, setAuthorDestination] = useState(null)
   const [authorFallback, setAuthorFallback] = useState(null)
   const [settingsDestination, setSettingsDestination] = useState(null)
+  const [labDestination, setLabDestination] = useState(null)
   const [boardJob, setBoardJob] = useState(null)
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
   const boardPreviewRunRef = useRef(null)
@@ -1058,6 +1063,11 @@ export default function App() {
     routePrompt: nlPrompt,
     get projectSolarClient() { return projectSolarClientRef.current },
   }), [])
+  const labEnabled = import.meta.env.DEV && labPreviewEnabled()
+  const labContext = {
+    enabled: labEnabled, mock, session, accountScope: projectSolarAccountScope,
+    tenant, orgId, openProjectId, workspace, wsLoading,
+  }
   const engineViewArmed = useEngineViewArmed(projectMode)
   const catalogAdapters = useMemo(() => ({
     humanizeError,
@@ -4635,6 +4645,7 @@ export default function App() {
                 : undefined,
             } : undefined}
             panel={surfaceSlots.ground === 'board' ? <>
+              {labEnabled && <div className="lab-preview-destination" ref={setLabDestination} />}
               {!mock && signedIn && !openProjectId && <ProjectStartPanel
                 bootstrapState={workspaceController.bootstrapState}
                 projects={projects}
@@ -5510,6 +5521,13 @@ export default function App() {
         )}
 
         <div ref={setAuthorFallback} />
+        {labEnabled && (
+          <PersistentSeat destination={labDestination}>
+            <Suspense fallback={<div role="status" aria-live="polite">Loading Lab widgets…</div>}>
+              <LabWidgetsPreview context={labContext} />
+            </Suspense>
+          </PersistentSeat>
+        )}
         {paneSeats.authorMounted && (
           <PersistentSeat destination={paneSeats.authorTarget}>
             <AuthorPanel

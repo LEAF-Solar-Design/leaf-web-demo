@@ -1,0 +1,36 @@
+.lab-preview-destination, .lab-preview-destination > div { min-width: 0; max-width: 100%; }
+.lab-preview {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin-block: 12px;
+  padding: 12px;
+  color: var(--foreground, #18181b);
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #d4d4d8);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.lab-preview-panel { min-width: 0; margin-top: 12px; }
+.lab-preview-panel[hidden] { display: none; }
+.lab-preview [role="tablist"] { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.lab-preview-toggle, .lab-preview [role="tab"] {
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 8px 12px;
+  font: inherit;
+  color: inherit;
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #a1a1aa);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.lab-preview [aria-selected="true"], .lab-preview-toggle[aria-expanded="true"] {
+  border-color: var(--primary, #15803d);
+  background: var(--accent-tint, #dcfce7);
+}
+.lab-preview :is(button, input, textarea, select):focus-visible {
+  outline: 3px solid var(--primary, #15803d);
+  outline-offset: 2px;
+}
+.lab-preview [role="tabpanel"], .lab-preview .widgets-view { min-width: 0; max-width: 100%; box-sizing: border-box; }
