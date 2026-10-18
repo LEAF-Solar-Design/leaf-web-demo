@@ -1,7 +1,7 @@
 """Fails closed on malformed input, compares every entity by handle, and treats an entity outside the declared scope that differs as a defect.
 
 Block definitions are never in scope in v1.
-Unsupported kinds are compared as raw records; a change is always a defect
+Unsupported kinds are compared as ordered raw records; a change is always a defect
 regardless of scope, since they have no handle the scope could name.
 """
 from __future__ import annotations
@@ -118,7 +118,7 @@ def _unsupported_records(records):
         for code, value in record["groups"]:
             value = _raw_value(code, value)
             groups.append((code, round(value, 6) if isinstance(value, float) else value))
-        canonical[(record["type"], tuple(sorted(groups)))] += 1
+        canonical[(record["type"], tuple(groups))] += 1
     return canonical
 
 

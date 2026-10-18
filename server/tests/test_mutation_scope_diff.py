@@ -124,6 +124,28 @@ def test_unsupported_kind_change_is_a_defect():
     assert result["untouched_changed"] == []
 
 
+def test_unsupported_record_group_order_is_significant():
+    prefix = (
+        b"0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n0\nENDSEC\n"
+        b"0\nSECTION\n2\nENTITIES\n0\nSPLINE\n5\nA1\n100\nAcDbEntity\n8\n0\n"
+        b"100\nAcDbSpline\n70\n8\n71\n1\n72\n4\n73\n2\n74\n0\n"
+        b"40\n0\n40\n0\n40\n1\n40\n1\n"
+    )
+    control_points = (b"10\n0\n20\n0\n30\n0\n", b"10\n10\n20\n5\n30\n0\n")
+    suffix = b"0\nENDSEC\n0\nEOF\n"
+    before = prefix + b"".join(control_points) + suffix
+    after = prefix + b"".join(reversed(control_points)) + suffix
+    assert after != before
+    scope = MutationScope.from_iterables()
+    identity = compare_scoped(before, before, scope, source_name="spline.dxf")
+    assert identity["ok"] is True
+    assert identity["unsupported_kinds"] == ["SPLINE"]
+    assert identity["unsupported_changed"] is False
+    changed = compare_scoped(before, after, scope, source_name="spline.dxf")
+    assert changed["ok"] is False
+    assert changed["unsupported_changed"] is True
+
+
 def test_block_fixture_identity_is_ok():
     path = PROJECT_ROOT / "web/e2e/fixtures/block-fixture.dxf"
     before = path.read_bytes()
