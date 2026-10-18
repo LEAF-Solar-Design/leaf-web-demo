@@ -94,8 +94,34 @@ def test_identity_is_ok_for_every_tracked_drawing(drawings):
             "untouched_changed": [], "unexpected_removed": [], "unexpected_added": [],
             "expected_removed_missing": [], "touched_changed": [], "handleless_changed": False,
             "blocks_changed": [],
+            "unsupported_kinds": [], "unsupported_changed": False,
             "kind_counts_before": ledger["counts"], "kind_counts_after": ledger["counts"],
         }
+
+
+def test_unsupported_kind_identity_is_ok():
+    path = PROJECT_ROOT / "vendor/acadrust-worker/fixtures/one_line.dxf"
+    before = path.read_bytes()
+    result = compare_scoped(before, before, MutationScope.from_iterables(), source_name=path.name)
+    assert result["ok"] is True
+    assert result["unsupported_kinds"] == ["LINE"]
+    assert result["unsupported_changed"] is False
+
+
+def test_unsupported_kind_change_is_a_defect():
+    path = PROJECT_ROOT / "vendor/acadrust-worker/fixtures/one_line.dxf"
+    before = path.read_bytes()
+    text = before.decode("ascii")
+    endpoint = re.search(r"(?m)^11\r?\n([^\r\n]+)", text)
+    assert endpoint is not None
+    replacement = endpoint.group().replace(endpoint.group(1), str(float(endpoint.group(1)) + 1))
+    after = text.replace(endpoint.group(), replacement, 1).encode("ascii")
+    assert after != before
+    result = compare_scoped(before, after, MutationScope.from_iterables(), source_name=path.name)
+    assert result["ok"] is False
+    assert result["unsupported_kinds"] == ["LINE"]
+    assert result["unsupported_changed"] is True
+    assert result["untouched_changed"] == []
 
 
 def test_block_fixture_identity_is_ok():
@@ -117,6 +143,29 @@ def test_block_definition_change_is_a_defect():
     replacement = endpoint.group().replace(endpoint.group(1), str(float(endpoint.group(1)) + 1))
     changed_blocks = blocks.replace(endpoint.group(), replacement, 1)
     after = (changed_blocks + "ENTITIES" + entities).encode("ascii")
+    assert after != before
+    result = compare_scoped(before, after, MutationScope.from_iterables(), source_name=path.name)
+    assert result["ok"] is False
+    assert result["blocks_changed"] == [name.group(1)]
+    assert result["untouched_changed"] == []
+
+
+def test_block_child_layer_change_is_a_defect():
+    path = PROJECT_ROOT / "web/e2e/fixtures/block-fixture.dxf"
+    before = path.read_bytes()
+    text = before.decode("ascii")
+    blocks, entities = text.split("ENTITIES", 1)
+    name = re.search(r"(?m)^0\r?\nBLOCK\r?\n.*?^2\r?\n([^\r\n]+)", blocks, re.DOTALL)
+    assert name is not None and name.group(1) == "Fixture"
+    lines = blocks.splitlines(keepends=True)
+    pairs = [(lines[i].strip(), lines[i + 1].strip()) for i in range(0, len(lines) - 1, 2)]
+    block_start = pairs.index(("0", "BLOCK"))
+    block_end = pairs.index(("0", "ENDBLK"), block_start)
+    child = pairs.index(("0", "LINE"), block_start, block_end)
+    assert pairs[child + 1:child + 3] == [("5", "100"), ("8", "0")]
+    layer_value = 2 * (child + 2) + 1
+    lines[layer_value] = lines[layer_value].replace("0", "LEAF_CANARY", 1)
+    after = ("".join(lines) + "ENTITIES" + entities).encode("ascii")
     assert after != before
     result = compare_scoped(before, after, MutationScope.from_iterables(), source_name=path.name)
     assert result["ok"] is False
