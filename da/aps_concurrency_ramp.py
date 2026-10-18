@@ -1,10 +1,8 @@
 """Bounded APS concurrency measurement, dry run by default.
 
-Live mode spends money and is bounded by a spend cap. This tool never prints,
+Live mode spends money and is limited by a spend budget. This tool never prints,
 logs or writes a credential value and fails closed on malformed input.
-The cap is a hard bound: each level's per WorkItem processing limit is set so
-that the limit plus the transfer allowance, times n, at the rate, fits the
-remaining budget. Spend is priced from download start to upload end.
+The cap is a budget, not a hard bound. Each level's per WorkItem processing limit is set so that the limit plus TRANSFER_ALLOWANCE_S, times n, at the rate, fits the remaining budget, and spend is priced from download start to upload end. APS's processing limit does not bound download and upload, so a WorkItem whose transfer outlasts the allowance can overrun the budget by that excess; the receipt records any overrun as cap_overrun_usd.
 """
 
 import argparse
@@ -23,7 +21,7 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 ACTIVITY = "LeafTool_count_by_layer"
 TENANT = "aps-ramp"
-# APS bills timeDownloadStarted to timeUploadEnded, and the processing limit may not bound download and upload, so each WorkItem reserves this much on top of its limit.
+# APS bills download start to upload end and its processing limit does not bound transfer, so admission reserves this much per WorkItem; it is an allowance, not a bound.
 TRANSFER_ALLOWANCE_S = 60
 TIMES = ("timeQueued", "timeDownloadStarted", "timeInstructionsStarted",
          "timeInstructionsEnded", "timeFinished", "timeUploadEnded")
@@ -135,7 +133,8 @@ def main(argv=None, client_module=None, now=time.time):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--levels", type=_levels, default="1,2,4,8,16,32")
     parser.add_argument("--workload", choices=("count_by_layer", "extract"), default="count_by_layer")
-    parser.add_argument("--spend-cap-usd", type=float, default=10.)
+    parser.add_argument("--spend-cap-usd", type=float, default=10.,
+                        help="spend budget in USD; see the module docstring for why it is not a hard bound")
     parser.add_argument("--stop-error-rate", type=float, default=.10)
     parser.add_argument("--stop-queue-p95-s", type=float, default=300.)
     parser.add_argument("--poll-budget-per-min", type=int, default=60)
@@ -290,6 +289,7 @@ def main(argv=None, client_module=None, now=time.time):
         for level in receipt["levels"]:
             _summarise(level, rate)
         receipt["cumulative_usd_est"] = sum(l["usd_est"] for l in receipt["levels"])
+    receipt["cap_overrun_usd"] = max(0.0, receipt["cumulative_usd_est"] - args.spend_cap_usd)
     receipt["ended_at"] = _stamp(now())
     try:
         if not _write(args.out, receipt, forbidden):

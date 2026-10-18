@@ -169,6 +169,7 @@ def test_completed_ramp_summarises_every_level(tmp_path):
     assert receipt["engine"] == client.ENGINE
     assert receipt["levels_requested"] == [1, 2, 4]
     assert receipt["cumulative_usd_est"] == pytest.approx(37 * 7 * 10 / 3600)
+    assert receipt["cap_overrun_usd"] == 0
     assert receipt["started_at"] == receipt["ended_at"]
     assert receipt["spend_cap_usd"] == 10 and receipt["poll_budget_per_min"] == 60
     for n, level in zip((1, 2, 4), receipt["levels"]):
@@ -255,6 +256,23 @@ def test_spend_counts_download_through_upload(tmp_path):
     assert row["billed_s"] == 340
     assert row["usd_est"] == pytest.approx(340 * 10 / 3600)
     assert row["engine_s"] == 36
+
+
+def test_transfer_overrun_is_recorded_in_the_receipt(tmp_path):
+    client = FakeClient()
+    def poll_with_long_transfer(identifier):
+        base = datetime(2026, 10, 18, tzinfo=timezone.utc)
+        offsets = (0, 0, 300, 336, 400, 400)
+        return {"id": identifier, "status": "success",
+                "stats": {k: (base + timedelta(seconds=s)).isoformat()
+                          for k, s in zip(ramp.TIMES, offsets)}}
+    client._poll_workitem = poll_with_long_transfer
+    code, receipt = live(tmp_path, client, "--levels", "1,2", "--spend-cap-usd", "1.0")
+    assert code == 0 and receipt["stop_reason"] == "spend_cap"
+    assert len(client.arguments) == 1
+    assert receipt["levels"][0]["workitems"][0]["billed_s"] == 400
+    assert receipt["cumulative_usd_est"] == pytest.approx(400 * 10 / 3600)
+    assert receipt["cap_overrun_usd"] == pytest.approx(400 * 10 / 3600 - 1.0)
 
 
 def test_receipt_never_contains_urls_or_secrets(tmp_path, capsys):
