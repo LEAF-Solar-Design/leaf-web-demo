@@ -1025,11 +1025,6 @@ export default function App() {
   const projectMode = !mock && !!openProjectId
   projectModeRef.current = projectMode
   const projectSolarAccountScope = composerDraftAccountScope()
-  const labEnabled = import.meta.env.DEV && labPreviewEnabled()
-  const labContext = {
-    enabled: labEnabled, mock, session, accountScope: projectSolarAccountScope,
-    tenant, orgId, openProjectId, workspace, wsLoading,
-  }
   const projectSolarSession = {
     authenticated: !mock && session.status === 'active',
     actorId: projectSolarAccountScope && projectSolarAccountScope !== 'guest' ? projectSolarAccountScope : null,
@@ -1068,6 +1063,11 @@ export default function App() {
     routePrompt: nlPrompt,
     get projectSolarClient() { return projectSolarClientRef.current },
   }), [])
+  const labEnabled = import.meta.env.DEV && labPreviewEnabled()
+  const labContext = {
+    enabled: labEnabled, mock, session, accountScope: projectSolarAccountScope,
+    tenant, orgId, openProjectId, workspace, wsLoading,
+  }
   const engineViewArmed = useEngineViewArmed(projectMode)
   const catalogAdapters = useMemo(() => ({
     humanizeError,

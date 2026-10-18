@@ -2188,7 +2188,26 @@ describe('project board live pane wiring', () => {
   it('BI03-20 App preserves existing owners and declares the new totals', () => {
     for (const name of ['ProjectWorkspacePanels', 'ConversePanel', 'AuthorPanel',
       'AnnotationDecisionCard', 'ProjectLifecyclePanel']) assert.equal(elements(name).length, 1, name)
-    assert.equal(elements('PersistentSeat').length, 3)
+    const seats = elements('PersistentSeat')
+    assert.equal(seats.length, 4)
+    const labSeats = seats.filter((seat) => {
+      const destination = expression(seat, 'destination')
+      return destination.type === 'Identifier' && destination.name === 'labDestination'
+    })
+    assert.equal(labSeats.length, 1)
+    const labSeat = labSeats[0]
+    assert.ok(!labSeat.openingElement.attributes.some((attr) => attr.name?.name === 'key'))
+    const labPanels = elements('LabWidgetsPreview')
+    assert.equal(labPanels.length, 1)
+    const seatedLabPanels = []
+    csuWalk(labSeat, (node) => {
+      if (node.type === 'JSXElement' && node.openingElement.name.name === 'LabWidgetsPreview') {
+        seatedLabPanels.push(node)
+      }
+    })
+    assert.deepEqual(seatedLabPanels, labPanels)
+    guard('LabWidgetsPreview', 'labEnabled')
+    assert.equal(ownerExpression('LabWidgetsPreview').right, labSeat)
     assert.deepEqual(expression(elements('ProjectWorkspacePanels')[0], 'slots').properties.map(csuKey),
       ['catalog', 'conversation', 'annotations', 'authoring', 'settings'])
     const actions = expression(elements('SurfaceGrounds')[0], 'actions').consequent
