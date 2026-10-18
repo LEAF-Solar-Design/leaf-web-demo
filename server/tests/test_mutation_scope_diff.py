@@ -93,8 +93,63 @@ def test_identity_is_ok_for_every_tracked_drawing(drawings):
             "ok": True, "source_name": path.name, "untouched_total": len(ledger["keyed"]),
             "untouched_changed": [], "unexpected_removed": [], "unexpected_added": [],
             "expected_removed_missing": [], "touched_changed": [], "handleless_changed": False,
+            "blocks_changed": [],
             "kind_counts_before": ledger["counts"], "kind_counts_after": ledger["counts"],
         }
+
+
+def test_block_fixture_identity_is_ok():
+    path = PROJECT_ROOT / "web/e2e/fixtures/block-fixture.dxf"
+    before = path.read_bytes()
+    result = compare_scoped(before, before, MutationScope.from_iterables(), source_name=path.name)
+    assert result["ok"] is True
+    assert result["blocks_changed"] == []
+
+
+def test_block_definition_change_is_a_defect():
+    path = PROJECT_ROOT / "web/e2e/fixtures/block-fixture.dxf"
+    before = path.read_bytes()
+    text = before.decode("ascii")
+    blocks, entities = text.split("ENTITIES", 1)
+    name = re.search(r"(?m)^0\r?\nBLOCK\r?\n.*?^2\r?\n([^\r\n]+)", blocks, re.DOTALL)
+    endpoint = re.search(r"(?m)^11\r?\n([^\r\n]+)", blocks)
+    assert name is not None and endpoint is not None
+    replacement = endpoint.group().replace(endpoint.group(1), str(float(endpoint.group(1)) + 1))
+    changed_blocks = blocks.replace(endpoint.group(), replacement, 1)
+    after = (changed_blocks + "ENTITIES" + entities).encode("ascii")
+    assert after != before
+    result = compare_scoped(before, after, MutationScope.from_iterables(), source_name=path.name)
+    assert result["ok"] is False
+    assert result["blocks_changed"] == [name.group(1)]
+    assert result["untouched_changed"] == []
+
+
+def test_parse_errors_raise_value_error(tmp_path, capsys):
+    path = PROJECT_ROOT / "web/e2e/fixtures/block-fixture.dxf"
+    valid = path.read_bytes()
+    blocks, entities = valid.decode("ascii").split("ENTITIES", 1)
+    name = re.search(r"(?m)^2\r?\n([^\r\n]+)", entities)
+    assert name is not None
+    missing_name = name.group(1) + "_MISSING"
+    malformed = (blocks + "ENTITIES" + entities.replace(name.group(), name.group().replace(
+        name.group(1), missing_name), 1)).encode("ascii")
+    assert malformed != valid
+    errors = dxf_intake.parse_dxf_bytes(malformed, source_name=path.name)["parseErrors"]
+    assert missing_name in errors[0]
+    before_path, after_path = tmp_path / "before.dxf", tmp_path / "after.dxf"
+    for side, before, after in (
+        ("before", malformed, valid), ("after", valid, malformed),
+        ("before", malformed, malformed),
+    ):
+        with pytest.raises(ValueError) as exc:
+            compare_scoped(before, after, MutationScope.from_iterables(), source_name=path.name)
+        assert str(exc.value) == f"{side}: {errors[0]}"
+        before_path.write_bytes(before)
+        after_path.write_bytes(after)
+        assert main(["--before", str(before_path), "--after", str(after_path)]) == 2
+        captured = capsys.readouterr()
+        assert captured.err.strip() == f"{side}: {errors[0]}"
+        assert not captured.out
 
 
 def test_touched_vertex_move_is_ok_and_reported_informationally(entity_case):

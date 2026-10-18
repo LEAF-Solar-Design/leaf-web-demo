@@ -1,4 +1,7 @@
-"""Fails closed on malformed input, compares every entity by handle, and treats an entity outside the declared scope that differs as a defect."""
+"""Fails closed on malformed input, compares every entity by handle, and treats an entity outside the declared scope that differs as a defect.
+
+Block definitions are never in scope in v1.
+"""
 from __future__ import annotations
 
 import argparse
@@ -27,8 +30,29 @@ class MutationScope:
 
 
 def compare_scoped(before: bytes, after: bytes, scope: MutationScope, *, source_name: str) -> dict:
-    left = _fidelity._ledger(_dxf_intake.parse_dxf_bytes(before, source_name=source_name))
-    right = _fidelity._ledger(_dxf_intake.parse_dxf_bytes(after, source_name=source_name))
+    parsed_before = _dxf_intake.parse_dxf_bytes(before, source_name=source_name)
+    if parsed_before.get("parseErrors"):
+        raise ValueError(f"before: {parsed_before['parseErrors'][0]}")
+    parsed_after = _dxf_intake.parse_dxf_bytes(after, source_name=source_name)
+    if parsed_after.get("parseErrors"):
+        raise ValueError(f"after: {parsed_after['parseErrors'][0]}")
+    left = _fidelity._ledger(parsed_before)
+    right = _fidelity._ledger(parsed_after)
+    block_left, block_right = _fidelity._block_ledger(before), _fidelity._block_ledger(after)
+    blocks_changed = set()
+    for handle in block_left["keyed"].keys() | block_right["keyed"].keys():
+        a, b = block_left["keyed"].get(handle), block_right["keyed"].get(handle)
+        if a is None or b is None or not (
+            _fidelity._same_block_record(a, b) and _fidelity._same_block_record(b, a)
+        ):
+            blocks_changed.update(record["block"] for record in (a, b) if record is not None)
+    for group in block_left["unkeyed"].keys() | block_right["unkeyed"].keys():
+        a, b = block_left["unkeyed"].get(group, []), block_right["unkeyed"].get(group, [])
+        if len(a) != len(b) or not all(
+            _fidelity._same_block_record(x, y) and _fidelity._same_block_record(y, x)
+            for x, y in zip(a, b)
+        ):
+            blocks_changed.add(group[0])
     source, output = left["keyed"], right["keyed"]
     untouched = source.keys() - scope.touched_handles - scope.removed_handles
     changed = {
@@ -55,7 +79,7 @@ def compare_scoped(before: bytes, after: bytes, scope: MutationScope, *, source_
     return {
         "ok": not (
             untouched_changed or unexpected_removed or unexpected_added
-            or expected_removed_missing or handleless_changed
+            or expected_removed_missing or handleless_changed or blocks_changed
         ),
         "source_name": source_name,
         "untouched_total": len(untouched),
@@ -65,6 +89,7 @@ def compare_scoped(before: bytes, after: bytes, scope: MutationScope, *, source_
         "expected_removed_missing": expected_removed_missing,
         "touched_changed": sorted(scope.touched_handles & changed),
         "handleless_changed": handleless_changed,
+        "blocks_changed": sorted(blocks_changed),
         "kind_counts_before": left["counts"],
         "kind_counts_after": right["counts"],
     }
