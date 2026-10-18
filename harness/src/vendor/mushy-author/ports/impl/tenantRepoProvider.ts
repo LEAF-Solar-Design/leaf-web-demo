@@ -289,8 +289,9 @@ const trustedGitDirectories = new Set<string>();
  * Git accepts safe.directory only from protected configuration. Tenant repos
  * can be owned by the EFS access-point UID rather than the container UID, so
  * add only the exact resolved worktree and git-dir paths to this process's
- * command-scope config. Local clone/upload-pack children inherit the same
- * protected config. No wildcard trust or user-global mutation is permitted.
+ * command-scope config. Local transport children need the separate protected
+ * file below because Git removes GIT_CONFIG_COUNT before upload-pack.
+ * No wildcard trust or user-global mutation is permitted.
  */
 function trustSharedRepo(dir: string): void {
   const root = (existsSync(dir) ? realpathSync(dir) : resolve(dir)).replaceAll("\\", "/");
@@ -316,14 +317,36 @@ export function tenantGitEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
-function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
+/** @internal Scoped file survives Git's removal of command config in transport children. */
+export function withLocalGitTrust<T>(sourceRef: string, action: (env: NodeJS.ProcessEnv) => T): T {
+  const source = realpathSync(sourceRef).replaceAll("\\", "/");
+  const paths = [source, join(source, ".git").replaceAll("\\", "/")];
+  const quote = (value: string): string => {
+    if (/[\0\r]/.test(value)) throw new Error("invalid local Git trust path");
+    return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\n", "\\n").replaceAll("\t", "\\t")}"`;
+  };
+  const content = `[safe]\n\tdirectory =\n${paths.map(path => `\tdirectory = ${quote(path)}\n`).join("")}`;
+  const dir = mkdtempSync(join(tmpdir(), "leaf-git-trust-"));
+  try {
+    const path = join(dir, "config");
+    writeFileSync(path, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const env = tenantGitEnvironment();
+    env.GIT_CONFIG_NOSYSTEM = "1";
+    env.GIT_CONFIG_GLOBAL = path;
+    return action(env);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function git(cwd: string, args: string[], identity?: HarnessIdentity, env = tenantGitEnvironment()): string {
   const cfg = identity
     ? ["-c", `user.name=${identity.name}`, "-c", `user.email=${identity.email}`]
     : [];
   try {
     // Scrubbed env (sol-critic R5, same rule as the git worker): git and anything
     // it runs (filters, hooks) must never inherit a credential or hop secret.
-    return execFileSync("git", [...cfg, ...args], { cwd, encoding: "utf8", env: tenantGitEnvironment() });
+    return execFileSync("git", [...cfg, ...args], { cwd, encoding: "utf8", env });
   } catch (e) {
     const err = e as { status?: number; signal?: string; code?: string; stderr?: string; stdout?: string; message: string };
     throw new Error(
@@ -331,6 +354,11 @@ function git(cwd: string, args: string[], identity?: HarnessIdentity): string {
         `stderr=${err.stderr ?? ""} stdout=${err.stdout ?? ""}`,
     );
   }
+}
+
+function gitTransport(cwd: string, args: string[], sourceRef: string): string {
+  if (!existsSync(sourceRef)) return git(cwd, args);
+  return withLocalGitTrust(sourceRef, env => git(cwd, args, undefined, env));
 }
 
 class GitTenantRepo implements TenantRepo {
@@ -786,7 +814,7 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
     const dir = mkdtempSync(join(base, `mushy-${tenantId}-`));
     trustSharedRepo(dir);
     if (existsSync(ref)) trustSharedRepo(ref);
-    git(dir, ["clone", "--depth", "1", ref, "."]);
+    gitTransport(dir, ["clone", "--no-local", "--depth", "1", ref, "."], ref);
     if (this.lease && lease) lease.repoDirs.add(dir);
     const fence =
       this.lease && lease
@@ -885,13 +913,13 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
       trustSharedRepo(dir);
       const alreadyExists = existsSync(join(dir, "HEAD"));
       if (!alreadyExists) {
-        git(this.opts.bareBase, ["clone", "--bare", ref, dir]);
+        gitTransport(this.opts.bareBase, ["clone", "--no-local", "--bare", ref, dir], ref);
       } else {
         ensureBareOrigin(dir, ref);
         // Fetch the source only to bootstrap a missing main. After that,
         // publishToMain owns the canonical branch and private refs remain local.
         if (!bareRepoHasMain(dir)) {
-          git(dir, ["fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"]);
+          gitTransport(dir, ["fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"], ref);
         }
         git(dir, ["symbolic-ref", "HEAD", "refs/heads/main"]);
       }
@@ -900,7 +928,7 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
       mkdirSync(base, { recursive: true });
       dir = mkdtempSync(join(base, `mushy-bare-${tenantId}-`));
       trustSharedRepo(dir);
-      git(dir, ["clone", "--bare", ref, "."]);
+      gitTransport(dir, ["clone", "--no-local", "--bare", ref, "."], ref);
     }
     const repo = { dir, sourceRef: ref };
     this.bareRepos.set(tenantId, repo);

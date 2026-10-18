@@ -7,8 +7,8 @@
  * never clobbered. commit() still works (its Windows spawn-pressure retry is intact).
  */
 
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 import { HARNESS_IDENTITY } from "../src/registry/registerTool.js";
+import { withLocalGitTrust } from "../src/vendor/mushy-author/ports/impl/tenantRepoProvider.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = join(HERE, "fixtures", "tenant-repo");
@@ -207,7 +208,7 @@ describe("TenantRepoProviderImpl auto-provision", () => {
     expect(git(sourceDir, ["rev-parse", "refs/heads/main"]).trim()).toBe(originalMain);
   });
 
-  it("opens a bare clone from an existing foreign-owned tenant repo", async () => {
+  it.each(["bare", "checkout"] as const)("opens a %s clone from an existing foreign-owned tenant repo", async operation => {
     const dir = join(base, "partial");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "registry.json"), JSON.stringify({ tools: [] }), "utf8");
@@ -218,12 +219,60 @@ describe("TenantRepoProviderImpl auto-provision", () => {
     const previousOwnerTest = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
     process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = "1";
     try {
-      const bare = await provider(base).bare("partial");
-      expect(git(bare.dir, ["show-ref", "--verify", "refs/heads/main"]).trim()).toContain("refs/heads/main");
+      const p = new TenantRepoProviderImpl({
+        locator: { async repoRef(tenant) { return join(base, tenant); } },
+        workBase: base, bareBase: join(base, "tenant-git"),
+      });
+      const cloned = await p[operation]("partial");
+      expect(git(cloned.dir, ["rev-parse", "HEAD"])).toBe(git(dir, ["rev-parse", "HEAD"]));
     } finally {
       if (previousOwnerTest === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
       else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previousOwnerTest;
     }
+  });
+
+  it("limits child transport trust to the exact source and removes its private config", () => {
+    const source = join(base, "source with spaces");
+    const sibling = join(base, "untrusted-sibling");
+    for (const dir of [source, sibling]) {
+      mkdirSync(dir);
+      git(dir, ["init", "-q", "-b", "main"]);
+    }
+    const callerConfig = process.env.GIT_CONFIG_GLOBAL!;
+    writeFileSync(callerConfig, "[safe]\n\tdirectory = *\n");
+    let privateConfig = "";
+    withLocalGitTrust(source, env => {
+      privateConfig = env.GIT_CONFIG_GLOBAL!;
+      expect(privateConfig).not.toBe(callerConfig);
+      if (process.platform !== "win32") expect(statSync(privateConfig).mode & 0o777).toBe(0o600);
+      const childEnv = { ...env, GIT_CONFIG_COUNT: "0" };
+      const entries = execFileSync("git", ["config", "--file", privateConfig, "--get-all", "safe.directory"], {
+        encoding: "utf8", env: childEnv,
+      }).split(/\r?\n/).slice(0, -1);
+      const resolved = realpathSync(source).replaceAll("\\", "/");
+      expect(entries).toEqual(["", resolved, `${resolved}/.git`]);
+      const untrusted = spawnSync("git", ["-C", sibling, "status", "--porcelain"], {
+        encoding: "utf8", env: { ...childEnv, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1" },
+      });
+      expect(untrusted.status).toBe(128);
+      expect(untrusted.stderr).toContain("dubious ownership");
+    });
+    expect(existsSync(dirname(privateConfig))).toBe(false);
+    expect(readFileSync(callerConfig, "utf8")).toBe("[safe]\n\tdirectory = *\n");
+  });
+
+  it("removes private child trust when a Git transport command fails", () => {
+    const source = join(base, "source");
+    mkdirSync(source);
+    let privateConfig = "";
+    expect(() => withLocalGitTrust(source, env => {
+      privateConfig = env.GIT_CONFIG_GLOBAL!;
+      execFileSync("git", ["clone", "--no-local", join(base, "absent-source"), join(base, "failed-clone")], {
+        env, stdio: "pipe",
+      });
+    })).toThrow();
+    expect(privateConfig).not.toBe("");
+    expect(existsSync(dirname(privateConfig))).toBe(false);
   });
 
   it("does not re-provision an existing repo on later checkout, and commit() works", async () => {

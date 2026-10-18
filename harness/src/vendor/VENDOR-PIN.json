@@ -50,8 +50,8 @@
       "sha256": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f"
     },
     "ports/impl/tenantRepoProvider.ts": {
-      "reason": "Selective PR93 Forge publication with consumer leases and the durable effective catalog checkout (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
-      "sha256": "a1469ba8882eea3b79e450135abad9f29b95718e67bf511180d9c728052f8c15"
+      "reason": "Selective PR93 Forge publication with consumer leases and the durable effective catalog checkout (rebased onto mushy-code ad209705 by AD4; upstream candidate); P05: exact local transport trust in a temporary protected config plus no-local cloning for foreign-owned source repositories; retire when upstream includes equivalent behavior.",
+      "sha256": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691"
     },
     "ports/index.ts": {
       "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
@@ -116,7 +116,7 @@
     "ports/impl/standardServicesRuntime.ts": "74925259f354b874d5ad5318701f4bc727d4a043939dfe8c995711daa7300e95",
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "32740d32b3dce694ec1c7f35a4191517da9d91cea6b23906438ba1a8624b5888",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
-    "ports/impl/tenantRepoProvider.ts": "a1469ba8882eea3b79e450135abad9f29b95718e67bf511180d9c728052f8c15",
+    "ports/impl/tenantRepoProvider.ts": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691",
     "ports/index.ts": "7cc65099cb8b31a6ec796ed162fbe7c55a05ee4ed66ce2abf3eb089e65bd4552",
     "ports/modelAllowlist.ts": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
