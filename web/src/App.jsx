@@ -202,7 +202,9 @@ import ProjectSolarWorkspace from './solar/ProjectSolarWorkspace.jsx'
 import ProjectSolarGraphForm from './solar/ProjectSolarGraphForm.jsx'
 import { createProjectSolarClient } from './api.js'
 import { composerDraftAccountScope } from './lib/composerDraft.js'
-import LabWidgetsPreview from './lab/LabWidgetsPreview.jsx'
+const LabWidgetsPreview = import.meta.env.DEV
+  ? React.lazy(() => import('./lab/LabWidgetsPreview.jsx'))
+  : null
 import { labPreviewEnabled } from './lab/labPreview.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
 import { useDrawingIdentity, useDrawingScopeReset } from './drawing/DrawingIdentityProvider.jsx'
@@ -1023,7 +1025,7 @@ export default function App() {
   const projectMode = !mock && !!openProjectId
   projectModeRef.current = projectMode
   const projectSolarAccountScope = composerDraftAccountScope()
-  const labEnabled = labPreviewEnabled()
+  const labEnabled = import.meta.env.DEV && labPreviewEnabled()
   const labContext = {
     enabled: labEnabled, mock, session, accountScope: projectSolarAccountScope,
     tenant, orgId, openProjectId, workspace, wsLoading,
@@ -5521,7 +5523,9 @@ export default function App() {
         <div ref={setAuthorFallback} />
         {labEnabled && (
           <PersistentSeat destination={labDestination}>
-            <LabWidgetsPreview context={labContext} />
+            <Suspense fallback={<div role="status" aria-live="polite">Loading Lab widgets…</div>}>
+              <LabWidgetsPreview context={labContext} />
+            </Suspense>
           </PersistentSeat>
         )}
         {paneSeats.authorMounted && (
