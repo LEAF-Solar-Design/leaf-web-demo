@@ -2053,7 +2053,7 @@ def build_suites() -> List[Suite]:
         # local AutoCAD runtime or tracked demo DWG is unavailable.
         Suite("da-mutation-apply-accoreconsole",
               "da test_mutation_apply_accoreconsole.py", "pytest", DA,
-              _py_pytest("test_mutation_apply_accoreconsole.py"), 1,
+              _py_pytest("test_mutation_apply_accoreconsole.py"), 3,
               # The canary no longer pins one AutoCAD year: it resolves whichever
               # console is installed and names what it tried when none is. CI has
               # none, so the skip is expected there and its reason now carries the
