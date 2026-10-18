@@ -3368,6 +3368,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_egress_guard_telemetry.py"), 9),
         Suite("server-engine-corpus-harness", "server tests/test_engine_corpus_harness.py", "pytest", SERVER,
               _py_pytest("tests/test_engine_corpus_harness.py"), 24),
+        Suite("server-mutation-scope-diff", "server tests/test_mutation_scope_diff.py", "pytest", SERVER,
+              _py_pytest("tests/test_mutation_scope_diff.py"), 13),
         # Registered WITH the file, per the #29 fix-then-register rule. The
         # style receipt (colour, linetype, lineweight, block children) beside
         # the geometry receipt above; hermetic, identity adapter only, no
