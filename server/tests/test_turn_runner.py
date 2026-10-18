@@ -184,6 +184,100 @@ def _wait_until(predicate, timeout_s: float = 3.0, poll_s: float = 0.02):
     return predicate()
 
 
+@pytest.fixture
+def authority_clock(monkeypatch):
+    clock = [1000.0]
+    timers = []
+    monkeypatch.setenv("TURN_MAX_S", "300")
+
+    class Timer:
+        def __init__(self, interval, function):
+            self.interval, self.function = interval, function
+            self.cancelled = False
+            timers.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.cancelled = True
+
+    monkeypatch.setattr(turn_runner.threading, "Timer", Timer)
+    monkeypatch.setattr(turn_runner.time, "time", lambda: clock[0])
+    monkeypatch.setattr(turn_runner.request_journal, "enabled", lambda: False)
+    monkeypatch.setattr(turn_runner.requests, "post", lambda *_a, **_k: pytest.fail("converse called"))
+    monkeypatch.setattr(turn_runner.context_packet, "build_packet", lambda *_a, **_k: pytest.fail("context built"))
+    yield clock, timers
+    for turn_id in list(turn_runner._stage_authority_timers):
+        turn_runner._stage_authority_timers.pop(turn_id).cancel()
+        turn_runner._drop_canceller(turn_id)
+
+
+@pytest.mark.parametrize("finish", ["success", "cancel", "orphan", "expiry"])
+def test_dedicated_authority_has_no_model_and_bounded_terminal(authority_clock, finish):
+    clock, timers = authority_clock
+    tenant = deps.TenantContext("tenant-authority", tier="hosted_pro", subject="author")
+    session = _new_session(str(tenant), drawing_id=f"authority-{finish}")
+    sid = session["session_id"]
+    turn = turn_runner.start_turn(
+        tenant, sid, text="make a tool",
+        classifier_hint={"source": "author_panel", "purpose": "stage_authority"},
+    )
+    assert session_store.active_turn_subject(sid, turn, str(tenant), 300) == "author"
+    assert not turn_runner.finish_stage_authority("another-tenant", sid, turn, "author")
+    assert not turn_runner.finish_stage_authority(str(tenant), sid, turn, "another-author")
+    if finish == "success":
+        assert turn_runner.finish_stage_authority(str(tenant), sid, turn, "author")
+    elif finish in {"cancel", "orphan"}:
+        if finish == "orphan":
+            turn_runner._drop_canceller(turn)
+        assert turn_runner.request_cancel(tenant, sid, turn) == "cancelled"
+    else:
+        clock[0] += 301
+        assert session_store.active_turn_subject(sid, turn, str(tenant), 300) is None
+        timers[0].function()
+    assert session_store.get_session(sid)["active_turn_id"] is None
+    assert not turn_runner.finish_stage_authority(str(tenant), sid, turn, "author")
+    assert session_store.try_begin_turn(sid, "replacement", 300, subject="author")
+    session_store.append_event(sid, "replacement", "turn_started", {"text": "ordinary"})
+    assert not turn_runner.finish_stage_authority(str(tenant), sid, turn, "author")
+    assert not turn_runner.finish_stage_authority(str(tenant), sid, "replacement", "author")
+    assert session_store.get_session(sid)["active_turn_id"] == "replacement"
+    session_store.end_turn(sid, "replacement")
+
+
+def test_authority_journal_replay_preserves_deadline_and_finishes_bookkeeping(
+    authority_clock, monkeypatch,
+):
+    clock, timers = authority_clock
+    tenant = deps.TenantContext("tenant-authority-journal", tier="hosted_pro", subject="author")
+    sid = _new_session(str(tenant), drawing_id="journal-authority")["session_id"]
+    claims, terminal = [], []
+    monkeypatch.setattr(turn_runner.request_journal, "enabled", lambda: True)
+
+    def begin(request_id, turn_id, **kwargs):
+        claims.append(request_id)
+        return session_store.try_begin_turn(sid, turn_id, 300, subject=kwargs["subject"])
+
+    monkeypatch.setattr(turn_runner.request_journal, "begin_request_and_turn", begin)
+    monkeypatch.setattr(turn_runner.request_journal, "finish_turn", lambda *a, **k: terminal.append((a, k)))
+    monkeypatch.setattr(turn_runner.request_journal, "claim_next_queued_and_turn", lambda **_k: None)
+    hint = {"source": "author_panel", "purpose": "stage_authority"}
+    turn = turn_runner.start_turn(tenant, sid, text="tool", classifier_hint=hint, request_id="request")
+    clock[0] += 120
+    assert turn_runner.start_turn(
+        tenant, sid, text="tool", classifier_hint=hint, request_id="request",
+        turn_id=turn, journal_claimed=True,
+    ) == turn
+    assert claims == ["request"]
+    assert timers[0].cancelled
+    assert timers[1].interval == pytest.approx(180)
+    assert session_store.turn_started_data(sid, turn, str(tenant))["stage_authority"] is True
+    assert turn_runner.finish_stage_authority(str(tenant), sid, turn, "author")
+    assert len(terminal) == 1
+    assert terminal[0][1]["state"] == "completed"
+
+
 # =========================================================================== #
 # (a) happy path — monotonic seq, CAS released on turn_complete
 # =========================================================================== #

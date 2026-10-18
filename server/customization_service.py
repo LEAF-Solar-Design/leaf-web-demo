@@ -67,6 +67,23 @@ DEFAULT_DB = Path(__file__).resolve().parent / "customization.db"
 _configured_lock = threading.Lock()
 _configured_services: dict[str, "CustomizationService"] = {}
 _LOG = logging.getLogger(__name__)
+
+
+def finish_stage_authority_for_change(change: ChangeSet) -> None:
+    """Terminal stage cleanup cannot undo a validated durable stage result."""
+    if change.state not in {ChangeState.STAGED, ChangeState.FAILED}:
+        return
+    try:
+        import turn_runner
+        turn_runner.finish_stage_authority(
+            change.tenant_id, change.authority_session_id,
+            change.authority_turn_id, change.author_subject,
+            stop_reason="stage_complete" if change.state is ChangeState.STAGED else "stage_failed",
+        )
+    except Exception as exc:
+        _LOG.warning("stage_authority_cleanup_failed: exception=%s", type(exc).__name__)
+
+
 _REPOSITORY_VISIBILITY_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 # The harness's closed 409 codes for a publish that lost for good (a lost
 # expected-head CAS, a remote that did not accept). Only these end a change
@@ -1392,6 +1409,7 @@ class CustomizationService:
         snapshot = self._derive_catalog_record_fields(proposed)
         if durable.state is ChangeState.STAGED:
             agreement(durable, snapshot)
+            finish_stage_authority_for_change(durable)
             return durable, changed
         if durable.state is not ChangeState.STAGING:
             raise CustomizationServiceError("record_fields_stage_conflict", 409)
@@ -1410,6 +1428,7 @@ class CustomizationService:
             winner = self._record_fields_change(durable.tenant_id, durable.change_set_id)
             if winner.state is ChangeState.STAGED:
                 agreement(winner, snapshot)
+                finish_stage_authority_for_change(winner)
                 return winner, changed
             code = "idempotency_replay" if isinstance(exc, IdempotencyReplayError) else "record_fields_stage_conflict"
             raise CustomizationServiceError(code, 409) from exc
@@ -1417,6 +1436,7 @@ class CustomizationService:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
         except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
             raise CustomizationServiceError("record_fields_write_failed", 503) from exc
+        finish_stage_authority_for_change(completed)
         return completed, changed
 
     # The job status each stored stage state can project to. A row whose state and

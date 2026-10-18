@@ -1048,6 +1048,15 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     if session is None:
         return _session_not_found(session_id)
 
+    if turn_runner.is_stage_authority_hint(req.classifier_hint) and (
+        req.confirm is not None or req.images or req.credential_grant is not None
+        or req.queue is True
+    ):
+        return error_response(
+            ErrorCode.BAD_PARAMS, "stage authority requires an unqueued plain-text turn",
+            retryable=False, status_code=400,
+        )
+
     # 2. Validate images before entitlement evaluation or approval consumption.
     requested_scope = None
     frozen_scope = None

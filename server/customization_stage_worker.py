@@ -9,7 +9,9 @@ import uuid
 from typing import Any
 
 from customization_models import ChangeState
-from customization_service import CustomizationService, CustomizationServiceError
+from customization_service import (
+    CustomizationService, CustomizationServiceError, finish_stage_authority_for_change,
+)
 
 
 _LOG = logging.getLogger(__name__)
@@ -152,6 +154,13 @@ def run_once(
         return True
     finally:
         guard.close()
+        try:
+            terminal = service.store.get_change_set(
+                tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+            )
+            finish_stage_authority_for_change(terminal)
+        except Exception as exc:
+            _LOG.warning("stage_authority_cleanup_read_failed: exception=%s", type(exc).__name__)
     service.store.complete_stage_claim(
         tenant_id=change.tenant_id,
         change_set_id=change.change_set_id,

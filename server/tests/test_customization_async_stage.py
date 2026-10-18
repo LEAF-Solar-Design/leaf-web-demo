@@ -16,6 +16,7 @@ import customization_service
 import author_quota
 import deps
 import session_store
+import turn_runner
 from customization_models import (
     ChangeSetNotFoundError,
     ChangeSetConflictError,
@@ -251,6 +252,125 @@ def _admission_service(store, monkeypatch):
         "tenant-a", tier="hosted_pro", subject="auth0|author"
     )
     return service, tenant
+
+
+@pytest.mark.parametrize("outcome", ["success", "callback", "failure", "defer", "cancel", "expiry"])
+def test_real_authority_route_survives_repository_admission_until_stage_terminal(
+    store, monkeypatch, tmp_path, outcome,
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routers import sessions as sessions_router
+
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "legacy")
+    monkeypatch.setenv("TURN_MAX_S", "300")
+    monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "authority-sessions.db")
+    monkeypatch.setattr(session_store, "_conn", None)
+    session_store.ensure_started()
+    service, tenant = _admission_service(store, monkeypatch)
+    monkeypatch.setattr(customization_service.entitlements, "entitlements_for",
+                        lambda *_args: {"build": True, "converse": True})
+    monkeypatch.setattr(turn_runner.request_journal, "enabled", lambda: False)
+    session = session_store.get_or_create_session(str(tenant), "authority-drawing")
+    sid = session["session_id"]
+    app = FastAPI()
+    app.include_router(sessions_router.router)
+    app.dependency_overrides[deps.require_active_tenant] = lambda: tenant
+    calls = []
+
+    def post(url, **_kwargs):
+        assert url == "http://harness/author/stage", "independent converse must never run"
+        calls.append(url)
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"receipt": {}})
+
+    monkeypatch.setattr(turn_runner.requests, "post", post)
+    monkeypatch.setattr(turn_runner.context_packet, "build_packet",
+                        lambda *_a, **_k: pytest.fail("authority built model context"))
+    monkeypatch.setattr(customization_service, "_harness_config", lambda: ("http://harness", "test-only"))
+    with TestClient(app) as client:
+        response = client.post(f"/api/sessions/{sid}/messages", json={
+            "text": DESCRIPTION,
+            "classifier_hint": {"source": "author_panel", "purpose": "stage_authority"},
+        })
+    assert response.status_code == 202, response.text
+    turn = response.json()["turn_id"]
+    entered, release = threading.Event(), threading.Event()
+
+    def prepare(_tenant):
+        entered.set()
+        assert release.wait(5), "test did not release repository preparation"
+        return object()
+
+    monkeypatch.setattr(customization_service, "_ensure_bare_repo", prepare)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            admission = pool.submit(
+                service.enqueue_stage, tenant=tenant, description=DESCRIPTION,
+                mode="build", idempotency_key="held-authority",
+                authority_session_id=sid, authority_turn_id=turn,
+            )
+            try:
+                assert entered.wait(3), "repository admission was not reached"
+                assert deps.active_stage_author_subject(str(tenant), sid, turn) == tenant.subject
+                assert calls == []
+            finally:
+                release.set()
+            accepted = admission.result(timeout=5)
+
+        if outcome == "cancel":
+            assert turn_runner.request_cancel(tenant, sid, turn) == "cancelled"
+        elif outcome == "expiry":
+            started = session_store.get_session(sid)["turn_started_at"]
+            monkeypatch.setattr(session_store.time, "time", lambda: float(started) + 301)
+            assert deps.active_stage_author_subject(str(tenant), sid, turn) is None
+
+        original_dispatch = service.dispatch_stage
+
+        def dispatch(change):
+            if outcome in {"failure", "defer"}:
+                code = ("customization_author_job_failed" if outcome == "failure"
+                        else "customization_harness_unavailable")
+                raise CustomizationServiceError(code, 503)
+            return original_dispatch(change)
+
+        def reconcile(change, _body, **_lease):
+            if outcome == "callback":
+                return service.record_staged_callback(tenant_id=change.tenant_id, receipt={
+                    "change_set_id": change.change_set_id, "staged_commit": STAGED,
+                    "catalog_digest": DIGEST, "platform_release": "release-a",
+                    "workspace_contract_digest": WORKSPACE,
+                })
+            return store.record_staged(
+                tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+                expected_version=change.version, idempotency_key="stage-complete",
+                staged_commit=STAGED, catalog_digest=DIGEST,
+                platform_release="release-a", workspace_contract_digest=WORKSPACE,
+            )
+
+        monkeypatch.setattr(service, "dispatch_stage", dispatch)
+        monkeypatch.setattr(service, "reconcile_stage_worker", reconcile)
+        if outcome == "callback":
+            monkeypatch.setattr(deps, "auth_live", lambda: True)
+            monkeypatch.setattr(service, "_validate_receipt", lambda receipt, _change: receipt)
+            monkeypatch.setattr(service, "_verify_catalog", lambda *_args: None)
+            monkeypatch.setattr(service, "_verify_bound_stage_policy", lambda *_args: ())
+            monkeypatch.setattr(service, "_derive_catalog_record_fields", lambda *_args: None)
+        assert customization_stage_worker.run_once("authority-worker", service=service)
+        durable = store.get_change_set(tenant_id=str(tenant), change_set_id=accepted["change_set_id"])
+        if outcome in {"success", "callback"}:
+            assert calls == ["http://harness/author/stage"]
+            assert durable.state is ChangeState.STAGED
+        elif outcome == "defer":
+            assert calls == []
+            assert durable.state is ChangeState.STAGING
+            assert deps.active_stage_author_subject(str(tenant), sid, turn) == tenant.subject
+        else:
+            assert calls == []
+            assert durable.state is ChangeState.FAILED
+        if outcome != "defer":
+            assert session_store.get_session(sid)["active_turn_id"] is None
+    finally:
+        turn_runner.finish_stage_authority(str(tenant), sid, turn, tenant.subject)
 
 
 @pytest.mark.parametrize("window", ["before_charge", "after_charge", "before_queue"])

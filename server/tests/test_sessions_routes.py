@@ -237,6 +237,21 @@ def test_messages_text_success_202_calls_start_turn(client, monkeypatch):
     assert captured["confirm"] is None
 
 
+@pytest.mark.parametrize("extra", [
+    {"queue": True}, {"confirm": {"confirmation_id": "unused"}},
+    {"credential_grant": {"kind": "api_key", "api_key": "test-only-not-a-key"}},
+])
+def test_authority_mode_rejects_mixed_shapes_before_dispatch(client, monkeypatch, extra):
+    sess = _seed_session()
+    monkeypatch.setattr(turn_runner, "start_turn", lambda *_a, **_k: pytest.fail("dispatched"))
+    response = client.post(
+        f"/api/sessions/{sess['session_id']}/messages", headers=_h("tenant-a"),
+        json={"text": "tool", "classifier_hint": {
+            "source": "author_panel", "purpose": "stage_authority"}, **extra},
+    )
+    assert response.status_code == 400
+
+
 def test_messages_busy_409_turn_in_progress(client, monkeypatch):
     sess = _seed_session()
 

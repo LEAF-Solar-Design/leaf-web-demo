@@ -244,6 +244,87 @@ _TRUNCATION_MARKER = "\n[... earlier text omitted ...]"
 # so a cancel ALWAYS releases the session's CAS, never only sometimes.
 _cancellers_lock = threading.Lock()
 _cancellers: Dict[str, Any] = {}
+_stage_authority_timers: Dict[str, Any] = {}
+
+
+def is_stage_authority_hint(hint: Any) -> bool:
+    """Select execution mode, never identity or permission."""
+    return (isinstance(hint, dict) and hint.get("source") == "author_panel"
+            and hint.get("purpose") == "stage_authority")
+
+
+def finish_stage_authority(tenant_id: str, session_id: Optional[str],
+                           turn_id: Optional[str], subject: Optional[str], *,
+                           stop_reason: str = "stage_complete") -> bool:
+    """Release only this dedicated, tenant/author-bound active turn.
+
+    The durable server marker survives process loss. A late stage callback
+    cannot release either an ordinary conversation or its replacement turn.
+    """
+    if not session_id or not turn_id or not subject:
+        return False
+    with _orphan_cancel_lock:
+        started = session_store.turn_started_data(session_id, turn_id, str(tenant_id))
+        if not started or started.get("stage_authority") is not True:
+            return False
+        active_subject = session_store.active_turn_subject(
+            session_id, turn_id, str(tenant_id), None)
+        if active_subject != subject:
+            if active_subject is None:
+                with _cancellers_lock:
+                    timer = _stage_authority_timers.pop(turn_id, None)
+                    _cancellers.pop(turn_id, None)
+                if timer is not None:
+                    timer.cancel()
+            return False
+        try:
+            session_store.append_event(
+                session_id, turn_id, "turn_complete", {"stop_reason": stop_reason})
+        except Exception as exc:
+            print(f"[leaf-agent] authority terminal event failed: {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
+        finally:
+            session_store.end_turn(session_id, turn_id)
+            with _cancellers_lock:
+                timer = _stage_authority_timers.pop(turn_id, None)
+                _cancellers.pop(turn_id, None)
+            if timer is not None:
+                timer.cancel()
+        if request_journal.enabled():
+            request_journal.finish_turn(
+                session_id, turn_id, state="completed", response_status=200,
+                response={"turn_id": turn_id, "status": "completed",
+                          "stop_reason": stop_reason})
+    _kick_queued(session_id)
+    return True
+
+
+def _hold_stage_authority(tenant_id: str, session_id: str, turn_id: str,
+                          subject: Optional[str], max_s: float) -> None:
+    def finish(reason: str) -> None:
+        try:
+            finish_stage_authority(
+                tenant_id, session_id, turn_id, subject, stop_reason=reason)
+        except Exception as exc:  # keep timer/cancel failures secret-free
+            print(f"[leaf-agent] authority terminal failed: {type(exc).__name__}",
+                  file=sys.stderr, flush=True)
+
+    session = session_store.get_session(session_id) or {}
+    started_at = session.get("turn_started_at")
+    remaining = max_s - (time.time() - float(started_at)) if started_at is not None else 0.0
+    timer = threading.Timer(max(0.0, min(max_s, remaining)), lambda: finish("timeout"))
+    timer.daemon = True
+    with _cancellers_lock:
+        previous = _stage_authority_timers.get(turn_id)
+        if previous is not None:
+            previous.cancel()
+        _stage_authority_timers[turn_id] = timer
+        _cancellers[turn_id] = lambda: finish("interrupted")
+    try:
+        timer.start()
+    except Exception:
+        finish("error")
+        raise
 
 # Serializes the ORPHAN cancel path's check-then-act. Two cancels arriving at
 # once would otherwise both read `active_turn_id == turn_id` and both append a
@@ -677,6 +758,13 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
 
+    authority_only = is_stage_authority_hint(classifier_hint)
+    if authority_only and (not subject or confirm is not None or images
+                           or credential_grant is not None or queued_id is not None):
+        raise TurnRejected(400, ErrorCode.BAD_PARAMS,
+                           "stage authority requires an authenticated plain-text turn",
+                           pre_harness=True)
+
     turn_id = turn_id or str(uuid.uuid4())
     max_s = turn_max_s()
     fused_journal_turn = request_id is not None and request_journal.enabled()
@@ -755,7 +843,21 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         user_data["confirm"] = confirm
     if classifier_hint is not None:
         user_data["classifier_hint"] = classifier_hint
-    session_store.append_event(session_id, turn_id, "turn_started", user_data)
+    if authority_only:
+        user_data["stage_authority"] = True
+    existing_authority = (session_store.turn_started_data(session_id, turn_id, tenant_id)
+                          if authority_only else None)
+    if existing_authority is None:
+        session_store.append_event(session_id, turn_id, "turn_started", user_data)
+    elif existing_authority.get("stage_authority") is not True:
+        raise TurnRejected(409, ErrorCode.BAD_PARAMS,
+                           "turn is not dedicated stage authority", pre_harness=True)
+
+    if authority_only:
+        # This is an app-owned authority lifetime, not a model conversation.
+        # Recovery enters this same branch with the journal's saved hint.
+        _hold_stage_authority(tenant_id, session_id, turn_id, subject, max_s)
+        return turn_id
 
     def _release_cas() -> None:
         # Synchronous rejections release the CAS HERE, not through the relay's
@@ -1108,6 +1210,10 @@ def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
         except Exception:  # noqa: BLE001  best-effort; releasing the CAS is what matters
             pass
         session_store.end_turn(session_id, turn_id)
+        with _cancellers_lock:
+            authority_timer = _stage_authority_timers.pop(turn_id, None)
+        if authority_timer is not None:
+            authority_timer.cancel()
         if request_journal.enabled():
             try:
                 request_journal.finish_turn(
