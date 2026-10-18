@@ -202,6 +202,8 @@ import ProjectSolarWorkspace from './solar/ProjectSolarWorkspace.jsx'
 import ProjectSolarGraphForm from './solar/ProjectSolarGraphForm.jsx'
 import { createProjectSolarClient } from './api.js'
 import { composerDraftAccountScope } from './lib/composerDraft.js'
+import LabWidgetsPreview from './lab/LabWidgetsPreview.jsx'
+import { labPreviewEnabled } from './lab/labPreview.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
 import { useDrawingIdentity, useDrawingScopeReset } from './drawing/DrawingIdentityProvider.jsx'
 import { hasDrawingSelection } from './drawing/drawingIdentity.js'
@@ -943,6 +945,7 @@ export default function App() {
   const [authorDestination, setAuthorDestination] = useState(null)
   const [authorFallback, setAuthorFallback] = useState(null)
   const [settingsDestination, setSettingsDestination] = useState(null)
+  const [labDestination, setLabDestination] = useState(null)
   const [boardJob, setBoardJob] = useState(null)
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
   const boardPreviewRunRef = useRef(null)
@@ -1020,6 +1023,11 @@ export default function App() {
   const projectMode = !mock && !!openProjectId
   projectModeRef.current = projectMode
   const projectSolarAccountScope = composerDraftAccountScope()
+  const labEnabled = labPreviewEnabled()
+  const labContext = {
+    enabled: labEnabled, mock, session, accountScope: projectSolarAccountScope,
+    tenant, orgId, openProjectId, workspace, wsLoading,
+  }
   const projectSolarSession = {
     authenticated: !mock && session.status === 'active',
     actorId: projectSolarAccountScope && projectSolarAccountScope !== 'guest' ? projectSolarAccountScope : null,
@@ -4635,6 +4643,7 @@ export default function App() {
                 : undefined,
             } : undefined}
             panel={surfaceSlots.ground === 'board' ? <>
+              {labEnabled && <div className="lab-preview-destination" ref={setLabDestination} />}
               {!mock && signedIn && !openProjectId && <ProjectStartPanel
                 bootstrapState={workspaceController.bootstrapState}
                 projects={projects}
@@ -5510,6 +5519,11 @@ export default function App() {
         )}
 
         <div ref={setAuthorFallback} />
+        {labEnabled && (
+          <PersistentSeat destination={labDestination}>
+            <LabWidgetsPreview context={labContext} />
+          </PersistentSeat>
+        )}
         {paneSeats.authorMounted && (
           <PersistentSeat destination={paneSeats.authorTarget}>
             <AuthorPanel
