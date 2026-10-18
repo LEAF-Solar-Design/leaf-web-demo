@@ -17,6 +17,8 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
 import esbuild from 'esbuild'
+import React, { useId, useState } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { parse as parseJs } from '@babel/parser'
 import {
   prepareCatalogRunParams, createRunIntentState, createCatalogToolSnapshot,
@@ -1256,7 +1258,7 @@ describe('A1b-2 stored Solar graph wiring', () => {
     const seatFunction = nodes(seatTree, node => node.type === 'FunctionDeclaration')[0]
     const seatCode = esbuild.transformSync(seatSource.slice(seatFunction.start, seatFunction.end),
       { loader: 'jsx', jsxFactory: 'h' }).code
-    const renderSeat = Function('h', seatCode + '; return SolarFlowSeat')(h)
+    const Seat = Function('h', 'useId', 'useState', seatCode + '; return SolarFlowSeat')(React.createElement, useId, useState)
     for (const [reason, expected] of [
       ['invalid_graph', reasons.invalid_graph], ['invalid_scale', reasons.invalid_scale],
       ['overlay_limit', reasons.overlay_limit], ['drawing_mismatch', reasons.drawing_mismatch],
@@ -1268,8 +1270,15 @@ describe('A1b-2 stored Solar graph wiring', () => {
       assert.deepEqual(rendered.props, { role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true',
         className: 'solar-workspace-announce', 'data-testid': 'solar-graph-overlay-status' })
       assert.equal(rendered.children.join(''), status)
-      assert.equal(renderSeat({ seated: false, children: rendered }), rendered)
-      assert.equal(renderSeat({ seated: true, children: rendered }).children[0], rendered)
+      const child = React.createElement('p', rendered.props, status)
+      const plain = renderToStaticMarkup(child)
+      assert.equal(renderToStaticMarkup(React.createElement(Seat, { seated: false }, child)), plain)
+      const seated = renderToStaticMarkup(React.createElement(Seat, { seated: true }, child))
+      assert.ok(seated.includes(plain))
+      assert.match(seated, /aria-expanded="false"/)
+      assert.match(seated, /data-expanded="false"/)
+      assert.match(seated, /Solar flow tools/)
+      assert.match(seated, /class="solar-flow-seat-content"/)
     }
     for (const [reason, expected] of [['INVALID_SCALE', reasons.invalid_scale], ['OVERLAY_LIMIT', reasons.overlay_limit],
       ['GRAPH_PAIR_INVALID', reasons.invalid_graph], ['GRAPH_UNREADABLE', reasons.invalid_graph],
