@@ -270,6 +270,7 @@
     "server-engine-corpus-harness",
     "server-broker-metering-crash-window",
     "server-drawings-cross-tenant-canary",
+    "server-mutation-scope-diff",
     "server-engine-registry-scripts",
     "server-cost-internal",
     "server-engine-selector",
