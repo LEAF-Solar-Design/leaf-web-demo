@@ -147,6 +147,34 @@ def test_schema_status_ok_with_every_authority_on_postgres(monkeypatch):
     assert status["ok"] is True, _describe("every selector=postgres", status)
 
 
+def test_demo_registry_migration_has_its_identity_and_counter_schema():
+    """The new authority is PostgreSQL-only even while its switch stays off."""
+    expected = {
+        "demo_sessions": {"id", "subject", "tenant_id", "org_id", "created_at",
+                          "expires_at", "revoked_at", "client_ip_hash"},
+        "demo_mint_counters": {"day", "scope", "count"},
+    }
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ANY(%s)",
+            (list(expected),))
+        actual = {}
+        for row in cur.fetchall():
+            actual.setdefault(row["table_name"], set()).add(row["column_name"])
+        assert actual == expected
+        cur.execute(
+            "SELECT conname FROM pg_constraint WHERE connamespace = "
+            "current_schema()::regnamespace AND conrelid IN "
+            "('demo_sessions'::regclass, 'demo_mint_counters'::regclass)")
+        names = {row["conname"] for row in cur.fetchall()}
+    assert {"demo_sessions_pkey", "demo_sessions_subject_key",
+            "demo_sessions_tenant_id_key", "demo_mint_counters_pkey"} <= names
+    required = db.required_catalog_for_selected_authorities({})["constraints"]
+    assert {name for name, contract in required.items()
+            if contract["relation"] in expected} == names
+
+
 @pytest.mark.parametrize("selector", SELECTORS)
 def test_schema_status_ok_for_each_authority_on_postgres(monkeypatch, selector):
     """One selector at a time, so a failure names the authority that broke.

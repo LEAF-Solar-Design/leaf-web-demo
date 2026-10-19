@@ -863,7 +863,8 @@ class TenantContext(str):
                 backedge: bool = False,
                 authority_resolved: bool = False,
                 roles: tuple = (),
-                elevated: bool = False) -> "TenantContext":
+                elevated: bool = False,
+                verified_demo: bool = False) -> "TenantContext":
         obj = super().__new__(cls, tenant_id)
         obj.tenant_id = str(tenant_id)
         obj.org_id = org_id
@@ -885,6 +886,7 @@ class TenantContext(str):
         # identity binding. This avoids a second authority lookup in
         # require_active_tenant and keeps one request on one tenant snapshot.
         obj.authority_resolved = authority_resolved
+        obj.verified_demo = verified_demo is True
         return obj
 
 
@@ -1264,6 +1266,7 @@ def require_tenant(
     authorization: Optional[str] = Header(default=None),
     x_dispatch_secret: Optional[str] = Header(default=None),
     x_guest_session: Optional[str] = Header(default=None),
+    x_demo_session: Optional[str] = Header(default=None),
 ):
     """FastAPI dependency: resolve the calling tenant.
 
@@ -1275,13 +1278,30 @@ def require_tenant(
          (`backedge_tenant`) — never a bare str, which would resolve to "demo"
          and hand a downgraded tenant every capability.
     """
+    # Header presence matters: even an empty Authorization selects Bearer.
+    # Direct dependency callers may leave Header(...) defaults unexpanded.
+    demo = x_demo_session if isinstance(x_demo_session, str) else None
+    demo = request.headers.get("x-demo-session", demo)
+    authorization = authorization if isinstance(authorization, str) else None
+    authorization = request.headers.get("authorization", authorization)
+    dispatch_leg = (auth_live() and x_dispatch_secret is not None and x_tenant_id
+                    and _dispatch_backedge_route(request.method, request.url.path)
+                    and _dispatch_secret_ok(x_dispatch_secret))
+    import demo_sessions
+    record = demo_sessions.resolve_demo_session(
+        auth_live=auth_live(), demo=demo, authorization=authorization,
+        guest=request.headers.get("x-guest-session",
+                                  x_guest_session if isinstance(x_guest_session, str) else None),
+        dispatch_leg=bool(dispatch_leg))
+    if record is not None:
+        demo_sessions.require_demo_route(request)
+        return demo_tenant_context(record)
+
     if not auth_live():
         # BYTE-IDENTICAL legacy path — X-Tenant-Id header stub, plain str.
         return x_tenant_id or DEFAULT_TENANT
 
-    if (x_dispatch_secret is not None and x_tenant_id
-            and _dispatch_backedge_route(request.method, request.url.path)
-            and _dispatch_secret_ok(x_dispatch_secret)):
+    if dispatch_leg:
         return backedge_tenant(x_tenant_id)
 
     # Guest-session leg (CONTRACT-ADDENDUM §19): a VALID HMAC guest token — for
@@ -1298,7 +1318,7 @@ def require_tenant(
     # their account (or get the JWT path's honest 401), never the guest
     # allowlist's 403. The guest leg only exists for callers with no
     # Authorization at all.
-    if x_guest_session and not authorization:
+    if x_guest_session and authorization is None:
         import guest_uploads  # lazy: mirrors the auth/tenancy lazy-import discipline
         guest_tid = guest_uploads.verify_guest_session(x_guest_session)
         if guest_tid is not None:
@@ -1349,6 +1369,37 @@ def require_tenant(
     )
 
 
+def require_demo_boundary(request: Request) -> None:
+    """Apply demo precedence and route admission to otherwise public routes.
+
+    Run as a router dependency, before body parsing, optional-auth fallbacks,
+    rate counters, or writes. Requests without a demo header keep their
+    existing public behavior; Bearer-plus-demo uses the account resolver.
+    """
+    if "x-demo-session" in request.headers:
+        require_tenant(
+            request, x_tenant_id=request.headers.get("x-tenant-id"),
+            authorization=request.headers.get("authorization"),
+            x_dispatch_secret=request.headers.get("x-dispatch-secret"),
+            x_guest_session=request.headers.get("x-guest-session"),
+            x_demo_session=request.headers.get("x-demo-session"))
+
+
+def demo_tenant_context(record) -> TenantContext:
+    """Identity adapter, called directly in tests; grants no route admission."""
+    return TenantContext(
+        record.tenant_id, org_id=str(record.org_id), tier="demo_live",
+        subject=record.subject, authority_resolved=True, verified_demo=True,
+        roles=(), elevated=False)
+
+
+def resolve_demo_tenant(token: str) -> TenantContext:
+    """Resolve verified demo identity without pretending it is an account binding."""
+    import demo_sessions
+    record = demo_sessions.resolve_demo_session(auth_live=auth_live(), demo=token)
+    return demo_tenant_context(record)
+
+
 def admin_subjects() -> frozenset:
     """The server-owned admin allowlist (W14): Auth0 subjects an operator
     listed in LEAF_PLATFORM_ADMIN_SUBJECTS (comma-separated). Read at call
@@ -1389,6 +1440,8 @@ def resolve_active_tenant_context(tenant: Any) -> Any:
     identities.
     """
     if not auth_live() or not isinstance(tenant, TenantContext):
+        return tenant
+    if getattr(tenant, "verified_demo", False):
         return tenant
     if getattr(tenant, "authority_resolved", False):
         return tenant

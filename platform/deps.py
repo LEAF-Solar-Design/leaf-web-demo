@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 # --------------------------------------------------------------------------- #
 # live-auth wiring — reuse server/auth.py's RS256-pinned Auth0 verifier
@@ -98,15 +98,66 @@ def _verified_org(authorization: Optional[str]) -> uuid.UUID:
     return _verified_identity(authorization).platform_tenant_id
 
 
+def _demo_sessions():
+    """Load the ONE shared resolver without a platform/server deps collision."""
+    module = sys.modules.get("demo_sessions")
+    if module is None:
+        spec = importlib.util.spec_from_file_location(
+            "demo_sessions", _PROJECT_ROOT / "server" / "demo_sessions.py")
+        if spec is None or spec.loader is None:
+            raise HTTPException(503, "demo resolver unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["demo_sessions"] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def resolve_demo_org(token: str) -> uuid.UUID:
+    """Identity only: no binding is invented, and no route is admitted."""
+    record = _demo_sessions().resolve_demo_session(auth_live=auth_live(), demo=token)
+    return uuid.UUID(str(record.org_id))
+
+
+def _check_demo(x_demo_session, authorization, request, *, deny=False):
+    # Precedence is defined and implemented in server/demo_sessions.py:
+    # auth-off rejects demo; dispatch rejects demo; ANY Authorization selects
+    # Bearer only; guest+demo is 400; only demo alone resolves demo identity.
+    demo = x_demo_session if isinstance(x_demo_session, str) else None
+    authorization = authorization if isinstance(authorization, str) else None
+    guest = dispatch = None
+    if request is not None:
+        demo = request.headers.get("x-demo-session", demo)
+        authorization = request.headers.get("authorization", authorization)
+        guest = request.headers.get("x-guest-session")
+        dispatch = request.headers.get("x-dispatch-secret")
+    if demo is None:
+        return None
+    module = _demo_sessions()
+    record = module.resolve_demo_session(
+        auth_live=auth_live(), demo=demo, authorization=authorization,
+        guest=guest, dispatch_leg=dispatch is not None)
+    if record is not None:
+        if deny:
+            raise HTTPException(403, "demo sessions have no platform binding or write authority")
+        if request is not None:
+            module.require_demo_route(request)
+    return record
+
+
 def get_org_id(
     x_org_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
+    x_demo_session: str | None = Header(default=None),
+    request: Request = None,
 ) -> uuid.UUID:
     """Resolve the caller's org.
 
     OFF (auth off): the ``X-Org-Id`` header (dev seam). 400 if absent/malformed.
     ON  (auth live): a verified session's active identity binding. Header ignored.
     """
+    record = _check_demo(x_demo_session, authorization, request)
+    if record is not None:
+        return uuid.UUID(str(record.org_id))
     if not auth_live():
         # DEV SEAM — client-supplied X-Org-Id (documented demo behavior).
         if not x_org_id:
@@ -136,6 +187,8 @@ def get_write_actor(
     x_org_id: str | None = Header(default=None),
     x_actor_binding_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
+    x_demo_session: str | None = Header(default=None),
+    request: Request = None,
 ) -> WriteActor:
     """Resolve org AND the accountable actor in ONE verification pass.
 
@@ -146,6 +199,7 @@ def get_write_actor(
     Live auth IGNORES both headers: org, role, and actor all come from the
     verified Auth0 subject, and no client claim can select any of them.
     """
+    _check_demo(x_demo_session, authorization, request, deny=True)
     if not auth_live():
         org_id = get_org_id(x_org_id=x_org_id, authorization=authorization)
         # DEV SEAM ONLY. With auth off the org itself is already client-supplied,
@@ -168,6 +222,8 @@ def get_write_actor(
 def get_write_org_id(
     x_org_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
+    x_demo_session: str | None = Header(default=None),
+    request: Request = None,
 ) -> uuid.UUID:
     """Resolve the org for a mutation and enforce the server-owned live role.
 
@@ -177,12 +233,15 @@ def get_write_org_id(
     """
     return get_write_actor(
         x_org_id=x_org_id, x_actor_binding_id=None, authorization=authorization,
+        x_demo_session=x_demo_session, request=request,
     ).org_id
 
 
 def get_write_binding_id(
     x_actor_binding_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
+    x_demo_session: str | None = Header(default=None),
+    request: Request = None,
 ) -> uuid.UUID:
     """Resolve the audited actor binding for a project mutation.
 
@@ -190,6 +249,7 @@ def get_write_binding_id(
     verified subject. The auth-off development seam requires an explicit UUID,
     which the store still validates against the target organization and role.
     """
+    _check_demo(x_demo_session, authorization, request, deny=True)
     if not auth_live():
         if not x_actor_binding_id:
             raise HTTPException(status_code=400, detail="missing X-Actor-Binding-Id")
@@ -209,8 +269,11 @@ def get_write_binding_id(
 def get_review_binding_id(
     x_actor_binding_id: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
+    x_demo_session: str | None = Header(default=None),
+    request: Request = None,
 ) -> uuid.UUID:
     """Resolve a professional-review actor; live mode permits owner/reviewer only."""
+    _check_demo(x_demo_session, authorization, request, deny=True)
     if not auth_live():
         if not x_actor_binding_id:
             raise HTTPException(status_code=400, detail="missing X-Actor-Binding-Id")
@@ -229,6 +292,8 @@ def get_review_binding_id(
 
 def require_auth_when_live(
     authorization: str | None = Header(default=None),
+    x_demo_session: str | None = Header(default=None),
+    request: Request = None,
 ) -> Optional[Any]:
     """Gate for the otherwise-open bootstrap endpoint ``POST /api/orgs`` (F6).
 
@@ -240,6 +305,7 @@ def require_auth_when_live(
          required here; the route checks durable membership and an org hint
          before allowing first-workspace bootstrap or returning a handoff.
     """
+    _check_demo(x_demo_session, authorization, request, deny=True)
     if not auth_live():
         return None
     return _server_auth().verify_platform_token(authorization)  # -> 401 on bad/absent token

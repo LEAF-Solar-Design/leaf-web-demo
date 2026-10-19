@@ -1137,6 +1137,11 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_auth.py"), 14),
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
               _py_pytest("tests/test_auth_envelope.py"), 7),
+        Suite("server-demo-sessions", "server demo identity and dark route boundaries", "pytest",
+              SERVER, _py_pytest("tests/test_demo_sessions.py"), 115),
+        Suite("server-demo-sessions-postgres", "server durable demo mint races", "pytest",
+              SERVER, _py_pytest("tests/test_demo_sessions_postgres.py"), 9,
+              db_gated=True),
         Suite("server-mcp-gateway-authority",
               "server tests/test_mcp_gateway_authority.py", "pytest", SERVER,
               _py_pytest("tests/test_mcp_gateway_authority.py"), 55),
@@ -2316,6 +2321,9 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_ios_ship_source_routes.py"), 5),
         Suite("platform-ios-ship-source-catalog-static", "platform iOS source catalog static", "pytest",
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_ios_ship_source_catalog_static.py"), 1),
+        Suite("platform-demo-session-deps", "platform demo identity and denied dependencies", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_demo_session_deps.py"),
+              47, db_gated=True),
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.

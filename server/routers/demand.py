@@ -11,15 +11,16 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Union
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
+import deps
 from envelopes import ErrorCode, error_obj
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(deps.require_demo_boundary)])
 
 SERVER_DIR = Path(__file__).resolve().parent.parent
 _LOCK = threading.Lock()

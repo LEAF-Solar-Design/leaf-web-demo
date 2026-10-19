@@ -50,6 +50,11 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "demo_sessions": {
+        "id", "subject", "tenant_id", "org_id", "created_at", "expires_at",
+        "revoked_at", "client_ip_hash",
+    },
+    "demo_mint_counters": {"day", "scope", "count"},
     "project_sizing_exchanges": {
         "job_id", "org_id", "project_id", "drawing_id", "actor_binding_id",
         "target_settings_id", "admitted_tenant", "grant_ref", "classification",
@@ -685,6 +690,28 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "demo_sessions_pkey": _catalog_contract(
+        "demo_sessions", "PRIMARY KEY (id)"),
+    "demo_sessions_subject_key": _catalog_contract(
+        "demo_sessions", "UNIQUE (subject)"),
+    "demo_sessions_tenant_id_key": _catalog_contract(
+        "demo_sessions", "UNIQUE (tenant_id)"),
+    "demo_sessions_subject_check": _catalog_contract(
+        "demo_sessions", "CHECK", "subject = ('demo:'::text || id::text)"),
+    "demo_sessions_tenant_id_check": _catalog_contract(
+        "demo_sessions", "CHECK", "tenant_id = ('demo-'::text || id::text)"),
+    "demo_sessions_client_ip_hash_check": _catalog_contract(
+        "demo_sessions", "CHECK", "client_ip_hash ~ '^[0-9a-f]{64}$'::text"),
+    "demo_sessions_check": _catalog_contract(
+        "demo_sessions", "CHECK", "expires_at > created_at AND",
+        "expires_at <= (created_at + '01:00:00'::interval)"),
+    "demo_mint_counters_pkey": _catalog_contract(
+        "demo_mint_counters", "PRIMARY KEY (day, scope)"),
+    "demo_mint_counters_scope_check": _catalog_contract(
+        "demo_mint_counters", "CHECK", "scope = 'global'::text OR",
+        "scope ~ '^ip:[0-9a-f]{64}$'::text"),
+    "demo_mint_counters_count_check": _catalog_contract(
+        "demo_mint_counters", "CHECK", "count > 0"),
     "orgs_account_class_check": _catalog_contract(
         "orgs", "CHECK", "account_class", "'customer'", "'production_acceptance'"),
     "unit_economics_observations_org_class_check": _catalog_contract(

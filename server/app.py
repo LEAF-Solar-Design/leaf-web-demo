@@ -32,8 +32,10 @@ from typing import Any, Dict
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.routing import Match, Mount
 
 import dependency_health
+import demo_sessions
 import deps
 import conversations as conversation_crud
 import ios_ship_provider as ios_ship_provider_client
@@ -85,6 +87,56 @@ from routers import (
     tools,
     uploads,
     usage, overlay, cost as cost_router)
+
+
+class DemoSessionBoundaryMiddleware:
+    """Reject demo credentials before routing, body reads, or other middleware.
+
+    LD1a grants no routes. Only full route templates can match the shared
+    allowlist; neither raw URL strings nor a mount prefix grants authority.
+    """
+
+    def __init__(self, app, router) -> None:
+        self.app = app
+        self.router = router
+
+    @classmethod
+    def _route_template(cls, scope, routes):
+        for route in routes:
+            match, child_scope = route.matches(scope)
+            if match != Match.FULL:
+                continue
+            if isinstance(route, Mount):
+                # An opaque mounted ASGI app has no inspectable route grant.
+                child = cls._route_template(
+                    {**scope, **child_scope}, getattr(route.app, "routes", ()))
+                return route.path + child if child is not None else None
+            return getattr(route, "path", None)
+        return None
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") in {"http", "websocket"} and any(
+                key.lower() == b"x-demo-session"
+                for key, _ in scope.get("headers", [])):
+            template = (self._route_template(scope, self.router.routes)
+                        if demo_sessions.DEMO_ROUTE_ALLOWLIST else None)
+            if (template is not None and scope["type"] == "http" and
+                    (scope["method"].upper(), template) in demo_sessions.DEMO_ROUTE_ALLOWLIST):
+                await self.app(scope, receive, send)
+                return
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            else:
+                from envelopes import ErrorCode, error_response
+
+                response = error_response(
+                    ErrorCode.FORBIDDEN, "demo sessions have no application routes",
+                    retryable=False, status_code=403)
+                response.headers["Cache-Control"] = "no-store"
+                await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
 
 def _cors_origins() -> list[str]:
     """CORS allow-list, ENV-driven and default-deny in live-auth mode (F17).
@@ -151,6 +203,7 @@ def start_ios_ship_callback_tls() -> None:
         return
     callback_app = FastAPI(title="Leaf iOS ship private callbacks")
     callback_app.include_router(ios_ship_provider_router.router)
+    callback_app.add_middleware(DemoSessionBoundaryMiddleware, router=callback_app.router)
     global _ios_callback_tls_server
     _ios_callback_tls_server = ios_ship_callback_listener.CallbackTlsServer(callback_app, config)
     _ios_callback_tls_server.start()
@@ -562,6 +615,11 @@ def ready() -> JSONResponse:
         status_code=200 if report["ready"] else 503,
         content=with_envelope_fields(report, degraded_mode=report["status"] != "ready"),
     )
+
+
+# Last-added is outermost among the application's own middleware, including
+# project_drawings.no_store_responses and CORS. Keep this registration last.
+app.add_middleware(DemoSessionBoundaryMiddleware, router=app.router)
 
 
 if __name__ == "__main__":

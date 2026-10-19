@@ -334,12 +334,21 @@ Agreeing copies: `server/auth.py DEFAULT_CLAIM_NS`, the Post-Login Action
 credentials-exchange Action. `LEAF_TENANT_CLAIM_NS` remains an env override
 for test rigs only; production uses the frozen default.
 
-**11.2 Tier vocabulary (frozen, 7 members; grown 2026-07-30 per the §11
-promotion ritual — W14 admin self-edit lane):**
+**11.2 Tier vocabulary (frozen, 8 members; grown 2026-10-19 per the §11
+promotion ritual — durable live demo identity):**
+
+Operator authorization for this promotion, quoted verbatim on 2026-10-19:
+
+Mandate 4 (fork F2/F3 answer):
+> Real backend + services up (Recommended)
+
+Mandate 5 (fork F4 answer):
+> why are you being so restrictive? This stuff NEEDs to be tested to its fullest production extent, asap
 
 | Tier | Class | Meaning |
 |---|---|---|
 | `demo` | server-resolved | off-auth open-demo identity (full access, `LEAF_AUTH_LIVE=0`) |
+| `demo_live` | server-only, NEVER claim-mintable | durable demo registry identity; no application routes or capabilities in LD1a |
 | `guest` | server-resolved | ephemeral signed-out upload identity (§19) |
 | `restricted` | claim-mintable | authenticated but lapsed/unprovisioned — read-only floor |
 | `self_hosted` | claim-mintable | enterprise / BYO-infrastructure seat |
@@ -349,8 +358,8 @@ promotion ritual — W14 admin self-edit lane):**
 
 The **claim-mintable subset** {`restricted`, `self_hosted`, `hosted_starter`,
 `hosted_pro`, `admin`} is the only vocabulary a verified identity can carry
-(JWT tier claim, stored org tier). `demo`/`guest` are server-resolved
-identities and must never be minted into a token or stored as an org's billing
+(JWT tier claim, stored org tier). `demo`/`guest`/`demo_live` are server-resolved
+identities and must never be minted into a JWT claim or stored as an org's billing
 tier. `admin` is claim-mintable but **never plan-derived**: the Post-Login
 Action mints it solely from a root-level `app_metadata.leaf_admin === true`
 flag an operator set by hand in the Auth0 dashboard (root level, so
@@ -358,6 +367,16 @@ leaf_website subscription PATCHes replacing `app_metadata.leaf` can neither
 mint nor erase it); no `PLAN_TIER` value maps to it and
 `billing_tiers.derive_tier` never returns it, so no billing state can produce
 an admin identity. Revocation = remove the flag.
+
+`demo_live` is selected only by the server after verifying an enabled,
+unexpired, unrevoked PostgreSQL demo session. It MUST NEVER join the
+claim-mintable subset above, appear in any Auth0 Action, or be minted by a
+billing plan. Its roles are empty, elevation is false, every capability is
+false, and role overlays cannot grant it capabilities. The registry supplies
+the subject, tenant, org UUID and expiry; no account binding is implied.
+`LEAF_DEMO_LIVE_ENABLED` must equal `1` on every resolution or mint; otherwise
+demo credentials refuse and the issuer returns 404 without PostgreSQL access.
+
 Agreeing copies: `server/entitlements.json` keys, `server/entitlements.py
 _HARDCODED_DEFAULTS` (byte-identical mirror), `server/billing_tiers.py
 TIER_VOCABULARY`/`CLAIM_TIERS`, the Action's `PLAN_TIER` values, and the

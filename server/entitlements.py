@@ -56,6 +56,7 @@ CAPABILITIES = (
 # Fail-safe defaults — used verbatim if the JSON file is absent or unreadable. These
 # MUST mirror server/entitlements.json so enforcement is identical with or without it.
 _HARDCODED_DEFAULTS: Dict[str, Dict[str, bool]] = {
+    "demo_live": {cap: False for cap in CAPABILITIES},
     "demo": {"run_read": True, "run_write": True, "solve": True, "build": True,
              "converse": True, "agent_write_autopilot": True, "deploy": True,
              "platform_customize": False, "upload": True, "link_service": False},
@@ -258,6 +259,9 @@ def entitlements_for(tier: str, roles: tuple = (), elevated: bool = False) -> Di
     ADDITIVELY — see server/roles.py. With the defaults the result is
     byte-identical to the historical tier-only resolution, so a caller that has
     no verified role context (back-edge, broker, guest) simply omits them."""
+    # A durable demo cannot acquire capabilities through policy or role overlays.
+    if tier == "demo_live":
+        return {cap: False for cap in CAPABILITIES}
     policy = load_policy()
     # Membership, not `or`: an entry of `{}` is an operator saying "this tier gets
     # NOTHING", and a truthiness chain would fall through it to `restricted`, which

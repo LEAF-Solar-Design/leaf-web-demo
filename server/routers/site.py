@@ -10,7 +10,7 @@ import hashlib
 import json
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 import broker_client
@@ -19,13 +19,49 @@ import deps
 import site_demo
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
-router = APIRouter()
+def _demo_boundary(request: Request):
+    """Public site routes also refuse demo credentials, despite having no gate."""
+    if request.method == "POST" and request.url.path == "/api/site/demo-session":
+        return  # The issuer handles this itself so even refusals are no-store.
+    if "x-demo-session" in request.headers:
+        deps.require_tenant(
+            request, x_tenant_id=request.headers.get("x-tenant-id"),
+            authorization=request.headers.get("authorization"),
+            x_dispatch_secret=request.headers.get("x-dispatch-secret"),
+            x_guest_session=request.headers.get("x-guest-session"),
+            x_demo_session=request.headers.get("x-demo-session"))
+
+
+router = APIRouter(dependencies=[Depends(_demo_boundary)])
 
 CACHE_CONTROL = "public, max-age=300, stale-while-revalidate=3600"
 
 
 def _cache_headers(etag: str) -> Dict[str, str]:
     return {"ETag": etag, "Cache-Control": CACHE_CONTROL}
+
+
+@router.post("/api/site/demo-session")
+def issue_demo_session(request: Request):
+    import demo_sessions
+
+    try:
+        if (demo_sessions.is_enabled() and "x-demo-session" in request.headers
+                and "authorization" not in request.headers):
+            deps.require_tenant(
+                request, x_tenant_id=request.headers.get("x-tenant-id"),
+                authorization=request.headers.get("authorization"),
+                x_dispatch_secret=request.headers.get("x-dispatch-secret"),
+                x_guest_session=request.headers.get("x-guest-session"),
+                x_demo_session=request.headers.get("x-demo-session"))
+        minted = demo_sessions.mint(request)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code,
+                            content={"detail": exc.detail},
+                            headers={"Cache-Control": "no-store"})
+    return JSONResponse(
+        content={"token": minted.token, "expires_at": minted.expires_at.isoformat()},
+        headers={"Cache-Control": "no-store"})
 
 
 def _if_none_match_hit(request: Request, etag: str) -> bool:

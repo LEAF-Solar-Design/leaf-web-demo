@@ -6,6 +6,9 @@
   "merge_gate": "github-merge-queue",
   "minimum_full_runs": 3,
   "force_full_rules": [
+    "server/demo_sessions.py",
+    "server/tests/test_demo_sessions*.py",
+    "platform/tests/test_demo_session_deps.py",
     ".github/**",
     ".codebuild/**",
     "scripts/ci/**",
@@ -49,6 +52,9 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "server-demo-sessions",
+    "server-demo-sessions-postgres",
+    "platform-demo-session-deps",
     "platform-sip-r2-publication",
     "server-sip-r2-publication",
     "server-sip-r1-context",

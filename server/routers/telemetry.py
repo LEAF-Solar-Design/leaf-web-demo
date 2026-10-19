@@ -9,7 +9,8 @@ Design of record: docs/PLATFORM_TELEMETRY.md. Decisions that live here:
     per-IP token bucket. Identity fields in the payload are IGNORED and
     overwritten from the verified principal (the telemetry-proxy
     verified-identity lesson).
-  - The client can NEVER observe a telemetry failure: every outcome is
+  - Demo credentials are refused at the router boundary before ingestion.
+  - Otherwise the client can NEVER observe a telemetry failure: every outcome is
     `202 {accepted: n}` — auth-less off-allowlist events, validation drops,
     oversize bodies, sink overflow, disabled sink. Never a 4xx/5xx.
   - Caps: 50 events per body, 32 KB per body, label values stringified.
@@ -22,12 +23,12 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 import deps
 import telemetry_sink
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(deps.require_demo_boundary)])
 
 MAX_EVENTS = 50
 MAX_BODY_BYTES = 32 * 1024

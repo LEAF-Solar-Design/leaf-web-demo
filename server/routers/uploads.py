@@ -66,9 +66,10 @@ def _resolve_upload_identity(
 ) -> Tuple[Any, str, bool]:
     """-> (tenant, tenant_kind, minted). Raises HTTPException via the auth
     module for a PRESENT-but-invalid Bearer (an expired real login must surface
-    as 401, not silently downgrade the caller to a guest)."""
+    as 401, not silently downgrade the caller to a guest). Only None means the
+    Authorization header was absent; an empty value still attempts Bearer."""
     if deps.auth_live():
-        if authorization:
+        if authorization is not None:
             import auth  # noqa: PLC0415 - lazy, mirrors deps.require_tenant
             import tenancy  # noqa: PLC0415
             payload = auth.verify_platform_token(authorization)
@@ -213,7 +214,7 @@ def _upload_drawing_gated(
             retryable=True,
             status_code=503,
         )
-    if deps.auth_live() and not authorization:
+    if deps.auth_live() and authorization is None:
         if not guest_uploads.enabled():
             return error_response(
                 ErrorCode.INTERNAL,

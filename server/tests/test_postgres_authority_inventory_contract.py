@@ -24,7 +24,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 76)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 77)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
@@ -45,6 +45,7 @@ EXPECTED_SELECTOR_DEFAULTS = {
     "LEAF_CUSTOMIZATION_R5_MODE": "off",
     "LEAF_CUSTOMIZATION_R6_MODE": "off",
     "LEAF_CUSTOMIZATION_STORE": "sqlite",
+    "LEAF_DEMO_LIVE_ENABLED": "0",
 }
 EXPECTED_SELECTOR_DEPENDENCIES = [
     {
@@ -69,6 +70,7 @@ REQUIRED_COVERAGE = {
     "harness_sessions_grants",
     "customization",
     "tenant_repositories_leases",
+    "demo_identity",
 }
 # A selection status is a claim about HOW the value was established, so an
 # unrecognized one is a silent downgrade rather than a typo: "measurd" used to
@@ -99,6 +101,7 @@ REQUIRED_AUTHORITY_FIELDS = {
     "current_selection",
 }
 REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
+    "LEAF_DEMO_LIVE_ENABLED": {"demo_sessions", "demo_mint_counters"},
     "project_authority_modes.authority_mode": {
         "arlo_lab_inputs", "campaign_host_enrollments", "campaign_capability_links",
         "campaign_attempt_input_sources", "campaign_attempt_result_sources",

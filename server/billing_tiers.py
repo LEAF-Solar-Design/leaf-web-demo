@@ -39,11 +39,11 @@ from typing import Dict, FrozenSet, Optional
 # Every tier the entitlement policy knows (entitlements.json keys).
 TIER_VOCABULARY: FrozenSet[str] = frozenset({
     "demo", "guest", "restricted", "self_hosted", "hosted_starter", "hosted_pro",
-    "admin",
+    "admin", "demo_live",
 })
 
 # The subset a VERIFIED IDENTITY can carry (Auth0 claim / stored org tier).
-# `demo` and `guest` are server-resolved off-auth identities — never minted
+# `demo`, `guest`, and `demo_live` are server-resolved identities — never minted
 # into a JWT claim and never stored as an org's billing tier.
 # `admin` is claim-mintable but OPERATOR-GRANTED only: the Action mints it
 # solely from a root-level `app_metadata.leaf_admin === true` flag an operator

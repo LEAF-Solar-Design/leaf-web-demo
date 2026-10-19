@@ -35,8 +35,8 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'")
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert manifest[-1]["name"] == "0075_org_acceptance_classification.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0075"
+    assert manifest[-1]["name"] == "0076_demo_sessions.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0076"
 
     class Schema:
         absent = None
@@ -78,12 +78,19 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     monkeypatch.setattr(db, "required_catalog_for_selected_authorities", lambda: catalog)
     assert db.schema_status()["ok"]
     for table, column in (("orgs", "account_class"), ("unit_economics_observations", "org_id"),
-                          ("unit_economics_observations", "org_account_class")):
+                          ("unit_economics_observations", "org_account_class"),
+                          ("demo_sessions", "revoked_at"),
+                          ("demo_mint_counters", "count")):
         schema.absent = (table, column)
         status = db.schema_status()
         assert not status["ok"]
         assert column in status["missing"][table]
-    for constraint in ("orgs_account_class_check", "unit_economics_observations_org_class_check"):
+    for constraint in ("orgs_account_class_check", "unit_economics_observations_org_class_check",
+                       "demo_sessions_subject_key", "demo_sessions_tenant_id_key",
+                       "demo_sessions_subject_check", "demo_sessions_tenant_id_check",
+                       "demo_sessions_client_ip_hash_check", "demo_sessions_check",
+                       "demo_mint_counters_pkey", "demo_mint_counters_scope_check",
+                       "demo_mint_counters_count_check"):
         schema.absent = constraint
         status = db.schema_status()
         assert not status["ok"]
@@ -159,16 +166,16 @@ def test_sip_r1_schema_contract_complete():
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 76)]
+    ids = [f"{n:04d}" for n in range(1, 77)]
     assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0075_org_acceptance_classification.sql"
+    assert db.migration_manifest()[-1]["name"] == "0076_demo_sessions.sql"
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
     assert "project_sizing_exchanges" in ledger["postgres_tables"]
     for name in ("test_conversation_model.py", "test_template_store.py",
                  "test_postgres_authority_inventory_contract.py"):
         source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 76)" in source
+        assert "range(1, 77)" in source
         assert "range(1, 74)" not in source
 
 
@@ -183,6 +190,69 @@ def test_sip_r1_expand_only_migration():
     assert not any("0073" in violation for violation in violations), violations
     assert (db._PKG_DIR / "migrations/0074_project_sizing_exchanges.sql").is_file()
     assert not any("0074" in violation for violation in violations), violations
+
+
+def test_demo_migration_and_inventory_register_both_tables():
+    inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
+    authority = next(item for item in inventory["authorities"]
+                     if item["id"] == "demo_sessions")
+    assert authority["postgres_tables"] == ["demo_sessions", "demo_mint_counters"]
+    assert authority["coverage"] == ["demo_identity"]
+    assert authority["selectors"] == [{
+        "name": "LEAF_DEMO_LIVE_ENABLED", "allowed_modes": ["0", "1"],
+        "repository_default": "0"}]
+    sql = (db._PKG_DIR / "migrations/0076_demo_sessions.sql").read_text(encoding="utf-8")
+    assert set(re.findall(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)) == set(
+        authority["postgres_tables"])
+    columns = db.required_columns_for_selected_authorities({})
+    assert columns["demo_sessions"] == {
+        "id", "subject", "tenant_id", "org_id", "created_at", "expires_at",
+        "revoked_at", "client_ip_hash",
+    }
+    assert columns["demo_mint_counters"] == {"day", "scope", "count"}
+    constraints = db.required_catalog_for_selected_authorities({})["constraints"]
+    assert {name for name in constraints if name.startswith("demo_")} == {
+        "demo_sessions_pkey", "demo_sessions_subject_key", "demo_sessions_tenant_id_key",
+        "demo_sessions_subject_check", "demo_sessions_tenant_id_check",
+        "demo_sessions_client_ip_hash_check", "demo_sessions_check",
+        "demo_mint_counters_pkey", "demo_mint_counters_scope_check", "demo_mint_counters_count_check",
+    }
+    named_checks = re.findall(r"CONSTRAINT\s+(\w+)\s+CHECK\s*\(", sql)
+    expected_checks = {name for name in constraints
+                       if name.startswith("demo_") and name.endswith("_check")}
+    assert set(named_checks) == expected_checks
+    assert len(named_checks) == len(expected_checks) == len(re.findall(r"\bCHECK\s*\(", sql))
+
+
+@pytest.mark.parametrize("relation,name,definition,wrong_definition", [
+    ("demo_sessions", "demo_sessions_subject_check",
+     "CHECK (subject = ('demo:'::text || id::text))",
+     "CHECK (subject = ('demo-'::text || id::text))"),
+    ("demo_sessions", "demo_sessions_tenant_id_check",
+     "CHECK (tenant_id = ('demo-'::text || id::text))",
+     "CHECK (tenant_id = ('demo:'::text || id::text))"),
+    ("demo_sessions", "demo_sessions_client_ip_hash_check",
+     "CHECK (client_ip_hash ~ '^[0-9a-f]{64}$'::text)",
+     "CHECK (client_ip_hash ~ '^[0-9a-f]{32}$'::text)"),
+    ("demo_sessions", "demo_sessions_check",
+     "CHECK (expires_at > created_at AND expires_at <= (created_at + '01:00:00'::interval))",
+     "CHECK (expires_at > created_at OR expires_at <= (created_at + '01:00:00'::interval))"),
+    ("demo_mint_counters", "demo_mint_counters_scope_check",
+     "CHECK (scope = 'global'::text OR scope ~ '^ip:[0-9a-f]{64}$'::text)",
+     "CHECK (scope = 'global'::text AND scope ~ '^ip:[0-9a-f]{64}$'::text)"),
+    ("demo_mint_counters", "demo_mint_counters_count_check",
+     "CHECK (count > 0)", "CHECK (count >= 0)"),
+])
+def test_demo_check_catalog_definitions(relation, name, definition, wrong_definition):
+    constraints = db.required_catalog_for_selected_authorities({})["constraints"]
+    required = {"constraints": {name: constraints[name]}}
+    row = {"conname": name, "relation_name": relation, "validated": True,
+           "definition": definition}
+    assert db._catalog_contract_errors(required, {"constraints": [row]}) == {
+        "invalid_constraints": []}
+    row["definition"] = wrong_definition
+    assert db._catalog_contract_errors(required, {"constraints": [row]}) == {
+        "invalid_constraints": [f"{name}:definition-mismatch"]}
 
 
 def _assert_closed_world_pin(actual, expected, remediation):
@@ -284,12 +354,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0075_org_acceptance_classification.sql",
+        manifest_names[-1], "0076_demo_sessions.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0075",
+        inventory["scope"]["migration_ids"][-1], "0076",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )

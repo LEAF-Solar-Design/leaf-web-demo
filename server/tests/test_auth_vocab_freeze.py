@@ -38,6 +38,7 @@ FROZEN_NS = "https://leafdesign.ai/"
 FROZEN_TIERS = {
     "demo", "guest", "restricted", "self_hosted", "hosted_starter", "hosted_pro",
     "admin",  # W14 admin self-edit lane — §11 promotion ritual, 2026-07-30
+    "demo_live",  # Server-only durable demo — §11 ritual, 2026-10-19
 }
 FROZEN_CLAIM_TIERS = {
     "restricted", "self_hosted", "hosted_starter", "hosted_pro", "admin",

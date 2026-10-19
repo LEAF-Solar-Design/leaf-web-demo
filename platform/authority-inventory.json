@@ -76,7 +76,8 @@
       "0072",
       "0073",
       "0074",
-      "0075"
+      "0075",
+      "0076"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -1091,6 +1092,25 @@
           "status": "unknown",
           "evidence": "Live production app and broker environments are not recorded."
         }
+      }
+    },
+    {
+      "id": "demo_sessions",
+      "coverage": ["demo_identity"],
+      "selectors": [{
+        "name": "LEAF_DEMO_LIVE_ENABLED",
+        "allowed_modes": ["0", "1"],
+        "repository_default": "0"
+      }],
+      "postgres_tables": ["demo_sessions", "demo_mint_counters"],
+      "legacy_source": ["None: new PostgreSQL-only demo identity registry."],
+      "backfill": {"command": null, "status": "not_applicable", "note": "New authority; no legacy sessions exist."},
+      "parity": {"command": null, "status": "not_run", "note": "PostgreSQL proofs are in server/tests/test_demo_sessions_postgres.py; execution is required before enablement."},
+      "cutover_modes": ["0", "1"],
+      "rollback_mode": "Unset LEAF_DEMO_LIVE_ENABLED or set it to 0; credentials and issuer refuse without PostgreSQL access. Retain registry and counters.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "No deployment configuration changed by LD1a."},
+        "production": {"value": null, "status": "unknown", "evidence": "No deployment configuration changed by LD1a."}
       }
     }
   ]
