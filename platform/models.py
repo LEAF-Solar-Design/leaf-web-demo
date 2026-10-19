@@ -123,6 +123,7 @@ class Org:
     org_id: uuid.UUID
     name: str
     tier: str = "hosted_starter"
+    account_class: str = "customer"
     status: str = "active"
     created_at: Optional[datetime] = None
     offboarded_at: Optional[datetime] = None
@@ -135,6 +136,7 @@ class Org:
     def from_row(cls, r: Dict[str, Any]) -> "Org":
         return cls(
             org_id=r["org_id"], name=r["name"], tier=r["tier"], status=r["status"],
+            account_class=r["account_class"],
             created_at=r.get("created_at"), offboarded_at=r.get("offboarded_at"),
             deleted_at=r.get("deleted_at"),
             purge_requested_at=r.get("purge_requested_at"),

@@ -276,14 +276,17 @@ def resolve_project_repository_authority(
 # --------------------------------------------------------------------------- #
 
 def create_org(name: str, tier: str = "hosted_starter",
-               org_id: Optional[uuid.UUID] = None) -> Org:
+               org_id: Optional[uuid.UUID] = None, *, account_class: str = "customer") -> Org:
+    if account_class not in ("customer", "production_acceptance"):
+        raise ValueError("invalid organization account class")
     oid = org_id or new_uuid()
     with cursor() as cur:
         cur.execute(
-            "INSERT INTO orgs (org_id, name, tier) VALUES (%(org_id)s, %(name)s, %(tier)s) "
-            "RETURNING org_id, name, tier, status, created_at, offboarded_at, "
+            "INSERT INTO orgs (org_id, name, tier, account_class) "
+            "VALUES (%(org_id)s, %(name)s, %(tier)s, %(account_class)s) "
+            "RETURNING org_id, name, tier, account_class, status, created_at, offboarded_at, "
             "deleted_at, purge_requested_at, purge_completed_at",
-            {"org_id": oid, "name": name, "tier": tier},
+            {"org_id": oid, "name": name, "tier": tier, "account_class": account_class},
         )
         return Org.from_row(cur.fetchone())
 
@@ -299,8 +302,8 @@ def set_org_tier(org_id: uuid.UUID, tier: str) -> Optional[Org]:
     with cursor() as cur:
         cur.execute(
             "UPDATE orgs SET tier = %(tier)s "
-            "WHERE org_id = %(org_id)s AND status = 'active' "
-            "RETURNING org_id, name, tier, status, created_at, offboarded_at",
+            "WHERE org_id = %(org_id)s AND status = 'active' AND account_class = 'customer' "
+            "RETURNING org_id, name, tier, account_class, status, created_at, offboarded_at",
             {"org_id": org_id, "tier": tier},
         )
         row = cur.fetchone()
@@ -320,7 +323,7 @@ def create_org_with_identity(name: str, external_authority: str, external_subjec
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO orgs (org_id, name, tier) VALUES (%(org_id)s, %(name)s, %(tier)s) "
-                    "RETURNING org_id, name, tier, status, created_at, offboarded_at, "
+                    "RETURNING org_id, name, tier, account_class, status, created_at, offboarded_at, "
                     "deleted_at, purge_requested_at, purge_completed_at",
                     {"org_id": org_id, "name": name, "tier": tier},
                 )
@@ -1425,7 +1428,7 @@ def get_org(org_id: uuid.UUID) -> Optional[Org]:
     keep reading as null there; ``Org.from_row`` tolerates their absence)."""
     with cursor() as cur:
         cur.execute(
-            "SELECT org_id, name, tier, status, created_at, offboarded_at "
+            "SELECT org_id, name, tier, account_class, status, created_at, offboarded_at "
             "FROM orgs WHERE org_id = %(org_id)s",
             {"org_id": org_id},
         )

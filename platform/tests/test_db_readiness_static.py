@@ -20,6 +20,82 @@ _SPEC.loader.exec_module(db)
 _THIS_FILE = "platform/tests/test_db_readiness_static.py"
 
 
+def test_acceptance_schema_readiness_contract(monkeypatch):
+    from contextlib import nullcontext
+
+    columns = db.required_columns_for_selected_authorities({})
+    catalog = db.required_catalog_for_selected_authorities({})
+    assert "account_class" in columns["orgs"]
+    assert "org_id" in columns["unit_economics_observations"]
+    assert "org_account_class" in columns["unit_economics_observations"]
+    assert catalog["constraints"]["orgs_account_class_check"] == db._catalog_contract(
+        "orgs", "CHECK", "account_class", "'customer'", "'production_acceptance'")
+    assert catalog["constraints"]["unit_economics_observations_org_class_check"] == db._catalog_contract(
+        "unit_economics_observations", "CHECK", "org_id IS NULL", "org_account_class IS NULL",
+        "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'")
+    manifest = db.migration_manifest()
+    inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
+    assert manifest[-1]["name"] == "0075_org_acceptance_classification.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0075"
+
+    class Schema:
+        absent = None
+        definitions = {}
+
+        def cursor(self):
+            return nullcontext(self)
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            if "information_schema.columns" in self.sql:
+                required = {**columns, db._MIGRATION_LEDGER_TABLE: db._MIGRATION_LEDGER_COLUMNS}
+                return [{"table_name": table, "column_name": column}
+                        for table, names in required.items() for column in names
+                        if (table, column) != self.absent]
+            for kind, field in (("constraints", "conname"), ("indexes", "indexname"),
+                                ("triggers", "tgname")):
+                if {"constraints": "pg_constraint", "indexes": "pg_index",
+                    "triggers": "pg_trigger"}[kind] in self.sql:
+                    return [{field: name, "relation_name": contract["relation"],
+                             "definition": self.definitions.get(
+                                 name, " ".join(contract["definition_fragments"])),
+                             "validated": True, "valid": True, "ready": True, "enabled": "O"}
+                            for name, contract in catalog[kind].items() if name != self.absent]
+            return manifest
+
+        def fetchone(self):
+            return {"database": "static", "schema": "public"}
+
+    schema = Schema()
+    class Pool:
+        def connection(self):
+            return nullcontext(schema)
+
+    monkeypatch.setattr(db, "get_pool", lambda: Pool())
+    monkeypatch.setattr(db, "required_columns_for_selected_authorities", lambda: columns)
+    monkeypatch.setattr(db, "required_catalog_for_selected_authorities", lambda: catalog)
+    assert db.schema_status()["ok"]
+    for table, column in (("orgs", "account_class"), ("unit_economics_observations", "org_id"),
+                          ("unit_economics_observations", "org_account_class")):
+        schema.absent = (table, column)
+        status = db.schema_status()
+        assert not status["ok"]
+        assert column in status["missing"][table]
+    for constraint in ("orgs_account_class_check", "unit_economics_observations_org_class_check"):
+        schema.absent = constraint
+        status = db.schema_status()
+        assert not status["ok"]
+        assert f"{constraint}:missing-or-wrong-relation" in status["invalid_constraints"]
+    schema.absent = None
+    schema.definitions["unit_economics_observations_org_class_check"] = (
+        "CHECK (org_account_class = 'production_acceptance')")
+    status = db.schema_status()
+    assert not status["ok"]
+    assert "unit_economics_observations_org_class_check:definition-mismatch" in status["invalid_constraints"]
+
+
 def test_sip_r1_schema_contract_complete():
     assert db._REQUIRED_COLUMNS["project_drawing_checkouts"] == {
         "org_id", "project_id", "drawing_id", "holder", "holder_binding_id",
@@ -83,16 +159,16 @@ def test_sip_r1_schema_contract_complete():
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 75)]
+    ids = [f"{n:04d}" for n in range(1, 76)]
     assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0074_project_sizing_exchanges.sql"
+    assert db.migration_manifest()[-1]["name"] == "0075_org_acceptance_classification.sql"
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
     assert "project_sizing_exchanges" in ledger["postgres_tables"]
     for name in ("test_conversation_model.py", "test_template_store.py",
                  "test_postgres_authority_inventory_contract.py"):
         source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 75)" in source
+        assert "range(1, 76)" in source
         assert "range(1, 74)" not in source
 
 
@@ -208,12 +284,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0074_project_sizing_exchanges.sql",
+        manifest_names[-1], "0075_org_acceptance_classification.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0074",
+        inventory["scope"]["migration_ids"][-1], "0075",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )

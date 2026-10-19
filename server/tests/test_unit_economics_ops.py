@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -117,3 +118,29 @@ def test_observation_idempotency_drift_is_409(monkeypatch, stub_store):
         headers={"X-Ops-Secret": "ops-secret"},
     )
     assert response.status_code == 409
+
+
+def test_acceptance_observation_org_forwarded(monkeypatch, stub_store):
+    monkeypatch.setenv("LEAF_OPS_SECRET", "ops-secret")
+    org_id = uuid4()
+    body = {
+        "idempotency_key": "acceptance-attributed",
+        "period_start": "2026-08-01T00:00:00Z",
+        "period_end": "2026-09-01T00:00:00Z",
+        "kind": "revenue", "category": "subscriptions", "amount_usd": 10,
+        "source": "acceptance", "org_id": str(org_id),
+    }
+    response = _client().post("/api/ops/unit-economics/observations", json=body,
+                              headers={"X-Ops-Secret": "ops-secret"})
+    assert response.status_code == 200
+    assert stub_store.observation_args["org_id"] == org_id
+
+    def unknown(**kwargs):
+        assert kwargs["org_id"] == org_id
+        raise ValueError("observation org not found")
+
+    stub_store.append_observation = unknown
+    response = _client().post("/api/ops/unit-economics/observations", json=body,
+                              headers={"X-Ops-Secret": "ops-secret"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "observation org not found"

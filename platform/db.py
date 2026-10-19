@@ -259,7 +259,7 @@ _REQUIRED_COLUMNS = {
     "overlay_documents": {"tenant_id", "version", "tokens"},
     "overlay_audit": {"audit_id", "proposal_id", "tenant_id", "from_state",
                       "to_state", "token_count"},
-    "orgs": {"org_id", "tier", "status"},
+    "orgs": {"org_id", "tier", "status", "account_class"},
     "projects": {"project_id", "org_id", "status"},
     "built_tools": {"tool_id", "project_id", "org_id", "name"},
     "drawing_versions": {
@@ -279,6 +279,7 @@ _REQUIRED_COLUMNS = {
         "observed_at", "recorded_at",
     },
     "unit_economics_observations": {
+        "org_id", "org_account_class",
         "observation_key", "period_start", "period_end", "kind", "category",
         "amount_usd", "quantity", "unit", "source", "source_ref_sha256",
         "payload_sha256", "metadata", "recorded_at",
@@ -684,6 +685,11 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "orgs_account_class_check": _catalog_contract(
+        "orgs", "CHECK", "account_class", "'customer'", "'production_acceptance'"),
+    "unit_economics_observations_org_class_check": _catalog_contract(
+        "unit_economics_observations", "CHECK", "org_id IS NULL", "org_account_class IS NULL",
+        "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'"),
     "project_sizing_exchanges_pkey": _catalog_contract(
         "project_sizing_exchanges", "PRIMARY KEY (job_id)"),
     "project_sizing_exchanges_job_fk": _catalog_contract(

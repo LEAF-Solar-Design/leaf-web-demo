@@ -45,6 +45,7 @@ def upload_import_mutations_enabled() -> bool:
 # request bodies
 # --------------------------------------------------------------------------- #
 class CreateOrgBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
     tier: Optional[str] = None
     # DEV SEAM (contract/BILLING.md §6): with auth OFF, a caller may bootstrap
@@ -1036,7 +1037,7 @@ def billing_org_resolve(body: BillingOrgResolveBody,
     if role != "owner":
         raise HTTPException(status_code=404, detail="no platform org for this identity")
     org = store.get_org(binding.platform_tenant_id)
-    if org is None or org.status != "active":
+    if org is None or org.status != "active" or org.account_class == "production_acceptance":
         raise HTTPException(status_code=404, detail="no platform org for this identity")
     return {"org_id": str(org.org_id)}
 
@@ -1074,6 +1075,11 @@ def billing_tier_sync(org_id: uuid.UUID, body: BillingTierSyncBody,
         )
     except unit_economics.BillingOrgMissing as exc:
         raise HTTPException(status_code=404, detail="org not found") from exc
+    except unit_economics.BillingOrgAcceptance as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="production acceptance organization is excluded from billing; tier not updated",
+        ) from exc
     except unit_economics.BillingOrgInactive as exc:
         raise HTTPException(
             status_code=409,

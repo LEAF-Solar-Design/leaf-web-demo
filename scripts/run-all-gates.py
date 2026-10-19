@@ -1712,7 +1712,7 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_ops_metrics.py"), 22),
         Suite("server-unit-economics-ops",
               "server tests/test_unit_economics_ops.py", "pytest", SERVER,
-              _py_pytest("tests/test_unit_economics_ops.py"), 4),
+              _py_pytest("tests/test_unit_economics_ops.py"), 5),  # +1 org attribution
         # Ops usage scoreboard (M6). Registered WITH the file, per the #29
         # fix-then-register rule. Both files are hermetic -- every authority is
         # monkeypatched, no DB, no subprocess, no skipif -- so these floors are
@@ -2378,11 +2378,13 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_soft_delete_guard_static.py",
                  f"{repo_name}/platform/tests/test_identity_display_name_static.py",
                  f"{repo_name}/platform/tests/test_binding_grant_static.py",
-                 f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py"], 211,
+                 f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py"], 212,  # +1 acceptance readiness
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
         # replay drift before a PR reaches the GitHub simulator-gate workflow.
+        Suite("platform-org-acceptance", "platform organization acceptance", "pytest", REPO_PARENT,
+              _py_pytest(f"{repo_name}/platform/tests/test_org_acceptance.py"), 10, db_gated=True),  # +1 replay after org removal
         Suite("platform-simgate-self-test", "platform simulator-gate self-test", "script",
               REPO_PARENT,
               [sys.executable, f"{repo_name}/platform/simgate/run.py", "--self-test"], None),

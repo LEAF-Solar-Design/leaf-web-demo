@@ -27,6 +27,10 @@ class BillingOrgInactive(RuntimeError):
     """Billing may not mutate an offboarding or deleted organization."""
 
 
+class BillingOrgAcceptance(RuntimeError):
+    """Production acceptance organizations are excluded from billing."""
+
+
 class LedgerConflict(RuntimeError):
     """An idempotency key was replayed with different facts."""
 
@@ -91,7 +95,7 @@ def record_billing_tier_event(
     def _operation(conn) -> Dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT org_id, tier, status FROM orgs WHERE org_id = %(org_id)s FOR UPDATE",
+                "SELECT org_id, tier, status, account_class FROM orgs WHERE org_id = %(org_id)s FOR UPDATE",
                 {"org_id": org_id},
             )
             org = cur.fetchone()
@@ -99,6 +103,8 @@ def record_billing_tier_event(
                 raise BillingOrgMissing("org not found")
             if org["status"] != "active":
                 raise BillingOrgInactive(str(org["status"]))
+            if org["account_class"] == "production_acceptance":
+                raise BillingOrgAcceptance("production acceptance organization is excluded from billing")
 
             if event_ref is not None:
                 cur.execute(
@@ -175,7 +181,8 @@ def record_billing_tier_event(
                 }
             cur.execute(
                 "UPDATE orgs SET tier = %(tier)s "
-                "WHERE org_id = %(org_id)s AND status = 'active' RETURNING tier",
+                "WHERE org_id = %(org_id)s AND status = 'active' "
+                "AND account_class = 'customer' RETURNING tier",
                 {"org_id": org_id, "tier": derived_tier},
             )
             updated = cur.fetchone()
@@ -206,6 +213,7 @@ def append_observation(
     source: str,
     source_ref: Optional[str],
     metadata: Mapping[str, Any],
+    org_id: Optional[uuid.UUID] = None,
 ) -> Dict[str, Any]:
     """Append one externally observed fleet cost or revenue line."""
     start, end = _utc(period_start), _utc(period_end)
@@ -226,16 +234,35 @@ def append_observation(
         "source_ref_sha256": source_ref_sha256,
         "metadata": dict(metadata),
     }
+    if org_id is not None:
+        facts["org_id"] = str(org_id)
     payload_sha256 = _canonical_digest(facts)
 
     def _operation(conn) -> Dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
+                "SELECT payload_sha256 FROM unit_economics_observations "
+                "WHERE observation_key = %(key)s",
+                {"key": observation_key},
+            )
+            replay = cur.fetchone()
+            if replay is not None:
+                if replay["payload_sha256"] != payload_sha256:
+                    raise LedgerConflict("observation idempotency key was reused")
+                return {"observation_key": observation_key, "recorded": False}
+            org_account_class = None
+            if org_id is not None:
+                cur.execute("SELECT account_class FROM orgs WHERE org_id = %(org_id)s FOR SHARE", {"org_id": org_id})
+                org = cur.fetchone()
+                if org is None:
+                    raise ValueError("observation org not found")
+                org_account_class = org["account_class"]
+            cur.execute(
                 "INSERT INTO unit_economics_observations "
                 "(observation_key, period_start, period_end, kind, category, amount_usd, "
-                "quantity, unit, source, source_ref_sha256, payload_sha256, metadata) VALUES "
+                "quantity, unit, source, source_ref_sha256, payload_sha256, metadata, org_id, org_account_class) VALUES "
                 "(%(key)s, %(start)s, %(end)s, %(kind)s, %(category)s, %(amount)s, "
-                "%(quantity)s, %(unit)s, %(source)s, %(source_ref)s, %(payload)s, %(metadata)s) "
+                "%(quantity)s, %(unit)s, %(source)s, %(source_ref)s, %(payload)s, %(metadata)s, %(org_id)s, %(org_account_class)s) "
                 "ON CONFLICT (observation_key) DO NOTHING RETURNING observation_key",
                 {
                     "key": observation_key,
@@ -250,6 +277,8 @@ def append_observation(
                     "source_ref": source_ref_sha256,
                     "payload": payload_sha256,
                     "metadata": Jsonb(dict(metadata)),
+                    "org_id": org_id,
+                    "org_account_class": org_account_class,
                 },
             )
             if cur.fetchone() is not None:
@@ -281,7 +310,7 @@ def fleet_report(period_start: datetime, period_end: datetime) -> Dict[str, Any]
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT COUNT(*) AS hosted_accounts FROM orgs "
-                "WHERE status = 'active' AND tier LIKE 'hosted_%'"
+                "WHERE status = 'active' AND tier LIKE 'hosted_%' AND account_class = 'customer'"
             )
             hosted_accounts = int(cur.fetchone()["hosted_accounts"])
 
@@ -291,16 +320,20 @@ def fleet_report(period_start: datetime, period_end: datetime) -> Dict[str, Any]
                 "COUNT(*) FILTER (WHERE stripe_event_type = 'invoice.payment_failed') AS payment_failed, "
                 "COUNT(*) FILTER (WHERE subscription_status = 'canceled') AS canceled, "
                 "COUNT(*) FILTER (WHERE tier_changed) AS tier_changes "
-                "FROM billing_subscription_events "
-                "WHERE observed_at >= %(start)s AND observed_at < %(end)s",
+                "FROM billing_subscription_events b "
+                "WHERE observed_at >= %(start)s AND observed_at < %(end)s "
+                "AND NOT EXISTS (SELECT 1 FROM orgs o WHERE o.org_id = b.org_id "
+                "AND o.account_class = 'production_acceptance')",
                 {"start": start, "end": end},
             )
             billing = dict(cur.fetchone())
 
             cur.execute(
                 "SELECT COALESCE(stripe_event_type, 'unknown') AS label, COUNT(*) AS count "
-                "FROM billing_subscription_events "
+                "FROM billing_subscription_events b "
                 "WHERE observed_at >= %(start)s AND observed_at < %(end)s "
+                "AND NOT EXISTS (SELECT 1 FROM orgs o WHERE o.org_id = b.org_id "
+                "AND o.account_class = 'production_acceptance') "
                 "GROUP BY COALESCE(stripe_event_type, 'unknown') ORDER BY label",
                 {"start": start, "end": end},
             )
@@ -310,15 +343,19 @@ def fleet_report(period_start: datetime, period_end: datetime) -> Dict[str, Any]
                 "SELECT COUNT(*) AS turns, "
                 "COALESCE(SUM(CASE WHEN jsonb_typeof(record->'usd_est') = 'number' "
                 "THEN (record->>'usd_est')::numeric ELSE 0 END), 0) AS usd_est "
-                "FROM agent_usage_turns WHERE ts >= %(start)s AND ts < %(end)s",
+                "FROM agent_usage_turns a WHERE ts >= %(start)s AND ts < %(end)s "
+                "AND NOT EXISTS (SELECT 1 FROM orgs o WHERE o.org_id::text = a.tenant_id "
+                "AND o.account_class = 'production_acceptance')",
                 {"start": start, "end": end},
             )
             agent = dict(cur.fetchone())
 
             cur.execute(
                 "SELECT COUNT(*) AS runs, COALESCE(SUM(engine_seconds), 0) AS engine_seconds, "
-                "COALESCE(SUM(usd_est), 0) AS usd_est FROM broker_usage_ledger "
-                "WHERE ts >= %(start)s AND ts < %(end)s AND status = 'ok'",
+                "COALESCE(SUM(usd_est), 0) AS usd_est FROM broker_usage_ledger l "
+                "WHERE ts >= %(start)s AND ts < %(end)s AND status = 'ok' "
+                "AND NOT EXISTS (SELECT 1 FROM orgs o WHERE o.org_id::text = l.tenant_id "
+                "AND o.account_class = 'production_acceptance')",
                 # broker_usage_ledger.ts is epoch seconds (DOUBLE PRECISION).
                 {"start": start.timestamp(), "end": end.timestamp()},
             )
@@ -328,25 +365,79 @@ def fleet_report(period_start: datetime, period_end: datetime) -> Dict[str, Any]
                 "SELECT COUNT(*) FILTER (WHERE status = 'succeeded') AS succeeded_jobs, "
                 "COUNT(*) FILTER (WHERE status = 'succeeded' AND cost_usd IS NOT NULL) "
                 "AS costed_jobs, COALESCE(SUM(cost_usd) FILTER (WHERE status = 'succeeded'), 0) "
-                "AS usd_est FROM jobs WHERE updated_at >= %(start)s AND updated_at < %(end)s",
+                "AS usd_est FROM jobs j WHERE updated_at >= %(start)s AND updated_at < %(end)s "
+                "AND NOT EXISTS (SELECT 1 FROM orgs o WHERE o.org_id = j.org_id "
+                "AND o.account_class = 'production_acceptance')",
                 {"start": start, "end": end},
             )
             jobs = dict(cur.fetchone())
 
             cur.execute(
                 "SELECT kind, category, COUNT(*) AS lines, COALESCE(SUM(amount_usd), 0) AS amount_usd "
-                "FROM unit_economics_observations "
+                "FROM unit_economics_observations x "
                 "WHERE period_start >= %(start)s AND period_end <= %(end)s "
+                "AND x.org_account_class IS DISTINCT FROM 'production_acceptance' "
                 "GROUP BY kind, category ORDER BY kind, category",
                 {"start": start, "end": end},
             )
             observation_rows = [dict(row) for row in cur.fetchall()]
+
+            cur.execute(
+                "SELECT COUNT(*) AS turns, "
+                "COALESCE(SUM(CASE WHEN jsonb_typeof(record->'usd_est') = 'number' "
+                "THEN (record->>'usd_est')::numeric ELSE 0 END), 0) AS usd_est "
+                "FROM agent_usage_turns a WHERE ts >= %(start)s AND ts < %(end)s "
+                "AND EXISTS (SELECT 1 FROM orgs o WHERE o.org_id::text = a.tenant_id "
+                "AND o.account_class = 'production_acceptance')",
+                {"start": start, "end": end},
+            )
+            synthetic_agent = dict(cur.fetchone())
+
+            cur.execute(
+                "SELECT COUNT(*) AS runs, COALESCE(SUM(engine_seconds), 0) AS engine_seconds, "
+                "COALESCE(SUM(usd_est), 0) AS usd_est FROM broker_usage_ledger l "
+                "WHERE ts >= %(start)s AND ts < %(end)s AND status = 'ok' "
+                "AND EXISTS (SELECT 1 FROM orgs o WHERE o.org_id::text = l.tenant_id "
+                "AND o.account_class = 'production_acceptance')",
+                # broker_usage_ledger.ts is epoch seconds (DOUBLE PRECISION).
+                {"start": start.timestamp(), "end": end.timestamp()},
+            )
+            synthetic_aps = dict(cur.fetchone())
+
+            cur.execute(
+                "SELECT COUNT(*) FILTER (WHERE status = 'succeeded') AS succeeded_jobs, "
+                "COUNT(*) FILTER (WHERE status = 'succeeded' AND cost_usd IS NOT NULL) "
+                "AS costed_jobs, COALESCE(SUM(cost_usd) FILTER (WHERE status = 'succeeded'), 0) "
+                "AS usd_est FROM jobs j WHERE updated_at >= %(start)s AND updated_at < %(end)s "
+                "AND EXISTS (SELECT 1 FROM orgs o WHERE o.org_id = j.org_id "
+                "AND o.account_class = 'production_acceptance')",
+                {"start": start, "end": end},
+            )
+            synthetic_jobs = dict(cur.fetchone())
+
+            cur.execute(
+                "SELECT kind, category, COUNT(*) AS lines, COALESCE(SUM(amount_usd), 0) AS amount_usd "
+                "FROM unit_economics_observations x "
+                "WHERE period_start >= %(start)s AND period_end <= %(end)s "
+                "AND x.org_account_class = 'production_acceptance' "
+                "GROUP BY kind, category ORDER BY kind, category",
+                {"start": start, "end": end},
+            )
+            synthetic_observation_rows = [dict(row) for row in cur.fetchall()]
 
         observations: Dict[str, Dict[str, Dict[str, Any]]] = {
             "shared_fixed": {}, "usage_variable": {}, "revenue": {},
         }
         for row in observation_rows:
             observations[row["kind"]][row["category"]] = {
+                "lines": int(row["lines"]),
+                "amount_usd": _money(row["amount_usd"]),
+            }
+        synthetic_observations: Dict[str, Dict[str, Dict[str, Any]]] = {
+            "shared_fixed": {}, "usage_variable": {}, "revenue": {},
+        }
+        for row in synthetic_observation_rows:
+            synthetic_observations[row["kind"]][row["category"]] = {
                 "lines": int(row["lines"]),
                 "amount_usd": _money(row["amount_usd"]),
             }
@@ -390,6 +481,19 @@ def fleet_report(period_start: datetime, period_end: datetime) -> Dict[str, Any]
                     "tier_changes": int(billing["tier_changes"]),
                     "event_types": billing_event_types,
                 },
+            },
+            "synthetic_acceptance": {
+                "account_class": "production_acceptance",
+                "agent": {"turns": int(synthetic_agent["turns"]), "usd_est": _money(synthetic_agent["usd_est"])},
+                "aps": {"runs": int(synthetic_aps["runs"]), "engine_seconds": _money(synthetic_aps["engine_seconds"]),
+                        "usd_est": _money(synthetic_aps["usd_est"])},
+                "hosted_jobs_cross_check": {
+                    "succeeded_jobs": int(synthetic_jobs["succeeded_jobs"]),
+                    "costed_jobs": int(synthetic_jobs["costed_jobs"]),
+                    "usd_est": _money(synthetic_jobs["usd_est"]),
+                    "additive": False,
+                },
+                "observations": synthetic_observations,
             },
             "observations": observations,
             "coverage_gaps": gaps,

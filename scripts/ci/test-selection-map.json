@@ -84,6 +84,7 @@
     "platform",
     "platform-ios-ship-source-catalog",
     "platform-ios-ship-source-catalog-static",
+    "platform-org-acceptance",
     "platform-release-manifest",
     "platform-simgate-self-test",
     "platform-staging-convergence",

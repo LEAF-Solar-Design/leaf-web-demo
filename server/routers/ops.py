@@ -37,6 +37,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+from uuid import UUID
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -81,6 +82,7 @@ class DeploymentSnapshotRequest(BaseModel):
 class UnitEconomicsObservationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
+    org_id: Optional[UUID] = None
     idempotency_key: str = Field(..., min_length=1, max_length=256)
     period_start: datetime
     period_end: datetime
@@ -438,6 +440,7 @@ def ops_unit_economics_observation(
             source=body.source,
             source_ref=body.source_ref,
             metadata=body.metadata,
+            org_id=body.org_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
