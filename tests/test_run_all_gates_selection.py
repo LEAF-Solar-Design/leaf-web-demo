@@ -37,7 +37,7 @@ class SelectionAdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="leaf-selection-adapter-")
         self.addCleanup(self.temp.cleanup)
-        self.work = Path(self.temp.name)
+        self.work = Path(self.temp.name).resolve()
         self.logs = self.work / "logs"
         self.logs.mkdir()
 
