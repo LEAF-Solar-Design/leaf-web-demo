@@ -86,8 +86,8 @@ export const TOUR_STEPS = [
     id: 'author',
     title: 'The part that is different',
     body:
-      'Signed in, Leaf writes a new reusable tool from this sentence: code you can read, ' +
-      'keep and run again. This signed out demo stops before building it.',
+      'Leaf writes a new reusable tool from this sentence: code you can read, ' +
+      'keep and run again. Publish adds it to this demo session.',
     // The author flow lives in the studio's expanded catalog. The dock is
     // always present while that section is being revealed.
     target: '.author-section, .bar-dock',

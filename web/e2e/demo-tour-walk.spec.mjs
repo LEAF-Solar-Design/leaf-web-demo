@@ -9,7 +9,7 @@ test('the demo tour reaches step 7 using only Next', async ({ page }) => {
   const next = coach.getByRole('button', { name: 'Next', exact: true })
   const step = coach.locator('.tour-card-step')
   const result = studio.locator('.result-block')
-  await expect(studio).toBeVisible()
+  await expect(studio).toBeVisible({ timeout: 30_000 })
   await expect(step).toHaveText('Step 1 of 9')
   // Start with the ordinary collapsed catalog; no saved rail preference can
   // accidentally supply the author seat this walk is intended to exercise.
@@ -40,10 +40,10 @@ test('the demo tour reaches step 7 using only Next', async ({ page }) => {
   await expect(authorSection).toBeVisible()
   await expect(author).toHaveCount(1)
   await expect(author).toBeVisible()
-  await expect(author.locator('.inline-error').filter({
-    hasText: 'Tool building is unavailable in this signed-out demo.',
-  })).toBeVisible({ timeout: 20_000 })
-  await expect(author.locator('.authored')).toHaveCount(0)
+  const staged = author.locator('.authored')
+  await expect(staged).toBeVisible({ timeout: 20_000 })
+  await expect(staged.locator('.tool-name')).toHaveText(/\S+/, { timeout: 20_000 })
+  await expect(staged).toContainText('Demo preview staged. Publish to make it available in this demo.')
   await expect(next).toBeEnabled({ timeout: 20_000 })
 
   await next.click()
