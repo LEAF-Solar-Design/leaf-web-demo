@@ -3029,7 +3029,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-13: PP-2 adds one registration row (234 -> 235); R3e-2 one more (235 -> 236).
               # 2026-10-13: R14-E adds one registration row; measured 237 passing.
               # 2026-10-14: PP-3 record A adds one registration row (237 -> 238).
-              ["test_studio_walk_regression_gate.py"], 238),
+              # 2026-10-19: su-a4a adds one production proof registration row (238 -> 239).
+              ["test_studio_walk_regression_gate.py"], 239),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -3209,6 +3210,8 @@ def build_suites() -> List[Suite]:
         Suite("web-deployed-acceptance-contract",
               "web deployed authored CAD acceptance contract", "script", WEB,
               [_npm(), "run", "check:deployed-acceptance-contract"], None),
+        Suite("web-prod-readonly-contract", "web production read-only proof contract", "script", WEB,
+              [_npm(), "run", "check:prod-readonly-contract"], None),
         # These four scripts/test_*.mjs files had no automated consumer at all
         # (no npm script, no workflow) -- hand-run-only. That gap is why a real
         # defect (waitForInteractiveLogin resolving on the pre-navigation URL,

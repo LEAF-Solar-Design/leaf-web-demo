@@ -1,25 +1,11 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from './prodFixtures.mjs'
 import {
   assertProdResponse,
-  requireProdTarget,
   resolveExpectedSha,
   resolveProdBaseUrl,
 } from './prodConfig.mjs'
 
 const USER_AGENT = 'leaf-prod-readonly-smoke/1.0'
-test.use({
-  userAgent: USER_AGENT,
-  extraHTTPHeaders: { 'User-Agent': USER_AGENT, Authorization: '' },
-  storageState: { cookies: [], origins: [] },
-})
-
-test.beforeEach(() => {
-  // A required release run with a missing target fails here instead of skipping.
-  requireProdTarget()
-  test.skip(!process.env.LEAF_E2E_PROD_BASE_URL, 'LEAF_E2E_PROD_BASE_URL is not set')
-  resolveProdBaseUrl()
-})
-
 const prodUrl = (path) => new URL(path, resolveProdBaseUrl()).href
 
 async function get(request, path, headers = {}) {
@@ -31,7 +17,6 @@ async function get(request, path, headers = {}) {
 }
 
 test('production-like unified route is reachable without mutation', async ({ page }) => {
-  test.skip(!process.env.LEAF_E2E_PROD_BASE_URL, 'LEAF_E2E_PROD_BASE_URL is not set')
   const response = await page.goto(prodUrl('/try'))
   assertProdResponse(response.url())
   assertProdResponse(page.url())
@@ -99,7 +84,7 @@ test('production app renders the studio shell', async ({ page }) => {
 
 test('production app and web serve the expected candidate', async ({ request }) => {
   const expected = resolveExpectedSha()
-  test.skip(!expected, 'LEAF_E2E_EXPECTED_SHA is not set')
+  expect(expected).toMatch(/^[0-9a-f]{40}$/)
   const app = await get(request, '/api/health')
   expect(app.ok()).toBeTruthy()
   const appHealth = await app.json()

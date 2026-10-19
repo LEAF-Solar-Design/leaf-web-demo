@@ -650,6 +650,7 @@
     "web-markdown-contract",
     "web-panel-fold-contract",
     "web-pending-approvals-contract",
+    "web-prod-readonly-contract",
     "web-project-session-binding",
     "web-proof-receipt-contract",
     "web-route-scene-contract",

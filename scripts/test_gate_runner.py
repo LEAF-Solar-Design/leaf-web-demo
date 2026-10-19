@@ -46,6 +46,17 @@ def _load_runner():
     return mod
 
 
+def test_prod_readonly_contract_gate_registration():
+    runner = _load_runner()
+    suites = [s for s in runner.build_suites() if s.id == "web-prod-readonly-contract"]
+    assert len(suites) == 1
+    suite = suites[0]
+    assert suite.cwd == runner.WEB
+    assert suite.argv[-2:] == ["run", "check:prod-readonly-contract"]
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    assert suite.id in selection["mandatory_suite_ids"]
+
+
 def test_pp3a_gate_registration():
     runner = _load_runner()
     catalog = runner.build_suites()
@@ -120,7 +131,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 211
     assert suites["platform"].expected == 1178  # 2026-10-13: measured with ten R14-E rows.
-    assert suites["gate-runner-selftest"].expected == 238  # Measured with R14-E and PP-3 record A registrations.
+    assert suites["gate-runner-selftest"].expected == 239  # R14-E, PP-3 record A and su-a4a registrations.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4210,7 +4221,7 @@ def test_R14C_32_mandatory_registration():
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
     assert mandatory[-2:] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 238  # Measured with R14-E and PP-3 record A registrations.
+    assert suites["gate-runner-selftest"].expected == 239  # R14-E, PP-3 record A and su-a4a registrations.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4305,7 +4316,7 @@ def test_sip_r3e_gate_registration():
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
     # 2026-10-13: R14-E measured 1178 platform rows and 237 registration/selftest rows.
     assert suites["platform"].expected == 1178
-    assert suites["gate-runner-selftest"].expected == 238  # R14-E and PP-3 record A: measured registered suite.
+    assert suites["gate-runner-selftest"].expected == 239  # R14-E, PP-3 record A and su-a4a registrations.
 
 
 def test_sip_r14_sizing_gate_registration():

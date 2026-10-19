@@ -1,19 +1,25 @@
 import { defineConfig } from '@playwright/test'
+import { validateProdConfig } from './e2e/prod/prodConfig.mjs'
+
+const config = validateProdConfig()
 
 export default defineConfig({
   testDir: './e2e/prod',
+  testMatch: /(open-project|unified)-prod-readonly\.spec\.mjs$/,
   outputDir: '../artifacts/unified-surface-proof/prod/test-results',
-  reporter: [['list'], ['html', {
-    open: 'never',
-    outputFolder: '../artifacts/unified-surface-proof/prod/report',
-  }]],
+  reporter: [['./e2e/prod/prodReporter.mjs']],
+  retries: 0,
+  repeatEach: 1,
+  workers: 1,
+  projects: [{ name: 'chromium', use: { browserName: 'chromium' } }],
   use: {
-    baseURL: process.env.LEAF_E2E_PROD_BASE_URL || 'http://127.0.0.1:5275',
+    baseURL: config.enabled ? config.origin : undefined,
     browserName: 'chromium',
     headless: true,
-    video: 'on',
-    screenshot: 'only-on-failure',
-    trace: 'retain-on-failure',
+    video: 'off',
+    screenshot: 'off',
+    trace: 'off',
+    serviceWorkers: 'block',
     viewport: { width: 1600, height: 1000 },
   },
 })
