@@ -490,7 +490,8 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # Added test_binding_grant_static.py (6 tests) and
     # test_binding_grant_issuance_static.py (20 tests) on 2026-09-28: 182 -> 208.
     # Added test_acceptance_schema_readiness_contract on 2026-10-19: 211 -> 212.
-    assert static.expected == 212
+    # Added +26 SP2 invite-only org gate on 2026-10-19: 212 -> 238.
+    assert static.expected == 238
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv
