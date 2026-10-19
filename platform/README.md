@@ -140,7 +140,7 @@ exit 1. Tests: `platform/tests/test_entitlement.py`.
 
 ## Org bootstrap route — `POST /api/orgs` (dev posture: OPEN)
 
-`POST /api/orgs {name, tier?}` creates or reuses the verified identity's org and
+`POST /api/orgs {name}` creates or reuses the verified identity's org and
 returns `{org: {org_id, name, tier, status, created_at, ...}, created}`. A live
 replay with the same normalized name returns the same `org_id`; a different
 name for an already-bound identity returns 409. It never searches tenants by a
@@ -165,8 +165,9 @@ resolved to select an organization or grant membership. An administrator must
 establish authorized durable membership separately before the member signs in
 again and retries access. Bootstrap does not invoke provisioning automatically,
 move bindings, change roles, or rename organizations. An unbound subject without
-that key retains first-workspace bootstrap. String `detail` responses let the
-current workspace controller surface the handoff through its existing 409 path.
+that key may bootstrap only when self-provisioning is allowed. String `detail`
+responses let the current workspace controller surface the handoff through its
+existing 409 path.
 
 `store.create_identity_binding` is a trusted server-side writer, not an
 enrollment endpoint. Its caller must establish authorization and the intended
@@ -179,11 +180,14 @@ onboarding API. See `docs/workspace-project-bootstrap.md` for the handoff.
 
 **This endpoint is intentionally OPEN in dev** (no auth gate) to solve the
 bootstrap chicken/egg: you cannot present an `X-Org-Id` you do not yet have.
-**In production it MUST be gated behind the auth/identity layer** — org creation
-becomes a side effect of eligible first-workspace bootstrap, and a client-supplied
-identity is never trusted here (same seam as `deps.get_org_id`). `tier` is
-optional and, when supplied, validated against `models.TIERS` (else 422);
-omitted → the store default (`hosted_starter`).
+With `LEAF_AUTH_LIVE=1`, unbound verified subjects are invite-only (403
+`invite_only`) unless `LEAF_ORG_SELF_PROVISION` is exactly `1` or
+`LEAF_RUNTIME_ENV` is exactly `staging`, `development`, `test`, or `local`.
+Production denies self-provisioning by default; unset, unknown, case-changed,
+or whitespace-padded runtime names also deny. Existing active bindings remain
+authoritative. The tier is never client-set in any mode: a non-null `tier`
+gets 422, and new orgs use the server default (`hosted_starter`), with later
+tier changes controlled by billing sync.
 
 Dev-only extra: an optional `external_subject` (+ `external_authority`,
 default `auth0`) bootstraps the org WITH its identity binding
