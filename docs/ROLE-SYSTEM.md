@@ -124,6 +124,7 @@ If a target reports `missing`, check its live Action name and trigger binding.
 The live dashboard name may differ from the file stem in `TARGETS`. Rename the
 intended live Action to match, or update `TARGETS` to its verified name, then
 rerun the check. The script does not create Actions or change trigger bindings.
+`TARGETS` names the live Actions `Leaf Platform Tenant Claims` (post-login) and `Leaf M2M Tenant Claims` (credentials-exchange), verified 2026-10-19.
 It never deploys `server/auth0-actions/pre-user-registration-selfserve.js`,
 which is PROPOSED and relaxes the live signup gate.
 
