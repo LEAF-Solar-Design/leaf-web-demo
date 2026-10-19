@@ -75,8 +75,9 @@ def postgres_registry(monkeypatch):
 
     try:
         with connect() as conn:
-            migration = Path(__file__).resolve().parents[2] / "platform/migrations/0076_demo_sessions.sql"
-            conn.execute(migration.read_text(), prepare=False)
+            migrations = Path(__file__).resolve().parents[2] / "platform/migrations"
+            for migration in sorted(migrations.glob("[0-9][0-9][0-9][0-9]_*.sql")):
+                conn.execute(migration.read_text(), prepare=False)
         monkeypatch.setenv("LEAF_DEMO_LIVE_ENABLED", "1")
         monkeypatch.setenv("LEAF_DEMO_SESSION_SECRET", "postgres-test-signing")
         monkeypatch.setenv("LEAF_DEMO_IP_HASH_SECRET", "postgres-test-address")
@@ -199,7 +200,9 @@ def test_migrated_schema_columns_and_constraints(postgres_registry):
         assert columns["demo_mint_counters"] == {"day", "scope", "count"}
         constraints = conn.execute(
             "SELECT contype, conrelid::regclass::text AS table_name FROM pg_constraint "
-            "WHERE connamespace = %s::regnamespace", (postgres_registry.schema,)).fetchall()
+            "WHERE connamespace = %s::regnamespace "
+            "AND conrelid IN ('demo_sessions'::regclass, 'demo_mint_counters'::regclass)",
+            (postgres_registry.schema,)).fetchall()
         assert sum(row["contype"] == "p" for row in constraints) == 2
         assert sum(row["contype"] == "u" for row in constraints) == 2
         assert sum(row["contype"] == "c" for row in constraints) >= 6

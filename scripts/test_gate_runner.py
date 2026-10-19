@@ -130,7 +130,7 @@ def test_sip_r1_gate_registration():
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 238  # 2026-10-19: +26 SP2 invite-only org gate.
-    assert suites["platform"].expected == 1178  # 2026-10-13: measured with ten R14-E rows.
+    assert suites["platform"].expected == 1179  # LD1b: +1 demo classification regression.
     assert suites["gate-runner-selftest"].expected == 239  # R14-E, PP-3 record A and su-a4a registrations.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
@@ -4316,8 +4316,8 @@ def test_sip_r3e_gate_registration():
         assert ordered[start:start + 4] == [
             "server-sip-r14-" + name for name in ("evidence", "admission", "worker", "proof")]
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
-    # 2026-10-13: R14-E measured 1178 platform rows and 237 registration/selftest rows.
-    assert suites["platform"].expected == 1178
+    # LD1b adds one demo classification regression to the 1178 platform rows.
+    assert suites["platform"].expected == 1179
     assert suites["gate-runner-selftest"].expected == 239  # R14-E, PP-3 record A and su-a4a registrations.
 
 

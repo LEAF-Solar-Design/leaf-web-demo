@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 import uuid
 
@@ -78,11 +80,90 @@ def registry(monkeypatch):
     monkeypatch.setattr(demo, "_now", lambda: datetime(2031, 2, 3, 12, tzinfo=timezone.utc))
     store = Registry()
     monkeypatch.setattr(demo, "_db", lambda: store)
+    monkeypatch.setattr(demo, "provision_demo_tenant", lambda conn, session: None)
     return store
 
 
 def bomb(*args, **kwargs):
     pytest.fail("forbidden dependency was reached")
+
+
+def test_provisioning_loader_initializes_once_under_concurrency(monkeypatch):
+    monkeypatch.setitem(sys.modules, "demo_provisioning", None)
+    monkeypatch.delitem(sys.modules, "demo_provisioning", raising=False)
+    original_spec = demo.importlib.util.spec_from_file_location
+    entered = threading.Event()
+    release = threading.Event()
+    barrier = threading.Barrier(21)
+    executions = []
+
+    def spec_spy(*args, **kwargs):
+        spec = original_spec(*args, **kwargs)
+        original_exec = spec.loader.exec_module
+
+        def exec_spy(module):
+            executions.append(module)
+            entered.set()
+            assert release.wait(timeout=10)
+            original_exec(module)
+
+        monkeypatch.setattr(spec.loader, "exec_module", exec_spy)
+        return spec
+
+    monkeypatch.setattr(demo.importlib.util, "spec_from_file_location", spec_spy)
+
+    def load():
+        barrier.wait(timeout=10)
+        module = demo._load_demo_provisioning()
+        assert callable(module.provision_demo_tenant)
+        return module
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = [executor.submit(load) for _ in range(20)]
+        try:
+            barrier.wait(timeout=10)
+            assert entered.wait(timeout=10)
+            assert "demo_provisioning" not in sys.modules
+        finally:
+            release.set()
+        modules = [future.result(timeout=10) for future in futures]
+
+    assert len(executions) == 1
+    assert all(module is modules[0] for module in modules)
+    assert sys.modules["demo_provisioning"] is modules[0] is executions[0]
+
+
+def test_provisioning_loader_does_not_publish_failed_load_and_retries(monkeypatch):
+    monkeypatch.setitem(sys.modules, "demo_provisioning", None)
+    monkeypatch.delitem(sys.modules, "demo_provisioning", raising=False)
+    original_spec = demo.importlib.util.spec_from_file_location
+    executions = []
+
+    def spec_spy(*args, **kwargs):
+        spec = original_spec(*args, **kwargs)
+        original_exec = spec.loader.exec_module
+
+        def exec_spy(module):
+            executions.append(module)
+            original_exec(module)
+            if len(executions) == 1:
+                raise RuntimeError("injected provisioning load failure")
+
+        monkeypatch.setattr(spec.loader, "exec_module", exec_spy)
+        return spec
+
+    monkeypatch.setattr(demo.importlib.util, "spec_from_file_location", spec_spy)
+    with pytest.raises(RuntimeError, match="injected provisioning load failure"):
+        demo._load_demo_provisioning()
+    assert "demo_provisioning" not in sys.modules
+
+    module = demo._load_demo_provisioning()
+    assert callable(module.provision_demo_tenant)
+    assert len(executions) == 2
+    assert module is executions[1] and module is not executions[0]
+    assert sys.modules["demo_provisioning"] is module
+    assert demo._load_demo_provisioning() is module
+    assert len(executions) == 2
 
 
 def site_client():

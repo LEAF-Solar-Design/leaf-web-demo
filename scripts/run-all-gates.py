@@ -1138,9 +1138,13 @@ def build_suites() -> List[Suite]:
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
               _py_pytest("tests/test_auth_envelope.py"), 7),
         Suite("server-demo-sessions", "server demo identity and dark route boundaries", "pytest",
-              SERVER, _py_pytest("tests/test_demo_sessions.py"), 115),
+              # LD1a's expanded global/public boundary matrix raises the stale 115 floor to 268.
+              SERVER, _py_pytest("tests/test_demo_sessions.py"), 268),
         Suite("server-demo-sessions-postgres", "server durable demo mint races", "pytest",
               SERVER, _py_pytest("tests/test_demo_sessions_postgres.py"), 9,
+              db_gated=True),
+        Suite("server-demo-provisioning-postgres", "server atomic demo tenant provisioning", "pytest",
+              SERVER, _py_pytest("tests/test_demo_provisioning_postgres.py"), 15,
               db_gated=True),
         Suite("server-mcp-gateway-authority",
               "server tests/test_mcp_gateway_authority.py", "pytest", SERVER,
@@ -2312,7 +2316,7 @@ def build_suites() -> List[Suite]:
               # 2026-10-11: sip-r3d adds six conductor PostgreSQL rows (322 -> 328).
               # 2026-10-13: R3e-2 adds six to the measured 1162-row PostgreSQL baseline.
               # 2026-10-13: R14-E adds ten sizing rows; measured 1178 passing on PostgreSQL.
-              _py_pytest(f"{repo_name}/platform/tests"), 1178, db_gated=True,
+              _py_pytest(f"{repo_name}/platform/tests"), 1179, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -2398,7 +2402,7 @@ def build_suites() -> List[Suite]:
         # The committed replay fixture is dependency-free and catches hash or
         # replay drift before a PR reaches the GitHub simulator-gate workflow.
         Suite("platform-org-acceptance", "platform organization acceptance", "pytest", REPO_PARENT,
-              _py_pytest(f"{repo_name}/platform/tests/test_org_acceptance.py"), 10, db_gated=True),  # +1 replay after org removal
+              _py_pytest(f"{repo_name}/platform/tests/test_org_acceptance.py"), 11, db_gated=True),  # +1 demo observation
         Suite("platform-simgate-self-test", "platform simulator-gate self-test", "script",
               REPO_PARENT,
               [sys.executable, f"{repo_name}/platform/simgate/run.py", "--self-test"], None),

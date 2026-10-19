@@ -37,6 +37,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 import uuid
@@ -45,6 +46,7 @@ from fastapi import HTTPException
 
 
 DEMO_ROUTE_ALLOWLIST = frozenset()
+_PROVISIONING_LOAD_LOCK = threading.Lock()
 
 
 class DemoSession(NamedTuple):
@@ -177,6 +179,30 @@ def _db():
     return db
 
 
+def _load_demo_provisioning():
+    # Platform loads this resolver by file path, without server on sys.path.
+    # Keep the adjacent provisioning module reachable on that same import leg.
+    module = sys.modules.get("demo_provisioning")
+    if module is None:
+        with _PROVISIONING_LOAD_LOCK:
+            module = sys.modules.get("demo_provisioning")
+            if module is None:
+                spec = importlib.util.spec_from_file_location(
+                    "demo_provisioning", Path(__file__).with_name("demo_provisioning.py"))
+                if spec is None or spec.loader is None:
+                    raise RuntimeError("demo provisioning unavailable")
+                module = importlib.util.module_from_spec(spec)
+                # Publish only a fully initialized module; failed loads can retry.
+                spec.loader.exec_module(module)
+                sys.modules["demo_provisioning"] = module
+    return module
+
+
+def provision_demo_tenant(conn, session):
+    module = _load_demo_provisioning()
+    return module.provision_demo_tenant(conn, session)
+
+
 def _signature(record_id: uuid.UUID, expiry: int, secret: bytes) -> str:
     return hmac.new(secret, f"{record_id}.{expiry}".encode(), hashlib.sha256).hexdigest()
 
@@ -212,6 +238,9 @@ def mint(request) -> MintedSession:
             "VALUES (%s, %s, %s, %s, %s, %s, %s)",
             (record_id, f"demo:{record_id}", f"demo-{record_id}", org_id,
              now, expiry, ip_hash))
+        return provision_demo_tenant(conn, DemoSession(
+            record_id, f"demo:{record_id}", f"demo-{record_id}", org_id,
+            now, expiry, None, ip_hash))
 
     try:
         _db().run_transaction(insert)

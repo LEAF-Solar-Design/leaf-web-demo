@@ -713,10 +713,10 @@ _REQUIRED_CONSTRAINTS = {
     "demo_mint_counters_count_check": _catalog_contract(
         "demo_mint_counters", "CHECK", "count > 0"),
     "orgs_account_class_check": _catalog_contract(
-        "orgs", "CHECK", "account_class", "'customer'", "'production_acceptance'"),
+        "orgs", "CHECK", "account_class", "'customer'", "'production_acceptance'", "'demo'"),
     "unit_economics_observations_org_class_check": _catalog_contract(
         "unit_economics_observations", "CHECK", "org_id IS NULL", "org_account_class IS NULL",
-        "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'"),
+        "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'", "'demo'"),
     "project_sizing_exchanges_pkey": _catalog_contract(
         "project_sizing_exchanges", "PRIMARY KEY (job_id)"),
     "project_sizing_exchanges_job_fk": _catalog_contract(

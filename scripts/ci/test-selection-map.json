@@ -7,7 +7,9 @@
   "minimum_full_runs": 3,
   "force_full_rules": [
     "server/demo_sessions.py",
+    "server/demo_provisioning.py",
     "server/tests/test_demo_sessions*.py",
+    "server/tests/test_demo_provisioning*.py",
     "platform/tests/test_demo_session_deps.py",
     ".github/**",
     ".codebuild/**",
@@ -54,6 +56,7 @@
   "mandatory_suite_ids": [
     "server-demo-sessions",
     "server-demo-sessions-postgres",
+    "server-demo-provisioning-postgres",
     "platform-demo-session-deps",
     "platform-sip-r2-publication",
     "server-sip-r2-publication",

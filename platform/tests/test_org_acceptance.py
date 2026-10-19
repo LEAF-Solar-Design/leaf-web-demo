@@ -191,6 +191,22 @@ def test_acceptance_tier_writers_refuse():
     assert _event_count(org.org_id) == 1
 
 
+def test_demo_classification_tier_and_observation(period):
+    with pytest.raises(ValueError, match="invalid organization account class"):
+        store.create_org("Public demo injection", account_class="demo")
+    org_id = uuid.uuid4()
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO orgs (org_id, name, tier, account_class) "
+                    "VALUES (%s, 'Demo accounting', 'demo_live', 'demo')", (org_id,))
+    assert store.set_org_tier(org_id, "hosted_pro") is None
+    assert store.get_org(org_id).tier == "demo_live"
+    observation = economics.append_observation(**_observation(period, org_id))
+    with db.cursor() as cur:
+        cur.execute("SELECT org_id, org_account_class FROM unit_economics_observations "
+                    "WHERE observation_key = %s", (observation["observation_key"],))
+        assert dict(cur.fetchone()) == {"org_id": org_id, "org_account_class": "demo"}
+
+
 def test_acceptance_billing_http_refuses_and_cannot_resolve(client, monkeypatch):
     monkeypatch.setenv(billing.TIER_SYNC_FLAG_ENV, "1")
     monkeypatch.setenv(billing.TIER_SYNC_SECRET_ENV, "acceptance-secret")
