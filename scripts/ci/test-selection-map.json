@@ -96,6 +96,7 @@
     "platform-staging-convergence",
     "platform-static",
     "prewarm-staging-cutover-workflow",
+    "production-tenant-header-probe",
     "production-web-release",
     "prune-codeql-caches",
     "public-host-contract",
