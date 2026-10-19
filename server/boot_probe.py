@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 
@@ -67,10 +68,53 @@ def _schema_status():
     return status
 
 
+def _migrations_dir():
+    db = importlib.import_module("platform_link").platform_db()
+    return db._PKG_DIR / "migrations"
+
+
+def _unexplained_defects(status, pending):
+    texts = []
+    if len(pending) > 64:
+        raise ValueError("pending migration limit")
+    if pending:
+        directory = _migrations_dir()
+        for name in pending:
+            path = directory / name
+            if path.parent != directory:
+                raise ValueError("invalid migration name")
+            with path.open("rb") as migration:
+                limit = 2 * 1024 * 1024
+                if os.fstat(migration.fileno()).st_size > limit:
+                    raise ValueError("migration size limit")
+                contents = migration.read(limit)
+                if os.fstat(migration.fileno()).st_size > limit:
+                    raise ValueError("migration size limit")
+            texts.append(contents.decode("utf-8").replace('"', ''))
+
+    defects = [(f"{table}.{column}", (table, column))
+               for table, columns in status.get("missing", {}).items()
+               for column in columns]
+    for key, entries in status.items():
+        if (key.startswith(("invalid_", "missing_"))
+                and key != "missing_migrations" and isinstance(entries, list)):
+            # Catalog entries may append a diagnostic reason after the name.
+            defects.extend((entry, (entry.split(":", 1)[0],))
+                           for entry in entries)
+    unexplained = []
+    for label, identifiers in defects:
+        patterns = [re.compile(r"(?<![A-Za-z0-9_])" + re.escape(identifier.replace('"', ''))
+                               + r"(?![A-Za-z0-9_])", re.IGNORECASE | re.ASCII)
+                    for identifier in identifiers]
+        if not any(all(pattern.search(text) for pattern in patterns) for text in texts):
+            unexplained.append(label)
+    return sorted(unexplained)
+
+
 def run(env, schema_status=None) -> int:
     """Emit one credential-free JSON result; pending migrations are permitted."""
     failures = []
-    schema = {"pending": [], "drift": []}
+    schema = {"pending": [], "drift": [], "unexplained": []}
     previous_env = dict(os.environ)
     previous_path = list(sys.path)
 
@@ -97,7 +141,10 @@ def run(env, schema_status=None) -> int:
                 schema["pending"] = list(status["missing_migrations"])
                 schema["drift"] = sorted(set(status["migration_hash_drift"])
                                          | set(status.get("unknown_migrations", [])))
-                if schema["drift"] or (not schema["pending"] and not status["ok"]):
+                if schema["pending"]:
+                    schema["unexplained"] = _unexplained_defects(status, schema["pending"])
+                if (schema["drift"] or (not schema["pending"] and not status["ok"])
+                        or schema["unexplained"]):
                     failed("schema_status")
             except Exception:
                 failed("schema_status")
