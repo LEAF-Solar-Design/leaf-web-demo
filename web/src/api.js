@@ -54,6 +54,12 @@ const unauthorizedListeners = new Set()
 
 export const config = { apiBase: API_BASE, mockDefault: MOCK_DEFAULT, tenant: TENANT }
 
+// Intake and catalog loads carry the shell's current mode, including empty or
+// fixture workspaces that skip intake. Conversation authoring reads that same
+// choice instead of build defaults or URL parameters. Default to live.
+let conversationMock = false
+export function isMockConversation() { return conversationMock }
+
 // Read the bearer token at CALL time (not module load) so a sign-in mid-session
 // is picked up. Returns {} when absent -> merging it is a no-op off-auth.
 export function authHeaders() {
@@ -228,6 +234,9 @@ export function isWorkspaceBootstrapRequired(error) {
 // null in mock or when auth is off. The UI uses it for the honest tier chip
 // (falls back to "demo" when absent).
 export async function getSession(mock, dwg = 'rooftop_demo') {
+  // Record the choice before awaiting intake, so a late mock response cannot
+  // re-enable demo authority after the shell has switched to live.
+  conversationMock = mock === true
   // P2: never the raw dwg value (it can be a caller-supplied name/path via
   // ?drawing=; the privacy contract bans drawing names and paths).
   const catalogSource = dwg === 'rooftop_demo' ? 'default' : 'custom'
@@ -329,6 +338,7 @@ export async function getHealth() {
 
 // --- Tools --------------------------------------------------------------
 export async function getTools(mock) {
+  conversationMock = mock === true
   if (mock) {
     await nap(150)
     return listMockCatalogTools()
@@ -1868,6 +1878,9 @@ export async function stageAuthorTool(mock, description, targetToolName = null, 
       diff_summary: 'Demo preview only. No live tenant catalog changed.',
       validation: { status: 'demo' },
     }
+  }
+  if ([opts.authority?.sessionId, opts.authority?.turnId].some((id) => typeof id === 'string' && id.startsWith('demo-'))) {
+    throw Object.assign(new Error('Demo authority cannot authorize live tool building.'), { authorTerminal: true })
   }
   if (opts.pollUrl) {
     return pollAuthorStage({

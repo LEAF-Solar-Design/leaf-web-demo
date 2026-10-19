@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { isMockConversation } from '../api.js'
 import {
   classifyAgentError,
   ensureSession,
@@ -105,10 +106,20 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
   }, [drawingId])
 
   // `allowSecretOnce` is a per-call authorisation for an OVERRIDABLE credential
-  // refusal, handed straight to converse.postMessage, which is where the guard
-  // lives. Nothing here stores it, so a retry that never reaches postMessage
+  // refusal, handed straight to the live or mock transport's guard.
+  // Nothing here stores it, so a retry that never reaches the transport
   // authorises nothing.
   const startTurn = useCallback(async (text, classifierHint, { allowSecretOnce = false, requireImmediateTurn = false } = {}) => {
+    // Only mock author staging needs local authority. Do not attach these ids
+    // to the live session cache or load the mint for ordinary/live turns.
+    if (isMockConversation() && classifierHint?.purpose === 'stage_authority') {
+      const generation = generationRef.current
+      const { startMockStageAuthority } = await import('../mock/mockStageAuthority.js')
+      if (!isMockConversation() || generationRef.current !== generation) {
+        throw new Error('Conversation changed while starting tool building')
+      }
+      return startMockStageAuthority(text, classifierHint, { allowSecretOnce })
+    }
     const requestedProjectId = projectRef.current
     const requestedDrawingId = drawingRef.current
     const requestId = requestedProjectId ? createRequestId() : null
