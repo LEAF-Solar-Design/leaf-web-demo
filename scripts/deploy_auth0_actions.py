@@ -20,10 +20,10 @@ import urllib.request
 
 TARGETS = (
     {"file": "server/auth0-actions/post-login-add-tenant-claim.js",
-     "trigger": "post-login", "action_name": "post-login-add-tenant-claim"},
+     "trigger": "post-login", "action_name": "Leaf Platform Tenant Claims"},
     {"file": "server/auth0-actions/credentials-exchange-add-tenant-claim.js",
      "trigger": "credentials-exchange",
-     "action_name": "credentials-exchange-add-tenant-claim"},
+     "action_name": "Leaf M2M Tenant Claims"},
 )
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)*\.auth0\.com$")

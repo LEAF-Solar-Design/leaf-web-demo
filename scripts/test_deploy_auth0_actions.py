@@ -388,9 +388,9 @@ def test_pre_user_registration_action_is_never_a_target():
     assert isinstance(sync.TARGETS, tuple) and len(sync.TARGETS) == 2
     assert sync.TARGETS == (
         {"file": "server/auth0-actions/post-login-add-tenant-claim.js",
-         "trigger": "post-login", "action_name": "post-login-add-tenant-claim"},
+         "trigger": "post-login", "action_name": "Leaf Platform Tenant Claims"},
         {"file": "server/auth0-actions/credentials-exchange-add-tenant-claim.js",
-         "trigger": "credentials-exchange", "action_name": "credentials-exchange-add-tenant-claim"},
+         "trigger": "credentials-exchange", "action_name": "Leaf M2M Tenant Claims"},
     )
     assert "pre-user-registration" not in json.dumps(sync.TARGETS)
 
