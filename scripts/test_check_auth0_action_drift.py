@@ -20,6 +20,10 @@ BUILDSPEC = Path(__file__).resolve().parents[1] / ".codebuild" / "auth0-action-d
 DOMAIN = "fixture.us.auth0.com"
 SECRET = "sentinel-client-secret-do-not-print"
 TOKEN = "sentinel-management-token-do-not-print"
+LIVE_VERSION_KEYS = {
+    "action", "built_at", "code", "created_at", "dependencies", "deployed", "id",
+    "number", "runtime", "secrets", "status", "supported_triggers", "updated_at",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -66,11 +70,20 @@ class FakeTransport:
         if len(parts) == 6:
             return {"id": parts[5], "name": target["action_name"],
                     "deployed_version": {"id": "version-1"}}
-        return {"id": "version-1", "action_id": parts[5], "deployed": True, "status": "built",
-                "code": self.code[target["trigger"]]}
+        return {"id": "version-1", "action": {"id": parts[5], "name": target["action_name"]},
+                "deployed": True, "status": "built", "code": self.code[target["trigger"]],
+                "built_at": "2026-10-19T00:00:00Z", "created_at": "2026-10-19T00:00:00Z",
+                "updated_at": "2026-10-19T00:00:00Z", "dependencies": [], "secrets": [],
+                "supported_triggers": [], "number": 1, "runtime": "node22"}
 
     def drift(self, index=0, code="old code"):
         self.code[sync.TARGETS[index]["trigger"]] = code
+
+
+def test_fake_version_has_live_keys():
+    version = FakeTransport().request(
+        "GET", "/api/v2/actions/actions/action-0/versions/version-1", token=TOKEN)
+    assert set(version) == LIVE_VERSION_KEYS
 
 
 class Runner:

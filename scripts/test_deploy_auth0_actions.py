@@ -19,6 +19,10 @@ SPEC.loader.exec_module(sync)
 DOMAIN = "fixture.us.auth0.com"
 SECRET = "sentinel-client-secret-do-not-print"
 TOKEN = "sentinel-management-token-do-not-print"
+LIVE_VERSION_KEYS = {
+    "action", "built_at", "code", "created_at", "dependencies", "deployed", "id",
+    "number", "runtime", "secrets", "status", "supported_triggers", "updated_at",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -99,8 +103,53 @@ class FakeTransport:
                     "deployed_version": {"id": action["version"]},
                     "code": "draft code must never be compared"}
         assert parts[6:] == ["versions", action["version"]]
-        return {"id": action["version"], "action_id": action_id,
-                "code": action["code"], "deployed": True, "status": "built"}
+        return {"id": action["version"], "action": {"id": action_id, "name": action["name"]},
+                "code": action["code"], "deployed": True, "status": "built",
+                "built_at": "2026-10-19T00:00:00Z", "created_at": "2026-10-19T00:00:00Z",
+                "updated_at": "2026-10-19T00:00:00Z", "dependencies": [], "secrets": [],
+                "supported_triggers": [], "number": 1, "runtime": "node22"}
+
+
+def test_fake_version_has_live_keys():
+    version = FakeTransport().request(
+        "GET", "/api/v2/actions/actions/action-0/versions/old-version", token=TOKEN)
+    assert set(version) == LIVE_VERSION_KEYS
+
+
+class VersionTransport:
+    def __init__(self, parent):
+        self.version = {"id": "version-1", "deployed": True, "status": "built",
+                        "code": "fixture code\r\n", **parent}
+
+    def request(self, method, path, *, token):
+        assert (method, path, token) == (
+            "GET", "/api/v2/actions/actions/action-0/versions/version-1", TOKEN)
+        return self.version
+
+
+@pytest.mark.parametrize("parent", [
+    {"action": {"id": "action-0"}},
+    {"action_id": "action-0"},
+    {"action": {"id": "action-0"}, "action_id": "action-0"},
+])
+def test_deployed_hash_accepts_matching_parent(parent):
+    fake = VersionTransport(parent)
+    assert sync._deployed_hash(fake, TOKEN, "action-0", "version-1") == (
+        sync.normalized_sha256(fake.version["code"]))
+
+
+@pytest.mark.parametrize("parent", [
+    {"action": {"id": "other-action"}},
+    {},
+    {"action": {"id": "action-0"}, "action_id": "other-action"},
+    {"action": {"id": "other-action"}, "action_id": "action-0"},
+    {"action": "action-0"},
+    {"action": {}},
+    {"action_id": None},
+])
+def test_deployed_hash_rejects_invalid_parent(parent):
+    with pytest.raises(sync.SyncError, match="^deployed_version_invalid$"):
+        sync._deployed_hash(VersionTransport(parent), TOKEN, "action-0", "version-1")
 
 
 def _check(fake, capsys):
