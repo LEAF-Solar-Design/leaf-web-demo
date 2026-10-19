@@ -33,7 +33,7 @@ def harness(monkeypatch, tmp_path):
         "responses": [
             (200, {"tenant_id": TENANT, "org_id": ORG, "intake": {"private": TOKEN}}),
             (200, {"tenant_id": TENANT, "org_id": ORG.upper()}),
-            (200, {"status": "verified", "private": TOKEN,
+            (200, {"status": "verified", "environment": "production", "private": TOKEN,
                    "services": {"platform": {"image_digest": DIGEST,
                                              "source_revision": COMMIT,
                                              "private": TOKEN}}}),
@@ -74,7 +74,8 @@ def test_happy_path(harness):
                                  "acceptance_org_match": True}
     assert result["spoof"] == {"status": 200, "honored": False}
     assert result["deployment_identity"] == {
-        "status": "verified", "services": {"platform": {"digest": DIGEST, "commit": COMMIT}}}
+        "status": "verified", "environment": "production",
+        "services": {"platform": {"digest": DIGEST, "commit": COMMIT}}}
     # Fixed independent canonical byte strings pin sorting and JSON encoding.
     assert result["capabilities"] == {
         "count": 2, "ids": ["alpha", "zeta"],
@@ -118,13 +119,34 @@ def test_spoof_403_is_refusal(harness):
 
 
 def test_mismatched_deployment_is_not_verified(harness):
-    harness["responses"][2][1]["status"] = "mismatch"
-    assert probe.main(harness["argv"]) == 1
-    result = snapshot(harness)
-    assert result["ok"] is False
-    assert result["failed_check"] == "deployment_identity_not_verified"
-    assert result["deployment_identity"]["status"] == "mismatch"
-    assert len(harness["calls"]) == 3
+    identity = copy.deepcopy(harness["responses"][2][1])
+    for status, environment_fields, requested_env, failed_check in [
+        ("mismatch", {"environment": "production"}, "production",
+         "deployment_identity_not_verified"),
+        ("verified", {"environment": "staging"}, "production",
+         "deployment_identity_environment_mismatch"),
+        ("verified", {}, "production", "deployment_identity_environment_mismatch"),
+        ("verified", {"environment": None}, "production",
+         "deployment_identity_environment_mismatch"),
+        ("verified", {"environment": 123}, "production",
+         "deployment_identity_environment_mismatch"),
+        ("verified", {"environment": "production"}, "staging",
+         "deployment_identity_environment_mismatch"),
+    ]:
+        body = copy.deepcopy(identity)
+        del body["environment"]
+        body.update(status=status, **environment_fields)
+        harness["responses"][2] = (200, body)
+        harness["calls"].clear()
+        assert probe.main(harness["argv"] + ["--env", requested_env]) == 1
+        result = snapshot(harness)
+        assert result["ok"] is False
+        assert result["failed_check"] == failed_check
+        assert result["deployment_identity"]["status"] == status
+        environment = environment_fields.get("environment")
+        assert result["deployment_identity"]["environment"] == (
+            environment if isinstance(environment, str) else None)
+        assert len(harness["calls"]) == 3
 
 
 @pytest.mark.parametrize("index,check", enumerate(

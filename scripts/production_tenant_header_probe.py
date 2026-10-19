@@ -134,7 +134,7 @@ def main(argv=None):
         "ok": False, "failed_check": None,
         "session": {"tenant_id": None, "org_id": None, "acceptance_org_match": False},
         "spoof": {"status": None, "honored": False},
-        "deployment_identity": {"status": None, "services": {}},
+        "deployment_identity": {"status": None, "environment": None, "services": {}},
         "capabilities": None, "tools": None,
     }
     headers = {"Authorization": "Bearer " + token,
@@ -185,6 +185,9 @@ def main(argv=None):
         services = body.get("services")
         snapshot["deployment_identity"]["status"] = (
             body.get("status") if isinstance(body.get("status"), str) else None)
+        environment = body.get("environment")
+        snapshot["deployment_identity"]["environment"] = (
+            environment if isinstance(environment, str) else None)
         if not isinstance(services, dict):
             raise _CheckFailed("deployment_identity_not_verified")
         snapshot["deployment_identity"]["services"] = {
@@ -194,6 +197,8 @@ def main(argv=None):
         }
         if body.get("status") != "verified":
             raise _CheckFailed("deployment_identity_not_verified")
+        if not isinstance(environment, str) or environment != args.env:
+            raise _CheckFailed("deployment_identity_environment_mismatch")
 
         for check in ("capabilities", "tools"):
             status, body = http_get(base_url, "/api/" + check, headers, args.timeout_s)
