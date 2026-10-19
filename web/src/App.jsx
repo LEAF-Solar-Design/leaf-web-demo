@@ -2397,6 +2397,7 @@ export default function App() {
         runPromise.then(settle, () => settle(null))
       }
     }
+    return runPromise
   }, [dismissRoute, mock, onRun, refuseProjectSolar, clearSolarFlowStaged])
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
@@ -2601,6 +2602,12 @@ export default function App() {
     return authorStage.stage(description, targetToolName, opts)
   }, [authorStage.stage])
 
+  const onTourAuthorSettled = useCallback((signal) => {
+    if (mock && tourOn && TOUR_STEPS[tourStepRef.current]?.id === 'author' && signal === authorSignal) {
+      setTourLanded(true)
+    }
+  }, [mock, tourOn, authorSignal])
+
   const onReviseAuthoredTool = useCallback((tool) => {
     if (!tool?.name || authorPendingRef.current) return
     setAuthorTargetTool(tool.name)
@@ -2618,35 +2625,31 @@ export default function App() {
   }, [])
 
   const onPublishAuthor = useCallback(async (staged) => {
-    try {
-      const res = await publishStagedAuthor(mock, staged)
-      const tool = res.tool || staged.tool
-      if (res.published) {
-        upsertTool(tool)
-        // The ribbon's Author cluster shows this tool from here on, and says
-        // honestly that it is not runnable until the catalog issues its digest.
-        setLastAuthoredTool(tool)
-        // Re-group the catalog so the new tool lands in "Custom authored tools"
-        // (visible re-fetch of the grouped capabilities).
-        loadCatalog()
-        // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
-        // it is visible even when the author section is collapsed / scrolled away.
-        showToast({
-          text: `Tool published: ${tool.name}`,
-          action: {
-            label: 'View',
-            onClick: () => {
-              setAuthorOpen(true)
-              setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
-            },
+    const res = await publishStagedAuthor(mock, staged)
+    const tool = res.tool || staged.tool
+    if (res.published) {
+      upsertTool(tool)
+      // The ribbon's Author cluster shows this tool from here on, and says
+      // honestly that it is not runnable until the catalog issues its digest.
+      setLastAuthoredTool(tool)
+      // Re-group the catalog so the new tool lands in "Custom authored tools"
+      // (visible re-fetch of the grouped capabilities).
+      loadCatalog()
+      // Authoring is a ~1-2 min agent run — surface completion as an NT2 toast so
+      // it is visible even when the author section is collapsed / scrolled away.
+      showToast({
+        text: `Tool published: ${tool.name}`,
+        action: {
+          label: 'View',
+          onClick: () => {
+            setAuthorOpen(true)
+            setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
           },
-        })
-        authorStage.completePublication()
-      }
-      return { ...res, tool }
-    } finally {
-      setTourLanded(true)
+        },
+      })
+      authorStage.completePublication()
     }
+    return { ...res, tool }
   }, [authorStage.completePublication, mock, loadCatalog, showToast, upsertTool])
 
   // "Run it now" from the author card — prefill the RUN lane (RoutePanel) with
@@ -2869,22 +2872,21 @@ export default function App() {
         tourDispatchRef.current = false
       }
       if (cannedSeq.current !== seq) return
-      if (r && r.lane === 'run' && step?.action === 'run') {
-        const toolObj = tools.find((t) => t.name === r.tool)
+      if (step?.action === 'run') {
+        const toolObj = tools.find((t) => t.name === r?.tool)
         const isWrite = (toolObj?.capabilities || []).includes('drawing.write')
-        if (toolObj && !isWrite) {
-          // Kept on ONE line: scripts/check_run_intent.mjs pins this exact
-          // call shape as the PR107 intent-contract witness.
-          onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection. Confirm before it runs.', 'tour')
-        }
+        if (r?.lane !== 'run' || !toolObj || isWrite) throw new Error('The guided tour could not select a read-only tool for this step.')
+        const armed = onRequestCatalogRun(toolObj, r.params || {}, 'Guided tour selection. Confirm before it runs.', 'tour')
+        if (!armed?.runIntent) throw new Error('The guided tour could not prepare this run. Try the request again.')
+        await onConfirmCatalogRun(armed.runIntent, toolObj, armed.runIntent.params)
       }
+    } catch (e) {
+      if (cannedSeq.current === seq) setRunErr(humanizeError(e))
     } finally {
-      // The BUILD lane hands off to AuthorPanel's auto-submit, whose onAuthor
-      // finally owns `landed` — flipping it here would unlock Next before the
-      // tool is actually authored, which is the whole differentiator beat.
-      if (cannedSeq.current === seq && !(r && r.lane === 'build')) setTourLanded(true)
+      // AuthorPanel reports staging only after its card or failure is rendered.
+      if (cannedSeq.current === seq && !(step?.action === 'author' && r?.lane === 'build')) setTourLanded(true)
     }
-  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, tools])
+  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools])
 
   const onTourStepChange = useCallback((index) => {
     tourStepRef.current = index
@@ -5532,6 +5534,7 @@ export default function App() {
           <PersistentSeat destination={paneSeats.authorTarget}>
             <AuthorPanel
               onAuthor={onAuthor}
+              onStageSettled={onTourAuthorSettled}
               onPublish={onPublishAuthor}
               onUseAuthored={onUseAuthored}
               seed={authorSeed}

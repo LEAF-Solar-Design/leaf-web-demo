@@ -86,9 +86,9 @@ export const TOUR_STEPS = [
     id: 'author',
     title: 'The part that is different',
     body:
-      'Ask for something that does not exist yet and Leaf writes a new reusable ' +
-      'tool: code you can read, keep and run again. Watch it write the code, ' +
-      'then Run it now.',
+      'Leaf stages a reusable tool as a card with code to review. ' +
+      'Publish adds it to this demo session; Run it now opens confirmation. ' +
+      'You can continue without publishing.',
     target: '.author-section, .workspace-card',
     prompt: 'build a tool that flags panels within 24 in of the roof edge',
     action: 'author',
