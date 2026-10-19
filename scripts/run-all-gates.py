@@ -2923,6 +2923,9 @@ def build_suites() -> List[Suite]:
               # only the supply envelope is refused at the provider's
               # digest-aware consumer-contract gate before any credential.
               SCRIPTS_DIR, _py_pytest("test_reconcile_staging_fleet.py"), 23),
+        Suite("production-tenant-header-probe",
+              "scripts test_production_tenant_header_probe.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_production_tenant_header_probe.py"), 18),
         # These entrypoint checks shipped with the instant-execution container
         # contract but were never registered in the aggregate gate. The mode
         # checks are hermetic file reads, so their measured counts are exact.
