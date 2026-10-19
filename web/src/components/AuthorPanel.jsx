@@ -249,6 +249,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
   // the wire, and this is the notice that says so.
   const [secretNotice, setSecretNotice] = useState(null)
   const lastSignal = useRef(null)
+  const previousTargetToolName = useRef(targetToolName)
   const reportedSettledSignal = useRef(null)
   const shownErrorRef = useRef(null)
   const startRef = useRef(null)
@@ -256,7 +257,13 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
   const descRef = useRef(null)
 
   useEffect(() => {
-    setDesc('')
+    // Reset only when switching targets. StrictMode replays mount effects,
+    // after the seed signal has already been consumed; clearing on that
+    // replay would erase the prefill when the studio reopens this panel.
+    if (previousTargetToolName.current !== targetToolName) {
+      previousTargetToolName.current = targetToolName
+      setDesc('')
+    }
     setErr(null)
     setAuthored(null)
     setPublishErr(null)

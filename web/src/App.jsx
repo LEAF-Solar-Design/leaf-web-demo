@@ -1653,10 +1653,20 @@ export default function App() {
   useEffect(() => {
     const pending = authorStage.pointer
     if (!pending) return
-    setAuthorTargetTool(pending.target_tool_name || null)
-    setAuthorSeed(pending.description || '')
-    setAuthorSignal((value) => value + 1)
+    const targetToolName = pending.target_tool_name || null
+    const description = pending.description || ''
+    // Restoring a different request re-seeds the panel. The pointer created by
+    // its own seeded submission must retain that signal: onStageSettled reports
+    // it after either a staged card or a failure becomes visible.
+    if (description !== authorSeed || targetToolName !== authorTargetTool) {
+      setAuthorTargetTool(targetToolName)
+      setAuthorSeed(description)
+      setAuthorSignal((value) => value + 1)
+    }
     setAuthorOpen(true)
+    // Restore only on a new request key: a later route's seed must survive
+    // while this pointer remains pending. The current render supplies the
+    // comparison above without making seed edits trigger restoration.
   }, [authorStage.pointer?.idempotency_key])
 
   // Tab-close survivability: on load in live mode, if a durable in-flight job
@@ -2891,9 +2901,10 @@ export default function App() {
   const onTourStepChange = useCallback((index) => {
     tourStepRef.current = index
     const stepId = TOUR_STEPS[index]?.id
+    if (stepId === 'author') onOpenAuthor()
     setTourStep(stepId)
     track('tour.step_reached', { step_id: stepId })
-  }, [])
+  }, [onOpenAuthor])
 
   const onTourExit = useCallback(() => {
     // Leaving the tour keeps you exactly where you are — in mock, on the same
@@ -3186,7 +3197,6 @@ export default function App() {
   const projectLayout = useProjectWorkspaceLayout({ mock, projectId: openProjectId, surface: activeSurface })
   const drawingViewport = useDrawingViewport(studioGround && groundShowsDrawing(activeSurface) ? studioGround : null, STUDIO_DRAWING_OCCLUDERS)
   drawingViewportRef.current = drawingViewport
-  revealProjectToolsRef.current = projectLayout.revealTools
   const onSelectSurface = useCallback((id) => {
     returnToDrawing()
     request(id)
@@ -3534,6 +3544,13 @@ export default function App() {
     }
   }, [drafting, surfaceSlots.toolbar.profile])
   const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
+  // Build routing and "Open author flow" both use setAuthorOpen. The studio
+  // must reveal the catalog too: its collapsed
+  // spine omits the author section and therefore the persistent panel's seat.
+  revealProjectToolsRef.current = () => {
+    projectLayout.revealTools()
+    if (studioShell) setNavExpanded(true)
+  }
   // Global key ladder, TABLE-DRIVEN from the action registry (slice 10a):
   // ⌘K summons the bar; Esc closes the topmost surface (drawer > history >
   // route/failed strip > running run > selection > open project); R retries the

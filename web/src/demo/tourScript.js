@@ -86,10 +86,11 @@ export const TOUR_STEPS = [
     id: 'author',
     title: 'The part that is different',
     body:
-      'Leaf stages a reusable tool as a card with code to review. ' +
-      'Publish adds it to this demo session; Run it now opens confirmation. ' +
-      'You can continue without publishing.',
-    target: '.author-section, .workspace-card',
+      'Signed in, Leaf writes a new reusable tool from this sentence: code you can read, ' +
+      'keep and run again. This signed out demo stops before building it.',
+    // The author flow lives in the studio's expanded catalog. The dock is
+    // always present while that section is being revealed.
+    target: '.author-section, .bar-dock',
     prompt: 'build a tool that flags panels within 24 in of the roof edge',
     action: 'author',
   },
