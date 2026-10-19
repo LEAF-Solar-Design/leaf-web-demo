@@ -377,9 +377,28 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar { position: relative; }
 }
 @media (min-width: 981px) {
-/* The Find field is viewport-fixed above the rail, so its own inset must clear the open rail. */
+/* Viewport-fixed canvas controls share an inset clear of the open catalog. */
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav:not([data-spine])) .drawing-navigation {
     left: calc(var(--ck-nav-width) + 8px);
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav:not([data-spine])) :is(.result-block, .cockpit-view, .drawing-objects-panel) {
+    left: calc(var(--ck-nav-width) + 8px);
+    overflow: auto;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav:not([data-spine])) :is(.drawing-navigation, .result-block, .cockpit-view, .drawing-objects-panel) {
+    max-width: calc(100vw - var(--ck-nav-width) - 24px);
+    box-sizing: border-box;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]:has(aside.nav:not([data-spine])) :is(.drawing-navigation, .result-block, .cockpit-view, .drawing-objects-panel) {
+    max-width: calc(100vw - var(--ck-nav-width) - var(--ck-rail-width) - 24px);
+  }
+/* Keep Find scrollable without clipping its absolutely positioned results. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav:not([data-spine])) .drawing-find-band {
+    overflow: auto; pointer-events: auto;
+  }
+/* Objects uses the next row below Find, including when its disclosure is open. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav:not([data-spine])) .drawing-objects-panel {
+    top: calc(var(--ck-canvas-top) + 82px);
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.nav:not([data-spine]) {
     position: fixed; left: 0; top: var(--ck-canvas-top); bottom: var(--ck-status); z-index: 5;

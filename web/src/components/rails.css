@@ -91,6 +91,7 @@ aside.job-inbox {
   margin-top: 12px;
   min-height: 0;
 }
+.job-inbox h2 .n { margin-left: 6px; }
 .inbox-row { border-top: 1px solid var(--border); padding: 8px 2px; display: flex; flex-direction: column; gap: 4px; }
 .inbox-row:first-child { border-top: 0; }
 .inbox-row-top { display: flex; align-items: center; gap: 8px; }
