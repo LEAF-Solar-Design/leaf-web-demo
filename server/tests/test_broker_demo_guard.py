@@ -20,7 +20,12 @@ import broker_demo_guard as guard
 import broker_pg_store
 
 
-TENANT = "demo-session-123"
+TENANT = "demo-12345678-9abc-4def-8123-456789abcdef"
+ORDINARY_DEMO_IDS = (
+    "demo-tenant", "demo-session-123", "demo-",
+    "demo-12345678-9ABC-4DEF-8123-456789ABCDEF",
+    "demo-123456789abc4def8123456789abcdef",
+)
 STATES = (
     "no_broker", "null_tier", "empty_tier", "demo_tier", "pro_tier",
     "disabled", "null_disabled", "no_session", "revoked", "expired",
@@ -97,16 +102,16 @@ def deny_state(db, state, monkeypatch):
         db.error = RuntimeError(state)
 
 
-def plan_request():
+def plan_request(tenant_id=TENANT):
     return broker.BrokerPlanRunRequest(
-        tenant_id=TENANT, dwg="drawing", dwg_version=1, ledger_event_key="event",
+        tenant_id=tenant_id, dwg="drawing", dwg_version=1, ledger_event_key="event",
         plan={"drawing_id": "drawing", "parent_version": 1, "mutations": {},
               "plan_sha256": "a" * 64, "source_sha256": "b" * 64})
 
 
-def invoke(action):
+def invoke(action, tenant_id=TENANT):
     tool = {"name": "read-test", "engine_op": "read"}
-    req = broker.BrokerRunRequest(tenant_id=TENANT, tool=tool, ledger_event_key="event")
+    req = broker.BrokerRunRequest(tenant_id=tenant_id, tool=tool, ledger_event_key="event")
     if action == "run_write":
         req.tool = {"name": "write-test", "engine_op": "write",
                     "capabilities": ["drawing.write"]}
@@ -114,13 +119,13 @@ def invoke(action):
         req.aps_live, req.dwg_version = True, 1
     if action in {"extract", "upload", "extract_internal"}:
         extract = broker.BrokerExtractRequest(
-            tenant_id=TENANT, upload=action == "upload", ledger_event_key="event")
+            tenant_id=tenant_id, upload=action == "upload", ledger_event_key="event")
         fn = broker._broker_extract if action == "extract_internal" else broker.broker_extract
         return fn(extract)
     if action == "plan":
-        return broker.broker_run_plan(plan_request())
+        return broker.broker_run_plan(plan_request(tenant_id))
     if action == "execute_plan":
-        return broker._execute_plan(plan_request(), broker.PLAN_TOOL, "write", 0, {})
+        return broker._execute_plan(plan_request(tenant_id), broker.PLAN_TOOL, "write", 0, {})
     if action == "execute":
         return broker._execute(req, tool, "read", 0, {})
     if action in {"admission", "replay"}:
@@ -129,7 +134,7 @@ def invoke(action):
         return broker._broker_run(req)
     if action == "feasibility":
         return broker.blank_dwg_feasibility(broker.BlankDwgFeasibilityRequest(
-            tenant_id=TENANT, project_id="project", ledger_event_key="event",
+            tenant_id=tenant_id, project_id="project", ledger_event_key="event",
             job_id="job", source_sha="a" * 40))
     return broker.broker_run(req)
 
@@ -210,6 +215,100 @@ def test_non_demo_unprovisioned_default_unchanged(authority, monkeypatch, mode):
     assert guard.demo_tenant_authorized("unprovisioned").authorized is True
     assert broker._demo_denial("unprovisioned") is None
     assert broker._tenant_tier("unprovisioned") == broker.entitlements.DEFAULT_TIER
+    assert authority.queries == []
+
+
+@pytest.mark.parametrize("tenant_id", ORDINARY_DEMO_IDS + (
+    TENANT + "\n", TENANT + "-extra", "x" + TENANT,
+))
+def test_only_canonical_demo_session_ids_are_guarded(tenant_id):
+    assert guard.is_demo_session_tenant(TENANT) is True
+    assert guard.is_demo_session_tenant(tenant_id) is False
+
+
+@pytest.mark.parametrize("mode", ["legacy", "postgres"])
+@pytest.mark.parametrize("tenant_id", ORDINARY_DEMO_IDS)
+@pytest.mark.parametrize("action", ACTIONS)
+def test_ordinary_demo_ids_reach_existing_action_behavior(
+        authority, monkeypatch, mode, tenant_id, action):
+    monkeypatch.setenv("LEAF_BROKER_STORE", mode)
+    monkeypatch.setenv("LEAF_DEMO_LIVE_ENABLED", "0")
+    authority.error = AssertionError("ordinary tenant consulted demo authority")
+    lookup = Mock(side_effect=AssertionError("ordinary tenant consulted demo authority"))
+    monkeypatch.setattr(guard, "_lookup_authorized", lookup)
+    # Ordinary kill-switch refusal and stored replay mark the existing paths
+    # after the demo guard. Neither needs extraction, source files or APS.
+    disabled = Mock(return_value=True)
+    monkeypatch.setattr(broker, "tenant_disabled", disabled)
+    monkeypatch.setattr(broker, "_get_usage", lambda: None)
+    monkeypatch.setattr(broker, "_ledger_append", Mock())
+    monkeypatch.setattr(broker, "_emit_aps_metric", Mock())
+    store = Mock()
+    store.tenant.return_value = None
+    saved = {"ok": True, "result": "ordinary stored success"}
+    store.admit_run.return_value = {"status": "replay", "http_status": 200, "result": saved}
+    monkeypatch.setattr(broker, "_postgres_store", lambda: store)
+    @contextmanager
+    def open_fence():
+        yield None
+    monkeypatch.setattr(broker.write_loop, "drawing_mutation_refusal_guard", open_fence)
+    monkeypatch.setattr(broker.write_loop, "upload_mutation_refusal_guard", open_fence)
+    env, status = unpack(invoke(action, tenant_id))
+    if action == "feasibility":
+        assert status == 400
+        assert env["error"]["error_code"] == broker.ErrorCode.BAD_PARAMS
+        assert env["error"]["reason_code"] == "blank_dwg_scope_invalid"
+        disabled.assert_not_called()
+        store.admit_run.assert_not_called()
+    elif mode == "postgres" and action in {
+            "run", "run_write", "plan", "admission", "replay", "source_read", "run_internal"}:
+        assert (env, status) == (saved, 200)
+        assert store.admit_run.call_count == 1
+        assert store.admit_run.call_args.args[:2] == ("event", tenant_id)
+        disabled.assert_not_called()
+    else:
+        assert status == broker.DEFAULT_HTTP_STATUS[broker.ErrorCode.TENANT_DISABLED]
+        assert env["error"]["error_code"] == broker.ErrorCode.TENANT_DISABLED
+        disabled.assert_called_once_with(tenant_id)
+        store.admit_run.assert_not_called()
+    lookup.assert_not_called()
+    assert authority.queries == []
+
+
+@pytest.mark.parametrize("mode", ["legacy", "postgres"])
+@pytest.mark.parametrize("tenant_id", ORDINARY_DEMO_IDS)
+def test_ordinary_demo_ids_keep_tiers_and_operator_storage(
+        authority, monkeypatch, mode, tenant_id):
+    monkeypatch.setenv("LEAF_BROKER_STORE", mode)
+    monkeypatch.setenv("LEAF_DEMO_LIVE_ENABLED", "0")
+    monkeypatch.setattr(broker, "_tenants", {})
+    monkeypatch.delenv("LEAF_BROKER_TENANT_TIERS", raising=False)
+    store = Mock()
+    store.tenant.return_value = None
+    monkeypatch.setattr(broker, "_postgres_store", lambda: store)
+    save = Mock()
+    monkeypatch.setattr(broker, "_save_tenants", save)
+    assert guard.demo_tenant_authorized(tenant_id).authorized is True
+    assert broker._tenant_tier(tenant_id) == broker.entitlements.DEFAULT_TIER
+    assert broker.tenant_disabled(tenant_id) is False
+    monkeypatch.setenv("LEAF_BROKER_TENANT_TIERS", json.dumps({tenant_id: "hosted_pro"}))
+    assert broker._tenant_tier(tenant_id) == (
+        "hosted_pro" if mode == "legacy" else broker.entitlements.DEFAULT_TIER)
+    monkeypatch.setattr(broker, "_tenants", {tenant_id: {"tier": "restricted", "disabled": True}})
+    store.tenant.return_value = {"tier": "restricted", "disabled": True}
+    assert broker._tenant_tier(tenant_id) == "restricted"
+    assert broker.tenant_disabled(tenant_id) is True
+    broker.enable_tenant(tenant_id)
+    broker.disable_tenant(tenant_id)
+    if mode == "postgres":
+        assert store.set_tenant_disabled.call_args_list == [
+            call(tenant_id, False), call(tenant_id, True)]
+        save.assert_not_called()
+    else:
+        store.set_tenant_disabled.assert_not_called()
+        assert save.call_count == 2
+        assert broker._tenants[tenant_id]["disabled"] is True
+        assert broker._tenants[tenant_id]["tier"] == "restricted"
     assert authority.queries == []
 
 

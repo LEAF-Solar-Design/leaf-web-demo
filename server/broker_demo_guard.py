@@ -2,7 +2,16 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import NamedTuple
+
+
+def is_demo_session_tenant(tenant_id: str) -> bool:
+    """Match only the canonical lowercase UUID tenant ids minted by demo_sessions."""
+    return re.fullmatch(
+        r"demo-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        tenant_id,
+    ) is not None
 
 
 class DemoGuardResult(NamedTuple):
@@ -28,7 +37,7 @@ def _lookup_authorized(tenant_id: str) -> bool:
 
 def demo_tenant_authorized(tenant_id: str) -> DemoGuardResult:
     """Return an explicit decision; unavailable authority always denies demo work."""
-    if not tenant_id.startswith("demo-"):
+    if not is_demo_session_tenant(tenant_id):
         return DemoGuardResult(True)
     if os.environ.get("LEAF_DEMO_LIVE_ENABLED") != "1":
         return DemoGuardResult(False)

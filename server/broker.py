@@ -10,6 +10,8 @@ Also the attribution + quota + kill-switch chokepoint:
   - POST /broker/tenants/{tid}/disable|enable flips a persisted kill-switch
   - an in-process egress allowlist guards every outbound HTTP request
 
+Demo-session tenants are exactly demo- followed by a canonical lowercase UUID;
+other ids, including the default demo-tenant, keep ordinary tenant behavior.
 Demo execution/read actions guarded before any work: /broker/run (including
 source reads), /broker/run-plan, /broker/extract (library and upload), and
 /broker/blank-dwg/feasibility. Admission and stored-result replay are guarded
@@ -100,7 +102,7 @@ import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 import platform_link  # noqa: E402  (collision-safe leaf_platform store loader)
 from jobs import PLAN_TOOL, PLAN_TOOL_NAME  # noqa: E402
 from broker_pg_store import normalize_ledger_job_id  # noqa: E402
-from broker_demo_guard import demo_tenant_authorized  # noqa: E402
+from broker_demo_guard import demo_tenant_authorized, is_demo_session_tenant  # noqa: E402
 
 try:  # noqa: E402 - APS domain metrics via CloudWatch EMF; best-effort, optional
     import emf_metrics
@@ -292,7 +294,7 @@ def tenant_disabled(tid: str) -> bool:
     disables, because "I cannot tell whether this tenant is killed" has one safe
     answer.
     """
-    if tid.startswith("demo-"):
+    if is_demo_session_tenant(tid):
         return not demo_tenant_authorized(tid).authorized
     if _broker_store_mode() == "postgres":
         rec = _postgres_store().tenant(tid)
@@ -313,7 +315,7 @@ def tenant_disabled(tid: str) -> bool:
 
 def set_tenant_disabled(tid: str, disabled: bool) -> None:
     global _tenants
-    if tid.startswith("demo-") or _broker_store_mode() == "postgres":
+    if is_demo_session_tenant(tid) or _broker_store_mode() == "postgres":
         _postgres_store().set_tenant_disabled(tid, disabled)
         return
     with _tenants_lock:
@@ -998,7 +1000,7 @@ def _provisioned_tier(tenant_id: str) -> Optional[str]:
 
 
 def _tenant_tier(tenant_id: str) -> str:
-    if tenant_id.startswith("demo-"):
+    if is_demo_session_tenant(tenant_id):
         # Authorization is a separate explicit decision at the work boundary.
         # Never let an env/local override broaden an authorized demo's tier.
         return "demo_live"
