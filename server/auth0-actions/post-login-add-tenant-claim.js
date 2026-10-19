@@ -25,6 +25,11 @@
  *   tier      = PLAN_TIER[plan]  (DeploymentTier enum; default hosted_starter).
  *               Surface-only — the server does NOT enforce entitlement here.
  *
+ * Optional app_metadata.leaf_platform_tenant_by_client overrides the platform
+ * tenant for an Auth0 client id. Production and staging share an Auth0 tenant
+ * and user records but have per-environment identity bindings (issue #2); this
+ * map, keyed by Auth0 client id, lets either binding change independently.
+ *
  * SUBSCRIPTION-LAPSE OVERRIDE (2026-07-20):
  *   app_metadata.leaf.subscription_active and .subscription_status are
  *   SIBLINGS of .plan (confirmed: leaf_website/lib/auth0.ts SubscriptionMetadata,
@@ -105,7 +110,20 @@ function deriveClaims(event) {
   const orgId = leaf.organization_id || null;
   // Kept at app_metadata root so leaf_website subscription PATCHes can replace
   // app_metadata.leaf without erasing the platform identity binding.
-  const platformTenantId = appMetadata.leaf_platform_tenant_id || null;
+  let platformTenantId = appMetadata.leaf_platform_tenant_id || null;
+  const tenantByClient = appMetadata.leaf_platform_tenant_by_client;
+  const clientId = event && event.client && event.client.client_id;
+  if (tenantByClient !== null && typeof tenantByClient === 'object' &&
+      (Object.getPrototypeOf(tenantByClient) === Object.prototype ||
+       Object.getPrototypeOf(tenantByClient) === null) &&
+      typeof clientId === 'string' &&
+      Object.prototype.hasOwnProperty.call(tenantByClient, clientId)) {
+    const clientTenantId = tenantByClient[clientId];
+    if (typeof clientTenantId === 'string' &&
+        clientTenantId.length > 0 && clientTenantId.length <= 200) {
+      platformTenantId = clientTenantId;
+    }
+  }
   const sub = user.user_id || user.sub || null;
   const tenantId = platformTenantId || orgId || sub;
   const plan = (leaf.plan || '').toString().toLowerCase();
