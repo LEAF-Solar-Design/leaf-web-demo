@@ -26,7 +26,7 @@ CHECKS = (
 
 
 @pytest.fixture
-def probe(monkeypatch):
+def probe(monkeypatch, tmp_path):
     # Match the flat-import image entrypoint, retaining stdlib/site-packages.
     monkeypatch.setattr(sys, "path", [str(SERVER)] + [
         p for p in sys.path if p not in {str(SERVER), str(SERVER.parent), ""}
@@ -35,6 +35,9 @@ def probe(monkeypatch):
     spec = importlib.util.spec_from_file_location("production_boot_probe", SERVER / "boot_probe.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_migrations_dir", lambda: tmp_path)
+    for name in ("0070.sql", "0075.sql"):
+        (tmp_path / name).write_text("SELECT 1;", encoding="utf-8")
     assert sys.path[0] == str(SERVER)
     assert str(SERVER.parent) not in sys.path
     # This is the only validator that can contact a DB. The Step 1 pin is
@@ -94,10 +97,80 @@ def test_production_shape_schema_outcomes(probe, env, capsys, schema, expected):
     assert payload["schema"] == {
         "pending": schema["missing_migrations"],
         "drift": sorted(schema["migration_hash_drift"] + schema["unknown_migrations"]),
+        "unexplained": [],
     }
     assert dict(os.environ) == before
     assert sys.path == path
     assert "app" not in sys.modules
+
+
+@pytest.mark.parametrize("sql,defects,expected,unexplained", [
+    ("CREATE INDEX ix_widget_owner ON widgets (owner_id);",
+     {"invalid_indexes": ["ix_widget_owner"]}, 0, []),
+    ("SELECT 1;", {"invalid_indexes": ["ix_other"]}, 10, ["ix_other"]),
+    ('ALTER TABLE "widgets" ADD COLUMN owner_id integer;',
+     {"missing": {"widgets": ["owner_id"]}}, 0, []),
+    ("ALTER TABLE widgets ADD COLUMN other_id integer;",
+     {"missing": {"widgets": ["owner_id"]}}, 10, ["widgets.owner_id"]),
+    ("CREATE INDEX ix_widget_owner_v2 ON widgets (owner_id);",
+     {"invalid_indexes": ["ix_widget_owner"]}, 10, ["ix_widget_owner"]),
+    ('CREATE INDEX "IX_WIDGET_OWNER" ON widgets (owner_id);',
+     {"invalid_indexes": ["ix_widget_owner:not-valid-ready"]}, 0, []),
+    ("SELECT 1;", {"invalid_constraints": ["ck_widget"],
+                    "invalid_triggers": ["tr_widget"],
+                    "missing_indexes": ["ix_widget"]},
+     10, ["ck_widget", "ix_widget", "tr_widget"]),
+    ("SELECT 1;", {}, 0, []),
+])
+def test_pending_migrations_explain_only_named_defects(
+        probe, env, capsys, tmp_path, sql, defects, expected, unexplained):
+    (tmp_path / "0075_x.sql").write_text(sql, encoding="utf-8")
+    code = probe.run(env, lambda: status(pending=["0075_x.sql"], **defects))
+    assert code == expected
+    payload = result(capsys, code)
+    assert payload["schema"]["unexplained"] == unexplained
+    assert [failure["check"] for failure in payload["failures"]] == (
+        ["schema_status"] if expected else [])
+    assert "app" not in sys.modules
+
+
+def test_pending_column_identifiers_must_share_one_file(probe, env, capsys, tmp_path):
+    (tmp_path / "0070.sql").write_text("ALTER TABLE widgets;", encoding="utf-8")
+    (tmp_path / "0075.sql").write_text("SELECT owner_id;", encoding="utf-8")
+    code = probe.run(env, lambda: status(
+        pending=["0070.sql", "0075.sql"], missing={"widgets": ["owner_id"]}))
+    assert code == 10
+    assert result(capsys, code)["schema"]["unexplained"] == ["widgets.owner_id"]
+
+
+def test_unreadable_pending_migration_fails_closed(probe, env, capsys):
+    code = probe.run(env, lambda: status(pending=["0075_absent.sql"]))
+    assert code == 10
+    payload = result(capsys, code)
+    assert [failure["check"] for failure in payload["failures"]] == ["schema_status"]
+    assert payload["schema"]["unexplained"] == []
+
+
+@pytest.mark.parametrize("size,expected", [(2 * 1024 * 1024, 0), (2 * 1024 * 1024 + 1, 10)])
+def test_pending_migration_size_bound(probe, env, capsys, tmp_path, size, expected):
+    (tmp_path / "0075_x.sql").write_bytes(b" " * size)
+    code = probe.run(env, lambda: status(pending=["0075_x.sql"]))
+    assert code == expected
+    payload = result(capsys, code)
+    assert [failure["check"] for failure in payload["failures"]] == (
+        ["schema_status"] if expected else [])
+
+
+@pytest.mark.parametrize("count,expected", [(64, 0), (65, 10)])
+def test_pending_migration_count_bound(probe, env, capsys, tmp_path, count, expected):
+    pending = [f"{number:04d}_x.sql" for number in range(count)]
+    for name in pending:
+        (tmp_path / name).write_text("SELECT 1;", encoding="utf-8")
+    code = probe.run(env, lambda: status(pending=pending))
+    assert code == expected
+    payload = result(capsys, code)
+    assert [failure["check"] for failure in payload["failures"]] == (
+        ["schema_status"] if expected else [])
 
 
 @pytest.mark.parametrize("module,name", CHECKS)
