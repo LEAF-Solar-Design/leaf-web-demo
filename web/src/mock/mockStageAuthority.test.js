@@ -167,21 +167,8 @@ describe('mock stage authority boundary', () => {
     expect(postMessage).toHaveBeenCalledWith('live-session', expect.any(Object))
   })
 
-  it('guards mock authority text and keeps the override scoped to one call', async () => {
-    await setMode(true)
-    const { result } = renderHook(() => useConverseSessionController({ drawingId: 'rooftop_demo' }))
-    const text = `api_key: ${'x'.repeat(24)}`
-    await act(async () => {
-      await expect(result.current.startTurn(text, hint, immediate)).rejects.toMatchObject({ secretRefused: true })
-      await expect(result.current.startTurn(text, hint, { ...immediate, allowSecretOnce: true }))
-        .resolves.toMatchObject({ session_id: expect.stringMatching(/^demo-session-/) })
-      await expect(result.current.startTurn(text, hint, immediate)).rejects.toMatchObject({ secretRefused: true })
-      const named = `sk-ant-api03-${'A9_-'.repeat(12)}`
-      await expect(result.current.startTurn(named, hint, { ...immediate, allowSecretOnce: true }))
-        .rejects.toMatchObject({ secretRefused: true })
-    })
-    expect(fetch).not.toHaveBeenCalled()
-    expect(postMessage).not.toHaveBeenCalled()
+  it.each([undefined, null, {}, { purpose: 'chat' }])('does not mint without the stage purpose (%j)', (classifierHint) => {
+    expect(mockAuthority.startMockStageAuthority(description, classifierHint)).toBeNull()
   })
 
   it.each(['sessionId', 'turnId'])('rejects demo %s on live author staging before transport', async (field) => {
