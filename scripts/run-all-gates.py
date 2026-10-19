@@ -1773,9 +1773,11 @@ def build_suites() -> List[Suite]:
         # same 13 executed / 0 skipped as an operator box (runs 30251486524 and
         # 30250680397). Left at 12 the suite passed with a standing drift note,
         # so the next test added here could have vanished behind it unnoticed.
+        # Add 25 production env-shape boot cases to the 13 startup cases.
         Suite("server-platform-postgres-startup",
-              "server tests/test_platform_postgres_startup.py", "pytest", SERVER,
-              _py_pytest("tests/test_platform_postgres_startup.py"), 13),
+              "server PostgreSQL startup and production env-shape boot", "pytest", SERVER,
+              _py_pytest("tests/test_platform_postgres_startup.py") +
+              ["tests/test_production_env_shape_boot.py"], 38),
         # Floor 46, re-measured 2026-08-07 after merging origin/main. THE MERGE
         # IS WHY THIS LINE NEEDS READING TWICE: this branch raised it 43 -> 45
         # for two new cases, main separately added
