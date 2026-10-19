@@ -56,12 +56,21 @@ Namespace prefix is configurable via `LEAF_TENANT_CLAIM_NS` (default
 **Derivation** (in the Action, from `event.user.app_metadata.leaf`, the shape
 leaf_website already stores — see `leaf_website/lib/auth0.ts SubscriptionMetadata`):
 
-- `tenant_id` = `leaf.organization_id`, else the Auth0 `sub` (a single-user
-  tenant until they create/join an org).
+- `tenant_id` = `app_metadata.leaf_platform_tenant_id`, else
+  `leaf.organization_id`, else the Auth0 `sub` (a single-user tenant until
+  they create/join an org).
 - `org_id` = `leaf.organization_id` (null for a solo user).
 - `tier` = `PLAN_TIER[leaf.plan]` mapped onto the orchestration platform's
   `DeploymentTier` enum (default `hosted_starter`). **Surface-only** — this lane does NOT enforce
   entitlement; downstream (credential broker / metering) consumes the tier.
+
+Optional `app_metadata.leaf_platform_tenant_by_client` is a plain object keyed
+by Auth0 client id: an own entry for `event.client.client_id` with a non-empty
+string value of at most 200 characters takes precedence over
+`leaf_platform_tenant_id` and the remaining tenant fallbacks. Missing or invalid
+entries leave that chain unchanged. This lets production and staging share an
+Auth0 tenant and user record while maintaining independent per-environment
+identity bindings (issue #2).
 
 > **Update (Wave 5, §17):** the `tier` claim now **DRIVES entitlement enforcement**
 > server-side — `run_read` / `run_write` / `build` per tier via `server/entitlements.py`

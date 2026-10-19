@@ -3,10 +3,72 @@
 const assert = require('node:assert/strict');
 const action = require('./post-login-add-tenant-claim');
 
-function event(appMetadata, authzRoles) {
+function event(appMetadata, authzRoles, clientId) {
   const e = { user: { user_id: 'auth0|test', app_metadata: appMetadata || {} } };
   if (authzRoles !== undefined) e.authorization = { roles: authzRoles };
+  if (clientId !== undefined) e.client = { client_id: clientId };
   return e;
+}
+
+// A shared user's client override takes precedence only for the named client.
+{
+  const metadata = {
+    leaf_platform_tenant_id: 'tenant-default',
+    leaf_platform_tenant_by_client: { stg: 'tenant-staging' },
+    leaf: { organization_id: 'org-test' },
+  };
+  assert.equal(action.deriveClaims(event(metadata, undefined, 'stg')).tenant_id,
+    'tenant-staging');
+  assert.equal(action.deriveClaims(event(metadata, undefined, 'prod')).tenant_id,
+    'tenant-default');
+  assert.equal(action.deriveClaims(event(metadata)).tenant_id, 'tenant-default');
+  assert.equal(action.deriveClaims(event(metadata, undefined, 123)).tenant_id,
+    'tenant-default');
+}
+
+// Malformed maps and invalid values leave the existing platform tenant intact.
+for (const map of [
+  Object.assign([], { stg: 'tenant-staging' }),
+  null,
+  123,
+  { stg: 123 },
+  { stg: '' },
+  { stg: 'x'.repeat(201) },
+  Object.create({ stg: 'tenant-inherited' }),
+  new Date(),
+]) {
+  assert.equal(action.deriveClaims(event({
+    leaf_platform_tenant_id: 'tenant-default',
+    leaf_platform_tenant_by_client: map,
+  }, undefined, 'stg')).tenant_id, 'tenant-default');
+}
+
+// Own-key lookup also ignores Object.prototype properties on a plain map.
+assert.equal(action.deriveClaims(event({
+  leaf_platform_tenant_id: 'tenant-default',
+  leaf_platform_tenant_by_client: {},
+}, undefined, 'toString')).tenant_id, 'tenant-default');
+
+// The maximum length is accepted, including on a map with no prototype.
+{
+  const map = Object.create(null);
+  map.stg = 'x'.repeat(200);
+  assert.equal(action.deriveClaims(event({
+    leaf_platform_tenant_by_client: map,
+  }, undefined, 'stg')).tenant_id, map.stg);
+}
+
+// An unmapped client with no default retains the organization -> sub fallback.
+{
+  const metadata = {
+    leaf_platform_tenant_by_client: { stg: 'tenant-staging' },
+    leaf: { organization_id: 'org-test' },
+  };
+  assert.equal(action.deriveClaims(event(metadata, undefined, 'prod')).tenant_id,
+    'org-test');
+  assert.equal(action.deriveClaims(event({
+    leaf_platform_tenant_by_client: metadata.leaf_platform_tenant_by_client,
+  }, undefined, 'prod')).tenant_id, 'auth0|test');
 }
 
 // 16 valid role names that ALL sort before 'platform_admin'.
