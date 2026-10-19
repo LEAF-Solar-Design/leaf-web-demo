@@ -2390,7 +2390,9 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_soft_delete_guard_static.py",
                  f"{repo_name}/platform/tests/test_identity_display_name_static.py",
                  f"{repo_name}/platform/tests/test_binding_grant_static.py",
-                 f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py"], 212,  # +1 acceptance readiness
+                 f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py",
+                 f"{repo_name}/platform/tests/test_org_self_provision_gate_static.py"  # SP2 invite-only org gate
+                 ], 238,  # +26 SP2 invite-only org gate
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or

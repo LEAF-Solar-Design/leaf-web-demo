@@ -140,12 +140,12 @@ def _platform_client():
 @requires_db
 def test_A_create_org_roundtrip_and_shape():
     c = _platform_client()
-    r = c.post("/api/orgs", json={"name": "Wave2 Org", "tier": "hosted_pro"})
+    r = c.post("/api/orgs", json={"name": "Wave2 Org"})
     assert r.status_code == 200, r.text
     org = r.json()["org"]
     assert uuid.UUID(org["org_id"])
     assert org["name"] == "Wave2 Org"
-    assert org["tier"] == "hosted_pro"
+    assert org["tier"] == "hosted_starter"
     assert org["status"] == "active"
     assert isinstance(org["created_at"], str) and org["created_at"]
     # the contract's declared fields are all present
@@ -161,6 +161,8 @@ def test_A_create_org_default_tier_and_invalid_tier():
 
     bad = c.post("/api/orgs", json={"name": "x", "tier": "gold"})
     assert bad.status_code == 422, bad.text
+    paid = c.post("/api/orgs", json={"name": "x", "tier": "hosted_pro"})
+    assert paid.status_code == 422, paid.text
 
 
 @requires_db

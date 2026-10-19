@@ -83,6 +83,8 @@ def _bind_as(org, subject: str, role: str):
 def live_auth(monkeypatch):
     """Turn Auth0 verification ON, pointed at the local RS256 JWKS (no network)."""
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    # These tests exercise bootstrap; gate denial is covered by the static tests.
+    monkeypatch.setenv("LEAF_ORG_SELF_PROVISION", "1")
     monkeypatch.setenv("LEAF_AUTH0_ISSUER", ISS)
     monkeypatch.setenv("LEAF_AUTH0_AUDIENCE", AUD)
     monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", NS)

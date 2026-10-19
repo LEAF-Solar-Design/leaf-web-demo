@@ -129,7 +129,7 @@ def test_sip_r1_gate_registration():
         assert suite.db_gated is gated
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
-    assert suites["platform-static"].expected == 212  # 2026-10-19: +1 acceptance readiness contract (su-a2a).
+    assert suites["platform-static"].expected == 238  # 2026-10-19: +26 SP2 invite-only org gate.
     assert suites["platform"].expected == 1178  # 2026-10-13: measured with ten R14-E rows.
     assert suites["gate-runner-selftest"].expected == 239  # R14-E, PP-3 record A and su-a4a registrations.
     assert suites["server-postgres-authority-inventory"].expected == 9
@@ -490,7 +490,8 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # Added test_binding_grant_static.py (6 tests) and
     # test_binding_grant_issuance_static.py (20 tests) on 2026-09-28: 182 -> 208.
     # Added test_acceptance_schema_readiness_contract on 2026-10-19: 211 -> 212.
-    assert static.expected == 212
+    # Added +26 SP2 invite-only org gate on 2026-10-19: 212 -> 238.
+    assert static.expected == 238
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv

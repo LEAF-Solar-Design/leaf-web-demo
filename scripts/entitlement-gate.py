@@ -230,7 +230,7 @@ def run_remote_devseam_with_restricted(base_url: str, restricted_org_id: str) ->
             except Exception:
                 return e.code, {}
 
-    st, body = post("/api/orgs", {"name": "gate-entitled", "tier": "hosted_starter"}, {})
+    st, body = post("/api/orgs", {"name": "gate-entitled"}, {})
     if st != 200:
         _fail(f"entitled org bootstrap failed ({st}): {body}")
     for org_id, label, denied in (

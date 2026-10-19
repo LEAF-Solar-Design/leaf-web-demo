@@ -177,6 +177,12 @@ class ReviewSignatureBody(BaseModel):
 # --------------------------------------------------------------------------- #
 # orgs — the tenant anchor every project/job route requires
 # --------------------------------------------------------------------------- #
+def _org_self_provision_allowed() -> bool:
+    # Fail closed unless self-provisioning or a named non-production runtime is explicit.
+    return (os.environ.get("LEAF_ORG_SELF_PROVISION") == "1"
+            or os.environ.get("LEAF_RUNTIME_ENV") in {"staging", "development", "test", "local"})
+
+
 # DEV POSTURE (open endpoint) vs LIVE AUTH (F6): POST /api/orgs mints an org.
 # With auth OFF (demo) it is UNGATED so the demo can bootstrap the first org_id
 # (chicken/egg: you cannot present an org you do not yet have). With
@@ -187,10 +193,14 @@ class ReviewSignatureBody(BaseModel):
 # isolation posture as the project/job reads: a caller may only read THEIR OWN
 # org, and a cross-org (or unknown) org yields 404. In live-auth mode the caller
 # org is the VERIFIED session's org (deps.get_org_id), never the X-Org-Id header.
+# Live auth is invite-only for unbound verified subjects unless explicitly enabled
+# by LEAF_ORG_SELF_PROVISION=1 or LEAF_RUNTIME_ENV=staging/development/test/local.
+# Existing active bindings remain authoritative; client identity hints are refused.
+# Auth-off demo bootstrap stays open. Tiers are always server-derived.
 @router.post("/orgs")
 def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)):
-    if body.tier is not None and body.tier not in TIERS:
-        raise HTTPException(status_code=422, detail=f"tier must be one of {list(TIERS)}")
+    if body.tier is not None:
+        raise HTTPException(status_code=422, detail="tier is server-derived; clients never set it")
     if _auth is not None:
         # Live auth: identity comes from the VERIFIED token only. A body-supplied
         # subject is refused loudly rather than silently ignored, so a miswired
@@ -210,10 +220,12 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
                        "Contact your workspace administrator to complete provisioning, "
                        "then sign in again.",
             )
+        if binding is None and not _org_self_provision_allowed():
+            raise HTTPException(status_code=403, detail="invite_only")
         try:
             org, created = store.ensure_org_with_identity(
                 body.name, "auth0", str(subject),
-                tier=body.tier or "hosted_starter",
+                tier="hosted_starter",
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -223,14 +235,13 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
         try:
             org = store.create_org_with_identity(
                 body.name, body.external_authority, body.external_subject,
-                tier=body.tier or "hosted_starter",
+                tier="hosted_starter",
             )
             created = True
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
     else:
-        org = (store.create_org(body.name, tier=body.tier) if body.tier is not None
-               else store.create_org(body.name))
+        org = store.create_org(body.name)
         created = True
     if created:
         _emit_org_event("org.created", str(org.org_id), {"tier": org.tier})
