@@ -1836,6 +1836,8 @@ def build_suites() -> List[Suite]:
         Suite("server-agent-ops-postgres", "server tests/test_agent_ops_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_agent_ops_postgres.py"), 6,
               uses_database=True, database_skip_reasons=(r"DATABASE_URL is not set",)),
+        Suite("server-broker-demo-guard", "server tests/test_broker_demo_guard.py",
+              "pytest", SERVER, _py_pytest("tests/test_broker_demo_guard.py"), 413),
         Suite("server-broker-pg-store", "server tests/test_broker_pg_store.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_pg_store.py"), 28,
               uses_database=True, database_skip_reasons=(r"DATABASE_URL is not configured",)),
