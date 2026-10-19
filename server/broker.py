@@ -10,6 +10,16 @@ Also the attribution + quota + kill-switch chokepoint:
   - POST /broker/tenants/{tid}/disable|enable flips a persisted kill-switch
   - an in-process egress allowlist guards every outbound HTTP request
 
+Demo execution/read actions guarded before any work: /broker/run (including
+source reads), /broker/run-plan, /broker/extract (library and upload), and
+/broker/blank-dwg/feasibility. Admission and stored-result replay are guarded
+as part of those actions, as are the internal execution entry points.
+Operator/recovery actions remain available with their existing authentication:
+/broker/tenants/{tid}/disable and /enable, /broker/reap, and
+/broker/admin/admissions/executing, /{event_key}, /{event_key}/resolve.
+Demo enable/disable writes always target PostgreSQL, including in legacy mode.
+/broker/health is process health; /da/callback completes already-submitted work.
+
 Run:  cd server && uvicorn broker:app --port 8140   (env BROKER_PORT for python broker.py)
 
 Env:
@@ -90,6 +100,7 @@ import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 import platform_link  # noqa: E402  (collision-safe leaf_platform store loader)
 from jobs import PLAN_TOOL, PLAN_TOOL_NAME  # noqa: E402
 from broker_pg_store import normalize_ledger_job_id  # noqa: E402
+from broker_demo_guard import demo_tenant_authorized  # noqa: E402
 
 try:  # noqa: E402 - APS domain metrics via CloudWatch EMF; best-effort, optional
     import emf_metrics
@@ -281,6 +292,8 @@ def tenant_disabled(tid: str) -> bool:
     disables, because "I cannot tell whether this tenant is killed" has one safe
     answer.
     """
+    if tid.startswith("demo-"):
+        return not demo_tenant_authorized(tid).authorized
     if _broker_store_mode() == "postgres":
         rec = _postgres_store().tenant(tid)
         return bool(rec["disabled"]) if rec is not None else False
@@ -300,7 +313,7 @@ def tenant_disabled(tid: str) -> bool:
 
 def set_tenant_disabled(tid: str, disabled: bool) -> None:
     global _tenants
-    if _broker_store_mode() == "postgres":
+    if tid.startswith("demo-") or _broker_store_mode() == "postgres":
         _postgres_store().set_tenant_disabled(tid, disabled)
         return
     with _tenants_lock:
@@ -985,10 +998,35 @@ def _provisioned_tier(tenant_id: str) -> Optional[str]:
 
 
 def _tenant_tier(tenant_id: str) -> str:
+    if tenant_id.startswith("demo-"):
+        # Authorization is a separate explicit decision at the work boundary.
+        # Never let an env/local override broaden an authorized demo's tier.
+        return "demo_live"
     provisioned = _provisioned_tier(tenant_id)
     if provisioned is None:
         return entitlements.DEFAULT_TIER  # no verified tier at the broker -> friction-free demo
     return entitlements.resolve_tier(_TenantTier(provisioned))
+
+
+def _demo_denial(tenant_id: str) -> Optional[Tuple[Dict[str, Any], int]]:
+    if demo_tenant_authorized(tenant_id).authorized:
+        return None
+    return (err_envelope(
+        ErrorCode.FORBIDDEN, "demo tenant is not authorized for broker work",
+        retryable=False,
+    ), DEFAULT_HTTP_STATUS[ErrorCode.FORBIDDEN])
+
+
+def _guard_demo_action(fn):
+    """Guard HTTP and shared admission entry points before even local reads."""
+    @functools.wraps(fn)
+    def guarded(req):
+        denied = _demo_denial(req.tenant_id)
+        if denied is not None:
+            env, status = denied
+            return JSONResponse(status_code=status, content=env)
+        return fn(req)
+    return guarded
 
 
 # --------------------------------------------------------------------------- #
@@ -2552,6 +2590,7 @@ async def da_callback(request: Request,
 
 
 @app.post("/broker/extract", dependencies=[Depends(require_broker_auth)])
+@_guard_demo_action
 def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     # ONLY the upload lane commits drawing state here. A library/session
     # extraction (`upload=False`, what routers/session.py sends) is a READ: it
@@ -2569,6 +2608,7 @@ def broker_extract(req: BrokerExtractRequest) -> JSONResponse:
         return _broker_extract(req)
 
 
+@_guard_demo_action
 def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     """Extract intake through the credential-holding process only."""
     if tenant_disabled(req.tenant_id):
@@ -2813,6 +2853,7 @@ def _broker_extract(req: BrokerExtractRequest) -> JSONResponse:
     "/broker/blank-dwg/feasibility",
     dependencies=[Depends(require_broker_reconcile_auth)],
 )
+@_guard_demo_action
 def blank_dwg_feasibility(req: BlankDwgFeasibilityRequest) -> JSONResponse:
     """Protected one-shot source for the dormant APS feasibility workflow."""
     try:
@@ -2856,6 +2897,7 @@ def blank_dwg_feasibility(req: BlankDwgFeasibilityRequest) -> JSONResponse:
 
 
 @app.post("/broker/run", dependencies=[Depends(require_broker_auth)])
+@_guard_demo_action
 def broker_run(req: BrokerRunRequest) -> JSONResponse:
     if (req.tool or {}).get("name") == PLAN_TOOL_NAME:
         return _broker_run(req)
@@ -2870,6 +2912,7 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
 
 
 @app.post("/broker/run-plan", dependencies=[Depends(require_broker_auth)])
+@_guard_demo_action
 def broker_run_plan(req: BrokerPlanRunRequest) -> JSONResponse:
     """Apply a server-owned data plan under the live drawing mutation guard.
 
@@ -2888,6 +2931,7 @@ def _broker_run_plan(req: BrokerPlanRunRequest) -> JSONResponse:
     return _broker_run_request(req)
 
 
+@_guard_demo_action
 def _broker_run(req: BrokerRunRequest) -> JSONResponse:
     if (req.tool or {}).get("name") == PLAN_TOOL_NAME:
         return JSONResponse(
@@ -2898,6 +2942,7 @@ def _broker_run(req: BrokerRunRequest) -> JSONResponse:
     return _broker_run_request(req)
 
 
+@_guard_demo_action
 def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> JSONResponse:
     """Share admission and one terminal attribution for tool and plan requests."""
     t0 = time.perf_counter()
@@ -3193,6 +3238,9 @@ def _execute_plan(req: BrokerPlanRunRequest, tool: Dict[str, Any], engine_op: st
                   t0: float, entry: Dict[str, Any], *, quota_reserved: bool = False,
                   admission: Optional[Dict[str, Any]] = None,
                   run_token: Optional[str] = None):
+    denied = _demo_denial(req.tenant_id)
+    if denied is not None:
+        return denied
     if tenant_disabled(req.tenant_id):
         return (err_envelope(
             ErrorCode.TENANT_DISABLED,
@@ -3310,6 +3358,9 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
              entry: Dict[str, Any], *, quota_reserved: bool = False,
              admission: Optional[Dict[str, Any]] = None,
              run_token: Optional[str] = None):
+    denied = _demo_denial(req.tenant_id)
+    if denied is not None:
+        return denied
     # 1) kill-switch FIRST — a disabled tenant never touches APS
     if tenant_disabled(req.tenant_id):
         env = err_envelope(ErrorCode.TENANT_DISABLED,

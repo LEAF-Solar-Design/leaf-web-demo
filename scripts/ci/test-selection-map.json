@@ -184,6 +184,7 @@
     "server-aps-completion-producer",
     "server-broker-blank-dwg",
     "server-broker-boundary",
+    "server-broker-demo-guard",
     "server-broker-ledger-runtime",
     "server-cost-share-ledger",
     "server-broker-ledger-schema",
