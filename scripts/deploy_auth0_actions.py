@@ -193,7 +193,14 @@ def _action_version(transport, token, action_id, action_name):
 def _deployed_hash(transport, token, action_id, version_id):
     version = transport.request(
         "GET", f"/api/v2/actions/actions/{action_id}/versions/{version_id}", token=token)
-    if (version.get("id") != version_id or version.get("action_id") != action_id
+    parent_ids = []
+    if isinstance(version.get("action"), dict):
+        parent_ids.append(version["action"].get("id"))
+    if "action_id" in version:
+        parent_ids.append(version["action_id"])
+    # Live Auth0 nests action.id, with no action_id (observed 2026-10-19); accept action_id if present.
+    if (version.get("id") != version_id or not parent_ids
+            or any(parent_id != action_id for parent_id in parent_ids)
             or version.get("deployed") is not True or version.get("status") != "built"
             or not isinstance(version.get("code"), str)):
         raise SyncError("deployed_version_invalid")
