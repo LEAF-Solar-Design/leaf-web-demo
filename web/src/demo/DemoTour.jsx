@@ -379,7 +379,9 @@ export default function DemoTour({
         {/* Kept permanently mounted so the live region pre-exists the unlock —
             a region that mounts with its text is not reliably announced. */}
         <div className="tour-card-wait" role="status" aria-live="polite">
-          {needsEffect && !landed ? 'Running it for real. Next unlocks when the result lands.' : ''}
+          {needsEffect && !landed ? (step.action === 'author'
+            ? 'Staging the tool. Next unlocks when the staged card or an error appears.'
+            : 'Running it for real. Next unlocks when the result lands.') : ''}
         </div>
 
         <div className="tour-dots" aria-hidden="true">

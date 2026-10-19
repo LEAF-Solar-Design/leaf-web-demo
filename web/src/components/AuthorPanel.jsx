@@ -226,7 +226,7 @@ function lifecycleMessage(error) {
   return 'Publish did not complete. The staged tool is not runnable.'
 }
 
-export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled = true }) {
+export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStageSettled, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled = true }) {
   const [desc, setDesc] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
@@ -236,6 +236,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const [svcGate, setSvcGate] = useState(false) // authoring service unreachable (B2; calm, not red)
   const [quotaGate, setQuotaGate] = useState(null) // daily authoring cap reached ({limit, used}; calm, not red)
   const [authored, setAuthored] = useState(null)
+  const [settledSignal, setSettledSignal] = useState(null)
   const [publishing, setPublishing] = useState(false)
   const [publishErr, setPublishErr] = useState(null)
   const [draftMessage, setDraftMessage] = useState(null)
@@ -345,6 +346,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   async function submit(override, { allowSecretOnce = false, newAttempt = false } = {}) {
     const d = (typeof override === 'string' ? override : desc).trim()
     if (!d || !buildEntitled) return
+    setSettledSignal(null)
     setDraftMessage(null)
     setBusy(true); setErr(null); setPublishErr(null); setGrantGate(false); setBuildGate(false); setSvcGate(false); setQuotaGate(null); setAuthored(null); setSecretNotice(null)
     try {
@@ -387,6 +389,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
       else setErr(e)
     } finally {
       setBusy(false)
+      setSettledSignal(seedSignal)
     }
   }
 
@@ -464,6 +467,14 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, seed, 
   const authorLocked = busyNow || publishing || (!!stageActivity?.pointer && !stageActivity?.failedRequest && !stageActivity?.draftOnly)
   const shownElapsedMs = stageActivity?.active ? stageActivity.elapsedMs : elapsedMs
   const shownSecs = Math.floor(shownElapsedMs / 1000)
+
+  // Let the tour advance only once this submission's card or failure is on screen.
+  useEffect(() => {
+    if (settledSignal == null || settledSignal !== seedSignal || busyNow) return
+    if (authored || err || grantGate || buildGate || svcGate || quotaGate || secretNotice) {
+      onStageSettled?.(settledSignal)
+    }
+  }, [settledSignal, seedSignal, busyNow, authored, err, grantGate, buildGate, svcGate, quotaGate, secretNotice, onStageSettled])
 
   return (
     <div className="author-panel author-inner">
