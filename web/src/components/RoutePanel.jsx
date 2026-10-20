@@ -4,11 +4,12 @@
 // route is a RESOLVER card of rows attached above the well — active row = 2 px
 // accent left bar on the accent tint + Enter cap, counts muted right, lane
 // dots per the standard's grammar. Keyboard: ↑/↓ move the active resolver row,
-// Enter confirms; Esc (App's global key ladder) dismisses the route. The user
+// Enter confirms; Esc (the proposal Escape owner) dismisses the route. The user
 // still confirms before anything runs — paid actions never auto-execute.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { humanKey } from '../labels.js'
 import { MIN_RUN_MATCH_CONF } from '../mock/mockNlPrompt.js'
 
@@ -59,7 +60,16 @@ export default function RoutePanel({
   // last route is held for the 180 ms .exit fade (display-only) before unmount.
   const { shown: route, exiting } = useExit(liveRoute)
   const [activeIdx, setActiveIdx] = useState(0)
+  const surfaceRef = useRef(null)
   const resolverRef = useRef(null)
+  useEscapeOwner('route-proposal', !!liveRoute && !!onDismiss, () => {
+    const surface = surfaceRef.current
+    const returnFocus = surface?.contains(document.activeElement)
+      ? surface.parentElement?.querySelector('.bar-field')
+      : null
+    onDismiss?.()
+    returnFocus?.focus()
+  }, { layer: 'proposal', scope: surfaceRef })
   // Enter arms 350ms AFTER the route mounts: the keypress that dispatched the
   // prompt (or its OS key-repeat) must never also confirm the run — one Enter,
   // one act. A deliberate second Enter lands after the cooldown.
@@ -114,8 +124,8 @@ export default function RoutePanel({
     resolverRef.current.querySelector('[role="option"][aria-selected="true"]')?.focus()
   }, [activeIdx])
 
-  // Enter / arrow keys while a decision surface is up (Esc lives in App's
-  // global ladder). Editors and focused controls own their Enter key, an editor
+  // Enter / arrow keys while a decision surface is up (Esc belongs to the
+  // proposal owner). Editors and focused controls own their Enter key, an editor
   // owns its arrow keys, and so does whatever already handled one (a stepper, an
   // open menu): those leave here untouched, before any row moves.
   // A fading (exiting) surface is display-only — no keys.
@@ -163,7 +173,7 @@ export default function RoutePanel({
   // ---- BUILD lane: decision strip pointing at the author flow ---------------
   if (!outage && route.lane === 'build') {
     return (
-      <div className={`strip-decision ${motion}`}>
+      <div ref={surfaceRef} className={`strip-decision ${motion}`} data-escape-passive={!liveRoute ? 'true' : undefined}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           Build: <span className="route-title">author a new capability</span>. Your description is
@@ -184,7 +194,7 @@ export default function RoutePanel({
     const solverPicks = (route.alternatives || []).filter((alt) =>
       tools.some((t) => t.name === alt.tool && (t.capabilities || []).includes('solve')))
     return (
-      <div className={`strip-decision ${motion}`}>
+      <div ref={surfaceRef} className={`strip-decision ${motion}`} data-escape-passive={!liveRoute ? 'true' : undefined}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           <span className="route-title">Solve</span>
@@ -209,7 +219,7 @@ export default function RoutePanel({
       ? `params ${JSON.stringify(route.runIntent.params)}`
       : paramsSummary(params)
     return (
-      <div className={`strip-decision ${motion}`}>
+      <div ref={surfaceRef} className={`strip-decision ${motion}`} data-escape-passive={!liveRoute ? 'true' : undefined}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           {route.routedLane === 'solve' ? 'Solve with ' : 'Run '}<span className="route-tool">{route.tool}</span>
@@ -248,7 +258,7 @@ export default function RoutePanel({
     : paramsSummary(params)
   const conf = Math.round((route.confidence || 0) * 100)
   return (
-    <div ref={resolverRef} className={`resolver ${motion}`} role="listbox" aria-label="Route resolver">
+    <div ref={(node) => { surfaceRef.current = node; resolverRef.current = node }} className={`resolver ${motion}`} role="listbox" aria-label="Route resolver">
       <div className="resolver-header">
         {route.stubKind === 'demo' && <span>This demo matches requests against a limited tool catalog.</span>}
         {outage
