@@ -347,7 +347,7 @@ def test_mleader_dxf_probe_group_sequence_and_references():
     ts, = _dxf_records(raw, "STYLE")
     assert top[340] == dict(ms)[5]
     assert top[343] == dict(ts)[5] == dict(ms)[342]
-    assert dict(ts)[2] == "Standard" and dict(ts)[3] == "txt"
+    assert dict(ts)[2] == "Standard" and dict(ts)[3] == "arial.ttf"
     assert dict(ts)[40] == "0.0" and dict(ts)[41] == "1.0"
     assert dict(ms)[173] == "1" and dict(ms)[170] == "2"
     assert [code for code, _ in ms] == [int(c) for c in (

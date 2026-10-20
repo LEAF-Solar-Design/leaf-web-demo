@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "server"))
 
 from dxf_intake import parse_dxf_bytes
+import intake_dxf
 from intake_dxf import intake_to_dxf
 
 
@@ -270,6 +271,75 @@ def test_existing_symbol_and_user_block_handles_survive_table_merge():
     assert _get(style, 342) == "103" and _get(style, 340) == "101"
     child = next(r for r in _records(sections["BLOCKS"]) if r[0] == ("0", "LINE"))
     assert _get(child, 5) == "110"
+
+
+def test_mleader_standard_textstyle_and_bylayer_fields_survive():
+    intake = _small()
+    intake["mlstyles"] = [{"name": "Standard", "textstyle": "Standard", "segments": 1,
+                           "height": 0.18, "arrow": 0.18, "dogleg": 0.36, "gap": 0.09}]
+    intake["mleaders"] = [{"handle": "B", "layer": "0", "style": "Standard",
+        "textstyle": "Standard", "pts": [[0, 0, 0], [5, 4, 0]],
+        "landing": [5, 4, 0], "dogleg_dir": [1, 0, 0], "textpt": [5.45, 4.09, 0],
+        "height": 0.18, "arrow": 0.18, "dogleg": 0.36, "attachment": 1, "text": "Valve"}]
+    sections = _sections(intake_to_dxf(intake))
+    records = _records(sections["TABLES"])
+    style, = [r for r in records if r[0] == ("0", "STYLE") and ("2", "Standard") in r]
+    assert style[6:] == [("70", "0"), ("40", "0.0"), ("41", "1.0"), ("50", "0.0"),
+                         ("71", "0"), ("42", "0.2"), ("3", "arial.ttf"), ("4", "")]
+    leader, = [r for r in _records(sections["ENTITIES"]) if r[0] == ("0", "MULTILEADER")]
+    assert ("340", _get(style, 5)) in leader
+    ltype, = [r for r in records if r[0] == ("0", "LTYPE") and ("2", "ByLayer") in r]
+    assert ltype[6:] == [("70", "0"), ("3", ""), ("72", "65"), ("73", "0"), ("40", "0.0")]
+
+
+def test_dimension_standard_keeps_pre_envelope_fields_and_gains_defaults(monkeypatch):
+    intake = _small()
+    intake["dimensions"] = [{"handle": "B", "type": "LINEAR", "layer": "0",
+        "p1": [0, 0, 0], "p2": [3, 4, 0], "dimline": [1.5, 6, 0],
+        "style": "Standard", "measurement": 3.0}]
+    before = []
+    envelope = intake_dxf._r2000_envelope
+
+    def capture(lines, *args):
+        before.extend(_records(_sections(("\n".join(lines) + "\n").encode())["TABLES"]))
+        return envelope(lines, *args)
+
+    monkeypatch.setattr(intake_dxf, "_r2000_envelope", capture)
+    records = _records(_sections(intake_to_dxf(intake))["TABLES"])
+    old, = [r for r in before if r[0] == ("0", "DIMSTYLE") and ("2", "Standard") in r]
+    new, = [r for r in records if r[0] == ("0", "DIMSTYLE") and ("2", "Standard") in r]
+    assert _get(new, 105) == _get(old, 105)
+    assert new[3:6] == old[2:5]
+    assert new[6:7] == old[5:] == [("70", "0")]
+    assert new[7:9] == [("3", ""), ("4", "")]
+    assert _get(new, 143) == "0.03937007874"
+    assert len([c for c, _ in new if c == "70"]) == 1
+    assert _get(new, 330) == _get(next(r for r in records
+        if r[0] == ("0", "TABLE") and ("2", "DIMSTYLE") in r), 5)
+
+
+@pytest.mark.parametrize("kind,symbol", [
+    ("VPORT", "*Active"), ("LTYPE", "ByBlock"), ("LTYPE", "ByLayer"),
+    ("LTYPE", "Continuous"), ("STYLE", "Standard"), ("APPID", "ACAD"),
+    ("DIMSTYLE", "Standard"), ("BLOCK_RECORD", "*Model_Space"),
+    ("BLOCK_RECORD", "*Paper_Space"),
+])
+def test_default_symbol_merge_keeps_custom_fields_order_and_repeats(kind, symbol):
+    # Exercise records the subset writer does not currently emit, too.
+    fields = [("70", "7"), ("3", "custom"), ("49", "1.25"), ("49", "-0.5")]
+    lines = ["0", "SECTION", "2", "TABLES", "0", "TABLE", "2", kind,
+             "70", "1", "0", kind, "105" if kind == "DIMSTYLE" else "5", "A",
+             "2", symbol.swapcase(), *[value for pair in fields for value in pair],
+             "0", "ENDTAB", "0", "ENDSEC", "0", "SECTION", "2", "ENTITIES",
+             "0", "ENDSEC", "0", "EOF"]
+    handles = iter(format(n, "X") for n in range(0x100, 0x200))
+    result = intake_dxf._r2000_envelope(lines, lambda: next(handles), lambda: "200", {}, False)
+    records = _records(_sections(("\n".join(result) + "\n").encode())["TABLES"])
+    record, = [r for r in records if r[0] == ("0", kind) and ("2", symbol.swapcase()) in r]
+    assert _get(record, 105 if kind == "DIMSTYLE" else 5) == "A"
+    assert record[6:10] == fields
+    assert not {c for c, _ in fields} & {c for c, _ in record[10:]}
+    assert sum(c == "100" for c, _ in record) == 2
 
 
 def test_sample_ezdxf_recovery_has_no_audit_errors(tmp_path):

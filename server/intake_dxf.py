@@ -828,6 +828,11 @@ def _r2000_envelope(lines, fresh_handle, handseed, intake, emit_dimstyle_table):
             old = by_name.pop(symbol.casefold(), [])
             handle_code = "105" if name == "DIMSTYLE" else "5"
             handle = get(old, handle_code) or fresh_handle()
+            if old:
+                old_fields = [(c, v) for c, v in old
+                              if c not in ("0", handle_code, "330", "100", "2")]
+                old_codes = {c for c, _ in old}
+                fields = old_fields + [(c, v) for c, v in fields if c not in old_codes]
             merged.append([("0", name), (handle_code, handle), ("330", owner),
                            ("100", "AcDbSymbolTableRecord"), ("100", subclass),
                            ("2", get(old, 2, symbol)), *fields])

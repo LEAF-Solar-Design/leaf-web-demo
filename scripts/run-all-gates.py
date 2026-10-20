@@ -1530,7 +1530,7 @@ def build_suites() -> List[Suite]:
         # DXF1b: R2000 envelope; five cases execute without optional ezdxf.
         Suite("server-intake-dxf-envelope", "server tests/test_intake_dxf_envelope.py", "pytest", SERVER,
               _py_pytest("tests/test_intake_dxf_envelope.py"), 5,
-              allowed_skip_reasons=(r"could not import 'ezdxf'",)),
+              allowed_skip_reasons=(r"could not import 'ezdxf': .*",)),
         Suite("server-drawing-dxf-route", "server tests/test_drawing_dxf_route.py", "pytest", SERVER,
               _py_pytest("tests/test_drawing_dxf_route.py"), 10),
         Suite("server-save-edited-version", "server tests/test_save_edited_version.py", "pytest", SERVER,
