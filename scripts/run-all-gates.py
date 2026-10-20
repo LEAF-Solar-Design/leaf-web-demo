@@ -1913,7 +1913,7 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r3a-graph", "server canonical Solar graph adapter", "pytest", SERVER,
               _py_pytest("tests/test_sip_r3a_graph.py"), 24),
         Suite("server-sip-r3b-tools", "server canonical Solar tool chain", "pytest", SERVER,
-      _py_pytest("tests/test_sip_r3b_tools.py"), 19),
+      _py_pytest("tests/test_sip_r3b_tools.py"), 24),
         Suite("platform-sip-r3b-tools", "platform canonical Solar tool publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r3b_tools.py"), 7,
               uses_database=True, db_gated=True, database_skip_reasons=(
@@ -1940,7 +1940,7 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r4-jobs", "server durable canonical Solar graph jobs",
               "pytest", SERVER, _py_pytest("tests/test_sip_r4_jobs.py"), 26),
         Suite("server-sip-r5-policy", "server canonical Solar admission policy",
-              "pytest", SERVER, _py_pytest("tests/test_sip_r5_policy.py"), 14),
+              "pytest", SERVER, _py_pytest("tests/test_sip_r5_policy.py"), 15),
         Suite("server-text-match", "server constant-time text comparison that never raises",
               "pytest", SERVER, _py_pytest("tests/test_text_match.py"), 11),
         Suite("server-text-match-request-sites",

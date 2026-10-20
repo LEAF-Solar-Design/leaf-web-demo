@@ -27,11 +27,11 @@ import test_sip_r4_jobs as r4
 import test_w1_design_graph as w1
 
 
-# 2026-10-13: R3e-2 adds canonical grouping; twelve supported tools, four creation tools.
+# W1C-1 adds correction; thirteen supported tools, four creation tools.
 ELEVEN = frozenset((
     "solar-assign-equipment", "solar-combiners", "solar-feeders", "solar-homeruns",
     "solar-panels-from-drawing", "solar-schedule", "solar-settings",
-    "solar-size-strings", "solar-string-add", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups",
+    "solar-size-strings", "solar-string-add", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string",
 ))
 
 
@@ -131,17 +131,38 @@ def test_sip_r5_exact_supported_identity(monkeypatch):
     for name in ("solar-assign-strings", "solar-pvcase-convert", "solar-commit-solve"):
         assert_refusal(request(a, {}, tool_name=name), "SIP_R3_TOOL_UNSUPPORTED",
             message="Project Solar admission unavailable.")
-    assert len(calls) == 12
+    assert len(calls) == 13
     r3a.refused("SIP_R3_TOOL_UNSUPPORTED", lambda: graph._tool("solar-assign-strings", "x"))
     r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-string-multi-add", "x"))
     r3a.refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: graph._tool("solar-settings", "x"))
     result = request(a, {}, tenant=str(UUID(int=999)))
-    assert result["status_code"] == 409 and len(calls) == 12
+    assert result["status_code"] == 409 and len(calls) == 13
     monkeypatch.setattr(deps, "auth_live", lambda: True)
-    assert request(a, {})["status_code"] == 409 and len(calls) == 12
+    assert request(a, {})["status_code"] == 409 and len(calls) == 13
     tenant = deps.TenantContext(str(a.s.org), subject="verified-subject")
     assert request(a, {}, tenant=tenant)["status_code"] == 200
     assert calls[-1][0][0] is tenant
+
+
+def test_sip_r5_correction_availability(monkeypatch):
+    a = setup(monkeypatch)
+    tool = solar_tools.trusted_record("solar-correct-string")
+    state = policy().project_catalog_availability(tool, enabled=True)
+    assert state["engine_ready"] is True
+    assert state["engine_reason"] is None
+    assert state["input_reason"] == "project_request_required"
+    assert state["admission_checked"] is False and state["runnable"] is False
+    ctx = r3b.chain(a.s)[-1][2]
+    r4.at(a, monkeypatch, ctx, "solar-correct-string")
+    before = deepcopy((a.s.blobs, a.s.versions, a.s.writes))
+    accepted = request(a, {"expected_rev": ctx.graph["rev"],
+        "settings_changes": {"num_mppt": 3}}, tool_name="solar-correct-string",
+        input_version_id=ctx.parent_version_id)
+    assert accepted["status_code"] == 200 and accepted["content"]["admissible"] is True
+    state = policy().project_catalog_availability(tool, enabled=True, admission=accepted)
+    assert state["runnable"] is True and state["admission_checked"] is True
+    assert state["input_reason"] is None and state["engine_reason"] is None
+    assert (a.s.blobs, a.s.versions, a.s.writes) == before and not a.accepted
 
 
 def test_sip_r5_preview_success_is_read_only(monkeypatch):
