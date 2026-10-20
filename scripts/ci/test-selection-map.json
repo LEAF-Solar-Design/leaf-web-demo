@@ -58,6 +58,7 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "server-integration-tools",
     "server-integration-turn-grants",
     "server-integration-turn-grants-postgres",
     "server-demo-sessions",

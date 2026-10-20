@@ -69,6 +69,7 @@ from routers import (
     ios_surface,
     jobs as jobs_router,
     mcp_gateway,
+    integration_tools,
     mcp_status,
     ops,
     ops_metrics,
@@ -346,6 +347,7 @@ app.include_router(builds_router.router)  # slice 11a: GET /api/builds, one reco
 app.include_router(capabilities.router)
 app.include_router(mcp_status.router)
 app.include_router(mcp_gateway.router)
+app.include_router(integration_tools.router)
 app.include_router(deployment_identity.router)
 app.include_router(demand.router)  # public waitlist capture, no auth required
 app.include_router(author.router)
