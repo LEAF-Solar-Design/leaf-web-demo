@@ -10,7 +10,7 @@ from leaf_platform.db import cursor
 def _project(make_org, name="Share project"):
     org = make_org(name)
     project = store.create_project(org.org_id, name)
-    owner = store.create_identity_binding(org.org_id, "auth0", f"auth0|{name}-owner", role="owner")
+    owner = store.create_identity_binding(org.org_id, "auth0", f"auth0|{name}-owner-{uuid.uuid4().hex}", role="owner")
     return org, project, owner
 
 
@@ -46,7 +46,7 @@ def test_share_grant_is_hashed_expiring_revocable_and_audited(make_org):
 def test_share_grant_admin_and_tenant_boundaries(make_org):
     org, project, owner = _project(make_org, "Share owner")
     reviewer = store.create_identity_binding(
-        org.org_id, "auth0", "auth0|share-reviewer", role="reviewer")
+        org.org_id, "auth0", f"auth0|share-reviewer-{uuid.uuid4().hex}", role="reviewer")
     other, other_project, other_owner = _project(make_org, "Share other")
     for actor in (reviewer.binding_id, other_owner.binding_id):
         with pytest.raises(PermissionError):

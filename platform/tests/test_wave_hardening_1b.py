@@ -55,7 +55,9 @@ _JWKS_FILE.write_text(json.dumps({"keys": [_jwk]}), encoding="utf-8")
 
 
 def _mint(org_id: str, *, tenant_id: str = "tenant-1b", with_org: bool = True,
-          subject: str = "auth0|1b", claim_namespace: str = NS) -> str:
+          subject: str | None = None, claim_namespace: str = NS) -> str:
+    if subject is None:
+        subject = f"auth0|1b-{uuid.uuid4().hex}"
     now = int(time.time())
     payload = {
         "iss": ISS, "aud": AUD, "iat": now, "exp": now + 3600, "sub": subject,
@@ -107,7 +109,7 @@ def test_live_auth_ignores_cross_org_header_exploit_now_blocked(client, make_org
     POST-FIX: the header is ignored, caller org == verified A, so reading B -> 404."""
     org_a = make_org(name="Victim-adjacent A")
     org_b = make_org(name="Other-tenant B")
-    subject = "auth0|1b-cross-org"
+    subject = f"auth0|1b-cross-org-{uuid.uuid4().hex}"
     _bind(org_a, subject)
 
     # Attacker holds a VALID session for A but forges the header to name B.
@@ -129,7 +131,7 @@ def test_live_auth_project_scope_follows_verified_org_not_header(client, make_or
     """A forged `X-Org-Id: <B>` cannot pivot the project list off the verified org A."""
     org_a = make_org(name="Proj Owner A")
     org_b = make_org(name="Empty B")
-    subject = "auth0|1b-project-scope"
+    subject = f"auth0|1b-project-scope-{uuid.uuid4().hex}"
     _bind(org_a, subject)
 
     # create a project as verified A
@@ -157,7 +159,7 @@ def test_live_auth_unauthenticated_read_is_401(client, live_auth):
 
 def test_live_auth_verified_token_without_org_claim_is_403(client, live_auth):
     """A verified identity that carries no org claim is authenticated-but-unprovisioned -> 403."""
-    tok = _mint("unused", with_org=False, subject="auth0|1b-unbound")
+    tok = _mint("unused", with_org=False, subject=f"auth0|1b-unbound-{uuid.uuid4().hex}")
     r = client.get("/api/projects", headers={"Authorization": "Bearer " + tok})
     assert r.status_code == 403, r.text
 
@@ -349,12 +351,13 @@ def test_custom_namespace_does_not_treat_default_claim_as_assignment(client, liv
 def test_live_bootstrap_rejects_body_subject(client, live_auth):
     headers = _bearer("unused", with_org=False, subject="auth0|body-" + str(uuid.uuid4()))
     response = client.post("/api/orgs", json={"name": "Body " + str(uuid.uuid4()),
-                                            "external_subject": "auth0|forged"}, headers=headers)
+                                            "external_subject": f"auth0|forged-{uuid.uuid4().hex}"}, headers=headers)
     assert response.status_code == 422, response.text
 
 
 def test_live_auth_project_create_replays_same_uuid(client, live_auth):
-    tok = _mint("unused", with_org=False, subject="auth0|workspace-project-replay")
+    subject = f"auth0|workspace-project-replay-{uuid.uuid4().hex}"
+    tok = _mint("unused", with_org=False, subject=subject)
     headers = {"Authorization": "Bearer " + tok}
     org = client.post("/api/orgs", json={"name": "Leaf Automation"}, headers=headers)
     assert org.status_code == 200, org.text
@@ -402,7 +405,7 @@ def test_live_auth_read_only_roles_cannot_mutate_canonical_records_or_jobs(clien
     org = make_org(name=f"{role} org")
     project = platform_store.create_project(org.org_id, f"{role} project")
     platform_store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
-    subject = f"auth0|{role}-denied"
+    subject = f"auth0|{role}-denied-{uuid.uuid4().hex}"
     _bind_as(org, subject, role)
     headers = _bearer(str(org.org_id), subject=subject)
     headers["Idempotency-Key"] = "reviewer-key"
@@ -419,7 +422,7 @@ def test_live_auth_owner_and_editor_can_mutate_canonical_records_and_jobs(client
     org = make_org(name=f"{role} org")
     project = platform_store.create_project(org.org_id, f"{role} project")
     platform_store.set_project_authority_mode(org.org_id, project.project_id, "postgres_canonical")
-    subject = f"auth0|{role}-allowed"
+    subject = f"auth0|{role}-allowed-{uuid.uuid4().hex}"
     _bind_as(org, subject, role)
     headers = _bearer(str(org.org_id), subject=subject)
     headers["Idempotency-Key"] = f"{role}-history"
