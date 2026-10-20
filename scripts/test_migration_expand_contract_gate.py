@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import migration_expand_contract_gate as gate
 
 
@@ -29,6 +31,73 @@ def test_additive_migration_passes(tmp_path):
         "ALTER TABLE orgs ADD COLUMN IF NOT EXISTS widget_id UUID;\n"
         "CREATE INDEX IF NOT EXISTS idx_w ON widgets (id);\n")})
     assert gate.check_migrations(root) == []
+
+
+@pytest.mark.parametrize("revoke", [
+    "REVOKE ALL ON public.widgets FROM PUBLIC;",
+    "REVOKE ALL PRIVILEGES ON TABLE public.widgets FROM PUBLIC;",
+    "revoke all on table PUBLIC.WIDGETS from public;",
+    "REVOKE/**/ALL ON public.widgets FROM PUBLIC;",
+])
+def test_new_table_privilege_initialization_passes(tmp_path, revoke):
+    root = _dir(tmp_path, {"0023_widgets.sql": (
+        "-- CREATE TABLE public.other (id int);\n"
+        "CREATE TABLE public.widgets (id INT);\n" + revoke)})
+    assert gate.check_migrations(root) == []
+
+
+@pytest.mark.parametrize("sql", [
+    "REVOKE ALL ON public.widgets FROM PUBLIC;",
+    "REVOKE ALL ON public.widgets FROM PUBLIC; CREATE TABLE public.widgets (id INT);",
+    "CREATE TABLE IF NOT EXISTS public.widgets (id INT); REVOKE ALL ON public.widgets FROM PUBLIC;",
+    "CREATE TABLE public.other (id INT); REVOKE ALL ON public.widgets FROM PUBLIC;",
+    "CREATE TABLE private.widgets (id INT); REVOKE ALL ON public.widgets FROM PUBLIC;",
+    "DO $$ BEGIN CREATE TABLE public.widgets (id INT); END $$; REVOKE ALL ON public.widgets FROM PUBLIC;",
+    "DO $body$ BEGIN; CREATE TABLE public.widgets (id INT); END $body$; REVOKE ALL ON public.widgets FROM PUBLIC;",
+    "CREATE FUNCTION f() RETURNS void LANGUAGE SQL BEGIN ATOMIC SELECT 1; CREATE TABLE public.widgets (id INT); END; REVOKE ALL ON public.widgets FROM PUBLIC;",
+    "-- CREATE TABLE public.widgets (id INT);\nREVOKE ALL ON public.widgets FROM PUBLIC;",
+    "SELECT 'CREATE TABLE public.widgets (id INT);'; REVOKE ALL ON public.widgets FROM PUBLIC;",
+    'CREATE TABLE public."widgets" (id INT); REVOKE ALL ON public.widgets FROM PUBLIC;',
+    'CREATE TABLE public.widgets (id INT); REVOKE ALL ON public."widgets" FROM PUBLIC;',
+    "CREATE TABLE widgets (id INT); REVOKE ALL ON widgets FROM PUBLIC;",
+    "CREATE TABLE public.widgets (id INT); REVOKE SELECT ON public.widgets FROM PUBLIC;",
+    "CREATE TABLE public.widgets (id INT); REVOKE ALL ON public.widgets FROM app_role;",
+    "CREATE TABLE public.widgets (id INT); REVOKE ALL ON public.widgets FROM PUBLIC, app_role;",
+    "CREATE TABLE public.widgets (id INT); REVOKE ALL ON public.widgets FROM PUBLIC CASCADE;",
+    "CREATE TABLE public.widgets (id INT); REVOKE ALL ON public.widgets FROM PUBLIC",
+    "CREATE TABLE public.widgets (id INT); REVOKE ALL ON public.widgets, public.other FROM PUBLIC;",
+    "CREATE TABLE public.widgets (id INT); REVOKE ALL ON SEQUENCE public.widgets FROM PUBLIC;",
+])
+def test_other_revokes_still_require_marker(tmp_path, sql):
+    root = _dir(tmp_path, {"0023_widgets.sql": sql})
+    violations = gate.check_migrations(root)
+    assert len(violations) == 1
+    assert "REVOKE" in violations[0]
+
+
+@pytest.mark.parametrize("other,label", [
+    ("DROP TABLE public.legacy;", "DROP"),
+    ("REVOKE ALL ON public.legacy FROM PUBLIC;", "REVOKE"),
+    ("REVOKE SELECT ON public.widgets FROM app_role;", "REVOKE"),
+])
+def test_initialization_does_not_exempt_other_contracts(tmp_path, other, label):
+    root = _dir(tmp_path, {"0023_widgets.sql": (
+        "CREATE TABLE public.widgets (id INT);\n"
+        "REVOKE ALL ON public.widgets FROM PUBLIC;\n" + other)})
+    violations = gate.check_migrations(root)
+    assert len(violations) == 1
+    assert f"[{label}]" in violations[0]
+
+
+def test_table_created_in_earlier_migration_is_not_initialization(tmp_path):
+    root = _dir(tmp_path, {
+        "0023_widgets.sql": "CREATE TABLE public.widgets (id INT);",
+        "0024_privileges.sql": "REVOKE ALL ON public.widgets FROM PUBLIC;",
+    })
+    violations = gate.check_migrations(root)
+    assert len(violations) == 1
+    assert "0024_privileges.sql" in violations[0]
+    assert "REVOKE" in violations[0]
 
 
 def test_contract_without_marker_fails(tmp_path):

@@ -1150,6 +1150,8 @@ def build_suites() -> List[Suite]:
               db_gated=True),
         Suite("server-demo-actor", "server verified demo actor scope", "pytest",
               SERVER, _py_pytest("tests/test_demo_actor.py"), 43),
+        Suite("server-migration-fixture-sql", "server isolated migration fixture mapping", "pytest",
+              SERVER, _py_pytest("tests/test_migration_fixture_sql.py"), 21),
         Suite("server-demo-actor-postgres", "server durable demo actor scope", "pytest",
               SERVER, _py_pytest("tests/test_demo_actor_postgres.py"), 31,
               uses_database=True, db_gated=True,
