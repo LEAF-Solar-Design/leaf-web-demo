@@ -1969,6 +1969,13 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",
               )),
+        Suite("platform-sip-w1c-exchange", "platform Solar solve proposal exchange custody",
+              "pytest", REPO / "platform",
+              _py_pytest("tests/test_sip_w1c_exchange.py"), 26,
+              uses_database=True, db_gated=True,
+              database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",
+              )),
         Suite("platform-sip-r14-exchange", "platform Solar sizing exchange custody",
               "pytest", REPO / "platform",
               _py_pytest("tests/test_sip_r14_exchange.py"), 31,
@@ -2324,7 +2331,7 @@ def build_suites() -> List[Suite]:
               # 2026-10-11: sip-r3d adds six conductor PostgreSQL rows (322 -> 328).
               # 2026-10-13: R3e-2 adds six to the measured 1162-row PostgreSQL baseline.
               # 2026-10-13: R14-E adds ten sizing rows; measured 1178 passing on PostgreSQL.
-              _py_pytest(f"{repo_name}/platform/tests"), 1179, db_gated=True,
+              _py_pytest(f"{repo_name}/platform/tests"), 1205, db_gated=True,
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -3062,7 +3069,7 @@ def build_suites() -> List[Suite]:
               # 2026-10-13: R14-E adds one registration row; measured 237 passing.
               # 2026-10-14: PP-3 record A adds one registration row (237 -> 238).
               # 2026-10-19: su-a4a adds one production proof registration row (238 -> 239).
-              ["test_studio_walk_regression_gate.py"], 240),
+              ["test_studio_walk_regression_gate.py"], 241),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

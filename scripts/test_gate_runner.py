@@ -130,8 +130,8 @@ def test_sip_r1_gate_registration():
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 239  # +1 demo inventory/migration contract regression.
-    assert suites["platform"].expected == 1179  # LD1b: +1 demo classification regression.
-    assert suites["gate-runner-selftest"].expected == 240  # LD1d: demo actor registration.
+    assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
+    assert suites["gate-runner-selftest"].expected == 241  # LD1d: demo actor registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4223,8 +4223,8 @@ def test_R14C_32_mandatory_registration():
         assert ordered[start:start + 3] == wanted
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
-    assert mandatory[-2:] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 240  # LD1d: demo actor registration.
+    assert mandatory[-3:-1] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
+    assert suites["gate-runner-selftest"].expected == 241  # LD1d: demo actor registration.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4241,7 +4241,7 @@ def test_sip_r14_exchange_gate_registration():
     assert suite.database_skip_reasons == (
         r"PostgreSQL integration test requires DATABASE_URL",)
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
-    assert selection["mandatory_suite_ids"][-2:] == [suite.id, "platform-sip-r14-sizing"]
+    assert selection["mandatory_suite_ids"][-3:-1] == [suite.id, "platform-sip-r14-sizing"]
     assert selection["selection_enabled"] is False
     assert selection["phase"] == "shadow"
 
@@ -4310,7 +4310,7 @@ def test_sip_r3e_gate_registration():
     assert ids[start - 1:start + 3] == [
         "server-sip-r3d-conductors", "server-sip-r3e-groups",
         "platform-sip-r3e-groups", "server-sip-r14-evidence"]
-    assert selection["mandatory_suite_ids"][-4:-1] == [
+    assert selection["mandatory_suite_ids"][-5:-2] == [
         "server-sip-r3e-groups", "platform-sip-r3e-groups", "platform-sip-r14-exchange"]
     for ordered in (ids, selection["mandatory_suite_ids"]):
         start = ordered.index("server-sip-r14-evidence")
@@ -4318,8 +4318,8 @@ def test_sip_r3e_gate_registration():
             "server-sip-r14-" + name for name in ("evidence", "admission", "worker", "proof")]
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
     # LD1b adds one demo classification regression to the 1178 platform rows.
-    assert suites["platform"].expected == 1179
-    assert suites["gate-runner-selftest"].expected == 240  # LD1d: demo actor registration.
+    assert suites["platform"].expected == 1205
+    assert suites["gate-runner-selftest"].expected == 241  # LD1d: demo actor registration.
 
 
 def test_demo_actor_gate_registration():
@@ -4376,5 +4376,21 @@ def test_sip_r14_sizing_gate_registration():
         assert ordered.count(suite.id) == ordered.count("platform-sip-r14-exchange") == 1
         start = ordered.index("platform-sip-r14-exchange")
         assert ordered[start:start + 2] == ["platform-sip-r14-exchange", suite.id]
+    assert selection["mandatory_suite_ids"][-2] == suite.id
+    assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_sip_w1c_exchange_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads(
+        (SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    suite = suites["platform-sip-w1c-exchange"]
+    assert suite == runner.Suite(
+        "platform-sip-w1c-exchange", "platform Solar solve proposal exchange custody",
+        "pytest", REPO / "platform", runner._py_pytest("tests/test_sip_w1c_exchange.py"), 26,
+        uses_database=True, db_gated=True,
+        database_skip_reasons=(r"PostgreSQL integration test requires DATABASE_URL",))
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1
     assert selection["mandatory_suite_ids"][-1] == suite.id
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"

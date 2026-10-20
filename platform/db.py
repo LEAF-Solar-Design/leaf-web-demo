@@ -50,6 +50,14 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "project_solve_exchanges": {
+        "job_id", "org_id", "project_id", "drawing_id", "input_version_id",
+        "parent_intake_sha256", "graph_revision", "graph_sha256", "frame_id", "phase",
+        "grant_ref", "classification", "state", "request_bytes", "request_sha256",
+        "response_bytes", "response_sha256", "solver_endpoint", "solver_version",
+        "candidate_bytes", "candidate_sha256", "proof_bytes", "proof_sha256",
+        "sender_worker", "sender_attempt", "refusal_code", "created_at", "updated_at",
+    },
     "demo_sessions": {
         "id", "subject", "tenant_id", "org_id", "created_at", "expires_at",
         "revoked_at", "client_ip_hash",
@@ -690,6 +698,72 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "project_solve_exchanges_pkey": _catalog_contract(
+        "project_solve_exchanges", "PRIMARY KEY (job_id)"),
+    "project_solve_exchanges_job_fk": _catalog_contract(
+        "project_solve_exchanges", "FOREIGN KEY (org_id, project_id, job_id)",
+        "REFERENCES jobs(org_id, project_id, job_id)", "ON DELETE CASCADE"),
+    "project_solve_exchanges_artifact_fk": _catalog_contract(
+        "project_solve_exchanges", "FOREIGN KEY (drawing_id, project_id, org_id)",
+        "REFERENCES drawing_artifacts(drawing_id, project_id, org_id)", "ON DELETE CASCADE"),
+    "project_solve_exchanges_input_fk": _catalog_contract(
+        "project_solve_exchanges", "FOREIGN KEY (input_version_id)",
+        "REFERENCES drawing_versions(version_id)"),
+    "project_solve_exchanges_grant_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "grant_ref ~ '^[a-zA-Z0-9_-]{1,64}$'"),
+    "project_solve_exchanges_graph_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "graph_revision >= 0",
+        "char_length(frame_id) >= 1", "char_length(frame_id) <= 200",
+        "project_solve_exchange_worker_ok(frame_id)"),
+    "project_solve_exchanges_phase_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "'initial'", "'background'"),
+    "project_solve_exchanges_worker_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "project_solve_exchange_worker_ok(sender_worker)"),
+    "project_solve_exchanges_solver_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "solver_endpoint IS NULL",
+        "char_length(solver_endpoint) >= 1", "char_length(solver_endpoint) <= 2048",
+        "solver_endpoint !~ '[[:cntrl:]]'", "solver_endpoint = btrim(solver_endpoint)",
+        "project_solve_exchange_worker_ok(solver_version)"),
+    "project_solve_exchanges_classification_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "'live'", "'synthetic'"),
+    "project_solve_exchanges_state_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "'prepared'", "'sending'", "'responded'",
+        "'completed'", "'refused'", "'outcome_unknown'"),
+    "project_solve_exchanges_request_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK",
+        "octet_length(request_bytes) >= 1", "octet_length(request_bytes) <= 262144"),
+    "project_solve_exchanges_response_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "response_bytes IS NULL",
+        "octet_length(response_bytes) >= 1", "octet_length(response_bytes) <= 1048576"),
+    "project_solve_exchanges_candidate_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "candidate_bytes IS NULL",
+        "octet_length(candidate_bytes) >= 1", "octet_length(candidate_bytes) <= 1048576"),
+    "project_solve_exchanges_proof_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "proof_bytes IS NULL",
+        "octet_length(proof_bytes) >= 1", "octet_length(proof_bytes) <= 262144"),
+    "project_solve_exchanges_hash_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK",
+        "parent_intake_sha256 ~ '^[0-9a-f]{64}$'",
+        "graph_sha256 ~ '^[0-9a-f]{64}$'",
+        "request_sha256 ~ '^[0-9a-f]{64}$'",
+        "response_sha256 ~ '^[0-9a-f]{64}$'",
+        "candidate_sha256 ~ '^[0-9a-f]{64}$'",
+        "proof_sha256 ~ '^[0-9a-f]{64}$'"),
+    "project_solve_exchanges_digest_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK",
+        "request_sha256 = encode(sha256(request_bytes), 'hex')",
+        "response_sha256 = encode(sha256(response_bytes), 'hex')",
+        "candidate_sha256 = encode(sha256(candidate_bytes), 'hex')",
+        "proof_sha256 = encode(sha256(proof_bytes), 'hex')"),
+    "project_solve_exchanges_shape_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "response_bytes IS NULL", "response_sha256 IS NULL",
+        "candidate_bytes IS NULL", "candidate_sha256 IS NULL", "proof_bytes IS NULL",
+        "proof_sha256 IS NULL", "sender_worker IS NULL", "sender_attempt IS NULL",
+        "sender_attempt > 0", "solver_endpoint IS NULL", "solver_version IS NULL",
+        "candidate_bytes IS NOT NULL", "proof_bytes IS NOT NULL", "response_bytes IS NOT NULL",
+        "sender_worker IS NOT NULL", "refusal_code IS NULL", "refusal_code IS NOT NULL",
+        "'SOLVE_OUTCOME_UNKNOWN'", "'cloud_request_invalid'", "'cloud_auth_missing'",
+        "'cloud_tenant_unauthorized'", "'cloud_upstream_failure'", "'cloud_response_invalid'"),
     "demo_sessions_pkey": _catalog_contract(
         "demo_sessions", "PRIMARY KEY (id)"),
     "demo_sessions_subject_key": _catalog_contract(
@@ -944,6 +1018,8 @@ _REQUIRED_CONSTRAINTS = {
 }
 
 _REQUIRED_INDEXES = {
+    "idx_project_solve_exchanges_scope": _catalog_contract(
+        "project_solve_exchanges", "(org_id, project_id, drawing_id, job_id)"),
     "idx_project_sizing_exchanges_scope": _catalog_contract(
         "project_sizing_exchanges",
         "(org_id, project_id, drawing_id, job_id)"),
@@ -984,6 +1060,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "project_solve_exchanges_guard": _catalog_contract(
+        "project_solve_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION guard_project_solve_exchange()"),
     "project_sizing_exchange_completion": _catalog_contract(
         "project_sizing_exchanges", "AFTER INSERT OR UPDATE",
         "DEFERRABLE INITIALLY DEFERRED", "FOR EACH ROW",
