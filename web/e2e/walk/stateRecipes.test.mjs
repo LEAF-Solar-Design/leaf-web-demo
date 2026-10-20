@@ -12,7 +12,7 @@ import { resolveProbe } from './probes.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
 import { seedSolarChain } from './fixtures.mjs'
 import { solarChainSteps } from './probes.mjs'
-import { projectSolarResponse, projectSolarStep, switchProjectSolarForms, assertProjectSolarDrawing, observeProjectSolarResponses, setupRequestHeaders } from './fixtures.mjs'
+import { projectSolarResponse, projectSolarStep, switchProjectSolarForms, assertProjectSolarDrawing, observeProjectSolarResponses, setupRequestHeaders, observeProbeRequests } from './fixtures.mjs'
 import { inspectJob, inspectContext } from '../local/solarProjectWalk.mjs'
 
 function authHeader(token) { const headers = {}; headers.Authorization = `Bearer ${token}`; return headers }
@@ -1385,15 +1385,15 @@ const expect = (value) => ({
 })
 
 test('failed drawing setup accepts an empty canvas and requires the product no-drawing signal on each surface', async () => {
-  for (const surface of ['cad', 'solar', 'browser', 'ios']) {
+  for (const surface of ['cad', 'solar', 'browser', 'ios']) for (const status of [400, 404]) {
     const undo = { visible: true, disabled: true }
-    const page = {
-      goto: async (url) => assert.equal(url, `/app?surface=${surface}&drawing=missing.invalid`),
-      waitForResponse: async (predicate) => {
+    const page = Object.assign(new EventEmitter(), {
+      goto: async (url) => {
+        assert.equal(url, `/app?surface=${surface}&drawing=missing.invalid`)
         const response = { url: () => 'http://walk/api/session?dwg=missing.invalid',
-          status: () => 404, json: async () => ({ error: 'missing drawing' }) }
-        assert.equal(predicate(response), true)
-        return response
+          status: () => status, json: async () => ({ error: 'missing drawing' }) }
+        page.emit('response', response)
+        page.emit('requestfailed', timedRequest('/api/session?dwg=missing.invalid', { failure: 'late failure' }))
       },
       locator: () => assert.fail('canvas count cannot establish drawing readiness'),
       getByRole: (role, options) => {
@@ -1406,7 +1406,7 @@ test('failed drawing setup accepts an empty canvas and requires the product no-d
           return undo
         } }
       },
-    }
+    })
     const assertions = (value) => ({ ...expect(value),
       toContain: (expected) => assert.ok(value.includes(expected)),
       toBeDisabled: async () => assert.equal(value.disabled, true),
@@ -1415,13 +1415,206 @@ test('failed drawing setup accepts an empty canvas and requires the product no-d
     await setupStep({}, runtime, { kind: 'open-failed-drawing',
       url: `/app?surface=${surface}&drawing=missing.invalid` }, assertions)
     assert.equal(runtime.failedDrawing, true)
-    assert.equal(runtime.evidence.failedDrawing.status, 404)
+    assert.equal(runtime.evidence.failedDrawing.status, status)
+    for (const event of ['request', 'response', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
     undo.disabled = false
     await assert.rejects(requireNoDrawing(page, assertions), assert.AssertionError)
     undo.disabled = true
     undo.visible = false
     await assert.rejects(requireNoDrawing(page, assertions), assert.AssertionError)
   }
+})
+
+function timedRequest(path, { startTime = Date.now(), durationMs = 2500, status = 200, failure = null,
+  method = 'GET' } = {}) {
+  return { url: () => `http://walk${path}`, method: () => method,
+    timing: () => ({ startTime, responseEnd: durationMs }),
+    failure: () => failure ? { errorText: failure } : null,
+    response: async () => ({ status: () => status }),
+    headers: () => assert.fail('request evidence must not read headers'),
+    postData: () => assert.fail('request evidence must not read bodies'),
+  }
+}
+
+test('WL19 failed drawing setup rejects a matching abort during navigation with its reason and elapsed time', { timeout: 1000 }, async () => {
+  const page = Object.assign(new EventEmitter(), { goto: async () => {
+    await Promise.resolve()
+    for (const path of ['/api/tools', '/api/session?dwg=other', '/elsewhere?dwg=missing.invalid']) {
+      const unrelated = timedRequest(path, { failure: 'unrelated failure' })
+      page.emit('request', unrelated)
+      page.emit('requestfailed', unrelated)
+    }
+    page.emit('response', { url: () => 'http://walk/api/session?dwg=other' })
+    const request = timedRequest('/api/session?dwg=missing.invalid', {
+      startTime: Date.now() - 5100, durationMs: -1, failure: 'net::ERR_ABORTED',
+    })
+    page.emit('request', request)
+    page.emit('requestfailed', request)
+    page.emit('response', { url: () => 'http://walk/api/session?dwg=missing.invalid', status: () => 404 })
+    return new Promise(() => {})
+  } })
+  const runtime = { page, evidence: {} }
+  await assert.rejects(setupStep({}, runtime, { kind: 'open-failed-drawing', url: '/app?drawing=missing.invalid' }),
+    (error) => {
+      assert.match(error.message, /^open-failed-drawing: GET \/api\/session failed after \d+ ms: net::ERR_ABORTED$/)
+      assert.ok(Number(error.message.match(/after (\d+) ms/)[1]) >= 5100)
+      assert.ok(!(error instanceof UnsupportedLocalError))
+      return true
+    })
+  assert.equal(runtime.failedDrawing, undefined)
+  assert.equal(runtime.evidence.result, undefined)
+  for (const event of ['request', 'response', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
+})
+
+test('WL19b a matching response wins over a later failure and awaits navigation before drawing assertions', { timeout: 1000 }, async () => {
+  let rejectNavigation, responseReceived
+  const responseSeen = new Promise((resolve) => { responseReceived = resolve })
+  const navigation = new Promise((_resolve, reject) => { rejectNavigation = reject })
+  const page = Object.assign(new EventEmitter(), { goto: async () => {
+    await Promise.resolve()
+    page.emit('response', { url: () => 'http://walk/api/session?dwg=missing.invalid', status: () => 404 })
+    page.emit('requestfailed', timedRequest('/api/session?dwg=missing.invalid', { failure: 'late failure' }))
+    responseReceived()
+    return navigation
+  } })
+  let assertionsStarted = false
+  const navigationFailure = new Error('navigation failed after response')
+  const setup = setupStep({}, { page, evidence: {} }, { kind: 'open-failed-drawing', url: '/app' }, () => {
+    assertionsStarted = true
+    assert.fail('drawing assertions must wait for navigation')
+  })
+  const rejected = assert.rejects(setup, navigationFailure)
+  await responseSeen
+  assert.equal(assertionsStarted, false)
+  // A navigation rejection must still be observed after the response wins.
+  rejectNavigation(navigationFailure)
+  await rejected
+  assert.equal(assertionsStarted, false)
+  for (const event of ['request', 'response', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
+})
+
+test('WL19 failed drawing waiter releases listeners after navigation failure', async () => {
+  const failure = new Error('navigation failed')
+  const page = Object.assign(new EventEmitter(), { goto: async () => { throw failure } })
+  await assert.rejects(setupStep({}, { page, evidence: {} }, { kind: 'open-failed-drawing', url: '/app' }), failure)
+  for (const event of ['request', 'response', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
+})
+
+test('WL19 runner preserves setup failure and per-probe request evidence, then releases observers', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find((entry) => entry.id === 'control:more-panels'), 'failed-load')
+  const page = Object.assign(new EventEmitter(), { goto: async () => {
+    const slow = timedRequest('/api/tools?private=hidden')
+    page.emit('request', slow)
+    page.emit('requestfinished', slow)
+    const failed = timedRequest('/api/session?dwg=missing.invalid', { durationMs: 5100, failure: 'net::ERR_ABORTED' })
+    page.emit('request', failed)
+    page.emit('requestfailed', failed)
+  } })
+  const records = []
+  for (let index = 0; index < 2; index++) {
+    const runtime = { page, evidence: { steps: [] }, runStep: async (_name, callback) => callback() }
+    await assert.rejects(runProbe(probe, runtime), /open-failed-drawing: GET \/api\/session failed after 5100 ms: net::ERR_ABORTED/)
+    assert.match(runtime.evidence.failure.message, /net::ERR_ABORTED/)
+    assert.equal(runtime.evidence.result, undefined)
+    assert.equal(runtime.evidence.cleanupCompleted, true)
+    assert.equal(runtime.evidence.requestTimings.length, 2)
+    assert.equal(runtime.evidence.requestTimings[0].path, '/api/tools')
+    assert.equal(runtime.evidence.requestTimings[0].status, 200)
+    assert.equal(runtime.evidence.requestTimings[1].path, '/api/session')
+    assert.equal(runtime.evidence.requestTimings[1].durationMs, 5100)
+    assert.equal(runtime.evidence.requestTimings[1].failure, 'net::ERR_ABORTED')
+    assert.deepEqual(runtime.evidence.abortedRequests, [runtime.evidence.requestTimings[1]])
+    assert.deepEqual(runtime.evidence.failedRequests, [])
+    records.push(runtime.evidence.requestTimings)
+    for (const event of ['request', 'response', 'requestfinished', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
+  }
+  assert.notEqual(records[0], records[1])
+})
+
+test('WL19 request evidence records slow completions and all failures with redacted paths and request timing', async () => {
+  const context = new EventEmitter()
+  const page = { context: () => context }
+  const evidence = {}, startedAt = Date.now()
+  const stop = observeProbeRequests(page, evidence, startedAt)
+  for (const path of ['/api/session', '/api/tools', '/api/capabilities', '/api/builds']) {
+    const request = timedRequest(`${path}?secret=never-record-this`, { startTime: startedAt + 120, status: 503 })
+    context.emit('request', request)
+    context.emit('requestfinished', request)
+  }
+  for (const durationMs of [0, 1999, 2000]) {
+    const fast = timedRequest('/api/tools', { durationMs })
+    context.emit('request', fast)
+    context.emit('requestfinished', fast)
+  }
+  const failed = timedRequest('/api/session?dwg=private', {
+    startTime: startedAt + 300, durationMs: 25, failure: 'net::ERR_CONNECTION_RESET', method: 'POST',
+  })
+  context.emit('request', failed)
+  context.emit('requestfailed', failed)
+  context.emit('requestfinished', timedRequest('/not-started-in-this-probe'))
+  await stop()
+  assert.deepEqual(evidence.requestTimings, [
+    ...['/api/session', '/api/tools', '/api/capabilities', '/api/builds'].map((path) => ({
+      method: 'GET', path, startOffsetMs: 120, durationMs: 2500, status: 503,
+    })),
+    { method: 'POST', path: '/api/session', startOffsetMs: 300, durationMs: 25, failure: 'net::ERR_CONNECTION_RESET' },
+  ])
+  assert.deepEqual(evidence.failedRequests, [
+    { method: 'POST', path: '/api/session', startOffsetMs: 300, durationMs: 25, failure: 'net::ERR_CONNECTION_RESET' },
+  ])
+  assert.deepEqual(evidence.abortedRequests, [])
+  assert.ok(!JSON.stringify(evidence).includes('never-record-this'))
+  for (const event of ['request', 'requestfinished', 'requestfailed']) assert.equal(context.listenerCount(event), 0)
+})
+
+test('WL19b request failures are classified with bounded, query-free timing fields', async () => {
+  for (const failure of ['net::ERR_ABORTED', 'NS_BINDING_ABORTED', 'cancelled', 'canceled',
+    'net::ERR_CONNECTION_RESET', null]) {
+    const page = new EventEmitter(), evidence = { failedRequests: [{ stale: true }], abortedRequests: [{ stale: true }] }
+    const startedAt = Date.now()
+    const stop = observeProbeRequests(page, evidence, startedAt)
+    for (let index = 0; index < 60; index++) {
+      const request = timedRequest('/api/session?dwg=private', { startTime: startedAt + 5, durationMs: 10, failure })
+      page.emit('request', request)
+      page.emit('requestfailed', request)
+    }
+    await stop()
+    const aborted = ['net::ERR_ABORTED', 'NS_BINDING_ABORTED', 'cancelled', 'canceled'].includes(failure)
+    const records = evidence[aborted ? 'abortedRequests' : 'failedRequests']
+    assert.equal(records.length, 50)
+    assert.deepEqual(records, evidence.requestTimings)
+    assert.deepEqual(records[0], { method: 'GET', path: '/api/session', startOffsetMs: 5,
+      durationMs: 10, failure: failure || 'request failed' })
+    assert.deepEqual(evidence[aborted ? 'failedRequests' : 'abortedRequests'], [])
+    assert.ok(!JSON.stringify(evidence).includes('private'))
+  }
+})
+
+test('WL19 request evidence is capped at 50 and metadata errors cannot change a verdict', async () => {
+  const page = new EventEmitter(), evidence = {}
+  const stop = observeProbeRequests(page, evidence)
+  const broken = timedRequest('/api/tools')
+  broken.timing = () => { throw new Error('timing unavailable') }
+  page.emit('request', broken)
+  assert.doesNotThrow(() => page.emit('requestfinished', broken))
+  const noResponse = timedRequest('/api/builds', { durationMs: 2001 })
+  noResponse.response = async () => { throw new Error('page closed') }
+  page.emit('request', noResponse)
+  page.emit('requestfinished', noResponse)
+  for (let index = 0; index < 60; index++) {
+    const request = timedRequest(`/api/tools?index=${index}`, { failure: 'cancelled', durationMs: 1 })
+    page.emit('request', request)
+    page.emit('requestfailed', request)
+  }
+  await stop()
+  assert.equal(evidence.requestTimings.length, 50)
+  assert.equal(evidence.requestTimings[0].durationMs, 2001)
+  assert.equal(evidence.requestTimings[1].failure, 'cancelled')
+  assert.equal(evidence.abortedRequests.length, 49)
+  assert.deepEqual(evidence.failedRequests, [])
+  const before = JSON.stringify(evidence)
+  page.emit('requestfailed', timedRequest('/after-stop', { failure: 'cancelled' }))
+  assert.equal(JSON.stringify(evidence), before)
 })
 
 test('ready Solar catalog setup requires the browser drawing query and exact enabled tool', async () => {

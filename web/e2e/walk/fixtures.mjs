@@ -173,6 +173,55 @@ export async function previewVersion(probe, runtime, assertions = expect, worksp
   return
 }
 
+function requestTiming(request, observedStart) {
+  const timing = request.timing()
+  const startTime = timing.startTime > 0 ? timing.startTime : observedStart
+  const durationMs = Math.max(0, Math.round(timing.responseEnd >= 0 ? timing.responseEnd : Date.now() - startTime))
+  return { startTime, durationMs }
+}
+
+export function observeProbeRequests(page, evidence, startedAt = Date.now()) {
+  // Context events also cover recipes that replace the ordinary page.
+  const source = typeof page.context === 'function' ? page.context() : page
+  const starts = new WeakMap()
+  const pending = []
+  evidence.requestTimings = []
+  evidence.failedRequests = []
+  evidence.abortedRequests = []
+  const request = (request) => { starts.set(request, Date.now()) }
+  const complete = (request, failed) => {
+    try {
+      const observedStart = starts.get(request)
+      if (observedStart === undefined || evidence.requestTimings.length >= 50) return
+      starts.delete(request)
+      const { startTime, durationMs } = requestTiming(request, observedStart)
+      if (!failed && durationMs <= 2000) return
+      const record = { method: request.method(), path: new URL(request.url()).pathname,
+        startOffsetMs: Math.max(0, Math.round(startTime - startedAt)), durationMs }
+      if (failed) {
+        record.failure = request.failure()?.errorText || 'request failed'
+        const aborted = /abort|cancelled|canceled/i.test(record.failure)
+        evidence[aborted ? 'abortedRequests' : 'failedRequests'].push(record)
+      }
+      evidence.requestTimings.push(record)
+      if (!failed) pending.push(Promise.resolve().then(() => request.response()).then((response) => {
+        record.status = response?.status() ?? null
+      }).catch(() => {}))
+    } catch { /* Optional request evidence never changes the probe verdict. */ }
+  }
+  const finished = (request) => complete(request, false)
+  const failed = (request) => complete(request, true)
+  source.on('request', request)
+  source.on('requestfinished', finished)
+  source.on('requestfailed', failed)
+  return async () => {
+    source.off('request', request)
+    source.off('requestfinished', finished)
+    source.off('requestfailed', failed)
+    await Promise.allSettled(pending)
+  }
+}
+
 export const test = base.extend({
   firstRun: [false, { option: true }],
   walkPostgres: [false, { option: true, scope: 'worker' }],
@@ -249,6 +298,7 @@ export const test = base.extend({
     }
     const pageError = (error) => { walkEvidence.pageErrors.push({ message: error.message, stack: error.stack }) }
     const requestFailed = (request) => {
+      if (walkEvidence.requestTimings) return // The probe observer owns bounded request evidence while probes run.
       const record = { url: request.url(), method: request.method(), error: request.failure()?.errorText }
       const aborted = ['net::ERR_ABORTED', 'NS_BINDING_ABORTED', 'cancelled'].includes(record.error)
       walkEvidence[aborted ? 'abortedRequests' : 'failedRequests'].push(record)
@@ -2209,12 +2259,37 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     case 'require-solar-document': await requireSolarDocument(probe, runtime, assertions); return
     case 'navigate': await page.goto(recipe.url); return
     case 'open-failed-drawing': {
-      const sessionReply = page.waitForResponse((response) => {
-        const url = new URL(response.url())
+      const starts = new WeakMap()
+      const matches = (request) => {
+        const url = new URL(request.url())
         return url.pathname === '/api/session' && url.searchParams.get('dwg') === 'missing.invalid'
+      }
+      let timer, onResponse, onFailed
+      const onRequest = (request) => { if (matches(request)) starts.set(request, Date.now()) }
+      const sessionReply = new Promise((resolve, reject) => {
+        onResponse = (response) => { if (matches(response)) resolve(response) }
+        onFailed = (request) => {
+          if (!matches(request)) return
+          const { durationMs } = requestTiming(request, starts.get(request) ?? Date.now())
+          reject(new Error(`${recipe.kind}: ${request.method()} /api/session failed after ${durationMs} ms: ${request.failure()?.errorText || 'request failed'}`))
+        }
+        timer = setTimeout(() => reject(new Error(`${recipe.kind}: /api/session response timed out after 15000 ms`)), 15_000)
+        page.on('request', onRequest)
+        page.on('response', onResponse)
+        page.on('requestfailed', onFailed)
       })
-      await page.goto(recipe.url)
-      const response = await sessionReply
+      // Observe failure immediately, including while navigation is still pending.
+      let response
+      try {
+        const navigation = page.goto(recipe.url)
+        response = await Promise.race([sessionReply, navigation.then(() => sessionReply)])
+        await navigation
+      } finally {
+        clearTimeout(timer)
+        page.off('request', onRequest)
+        page.off('response', onResponse)
+        page.off('requestfailed', onFailed)
+      }
       assertions([400, 404]).toContain(response.status())
       evidence.failedDrawing = { drawingId: 'missing.invalid', status: response.status(), response: await response.json() }
       await assertions(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
@@ -3321,6 +3396,9 @@ export async function runProbe(probe, runtime) {
   const setupStartedAt = Date.now()
   let originalError
   try {
+    if (typeof observeProbeRequests === 'function' && typeof page.on === 'function') {
+      runtime.cleanup.push(observeProbeRequests(page, evidence, setupStartedAt))
+    }
     const initialReason = (probe.setup?.context?.openProjectId
       || typeof UI_UNREACHABLE_STATES !== 'undefined' && UI_UNREACHABLE_STATES.has(probe.state))
       && typeof unsupportedBeforeSetup === 'function'
