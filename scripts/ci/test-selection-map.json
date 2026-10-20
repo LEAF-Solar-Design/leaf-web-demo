@@ -64,6 +64,7 @@
     "server-integration-element-save",
     "server-integration-turn-grants",
     "server-integration-turn-grants-postgres",
+    "server-integration-project-turn-postgres",
     "server-demo-sessions",
     "server-demo-policy",
     "server-demo-sessions-postgres",
