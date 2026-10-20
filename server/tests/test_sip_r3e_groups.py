@@ -40,7 +40,7 @@ TWELVE = frozenset((
     "solar-settings", "solar-panels-from-drawing", "solar-size-strings",
     "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
     "solar-string-add", "solar-assign-equipment", "solar-string-multi-add",
-    "solar-string-conductors", "solar-panel-groups", "solar-correct-string",
+    "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal",
 ))
 CREATING = {"solar-string-add", "solar-assign-equipment",
             "solar-string-multi-add", "solar-panel-groups"}

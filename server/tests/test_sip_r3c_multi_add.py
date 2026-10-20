@@ -74,9 +74,9 @@ def job_proof(s, result, prepared, monkeypatch):
     return adapter.project_graph_job_provenance(s.job, result, expected=prepared, conn=conn)
 
 
-# W1C-1 adds correction; thirteen supported tools, four creation tools.
+# W1C-2b adds proposal; fourteen supported tools, four creation tools.
 def test_sip_r3c_multi_add_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 13
+    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 14
     assert adapter.CREATION_TOOLS == {"solar-string-add", "solar-assign-equipment", TOOL, "solar-panel-groups"}
     assert adapter._tool(TOOL, manifest(TOOL)) == solar_tools.get(TOOL)
     refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: adapter._tool(TOOL, "x"))

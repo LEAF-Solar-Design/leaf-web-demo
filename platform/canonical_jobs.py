@@ -497,10 +497,14 @@ def _graph_ids(row):
     """Validate durable identities before using them as stored authority."""
     context = row.get("execution_context")
     try:
+        context_keys = {"schema", "authority_mode", "execution_path",
+            "drawing_id", "actor_binding_id", "checkout_fence",
+            "tool_manifest_sha256", "parent_intake_sha256", "initialized"}
+        # Keep the original closed context for every ordinary graph tool.
+        if row.get("tool_name") == "solar-solve-proposal":
+            context_keys.add("solve_binding")
         if (row["kind"] != "run" or type(context) is not dict
-                or set(context) != {"schema", "authority_mode", "execution_path",
-                    "drawing_id", "actor_binding_id", "checkout_fence",
-                    "tool_manifest_sha256", "parent_intake_sha256", "initialized"}
+                or set(context) != context_keys
                 or context["schema"] != PROJECT_GRAPH_JOB_SCHEMA
                 or context["authority_mode"] != "postgres_canonical"
                 or context["execution_path"] != "local"
@@ -528,6 +532,17 @@ def _graph_ids(row):
         if any(context[name] != str(value) for name, value in
                zip(("drawing_id", "actor_binding_id"), extra)):
             _graph_binding_error()
+        if row["tool_name"] == "solar-solve-proposal":
+            bound = context["solve_binding"]
+            if (type(bound) is not dict or set(bound) != {
+                    "frame_id", "phase", "expected_rev", "graph_sha256", "request"}
+                    or type(bound["frame_id"]) is not str or not 1 <= len(bound["frame_id"]) <= 200
+                    or bound["phase"] not in ("initial", "background")
+                    or type(bound["expected_rev"]) is not int or bound["expected_rev"] < 0
+                    or type(bound["graph_sha256"]) is not str
+                    or not _HASH_RE.fullmatch(bound["graph_sha256"])
+                    or type(bound["request"]) is not dict):
+                _graph_binding_error()
         return (*ids, *extra)
     except (ValueError, TypeError, KeyError, AttributeError):
         _graph_binding_error()
@@ -797,6 +812,72 @@ def complete_project_graph_job(job_id, worker_id, attempt, completion, *, publis
         if cur.rowcount != 1:
             raise _GraphLeaseLost()
         return "applied", result
+
+
+def complete_project_solve_job(job_id, worker_id, attempt, completion, *, conn):
+    """Settle a frozen proposal under the live lease without publishing a version."""
+    from . import project_graph_store as graph, project_solve_store as exchanges
+    graph._ids(job_id)
+    fingerprint = _fingerprint("canonical-project-solve-success", completion)
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL FOR UPDATE", (job_id,))
+        row = cur.fetchone()
+        if row is None:
+            return "missing", None
+        if row["tool_name"] != "solar-solve-proposal" or not _is_project_graph_job(row):
+            return "conflict", None
+        _graph_scope(row, conn)
+        if row["status"] in _TERMINAL:
+            if (row["status"] == "succeeded" and type(attempt) is int
+                    and row["attempt"] == attempt and row["terminal_fingerprint"] == fingerprint):
+                return "duplicate", row["result"]
+            return "conflict", None
+        observed = graph._clock(cur)
+        if (row["status"] != "running" or row["lease_owner"] != worker_id
+                or type(attempt) is not int or row["attempt"] != attempt
+                or row["lease_expires_at"] is None or row["lease_expires_at"] <= observed):
+            return "not_owner", None
+        org, proj, _parent, _job, drawing, _actor = _graph_ids(row)
+        exchange = exchanges.read_completed_exchange(org, proj, drawing, job_id, conn=conn)
+        if (type(completion) is not dict or set(completion) != {
+                "schema", "candidate_sha256", "request_sha256", "response_sha256", "frame_id",
+                "phase", "candidate_summary", "execution_provenance"}
+                or completion["schema"] != "leaf.solar-solve-proposal.v1"
+                or any(completion[name] != exchange[name] for name in (
+                    "candidate_sha256", "request_sha256", "response_sha256", "frame_id", "phase"))
+                or type(completion["candidate_summary"]) is not list
+                or len(completion["candidate_summary"]) > 4096):
+            _graph_binding_error()
+        from solar_project_solve import project_solve_job_provenance
+        project_solve_job_provenance(job_id, completion, conn=conn)
+        history_payload = {"jobId": str(job_id), "inputVersionId": str(row["input_version_id"]),
+            "candidateSha256": exchange["candidate_sha256"], "requestHash": exchange["request_sha256"],
+            "responseHash": exchange["response_sha256"]}
+        digest = canonical_hash("history-operation",
+            {"operationType": "solar.solve.proposed", "payload": history_payload})
+        operation_id = new_uuid()
+        cur.execute(
+            "INSERT INTO history_operations (operation_id, org_id, project_id, operation_type, "
+            "payload, idempotency_key, hash_algorithm, hash_canonicalization, hash_domain, hash_value) "
+            "VALUES (%(id)s, %(org)s, %(project)s, 'solar.solve.proposed', %(payload)s, %(key)s, "
+            "%(algorithm)s, %(canonicalization)s, %(domain)s, %(value)s)",
+            {"id": operation_id, "org": org, "project": proj, "payload": Jsonb(history_payload),
+             "key": f"job:{job_id}:history", **digest.to_dict()})
+        _insert_outbox(cur, org, proj, "history_operation", operation_id,
+            "history.operation.appended", {"operationId": str(operation_id), "jobId": str(job_id)})
+        cur.execute(
+            "UPDATE jobs SET status='succeeded', result=%(result)s, output_version_id=NULL, "
+            "provenance=%(provenance)s, terminal_fingerprint=%(fingerprint)s, error=NULL, "
+            "finished_at=clock_timestamp(), updated_at=clock_timestamp(), lease_owner=NULL, lease_expires_at=NULL "
+            "WHERE job_id=%(job)s AND status='running' AND kind='run' "
+            "AND execution_context->>'schema'=%(schema)s AND deleted_at IS NULL "
+            "AND lease_owner=%(worker)s AND attempt=%(attempt)s AND lease_expires_at>clock_timestamp()",
+            {"result": Jsonb(completion), "provenance": Jsonb(completion["execution_provenance"]),
+             "fingerprint": fingerprint, "job": job_id, "schema": PROJECT_GRAPH_JOB_SCHEMA,
+             "worker": worker_id, "attempt": attempt})
+        if cur.rowcount != 1:
+            raise _GraphLeaseLost()
+        return "applied", completion
 
 
 def get_job_for_tenant(job_id: uuid.UUID, request_tenant_id: str) -> Optional[Dict[str, Any]]:

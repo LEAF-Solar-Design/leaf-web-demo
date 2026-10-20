@@ -14,4 +14,5 @@ SUPPORTED_TOOLS = frozenset((
     "solar-string-conductors",
     "solar-panel-groups",
     "solar-correct-string",
+    "solar-solve-proposal",
 ))

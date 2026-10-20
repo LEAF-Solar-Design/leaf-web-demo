@@ -380,8 +380,27 @@ def piece_proposal(params: dict, tenant_id: str, job_id: str) -> dict:
             "proposal": result.model_dump(exclude_none=False), "visited_path": path}
 
 
-def post_stringer(request: StringerRequest, grant: CloudGrant) -> bytes:
-    """Only the broker calls this transport; no redirects or response logging."""
+def _known_prewrite_failure(exc):
+    """Only connection establishment errors prove that no request was written."""
+    from urllib3.exceptions import NewConnectionError
+    pending, seen = [exc], set()
+    while pending and len(seen) < 32:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, (requests.ConnectTimeout, NewConnectionError,
+                             ConnectionRefusedError)):
+            return True
+        if isinstance(item, BaseException):
+            pending.extend(value for value in (
+                item.__cause__, item.__context__, getattr(item, "reason", None), *item.args)
+                if isinstance(value, BaseException))
+    return False
+
+
+def post_stringer(request: StringerRequest, grant: CloudGrant, *, preserve_uncertainty=False) -> bytes:
+    """Broker and custodied worker transport; no redirects or response logging."""
     try:
         deadline = time.monotonic() + 50
         with requests.post(
@@ -402,7 +421,9 @@ def post_stringer(request: StringerRequest, grant: CloudGrant) -> bytes:
                 if len(chunks) > MAX_RESPONSE_BYTES or time.monotonic() > deadline:
                     raise CloudError("cloud_response_invalid", 502)
             return bytes(chunks)
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        if preserve_uncertainty and not _known_prewrite_failure(exc):
+            raise CloudError("solve_outcome_unknown", 502) from None
         raise CloudError("cloud_upstream_failure", 502) from None
 
 

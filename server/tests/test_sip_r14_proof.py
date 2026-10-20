@@ -236,7 +236,7 @@ def test_R14C_30_compatibility_boundary(monkeypatch):
         b3.prepare(w.s, graph.SIZING_TOOL, w.params, w.context)
     assert caught.value.reason_code == "SIP_R3_SERVICE_EVIDENCE_REQUIRED"
     calls = []
-    monkeypatch.setattr(cloud, "post_string_length", lambda *args: calls.append(args) or w.raw)
+    monkeypatch.setattr(cloud, "post_string_length", lambda *args, **kwargs: calls.append(args) or w.raw)
     standalone = {"grant_ref": "g1", "request": next(iter(w.params["requests"].values()))}
     for _ in range(2):
         assert cloud.size(standalone, str(w.s.org), str(uuid4()))["sizing"]["panels_in_sequence"] == 10

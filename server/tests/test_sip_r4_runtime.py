@@ -211,8 +211,12 @@ try:
     import solar_local_graph as local
 
     tools = sorted(adapter.SUPPORTED_TOOLS)
+    SOLVE_ADAPTER_TOOLS = {"solar-solve-proposal"}
     for t in tools:
-        local._load_builtin(t)
+        if t not in SOLVE_ADAPTER_TOOLS:
+            local._load_builtin(t)
+    import solar_project_solve
+    assert SOLVE_ADAPTER_TOOLS == {solar_project_solve.TOOL_NAME}
     out["tools"] = tools
     import solar_design_graph
 

@@ -67,6 +67,9 @@ def world(make_org, monkeypatch):
             "drawing_id": str(s.drawing), "actor_binding_id": str(s.actor),
             "checkout_fence": str(s.lease.fence), "tool_manifest_sha256": manifest,
             "parent_intake_sha256": ctx.intake_sha256, "initialized": False,
+            "solve_binding": {"frame_id": "world", "phase": "initial",
+                "expected_rev": ctx.graph["rev"], "graph_sha256": pg.local.digest(ctx.graph),
+                "request": {}},
         }
         fingerprint = pg.jobs._fingerprint("w1c-test-submission", {
             "nonce": str(uuid4()), "parameters": params, "context": execution})

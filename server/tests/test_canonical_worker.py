@@ -297,6 +297,7 @@ def test_worker_base_option_abbreviations_unchanged(monkeypatch):
             canonical_worker.main()
             assert calls[-1][key] == expected, (argv, calls[-1])
             tried += 1
+    # One prefix per character after '--': --lease-seconds has thirteen prefixes.
     assert tried == len(calls) == 4 + 4 + 12 + 13
 
 
@@ -322,7 +323,7 @@ def test_graph_worker_descriptor(monkeypatch, tmp_path):
         "leaf_cloud_client.py", "platform_link.py", "solar_design_graph.py", "solar_graph_context.py",
         "solar_graph_seed.py", "solar_local_graph.py", "solar_preset_sync.py", "solar_project.py",
         "solar_project_context.py", "solar_project_graph.py", "solar_project_jobs.py",
-        "solar_project_sizing.py", "solar_project_tools.py", "solar_settings_invalidation.py",
+        "solar_project_sizing.py", "solar_project_solve.py", "solar_project_tools.py", "solar_settings_invalidation.py",
         "solar_sizing_client.py", "solar_sizing_power.py", "solar_solve_results.py",
         "solar_tools/__init__.py", "tenant_id_validator.py", "tool_validate.py", "write_loop.py",
     )

@@ -19,10 +19,10 @@ from test_sip_r3a_graph import Memory, INTAKE, UNITS, publish, proof, refused
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
 
-# W1C-1 adds correction; thirteen supported tools, four creation tools.
+# W1C-2b adds proposal; fourteen supported tools, four creation tools.
 TOOLS = {"solar-settings", "solar-panels-from-drawing", "solar-size-strings",
          "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
-         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string"}
+         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal"}
 HASHES = (
     "c9b8f4d3b108024f0ca3d889282fc23df485aca605c4b675a2ca2ffc9e826004",
     "76637c9607c2e780a91070d2e928c234092a0ef09b185aeaffe2381f1d5ae489",

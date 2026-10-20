@@ -1969,6 +1969,10 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",
               )),
+        Suite("server-w1c-solve-proposal-postgres", "server canonical Solar proposal PostgreSQL",
+              "pytest", SERVER, _py_pytest("tests/test_w1c_solve_proposal_postgres.py"), 8,
+              uses_database=True, db_gated=True,
+              database_skip_reasons=(r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("platform-sip-w1c-exchange", "platform Solar solve proposal exchange custody",
               "pytest", REPO / "platform",
               _py_pytest("tests/test_sip_w1c_exchange.py"), 26,
@@ -3069,7 +3073,7 @@ def build_suites() -> List[Suite]:
               # 2026-10-13: R14-E adds one registration row; measured 237 passing.
               # 2026-10-14: PP-3 record A adds one registration row (237 -> 238).
               # 2026-10-19: su-a4a adds one production proof registration row (238 -> 239).
-              ["test_studio_walk_regression_gate.py"], 241),
+              ["test_studio_walk_regression_gate.py"], 242),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -3639,6 +3643,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_sip_r14_worker.py"), 34),
         Suite("server-sip-r14-proof", "server canonical Solar sizing custody proof",
               "pytest", SERVER, _py_pytest("tests/test_sip_r14_proof.py"), 36),
+        Suite("server-w1c-solve-proposal", "server canonical Solar solve proposal",
+              "pytest", SERVER, _py_pytest("tests/test_w1c_solve_proposal.py"), 31),
         # 2026-10-11: sip-r3d PostgreSQL acceptance floor: six conductor rows.
         Suite("platform-sip-r3d-conductors", "platform canonical Solar conductors",
               "pytest", REPO / "platform", _py_pytest("tests/test_sip_r3d_conductors.py"), 6,

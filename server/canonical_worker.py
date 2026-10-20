@@ -59,6 +59,7 @@ GRAPH_WORKER_MANIFEST = (
     "solar_project_graph.py",
     "solar_project_jobs.py",
     "solar_project_sizing.py",
+    "solar_project_solve.py",
     "solar_project_tools.py",
     "solar_settings_invalidation.py",
     "solar_sizing_client.py",

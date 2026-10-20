@@ -236,7 +236,7 @@ def test_sip_r5_seed_submission(lane, monkeypatch):
     assert (lane.s.blobs, lane.s.versions, lane.s.fingerprints, lane.s.writes) == before
 
 
-# W1C-1 adds correction; thirteen supported tools, four creation tools.
+# W1C-2b adds proposal; fourteen supported tools, four creation tools.
 def test_sip_r5_supported_tools(lane, monkeypatch):
     monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
     calls = []
@@ -251,7 +251,7 @@ def test_sip_r5_supported_tools(lane, monkeypatch):
         refusal(run(lane, {}, name), "SIP_R3_TOOL_UNSUPPORTED")
     lane.tools["solar-settings"]["description"] = "Changed record"
     refusal(run(lane, {}), "SIP_R3_TOOL_MANIFEST_MISMATCH")
-    assert len(calls) == 13
+    assert len(calls) == 14
 
 
 def test_sip_r5_binding_and_legacy_pins(lane, monkeypatch):
@@ -307,7 +307,9 @@ def test_sip_r5_binding_and_legacy_pins(lane, monkeypatch):
         req.catalog_digest = deps.catalog_tool_digest(lane.tools[req.tool])
         patch.setattr(entitlements, "w1_tool_availability", lambda *args, **kwargs:
             {"runnable": False, "refusal_reasons": ["drawing_context_required"]})
-        response = route.run(req, tenant_id=lane.tenant)
+        # Go through HTTP so absent headers are None, rather than FastAPI's
+        # Header parameter descriptors from calling the route function directly.
+        response = lane.client.post("/api/run", json=req.model_dump(exclude_unset=True), headers={})
         assert response.status_code == 409 and len(calls) == before
 
 
@@ -431,7 +433,7 @@ def test_sip_r5_catalog_preview(lane, monkeypatch):
                       "idempotency_key": "key"} for name in policy_cases.ELEVEN}
     response = preview(lane, project_runs=json.dumps(entries))
     assert all(states(response)[name]["runnable"] for name in policy_cases.ELEVEN)
-    assert len(calls) == 13 and len({name for name, _ in calls}) == 13
+    assert len(calls) == 14 and len({name for name, _ in calls}) == 14
     missing = states(preview(lane, input_version_id=""))["solar-settings"]
     assert missing["admission"]["status_code"] == 400
     assert missing["admission"]["error"]["message"] == "a canonical drawing version UUID is required"

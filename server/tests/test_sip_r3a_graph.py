@@ -60,10 +60,11 @@ class Memory:
         self.blobs[key] = raw
 
     def resolve(self, org, proj, version, *, drawing_id=None, conn=None):
-        if ((org, proj, drawing_id) != (self.org, self.project, self.drawing)
+        if ((org, proj) != (self.org, self.project)
+                or drawing_id not in (None, self.drawing)
                 or version not in self.versions):
             project.refuse("CONTEXT_NOT_FOUND")
-        return project.VersionBinding(org, proj, drawing_id, version, self.head,
+        return project.VersionBinding(org, proj, self.drawing, version, self.head,
                                       version == self.head, self.versions[version])
 
     def context(self, version=None):
@@ -459,7 +460,7 @@ def test_sip_r3a_legacy_bytes():
         "schema_version": 1, "source_intake_sha256": source_hash, "units": deepcopy(UNITS)}}) == "ec73fc8a161f512cf3b8c554f4227b6f7547727a80f238e38b4f989f56b6b52c"
 
 
-# W1C-1 adds correction; thirteen supported tools, four creation tools.
+# W1C-2b adds proposal; fourteen supported tools, four creation tools.
 def test_sip_r3a_additive_entrypoints_no_activation(memory, monkeypatch):
     for name in ("run_project_graph_seed", "run_project_graph_commit", "project_graph_commit_provenance"):
         sentinel = object()
@@ -467,7 +468,7 @@ def test_sip_r3a_additive_entrypoints_no_activation(memory, monkeypatch):
         assert getattr(local, name)("forwarded") is sentinel
     assert adapter.SUPPORTED_TOOLS == {"solar-settings", "solar-panels-from-drawing",
         "solar-size-strings", "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
-        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string"}
+        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal"}
     root = Path(local.__file__).parent
     worker = (root / "canonical_worker.py").read_text(encoding="utf-8")
     assert "if tool_name in solar_project_graph.SUPPORTED_TOOLS:" in worker

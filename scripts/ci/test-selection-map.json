@@ -710,6 +710,8 @@
     "server-sip-r14-admission",
     "server-sip-r14-worker",
     "server-sip-r14-proof",
+    "server-w1c-solve-proposal",
+    "server-w1c-solve-proposal-postgres",
     "server-sip-r3e-groups",
     "platform-sip-r3e-groups",
     "platform-sip-r14-exchange",

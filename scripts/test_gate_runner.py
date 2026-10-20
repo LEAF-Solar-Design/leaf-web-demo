@@ -131,7 +131,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 239  # +1 demo inventory/migration contract regression.
     assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
-    assert suites["gate-runner-selftest"].expected == 241  # LD1d: demo actor registration.
+    assert suites["gate-runner-selftest"].expected == 242  # W1C proposal registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4224,7 +4224,7 @@ def test_R14C_32_mandatory_registration():
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
     assert mandatory[-3:-1] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 241  # LD1d: demo actor registration.
+    assert suites["gate-runner-selftest"].expected == 242  # W1C proposal registration.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4310,7 +4310,8 @@ def test_sip_r3e_gate_registration():
     assert ids[start - 1:start + 3] == [
         "server-sip-r3d-conductors", "server-sip-r3e-groups",
         "platform-sip-r3e-groups", "server-sip-r14-evidence"]
-    assert selection["mandatory_suite_ids"][-5:-2] == [
+    start = selection["mandatory_suite_ids"].index("server-sip-r3e-groups")
+    assert selection["mandatory_suite_ids"][start:start + 3] == [
         "server-sip-r3e-groups", "platform-sip-r3e-groups", "platform-sip-r14-exchange"]
     for ordered in (ids, selection["mandatory_suite_ids"]):
         start = ordered.index("server-sip-r14-evidence")
@@ -4319,7 +4320,7 @@ def test_sip_r3e_gate_registration():
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
     # LD1b adds one demo classification regression to the 1178 platform rows.
     assert suites["platform"].expected == 1205
-    assert suites["gate-runner-selftest"].expected == 241  # LD1d: demo actor registration.
+    assert suites["gate-runner-selftest"].expected == 242  # W1C proposal registration.
 
 
 def test_demo_actor_gate_registration():
@@ -4394,3 +4395,17 @@ def test_sip_w1c_exchange_gate_registration():
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
     assert selection["mandatory_suite_ids"][-1] == suite.id
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_w1c_solve_proposal_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suffix, floor, database in (("", 31, False), ("-postgres", 8, True)):
+        suite = suites["server-w1c-solve-proposal" + suffix]
+        assert suite.cwd == REPO / "server"
+        assert suite.argv == runner._py_pytest(
+            "tests/test_w1c_solve_proposal" + suffix.replace("-", "_") + ".py")
+        assert suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert selection["mandatory_suite_ids"].count(suite.id) == 1

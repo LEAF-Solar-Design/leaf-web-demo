@@ -228,8 +228,8 @@ def test_sip_r4_submission_no_secrets(admission, monkeypatch):
         calls.append(args[1])
         return original(*args, **kwargs)
     monkeypatch.setattr(service, "_validate_new_project_graph_params", spy)
-    assert set(CLEAN) == ELEVEN
-    for name in sorted(ELEVEN):
+    assert set(CLEAN) == ELEVEN - {"solar-solve-proposal"}
+    for name in sorted(CLEAN):
         clean = deepcopy(CLEAN[name])
         assert not tool_validate.validate_params(solar_tools.trusted_record(name), clean)
         inserts, entitlements_read, preparations = (
@@ -394,11 +394,11 @@ def test_sip_r4_every_tool_prepared_at_admission(admission, monkeypatch):
     # Ordinary/manual requests use worker output preparation; global sizing uses pure planning.
     # These thirteen ordinary/manual cases refuse graphless and stale parents before insertion.
     a = admission
-    for tool in sorted(ELEVEN):
+    for tool in sorted(CLEAN):
         check_admission_refusal(a, "GRAPH_NOT_EMBEDDED", deepcopy(CLEAN[tool]), tool_name=tool,
                                 tool_manifest_sha256=manifest(tool))
     ctx = chain(a.s, 1)[-1][2]
-    for tool in sorted(ELEVEN):
+    for tool in sorted(CLEAN):
         params = deepcopy(CLEAN[tool])
         params["expected_rev"] = 97
         check_admission_refusal(a, "STALE_GRAPH_REVISION", params, **at(a, monkeypatch, ctx, tool))
@@ -427,7 +427,7 @@ def test_sip_r4_prerequisite_refusals_at_admission(admission, monkeypatch):
         params["expected_rev"] = 1
         check_admission_refusal(a, f"^{code}:", params, **at(a, monkeypatch, ctx, tool))
     assert not a.accepted and a.events.count("insert") == a.events.count("entitlement") == 0
-    for tool in sorted(set(ELEVEN) - set(PREREQUISITE_REFUSALS)):
+    for tool in sorted(set(CLEAN) - set(PREREQUISITE_REFUSALS)):
         params = deepcopy(CLEAN[tool])
         params["expected_rev"] = 1
         check_admitted(a, params, **at(a, monkeypatch, ctx, tool))
@@ -784,8 +784,13 @@ def test_sip_r4_no_http_activation(monkeypatch):
             dwg=str(UUID(int=3)), dwg_version=1, catalog_digest=router.deps.catalog_tool_digest(tool)),
             wait=0, tenant_id="demo", x_org_id=str(UUID(int=1)), x_project_id=str(UUID(int=2)),
             authorization=None, idempotency_key="key")
-        assert response.status_code == 409
         body = json.loads(response.body)
+        if name == "solar-solve-proposal":
+            assert response.status_code == 401
+            assert body["ok"] is False and body["error"]["error_code"] == "UNAUTHENTICATED"
+            assert body["error"]["message"] == "cloud_auth_missing"
+            continue
+        assert response.status_code == 409
         assert body["ok"] is False and body["error"]["error_code"] == "BAD_PARAMS"
         assert "project-scoped canonical execution" in body["error"]["message"]
     for path in (root / "routers").rglob("*.py"):
