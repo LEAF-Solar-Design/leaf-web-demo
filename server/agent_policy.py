@@ -161,6 +161,239 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
     "approval_ttl_s": 300,
     "rate_limits": {"low_per_hour": 120, "medium_per_hour": 60, "high_per_hour": 10},
     "actions": {
+        "read_integration_data": {
+            "description": "Discover project datasets or query an existing materialization.",
+            "rung": 1,
+            "required_capability": "converse",
+            "policy": "auto",
+            "enabled": True,
+            "tenant_tightenable": True,
+            "dispatch": {
+                "kind": "app_api",
+                "routes": [
+                    "POST /internal/integrations/datasets",
+                    "POST /internal/integrations/query"
+                ]
+            },
+            "rate_limit_category": "low",
+            "timeout_s": 10,
+            "audit_extra": [
+                "operation"
+            ],
+            "args_schema": {
+                "$defs": {
+                    "IntegrationRefV1": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+                            },
+                            "version": {
+                                "type": "integer",
+                                "exclusiveMinimum": 0,
+                                "maximum": 9007199254740991
+                            },
+                            "digest": {
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+                            }
+                        },
+                        "required": [
+                            "id",
+                            "version",
+                            "digest"
+                        ],
+                        "additionalProperties": False
+                    },
+                    "DatasetQueryV1": {
+                        "type": "object",
+                        "properties": {
+                            "fields": {
+                                "minItems": 1,
+                                "maxItems": 100,
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 128,
+                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                }
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1000
+                            },
+                            "cursor": {
+                                "type": "string",
+                                "maxLength": 2048
+                            },
+                            "filters": {
+                                "maxItems": 20,
+                                "type": "array",
+                                "items": {
+                                    "anyOf": [
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "field": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                    "maxLength": 128,
+                                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                                },
+                                                "op": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "eq",
+                                                        "neq",
+                                                        "gt",
+                                                        "gte",
+                                                        "lt",
+                                                        "lte"
+                                                    ]
+                                                },
+                                                "value": {
+                                                    "anyOf": [
+                                                        {
+                                                            "type": "string"
+                                                        },
+                                                        {
+                                                            "type": "number"
+                                                        },
+                                                        {
+                                                            "type": "boolean"
+                                                        },
+                                                        {
+                                                            "type": "null"
+                                                        }
+                                                    ]
+                                                }
+                                            },
+                                            "required": [
+                                                "field",
+                                                "op",
+                                                "value"
+                                            ],
+                                            "additionalProperties": False
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "field": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                    "maxLength": 128,
+                                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                                },
+                                                "op": {
+                                                    "type": "string",
+                                                    "const": "is_null"
+                                                }
+                                            },
+                                            "required": [
+                                                "field",
+                                                "op"
+                                            ],
+                                            "additionalProperties": False
+                                        }
+                                    ]
+                                }
+                            },
+                            "sort": {
+                                "maxItems": 4,
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "field": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "maxLength": 128,
+                                            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                        },
+                                        "direction": {
+                                            "type": "string",
+                                            "enum": [
+                                                "asc",
+                                                "desc"
+                                            ]
+                                        }
+                                    },
+                                    "required": [
+                                        "field",
+                                        "direction"
+                                    ],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": [
+                            "fields",
+                            "limit"
+                        ],
+                        "additionalProperties": False
+                    }
+                },
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "operation": {
+                                "const": "datasets"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 50
+                            },
+                            "after": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1024,
+                                "pattern": "^[A-Za-z0-9_-]+(?![\\s\\S])"
+                            },
+                            "confirmation_id": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{16}(?![\\s\\S])"
+                            }
+                        },
+                        "required": [
+                            "operation",
+                            "limit"
+                        ],
+                        "additionalProperties": False
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "operation": {
+                                "const": "query"
+                            },
+                            "dataset_ref": {
+                                "$ref": "#/$defs/IntegrationRefV1"
+                            },
+                            "query": {
+                                "$ref": "#/$defs/DatasetQueryV1"
+                            },
+                            "confirmation_id": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{16}(?![\\s\\S])"
+                            }
+                        },
+                        "required": [
+                            "operation",
+                            "dataset_ref",
+                            "query"
+                        ],
+                        "additionalProperties": False
+                    }
+                ]
+            }
+        },
         "request_confirmation": {
             "description": "UI-only consent chip: ask the user to approve something before proceeding (R0; wire contract section 5). Dispatches nowhere — the gate mints the confirmation_id and the harness renders the card, then ends the turn. always-confirm is what MAKES the id: the app's pending store is the only authority allowed to mint one (section 6), so a self-issued harness id could never be redeemed.",
             "rung": 0, "required_capability": "converse", "policy": "always-confirm",
