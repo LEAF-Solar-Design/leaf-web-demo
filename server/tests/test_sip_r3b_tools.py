@@ -19,10 +19,10 @@ from test_sip_r3a_graph import Memory, INTAKE, UNITS, publish, proof, refused
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
 
-# 2026-10-13: R3e-2 adds canonical grouping; twelve supported tools, four creation tools.
+# W1C-1 adds correction; thirteen supported tools, four creation tools.
 TOOLS = {"solar-settings", "solar-panels-from-drawing", "solar-size-strings",
          "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
-         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups"}
+         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string"}
 HASHES = (
     "c9b8f4d3b108024f0ca3d889282fc23df485aca605c4b675a2ca2ffc9e826004",
     "76637c9607c2e780a91070d2e928c234092a0ef09b185aeaffe2381f1d5ae489",
@@ -317,6 +317,86 @@ def test_sip_r3b_homeruns(memory, case, monkeypatch):
     assert r["after_rev"] == ctx.graph["rev"] + 1
 
 
+def test_sip_r3b_correction_membership(memory, case, monkeypatch):
+    from solar_solve_results import correct_graph
+    ctx = assigned_parent(memory, case)
+    ctx = canonical_custody(memory, monkeypatch, ctx.graph)
+    string = ctx.graph["strings"][0]
+    params = {"expected_rev": ctx.graph["rev"], "memberships": [{
+        "string_ref": string["id"],
+        "ordered_panel_refs": list(reversed(string["ordered_panel_refs"]))}]}
+    before = deepcopy((ctx.graph, params))
+    expected = correct_graph(ctx.graph, params)
+    p = prepare(memory, "solar-correct-string", params, ctx)
+    again = prepare(memory, "solar-correct-string", params, ctx)
+    assert again == p
+    assert (again.request_bytes, again.output_intake_bytes, again.receipt_bytes) == (
+        p.request_bytes, p.output_intake_bytes, p.receipt_bytes)
+    r = publish(memory, p)
+    out = output(memory, r)
+    assert out.graph == expected
+    assert out.graph["rev"] == r["after_rev"] == ctx.graph["rev"] + 1
+    assert out.graph["parent_rev"] == ctx.graph["rev"]
+    assert (ctx.graph, params) == before
+
+
+def test_sip_r3b_correction_settings(memory):
+    from solar_solve_results import correct_graph
+    ctx = chain(memory)[-1][2]
+    assert ctx.graph["settings"]["global_string_sizing_confirmed"] is True
+    assert "string_sizing" in ctx.graph["settings"]["extra"]
+    params = {"expected_rev": ctx.graph["rev"], "settings_changes": {"num_mppt": 3}}
+    expected = correct_graph(ctx.graph, params)
+    _, r, out = commit(memory, "solar-correct-string", params, ctx)
+    assert out.graph == expected and r["after_rev"] == ctx.graph["rev"] + 1
+    assert out.graph["settings"]["global_string_sizing_confirmed"] is False
+    assert "string_sizing" not in out.graph["settings"]["extra"]
+
+
+def test_sip_r3b_correction_refusals(memory):
+    ctx = chain(memory)[-1][2]
+    before = deepcopy((memory.versions, memory.blobs, memory.writes))
+    for code, params in (
+        ("GRAPH_COMMIT_CANCELLED", {"expected_rev": ctx.graph["rev"], "cancel": True}),
+        ("STALE_GRAPH_REVISION", {"expected_rev": ctx.graph["rev"] - 1,
+                                  "settings_changes": {"num_mppt": 3}}),
+        ("INVALID_CORRECTION", {"expected_rev": ctx.graph["rev"], "surprise": 1}),
+        ("INVALID_CORRECTION", {"expected_rev": ctx.graph["rev"],
+                                 "memberships": [], "settings_changes": {}})):
+        refused(code, lambda: prepare(memory, "solar-correct-string", params, ctx))
+    assert (memory.versions, memory.blobs, memory.writes) == before
+
+
+def test_sip_r3b_correction_sizing_custody(memory, case, monkeypatch):
+    # This imported legacy evidence has no canonical exchange. Correction may not repair it.
+    ctx = assigned_parent(memory, case)
+    builtin = local._load_builtin("solar-correct-string")
+    seen = []
+    def spy(*args, **kwargs):
+        seen.append(True)
+        pytest.fail("correction ran before sizing custody was proved")
+    monkeypatch.setattr(builtin, "run", spy)
+    before = deepcopy((memory.versions, memory.blobs, memory.writes))
+    params = {"expected_rev": ctx.graph["rev"], "settings_changes": {"num_mppt": 3}}
+    refused("SIP_R3_SERVICE_EVIDENCE_REQUIRED", lambda: adapter.require_project_sizing(ctx))
+    refused("SIP_R3_SERVICE_EVIDENCE_REQUIRED", lambda: prepare(
+        memory, "solar-correct-string", params, ctx))
+    assert seen == []
+    assert (memory.versions, memory.blobs, memory.writes) == before
+
+
+def test_sip_r3b_correction_request_tampering(memory):
+    ctx = chain(memory)[-1][2]
+    p = prepare(memory, "solar-correct-string", {
+        "expected_rev": ctx.graph["rev"], "settings_changes": {"num_mppt": 3}}, ctx)
+    request = p.request
+    request["parameters"]["settings_changes"]["num_mppt"] = 4
+    changed = replace(p, request_bytes=local.canonical_bytes(request))
+    before = deepcopy((memory.versions, memory.blobs, memory.writes))
+    refused("SIP_R3_PROOF_REJECTED", lambda: publish(memory, changed))
+    assert (memory.versions, memory.blobs, memory.writes) == before
+
+
 def test_sip_r3b_schedule(memory, case, monkeypatch):
     ctx = assigned_parent(memory, case)
     ctx = canonical_custody(memory, monkeypatch, ctx.graph)
@@ -336,6 +416,9 @@ def test_sip_r3b_schedule(memory, case, monkeypatch):
 
 def test_sip_r3b_replay(memory, monkeypatch):
     rows = chain(memory)[2:]
+    ctx = rows[-1][2]
+    rows.append(commit(memory, "solar-correct-string", {
+        "expected_rev": ctx.graph["rev"], "settings_changes": {"num_mppt": 3}}, ctx))
     ctx, params = combiner_parent(memory)
     row = commit(memory, "solar-combiners", params, ctx)
     rows.append(row)
@@ -380,6 +463,9 @@ def test_sip_r3b_request_binding(memory):
 
 def test_sip_r3b_proof_tampering(memory):
     rows = [chain(memory)[-1]]
+    ctx = rows[-1][2]
+    rows.append(commit(memory, "solar-correct-string", {
+        "expected_rev": ctx.graph["rev"], "settings_changes": {"num_mppt": 3}}, ctx))
     ctx, params = combiner_parent(memory)
     rows.append(commit(memory, "solar-combiners", params, ctx))
     for p, r, _ in rows:

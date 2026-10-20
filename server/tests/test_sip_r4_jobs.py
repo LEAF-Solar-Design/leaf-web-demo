@@ -32,6 +32,7 @@ SIMPLE = {"expected_rev": 1}
 M = {"expected_rev": 4, "operation": "add-strings", "string_length": 2,
      "ordered_panel_refs": PANELS}
 CLEAN = {
+    "solar-correct-string": {"expected_rev": 1, "settings_changes": {"num_mppt": 2}},
     # R3e-2: grouping joins ordinary admission; nested validation still runs in preparation.
     "solar-panel-groups": {
         "expected_rev": 1,
@@ -391,7 +392,7 @@ def test_sip_r4_seed_parameter_admission(admission, monkeypatch):
 
 def test_sip_r4_every_tool_prepared_at_admission(admission, monkeypatch):
     # Ordinary/manual requests use worker output preparation; global sizing uses pure planning.
-    # These twelve ordinary/manual cases refuse graphless and stale parents before insertion.
+    # These thirteen ordinary/manual cases refuse graphless and stale parents before insertion.
     a = admission
     for tool in sorted(ELEVEN):
         check_admission_refusal(a, "GRAPH_NOT_EMBEDDED", deepcopy(CLEAN[tool]), tool_name=tool,
@@ -418,7 +419,7 @@ PREREQUISITE_REFUSALS = {
 def test_sip_r4_prerequisite_refusals_at_admission(admission, monkeypatch):
     # On a seeded parent at the right revision the tool's own preparation decides admission, not only the
     # context and revision checks: ten tools refuse with the worker's own code before the insert and the
-    # entitlement read, and the two with no unmet prerequisite are admitted.
+    # entitlement read, and the three with no unmet prerequisite are admitted.
     a = admission
     ctx = chain(a.s, 1)[-1][2]
     for tool, code in sorted(PREREQUISITE_REFUSALS.items()):
@@ -430,7 +431,8 @@ def test_sip_r4_prerequisite_refusals_at_admission(admission, monkeypatch):
         params = deepcopy(CLEAN[tool])
         params["expected_rev"] = 1
         check_admitted(a, params, **at(a, monkeypatch, ctx, tool))
-    assert [row[3] for row in a.accepted] == ["solar-panels-from-drawing", "solar-settings"]
+    assert [row[3] for row in a.accepted] == [
+        "solar-correct-string", "solar-panels-from-drawing", "solar-settings"]
 
 
 

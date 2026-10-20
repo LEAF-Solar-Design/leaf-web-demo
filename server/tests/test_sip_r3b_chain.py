@@ -22,10 +22,10 @@ from test_w2_string_add import free_panels, solved  # noqa: F401
 
 STRING = "solar-string-add"
 EQUIPMENT = "solar-assign-equipment"
-# 2026-10-13: R3e-2 adds canonical grouping; twelve supported tools, four creation tools.
+# W1C-1 adds correction; thirteen supported tools, four creation tools.
 ELEVEN = {"solar-settings", "solar-panels-from-drawing", "solar-size-strings",
         "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
-        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups"}
+        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string"}
 # Measured on the R3b-1 chain: the rev-4 parent and its ordered panels.
 PARENT_VERSION = UUID("00000000-0000-0000-0000-00000000000c")
 PARENT_INTAKE = "aaffa0f67f4a30d0d1fb8bb6b07980d10e2cc5aceb5922ff227e9d598ad2c73b"
@@ -149,7 +149,7 @@ def test_sip_r3b_chain_membership(memory):
     assert adapter.SUPPORTED_TOOLS == ELEVEN
     for tool in ("solar-assign-strings", "solar-commit-solve",
                  "solar-pvcase-convert", "solar-solaredge-accept", "solar-trackers-to-panel-groups",
-                 "solar-string-delete", "solar-correct-string"):
+                 "solar-string-delete"):
         refused("SIP_R3_TOOL_UNSUPPORTED", lambda: prepare(memory, tool, {}))
     for tool in (STRING, EQUIPMENT):
         refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: prepare(

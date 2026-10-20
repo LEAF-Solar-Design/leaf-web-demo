@@ -236,7 +236,7 @@ def test_sip_r5_seed_submission(lane, monkeypatch):
     assert (lane.s.blobs, lane.s.versions, lane.s.fingerprints, lane.s.writes) == before
 
 
-# 2026-10-13: R3e-2 adds canonical grouping; twelve supported tools, four creation tools.
+# W1C-1 adds correction; thirteen supported tools, four creation tools.
 def test_sip_r5_supported_tools(lane, monkeypatch):
     monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
     calls = []
@@ -251,7 +251,7 @@ def test_sip_r5_supported_tools(lane, monkeypatch):
         refusal(run(lane, {}, name), "SIP_R3_TOOL_UNSUPPORTED")
     lane.tools["solar-settings"]["description"] = "Changed record"
     refusal(run(lane, {}), "SIP_R3_TOOL_MANIFEST_MISMATCH")
-    assert len(calls) == 12
+    assert len(calls) == 13
 
 
 def test_sip_r5_binding_and_legacy_pins(lane, monkeypatch):
@@ -431,7 +431,7 @@ def test_sip_r5_catalog_preview(lane, monkeypatch):
                       "idempotency_key": "key"} for name in policy_cases.ELEVEN}
     response = preview(lane, project_runs=json.dumps(entries))
     assert all(states(response)[name]["runnable"] for name in policy_cases.ELEVEN)
-    assert len(calls) == 12 and len({name for name, _ in calls}) == 12
+    assert len(calls) == 13 and len({name for name, _ in calls}) == 13
     missing = states(preview(lane, input_version_id=""))["solar-settings"]
     assert missing["admission"]["status_code"] == 400
     assert missing["admission"]["error"]["message"] == "a canonical drawing version UUID is required"

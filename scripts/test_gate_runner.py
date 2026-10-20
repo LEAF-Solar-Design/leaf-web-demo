@@ -164,7 +164,7 @@ def test_sip_r5_gate_registration():
     suites = {suite.id: suite for suite in runner.build_suites()}
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     for suite_id, directory, target, floor, database in (
-            ("server-sip-r5-policy", "server", "tests/test_sip_r5_policy.py", 14, False),
+            ("server-sip-r5-policy", "server", "tests/test_sip_r5_policy.py", 15, False),
             ("server-sip-r5-routes", "server", "tests/test_sip_r5_routes.py", 18, False),
             ("platform-sip-r5-admission", "platform", "tests/test_sip_r5_admission.py", 4, True)):
         suite = suites[suite_id]
@@ -205,7 +205,7 @@ def test_sip_r3b_gate_registration():
     suites = {suite.id: suite for suite in runner.build_suites()}
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     for suite_id, directory, floor, database in (
-        ("server-sip-r3b-tools", "server", 19, False),
+        ("server-sip-r3b-tools", "server", 24, False),
             ("platform-sip-r3b-tools", "platform", 7, True)):
         suite = suites[suite_id]
         assert suite.cwd == REPO / directory
