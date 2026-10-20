@@ -19,6 +19,7 @@
 import { PRODUCT_SURFACES, surfaceGround } from './productSurfaces.js'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
 import { DeviceGround } from '../ios/DeviceGround.jsx'
+import { OpsWorkspaceGround } from '../integrations/OpsWorkspaceGround.jsx'
 import { NO_OCCLUDERS } from './groundWindow.js'
 
 export { ProjectBoardGround } from './ProjectBoardGround.jsx'
@@ -54,6 +55,7 @@ export default function SurfaceGrounds({
   occluders = NO_OCCLUDERS,
   studioPresentation = false, studioShell = false,
   iosEnabled, iosContract, revision, ship, onLaunch,
+  projectId, session, signedIn, accountScope,
 }) {
   const projectLabel = workspaceProject?.kind === 'project'
     ? workspaceProject.label
@@ -96,6 +98,18 @@ export default function SurfaceGrounds({
         revision={revision}
         ship={ship}
         onLaunch={onLaunch}
+      />
+      <OpsWorkspaceGround
+        active={!boardVisible && surfaceGround(surface) === 'integrations'}
+        projectId={projectId}
+        projectLabel={projectLabel}
+        session={session}
+        signedIn={signedIn}
+        accountScope={accountScope}
+        mock={mock}
+        leavingGround={leavingGround}
+        studioShell={studioShell}
+        occluders={occluders}
       />
     </>
   )

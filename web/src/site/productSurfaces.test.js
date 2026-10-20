@@ -40,9 +40,9 @@ describe('product surface contract', () => {
     }
   })
 
-  it('defines the five profiles once over one shared capability substrate', () => {
-    expect(PRODUCT_SURFACES.map(({ id }) => id)).toEqual(['browser', 'cad', 'solar', 'ios', 'sheets'])
-    expect(new Set(PRODUCT_SURFACES.map(({ id }) => id)).size).toBe(5)
+  it('defines the six profiles once over one shared capability substrate', () => {
+    expect(PRODUCT_SURFACES.map(({ id }) => id)).toEqual(['browser', 'cad', 'solar', 'ios', 'ops', 'sheets'])
+    expect(new Set(PRODUCT_SURFACES.map(({ id }) => id)).size).toBe(6)
     expect(SHARED_WORKSPACE_CAPABILITIES).toEqual(expect.arrayContaining([
       'conversation', 'annotations', 'approvals', 'marathons', 'one-shot execution',
     ]))
@@ -176,6 +176,18 @@ describe('product surface contract', () => {
 //   remaining slots undeclared today (null)
 // ---------------------------------------------------------------------------
 const CONTRACT_FIXTURE = {
+  ops: {
+    ground: 'integrations', scene: 'app',
+    chrome: { shell: 'cockpit', productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true },
+    toolbar: { profile: 'project', ribbon: true, home: 'project', quick: null },
+    rails: { left: 'spine', right: 'job-spine', dock: null },
+    groundMaterial: { layerAccent: null, solarStrings: false },
+    commandLine: true, authoring: true, versions: 'none', conversations: { scope: 'drawing' },
+    integrations: { link: 'standard-flow' }, builds: { routes: ['one-shot'], card: 'job-rail' },
+    contextMenu: ['turn', 'approval', 'item'], shortcuts: null, entitlements: ['build', 'run_read', 'run_write'],
+    resetOn: null, a11y: null,
+    tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: null },
+  },
   browser: {
     ground: 'board',
     scene: 'app',
@@ -302,7 +314,7 @@ const CONTRACT_FIXTURE = {
   },
 }
 
-const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'sheets']
+const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'ops', 'sheets']
 
 it('D2 ios declares the ship-lane route and it is the only surface that does', () => {
   expect(surfaceContract('ios').builds.routes).toEqual(['one-shot', 'ship-lane'])
@@ -314,7 +326,7 @@ it('D2 ios declares the ship-lane route and it is the only surface that does', (
 // The four the STUDIO hosts (`scene: 'app'`). Kept separate from SURFACE_IDS
 // so a row about the console cannot silently start asserting about a surface
 // the console never renders.
-const STUDIO_SURFACE_IDS = ['browser', 'cad', 'solar', 'ios']
+const STUDIO_SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'ops']
 
 const CONTRACT_KEYS = [
   'ground', 'scene', 'chrome', 'toolbar', 'rails', 'groundMaterial', 'commandLine', 'authoring',
@@ -326,7 +338,7 @@ const ENUMS = {
   // 'sheet' is slice 5b's addition: a chrome-free public page is none of the
   // three studio grounds, and SurfaceGrounds derives its drawing set from this
   // value, so a fourth kind excludes sheets there by construction.
-  ground: ['drawing', 'board', 'device-stage', 'sheet'],
+  ground: ['drawing', 'board', 'device-stage', 'integrations', 'sheet'],
   scene: ['app', 'sheets'],
   // null joins the stage arms: a surface the stage never casts declares no arm
   // rather than being forced into the frame fallthrough. Loosening this enum

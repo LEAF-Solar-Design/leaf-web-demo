@@ -1,0 +1,12 @@
+.studio-ground-ops { position: absolute; inset: 0; min-width: 0; overflow: hidden; pointer-events: none; font-family: system-ui, sans-serif; }
+.studio-ground-ops[hidden] { display: none; }
+.ops-workspace { position: absolute; top: var(--ground-top, 180px); left: var(--ground-left, 16px); right: var(--ground-right, 16px); height: var(--ground-window, calc(100% - 280px)); overflow: auto; overscroll-behavior: contain; box-sizing: border-box; padding: 16px; min-width: 0; pointer-events: auto; background: var(--leaf-card, #fff); color: var(--leaf-foreground, #17202a); border-radius: 12px; }
+.ops-workspace h1 { font-size: 22px; }
+.ops-workspace h2 { font-size: 18px; }
+.ops-workspace p, .ops-workspace li { overflow-wrap: anywhere; }
+.ops-workspace fieldset { min-width: 0; margin: 12px 0; border: 1px solid #88929d; border-radius: 6px; }
+.ops-workspace label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.ops-workspace input, .ops-workspace select { max-width: 100%; min-width: 0; box-sizing: border-box; padding: 8px; font: inherit; }
+.ops-workspace button { min-height: 44px; margin: 4px; padding: 8px 12px; font: inherit; cursor: pointer; }
+.ops-workspace :focus-visible { outline: 2px solid #2468c8; outline-offset: 3px; }
+.studio-ground-ops[data-studio-shell="cockpit"] .ops-workspace { position: absolute; }
