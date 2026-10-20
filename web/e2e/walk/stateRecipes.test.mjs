@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
@@ -11,6 +12,167 @@ import { resolveProbe } from './probes.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
 import { seedSolarChain } from './fixtures.mjs'
 import { solarChainSteps } from './probes.mjs'
+import { projectSolarResponse, projectSolarStep, switchProjectSolarForms, assertProjectSolarDrawing, observeProjectSolarResponses } from './fixtures.mjs'
+import { inspectJob, inspectContext } from '../local/solarProjectWalk.mjs'
+
+test('WL16b canonical publication requires a complete bound job, a distinct output and the current head', () => {
+  const ids = [1, 2, 3, 4, 5, 6].map((id) => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`)
+  const binding = { organization_id: ids[0], project_id: ids[1], drawing_id: ids[2], input_version_id: ids[3] }
+  const job = { job_id: ids[4], org_id: ids[0], project_id: ids[1], input_version_id: ids[3], tool_name: 'solar-settings',
+    execution_context: { schema: 'leaf.solar-project-graph-job.v1', drawing_id: ids[2] }, status: 'complete', error: null,
+    result: { output_version_id: ids[5] } }
+  assert.equal(inspectJob(job, binding, ids[4], 'solar-settings'), ids[5])
+  assert.equal(inspectJob({ ...job, status: 'running' }, binding, ids[4], 'solar-settings'), null)
+  for (const patch of [{ status: 'failed' }, { project_id: ids[0] }, { input_version_id: ids[5] },
+    { result: { output_version_id: ids[3] } }, { error: { reason_code: 'FAILED' } }]) {
+    assert.throws(() => inspectJob({ ...job, ...patch }, binding, ids[4], 'solar-settings'), /job/)
+  }
+  const next = { ...binding, input_version_id: ids[5] }
+  const context = { context: { ...next, head_version_id: ids[5], is_head: true, intake_sha256: 'a'.repeat(64) },
+    intake: { solar_design_graph: { rev: 1, panels: [], strings: [], inverters: [], routes: [], schedules: [] },
+      solar_design_graph_sha256: 'b'.repeat(64) } }
+  assert.equal(inspectContext(context, next).head, ids[5])
+  for (const patch of [{ head_version_id: ids[3] }, { is_head: false }, { drawing_id: ids[0] }]) {
+    assert.throws(() => inspectContext({ ...context, context: { ...context.context, ...patch } }, next), /context binding/)
+  }
+})
+
+test('WL16b setup failures name the step and real server response without becoming unavailable', async () => {
+  for (const [status, body] of [[403, { error: { reason_code: 'PROJECT_FORBIDDEN' } }],
+    [409, { detail: 'checkout held elsewhere' }], [503, { detail: 'worker offline' }]]) {
+    const runtime = { evidence: {} }
+    await assert.rejects(projectSolarStep(runtime, 'publish-project-solar', () => projectSolarResponse({
+      status: () => status, json: async () => body,
+    }, 'POST /api/run', [202])), (error) => {
+      assert.ok(!(error instanceof UnsupportedLocalError))
+      assert.match(error.message, /publish-project-solar: POST \/api\/run: HTTP/)
+      assert.ok(error.message.includes(String(status)))
+      assert.ok(error.message.includes(JSON.stringify(body)))
+      return true
+    })
+    assert.equal(runtime.evidence.projectSolar.steps[0].complete, undefined)
+    assert.ok(runtime.evidence.projectSolar.steps[0].error)
+  }
+  const response = { status: () => 202, json: async () => ({ job_id: 'accepted' }) }
+  assert.deepEqual(await projectSolarResponse(response, 'run', [202]), { job_id: 'accepted' })
+  await assert.rejects(projectSolarResponse({ status: () => 500, json: async () => { throw new Error('not JSON') } },
+    'canonical import', [201]), /canonical import: HTTP 500.*response JSON unreadable/)
+  const runtime = { evidence: {}, projectSolar: { drainDiagnostics: async () => {
+    runtime.evidence.projectSolar.serverFailure = { path: '/api/jobs/id', status: 500, body: { error: 'real failure' } }
+  } } }
+  await assert.rejects(projectSolarStep(runtime, 'job publication', async () => { throw new Error('read failed') }),
+    /job publication: read failed; server response.*real failure/)
+  const apiRuntime = { evidence: {} }
+  await assert.rejects(projectSolarStep(apiRuntime, 'create org', async () => {
+    await projectSolarResponse({ status: () => 201, json: async () => ({ org: null }) }, 'org receipt', [201], apiRuntime)
+    throw new Error('org identity missing')
+  }), /create org: org identity missing; server response.*"status":201.*"org":null/)
+})
+
+test('WL16b diagnostics observe drawing and project setup before canonical import and release listeners', async () => {
+  for (const [path, status, body] of [
+    ['/api/drawings/upload', 403, { error: 'upload refused' }],
+    ['/api/drawings/private/upload-status', 200, { status: 'failed', error: 'extraction failed' }],
+    ['/api/orgs', 500, { detail: 'workspace failed' }],
+    ['/api/projects', 409, { detail: 'project refused' }],
+    ['/api/projects/project/drawing-versions/import', 422, { detail: 'import refused' }],
+    ['/api/jobs/00000000-0000-4000-8000-000000000001', 200, { status: 'failed', error: 'worker failed' }],
+    ['/api/projects/project/drawing-versions/version/context', 404, { detail: 'context missing' }],
+  ]) {
+    const page = new EventEmitter()
+    const runtime = { page, stack: { baseURL: 'http://127.0.0.1:8230' }, evidence: {}, cleanup: [] }
+    observeProjectSolarResponses(runtime)
+    const response = { url: () => `${runtime.stack.baseURL}${path}`, status: () => status, json: async () => body }
+    page.emit('response', response)
+    await assert.rejects(projectSolarStep(runtime, 'setup under test', async () => { throw new Error('step failed') }),
+      (error) => error.message.includes(path) && error.message.includes(body.error || body.detail))
+    const proof = runtime.evidence.projectSolar
+    assert.equal(proof.serverFailure.status, status)
+    assert.equal(proof.steps[0].complete, undefined)
+    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+    assert.equal(page.listenerCount('response'), 0)
+  }
+  const page = new EventEmitter()
+  const runtime = { page, stack: { baseURL: 'http://127.0.0.1:8230' }, evidence: {}, cleanup: [] }
+  observeProjectSolarResponses(runtime)
+  page.emit('response', { url: () => `${runtime.stack.baseURL}/api/projects/project/drawings/drawing/checkout`,
+    status: () => 200, json: async () => assert.fail('successful checkout capabilities must not enter diagnostics') })
+  await runtime.projectSolar.drainDiagnostics()
+  assert.equal(runtime.evidence.projectSolar.lastCanonicalResponse, undefined)
+  for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+})
+
+test('WL16b drawing oracle refuses an old displayed UUID or an empty canonical canvas', async () => {
+  const binding = { input_version_id: 'published-uuid' }
+  for (const fault of [null, 'old-title', 'empty-canvas']) {
+    const runtime = { projectSolar: { binding }, page: {
+      locator: (selector) => ({ selector, evaluate: async () => fault !== 'empty-canvas' }),
+      getByTestId: (selector) => ({ selector }),
+    } }
+    const checked = []
+    const assertions = (value) => ({
+      toBeVisible: async () => checked.push(value.selector),
+      toHaveCount: async (count) => assert.equal(count, 1),
+      toContainText: async (uuid) => assert.equal(uuid, fault === 'old-title' ? 'old-uuid' : binding.input_version_id),
+      toBe: (expected) => assert.equal(value, expected),
+    })
+    if (fault) await assert.rejects(assertProjectSolarDrawing(runtime, assertions), assert.AssertionError)
+    else {
+      await assertProjectSolarDrawing(runtime, assertions)
+      assert.deepEqual(checked, ['.project-solar-workspace', 'solar-flow-rail', 'solar-flow-seat', '.studio-ground .viewer-canvas canvas'])
+    }
+  }
+})
+
+test('WL16b form switching detects stale drafts and never clicks a submit control', async () => {
+  for (const retainDraft of [false, true]) {
+    let active = null
+    const edits = [], clicks = []
+    const fields = () => ({ 'Grant ref': '', Request: '', Frame: '', Phase: '0', Memberships: '' })
+    let values = fields()
+    const solveNames = ['Grant ref', 'Request', 'Frame', 'Phase']
+    const node = (kind, name) => ({
+      isVisible: async () => kind === 'editor' ? active !== null : kind !== 'more',
+      getByRole: (role, options) => node(role, options.name),
+      getByLabel: (label) => node('field', label),
+      locator: (selector) => node('tool', selector.match(/data-tool="([^"]+)"/)[1]),
+      click: async () => {
+        clicks.push(name)
+        if (name instanceof RegExp) active = null
+        if (kind === 'tool') { active = name; if (!retainDraft) values = fields() }
+        assert.ok(!['Run solve', 'Correct strings'].includes(name), 'form switch must never submit')
+      },
+      fill: async (value) => { edits.push(name); values[name] = value },
+      selectOption: async (value) => { edits.push(name); values[name] = value },
+      value: () => values[name],
+      count: () => kind === 'editor' ? Number(active !== null)
+        : Number(active === (solveNames.includes(name) ? 'solar-solve-proposal' : 'solar-correct-string')),
+    })
+    const runtime = { evidence: { projectSolar: { steps: [] } }, projectSolar: { traffic: { runCount: 1 } }, page: {
+      locator: () => node('editor', 'editor'), getByTestId: () => node('ribbon', 'ribbon'),
+      getByLabel: (name) => node('field', name),
+      getByRole: (role, options) => node(options.name === 'More panels' ? 'more' : role, options.name),
+    } }
+    const assertions = (value) => ({
+      toBe: (expected) => assert.equal(value, expected),
+      toBeEnabled: async () => {},
+      toBeDisabled: async () => assert.equal(values.Frame, ''),
+      toHaveCount: async (count) => assert.equal(value.count(), count),
+      toHaveValue: async (expected) => assert.equal(value.value(), expected),
+    })
+    assertions.poll = (read) => ({ toBe: async (expected) => assert.equal(await read(), expected) })
+    if (retainDraft) await assert.rejects(switchProjectSolarForms(runtime, assertions), /switch Solve to Correct strings and back/)
+    else {
+      await switchProjectSolarForms(runtime, assertions)
+      assert.deepEqual(edits, ['Grant ref', 'Request', 'Frame', 'Phase', 'Memberships'])
+      assert.deepEqual(runtime.evidence.projectSolar.formSwitch, {
+        solveFieldsReset: true, membershipsReset: true, runSolveDisabled: true, submittedRuns: 0,
+      })
+    }
+    assert.ok(clicks.includes('solar-correct-string'))
+    assert.ok(!clicks.some((name) => name instanceof RegExp), 'switch tools directly without closing their editors first')
+  }
+})
 
 function solarChainRuntime({ failTool, staleVersion = false, staleGraph = false, releaseFails = false,
   missingPanels = false, unconfirmedSizing = false, missingStrings = false, missingZone = false,
@@ -223,6 +385,24 @@ const censusAssertions = (value) => ({
 })
 
 const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+
+test('WL16b canonical import opens material intake through the Upload drawing ribbon action', () => {
+  const source = fixtureSource.slice(fixtureSource.indexOf('export async function openProjectSolar('),
+    fixtureSource.indexOf('export async function openProjectSolarTool('))
+  const steps = [
+    "await page.getByRole('tab', { name: 'Browser', exact: true }).click()",
+    "await page.getByRole('button', { name: 'Upload drawing', exact: true }).click()",
+    'const material = page.locator(\'[data-pane="material-intake"]\')',
+    "await assertions(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()",
+  ]
+  let previous = -1
+  for (const step of steps) {
+    const position = source.indexOf(step)
+    assert.ok(position > previous, `canonical material import must perform in order: ${step}`)
+    previous = position
+  }
+})
+
 const activationSource = fixtureSource.slice(fixtureSource.indexOf('async function activate('),
   fixtureSource.indexOf('export async function assertEffect('))
 const extractedActivate = (assertions) => new Function('expect', `${activationSource}; return activate`)(assertions)
