@@ -38,6 +38,7 @@ export function declareProbes(test, runProbe, cases) {
         })
       } else {
         test(title, options, async ({ page, stack, walkEvidence }, testInfo) => {
+          if (probe.setup?.context?.projectSolar && probe.setup.context.projectSolar !== 'proposal-offline') testInfo.setTimeout(300_000)
           await runProbe(probe, { page, stack, evidence: walkEvidence, testInfo })
         })
       }

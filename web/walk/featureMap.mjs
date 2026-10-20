@@ -563,6 +563,9 @@ function buildEntry(item, config, snapshot, registries) {
     entry.sources = ['web/src/site/productSurfaces.js', 'web/src/components/ProductSurfaceTabs.jsx']
     entry.contract = record.contract
     addCases(entry, cases(config, kind), (ctx) => {
+      if (record.id === 'solar' && ctx.openProjectId && ctx.projectSolar) return {
+        effect: { kind: 'renders', target: 'project-solar-workspace', phase: ctx.projectSolar },
+      }
       const status = registries.surfaceStates(ctx)[record.id]
       if (!status) throw new Error(`featureMap: no surface state projection for ${record.id}`)
       return { effect: { kind: 'renders', target: `surface:${record.id}`, ground: record.contract.ground, ...status } }

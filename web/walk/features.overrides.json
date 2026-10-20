@@ -2421,7 +2421,11 @@
         "no-drawing": {"hasDrawing": false, "solarReady": false},
         "execution-paused": {"apsLive": false},
         "solar-not-ready": {"solarReady": false},
-        "apple-not-ready": {"iosReady": false}
+        "apple-not-ready": {"iosReady": false},
+        "project-solar-open": {"openProjectId": "walk-project", "projectSolar": "open"},
+        "project-solar-published": {"openProjectId": "walk-project", "projectSolar": "published"},
+        "project-solar-form-switch": {"openProjectId": "walk-project", "projectSolar": "form-switch"},
+        "project-solar-proposal-offline": {"openProjectId": "walk-project", "projectSolar": "proposal-offline"}
       }
     },
     "tool": {
@@ -2436,6 +2440,7 @@
     }
   },
   "overrides": {
+    "surface:solar": {"sources": ["web/src/solar/ProjectSolarWorkspace.jsx", "web/src/solar/ProjectSolveReview.jsx", "web/e2e/local/solarProjectWalk.mjs"]},
     "action:engine-repeat": {"effect": {"kind": "opens", "target": "cockpit-prompt", "operation": "createLine", "group": "draw"}, "sources": ["web/src/cadedit/CommandLineArmer.jsx"]},
     "action:fit": {"effect": {"kind": "renders", "target": "viewer-home"}, "sources": ["web/src/lib/ribbonClusters.js"]},
     "action:zoom-in": {"effect": {"kind": "renders", "target": "viewer-zoom-in"}, "sources": ["web/src/lib/ribbonClusters.js"]},

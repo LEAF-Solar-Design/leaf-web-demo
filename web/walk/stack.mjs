@@ -352,7 +352,7 @@ process.once('SIGINT', () => { void stopAll('SIGINT') })
 process.once('SIGTERM', () => { void stopAll('SIGTERM') })
 process.on('beforeExit', () => { for (const state of running) void state.stop().catch((error) => { console.error(error); process.exitCode = 1 }) })
 
-export async function startStack({ slot, admission = defaultAdmission, slots, databaseURL, harnessDatabaseURL, postgres, timeoutMs = 180000, postgresServices = {} } = {}) {
+export async function startStack({ slot, admission = defaultAdmission, slots, databaseURL, harnessDatabaseURL, postgres, canonicalWorkerTool = 'solar-settings', timeoutMs = 180000, postgresServices = {} } = {}) {
   if (typeof admission !== 'function') throw new TypeError('admission must be a function')
   if (postgres !== undefined && postgres !== false && postgres !== true && postgres !== 'ephemeral' && (!postgres || typeof postgres !== 'object' || Array.isArray(postgres))) throw new TypeError('postgres must be true, ephemeral or an object with adminUrl')
   if (postgres && (databaseURL || harnessDatabaseURL)) throw new TypeError('postgres owns database authority; do not also pass databaseURL or harnessDatabaseURL')
@@ -448,6 +448,10 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
     state.root = await mkdtemp(join(tmpdir(), `leaf-walk-stack-${slot}-`))
     state.metricsPath = join(dirname(state.root), `leaf-walk-stack-metrics-${slot}.json`)
     const env = await privateEnvironment(state.root, state.ports, databaseURL, harnessDatabaseURL)
+    // Select the local graph worker through the launcher's existing CLI. A
+    // null selection retains its default autofill worker for solver proofs.
+    const workerTools = postgres && databaseURL && canonicalWorkerTool ? [canonicalWorkerTool] : []
+    if (postgres) env.LEAF_SOLAR_PROJECT_RUN_ENABLED = '1'
     if (solverEnv) Object.assign(env, solverEnv, {
       // PostgreSQL enables the canonical solver worker, but the launcher's
       // authored-execution default also arms an E2B-only harness boundary.
@@ -457,6 +461,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
     })
     const readyPath = join(state.root, 'ready.json')
     const args = ['-B', '-u', join(repo, 'scripts', 'start-leaf.py'), '--no-web', '--with-harness', '--strict-ports', '--ready-file', readyPath,
+      ...workerTools.flatMap((tool) => ['--canonical-worker-tool', tool]),
       '--env-allowlist', Object.keys(env).filter((key) => !osNames.has(key.toUpperCase())).join(','),
       ...['app', 'broker', 'harness', 'web'].flatMap((role) => [`--${role}-port`, String(state.ports[role])])]
     // The cached build/preparation may have waited on another worker. An
@@ -486,7 +491,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
     for (const role of ['web', 'proxy']) state.proxies.push(await startSameOriginProxy({ port: state.ports[role], appPort: state.ports.app, bundleDir }))
     if (state.closed || (await Promise.all(Object.values(state.ports).map(portListening))).some((open) => !open)) throw new Error('Stack lost a listener before boot completed')
     state.bootSeconds = (performance.now() - start) / 1000
-    return { baseURL: `http://127.0.0.1:${state.ports.proxy}`, ports: state.ports, pids: state.pids, root: state.root, env, ...(state.database ? { database: state.database } : {}), ...(state.postgres ? { postgres: state.postgres } : {}), metricsPath: state.metricsPath, output: () => state.output, stop: state.stop }
+    return { baseURL: `http://127.0.0.1:${state.ports.proxy}`, ports: state.ports, pids: state.pids, root: state.root, env, canonicalWorkerTools: workerTools, ...(state.database ? { database: state.database } : {}), ...(state.postgres ? { postgres: state.postgres } : {}), metricsPath: state.metricsPath, output: () => state.output, stop: state.stop }
   } catch (error) {
     try { await state.stop() } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Stack boot failed and cleanup failed') }
     throw error
