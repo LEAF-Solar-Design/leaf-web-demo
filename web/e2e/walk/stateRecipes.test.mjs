@@ -802,42 +802,66 @@ test('History fault is removed before R and its oracle rejects duplicate recover
   assert.equal(off, 1)
 })
 
-test('project Escape setup uses bounded org/project API calls and restores persisted org in cleanup', async () => {
-  const events = []
-  const board = { visible: true, getByRole: () => ({ click: async () => events.push('open-project') }) }
-  const runtime = { cleanup: [], evidence: {}, page: {
-    request: { post: async (path, options) => {
-      assert.equal(options.timeout, 15_000)
-      events.push(path)
-      if (path === '/api/projects') assert.deepEqual(options.headers, { 'X-Org-Id': 'org' })
-      return { ok: () => true, json: async () => path === '/api/orgs' ? { org: { org_id: 'org' } } : { project: { project_id: 'project' } } }
-    } },
-    evaluate: async (callback, value) => { events.push(['storage', value]); return 'previous-org' },
-    reload: async (options) => { assert.equal(options.timeout, 60_000); events.push('reload') },
-    getByRole: (role, options) => {
-      if (role === 'region') return board
-      if (role === 'dialog') return { visible: false }
-      if (options.name instanceof RegExp) return { countValue: 0 }
-      return { isVisible: async () => true, click: async () => {
-        events.push(options.name)
-        if (options.name === 'Return to drawing') board.visible = false
-      } }
-    },
-    getByTestId: () => ({ locator: () => ({ text: 'no selection' }) }),
-  } }
-  // Keep the product name stable across the API and summary observation.
-  let name
-  const post = runtime.page.request.post
-  runtime.page.request.post = async (path, options) => { name = options.data.name; return post(path, options) }
-  runtime.page.locator = (selector) => selector === '.workspace-summary' ? { get text() { return name } } : { countValue: 0 }
-  const assertions = (value) => ({ ...faultAssertions(value), toHaveText: async (expected) => assert.equal(value.text, expected) })
-  const probe = resolveProbe(buildFeatureMap().entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open')
-  await setupStep(probe, runtime, probe.setup.steps.at(-1), assertions)
-  assert.equal(runtime.evidence.escapeProject.projectId, 'project')
-  assert.deepEqual(events.slice(0, 4), ['/api/orgs', '/api/projects', ['storage', 'org'], 'reload'])
-  assert.ok(events.includes('open-project'))
-  await runtime.cleanup[0]()
-  assert.deepEqual(events.slice(-2), ['Close workspace', ['storage', 'previous-org']])
+test('project Escape observes UI creation and rejects refused or cross-org receipts while retaining cleanup', async () => {
+  for (const fault of [null, 'refused', 'wrong-org']) {
+    const events = []
+    const board = { visible: true, attributes: { 'data-project-state': 'project' },
+      getByRole: (role, options) => {
+        assert.equal(role, 'button')
+        assert.deepEqual(options, { name: 'Create project from this drawing', exact: true })
+        return { disabled: false, click: async () => events.push('create-from-drawing') }
+      },
+      getByText: (text) => {
+        assert.ok(['Versions live with a workspace project', 'Runs appear here with a project open'].includes(text))
+        return { countValue: 0 }
+      },
+    }
+    const project = { project_id: 'ui-project', org_id: fault === 'wrong-org' ? 'other-org' : 'org', name: 'walk.dxf' }
+    const runtime = { cleanup: [], evidence: {}, page: {
+      request: { post: async (path, options) => {
+        // Project creation must come from the browser, never the fixture's API client.
+        assert.equal(path, '/api/orgs')
+        assert.equal(options.timeout, 15_000)
+        events.push(path)
+        return { ok: () => true, json: async () => ({ org: { org_id: 'org' } }) }
+      } },
+      waitForResponse: async (predicate, options) => {
+        assert.equal(options.timeout, 15_000)
+        assert.equal(predicate({ url: () => 'http://walk/api/projects', request: () => ({ method: () => 'POST' }) }), true)
+        events.push('observe-create')
+        return { ok: () => fault !== 'refused', request: () => ({ headers: () => ({ 'x-org-id': 'org' }) }),
+          json: async () => ({ project }) }
+      },
+      evaluate: async (callback, value) => { events.push(['storage', value]); return 'previous-org' },
+      reload: async (options) => { assert.equal(options.timeout, 60_000); events.push('reload') },
+      getByRole: (role, options) => {
+        if (role === 'region') return board
+        if (role === 'dialog') return { visible: false }
+        if (options.name instanceof RegExp) return { countValue: 0 }
+        return { isVisible: async () => true, click: async () => {
+          events.push(options.name)
+          if (options.name === 'Return to drawing') board.visible = false
+        } }
+      },
+      locator: (selector) => selector === '.workspace-summary' ? { text: project.name } : { countValue: 0 },
+      getByTestId: () => ({ locator: () => ({ text: 'no selection' }) }),
+    } }
+    const assertions = (value) => ({ ...faultAssertions(value), toHaveText: async (expected) => assert.equal(value.text, expected) })
+    const probe = resolveProbe(buildFeatureMap().entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open')
+    const open = () => setupStep(probe, runtime, probe.setup.steps.at(-1), assertions)
+    if (fault) {
+      await assert.rejects(open(), assert.AssertionError)
+      assert.equal(runtime.evidence.escapeProject, undefined)
+      assert.ok(!events.includes('Return to drawing'))
+    } else {
+      await open()
+      assert.deepEqual(runtime.evidence.escapeProject, { orgId: 'org', projectId: 'ui-project', name: 'walk.dxf' })
+      assert.equal(board.visible, false)
+    }
+    assert.deepEqual(events.slice(0, 6), ['/api/orgs', ['storage', 'org'], 'reload', 'Start', 'observe-create', 'create-from-drawing'])
+    await runtime.cleanup[0]()
+    assert.deepEqual(events.slice(-2), ['Close workspace', ['storage', 'previous-org']])
+  }
 })
 
 test('Solar no-saved-drawing chooses outline and selection oracles only after verified starter projection', () => {
