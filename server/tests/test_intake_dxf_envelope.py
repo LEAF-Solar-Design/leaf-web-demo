@@ -56,6 +56,16 @@ def _get(record, code):
     return next(v for c, v in record if c == str(code))
 
 
+def _replace_objects(raw, objects):
+    sections = _sections(raw)
+    sections["OBJECTS"] = [pair for record in objects for pair in record]
+    pairs = []
+    for name, body in sections.items():
+        pairs.extend([("0", "SECTION"), ("2", name), *body, ("0", "ENDSEC")])
+    pairs.append(("0", "EOF"))
+    return ("\n".join(value for pair in pairs for value in pair) + "\n").encode()
+
+
 @pytest.mark.parametrize("case", ["sample", "small", "blocks-groups"])
 def test_r2000_document_envelope_and_legacy_handles(case):
     intake = (json.loads((ROOT / "web/public/sample.intake.json").read_text())
@@ -117,7 +127,13 @@ def test_r2000_document_envelope_and_legacy_handles(case):
     objects = records["OBJECTS"]
     root = next(r for r in objects if r[0] == ("0", "DICTIONARY") and _get(r, 330) == "0")
     entries = {root[i][1]: root[i + 1][1] for i in range(len(root) - 1) if root[i][0] == "3"}
-    assert set(entries) == {"ACAD_GROUP", "ACAD_PLOTSTYLENAME"}
+    assert set(entries) == {"ACAD_GROUP", "ACAD_PLOTSTYLENAME", "LEAF_INTAKE_ENVELOPE"}
+    marker, = [r for r in objects if r[0] == ("0", "XRECORD")]
+    assert marker == [("0", "XRECORD"), ("5", entries["LEAF_INTAKE_ENVELOPE"]),
+                      ("330", _get(root, 5)), ("100", "AcDbXrecord"), ("280", "1"),
+                      ("1", "dimstyle-standard"),
+                      *([] if case == "blocks-groups" else [("1", "groups"), ("1", "blocks")])]
+    assert int(_get(marker, 5), 16) < seed
     normal, = [r for r in objects if r[0] == ("0", "ACDBPLACEHOLDER")]
     plot, = [r for r in objects if r[0] == ("0", "ACDBDICTIONARYWDFLT")]
     assert plot == [("0", "ACDBDICTIONARYWDFLT"), ("5", entries["ACAD_PLOTSTYLENAME"]),
@@ -145,6 +161,80 @@ def test_r2000_document_envelope_and_legacy_handles(case):
                                    "flags": 0, "selectable": 1, "members": ["A", "100"]}]
     else:
         assert "blocks" not in back and "groups" not in back
+
+
+@pytest.mark.parametrize("explicit", [(), ("dimstyles",), ("groups",), ("blocks",),
+                                    ("dimstyles", "groups"), ("dimstyles", "blocks"),
+                                    ("groups", "blocks"), ("dimstyles", "groups", "blocks")])
+def test_provenance_preserves_explicit_catalogues_and_empty_fields(explicit):
+    intake = _small()
+    supplied = {"dimstyles": ["Standard"], "groups": [], "blocks": {}}
+    intake.update({key: supplied[key] for key in explicit})
+    raw = intake_to_dxf(intake)
+    back = parse_dxf_bytes(raw)
+    for key, value in supplied.items():
+        if key in explicit:
+            assert back[key] == value
+        else:
+            assert key not in back
+    sections = _sections(raw)
+    objects = _records(sections["OBJECTS"])
+    root, = [r for r in objects if r[0] == ("0", "DICTIONARY") and _get(r, 330) == "0"]
+    entry, = [i for i, pair in enumerate(root) if pair == ("3", "LEAF_INTAKE_ENVELOPE")]
+    assert root[entry + 1][0] == "350"
+    marker, = [r for r in objects if r[0] == ("0", "XRECORD")]
+    assert _get(marker, 5) == root[entry + 1][1]
+    assert _get(marker, 330) == _get(root, 5)
+    assert int(_get(marker, 5), 16) < int(_get(sections["HEADER"], 5), 16)
+    assert [value for code, value in marker if code == "1"] == [
+        item for key, item in (("dimstyles", "dimstyle-standard"), ("groups", "groups"),
+                              ("blocks", "blocks")) if key not in explicit]
+
+
+def test_unmarked_reference_envelope_is_not_filtered():
+    raw = intake_to_dxf(_small())
+    objects = _records(_sections(raw)["OBJECTS"])
+    root = next(r for r in objects if r[0] == ("0", "DICTIONARY") and _get(r, 330) == "0")
+    entry = root.index(("3", "LEAF_INTAKE_ENVELOPE"))
+    marker_handle = root[entry + 1][1]
+    del root[entry:entry + 2]
+    objects = [r for r in objects if _get(r, 5) != marker_handle]
+    back = parse_dxf_bytes(_replace_objects(raw, objects))
+    assert back["dimstyles"] == ["Standard"]
+    assert back["groups"] == []
+    assert back["blocks"] == {}
+
+
+@pytest.mark.parametrize("items, removed", [
+    (["unknown", "groups"], {"groups"}),
+    (["unknown"] * 8 + ["dimstyle-standard", "groups", "blocks"], set()),
+    (["unknown"] * 7 + ["groups", "blocks"], {"groups"}),
+])
+def test_provenance_ignores_unknown_items_and_reads_at_most_eight(items, removed):
+    raw = intake_to_dxf(_small())
+    objects = _records(_sections(raw)["OBJECTS"])
+    marker, = [r for r in objects if r[0] == ("0", "XRECORD")]
+    marker[:] = [(c, v) for c, v in marker if c != "1"] + [("1", item) for item in items]
+    back = parse_dxf_bytes(_replace_objects(raw, objects))
+    for key, value in (("dimstyles", ["Standard"]), ("groups", []), ("blocks", {})):
+        if key in removed:
+            assert key not in back
+        else:
+            assert back[key] == value
+
+
+@pytest.mark.parametrize("invalid", ["type", "owner", "subclass"])
+def test_invalid_provenance_does_not_filter(invalid):
+    raw = intake_to_dxf(_small())
+    objects = _records(_sections(raw)["OBJECTS"])
+    marker, = [r for r in objects if r[0] == ("0", "XRECORD")]
+    code, value = {"type": ("0", "ACDBPLACEHOLDER"), "owner": ("330", "0"),
+                   "subclass": ("100", "Invalid")}[invalid]
+    marker[:] = [(c, value if c == code else v) for c, v in marker]
+    back = parse_dxf_bytes(_replace_objects(raw, objects))
+    assert back["dimstyles"] == ["Standard"]
+    assert back["groups"] == []
+    assert back["blocks"] == {}
 
 
 def test_paper_space_entity_owner():

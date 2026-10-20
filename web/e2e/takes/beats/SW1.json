@@ -7,8 +7,8 @@
   "fixtures": [
     {
       "path": "web/public/sample.dxf",
-      "sha256": "472df36a688dc1b672a4c1c1d92aaab1d67d53c03051e69fb48f57852e8e3ffb",
-      "bytes": 448588
+      "sha256": "a4985dc952b58154fd08c0a885d40e46670c51cd4f432df440a52a92d6ca03f4",
+      "bytes": 448706
     }
   ],
   "steps": [

@@ -364,7 +364,7 @@ def test_mleader_dxf_probe_group_sequence_and_references():
     dictionaries = _dxf_records(raw, "DICTIONARY")
     root = next(r for r in dictionaries if dict(r).get(330) == "0")
     entries = {root[i][1]: root[i + 1][1] for i in range(len(root) - 1) if root[i][0] == 3}
-    assert set(entries) == {"ACAD_GROUP", "ACAD_PLOTSTYLENAME", "ACAD_MLEADERSTYLE"}
+    assert set(entries) == {"ACAD_GROUP", "ACAD_PLOTSTYLENAME", "ACAD_MLEADERSTYLE", "LEAF_INTAKE_ENVELOPE"}
     catalogue = next(dict(r) for r in dictionaries if dict(r)[5] == entries["ACAD_MLEADERSTYLE"])
     assert catalogue[3] == "Standard" and catalogue[350] == dict(ms)[5]
 

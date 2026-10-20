@@ -96,7 +96,6 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     dimensions_unsupported = 0
     dimstyles: List[str] = []
     seen_dimstyles: set[str] = set()
-    reference_dimstyle = False
     # W4g-7b-3s: colour/linetype/lineweight for every LINE / LWPOLYLINE /
     # CIRCLE / ARC / INSERT, the same EP shape da/intake_parse.py builds from
     # accoreconsole's entget so the plan route's DXF preflight
@@ -153,16 +152,6 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             j = i + 1
             while j < n and pairs[j][0] != 0:
                 j += 1
-            record = dict(pairs[i + 1:j])
-            # The R2000 document default is scaffolding, not an intake
-            # catalogue. Bare/custom uploaded DIMSTYLE records retain their
-            # existing behavior; dimensions below still expose Standard.
-            if (record.get(2, "").casefold() == "standard"
-                    and record.get(143) == "0.03937007874"
-                    and record.get(371) == "-2" and record.get(372) == "-2"):
-                reference_dimstyle = True
-                i = j
-                continue
             for code, value in pairs[i + 1:j]:
                 if code == 2 and value not in seen_dimstyles:
                     seen_dimstyles.add(value)
@@ -333,10 +322,27 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 yield key, value.upper()
                 key = None
 
+    envelope_only = set()
+    envelope_item_count = 0
     for kind, record in objects.values():
         if kind != "DICTIONARY" or next((v for c, v in record if c == 330), "0") != "0":
             continue
         for key, dictionary in dictionary_entries(record):
+            if key == "LEAF_INTAKE_ENVELOPE":
+                marker_kind, marker = objects.get(dictionary, (None, []))
+                root_handle = next((v.upper() for c, v in record if c == 5), None)
+                owner = next((v.upper() for c, v in marker if c == 330), None)
+                if (marker_kind == "XRECORD" and root_handle is not None
+                        and owner == root_handle and (100, "AcDbXrecord") in marker
+                        and envelope_item_count < 8):
+                    for code, item in marker:
+                        if code != 1:
+                            continue
+                        if item in ("dimstyle-standard", "groups", "blocks"):
+                            envelope_only.add(item)
+                        envelope_item_count += 1
+                        if envelope_item_count == 8:
+                            break
             if key.upper() != "ACAD_GROUP":
                 continue
             group_kind, group_dictionary = objects.get(dictionary, (None, []))
@@ -352,8 +358,6 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                     "flags": int(next((v for c, v in group if c == 70), "0")),
                     "selectable": int(next((v for c, v in group if c == 71), "1")),
                     "members": [v.upper() for c, v in group if c == 340]})
-    if reference_dimstyle and out.get("groups") == []:
-        del out["groups"]  # Empty ACAD_GROUP in the reference envelope.
     if properties:
         out["properties"] = properties
     if dropped_count[0]:
@@ -370,14 +374,17 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         out["inserts"] = resolved_inserts
     if dimensions:
         out["dimensions"] = dimensions
-    if reference_dimstyle and (dimensions or dimstyles):
-        dimstyles.insert(0, "Standard")
+    if "dimstyle-standard" in envelope_only:
+        dimstyles = [name for name in dimstyles if name.casefold() != "standard"]
     if dimstyles:
         out["dimstyles"] = dimstyles
     if dimensions_unsupported:
         out["dimensions_unsupported"] = dimensions_unsupported
-    if has_blocks and (blocks or not reference_dimstyle):
+    if has_blocks:
         out["blocks"] = blocks
+    for item in ("groups", "blocks"):
+        if item in envelope_only:
+            out.pop(item, None)
     if block_count > 200:
         out["blocksCapped"] = block_count
     out["memberEvidenceCovered"] = True

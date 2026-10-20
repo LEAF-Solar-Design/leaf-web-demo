@@ -191,7 +191,7 @@ def test_main_cli_exits_zero_over_the_full_corpus_with_identity_adapter(capsys):
 
 # T1 through T8: source bytes, polyline count, insert count, real and unkeyed handles.
 _TRACKED_CASES = (
-    ("web/public/sample.dxf", 448588, 2345, 0, 2345, 0),
+    ("web/public/sample.dxf", 448706, 2345, 0, 2345, 0),
     ("web/e2e/fixtures/block-fixture.dxf", 280, 0, 1, 1, 0),
     ("web/e2e/fixtures/distinctive-panel.dxf", 146, 1, 0, 1, 0),
     ("vendor/acadrust-worker/fixtures/one_line.dxf", 140, 1, 0, 0, 1),

@@ -755,11 +755,12 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                                       if row[0] == "mleader" and row[1]["style"] == name])
         out += ["0", "ENDSEC"]
     out += ["0", "EOF"]
-    out = _r2000_envelope(out, fresh_handle, lambda: format(next_handle, "X"))
+    out = _r2000_envelope(out, fresh_handle, lambda: format(next_handle, "X"),
+                          intake, emit_dimstyle_table)
     return ("\n".join(out) + "\n").encode("utf-8")
 
 
-def _r2000_envelope(lines, fresh_handle, handseed):
+def _r2000_envelope(lines, fresh_handle, handseed, intake, emit_dimstyle_table):
     """Complete the document after ALL legacy identities have been allocated.
 
     Keep the entity and user-block records intact while merging the symbol
@@ -891,6 +892,18 @@ def _r2000_envelope(lines, fresh_handle, handseed):
         if get(record, 2).casefold() == "defpoints":
             record.append(("290", "0"))
         record.extend([("370", "-3"), ("390", normal)])
+    envelope_only = []
+    if not emit_dimstyle_table:
+        envelope_only.append("dimstyle-standard")
+    if "groups" not in intake:
+        envelope_only.append("groups")
+    if "blocks" not in intake:
+        envelope_only.append("blocks")
+    provenance = fresh_handle()
+    root.extend([("3", "LEAF_INTAKE_ENVELOPE"), ("350", provenance)])
+    objects.append([("0", "XRECORD"), ("5", provenance), ("330", root_handle),
+                    ("100", "AcDbXrecord"), ("280", "1"),
+                    *[("1", item) for item in envelope_only]])
     sections["TABLES"] = []
     for name in table_order:
         head, records = tables[name]
