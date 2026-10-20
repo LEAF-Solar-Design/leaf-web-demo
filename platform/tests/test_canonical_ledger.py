@@ -55,23 +55,29 @@ def test_legacy_authority_cannot_write_canonical_ledger(make_org):
 
 
 def test_active_external_subject_binding_is_tenant_specific(make_org):
+    subject = f"auth0|ledger-user-{uuid.uuid4().hex}"
     org = make_org("Binding org")
-    binding = store.create_identity_binding(org.org_id, "auth0", "auth0|ledger-user")
-    resolved = store.resolve_active_identity_binding("auth0", "auth0|ledger-user")
+    binding = store.create_identity_binding(org.org_id, "auth0", subject)
+    resolved = store.resolve_active_identity_binding("auth0", subject)
     assert resolved is not None and resolved.binding_id == binding.binding_id
     other = make_org("Other binding org")
     with pytest.raises(ValueError, match="another platform tenant"):
-        store.create_identity_binding(other.org_id, "auth0", "auth0|ledger-user")
+        store.create_identity_binding(other.org_id, "auth0", subject)
 
 
 def test_org_bootstrap_binding_conflict_rolls_back_tenant():
-    first = store.create_org_with_identity("Bootstrap one", "auth0", "auth0|bootstrap-ledger")
+    subject = f"auth0|bootstrap-ledger-{uuid.uuid4().hex}"
+    suffix = uuid.uuid4().hex
+    first_name = f"Bootstrap one {suffix}"
+    duplicate_name = f"Bootstrap duplicate {suffix}"
+    first = store.create_org_with_identity(first_name, "auth0", subject)
     with pytest.raises(ValueError, match="already has"):
-        store.create_org_with_identity("Bootstrap duplicate", "auth0", "auth0|bootstrap-ledger")
+        store.create_org_with_identity(duplicate_name, "auth0", subject)
     with db.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) AS count FROM orgs "
-            "WHERE name IN ('Bootstrap one', 'Bootstrap duplicate')",
+            "WHERE name IN (%(first_name)s, %(duplicate_name)s)",
+            {"first_name": first_name, "duplicate_name": duplicate_name},
         )
         assert cur.fetchone()["count"] == 1
 
