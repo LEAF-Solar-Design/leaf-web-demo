@@ -2,13 +2,99 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
-import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS } from './probes.mjs'
+import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS,
+  SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { observeSolarEditorRequests, solarAvailabilityProbe } from './fixtures.mjs'
+import { observeSolarEditorRequests, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+test('WL15 solar stage prefixes are closed, ordered and contain each earlier stage once', () => {
+  assert.deepEqual(SOLAR_CHAIN_STAGES, ['panels', 'sized', 'strung', 'equipped', 'routed'])
+  const expected = [
+    ['solar-settings', 'solar-settings', 'solar-panels-from-drawing'],
+    ['solar-size-strings'], ['solar-string-add'], ['solar-assign-equipment'], ['solar-homeruns'],
+  ]
+  for (const [index, stage] of SOLAR_CHAIN_STAGES.entries()) {
+    const steps = solarChainSteps(stage)
+    assert.deepEqual(steps.map((row) => row.tool), expected.slice(0, index + 1).flat())
+    assert.deepEqual([...new Set(steps.map((row) => row.stage))], SOLAR_CHAIN_STAGES.slice(0, index + 1))
+    if (index) assert.deepEqual(steps.slice(0, -1), solarChainSteps(SOLAR_CHAIN_STAGES[index - 1]))
+    steps[0].tool = 'changed'
+    assert.equal(solarChainSteps(stage)[0].tool, 'solar-settings')
+  }
+  for (const stage of ['grouped', 'zoned', '', null, 'STRUNG']) assert.throws(() => solarChainSteps(stage), /Unknown solar chain stage/)
+})
+
+test('WL15 every triaged Solar tool has one minimal stage or a named offline prerequisite', () => {
+  // Independent list pinned to the sweep triage, rather than derived from the setup table.
+  const triaged = ['assign-equipment', 'assign-strings', 'autofill', 'autofill-plan', 'color-strings',
+    'commit-solve', 'correct-string', 'equipment-move', 'guardrails-read', 'homeruns', 'panel-add', 'panel-group-delete',
+    'panel-groups', 'panel-remove', 'schedule', 'select-by-zone', 'size-strings', 'string-add',
+    'string-conductors', 'string-data', 'string-delete', 'string-flip', 'string-midpoint',
+    'string-multi-add', 'string-rebuild', 'string-swap', 'trackers-to-panel-groups', 'solve-proposal']
+  assert.deepEqual(Object.keys(SOLAR_TOOL_SETUP).sort(),
+    [...triaged.map((suffix) => `solar-${suffix}`), 'solar-settings', 'solar-panels-from-drawing'].sort())
+  for (const suffix of triaged) {
+    const name = `solar-${suffix}`
+    const setup = SOLAR_TOOL_SETUP[name]
+    assert.ok(setup, name)
+    assert.equal(Number(!!setup.stage) + Number(!!setup.reason), 1, name)
+    const probe = resolveProbe(map.entries.find((row) => row.source_id === name), 'ready')
+    if (setup.stage) {
+      assert.ok(SOLAR_CHAIN_STAGES.includes(setup.stage), name)
+      assert.deepEqual(probe.setup.steps.filter((row) => row.kind === 'seed-solar-chain'), [{ kind: 'seed-solar-chain', ...setup }])
+      assert.equal(unsupportedBeforeSetup(probe), null, name)
+    } else {
+      assert.match(setup.gate, /^server\//, name)
+      assert.equal(probe.setup.steps.some((row) => row.kind.startsWith('seed-solar')), false, name)
+      // Explicit causes take precedence even over an unscoped input_ready:false catalog.
+      const reason = unsupportedBeforeSetup(probe, { catalog: { families: [{ capabilities: [{ name,
+        availability: { input_ready: false } }] }] } })
+      assert.ok(reason.startsWith(`${setup.reason}:`), reason)
+      assert.ok(!reason.includes('input_ready is false'), reason)
+    }
+  }
+  for (const suffix of ['solve-proposal', 'commit-solve']) assert.equal(SOLAR_TOOL_SETUP[`solar-${suffix}`].reason, 'cloud_service_offline')
+  for (const suffix of ['assign-equipment', 'equipment-move', 'homeruns', 'schedule', 'string-data', 'panel-groups']) {
+    assert.equal(SOLAR_TOOL_SETUP[`solar-${suffix}`].reason, 'needs_live_sizing')
+  }
+  for (const suffix of ['string-add', 'string-multi-add', 'size-strings']) assert.equal(SOLAR_TOOL_SETUP[`solar-${suffix}`].stage, 'panels')
+  for (const suffix of ['string-flip', 'string-rebuild', 'string-conductors']) assert.equal(SOLAR_TOOL_SETUP[`solar-${suffix}`].stage, 'strung')
+  assert.equal(SOLAR_TOOL_SETUP['solar-select-by-zone'].electricalZone, true)
+  for (const name of ['solar-settings', 'solar-panels-from-drawing']) {
+    const probe = resolveProbe(map.entries.find((row) => row.source_id === name), 'ready')
+    assert.equal(SOLAR_TOOL_SETUP[name].graphOnly, true)
+    assert.equal(probe.setup.steps.some((row) => row.kind === 'seed-solar-chain'), false)
+    assert.equal(probe.setup.steps.some((row) => row.kind === 'seed-solar-graph'), true)
+  }
+})
+
+test('WL15 seeded readiness leaves callers without a chain recipe unchanged', () => {
+  const catalog = { get families() { assert.fail('Non-chain setup must not inspect catalog readiness') } }
+  for (const setup of [undefined, {}, { steps: [] }, { steps: [{ kind: 'seed-solar-graph' }] }]) {
+    requireSeededSolarReady({ state: 'ready', sourceId: 'solar-string-flip', setup }, catalog)
+  }
+  requireSeededSolarReady({ state: 'write-locked', sourceId: 'solar-string-flip',
+    setup: { steps: [{ kind: 'seed-solar-chain', stage: 'strung' }] } }, catalog)
+})
+
+test('WL15 upstream Solar prerequisites do not hide product gate probes', () => {
+  for (const name of ['solar-panel-add', 'solar-assign-equipment', 'solar-homeruns', 'solar-schedule',
+    'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string']) {
+    const entry = map.entries.find((row) => row.source_id === name)
+    for (const state of entry.states.filter((state) => state !== 'ready'
+      && entry.expected_effect[state].kind === 'disabled_with_reason')) {
+      const probe = resolveProbe(entry, state)
+      assert.equal(probe.setup.steps.some((row) => row.kind === 'require-local-state'), false, `${name}/${state}`)
+      assert.equal(probe.setup.steps.some((row) => row.kind === 'seed-solar-chain'), false, `${name}/${state}`)
+      assert.equal(probe.setup.steps.some((row) => row.kind === 'seed-solar-graph'), true, `${name}/${state}`)
+      assert.equal(unsupportedBeforeSetup(probe), null, `${name}/${state}`)
+    }
+  }
+})
 
 test('G4 selection-set probes reuse the real two-LINE recipe and registry oracles', () => {
   for (const op of ['delete', 'move', 'copy', 'rotate', 'scale', 'mirror']) {
@@ -419,11 +505,11 @@ test('Solar availability is evaluated after drawing and graph setup', () => {
   const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
   const runner = source.slice(source.indexOf('export async function runProbe'), source.indexOf('// This reporter'))
   assert.ok(runner.indexOf('await workerCatalog') > runner.indexOf('for (const recipe of probe.setup.steps)'))
-  for (const id of ['tool:solar-settings', 'tool:solar-autofill']) {
+  for (const id of ['tool:solar-size-strings', 'tool:solar-string-flip']) {
     const probe = resolveProbe(map.entries.find((entry) => entry.id === id), 'ready')
     const kinds = probe.setup.steps.map((step) => step.kind)
-    assert.ok(kinds.indexOf('open-private-drawing') < kinds.indexOf('seed-solar-graph'))
-    assert.ok(kinds.indexOf('seed-solar-graph') < kinds.indexOf('catalog-tool'))
+    assert.ok(kinds.indexOf('open-private-drawing') < kinds.indexOf('seed-solar-chain'))
+    assert.ok(kinds.indexOf('seed-solar-chain') < kinds.indexOf('catalog-tool'))
   }
 })
 
@@ -891,16 +977,16 @@ test('failed drawing refusal mismatches preserve expected and observed text in t
 })
 test('the runner ignores worker-global Solar refusal and fetches readiness after every setup step', async () => {
   const runner = new AsyncFunction('probe', 'runtime', 'test', 'setupStep', 'UnsupportedLocalError',
-    'workerCatalog', 'unsupportedBeforeSetup', 'toolAvailabilityEvidence', 'unsupported',
+    'workerCatalog', 'unsupportedBeforeSetup', 'toolAvailabilityEvidence', 'unsupported', 'requireSeededSolarReady',
     functionBody('export async function runProbe(probe, runtime) {', '\n// This reporter'))
   const calls = []
-  const probe = { featureId: 'tool:solar-autofill', sourceId: 'solar-autofill', kind: 'tool', state: 'ready',
-    setup: { steps: [{ kind: 'open-private-drawing' }, { kind: 'seed-solar-graph' }] },
-    assertion: { kind: 'opens', target: 'catalog-run-decision', assertionId: 'autofill/oracle' } }
+  const probe = { featureId: 'tool:solar-string-flip', sourceId: 'solar-string-flip', kind: 'tool', state: 'ready',
+    setup: { steps: [{ kind: 'open-private-drawing' }, { kind: 'seed-solar-chain', stage: 'strung' }] },
+    assertion: { kind: 'opens', target: 'catalog-run-decision', assertionId: 'string-flip/oracle' } }
   const runtime = { page: { request: {} }, evidence: { steps: [] }, workerFacts: { catalog: { families: [{
-    capabilities: [{ name: 'solar-autofill', availability: { input_ready: false, refusal_reasons: ['drawing_context_required'] } }],
+    capabilities: [{ name: 'solar-string-flip', availability: { input_ready: false, refusal_reasons: ['drawing_context_required'] } }],
   }] } }, testInfo: { annotations: [] } }
-  const result = await runner(probe, runtime, { step: async (name, callback) => { calls.push(name); return callback() } },
+  await assert.rejects(runner(probe, runtime, { step: async (name, callback) => { calls.push(name); return callback() } },
     async (_, current, recipe) => {
       if (recipe.kind === 'open-private-drawing') current.drawingId = 'own-drawing'
       else current.drawingVersion = 2
@@ -910,16 +996,15 @@ test('the runner ignores worker-global Solar refusal and fetches readiness after
       assert.deepEqual(scope, { drawingId: 'own-drawing', version: 2 })
       assert.notEqual(facts, runtime.workerFacts)
       calls.push('scoped-readiness')
-      facts.catalog = { families: [{ capabilities: [{ name: 'solar-autofill', availability: {
-        entitled: true, engine_ready: true, implemented: true, input_ready: false, refusal_reasons: ['frames_required'],
+      facts.catalog = { families: [{ capabilities: [{ name: 'solar-string-flip', availability: {
+        entitled: true, engine_ready: true, implemented: true, input_ready: false, refusal_reasons: ['strings_required'],
       } }] }] }
     }, unsupportedBeforeSetup, toolAvailabilityEvidence,
-    async (probe, current, reason) => { current.evidence.result = { reason }; throw new UnsupportedLocalError(probe, reason) })
-  assert.deepEqual(calls, ['Setup: open-private-drawing', 'Setup: seed-solar-graph', 'scoped-readiness'])
-  assert.equal(result.unsupported, true)
-  assert.match(result.reason, /frames_required/)
-  assert.doesNotMatch(result.reason, /drawing_context_required/)
-  assert.deepEqual(runtime.unsupportedAvailability.refusal_codes, ['frames_required'])
+    async () => assert.fail('A failed stage must not become unavailable'), requireSeededSolarReady),
+  /seed-solar-chain strung did not make solar-string-flip input ready:.*strings_required/)
+  assert.deepEqual(calls, ['Setup: open-private-drawing', 'Setup: seed-solar-chain', 'scoped-readiness'])
+  assert.doesNotMatch(runtime.evidence.failure.message, /drawing_context_required/)
+  assert.equal(runtime.evidence.result, undefined)
   assert.ok(runtime.evidence.setupCompleted)
   assert.equal(runtime.evidence.cleanupCompleted, true)
 })

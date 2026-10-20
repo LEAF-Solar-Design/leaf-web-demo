@@ -3,7 +3,7 @@ import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildFeatureMap } from './featureMap.mjs'
-import { stateRecipe } from '../e2e/walk/probes.mjs'
+import { stateRecipe, SOLAR_CHAIN_STAGES } from '../e2e/walk/probes.mjs'
 import { assertionAlias, packUxEvidence, uxObservation } from '../e2e/walk/uxEvidence.mjs'
 
 export const MAX_RECEIPT_BYTES = 1024 * 1024
@@ -240,6 +240,12 @@ function observations(feature_id, state, viewport, evidence) {
     if (total > 0) add(kind, { count: total })
   }
   if (Number.isFinite(evidence.timeToTaskMs) && evidence.timeToTaskMs >= 0) add('time_to_task', { milliseconds: evidence.timeToTaskMs })
+  for (const stage of Array.isArray(evidence.solarChain?.stages) ? evidence.solarChain.stages : []) {
+    if (![...SOLAR_CHAIN_STAGES, 'zone'].includes(stage?.stage)
+      || !Number.isFinite(stage.elapsedMs) || stage.elapsedMs < 0) continue
+    add('solar_chain_stage', { stage: stage.stage, milliseconds: stage.elapsedMs,
+      operations: count(stage.operations) })
+  }
   for (const violation of evidence.accessibility?.violations || []) {
     // Never propagate html, targets, help text, model prose or arbitrary ids.
     if (typeof violation.id !== 'string' || !/^[a-z][a-z0-9-]{0,99}$/.test(violation.id)) continue
@@ -355,7 +361,7 @@ export function buildReceipt({ playwrightReport, featureMap, identity }) {
     if (outcome.reason) detail.reason = redact(outcome.reason)
     receipt.evidence.cases.push(detail)
     receipt.verdicts.push({ feature_id: triple.feature_id, verdict: wireVerdict[outcome.verdict],
-      reason: `${triple.state} @${triple.viewport}: ${outcome.verdict}` })
+      reason: `${triple.state} @${triple.viewport}: ${outcome.verdict}${outcome.reason ? ': ' + redact(outcome.reason) : ''}` })
     if (flaky) {
       receipt.flakes.push({ feature_id: triple.feature_id, reason: `Failed then passed: ${triple.state} @${triple.viewport}`, occurrences: runs.length })
       receipt.evidence.flakes.push({ ...triple, occurrences: runs.length })

@@ -11,11 +11,11 @@ import { familiesForSurface } from '../../src/lib/surfaceRails.js'
 import { buildViewSearch } from '../../src/lib/urlState.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
-import { normalizedControlKey } from './probes.mjs'
+import { normalizedControlKey, solarChainSteps } from './probes.mjs'
 import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
-import { seedParams, runBody } from '../solarGraphCommitProof.mjs'
+import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
 
 export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
@@ -1574,7 +1574,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'undo-edit', 'preview-version', 'zoom-before-fit', 'require-engine-state', 'crash-engine-worker',
   'require-surface-context', 'require-local-state',
   'hold-version-change', 'fault-restored-head', 'fault-history',
-  'saved-version-history', 'require-versionless-drawing', 'seed-solar-graph',
+  'saved-version-history', 'require-versionless-drawing', 'seed-solar-graph', 'seed-solar-chain',
   'require-solar-document', 'hold-solar-projection',
 ]))
 export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
@@ -1642,8 +1642,20 @@ export function catalogSolarNeedsDrawing(probe) {
   return probe.kind === 'tool' && probe.sourceId?.startsWith('solar-')
     && probe.assertion.kind !== 'disabled_with_reason'
 }
+export function requireSeededSolarReady(probe, catalog) {
+  const seed = probe.setup?.steps?.find((recipe) => recipe.kind === 'seed-solar-chain')
+  if (!seed || probe.state !== 'ready') return
+  const availability = catalog?.families.flatMap((family) => family.capabilities)
+    .find((tool) => tool.name === probe.sourceId)?.availability
+  if (availability?.input_ready === false) {
+    throw new Error(`seed-solar-chain ${seed.stage} did not make ${probe.sourceId} input ready: ${JSON.stringify(availability)}`)
+  }
+}
 export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailability = true) {
   if (UI_UNREACHABLE_STATES.has(probe.state)) return VERSIONLESS_DRAWING_REASON
+  const offlineSolar = probe.setup.steps.find((recipe) => recipe.kind === 'require-local-state'
+    && /^(needs_live_sizing|cloud_service_offline|ground_physical_state_required):/.test(recipe.reason || ''))
+  if (offlineSolar) return offlineSolar.reason
   const tool = workerFacts.catalog?.families.flatMap((family) => family.capabilities)
     .find((tool) => tool.name === probe.sourceId)
   if (catalogSolarNeedsDrawing(probe) && workerFacts.buildFlags
@@ -1666,6 +1678,124 @@ export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailabilit
     }
   }
   return null
+}
+
+// API-only so the planner's isolated-stack proof can exercise exactly the walk's seed path.
+// A single lease protects the entire prefix. Every successful write is checked against
+// the persisted version chain, and failures preserve the stage, server body and timing.
+// Legacy request exemplars (server/tests/): seedParams uses test_w1_seed_product_path.py;
+// test_w1_rooftop_acceptance.py:325-336 supplies project completion and panel import,
+// and :449 supplies the revision-only homeruns request. Equipment is gated before submission.
+export async function seedSolarChain(runtime, recipe) {
+  const steps = solarChainSteps(recipe.stage)
+  if (recipe.electricalZone) steps.push({ stage: 'zone', tool: 'solar-electrical-zones', operation: 0 })
+  const { page: { request }, drawingId, evidence } = runtime
+  const path = `/api/drawings/${drawingId}`
+  const proof = evidence.solarChain = { drawingId, requestedStage: recipe.stage, stages: [] }
+  let currentStage, stageProof, lease, chain, rev = 0
+  const checked = async (response, label) => {
+    const body = await response.json()
+    if (!response.ok() || body.ok === false) throw new Error(`${label}: HTTP ${response.status()} ${JSON.stringify(body)}`)
+    return body
+  }
+  const readGraph = async () => {
+    const session = await checked(await request.get(`/api/session?dwg=${encodeURIComponent(drawingId)}`, { timeout: 15_000 }), 'session')
+    const graph = session.intake?.solar_design_graph
+    if (!graph || graph.rev !== rev) throw new Error(`session graph revision is not ${rev}`)
+    return graph
+  }
+  const finishStage = async () => {
+    const graph = await readGraph()
+    if (!graph.panels?.length) throw new Error('physical DXF produced no panels')
+    if (['sized', 'strung'].includes(currentStage)
+      && (graph.settings?.global_string_sizing_confirmed !== true
+        || graph.settings?.extra?.string_sizing?.mode !== 'manual-global')) {
+      throw new Error('confirmed manual sizing was not persisted')
+    }
+    if (currentStage === 'strung' && !graph.strings?.length) throw new Error('local string was not persisted')
+    if (currentStage === 'zone' && !graph.electrical_zones?.length) throw new Error('local electrical zone was not persisted')
+    stageProof.graphRev = graph.rev
+    stageProof.elapsedMs = Date.now() - stageProof.startedAt
+    proof.completedStage = currentStage
+  }
+  try {
+    chain = await checked(await request.get(`${path}/versions`, { timeout: 15_000 }), 'versions')
+    const tools = (await checked(await request.get('/api/tools', { timeout: 15_000 }), 'tools')).tools
+    lease = await checked(await request.post(`${path}/checkout`, { data: { holder: 'drafter', ttl_s: 300 }, timeout: 15_000 }), 'checkout')
+    if (!lease.acquired || !lease.checkout_capability) throw new Error('checkout was not acquired')
+    for (const operation of steps) {
+      if (operation.stage !== currentStage) {
+        if (stageProof) await finishStage()
+        currentStage = operation.stage
+        stageProof = { stage: currentStage, startedAt: Date.now(), operations: [] }
+        proof.stages.push(stageProof)
+      }
+      const { tool } = operation
+      let params = { expected_rev: rev }
+      if (tool === 'solar-settings' && operation.operation === 0) {
+        params = seedParams(chain.versions.find((row) => Number(row.v) === Number(chain.head)))
+      } else if (tool === 'solar-settings') {
+        // test_w1_rooftop_acceptance.py:331-335: project completion is its own commit.
+        params.project_changes = { name: 'Walk rooftop', zip_code: '44224', latitude: null, longitude: null }
+      } else if (tool === 'solar-size-strings') {
+        // test_solar_tool_solar_size_strings.py:400-419: manual_params/test_W21C2_manual_commit.
+        params = { ...params, mode: 'manual-global', confirm: true }
+      } else if (tool === 'solar-string-add') {
+        // test_solar_ground_equipment.py:493-512: test_ground_equipment_rail_end_to_end
+        // submits this operation/revision/ordered-ref shape through the legacy commit rail.
+        const graph = await readGraph()
+        const refs = graph.panels.slice(0, graph.settings.panels_in_sequence).map((panel) => panel.id)
+        if (!refs.length) throw new Error('solar-string-add: physical DXF produced no panels')
+        params = { ...params, operation: 'add-string', ordered_panel_refs: refs }
+      } else if (tool === 'solar-electrical-zones') {
+        // test_solar_w2_registration.py:207-217: test_zone_add_publishes_a_version.
+        params = { ...params, operation: 'add', name: 'Walk zone', color_index: 1 }
+      } else if (tool === 'solar-assign-equipment') {
+        // Never manufacture frames or module power to get past this gate. The legacy
+        // chain requires panelled frames even for manually added, otherwise valid strings.
+        const catalog = await checked(await request.get(`/api/capabilities?drawing_id=${encodeURIComponent(drawingId)}&drawing_version=${runtime.drawingVersion}`, { timeout: 15_000 }), 'equipment readiness')
+        const availability = catalog.families.flatMap((family) => family.capabilities)
+          .find((record) => record.name === tool)?.availability
+        proof.equipmentAvailability = availability
+        if (availability?.input_ready !== false) {
+          throw new Error(`equipment readiness did not confirm the missing frame prerequisite: ${JSON.stringify(availability)}`)
+        }
+        throw new Error(`needs_live_sizing: server/product_capability_availability.py:432-452; ${JSON.stringify(availability)}; local equipment requires grouped frames with module power`)
+      }
+      const catalogDigest = tools.find((record) => record.name === tool)?.catalog_digest
+      const receipt = await checked(await request.post('/api/run?wait=1', {
+        headers: { 'X-Checkout-Capability': lease.checkout_capability },
+        data: runBody({ tool, drawingId, params, catalogDigest }), timeout: 45_000,
+      }), tool)
+      if (receipt.result?.after_rev !== rev + 1 || !receipt.result?.new_version?.version) {
+        throw new Error(`${tool}: missing committed revision/version: ${JSON.stringify(receipt)}`)
+      }
+      const after = await checked(await request.get(`${path}/versions`, { timeout: 15_000 }), 'committed versions')
+      const head = expectHeadAdvanced(chain, after)
+      if (Number(head.v) !== Number(receipt.result.new_version.version)) throw new Error(`${tool}: receipt version differs from persisted head`)
+      rev = receipt.result.after_rev
+      chain = after
+      runtime.drawingVersion = head.v
+      stageProof.operations.push({ tool, graphRev: rev, version: head.v })
+    }
+    await finishStage()
+    proof.version = runtime.drawingVersion
+  } catch (error) {
+    proof.error = `seed-solar-chain ${currentStage || recipe.stage}: ${error.message}`
+    throw new Error(proof.error, { cause: error })
+  } finally {
+    if (stageProof) stageProof.elapsedMs = Date.now() - stageProof.startedAt
+    if (lease?.acquired && lease.checkout_capability) {
+      try {
+        await checked(await request.delete(`${path}/checkout`, {
+          headers: { 'X-Checkout-Capability': lease.checkout_capability }, timeout: 15_000,
+        }), 'release checkout')
+      } catch (error) {
+        proof.releaseError = error.message
+        if (!proof.error) throw error
+      }
+    }
+  }
 }
 
 export async function setupStep(probe, runtime, recipe, assertions = runtime.recipeAssertions || expect) {
@@ -2074,6 +2204,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         catalog_sha256: facts.catalog_sha256, families: catalog.families.length,
         capabilities: catalog.families.reduce((count, family) => count + family.capabilities.length, 0) }
       if (!tool) await unsupported(probe, runtime, `The isolated catalog does not provide ${recipe.name}`)
+      requireSeededSolarReady(probe, catalog)
       runtime.catalogPanelName = family.label
       // Solar seats unplaced families outside its Manage fold on the Solar tab.
       const placementTab = toolPlacementTab(tool)
@@ -2102,6 +2233,12 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         await assertions(button).toBeVisible({ timeout: 15_000 })
         await assertions(button).toBeEnabled({ timeout: 15_000 })
       }
+      return
+    }
+    case 'seed-solar-chain': {
+      await seedSolarChain(runtime, recipe)
+      await page.reload({ timeout: 60_000 })
+      await requireWorkspace(runtime)
       return
     }
     case 'seed-solar-graph': {
@@ -2900,6 +3037,7 @@ export async function runProbe(probe, runtime) {
       runtime.catalogFacts ||= {}
       await workerCatalog(runtime.catalogFacts, page.request, { drawingId: runtime.drawingId, version: runtime.drawingVersion || 'head' })
       if (runtime.catalogFacts.catalogError) throw runtime.catalogFacts.catalogError
+      if (typeof requireSeededSolarReady === 'function') requireSeededSolarReady(probe, runtime.catalogFacts.catalog)
       if (typeof solarAvailabilityProbe === 'function') {
         probe = solarAvailabilityProbe(probe, runtime.catalogFacts.catalog)
         evidence.effectiveEffect = probe.assertion

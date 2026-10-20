@@ -9,6 +9,143 @@ import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAv
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
+import { seedSolarChain } from './fixtures.mjs'
+import { solarChainSteps } from './probes.mjs'
+
+function solarChainRuntime({ failTool, staleVersion = false, staleGraph = false, releaseFails = false,
+  missingPanels = false, unconfirmedSizing = false, missingStrings = false, missingZone = false,
+  equipmentReady = false } = {}) {
+  const requests = [], runs = []
+  let rev = 0, head = 1, releases = 0
+  const versions = [{ v: 1, sha256: 'a'.repeat(64) }]
+  const response = (body, status = 200) => ({ ok: () => status === 200, status: () => status, json: async () => structuredClone(body) })
+  const request = {
+    get: async (url) => {
+      requests.push(['GET', url])
+      if (url.endsWith('/versions')) return response({ drawing_id: 'private', head, latest: head, versions })
+      if (url === '/api/tools') return response({ tools: [...new Set(solarChainSteps('routed').map((row) => row.tool)), 'solar-electrical-zones']
+        .map((name) => ({ name, catalog_digest: `digest:${name}` })) })
+      if (url === '/api/session?dwg=private') return response({ intake: { solar_design_graph: {
+        rev: staleGraph ? rev - 1 : rev, settings: { panels_in_sequence: 3,
+          global_string_sizing_confirmed: !unconfirmedSizing && rev >= 4,
+          extra: rev >= 4 ? { string_sizing: { mode: 'manual-global', records: {} } } : {} },
+        panels: !missingPanels && rev >= 3 ? [{ id: 'physical-panel' }] : [],
+        strings: !missingStrings && rev >= 5 ? [{ id: 'local-string' }] : [],
+        electrical_zones: !missingZone && runs.some((row) => row.tool === 'solar-electrical-zones') ? [{ id: 'local-zone' }] : [],
+      } } })
+      if (url.startsWith('/api/capabilities?drawing_id=private&drawing_version=')) return response({ families: [{ capabilities: [
+        { name: 'solar-assign-equipment', availability: { input_ready: equipmentReady, refusal_reasons: equipmentReady ? [] : ['valid_strings_required'] } },
+      ] }] })
+      assert.fail(url)
+    },
+    post: async (url, options) => {
+      requests.push(['POST', url])
+      if (url.endsWith('/checkout')) return response({ acquired: true, checkout_capability: 'lease' })
+      assert.equal(url, '/api/run?wait=1')
+      assert.equal(options.headers['X-Checkout-Capability'], 'lease')
+      assert.equal(options.data.dwg, 'private')
+      assert.equal(options.data.catalog_digest, `digest:${options.data.tool}`)
+      assert.equal(options.data.params.expected_rev, rev)
+      runs.push(options.data)
+      if (options.data.tool === failTool) return response({ ok: false, error: 'SERVER_REFUSAL' }, 409)
+      rev++
+      if (!staleVersion) {
+        versions.push({ v: head + 1, parent: head, sha256: 'b'.repeat(64) })
+        head++
+      }
+      return response({ ok: true, result: { after_rev: rev, new_version: { version: head } } })
+    },
+    delete: async (url, options) => {
+      assert.equal(url, '/api/drawings/private/checkout')
+      assert.equal(options.headers['X-Checkout-Capability'], 'lease')
+      requests.push(['DELETE', url]); releases++
+      return response({ ok: !releaseFails, error: releaseFails ? 'release failed' : undefined }, releaseFails ? 500 : 200)
+    },
+  }
+  return { runtime: { page: { request }, drawingId: 'private', evidence: {} }, requests, runs, releases: () => releases }
+}
+
+test('WL15 seed builds only the requested prefix using one lease and persisted version/revision advances', async () => {
+  for (const stage of ['panels', 'sized', 'strung']) {
+    const { runtime, requests, runs, releases } = solarChainRuntime()
+    await seedSolarChain(runtime, { stage })
+    assert.deepEqual(runs.map((row) => row.tool), solarChainSteps(stage).map((row) => row.tool))
+    assert.deepEqual(runs.map((row) => row.params.expected_rev), runs.map((_, index) => index))
+    assert.deepEqual(runs[0].params.initialize.source_intake_sha256, 'a'.repeat(64))
+    assert.deepEqual(runs[1].params.project_changes, { name: 'Walk rooftop', zip_code: '44224', latitude: null, longitude: null })
+    if (stage !== 'panels') assert.deepEqual(runs[3].params, { expected_rev: 3, mode: 'manual-global', confirm: true })
+    // solar_string_add.json requires operation; the legacy builtin dispatches on it.
+    if (stage === 'strung') assert.deepEqual(runs[4].params, {
+      expected_rev: 4, operation: 'add-string', ordered_panel_refs: ['physical-panel'],
+    })
+    assert.equal(requests.filter(([method, path]) => method === 'POST' && path.endsWith('/checkout')).length, 1)
+    assert.equal(releases(), 1)
+    assert.equal(runtime.drawingVersion, runs.length + 1)
+    assert.equal(runtime.evidence.solarChain.version, runtime.drawingVersion)
+    assert.equal(runtime.evidence.solarChain.completedStage, stage)
+    for (const proof of runtime.evidence.solarChain.stages) {
+      assert.ok(proof.elapsedMs >= 0)
+      assert.ok(proof.operations.length)
+    }
+  }
+})
+
+test('WL15 a zone uses the local producer only for its requesting probe', async () => {
+  const { runtime, runs } = solarChainRuntime()
+  await seedSolarChain(runtime, { stage: 'panels', electricalZone: true })
+  assert.deepEqual(runs.map((row) => row.tool), [...solarChainSteps('panels').map((row) => row.tool), 'solar-electrical-zones'])
+  assert.deepEqual(runs.at(-1).params, { expected_rev: 3, operation: 'add', name: 'Walk zone', color_index: 1 })
+  assert.equal(runtime.evidence.solarChain.stages.at(-1).stage, 'zone')
+})
+
+test('WL15 server refusals, stale persistence and stale graph reads fail setup loudly and release the lease', async () => {
+  for (const [fault, pattern, stage] of [
+    [{ failTool: 'solar-panels-from-drawing' }, /panels.*solar-panels-from-drawing.*SERVER_REFUSAL/, 'panels'],
+    [{ failTool: 'solar-size-strings' }, /sized.*solar-size-strings.*SERVER_REFUSAL/, 'sized'],
+    [{ failTool: 'solar-string-add' }, /strung.*solar-string-add.*SERVER_REFUSAL/, 'strung'],
+    [{ staleVersion: true }, /panels.*head did not advance/, 'panels'],
+    [{ staleGraph: true }, /panels.*session graph revision/, 'strung'],
+    [{ missingPanels: true }, /panels.*physical DXF produced no panels/, 'panels'],
+    [{ unconfirmedSizing: true }, /sized.*confirmed manual sizing was not persisted/, 'strung'],
+    [{ missingStrings: true }, /strung.*local string was not persisted/, 'strung'],
+  ]) {
+    const { runtime, releases } = solarChainRuntime(fault)
+    await assert.rejects(seedSolarChain(runtime, { stage }), pattern)
+    assert.equal(releases(), 1)
+    assert.ok(runtime.evidence.solarChain.error)
+    assert.ok(runtime.evidence.solarChain.stages.at(-1).elapsedMs >= 0)
+  }
+  const { runtime, requests } = solarChainRuntime()
+  await assert.rejects(seedSolarChain(runtime, { stage: 'grouped' }), /Unknown solar chain stage/)
+  assert.deepEqual(requests, [])
+  const zone = solarChainRuntime({ missingZone: true })
+  await assert.rejects(seedSolarChain(zone.runtime, { stage: 'panels', electricalZone: true }), /zone.*local electrical zone was not persisted/)
+  assert.equal(zone.releases(), 1)
+})
+
+test('WL15 equipped and routed stop at the real frame prerequisite without fabricated evidence or equipment', async () => {
+  for (const stage of ['equipped', 'routed']) {
+    const { runtime, runs, requests, releases } = solarChainRuntime()
+    await assert.rejects(seedSolarChain(runtime, { stage }), /equipped.*needs_live_sizing.*valid_strings_required/)
+    assert.equal(releases(), 1)
+    assert.deepEqual(runs.map((row) => row.tool), solarChainSteps('strung').map((row) => row.tool))
+    assert.equal(requests.some(([, url]) => url === '/api/capabilities?drawing_id=private&drawing_version=6'), true)
+    assert.equal(runtime.evidence.solarChain.equipmentAvailability.input_ready, false)
+  }
+  const changed = solarChainRuntime({ equipmentReady: true })
+  await assert.rejects(seedSolarChain(changed.runtime, { stage: 'routed' }), /equipment readiness did not confirm the missing frame prerequisite/)
+  assert.ok(!changed.runtime.evidence.solarChain.error.includes('needs_live_sizing'))
+  assert.equal(changed.releases(), 1)
+})
+
+test('WL15 release failure preserves the server refusal as the primary failure', async () => {
+  const { runtime, releases } = solarChainRuntime({ failTool: 'solar-size-strings', releaseFails: true })
+  await assert.rejects(seedSolarChain(runtime, { stage: 'sized' }), /sized.*SERVER_REFUSAL/)
+  assert.match(runtime.evidence.solarChain.releaseError, /release failed/)
+  assert.equal(releases(), 1)
+  const success = solarChainRuntime({ releaseFails: true })
+  await assert.rejects(seedSolarChain(success.runtime, { stage: 'panels' }), /release failed/)
+})
 
 test('WL14 Find-submit clicks its own button after preparing a fresh query', () => {
   const map = buildFeatureMap()

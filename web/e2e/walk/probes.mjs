@@ -16,6 +16,61 @@ const step = (kind, properties = {}) => ({ kind, ...properties })
 const role = (name, accessible, scope) => ({ role: name, name: accessible, exact: true, ...(scope ? { scope } : {}) })
 const escapePattern = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+export const SOLAR_CHAIN_STAGES = Object.freeze(['panels', 'sized', 'strung', 'equipped', 'routed'])
+const solarStageTools = Object.freeze({
+  panels: ['solar-settings', 'solar-settings', 'solar-panels-from-drawing'],
+  sized: ['solar-size-strings'],
+  strung: ['solar-string-add'],
+  equipped: ['solar-assign-equipment'],
+  routed: ['solar-homeruns'],
+})
+export function solarChainSteps(stage) {
+  const index = SOLAR_CHAIN_STAGES.indexOf(stage)
+  if (index < 0) throw new Error(`Unknown solar chain stage: ${stage}`)
+  return SOLAR_CHAIN_STAGES.slice(0, index + 1).flatMap((name) =>
+    solarStageTools[name].map((tool, operation) => ({ stage: name, tool, operation })))
+}
+
+// Readiness sources: solar_tools/*.json facets and product_capability_availability.py:327-463.
+// A graph-only producer must not import panels before probing panels-from-drawing.
+// Manual sizing carries no module power; it cannot unlock frames or the equipment chain.
+const solarStage = (stage) => Object.freeze({ stage })
+const solarOffline = (reason, gate) => Object.freeze({ reason, gate })
+const solarGraphOnly = Object.freeze({ graphOnly: true })
+export const SOLAR_TOOL_SETUP = Object.freeze({
+  'solar-settings': solarGraphOnly,
+  'solar-panels-from-drawing': solarGraphOnly,
+  'solar-size-strings': solarStage('panels'),
+  'solar-string-add': solarStage('panels'),
+  'solar-string-multi-add': solarStage('panels'),
+  'solar-correct-string': solarStage('strung'),
+  'solar-string-flip': solarStage('strung'),
+  'solar-string-swap': solarStage('strung'),
+  'solar-string-rebuild': solarStage('strung'),
+  'solar-string-delete': solarStage('strung'),
+  'solar-string-conductors': solarStage('strung'),
+  'solar-color-strings': solarStage('strung'),
+  'solar-panel-groups': solarOffline('needs_live_sizing', 'server/product_capability_availability.py:414-416'),
+  'solar-autofill': solarOffline('needs_live_sizing', 'server/solar_tools/solar_autofill.json:11 (frames)'),
+  'solar-autofill-plan': solarOffline('needs_live_sizing', 'server/solar_tools/solar_autofill_plan.json:11 (frames)'),
+  'solar-panel-add': solarOffline('needs_live_sizing', 'server/solar_tools/solar_panel_add.json:11 (frames)'),
+  'solar-panel-remove': solarOffline('needs_live_sizing', 'server/solar_tools/solar_panel_remove.json:11 (frames)'),
+  'solar-panel-group-delete': solarOffline('needs_live_sizing', 'server/solar_tools/solar_panel_group_delete.json:11 (frames)'),
+  'solar-string-midpoint': solarOffline('needs_live_sizing', 'server/solar_tools/solar_string_midpoint.json:11 (frames)'),
+  'solar-string-data': solarOffline('needs_live_sizing', 'server/solar_tools/solar_string_data.json:11 (strings, frames)'),
+  'solar-assign-equipment': solarOffline('needs_live_sizing', 'server/product_capability_availability.py:432-452 (panelled requires frames)'),
+  'solar-homeruns': solarOffline('needs_live_sizing', 'server/product_capability_availability.py:438-454 (assigned requires panelled)'),
+  'solar-schedule': solarOffline('needs_live_sizing', 'server/product_capability_availability.py:454-473 (routed requires assigned)'),
+  'solar-equipment-move': solarOffline('needs_live_sizing', 'server/builtins/solar_equipment_move.py:161-168 (equipment and routing)'),
+  'solar-assign-strings': solarOffline('needs_live_sizing', 'server/builtins/solar_assign_strings.py:245-252 (collectors required)'),
+  'solar-guardrails-read': solarOffline('needs_live_sizing', 'server/builtins/solar_guardrails_read.py:41-59 (sizing response electricals)'),
+  'solar-solve-proposal': solarOffline('cloud_service_offline', 'server/builtins/solar_solve_proposal.py:6 (cloud broker required)'),
+  'solar-commit-solve': solarOffline('cloud_service_offline', 'server/product_capability_availability.py:476-485 (proposal candidate required)'),
+  'solar-trackers-to-panel-groups': solarOffline('ground_physical_state_required', 'server/builtins/solar_trackers_to_panel_groups.py:68-76; server/product_capability_availability.py:280-300 (Ground physical tracker rows)'),
+  // Zones have an honest local producer, independent of grouping and sizing.
+  'solar-select-by-zone': Object.freeze({ stage: 'panels', electricalZone: true }),
+})
+
 export const CENSUS_RECIPE_CONTROLS = Object.freeze([
   'open-dxf', 'save-version', 'undo-edit', 'redo-edit', 'more-panels',
   'open-dxf-browser', 'objects', 'ribbon-script', 'choose-script', 'run-script', 'object-snap-modes',
@@ -331,7 +386,15 @@ export function stateRecipe(entry, state) {
     } else if ((action.op || action.id === 'engine:repeat') && context.session?.engineParsed) steps.push(step('engine-ready'))
   }
   if (entry.kind === 'tool') {
-    if (entry.source_id.startsWith('solar-')) steps.push(step('seed-solar-graph'))
+    if (entry.source_id.startsWith('solar-')) {
+      const solar = SOLAR_TOOL_SETUP[entry.source_id]
+      // Product gate probes need only a graph: upstream inputs must not hide a
+      // write lock, entitlement, running-job or unsaved-edit refusal.
+      if (state !== 'ready' && effect.kind === 'disabled_with_reason') steps.push(step('seed-solar-graph'))
+      else if (solar?.reason) steps.push(step('require-local-state', { reason: `${solar.reason}: ${entry.source_id}; ${solar.gate}` }))
+      else if (solar?.stage) steps.push(step('seed-solar-chain', { ...solar }))
+      else steps.push(step('seed-solar-graph'))
+    }
     steps.push(step('catalog-tool', { name: entry.source_id }))
   }
   if (state === 'no-versioned-drawing') steps.push(step('require-versionless-drawing'))

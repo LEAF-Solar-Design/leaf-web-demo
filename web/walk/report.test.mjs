@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { buildFeatureMap } from './featureMap.mjs'
-import { stateRecipe } from '../e2e/walk/probes.mjs'
+import { stateRecipe, SOLAR_TOOL_SETUP } from '../e2e/walk/probes.mjs'
 import { uxObservation } from '../e2e/walk/uxEvidence.mjs'
 import { buildReceipt, validateReceipt, redact, artifactReference, MAX_INPUT_BYTES, MAX_RECEIPT_BYTES } from './report.mjs'
 
@@ -388,6 +388,46 @@ test('passed unsupported evidence and legacy failed unsupported errors remain un
     assert.ok(receipt.verdicts.every((row) => row.verdict !== 'PASS'))
     assert.equal(receipt.failures.length, 0)
   }
+})
+
+test('WL15 missing Solar producers render UNAVAILABLE with the explicit reason and gate', () => {
+  const featureMap = buildFeatureMap()
+  for (const [name, setup] of Object.entries(SOLAR_TOOL_SETUP).filter(([, setup]) => setup.reason)) {
+    const reason = `${setup.reason}: ${name}; ${setup.gate}`
+    const spec = { title: `tool:${name} [ready] @desktop`, tests: [{ projectName: 'desktop', results: [{
+      status: 'passed', attachments: [attach({ result: { result: 'unsupported_local', reason } })],
+    }] }] }
+    const receipt = build({ suites: [{ specs: [spec] }] },
+      { ...featureMap, entries: featureMap.entries.filter((entry) => entry.source_id === name) },
+      { ...identity, catalog_version: featureMap.catalog_version })
+    assert.deepEqual(receipt.verdicts, [{ feature_id: `tool:${name}`, verdict: 'UNAVAILABLE',
+      reason: `ready @desktop: unsupported_local: ${reason}` }])
+    assert.deepEqual(receipt.unavailable_features, [{ feature_id: `tool:${name}`, reason: `ready @desktop: ${reason}` }])
+    assert.deepEqual(receipt.evidence.unavailable, [{ feature_id: `tool:${name}`, state: 'ready', viewport: 'desktop', reason }])
+    assert.equal(receipt.evidence.cases.find((row) => row.feature_id === `tool:${name}` && row.state === 'ready').reason, reason)
+    assert.equal(receipt.failures.length, 0)
+    assert.ok(!JSON.stringify(receipt.unavailable_features).includes('input_ready is false'))
+    assert.equal(validateReceipt(receipt).valid, true)
+  }
+})
+
+test('WL15 stage costs survive report projection, including a failed final stage', () => {
+  const spec = structuredClone(featureSpec(sample))
+  const result = firstResult(spec)
+  result.attachments = [attach({ solarChain: { requestedStage: 'routed', stages: [
+    { stage: 'panels', elapsedMs: 125, operations: [{ tool: 'solar-settings' }, { tool: 'solar-settings' }, { tool: 'solar-panels-from-drawing' }] },
+    { stage: 'sized', elapsedMs: 20, operations: [{ tool: 'solar-size-strings' }] },
+    { stage: 'strung', elapsedMs: 30, operations: [{ tool: 'solar-string-add' }] },
+    { stage: 'equipped', elapsedMs: 5, operations: [] },
+    { stage: 'grouped', elapsedMs: 100, operations: [] },
+    { stage: 'routed', elapsedMs: -1, operations: [] },
+    { stage: 'zone', elapsedMs: '5', operations: [] },
+  ] } })]
+  const receipt = build({ suites: [{ specs: [spec] }] })
+  assert.deepEqual(receipt.findings, [['panels', 125, 3], ['sized', 20, 1], ['strung', 30, 1], ['equipped', 5, 0]]
+    .map(([stage, milliseconds, operations]) => ({ feature_id: 'drawer:nav', category: 'solar_chain_stage',
+      evidence: { kind: 'solar_chain_stage', state: 'closed', viewport: 'desktop', stage, milliseconds, operations } })))
+  assert.equal(validateReceipt(receipt).valid, true)
 })
 
 test('unsupported, staging certifications and queued execution cannot become passes', () => {
