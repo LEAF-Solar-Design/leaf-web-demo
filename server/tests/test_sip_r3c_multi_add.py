@@ -35,7 +35,7 @@ IDS = ["leaf:string:bb85f3ba-958a-4740-8720-0a175f1ee27d",
        "leaf:string:100fd959-8d6f-4df6-9b70-bbd019918bcd"]
 GRAPH_SHA = "7bdf60c961ea2ad58e45c73a50198c9ce51b5162301ca2a4c46fdfe4f53a44cf"
 INTAKE_SHA = "278b4800db7e5e49d7c3e3c36fcc2f6f40a8bb5c67d81ab488ef287e1e7be63e"
-UNSUPPORTED = ("solar-assign-strings", "solar-commit-solve", "solar-pvcase-convert",
+UNSUPPORTED = ("solar-assign-strings", "solar-pvcase-convert",
                "solar-solaredge-accept", "solar-trackers-to-panel-groups",
                "solar-string-delete")
 
@@ -74,9 +74,9 @@ def job_proof(s, result, prepared, monkeypatch):
     return adapter.project_graph_job_provenance(s.job, result, expected=prepared, conn=conn)
 
 
-# W1C-2b adds proposal; fourteen supported tools, four creation tools.
+# W1C-3 adds commit; fifteen supported tools, four creation tools.
 def test_sip_r3c_multi_add_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 14
+    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 15
     assert adapter.CREATION_TOOLS == {"solar-string-add", "solar-assign-equipment", TOOL, "solar-panel-groups"}
     assert adapter._tool(TOOL, manifest(TOOL)) == solar_tools.get(TOOL)
     refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: adapter._tool(TOOL, "x"))

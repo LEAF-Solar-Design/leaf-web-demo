@@ -25,7 +25,7 @@ def _jobs():
 
 
 def _submission_fingerprint(org, proj, drawing, parent, tenant, actor, tool, params, manifest,
-                            solve_context=None):
+                            solve_context=None, proposal_job_id=None):
     return _jobs()._fingerprint("canonical-project-graph-submission", {
         "schema": _jobs().PROJECT_GRAPH_JOB_SCHEMA,
         "organization_id": str(org), "project_id": str(proj), "drawing_id": str(drawing),
@@ -34,6 +34,7 @@ def _submission_fingerprint(org, proj, drawing, parent, tenant, actor, tool, par
         "tool_manifest_sha256": manifest, "initialized": "initialize" in params,
         "max_attempts": 3,
         **({"solve_context": solve_context} if tool == solve.TOOL_NAME else {}),
+        **({"proposal_job_id": proposal_job_id} if tool == solve.COMMIT_TOOL else {}),
     })
 
 
@@ -62,6 +63,7 @@ def _validate_new_project_graph_params(context, tool_name, params, *, checkout,
 def submit_project_graph_job(
     tenant, project_id, drawing_id, input_version_id, tool_name, params, *,
     tool_manifest_sha256, checkout_capability, idempotency_key, preview=False, solve_context=None,
+    proposal_job_id=None,
 ):
     if is_demo_context(tenant):
         reason = demo_run_verdict(tenant, tool_name, params)
@@ -103,7 +105,7 @@ def submit_project_graph_job(
                         "requests": {target: parsed.request.wire()},
                         "cancel": normalized.get("cancel", False)}
         fingerprint = _submission_fingerprint(org, project_id, drawing_id, input_version_id,
-            tenant, actor, tool_name, normalized, tool_manifest_sha256, solve_context)
+            tenant, actor, tool_name, normalized, tool_manifest_sha256, solve_context, proposal_job_id)
         return jobs._graph_replay(existing, fingerprint)
     admission = project.verify_at_admission(tenant, project_id, drawing_id, input_version_id,
                                            checkout_capability=checkout_capability)
@@ -123,6 +125,14 @@ def submit_project_graph_job(
         plan = solve.plan_request(context, normalized, solve_context)
         normalized = plan["normalized_params"]
         solve.cloud.resolve_grant(normalized["grant_ref"], str(org))
+    elif tool_name == solve.COMMIT_TOOL:
+        def prepare_commit(conn):
+            frozen = solve.freeze_proposal(context, proposal_job_id, conn=conn)
+            prepared = graph.prepare_project_graph_commit(context, tool_name, normalized,
+                checkout=admission.checkout, job_id=UUID(int=0), attempt=1,
+                tool_manifest_sha256=tool_manifest_sha256, trusted_proposal=frozen, conn=conn)
+            return frozen, prepared.request["parameters"]
+        trusted_proposal, normalized = platform_link.platform_db().run_transaction(prepare_commit)
     else:
         normalized = _validate_new_project_graph_params(context, tool_name, normalized,
             checkout=admission.checkout, tool_manifest_sha256=tool_manifest_sha256)
@@ -145,9 +155,10 @@ def submit_project_graph_job(
         "tool_manifest_sha256": tool_manifest_sha256,
         "parent_intake_sha256": context.intake_sha256, "initialized": initialized,
         **({"solve_binding": plan["solve_binding"]} if tool_name == solve.TOOL_NAME else {}),
+        **({"trusted_proposal": trusted_proposal} if tool_name == solve.COMMIT_TOOL else {}),
     }
     fingerprint = _submission_fingerprint(org, project_id, drawing_id, input_version_id,
-        tenant, actor, tool_name, normalized, tool_manifest_sha256, solve_context)
+        tenant, actor, tool_name, normalized, tool_manifest_sha256, solve_context, proposal_job_id)
     with project.write_loop.drawing_mutation_refusal_guard() as refusal:
         if refusal is not None:
             project.refuse("WRITES_DRAINED")

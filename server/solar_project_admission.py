@@ -114,7 +114,8 @@ def _trusted(tool):
 
 def project_tool_admission(tool, tenant, *, org_header, project_header, authorization,
                            input_version_id, drawing_id, params, catalog_digest,
-                           idempotency_key, checkout_capability, preview, solve_context=None):
+                           idempotency_key, checkout_capability, preview, solve_context=None,
+                           proposal_job_id=None):
     if not project_runs_enabled():
         return _refusal("project_execution_disabled")
     try:
@@ -178,7 +179,7 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
         except (ValueError, TypeError, AttributeError):
             return _refusal(None, status=400, message="a canonical drawing version UUID is required")
         try:
-            if drawing_id is None and trusted["name"] == "solar-solve-proposal":
+            if drawing_id is None and trusted["name"] in ("solar-solve-proposal", "solar-commit-solve"):
                 org, _actor = project._access(tenant, UUID(str(context["project_id"])), write=True)
                 binding = project.graph_store().resolve_version_binding(
                     org, UUID(str(context["project_id"])), parent)
@@ -192,11 +193,13 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
                   "idempotency_key": idempotency_key}
         if trusted["name"] == "solar-solve-proposal":
             kwargs["solve_context"] = solve_context
+        if trusted["name"] == "solar-commit-solve":
+            kwargs["proposal_job_id"] = proposal_job_id
         if preview:
             row = service.submit_project_graph_job(*args, **kwargs, preview=True)
             return {"status_code": 200, "content": with_envelope_fields(
                 {"admissible": True, "replay": "job_id" in row})}
-        if trusted["name"] == "solar-solve-proposal":
+        if trusted["name"] in ("solar-solve-proposal", "solar-commit-solve"):
             job_id = str(service.submit_project_graph_job(*args, **kwargs)["job_id"])
         else:
             job_id = platform_link.submit_canonical_graph(*args, **kwargs)

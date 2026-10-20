@@ -131,7 +131,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 239  # +1 demo inventory/migration contract regression.
     assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
-    assert suites["gate-runner-selftest"].expected == 242  # W1C proposal registration.
+    assert suites["gate-runner-selftest"].expected == 243  # W1C commit registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4224,7 +4224,7 @@ def test_R14C_32_mandatory_registration():
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
     assert mandatory[-3:-1] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 242  # W1C proposal registration.
+    assert suites["gate-runner-selftest"].expected == 243  # W1C commit registration.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4320,7 +4320,7 @@ def test_sip_r3e_gate_registration():
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
     # LD1b adds one demo classification regression to the 1178 platform rows.
     assert suites["platform"].expected == 1205
-    assert suites["gate-runner-selftest"].expected == 242  # W1C proposal registration.
+    assert suites["gate-runner-selftest"].expected == 243  # W1C commit registration.
 
 
 def test_demo_actor_gate_registration():
@@ -4409,3 +4409,20 @@ def test_w1c_solve_proposal_gate_registration():
         assert suite.expected == floor
         assert suite.uses_database is database and suite.db_gated is database
         assert selection["mandatory_suite_ids"].count(suite.id) == 1
+
+
+def test_w1c_commit_solve_gate_registration():
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suffix, floor, database in (("", 42, False), ("-postgres", 6, True)):
+        suite_id = "server-w1c-commit-solve" + suffix
+        suite = suites[suite_id]
+        assert suite == runner.Suite(
+            suite_id, "server canonical Solar commit " + ("PostgreSQL" if database else "solve"),
+            "pytest", REPO / "server", runner._py_pytest(
+                "tests/test_w1c_commit_solve" + suffix.replace("-", "_") + ".py"), floor,
+            uses_database=database, db_gated=database,
+            database_skip_reasons=((r"PostgreSQL integration test requires DATABASE_URL",) if database else ()))
+        assert selection["mandatory_suite_ids"].count(suite_id) == 1
+    assert suites["gate-runner-selftest"].expected == 243

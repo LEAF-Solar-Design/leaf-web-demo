@@ -358,7 +358,8 @@ def test_execution_context_keys_are_tool_conditional(world):
     seeded["execution_context"]["initialized"] = True
     seeded["params"] = {"initialize": {}}
     assert jobs._graph_ids(seeded) == expected
-    for tool in adapter.SUPPORTED_TOOLS - {solve.TOOL_NAME}:
+    # Commit's distinct trusted_proposal context is covered by W1C-3.
+    for tool in adapter.SUPPORTED_TOOLS - {solve.TOOL_NAME, solve.COMMIT_TOOL}:
         row = deepcopy(proposal)
         row["tool_name"] = tool
         del row["execution_context"]["solve_binding"]

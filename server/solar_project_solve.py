@@ -15,6 +15,7 @@ import solar_tools
 from solar_design_graph import GraphValidationError
 
 TOOL_NAME = cloud.TOOL_NAME
+COMMIT_TOOL = "solar-commit-solve"
 SOLVE_CLASSIFICATION = "live"
 RESULT_SCHEMA = "leaf.solar-solve-proposal.v1"
 
@@ -214,8 +215,8 @@ def prepare_job(job, guard):
     return _result(exchange, summary, provenance)
 
 
-def project_solve_job_provenance(job_id, result, *, conn):
-    """Check all custody digests and re-derive the candidate without network or grant IO."""
+def project_solve_job_provenance(job_id, result=None, *, conn):
+    """Rederive custody offline; optionally also check the caller's result projection."""
     from solar_project_jobs import _job_context
     job = graph._stored_job(job_id, conn)
     jobs = platform_link._canonical_jobs_module()
@@ -234,6 +235,66 @@ def project_solve_job_provenance(job_id, result, *, conn):
         "execution_path": "leaf_cloud_service", "classification": exchange["classification"],
         "tool_manifest_sha256": deps.catalog_tool_digest(solar_tools.trusted_record(TOOL_NAME)),
         "proof_sha256": exchange["proof_sha256"]}
-    if provenance != expected or result != _result(exchange, summary, expected):
+    if result is not None and (provenance != expected or result != _result(exchange, summary, expected)):
         jobs._graph_binding_error()
     return {"candidate": json.loads(candidate), "proof": json.loads(proof)}
+
+
+def _proposal_id(value):
+    try:
+        if type(value) is not str or str(UUID(value)) != value:
+            raise ValueError()
+        return UUID(value)
+    except (ValueError, TypeError, AttributeError):
+        raise GraphValidationError("SOLVE_PROPOSAL_REQUIRED") from None
+
+
+def freeze_proposal(context, proposal_job_id, *, conn):
+    """Resolve only canonical custody in the exact parent scope, before a job insert."""
+    job_id = _proposal_id(proposal_job_id)
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL", (job_id,))
+        row = cur.fetchone()
+    execution = row.get("execution_context") if row is not None else None
+    if (row is None or row.get("deleted_at") is not None
+            or str(row.get("org_id")) != str(context.organization_id)
+            or str(row.get("project_id")) != str(context.project_id)
+            or row.get("tool_name") != TOOL_NAME or row.get("kind") != "run"
+            or type(execution) is not dict or execution.get("drawing_id") != str(context.drawing_id)):
+        raise GraphValidationError("SOLVE_PROPOSAL_NOT_FOUND")
+    if row.get("status") != "succeeded":
+        raise GraphValidationError("SOLVE_PROPOSAL_NOT_SUCCEEDED")
+    if str(row.get("input_version_id")) != str(context.parent_version_id):
+        raise GraphValidationError("SOLVE_PROPOSAL_STALE")
+    manifest = deps.catalog_tool_digest(solar_tools.trusted_record(TOOL_NAME))
+    if execution.get("tool_manifest_sha256") != manifest:
+        raise GraphValidationError("SOLVE_PROPOSAL_MANIFEST_MISMATCH")
+    try:
+        platform_link._canonical_jobs_module()._graph_ids(row)
+        exchange = _store().read_completed_exchange(context.organization_id, context.project_id,
+            context.drawing_id, job_id, conn=conn)
+        if (exchange["input_version_id"] != context.parent_version_id
+                or exchange["parent_intake_sha256"] != context.intake_sha256
+                or exchange["graph_sha256"] != kernel.digest(context.graph)
+                or exchange["graph_revision"] != context.graph["rev"]):
+            raise GraphValidationError("SOLVE_PROPOSAL_EVIDENCE_INVALID")
+    except (_store().SolveExchangeError, project.ProjectContextError, GraphValidationError,
+            ValueError, TypeError, KeyError):
+        raise GraphValidationError("SOLVE_PROPOSAL_EVIDENCE_INVALID") from None
+    return {"proposal_job_id": str(job_id), "proposal_tool_manifest_sha256": manifest,
+            **{key: exchange[key] for key in ("candidate_sha256", "request_sha256", "response_sha256")}}
+
+
+def commit_candidate(context, trusted_proposal, *, conn):
+    """Recheck the frozen identity and rederive the candidate without result or network IO."""
+    frozen = freeze_proposal(context, trusted_proposal["proposal_job_id"], conn=conn)
+    if frozen != trusted_proposal:
+        raise GraphValidationError("SOLVE_PROPOSAL_EVIDENCE_INVALID")
+    try:
+        proof = project_solve_job_provenance(UUID(frozen["proposal_job_id"]), conn=conn)
+        if _sha(cloud.canonical_bytes(proof["candidate"])) != frozen["candidate_sha256"]:
+            raise GraphValidationError("SOLVE_PROPOSAL_EVIDENCE_INVALID")
+        return proof["candidate"]["candidate"]
+    except (_store().SolveExchangeError, project.ProjectContextError, GraphValidationError,
+            ValueError, TypeError, KeyError, AttributeError):
+        raise GraphValidationError("SOLVE_PROPOSAL_EVIDENCE_INVALID") from None

@@ -19,10 +19,10 @@ from test_sip_r3a_graph import Memory, INTAKE, UNITS, publish, proof, refused
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
 
-# W1C-2b adds proposal; fourteen supported tools, four creation tools.
+# W1C-3 adds commit; fifteen supported tools, four creation tools.
 TOOLS = {"solar-settings", "solar-panels-from-drawing", "solar-size-strings",
          "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
-         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal"}
+         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve"}
 HASHES = (
     "c9b8f4d3b108024f0ca3d889282fc23df485aca605c4b675a2ca2ffc9e826004",
     "76637c9607c2e780a91070d2e928c234092a0ef09b185aeaffe2381f1d5ae489",
@@ -163,7 +163,7 @@ def canonical_custody(s, monkeypatch, value):
 
 def test_sip_r3b_membership(memory):
     assert adapter.SUPPORTED_TOOLS == TOOLS
-    for tool in ("solar-commit-solve", "solar-trackers-to-panel-groups", "solar-solaredge-accept",
+    for tool in ("solar-trackers-to-panel-groups", "solar-solaredge-accept",
                  "solar-pvcase-convert", "solar-pvcase-solve", "solar-pvcase-export"):
         refused("SIP_R3_TOOL_UNSUPPORTED", lambda: prepare(memory, tool, {}))
 

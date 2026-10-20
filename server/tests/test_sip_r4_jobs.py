@@ -74,7 +74,8 @@ def record(s, prepared):
         "execution_context": {"schema": jobs.PROJECT_GRAPH_JOB_SCHEMA,
             "authority_mode": "postgres_canonical", "execution_path": "local",
             **{k: r[k] for k in ("drawing_id", "actor_binding_id", "checkout_fence",
-                "tool_manifest_sha256", "parent_intake_sha256", "initialized")}},
+                "tool_manifest_sha256", "parent_intake_sha256", "initialized")},
+            **({"trusted_proposal": r["trusted_proposal"]} if r["tool"] == "solar-commit-solve" else {})},
         "result": None, "output_version_id": None, "deleted_at": None}
 
 
@@ -228,7 +229,8 @@ def test_sip_r4_submission_no_secrets(admission, monkeypatch):
         calls.append(args[1])
         return original(*args, **kwargs)
     monkeypatch.setattr(service, "_validate_new_project_graph_params", spy)
-    assert set(CLEAN) == ELEVEN - {"solar-solve-proposal"}
+    # Both solve tools require separate trusted proposal/binding fixtures.
+    assert set(CLEAN) == ELEVEN - {"solar-solve-proposal", "solar-commit-solve"}
     for name in sorted(CLEAN):
         clean = deepcopy(CLEAN[name])
         assert not tool_validate.validate_params(solar_tools.trusted_record(name), clean)

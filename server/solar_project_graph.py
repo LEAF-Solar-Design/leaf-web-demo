@@ -232,7 +232,7 @@ def _run_builtin(context, tool, graph, params, trusted, job_id):
     return local._load_builtin(tool).run(graph, params, **trusted)
 
 
-def _candidate(context, tool, params, initialized, job_id, *, conn=None):
+def _candidate(context, tool, params, initialized, job_id, *, conn=None, trusted_proposal=None):
     before = _companion(context.intake)
     builtin_params = copy.deepcopy(params)
     base = None
@@ -253,6 +253,9 @@ def _candidate(context, tool, params, initialized, job_id, *, conn=None):
     trusted = {}
     if "source_intake" in solar_tools.get(tool)["trusted_inputs"]:
         trusted["source_intake"] = _canonical_source_intake(context)
+    if tool == "solar-commit-solve":
+        from solar_project_solve import commit_candidate
+        trusted["candidate"] = commit_candidate(context, trusted_proposal, conn=conn)
     if not initialized and tool not in ("solar-settings", "solar-panels-from-drawing", SIZING_TOOL):
         require_project_sizing(context, conn=conn)
     if _global_sizing(tool, params) and conn is not None:
@@ -267,7 +270,7 @@ def _candidate(context, tool, params, initialized, job_id, *, conn=None):
 
 
 def _prepare(context, tool, params, *, checkout, job_id, attempt, tool_manifest_sha256,
-             initialized, conn=None):
+             initialized, conn=None, trusted_proposal=None):
     if isinstance(context, project.VerifiedProjectContext):
         context = resolve_project_graph_context(context)
     if not isinstance(context, ProjectGraphContext):
@@ -281,7 +284,13 @@ def _prepare(context, tool, params, *, checkout, job_id, attempt, tool_manifest_
             or not isinstance(job_id, UUID) or type(attempt) is not int or attempt < 1):
         _reject()
     parameters = _parameters(context, params)
-    before, after, base, output = _candidate(context, tool, parameters, initialized, job_id, conn=conn)
+    if tool == "solar-commit-solve" and trusted_proposal is None:
+        jobs = project.platform_link._canonical_jobs_module()
+        row = _stored_job(job_id, conn)
+        jobs._graph_ids(row)
+        trusted_proposal = row["execution_context"]["trusted_proposal"]
+    before, after, base, output = _candidate(context, tool, parameters, initialized, job_id,
+        conn=conn, trusted_proposal=trusted_proposal)
     request = {"schema": SCHEMA, "organization_id": str(context.organization_id),
         "project_id": str(context.project_id), "drawing_id": str(context.drawing_id),
         "parent_version_id": str(context.parent_version_id),
@@ -291,6 +300,8 @@ def _prepare(context, tool, params, *, checkout, job_id, attempt, tool_manifest_
         "parent_intake_sha256": context.intake_sha256,
         "before_graph_sha256": None if before is None else local.digest(before),
         "graph_project_id": after["project"]["id"], "initialized": initialized}
+    if tool == "solar-commit-solve":
+        request["trusted_proposal"] = copy.deepcopy(trusted_proposal)
     if _global_sizing(tool, parameters):
         request["sizing_exchange"] = after["settings"]["extra"]["string_sizing"]["project_exchange"]
         project.platform_link._canonical_jobs_module()._validate_graph_request(
@@ -314,9 +325,10 @@ def prepare_project_graph_seed(context, params, *, checkout, job_id, attempt, to
 
 
 def prepare_project_graph_commit(context, tool, params, *, checkout, job_id, attempt, tool_manifest_sha256,
-                                 conn=None):
+                                 conn=None, trusted_proposal=None):
     return _prepare(context, tool, params, checkout=checkout, job_id=job_id,
-                    attempt=attempt, tool_manifest_sha256=tool_manifest_sha256, initialized=False, conn=conn)
+                    attempt=attempt, tool_manifest_sha256=tool_manifest_sha256, initialized=False,
+                    conn=conn, trusted_proposal=trusted_proposal)
 
 
 def _stored_context(request, version_id, conn):

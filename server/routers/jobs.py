@@ -430,7 +430,9 @@ def _project_solar_admission(tool, tenant, req, org_header, project_header,
         catalog_digest=req.catalog_digest,
         idempotency_key=idempotency_key if isinstance(idempotency_key, str) else None,
         checkout_capability=checkout_header if isinstance(checkout_header, str) else None,
-        preview=preview, **({"solve_context": req.solve_context.model_dump()}
+        preview=preview, **({"proposal_job_id": req.proposal_job_id}
+                          if req.tool == "solar-commit-solve" else {}),
+        **({"solve_context": req.solve_context.model_dump()}
                           if req.solve_context is not None else {}))
     return JSONResponse(status_code=result["status_code"], content=result["content"])
 

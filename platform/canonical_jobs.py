@@ -503,6 +503,8 @@ def _graph_ids(row):
         # Keep the original closed context for every ordinary graph tool.
         if row.get("tool_name") == "solar-solve-proposal":
             context_keys.add("solve_binding")
+        if row.get("tool_name") == "solar-commit-solve":
+            context_keys.add("trusted_proposal")
         if (row["kind"] != "run" or type(context) is not dict
                 or set(context) != context_keys
                 or context["schema"] != PROJECT_GRAPH_JOB_SCHEMA
@@ -543,6 +545,17 @@ def _graph_ids(row):
                     or not _HASH_RE.fullmatch(bound["graph_sha256"])
                     or type(bound["request"]) is not dict):
                 _graph_binding_error()
+        if row["tool_name"] == "solar-commit-solve":
+            bound = context["trusted_proposal"]
+            if (type(bound) is not dict or set(bound) != {"proposal_job_id",
+                    "proposal_tool_manifest_sha256", "candidate_sha256", "request_sha256", "response_sha256"}
+                    or type(bound["proposal_job_id"]) is not str
+                    or str(uuid.UUID(bound["proposal_job_id"])) != bound["proposal_job_id"]
+                    or type(bound["proposal_tool_manifest_sha256"]) is not str
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", bound["proposal_tool_manifest_sha256"]) is None
+                    or any(type(bound[key]) is not str or not _HASH_RE.fullmatch(bound[key])
+                           for key in ("candidate_sha256", "request_sha256", "response_sha256"))):
+                _graph_binding_error()
         return (*ids, *extra)
     except (ValueError, TypeError, KeyError, AttributeError):
         _graph_binding_error()
@@ -561,6 +574,10 @@ def _validate_graph_request(row, request):
         "parameters": row["params"], "parent_intake_sha256": context["parent_intake_sha256"],
         "initialized": context["initialized"],
     }
+    if row["tool_name"] == "solar-commit-solve":
+        expected["trusted_proposal"] = context["trusted_proposal"]
+    elif type(request) is dict and "trusted_proposal" in request:
+        _graph_binding_error()
     if (type(request) is not dict or type(request.get("attempt")) is not int
             or type(request.get("initialized")) is not bool
             or any(_canonical_json(request.get(key)) != _canonical_json(value)

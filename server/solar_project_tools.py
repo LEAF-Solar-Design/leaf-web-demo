@@ -15,4 +15,5 @@ SUPPORTED_TOOLS = frozenset((
     "solar-panel-groups",
     "solar-correct-string",
     "solar-solve-proposal",
+    "solar-commit-solve",
 ))

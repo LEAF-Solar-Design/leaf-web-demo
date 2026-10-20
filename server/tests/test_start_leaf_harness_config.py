@@ -53,7 +53,7 @@ def _server_graph_tools():
 def test_launcher_project_worker_selection(monkeypatch):
     configured = {"DATABASE_URL": "postgresql://local/leaf"}
     tools = _server_graph_tools()
-    assert _launcher_module().project_worker_tools() == tools and len(tools) == 14
+    assert _launcher_module().project_worker_tools() == tools and len(tools) == 15
     for tool in sorted(tools):
         with monkeypatch.context() as patch:
             launcher, spawned = _fake_launcher(patch, ["--canonical-worker-tool", tool], configured)

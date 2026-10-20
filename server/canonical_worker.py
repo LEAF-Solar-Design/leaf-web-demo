@@ -42,6 +42,7 @@ def project_posture_ok(environ=None) -> bool:
 # Frozen server-relative source scope. The selected declaration is added below.
 # Include the settings builtin and its direct helpers, not just the dispatcher.
 GRAPH_WORKER_MANIFEST = (
+    "builtins/solar_commit_solve.py",
     "builtins/solar_settings.py",
     "canonical_worker.py",
     "checkout_capability.py",
@@ -61,6 +62,7 @@ GRAPH_WORKER_MANIFEST = (
     "solar_project_sizing.py",
     "solar_project_solve.py",
     "solar_project_tools.py",
+    "solar_proposal_candidate.py",
     "solar_settings_invalidation.py",
     "solar_sizing_client.py",
     "solar_sizing_power.py",

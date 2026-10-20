@@ -236,7 +236,7 @@ def test_sip_r5_seed_submission(lane, monkeypatch):
     assert (lane.s.blobs, lane.s.versions, lane.s.fingerprints, lane.s.writes) == before
 
 
-# W1C-2b adds proposal; fourteen supported tools, four creation tools.
+# W1C-3 adds commit; fifteen supported tools, four creation tools.
 def test_sip_r5_supported_tools(lane, monkeypatch):
     monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
     calls = []
@@ -247,11 +247,11 @@ def test_sip_r5_supported_tools(lane, monkeypatch):
         assert run(lane, {}, name).status_code == 202
         assert calls[-1][0][4] == name and calls[-1][0][0] is lane.tenant
         assert lane.tools[name] == before
-    for name in ("solar-assign-strings", "solar-pvcase-convert", "solar-commit-solve"):
+    for name in ("solar-assign-strings", "solar-pvcase-convert"):
         refusal(run(lane, {}, name), "SIP_R3_TOOL_UNSUPPORTED")
     lane.tools["solar-settings"]["description"] = "Changed record"
     refusal(run(lane, {}), "SIP_R3_TOOL_MANIFEST_MISMATCH")
-    assert len(calls) == 14
+    assert len(calls) == 15
 
 
 def test_sip_r5_binding_and_legacy_pins(lane, monkeypatch):
@@ -433,7 +433,7 @@ def test_sip_r5_catalog_preview(lane, monkeypatch):
                       "idempotency_key": "key"} for name in policy_cases.ELEVEN}
     response = preview(lane, project_runs=json.dumps(entries))
     assert all(states(response)[name]["runnable"] for name in policy_cases.ELEVEN)
-    assert len(calls) == 14 and len({name for name, _ in calls}) == 14
+    assert len(calls) == 15 and len({name for name, _ in calls}) == 15
     missing = states(preview(lane, input_version_id=""))["solar-settings"]
     assert missing["admission"]["status_code"] == 400
     assert missing["admission"]["error"]["message"] == "a canonical drawing version UUID is required"
