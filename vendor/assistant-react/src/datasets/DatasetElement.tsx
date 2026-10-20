@@ -137,6 +137,7 @@ export function DatasetElement({
         <>
           <LineChartCore hideCard data={chartRows} xKey="x" yKey="y" connectNulls={false}
             xAxisType="number" xAxisDomain={["dataMin", "dataMax"]}
+            xAxisTicks={xField!.type.kind === "date" ? [...new Set(chartRows.map(point => point.x))] : undefined}
             xAxisAllowDecimals={xField!.type.kind !== "count"}
             yAxisAllowDecimals={yField!.type.kind !== "count" &&
               !(yField!.type.kind === "money" && yField!.type.scale === "minor")}

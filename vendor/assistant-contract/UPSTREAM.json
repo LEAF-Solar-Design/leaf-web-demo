@@ -3,7 +3,7 @@
   "upstream": "LEAF-Solar-Design/mushy-code",
   "package": "assistant-contract",
   "path": "packages/assistant-contract",
-  "commit": "c5b969e83dd194a7431289d5a83b41827b46ef97",
+  "commit": "cd637b434f7f1c103160f93c3c0119122c746a67",
   "tree_sha256": "50cad842d77f141b6391f57a3dd32265af0bdf3bc9368fcc1be80c3e0db42315",
   "files": {
     "README.md": "82d00c9699388b973b8294c4ebc8966a42d0c9517e4fff5e45eca2dde8a978f2",

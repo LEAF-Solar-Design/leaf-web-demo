@@ -25,6 +25,7 @@ export interface LineChartCoreProps {
   xLabel?: string;
   xAxisType?: "category" | "number";
   xAxisDomain?: [number | "dataMin" | "dataMax", number | "dataMin" | "dataMax"];
+  xAxisTicks?: number[];
   xAxisAllowDecimals?: boolean;
   yAxisAllowDecimals?: boolean;
   accessibilityLabel?: string;
@@ -76,7 +77,7 @@ const ink = `var(--leaf-muted-foreground, var(--muted-foreground, ${colors["mute
 export function LineChartCore({
   title, data, xKey, yKey, color = `var(--leaf-chart-1, var(--chart-1, ${colors["chart-1"]}))`,
   height = 300, yAxisDomain, referenceLine, hideCard = false,
-  xFormatter, yFormatter, valueLabel, xLabel, xAxisType = "category", xAxisDomain,
+  xFormatter, yFormatter, valueLabel, xLabel, xAxisType = "category", xAxisDomain, xAxisTicks,
   xAxisAllowDecimals, yAxisAllowDecimals, accessibilityLabel, accessibilityDescription,
   connectNulls = false, className, style,
 }: LineChartCoreProps) {
@@ -92,7 +93,7 @@ export function LineChartCore({
       <ResponsiveContainer width="100%" height={height} minWidth={0}>
         <RechartsLineChart data={data} accessibilityLayer>
           <CartesianGrid strokeDasharray="3 3" stroke={`var(--leaf-border, var(--border, ${colors.border}))`} />
-          <XAxis dataKey={xKey} type={xAxisType} domain={xAxisDomain} allowDecimals={xAxisAllowDecimals}
+          <XAxis dataKey={xKey} type={xAxisType} domain={xAxisDomain} ticks={xAxisTicks} allowDecimals={xAxisAllowDecimals}
             tick={{ fill: ink, fontSize: 12 }}
             label={xLabel ? { value: xLabel, position: "insideBottom", offset: -5, fill: ink } : undefined}
             tickFormatter={xFormatter ?? ((value) => typeof value === "string" && value.includes("-")
@@ -107,7 +108,7 @@ export function LineChartCore({
           {referenceLine && <ReferenceLine y={referenceLine.y}
             stroke={referenceLine.color ?? `var(--leaf-chart-2, var(--chart-2, ${colors["chart-2"]}))`}
             strokeDasharray="3 3" label={{ value: referenceLine.label, fill: ink, fontSize: 12 }} />}
-          <Line type="monotone" dataKey={yKey} stroke={color} strokeWidth={2} dot={false}
+          <Line type="monotone" dataKey={yKey} stroke={color} strokeWidth={2} dot={{ r: 3, fill: color }}
             activeDot={{ r: 4 }} connectNulls={connectNulls} isAnimationActive={false} />
         </RechartsLineChart>
       </ResponsiveContainer>
