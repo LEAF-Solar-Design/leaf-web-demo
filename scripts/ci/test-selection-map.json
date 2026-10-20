@@ -61,6 +61,7 @@
     "server-integration-turn-grant-capture",
     "server-integration-turn-grant-lifecycle",
     "server-integration-tools",
+    "server-integration-element-save",
     "server-integration-turn-grants",
     "server-integration-turn-grants-postgres",
     "server-demo-sessions",
