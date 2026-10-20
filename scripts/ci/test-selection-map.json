@@ -70,6 +70,7 @@
     "server-demo-sessions-postgres",
     "server-demo-provisioning-postgres",
     "server-demo-actor",
+    "server-migration-fixture-sql",
     "server-demo-actor-postgres",
     "platform-demo-session-deps",
     "platform-sip-r2-publication",

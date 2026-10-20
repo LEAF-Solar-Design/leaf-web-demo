@@ -133,6 +133,36 @@ def strip_sql_noise(text: str) -> str:
     return "".join(out)
 
 
+def initial_table_revokes(stripped: str) -> set[int]:
+    """Offsets of narrowly supported, same-migration privilege initialization.
+
+    Only complete top-level statements count. Noise stripping removes ordinary
+    function/DO bodies; unsupported tagged bodies and SQL compound bodies get
+    no exception rather than guessing where their top-level statements begin.
+    """
+    if re.search(r"\$[A-Za-z_][A-Za-z_0-9]*\$|\bBEGIN\s+ATOMIC\b",
+                 stripped, re.IGNORECASE):
+        return set()
+    identifier = r"[A-Za-z_][A-Za-z_0-9$]*"
+    target = rf"({identifier})\.({identifier})"
+    create = re.compile(rf"\s*CREATE\s+TABLE\s+{target}\s*\(.*\)\s*;",
+                        re.IGNORECASE | re.DOTALL)
+    revoke = re.compile(
+        rf"\s*REVOKE\s+ALL\s+(?:PRIVILEGES\s+)?ON\s+(?:TABLE\s+)?"
+        rf"{target}\s+FROM\s+PUBLIC\s*;", re.IGNORECASE)
+    created: set[tuple[str, str]] = set()
+    allowed: set[int] = set()
+    for statement in re.finditer(r"[^;]*;", stripped):
+        sql = statement.group()
+        match = create.fullmatch(sql)
+        if match:
+            created.add((match[1].lower(), match[2].lower()))
+        match = revoke.fullmatch(sql)
+        if match and (match[1].lower(), match[2].lower()) in created:
+            allowed.add(statement.start() + len(sql) - len(sql.lstrip()))
+    return allowed
+
+
 def check_migrations(migrations_dir: Path) -> list[str]:
     """Return violation strings (empty = pass)."""
     violations: list[str] = []
@@ -159,8 +189,10 @@ def check_migrations(migrations_dir: Path) -> list[str]:
         name = numbered[number]
         text = (migrations_dir / name).read_text(encoding="utf-8")
         stripped = strip_sql_noise(text)
+        initial_revokes = initial_table_revokes(stripped)
         hits = [label for label, pattern in CONTRACT_PATTERNS
-                if pattern.search(stripped)]
+                if any(label != "REVOKE" or match.start() not in initial_revokes
+                       for match in pattern.finditer(stripped))]
         if number in GRANDFATHERED:
             continue  # applied before the gate; ledger-pinned bytes
         if not hits:
