@@ -42,6 +42,50 @@ function declsFor(css, selector) {
 const cockpit = read('src/site/cockpit.css')
 const text = stripComments(cockpit)
 
+describe('Start keeps the inline project summary off the board header (WL16g)', () => {
+  const selector = '.studio-shell .app[data-start-open="true"] main.center-scroll > .workspace-summary'
+  const summaryRules = [...text.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, head]) => head.includes('.workspace-summary'))
+
+  it('removes the inline summary from layout and hit testing while Start is open', () => {
+    expect(summaryRules.map(([, head, body]) => [head.trim(), body.trim()])).toEqual([
+      [selector, 'display: none;'],
+    ])
+  })
+
+  it('spares the board summary and releases the inline summary when Start closes', () => {
+    // Match the two mount locations: the ground portal is a sibling of .app.
+    const shell = document.createElement('div')
+    shell.className = 'studio-shell'
+    shell.innerHTML = `
+      <div class="studio-ground">
+        <div data-ground="browser"><section class="card workspace-summary"></section></div>
+      </div>
+      <div class="app" data-studio-shell="cockpit" data-start-open="true">
+        <div class="center-col"><main class="center-scroll">
+          <section class="card workspace-summary"></section>
+          <div><section class="workspace-summary"></section></div>
+        </main></div>
+      </div>`
+    const app = shell.querySelector('.app')
+    const inline = app.querySelector('main.center-scroll > .workspace-summary')
+    const actualSelector = summaryRules[0]?.[1].trim()
+    expect(actualSelector).toBe(selector)
+    for (const surface of ['cad', 'solar']) {
+      app.dataset.surface = surface
+      app.dataset.startOpen = 'true'
+      expect([...shell.querySelectorAll(actualSelector)]).toEqual([inline])
+      app.dataset.startOpen = 'false'
+      expect([...shell.querySelectorAll(actualSelector)]).toEqual([])
+      delete app.dataset.startOpen
+      expect([...shell.querySelectorAll(actualSelector)]).toEqual([])
+    }
+    app.dataset.startOpen = 'true'
+    shell.className = ''
+    expect([...shell.querySelectorAll(actualSelector)]).toEqual([])
+  })
+})
+
 const HOST_TOKENS = {
   '--background': '--ck-chrome',
   '--card': '--ck-recess',

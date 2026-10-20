@@ -550,6 +550,8 @@
   .studio-shell .app[data-surface="solar"] .solar-flow-seat-toggle:focus-visible { outline: 2px solid var(--ck-ink); outline-offset: -2px; }
 
 .studio-shell .app[data-start-open="true"] .solar-flow-seat { visibility: hidden; }
+/* The inline project summary must yield layout and pointer hits to the Start board. */
+.studio-shell .app[data-start-open="true"] main.center-scroll > .workspace-summary { display: none; }
 .studio-shell .app[data-surface="solar"] .workspace-card[data-cockpit-picking="1"] :is(.solar-flow-seat, .solar-flow-seat *) { pointer-events: none; }
 .studio-shell .app[data-surface="solar"] .workspace-card[data-cockpit-picking="1"] .solar-flow-seat { opacity: 0.42; }
 
