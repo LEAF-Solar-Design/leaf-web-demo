@@ -3495,6 +3495,11 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_integration_turn_grant_postgres.py"), 1,
               opt_in_env=("" if os.environ.get("INTEGRATION_GRANT_TEST_DATABASE_URL", "").strip()
                           else "INTEGRATION_GRANT_TEST_DATABASE_URL")),
+        Suite("server-integration-project-turn-postgres", "real project producer PostgreSQL custody", "pytest", SERVER,
+              _py_pytest("tests/test_integration_project_turn_postgres.py"), 1,
+              allowed_skip_reasons=(r"INTEGRATION_GRANT_TEST_DATABASE_URL absent: PostgreSQL isolation unverified",),
+              opt_in_env=("" if os.environ.get("INTEGRATION_GRANT_TEST_DATABASE_URL", "").strip()
+                          else "INTEGRATION_GRANT_TEST_DATABASE_URL")),
         Suite("server-multi-claude-grants", "server tests/test_multi_claude_grants.py", "pytest", SERVER,
               _py_pytest("tests/test_multi_claude_grants.py"), 1),
         Suite("server-plan-first", "server tests/test_plan_first.py", "pytest", SERVER,
