@@ -1055,15 +1055,10 @@ export async function assertHistoryRecovery(runtime, assertions = expect) {
 
 export async function setupRealProject(runtime, assertions = expect) {
   const { page, evidence } = runtime
-  const name = `Walk Escape ${Date.now()}`
-  const orgResponse = await page.request.post('/api/orgs', { data: { name }, timeout: 15_000 })
+  const orgResponse = await page.request.post('/api/orgs', { data: { name: `Walk Escape ${Date.now()}` }, timeout: 15_000 })
   assertions(orgResponse.ok()).toBe(true)
   const { org } = await orgResponse.json()
   assertions(org.org_id).toBeTruthy()
-  const response = await page.request.post('/api/projects', { data: { name }, headers: { 'X-Org-Id': org.org_id }, timeout: 15_000 })
-  assertions(response.ok()).toBe(true)
-  const { project } = await response.json()
-  assertions(project.project_id).toBeTruthy()
   const previousOrg = await page.evaluate((orgId) => {
     const previous = localStorage.getItem('leaf.org_id')
     localStorage.setItem('leaf.org_id', orgId)
@@ -1081,8 +1076,26 @@ export async function setupRealProject(runtime, assertions = expect) {
   await page.getByRole('button', { name: 'Start', exact: true }).click({ timeout: 15_000 })
   const board = page.getByRole('region', { name: 'Project workspace', exact: true })
   await assertions(board).toBeVisible()
-  await board.getByRole('button', { name, exact: true }).click({ timeout: 15_000 })
+  // WorkspaceProjectSlot supplies the drawing's name; the controller creates
+  // and opens the project directly, without a name field or native dialog.
+  const create = board.getByRole('button', { name: 'Create project from this drawing', exact: true })
+  await assertions(create).toBeEnabled()
+  const created = page.waitForResponse(drawingRequest('/api/projects', 'POST'), { timeout: 15_000 })
+  created.catch(() => {})
+  await create.click({ timeout: 15_000 })
+  const response = await created
+  assertions(response.ok()).toBe(true)
+  assertions(response.request().headers()['x-org-id']).toBe(org.org_id)
+  const { project } = await response.json()
+  assertions(project.project_id).toBeTruthy()
+  assertions(project.org_id).toBe(org.org_id)
+  const name = project.name
+  assertions(name).toBeTruthy()
+  evidence.escapeProject = { orgId: org.org_id, projectId: project.project_id, name }
   await assertions(page.locator('.workspace-summary')).toContainText(name)
+  await assertions(board).toHaveAttribute('data-project-state', 'project')
+  await assertions(board.getByText('Versions live with a workspace project', { exact: true })).toHaveCount(0)
+  await assertions(board.getByText('Runs appear here with a project open', { exact: true })).toHaveCount(0)
   const back = page.getByRole('button', { name: 'Return to drawing', exact: true })
   if (await back.isVisible()) await back.click({ timeout: 15_000 })
   await assertions(board).toBeHidden()
@@ -1090,7 +1103,6 @@ export async function setupRealProject(runtime, assertions = expect) {
   await assertions(page.locator('.strip-failed, .strip-running')).toHaveCount(0)
   await assertions(page.getByRole('button', { name: /^Run / })).toHaveCount(0)
   await assertions(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText('no selection')
-  evidence.escapeProject = { orgId: org.org_id, projectId: project.project_id, name }
 }
 
 export const CENSUS_DISCLOSURES = Object.freeze({
