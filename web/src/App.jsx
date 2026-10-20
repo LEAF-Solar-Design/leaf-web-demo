@@ -532,7 +532,6 @@ export default function App() {
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [solarFormTool, setSolarFormTool] = useState(null)
-  const solarRibbonFormRef = useRef(null)
   const projectModeRef = useRef(false)
   const settingsRunRef = useRef(null)
   const [settingsRunResult, setSettingsRunResult] = useState(null)
@@ -4799,7 +4798,7 @@ export default function App() {
               </button>
             </div>
           )}
-          <SolarFlowSeat seated={solarFlowSeated} activeForm={solarFormTool} formRef={solarRibbonFormRef}>
+          <SolarFlowSeat seated={solarFlowSeated}>
           {solarOverlayStatus && (
             <p role="status" aria-live="polite" aria-atomic="true"
               className="solar-workspace-announce" data-testid="solar-graph-overlay-status">
@@ -4838,8 +4837,7 @@ export default function App() {
           ) : (
             <>
           {ENV_CAD_EDIT && drafting && surfaceSlots.toolbar.profile === 'solar' && solarFormTool && (
-            <div ref={solarRibbonFormRef} tabIndex={-1}>
-            {ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext }) === 'typed' ? (
+            ENV_SOLAR_SETTINGS_FORM && solarSettingsFormChoice({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, toolName: solarFormTool.name, context: catalogRunContext }) === 'typed' ? (
               <div id="solar-tool-form" key={solarFormTool.name} ref={solarSettingsFormRef}>
                 <SolarSettingsForm
                   context={catalogRunContext}
@@ -4885,8 +4883,7 @@ export default function App() {
               onSubmit={(tool, params) => onRequestCatalogRun(tool, params, RIBBON_RATIONALE, 'ribbon', { complete: true })}
               onClose={() => setSolarFormTool(null)}
             />
-            )}
-            </div>
+            )
           )}
           {ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar' && (
             <div className="solar-flow-host">

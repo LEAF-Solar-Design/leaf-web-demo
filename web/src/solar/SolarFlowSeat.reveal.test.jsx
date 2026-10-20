@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react'
+import React, { useState } from 'react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -6,6 +6,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { profileRibbonTabs } from '../lib/ribbonClusters.js'
 import SolarFlowSeat from './SolarFlowSeat.jsx'
 import SolarToolForm from './SolarToolForm.jsx'
+import SolarStepEditor from './SolarStepEditor.jsx'
+import SolarSettingsForm from './SolarSettingsForm.jsx'
 import presets from '../../../server/solar_tools/solar_design_presets.json'
 import presetList from '../../../server/solar_tools/solar_design_presets_list.json'
 import voltageDrop from '../../../server/solar_tools/solar_nec_ac_voltage_drop.json'
@@ -53,11 +55,10 @@ afterEach(() => {
 })
 
 // Exercise the real ribbon projection and form router at App's state boundary:
-// onOpenForm sets solarFormTool, which supplies activeForm and the form ref.
+// onOpenForm sets solarFormTool, which mounts the form in App's Fragment.
 function RibbonSeat({ onRun, onSubmit, seated = true }) {
   const [solarFormTool, setSolarFormTool] = useState(null)
   const [otherState, setOtherState] = useState(0)
-  const formRef = useRef(null)
   const tabs = profileRibbonTabs('solar', {
     families, onRun,
     solarRail: { families, openName: solarFormTool?.name ?? null, onOpenForm: setSolarFormTool },
@@ -71,12 +72,12 @@ function RibbonSeat({ onRun, onSubmit, seated = true }) {
           data-tool={tool.id} aria-expanded={tool.expanded} onClick={tool.onClick}>{tool.id}</button>)}
       </div>
       <button type="button" onClick={() => setOtherState((value) => value + 1)}>Other action {otherState}</button>
-      <SolarFlowSeat seated={seated} activeForm={solarFormTool} formRef={formRef}>
+      <SolarFlowSeat seated={seated}>
         <span>Flow rail</span>
-        {solarFormTool && <div ref={formRef} tabIndex={-1} data-testid="ribbon-form-host">
-          <SolarToolForm key={solarFormTool.name} tool={solarFormTool}
-            onSubmit={onSubmit} onClose={() => setSolarFormTool(null)} />
-        </div>}
+        <>
+          {solarFormTool && <SolarToolForm key={solarFormTool.name} tool={solarFormTool}
+            onSubmit={onSubmit} onClose={() => setSolarFormTool(null)} />}
+        </>
       </SolarFlowSeat>
     </div>
   </div>
@@ -84,13 +85,14 @@ function RibbonSeat({ onRun, onSubmit, seated = true }) {
 
 const toggle = () => screen.getByRole('button', { name: 'Solar flow tools' })
 const content = () => screen.getByTestId('solar-flow-seat-content')
+const formHost = () => document.getElementById('solar-tool-form')
 function choose(name) {
   const button = screen.getByRole('button', { name, exact: true })
   expect(button).toBeEnabled()
   fireEvent.click(button)
 }
 function expectFocusedForm() {
-  const host = screen.getByTestId('ribbon-form-host')
+  const host = formHost()
   expect(host).toBeVisible()
   expect(host.contains(document.activeElement)).toBe(true)
   expect(document.activeElement).toBeVisible()
@@ -118,7 +120,7 @@ it.each(rows.map((row) => [row.name]))('%s reveals and focuses its form through 
   expect(content()).toBeVisible()
   expectFocusedForm()
   fireEvent.click(screen.getByRole('button', { name: 'Cancel', exact: true }))
-  expect(screen.queryByTestId('ribbon-form-host')).toBeNull()
+  expect(formHost()).toBeNull()
   // The last explicit toggle expanded the seat, so cancel keeps it expanded.
   expect(toggle()).toHaveAttribute('aria-expanded', 'true')
   expect(onRun).not.toHaveBeenCalled()
@@ -132,7 +134,7 @@ it('cancel restores the initially collapsed preference after a temporary reveal'
   choose(voltageDrop.name)
   expectFocusedForm()
   fireEvent.click(screen.getByRole('button', { name: 'Cancel', exact: true }))
-  expect(screen.queryByTestId('ribbon-form-host')).toBeNull()
+  expect(formHost()).toBeNull()
   expect(toggle()).toHaveAttribute('aria-expanded', 'false')
   expect(content()).not.toBeVisible()
   expect(onRun).not.toHaveBeenCalled()
@@ -153,7 +155,7 @@ it('only explicit Review hands the form values to the existing submit callback',
   expect(onSubmit).toHaveBeenCalledTimes(1)
   expect(onSubmit).toHaveBeenCalledWith(rows.find((row) => row.name === presetList.name), { drawing_id: 'drawing-1' })
   expect(onRun).not.toHaveBeenCalled()
-  expect(screen.queryByTestId('ribbon-form-host')).toBeNull()
+  expect(formHost()).toBeNull()
   expect(content()).not.toBeVisible()
 })
 
@@ -163,7 +165,7 @@ it.each([false, true])('closing via the ribbon restores the prior user preferenc
   choose(voltageDrop.name)
   expectFocusedForm()
   choose(voltageDrop.name)
-  expect(screen.queryByTestId('ribbon-form-host')).toBeNull()
+  expect(formHost()).toBeNull()
   expect(toggle()).toHaveAttribute('aria-expanded', String(expanded))
   expect(getComputedStyle(content()).display === 'none').toBe(!expanded)
 })
@@ -171,7 +173,7 @@ it.each([false, true])('closing via the ribbon restores the prior user preferenc
 it('choosing another form reveals a manually collapsed seat again and focuses the new form', () => {
   render(<RibbonSeat onRun={vi.fn()} onSubmit={vi.fn()} />)
   choose(voltageDrop.name)
-  const oldHost = screen.getByTestId('ribbon-form-host')
+  const oldHost = formHost()
   const oldControl = document.activeElement
   fireEvent.click(toggle())
   expect(oldHost).not.toBeVisible()
@@ -195,7 +197,7 @@ it('load, unrelated state updates, and run-mode ribbon tools do not reveal the s
   expect(content()).not.toBeVisible()
   view.rerender(<RibbonSeat onRun={onRun} onSubmit={onSubmit} />)
   expect(content()).not.toBeVisible()
-  expect(screen.queryByTestId('ribbon-form-host')).toBeNull()
+  expect(formHost()).toBeNull()
   expect(onSubmit).not.toHaveBeenCalled()
 })
 
@@ -208,14 +210,53 @@ it('unseated forms remain visible and receive focus without adding a seat toggle
 })
 
 it('focus falls back to the form host when it has no enabled controls', () => {
-  function EmptyForm({ activeForm }) {
-    const formRef = useRef(null)
-    return <SolarFlowSeat seated activeForm={activeForm} formRef={formRef}>
-      {activeForm && <div ref={formRef} tabIndex={-1} data-testid="empty-form"><input disabled /></div>}
-    </SolarFlowSeat>
+  render(<RibbonSeat onRun={vi.fn()} onSubmit={vi.fn()} />)
+  choose(voltageDrop.name)
+  for (const control of formHost().querySelectorAll('input, select, textarea, button')) control.disabled = true
+  fireEvent.click(toggle())
+  fireEvent.click(toggle())
+  expect(formHost()).toBeVisible()
+  expect(formHost()).toHaveFocus()
+})
+
+it.each(['step', 'settings'])('reveals and focuses App\'s existing %s ribbon form shape', (kind) => {
+  const onSubmit = vi.fn()
+  const pendingRead = () => new Promise(() => {})
+  function Seat({ active }) {
+    return <div className="studio-shell"><div className="app" data-surface="solar"><SolarFlowSeat seated><>
+      {active && (kind === 'step'
+        ? <SolarStepEditor key={rows[2].name} row={rows[2]} onSubmit={onSubmit} onClose={() => {}} />
+        : <div id="solar-tool-form" key="solar-settings">
+          <SolarSettingsForm context={{}} readIntake={pendingRead} readVersions={pendingRead}
+            onSubmit={onSubmit} onClose={() => {}} />
+        </div>)}
+    </></SolarFlowSeat></div></div>
   }
-  const view = render(<EmptyForm activeForm={null} />)
-  view.rerender(<EmptyForm activeForm={rows[0]} />)
-  expect(screen.getByTestId('empty-form')).toBeVisible()
-  expect(screen.getByTestId('empty-form')).toHaveFocus()
+  const view = render(<Seat active={false} />)
+  expect(content()).not.toBeVisible()
+  view.rerender(<Seat active />)
+  const host = document.getElementById(kind === 'step' ? 'solar-step-editor' : 'solar-tool-form')
+  expect(host).toBeVisible()
+  expect(host.contains(document.activeElement)).toBe(true)
+  expect(document.activeElement).toBeVisible()
+  expect(onSubmit).not.toHaveBeenCalled()
+  view.rerender(<Seat active={false} />)
+  expect(content()).not.toBeVisible()
+})
+
+it.each(['flow', 'project'])('mounting a form inside the %s host never reveals the seat', (kind) => {
+  function Seat({ active }) {
+    return <div className="studio-shell"><div className="app" data-surface="solar"><SolarFlowSeat seated><>
+      <div className={kind === 'flow' ? 'solar-flow-host' : undefined}
+        id={kind === 'project' ? 'solar-tool-form' : undefined}>
+        {active && <SolarStepEditor row={rows[2]} onSubmit={vi.fn()} onClose={() => {}} />}
+      </div>
+    </></SolarFlowSeat></div></div>
+  }
+  const view = render(<Seat active={false} />)
+  view.rerender(<Seat active />)
+  expect(toggle()).toHaveAttribute('aria-expanded', 'false')
+  expect(content()).not.toBeVisible()
+  fireEvent.click(toggle())
+  expect(content()).toBeVisible()
 })
