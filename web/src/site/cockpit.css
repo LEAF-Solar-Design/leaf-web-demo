@@ -890,6 +890,17 @@
 /* The panel host has no box in the reference frame. Hidden panels stay
    mounted so engine portals and widget drafts survive overflow changes. */
 .studio-shell .ribbon-panels { display: contents; }
+@media (min-width: 981px) {
+  /* Keep panel contents in a shrinkable seat. Their intrinsic width must
+     never push the disclosure out of the band or into the activity rail. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon {
+    min-width: 0; max-width: 100%;
+  }
+  .studio-shell .drafting-ribbon:not([data-overflow-open="true"]) .ribbon-panels {
+    display: flex; flex: 1 1 0; min-width: 0; overflow: hidden;
+  }
+  .studio-shell .ribbon-more { margin-left: auto; }
+}
 .studio-shell .drafting-ribbon .ribbon-cluster[hidden],
 .studio-shell .drafting-ribbon .ribbon-more[hidden] { display: none !important; }
 .studio-shell .ribbon-more {
