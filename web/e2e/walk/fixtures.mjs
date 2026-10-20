@@ -481,7 +481,7 @@ export function solarCalibrationFailure(probe, recipe, error) {
     && error.message === 'The drawing needs two uncovered calibration points'
 }
 
-async function selectEntity(probe, runtime, recipe) {
+async function selectEntity(probe, runtime, recipe, panAttempt = 0) {
   if (!recipe.viewerOnly) await engineReady(probe, runtime)
   const { page } = runtime
   // Calibrate the flat drawing's projection from its production cursor
@@ -513,18 +513,38 @@ async function selectEntity(probe, runtime, recipe) {
   const scaleY = (samples[1].y - samples[0].y) / (readings[1][1] - readings[0][1])
   expect(scaleX).toBeGreaterThan(0)
   expect(scaleY).toBeLessThan(0)
-  const clickPoint = async ([x, y]) => {
-    const point = { x: samples[0].x + (x - readings[0][0]) * scaleX, y: samples[0].y + (y - readings[0][1]) * scaleY }
+  const project = ([x, y]) => ({ x: samples[0].x + (x - readings[0][0]) * scaleX, y: samples[0].y + (y - readings[0][1]) * scaleY })
+  let picks = points.map(project)
+  if (recipe.multiple && recipe.type === 'LINE') {
+    // Search each fixture segment, not just its midpoint: Solar's fixed flow
+    // seat can hide the midpoint while leaving an end of the line exposed.
+    picks = await canvas(page).evaluate((element, candidates) => candidates.map((segment) =>
+      segment.find((point) => document.elementFromPoint(point.x, point.y) === element)),
+    points.map(([, y]) => Array.from({ length: 55 }, (_, i) => project([222 + Math.ceil(i / 2) * 4 * (i % 2 ? -1 : 1), y]))))
+    if (picks.some((point) => !point)) {
+      expect(panAttempt, 'both fixture lines must become exposed through normal viewport controls').toBeLessThan(4)
+      const expand = page.getByRole('button', { name: 'Expand drawing overview', exact: true })
+      if (await expand.isVisible()) await expand.click()
+      const overview = page.getByRole('button', { name: 'Drawing overview', exact: true })
+      const before = await viewportBounds(page)
+      await overview.press(panAttempt < 2 ? 'ArrowUp' : 'ArrowLeft')
+      await expect.poll(() => viewportBounds(page)).not.toEqual(before)
+      return selectEntity(probe, runtime, recipe, panAttempt + 1)
+    }
+  }
+  const clickPoint = async (point) => {
     const exposed = await canvas(page).evaluate((element, point) => document.elementFromPoint(point.x, point.y) === element, point)
     expect(exposed, 'the selected entity must be visible and uncovered on the drawing canvas').toBe(true)
     await page.mouse.click(point.x, point.y)
   }
-  await clickPoint(points[0])
+  await clickPoint(picks[0])
   if (recipe.multiple) {
     expect(points.length).toBeGreaterThan(1)
     await page.keyboard.down('Shift')
-    try { await clickPoint(points[1]) } finally { await page.keyboard.up('Shift') }
+    try { await clickPoint(picks[1]) } finally { await page.keyboard.up('Shift') }
     await expect(page.getByTestId('dock-selection-count')).toHaveText('2 objects selected')
+    await expect.poll(() => page.getByTestId('cad-edit-entity-list').locator('li[data-in-selection="true"] input')
+      .evaluateAll((inputs) => inputs.map((input) => input.value).sort())).toEqual([0xA100, 0xA101].map(String).sort())
   }
   if (recipe.viewerOnly) await expect(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText(/^sel /)
   else await expect(page.getByTestId('dock-properties')).toBeVisible()
@@ -719,6 +739,11 @@ export async function assertBarNoRung(probe, runtime, locator, before, assertion
 
 export async function assertCopiedGeometry(probe, runtime, before, assertions = expect) {
   assertions(await observedGeometry(runtime.page)).toEqual(before.geometry)
+  const source = before.geometry.entities.find((entity) => String(entity.id) === String(before.sourceId))
+  assertions(!!source, 'the copied source must be observed before activation').toBe(true)
+  const anchor = source.vertices[0]
+  const expected = { type: source.type, layer: source.layer,
+    vertices: source.vertices.map(([x, y]) => [400 + x - anchor[0], 100 + y - anchor[1]]) }
   const { page } = runtime
   await pasteButton(page).click()
   await assertions(page.getByTestId('cockpit-prompt')).toHaveAccessibleName('PASTE command')
@@ -728,10 +753,10 @@ export async function assertCopiedGeometry(probe, runtime, before, assertions = 
   const after = await observedGeometry(page)
   const added = after.entities.filter((entity) => !before.geometry.entities.some((old) => String(old.id) === String(entity.id)))
   assertions(added.map((entity) => ({ type: entity.type, layer: entity.layer, vertices: entity.vertices.map((point) => point.slice(0, 2)) }))).toEqual([
-    { type: 'LINE', layer: 'Walk', vertices: [[400, 100], [622, 100]] },
+    expected,
   ])
   assertions(after.entities.filter((entity) => before.geometry.entities.some((old) => String(old.id) === String(entity.id)))).toEqual(before.geometry.entities)
-  runtime.evidence.clipboardPaste = { base: [400, 100], added }
+  runtime.evidence.clipboardPaste = { base: [400, 100], source, expected, added }
 }
 
 export function expectedVersionHead(probe, versions) {
@@ -1543,6 +1568,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
   'properties-state', 'properties-section-state', 'properties-close-state', 'layer-visible-state',
   'job-monitor-collapsed', 'overview-expanded-state', 'overview-pan-state', 'open-start',
+  'open-escape-owner', 'find-submit-state',
   'open-history', 'slash-menu', 'open-route', 'catalog-tool', 'foreign-checkout', 'private-policy',
   'create-line', 'hold-engine-edit', 'start-pending-run', 'require-authoring-off', 'fresh-history',
   'undo-edit', 'preview-version', 'zoom-before-fit', 'require-engine-state', 'crash-engine-worker',
@@ -2000,6 +2026,33 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     }
     case 'open-start': await page.getByRole('button', { name: 'Start', exact: true }).click(); return
     case 'open-history': await openHistory(probe, runtime, assertions); return
+    case 'open-escape-owner': {
+      const bar = await clearComposer(page)
+      await bar.fill('/')
+      await expect(page.getByRole('listbox', { name: 'Tool commands', exact: true })).toBeVisible()
+      await expect(bar).toHaveAttribute('aria-expanded', 'true')
+      await expect(bar).toBeFocused()
+      evidence.escapeOwner = { menu: 'Tool commands', focus: 'Command bar' }
+      return
+    }
+    case 'find-submit-state': {
+      const field = page.getByRole('combobox', { name: 'Find in drawing', exact: true })
+      const reply = await page.request.get('/api/session?dwg=' + encodeURIComponent(runtime.drawingId), { timeout: 15_000 })
+      expect(reply.ok()).toBe(true)
+      const { intake } = await reply.json()
+      expect(intake).toBeTruthy()
+      const index = buildDrawingObjectIndex({ drawingKey: runtime.drawingId, intake,
+        solarGraph: intake.solar_design_graph ? { drawingKey: runtime.drawingId, graph: intake.solar_design_graph } : null })
+      expect(index.records.length).toBeGreaterThan(0)
+      expect(index.resolve('w1k-absent-object-7f942').status).toBe('missing')
+      await field.fill('')
+      await expect(page.getByRole('status').filter({ hasText: 'No matching object in this drawing.' })).toHaveCount(0)
+      await field.fill('w1k-absent-object-7f942')
+      await expect(field).toHaveAttribute('aria-expanded', 'false')
+      await expect(page.getByRole('status').filter({ hasText: 'No matching object in this drawing.' })).toHaveCount(0)
+      runtime.cleanup.push(async () => { await field.fill('') })
+      return
+    }
     case 'slash-menu': {
       const bar = page.getByRole('combobox', { name: 'Command bar', exact: true })
       await bar.fill(`/${recipe.command}`)
@@ -2249,7 +2302,8 @@ async function captureBefore(probe, runtime) {
   if (probe.state === 'multiple-selected' && ['engine:delete', 'cockpit-prompt'].includes(target)
     && typeof captureMultipleSelection === 'function') return captureMultipleSelection(probe, runtime)
   if (target === 'engine-refusal') return captureEngineRefusal(runtime)
-  if (target === 'browser-clipboard' || target === 'engine:explode') return { count: await engineCount(page), geometry: await observedGeometry(page) }
+  if (target === 'browser-clipboard' || target === 'engine:explode') return { count: await engineCount(page), geometry: await observedGeometry(page),
+    ...(target === 'browser-clipboard' ? { sourceId: await page.getByTestId('cad-edit-entity-list').locator('input:checked').inputValue() } : {}) }
   if (/^properties-(drawing|layers|plan|selection)-section$/.test(target)) {
     return { expanded: await control(page, probe.locator).getAttribute('aria-expanded') === 'true' }
   }
@@ -2316,6 +2370,12 @@ async function activate(probe, runtime, locator) {
   }
   if (recipe.trigger === 'keyboard') {
     if (recipe.key === 'Mod+K') await page.keyboard.press('ControlOrMeta+k')
+    else if (recipe.key === 'Escape' && probe.assertion.target === 'escape:owner') {
+      // Exercise the slash menu while its prepared input still owns focus.
+      const bar = page.getByRole('combobox', { name: 'Command bar', exact: true })
+      await expect(bar).toBeFocused()
+      await bar.press('Escape')
+    }
     else {
       // Focus a real non-text control without clicking outside a drawer.
       // That click could close it before the keyboard action under test.
@@ -2421,9 +2481,9 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await expect(page.getByRole('listbox', { name: 'Tool commands', exact: true })).toBeVisible()
     return
   }
-  if (target === 'drawing-find-no-match') {
+  if (target === 'drawing-find-no-match' || target === 'drawing-find-submit-no-match') {
     await expect(page.getByRole('status').filter({ hasText: /^No matching object in this drawing\.$/ })).toHaveText('No matching object in this drawing.')
-    await expect(locator).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.getByRole('combobox', { name: 'Find in drawing', exact: true })).toHaveAttribute('aria-expanded', 'false')
     return
   }
   if (effect.kind === 'disabled_with_reason') {
@@ -2652,7 +2712,13 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   }
   if (target.startsWith('escape:')) {
     const rung = target.slice(7)
-    if (rung === 'drawer') {
+    if (rung === 'owner') {
+      await expect(page.getByRole('listbox', { name: 'Tool commands', exact: true })).toBeHidden()
+      const bar = page.getByRole('combobox', { name: 'Command bar', exact: true })
+      await expect(bar).toHaveAttribute('aria-expanded', 'false')
+      await expect(bar).toBeFocused()
+      runtime.evidence.escapeOwner.dismissed = true
+    } else if (rung === 'drawer') {
       for (const label of ['Catalog', 'Jobs', 'Result', 'Plan']) await expect(panelButton(page, label)).toHaveAttribute('aria-expanded', 'false')
     } else if (rung === 'history') await expect(page.getByRole('dialog', { name: 'Version history', exact: true })).toBeHidden()
     else if (rung === 'start') await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeHidden()

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
@@ -8,6 +9,21 @@ import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAv
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
+
+test('WL14 Find-submit clicks its own button after preparing a fresh query', () => {
+  const map = buildFeatureMap()
+  const entry = map.entries.find((row) => row.id === 'control:find-drawing-submit')
+  const probe = resolveProbe(entry, 'ready')
+  assert.equal(probe.certify, 'both')
+  assert.deepEqual(probe.locator, { role: 'button', name: 'Find', exact: true, trigger: 'click',
+    tooltip: undefined, description: undefined })
+  assert.deepEqual(probe.setup.steps, [{ kind: 'open-private-drawing', surface: 'cad' }, { kind: 'find-submit-state' }])
+  assert.deepEqual(probe.assertion, { kind: 'renders', target: 'drawing-find-submit-no-match',
+    assertionId: 'control:find-drawing-submit/ready/renders' })
+  const field = resolveProbe(map.entries.find((row) => row.id === 'control:find-drawing'), 'ready')
+  assert.equal(field.locator.trigger, 'fill-enter')
+  assert.equal(field.locator.role, 'combobox')
+})
 
 test('G4 delete removes both fixture LINEs and one Undo restores the whole drawing', async () => {
   const geometry = { entities: [{ id: 0xA100, type: 'LINE' }, { id: 0xA101, type: 'LINE' }, { id: 9, type: 'CIRCLE' }] }
@@ -67,6 +83,72 @@ const censusAssertions = (value) => ({
   toHaveValue: async (expected) => assert.equal(value.text, expected),
   toHaveText: async (expected) => assert.equal(value.text, expected),
   toContainText: async (expected) => assert.ok(value.text.includes(expected)),
+})
+
+const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+const activationSource = fixtureSource.slice(fixtureSource.indexOf('async function activate('),
+  fixtureSource.indexOf('export async function assertEffect('))
+const extractedActivate = (assertions) => new Function('expect', `${activationSource}; return activate`)(assertions)
+
+test('WL14 owner Escape keeps command-bar focus through activation and menu dismissal', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find((row) => row.id === 'action:bar-escape'), 'owner-open')
+  const events = []
+  let focused = true, menuVisible = true
+  const bar = {
+    press: async (key) => {
+      assert.equal(key, 'Escape')
+      assert.equal(focused, true)
+      assert.equal(menuVisible, true)
+      events.push(key)
+      menuVisible = false
+    },
+  }
+  const menu = {}
+  const runtime = { evidence: { escapeOwner: { menu: 'Tool commands', focus: 'Command bar' } }, page: {
+    getByRole: (role, options) => {
+      assert.equal(options.exact, true)
+      if (role === 'combobox') { assert.equal(options.name, 'Command bar'); return bar }
+      if (role === 'listbox') { assert.equal(options.name, 'Tool commands'); return menu }
+      assert.fail(`owner Escape must not move focus to ${role}`)
+    },
+  } }
+  const assertions = (value) => ({
+    toBeFocused: async () => { assert.equal(value, bar); assert.equal(focused, true); events.push('bar-focused') },
+    toBeHidden: async () => { assert.equal(value, menu); assert.equal(menuVisible, false); events.push('menu-hidden') },
+    toHaveAttribute: async (name, expected) => {
+      assert.equal(value, bar)
+      assert.equal(name, 'aria-expanded')
+      assert.equal(String(menuVisible), expected)
+    },
+  })
+  const activate = extractedActivate(assertions)
+  await activate(probe, runtime, bar)
+  await assertEffect(probe, runtime, bar, {}, assertions)
+  assert.deepEqual(events, ['bar-focused', 'Escape', 'menu-hidden', 'bar-focused'])
+  assert.equal(runtime.evidence.escapeOwner.dismissed, true)
+
+  focused = false
+  await assert.rejects(activate(probe, runtime, bar), assert.AssertionError)
+})
+
+test('other keyboard actions retain workspace-tab focus before dispatch', async () => {
+  const activate = extractedActivate(() => assert.fail('ordinary keyboard actions must not assert command-bar focus'))
+  for (const [key, target] of [['Escape', 'escape:drawer'], ['r', 'retry']]) {
+    const events = []
+    const runtime = { page: {
+      getByRole: (role, options) => {
+        assert.equal(role, 'tablist')
+        assert.deepEqual(options, { name: 'Workspace profile', exact: true })
+        return { getByRole: (role) => {
+          assert.equal(role, 'tab')
+          return { first: () => ({ focus: async () => events.push('tab-focused') }) }
+        } }
+      },
+      keyboard: { press: async (pressed) => events.push(pressed) },
+    } }
+    await activate({ locator: { trigger: 'keyboard', key }, assertion: { target } }, runtime, {})
+    assert.deepEqual(events, ['tab-focused', key])
+  }
 })
 
 test('Repeat focuses the drawing landmark, presses Enter and restores its tab stop', async () => {
@@ -1494,10 +1576,11 @@ test('zoom-out baseline zooms past saturation and refuses a viewport that never 
   assert.equal(clicks, 30)
 })
 
-test('copy verifies a paste at the known base and detects corrupt copied or untouched geometry', async () => {
-  for (const fault of [null, 'copy', 'untouched']) {
-    const original = { id: '1', type: 'LINE', layer: 'Walk', vertices: [[111, 190, 0], [333, 190, 0]] }
-    const before = { count: 1, geometry: { documentId: 'private-v1.dxf', entities: [original] } }
+test('copy derives pasted kind and translation from the observed source and rejects corruption', async () => {
+  for (const type of ['LINE', 'LWPOLYLINE']) for (const fault of [null, 'copy', 'untouched', 'type', 'layer', 'count', 'source-missing']) {
+    const original = { id: '1', type, layer: 'Walk', vertices: [[111, 190, 0], [333, 210, 0]] }
+    const before = { count: 1, sourceId: fault === 'source-missing' ? 'missing' : original.id,
+      geometry: { documentId: 'private-v1.dxf', entities: [original] } }
     let geometry = structuredClone(before.geometry)
     let count = 1
     const page = {
@@ -1507,8 +1590,9 @@ test('copy verifies a paste at the known base and detects corrupt copied or unto
       getByTestId: (id) => id === 'cockpit-prompt' ? { name: 'PASTE command' }
         : id === 'cad-edit-entity-count' ? { innerText: async () => String(count) }
           : { click: async () => {
-            count = 2
-            geometry.entities.push({ id: '2', type: 'LINE', layer: 'Walk', vertices: [[400, 100, 0], [fault === 'copy' ? 623 : 622, 100, 0]] })
+            count = fault === 'count' ? 1 : 2
+            geometry.entities.push({ id: '2', type: fault === 'type' ? 'CIRCLE' : type,
+              layer: fault === 'layer' ? 'Panels' : 'Walk', vertices: [[400, 100, 0], [fault === 'copy' ? 623 : 622, 120, 0]] })
             if (fault === 'untouched') geometry.entities[0].vertices[0][0]++
           } },
     }
@@ -1517,6 +1601,9 @@ test('copy verifies a paste at the known base and detects corrupt copied or unto
     else {
       await assertCopiedGeometry({}, runtime, before, oracleAssertions)
       assert.deepEqual(runtime.evidence.clipboardPaste.base, [400, 100])
+      assert.deepEqual(runtime.evidence.clipboardPaste.source, original)
+      assert.deepEqual(runtime.evidence.clipboardPaste.expected,
+        { type, layer: 'Walk', vertices: [[400, 100], [622, 120]] })
     }
   }
 })

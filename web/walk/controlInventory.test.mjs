@@ -10,6 +10,28 @@ import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, locatorRecipe, normali
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/control-census.${name}.json`, import.meta.url), 'utf8'))
 const resolve = (data, context) => resolveCensus(data.controls, data.derivedMappings, data.map, data.inventory, context)
 
+test('WL14 Find-submit resolves separately from the Find combobox without a baseline exemption', () => {
+  const map = buildFeatureMap()
+  const inventory = readControlInventory(map)
+  const mapping = { feature_id: 'control:find-drawing-submit', scope: 'document', role: 'button',
+    name: 'Find', states: ['ready'], viewports: ['desktop'] }
+  assert.deepEqual(inventory.mappings.filter((row) => row.feature_id === mapping.feature_id), [mapping])
+  assert.deepEqual(CONTROL_CENSUS_BATCH.filter((row) => row.feature_id === mapping.feature_id), [mapping])
+  assert.ok(!inventory.baseline_unmapped.some((row) => controlKey(row) === controlKey(mapping)))
+  const controls = [
+    { index: 0, scope: 'document', role: 'combobox', name: 'Find in drawing', visible: true },
+    { index: 1, scope: 'document', role: 'button', name: 'Find', visible: true },
+  ]
+  const context = { state: 'ready', viewport: 'desktop' }
+  const result = resolveCensus(controls, [], map, inventory, context)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.resolved.map((row) => row.feature_id), ['control:find-drawing', mapping.feature_id])
+  const missing = { ...inventory, mappings: inventory.mappings.filter((row) => row.feature_id !== mapping.feature_id) }
+  const rejected = resolveCensus(controls, [], map, missing, context)
+  assert.equal(rejected.ok, false)
+  assert.deepEqual(rejected.unmapped.map((row) => row.index), [1])
+})
+
 test('B2 adds seven button mappings and the Objects text label and preserves the Retry baseline', () => {
   const map = buildFeatureMap()
   const inventory = readControlInventory(map)
@@ -23,7 +45,7 @@ test('B2 adds seven button mappings and the Objects text label and preserves the
     ['objects', 'document', 'Objects'],
   ].map(([id, scope, name]) => ({ feature_id: `control:${id}`, scope, name, role: 'button',
     states: ['ready', 'failed-load'], viewports: ['desktop'] }))
-  assert.deepEqual(inventory.mappings.slice(40, 48), [...expected, {
+  assert.deepEqual(inventory.mappings.slice(41, 49), [...expected, {
     feature_id: 'control:objects', scope: 'document', role: 'text', name: 'Objects',
     states: ['ready', 'failed-load'], viewports: ['desktop'],
   }])
@@ -56,7 +78,7 @@ test('Script census maps exactly the reviewed scope, roles and names in both loa
     { feature_id: 'control:choose-script', scope, role: 'button', name: 'Choose script' },
     { feature_id: 'control:run-script', scope, role: 'button', name: 'Run script' },
   ]
-  assert.deepEqual(inventory.mappings.slice(48), expected.map((row) => ({ ...row,
+  assert.deepEqual(inventory.mappings.slice(49), expected.map((row) => ({ ...row,
     states: ['ready', 'failed-load'], viewports: ['desktop'] })))
   for (const state of ['ready', 'failed-load']) {
     const controls = expected.map((row, index) => ({ ...row, index, visible: true,
@@ -556,7 +578,7 @@ test('batch three retires exactly seventeen baseline keys and retains the precis
   assert.equal(previous.length, 18)
   assert.equal(additions.length, 17)
   assert.deepEqual(inventory.mappings.slice(23, 40), additions)
-  assert.deepEqual(CONTROL_CENSUS_BATCH.slice(-17), additions)
+  assert.deepEqual(CONTROL_CENSUS_BATCH.slice(22, 39), additions)
   assert.deepEqual(inventory.baseline_unmapped, [{"scope":"document","role":"button","name":"Retry","reason":"Retry remains unmapped: the failed-load recipe uses a permanent missing drawing; bare Retry has multiple owners, and no checked public recovery recipe establishes a semantic successful retry for the observed owner.","states":["failed-load"],"viewports":["desktop"]}])
   assert.deepEqual(previous.filter((row) => !inventory.baseline_unmapped.some((other) => controlKey(other) === controlKey(row)))
     .map(controlKey).sort(), additions.map(controlKey).sort())
@@ -812,9 +834,9 @@ test('batch two retains its twelve exact mappings after batch three retires seve
   assert.deepEqual(CONTROL_CENSUS_BATCH.slice(10, 22), retired)
   assert.deepEqual(expected.filter((row) => !batchTwoRemainder.some((retained) => controlKey(retained) === controlKey(row)))
     .map(controlKey), retired.map(controlKey))
-  const mappings = inventory.mappings.slice(0, 40).filter((row) => row.feature_id.startsWith('control:'))
+  const mappings = inventory.mappings.slice(0, 41).filter((row) => row.feature_id.startsWith('control:'))
   assert.deepEqual(mappings, CONTROL_CENSUS_BATCH)
-  assert.equal(mappings.length, 39)
+  assert.equal(mappings.length, 40)
   for (const row of mappings) assert.ok(!inventory.baseline_unmapped.some((other) => controlKey(other) === controlKey(row)))
 })
 

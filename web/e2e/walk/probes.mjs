@@ -84,6 +84,7 @@ export const CONTROL_CENSUS_BATCH = Object.freeze([
   {"feature_id":"control:cost-panel","scope":"document","role":"button","name":"What Leaf costs to operate","states":["ready","failed-load"],"viewports":["desktop"]},
   {"feature_id":"control:command-bar","scope":"document","role":"combobox","name":"Command bar","states":["ready","failed-load"],"viewports":["desktop"]},
   {"feature_id":"control:find-drawing","scope":"document","role":"combobox","name":"Find in drawing","states":["ready"],"viewports":["desktop"]},
+  {"feature_id":"control:find-drawing-submit","scope":"document","role":"button","name":"Find","states":["ready"],"viewports":["desktop"]},
 ])
 
 export const normalizedControlKey = (row) => controlKey({ ...row,
@@ -272,6 +273,7 @@ export function stateRecipe(entry, state) {
       ? step('open-failed-drawing', { url: '/app?surface=cad&drawing=missing.invalid' })
       : step('open-private-drawing', { surface: 'cad' }))
     const locator = locatorRecipe(entry, state)
+    if (entry.source_id === 'find-drawing-submit') steps.push(step('find-submit-state'))
     if (["control:scope-add","control:demo-return","control:claude-accounts","control:drawing-close-start","control:notification-collapse","control:session-details","control:version-history","control:linked-services","control:project-board","control:prompt-run","control:prompt-scope","control:sign-out","control:start-board","control:take-edit-lock","control:cost-panel","control:command-bar","control:find-drawing"].includes(entry.id)) {
       steps.push(step('baseline-three-state', { sourceId: entry.source_id, target: effect.target, control: locator, expanded: context.expanded }))
     }
@@ -344,6 +346,7 @@ export function stateRecipe(entry, state) {
   if (state === 'drawer-open' && entry.kind !== 'drawer') steps.push(step('drawer-state', { name: 'Catalog', open: true }))
   if (state === 'start-open') steps.push(step('open-start'))
   if (state === 'history-open') steps.push(step('open-history'))
+  if (state === 'owner-open') steps.push(step('open-escape-owner'))
   if (state === 'selection-present') steps.push(step('engine-ready'), step('select-entity', { type: 'LINE', editable: true }))
   if (state === 'route-open') steps.push(step('open-route', { tool: context.route.tool }))
   if (state === 'read-only') steps.push(step('preview-version'))

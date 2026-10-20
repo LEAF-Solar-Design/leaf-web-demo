@@ -1632,6 +1632,21 @@
         "desktop"
       ],
       "certify": "both"
+    },
+    {
+      "id": "control:find-drawing-submit",
+      "source_id": "find-drawing-submit",
+      "title": "Find",
+      "sources": ["web/src/site/DrawingNavigationTools.jsx", "web/src/lib/drawingObjectIndex.js"],
+      "states": ["ready"],
+      "state_contexts": {
+        "ready": {"document": true, "name": "Find", "failedLoad": false}
+      },
+      "expected_effect": {
+        "ready": {"kind": "renders", "target": "drawing-find-submit-no-match"}
+      },
+      "viewports": ["desktop"],
+      "certify": "both"
     }
     ,
     {

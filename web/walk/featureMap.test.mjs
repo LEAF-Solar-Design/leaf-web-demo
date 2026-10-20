@@ -20,6 +20,19 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
+test('WL14 Find-submit is a distinct certified control with a search-result effect', () => {
+  const entry = entryFor('control:find-drawing-submit')
+  assert.equal(entry.source_id, 'find-drawing-submit')
+  assert.equal(entry.title, 'Find')
+  assert.equal(entry.certify, 'both')
+  assert.deepEqual(entry.states, ['ready'])
+  assert.deepEqual(entry.viewports, ['desktop'])
+  assert.deepEqual(entry.state_contexts.ready, { document: true, name: 'Find', failedLoad: false })
+  assert.deepEqual(entry.expected_effect.ready, { kind: 'renders', target: 'drawing-find-submit-no-match' })
+  assert.notEqual(entry.expected_effect.ready.target, entryFor('control:find-drawing').expected_effect.ready.target)
+  assert.throws(() => checkCompleteness({ ...map, entries: map.entries.filter((row) => row.id !== entry.id) }), /completeness failed/)
+})
+
 test('G4 multiple-selected contains two editable LINEs and derives selection-set effects', () => {
   for (const op of ['delete', 'move', 'copy', 'rotate', 'scale', 'mirror']) {
     const entry = entryFor(`action:modify-${op}`)
@@ -137,7 +150,7 @@ test('C2 certifies all seven engine and disclosure controls with real recipes', 
     ['open-dxf-browser', 'Open a DXF in the browser engine', 'toggles', 'dxf-import-expanded', 'closed'],
     ['objects', 'Objects', 'toggles', 'drawing-objects-expanded', 'closed'],
   ]
-  assert.deepEqual(overrides.controls.slice(39, 46).map((row) => row.id), expected.map(([id]) => `control:${id}`))
+  assert.deepEqual(overrides.controls.slice(40, 47).map((row) => row.id), expected.map(([id]) => `control:${id}`))
   for (const [id, title, kind, target, state] of expected) {
     const entry = entryFor(`control:${id}`)
     assert.equal(entry.title, title)
@@ -174,7 +187,7 @@ test('Script controls name scoped effects, native running locks and the Run refu
     ['choose-script', 'Choose script', 'opens', 'script-file-picker'],
     ['run-script', 'Run script', 'submits', 'script-run'],
   ]
-  assert.deepEqual(overrides.controls.slice(47).map((row) => row.id), expected.map(([id]) => `control:${id}`))
+  assert.deepEqual(overrides.controls.slice(48).map((row) => row.id), expected.map(([id]) => `control:${id}`))
   for (const [id, title, kind, target] of expected) {
     const entry = entryFor(`control:${id}`)
     assert.equal(entry.title, title)
@@ -246,8 +259,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   // G4 changes six multiple-selected effects, retaining all six rows: 852 + 0 and 818 + 0 triples.
   // C3 adds three Object snap modes disclosure states: 852 + 3 = 855, 818 + 3 = 821.
   // S27 adds the bar:escape owner-open state for the Escape owner rung: 855 + 1 = 856, 821 + 1 = 822.
-  assert.equal(previousTriples.length, 856)
-  assert.equal(triples(map).length, 822)
+  // WL14 adds one desktop Find-submit ready triple.
+  assert.equal(previousTriples.length, 857)
+  assert.equal(triples(map).length, 823)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
@@ -564,7 +578,7 @@ test('completeness rejects every omitted row, including tools and the none drawe
   assert.throws(() => checkCompleteness({ ...map, entries: [...map.entries, map.entries[0]] }), /duplicate/)
 })
 
-test('fifty exact control declarations participate in independent completeness', () => {
+test('fifty-one exact control declarations participate in independent completeness', () => {
   const expected = ['fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
     'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up',
     'properties-close', 'properties-drawing', 'properties-layers', 'properties-panels', 'properties-plan',
@@ -572,9 +586,9 @@ test('fifty exact control declarations participate in independent completeness',
     'drawing-overview', 'drawing-overview-collapse',
     'scope-add', 'demo-return', 'claude-accounts', 'drawing-close-start', 'notification-collapse', 'session-details', 'version-history', 'linked-services', 'project-board', 'prompt-run', 'prompt-scope', 'sign-out', 'start-board', 'take-edit-lock', 'cost-panel', 'command-bar', 'find-drawing',
     'open-dxf', 'save-version', 'undo-edit', 'redo-edit', 'more-panels', 'open-dxf-browser', 'objects',
-    'ribbon-script', 'choose-script', 'run-script', 'object-snap-modes'].map((id) => 'control:' + id).sort()
-  // One disclosure control joins the previous 49 declarations: 49 + 1 = 50.
-  assert.equal(expected.length, 50)
+    'ribbon-script', 'choose-script', 'run-script', 'object-snap-modes', 'find-drawing-submit'].map((id) => 'control:' + id).sort()
+  // Find-submit joins the previous 50 declarations.
+  assert.equal(expected.length, 51)
   assert.deepEqual(map.entries.filter((row) => row.kind === 'control').map((row) => row.id), expected)
   for (const declaration of overrides.controls) {
     const entry = entryFor(declaration.id)

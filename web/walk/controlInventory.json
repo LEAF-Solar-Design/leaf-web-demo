@@ -506,6 +506,14 @@
       "viewports": [
         "desktop"
       ]
+    },
+    {
+      "feature_id": "control:find-drawing-submit",
+      "scope": "document",
+      "role": "button",
+      "name": "Find",
+      "states": ["ready"],
+      "viewports": ["desktop"]
     }
     ,
     {
