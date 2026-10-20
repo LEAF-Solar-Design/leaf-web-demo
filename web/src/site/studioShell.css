@@ -179,6 +179,9 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] > .rail-stack > :not([data-spine]) {
     flex: 0 0 auto; min-width: 0; max-width: 100%; box-sizing: border-box;
   }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .studio-chrome-host {
+    min-width: 0; max-width: 100%;
+  }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .job-inbox :is(.rail-note, .rail-ev, .rail-detail) {
     white-space: normal; overflow-wrap: normal; word-break: normal;
   }
