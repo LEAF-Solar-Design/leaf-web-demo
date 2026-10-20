@@ -135,5 +135,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "9688808ab12645c21ced9b99fd4ee0f82016a6a1"
+  "upstream_commit": "22ffa8858bde431934940a577ce73897dc7db94b"
 }

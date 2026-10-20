@@ -4,13 +4,13 @@
     "assistant.schema.json": {
       "path": "contract/assistant.schema.json",
       "sha256": "ffb358c9587ec49507cd9b24a3bb3e28ed4f5d96a6f37e64f0a7e8df8f58c449",
-      "upstream_commit": "9688808ab12645c21ced9b99fd4ee0f82016a6a1",
+      "upstream_commit": "22ffa8858bde431934940a577ce73897dc7db94b",
       "upstream_path": "packages/assistant-contract/schema/assistant.schema.json"
     },
     "surface-config.v1.schema.json": {
       "path": "contract/surface-config.v1.schema.json",
       "sha256": "a7b94b169ec259715ea1731135c330eeefcbad69bc962b81abc1df953d9bde33",
-      "upstream_commit": "9688808ab12645c21ced9b99fd4ee0f82016a6a1",
+      "upstream_commit": "22ffa8858bde431934940a577ce73897dc7db94b",
       "upstream_path": "contract/surface-config.v1.schema.json"
     }
   },
@@ -25,5 +25,5 @@
   },
   "surface": "packages/fold-py/src/mushy_fold",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "9688808ab12645c21ced9b99fd4ee0f82016a6a1"
+  "upstream_commit": "22ffa8858bde431934940a577ce73897dc7db94b"
 }
