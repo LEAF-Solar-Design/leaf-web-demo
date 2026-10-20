@@ -32,7 +32,6 @@ from typing import Any, Dict
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.routing import Match, Mount
 
 import dependency_health
 import demo_sessions
@@ -92,7 +91,7 @@ from routers import (
 class DemoSessionBoundaryMiddleware:
     """Reject demo credentials before routing, body reads, or other middleware.
 
-    LD1a grants no routes. Only full route templates can match the shared
+    Only full route templates can match the shared
     allowlist; neither raw URL strings nor a mount prefix grants authority.
     """
 
@@ -100,28 +99,23 @@ class DemoSessionBoundaryMiddleware:
         self.app = app
         self.router = router
 
-    @classmethod
-    def _route_template(cls, scope, routes):
-        for route in routes:
-            match, child_scope = route.matches(scope)
-            if match != Match.FULL:
-                continue
-            if isinstance(route, Mount):
-                # An opaque mounted ASGI app has no inspectable route grant.
-                child = cls._route_template(
-                    {**scope, **child_scope}, getattr(route.app, "routes", ()))
-                return route.path + child if child is not None else None
-            return getattr(route, "path", None)
-        return None
+    @staticmethod
+    def _route_template(scope):
+        matches = [template for method, template, pattern in demo_sessions.DEMO_ROUTE_PATTERNS
+                   if method == scope.get("method", "").upper()
+                   and pattern.fullmatch(scope.get("path", ""))]
+        # Ambiguous grants fail closed; routing must independently confirm the
+        # selected template in require_demo_route after Starlette dispatches.
+        return matches[0] if len(matches) == 1 else None
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") in {"http", "websocket"} and any(
                 key.lower() == b"x-demo-session"
                 for key, _ in scope.get("headers", [])):
-            template = (self._route_template(scope, self.router.routes)
-                        if demo_sessions.DEMO_ROUTE_ALLOWLIST else None)
+            template = self._route_template(scope)
             if (template is not None and scope["type"] == "http" and
                     (scope["method"].upper(), template) in demo_sessions.DEMO_ROUTE_ALLOWLIST):
+                scope["demo_route_template"] = template
                 await self.app(scope, receive, send)
                 return
             if scope["type"] == "websocket":

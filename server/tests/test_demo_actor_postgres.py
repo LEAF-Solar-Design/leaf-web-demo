@@ -141,7 +141,7 @@ def test_durable_row_refusals(scope, monkeypatch, failure):
         assert json.loads(response.body)["error"]["reason_code"] == "demo_actor_refused"
 
 
-def drawing(s, monkeypatch):
+def drawing(s, monkeypatch, *, persist=False):
     """Test-only import preparation; production mint still creates no drawing."""
     from psycopg.types.json import Jsonb
     store = platform_link.platform_store()
@@ -159,17 +159,95 @@ def drawing(s, monkeypatch):
     execute(s, "UPDATE drawing_versions SET provenance=%s, intake_ref=%s, oss_object=%s WHERE version_id=%s",
         (Jsonb(provenance), key, key[:-12] + ".dwg", version.version_id))
     s.reads, s.writes, s.namespaces = [], [], []
+    objects = {key: raw}
 
     def backend(tenant):
         s.namespaces.append(str(tenant))
         assert str(tenant) == str(actor.org_id)
         def get(ref):
             s.reads.append(ref)
-            assert ref == key
-            return raw
-        return SimpleNamespace(get=get, put_if_absent_or_verify=lambda *args: s.writes.append(args))
+            if not persist:
+                assert ref == key
+            return objects[ref]
+        def put(ref, content):
+            s.writes.append((ref, content))
+            if persist:
+                assert ref not in objects or objects[ref] == content
+                objects[ref] = content
+        return SimpleNamespace(get=get, put_if_absent_or_verify=put)
     monkeypatch.setattr(project.write_loop, "upload_backend_for_tenant", backend)
     return artifact.drawing_id, version.version_id, digest
+
+
+def test_demo_w1_through_production_app_and_real_worker(scope, monkeypatch):
+    """Only X-Demo-Session authenticates; no dependency or entitlement overrides."""
+    from fastapi.testclient import TestClient
+    import app as composition
+    import canonical_worker
+    import solar_project_jobs
+
+    s, actor = scope, scope.actors[0]
+    draw, version, digest = drawing(s, monkeypatch, persist=True)
+    assert not composition.app.dependency_overrides
+    client = TestClient(composition.app)  # No lifespan/background worker race.
+    identity = {"X-Demo-Session": s.tokens[0].token}
+    context_path = f"/api/projects/{actor.project_id}/drawing-versions/{version}/context"
+    response = client.get(context_path, headers=identity)
+    assert response.status_code == 200, response.text
+    assert response.json()["context"]["drawing_id"] == str(draw)
+    response = client.post(
+        f"/api/projects/{actor.project_id}/drawings/{draw}/checkout", headers=identity)
+    assert response.status_code == 200, response.text
+    checkout = response.json()["checkout_capability"]
+    headers = {**identity, "X-Org-Id": str(actor.org_id),
+        "X-Project-Id": str(actor.project_id), "X-Checkout-Capability": checkout,
+        "Idempotency-Key": "demo-w1-production-app"}
+    tool = solar_tools.trusted_record("solar-settings")
+    payload = {"tool": "solar-settings", "dwg": str(version),
+        "catalog_digest": deps.catalog_tool_digest(tool), "params": {
+            "drawing_id": str(draw), "expected_rev": 0,
+            "changes": {"panels_in_sequence": 3}, "initialize": {
+                "schema_version": 1, "source_intake_sha256": digest,
+                "units": deepcopy(UNITS)}}}
+    response = client.post("/api/run", headers=headers, json=payload)
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    assert canonical_worker.run_once("demo-w1-worker", tool_name="solar-settings") is True
+    response = client.get(f"/api/jobs/{job_id}", headers=identity)
+    assert response.status_code == 200, response.text
+    # The HTTP job vocabulary maps the stored succeeded state to complete.
+    assert response.json()["status"] == "complete", response.json()
+    assert execute(s, "SELECT status FROM jobs WHERE job_id=%s", (UUID(job_id),)) == [
+        {"status": "succeeded"}]
+
+    before = snapshot(s)
+    grant_reads = []
+    def forbidden_grant(*args, **kwargs):
+        grant_reads.append(args)
+        pytest.fail("demo global sizing read a cloud grant")
+    monkeypatch.setattr(solar_project_jobs.cloud, "resolve_grant", forbidden_grant)
+    sizing_tool = solar_tools.trusted_record("solar-size-strings")
+    paid = {"tool": "solar-size-strings", "dwg": str(version),
+        "catalog_digest": deps.catalog_tool_digest(sizing_tool),
+        "params": {"drawing_id": str(draw), "mode": "global"}}
+    response = client.post("/api/run", headers={**headers,
+        "Idempotency-Key": "demo-paid-refused"}, json=paid)
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["reason_code"] == "demo_paid_service_not_allowed"
+    assert snapshot(s) == before and grant_reads == []
+    response = client.post("/api/run", headers={**headers,
+        "X-Project-Id": str(s.actors[1].project_id),
+        "Idempotency-Key": "demo-foreign-refused"}, json=payload)
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["reason_code"] == "demo_actor_refused"
+    response = client.get(context_path.replace(str(actor.project_id),
+        str(s.actors[1].project_id)), headers=identity)
+    assert response.status_code == 403, response.text
+    assert client.post("/api/campaigns", headers=identity, json={}).status_code == 403
+    response = client.post("/api/sessions", headers=identity, json={"drawing_id": str(draw)})
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["reason_code"] == "demo_actor_refused"
+    assert snapshot(s) == before and grant_reads == []
 
 
 def snapshot(s):

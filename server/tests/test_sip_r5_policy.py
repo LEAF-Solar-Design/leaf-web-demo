@@ -328,6 +328,7 @@ def test_sip_r5_failure_projection(monkeypatch):
     a = setup(monkeypatch)
     mappings = {
         "demo_actor_refused": (403, False),
+        "demo_tool_not_allowed": (403, False), "demo_paid_service_not_allowed": (403, False),
         "SIP_R1_INVALID_BINDING": (400, False), "SIP_R1_CONTEXT_NOT_FOUND": (404, False),
         "SIP_R1_PROJECT_FORBIDDEN": (403, False), "SIP_R1_CANONICAL_AUTHORITY_REQUIRED": (409, False),
         "SIP_R1_INTAKE_PROOF_REQUIRED": (409, False), "SIP_R1_INTAKE_REFERENCE_INVALID": (500, False),
