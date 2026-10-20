@@ -268,8 +268,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   // C3 adds three Object snap modes disclosure states: 852 + 3 = 855, 818 + 3 = 821.
   // S27 adds the bar:escape owner-open state for the Escape owner rung: 855 + 1 = 856, 821 + 1 = 822.
   // WL14 adds one desktop Find-submit ready triple.
-  assert.equal(previousTriples.length, 857)
-  assert.equal(triples(map).length, 823)
+  // Ops adds ready/desktop and signed-out/desktop triples.
+  assert.equal(previousTriples.length, 859)
+  assert.equal(triples(map).length, 825)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))

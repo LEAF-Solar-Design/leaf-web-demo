@@ -199,7 +199,7 @@ def test_sip_r1_migration_registration_complete():
     for name in ("test_conversation_model.py", "test_template_store.py",
                  "test_postgres_authority_inventory_contract.py"):
         source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 79)" in source
+        assert "range(1, 80)" in source
         assert "range(1, 74)" not in source
 
 

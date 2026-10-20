@@ -58,7 +58,7 @@ describe("invariant v2 — static: the converse lane never imports the Agent SDK
     });
   }
 
-  it("converseLoop imports only the spine prompt, the ports boundary, and the redactor", () => {
+  it("converseLoop imports only the spine prompt, ports, integration client validation, and redactor", () => {
     const source = readFileSync(join(SRC, "agent/converseLoop.ts"), "utf8");
     const specifiers = [...source.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
     for (const spec of specifiers) {
@@ -66,6 +66,9 @@ describe("invariant v2 — static: the converse lane never imports the Agent SDK
         spec === "node:crypto" ||
           spec === "./spineSystemPrompt.js" ||
           spec === "../ports/index.js" ||
+          // Canonical integration validation and fixed errors, with the same
+          // SDK and dynamic-import exclusions checked above.
+          spec === "../ports/impl/appRunClient.js" ||
           // The loop writes an arbitrary caught error into a DURABLE transcript
           // event, so it must be able to scrub a token-shaped string first
           // (sol-critic PR #117, blocker 2). Admitted only because redact.ts is
