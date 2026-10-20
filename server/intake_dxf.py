@@ -819,13 +819,21 @@ def _r2000_envelope(lines, fresh_handle, handseed, intake, emit_dimstyle_table):
                          for name in ("*Model_Space", "*Paper_Space")],
     }
     table_order = ("VPORT", "LTYPE", "LAYER", "STYLE", "VIEW", "UCS", "APPID", "DIMSTYLE", "BLOCK_RECORD")
+    spaces = {}
     for name in table_order:
         old_head, old_records = tables.get(name, ([], []))
         owner = get(old_head, 5) or fresh_handle()
-        by_name = {get(r, 2).casefold(): r for r in old_records}
+        replacements = {}
         merged = []
         for symbol, subclass, fields in defaults.get(name, []):
-            old = by_name.pop(symbol.casefold(), [])
+            # Select by position: case variants are distinct legacy identities.
+            index = next((i for i, r in enumerate(old_records)
+                          if i not in replacements and get(r, 2) == symbol), None)
+            if index is None:
+                index = next((i for i, r in enumerate(old_records)
+                              if i not in replacements
+                              and get(r, 2).casefold() == symbol.casefold()), None)
+            old = old_records[index] if index is not None else []
             handle_code = "105" if name == "DIMSTYLE" else "5"
             handle = get(old, handle_code) or fresh_handle()
             if old:
@@ -833,10 +841,20 @@ def _r2000_envelope(lines, fresh_handle, handseed, intake, emit_dimstyle_table):
                               if c not in ("0", handle_code, "330", "100", "2")]
                 old_codes = {c for c, _ in old}
                 fields = old_fields + [(c, v) for c, v in fields if c not in old_codes]
-            merged.append([("0", name), (handle_code, handle), ("330", owner),
-                           ("100", "AcDbSymbolTableRecord"), ("100", subclass),
-                           ("2", get(old, 2, symbol)), *fields])
-        for record in by_name.values():
+            record = [("0", name), (handle_code, handle), ("330", owner),
+                      ("100", "AcDbSymbolTableRecord"), ("100", subclass),
+                      ("2", get(old, 2, symbol)), *fields]
+            if index is None:
+                merged.append(record)
+            else:
+                replacements[index] = record
+            if name == "BLOCK_RECORD":
+                spaces[symbol.casefold()] = handle
+        # Only missing defaults precede the legacy records; matches stay in place.
+        for index, record in enumerate(old_records):
+            if index in replacements:
+                merged.append(replacements[index])
+                continue
             handle_code = "105" if name == "DIMSTYLE" else "5"
             handle = get(record, handle_code) or fresh_handle()
             merged.append([record[0], (handle_code, handle), ("330", owner),
@@ -847,7 +865,6 @@ def _r2000_envelope(lines, fresh_handle, handseed, intake, emit_dimstyle_table):
             head.append(("100", "AcDbDimStyleTable"))
         tables[name] = [head, merged]
 
-    spaces = {get(r, 2).casefold(): get(r, 5) for r in tables["BLOCK_RECORD"][1]}
     space_blocks = []
     for name in ("*Model_Space", "*Paper_Space"):
         owner = spaces[name.casefold()]

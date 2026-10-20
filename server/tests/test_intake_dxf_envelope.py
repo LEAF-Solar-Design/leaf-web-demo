@@ -57,6 +57,67 @@ def _get(record, code):
     return next(v for c, v in record if c == str(code))
 
 
+def _assert_pointers_resolve(raw):
+    sections = _sections(raw)
+    records = [record for name, pairs in sections.items() if name != "HEADER"
+               for record in _records(pairs)]
+    handles = {v.upper() for record in records for c, v in record if c in ("5", "105")}
+    for pairs in sections.values():
+        for code, value in pairs:
+            if (330 <= int(code) <= 369 or 390 <= int(code) <= 399) and value != "0":
+                assert value.upper() in handles, (code, value)
+
+
+def _round_trip_with_resolved_pointers(intake):
+    raw = intake_to_dxf(intake)
+    _assert_pointers_resolve(raw)
+    return parse_dxf_bytes(raw, source_name="x.dxf")
+
+
+def test_case_distinct_layers_keep_legacy_order():
+    intake = {"layers": ["Roof", "roof"], "polylines": [
+        {"layer": "Roof", "closed": True, "pts": [[0, 0], [1, 0], [1, 1]]}]}
+    back = _round_trip_with_resolved_pointers(intake)
+    assert back["layers"] == ["Roof", "roof"]
+    assert back["polylines"][0]["layer"] == "Roof"
+
+
+def test_default_dimstyle_merges_in_legacy_position():
+    back = _round_trip_with_resolved_pointers({"dimstyles": ["Foo", "Standard"]})
+    assert back["dimstyles"] == ["Foo", "Standard"]
+
+
+def test_case_distinct_dimstyles_survive():
+    back = _round_trip_with_resolved_pointers({"dimstyles": ["standard"]})
+    assert back["dimstyles"] == ["Standard", "standard"]
+
+
+def test_case_distinct_textstyles_keep_mleader_style_pointers():
+    intake = {"mlstyles": [
+        {"name": name, "textstyle": textstyle, "segments": 1,
+         "height": 1, "arrow": 1, "dogleg": 1, "gap": 1}
+        for name, textstyle in (("M", "Standard"), ("N", "standard"))]}
+    back = _round_trip_with_resolved_pointers(intake)
+    assert [(s["name"], s["textstyle"]) for s in back["mlstyles"]] == [
+        ("M", "Standard"), ("N", "standard")]
+
+
+def test_case_distinct_block_records_keep_definition_owners():
+    intake = {"blocks": {name: {"base": [0, 0, 0], "children": []} for name in ("B", "b")}}
+    back = _round_trip_with_resolved_pointers(intake)
+    assert list(back["blocks"]) == ["B", "b"]
+    assert back["blocks"] == {
+        name: {"base": [0, 0, 0], "count": 0, "complete": True, "children": []}
+        for name in ("B", "b")}
+
+
+@pytest.mark.parametrize("asset", ["sample", "rooftop"])
+def test_asset_pointers_resolve(asset):
+    raw = ((ROOT / "web/public/sample.dxf").read_bytes() if asset == "sample" else
+           intake_to_dxf(json.loads((ROOT / "data/rooftop_unsplit.intake.json").read_bytes())))
+    _assert_pointers_resolve(raw)
+
+
 def _replace_objects(raw, objects):
     sections = _sections(raw)
     sections["OBJECTS"] = [pair for record in objects for pair in record]
@@ -340,6 +401,45 @@ def test_default_symbol_merge_keeps_custom_fields_order_and_repeats(kind, symbol
     assert record[6:10] == fields
     assert not {c for c, _ in fields} & {c for c, _ in record[10:]}
     assert sum(c == "100" for c, _ in record) == 2
+
+
+@pytest.mark.parametrize("kind,symbol", [
+    ("VPORT", "*Active"), ("LTYPE", "ByBlock"), ("LTYPE", "ByLayer"),
+    ("LTYPE", "Continuous"), ("STYLE", "Standard"), ("APPID", "ACAD"),
+    ("DIMSTYLE", "Standard"), ("BLOCK_RECORD", "*Model_Space"),
+    ("BLOCK_RECORD", "*Paper_Space"),
+])
+def test_default_merge_prefers_exact_name_without_moving_case_variants(kind, symbol):
+    handle_code = "105" if kind == "DIMSTYLE" else "5"
+    legacy = [(symbol.swapcase(), "A"), (symbol, "B"), (symbol, "C")]
+    pairs = [("0", "SECTION"), ("2", "TABLES"), ("0", "TABLE"),
+             ("2", kind), ("70", "3")]
+    for name, handle in legacy:
+        pairs.extend([("0", kind), (handle_code, handle), ("2", name),
+                      ("100", "AcDbSymbolTableRecord"), ("100", "LegacyRecord"),
+                      ("70", "7")])
+    pairs.extend([("0", "ENDTAB"), ("0", "ENDSEC"), ("0", "SECTION"),
+                  ("2", "ENTITIES"), ("0", "LINE"), ("5", "D"),
+                  ("100", "AcDbEntity"), ("8", "0"), ("0", "ENDSEC"), ("0", "EOF")])
+    handles = iter(format(n, "X") for n in range(0x100, 0x200))
+    result = intake_dxf._r2000_envelope(
+        [value for pair in pairs for value in pair], lambda: next(handles), lambda: "200", {}, False)
+    raw = ("\n".join(result) + "\n").encode()
+    _assert_pointers_resolve(raw)
+    sections = _sections(raw)
+    records = _records(sections["TABLES"])
+    kept = [r for r in records if r[0] == ("0", kind) and _get(r, handle_code) in ("A", "B", "C")]
+    assert [(_get(r, 2), _get(r, handle_code)) for r in kept] == legacy
+    # Only the first exact match gets the default subclass and fields.
+    assert ("100", "LegacyRecord") in kept[0]
+    assert ("100", "LegacyRecord") not in kept[1]
+    assert ("100", "LegacyRecord") in kept[2]
+    if kind == "BLOCK_RECORD":
+        blocks = _records(sections["BLOCKS"])
+        begin = next(r for r in blocks if r[0] == ("0", "BLOCK") and ("2", symbol) in r)
+        assert _get(begin, 330) == "B"
+        if symbol == "*Model_Space":
+            assert _get(_records(sections["ENTITIES"])[0], 330) == "B"
 
 
 def test_sample_ezdxf_recovery_has_no_audit_errors(tmp_path):
