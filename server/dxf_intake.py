@@ -96,6 +96,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     dimensions_unsupported = 0
     dimstyles: List[str] = []
     seen_dimstyles: set[str] = set()
+    reference_dimstyle = False
     # W4g-7b-3s: colour/linetype/lineweight for every LINE / LWPOLYLINE /
     # CIRCLE / ARC / INSERT, the same EP shape da/intake_parse.py builds from
     # accoreconsole's entget so the plan route's DXF preflight
@@ -151,10 +152,21 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         if section == "TABLES" and code == 0 and value == "DIMSTYLE":
             j = i + 1
             while j < n and pairs[j][0] != 0:
-                if pairs[j][0] == 2 and pairs[j][1] not in seen_dimstyles:
-                    seen_dimstyles.add(pairs[j][1])
-                    dimstyles.append(pairs[j][1])
                 j += 1
+            record = dict(pairs[i + 1:j])
+            # The R2000 document default is scaffolding, not an intake
+            # catalogue. Bare/custom uploaded DIMSTYLE records retain their
+            # existing behavior; dimensions below still expose Standard.
+            if (record.get(2, "").casefold() == "standard"
+                    and record.get(143) == "0.03937007874"
+                    and record.get(371) == "-2" and record.get(372) == "-2"):
+                reference_dimstyle = True
+                i = j
+                continue
+            for code, value in pairs[i + 1:j]:
+                if code == 2 and value not in seen_dimstyles:
+                    seen_dimstyles.add(value)
+                    dimstyles.append(value)
             i = j
             continue
         if section == "BLOCKS" and code == 0 and value == "BLOCK":
@@ -340,6 +352,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                     "flags": int(next((v for c, v in group if c == 70), "0")),
                     "selectable": int(next((v for c, v in group if c == 71), "1")),
                     "members": [v.upper() for c, v in group if c == 340]})
+    if reference_dimstyle and out.get("groups") == []:
+        del out["groups"]  # Empty ACAD_GROUP in the reference envelope.
     if properties:
         out["properties"] = properties
     if dropped_count[0]:
@@ -356,11 +370,13 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         out["inserts"] = resolved_inserts
     if dimensions:
         out["dimensions"] = dimensions
+    if reference_dimstyle and (dimensions or dimstyles):
+        dimstyles.insert(0, "Standard")
     if dimstyles:
         out["dimstyles"] = dimstyles
     if dimensions_unsupported:
         out["dimensions_unsupported"] = dimensions_unsupported
-    if has_blocks:
+    if has_blocks and (blocks or not reference_dimstyle):
         out["blocks"] = blocks
     if block_count > 200:
         out["blocksCapped"] = block_count

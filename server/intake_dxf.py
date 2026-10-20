@@ -755,7 +755,155 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                                       if row[0] == "mleader" and row[1]["style"] == name])
         out += ["0", "ENDSEC"]
     out += ["0", "EOF"]
+    out = _r2000_envelope(out, fresh_handle, lambda: format(next_handle, "X"))
     return ("\n".join(out) + "\n").encode("utf-8")
+
+
+def _r2000_envelope(lines, fresh_handle, handseed):
+    """Complete the document after ALL legacy identities have been allocated.
+
+    Keep the entity and user-block records intact while merging the symbol
+    tables. In particular, adding defaults must never renumber a block child,
+    dimstyle, textstyle or mleader style allocated by the subset writer.
+    """
+    sections = {}
+    records = None
+    for code, value in zip(lines[::2], lines[1::2]):
+        if code == "0" and value == "SECTION":
+            records = None
+        elif code == "2" and records is None:
+            records = sections.setdefault(value, [])
+        elif code == "0" and value in ("ENDSEC", "EOF"):
+            records = None
+        elif records is not None:
+            if code == "0":
+                records.append([])
+            records[-1].append((code, value))
+
+    def get(record, code, default=None):
+        return next((v for c, v in record if c == str(code)), default)
+
+    tables = {}
+    for record in sections["TABLES"]:
+        if record[0] == ("0", "TABLE"):
+            name = get(record, 2)
+            tables[name] = [record, []]
+        elif record[0] != ("0", "ENDTAB"):
+            tables[name][1].append(record)
+
+    def body(text):
+        return [tuple(line.split("|", 1)) for line in text.splitlines()]
+
+    defaults = {
+        "VPORT": [("*Active", "AcDbViewportTableRecord", body(
+            "70|0\n10|0.0\n20|0.0\n11|1.0\n21|1.0\n12|0.0\n22|0.0\n"
+            "13|0.0\n23|0.0\n14|0.5\n24|0.5\n15|0.5\n25|0.5\n16|0.0\n"
+            "26|0.0\n36|1.0\n17|0.0\n27|0.0\n37|0.0\n40|1000.0\n41|1.34\n"
+            "42|50.0\n43|0.0\n44|0.0\n50|0.0\n51|0.0\n71|0\n72|1000\n73|1\n"
+            "74|3\n75|0\n76|0\n77|0\n78|0\n281|0\n65|0\n146|0.0"))],
+        "LTYPE": [(name, "AcDbLinetypeTableRecord", body("70|0\n3|\n72|65\n73|0\n40|0.0"))
+                  for name in ("ByBlock", "ByLayer", "Continuous")],
+        "STYLE": [("Standard", "AcDbTextStyleTableRecord", body(
+            "70|0\n40|0.0\n41|1.0\n50|0.0\n71|0\n42|2.5\n3|txt\n4|"))],
+        "APPID": [("ACAD", "AcDbRegAppTableRecord", body("70|0"))],
+        "DIMSTYLE": [("Standard", "AcDbDimStyleTableRecord", body(
+            "70|0\n3|\n4|\n40|1.0\n41|2.5\n42|0.625\n43|3.75\n44|1.25\n"
+            "45|0.0\n46|0.0\n47|0.0\n48|0.0\n140|2.5\n141|2.5\n142|0.0\n"
+            "143|0.03937007874\n144|1.0\n145|0.0\n146|1.0\n147|0.625\n148|0.0\n"
+            "71|0\n72|0\n73|0\n74|0\n75|0\n76|0\n77|1\n78|8\n79|3\n170|0\n"
+            "171|3\n172|1\n173|0\n174|0\n175|0\n176|0\n177|0\n178|0\n179|2\n"
+            "271|2\n272|2\n273|2\n274|3\n275|0\n276|0\n277|2\n278|44\n279|0\n"
+            "280|0\n281|0\n282|0\n283|0\n284|8\n285|0\n286|0\n288|0\n289|3\n371|-2\n372|-2"))],
+        "BLOCK_RECORD": [(name, "AcDbBlockTableRecord", [])
+                         for name in ("*Model_Space", "*Paper_Space")],
+    }
+    table_order = ("VPORT", "LTYPE", "LAYER", "STYLE", "VIEW", "UCS", "APPID", "DIMSTYLE", "BLOCK_RECORD")
+    for name in table_order:
+        old_head, old_records = tables.get(name, ([], []))
+        owner = get(old_head, 5) or fresh_handle()
+        by_name = {get(r, 2).casefold(): r for r in old_records}
+        merged = []
+        for symbol, subclass, fields in defaults.get(name, []):
+            old = by_name.pop(symbol.casefold(), [])
+            handle_code = "105" if name == "DIMSTYLE" else "5"
+            handle = get(old, handle_code) or fresh_handle()
+            merged.append([("0", name), (handle_code, handle), ("330", owner),
+                           ("100", "AcDbSymbolTableRecord"), ("100", subclass),
+                           ("2", get(old, 2, symbol)), *fields])
+        for record in by_name.values():
+            handle_code = "105" if name == "DIMSTYLE" else "5"
+            handle = get(record, handle_code) or fresh_handle()
+            merged.append([record[0], (handle_code, handle), ("330", owner),
+                           *[(c, v) for c, v in record[1:] if c not in (handle_code, "330")]])
+        head = [("0", "TABLE"), ("2", name), ("5", owner), ("330", "0"),
+                ("100", "AcDbSymbolTable"), ("70", str(len(merged)))]
+        if name == "DIMSTYLE":
+            head.append(("100", "AcDbDimStyleTable"))
+        tables[name] = [head, merged]
+
+    spaces = {get(r, 2).casefold(): get(r, 5) for r in tables["BLOCK_RECORD"][1]}
+    space_blocks = []
+    for name in ("*Model_Space", "*Paper_Space"):
+        owner = spaces[name.casefold()]
+        existing = [r for r in sections.get("BLOCKS", []) if get(r, 330) == owner]
+        handles = [get(r, 5) for r in existing if r[0][1] in ("BLOCK", "ENDBLK")]
+        begin, end = handles if handles else (fresh_handle(), fresh_handle())
+        common = [("330", owner), ("100", "AcDbEntity")]
+        if name == "*Paper_Space":
+            common.append(("67", "1"))
+        common.append(("8", "0"))
+        space_blocks.extend([
+            [("0", "BLOCK"), ("5", begin), *common, ("100", "AcDbBlockBegin"),
+             ("2", name), ("70", "0"), ("10", "0.0"), ("20", "0.0"), ("30", "0.0"),
+             ("3", name), ("1", "")],
+            [("0", "ENDBLK"), ("5", end), *common, ("100", "AcDbBlockEnd")]])
+    space_owners = {spaces[n.casefold()] for n in ("*Model_Space", "*Paper_Space")}
+    sections["BLOCKS"] = space_blocks + [r for r in sections.get("BLOCKS", [])
+                                         if get(r, 330) not in space_owners]
+    for record in sections["ENTITIES"]:
+        if get(record, 5) is None:  # VERTEX / SEQEND belong to their POLYLINE.
+            continue
+        owner = spaces["*paper_space" if get(record, 67) == "1" else "*model_space"]
+        record[:] = [(c, v) for c, v in record if c != "330"]
+        index = next(i for i, (c, _) in enumerate(record) if c == "5") + 1
+        record[index:index] = [("330", owner)]
+
+    objects = sections.setdefault("OBJECTS", [])
+    root = next((r for r in objects if r[0] == ("0", "DICTIONARY") and get(r, 330) == "0"), None)
+    if root is None:
+        root = [("0", "DICTIONARY"), ("5", fresh_handle()), ("330", "0"),
+                ("100", "AcDbDictionary"), ("281", "1")]
+        objects.insert(0, root)
+    root_handle = get(root, 5)
+    if not any(c == "3" and v == "ACAD_GROUP" for c, v in root):
+        group_handle = fresh_handle()
+        root.extend([("3", "ACAD_GROUP"), ("350", group_handle)])
+        objects.append([("0", "DICTIONARY"), ("5", group_handle), ("330", root_handle),
+                        ("100", "AcDbDictionary"), ("281", "1")])
+    plot, normal = fresh_handle(), fresh_handle()
+    root.extend([("3", "ACAD_PLOTSTYLENAME"), ("350", plot)])
+    objects.extend([
+        [("0", "ACDBDICTIONARYWDFLT"), ("5", plot), ("330", root_handle),
+         ("100", "AcDbDictionary"), ("281", "1"), ("3", "Normal"), ("350", normal),
+         ("100", "AcDbDictionaryWithDefault"), ("340", normal)],
+        [("0", "ACDBPLACEHOLDER"), ("5", normal), ("330", plot)]])
+    for record in tables["LAYER"][1]:
+        if get(record, 2).casefold() == "defpoints":
+            record.append(("290", "0"))
+        record.extend([("370", "-3"), ("390", normal)])
+    sections["TABLES"] = []
+    for name in table_order:
+        head, records = tables[name]
+        sections["TABLES"].extend([head, *records, [("0", "ENDTAB")]])
+    result = ["0", "SECTION", "2", "HEADER", "9", "$ACADVER", "1", "AC1015",
+              "9", "$HANDSEED", "5", handseed(), "0", "ENDSEC"]
+    for name in ("TABLES", "BLOCKS", "ENTITIES", "OBJECTS"):
+        result.extend(["0", "SECTION", "2", name])
+        for record in sections[name]:
+            for code, value in record:
+                result.extend([code, value])
+        result.extend(["0", "ENDSEC"])
+    return result + ["0", "EOF"]
 
 
 def _ml_pairs(pairs):

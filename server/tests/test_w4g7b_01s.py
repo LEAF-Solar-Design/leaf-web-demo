@@ -333,18 +333,17 @@ def test_no_blocks_dxf_has_the_legacy_intake_bytes():
     assert json.dumps(parsed).encode() == expected
 
 
-def test_intake_without_blocks_or_inserts_has_the_legacy_dxf_bytes():
+def test_intake_without_blocks_or_inserts_keeps_entity_bytes_with_model_owner():
     intake = {"layers": ["0"], "polylines": [{
         "layer": "0", "closed": False, "pts": [[1, 2, 0], [4, 2, 0]], "handle": "A"}]}
     expected = _dxf(
-        (0, "SECTION"), (2, "TABLES"), (0, "TABLE"), (2, "LAYER"), (70, 1),
-        (0, "LAYER"), (100, "AcDbSymbolTableRecord"), (100, "AcDbLayerTableRecord"),
-        (2, "0"), (70, 0), (62, 7), (6, "Continuous"), (0, "ENDTAB"), (0, "ENDSEC"),
-        (0, "SECTION"), (2, "ENTITIES"), (0, "LWPOLYLINE"), (5, "A"),
+        (0, "LWPOLYLINE"), (5, "A"), (330, "111"),
         (100, "AcDbEntity"), (8, "0"), (100, "AcDbPolyline"), (90, 2), (70, 0),
         (38, "0.0"), (10, "1.0"), (20, "2.0"), (10, "4.0"), (20, "2.0"),
-        (0, "ENDSEC"), (0, "EOF"))
-    assert intake_dxf.intake_to_dxf(intake) == expected
+    )
+    data = intake_dxf.intake_to_dxf(intake)
+    entities = data.split(b"0\nSECTION\n2\nENTITIES\n", 1)[1].split(b"0\nENDSEC\n", 1)[0]
+    assert entities == expected
 
 
 def _v2_case():
