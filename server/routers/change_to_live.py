@@ -204,7 +204,12 @@ def receipts(
         from routers import jobs as jobs_router  # noqa: PLC0415 - lazy, avoids an import cycle
 
         tenant_id = jobs_router._bound_tenant_id(tenant)
-        record = jobs_router._job_for_tenant(value, tenant_id)
+        if jobs_router.is_demo_context(tenant):
+            record, denied = jobs_router._demo_observation(value, tenant)
+            if denied is not None:
+                return denied
+        else:
+            record = jobs_router._job_for_tenant(value, tenant_id)
         if record is None or record.get("tenant_id") != tenant_id:
             return error_response(
                 ErrorCode.BAD_PARAMS, f"unknown job_id: {value}",

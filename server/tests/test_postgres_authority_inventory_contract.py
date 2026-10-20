@@ -101,7 +101,8 @@ REQUIRED_AUTHORITY_FIELDS = {
     "current_selection",
 }
 REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
-    "LEAF_DEMO_LIVE_ENABLED": {"demo_sessions", "demo_mint_counters"},
+    "LEAF_DEMO_LIVE_ENABLED": {"demo_sessions", "demo_mint_counters", "identity_bindings",
+                               "orgs", "projects", "project_member_bindings"},
     "project_authority_modes.authority_mode": {
         "arlo_lab_inputs", "campaign_host_enrollments", "campaign_capability_links",
         "campaign_attempt_input_sources", "campaign_attempt_result_sources",

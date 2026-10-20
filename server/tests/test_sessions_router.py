@@ -1056,3 +1056,102 @@ def test_byo_credential_is_never_echoed_by_the_validation_handler(client, wired)
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+@pytest.mark.parametrize("project_scoped", [False, True])
+def test_create_session_refuses_verified_demo_before_access_or_store(monkeypatch, project_scoped):
+    import uuid
+    from routers import sessions as router
+    tenant = router.deps.TenantContext(
+        "demo-" + str(uuid.uuid4()), org_id=str(uuid.uuid4()),
+        subject="demo:session", verified_demo=True,
+    )
+    def unexpected(*a, **kw):
+        pytest.fail("demo session request reached access or store")
+    monkeypatch.setattr(router.request_journal, "enabled", unexpected)
+    monkeypatch.setattr(router.platform_link, "require_project_access", unexpected)
+    monkeypatch.setattr(router.session_store, "get_or_create_session", unexpected)
+    response = router.create_session(router.CreateSessionRequest(
+        drawing_id="drawing", project_id=str(uuid.uuid4()) if project_scoped else None,
+    ), tenant=tenant)
+    assert response.status_code == 403
+    body = json.loads(response.body)
+    assert body["error"]["error_code"] == ErrorCode.FORBIDDEN
+    assert body["error"]["retryable"] is False
+    assert body["error"]["reason_code"] == "demo_actor_refused"
+
+
+@pytest.mark.parametrize("method,path,body", [
+    ("POST", "/api/sessions", {"drawing_id": "drawing"}),
+    ("POST", "/api/sessions/unknown/messages", {"text": "hello"}),
+    ("POST", "/api/sessions/unknown/turns/unknown/cancel", None),
+    ("GET", "/api/sessions/unknown/stream", None),
+    ("GET", "/api/sessions/unknown/transcript", None),
+])
+def test_session_routes_refuse_verified_demo_at_entry(client, monkeypatch, method, path, body):
+    from unittest.mock import Mock
+    router = sessions_router
+    tenant = router.deps.TenantContext("demo-session", verified_demo=True)
+    access = Mock(side_effect=AssertionError("session access after demo refusal"))
+    read = Mock(side_effect=AssertionError("session read after demo refusal"))
+    create = Mock(side_effect=AssertionError("session write after demo refusal"))
+    monkeypatch.setattr(router, "_require_owned_session", access)
+    monkeypatch.setattr(session_store, "get_session", read)
+    monkeypatch.setattr(session_store, "get_or_create_session", create)
+    client.app.dependency_overrides[router.deps.require_active_tenant] = lambda: tenant
+    client.app.dependency_overrides[router.deps.require_tenant] = lambda: tenant
+    response = client.request(method, path, json=body)
+    assert response.status_code == 403, response.text
+    error = response.json()["error"]
+    assert error["error_code"] == ErrorCode.FORBIDDEN
+    assert error["reason_code"] == "demo_actor_refused"
+    assert error["retryable"] is False
+    access.assert_not_called()
+    read.assert_not_called()
+    create.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["auth0", "guest", "auth_off", "unmarked_demo"])
+def test_create_session_non_demo_callers_unchanged(client, kind):
+    from uuid import uuid4
+    router = sessions_router
+    tenant_id = str(uuid4())
+    if kind == "auth_off":
+        tenant = tenant_id
+    else:
+        tenant = router.deps.TenantContext(
+            "demo-" + tenant_id if kind == "unmarked_demo" else tenant_id,
+            subject="auth0|caller" if kind == "auth0" else (
+                "demo:" + tenant_id if kind == "unmarked_demo" else None
+            ),
+        )
+    client.app.dependency_overrides[router.deps.require_active_tenant] = lambda: tenant
+    response = client.post("/api/sessions", json={"drawing_id": "non-demo-control"})
+    assert response.status_code == 200, response.text
+    session = session_store.get_session(response.json()["session_id"])
+    assert session["tenant_id"] == str(tenant)
+
+
+@pytest.mark.parametrize("kind", ["auth0", "guest", "auth_off", "unmarked_demo"])
+@pytest.mark.parametrize("method,path,body", [
+    ("POST", "/api/sessions/unknown/messages", {"text": "hello"}),
+    ("POST", "/api/sessions/unknown/turns/unknown/cancel", None),
+    ("GET", "/api/sessions/unknown/stream", None),
+    ("GET", "/api/sessions/unknown/transcript", None),
+])
+def test_session_access_non_demo_callers_unchanged(client, monkeypatch, kind, method, path, body):
+    from unittest.mock import Mock
+    router = sessions_router
+    tenant = "legacy-tenant" if kind == "auth_off" else router.deps.TenantContext(
+        "demo-session" if kind == "unmarked_demo" else "tenant",
+        subject="auth0|caller" if kind == "auth0" else None,
+    )
+    access = Mock(return_value=None)
+    monkeypatch.setattr(router, "_require_owned_session", access)
+    client.app.dependency_overrides[router.deps.require_active_tenant] = lambda: tenant
+    client.app.dependency_overrides[router.deps.require_tenant] = lambda: tenant
+    response = client.request(method, path, json=body)
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["error_code"] == "session_not_found"
+    access.assert_called_once()
+    assert access.call_args.args[:2] == ("unknown", tenant)

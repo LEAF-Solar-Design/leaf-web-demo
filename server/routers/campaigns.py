@@ -19,6 +19,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 
 import deps
+from demo_actor import DemoActorRefused, DemoActorUnavailable
 import platform_link
 import project_repository_source
 import campaign_worker_service
@@ -129,6 +130,12 @@ def _failure(status, code, message):
         'error_code': code, 'message': message, 'retryable': status >= 500}})
 
 
+def _demo_refusal():
+    return JSONResponse(status_code=403, content={'ok': False, 'error': {
+        'error_code': 'forbidden', 'reason_code': 'demo_actor_refused',
+        'message': 'Demo actor unavailable', 'retryable': False}})
+
+
 def _quota_failure(exc):
     # The POST /api/run tenant in-flight refusal, in this router's envelope: retryable,
     # with quota_kind/limit/used top-level so clients can name the state.
@@ -178,6 +185,10 @@ def _execute(tenant, project_id, operation, key, *, created=False, project=_disp
         status = 201 if created and not result.get('replayed', False) else 200
         projected = [project(row) for row in result] if isinstance(result, list) else project(result)
         return JSONResponse(status_code=status, content={'ok': True, key: projected})
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return _failure(503, 'campaigns_unavailable', 'campaign store is unavailable')
     except platform_link.ProjectSessionForbidden:
         return _failure(403, 'forbidden', 'project role does not permit access')
     except project_repository_source.SourceConflict:
@@ -263,6 +274,10 @@ async def enroll(campaign_id: str, request: Request, tenant: Any = Depends(deps.
 def _capability_call(key, function, *args):
     try:
         return {'ok': True, key: function(*args)}
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return _failure(503, 'capability_unavailable', 'Campaign capability request failed')
     except campaign_capability_api.QuotaExceeded as exc:
         return _quota_failure(exc)
     except campaign_capability_api.CapabilityError as exc:
@@ -517,6 +532,10 @@ def _release_call(key, function, *args, **kwargs):
     import campaign_delivery_service as delivery
     try:
         return {'ok': True, key: function(*args, **kwargs)}
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return _failure(503, 'release_unavailable', 'Release service unavailable')
     except campaign_capability_api.QuotaExceeded as exc:
         # Raised by the transform acquisition submit; no stage was recorded for it.
         return _quota_failure(exc)

@@ -36,6 +36,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 import deps
+from demo_actor import DemoActorRefused, DemoActorUnavailable, is_demo_context
 import platform_link
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
@@ -990,6 +991,19 @@ def _forbidden() -> JSONResponse:
     )
 
 
+def _demo_refusal():
+    response = error_response(ErrorCode.FORBIDDEN, "Demo actor unavailable",
+                              retryable=False, status_code=403)
+    body = json.loads(response.body)
+    body["error"]["reason_code"] = "demo_actor_refused"
+    return JSONResponse(status_code=403, content=body)
+
+
+def _demo_unavailable():
+    return error_response(ErrorCode.INTERNAL, "conversation store unavailable",
+                          retryable=True, status_code=503)
+
+
 def _require_project(tenant: Any, project_id: str, *, write: bool) -> Optional[str]:
     """Resolve org_id for a verified, same-tenant, role-checked project.
 
@@ -1000,6 +1014,8 @@ def _require_project(tenant: Any, project_id: str, *, write: bool) -> Optional[s
     """
     try:
         return platform_link.require_project_access(tenant, project_id, write=write)
+    except (DemoActorRefused, DemoActorUnavailable):
+        raise
     except LookupError:
         return None
 
@@ -1012,6 +1028,8 @@ def _actor_binding_id(tenant: Any) -> str:
     internally -- this call re-reads the same row, it does not trust anything
     the client supplied.
     """
+    if is_demo_context(tenant):
+        return str(platform_link.resolve_caller_binding(tenant).binding_id)
     subject = getattr(tenant, "subject", None)
     if not isinstance(subject, str) or not subject:
         raise platform_link.ProjectSessionForbidden(
@@ -1034,6 +1052,10 @@ def api_create_conversation(project_id: str, req: CreateConversationRequest,
         if org_id is None:
             return _not_found()
         actor_binding_id = _actor_binding_id(tenant)
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return _demo_unavailable()
     except platform_link.ProjectSessionForbidden:
         return _forbidden()
     conversation = create_conversation(
@@ -1051,6 +1073,10 @@ def api_list_conversations(project_id: str,
         return _flag_off()
     try:
         org_id = _require_project(tenant, project_id, write=False)
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return _demo_unavailable()
     except platform_link.ProjectSessionForbidden:
         return _forbidden()
     if org_id is None:
@@ -1066,6 +1092,10 @@ def api_get_conversation(project_id: str, conversation_id: str,
         return _flag_off()
     try:
         org_id = _require_project(tenant, project_id, write=False)
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return _demo_unavailable()
     except platform_link.ProjectSessionForbidden:
         return _forbidden()
     if org_id is None:
@@ -1092,6 +1122,10 @@ def api_recover_conversation(project_id: str,
         if org_id is None:
             return _not_found()
         actor_binding_id = _actor_binding_id(tenant)
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return _demo_unavailable()
     except platform_link.ProjectSessionForbidden:
         return _forbidden()
     conversation = recover_or_create_conversation(

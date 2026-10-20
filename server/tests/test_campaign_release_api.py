@@ -236,3 +236,23 @@ def test_mcp_deadline_schema_and_authority_header_transport(client, monkeypatch)
     assert calls[0][1] == {'authority_session_id': 'session', 'authority_turn_id': 'turn'}
     body['params']['arguments']['authority_session_id'] = 'forged-model-argument'
     assert client.post('/api/mcp/campaigns', json=body).json()['error']['code'] == -32602
+
+
+@pytest.mark.parametrize("kind", ["refused", "unavailable"])
+@pytest.mark.parametrize("wrapper", ["release", "capability"])
+def test_demo_release_refusal_and_unavailable_transport(kind, wrapper):
+    import demo_actor
+    import json
+    failure = demo_actor.DemoActorRefused if kind == "refused" else demo_actor.DemoActorUnavailable
+    def fail():
+        raise failure()
+    call = campaigns._release_call if wrapper == "release" else campaigns._capability_call
+    response = call("result", fail)
+    assert response.status_code == (403 if kind == "refused" else 503)
+    body = json.loads(response.body)
+    assert body["error"]["retryable"] is (kind == "unavailable")
+    if kind == "refused":
+        assert body["error"]["error_code"] == "forbidden"
+        assert body["error"]["reason_code"] == "demo_actor_refused"
+    else:
+        assert body["error"]["error_code"] == ("release_unavailable" if wrapper == "release" else "capability_unavailable")

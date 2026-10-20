@@ -45,6 +45,7 @@ GRAPH_WORKER_MANIFEST = (
     "builtins/solar_settings.py",
     "canonical_worker.py",
     "checkout_capability.py",
+    "demo_actor.py",
     "deps.py",
     "leaf_cloud_client.py",
     "platform_link.py",

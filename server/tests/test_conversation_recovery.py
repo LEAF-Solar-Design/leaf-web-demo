@@ -714,3 +714,23 @@ def test_pg_tampered_cross_project_cursor_never_leaks_another_projects_rows(pg) 
     assert returned_ids <= {id_a1, id_a2}
     # project A's own row at t+10s is still correctly past the t+5s boundary.
     assert id_a2 in returned_ids
+
+
+@pytest.mark.parametrize("kind", ["refused", "unavailable"])
+def test_demo_recovery_tail_actor_exception_transport(monkeypatch, kind):
+    import demo_actor
+    import json
+    monkeypatch.setattr(conversations, "conv_durable_enabled", lambda: True)
+    failure = demo_actor.DemoActorRefused if kind == "refused" else demo_actor.DemoActorUnavailable
+    def fail(*a, **kw):
+        raise failure()
+    monkeypatch.setattr(platform_link, "require_project_access", fail)
+    monkeypatch.setattr(conversations, "recover_conversation_tail",
+                        lambda *a, **kw: pytest.fail("recovery after denial"))
+    response = recovery_router_mod.api_recover_conversation_tail("project", cursor=None, limit=10,
+                                                                 tenant="demo-test")
+    assert response.status_code == (403 if kind == "refused" else 503)
+    body = json.loads(response.body)
+    assert body["error"]["retryable"] is (kind == "unavailable")
+    if kind == "refused":
+        assert body["error"]["reason_code"] == "demo_actor_refused"

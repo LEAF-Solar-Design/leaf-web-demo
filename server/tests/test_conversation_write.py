@@ -711,3 +711,46 @@ def test_conversation_lookup_uses_parameter_safe_transaction_timeout() -> None:
     src = inspect.getsource(conversations.get_conversation)
     assert "SELECT set_config('statement_timeout', %s, true)" in src
     assert "SET LOCAL statement_timeout = %s" not in src
+
+
+@pytest.mark.parametrize("stage", ["project", "binding"])
+@pytest.mark.parametrize("kind", ["refused", "unavailable"])
+def test_demo_message_actor_exception_transport(monkeypatch, stage, kind):
+    import demo_actor
+    import json
+    tenant = deps.TenantContext("demo-" + str(uuid.uuid4()), subject="demo:verified",
+                               org_id=str(uuid.uuid4()), verified_demo=True)
+    failure = demo_actor.DemoActorRefused if kind == "refused" else demo_actor.DemoActorUnavailable
+    writes = _never_write(monkeypatch)
+    def fail(*a, **kw):
+        raise failure()
+    monkeypatch.setattr(platform_link, "require_project_access",
+                        fail if stage == "project" else lambda *a, **kw: tenant.org_id)
+    monkeypatch.setattr(platform_link, "resolve_caller_binding", fail)
+    monkeypatch.setattr(conversations, "platform_store", lambda: pytest.fail("Auth0 fallback"))
+    response = conversations_router._resolve_and_write(tenant, "project", "conversation", "hello", {}, "key")
+    assert response.status_code == (403 if kind == "refused" else 503)
+    body = json.loads(response.body)
+    assert body["error"]["retryable"] is (kind == "unavailable")
+    if kind == "refused":
+        assert body["error"]["reason_code"] == "demo_actor_refused"
+    assert writes["count"] == 0
+
+
+def test_demo_message_uses_leaf_demo_binding(monkeypatch):
+    from types import SimpleNamespace
+    tenant = deps.TenantContext("demo-" + str(uuid.uuid4()), subject="demo:verified",
+                               org_id=str(uuid.uuid4()), verified_demo=True)
+    binding = str(uuid.uuid4())
+    monkeypatch.setattr(platform_link, "require_project_access", lambda *a, **kw: tenant.org_id)
+    monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda t: SimpleNamespace(binding_id=binding))
+    monkeypatch.setattr(conversations, "platform_store", lambda: pytest.fail("Auth0 fallback"))
+    monkeypatch.setattr(conversations, "get_conversation", lambda *a: {"conversation_id": "conversation"})
+    seen = []
+    def write(org, proj, conv, actor, **kwargs):
+        seen.append((org, proj, conv, actor))
+        return {"replayed": True, "message": {"message_id": "message"}}
+    monkeypatch.setattr(conversations, "create_message", write)
+    response = conversations_router._resolve_and_write(tenant, "project", "conversation", "hello", {}, "key")
+    assert response.status_code == 200
+    assert seen == [(tenant.org_id, "project", "conversation", binding)]

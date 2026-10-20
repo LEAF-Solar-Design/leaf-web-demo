@@ -10,6 +10,7 @@ from uuid import UUID
 import checkout_capability
 import platform_link
 import write_loop
+from demo_actor import DemoActorRefused, DemoActorUnavailable, resolve_demo_actor
 
 platform_link._ensure_platform_package()
 from leaf_platform.project_graph_store import (
@@ -42,7 +43,8 @@ def _access(tenant, project_id, *, write):
         refuse("INVALID_BINDING")
     try:
         binding = platform_link.resolve_caller_binding(tenant)
-        org_id = UUID(str(tenant))
+        actor = resolve_demo_actor(tenant)
+        org_id = actor.org_id if actor is not None else UUID(str(tenant))
         if binding is None or binding.platform_tenant_id != org_id:
             refuse("CONTEXT_NOT_FOUND")
         platform_link.require_project_access(tenant, project_id, write=write, binding=binding)
@@ -51,8 +53,12 @@ def _access(tenant, project_id, *, write):
             refuse("CONTEXT_NOT_FOUND")
         platform_link.resolve_project_authority(org_id, project_id)
         return org_id, binding.binding_id
+    except DemoActorUnavailable:
+        refuse("STORE_UNAVAILABLE")
     except ProjectContextError:
         raise
+    except DemoActorRefused:
+        raise ProjectContextError("demo_actor_refused") from None
     except platform_link.ProjectSessionForbidden:
         refuse("PROJECT_FORBIDDEN")
     except platform_link.ProjectAuthorityRequired:

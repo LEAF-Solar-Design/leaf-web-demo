@@ -9,6 +9,7 @@ import re
 import uuid
 
 import deps
+from demo_actor import DemoActorRefused, DemoActorUnavailable
 import platform_link
 
 
@@ -35,6 +36,8 @@ def _safe(fn):
     def call(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except (DemoActorRefused, DemoActorUnavailable):
+            raise
         except CapabilityError:
             raise
         except platform_link.ProjectSessionForbidden:

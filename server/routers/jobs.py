@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 import checkout_capability
 import catalog
 import deps
+from demo_actor import DemoActorRefused, DemoActorUnavailable, is_demo_context, resolve_demo_actor, require_demo_project
 import entitlements
 import entity_scope
 import jobs
@@ -291,18 +292,28 @@ def _job_for_tenant(job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
         linked = jobs._pg_store.linked_capability_job(job_id, str(tenant_id))
         if linked is not None:
             return linked
-    return jobs.platform_link.get_canonical_job(job_id, str(tenant_id))
+    return jobs.platform_link.get_canonical_job(job_id, str(tenant_id),
+        **({"strict": True} if is_demo_context(tenant_id) else {}))
 
 
 def _capability_access(rec, tenant, *, write=False):
     """Authorize with the verified caller and stored project on every observation."""
+    actor = resolve_demo_actor(tenant)
+    if actor is not None:
+        if rec is None:
+            raise DemoActorRefused()
+        if (rec.get("tenant_id") != actor.server_tenant
+                or str(rec.get("org_id")) != str(actor.org_id)
+                or str(rec.get("project_id")) != str(actor.project_id)):
+            raise DemoActorRefused()
+        jobs.platform_link.require_project_access(tenant, actor.project_id, write=write)
     if rec is None:
         return
     context = rec.get("execution_context")
     if isinstance(context, dict) and context.get("schema") == "leaf.solar-project-graph-job.v1":
         if (not isinstance(tenant, deps.TenantContext) or not tenant.subject
                 or rec.get("tenant_id") != _bound_tenant_id(tenant)
-                or rec.get("org_id") != rec.get("tenant_id")):
+                or (actor is None and rec.get("org_id") != rec.get("tenant_id"))):
             raise LookupError("job unavailable")
         org_id = uuid.UUID(str(rec.get("org_id")))
         project_id = uuid.UUID(str(rec.get("project_id")))
@@ -335,13 +346,48 @@ def _capability_access(rec, tenant, *, write=False):
 def _access_error(rec, tenant, job_id, *, write=False):
     try:
         _capability_access(rec, tenant, write=write)
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return error_response(ErrorCode.INTERNAL, "job store unavailable",
+                              retryable=True, status_code=503)
     except jobs.platform_link.ProjectSessionForbidden:
         return error_response(ErrorCode.BAD_PARAMS, "project access forbidden",
                               retryable=False, status_code=403)
     except (LookupError, ValueError):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
+    except Exception:
+        if not is_demo_context(tenant):
+            raise
+        return error_response(ErrorCode.INTERNAL, "job store unavailable",
+                              retryable=True, status_code=503)
     return None
+
+
+def _demo_refusal():
+    response = error_response(ErrorCode.FORBIDDEN, "Demo actor unavailable",
+                              retryable=False, status_code=403)
+    body = json.loads(response.body)
+    body["error"]["reason_code"] = "demo_actor_refused"
+    return JSONResponse(status_code=403, content=body)
+
+
+def _demo_observation(job_id, tenant, *, write=False, missing_is_404=False):
+    """Keep lookup failures distinct from a missing or foreign job's refusal."""
+    try:
+        resolve_demo_actor(tenant)
+        rec = _job_for_tenant(job_id, tenant)
+    except DemoActorRefused:
+        return None, _demo_refusal()
+    except Exception:
+        return None, error_response(ErrorCode.INTERNAL, "job store unavailable",
+                                    retryable=True, status_code=503)
+    if rec is None and missing_is_404:
+        return None, error_response(
+            ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
+            retryable=False, status_code=404)
+    return rec, _access_error(rec, tenant, job_id, write=write)
 
 
 def _catalog_digest_matches(candidate, current):
@@ -393,7 +439,12 @@ def _wait_project_solar(submitted, tenant):
     job_id = json.loads(submitted.body)["job_id"]
     deadline = time.time() + jobs.job_max_s() + 30
     while True:
-        rec = _job_for_tenant(job_id, _bound_tenant_id(tenant))
+        if is_demo_context(tenant):
+            rec, denied = _demo_observation(job_id, tenant)
+            if denied is not None:
+                return denied
+        else:
+            rec = _job_for_tenant(job_id, _bound_tenant_id(tenant))
         if rec is None:
             return error_response(ErrorCode.INTERNAL, "job record vanished", retryable=False)
         denied = _access_error(rec, tenant, job_id)
@@ -411,6 +462,8 @@ def _wait_project_solar(submitted, tenant):
 
 
 def _active_binding_tenant(tenant: Any) -> Optional[str]:
+    if is_demo_context(tenant):
+        return str(tenant)
     if deps.auth_live() and isinstance(tenant, deps.TenantContext) and tenant.subject:
         binding = jobs.platform_link.platform_store().resolve_active_identity_binding(
             "auth0", tenant.subject)
@@ -441,6 +494,12 @@ def _legacy_drawing_head(tenant_id: str, drawing_id: str) -> int:
 
 def _canonical_tenant_id(tenant: Any, context: Dict[str, Any]) -> str:
     """Bind JWT tenant/org claims to the server-owned platform identity."""
+    actor = resolve_demo_actor(tenant)
+    if actor is not None:
+        require_demo_project(actor, context.get("project_id"))
+        if str(context.get("org_id")) != str(actor.org_id):
+            raise DemoActorRefused()
+        return actor.server_tenant
     canonical = str(context["org_id"])
     if deps.auth_live():
         if not isinstance(tenant, deps.TenantContext) \
@@ -474,6 +533,11 @@ def _resolve_project_read_context(tenant, headers, req, params):
     if binding is None:
         raise jobs.platform_link.ProjectSessionForbidden()
     org_id = uuid.UUID(str(binding.platform_tenant_id))
+    actor = resolve_demo_actor(tenant)
+    if actor is not None:
+        require_demo_project(actor, project_header)
+        if org_header is not None and str(org_header) != str(actor.org_id):
+            raise DemoActorRefused()
     if org_header is not None and uuid.UUID(str(org_header)) != org_id:
         raise ValueError("project context does not belong to the verified platform tenant")
     project_id = uuid.UUID(str(project_header))
@@ -514,6 +578,10 @@ def _run_project_read(tool, tenant, headers, req, params):
         denial, _org = platform_entitlements.stored_job_entitlement_verdict(org_id, "extract")
         if denial is not None:
             return denial
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
     except jobs.platform_link.ProjectSessionForbidden:
         return error_response(ErrorCode.FORBIDDEN, "project access denied",
                               retryable=False, status_code=403)
@@ -533,7 +601,8 @@ def _run_project_read(tool, tenant, headers, req, params):
     except Exception:
         return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
     env = tool_loader.run_tool_dynamic(
-        tool, context.intake, params, aps_live=False, da=None, tenant_id=str(org_id))
+        tool, context.intake, params, aps_live=False, da=None,
+        tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
     body = {
         key: env[key]
         for key in (
@@ -892,7 +961,8 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     aps_live_authorized = False
     try:
         platform_context = jobs.platform_link.resolve_submission_context(
-            x_org_id, x_project_id, authorization)
+            x_org_id, x_project_id, authorization,
+            **({"tenant_context": tenant_id} if is_demo_context(tenant_id) else {}))
         resolved_org = (str(platform_context["org_id"]) if platform_context else None)
         resolved_project = (str(platform_context["project_id"]) if platform_context else None)
         authority_mode = (str(platform_context["authority_mode"])
@@ -1042,6 +1112,11 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
                 **({"proposal_candidate": proposal_candidate}
                    if proposal_candidate is not None else {}),
             )
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return error_response(ErrorCode.INTERNAL, "job store unavailable",
+                              retryable=True, status_code=503)
     except GraphValidationError as exc:
         return JSONResponse(status_code=409, content=with_envelope_fields({
             "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=False),
@@ -1071,11 +1146,21 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             rec = jobs.wait_for_terminal(job_id, timeout_s=jobs.job_max_s() + 30)
         else:
             deadline = time.time() + jobs.job_max_s() + 30
-            rec = _job_for_tenant(job_id, str(tenant_id))
+            if is_demo_context(tenant_id):
+                rec, denied = _demo_observation(job_id, tenant_id)
+                if denied is not None:
+                    return denied
+            else:
+                rec = _job_for_tenant(job_id, str(tenant_id))
             while rec is not None and rec["status"] not in jobs.TERMINAL \
                     and time.time() < deadline:
                 time.sleep(0.1)
-                rec = _job_for_tenant(job_id, str(tenant_id))
+                if is_demo_context(tenant_id):
+                    rec, denied = _demo_observation(job_id, tenant_id)
+                    if denied is not None:
+                        return denied
+                else:
+                    rec = _job_for_tenant(job_id, str(tenant_id))
         if rec is None:
             return error_response(ErrorCode.INTERNAL, "job record vanished", retryable=False)
         if rec["status"] == "complete":
@@ -1102,7 +1187,12 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
 @router.get("/api/jobs/{job_id}")
 def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
     tenant_id = _bound_tenant_id(tenant)
-    rec = _job_for_tenant(job_id, tenant_id)
+    if is_demo_context(tenant):
+        rec, denied = _demo_observation(job_id, tenant)
+        if denied is not None:
+            return denied
+    else:
+        rec = _job_for_tenant(job_id, tenant_id)
     # 404 (never 403) both when the job is unknown AND when it belongs to another
     # tenant — no cross-tenant existence leak (security-audit F8).
     if rec is None or rec.get("tenant_id") != tenant_id:
@@ -1159,7 +1249,12 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
     now awaits on the event loop; the per-tick DB read hops to a thread so the
     loop never blocks on the jobs-module lock. Wire format/timing unchanged."""
     tenant_id = _bound_tenant_id(tenant)
-    _rec0 = await asyncio.to_thread(_job_for_tenant, job_id, tenant_id)
+    if is_demo_context(tenant):
+        _rec0, denied = await asyncio.to_thread(_demo_observation, job_id, tenant)
+        if denied is not None:
+            return denied
+    else:
+        _rec0 = await asyncio.to_thread(_job_for_tenant, job_id, tenant_id)
     if _rec0 is None or _rec0.get("tenant_id") != tenant_id:
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
@@ -1171,10 +1266,15 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
         last = None
         deadline = time.time() + jobs.job_max_s() + 60
         while time.time() < deadline:
-            rec = await asyncio.to_thread(_job_for_tenant, job_id, tenant_id)
-            denied = await asyncio.to_thread(_access_error, rec, tenant, job_id)
+            if is_demo_context(tenant):
+                rec, denied = await asyncio.to_thread(_demo_observation, job_id, tenant)
+            else:
+                rec = await asyncio.to_thread(_job_for_tenant, job_id, tenant_id)
+                denied = await asyncio.to_thread(_access_error, rec, tenant, job_id)
             if rec is None or denied is not None:
-                yield "data: " + json.dumps({"job_id": job_id, "status": "unknown"}) + "\n\n"
+                payload = (json.loads(denied.body) if denied is not None and is_demo_context(tenant)
+                           else {"job_id": job_id, "status": "unknown"})
+                yield "data: " + json.dumps(payload) + "\n\n"
                 return
             key = (rec["status"], rec["progress"])
             if key != last:
@@ -1198,23 +1298,50 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
 def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
-    canonical = jobs.platform_link.list_canonical_jobs(_bound_tenant_id(tenant), limit=limit)
-    legacy = jobs.list_jobs(_bound_tenant_id(tenant), limit)
-    visible = []
-    seen = set()
-    for rec in canonical + legacy:
-        if jobs.job_store_mode() == "postgres" and rec in canonical:
-            rec = jobs._pg_store.linked_capability_job(
-                str(rec["job_id"]), _bound_tenant_id(tenant)) or rec
-        if (rec.get("tenant_id") != _bound_tenant_id(tenant)
-                or _access_error(rec, tenant, rec["job_id"]) is not None
-                or rec["job_id"] in seen):
-            continue
-        visible.append(rec)
-        seen.add(rec["job_id"])
-    return with_envelope_fields(
-        {"jobs": [_record_body(r) for r in visible[:limit]]}
-    )
+    actor = None
+    if is_demo_context(tenant):
+        try:
+            actor = resolve_demo_actor(tenant)
+        except DemoActorRefused:
+            return _demo_refusal()
+        except Exception:
+            return error_response(ErrorCode.INTERNAL, "job store unavailable",
+                                  retryable=True, status_code=503)
+    try:
+        if actor is not None:
+            canonical = jobs.platform_link.list_canonical_jobs(actor.server_tenant, limit=limit, strict=True)
+            legacy = jobs.list_jobs(actor.server_tenant, limit)
+        else:
+            canonical = jobs.platform_link.list_canonical_jobs(_bound_tenant_id(tenant), limit=limit)
+            legacy = jobs.list_jobs(_bound_tenant_id(tenant), limit)
+        visible = []
+        seen = set()
+        for rec in canonical + legacy:
+            if jobs.job_store_mode() == "postgres" and rec in canonical:
+                rec = jobs._pg_store.linked_capability_job(
+                    str(rec["job_id"]),
+                    actor.server_tenant if actor is not None else _bound_tenant_id(tenant)) or rec
+            if actor is not None:
+                # The entry lookup already validated this actor's live membership.
+                if (rec.get("tenant_id") != actor.server_tenant
+                        or str(rec.get("org_id")) != str(actor.org_id)
+                        or str(rec.get("project_id")) != str(actor.project_id)
+                        or rec["job_id"] in seen):
+                    continue
+            elif (rec.get("tenant_id") != _bound_tenant_id(tenant)
+                    or _access_error(rec, tenant, rec["job_id"]) is not None
+                    or rec["job_id"] in seen):
+                continue
+            visible.append(rec)
+            seen.add(rec["job_id"])
+        return with_envelope_fields(
+            {"jobs": [_record_body(r) for r in visible[:limit]]}
+        )
+    except Exception:
+        if actor is None:
+            raise
+        return error_response(ErrorCode.INTERNAL, "job store unavailable",
+                              retryable=True, status_code=503)
 
 
 @router.get("/api/platform/capabilities")
@@ -1227,7 +1354,13 @@ def platform_capabilities(
     """Authenticated capability truth; never promotes from configuration alone."""
     try:
         context = jobs.platform_link.resolve_submission_context(
-            x_org_id, x_project_id, authorization)
+            x_org_id, x_project_id, authorization,
+            **({"tenant_context": tenant} if is_demo_context(tenant) else {}))
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return error_response(ErrorCode.INTERNAL, "job store unavailable",
+                              retryable=True, status_code=503)
     except ValueError as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=409)
     if context is None:
@@ -1235,6 +1368,11 @@ def platform_capabilities(
                               retryable=False, status_code=400)
     try:
         _canonical_tenant_id(tenant, context)
+    except DemoActorRefused:
+        return _demo_refusal()
+    except DemoActorUnavailable:
+        return error_response(ErrorCode.INTERNAL, "job store unavailable",
+                              retryable=True, status_code=503)
     except ValueError as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=409)
     health = jobs.platform_link.canonical_worker_health(AUTOFILL_TOOL)
@@ -1273,24 +1411,42 @@ def close_job(job_id: str, tenant_id: str = Depends(deps.require_tenant)):
     """Tab-close / session-end signal: mark this in-flight job's owner gone so the
     orphan reaper fails it (and its APS WorkItem can be reaped broker-side).
     Idempotent. 404s (not 403) on a job owned by another tenant — never leaks
-    existence across the tenant boundary."""
-    rec = jobs.get_job(job_id)
-    if rec is None and jobs.job_store_mode() == "postgres":
-        rec = jobs._pg_store.linked_capability_job(job_id, _bound_tenant_id(tenant_id))
-    if rec is None or _bound_tenant_id(tenant_id) != rec["tenant_id"]:
-        return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
-                              retryable=False, status_code=404)
-    denied = _access_error(rec, tenant_id, job_id, write=True)
+    existence across the tenant boundary. Verified demos use the observation
+    boundary's explicit refusal and current project write authorization."""
+    if is_demo_context(tenant_id):
+        rec, denied = _demo_observation(job_id, tenant_id, write=True, missing_is_404=True)
+    else:
+        rec = jobs.get_job(job_id)
+        if rec is None and jobs.job_store_mode() == "postgres":
+            rec = jobs._pg_store.linked_capability_job(job_id, _bound_tenant_id(tenant_id))
+        if rec is None or _bound_tenant_id(tenant_id) != rec["tenant_id"]:
+            return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
+                                  retryable=False, status_code=404)
+        denied = _access_error(rec, tenant_id, job_id, write=True)
     if denied is not None:
         return denied
     job_id = rec["job_id"]
-    _rec = jobs.get_job(job_id)
-    if _rec is not None and _rec.get("tenant_id") != _bound_tenant_id(tenant_id):
-        # Another tenant's job — silently no-op (beacon path, keep it 200/idempotent).
-        return JSONResponse(status_code=200,
-                            content=with_envelope_fields({"job_id": job_id, "closed": False}))
-    flagged = jobs.mark_job_closed(job_id)
-    after = jobs.get_job(job_id)
+    try:
+        _rec = jobs.get_job(job_id)
+        if is_demo_context(tenant_id) and _rec is None:
+            linked = None
+            if jobs.job_store_mode() == "postgres":
+                linked = jobs._pg_store.linked_capability_job(job_id, _bound_tenant_id(tenant_id))
+            if linked is None:
+                # Canonical-only jobs have no legacy close signal to update.
+                return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
+                                      retryable=False, status_code=404)
+        if _rec is not None and _rec.get("tenant_id") != _bound_tenant_id(tenant_id):
+            # Another tenant's job — silently no-op (beacon path, keep it 200/idempotent).
+            return JSONResponse(status_code=200,
+                                content=with_envelope_fields({"job_id": job_id, "closed": False}))
+        flagged = jobs.mark_job_closed(job_id)
+        after = jobs.get_job(job_id)
+    except Exception:
+        if not is_demo_context(tenant_id):
+            raise
+        return error_response(ErrorCode.INTERNAL, "job store unavailable",
+                              retryable=True, status_code=503)
     return with_envelope_fields(deps.tenant_echo(
         {"job_id": job_id, "closed": bool(flagged),
          "status": after["status"] if after else "unknown"}, tenant_id))

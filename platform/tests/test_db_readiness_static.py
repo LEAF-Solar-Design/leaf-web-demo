@@ -1,9 +1,9 @@
 """Dependency-light proofs for the PostgreSQL production configuration seam."""
+import importlib.util
 import inspect
 import json
-import importlib.util
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pytest
 
@@ -196,14 +196,18 @@ def test_demo_migration_and_inventory_register_both_tables():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     authority = next(item for item in inventory["authorities"]
                      if item["id"] == "demo_sessions")
-    assert authority["postgres_tables"] == ["demo_sessions", "demo_mint_counters"]
+    assert authority["postgres_tables"] == [
+        "demo_sessions", "demo_mint_counters", "identity_bindings", "orgs",
+        "projects", "project_member_bindings",
+    ]
     assert authority["coverage"] == ["demo_identity"]
     assert authority["selectors"] == [{
         "name": "LEAF_DEMO_LIVE_ENABLED", "allowed_modes": ["0", "1"],
         "repository_default": "0"}]
     sql = (db._PKG_DIR / "migrations/0076_demo_sessions.sql").read_text(encoding="utf-8")
-    assert set(re.findall(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)) == set(
-        authority["postgres_tables"])
+    migration_owned_tables = {"demo_sessions", "demo_mint_counters"}
+    assert set(re.findall(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)) == migration_owned_tables
+    assert migration_owned_tables <= set(authority["postgres_tables"])
     columns = db.required_columns_for_selected_authorities({})
     assert columns["demo_sessions"] == {
         "id", "subject", "tenant_id", "org_id", "created_at", "expires_at",

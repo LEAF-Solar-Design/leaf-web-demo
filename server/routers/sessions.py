@@ -108,6 +108,7 @@ import emf_metrics
 import entitlements
 import entity_scope
 import instant_execution
+from demo_actor import DemoActorRefused, DemoActorUnavailable, is_demo_context
 import platform_link
 import request_journal
 import session_fanout
@@ -614,6 +615,14 @@ def _session_not_found(session_id: str) -> JSONResponse:
     )
 
 
+def _demo_refusal() -> JSONResponse:
+    response = error_response(ErrorCode.FORBIDDEN, "Demo actor unavailable",
+                              retryable=False, status_code=403)
+    body = json.loads(response.body)
+    body["error"]["reason_code"] = "demo_actor_refused"
+    return JSONResponse(status_code=403, content=body)
+
+
 def _require_owned_session(
     session_id: str, tenant: Any, write: bool = False,
 ) -> Optional[Dict[str, Any]]:
@@ -840,6 +849,8 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
     drawing_id returns the SAME session (session_store's UNIQUE constraint +
     INSERT OR IGNORE, not re-derived here). An optional `model` (validated against
     the allowlist) is persisted as the session's per-session model choice."""
+    if is_demo_context(tenant):
+        return _demo_refusal()
     if req.model is not None and not turn_runner.is_allowed_model(req.model):
         return _invalid_model_response(req.model)
     if req.policy is not None and not session_policy.is_valid_policy(req.policy):
@@ -863,6 +874,11 @@ def create_session(req: CreateSessionRequest, tenant=Depends(deps.require_active
             org_id = platform_link.require_project_access(
                 tenant, project_id, write=False,
             )
+        except DemoActorRefused:
+            return _demo_refusal()
+        except DemoActorUnavailable:
+            return error_response(ErrorCode.INTERNAL, "session store unavailable",
+                                  retryable=True, status_code=503)
         except (ValueError, LookupError):
             return _session_not_found("project")
         except platform_link.ProjectSessionForbidden:
@@ -974,6 +990,8 @@ def list_sessions(scope: Optional[str] = None, limit: int = LIST_DEFAULT_LIMIT,
     turn, so a conversation just talked to can vanish from a deeper page it
     would otherwise have been on; it never appears twice.
     """
+    if is_demo_context(tenant):
+        return _demo_refusal()
     try:
         scope_kind, scope_handle = _parse_scope_query(scope)
     except ValueError as exc:
@@ -1011,6 +1029,11 @@ def list_sessions(scope: Optional[str] = None, limit: int = LIST_DEFAULT_LIMIT,
                     project_access[key] = platform_link.require_project_session_access(
                         sess, tenant, write=False, binding=binding,
                     ) is not None
+                except DemoActorRefused:
+                    return _demo_refusal()
+                except DemoActorUnavailable:
+                    return error_response(ErrorCode.INTERNAL, "session store unavailable",
+                                          retryable=True, status_code=503)
                 except (platform_link.ProjectSessionForbidden, LookupError):
                     # Fail closed: a row whose membership cannot be proven
                     # right now is not listed. It is not deleted, not
@@ -1040,6 +1063,8 @@ async def post_message_route(session_id: str, request: Request,
 
 def post_message(session_id: str, req: MessageRequest, request: Request,
                  tenant=Depends(deps.require_active_tenant)):
+    if is_demo_context(tenant):
+        return _demo_refusal()
     # 1. ownership guard (404-not-403, no existence leak).
     try:
         session = _require_owned_session(session_id, tenant, True)
@@ -1506,6 +1531,8 @@ def cancel_turn(session_id: str, turn_id: str, tenant=Depends(deps.require_tenan
     client holding a stale turn_id must not be able to end the turn that
     replaced it.
     """
+    if is_demo_context(tenant):
+        return _demo_refusal()
     # ownership guard first (404-not-403, no existence leak) — mirrors post_message.
     try:
         owned = _require_owned_session(session_id, tenant, True)
@@ -1564,6 +1591,8 @@ async def stream_session(session_id: str, after_seq: int = 0,
     endpoint in the app. The poll cadence now awaits on the event loop; the
     404 pre-check and each per-tick store read hop to a thread so the loop
     never blocks on the session_store lock. Wire format/timing unchanged."""
+    if is_demo_context(tenant):
+        return _demo_refusal()
     try:
         owned = await asyncio.to_thread(_require_owned_session, session_id, tenant)
     except platform_link.ProjectSessionForbidden:
@@ -1627,6 +1656,8 @@ def get_transcript(session_id: str, limit: int = TRANSCRIPT_DEFAULT_LIMIT,
     """Most-recent-N envelopes, ascending by seq — no after_seq cursor (§2.1.4:
     'most recent N, ascending by seq'). `limit` is clamped to
     [1, TRANSCRIPT_MAX_LIMIT] regardless of what the caller sends."""
+    if is_demo_context(tenant):
+        return _demo_refusal()
     try:
         owned = _require_owned_session(session_id, tenant)
     except platform_link.ProjectSessionForbidden:

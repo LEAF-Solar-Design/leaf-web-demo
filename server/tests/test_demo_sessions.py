@@ -8,6 +8,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 import sys
 import threading
 from types import SimpleNamespace
@@ -720,8 +721,15 @@ def test_migration_and_authority_inventory_agree():
     root = Path(__file__).resolve().parents[2]
     inventory = json.loads((root / "platform/authority-inventory.json").read_text())
     entry = next(item for item in inventory["authorities"] if item["id"] == "demo_sessions")
-    assert set(entry["postgres_tables"]) == {"demo_sessions", "demo_mint_counters"}
+    assert set(entry["postgres_tables"]) == {
+        "demo_sessions", "demo_mint_counters", "identity_bindings", "orgs",
+        "projects", "project_member_bindings",
+    }
     assert "0076" in inventory["scope"]["migration_ids"]
     sql = (root / "platform/migrations/0076_demo_sessions.sql").read_text()
-    for table in entry["postgres_tables"]:
+    for table in ("demo_sessions", "demo_mint_counters"):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
+    migrations = list((root / "platform/migrations").glob("*.sql"))
+    for table in ("identity_bindings", "orgs", "projects", "project_member_bindings"):
+        pattern = rf"(?i:CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?){re.escape(table)}\s*\("
+        assert any(re.search(pattern, migration.read_text()) for migration in migrations)

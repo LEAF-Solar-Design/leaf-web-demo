@@ -1146,6 +1146,12 @@ def build_suites() -> List[Suite]:
         Suite("server-demo-provisioning-postgres", "server atomic demo tenant provisioning", "pytest",
               SERVER, _py_pytest("tests/test_demo_provisioning_postgres.py"), 15,
               db_gated=True),
+        Suite("server-demo-actor", "server verified demo actor scope", "pytest",
+              SERVER, _py_pytest("tests/test_demo_actor.py"), 43),
+        Suite("server-demo-actor-postgres", "server durable demo actor scope", "pytest",
+              SERVER, _py_pytest("tests/test_demo_actor_postgres.py"), 31,
+              uses_database=True, db_gated=True,
+              database_skip_reasons=(r"PostgreSQL race test requires explicit DATABASE_URL",)),
         Suite("server-mcp-gateway-authority",
               "server tests/test_mcp_gateway_authority.py", "pytest", SERVER,
               _py_pytest("tests/test_mcp_gateway_authority.py"), 55),
@@ -2380,6 +2386,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_evidence_freeze_static.py",
                  f"{repo_name}/platform/tests/test_db_primitives_static.py",
                  f"{repo_name}/platform/tests/test_db_readiness_static.py",
+                 f"{repo_name}/platform/tests/test_demo_inventory_contract_static.py",
                  f"{repo_name}/platform/tests/test_db_schema_proof_static.py",
                  f"{repo_name}/platform/tests/test_overlay_store_static.py",
                  f"{repo_name}/platform/tests/test_ios_ship_schema_static.py",
@@ -2396,7 +2403,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_binding_grant_static.py",
                  f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py",
                  f"{repo_name}/platform/tests/test_org_self_provision_gate_static.py"  # SP2 invite-only org gate
-                 ], 238,  # +26 SP2 invite-only org gate
+                 ], 239,  # +1 demo inventory/migration contract regression
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -3053,7 +3060,7 @@ def build_suites() -> List[Suite]:
               # 2026-10-13: R14-E adds one registration row; measured 237 passing.
               # 2026-10-14: PP-3 record A adds one registration row (237 -> 238).
               # 2026-10-19: su-a4a adds one production proof registration row (238 -> 239).
-              ["test_studio_walk_regression_gate.py"], 239),
+              ["test_studio_walk_regression_gate.py"], 240),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

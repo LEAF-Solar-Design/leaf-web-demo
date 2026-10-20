@@ -129,9 +129,9 @@ def test_sip_r1_gate_registration():
         assert suite.db_gated is gated
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
-    assert suites["platform-static"].expected == 238  # 2026-10-19: +26 SP2 invite-only org gate.
+    assert suites["platform-static"].expected == 239  # +1 demo inventory/migration contract regression.
     assert suites["platform"].expected == 1179  # LD1b: +1 demo classification regression.
-    assert suites["gate-runner-selftest"].expected == 239  # R14-E, PP-3 record A and su-a4a registrations.
+    assert suites["gate-runner-selftest"].expected == 240  # LD1d: demo actor registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -491,7 +491,8 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # test_binding_grant_issuance_static.py (20 tests) on 2026-09-28: 182 -> 208.
     # Added test_acceptance_schema_readiness_contract on 2026-10-19: 211 -> 212.
     # Added +26 SP2 invite-only org gate on 2026-10-19: 212 -> 238.
-    assert static.expected == 238
+    # Added demo inventory/migration contract regression: 238 -> 239.
+    assert static.expected == 239
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv
@@ -4223,7 +4224,7 @@ def test_R14C_32_mandatory_registration():
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
     assert mandatory[-2:] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 239  # R14-E, PP-3 record A and su-a4a registrations.
+    assert suites["gate-runner-selftest"].expected == 240  # LD1d: demo actor registration.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4318,7 +4319,34 @@ def test_sip_r3e_gate_registration():
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
     # LD1b adds one demo classification regression to the 1178 platform rows.
     assert suites["platform"].expected == 1179
-    assert suites["gate-runner-selftest"].expected == 239  # R14-E, PP-3 record A and su-a4a registrations.
+    assert suites["gate-runner-selftest"].expected == 240  # LD1d: demo actor registration.
+
+
+def test_demo_actor_gate_registration():
+    runner = _load_runner()
+    catalog = runner.build_suites()
+    suites = {suite.id: suite for suite in catalog}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suffix, floor, database in (("", 43, False), ("-postgres", 31, True)):
+        suite_id = "server-demo-actor" + suffix
+        suite = suites[suite_id]
+        assert suite.cwd == REPO / "server"
+        target = "tests/test_demo_actor" + ("_postgres" if database else "") + ".py"
+        assert suite.argv == runner._py_pytest(target)
+        assert suite.kind == "pytest" and suite.expected == floor
+        assert suite.db_gated is database and suite.uses_database is database
+        assert suite.allowed_skip_reasons == ()
+        assert suite.database_skip_reasons == (
+            (r"PostgreSQL race test requires explicit DATABASE_URL",) if database else ())
+        assert suite.opt_in_env == suite.db_deferred == ""
+        assert selection["mandatory_suite_ids"].count(suite_id) == 1
+    for ordered in ([suite.id for suite in catalog], selection["mandatory_suite_ids"]):
+        start = ordered.index("server-demo-provisioning-postgres")
+        assert ordered[start:start + 3] == ["server-demo-provisioning-postgres",
+                                           "server-demo-actor", "server-demo-actor-postgres"]
+    rules = selection["force_full_rules"]
+    assert "server/demo_actor.py" in rules
+    assert "server/tests/test_demo_actor*.py" in rules
 
 
 def test_sip_r14_sizing_gate_registration():

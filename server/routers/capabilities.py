@@ -205,6 +205,11 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
                         response = jobs_router._project_solar_admission(
                             tool, tenant, req, x_org_id, selected_project, authorization,
                             x_checkout_capability, idempotency_key=entry["idempotency_key"], preview=True)
+                        if jobs_router.is_demo_context(tenant):
+                            body = json.loads(response.body)
+                            reason = (body.get("error") or {}).get("reason_code")
+                            if reason in {"demo_actor_refused", "SIP_R1_STORE_UNAVAILABLE"}:
+                                return response
                         state = solar_project_admission.project_catalog_availability(tool, enabled=True,
                             admission={"status_code": response.status_code,
                                        "content": json.loads(response.body)})

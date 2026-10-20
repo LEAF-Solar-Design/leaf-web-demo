@@ -16,6 +16,7 @@ from fastapi import HTTPException
 import deps
 import entitlements
 import platform_link
+from demo_actor import DemoActorRefused, DemoActorUnavailable, is_demo_context, resolve_demo_actor
 import solar_project_context as project
 import solar_project_graph as graph
 import solar_project_jobs as service
@@ -27,6 +28,7 @@ from leaf_cloud_grants import CloudError
 
 
 _FAILURES = {
+    "demo_actor_refused": (403, False),
     "SIP_R1_INVALID_BINDING": (400, False), "SIP_R1_CONTEXT_NOT_FOUND": (404, False),
     "SIP_R1_PROJECT_FORBIDDEN": (403, False), "SIP_R1_CANONICAL_AUTHORITY_REQUIRED": (409, False),
     "SIP_R1_INTAKE_PROOF_REQUIRED": (409, False), "SIP_R1_INTAKE_REFERENCE_INVALID": (500, False),
@@ -133,13 +135,30 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
                 "tool manifest changed after approval; refresh tools and confirm again")
         try:
             context = platform_link.resolve_submission_context(
-                org_header, project_header, authorization)
+                org_header, project_header, authorization,
+                **({"tenant_context": tenant} if is_demo_context(tenant) else {}))
+        except DemoActorUnavailable:
+            return _refusal("SIP_R1_STORE_UNAVAILABLE", status=503, retryable=True)
         except ValueError as exc:
             message = exc.args[0] if exc.args and exc.args[0] in _RESOLVER_MESSAGES else _UNAVAILABLE
             return _refusal(None, status=400 if "required" in message else 409, message=message)
+        except DemoActorRefused:
+            raise
+        except Exception:
+            if is_demo_context(tenant):
+                return _refusal("SIP_R1_STORE_UNAVAILABLE", status=503, retryable=True)
+            raise
         if context is None:
             return _refusal(None, status=400, message="X-Project-Id is required with X-Org-Id")
-        if str(context["org_id"]) != str(tenant) or (
+        try:
+            actor = resolve_demo_actor(tenant)
+        except DemoActorRefused:
+            raise
+        except Exception:
+            if is_demo_context(tenant):
+                return _refusal("SIP_R1_STORE_UNAVAILABLE", status=503, retryable=True)
+            raise
+        if str(context["org_id"]) != str(actor.org_id if actor else tenant) or (
                 deps.auth_live() and (not isinstance(tenant, deps.TenantContext) or not tenant.subject)):
             return _refusal(None, message="verified subject must match the active platform identity binding")
         if context.get("authority_mode") != "postgres_canonical":
@@ -163,6 +182,8 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
         job_id = platform_link.submit_canonical_graph(*args, **kwargs)
         return {"status_code": 202, "content": deps.tenant_echo(with_envelope_fields(
             {"job_id": job_id, "status": "submitted"}), tenant)}
+    except DemoActorRefused:
+        return _refusal("demo_actor_refused", status=403)
     except (platform_link.CanonicalEntitlementDenied, EntitlementDenied) as exc:
         return _response(exc.response)
     except GraphValidationError as exc:

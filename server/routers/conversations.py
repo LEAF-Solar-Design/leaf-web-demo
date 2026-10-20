@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse
 
 import conversations
 import deps
+from demo_actor import DemoActorRefused, DemoActorUnavailable
 import platform_link
 import telemetry_sink
 from envelopes import ErrorCode, error_response, with_envelope_fields
@@ -218,6 +219,10 @@ def _resolve_and_write(
         if org_id is None:
             return conversations._not_found()
         actor_binding_id = conversations._actor_binding_id(tenant)
+    except DemoActorRefused:
+        return conversations._demo_refusal()
+    except DemoActorUnavailable:
+        return conversations._demo_unavailable()
     except platform_link.ProjectSessionForbidden:
         return conversations._forbidden()
 
@@ -341,6 +346,10 @@ def api_recover_conversation_tail(
         return conversations._flag_off()
     try:
         org_id = conversations._require_project(tenant, project_id, write=False)
+    except DemoActorRefused:
+        return conversations._demo_refusal()
+    except DemoActorUnavailable:
+        return conversations._demo_unavailable()
     except platform_link.ProjectSessionForbidden:
         return conversations._forbidden()
     if org_id is None:

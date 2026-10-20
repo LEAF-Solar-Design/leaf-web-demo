@@ -318,7 +318,7 @@ def test_graph_worker_descriptor(monkeypatch, tmp_path):
 
     # Independent scope oracle: dropping any source must change the expected digest.
     manifest = (
-        "builtins/solar_settings.py", "canonical_worker.py", "checkout_capability.py", "deps.py",
+        "builtins/solar_settings.py", "canonical_worker.py", "checkout_capability.py", "demo_actor.py", "deps.py",
         "leaf_cloud_client.py", "platform_link.py", "solar_design_graph.py", "solar_graph_context.py",
         "solar_graph_seed.py", "solar_local_graph.py", "solar_preset_sync.py", "solar_project.py",
         "solar_project_context.py", "solar_project_graph.py", "solar_project_jobs.py",

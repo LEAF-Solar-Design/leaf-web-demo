@@ -1103,7 +1103,7 @@
         "allowed_modes": ["0", "1"],
         "repository_default": "0"
       }],
-      "postgres_tables": ["demo_sessions", "demo_mint_counters"],
+      "postgres_tables": ["demo_sessions", "demo_mint_counters", "identity_bindings", "orgs", "projects", "project_member_bindings"],
       "legacy_source": ["None: new PostgreSQL-only demo identity registry."],
       "backfill": {"command": null, "status": "not_applicable", "note": "New authority; no legacy sessions exist."},
       "parity": {"command": null, "status": "not_run", "note": "PostgreSQL proofs are in server/tests/test_demo_sessions_postgres.py; execution is required before enablement."},

@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 import deps
+from demo_actor import DemoActorRefused, is_demo_context, resolve_demo_actor, require_demo_project
 import solar_project_context as service
 from envelopes import ErrorCode, err_envelope, with_envelope_fields
 
@@ -20,6 +21,7 @@ _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
     r"drawings/[^/]+/versions/[^/]+/solar-reads|drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
+    "demo_actor_refused": (403, False),
     "SIP_R1_INVALID_BINDING": (400, False), "SIP_R1_CONTEXT_NOT_FOUND": (404, False),
     "SIP_R1_PROJECT_FORBIDDEN": (403, False), "SIP_R1_CANONICAL_AUTHORITY_REQUIRED": (409, False),
     "SIP_R1_INTAKE_PROOF_REQUIRED": (409, False), "SIP_R1_INTAKE_REFERENCE_INVALID": (500, False),
@@ -63,13 +65,33 @@ class CheckoutRequest(BaseModel):
 
 
 def _headers(tenant, project_id, org_header, project_header):
+    try:
+        actor = resolve_demo_actor(tenant)
+        if actor is not None:
+            require_demo_project(actor, project_id)
+            if ((org_header is not None and str(org_header) != str(actor.org_id))
+                    or (project_header is not None and project_header != actor.project_id)):
+                raise DemoActorRefused()
+            return
+    except DemoActorRefused:
+        raise service.ProjectContextError("demo_actor_refused") from None
+    except Exception:
+        service.refuse("STORE_UNAVAILABLE")
     if (org_header is not None and str(org_header) != str(tenant)) or (
             project_header is not None and project_header != project_id):
         service.refuse("CONTEXT_NOT_FOUND")
 
 
 def _identity(tenant, project_id, drawing_id):
-    return {"organization_id": str(tenant), "project_id": str(project_id),
+    try:
+        actor = resolve_demo_actor(tenant)
+    except DemoActorRefused:
+        raise service.ProjectContextError("demo_actor_refused") from None
+    except Exception:
+        if is_demo_context(tenant):
+            service.refuse("STORE_UNAVAILABLE")
+        raise
+    return {"organization_id": str(actor.org_id if actor is not None else tenant), "project_id": str(project_id),
             "drawing_id": str(drawing_id)}
 
 

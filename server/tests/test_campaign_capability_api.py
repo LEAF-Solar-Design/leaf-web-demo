@@ -393,3 +393,21 @@ def test_lock_cleanup_failure_closes_connection_and_masks_drift(monkeypatch):
             raise api.CapabilityError(409, 'catalog_drift')
     assert error.value.code == 'invocation_unknown'
     assert calls[-2:] == ['close', 'return']
+
+
+@pytest.mark.parametrize("entrypoint", ["list_capabilities", "bind_publication", "invoke", "enrollment_snapshot"])
+@pytest.mark.parametrize("kind", ["refused", "unavailable"])
+def test_safe_preserves_demo_actor_exceptions(monkeypatch, entrypoint, kind):
+    import demo_actor
+    import campaign_capability_api as api
+    failure = demo_actor.DemoActorRefused if kind == "refused" else demo_actor.DemoActorUnavailable
+    def fail(*a, **kw):
+        raise failure()
+    monkeypatch.setattr(api, "_scope", fail)
+    args = ["tenant", str(uuid.uuid4()), str(uuid.uuid4())]
+    if entrypoint == "bind_publication":
+        args += [str(uuid.uuid4()), "change"]
+    if entrypoint == "invoke":
+        args += [str(uuid.uuid4()), "a" * 64, "key"]
+    with pytest.raises(failure):
+        getattr(api, entrypoint)(*args)

@@ -224,3 +224,48 @@ def test_postgres_org_query_keeps_each_ordered_branch_parenthesized(monkeypatch)
     assert "SELECT * FROM ((SELECT" in query
     assert ") UNION ALL (SELECT" in query
     assert ")) merged ORDER BY" in query
+
+
+@pytest.mark.parametrize("query", ["", "?scope=bogus&cursor=invalid"])
+def test_list_sessions_refuses_verified_demo_before_access_or_store(client, monkeypatch, query):
+    from unittest.mock import Mock
+    router = sessions_router
+    tenant = router.deps.TenantContext("demo-session", verified_demo=True)
+    read = Mock(side_effect=AssertionError("list store read after demo refusal"))
+    binding = Mock(side_effect=AssertionError("binding lookup after demo refusal"))
+    access = Mock(side_effect=AssertionError("project access after demo refusal"))
+    monkeypatch.setattr(session_store, "list_sessions", read)
+    monkeypatch.setattr(router.platform_link, "resolve_caller_binding", binding)
+    monkeypatch.setattr(router.platform_link, "require_project_session_access", access)
+    client.app.dependency_overrides[router.deps.require_active_tenant] = lambda: tenant
+    response = client.get("/api/sessions" + query)
+    assert response.status_code == 403, response.text
+    error = response.json()["error"]
+    assert error["error_code"] == router.ErrorCode.FORBIDDEN
+    assert error["reason_code"] == "demo_actor_refused"
+    assert error["retryable"] is False
+    read.assert_not_called()
+    binding.assert_not_called()
+    access.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["auth0", "guest", "auth_off", "unmarked_demo"])
+def test_list_sessions_non_demo_callers_unchanged(client, monkeypatch, kind):
+    from unittest.mock import Mock
+    router = sessions_router
+    tenant = "legacy-tenant" if kind == "auth_off" else router.deps.TenantContext(
+        "demo-session" if kind == "unmarked_demo" else "tenant",
+        subject="auth0|caller" if kind == "auth0" else None,
+    )
+    row = {"id": "session-control"}
+    read = Mock(return_value=([row], None))
+    monkeypatch.setattr(session_store, "list_sessions", read)
+    monkeypatch.setattr(router, "_session_row", lambda sess: sess)
+    client.app.dependency_overrides[router.deps.require_active_tenant] = lambda: tenant
+    response = client.get("/api/sessions")
+    assert response.status_code == 200, response.text
+    assert response.json()["sessions"] == [row]
+    read.assert_called_once_with(
+        str(tenant), scope_kind=None, scope_handle=None,
+        limit=router.LIST_DEFAULT_LIMIT, cursor=None,
+    )

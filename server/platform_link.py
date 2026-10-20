@@ -152,6 +152,10 @@ def resolve_caller_binding(tenant: Any) -> Any:
     ``ProjectSessionForbidden`` on no verified identity, mirroring
     ``require_project_access``'s own guard so a caller that skips memoizing
     sees the identical failure mode."""
+    from demo_actor import resolve_demo_actor
+    actor = resolve_demo_actor(tenant)
+    if actor is not None:
+        return actor.binding
     subject = getattr(tenant, "subject", None)
     if not isinstance(subject, str) or not subject:
         raise ProjectSessionForbidden("project access requires a verified identity")
@@ -176,6 +180,23 @@ def require_project_access(tenant: Any, project_id: Any, *, write: bool,
     project (review finding 4). ``None`` (every other caller) resolves it
     here exactly as before.
     """
+    from demo_actor import (resolve_demo_actor, require_demo_project,
+                            DemoActorRefused, DemoActorUnavailable)
+    actor = resolve_demo_actor(tenant)
+    if actor is not None:
+        try:
+            require_demo_project(actor, project_id, write=write)
+            _ensure_platform_package()
+            import leaf_platform.project_lifecycle as lifecycle  # noqa: PLC0415
+            try:
+                lifecycle.require_project_role(actor.org_id, actor.project_id, actor.binding_id, write=write)
+            except (lifecycle.LifecycleForbidden, lifecycle.LifecycleUnavailable) as exc:
+                raise DemoActorRefused() from exc
+        except DemoActorRefused:
+            raise
+        except Exception as exc:
+            raise DemoActorUnavailable() from exc
+        return str(actor.org_id)
     _ensure_platform_package()
     import leaf_platform.project_lifecycle as lifecycle  # noqa: PLC0415
     try:
@@ -395,8 +416,25 @@ def resolve_project_authority(org_id: uuid.UUID, project_id: uuid.UUID) -> Dict[
 
 
 def resolve_submission_context(org_id: Optional[str], project_id: Optional[str],
-                               authorization: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                               authorization: str | None = None, *,
+                               tenant_context: Any = None) -> Optional[Dict[str, Any]]:
     """Resolve project ownership and authority through the canonical boundary."""
+    from demo_actor import (resolve_demo_actor, require_demo_project,
+                            DemoActorRefused, DemoActorUnavailable)
+    actor = resolve_demo_actor(tenant_context)
+    if actor is not None:
+        if not project_id:
+            raise DemoActorRefused()
+        require_demo_project(actor, project_id, write=True)
+        if org_id is not None and str(org_id) != str(actor.org_id):
+            raise DemoActorRefused()
+        require_project_access(tenant_context, project_id, write=True)
+        try:
+            return resolve_project_authority(actor.org_id, actor.project_id)
+        except (ProjectAuthorityNotFound, ProjectAuthorityRequired) as exc:
+            raise DemoActorRefused() from exc
+        except Exception as exc:
+            raise DemoActorUnavailable() from exc
     if not project_id:
         if org_id:
             raise ValueError("X-Project-Id is required with X-Org-Id")
@@ -497,19 +535,27 @@ def _canonical_record(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, An
     return rec
 
 
-def get_canonical_job(job_id: str, request_tenant_id: str) -> Optional[Dict[str, Any]]:
+def get_canonical_job(job_id: str, request_tenant_id: str, *, strict=False) -> Optional[Dict[str, Any]]:
+    try:
+        parsed_id = uuid.UUID(str(job_id))
+    except ValueError:
+        return None
     try:
         return _canonical_record(_canonical_jobs_module().get_job_for_tenant(
-            uuid.UUID(str(job_id)), str(request_tenant_id)))
+            parsed_id, str(request_tenant_id)))
     except (ValueError, RuntimeError):
+        if strict:
+            raise
         return None
 
 
-def list_canonical_jobs(request_tenant_id: str, limit: int = 20) -> list[Dict[str, Any]]:
+def list_canonical_jobs(request_tenant_id: str, limit: int = 20, *, strict=False) -> list[Dict[str, Any]]:
     try:
         return [_canonical_record(item) for item in
                 _canonical_jobs_module().list_jobs_for_tenant(str(request_tenant_id), limit=limit)]
     except RuntimeError:
+        if strict:
+            raise
         return []
 
 

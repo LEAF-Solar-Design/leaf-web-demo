@@ -46,6 +46,7 @@ if str(SERVER_DIR) not in sys.path:
 import deps  # noqa: E402
 import entitlements  # noqa: E402
 import receipts_read as rr  # noqa: E402
+from test_demo_actor import registry  # noqa: E402,F401 - shared actor row fixture
 
 FAKE_TOKEN = "ghp-fixture-token-never-real"
 FAKE_FALLBACK_TOKEN = "ghp-fixture-fallback-never-real"
@@ -1228,3 +1229,56 @@ def test_a_job_scope_for_another_tenants_job_is_404(monkeypatch, tmp_path):
     resp = _client().get("/api/receipts", params={"scope": "job:job-77"})
     assert resp.status_code == 404
     assert "leaked" not in resp.text
+
+
+@pytest.mark.parametrize("case", ["outage", "revoked", "revoked_binding", "foreign_project", "own", "non_demo"])
+def test_demo_receipts_use_live_strict_observation(registry, monkeypatch, case):
+    from uuid import uuid4
+    import platform_link
+    from routers import change_to_live, jobs as jobs_router
+    from test_demo_actor import own_job, assert_unavailable
+
+    record = own_job(registry)
+    record["job_id"] = str(uuid4())
+    reads, canonical_reads, legacy_reads = [], [], []
+    def receipts(scope):
+        reads.append(scope)
+        return {"rows": [{"summary": "private receipt"}]}
+    def canonical(*args):
+        canonical_reads.append(args)
+        raise RuntimeError("private database details")
+    def legacy(*args):
+        legacy_reads.append(args)
+        return record if case in {"foreign_project", "own"} else None
+    # Keep observation, lookup and canonical-helper code intact. Only its
+    # underlying store fails, so passing a plain tenant string fails this test.
+    monkeypatch.setattr(platform_link, "_canonical_jobs_module", lambda:
+                        type("Store", (), {"get_job_for_tenant": staticmethod(canonical)})())
+    monkeypatch.setattr(jobs_router.jobs, "job_store_mode", lambda: "legacy")
+    monkeypatch.setattr(rr, "read_receipts", receipts)
+    monkeypatch.setattr(jobs_router.jobs, "get_job", legacy)
+    tenant = registry.tenant
+    if case == "revoked":
+        registry.session_live = False
+    elif case == "revoked_binding":
+        registry.bindings[0].update(status="revoked", revoked_at="now")
+    elif case == "foreign_project":
+        record["project_id"] = str(uuid4())
+    elif case == "non_demo":
+        tenant = deps.TenantContext(str(uuid4()), subject="auth0|control")
+    response = change_to_live.receipts("job:" + record["job_id"], tenant)
+    if case == "outage":
+        assert_unavailable(response, "job store unavailable")
+        assert len(canonical_reads) == 1
+    elif case in {"revoked", "revoked_binding", "foreign_project"}:
+        assert response.status_code == 403
+        assert json.loads(response.body)["error"]["reason_code"] == "demo_actor_refused"
+        assert canonical_reads == []
+        if case != "foreign_project":
+            assert legacy_reads == []
+    elif case == "non_demo":
+        assert response.status_code == 404
+        assert len(canonical_reads) == 1
+    else:
+        assert response["rows"] == [{"summary": "private receipt"}]
+    assert len(reads) == (1 if case == "own" else 0)
