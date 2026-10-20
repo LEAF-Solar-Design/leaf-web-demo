@@ -1,0 +1,260 @@
+{
+  "name": "card-expired",
+  "title": "A consent card that expired before anyone approved it",
+  "thread": {
+    "session_id": "sess-tenant-05",
+    "scope": { "kind": "tenant", "label": "Your account" },
+    "provider": { "kind": "claude-code-cli", "label": "Claude", "model": "claude-sonnet-5" },
+    "quota": { "used": 4, "limit": 30, "window": "hour", "resets_at": "2026-09-23T17:00:00Z" },
+    "items": [
+      {
+        "seq": 1,
+        "item_id": "item-u1",
+        "turn_id": "turn-1",
+        "role": "user",
+        "at": "2026-09-23T16:30:00Z",
+        "blocks": [{ "type": "text", "text": "Raise my daily loss limit to $50." }]
+      },
+      {
+        "seq": 4,
+        "item_id": "item-a1",
+        "turn_id": "turn-1",
+        "role": "assistant",
+        "at": "2026-09-23T16:30:04Z",
+        "blocks": [
+          {
+            "type": "tools",
+            "tools": [{ "invocation_id": "inv-301", "name": "config.propose_change", "label": "Draft config change", "state": "done" }]
+          },
+          {
+            "type": "card",
+            "origin": "server",
+            "card": {
+              "card_id": "card-301",
+              "proposal_id": "prop-301",
+              "proposal_digest": "9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b",
+              "kind": "config_draft",
+              "state": "expired",
+              "title": { "text": "Change daily loss limit", "origin": "server" },
+              "fields": [
+                { "key": "setting", "label": "Setting", "value": "Daily loss limit", "origin": "server", "placement": "above_approve" },
+                { "key": "from", "label": "From", "value": "$25.00", "origin": "server", "placement": "above_approve" },
+                { "key": "to", "label": "To", "value": "$50.00", "origin": "server", "placement": "above_approve" },
+                {
+                  "key": "cooldown",
+                  "label": "Takes effect",
+                  "value": "After a 10 minute cooldown",
+                  "origin": "server",
+                  "placement": "above_approve"
+                },
+                {
+                  "key": "note",
+                  "label": "Assistant's note",
+                  "value": "You said the current limit stops you out too early.",
+                  "origin": "model",
+                  "placement": "assistants_note"
+                }
+              ],
+              "approve": { "text": "Request change", "origin": "server" },
+              "decline": { "text": "Cancel", "origin": "server" },
+              "spend": { "state": "none", "cents": null },
+              "requires_face_id": true,
+              "created_at": "2026-09-23T16:30:04Z",
+              "expires_at": "2026-09-23T16:35:04Z",
+              "card_digest": "5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d",
+              "resolution": {
+                "at": "2026-09-23T16:35:04Z",
+                "actor": null,
+                "receipt": { "text": "Expired at 11:35 AM CT. Nothing was changed.", "origin": "server" }
+              }
+            }
+          },
+          {
+            "type": "notice",
+            "origin": "server",
+            "reason": {
+              "code": "card_expired",
+              "text": "This request expired. Nothing was changed.",
+              "next": { "label": "Ask again", "action": "retry" }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "type": "item",
+      "session_id": "sess-tenant-05",
+      "seq": 1,
+      "at": "2026-09-23T16:30:00Z",
+      "requires_action": false,
+      "item": {
+        "seq": 1,
+        "item_id": "item-u1",
+        "turn_id": "turn-1",
+        "role": "user",
+        "at": "2026-09-23T16:30:00Z",
+        "blocks": [{ "type": "text", "text": "Raise my daily loss limit to $50." }]
+      }
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-tenant-05",
+      "seq": 2,
+      "at": "2026-09-23T16:30:00.120Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "queued"
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-tenant-05",
+      "seq": 3,
+      "at": "2026-09-23T16:30:01Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "running"
+    },
+    {
+      "type": "item",
+      "session_id": "sess-tenant-05",
+      "seq": 4,
+      "at": "2026-09-23T16:30:04Z",
+      "requires_action": true,
+      "item": {
+        "seq": 4,
+        "item_id": "item-a1",
+        "turn_id": "turn-1",
+        "role": "assistant",
+        "at": "2026-09-23T16:30:04Z",
+        "blocks": [
+          {
+            "type": "tools",
+            "tools": [{ "invocation_id": "inv-301", "name": "config.propose_change", "label": "Draft config change", "state": "done" }]
+          },
+          {
+            "type": "card",
+            "origin": "server",
+            "card": {
+              "card_id": "card-301",
+              "proposal_id": "prop-301",
+              "proposal_digest": "9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b",
+              "kind": "config_draft",
+              "state": "pending",
+              "title": { "text": "Change daily loss limit", "origin": "server" },
+              "fields": [
+                { "key": "setting", "label": "Setting", "value": "Daily loss limit", "origin": "server", "placement": "above_approve" },
+                { "key": "from", "label": "From", "value": "$25.00", "origin": "server", "placement": "above_approve" },
+                { "key": "to", "label": "To", "value": "$50.00", "origin": "server", "placement": "above_approve" },
+                {
+                  "key": "cooldown",
+                  "label": "Takes effect",
+                  "value": "After a 10 minute cooldown",
+                  "origin": "server",
+                  "placement": "above_approve"
+                },
+                {
+                  "key": "note",
+                  "label": "Assistant's note",
+                  "value": "You said the current limit stops you out too early.",
+                  "origin": "model",
+                  "placement": "assistants_note"
+                }
+              ],
+              "approve": { "text": "Request change", "origin": "server" },
+              "decline": { "text": "Cancel", "origin": "server" },
+              "spend": { "state": "none", "cents": null },
+              "requires_face_id": true,
+              "created_at": "2026-09-23T16:30:04Z",
+              "expires_at": "2026-09-23T16:35:04Z",
+              "card_digest": "5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d",
+              "resolution": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-tenant-05",
+      "seq": 5,
+      "at": "2026-09-23T16:30:05Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "done"
+    },
+    {
+      "type": "item",
+      "session_id": "sess-tenant-05",
+      "seq": 6,
+      "at": "2026-09-23T16:35:04Z",
+      "requires_action": false,
+      "item": {
+        "seq": 4,
+        "item_id": "item-a1",
+        "turn_id": "turn-1",
+        "role": "assistant",
+        "at": "2026-09-23T16:30:04Z",
+        "blocks": [
+          {
+            "type": "tools",
+            "tools": [{ "invocation_id": "inv-301", "name": "config.propose_change", "label": "Draft config change", "state": "done" }]
+          },
+          {
+            "type": "card",
+            "origin": "server",
+            "card": {
+              "card_id": "card-301",
+              "proposal_id": "prop-301",
+              "proposal_digest": "9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b9e8d7c6b",
+              "kind": "config_draft",
+              "state": "expired",
+              "title": { "text": "Change daily loss limit", "origin": "server" },
+              "fields": [
+                { "key": "setting", "label": "Setting", "value": "Daily loss limit", "origin": "server", "placement": "above_approve" },
+                { "key": "from", "label": "From", "value": "$25.00", "origin": "server", "placement": "above_approve" },
+                { "key": "to", "label": "To", "value": "$50.00", "origin": "server", "placement": "above_approve" },
+                {
+                  "key": "cooldown",
+                  "label": "Takes effect",
+                  "value": "After a 10 minute cooldown",
+                  "origin": "server",
+                  "placement": "above_approve"
+                },
+                {
+                  "key": "note",
+                  "label": "Assistant's note",
+                  "value": "You said the current limit stops you out too early.",
+                  "origin": "model",
+                  "placement": "assistants_note"
+                }
+              ],
+              "approve": { "text": "Request change", "origin": "server" },
+              "decline": { "text": "Cancel", "origin": "server" },
+              "spend": { "state": "none", "cents": null },
+              "requires_face_id": true,
+              "created_at": "2026-09-23T16:30:04Z",
+              "expires_at": "2026-09-23T16:35:04Z",
+              "card_digest": "5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d5a4b3c2d",
+              "resolution": {
+                "at": "2026-09-23T16:35:04Z",
+                "actor": null,
+                "receipt": { "text": "Expired at 11:35 AM CT. Nothing was changed.", "origin": "server" }
+              }
+            }
+          },
+          {
+            "type": "notice",
+            "origin": "server",
+            "reason": {
+              "code": "card_expired",
+              "text": "This request expired. Nothing was changed.",
+              "next": { "label": "Ask again", "action": "retry" }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,239 @@
+{
+  "name": "card-approved",
+  "title": "A consent card rendered by the server and approved by the owner",
+  "thread": {
+    "session_id": "sess-owner-04",
+    "scope": { "kind": "owner", "label": "Owner" },
+    "provider": { "kind": "claude-code-cli", "label": "Claude", "model": "claude-sonnet-5" },
+    "quota": null,
+    "items": [
+      {
+        "seq": 1,
+        "item_id": "item-u1",
+        "turn_id": "turn-1",
+        "role": "user",
+        "at": "2026-09-23T16:20:00Z",
+        "blocks": [{ "type": "text", "text": "Halt the ETH engine for today." }]
+      },
+      {
+        "seq": 4,
+        "item_id": "item-a1",
+        "turn_id": "turn-1",
+        "role": "assistant",
+        "at": "2026-09-23T16:20:04Z",
+        "blocks": [
+          {
+            "type": "tools",
+            "tools": [{ "invocation_id": "inv-201", "name": "control.propose", "label": "Prepare halt request", "state": "done" }]
+          },
+          {
+            "type": "card",
+            "origin": "server",
+            "card": {
+              "card_id": "card-201",
+              "proposal_id": "prop-201",
+              "proposal_digest": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+              "kind": "control",
+              "state": "approved",
+              "title": { "text": "Halt engine ETH-15m", "origin": "server" },
+              "fields": [
+                { "key": "action", "label": "Action", "value": "Halt engine", "origin": "server", "placement": "above_approve" },
+                { "key": "engine", "label": "Engine", "value": "ETH-15m", "origin": "server", "placement": "above_approve" },
+                {
+                  "key": "effect",
+                  "label": "Effect",
+                  "value": "No new orders until you enable it again.",
+                  "origin": "server",
+                  "placement": "above_approve"
+                },
+                {
+                  "key": "note",
+                  "label": "Assistant's note",
+                  "value": "You asked to stop trading ETH for the rest of today.",
+                  "origin": "model",
+                  "placement": "assistants_note"
+                }
+              ],
+              "approve": { "text": "Halt engine", "origin": "server" },
+              "decline": { "text": "Keep it running", "origin": "server" },
+              "spend": { "state": "none", "cents": null },
+              "requires_face_id": true,
+              "created_at": "2026-09-23T16:20:04Z",
+              "expires_at": "2026-09-23T16:25:04Z",
+              "card_digest": "0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c",
+              "resolution": {
+                "at": "2026-09-23T16:20:30Z",
+                "actor": { "kind": "owner", "label": "Owner iPhone", "principal_id": "dev-owner-01" },
+                "receipt": { "text": "Approved on Owner iPhone at 11:20 AM CT", "origin": "server" }
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "type": "item",
+      "session_id": "sess-owner-04",
+      "seq": 1,
+      "at": "2026-09-23T16:20:00Z",
+      "requires_action": false,
+      "item": {
+        "seq": 1,
+        "item_id": "item-u1",
+        "turn_id": "turn-1",
+        "role": "user",
+        "at": "2026-09-23T16:20:00Z",
+        "blocks": [{ "type": "text", "text": "Halt the ETH engine for today." }]
+      }
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-owner-04",
+      "seq": 2,
+      "at": "2026-09-23T16:20:00.100Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "queued"
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-owner-04",
+      "seq": 3,
+      "at": "2026-09-23T16:20:01Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "running"
+    },
+    {
+      "type": "item",
+      "session_id": "sess-owner-04",
+      "seq": 4,
+      "at": "2026-09-23T16:20:04Z",
+      "requires_action": true,
+      "item": {
+        "seq": 4,
+        "item_id": "item-a1",
+        "turn_id": "turn-1",
+        "role": "assistant",
+        "at": "2026-09-23T16:20:04Z",
+        "blocks": [
+          {
+            "type": "tools",
+            "tools": [{ "invocation_id": "inv-201", "name": "control.propose", "label": "Prepare halt request", "state": "done" }]
+          },
+          {
+            "type": "card",
+            "origin": "server",
+            "card": {
+              "card_id": "card-201",
+              "proposal_id": "prop-201",
+              "proposal_digest": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+              "kind": "control",
+              "state": "pending",
+              "title": { "text": "Halt engine ETH-15m", "origin": "server" },
+              "fields": [
+                { "key": "action", "label": "Action", "value": "Halt engine", "origin": "server", "placement": "above_approve" },
+                { "key": "engine", "label": "Engine", "value": "ETH-15m", "origin": "server", "placement": "above_approve" },
+                {
+                  "key": "effect",
+                  "label": "Effect",
+                  "value": "No new orders until you enable it again.",
+                  "origin": "server",
+                  "placement": "above_approve"
+                },
+                {
+                  "key": "note",
+                  "label": "Assistant's note",
+                  "value": "You asked to stop trading ETH for the rest of today.",
+                  "origin": "model",
+                  "placement": "assistants_note"
+                }
+              ],
+              "approve": { "text": "Halt engine", "origin": "server" },
+              "decline": { "text": "Keep it running", "origin": "server" },
+              "spend": { "state": "none", "cents": null },
+              "requires_face_id": true,
+              "created_at": "2026-09-23T16:20:04Z",
+              "expires_at": "2026-09-23T16:25:04Z",
+              "card_digest": "0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c",
+              "resolution": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-owner-04",
+      "seq": 5,
+      "at": "2026-09-23T16:20:05Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "done"
+    },
+    {
+      "type": "item",
+      "session_id": "sess-owner-04",
+      "seq": 6,
+      "at": "2026-09-23T16:20:30Z",
+      "requires_action": false,
+      "item": {
+        "seq": 4,
+        "item_id": "item-a1",
+        "turn_id": "turn-1",
+        "role": "assistant",
+        "at": "2026-09-23T16:20:04Z",
+        "blocks": [
+          {
+            "type": "tools",
+            "tools": [{ "invocation_id": "inv-201", "name": "control.propose", "label": "Prepare halt request", "state": "done" }]
+          },
+          {
+            "type": "card",
+            "origin": "server",
+            "card": {
+              "card_id": "card-201",
+              "proposal_id": "prop-201",
+              "proposal_digest": "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4",
+              "kind": "control",
+              "state": "approved",
+              "title": { "text": "Halt engine ETH-15m", "origin": "server" },
+              "fields": [
+                { "key": "action", "label": "Action", "value": "Halt engine", "origin": "server", "placement": "above_approve" },
+                { "key": "engine", "label": "Engine", "value": "ETH-15m", "origin": "server", "placement": "above_approve" },
+                {
+                  "key": "effect",
+                  "label": "Effect",
+                  "value": "No new orders until you enable it again.",
+                  "origin": "server",
+                  "placement": "above_approve"
+                },
+                {
+                  "key": "note",
+                  "label": "Assistant's note",
+                  "value": "You asked to stop trading ETH for the rest of today.",
+                  "origin": "model",
+                  "placement": "assistants_note"
+                }
+              ],
+              "approve": { "text": "Halt engine", "origin": "server" },
+              "decline": { "text": "Keep it running", "origin": "server" },
+              "spend": { "state": "none", "cents": null },
+              "requires_face_id": true,
+              "created_at": "2026-09-23T16:20:04Z",
+              "expires_at": "2026-09-23T16:25:04Z",
+              "card_digest": "0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c0f1e2d3c",
+              "resolution": {
+                "at": "2026-09-23T16:20:30Z",
+                "actor": { "kind": "owner", "label": "Owner iPhone", "principal_id": "dev-owner-01" },
+                "receipt": { "text": "Approved on Owner iPhone at 11:20 AM CT", "origin": "server" }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
