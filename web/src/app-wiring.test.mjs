@@ -1255,10 +1255,12 @@ describe('A1b-2 stored Solar graph wiring', () => {
     const renderStatus = Function('h', 'solarOverlayStatus', 'return ' + jsxCode)
     const seatSource = readFileSync(new URL('./solar/SolarFlowSeat.jsx', import.meta.url), 'utf8')
     const seatTree = parseJs(seatSource, { sourceType: 'module', plugins: ['jsx'] })
-    const seatFunction = nodes(seatTree, node => node.type === 'FunctionDeclaration')[0]
-    const seatCode = esbuild.transformSync(seatSource.slice(seatFunction.start, seatFunction.end),
+    // Evaluate all production helpers and provide the component's React imports;
+    // the seat now owns ribbon reveal state as well as its manual toggle.
+    const seatFunctions = nodes(seatTree, node => node.type === 'FunctionDeclaration')
+    const seatCode = esbuild.transformSync(seatFunctions.map(node => seatSource.slice(node.start, node.end)).join('\n'),
       { loader: 'jsx', jsxFactory: 'h' }).code
-    const Seat = Function('h', 'useId', 'useState', seatCode + '; return SolarFlowSeat')(React.createElement, useId, useState)
+    const Seat = Function('h', ...Object.keys(React), seatCode + '; return SolarFlowSeat')(React.createElement, ...Object.values(React))
     for (const [reason, expected] of [
       ['invalid_graph', reasons.invalid_graph], ['invalid_scale', reasons.invalid_scale],
       ['overlay_limit', reasons.overlay_limit], ['drawing_mismatch', reasons.drawing_mismatch],
