@@ -29,7 +29,8 @@ BODY = {"dataset_ref": REF, "query": {"fields": ["id"], "limit": 10}}
 def host(monkeypatch):
     tenant, project, user, binding_id = (str(uuid4()) for _ in range(4))
     state = SimpleNamespace(tenant=tenant, project=project, subject="auth0|person", turn="turn-1",
-                            role=True, ops=[], gates=[], decision="allow", on_http=lambda: None)
+                            role=True, write_access=True, write_checks=[], ops=[], gates=[],
+                            decision="allow", on_http=lambda: None)
     state.session = {"session_id": "app-session", "tenant_id": tenant,
                      "org_id": tenant, "project_id": project}
     state.binding = SimpleNamespace(platform_tenant_id=UUID(tenant), binding_id=UUID(binding_id),
@@ -50,8 +51,8 @@ def host(monkeypatch):
     monkeypatch.setattr(service.deps, "resolve_active_platform_tenant_authority", lambda subject: (state.tenant, "hosted_pro"))
     monkeypatch.setattr(service.platform_link, "resolve_caller_binding", lambda ctx: state.binding)
     def access(ctx, pid, *, write, binding=None):
-        assert write is False
-        if not state.role:
+        state.write_checks.append(write)
+        if not state.role or (write and not state.write_access):
             raise service.platform_link.ProjectSessionForbidden("removed role")
         if pid != state.project or str(ctx) != state.tenant or binding is not state.binding:
             raise LookupError("foreign project")
@@ -76,6 +77,8 @@ def host(monkeypatch):
     async def http(request):
         state.ops.append(request)
         state.on_http()
+        if "/integrations/elements" in request.url.path:
+            return httpx.Response(200, json={"element": json.loads(request.content), "revision": 1})
         return httpx.Response(200, json={
             "schema_version": 1, "dataset_ref": REF,
             "fields": [{"id": "id", "label": "ID", "type": {"kind": "identifier"},

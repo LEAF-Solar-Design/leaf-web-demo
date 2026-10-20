@@ -3486,6 +3486,8 @@ def build_suites() -> List[Suite]:
         Suite("server-integration-tools", "turn-bound integration read endpoints", "pytest", SERVER,
               _py_pytest("tests/test_integration_tool_service.py")
               + ["tests/test_integration_tool_routes.py"], 30),
+        Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
+              _py_pytest("tests/test_integration_element_save.py"), 1),
         # This proof owns an EMPTY named disposable database. Never alias the
         # general gate DSN to it. opt_in_env normally accepts boolean flags;
         # a present dedicated DSN selects this suite directly instead.

@@ -58,12 +58,19 @@ def test_shipped_catalog_loads_with_v1_shape():
         "request_confirmation", "read_platform_state", "run_read_tool",
         "run_write_tool", "submit_live_solve", "undo_drawing_version",
         "author_tool", "request_publication", "register_tool", "customize_platform",
-        "propose_overlay", "finish_project", "read_integration_data",
+        "propose_overlay", "finish_project", "read_integration_data", "save_integration_element",
     }
     assert pol.rate_limits == {"low": 120, "medium": 60, "high": 10}
     assert pol.approval_ttl_s == 300
 
     assert pol.actions["finish_project"].policy == "auto"
+
+    save = pol.actions["save_integration_element"]
+    assert (save.rung, save.required_capability, save.policy) == (3, "converse", "auto")
+    assert save.enabled is True and save.tenant_tightenable is True
+    assert save.rate_limit_category == "medium" and save.timeout_s == 10
+    assert save.audit_extra == ("expectedRevision",)
+    assert save.dispatch == {"kind": "app_api", "routes": ["POST /internal/integrations/elements"]}
 
     reg = pol.actions["register_tool"]
     assert reg.policy == "always-confirm"
