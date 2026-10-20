@@ -511,6 +511,108 @@ def test_sip_r5_catalog_run_parity(lane, monkeypatch):
             refusal(response, code, message="Canonical Solar request was refused.")
 
 
+@pytest.fixture
+def catalog_proposal(lane, monkeypatch):
+    import test_w1c_solve_proposal as proposals
+    case = proposals.case.__wrapped__(policy_cases.w1.graph.__wrapped__(), monkeypatch)
+    value = proposals.ready_graph(case[0])
+    a = lane.a
+    a.s.set_parent(policy_cases.r3b.embedded(value))
+    a.params = {"grant_ref": "g1", "request": case[1]}
+    a.solve_context = proposals.solve_context(value)
+    a.context = graph.resolve_project_graph_context(a.s.context())
+    a.grants = []
+    monkeypatch.setattr(proposals.cloud, "resolve_grant", lambda ref, tenant:
+        a.grants.append((ref, tenant)) or proposals.CloudGrant(tenant, "private-test-token"))
+    return SimpleNamespace(a=a, case=case)
+
+
+def extra_field_parity(lane, params, name, **fields):
+    request = body(lane, params, name, **fields)
+    entry = {"params": request["params"], "catalog_digest": request["catalog_digest"],
+             "idempotency_key": "key", **fields}
+    before = deepcopy((lane.s.blobs, lane.s.versions, lane.s.fingerprints, lane.s.writes))
+    accepted = len(lane.a.accepted)
+    state = states(preview(lane, params, name, project_runs=json.dumps({name: entry})))[name]
+    assert len(lane.a.accepted) == accepted
+    assert (lane.s.blobs, lane.s.versions, lane.s.fingerprints, lane.s.writes) == before
+    response = run(lane, params, name, **fields)
+    assert state["admission_checked"]
+    assert state["admission"]["error"] == response.json().get("error")
+    assert state["admission"]["status_code"] == (200 if response.status_code == 202 else response.status_code)
+    return state, response
+
+
+@pytest.mark.parametrize("phase", [None, "initial", "background"])
+def test_sip_r5_catalog_solve_context_parity(lane, catalog_proposal, phase):
+    a = catalog_proposal.a
+    context = {key: value for key, value in a.solve_context.items() if key != "phase"}
+    if phase is not None:
+        context["phase"] = phase
+    state, response = extra_field_parity(lane, a.params, "solar-solve-proposal", solve_context=context)
+    if phase == "background":
+        assert not state["runnable"]
+        refusal(response, "INITIAL_SOLVE_REQUIRED", message="Canonical Solar request was refused.")
+    else:
+        assert state["runnable"] and response.status_code == 202
+        bound = a.accepted[-1][-1]["execution_context"]["solve_binding"]
+        assert bound["frame_id"] == context["frame_ref"] and bound["phase"] == "initial"
+    state, response = extra_field_parity(lane, a.params, "solar-solve-proposal")
+    assert not state["runnable"]
+    refusal(response, "INVALID_SOLVE_BINDING", message="Canonical Solar request was refused.")
+
+
+def test_sip_r5_catalog_proposal_job_parity(lane, catalog_proposal, monkeypatch):
+    import test_w1c_solve_proposal as proposals
+    import test_w1c_commit_solve as commits
+    a = proposals.world.__wrapped__(catalog_proposal.a, catalog_proposal.case, monkeypatch)
+    a = commits.world.__wrapped__(a, monkeypatch)
+    state, response = extra_field_parity(lane, a.params, "solar-commit-solve",
+                                         proposal_job_id=a.proposal_id)
+    assert state["runnable"] and response.status_code == 202
+    assert a.accepted[-1][-1]["execution_context"]["trusted_proposal"] == a.frozen
+    state, response = extra_field_parity(lane, a.params, "solar-commit-solve")
+    assert not state["runnable"]
+    refusal(response, "SOLVE_PROPOSAL_REQUIRED", message="Canonical Solar request was refused.")
+
+
+def test_sip_r5_catalog_extra_field_validation(lane, monkeypatch):
+    monkeypatch.setattr(policy, "project_tool_admission", policy_cases.r4.forbidden)
+    good = {"params": {}, "catalog_digest": "digest", "idempotency_key": "key"}
+    context = {"frame_ref": "frame", "expected_rev": 0}
+    proposal = "abcdef00-0000-4000-8000-000000000001"
+    bad = [
+        ("solar-settings", {"solve_context": context}),
+        ("solar-settings", {"proposal_job_id": proposal}),
+        ("solar-commit-solve", {"solve_context": context}),
+        ("solar-solve-proposal", {"proposal_job_id": proposal}),
+        ("solar-solve-proposal", {"solve_context": context, "extra": True}),
+        ("solar-commit-solve", {"proposal_job_id": proposal, "extra": True}),
+    ]
+    for value in (None, [], "context", {}, {**context, "extra": True},
+                  {**context, "frame_ref": ""}, {**context, "frame_ref": "x" * 257},
+                  {**context, "frame_ref": 1}, {**context, "expected_rev": True},
+                  {**context, "expected_rev": -1}, {**context, "expected_rev": 1.5},
+                  {**context, "expected_rev": "0"}, {**context, "phase": "other"}):
+        bad.append(("solar-solve-proposal", {"solve_context": value}))
+    for value in (None, [], {}, True, 1, "", "not-a-uuid", proposal.upper(),
+                  proposal.replace("-", ""), " " + proposal, proposal + " "):
+        bad.append(("solar-commit-solve", {"proposal_job_id": value}))
+    for name, fields in bad:
+        response = preview(lane, name=name, project_runs=json.dumps({name: {**good, **fields}}))
+        assert response.status_code == 400
+        assert response.json()["error"]["message"] == "project_runs must contain valid project admission requests"
+    for name, fields in (("solar-solve-proposal", {"solve_context": context}),
+                         ("solar-commit-solve", {"proposal_job_id": proposal})):
+        text = json.dumps({name: {**good, **fields}})
+        assert catalog_route._project_requests(text + " " * (262144 - len(text)), {name},
+                                               str(lane.s.drawing))[name] == {
+            **good, **fields, "params": {"drawing_id": str(lane.s.drawing)}}
+        with pytest.raises(ValueError):
+            catalog_route._project_requests(text + " " * (262145 - len(text)), {name}, str(lane.s.drawing))
+    assert not lane.a.events
+
+
 def test_sip_r5_catalog_request_validation(lane, monkeypatch):
     monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
     monkeypatch.setattr(policy, "project_tool_admission", policy_cases.r4.forbidden)

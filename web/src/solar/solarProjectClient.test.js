@@ -44,6 +44,30 @@ function artifact(changes = {}) {
 }
 
 describe('project Solar transport and lifecycle', () => {
+  it('W1C6 previews carry the same optional solve and commit fields as run bodies', async () => {
+    const { client, fetchImpl, intent } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValue(response({ families: [] }))
+    for (const [tool, extra, wire] of [
+      ['solar-settings', {}, {}],
+      ['solar-solve-proposal', {}, {}],
+      ['solar-commit-solve', {}, {}],
+      ['solar-solve-proposal', { solveContext: { frame_ref: 'frame-1', expected_rev: 6 } },
+        { solve_context: { frame_ref: 'frame-1', expected_rev: 6 } }],
+      ['solar-solve-proposal', { solveContext: { frame_ref: 'frame-1', expected_rev: 6, phase: 'background' } },
+        { solve_context: { frame_ref: 'frame-1', expected_rev: 6, phase: 'background' } }],
+      ['solar-commit-solve', { proposalJobId: J }, { proposal_job_id: J }],
+    ]) {
+      const prepared = intent({ tool, ...extra })
+      expect((await client.catalog({ intents: [prepared] })).ok).toBe(true)
+      const entry = JSON.parse(new URL(url(fetchImpl)).searchParams.get('project_runs'))
+      expect(entry).toEqual({ [tool]: { params: prepared.params, catalog_digest: digest,
+        idempotency_key: 'request-1', ...wire } })
+      expect(init(fetchImpl).headers['X-Checkout-Capability']).toBe(token())
+      expect(url(fetchImpl)).not.toContain(token())
+      expect(init(fetchImpl)).not.toHaveProperty('body')
+    }
+  })
   it('W1C5 carries only tool-matched proposal transport fields and keeps checkout proof private', async () => {
     const { client, fetchImpl, intent } = setup(acquired())
     await client.acquireCheckout()

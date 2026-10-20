@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   prepareCatalogRunParams, createRunIntentState, createCatalogToolSnapshot,
   stageRunIntent, confirmRunIntent,
-  createRunSubmissionRequest,
+  createRunSubmissionRequest, projectSolarRequestExtras,
 } from './runIntent.js'
 
 const C = { tenantId: 't1', drawingId: 'd1', drawingVersion: 3 }
@@ -14,6 +14,21 @@ const T = (properties, capabilities = []) => ({
 const complete = { complete: true }
 
 describe('complete catalog submissions', () => {
+  it('W1C6 shares optional request field mapping between previews and run bodies', () => {
+    const solveContext = { frame_ref: 'frame-1', expected_rev: 0 }
+    const proposalJobId = '11111111-1111-4111-8111-111111111111'
+    for (const [tool, options, wire] of [
+      ['solar-settings', {}, {}],
+      ['solar-solve-proposal', {}, {}],
+      ['solar-commit-solve', {}, {}],
+      ['solar-solve-proposal', { solveContext }, { solve_context: solveContext }],
+      ['solar-commit-solve', { proposalJobId }, { proposal_job_id: proposalJobId }],
+    ]) {
+      expect(projectSolarRequestExtras(tool, options)).toEqual(wire)
+      expect(createRunSubmissionRequest(tool, {}, 'version', options).body)
+        .toEqual({ tool, params: {}, dwg: 'version', ...wire })
+    }
+  })
   it('W1C5 puts proposal references and solve context at the top level only for their tools', () => {
     const solveContext = { frame_ref: 'frame-1', expected_rev: 0, phase: 'background' }
     const proposalJobId = '11111111-1111-4111-8111-111111111111'
