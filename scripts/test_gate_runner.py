@@ -4105,7 +4105,7 @@ def test_web_walk_unit_is_one_mandatory_fixed_script_row():
         "walk/controlInventory.test.mjs", "walk/processTable.test.mjs",
         "walk/stackEnv.test.mjs", "walk/stackPorts.test.mjs", "walk/serverDiagnostics.test.mjs", "walk/memory.test.mjs",
         "walk/buildFlags.test.mjs", "walk/engineArtifacts.test.mjs",
-        "walk/report.test.mjs", "walk/walkSpecs.test.mjs", "e2e/walk/probes.test.mjs", "e2e/walk/stateRecipes.test.mjs", "e2e/walk/unsupported.test.mjs", "e2e/walk/lenses.test.mjs",
+        "walk/report.test.mjs", "walk/walkSpecs.test.mjs", "e2e/walk/collection.test.mjs", "e2e/walk/probes.test.mjs", "e2e/walk/stateRecipes.test.mjs", "e2e/walk/unsupported.test.mjs", "e2e/walk/lenses.test.mjs",
         "e2e/walk/uxMetrics.test.mjs",
         "e2e/walk/uxEvidence.test.mjs",
         "e2e/walk/uxProbe.test.mjs",

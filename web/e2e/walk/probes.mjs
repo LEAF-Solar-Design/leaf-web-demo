@@ -293,6 +293,9 @@ export function stateRecipe(entry, state) {
       : entry.kind === 'tool' && entry.source_id.startsWith('solar-') && state === 'ready' ? 'solar'
       : entry.kind === 'action' && actionRecord(entry).panel === 'solar-panels' ? 'solar' : 'cad'
   const steps = []
+  // A project context is a recipe requirement, regardless of feature kind.
+  // Open it after the drawing/surface setup so navigation cannot clear it.
+  const projectSteps = () => context.openProjectId ? [step('open-real-project')] : []
   if (entry.kind === 'control') {
     if (CENSUS_RECIPE_CONTROLS.includes(entry.id)) {
       const script = ['ribbon-script', 'choose-script', 'run-script'].includes(entry.source_id)
@@ -321,7 +324,7 @@ export function stateRecipe(entry, state) {
         if (state === 'nothing-to-undo' || state === 'nothing-to-redo' || state === 'nothing-edited') steps.push(step('fresh-history'))
         if (state === 'engine-busy') steps.push(step('hold-engine-edit'))
       }
-      return { context, steps }
+      return { context, steps: [...steps, ...projectSteps()] }
     }
     if (effect.target === 'signed-out-session') steps.push(step('fresh-sign-out-page'))
     steps.push(context.failedLoad
@@ -353,15 +356,16 @@ export function stateRecipe(entry, state) {
     if (effect.target === 'job-monitor') steps.push(step('job-monitor-collapsed'))
     if (effect.target === 'viewer-overview-pan') steps.push(step('overview-pan-state'))
     if (effect.target === 'drawing-overview-expanded') steps.push(step('overview-expanded-state'))
-    return { context, steps }
+    return { context, steps: [...steps, ...projectSteps()] }
   }
-  if (surface === 'sheets') return { context, steps: [step('navigate', { url: '/sheets' })] }
+  if (surface === 'sheets') return { context, steps: [step('navigate', { url: '/sheets' }), ...projectSteps()] }
   if (state === 'no-drawing' && entry.kind === 'action') {
     return { context, steps: [
       step('open-failed-drawing', { url: `/app?surface=${surface}&drawing=missing.invalid` }),
       ...(['engine:undo', 'engine:redo', 'engine:repeat'].includes(entry.source_id) ? []
         : [step('failed-drawing-ribbon-tab', { name: actionTab(actionRecord(entry)) })]),
       ...(surface === 'solar' ? [step('require-solar-document')] : []),
+      ...projectSteps(),
     ] }
   }
   if (state === 'engine-busy') steps.push(step('prepare-engine-transport'))
@@ -439,15 +443,13 @@ export function stateRecipe(entry, state) {
         : entry.source_id === 'bar:retry' && state === 'retry-history' ? 'fault-history' : null)
   if (faultKind) steps.push(step(faultKind, { redo: entry.source_id === 'redo' }))
   else if (['version-changing', 'mutations-blocked',
-    'read-only-entity', 'project-open', 'errors-present', 'result-owns-retry'].includes(state)
+    'read-only-entity', 'errors-present', 'result-owns-retry'].includes(state)
     || state.startsWith('retry-')) {
     const routeError = entry.kind === 'action' && (
       entry.source_id === 'bar:escape' && state === 'errors-present'
       || entry.source_id === 'bar:retry' && state === 'retry-route')
     steps.push(step('require-local-state', { state, context, ...(routeError ? {
       reason: 'route errors are absorbed into local suggestions by api.js nlPrompt (transport failures and non-401 HTTP errors); routeErr is not reachable through a real fault',
-    } : entry.kind === 'action' && entry.source_id === 'bar:escape' && state === 'project-open' ? {
-      reason: 'the isolated walk stack runs without Postgres, so the platform router (/api/orgs, /api/projects) is not mounted; project-open needs a platform-enabled stack',
     } : {}) }))
   }
   if (entry.kind === 'surface') steps.push(step('require-surface-context', { surface, context }))
@@ -457,7 +459,7 @@ export function stateRecipe(entry, state) {
   if (effect.target === 'viewer-zoom-out') steps.push(step('zoom-inside-extents'))
   // LINE commands and policy reloads can close overflow or change the tab.
   if (entry.kind === 'tool') steps.push(step('catalog-tool', { name: entry.source_id }))
-  return { context, steps }
+  return { context, steps: [...steps, ...projectSteps()] }
 }
 
 export function effectAssertion(entry, state) {
@@ -480,5 +482,6 @@ export function resolveProbe(entry, state) {
     certification: ['unsupported_local', 'staging'].includes(entry.certify)
       ? { result: entry.certify, reason: entry.certify_reason } : null,
     setup: stateRecipe(entry, state), locator: locatorRecipe(entry, state), assertion,
+    ...(entry.state_contexts?.[state]?.openProjectId ? { workerOptions: { walkPostgres: true } } : {}),
   }
 }

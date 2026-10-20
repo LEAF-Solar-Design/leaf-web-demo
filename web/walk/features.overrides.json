@@ -2411,7 +2411,7 @@
         "route-open": {"route": {"tool": "count-by-layer"}},
         "errors-present": {"routeErr": "failed"},
         "selection-present": {"selectedHandle": "one"},
-        "project-open": {"openProjectId": "walk-project"}
+        "project-open": {"openProjectId": "walk-project", "walkPostgres": true}
       }
     },
     "surface": {

@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { prepareProductionBundle, startSameOriginProxy } from './sameOriginProxy.mjs'
 import { createStackDatabase, dropStaleStackDatabases, prepareStackDatabase } from './pgStack.mjs'
+import { resolvePostgresBinaries, startEphemeralPostgres } from './pgEphemeral.mjs'
 import { readProcessTable, measureWithRetry } from './processTable.mjs'
 import { availableMemory } from './memory.mjs'
 
@@ -351,13 +352,19 @@ process.once('SIGINT', () => { void stopAll('SIGINT') })
 process.once('SIGTERM', () => { void stopAll('SIGTERM') })
 process.on('beforeExit', () => { for (const state of running) void state.stop().catch((error) => { console.error(error); process.exitCode = 1 }) })
 
-export async function startStack({ slot, admission = defaultAdmission, slots, databaseURL, harnessDatabaseURL, postgres, timeoutMs = 180000 } = {}) {
+export async function startStack({ slot, admission = defaultAdmission, slots, databaseURL, harnessDatabaseURL, postgres, timeoutMs = 180000, postgresServices = {} } = {}) {
   if (typeof admission !== 'function') throw new TypeError('admission must be a function')
-  if (postgres !== undefined && postgres !== false && postgres !== true && (!postgres || typeof postgres !== 'object' || Array.isArray(postgres))) throw new TypeError('postgres must be true or an object with adminUrl')
+  if (postgres !== undefined && postgres !== false && postgres !== true && postgres !== 'ephemeral' && (!postgres || typeof postgres !== 'object' || Array.isArray(postgres))) throw new TypeError('postgres must be true, ephemeral or an object with adminUrl')
   if (postgres && (databaseURL || harnessDatabaseURL)) throw new TypeError('postgres owns database authority; do not also pass databaseURL or harnessDatabaseURL')
+  // Injectable PostgreSQL boundaries let lifecycle tests exercise startStack
+  // on hosts without server binaries. Production uses the canonical helpers.
+  const pg = { resolveBinaries: resolvePostgresBinaries, start: startEphemeralPostgres,
+    solver: resolveStackSolver, create: createStackDatabase, prepare: prepareStackDatabase,
+    sweep: dropStaleStackDatabases, ...postgresServices }
+  if (postgres === 'ephemeral') await pg.resolveBinaries()
   // The canonical worker resolves its descriptor before it can claim a job.
   // Check its source before provisioning a database or launching any child.
-  const solverEnv = postgres ? await resolveStackSolver() : undefined
+  const solverEnv = postgres ? await pg.solver() : undefined
   // No root, build, listener or stack child exists before this per-launch hook.
   const answer = await admission({ slot, kind: 'walk_local' })
   const status = typeof answer === 'string' ? answer.toLowerCase() : String(answer?.status || answer?.decision || (answer?.admitted === true ? 'admitted' : '')).toLowerCase()
@@ -394,6 +401,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
       // Keep its root and lease registered until the drop succeeds, so a
       // transient admin failure can be retried through stop().
       if (state.database) await state.database.drop()
+      if (state.postgresServer) await state.postgresServer.stop()
       const record = metrics(state)
       if (state.root) {
         const temporary = join(state.root, 'metrics.json')
@@ -409,7 +417,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
       if (errors.length) throw new AggregateError(errors, 'Stack stopped with cleanup errors')
       return record
     })().catch((error) => {
-      if (state.database) stopping = undefined
+      if (state.database || state.postgresServer) stopping = undefined
       throw error
     })
     return stopping
@@ -425,14 +433,16 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
     }
     if (!existsSync(join(repo, 'harness', 'dist', 'scripts', 'serve.js'))) throw new Error('Missing prerequisite harness/dist/scripts/serve.js; compile the harness before running the stack fixture')
     if (postgres) {
-      const adminUrl = postgres === true ? undefined : postgres.adminUrl
-      await dropStaleStackDatabases({ adminUrl })
-      state.database = await createStackDatabase({ adminUrl, slot })
+      if (postgres === 'ephemeral') state.postgresServer = await pg.start({ slot })
+      const adminUrl = state.postgresServer?.adminUrl ?? (postgres === true ? undefined : postgres.adminUrl)
+      if (postgres !== 'ephemeral') await pg.sweep({ adminUrl })
+      state.database = await pg.create({ adminUrl, slot })
       databaseURL = harnessDatabaseURL = state.database.url
       // The canonical worker asserts the complete schema before its first
       // claim, so apply the platform's own migrations before launching it.
-      const schema = await prepareStackDatabase(databaseURL)
+      const schema = await pg.prepare(databaseURL)
       if (schema.database !== state.database.name || schema.ok !== true) throw new Error('Platform migrations did not prepare the private stack database')
+      if (state.postgresServer) state.postgres = { postgres: 'ephemeral', port: state.postgresServer.port, migrated: true }
     }
     const bundleDir = await prepareProductionBundle()
     state.root = await mkdtemp(join(tmpdir(), `leaf-walk-stack-${slot}-`))
@@ -476,7 +486,7 @@ export async function startStack({ slot, admission = defaultAdmission, slots, da
     for (const role of ['web', 'proxy']) state.proxies.push(await startSameOriginProxy({ port: state.ports[role], appPort: state.ports.app, bundleDir }))
     if (state.closed || (await Promise.all(Object.values(state.ports).map(portListening))).some((open) => !open)) throw new Error('Stack lost a listener before boot completed')
     state.bootSeconds = (performance.now() - start) / 1000
-    return { baseURL: `http://127.0.0.1:${state.ports.proxy}`, ports: state.ports, pids: state.pids, root: state.root, env, ...(state.database ? { database: state.database } : {}), metricsPath: state.metricsPath, output: () => state.output, stop: state.stop }
+    return { baseURL: `http://127.0.0.1:${state.ports.proxy}`, ports: state.ports, pids: state.pids, root: state.root, env, ...(state.database ? { database: state.database } : {}), ...(state.postgres ? { postgres: state.postgres } : {}), metricsPath: state.metricsPath, output: () => state.output, stop: state.stop }
   } catch (error) {
     try { await state.stop() } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Stack boot failed and cleanup failed') }
     throw error

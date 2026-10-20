@@ -20,6 +20,14 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
+test('WL16 project-open declares a private PostgreSQL fixture while retaining the Escape oracle', () => {
+  const entry = entryFor('action:bar-escape')
+  assert.equal(entry.state_contexts['project-open'].openProjectId, 'walk-project')
+  assert.equal(entry.state_contexts['project-open'].walkPostgres, true)
+  assert.deepEqual(entry.expected_effect['project-open'], { kind: 'toggles', target: 'escape:project' })
+  assert.equal(entry.certify, 'both')
+})
+
 test('WL14 Find-submit is a distinct certified control with a search-result effect', () => {
   const entry = entryFor('control:find-drawing-submit')
   assert.equal(entry.source_id, 'find-drawing-submit')
@@ -914,7 +922,7 @@ test('state viewports remove desktop overlay cases while preserving phone and ot
   const fit = buildFeatureMap({ overrides: config }).entries.find((entry) => entry.id === 'action:fit')
   assert.deepEqual(fit.viewports, ['desktop'])
   assert.deepEqual(fit.state_viewports.ready, ['phone'])
-  const consumer = readFileSync(new URL('../e2e/walk/features.spec.mjs', import.meta.url), 'utf8')
+  const consumer = readFileSync(new URL('../e2e/walk/collection.mjs', import.meta.url), 'utf8')
   assert.ok(consumer.includes('entry.state_viewports?.[state] || entry.viewports'))
 })
 

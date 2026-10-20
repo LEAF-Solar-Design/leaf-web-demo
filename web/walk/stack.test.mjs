@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { allocatePorts, pidAlive, portListening, QueuedError, resolveStackSolver, SolverMissingError, StoppedError, startStack, waitForStackTeardown } from './stack.mjs'
 import { backendPaths, prepareProductionBundle, startSameOriginProxy } from './sameOriginProxy.mjs'
 import { PostgresUnavailableError, queryPostgres, stackAdminUrl } from './pgStack.mjs'
+import { resolvePostgresBinaries } from './pgEphemeral.mjs'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const firstSlot = Number(process.env.LEAF_WALK_TEST_SLOT || 0)
@@ -153,6 +154,66 @@ test('start and stop a real stack three times in a row without teardown errors',
   }
 })
 
+test('ephemeral PostgreSQL migrates before launch and drops before server stop, including failed boot', { timeout: 300000 }, async () => {
+  for (const failure of [null, 'create', 'migrate']) {
+    const calls = []
+    const server = { adminUrl: 'postgresql://postgres@127.0.0.1:25433/postgres', port: 25433,
+      stop: async () => { calls.push('stop-server') } }
+    const postgresServices = {
+      resolveBinaries: async () => { calls.push('resolve') },
+      solver: async () => undefined,
+      start: async ({ slot }) => { assert.equal(slot, firstSlot); calls.push('start-server'); return server },
+      sweep: async () => { assert.fail('fresh servers must not sweep stale databases') },
+      create: async ({ adminUrl, slot }) => {
+        assert.equal(adminUrl, server.adminUrl)
+        assert.equal(slot, firstSlot)
+        calls.push('create')
+        if (failure === 'create') throw new Error('fake create failure')
+        // PostgreSQL boundaries are faked; the real app still boots in its
+        // ordinary database-free mode so this proof needs no local binaries.
+        return { name: 'fake_walk_database', url: '', drop: async () => { calls.push('drop') } }
+      },
+      prepare: async (url) => {
+        assert.equal(url, '')
+        calls.push('migrate')
+        if (failure === 'migrate') throw new Error('fake migrate failure')
+        return { database: 'fake_walk_database', ok: true }
+      },
+    }
+    const boot = () => startStack({ slot: firstSlot, admission: () => ({ status: 'admitted', slots: 2 }),
+      postgres: 'ephemeral', postgresServices })
+    if (failure) {
+      await assert.rejects(boot(), new RegExp(`fake ${failure} failure`))
+    } else {
+      const stack = await boot()
+      try { assert.deepEqual(stack.postgres, { postgres: 'ephemeral', port: server.port, migrated: true }) }
+      finally { await stack.stop() }
+      await assertStopped(stack)
+      await stack.stop()
+    }
+    assert.deepEqual(calls, ['resolve', 'start-server', 'create', ...(failure === 'create' ? [] : ['migrate', 'drop']), 'stop-server'])
+  }
+})
+
+test('ephemeral stack uses real private PostgreSQL when binaries are installed', { timeout: 300000 }, async (t) => {
+  try { await resolvePostgresBinaries() } catch (error) {
+    if (error.code !== 'postgres_binaries_missing') throw error
+    t.skip(error.message)
+    return
+  }
+  const stack = await startStack({ slot: firstSlot, postgres: 'ephemeral', admission: () => ({ status: 'admitted', slots: 2 }) })
+  try {
+    assert.deepEqual(await queryPostgres(stack.database.url, 'SELECT current_database() AS name'), [{ name: stack.database.name }])
+    assert.equal(stack.postgres.migrated, true)
+    const org = expectStatus(await request(stack, '/api/orgs', { method: 'POST', json: { name: 'ephemeral walk' } }), 200).org
+    const project = expectStatus(await request(stack, '/api/projects', { method: 'POST',
+      headers: { 'X-Org-Id': org.org_id, 'X-Tenant-Id': org.org_id }, json: { name: 'private walk project' } }), 200).project
+    assert.ok(project.project_id)
+  } finally { await stack.stop() }
+  await assertStopped(stack)
+  assert.equal(await portListening(stack.postgres.port), false)
+})
+
 test('queued/stopped admission and zero slots cannot allocate or launch', async () => {
   const ports = await allocatePorts(firstSlot)
   const before = (await readdir(tmpdir())).filter((name) => name.startsWith(`leaf-walk-stack-${firstSlot}-`)).sort()
@@ -181,7 +242,8 @@ test('missing solver fails closed before database creation or launch', { timeout
   // Use a slot outside the database helper tests so their parallel CREATE and
   // DROP operations cannot change this preflight's catalog comparison.
   const slot = 474
-  const catalog = () => queryPostgres(adminUrl, "SELECT datname FROM pg_database WHERE starts_with(datname, %s) ORDER BY datname", [`leaf_walk_${slot}_`])
+  const catalog = () => process.env.LEAF_WALK_PG_ADMIN_URL || process.env.LEAF_GATE_DATABASE_URL
+    ? queryPostgres(adminUrl, "SELECT datname FROM pg_database WHERE starts_with(datname, %s) ORDER BY datname", [`leaf_walk_${slot}_`]) : []
   let admissions = 0
   try {
     await mkdir(empty)
@@ -491,6 +553,10 @@ test('two simultaneous real stacks isolate public API state and leave metrics wi
 })
 
 test('two PostgreSQL-backed stacks isolate projects and run authored work', { timeout: 600000 }, async (t) => {
+  if (!process.env.LEAF_WALK_PG_ADMIN_URL && !process.env.LEAF_GATE_DATABASE_URL) {
+    t.skip('Existing-server proof requires LEAF_WALK_PG_ADMIN_URL or LEAF_GATE_DATABASE_URL; ephemeral binaries are covered separately')
+    return
+  }
   const adminUrl = stackAdminUrl(process.env.LEAF_WALK_PG_ADMIN_URL || process.env.LEAF_GATE_DATABASE_URL || 'postgresql://leaf@127.0.0.1:25432/postgres')
   const stacks = []
   const unsupported = []
@@ -531,7 +597,7 @@ test('two PostgreSQL-backed stacks isolate projects and run authored work', { ti
       assert.equal(ready.dependencies.worker.required, true)
     }
 
-    const org = expectStatus(await request(a, '/api/orgs', { method: 'POST', json: { name: 'walk PostgreSQL ' + randomUUID(), tier: 'hosted_pro' } }), 200).org
+    const org = expectStatus(await request(a, '/api/orgs', { method: 'POST', json: { name: 'walk PostgreSQL ' + randomUUID() } }), 200).org
     const headers = { 'X-Org-Id': org.org_id, 'X-Tenant-Id': org.org_id }
     let project
     await t.test('project created through the public API on A is absent on B', async () => {

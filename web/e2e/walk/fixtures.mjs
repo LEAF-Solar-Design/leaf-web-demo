@@ -156,20 +156,35 @@ export async function previewVersion(probe, runtime, assertions = expect, worksp
 
 export const test = base.extend({
   firstRun: [false, { option: true }],
+  walkPostgres: [false, { option: true, scope: 'worker' }],
   workerFacts: [async ({}, use) => {
     await use({ engineMounted: undefined })
   }, { scope: 'worker' }],
-  workerStack: [async ({}, use, workerInfo) => {
+  workerStack: [async ({ walkPostgres, workerFacts }, use, workerInfo) => {
     let stack
     let bootError
     let witness
     try {
       // workerIndex also distinguishes replacement workers after a failure.
       try {
-        stack = await startStack({ slot: workerInfo.workerIndex, slots: workerInfo.config.workers })
+        workerFacts.walkPostgres = walkPostgres
+        const options = { slot: workerInfo.workerIndex, slots: workerInfo.config.workers }
+        try {
+          stack = await startStack({ ...options, ...(walkPostgres ? { postgres: 'ephemeral' } : {}) })
+        } catch (error) {
+          if (!walkPostgres || !['postgres_binaries_missing', 'SOLVER_MISSING'].includes(error.code)) throw error
+          // Keep the ordinary stack available so runProbe can attach a normal
+          // UNAVAILABLE result for project states without crashing the worker.
+          workerFacts.postgresUnavailableReason = error.code === 'SOLVER_MISSING' ? 'autofill_solver_missing' : error.code
+          workerFacts.postgresDiagnostic = error.message
+          stack = await startStack(options)
+        }
         const bootTimeMs = Date.now()
         const readiness = JSON.parse(await readFile(join(stack.root, 'ready.json'), 'utf8'))
-        witness = { ready: true, instance: stackInstanceRef(stack.root, readiness.launcher_pid, bootTimeMs) }
+        witness = { ready: true, instance: stackInstanceRef(stack.root, readiness.launcher_pid, bootTimeMs),
+          ...stack.postgres, ...(workerFacts.postgresUnavailableReason ? {
+            postgres: 'unavailable', reason: workerFacts.postgresUnavailableReason, diagnostic: workerFacts.postgresDiagnostic,
+          } : {}) }
       } catch (error) {
         bootError = error.code === 'QUEUED' ? new Error(`QUEUED: ${error.message}`, { cause: error }) : error
       }
@@ -1568,7 +1583,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
   'properties-state', 'properties-section-state', 'properties-close-state', 'layer-visible-state',
   'job-monitor-collapsed', 'overview-expanded-state', 'overview-pan-state', 'open-start',
-  'open-escape-owner', 'find-submit-state',
+  'open-escape-owner', 'find-submit-state', 'open-real-project',
   'open-history', 'slash-menu', 'open-route', 'catalog-tool', 'foreign-checkout', 'private-policy',
   'create-line', 'hold-engine-edit', 'start-pending-run', 'require-authoring-off', 'fresh-history',
   'undo-edit', 'preview-version', 'zoom-before-fit', 'require-engine-state', 'crash-engine-worker',
@@ -1652,6 +1667,10 @@ export function requireSeededSolarReady(probe, catalog) {
   }
 }
 export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailability = true) {
+  if (probe.setup?.context?.openProjectId) {
+    if (workerFacts.postgresUnavailableReason) return workerFacts.postgresUnavailableReason
+    if (workerFacts.walkPostgres !== true) return 'walk_postgres_required'
+  }
   if (UI_UNREACHABLE_STATES.has(probe.state)) return VERSIONLESS_DRAWING_REASON
   const offlineSolar = probe.setup.steps.find((recipe) => recipe.kind === 'require-local-state'
     && /^(needs_live_sizing|cloud_service_offline|ground_physical_state_required):/.test(recipe.reason || ''))
@@ -2411,6 +2430,9 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       }
       return
     }
+    case 'open-real-project':
+      await setupRealProject(runtime, assertions)
+      return
     case 'require-local-state':
       // No synthetic React state, mocked response or silent ready-state
       // fallback may stand in for a registry context. Keep this coverage gap
@@ -2986,7 +3008,8 @@ export async function runProbe(probe, runtime) {
   const setupStartedAt = Date.now()
   let originalError
   try {
-    const initialReason = typeof UI_UNREACHABLE_STATES !== 'undefined' && UI_UNREACHABLE_STATES.has(probe.state)
+    const initialReason = (probe.setup?.context?.openProjectId
+      || typeof UI_UNREACHABLE_STATES !== 'undefined' && UI_UNREACHABLE_STATES.has(probe.state))
       && typeof unsupportedBeforeSetup === 'function'
       ? unsupportedBeforeSetup(probe, runtime.workerFacts) : null
     if (initialReason) {
@@ -2999,7 +3022,7 @@ export async function runProbe(probe, runtime) {
     if (typeof authorAvailability === 'function') await authorAvailability(probe, runtime)
     // Source-extracted fake runners may omit module dependencies.
     const reason = typeof unsupportedBeforeSetup === 'function'
-      ? unsupportedBeforeSetup(probe, { engineMounted: runtime.workerFacts.engineMounted,
+      ? unsupportedBeforeSetup(probe, { ...runtime.workerFacts, engineMounted: runtime.workerFacts.engineMounted,
         engineUnavailableReason: runtime.workerFacts.engineUnavailableReason,
         buildFlags: runtime.workerFacts.buildFlags, catalog: runtime.workerFacts.catalog }, false) : null
     if (reason) {

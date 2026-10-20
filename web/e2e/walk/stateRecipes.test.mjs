@@ -831,7 +831,8 @@ test('project Escape setup uses bounded org/project API calls and restores persi
   runtime.page.request.post = async (path, options) => { name = options.data.name; return post(path, options) }
   runtime.page.locator = (selector) => selector === '.workspace-summary' ? { get text() { return name } } : { countValue: 0 }
   const assertions = (value) => ({ ...faultAssertions(value), toHaveText: async (expected) => assert.equal(value.text, expected) })
-  await setupRealProject(runtime, assertions)
+  const probe = resolveProbe(buildFeatureMap().entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open')
+  await setupStep(probe, runtime, probe.setup.steps.at(-1), assertions)
   assert.equal(runtime.evidence.escapeProject.projectId, 'project')
   assert.deepEqual(events.slice(0, 4), ['/api/orgs', '/api/projects', ['storage', 'org'], 'reload'])
   assert.ok(events.includes('open-project'))

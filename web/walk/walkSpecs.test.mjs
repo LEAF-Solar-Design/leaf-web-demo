@@ -49,7 +49,7 @@ function matchesSweep(name) {
 
 test('the default walk match is the frozen sweep list', () => {
   assert.deepEqual(SWEEP_SPECS, [
-    'features.spec.mjs', 'control-inventory.spec.mjs', 'journeys/**/*.spec.mjs',
+    'features.spec.mjs', 'features-postgres.spec.mjs', 'control-inventory.spec.mjs', 'journeys/**/*.spec.mjs',
   ])
   assert.ok(Object.isFrozen(SWEEP_SPECS))
   assert.equal(walkTestMatch({}), SWEEP_SPECS)

@@ -424,19 +424,23 @@ test('C1 reachable faults replace only their matching unsupported declarations',
     assert.match(unsupportedBeforeSetup(probe), /no public fixture recipe/)
   }
 })
-test('project-open declares the isolated stack platform router limitation', async () => {
-  const reason = 'the isolated walk stack runs without Postgres, so the platform router (/api/orgs, /api/projects) is not mounted; project-open needs a platform-enabled stack'
+test('project-open opts into a project-backed PostgreSQL recipe and reports missing binaries', async () => {
   const probe = resolveProbe(map.entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open')
   const recipe = probe.setup.steps.at(-1)
-  assert.equal(recipe.kind, 'require-local-state')
-  assert.equal(recipe.reason, reason)
-  assert.equal(unsupportedBeforeSetup(probe), reason)
-  assert.ok(probe.setup.steps.every((step) => step.kind !== 'open-real-project'))
-  const evidence = {}
-  await assert.rejects(setupStep(probe, {
-    page: {}, evidence, testInfo: { attach: async () => {} },
-  }, recipe), (error) => error instanceof UnsupportedLocalError && error.reason === reason)
-  assert.equal(evidence.result.reason, reason)
+  assert.deepEqual(recipe, { kind: 'open-real-project' })
+  assert.deepEqual(probe.workerOptions, { walkPostgres: true })
+  assert.equal(unsupportedBeforeSetup(probe), 'walk_postgres_required')
+  assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true }), null)
+  assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true,
+    postgresUnavailableReason: 'postgres_binaries_missing' }), 'postgres_binaries_missing')
+  assert.ok(probe.setup.steps.every((step) => step.kind !== 'require-local-state'))
+  const ordinary = resolveProbe(map.entries.find((entry) => entry.id === 'action:bar-escape'), 'ready')
+  assert.equal(ordinary.workerOptions, undefined)
+  const other = structuredClone(map.entries.find((entry) => entry.id === 'control:find-drawing-submit'))
+  other.state_contexts.ready.openProjectId = 'requested-project'
+  const generic = resolveProbe(other, 'ready')
+  assert.deepEqual(generic.workerOptions, { walkPostgres: true })
+  assert.deepEqual(generic.setup.steps.at(-1), { kind: 'open-real-project' })
 })
 
 test('route-error probes declare the real nlPrompt fallback limitation', async () => {
@@ -718,6 +722,11 @@ test('the map omits the versionless state while its before-setup guard remains f
   for (const kind of ['action', 'tool', 'control', 'tab', 'surface', 'drawer']) {
     // The declaration must not inspect recipes or query catalog/engine availability.
     assert.equal(unsupportedBeforeSetup({ kind, state: 'no-versioned-drawing' }), VERSIONLESS_DRAWING_REASON)
+    for (const setup of [null, { steps: [] }, { steps: [], context: {} }]) {
+      assert.equal(unsupportedBeforeSetup({ kind, state: 'no-versioned-drawing', setup }, {
+        walkPostgres: true, postgresUnavailableReason: 'postgres_binaries_missing',
+      }), VERSIONLESS_DRAWING_REASON)
+    }
   }
   for (const id of ['action:history', 'action:undo', 'action:redo']) {
     assert.equal(unsupportedBeforeSetup(resolveProbe(map.entries.find((entry) => entry.id === id), 'ready')), null)

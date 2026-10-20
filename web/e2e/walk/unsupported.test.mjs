@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { HANDLED_SETUP_KINDS, ENGINE_SETUP_KINDS, unsupportedBeforeSetup,
   UnsupportedLocalError, setupStep, TOOL_ARM_EFFECT_KINDS, workerCatalog,
   toolAvailabilityEvidence, catalogSolarNeedsDrawing, readWalkBuildFlags, CATALOG_SOLAR_FLAG_REASON, requireSeededSolarReady } from './fixtures.mjs'
@@ -21,10 +22,69 @@ const evidenceFixture = new AsyncFunction('workerFacts', 'use', 'testInfo', sour
   source.indexOf('walkEvidence: [async ({ workerFacts }, use, testInfo) => {')
     + 'walkEvidence: [async ({ workerFacts }, use, testInfo) => {'.length,
   source.indexOf('}, { auto: true }]')))
+const workerMarker = 'workerStack: [async ({ walkPostgres, workerFacts }, use, workerInfo) => {'
+const workerStart = source.indexOf(workerMarker) + workerMarker.length
+const workerFixture = new AsyncFunction('walkPostgres', 'workerFacts', 'use', 'workerInfo',
+  'startStack', 'readFile', 'join', 'stackInstanceRef',
+  source.slice(workerStart, source.indexOf("}, { scope: 'worker', timeout: 300_000 }]", workerStart)))
 const probeFor = (steps) => ({ featureId: 'action:unit', kind: 'action', state: 'unit-state',
   certify: 'local', setup: { context: { required: true }, steps }, locator: {},
   assertion: { assertionId: 'unit/effect', kind: 'renders' } })
 const engineReason = 'The production bundle has no mounted browser editing engine'
+
+test('worker PostgreSQL opt-in forwards ephemeral mode, records migration evidence and always stops', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open')
+  for (const mode of [false, true, 'postgres_binaries_missing', 'SOLVER_MISSING']) {
+    const reason = typeof mode === 'string'
+      ? mode === 'SOLVER_MISSING' ? 'autofill_solver_missing' : mode : undefined
+    const diagnostic = mode === 'SOLVER_MISSING' ? 'searched fake solver checkout' : 'searched fake binaries'
+    const facts = {}, calls = []
+    let stops = 0
+    let used
+    const stack = { root: '/private-stack', stop: async () => { stops++ },
+      ...(mode === true ? { postgres: { postgres: 'ephemeral', port: 25433, migrated: true } } : {}) }
+    await workerFixture(mode !== false, facts, async (value) => { used = value },
+      { workerIndex: 7, config: { workers: 2 } }, async (options) => {
+        calls.push(options)
+        if (reason && options.postgres) throw Object.assign(new Error(diagnostic), { code: mode })
+        return stack
+      }, async () => JSON.stringify({ launcher_pid: 42 }), join, () => 'instance')
+    assert.equal(stops, 1)
+    assert.equal(used.bootError, undefined)
+    assert.deepEqual(calls[0], { slot: 7, slots: 2, ...(mode !== false ? { postgres: 'ephemeral' } : {}) })
+    assert.equal(facts.walkPostgres, mode !== false)
+    if (mode === true) assert.deepEqual(used.witness, { ready: true, instance: 'instance', postgres: 'ephemeral', port: 25433, migrated: true })
+    if (reason) {
+      assert.deepEqual(calls, [{ slot: 7, slots: 2, postgres: 'ephemeral' }, { slot: 7, slots: 2 }])
+      assert.equal(used.stack, stack)
+      assert.equal(facts.postgresUnavailableReason, reason)
+      assert.equal(facts.postgresDiagnostic, diagnostic)
+      assert.deepEqual(used.witness, { ready: true, instance: 'instance', postgres: 'unavailable', reason, diagnostic })
+      assert.equal(unsupportedBeforeSetup(probe, facts), reason)
+    } else {
+      assert.equal(calls.length, 1)
+      assert.equal(facts.postgresUnavailableReason, undefined)
+      assert.equal(unsupportedBeforeSetup(probe, facts), mode ? null : 'walk_postgres_required')
+    }
+  }
+})
+
+test('worker boot errors outside PostgreSQL prerequisites do not fall back', async () => {
+  for (const [walkPostgres, code] of [[false, 'SOLVER_MISSING'], [false, 'postgres_binaries_missing'], [true, 'UNEXPECTED_BOOT_ERROR']]) {
+    const error = Object.assign(new Error('boot failed'), { code })
+    const facts = {}, calls = []
+    let used
+    await workerFixture(walkPostgres, facts, async (value) => { used = value },
+      { workerIndex: 7, config: { workers: 2 } }, async (options) => {
+        calls.push(options)
+        throw error
+      }, async () => assert.fail('failed boot must not read readiness'), join, () => 'instance')
+    assert.equal(calls.length, 1)
+    assert.equal(used.bootError, error)
+    assert.equal(used.stack, undefined)
+    assert.equal(facts.postgresUnavailableReason, undefined)
+  }
+})
 
 test('catalog Solar flag declarations require an effect and exact drawing-context evidence', async () => {
   const entries = buildFeatureMap().entries.filter((entry) => entry.kind === 'tool' && entry.source_id.startsWith('solar-'))
@@ -120,6 +180,27 @@ async function run(probe, facts, { precheck = unsupportedBeforeSetup, fallbackRe
   }, testInfo)
   return { result, runtime, log, attachments }
 }
+
+test('project probes report missing prerequisites before page work and run normally with walkPostgres', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open')
+  for (const [facts, reason] of [
+    [{}, 'walk_postgres_required'],
+    [{ walkPostgres: true, postgresUnavailableReason: 'postgres_binaries_missing' }, 'postgres_binaries_missing'],
+    [{ walkPostgres: true, postgresUnavailableReason: 'autofill_solver_missing' }, 'autofill_solver_missing'],
+  ]) {
+    const result = await run(probe, facts)
+    assert.deepEqual(result.log, [])
+    assert.equal(result.result.unsupported, true)
+    assert.equal(result.runtime.evidence.result.result, 'unsupported_local')
+    assert.equal(result.runtime.evidence.result.reason, reason)
+    assert.deepEqual(result.runtime.testInfo.annotations, [{ type: 'unsupported_local', description: reason }])
+    assert.equal(result.runtime.evidence.cleanupCompleted, true)
+    assert.ok(result.attachments.some((row) => row.name === 'walk-result'))
+  }
+  const normal = await run(probe, { walkPostgres: true })
+  assert.ok(normal.log.includes('open-real-project'))
+  assert.equal(normal.runtime.evidence.result.result, 'passed')
+})
 
 test('missing recipes are declared before any page work and retain the fallback reason', async () => {
   const recipe = { kind: 'require-local-state', state: 'unit-state', context: { required: true } }

@@ -5,10 +5,19 @@ import { buildFeatureMap } from './featureMap.mjs'
 import { readControlInventory, validateControlInventory, resolveCensus, censusFailure, controlKey, controlNameAttributes, registryCensusMappings } from './controlInventory.mjs'
 import { enumerateControls } from '../e2e/walk/controlCensus.mjs'
 import { PROFILE_RIBBON_TABS } from '../src/lib/ribbonTabs.data.js'
-import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, locatorRecipe, normalizedControlKey } from '../e2e/walk/probes.mjs'
+import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, locatorRecipe, normalizedControlKey, resolveProbe } from '../e2e/walk/probes.mjs'
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/control-census.${name}.json`, import.meta.url), 'utf8'))
 const resolve = (data, context) => resolveCensus(data.controls, data.derivedMappings, data.map, data.inventory, context)
+
+test('WL16 project Escape keeps its mapped control and requests only the project worker fixture', () => {
+  const entry = buildFeatureMap().entries.find((row) => row.id === 'action:bar-escape')
+  const project = resolveProbe(entry, 'project-open')
+  assert.deepEqual(project.locator, locatorRecipe(entry, 'project-open'))
+  assert.equal(project.locator.trigger, 'keyboard')
+  assert.deepEqual(project.workerOptions, { walkPostgres: true })
+  assert.equal(resolveProbe(entry, 'ready').workerOptions, undefined)
+})
 
 test('WL14 Find-submit resolves separately from the Find combobox without a baseline exemption', () => {
   const map = buildFeatureMap()

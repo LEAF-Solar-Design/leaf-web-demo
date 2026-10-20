@@ -1,5 +1,6 @@
 export const SWEEP_SPECS = Object.freeze([
   'features.spec.mjs',
+  'features-postgres.spec.mjs',
   'control-inventory.spec.mjs',
   'journeys/**/*.spec.mjs',
 ])

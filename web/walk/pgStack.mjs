@@ -159,7 +159,8 @@ export async function createStackDatabase({ adminUrl, slot } = {}) {
   databases.add(record)
   if (!exitCleanupInstalled) {
     exitCleanupInstalled = true
-    process.once('exit', () => { for (const database of databases) dropOnExit(database) })
+    // Databases must be dropped before an ephemeral server's exit hook stops it.
+    process.prependOnceListener('exit', () => { for (const database of databases) dropOnExit(database) })
   }
   let dropping
   let dropped = false

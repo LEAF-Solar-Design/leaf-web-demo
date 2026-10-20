@@ -37,6 +37,8 @@ export default defineConfig({
     ['json', { outputFile: './artifacts/walk/results.json' }],
   ],
   use: {
+    // Sweeps can opt a selected project probe into its own PostgreSQL worker.
+    walkPostgres: ['1', 'ephemeral'].includes(process.env.LEAF_WALK_POSTGRES),
     actionTimeout: 15000,
     navigationTimeout: 60000,
     browserName: 'chromium',
