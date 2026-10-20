@@ -91,7 +91,7 @@ export function LineChartCore({
       {title && !hideCard && <h2 style={{ fontSize: 16 }}>{title}</h2>}
       {accessibilityDescription && <p id={descriptionId} style={srOnly}>{accessibilityDescription}</p>}
       <ResponsiveContainer width="100%" height={height} minWidth={0}>
-        <RechartsLineChart data={data} accessibilityLayer>
+        <RechartsLineChart data={data} accessibilityLayer margin={{ top: 8, right: 40, bottom: 8, left: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={`var(--leaf-border, var(--border, ${colors.border}))`} />
           <XAxis dataKey={xKey} type={xAxisType} domain={xAxisDomain} ticks={xAxisTicks} allowDecimals={xAxisAllowDecimals}
             tick={{ fill: ink, fontSize: 12 }}
