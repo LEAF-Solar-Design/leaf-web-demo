@@ -1,12 +1,14 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 import SolarSettingsForm from './SolarSettingsForm.jsx'
-import ProjectSolarReadPanel, { projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
+import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
+import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
 const GRAPH_TOOLS = ['solar-panels-from-drawing', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
 const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']
+const SOLVE_TOOLS = ['solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const TOOL_NAME = new RegExp('^[a-z0-9][a-z0-9-]{0,127}$')
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
@@ -123,6 +125,7 @@ function sameScope(left, right) {
 
 function hostFor(row, props) {
   if (row?.name === 'solar-settings') return 'settings'
+  if (SOLVE_TOOLS.includes(row?.name)) return 'solve'
   if (STEP_TOOLS.includes(row?.name)) return props.StepEditor ? 'step' : 'host_unavailable'
   if (GRAPH_TOOLS.includes(row?.name)) return props.GraphForm ? 'graph' : 'host_unavailable'
   if (READ_TOOLS.includes(row?.name)) return 'read'
@@ -154,9 +157,24 @@ export default function ProjectSolarWorkspace(props) {
   const presentation = useRef({ row: openTool, retired: false, generation: 0 })
   const [, repaint] = useState(0)
   const notifications = useRef([])
+  const retainedProposal = useRef(null)
+  const [discardedProposal, discardProposal] = useState(null)
   const committed = scopeRef.current
   const replacing = !committed || !committed.alive || !sameScope(committed.owner, owner)
   const scope = replacing ? scopeToken(owner, props) : committed
+  function validProposal(receipt) {
+    try {
+      const meta = receipt?.meta
+      return receipt?.outcome?.state === 'proposal' && meta?.tool === 'solar-solve-proposal' &&
+        meta.authorityKey === owner.authorityKey && sameSolarDrawingBinding(meta.binding, owner.binding) &&
+        !meta.signal?.aborted && current(meta.isCurrent) && scope.isCurrent()
+    } catch { return false }
+  }
+  const incoming = validProposal(projectOutcome) ? projectOutcome : null
+  const retained = retainedProposal.current?.scope === scope ? retainedProposal.current.receipt : null
+  const proposalReceipt = projectPending?.tool === 'solar-solve-proposal' ? null
+    : incoming || (validProposal(retained) ? retained : null)
+  const proposal = proposalReceipt?.outcome?.jobId === discardedProposal ? null : proposalReceipt?.outcome
   const base = presentation.current
   let view = base
   if (replacing && committed) view = { ...view, retired: true, generation: view.generation + 1 }
@@ -164,6 +182,7 @@ export default function ProjectSolarWorkspace(props) {
   const generation = view.generation
   useLayoutEffect(() => {
     latest.current = props
+    retainedProposal.current = proposalReceipt ? { scope, receipt: proposalReceipt } : null
     if (scopeRef.current !== scope) {
       if (scopeRef.current) scopeRef.current.alive = false
       scopeRef.current = scope
@@ -219,12 +238,16 @@ export default function ProjectSolarWorkspace(props) {
   const canWrite = !busy && typeof newProjectIntentKey === 'function' && typeof props.onProjectSubmit === 'function'
   // A retained callback must still belong to this presentation at handoff. After handoff,
   // observation belongs only to the captured scope, never to this editor or its busy state.
-  function submit(prepared, options) {
+  function submit(prepared, options, runRow = selected) {
     const live = latest.current
     if (!canWrite || live.busy || typeof live.newProjectIntentKey !== 'function' || typeof live.onProjectSubmit !== 'function' ||
         presentation.current.retired || presentation.current.generation !== generation || live.openTool !== selected || !admitted(selected)) return undefined
     let handoff
     try {
+      if (!owner.rows.includes(runRow) || !admitted(runRow)) return undefined
+      if (runRow !== selected && !(runRow.name === 'solar-commit-solve' && selected?.name === 'solar-solve-proposal')) return undefined
+      if (runRow.name === 'solar-commit-solve' && (!proposal || !validProposal(proposalReceipt) ||
+          prepared?.proposalJobId !== proposal.jobId)) return undefined
       const fields = ['binding', 'authorityKey', 'tool', 'catalogDigest']
       if (!plain(prepared) || fields.some((key) => {
         const descriptor = Object.getOwnPropertyDescriptor(prepared, key)
@@ -233,7 +256,7 @@ export default function ProjectSolarWorkspace(props) {
           (options?.signal !== undefined && !(options.signal instanceof AbortSignal)) ||
           !sameSolarDrawingBinding(options?.binding, owner.binding) || options?.authorityKey !== owner.authorityKey ||
           !sameSolarDrawingBinding(prepared?.binding, owner.binding) || prepared?.authorityKey !== owner.authorityKey ||
-          prepared?.tool !== selected.name || prepared?.catalogDigest !== selected.catalog_digest ||
+          prepared?.tool !== runRow.name || prepared?.catalogDigest !== runRow.catalog_digest ||
           live.submissionSignal?.aborted || (live.submissionSignal !== undefined && !(live.submissionSignal instanceof AbortSignal))) return undefined
       const captured = owner.projectClient.captureCatalogScope()
       const guard = () => scope.isCurrent() && current(captured) && !submissionSignal?.aborted
@@ -253,6 +276,23 @@ export default function ProjectSolarWorkspace(props) {
   if (!reason && host === 'read') editor = <ProjectSolarReadPanel tool={selected} solarBinding={owner.binding}
     authorityKey={owner.authorityKey} projectClient={owner.projectClient} projectCatalog={owner.projectCatalog}
     isCurrent={scope.isCurrent} busy={busy} />
+  const solveRow = owner.rows.find((row) => row.name === 'solar-solve-proposal')
+  const commitRow = owner.rows.find((row) => row.name === 'solar-commit-solve')
+  if (!reason && host === 'solve') {
+    if (selected.name === 'solar-correct-string' || (selected.name === 'solar-solve-proposal' && !proposal)) {
+      editor = <ProjectSolarSchemaForm key={selected.name} {...shared} tool={selected} isCurrent={scope.isCurrent}
+        projectOutcome={projectOutcome} submissionSignal={submissionSignal} />
+    } else if (proposal) {
+      editor = <ProjectSolveReview {...shared} proposal={proposal} catalogDigest={commitRow?.catalog_digest}
+        isCurrent={scope.isCurrent} projectOutcome={projectOutcome} submissionSignal={submissionSignal}
+        onProjectSubmit={canWrite && commitRow ? (prepared, options) => submit(prepared, options, commitRow) : undefined}
+        onDiscard={() => discardProposal(proposal.jobId)} onSolveAgain={() => {
+          discardProposal(proposal.jobId)
+          if (solveRow) open(solveRow)
+        }} />
+    } else editor = <div><p role="status">{projectSolarWorkspaceReason('proposal_required')}</p>
+      {solveRow && <button type="button" disabled={busy} onClick={() => open(solveRow)}>{PROJECT_SOLAR_WORKSPACE_LABELS.run_solve_action}</button>}</div>
+  }
   const opening = !owner.reason && !!FlowRail && typeof props.onOpenTool === 'function'
   const inspectionRows = owner.rows.filter((row, index, rows) =>
     (GRAPH_TOOLS.includes(row.name) || READ_TOOLS.includes(row.name)) && rows.findIndex((item) => item.name === row.name) === index)

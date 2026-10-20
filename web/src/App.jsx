@@ -437,6 +437,7 @@ function StandaloneMaterialUpload({ token, pane, selection, getContext, onPolicy
 // (the first render, or a project closing) clears any override in its first effect, so an engine
 // document already parsed is applied after that clear instead of before it (R13-G2a read, finding 1).
 const PROJECT_SOLAR_SUPPORTED_TOOLS = new Set([
+  'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
   'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing',
   'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',

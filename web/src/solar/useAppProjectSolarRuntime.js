@@ -162,13 +162,13 @@ export function useAppProjectSolarRuntime(inputs) {
     run.meta = meta
     // An accepted job whose outcome is unknown may still commit: keep its lock (see staleRun).
     if (outcome.state === 'outcome_unknown') run.uncertain = true
-    const terminal = outcome.state === 'succeeded' || outcome.state === 'failed'
+    const terminal = ['succeeded', 'failed', 'proposal'].includes(outcome.state)
     // A queued terminal update may commit after App has already selected the output.
     const notificationCurrent = () => run.current() ||
       (m.transition?.outcome === outcome && transitionCurrent(m.transition))
     publish(notificationCurrent, previous => ({ projectPending: null, projectOutcome: { outcome, meta },
       projectRunMemory: terminal ? recordProjectSolarFlowRun(previous.projectRunMemory, meta, {
-        terminal: true, ok: outcome.state === 'succeeded',
+        terminal: true, ok: outcome.state === 'succeeded' || outcome.state === 'proposal',
         ...(outcome.reasonCode ? { reason_code: outcome.reasonCode } : {}),
       }) : previous.projectRunMemory,
       busy: outcome.state === 'succeeded', notice: outcome.state === 'outcome_unknown'
@@ -183,7 +183,7 @@ export function useAppProjectSolarRuntime(inputs) {
           projectSolarCompletion: meta,
         })).catch(completionFailed)
       } catch { completionFailed() }
-    } else if (outcome.state === 'failed' || outcome.state === 'refused') m.run = null
+    } else if (['failed', 'refused', 'proposal'].includes(outcome.state)) m.run = null
   }
   const a = inputs.projectSolar
   const binding = a?.scope?.binding

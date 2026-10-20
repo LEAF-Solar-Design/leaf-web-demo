@@ -27,6 +27,13 @@ const projectRailBinding = { kind: 'project', organization_id: '11111111-1111-11
   input_version_id: '44444444-4444-4444-4444-444444444444' }
 const projectRailNext = { ...projectRailBinding, input_version_id: '55555555-5555-5555-5555-555555555555' }
 const projectRailDigest = 'sha256:' + 'd'.repeat(64)
+const projectRailToolOrder = [
+  'solar-settings', 'solar-panels-from-drawing', 'solar-size-strings',
+  'solar-string-add', 'solar-string-multi-add',
+  'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
+  'solar-string-conductors', 'solar-assign-equipment', 'solar-homeruns', 'solar-feeders',
+  'solar-schedule', 'solar-string-data', 'solar-electrical-schedules', 'solar-cable-export',
+]
 function projectRailFamilies(availability = {}) {
   return [{ capabilities: [{ ...row('solar-assign-equipment', 70, 'Assign equipment',
     { ...READY, runnable: true, admission_checked: true, admission: { status_code: 200, error: null }, ...availability }),
@@ -171,7 +178,7 @@ it('R11-15 stale catalog provenance withdraws project actions resume and readine
   expect(h.props.onOpenStep).not.toHaveBeenCalled()
   view.rerender(<SolarFlowRail {...h.props} solarBinding={projectRailNext} />)
   expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('catalog_pending'))
-  expect(screen.queryAllByRole('button')).toHaveLength(13)
+  expect(screen.queryAllByRole('button').map((button) => button.id)).toEqual(projectRailToolOrder.map(solarFlowStepId))
   expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
   expect(screen.queryByText('Resume here')).toBeNull()
   h.real.setScope(projectRailNext, 'epoch-1')
@@ -194,14 +201,14 @@ it('R11-15 stale catalog provenance withdraws project actions resume and readine
     { ...h.props.projectCatalog, binding: projectRailBinding }, { ...h.props.projectCatalog, client: {} },
     { ...h.props.projectCatalog, isCurrent: () => false }]) {
     view.rerender(<SolarFlowRail {...h.props} projectCatalog={projectCatalog} />)
-    expect(screen.queryAllByRole('button')).toHaveLength(13)
-  expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
+    expect(screen.queryAllByRole('button').map((button) => button.id)).toEqual(projectRailToolOrder.map(solarFlowStepId))
+    expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
     expect(screen.queryByText('Resume here')).toBeNull()
     expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('catalog_pending'))
   }
   view.rerender(<SolarFlowRail {...h.props} />)
   await act(async () => { await h.real.acquireCheckout() })
-  expect(screen.queryAllByRole('button')).toHaveLength(13)
+  expect(screen.queryAllByRole('button').map((button) => button.id)).toEqual(projectRailToolOrder.map(solarFlowStepId))
   expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
   expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarFlowReason('catalog_pending'))
   expect(h.props.onOpenStep).toHaveBeenCalledTimes(1)
@@ -214,7 +221,7 @@ it('R11-29 a rail given only a project id is project mode and refuses without a 
   const legacy = { families: [{ capabilities: [legacyReady] }], familiesDrawingId: 'dwg-1', drawingId: 'dwg-1', onOpenStep }
   const view = render(<SolarFlowRail {...legacy} projectId={projectRailBinding.project_id} />)
   expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarRailReason('binding_invalid'))
-  expect(screen.queryAllByRole('button')).toHaveLength(13)
+  expect(screen.queryAllByRole('button').map((button) => button.id)).toEqual(projectRailToolOrder.map(solarFlowStepId))
   expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
   expect(screen.queryByText('Resume here')).toBeNull()
   expect(onOpenStep).not.toHaveBeenCalled()
@@ -227,7 +234,7 @@ it('R11-29 a rail given only a project id is project mode and refuses without a 
   expect(onOpenStep).toHaveBeenCalledTimes(1)
   view.rerender(<SolarFlowRail {...legacy} projectId={projectRailBinding.project_id} />)
   expect(screen.getByTestId('project-solar-flow-reason').textContent).toBe(projectSolarRailReason('binding_invalid'))
-  expect(screen.queryAllByRole('button')).toHaveLength(13)
+  expect(screen.queryAllByRole('button').map((button) => button.id)).toEqual(projectRailToolOrder.map(solarFlowStepId))
   expect(screen.queryAllByRole('button').every((button) => button.disabled)).toBe(true)
   expect(onOpenStep).toHaveBeenCalledTimes(1)
 })
@@ -1008,7 +1015,8 @@ describe('SolarStepEditor', () => {
 })
 
 const R13D_RAIL_NAMES = PROJECT_SOLAR_ROOFTOP_STAGES.flatMap((stage) => stage.capabilities)
-const R13D_CORE_LABELS = ['Settings', 'Panel import', 'Manual sizing', 'Single strings', 'Multiple strings', 'Conductors', 'Equipment']
+const R13D_CORE_LABELS = ['Settings', 'Panel import', 'Manual sizing', 'Single strings', 'Multiple strings',
+  'Solve', 'Commit proposal', 'Correct strings', 'Conductors', 'Equipment']
 function r13dRailRow(name, ready = false) {
   const index = R13D_RAIL_NAMES.indexOf(name)
   const candidate = { ...row(name, 999 - Math.max(index, 0), R13D_CORE_LABELS[index] || name,
@@ -1073,6 +1081,19 @@ function r13dAssertHandoff(h, name) {
   expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
 }
 
+it('W1C5 the project Strings stage opens solve, commit and correction in registry order', async () => {
+  const h = await r13dRailHarness()
+  render(<SolarFlowRail {...h.props} />)
+  const names = ['solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string']
+  expect(items().slice(5, 8).map(item => item.querySelector('button').id)).toEqual(names.map(solarFlowStepId))
+  for (const name of names) {
+    expect(r13dRailButton(name).disabled).toBe(false)
+    fireEvent.click(r13dRailButton(name))
+    expect(h.props.onOpenStep).toHaveBeenLastCalledWith(h.rows.find(row => row.name === name))
+  }
+  expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
 it('R13D-17 settings is the first reachable project step', async () => {
   const h = await r13dRailHarness()
   render(<SolarFlowRail {...h.props} />)
@@ -1125,8 +1146,9 @@ it('R13D-21 multiple string composition is reachable', async () => {
 it('R13D-22 conductors follow both string composers', async () => {
   const h = await r13dRailHarness()
   render(<R13DOpenHost h={h} />)
-  expect(items().slice(4, 7).map((item) => item.querySelector('button').id)).toEqual([
-    STRING_MULTI_ADD_TOOL, 'solar-string-conductors', 'solar-assign-equipment',
+  expect(items().slice(4, 10).map((item) => item.querySelector('button').id)).toEqual([
+    STRING_MULTI_ADD_TOOL, 'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
+    'solar-string-conductors', 'solar-assign-equipment',
   ].map(solarFlowStepId))
   fireEvent.click(r13dRailButton('solar-string-conductors'))
   await waitFor(() => expect(screen.getByLabelText('Select A1')).toBeTruthy())
@@ -1137,7 +1159,7 @@ it('R13D-22 conductors follow both string composers', async () => {
 it('R13D-23 equipment remains reachable after conductors', async () => {
   const h = await r13dRailHarness()
   render(<R13DOpenHost h={h} />)
-  expect(items()[6].querySelector('button')).toBe(r13dRailButton('solar-assign-equipment'))
+  expect(items()[9].querySelector('button')).toBe(r13dRailButton('solar-assign-equipment'))
   fireEvent.click(r13dRailButton('solar-assign-equipment'))
   await waitFor(() => expect(screen.getByTestId('project-solar-equipment-form').getAttribute('data-mode')).toBe('edit'))
   expect(screen.getByLabelText('Equipment')).toBeTruthy()
@@ -1166,7 +1188,7 @@ it('R13D-25 a missing stage stays visible with a sentence', async () => {
   const h = await r13dRailHarness(R13D_RAIL_NAMES.filter((name) => name !== 'solar-panels-from-drawing'))
   render(<SolarFlowRail {...h.props} />)
   const missing = r13dRailButton('solar-panels-from-drawing')
-  expect(items()).toHaveLength(13)
+  expect(items()).toHaveLength(16)
   expect(missing.disabled).toBe(true)
   expect(document.getElementById(missing.getAttribute('aria-describedby')).textContent).toBe(PROJECT_SOLAR_RAIL_REASONS.stage_missing)
   expect(r13dRailButton('solar-settings').disabled).toBe(false)
@@ -1189,7 +1211,7 @@ it('R13D-26 invalid or stale project scope retains disabled stages', async () =>
     [{ projectCatalog: { ...h.props.projectCatalog, isCurrent: () => { throw new Error('unreadable') } } }, 'catalog_pending'],
   ]) {
     view.rerender(<SolarFlowRail {...h.props} {...changes} />)
-    expect(items()).toHaveLength(13)
+    expect(items()).toHaveLength(16)
     for (const item of items()) {
       const open = item.querySelector('button')
       expect(open.disabled).toBe(true)
@@ -1208,7 +1230,7 @@ it('R13D-26 invalid or stale project scope retains disabled stages', async () =>
   expect(document.getElementById(r13dRailButton('solar-settings').getAttribute('aria-describedby')).textContent).toBe(PROJECT_SOLAR_RAIL_REASONS.form_unavailable)
   view.rerender(<SolarFlowRail {...h.props} />)
   await act(async () => { await h.real.acquireCheckout() })
-  expect(items()).toHaveLength(13)
+  expect(items()).toHaveLength(16)
   expect(items().every((item) => item.querySelector('button').disabled)).toBe(true)
   expect(h.props.onOpenStep).not.toHaveBeenCalled()
 })

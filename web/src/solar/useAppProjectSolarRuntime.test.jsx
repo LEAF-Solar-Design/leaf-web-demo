@@ -61,6 +61,42 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
+it('W1C5 releases a proposal run lock, preserves review, and starts commit as a new run', async () => {
+  const h = await setup({ toolName: 'solar-solve-proposal' })
+  expect(await h.submit()).toEqual(accepted)
+  await h.finish({ tool_name: 'solar-solve-proposal', output_version_id: null,
+    result: { schema: 'leaf.solar-solve-proposal.v1', candidate_sha256: 'a'.repeat(64), frame_id: 'frame-1',
+      phase: 'initial', candidate_summary: [], request_sha256: 'b'.repeat(64), response_sha256: 'c'.repeat(64),
+      execution_provenance: { schema: 'leaf.solar-solve-proposal.v1' } } })
+  expect(h.result.current.projectOutcome.outcome).toMatchObject({ state: 'proposal', jobId: J, outputVersionId: null })
+  expect(h.result.current.projectPending).toBeNull()
+  expect(h.result.current.busy).toBe(false)
+  expect(h.props.completedVersionRef.current).not.toHaveBeenCalled()
+  expect(h.ws.selectCanonicalVersion).not.toHaveBeenCalled()
+  const commit = { ...h.prepared, tool: 'solar-commit-solve', proposalJobId: J }
+  await h.update({ projectCatalog: { ...h.props.projectCatalog,
+    families: [{ capabilities: [h.tool, { name: commit.tool, catalog_digest: digest }] }] } })
+  const pendingCommit = deferred()
+  h.client.readJob.mockImplementation(() => pendingCommit.promise)
+  let answer
+  await act(async () => { answer = await h.result.current.onProjectSubmit(commit, h.options); await drain() })
+  expect(answer).toEqual(accepted)
+  expect(h.client.submitRun).toHaveBeenCalledTimes(2)
+  expect(h.client.submitRun.mock.calls[1][0]).toBe(commit)
+  expect(h.result.current.busy).toBe(true)
+  await act(async () => {
+    pendingCommit.resolve(response(job({ tool_name: 'solar-commit-solve' })))
+    await drain()
+  })
+  expect(h.result.current.projectOutcome.outcome).toMatchObject({ state: 'succeeded', outputVersionId: W })
+  const done = await h.complete()
+  expect(h.ws.selectCanonicalVersion).toHaveBeenCalledExactlyOnceWith(W)
+  await h.install()
+  expect(await done.promise).toBe(true)
+  expect(h.result.current.busy).toBe(false)
+  h.unmount()
+})
+
 async function setup({ strict = false, initialContext, hostEnabled = true, ready = true, toolName = T } = {}) {
   const ws = store({ orgId: O, openProjectId: P, canonicalVersionId: V, workspace: workspace() })
   ws.rehydrate = vi.fn(async () => { const value = workspace(); ws.change({ workspace: value }); return value })

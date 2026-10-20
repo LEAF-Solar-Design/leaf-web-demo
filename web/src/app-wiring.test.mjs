@@ -114,6 +114,14 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
     assert.equal(r13Find(n => n.type === 'CallExpression' && n.callee.name === name).length, 1, name)
   const supported = r13One(n => n.type === 'VariableDeclaration' && n.declarations.some(d => d.id.name === 'PROJECT_SOLAR_SUPPORTED_TOOLS'))
   assert.ok(r13Tree.program.body.includes(supported), 'supported tools are module-level')
+  const declaration = supported.declarations.find(d => d.id.name === 'PROJECT_SOLAR_SUPPORTED_TOOLS')
+  assert.deepEqual(declaration.init.arguments[0].elements.map(element => element.value), [
+    'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
+    'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
+    'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing',
+    'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
+    'solar-electrical-schedules', 'solar-cable-export',
+  ])
 })
 
 it('R13G2B-22 workspace stays in the existing Solar seat with one drawing owner', () => {

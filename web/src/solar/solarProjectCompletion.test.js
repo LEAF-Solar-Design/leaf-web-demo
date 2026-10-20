@@ -29,6 +29,38 @@ const fallback = { state: 'failed', jobId: J, outputVersionId: null, reasonCode:
   message: 'The server refused this solar tool' }
 
 describe('exact project Solar completion', () => {
+  it('W1C5 recognizes a scoped nonpublishing proposal and freezes only the review projection', () => {
+    const result = { schema: 'leaf.solar-solve-proposal.v1', candidate_sha256: 'a'.repeat(64),
+      frame_id: 'frame-1', phase: 'initial', candidate_summary: [{ panel_count: 12, endpoints: ['panel-1', 'panel-12'] }],
+      request_sha256: 'b'.repeat(64), response_sha256: 'c'.repeat(64),
+      execution_provenance: { schema: 'leaf.solar-solve-proposal.v1' }, private_payload: 'not retained' }
+    const proposal = () => read(job({ tool_name: 'solar-solve-proposal', result, output_version_id: null }), { tool: 'solar-solve-proposal' })
+    expect(proposal()).toEqual({ state: 'proposal', jobId: J, outputVersionId: null, reasonCode: null, message: null,
+      candidateSha256: 'a'.repeat(64), frameId: 'frame-1', phase: 'initial', summary: result.candidate_summary })
+    expect(Object.isFrozen(proposal().summary[0].endpoints)).toBe(true)
+    expect(JSON.stringify(proposal())).not.toContain('not retained')
+    for (const key of ['schema', 'candidate_sha256', 'frame_id', 'phase', 'candidate_summary',
+      'request_sha256', 'response_sha256', 'execution_provenance']) {
+      const saved = result[key]; delete result[key]
+      expect(proposal()).toEqual(unreadable)
+      result[key] = saved
+    }
+    result.candidate_summary[0].panel_count = 0
+    expect(proposal()).toEqual(unreadable)
+    result.candidate_summary[0].panel_count = 12
+    expect(read(job({ result, output_version_id: null }))).toEqual(unreadable)
+    expect(read(job({ tool_name: 'solar-solve-proposal', result, output_version_id: W }), { tool: 'solar-solve-proposal' })).toEqual(unreadable)
+    expect(read(job({ tool_name: 'solar-solve-proposal', org_id: X, result, output_version_id: null }), { tool: 'solar-solve-proposal' })).toEqual(unreadable)
+  })
+  it('W1C5 preserves commit refusal codes and keeps uncertain solve results locked', () => {
+    for (const code of ['SOLVE_PROPOSAL_STALE', 'SOLVE_PROPOSAL_NOT_FOUND', 'SOLVE_PROPOSAL_NOT_SUCCEEDED',
+      'SOLVE_PROPOSAL_MANIFEST_MISMATCH', 'SOLVE_PROPOSAL_EVIDENCE_INVALID']) {
+      expect(projectSolarRunFailure(code)).toMatchObject({ reasonCode: code.toLowerCase() })
+    }
+    expect(read(failed({ tool_name: 'solar-solve-proposal',
+      error: { error_code: 'GRAPH_JOB_FAILED', reason_code: 'SOLVE_OUTCOME_UNKNOWN', retryable: false } }),
+    { tool: 'solar-solve-proposal' })).toMatchObject({ state: 'outcome_unknown', jobId: J })
+  })
   it('R14D-08 test_cloud_completion_preserves_envelope_guards', () => {
     const cases = [
       ['CLOUD_AUTH_MISSING', SOLAR_SIZING_RUN_REASONS.grant_missing],

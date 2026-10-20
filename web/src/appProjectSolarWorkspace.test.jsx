@@ -359,6 +359,53 @@ it('R13G2B-14 unsupported Solar rows disable the legacy callback', async () => {
   expect(tool(h, 'solar-unknown')).toMatchObject({ disabled: true, reason: PROJECT_SOLAR_APP_REASONS.unsupported_form, onClick: undefined })
   await h.open('solar-unknown'); expect(h.runtime.openTool).toBeNull(); noLegacy(h)
 })
+
+it('W1C5 the project ribbon runs solve, reviews its candidate, then commits and recovers from refusal', async () => {
+  const h = await setup({ names: ['solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string'] })
+  await h.open('solar-solve-proposal')
+  fireEvent.change(screen.getByLabelText('Frame'), { target: { value: 'frame-1' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))
+  await waitFor(() => expect(h.client.submitRun).toHaveBeenCalledOnce())
+  expect(h.client.submitRun.mock.calls[0][0]).toMatchObject({ tool: 'solar-solve-proposal',
+    solveContext: { frame_ref: 'frame-1', phase: 'initial', expected_rev: 6 } })
+  await act(async () => {
+    h.job.resolve(response({ job_id: JOB, org_id: B.organization_id, project_id: B.project_id,
+      input_version_id: B.input_version_id, tool_name: 'solar-solve-proposal', status: 'complete',
+      execution_context: { schema: 'leaf.solar-project-graph-job.v1', drawing_id: B.drawing_id },
+      output_version_id: null, error: null, result: { schema: 'leaf.solar-solve-proposal.v1',
+        candidate_sha256: 'a'.repeat(64), frame_id: 'frame-1', phase: 'initial',
+        candidate_summary: [{ panel_count: 2, endpoints: ['p1', 'p2'] }],
+        request_sha256: 'b'.repeat(64), response_sha256: 'c'.repeat(64),
+        execution_provenance: { schema: 'leaf.solar-solve-proposal.v1' } } }))
+    await drain()
+  })
+  expect(h.runtime.busy).toBe(false)
+  expect(h.runtime.projectOutcome.outcome.state).toBe('proposal')
+  expect(screen.getByRole('region', { name: 'Solve proposal review' })).toBeInTheDocument()
+  expect(h.ws.selectCanonicalVersion).not.toHaveBeenCalled()
+  const commitJob = deferred()
+  h.client.readJob.mockImplementation(() => commitJob.promise)
+  fireEvent.click(screen.getByRole('button', { name: 'Commit proposal' }))
+  await waitFor(() => expect(h.client.submitRun).toHaveBeenCalledTimes(2))
+  expect(h.client.submitRun.mock.calls[1][0]).toMatchObject({ tool: 'solar-commit-solve', proposalJobId: JOB,
+    params: { drawing_id: B.drawing_id, expected_rev: 6 }, catalogDigest: D, idempotencyKey: 'intent-g2b' })
+  await act(async () => {
+    commitJob.resolve(response({ job_id: JOB, org_id: B.organization_id, project_id: B.project_id,
+      input_version_id: B.input_version_id, tool_name: 'solar-commit-solve', status: 'failed',
+      execution_context: { schema: 'leaf.solar-project-graph-job.v1', drawing_id: B.drawing_id },
+      result: null, output_version_id: null, error: { error_code: 'GRAPH_JOB_FAILED',
+        reason_code: 'SOLVE_PROPOSAL_STALE', retryable: false } }))
+    await drain()
+  })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Run solve again' })).toBeInTheDocument())
+  expect(h.view.container.textContent).toContain('solve_proposal_stale')
+  fireEvent.click(screen.getByRole('button', { name: 'Run solve again' }))
+  expect(screen.getByRole('button', { name: 'Run solve' })).toBeInTheDocument()
+  expect(screen.queryByRole('region', { name: 'Solve proposal review' })).toBeNull()
+  await h.open('solar-correct-string')
+  expect(screen.getByRole('form', { name: 'Correct strings' })).toBeInTheDocument()
+  noLegacy(h)
+})
 it('R13G2B-15 busy runtime supplies the frozen running reason', async () => {
   const h = await setup({ externalBusy: true })
   for (const row of h.rows) expect(tool(h, row.name)).toMatchObject({ disabled: true, reason: REASONS.running, onClick: undefined })

@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import ProjectSolarWorkspace from './ProjectSolarWorkspace.jsx'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
-import { PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
+import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 
 afterEach(cleanup)
@@ -123,6 +123,91 @@ function fixture(name = STEP[0], { code = null, realGraph = false, rows = null }
   return h
 }
 const last = (values) => values[values.length - 1]
+
+it('W1C5 mounts proposal review, keeps it through commit submission, and discards without writing', async () => {
+  const solve = Row('solar-solve-proposal'), commit = Row('solar-commit-solve')
+  const h = fixture(solve.name, { rows: [solve, commit] })
+  const receipt = { outcome: { state: 'proposal', jobId: JOB, candidateSha256: 'a'.repeat(64),
+    frameId: 'frame-1', phase: 'initial', summary: [] }, meta: {
+    binding: B, authorityKey: 'epoch-1', tool: solve.name, isCurrent: () => h.current } }
+  h.client.prepareRun.mockImplementation(request => ({ ...request, binding: B, authorityKey: 'epoch-1' }))
+  h.mount({ openTool: solve, projectOutcome: receipt })
+  fireEvent.click(screen.getByRole('button', { name: 'Commit proposal' }))
+  await waitFor(() => expect(h.submit).toHaveBeenCalledOnce())
+  expect(h.submit.mock.calls[0][0]).toMatchObject({ tool: commit.name, proposalJobId: JOB, catalogDigest: D })
+  h.update({ projectOutcome: null, busy: true })
+  expect(screen.getByRole('region', { name: 'Solve proposal review' })).toBeInTheDocument()
+  h.update({ busy: false })
+  fireEvent.click(screen.getByRole('button', { name: 'Discard' }))
+  expect(screen.queryByRole('region', { name: 'Solve proposal review' })).toBeNull()
+  expect(h.submit).toHaveBeenCalledOnce()
+})
+
+it.each(['solar-solve-proposal', 'solar-correct-string'])('W1C5 resets tool fields when switching away from %s', async (first) => {
+  const solve = Row('solar-solve-proposal'), correct = Row('solar-correct-string')
+  solve.params = { type: 'object', properties: {
+    grant_ref: { type: 'string' }, request: { type: 'object' },
+  }, required: ['grant_ref', 'request'] }
+  correct.params = { type: 'object', properties: {
+    memberships: { type: 'array', items: { type: 'object' } },
+  }, required: ['memberships'] }
+  const h = fixture(first, { rows: [solve, correct] })
+  h.client.prepareRun.mockImplementation(request => ({ ...request, binding: B, authorityKey: 'epoch-1' }))
+  h.mount()
+  const memberships = [{ string_ref: 's1', ordered_panel_refs: ['p1', 'p2'] }]
+  const editSolve = (frame, phase) => {
+    fireEvent.change(screen.getByLabelText('Grant ref'), { target: { value: 'grant-1' } })
+    fireEvent.change(screen.getByLabelText('Request'), { target: { value: '{"grid":{}}' } })
+    fireEvent.change(screen.getByLabelText('Frame'), { target: { value: frame } })
+    fireEvent.change(screen.getByLabelText('Phase'), { target: { value: phase === 'initial' ? '0' : '1' } })
+  }
+  const editCorrection = () => fireEvent.change(screen.getByLabelText('Memberships'), {
+    target: { value: JSON.stringify(memberships) },
+  })
+  if (first === solve.name) {
+    h.open(solve)
+    editSolve('old-frame', 'background')
+    h.open(correct)
+    expect(screen.getByLabelText('Memberships').value).toBe('')
+    editCorrection()
+    fireEvent.click(screen.getByRole('button', { name: 'Correct strings' }))
+    await waitFor(() => expect(h.submit).toHaveBeenCalledOnce())
+    expect(h.submit.mock.calls[0][0]).toMatchObject({ tool: correct.name })
+    expect(h.submit.mock.calls[0][0].params).toEqual({ memberships, drawing_id: B.drawing_id, expected_rev: 6 })
+    expect(h.submit.mock.calls[0][0]).not.toHaveProperty('solveContext')
+  } else {
+    // Seed an earlier solve draft so returning from correction also checks context reset.
+    h.open(solve)
+    editSolve('old-frame', 'background')
+    h.open(correct)
+    editCorrection()
+    h.open(solve)
+    expect(screen.getByLabelText('Grant ref').value).toBe('')
+    expect(screen.getByLabelText('Request').value).toBe('')
+    expect(screen.getByLabelText('Frame').value).toBe('')
+    expect(screen.getByLabelText('Phase').value).toBe('0')
+    expect(screen.getByRole('button', { name: 'Run solve' }).disabled).toBe(true)
+    editSolve('new-frame', 'initial')
+    fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))
+    await waitFor(() => expect(h.submit).toHaveBeenCalledOnce())
+    expect(h.submit.mock.calls[0][0]).toMatchObject({ tool: solve.name })
+    expect(h.submit.mock.calls[0][0].params).toEqual({ grant_ref: 'grant-1', request: { grid: {} }, drawing_id: B.drawing_id })
+    expect(h.submit.mock.calls[0][0].solveContext).toEqual({ frame_ref: 'new-frame', phase: 'initial', expected_rev: 6 })
+  }
+  expect(h.client.prepareRun).toHaveBeenCalledOnce()
+})
+
+it('W1C5 rejects a foreign proposal and offers solve when commit has no reviewed candidate', () => {
+  const solve = Row('solar-solve-proposal'), commit = Row('solar-commit-solve')
+  const h = fixture(commit.name, { rows: [solve, commit] })
+  h.mount({ openTool: commit, projectOutcome: { outcome: { state: 'proposal', jobId: JOB }, meta: {
+    binding: { ...B, project_id: JOB }, authorityKey: 'epoch-1', tool: solve.name, isCurrent: () => true } } })
+  expect(screen.queryByRole('button', { name: 'Commit proposal' })).toBeNull()
+  expect(screen.getByRole('status').textContent).toBe(PROJECT_SOLAR_WORKSPACE_REASONS.proposal_required)
+  fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))
+  expect(h.props.onOpenTool).toHaveBeenCalledWith(solve)
+  expect(h.submit).not.toHaveBeenCalled()
+})
 const optionsFor = (h) => ({ binding: B, authorityKey: 'epoch-1', signal: h.local.controller.signal,
   isCurrent: () => h.local.alive })
 const closeWorkspace = () => fireEvent.click(last(screen.getAllByRole('button', { name: 'Close' })))
@@ -379,7 +464,7 @@ describe('Project Solar workspace composition', () => {
     for (const name of READ) {
       const h = fixture(name)
       h.mount({ openTool: h.row, busy: true })
-      const read = screen.getByRole('button', { name: PROJECT_SOLAR_WORKSPACE_REASONS.read_action })
+      const read = screen.getByRole('button', { name: PROJECT_SOLAR_WORKSPACE_LABELS.read_action })
       expect(read.disabled).toBe(true)
       fireEvent.click(read)
       expect(h.client.readSolar).not.toHaveBeenCalled()
@@ -531,7 +616,7 @@ describe('Project Solar workspace composition', () => {
       expect(document.querySelectorAll('.project-solar-read-panel')).toHaveLength(1)
       expect(h.steps).toHaveLength(0)
       expect(h.graphs).toHaveLength(0)
-      fireEvent.click(screen.getByRole('button', { name: PROJECT_SOLAR_WORKSPACE_REASONS.read_action }))
+      fireEvent.click(screen.getByRole('button', { name: PROJECT_SOLAR_WORKSPACE_LABELS.read_action }))
       await waitFor(() => expect(screen.getByTestId('solar-read-headline').textContent).toBe('57.4 A'))
       expect(h.client.readSolar).toHaveBeenCalledTimes(1)
       expect(h.client.readSolar.mock.calls[0][0]).toEqual({ tool: name, params: { drawing_id: B.drawing_id },
@@ -546,7 +631,7 @@ describe('Project Solar workspace composition', () => {
     missingOperation.client.readSolar = undefined
     missingOperation.mount({ openTool: missingOperation.row })
     expect(document.querySelector('.project-solar-read-panel')).not.toBeNull()
-    expect(screen.getByRole('button', { name: PROJECT_SOLAR_WORKSPACE_REASONS.read_action }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: PROJECT_SOLAR_WORKSPACE_LABELS.read_action }).disabled).toBe(true)
     expect(missingOperation.view.container.textContent).toContain(PROJECT_SOLAR_WORKSPACE_REASONS.client_unavailable)
   })
 
@@ -604,7 +689,7 @@ describe('Project Solar workspace composition', () => {
       h.client.readSolar.mockReturnValueOnce(read.promise)
       h.mount({ openTool: h.row })
       fireEvent.change(screen.getByRole('textbox', { name: 'Note' }), { target: { value: 'old read draft' } })
-      fireEvent.click(screen.getByRole('button', { name: PROJECT_SOLAR_WORKSPACE_REASONS.read_action }))
+      fireEvent.click(screen.getByRole('button', { name: PROJECT_SOLAR_WORKSPACE_LABELS.read_action }))
       await waitFor(() => expect(h.client.readSolar).toHaveBeenCalledTimes(1))
       const signal = h.client.readSolar.mock.calls[0][0].signal
       if (switchFlow) fireEvent.click(screen.getByRole('button', { name: 'Switch flow' }))
@@ -880,10 +965,15 @@ describe('Project Solar workspace composition', () => {
     }
   })
 
-  it('R13E-44 composition owns no Viewer or runtime and all new sentences use the frozen map', () => {
+  it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './ProjectSolarReadPanel.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx'])
+    const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
+    const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
+    for (const dependency of reviewImports) {
+      expect(dependency).not.toMatch(/Viewer|runtime|client|controller|useProjectSolarScope/i)
+    }
     expect(source).not.toMatch(new RegExp('(?:Viewer|createProjectSolarRunController|useProjectSolarScope|createSolarProjectClient|fetch\\s*\\(|readIntake|readVersions|contextView|onSubmit=)'))
     expect(source).not.toMatch(new RegExp('(?:export\\s+const|const)\\s+\\w*REASONS\\s*='))
     expect(source).toContain("projectSolarWorkspaceReason(reason || 'busy')")
@@ -902,7 +992,25 @@ describe('Project Solar workspace composition', () => {
       noHost()
       h.view.unmount()
     }
-    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(12)
+    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(20)
     expect(projectSolarWorkspaceReason('not_a_reason')).toBeNull()
+  })
+
+  it('W1C5 review sentences and labels come from the frozen workspace maps', () => {
+    const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
+    const maps = { PROJECT_SOLAR_WORKSPACE_REASONS, PROJECT_SOLAR_WORKSPACE_LABELS }
+    const references = [...source.matchAll(new RegExp('PROJECT_SOLAR_WORKSPACE_(REASONS|LABELS)\\.(\\w+)', 'g'))]
+    for (const map of Object.values(maps)) expect(Object.isFrozen(map)).toBe(true)
+    expect(new Set(references.map((match) => match[0])).size).toBe(25)
+    for (const [, kind, key] of references) {
+      const map = maps[`PROJECT_SOLAR_WORKSPACE_${kind}`]
+      expect(Object.hasOwn(map, key)).toBe(true)
+      expect(typeof map[key]).toBe('string')
+    }
+    // No literal JSX copy, accessible labels, schema titles or feedback sentences bypass the map.
+    const literalText = [...source.matchAll(/(?:<\/?[A-Za-z][A-Za-z0-9]*>|["'}]>|\})([^<>{}\r\n]+)</g)].map((match) => match[1].trim())
+    expect(literalText.filter((text) => /[A-Za-z]/.test(text))).toEqual([])
+    expect(source).not.toMatch(/aria-label=["'][^"']*[A-Za-z][^"']*["']/)
+    expect(source).not.toMatch(/title:\s*['"][^'"]+[A-Za-z][^'"]*['"]|['"][^'"\r\n]*[A-Za-z][^'"\r\n]*\.['"]/)
   })
 })

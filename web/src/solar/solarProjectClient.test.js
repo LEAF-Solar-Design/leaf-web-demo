@@ -44,6 +44,52 @@ function artifact(changes = {}) {
 }
 
 describe('project Solar transport and lifecycle', () => {
+  it('W1C5 carries only tool-matched proposal transport fields and keeps checkout proof private', async () => {
+    const { client, fetchImpl, intent } = setup(acquired())
+    await client.acquireCheckout()
+    const solveContext = { frame_ref: 'frame-1', expected_rev: 6, phase: 'initial' }
+    for (const [tool, extra, wire] of [
+      ['solar-solve-proposal', { solveContext }, { solve_context: solveContext }],
+      ['solar-commit-solve', { proposalJobId: J }, { proposal_job_id: J }],
+    ]) {
+      const prepared = intent({ tool, ...extra })
+      expect(Object.keys(prepared).sort()).toEqual(['binding', 'authorityKey', 'tool', 'params',
+        'catalogDigest', 'idempotencyKey', ...Object.keys(extra)].sort())
+      fetchImpl.mockResolvedValueOnce(response({ job_id: J, status: 'submitted' }, 202))
+      expect((await client.submitRun(prepared)).ok).toBe(true)
+      expect(JSON.parse(init(fetchImpl).body)).toEqual({ tool, params: prepared.params, dwg: V, catalog_digest: digest, ...wire })
+      expect(init(fetchImpl).headers['Idempotency-Key']).toBe('request-1')
+      expect(init(fetchImpl).headers['X-Checkout-Capability']).toBe(token())
+      expect(init(fetchImpl).body).not.toContain(token())
+    }
+    const prepared = intent({ tool: 'solar-solve-proposal', solveContext })
+    solveContext.frame_ref = 'changed'
+    expect(prepared.solveContext.frame_ref).toBe('frame-1')
+    expect(Object.isFrozen(prepared.solveContext)).toBe(true)
+  })
+  it('W1C5 refuses extra fields on other tools, malformed values, accessors and open intents', async () => {
+    const { client, fetchImpl, intent } = setup()
+    const solveContext = { frame_ref: 'frame-1', expected_rev: 0 }
+    for (const changes of [
+      { solveContext }, { proposalJobId: J },
+      { tool: 'solar-solve-proposal', proposalJobId: J },
+      { tool: 'solar-commit-solve', solveContext },
+      ...[null, {}, { ...solveContext, extra: 1 }, { ...solveContext, expected_rev: true },
+        { ...solveContext, expected_rev: -1 }, { ...solveContext, phase: 'other' }]
+        .map((value) => ({ tool: 'solar-solve-proposal', solveContext: value })),
+      ...[null, 5, '', 'not-a-uuid'].map((proposalJobId) => ({ tool: 'solar-commit-solve', proposalJobId })),
+    ]) expect(() => intent(changes)).toThrow(TypeError)
+    let getters = 0
+    const forged = { ...intent(), tool: 'solar-solve-proposal' }
+    Object.defineProperty(forged, 'solveContext', { enumerable: true, get() { getters += 1; return solveContext } })
+    for (const supplied of [forged, { ...intent(), solveContext }, { ...intent(), surprise: true },
+      { ...intent(), tool: 'solar-commit-solve', proposalJobId: 'bad' }]) {
+      expect((await client.submitRun(supplied)).reason).toBe('SIP_R7_REQUEST_INVALID')
+      expect((await client.catalog({ intents: [supplied] })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect(getters).toBe(0)
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
   it('R7-37 successes settling after sign-out are refused for every project read and write', async () => {
     for (const [data, invoke] of [
       [contextData, ({ client }) => client.readContext()],

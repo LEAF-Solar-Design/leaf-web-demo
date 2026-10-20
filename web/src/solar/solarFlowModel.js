@@ -250,14 +250,16 @@ export function deriveProjectSolarFlowState({ steps, current, previousReady, pen
 
 export const PROJECT_SOLAR_REVIEW_TOOLS = Object.freeze([
   'solar-settings', 'solar-panels-from-drawing', 'solar-size-strings',
-  'solar-string-add', 'solar-string-multi-add', 'solar-string-conductors', 'solar-assign-equipment',
+  'solar-string-add', 'solar-string-multi-add', 'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
+  'solar-string-conductors', 'solar-assign-equipment',
 ])
 
 export const PROJECT_SOLAR_ROOFTOP_STAGES = Object.freeze([
   flowStage('settings', 'Settings', ['solar-settings']),
   flowStage('panels', 'Panel import', ['solar-panels-from-drawing']),
   flowStage('sizing', 'Manual sizing', ['solar-size-strings']),
-  flowStage('strings', 'Strings', ['solar-string-add', 'solar-string-multi-add']),
+  flowStage('strings', 'Strings', ['solar-string-add', 'solar-string-multi-add',
+    'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string']),
   flowStage('conductors', 'Conductors', ['solar-string-conductors']),
   flowStage('equipment', 'Equipment', ['solar-assign-equipment']),
   flowStage('routes', 'Routes', ['solar-homeruns', 'solar-feeders']),

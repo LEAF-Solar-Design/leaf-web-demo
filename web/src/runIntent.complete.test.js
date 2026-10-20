@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   prepareCatalogRunParams, createRunIntentState, createCatalogToolSnapshot,
   stageRunIntent, confirmRunIntent,
+  createRunSubmissionRequest,
 } from './runIntent.js'
 
 const C = { tenantId: 't1', drawingId: 'd1', drawingVersion: 3 }
@@ -13,6 +14,19 @@ const T = (properties, capabilities = []) => ({
 const complete = { complete: true }
 
 describe('complete catalog submissions', () => {
+  it('W1C5 puts proposal references and solve context at the top level only for their tools', () => {
+    const solveContext = { frame_ref: 'frame-1', expected_rev: 0, phase: 'background' }
+    const proposalJobId = '11111111-1111-4111-8111-111111111111'
+    expect(createRunSubmissionRequest('solar-solve-proposal', {}, 'version', { solveContext }).body)
+      .toEqual({ tool: 'solar-solve-proposal', params: {}, dwg: 'version', solve_context: solveContext })
+    expect(createRunSubmissionRequest('solar-commit-solve', {}, 'version', { proposalJobId }).body)
+      .toEqual({ tool: 'solar-commit-solve', params: {}, dwg: 'version', proposal_job_id: proposalJobId })
+    for (const [tool, options] of [['solar-settings', { solveContext }], ['solar-settings', { proposalJobId }],
+      ['solar-solve-proposal', { proposalJobId }], ['solar-commit-solve', { proposalJobId: 'bad' }],
+      ['solar-solve-proposal', { solveContext: { ...solveContext, extra: true } }]]) {
+      expect(() => createRunSubmissionRequest(tool, {}, 'version', options)).toThrow(TypeError)
+    }
+  })
   it('FORMB01 cleared nullable stays absent', () => {
     expect(prepareCatalogRunParams(T(N), {}, C, {}, complete)).toEqual({})
   })

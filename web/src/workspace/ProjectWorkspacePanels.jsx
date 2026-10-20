@@ -164,6 +164,8 @@ function pretty(value) {
 }
 
 function JobDetail({ job }) {
+  const proposal = job.tool_name === 'solar-solve-proposal' && job.status === 'complete' &&
+    job.result?.schema === 'leaf.solar-solve-proposal.v1' && !job.output_version_id
   return (
     <section className="ground-job-detail" aria-label="Job detail">
       <h3>{job.tool_name || job.kind || 'Job detail'}</h3>
@@ -173,7 +175,7 @@ function JobDetail({ job }) {
         <dt>Updated</dt><dd>{job.updated_at || 'Not recorded'}</dd>
         {job.cost_usd != null && <><dt>Cost (USD)</dt><dd>${job.cost_usd}</dd></>}
         <dt>Input version</dt><dd>{job.input_version_id || 'Not recorded'}</dd>
-        <dt>Output version</dt><dd>{job.output_version_id || 'Not recorded'}</dd>
+        <dt>Output version</dt><dd>{proposal ? 'Proposal ready for review; not published' : job.output_version_id || 'Not recorded'}</dd>
       </dl>
       <pre>{pretty(job.result)}</pre>
     </section>

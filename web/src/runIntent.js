@@ -96,7 +96,41 @@ export function createCatalogRunContext({
   }))
 }
 
+// The project intent stays closed. These two optional fields belong to one tool each.
+export function projectSolarIntentExtras(toolName, source) {
+  const extras = {}
+  const invalid = () => { throw new TypeError('Invalid Solar run context') }
+  for (const [key, tool] of [['solveContext', 'solar-solve-proposal'], ['proposalJobId', 'solar-commit-solve']]) {
+    const descriptor = Object.getOwnPropertyDescriptor(source, key)
+    if (!descriptor) continue
+    if (toolName !== tool || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) invalid()
+    const value = descriptor.value
+    if (key === 'proposalJobId') {
+      if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) invalid()
+      extras[key] = value
+    } else {
+      if (!value || Object.getPrototypeOf(value) !== Object.prototype) invalid()
+      const keys = Reflect.ownKeys(value)
+      if (!keys.includes('frame_ref') || !keys.includes('expected_rev') ||
+          keys.some((field) => !['frame_ref', 'expected_rev', 'phase'].includes(field))) invalid()
+      const context = {}
+      for (const field of keys) {
+        const entry = Object.getOwnPropertyDescriptor(value, field)
+        if (!Object.hasOwn(entry, 'value') || !entry.enumerable) invalid()
+        context[field] = entry.value
+      }
+      if (typeof context.frame_ref !== 'string' || !context.frame_ref.trim() || context.frame_ref.length > 256 ||
+          /lco1\.[0-9a-f]{64}/.test(context.frame_ref) ||
+          !Number.isSafeInteger(context.expected_rev) || context.expected_rev < 0 ||
+          (Object.hasOwn(context, 'phase') && !['initial', 'background'].includes(context.phase))) invalid()
+      extras[key] = Object.freeze(context)
+    }
+  }
+  return Object.freeze(extras)
+}
+
 export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
+  const extras = projectSolarIntentExtras(toolName, opts)
   const headers = {}
   if (opts.orgId) headers['X-Org-Id'] = opts.orgId
   if (opts.projectId) headers['X-Project-Id'] = opts.projectId
@@ -115,6 +149,8 @@ export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
       dwg,
       ...(opts.catalogDigest ? { catalog_digest: opts.catalogDigest } : {}),
       ...(opts.dwgVersion != null ? { dwg_version: opts.dwgVersion } : {}),
+      ...(extras.solveContext ? { solve_context: extras.solveContext } : {}),
+      ...(extras.proposalJobId ? { proposal_job_id: extras.proposalJobId } : {}),
     },
   }
 }

@@ -30,6 +30,38 @@ const present = (value, key) => !!Object.getOwnPropertyDescriptor(value, key)
 const completion = (state, jobId, outputVersionId = null, reasonCode = null, message = null) =>
   Object.freeze({ state, jobId, outputVersionId, reasonCode, message })
 
+// Project proposals are nonpublishing results. Keep only the review projection, never the solver payload.
+export function readSolarSolveProposal(result, jobId) {
+  assert(uuid(jobId) && field(result, 'schema') === 'leaf.solar-solve-proposal.v1')
+  const candidateSha256 = field(result, 'candidate_sha256')
+  const frameId = field(result, 'frame_id')
+  const phase = field(result, 'phase')
+  assert(typeof candidateSha256 === 'string' && /^[0-9a-f]{64}$/.test(candidateSha256))
+  assert(typeof frameId === 'string' && frameId.trim() && frameId.length <= 256 && !/lco1\.[0-9a-f]{64}/.test(frameId))
+  assert(['initial', 'background'].includes(phase))
+  const strings = field(result, 'candidate_summary')
+  assert(Array.isArray(strings) && strings.length <= 4096 && Reflect.ownKeys(strings).length === strings.length + 1)
+  const rows = []
+  for (let index = 0; index < strings.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(strings, String(index))
+    assert(descriptor && Object.hasOwn(descriptor, 'value'))
+    const row = descriptor.value
+    const panelCount = field(row, 'panel_count')
+    const endpoints = field(row, 'endpoints')
+    assert(Number.isSafeInteger(panelCount) && panelCount > 0 && Array.isArray(endpoints) && endpoints.length === 2)
+    const copied = []
+    for (let endpoint = 0; endpoint < 2; endpoint += 1) {
+      const entry = Object.getOwnPropertyDescriptor(endpoints, String(endpoint))
+      assert(entry && Object.hasOwn(entry, 'value') && typeof entry.value === 'string' &&
+        entry.value.length > 0 && entry.value.length <= 256 && !/lco1\.[0-9a-f]{64}/.test(entry.value))
+      copied.push(entry.value)
+    }
+    rows.push(Object.freeze({ panel_count: panelCount, endpoints: Object.freeze(copied) }))
+  }
+  return Object.freeze({ ...completion('proposal', jobId), candidateSha256, frameId, phase,
+    summary: Object.freeze(rows) })
+}
+
 export function projectSolarRunFailure(code) {
   if (typeof code !== 'string' || !CODE.test(code)) {
     return Object.freeze({ reasonCode: null, message: SOLAR_REFUSAL_REASONS.unlisted })
@@ -135,6 +167,15 @@ export function projectSolarRunFailure(code) {
     case 'project_execution_disabled': return Object.freeze({ reasonCode: key, message: SOLAR_REFUSAL_REASONS.project_execution_disabled })
     case 'project_adapter_unavailable': return Object.freeze({ reasonCode: key, message: SOLAR_REFUSAL_REASONS.project_adapter_unavailable })
     case 'project_request_required': return Object.freeze({ reasonCode: key, message: SOLAR_REFUSAL_REASONS.project_request_required })
+    case 'solve_proposal_stale':
+    case 'solve_proposal_not_succeeded':
+    case 'solve_proposal_not_found':
+    case 'solve_proposal_manifest_mismatch':
+    case 'solve_proposal_evidence_invalid':
+    case 'solve_proposal_required':
+    case 'solve_proposal_invalid':
+    case 'invalid_solve_candidate':
+    case 'stale_solve_result': return Object.freeze({ reasonCode: key, message: 'The server refused this proposal. Run the solve again.' })
     default: return Object.freeze({ reasonCode: null, message: SOLAR_REFUSAL_REASONS.unlisted })
   }
 }
@@ -168,6 +209,16 @@ export function readProjectSolarCompletion(options = {}) {
     if (status === 'submitted' || status === 'running') return completion('pending', jobId)
     if (status === 'complete') {
       const result = record(field(job, 'result'))
+      if (tool === 'solar-solve-proposal') {
+        assert(field(job, 'error', false) == null && field(job, 'output_version_id', false) == null &&
+          field(result, 'output_version_id', false) == null)
+        for (const key of ['request_sha256', 'response_sha256']) {
+          const hash = field(result, key)
+          assert(typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash))
+        }
+        assert(field(record(field(result, 'execution_provenance')), 'schema') === 'leaf.solar-solve-proposal.v1')
+        return readSolarSolveProposal(result, jobId)
+      }
       const output = field(result, 'output_version_id')
       assert(uuid(output))
       const top = field(job, 'output_version_id', false)
@@ -192,7 +243,7 @@ export function readProjectSolarCompletion(options = {}) {
     const result = field(job, 'result', false)
     const output = field(job, 'output_version_id', false)
     assert((!present(job, 'result') || result === null) && (!present(job, 'output_version_id') || output === null))
-    if ((reason === undefined ? code : reason).toLowerCase() === 'sizing_outcome_unknown') {
+    if (['sizing_outcome_unknown', 'solve_outcome_unknown'].includes((reason === undefined ? code : reason).toLowerCase())) {
       return completion('outcome_unknown', jobId, null, null, PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
     }
     const failure = projectSolarRunFailure(reason === undefined ? code : reason)

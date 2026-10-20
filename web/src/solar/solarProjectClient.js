@@ -1,4 +1,4 @@
-import { createRunSubmissionRequest } from '../runIntent.js'
+import { createRunSubmissionRequest, projectSolarIntentExtras } from '../runIntent.js'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, sameSolarCheckoutBinding } from './solarDrawingBinding.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -233,7 +233,9 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
   const checkoutPath = (b) => `/api/projects/${b.project_id}/drawings/${b.drawing_id}/checkout`
   const proof = () => capability ? { 'X-Checkout-Capability': capability } : {}
   const checkIntent = (intent) => {
-    assert(plain(intent) && Reflect.ownKeys(intent).length === 6 &&
+    assert(plain(intent))
+    const extras = projectSolarIntentExtras(Object.getOwnPropertyDescriptor(intent, 'tool')?.value, intent)
+    assert(Reflect.ownKeys(intent).length === 6 + Object.keys(extras).length &&
       ['binding', 'authorityKey', 'tool', 'params', 'catalogDigest', 'idempotencyKey'].every((key) => {
         const descriptor = Object.getOwnPropertyDescriptor(intent, key)
         return descriptor && Object.hasOwn(descriptor, 'value')
@@ -243,11 +245,13 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     assert(JSON.stringify(normalized.params) === JSON.stringify(copyJson(intent.params)))
     return normalized
   }
-  function prepareRun({ tool, params, catalogDigest, idempotencyKey }) {
+  function prepareRun(request) {
+    const { tool, params, catalogDigest, idempotencyKey } = request
+    const extras = projectSolarIntentExtras(tool, request)
     assert(binding && !disposed && typeof tool === 'string' && TOOL.test(tool) &&
       typeof catalogDigest === 'string' && DIGEST.test(catalogDigest) &&
       typeof idempotencyKey === 'string' && idempotencyKey.trim().length > 0 && utf8(idempotencyKey) <= 256 && !CONTAINS_CAPABILITY.test(idempotencyKey))
-    return Object.freeze({ binding, authorityKey, tool, params: parameters(params, binding), catalogDigest, idempotencyKey })
+    return Object.freeze({ binding, authorityKey, tool, params: parameters(params, binding), catalogDigest, idempotencyKey, ...extras })
   }
   async function mutate(kind, options, scope) {
     if (!binding || disposed) return local('SIP_R7_BINDING_INVALID')
@@ -358,7 +362,8 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       const intent = checkIntent(supplied)
       const built = createRunSubmissionRequest(intent.tool, intent.params, binding.input_version_id, {
         orgId: binding.organization_id, projectId: binding.project_id, catalogDigest: intent.catalogDigest,
-        idempotencyKey: intent.idempotencyKey, checkoutCapability: capability })
+        idempotencyKey: intent.idempotencyKey, checkoutCapability: capability,
+        ...projectSolarIntentExtras(intent.tool, intent) })
       return request('/api/run', { scope, method: 'POST', body: JSON.stringify(built.body), headers: built.headers, signal,
         validate: (data) => typeof data?.job_id === 'string' && UUID.test(data.job_id) && data.status === 'submitted' })
     }),

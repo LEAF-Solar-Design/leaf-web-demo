@@ -74,6 +74,35 @@ afterEach(async () => {
 })
 
 describe('bounded project Solar run controller', () => {
+  it('W1C5 follows proposal success and permits the next commit through the same controller', async () => {
+    const run = setup()
+    const solve = { ...run.preparedIntent, tool: 'solar-solve-proposal',
+      solveContext: { frame_ref: 'frame-1', expected_rev: 0, phase: 'initial' } }
+    run.projectClient.readJob.mockResolvedValueOnce(readResponse(job({ tool_name: solve.tool, output_version_id: null,
+      result: { schema: 'leaf.solar-solve-proposal.v1', candidate_sha256: 'a'.repeat(64), frame_id: 'frame-1',
+        phase: 'initial', candidate_summary: [], request_sha256: 'b'.repeat(64), response_sha256: 'c'.repeat(64),
+        execution_provenance: { schema: 'leaf.solar-solve-proposal.v1' } } })))
+    expect(await run.controller.onProjectSubmit(solve, run.options)).toEqual(accepted)
+    await drain()
+    expect(await run.settled()).toMatchObject({ state: 'proposal', jobId: J, outputVersionId: null })
+    const commit = { ...run.preparedIntent, tool: 'solar-commit-solve', proposalJobId: J }
+    run.projectClient.readJob.mockResolvedValueOnce(readResponse(job({ tool_name: commit.tool })))
+    expect(await run.controller.onProjectSubmit(commit, run.options)).toEqual(accepted)
+    await drain()
+    expect(await run.settled()).toEqual(success)
+    expect(run.projectClient.submitRun.mock.calls.map(([intent]) => intent)).toEqual([solve, commit])
+  })
+  it('W1C5 enforces the closed tool-matched extra-field rules before dispatch', async () => {
+    const run = setup()
+    for (const extra of [{ solveContext: { frame_ref: 'f', expected_rev: 0 } }, { proposalJobId: J },
+      { tool: 'solar-commit-solve', proposalJobId: 'bad' },
+      { tool: 'solar-solve-proposal', solveContext: { frame_ref: 'f', expected_rev: true } },
+      { tool: 'solar-commit-solve', proposalJobId: J, extra: 1 }]) {
+      expect(await run.controller.onProjectSubmit({ ...run.preparedIntent, ...extra }, run.options))
+        .toEqual(local('SIP_R7_REQUEST_INVALID'))
+    }
+    expect(run.projectClient.submitRun).not.toHaveBeenCalled()
+  })
   it('R13B-17 forwards the identical prepared intent', async () => {
     const run = setup()
     run.projectClient.submitRun.mockResolvedValueOnce({ ...accepted,

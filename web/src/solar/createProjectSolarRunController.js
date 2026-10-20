@@ -1,5 +1,6 @@
 import { createSolarDrawingBinding, sameSolarDrawingBinding } from './solarDrawingBinding.js'
 import { PROJECT_SOLAR_RUN_REASONS, projectSolarRunFailure, readProjectSolarCompletion } from './solarProjectCompletion.js'
+import { projectSolarIntentExtras } from '../runIntent.js'
 
 export const PROJECT_SOLAR_RUN_POLL_MS = 1000
 export const PROJECT_SOLAR_RUN_BUDGET_MS = 120000
@@ -264,7 +265,9 @@ export function createProjectSolarRunController({ projectClient, onOutcome = () 
         new TextEncoder().encode(authorityKey).byteLength <= 256 && typeof isCurrent === 'function')
       assert(signal === undefined || (signal && typeof signal.aborted === 'boolean' &&
         typeof signal.addEventListener === 'function' && typeof signal.removeEventListener === 'function'))
-      assert(plain(preparedIntent) && Reflect.ownKeys(preparedIntent).length === 6)
+      assert(plain(preparedIntent))
+      const extras = projectSolarIntentExtras(field(preparedIntent, 'tool'), preparedIntent)
+      assert(Reflect.ownKeys(preparedIntent).length === 6 + Object.keys(extras).length)
       for (const key of ['binding', 'authorityKey', 'tool', 'params', 'catalogDigest', 'idempotencyKey']) field(preparedIntent, key)
       assert(sameSolarDrawingBinding(field(preparedIntent, 'binding'), binding) &&
         field(preparedIntent, 'authorityKey') === authorityKey)

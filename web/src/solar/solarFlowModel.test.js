@@ -1272,6 +1272,7 @@ describe('run memory', () => {
 
 const R13D_NAMES = [
   'solar-settings', 'solar-panels-from-drawing', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
+  'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
   'solar-string-conductors', 'solar-assign-equipment', 'solar-homeruns', 'solar-feeders',
   'solar-schedule', 'solar-string-data', 'solar-electrical-schedules', 'solar-cable-export',
 ]
@@ -1321,13 +1322,13 @@ it('R13D-03 selection refuses catalog overflow before filtering', () => {
   const selection = projectSolarFlowSelect([{ capabilities: entries }, { capabilities: [final] }], 'rooftop')
   expect(selection.steps).toEqual([])
   expect(selection.reasonKey).toBe('catalog_unreadable')
-  expect(selection.positions).toHaveLength(13)
+  expect(selection.positions).toHaveLength(16)
   expect(selection.positions.every((position) => position.row === null)).toBe(true)
   expect(r13dDisplay(selection).items.every((item) => !item.ready && !item.enabled)).toBe(true)
 })
 
-it('R13D-04 all seven ordinary rows permit review only', () => {
-  expect(PROJECT_SOLAR_REVIEW_TOOLS).toEqual(R13D_NAMES.slice(0, 7))
+it('R13D-04 all ten ordinary rows permit review only', () => {
+  expect(PROJECT_SOLAR_REVIEW_TOOLS).toEqual(R13D_NAMES.slice(0, 10))
   expect(Object.isFrozen(PROJECT_SOLAR_REVIEW_TOOLS)).toBe(true)
   for (const name of PROJECT_SOLAR_REVIEW_TOOLS) {
     const candidate = r13dRow(name)
@@ -1376,7 +1377,7 @@ it('R13D-07 contradictory duplicates refuse in either order', () => {
 })
 
 it('R13D-08 downstream selection does not grant review or reads', () => {
-  const entries = R13D_NAMES.slice(7).map((name) => r13dRow(name))
+  const entries = R13D_NAMES.slice(10).map((name) => r13dRow(name))
   const before = JSON.stringify(entries)
   const selection = projectSolarFlowSelect([{ capabilities: entries }], 'rooftop')
   expect(selection.steps).toEqual(entries)
@@ -1463,7 +1464,7 @@ it('R13D-12 display projection never invents readiness', () => {
   expect(busy.items[0].row).toBeNull()
   const malformedEquipment = { ...r13dRow('solar-assign-equipment', true), solar: null }
   const lastRefused = r13dDisplay(projectSolarFlowSelect([{ capabilities: [sizing, malformedEquipment] }], 'rooftop'))
-  expect(lastRefused.items[6]).toMatchObject({ enabled: false, ready: false, invalidated: false })
+  expect(lastRefused.items[9]).toMatchObject({ enabled: false, ready: false, invalidated: false })
   expect(lastRefused.resumeIndex).toBe(2)
 })
 

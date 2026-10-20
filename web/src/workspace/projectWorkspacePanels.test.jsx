@@ -167,6 +167,16 @@ it('B2 row5 seats the job rail and shows bounded real job detail', () => {
   expect(container.querySelector('.ground-job-detail pre').textContent).toBe(`${JSON.stringify(result, null, 2).slice(0, 4000)}…`)
 })
 
+it('W1C5 shows a completed solve proposal as ready for review without a published version', () => {
+  const job = { job_id: 'proposal-1', tool_name: 'solar-solve-proposal', status: 'complete',
+    output_version_id: null, result: { schema: 'leaf.solar-solve-proposal.v1' } }
+  const view = render(<ProjectWorkspacePanels project={project} pane="jobs" workspace={{ jobs: [job] }} currentJob={job} />)
+  expect(screen.getByText('Proposal ready for review; not published')).toBeInTheDocument()
+  view.rerender(<ProjectWorkspacePanels project={project} pane="jobs" workspace={{ jobs: [job] }}
+    currentJob={{ ...job, tool_name: 'solar-settings' }} />)
+  expect(screen.queryByText('Proposal ready for review; not published')).toBeNull()
+})
+
 it('B2 row6 orders versions and preserves honest material and tool empties', () => {
   const old = { version_id: 'old', seq: 1, created_at: '2026-09-01' }
   const recent = { version_id: 'recent', seq: 2, created_at: '2026-09-02' }

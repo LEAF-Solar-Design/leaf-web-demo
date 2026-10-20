@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
+import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import { createSolarProjectClient } from './solarProjectClient.js'
 import { projectReadReason } from './solarReadResultModel.js'
 
@@ -289,8 +289,38 @@ describe('project Solar read ownership', () => {
       idle: 'Read Solar output for the selected drawing version.',
       reading: 'Reading Solar output for the selected drawing version.',
       read_refused: 'This Solar read could not finish. Your inputs are kept.',
-      read_action: 'Read project output',
+      run_submitted: 'Solar run submitted.',
+      run_published: 'Solar run published a drawing version.',
+      proposal_ready: 'Proposal ready for review.',
+      run_outcome_unknown: 'The run outcome is unknown. Check its job before submitting again.',
+      run_refused: 'The server refused this Solar request.',
+      proposal_unreadable: 'This Solar proposal could not be read.',
+      proposal_required: 'Run a solve and review its proposal before committing.',
+      proposal_unpublished: 'This proposal has not published a drawing version.',
+      proposal_more_strings: 'More proposed strings not shown: {count}.',
     })
+    expect(PROJECT_SOLAR_WORKSPACE_LABELS).toEqual({
+      read_action: 'Read project output',
+      solve_action: 'Solve',
+      correct_strings_action: 'Correct strings',
+      run_solve_action: 'Run solve',
+      close_action: 'Close',
+      proposal_review_label: 'Solve proposal review',
+      proposal_review_title: 'Review solve proposal',
+      frame_label: 'Frame',
+      phase_label: 'Phase',
+      string_count_label: 'String count',
+      proposed_strings_label: 'Proposed strings',
+      string_label: 'String',
+      panels_label: 'Panels',
+      start_label: 'Start',
+      end_label: 'End',
+      commit_proposal_action: 'Commit proposal',
+      discard_action: 'Discard',
+      solve_again_action: 'Run solve again',
+    })
+    expect(Object.isFrozen(PROJECT_SOLAR_WORKSPACE_LABELS)).toBe(true)
+    for (const key of Object.keys(PROJECT_SOLAR_WORKSPACE_LABELS)) expect(projectSolarWorkspaceReason(key)).toBeNull()
     expect(Object.isFrozen(PROJECT_SOLAR_WORKSPACE_REASONS)).toBe(true)
     for (const [key, text] of Object.entries(PROJECT_SOLAR_WORKSPACE_REASONS)) expect(projectSolarWorkspaceReason(key)).toBe(text)
     expect(projectSolarWorkspaceReason('unknown')).toBeNull()
