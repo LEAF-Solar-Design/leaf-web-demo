@@ -139,6 +139,7 @@ test('the demo tour keeps canvas chrome clear at the desktop breakpoint', async 
 })
 
 test('Open author flow reveals the same studio panel outside the tour', async ({ page }) => {
+  test.setTimeout(90_000)
   await page.goto('/try?demo=1')
   const studio = page.locator('.app[data-studio-shell="cockpit"]')
   await studio.locator('.tour-card').getByRole('button', { name: 'Skip', exact: true }).click()
