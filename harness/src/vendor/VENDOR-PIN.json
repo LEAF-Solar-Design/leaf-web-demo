@@ -26,8 +26,8 @@
       "sha256": "d2c4098b4b6d836a6e86fa962b9d235c233879585a14df69f7db3e8f1bb9f2e6"
     },
     "ports/impl/converseSdkRunner.ts": {
-      "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate); plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8)",
-      "sha256": "8e77f60fcb6ffcfed67a9fca7b8c2090562cb579852c786beb32f56e23e49829"
+      "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate); plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1",
+      "sha256": "77114b38f12f01d4c2f19c04eb9c840f2de8ac3cd9680e87a8df8f766068c42f"
     },
     "ports/impl/harnessSchema.ts": {
       "reason": "Held at mushy-code 52e8a36 bytes: ad209705 asserts harness_confirmations.consumed_at, consumed_by and a status CHECK including 'consumed', which no platform migration adds yet. Retired by slice AD4b (platform migration plus consumeApproved adoption).",
@@ -54,8 +54,8 @@
       "sha256": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691"
     },
     "ports/index.ts": {
-      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
-      "sha256": "7cc65099cb8b31a6ec796ed162fbe7c55a05ee4ed66ce2abf3eb089e65bd4552"
+      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1",
+      "sha256": "5c30cd30133c0bf8f789afa9073a96f598564f21763b86efdc12bfb964c6c5a5"
     },
     "ports/modelAllowlist.ts": {
       "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8; claude-haiku-5-5 allowlist entry from mushy-code 74e50286 carried too ahead of a re-pin; retire at the next re-pin past 74e50286; absorbed upstream at cd637b434f7f1c103160f93c3c0119122c746a67; provenance retained",
@@ -76,6 +76,7 @@
     "agent/tools/validateTool.ts": "df8a0522f5703a3cb76e9fbff5c3200e4a717a0ab4c99d12f912d8c44e38faee",
     "browser/conversationWorkspace.ts": "3bb8c517ff9ceb0db3510a5869e4383a4c04dcc0567268075f6db4c0dfadb7fa",
     "browser/historyFeed.ts": "504c16d2a1b2deb923b6b5ef2e0d2c12311e3966ca7c62ef2472d311e3cfa816",
+    "contracts/integration.ts": "44211c725b47016272746b99f215949ab32ff5dde93bb4ac970b2b966fad3a79",
     "index.ts": "b201a546958d8d25e8dd0b6e675484d564f9f716ad0baf668b7c15809b1d9d5d",
     "ports/converse.ts": "4f5fccd7162350df3fc151403633e890f7bdca05fab47a23813fcc62715b235e",
     "ports/fakes/fakeAgentRunner.ts": "bcd81974277d1934dd6a6e5a660203b248b5b3caefb0a594d32f4905a449d3ef",
@@ -92,7 +93,7 @@
     "ports/impl/agentSdkTurnRunner.ts": "d2c4098b4b6d836a6e86fa962b9d235c233879585a14df69f7db3e8f1bb9f2e6",
     "ports/impl/capabilityApproval.ts": "2e0e833df4bcb5e6aa347fbd01d043ef546c486aad4ba0e2f126e6452b401372",
     "ports/impl/conversationManager.ts": "423899c87e552aef85fb8b4b14f78a25a8813284adff56fb0b32946b7032ce4e",
-    "ports/impl/converseSdkRunner.ts": "8e77f60fcb6ffcfed67a9fca7b8c2090562cb579852c786beb32f56e23e49829",
+    "ports/impl/converseSdkRunner.ts": "77114b38f12f01d4c2f19c04eb9c840f2de8ac3cd9680e87a8df8f766068c42f",
     "ports/impl/e2bAgentRunner.ts": "3d89898c95e45e366107a10faa4ea1396f6aaa74242c3c2bacf55cd1add53a94",
     "ports/impl/envScrub.ts": "fc9640a4940a4cb4756714f91144a9dd54fc188f7333aa8618c2fa8f15212f5c",
     "ports/impl/escalationOutbox.ts": "f5b33fd43b776574d1a90fdccc4adbc9dfc2d1e3f540f4f9ae07c2ba7eb4ec5b",
@@ -117,7 +118,8 @@
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "32740d32b3dce694ec1c7f35a4191517da9d91cea6b23906438ba1a8624b5888",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantRepoProvider.ts": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691",
-    "ports/index.ts": "7cc65099cb8b31a6ec796ed162fbe7c55a05ee4ed66ce2abf3eb089e65bd4552",
+    "ports/index.ts": "5c30cd30133c0bf8f789afa9073a96f598564f21763b86efdc12bfb964c6c5a5",
+    "ports/integrationTools.ts": "8c502c0b3c01ab4725a81dec12a5163d3b254b2271fd8bd2fa6713994261ac27",
     "ports/modelAllowlist.ts": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
     "ports/wireGrant.ts": "ac9619a708b426ff3920c796497727497bc7e707d70a5a5503c759324e379904",
@@ -133,5 +135,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "cd637b434f7f1c103160f93c3c0119122c746a67"
+  "upstream_commit": "9688808ab12645c21ced9b99fd4ee0f82016a6a1"
 }
