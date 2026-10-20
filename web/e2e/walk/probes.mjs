@@ -296,6 +296,15 @@ export function stateRecipe(entry, state) {
   // A project context is a recipe requirement, regardless of feature kind.
   // Open it after the drawing/surface setup so navigation cannot clear it.
   const projectSteps = () => context.openProjectId ? [step('open-real-project')] : []
+  if (entry.id === 'surface:solar' && context.projectSolar) {
+    if (context.projectSolar === 'proposal-offline') return { context, steps: [step('require-local-state', {
+      reason: 'cloud_service_offline: project Solar proposal requires server/solar_project_solve.py (cloud stringer) and a retained proposal for review',
+    })] }
+    steps.push(step('open-private-drawing', { surface: 'cad' }), step('open-real-project'), step('open-project-solar'))
+    if (['published', 'form-switch'].includes(context.projectSolar)) steps.push(step('publish-project-solar'))
+    if (context.projectSolar === 'form-switch') steps.push(step('switch-project-solar-forms'))
+    return { context, steps }
+  }
   if (entry.kind === 'control') {
     if (CENSUS_RECIPE_CONTROLS.includes(entry.id)) {
       const script = ['ribbon-script', 'choose-script', 'run-script'].includes(entry.source_id)

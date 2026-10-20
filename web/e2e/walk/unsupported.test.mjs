@@ -41,8 +41,8 @@ test('worker PostgreSQL opt-in forwards ephemeral mode, records migration eviden
     const facts = {}, calls = []
     let stops = 0
     let used
-    const stack = { root: '/private-stack', stop: async () => { stops++ },
-      ...(mode === true ? { postgres: { postgres: 'ephemeral', port: 25433, migrated: true } } : {}) }
+    const stack = { root: '/private-stack', env: { LEAF_AUTH_LIVE: '0' }, stop: async () => { stops++ },
+      ...(mode === true ? { postgres: { postgres: 'ephemeral', port: 25433, migrated: true }, canonicalWorkerTools: ['solar-settings'] } : {}) }
     await workerFixture(mode !== false, facts, async (value) => { used = value },
       { workerIndex: 7, config: { workers: 2 } }, async (options) => {
         calls.push(options)
@@ -53,7 +53,8 @@ test('worker PostgreSQL opt-in forwards ephemeral mode, records migration eviden
     assert.equal(used.bootError, undefined)
     assert.deepEqual(calls[0], { slot: 7, slots: 2, ...(mode !== false ? { postgres: 'ephemeral' } : {}) })
     assert.equal(facts.walkPostgres, mode !== false)
-    if (mode === true) assert.deepEqual(used.witness, { ready: true, instance: 'instance', postgres: 'ephemeral', port: 25433, migrated: true })
+    assert.equal(facts.authLive, false)
+    if (mode === true) assert.deepEqual(used.witness, { ready: true, instance: 'instance', postgres: 'ephemeral', port: 25433, migrated: true, canonicalWorkerTools: ['solar-settings'] })
     if (reason) {
       assert.deepEqual(calls, [{ slot: 7, slots: 2, postgres: 'ephemeral' }, { slot: 7, slots: 2 }])
       assert.equal(used.stack, stack)
@@ -66,6 +67,49 @@ test('worker PostgreSQL opt-in forwards ephemeral mode, records migration eviden
       assert.equal(facts.postgresUnavailableReason, undefined)
       assert.equal(unsupportedBeforeSetup(probe, facts), mode ? null : 'walk_postgres_required')
     }
+  }
+})
+
+test('worker auth facts follow the launched environment and server auth spellings', async () => {
+  for (const [value, expected] of [[undefined, false], ['0', false], ['false', false],
+    ['1', true], ['true', true], ['yes', true], ['on', true], [' TRUE ', true]]) {
+    const facts = {}
+    const stack = { root: '/private-stack', env: { LEAF_AUTH_LIVE: value }, stop: async () => {} }
+    await workerFixture(true, facts, async () => {}, { workerIndex: 0, config: { workers: 1 } },
+      async () => stack, async () => JSON.stringify({ launcher_pid: 42 }), join, () => 'instance')
+    assert.equal(facts.authLive, expected, String(value))
+    const probe = resolveProbe(buildFeatureMap().entries.find((row) => row.id === 'surface:solar'), 'project-solar-open')
+    assert.equal(unsupportedBeforeSetup(probe, facts), expected ? null
+      : 'authenticated_subject_required: canonical project Solar needs an authenticated subject (server/platform_link.py:159-161, server/deps.py:1300-1302); walked signed in on staging (F1)')
+  }
+})
+
+test('WL16n missing page tokens fail live-auth project setup before any unauthenticated API request', async () => {
+  const map = buildFeatureMap()
+  const solar = map.entries.find((entry) => entry.id === 'surface:solar')
+  const probes = ['project-solar-open', 'project-solar-published', 'project-solar-form-switch']
+    .map((state) => resolveProbe(solar, state))
+  probes.push(resolveProbe(map.entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open'))
+  for (const probe of probes) for (const kind of ['open-private-drawing', 'open-real-project']) {
+    const facts = { walkPostgres: true, authLive: true }
+    assert.equal(unsupportedBeforeSetup(probe, facts), null)
+    const runtime = { workerFacts: facts, stack: { baseURL: 'http://walk' }, evidence: { steps: [] }, cleanup: [],
+      ...(probe.setup.context.projectSolar ? { projectSolar: {} } : {}), page: {
+        url: () => 'http://walk/app', evaluate: async () => null,
+        request: {
+          post: async () => assert.fail('missing live-auth token must fail before any setup write'),
+          get: async () => assert.fail('missing live-auth token must fail before any setup read'),
+        },
+      } }
+    const recipe = probe.setup.steps.find((step) => step.kind === kind)
+    await assert.rejects(setupStep(probe, runtime, recipe), (error) => {
+      assert.ok(!(error instanceof UnsupportedLocalError))
+      assert.match(error.message, /setup_auth_token_missing: \/api\/(drawings\/upload|orgs) requires leaf.jwt/)
+      return true
+    })
+    assert.equal(runtime.evidence.result, undefined, 'a missing bearer must not downgrade setup to unavailable')
+    assert.equal(runtime.drawingId, undefined)
+    assert.equal(runtime.evidence.escapeProject, undefined)
   }
 })
 
@@ -200,6 +244,58 @@ test('project probes report missing prerequisites before page work and run norma
   const normal = await run(probe, { walkPostgres: true })
   assert.ok(normal.log.includes('open-real-project'))
   assert.equal(normal.runtime.evidence.result.result, 'passed')
+})
+
+test('WL16m auth-off project Solar states stop before requests or setup; authenticated recipes retain prerequisites', async () => {
+  const entry = buildFeatureMap().entries.find((row) => row.id === 'surface:solar')
+  const authReason = 'authenticated_subject_required: canonical project Solar needs an authenticated subject (server/platform_link.py:159-161, server/deps.py:1300-1302); walked signed in on staging (F1)'
+  for (const state of ['project-solar-open', 'project-solar-published', 'project-solar-form-switch', 'project-solar-proposal-offline']) {
+    const probe = resolveProbe(entry, state)
+    if (state !== 'project-solar-proposal-offline') {
+      for (const facts of [{}, { walkPostgres: true }, { walkPostgres: true, authLive: false },
+        { walkPostgres: true, authLive: false, postgresUnavailableReason: 'postgres_binaries_missing' },
+        { walkPostgres: true, authLive: false, postgresUnavailableReason: 'autofill_solver_missing' }]) {
+        const result = await run(probe, facts, { readBuild: true, request: {
+          get: async () => assert.fail('auth-off project Solar must stop before any request'),
+          post: async () => assert.fail('auth-off project Solar must stop before any write'),
+        } })
+        assert.deepEqual(result.log, [])
+        assert.deepEqual(result.result, { unsupported: true, reason: authReason })
+        assert.equal(result.runtime.evidence.result.result, 'unsupported_local')
+        assert.equal(result.runtime.evidence.result.reason, authReason)
+        assert.deepEqual(result.runtime.testInfo.annotations, [{ type: 'unsupported_local', description: authReason }])
+        assert.deepEqual(result.runtime.evidence.steps, [])
+        assert.equal(result.runtime.evidence.oracleReached, undefined)
+        assert.equal(result.runtime.evidence.cleanupCompleted, true)
+        assert.ok(result.attachments.some((row) => row.name === 'walk-result'))
+      }
+    }
+    for (const [facts, reason] of [
+      [{ authLive: true }, 'walk_postgres_required'],
+      [{ walkPostgres: true, authLive: true, postgresUnavailableReason: 'postgres_binaries_missing' }, 'postgres_binaries_missing'],
+      [{ walkPostgres: true, authLive: true, postgresUnavailableReason: 'autofill_solver_missing' }, 'autofill_solver_missing'],
+    ]) {
+      const result = await run(probe, facts)
+      assert.deepEqual(result.log, [])
+      assert.deepEqual(result.result, { unsupported: true, reason })
+    }
+    const result = await run(probe, { walkPostgres: true, authLive: true })
+    if (state === 'project-solar-proposal-offline') {
+      assert.deepEqual(result.log, [])
+      assert.equal(result.result.unsupported, true)
+      assert.match(result.result.reason, /^cloud_service_offline:.*server\/solar_project_solve\.py/)
+      const authOff = await run(probe, { walkPostgres: true, authLive: false })
+      assert.deepEqual(authOff.log, [])
+      assert.deepEqual(authOff.result, result.result)
+    } else {
+      assert.equal(result.runtime.evidence.result.result, 'passed')
+      assert.deepEqual(result.log.slice(0, probe.setup.steps.length), probe.setup.steps.map((row) => row.kind))
+    }
+  }
+  for (const kind of ['open-project-solar', 'publish-project-solar', 'switch-project-solar-forms']) {
+    assert.equal(HANDLED_SETUP_KINDS.has(kind), true)
+    assert.equal(ENGINE_SETUP_KINDS.has(kind), false)
+  }
 })
 
 test('missing recipes are declared before any page work and retain the fallback reason', async () => {

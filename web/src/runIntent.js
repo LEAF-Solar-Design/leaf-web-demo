@@ -129,8 +129,16 @@ export function projectSolarIntentExtras(toolName, source) {
   return Object.freeze(extras)
 }
 
+export function projectSolarRequestExtras(toolName, source) {
+  const extras = projectSolarIntentExtras(toolName, source)
+  return {
+    ...(extras.solveContext ? { solve_context: extras.solveContext } : {}),
+    ...(extras.proposalJobId ? { proposal_job_id: extras.proposalJobId } : {}),
+  }
+}
+
 export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
-  const extras = projectSolarIntentExtras(toolName, opts)
+  const extras = projectSolarRequestExtras(toolName, opts)
   const headers = {}
   if (opts.orgId) headers['X-Org-Id'] = opts.orgId
   if (opts.projectId) headers['X-Project-Id'] = opts.projectId
@@ -149,8 +157,7 @@ export function createRunSubmissionRequest(toolName, params, dwg, opts = {}) {
       dwg,
       ...(opts.catalogDigest ? { catalog_digest: opts.catalogDigest } : {}),
       ...(opts.dwgVersion != null ? { dwg_version: opts.dwgVersion } : {}),
-      ...(extras.solveContext ? { solve_context: extras.solveContext } : {}),
-      ...(extras.proposalJobId ? { proposal_job_id: extras.proposalJobId } : {}),
+      ...extras,
     },
   }
 }

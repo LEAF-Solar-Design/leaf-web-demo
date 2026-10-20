@@ -11,6 +11,7 @@ import math
 import sys
 from copy import deepcopy
 from typing import Annotated, Any, Dict, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -58,12 +59,24 @@ def _project_requests(text, names, drawing_id):
     if not isinstance(requests, dict):
         raise ValueError()
     for name, entry in requests.items():
+        required = {"params", "catalog_digest", "idempotency_key"}
+        extra = {"solar-solve-proposal": "solve_context",
+                 "solar-commit-solve": "proposal_job_id"}.get(name)
         if (name not in names or not isinstance(entry, dict)
-                or set(entry) != {"params", "catalog_digest", "idempotency_key"}
+                or not required <= set(entry)
+                or set(entry) - required - ({extra} if extra else set())
                 or not isinstance(entry["params"], dict)
                 or not isinstance(entry["catalog_digest"], str)
                 or not isinstance(entry["idempotency_key"], str)):
             raise ValueError()
+        if "solve_context" in entry:
+            if not isinstance(entry["solve_context"], dict):
+                raise ValueError()
+            jobs_router.SolveContext.model_validate(entry["solve_context"])
+        if "proposal_job_id" in entry:
+            value = entry["proposal_job_id"]
+            if not isinstance(value, str) or str(UUID(value)) != value:
+                raise ValueError()
         params = deepcopy(entry["params"])
         if "drawing_id" in params and drawing_id is not None and params["drawing_id"] != drawing_id:
             raise ValueError()
@@ -201,7 +214,9 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
                     if entry is not None and state["engine_ready"]:
                         # An absent version uses an empty pin so policy returns its UUID refusal.
                         req = jobs_router.RunRequest(tool=name, params=entry["params"],
-                            dwg=input_version_id or "", catalog_digest=entry["catalog_digest"])
+                            dwg=input_version_id or "", catalog_digest=entry["catalog_digest"],
+                            **{key: entry[key] for key in ("solve_context", "proposal_job_id")
+                               if key in entry})
                         response = jobs_router._project_solar_admission(
                             tool, tenant, req, x_org_id, selected_project, authorization,
                             x_checkout_capability, idempotency_key=entry["idempotency_key"], preview=True)
