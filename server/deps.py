@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -21,6 +22,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1260,6 +1262,12 @@ def backedge_run_identity(tenant: Any, authority_session_id: Optional[str],
     return resolved
 
 
+@dataclass(frozen=True)
+class _VerifiedPlatformExpiry:
+    subject: str
+    expires_at: float
+
+
 def require_tenant(
     request: Request,
     x_tenant_id: Optional[str] = Header(default=None),
@@ -1278,6 +1286,7 @@ def require_tenant(
          (`backedge_tenant`) — never a bare str, which would resolve to "demo"
          and hand a downgraded tenant every capability.
     """
+    request.state._integration_verified_expiry = None
     # Header presence matters: even an empty Authorization selects Bearer.
     # Direct dependency callers may leave Header(...) defaults unexpanded.
     demo = x_demo_session if isinstance(x_demo_session, str) else None
@@ -1357,6 +1366,13 @@ def require_tenant(
     role_names = roles_mod.normalize_role_names(claims.get("roles"))
     elevated = bool(isinstance(subject, str) and subject.strip()
                     and subject in admin_subjects())
+    exp = payload.get("exp")
+    try:
+        if (subject and type(exp) in (int, float) and math.isfinite(exp)
+                and exp > time.time()):
+            request.state._integration_verified_expiry = _VerifiedPlatformExpiry(subject, exp)
+    except (ValueError, OverflowError):
+        pass
     return TenantContext(
         platform_tenant_id,
         org_id=platform_tenant_id,

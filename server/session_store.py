@@ -2066,7 +2066,7 @@ def active_turn_subject(
     return legacy
 
 
-def end_turn(session_id: str, turn_id: str) -> None:
+def _end_turn_with_store_mode(session_id: str, turn_id: str) -> None:
     mode = _store_mode()
     if mode == "postgres":
         _pg_end_turn(session_id, turn_id)
@@ -2097,6 +2097,17 @@ def end_turn(session_id: str, turn_id: str) -> None:
             "turn fence after release",
             _legacy_turn_fence(session_id), _pg_turn_fence(session_id),
         )
+
+
+def end_turn(session_id: str, turn_id: str) -> None:
+    try:
+        return _end_turn_with_store_mode(session_id, turn_id)
+    finally:
+        try:
+            import integration_turn_grants
+            integration_turn_grants.cleanup_turn(session_id, turn_id)
+        except Exception:
+            pass  # Preserve the store's return value and original exception.
 
 
 def create_approval(

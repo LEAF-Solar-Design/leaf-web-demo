@@ -722,7 +722,10 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                request_id: Optional[str] = None,
                turn_id: Optional[str] = None,
                journal_claimed: bool = False,
-               entity_scope: Optional[Dict[str, Any]] = None) -> str:
+               entity_scope: Optional[Dict[str, Any]] = None,
+               integration_capture=None) -> str:
+    if queued_id is not None or journal_claimed:
+        integration_capture = None
     entity_scope = deepcopy(entity_scope)
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
@@ -856,6 +859,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     if authority_only:
         # This is an app-owned authority lifetime, not a model conversation.
         # Recovery enters this same branch with the journal's saved hint.
+        integration_capture = None
         _hold_stage_authority(tenant_id, session_id, turn_id, subject, max_s)
         return turn_id
 
@@ -984,6 +988,13 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         raise _rejected(413, ErrorCode.BAD_PARAMS,
                         "the turn payload exceeded the harness body ceiling",
                         pre_harness=True)
+    try:
+        if integration_capture is not None:
+            integration_capture(session_id, turn_id, max_s)
+    except Exception:
+        pass  # No credential or provider exception enters diagnostics.
+    finally:
+        integration_capture = None
     try:
         resp = requests.post(f"{harness_url}/turn", data=body,
                              headers=harness_headers,
