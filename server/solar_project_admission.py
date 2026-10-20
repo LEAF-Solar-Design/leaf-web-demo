@@ -16,6 +16,7 @@ from fastapi import HTTPException
 import deps
 import entitlements
 import platform_link
+from demo_policy import demo_run_verdict
 from demo_actor import DemoActorRefused, DemoActorUnavailable, is_demo_context, resolve_demo_actor
 import solar_project_context as project
 import solar_project_graph as graph
@@ -29,6 +30,8 @@ from leaf_cloud_grants import CloudError
 
 _FAILURES = {
     "demo_actor_refused": (403, False),
+    "demo_tool_not_allowed": (403, False),
+    "demo_paid_service_not_allowed": (403, False),
     "SIP_R1_INVALID_BINDING": (400, False), "SIP_R1_CONTEXT_NOT_FOUND": (404, False),
     "SIP_R1_PROJECT_FORBIDDEN": (403, False), "SIP_R1_CANONICAL_AUTHORITY_REQUIRED": (409, False),
     "SIP_R1_INTAKE_PROOF_REQUIRED": (409, False), "SIP_R1_INTAKE_REFERENCE_INVALID": (500, False),
@@ -115,15 +118,22 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
     if not project_runs_enabled():
         return _refusal("project_execution_disabled")
     try:
-        tier = entitlements.resolve_tier(tenant)
-        roles, elevated = entitlements.resolve_roles(tenant)
-        required = entitlements.tool_required_capability(tool)
-        try:
-            allowed = entitlements.entitlements_for(tier, roles, elevated).get(required, False)
-        except entitlements.EntitlementsError:
-            return _response(entitlements.policy_unavailable_response(required, tier))
-        if not allowed:
-            return _response(entitlements.entitlement_denied_response(required, tier))
+        if is_demo_context(tenant):
+            demo_params = deepcopy(tool.get("default_params", {}))
+            demo_params.update(deepcopy(params or {}))
+            reason = demo_run_verdict(tenant, tool.get("name"), demo_params)
+            if reason:
+                return _refusal(reason, status=403)
+        else:
+            tier = entitlements.resolve_tier(tenant)
+            roles, elevated = entitlements.resolve_roles(tenant)
+            required = entitlements.tool_required_capability(tool)
+            try:
+                allowed = entitlements.entitlements_for(tier, roles, elevated).get(required, False)
+            except entitlements.EntitlementsError:
+                return _response(entitlements.policy_unavailable_response(required, tier))
+            if not allowed:
+                return _response(entitlements.entitlement_denied_response(required, tier))
         normalized = deepcopy(tool.get("default_params", {}))
         normalized.update(deepcopy(params or {}))
         trusted, reason = _trusted(tool)

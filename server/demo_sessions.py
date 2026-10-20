@@ -1,4 +1,4 @@
-"""Durable, dark-by-default demo identity; no application routes are granted.
+"""Durable, dark-by-default demo identity with explicit W1 route grants.
 
 Credential precedence (shared by server and platform), first matching row wins:
   auth off + demo                 -> 401 (never the development tenant stub)
@@ -8,10 +8,7 @@ Credential precedence (shared by server and platform), first matching row wins:
   demo alone, auth live           -> verify durable demo identity
   otherwise                      -> existing account/guest/development path
 
-Identity resolution is deliberately separate from route admission. LD1a's
-allowlist is empty, even when the issuer and identity resolver are enabled.
-The global application middleware rejects demo-header presence before this
-credential table runs; direct resolver calls alone exercise demo identity.
+Identity resolution is deliberately separate from explicit route admission.
 Configuration: LEAF_DEMO_LIVE_ENABLED must equal "1"; session signing uses
 LEAF_DEMO_SESSION_SECRET, address HMAC uses LEAF_DEMO_IP_HASH_SECRET, and mint
 requires positive LEAF_DEMO_PER_IP_DAILY_CAP and LEAF_DEMO_GLOBAL_DAILY_CAP.
@@ -43,9 +40,42 @@ from typing import NamedTuple
 import uuid
 
 from fastapi import HTTPException
+from starlette.routing import compile_path
 
 
-DEMO_ROUTE_ALLOWLIST = frozenset()
+DEMO_ROUTE_ALLOWLIST = frozenset({
+    ("POST", "/api/run"),
+    ("GET", "/api/jobs/{job_id}"),
+    ("GET", "/api/jobs/{job_id}/stream"),
+    ("GET", "/api/jobs"),
+    ("POST", "/api/jobs/{job_id}/close"),
+    ("GET", "/api/platform/capabilities"),
+    ("GET", "/api/projects/{project_id}/drawing-versions/{input_version_id}/context"),
+    ("GET", "/api/projects/{project_id}/drawings/{drawing_id}/checkout"),
+    ("POST", "/api/projects/{project_id}/drawings/{drawing_id}/checkout"),
+    ("DELETE", "/api/projects/{project_id}/drawings/{drawing_id}/checkout"),
+    ("POST", "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-reads"),
+    ("GET", "/api/projects/{project_id}/drawings/{drawing_id}/solar-artifacts/{artifact_id}"),
+    ("POST", "/api/projects/{project_id}/conversations"),
+    ("GET", "/api/projects/{project_id}/conversations"),
+    ("GET", "/api/projects/{project_id}/conversations/{conversation_id}"),
+    ("POST", "/api/projects/{project_id}/conversations/recover"),
+    ("POST", "/api/projects/{project_id}/conversations/{conversation_id}/messages"),
+    ("GET", "/api/projects/{project_id}/conversations/recovery/tail"),
+    ("POST", "/api/projects/{project_id}/conversations/recovery/tail"),
+    ("GET", "/api/capabilities"),
+    ("GET", "/api/receipts"),
+    ("POST", "/api/sessions"),
+    ("GET", "/api/sessions"),
+    ("POST", "/api/sessions/{session_id}/messages"),
+    ("POST", "/api/sessions/{session_id}/turns/{turn_id}/cancel"),
+    ("GET", "/api/sessions/{session_id}/stream"),
+    ("GET", "/api/sessions/{session_id}/transcript"),
+})
+DEMO_ROUTE_PATTERNS = tuple(
+    (method, template, compile_path(template)[0])
+    for method, template in sorted(DEMO_ROUTE_ALLOWLIST)
+)
 _PROVISIONING_LOAD_LOCK = threading.Lock()
 
 
@@ -305,5 +335,8 @@ def resolve_demo_session(*, auth_live: bool, demo: str | None,
 
 
 def require_demo_route(request) -> None:
-    if (request.method.upper(), request.url.path) not in DEMO_ROUTE_ALLOWLIST:
+    template = request.scope.get("demo_route_template")
+    dispatched_template = getattr(request.scope.get("route"), "path", None)
+    if (template != dispatched_template or
+            (request.method.upper(), template) not in DEMO_ROUTE_ALLOWLIST):
         raise HTTPException(403, "demo sessions have no application routes")

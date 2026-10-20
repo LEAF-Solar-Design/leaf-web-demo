@@ -602,6 +602,7 @@ def submit_project_graph_job(org_id, project_id, request_tenant_id, tool_name, p
             "AND EXISTS (SELECT 1 FROM drawing_versions v WHERE v.org_id=p.org_id "
             "AND v.project_id=p.project_id AND v.version_id=%(input)s AND v.deleted_at IS NULL) "
             "AND o.tier IS NOT DISTINCT FROM %(pinned_tier)s "
+            "AND (%(pinned_tier)s IS DISTINCT FROM 'demo_live' OR o.account_class = 'demo') "
             "ON CONFLICT (org_id, project_id, idempotency_key) WHERE idempotency_key IS NOT NULL "
             "DO NOTHING RETURNING *",
             {"job": new_uuid(), "org": org_id, "project": project_id,

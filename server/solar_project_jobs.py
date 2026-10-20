@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import platform_link
+from demo_actor import is_demo_context
+from demo_policy import demo_run_verdict
 import solar_project_context as project
 import solar_project_graph as graph
 import solar_project_sizing as sizing
@@ -58,6 +60,10 @@ def submit_project_graph_job(
     tenant, project_id, drawing_id, input_version_id, tool_name, params, *,
     tool_manifest_sha256, checkout_capability, idempotency_key, preview=False,
 ):
+    if is_demo_context(tenant):
+        reason = demo_run_verdict(tenant, tool_name, params)
+        if reason:
+            raise project.ProjectContextError(reason)
     org, actor = project._access(tenant, project_id, write=True)
     if not isinstance(drawing_id, UUID) or not isinstance(input_version_id, UUID):
         project.refuse("INVALID_BINDING")
@@ -107,6 +113,14 @@ def submit_project_graph_job(
         checkout=admission.checkout, tool_manifest_sha256=tool_manifest_sha256)
     from leaf_platform import entitlements
     denial, stored_org = entitlements.stored_job_entitlement_verdict(org, "run")
+    if is_demo_context(tenant) and stored_org is not None:
+        if (stored_org.status != "active" or stored_org.tier != "demo_live"
+                or stored_org.account_class != "demo"):
+            raise project.ProjectContextError("demo_tool_not_allowed")
+        reason = demo_run_verdict(tenant, tool_name, normalized)
+        if reason:
+            raise project.ProjectContextError(reason)
+        denial = None
     if denial is not None:
         raise entitlements.EntitlementDenied(denial)
     execution_context = {

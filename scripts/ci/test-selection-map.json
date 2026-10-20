@@ -9,6 +9,8 @@
     "server/demo_sessions.py",
     "server/demo_provisioning.py",
     "server/demo_actor.py",
+    "server/demo_policy.py",
+    "server/tests/test_demo_policy.py",
     "server/tests/test_demo_sessions*.py",
     "server/tests/test_demo_provisioning*.py",
     "server/tests/test_demo_actor*.py",
@@ -57,6 +59,7 @@
   ],
   "mandatory_suite_ids": [
     "server-demo-sessions",
+    "server-demo-policy",
     "server-demo-sessions-postgres",
     "server-demo-provisioning-postgres",
     "server-demo-actor",

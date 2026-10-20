@@ -409,21 +409,23 @@ def test_no_demo_capability_or_role_overlay(registry, monkeypatch):
 
 def test_representative_gated_ungated_and_public_routes_deny_before_side_effects(registry, monkeypatch):
     from routers import jobs, session, site
+    from app import DemoSessionBoundaryMiddleware
     token = demo.mint(request()).token
     app = FastAPI()
     app.include_router(session.router)
     app.include_router(jobs.router)
     app.include_router(site.router)
+    app.add_middleware(DemoSessionBoundaryMiddleware, router=app.router)
     monkeypatch.setattr(deps, "load_cached_intake", bomb)
     monkeypatch.setattr(site, "_builtin_tools", bomb)
     monkeypatch.setattr(jobs.jobs, "submit_job", bomb)
     client = TestClient(app)
-    for method, path in (("GET", "/api/session"), ("POST", "/api/run"),
+    for method, path in (("GET", "/api/session"), ("PUT", "/api/jobs/00000000-0000-0000-0000-000000000001"),
                          ("GET", "/api/site/capabilities")):
         response = client.request(method, path, headers={"x-demo-session": token},
                                   json={"tool": "drawing.inspect", "params": {}} if method == "POST" else None)
         assert response.status_code == 403
-    assert demo.DEMO_ROUTE_ALLOWLIST == frozenset()
+    assert ("POST", "/api/run") in demo.DEMO_ROUTE_ALLOWLIST
 
 
 @pytest.fixture
@@ -436,7 +438,7 @@ def globally_guarded_app(monkeypatch):
     from starlette.routing import Mount
 
     assert composition.app.user_middleware[0].cls is composition.DemoSessionBoundaryMiddleware
-    assert demo.DEMO_ROUTE_ALLOWLIST == frozenset()
+    assert ("POST", "/api/campaigns") not in demo.DEMO_ROUTE_ALLOWLIST
     monkeypatch.setattr(tenant_mcp.tenant_mcp_store, "pop_pending", bomb)
     monkeypatch.setattr(tenant_mcp.tenant_mcp_store, "update_record", bomb)
     monkeypatch.setattr(tenant_mcp, "_exchange_code", bomb)
@@ -563,6 +565,140 @@ def test_global_boundary_preserves_requests_without_demo_headers():
     middleware = DemoSessionBoundaryMiddleware(downstream, router=FastAPI().router)
     assert boundary_messages(middleware, scope)[0]["status"] == 204
     assert seen == [scope]
+
+
+def test_demo_route_allowlist_is_exact():
+    expected = {
+        "/api/run": ("POST",),
+        "/api/jobs/{job_id}": ("GET",),
+        "/api/jobs/{job_id}/stream": ("GET",),
+        "/api/jobs": ("GET",),
+        "/api/jobs/{job_id}/close": ("POST",),
+        "/api/platform/capabilities": ("GET",),
+        "/api/projects/{project_id}/drawing-versions/{input_version_id}/context": ("GET",),
+        "/api/projects/{project_id}/drawings/{drawing_id}/checkout": ("GET", "POST", "DELETE"),
+        "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-reads": ("POST",),
+        "/api/projects/{project_id}/drawings/{drawing_id}/solar-artifacts/{artifact_id}": ("GET",),
+        "/api/projects/{project_id}/conversations": ("POST", "GET"),
+        "/api/projects/{project_id}/conversations/{conversation_id}": ("GET",),
+        "/api/projects/{project_id}/conversations/recover": ("POST",),
+        "/api/projects/{project_id}/conversations/{conversation_id}/messages": ("POST",),
+        "/api/projects/{project_id}/conversations/recovery/tail": ("GET", "POST"),
+        "/api/capabilities": ("GET",),
+        "/api/receipts": ("GET",),
+        "/api/sessions": ("POST", "GET"),
+        "/api/sessions/{session_id}/messages": ("POST",),
+        "/api/sessions/{session_id}/turns/{turn_id}/cancel": ("POST",),
+        "/api/sessions/{session_id}/stream": ("GET",),
+        "/api/sessions/{session_id}/transcript": ("GET",),
+    }
+    assert demo.DEMO_ROUTE_ALLOWLIST == frozenset(
+        (method, path) for path, methods in expected.items() for method in methods)
+
+
+def test_parameterized_grant_uses_same_template_at_both_boundaries(registry):
+    from fastapi import Depends
+    from app import DemoSessionBoundaryMiddleware
+
+    application = FastAPI()
+
+    @application.get("/api/jobs/{job_id}")
+    def get_job(job_id: uuid.UUID, tenant=Depends(deps.require_tenant)):
+        return {"job_id": str(job_id), "verified_demo": tenant.verified_demo}
+
+    application.add_middleware(DemoSessionBoundaryMiddleware, router=application.router)
+    token = demo.mint(request()).token
+    job_id = str(uuid.uuid4())
+    client = TestClient(application)
+    response = client.get(f"/api/jobs/{job_id}", headers={"X-Demo-Session": token})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"job_id": job_id, "verified_demo": True}
+    for method, path in (("PUT", f"/api/jobs/{job_id}"), ("POST", "/api/campaigns")):
+        assert client.request(method, path, headers={"X-Demo-Session": token}).status_code == 403
+    scope = request({"x-demo-session": token}, path=f"/api/jobs/{job_id}", method="GET").scope
+    scope["type"] = "websocket"
+    assert boundary_messages(application, scope) == [{"type": "websocket.close", "code": 1008}]
+
+
+def test_dependency_requires_boundary_and_dispatched_templates_to_agree():
+    req = request(path="/api/jobs/00000000-0000-0000-0000-000000000001", method="GET")
+    with pytest.raises(HTTPException) as caught:
+        demo.require_demo_route(req)
+    assert caught.value.status_code == 403
+    req.scope["route"] = SimpleNamespace(path="/api/jobs/{job_id}")
+    with pytest.raises(HTTPException) as caught:
+        demo.require_demo_route(req)
+    assert caught.value.status_code == 403
+    req.scope["demo_route_template"] = "/api/jobs/{job_id}"
+    demo.require_demo_route(req)
+    req.scope["route"] = SimpleNamespace(path="/api/jobs/{shadow_id}")
+    with pytest.raises(HTTPException) as caught:
+        demo.require_demo_route(req)
+    assert caught.value.status_code == 403
+
+
+@pytest.mark.parametrize("method,template", sorted(demo.DEMO_ROUTE_ALLOWLIST))
+def test_production_app_dispatch_confirms_each_demo_grant(monkeypatch, method, template):
+    import app as composition
+    from fastapi.responses import Response
+    from route_flatten import iter_leaf_routes
+    from starlette.routing import request_response
+
+    seen = []
+
+    async def guarded_handler(req):
+        # Keep production routing and middleware, replacing only handler work
+        # so this contract needs neither a database nor request-body fixtures.
+        demo.require_demo_route(req)
+        scope = req.scope
+        seen.append((scope["demo_route_template"], scope["route"].path))
+        return Response(status_code=204)
+
+    routes = list(iter_leaf_routes(composition.app.routes))
+    assert any(path == template and method in getattr(route, "methods", ())
+               for path, route in routes)
+    for _, route in routes:
+        if hasattr(route, "get_route_handler"):
+            monkeypatch.setattr(route, "get_route_handler", lambda: guarded_handler)
+            # Older FastAPI versions cache this handler at construction time.
+            monkeypatch.setattr(route, "app", request_response(guarded_handler))
+    path = re.sub(r"\{[^}]+\}", lambda _: str(uuid.uuid4()), template)
+    response = TestClient(composition.app).request(
+        method, path, headers={"X-Demo-Session": "routing-contract"})
+    assert response.status_code == 204, response.text
+    assert seen == [(template, template)]
+
+
+def test_shadowing_route_cannot_borrow_demo_grant(registry):
+    from fastapi import Depends
+    from app import DemoSessionBoundaryMiddleware
+
+    application = FastAPI()
+
+    @application.get("/api/jobs/{shadow_id}")
+    def shadow(shadow_id: str, tenant=Depends(deps.require_tenant)):
+        pytest.fail("ungranted shadow handler reached")
+
+    @application.get("/api/jobs/{job_id}")
+    def granted(job_id: str, tenant=Depends(deps.require_tenant)):
+        pytest.fail("shadowed grant handler reached")
+
+    application.add_middleware(DemoSessionBoundaryMiddleware, router=application.router)
+    token = demo.mint(request()).token
+    response = TestClient(application).get(
+        f"/api/jobs/{uuid.uuid4()}", headers={"X-Demo-Session": token})
+    assert response.status_code == 403, response.text
+
+
+def test_boundary_refuses_ambiguous_or_multisegment_grants(monkeypatch):
+    from app import DemoSessionBoundaryMiddleware
+
+    scope = request(path=f"/api/jobs/{uuid.uuid4()}", method="GET").scope
+    assert DemoSessionBoundaryMiddleware._route_template(scope) == "/api/jobs/{job_id}"
+    monkeypatch.setattr(demo, "DEMO_ROUTE_PATTERNS", demo.DEMO_ROUTE_PATTERNS * 2)
+    assert DemoSessionBoundaryMiddleware._route_template(scope) is None
+    scope["path"] += "/extra"
+    assert DemoSessionBoundaryMiddleware._route_template(scope) is None
 
 
 @pytest.mark.parametrize("authorization", ["", "Basic malformed", "Bearer"])

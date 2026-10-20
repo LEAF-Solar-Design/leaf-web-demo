@@ -1138,8 +1138,10 @@ def build_suites() -> List[Suite]:
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
               _py_pytest("tests/test_auth_envelope.py"), 7),
         Suite("server-demo-sessions", "server demo identity and dark route boundaries", "pytest",
-              # LD1a's expanded global/public boundary matrix raises the stale 115 floor to 268.
-              SERVER, _py_pytest("tests/test_demo_sessions.py"), 268),
+              # LD1a's boundary matrix plus LD1d2's three W1 route contracts.
+              SERVER, _py_pytest("tests/test_demo_sessions.py"), 271),
+        Suite("server-demo-policy", "server local W1 demo execution policy", "pytest",
+              SERVER, _py_pytest("tests/test_demo_policy.py"), 27),
         Suite("server-demo-sessions-postgres", "server durable demo mint races", "pytest",
               SERVER, _py_pytest("tests/test_demo_sessions_postgres.py"), 9,
               db_gated=True),
