@@ -12,7 +12,7 @@
  * $comment blocks for the exact scoping.
  */
 
-const SURFACE_IDS = new Set(["browser", "cad", "solar", "ios", "sheets"]);
+const SURFACE_IDS = new Set(["browser", "cad", "solar", "ios", "sheets", "ops"]);
 
 const SLOT_NAMES = new Set([
   "chrome", "toolbar", "rails", "commandLine", "authoring", "versions",

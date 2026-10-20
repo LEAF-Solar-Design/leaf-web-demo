@@ -10,8 +10,8 @@
     "cad": { "$ref": "#/$defs/surfaceOverlay" },
     "solar": { "$ref": "#/$defs/surfaceOverlay" },
     "ios": { "$ref": "#/$defs/surfaceOverlay" },
-    "ops": { "$ref": "#/$defs/surfaceOverlay" },
-    "sheets": { "$ref": "#/$defs/surfaceOverlay" }
+    "sheets": { "$ref": "#/$defs/surfaceOverlay" },
+    "ops": { "$ref": "#/$defs/surfaceOverlay" }
   },
   "$defs": {
     "surfaceOverlay": {
