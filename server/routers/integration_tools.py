@@ -62,3 +62,8 @@ def datasets(parsed=Depends(_request)):
 @router.post("/internal/integrations/query")
 def query(parsed=Depends(_request)):
     return _execute("query", parsed)
+
+
+@router.post("/internal/integrations/elements")
+def elements(parsed=Depends(_request)):
+    return _execute("elements", parsed)

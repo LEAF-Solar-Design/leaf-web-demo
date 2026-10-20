@@ -161,6 +161,335 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
     "approval_ttl_s": 300,
     "rate_limits": {"low_per_hour": 120, "medium_per_hour": 60, "high_per_hour": 10},
     "actions": {
+        "save_integration_element": {
+            "description": "Create or replace a native dataset element in the current project using revision checks.",
+            "rung": 3,
+            "required_capability": "converse",
+            "policy": "auto",
+            "enabled": True,
+            "tenant_tightenable": True,
+            "dispatch": {
+                "kind": "app_api",
+                "routes": [
+                    "POST /internal/integrations/elements"
+                ]
+            },
+            "rate_limit_category": "medium",
+            "timeout_s": 10,
+            "audit_extra": [
+                "expectedRevision"
+            ],
+            "args_schema": {
+                "$defs": {
+                    "IntegrationRefV1": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+                            },
+                            "version": {
+                                "type": "integer",
+                                "exclusiveMinimum": 0,
+                                "maximum": 9007199254740991
+                            },
+                            "digest": {
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+                            }
+                        },
+                        "required": [
+                            "id",
+                            "version",
+                            "digest"
+                        ],
+                        "additionalProperties": False
+                    },
+                    "DatasetQueryV1": {
+                        "type": "object",
+                        "properties": {
+                            "fields": {
+                                "minItems": 1,
+                                "maxItems": 100,
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 128,
+                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                }
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1000
+                            },
+                            "cursor": {
+                                "type": "string",
+                                "maxLength": 2048
+                            },
+                            "filters": {
+                                "maxItems": 20,
+                                "type": "array",
+                                "items": {
+                                    "anyOf": [
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "field": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                    "maxLength": 128,
+                                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                                },
+                                                "op": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "eq",
+                                                        "neq",
+                                                        "gt",
+                                                        "gte",
+                                                        "lt",
+                                                        "lte"
+                                                    ]
+                                                },
+                                                "value": {
+                                                    "anyOf": [
+                                                        {
+                                                            "type": "string"
+                                                        },
+                                                        {
+                                                            "type": "number"
+                                                        },
+                                                        {
+                                                            "type": "boolean"
+                                                        },
+                                                        {
+                                                            "type": "null"
+                                                        }
+                                                    ]
+                                                }
+                                            },
+                                            "required": [
+                                                "field",
+                                                "op",
+                                                "value"
+                                            ],
+                                            "additionalProperties": False
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "field": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                    "maxLength": 128,
+                                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                                },
+                                                "op": {
+                                                    "type": "string",
+                                                    "const": "is_null"
+                                                }
+                                            },
+                                            "required": [
+                                                "field",
+                                                "op"
+                                            ],
+                                            "additionalProperties": False
+                                        }
+                                    ]
+                                }
+                            },
+                            "sort": {
+                                "maxItems": 4,
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "field": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "maxLength": 128,
+                                            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                        },
+                                        "direction": {
+                                            "type": "string",
+                                            "enum": [
+                                                "asc",
+                                                "desc"
+                                            ]
+                                        }
+                                    },
+                                    "required": [
+                                        "field",
+                                        "direction"
+                                    ],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": [
+                            "fields",
+                            "limit"
+                        ],
+                        "additionalProperties": False
+                    },
+                    "DatasetElementV1": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "schema_version": {
+                                        "type": "number",
+                                        "const": 1
+                                    },
+                                    "id": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 128,
+                                        "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+                                    },
+                                    "title": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 120
+                                    },
+                                    "dataset_ref": {
+                                        "$ref": "#/$defs/IntegrationRefV1"
+                                    },
+                                    "query": {
+                                        "$ref": "#/$defs/DatasetQueryV1"
+                                    },
+                                    "kind": {
+                                        "type": "string",
+                                        "const": "dataset.table"
+                                    },
+                                    "props": {
+                                        "type": "object",
+                                        "properties": {
+                                            "columns": {
+                                                "minItems": 1,
+                                                "maxItems": 100,
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                    "maxLength": 128,
+                                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                                }
+                                            },
+                                            "row_limit": {
+                                                "type": "integer",
+                                                "minimum": 1,
+                                                "maximum": 1000
+                                            }
+                                        },
+                                        "required": [
+                                            "columns",
+                                            "row_limit"
+                                        ],
+                                        "additionalProperties": False
+                                    }
+                                },
+                                "required": [
+                                    "schema_version",
+                                    "id",
+                                    "title",
+                                    "dataset_ref",
+                                    "query",
+                                    "kind",
+                                    "props"
+                                ],
+                                "additionalProperties": False
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "schema_version": {
+                                        "type": "number",
+                                        "const": 1
+                                    },
+                                    "id": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 128,
+                                        "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+                                    },
+                                    "title": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 120
+                                    },
+                                    "dataset_ref": {
+                                        "$ref": "#/$defs/IntegrationRefV1"
+                                    },
+                                    "query": {
+                                        "$ref": "#/$defs/DatasetQueryV1"
+                                    },
+                                    "kind": {
+                                        "type": "string",
+                                        "const": "dataset.line"
+                                    },
+                                    "props": {
+                                        "type": "object",
+                                        "properties": {
+                                            "x_field": {
+                                                "type": "string",
+                                                "minLength": 1,
+                                                "maxLength": 128,
+                                                "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                            },
+                                            "y_field": {
+                                                "type": "string",
+                                                "minLength": 1,
+                                                "maxLength": 128,
+                                                "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                                            }
+                                        },
+                                        "required": [
+                                            "x_field",
+                                            "y_field"
+                                        ],
+                                        "additionalProperties": False
+                                    }
+                                },
+                                "required": [
+                                    "schema_version",
+                                    "id",
+                                    "title",
+                                    "dataset_ref",
+                                    "query",
+                                    "kind",
+                                    "props"
+                                ],
+                                "additionalProperties": False
+                            }
+                        ]
+                    }
+                },
+                "type": "object",
+                "properties": {
+                    "recipe": {
+                        "$ref": "#/$defs/DatasetElementV1"
+                    },
+                    "expectedRevision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9007199254740991
+                    },
+                    "confirmation_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{16}(?![\\s\\S])"
+                    }
+                },
+                "required": [
+                    "recipe"
+                ],
+                "additionalProperties": False
+            }
+        },
         "read_integration_data": {
             "description": "Discover project datasets or query an existing materialization.",
             "rung": 1,
