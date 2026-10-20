@@ -262,7 +262,9 @@ def test_real_plan_first_approval_exact_recipe_revision_and_one_use(save, tmp_pa
     replay = {**value, "confirmation_id": confirmation}
     assert save.save({**replay, "expectedRevision": 8})["gate"]["decision"] == "deny"
     assert save.save({**replay, "recipe": {**recipe(), "title": "Drift"}})["gate"]["decision"] == "deny"
-    assert save.save(replay)["gate"]["decision"] == "allow"
+    approved = save.save(replay)["gate"]
+    assert approved["decision"] == "allow"
+    assert "confirmation_id" not in approved
     assert save.save(replay)["gate"]["decision"] == "deny"
     assert len(save.requests) == 1
 

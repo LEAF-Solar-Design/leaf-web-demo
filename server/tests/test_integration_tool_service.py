@@ -76,7 +76,8 @@ def rig(monkeypatch):
 
     def gate(*args, **kwargs):
         state.gates.append((deepcopy(args), kwargs))
-        return {"decision": state.decision, "reason": "fixture", "policy": "auto", "rung": 1}
+        return {"decision": state.decision, "reason": "fixture", "policy": "auto", "rung": 1,
+                **({"confirmation_id": "a" * 16} if state.decision == "awaiting_approval" else {})}
 
     async def http(request):
         state.requests.append(request)
@@ -272,9 +273,26 @@ def test_real_gate_plan_first_replay_and_argument_drift(rig, tmp_path, monkeypat
     value = {"dataset_ref": REF, "query": QUERY, "confirmation_id": confirmation}
     drift = {**value, "query": {**QUERY, "limit": 6}}
     assert rig.call(drift)["gate"]["decision"] == "deny"
-    assert rig.call(value)["gate"]["decision"] == "allow"
+    approved = rig.call(value)["gate"]
+    assert approved["decision"] == "allow"
+    assert "confirmation_id" not in approved
     assert rig.call(value)["gate"]["decision"] == "deny"
     assert len(rig.requests) == 1
+
+
+def test_real_gate_early_denial_projects_nullable_metadata(rig, tmp_path, monkeypatch):
+    kill = tmp_path / "kill"
+    kill.write_text("enabled", encoding="utf-8")
+    monkeypatch.setenv("LEAF_AGENT_KILL_FILE", str(kill))
+    monkeypatch.setenv("LEAF_AGENT_AUDIT", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    rig.svc.gate = agent_gate.gate
+    verdict = rig.call()["gate"]
+    assert verdict["decision"] == "deny"
+    assert isinstance(verdict["reason"], str)
+    assert "policy" not in verdict and "rung" not in verdict
+    assert "confirmation_id" not in verdict
+    assert not rig.requests
 
 
 def test_policy_entry_matches_fallback_and_pinned_definitions():

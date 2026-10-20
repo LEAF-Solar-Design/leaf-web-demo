@@ -73,7 +73,8 @@ def host(monkeypatch):
             service.crypto._scrub(token)
     def gate(*args, **kwargs):
         state.gates.append((args, kwargs))
-        return {"decision": state.decision, "reason": "fixture", "policy": "auto", "rung": 1}
+        return {"decision": state.decision, "reason": "fixture", "policy": "auto", "rung": 1,
+                **({"confirmation_id": "a" * 16} if state.decision == "awaiting_approval" else {})}
     async def http(request):
         state.ops.append(request)
         state.on_http()

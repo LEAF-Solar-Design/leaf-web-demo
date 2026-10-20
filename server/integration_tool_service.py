@@ -54,6 +54,30 @@ def failure(code):
     return {"error": {"code": code, "correlationId": str(uuid4())}}
 
 
+def project_gate(verdict):
+    """Project the shared gate producer onto the integration wire contract."""
+    if type(verdict) is not dict or verdict.get("decision") not in {"allow", "deny", "awaiting_approval"}:
+        raise ReadFailure("invalid_response")
+    projected = {"decision": verdict["decision"]}
+    for key, limit in (("reason", 512), ("policy", 128)):
+        value = verdict.get(key)
+        if value is not None:
+            if type(value) is not str:
+                raise ReadFailure("invalid_response")
+            projected[key] = value[:limit]
+    rung = verdict.get("rung")
+    if rung is not None:
+        if type(rung) is not int or not 0 <= rung <= 7:
+            raise ReadFailure("invalid_response")
+        projected["rung"] = rung
+    if verdict["decision"] == "awaiting_approval":
+        confirmation = verdict.get("confirmation_id")
+        if type(confirmation) is not str or not re.fullmatch(r"[a-f0-9]{16}", confirmation):
+            raise ReadFailure("invalid_response")
+        projected["confirmation_id"] = confirmation
+    return projected
+
+
 def _pairs(pairs):
     result = {}
     for key, value in pairs:
@@ -446,9 +470,9 @@ class IntegrationToolService:
                         "save_integration_element" if saving else "read_integration_data",
                         args, fresh.capabilities, tier=fresh.tier,
                         subject=fresh.authority.subject, policy_session_id=fresh.authority.session_id)
-                    if type(verdict) is not dict or verdict.get("decision") not in {"allow", "deny", "awaiting_approval"}:
-                        raise ReadFailure("unavailable")
-                    output = {"gate": verdict}
+                    if _reflection(verdict, token):
+                        raise ReadFailure("invalid_response")
+                    output = {"gate": project_gate(verdict)}
                     if verdict["decision"] == "allow":
                         check()
                         base = fresh.authority.origin + "/api/v1/projects/" + fresh.authority.project_id + "/integrations/datasets"

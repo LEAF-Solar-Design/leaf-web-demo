@@ -26,6 +26,9 @@ const FROZEN_SPINE_TOOL_NAMES = [
   "customize_platform",
   "finish_project",
   "project_completion_status",
+  "integration_datasets",
+  "integration_query",
+  "integration_save_element",
 ] as const;
 
 const FROZEN_EVENT_TYPES = [
@@ -66,7 +69,7 @@ export type SpineVocabularyFreeze = [
 ];
 
 describe("tenant spine constants stay frozen under the operator contract", () => {
-  it("SPINE_TOOL_NAMES equals the twelve frozen literals, in order", () => {
+  it("SPINE_TOOL_NAMES equals the frozen literals, in order", () => {
     expect([...SPINE_TOOL_NAMES]).toEqual([...FROZEN_SPINE_TOOL_NAMES]);
   });
 

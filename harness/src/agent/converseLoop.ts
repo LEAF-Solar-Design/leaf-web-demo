@@ -15,7 +15,11 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
-import { SPINE_TOOL_NAMES } from "../ports/index.js";
+import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES } from "../ports/index.js";
+import {
+  IntegrationClientError, integrationErrorMessage, validateIntegrationResponse,
+} from "../ports/impl/appRunClient.js";
+import type { IntegrationTool } from "../ports/impl/appRunClient.js";
 import type {
   IntentSynthesizer,
   TurnIntent,
@@ -38,6 +42,11 @@ import type {
   InstantExecutorClient,
   InstantInvocation,
   InstantSessionAssignment,
+  GateCheckResult,
+  IntegrationDatasetsInput,
+  IntegrationQueryInput,
+  IntegrationSaveElementInput,
+  IntegrationToolResult,
 } from "../ports/index.js";
 
 // --------------------------------------------------------------------------- //
@@ -706,6 +715,10 @@ export class ConverseLoop {
       args: Record<string, unknown>,
     ): Promise<{ action: string; args: Record<string, unknown> }> => {
       switch (tool) {
+        case "integration_datasets":
+        case "integration_query":
+        case "integration_save_element":
+          throw new IntegrationClientError("unavailable");
         case "catalog_search":
           return { action: "read_platform_state", args: { what: "capabilities" } };
         case "drawing_state":
@@ -920,14 +933,42 @@ export class ConverseLoop {
 
       let result: SpineToolResult;
       try {
-        // THE gate: before EVERY tool execution (wire contract section 5), in the
-        // app policy catalog's action vocabulary.
-        const consult = await gateConsultFor(tool, args);
-        const verdict = await gate.check(consult.action, consult.args, {
-          tenantId,
-          sessionId,
-          turnId,
-        });
+        // Integrations execute behind the host's sole gate and already return
+        // their result. All other tools retain consult/check/dispatch.
+        let hosted: IntegrationToolResult<unknown> | undefined;
+        let consult: { action: string; args: Record<string, unknown> };
+        let verdict: GateCheckResult;
+        if (isIntegrationTool(tool)) {
+          const parsed = INTEGRATION_TOOL_INPUTS[tool].safeParse(args);
+          if (!parsed.success) throw new IntegrationClientError("invalid_input");
+          args = parsed.data;
+          const validAuthority = (id: unknown): id is string => typeof id === "string" &&
+            id.length > 0 && id.length <= 200 && id.trim() === id && !/[\u0000-\u001f\u007f-\u009f]/.test(id);
+          if (!validAuthority(instant.authoritySessionId) || !validAuthority(instant.authorityTurnId)) {
+            throw new IntegrationClientError("unavailable");
+          }
+          const authority = { sessionId: instant.authoritySessionId, turnId: instant.authorityTurnId };
+          switch (tool) {
+            case "integration_datasets":
+              if (!appRun.integrationDatasets) throw new IntegrationClientError("unavailable");
+              hosted = await appRun.integrationDatasets(tenantId, args as IntegrationDatasetsInput, authority);
+              break;
+            case "integration_query":
+              if (!appRun.integrationQuery) throw new IntegrationClientError("unavailable");
+              hosted = await appRun.integrationQuery(tenantId, args as IntegrationQueryInput, authority);
+              break;
+            case "integration_save_element":
+              if (!appRun.integrationSaveElement) throw new IntegrationClientError("unavailable");
+              hosted = await appRun.integrationSaveElement(tenantId, args as IntegrationSaveElementInput, authority);
+              break;
+          }
+          hosted = validateIntegrationResponse(tool, parsed.data, hosted);
+          verdict = hosted.gate;
+          consult = { action: tool, args };
+        } else {
+          consult = await gateConsultFor(tool, args);
+          verdict = await gate.check(consult.action, consult.args, { tenantId, sessionId, turnId });
+        }
 
         // A deny is a RELAYABLE result, not a crash: the model explains it calmly.
         const relayDeny = (reason: string): SpineToolResult =>
@@ -957,7 +998,9 @@ export class ConverseLoop {
           // drawing. Raw SDK args may omit the default drawing, which would make
           // the mirror disagree with the app gate's args hash on replay.
           const confirmationArgs =
-            tool === "run_capability" || tool === "customize_platform" ? consult.args : args;
+            tool === "run_capability" || tool === "customize_platform" ? consult.args :
+              isIntegrationTool(tool) ? { ...args } : args;
+          if (isIntegrationTool(tool)) delete confirmationArgs.confirmation_id;
           await store.putConfirmation(
             mkConfirmation(confirmationId, tool, confirmationArgs, kind),
           );
@@ -988,7 +1031,7 @@ export class ConverseLoop {
             const payload =
               tool === "customize_platform"
                 ? customizeChipPayload(consult.args)
-                : args;
+                : isIntegrationTool(tool) ? confirmationArgs : args;
             await emit("confirmation_required", {
               confirmation_id: confirmationId,
               kind,
@@ -996,6 +1039,8 @@ export class ConverseLoop {
             });
             result = ok(JSON.stringify({ pending: true, confirmation_id: confirmationId }));
           }
+        } else if (hosted) {
+          result = ok(JSON.stringify(hosted.result));
         } else {
           const executionArgs = tool === "run_capability"
             ? { ...args, ...consult.args }
@@ -1019,7 +1064,9 @@ export class ConverseLoop {
           );
         }
       } catch (e) {
-        result = err(`tool error: ${(e as Error).message}`);
+        result = isIntegrationTool(tool)
+          ? err(e instanceof IntegrationClientError ? integrationErrorMessage(e.code) : integrationErrorMessage("unavailable"))
+          : err(`tool error: ${(e as Error).message}`);
       }
 
       const publicationResult = tool === "request_publication" && !result.isError
@@ -1059,6 +1106,10 @@ export class ConverseLoop {
     const tenantId = ctx.session.tenant_id;
 
     switch (tool) {
+      case "integration_datasets":
+      case "integration_query":
+      case "integration_save_element":
+        return err(integrationErrorMessage("unavailable"));
       case "catalog_search": {
         const query = String(args.query ?? "");
         const k = clampInt(args.k, 1, 20, 5);
@@ -1501,6 +1552,10 @@ function isSpineTool(name: string): name is SpineToolName {
   return (SPINE_TOOL_NAMES as readonly string[]).includes(name);
 }
 
+function isIntegrationTool(name: string): name is IntegrationTool {
+  return name === "integration_datasets" || name === "integration_query" || name === "integration_save_element";
+}
+
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
@@ -1583,6 +1638,12 @@ function truncate(s: string, n: number): string {
 /** Short HUMAN summary — never the full params (wire contract section 3). */
 function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string {
   switch (tool) {
+    case "integration_datasets":
+      return "discover datasets";
+    case "integration_query":
+      return "query dataset";
+    case "integration_save_element":
+      return "save dataset element";
     case "catalog_search":
       return `query="${truncate(String(args.query ?? ""), 60)}"`;
     case "drawing_state":
@@ -1726,6 +1787,9 @@ function resultSummary(tool: SpineToolName, result: SpineToolResult): string {
     const parsed = JSON.parse(result.content) as Record<string, unknown>;
     if (parsed.proposed) return `proposed (confirmation ${String(parsed.confirmation_id)})`;
     if (parsed.pending) return `pending (confirmation ${String(parsed.confirmation_id)})`;
+    if (tool === "integration_datasets") return `${Array.isArray(parsed.datasets) ? parsed.datasets.length : 0} datasets`;
+    if (tool === "integration_query") return `${Array.isArray(parsed.rows) ? parsed.rows.length : 0} rows (${String(parsed.status)})`;
+    if (tool === "integration_save_element") return `element ${String(asRecord(parsed.element).id)} revision ${String(parsed.revision)}`;
     if (typeof parsed.job_id === "string" && parsed.job_id) {
       return `job ${parsed.job_id} ${String(parsed.status ?? "")}`.trim();
     }
