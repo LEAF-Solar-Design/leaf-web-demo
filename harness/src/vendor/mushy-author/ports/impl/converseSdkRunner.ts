@@ -80,6 +80,7 @@ import type {
   SpineToolName,
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
+import { INTEGRATION_TOOL_INPUTS } from "../integrationTools.js";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
 import { composeRunnerCapabilities } from "./runnerCapabilities.js";
 import { createStandardServicesFacade } from "./standardServicesFacade.js";
@@ -155,6 +156,12 @@ function toEpochS(resetsAt: number): number {
 
 /** Wire-contract section 5 tool descriptions (what the model sees). */
 const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
+  integration_datasets:
+    "Discover one bounded page of datasets in the host's trusted scope (limit 1..50, default 50; optional after cursor). Use the returned exact dataset references. Unknown and null values are preserved. If confirmation is pending, end the turn; resume with unchanged arguments and the gate-issued confirmation_id. You cannot mint approval.",
+  integration_query:
+    "Query existing dataset materialization using an exact dataset_ref and bounded canonical query. Never implicitly refreshes or syncs. Preserve unknown and null values. If confirmation is pending, end the turn; resume with unchanged arguments and the gate-issued confirmation_id. You cannot mint approval.",
+  integration_save_element:
+    "Save a live dataset.table or dataset.line recipe in the current project using its exact dataset reference. This is a reversible project mutation subject to the host gate, never a snapshot, provider action, publish or sync. If confirmation is pending, end the turn; resume with unchanged arguments and the gate-issued confirmation_id. You cannot mint approval.",
   catalog_search:
     "Search the platform's registered tool catalog. Args {query, k?}. Returns matching tools; the top match includes its params_schema.",
   drawing_state:
@@ -260,6 +267,9 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       ...(r.isError ? { isError: true } : {}),
     });
     const schemas: Record<SpineToolName, Record<string, unknown>> = {
+      integration_datasets: INTEGRATION_TOOL_INPUTS.integration_datasets.shape,
+      integration_query: INTEGRATION_TOOL_INPUTS.integration_query.shape,
+      integration_save_element: INTEGRATION_TOOL_INPUTS.integration_save_element.shape,
       catalog_search: { query: z.string(), k: z.number().optional() },
       drawing_state: { what: z.enum(["summary", "versions", "checkout"]) },
       ask_user: {
@@ -318,9 +328,17 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       },
     };
     const tools = SPINE_TOOL_NAMES.map((name) =>
-      sdk.tool(name, TOOL_DESCRIPTIONS[name], schemas[name], async (args) =>
-        toResult(await input.tools.execute(name, args)),
-      ),
+      sdk.tool(name, TOOL_DESCRIPTIONS[name], schemas[name], async (args) => {
+        if (Object.prototype.hasOwnProperty.call(INTEGRATION_TOOL_INPUTS, name)) {
+          const schema = INTEGRATION_TOOL_INPUTS[name as keyof typeof INTEGRATION_TOOL_INPUTS];
+          const parsed = schema.safeParse(args);
+          if (!parsed.success) {
+            return toResult({ content: "Invalid integration tool input", isError: true });
+          }
+          return toResult(await input.tools.execute(name, parsed.data));
+        }
+        return toResult(await input.tools.execute(name, args));
+      }),
     );
     const server = sdk.createSdkMcpServer({ name: "spine", version: "1.0.0", tools });
     let services: ReturnType<typeof createStandardServicesFacade> | undefined;

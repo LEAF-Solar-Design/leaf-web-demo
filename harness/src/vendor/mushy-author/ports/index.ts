@@ -23,6 +23,18 @@
 // Frozen data contracts
 // --------------------------------------------------------------------------- //
 
+import type { DatasetReadV1 } from "../contracts/integration.js";
+import type {
+  IntegrationAuthority,
+  IntegrationDatasetsInput,
+  IntegrationDatasetsResult,
+  IntegrationQueryInput,
+  IntegrationSaveElementInput,
+  IntegrationSaveElementResult,
+  IntegrationToolResult,
+} from "./integrationTools.js";
+export * from "./integrationTools.js";
+
 /** JSON Schema fragment (structural — we validate the fields we depend on). */
 export interface JsonSchema {
   type?: string;
@@ -591,6 +603,9 @@ export const SPINE_TOOL_NAMES = [
   "customize_platform",
   "finish_project",
   "project_completion_status",
+  "integration_datasets",
+  "integration_query",
+  "integration_save_element",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
 
@@ -834,6 +849,24 @@ export interface SubmitRunResponse {
 }
 
 export interface AppRunClient {
+  /** One bounded discovery page; absent means unavailable in this host. */
+  integrationDatasets?(
+    tenantId: string,
+    input: IntegrationDatasetsInput,
+    authority: IntegrationAuthority,
+  ): Promise<IntegrationToolResult<IntegrationDatasetsResult>>;
+  /** Read existing materialization without implicitly refreshing it. */
+  integrationQuery?(
+    tenantId: string,
+    input: IntegrationQueryInput,
+    authority: IntegrationAuthority,
+  ): Promise<IntegrationToolResult<DatasetReadV1>>;
+  /** Save a live table/line recipe in the current project, subject to the host gate. */
+  integrationSaveElement?(
+    tenantId: string,
+    input: IntegrationSaveElementInput,
+    authority: IntegrationAuthority,
+  ): Promise<IntegrationToolResult<IntegrationSaveElementResult>>;
   /** GET /api/capabilities — the tenant's catalog (data the agent searches). */
   getCapabilities(tenantId: string): Promise<CapabilityEntry[]>;
   /** GET /api/drawings/* — summary | versions | checkout fragment. */
