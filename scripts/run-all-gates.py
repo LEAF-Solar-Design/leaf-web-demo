@@ -3476,6 +3476,16 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_mcp_status.py"), 4),
         Suite("server-mcp-tool-projection", "server tests/test_mcp_tool_projection.py", "pytest", SERVER,
               _py_pytest("tests/test_mcp_tool_projection.py"), 6),
+        Suite("server-integration-turn-grants", "encrypted Studio turn grant unit checks", "pytest", SERVER,
+              _py_pytest("tests/test_integration_turn_grant_crypto.py")
+              + ["tests/test_integration_turn_grant_store.py"], 61),
+        # This proof owns an EMPTY named disposable database. Never alias the
+        # general gate DSN to it. opt_in_env normally accepts boolean flags;
+        # a present dedicated DSN selects this suite directly instead.
+        Suite("server-integration-turn-grants-postgres", "disposable PostgreSQL grant isolation", "pytest", SERVER,
+              _py_pytest("tests/test_integration_turn_grant_postgres.py"), 1,
+              opt_in_env=("" if os.environ.get("INTEGRATION_GRANT_TEST_DATABASE_URL", "").strip()
+                          else "INTEGRATION_GRANT_TEST_DATABASE_URL")),
         Suite("server-multi-claude-grants", "server tests/test_multi_claude_grants.py", "pytest", SERVER,
               _py_pytest("tests/test_multi_claude_grants.py"), 1),
         Suite("server-plan-first", "server tests/test_plan_first.py", "pytest", SERVER,
