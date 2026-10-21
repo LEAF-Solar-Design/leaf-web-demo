@@ -47,6 +47,7 @@ MAX_COORDINATE = 1_000_000_000.0
 # words, not the typography), so every synthesized text gets this one.
 TEXT_HEIGHT = "2.5"
 
+_HANDLE_LIMIT = 16**32
 _HANDLE_RE = re.compile(r"^[0-9A-Fa-f]{1,32}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 # Mirrors server/mutation_plan.py's LINEWEIGHTS (the DXF group-370 enumeration).
@@ -526,6 +527,9 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
 
     def fresh_handle():
         nonlocal next_handle
+        # Reserve room for the $HANDSEED that follows the allocated handle.
+        if next_handle + 1 >= _HANDLE_LIMIT:
+            _fail("insufficient handle space for a fresh handle and $HANDSEED")
         h = format(next_handle, "X")
         next_handle += 1
         return h

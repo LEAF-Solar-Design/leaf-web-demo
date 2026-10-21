@@ -74,6 +74,32 @@ def _round_trip_with_resolved_pointers(intake):
     return parse_dxf_bytes(raw, source_name="x.dxf")
 
 
+def test_exhausted_handle_space_is_rejected():
+    intake = {"layers": ["0"], "polylines": [
+        {"layer": "0", "closed": True, "pts": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+         "xdata": None, "handle": "F" * 32}]}
+    with pytest.raises(intake_dxf.IntakeDxfError, match="handle space"):
+        intake_to_dxf(intake)
+
+
+def test_large_handle_with_available_space_is_preserved():
+    handle = "F" * 31
+    intake = {"layers": ["0"], "polylines": [
+        {"layer": "0", "closed": True, "pts": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],
+         "xdata": None, "handle": handle}]}
+    raw = intake_to_dxf(intake)
+    sections = _sections(raw)
+    polyline, = _records(sections["ENTITIES"])
+    assert _get(polyline, 5) == handle
+    assert parse_dxf_bytes(raw)["polylines"][0]["handle"] == handle
+    for pairs in sections.values():
+        for code, value in pairs:
+            if code in ("5", "105"):
+                assert 1 <= len(value) <= 32
+                assert int(value, 16) < 16**32
+    assert 1 <= len(_get(sections["HEADER"], 5)) <= 32
+
+
 def test_case_distinct_layers_keep_legacy_order():
     intake = {"layers": ["Roof", "roof"], "polylines": [
         {"layer": "Roof", "closed": True, "pts": [[0, 0], [1, 0], [1, 1]]}]}
