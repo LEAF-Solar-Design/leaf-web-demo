@@ -3849,6 +3849,16 @@
             "additionalProperties": false
           }
         ]
+      },
+      "IntegrationElementV1": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/DatasetElementV1"
+          },
+          {
+            "$ref": "#/components/schemas/IntegrationActionElementV1"
+          }
+        ]
       }
     }
   }

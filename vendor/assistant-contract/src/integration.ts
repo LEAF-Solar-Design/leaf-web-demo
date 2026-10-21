@@ -532,3 +532,6 @@ export const DatasetElementV1 = z.union([
   }),
 ]);
 export type DatasetElementV1 = z.infer<typeof DatasetElementV1>;
+
+export const IntegrationElementV1 = z.union([DatasetElementV1, IntegrationActionElementV1]);
+export type IntegrationElementV1 = z.infer<typeof IntegrationElementV1>;

@@ -161,7 +161,7 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
   integration_query:
     "Query existing dataset materialization using an exact dataset_ref and bounded canonical query. Never implicitly refreshes or syncs. Preserve unknown and null values. If confirmation is pending, end the turn; resume with unchanged arguments and the gate-issued confirmation_id. You cannot mint approval.",
   integration_save_element:
-    "Save a live dataset.table or dataset.line recipe in the current project using its exact dataset reference. This is a reversible project mutation subject to the host gate, never a snapshot, provider action, publish or sync. If confirmation is pending, end the turn; resume with unchanged arguments and the gate-issued confirmation_id. You cannot mint approval.",
+    "Compose and save a native dataset.table, dataset.line or inert integration.action form recipe in the current project. Tables and lines use exact dataset references; action forms bind a connection_id and exact immutable connector_ref and operation_ref, with typed form fields. Saving is a reversible project mutation subject to the host gate. Saving an action form never submits or executes it; execution remains host-only. If confirmation is pending, end the turn; resume with unchanged arguments and the gate-issued confirmation_id. You cannot mint approval.",
   catalog_search:
     "Search the platform's registered tool catalog. Args {query, k?}. Returns matching tools; the top match includes its params_schema.",
   drawing_state:

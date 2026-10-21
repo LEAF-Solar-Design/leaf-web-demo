@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { IntegrationRefV1, DatasetQueryV1, DatasetElementV1 } from "../contracts/integration.js";
+import { IntegrationRefV1, DatasetQueryV1, IntegrationElementV1 } from "../contracts/integration.js";
 import type { DatasetFieldV1, DatasetReadV1 } from "../contracts/integration.js";
 import type { GateCheckResult } from "./index.js";
 
@@ -20,7 +20,7 @@ export const IntegrationQueryInput = z.strictObject({
 export type IntegrationQueryInput = z.infer<typeof IntegrationQueryInput>;
 
 export const IntegrationSaveElementInput = z.strictObject({
-  recipe: DatasetElementV1,
+  recipe: IntegrationElementV1,
   expectedRevision: z.number().int().positive().optional(),
   confirmation_id: ConfirmationId.optional(),
 });
@@ -40,7 +40,7 @@ export interface IntegrationDatasetsResult {
   next_cursor: string | null;
 }
 export interface IntegrationSaveElementResult {
-  element: DatasetElementV1;
+  element: IntegrationElementV1;
   /** A positive integer, enforced by the host's canonical save contract. */
   revision: number;
 }
