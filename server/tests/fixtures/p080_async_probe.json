@@ -1,0 +1,17 @@
+{
+  "intake": {
+    "polylines": [
+      {"layer": "p080_r3", "closed": true, "pts": [[0, 0], [10, 0], [10, 10], [0, 10]]},
+      {"layer": "p080_r3", "closed": true, "pts": [[20, 0], [40, 0], [40, 10], [20, 10]]}
+    ]
+  },
+  "expected": {"layer": "p080_r3", "count": 2, "total_area": 300.0, "avg_area": 150.0, "units": "drawing"},
+  "scenarios": {
+    "happy": ["submitted", "running", "complete"],
+    "lost_ack": ["submitted", "running", "complete"],
+    "unknown": [],
+    "fast": ["complete"],
+    "inflight": ["running"],
+    "failed": ["submitted", "running", "failed"]
+  }
+}
