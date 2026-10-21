@@ -73,8 +73,49 @@ def _migrations_dir():
     return db._PKG_DIR / "migrations"
 
 
-def _unexplained_defects(status, pending):
+def _catalog_candidates(status, catalog):
+    candidates = {}
+    for kind in ("constraints", "indexes", "triggers"):
+        key = f"invalid_{kind}"
+        for entry in status.get(key, []):
+            name, _, reason = entry.partition(":")
+            if reason == "missing-or-wrong-relation":
+                relation = catalog.get(kind, {}).get(name, {}).get("relation")
+                if isinstance(relation, str) and relation:
+                    candidates[(key, entry)] = relation
+    return candidates
+
+
+def _catalog_relation_absence(status):
+    # No catalog or database lookup is needed for other diagnostic reasons.
+    if not any(entry.partition(":")[2] == "missing-or-wrong-relation"
+               for kind in ("constraints", "indexes", "triggers")
+               for entry in status.get(f"invalid_{kind}", [])):
+        return {}, set()
+    try:
+        db = importlib.import_module("platform_link").platform_db()
+        catalog = db.required_catalog_for_selected_authorities(os.environ)
+        names = sorted(set(_catalog_candidates(status, catalog).values()))
+        absent = set()
+        if names:
+            with db.get_pool().connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT name FROM unnest(%(names)s::text[]) AS name "
+                        "WHERE to_regclass(quote_ident(current_schema()) || '.' || "
+                        "quote_ident(name)) IS NULL",
+                        {"names": names},
+                    )
+                    absent = {row["name"] for row in cur.fetchall()}
+        return catalog, absent
+    except Exception:
+        # An unavailable catalog or relation lookup cannot explain a defect.
+        return {}, set()
+
+
+def _unexplained_defects(status, pending, *, catalog=None, absent_relations=None):
     texts = []
+    raw_texts = []
     if len(pending) > 64:
         raise ValueError("pending migration limit")
     if pending:
@@ -90,7 +131,26 @@ def _unexplained_defects(status, pending):
                 contents = migration.read(limit)
                 if os.fstat(migration.fileno()).st_size > limit:
                     raise ValueError("migration size limit")
-            texts.append(contents.decode("utf-8").replace('"', ''))
+            raw_texts.append(contents.decode("utf-8"))
+            texts.append(raw_texts[-1].replace('"', ''))
+
+    explained_catalog = set()
+    try:
+        for candidate, relation in _catalog_candidates(status, catalog or {}).items():
+            if absent_relations is None or relation not in absent_relations:
+                continue
+            identifier = re.escape(relation)
+            create = re.compile(
+                r'(?<![A-Za-z0-9_])CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?'
+                r'(?:(?:public|"public")\s*\.\s*)?'
+                + r'(?:"' + identifier + r'"|' + identifier + r')'
+                + r'(?![A-Za-z0-9_$"])(?!\s*\.)',
+                re.IGNORECASE | re.ASCII,
+            )
+            if any(create.search(text) for text in raw_texts):
+                explained_catalog.add(candidate)
+    except Exception:
+        explained_catalog.clear()
 
     defects = [(f"{table}.{column}", (table, column))
                for table, columns in status.get("missing", {}).items()
@@ -100,7 +160,7 @@ def _unexplained_defects(status, pending):
                 and key != "missing_migrations" and isinstance(entries, list)):
             # Catalog entries may append a diagnostic reason after the name.
             defects.extend((entry, (entry.split(":", 1)[0],))
-                           for entry in entries)
+                           for entry in entries if (key, entry) not in explained_catalog)
     unexplained = []
     for label, identifiers in defects:
         patterns = [re.compile(r"(?<![A-Za-z0-9_])" + re.escape(identifier.replace('"', ''))
@@ -142,7 +202,9 @@ def run(env, schema_status=None) -> int:
                 schema["drift"] = sorted(set(status["migration_hash_drift"])
                                          | set(status.get("unknown_migrations", [])))
                 if schema["pending"]:
-                    schema["unexplained"] = _unexplained_defects(status, schema["pending"])
+                    catalog, absent = _catalog_relation_absence(status)
+                    schema["unexplained"] = _unexplained_defects(
+                        status, schema["pending"], catalog=catalog, absent_relations=absent)
                 if (schema["drift"] or (not schema["pending"] and not status["ok"])
                         or schema["unexplained"]):
                     failed("schema_status")
