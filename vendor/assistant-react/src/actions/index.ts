@@ -6,3 +6,4 @@ export type { IntegrationActionFormProps } from "./IntegrationActionForm";
 export { IntegrationActionRunStatus } from "./IntegrationActionRunStatus";
 export type { IntegrationActionRunStatusProps } from "./IntegrationActionRunStatus";
 export type { ActionAvailability } from "./action-form-state";
+export { IntegrationActionPreflightError } from "./action-form-state";

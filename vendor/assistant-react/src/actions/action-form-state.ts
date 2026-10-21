@@ -14,7 +14,19 @@ export const availabilityCopy = {
   stale: "This action has changed. Refresh it before continuing.",
 } as const;
 export const unknownCopy = "Outcome unknown. The action may have executed. Local cancellation does not undo an action.";
+export const preflightCopy = "The action was not submitted. Retry submission when the action is available.";
 export const conflictCopy = "This submission conflicts with an existing request. Contact your workspace administrator.";
+
+/**
+ * Trusted host callback signal only: throw before invoking the action submission client.
+ * Conveys no authority; never infer it from HTTP codes, provider bodies or availability.
+ */
+export class IntegrationActionPreflightError extends Error {
+  constructor() {
+    super(preflightCopy);
+    this.name = "IntegrationActionPreflightError";
+  }
+}
 
 export function initialInputs(element: IntegrationActionElementV1): ActionInputs {
   return Object.fromEntries(element.form.fields.map((field) => [field.id, {

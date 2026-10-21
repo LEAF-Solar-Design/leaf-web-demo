@@ -8,7 +8,7 @@ import {
 import { resolveDisplayPreferences, type DisplayPreferences } from "../datasets/formatting";
 import { BASE_CSS, color, font, panel, primaryButton, secondaryButton, target, tokenStyle, type ColorMode } from "../tokens";
 import {
-  availabilityCopy, conflictCopy, initialInputs, isTerminal, matchesSubmission, sameRun,
+  availabilityCopy, conflictCopy, initialInputs, IntegrationActionPreflightError, isTerminal, matchesSubmission, preflightCopy, sameRun,
   unknownCopy, validateInputs, type ActionAvailability, type ActionInputs, type InputMode,
 } from "./action-form-state";
 import { IntegrationActionRunStatus } from "./IntegrationActionRunStatus";
@@ -21,6 +21,7 @@ export interface IntegrationActionFormProps {
   availability: ActionAvailability;
   displayPreferences?: DisplayPreferences;
   mode?: ColorMode;
+  /** May throw IntegrationActionPreflightError only before invoking the action submission client. */
   onSubmit: (submission: IntegrationActionSubmissionV1, signal: AbortSignal) => Promise<unknown>;
   onCheckStatus: (runId: string, signal: AbortSignal) => Promise<unknown>;
 }
@@ -73,6 +74,7 @@ function ActionFormInner({ element, grantRevision, availability, displayPreferen
   const [receipts, setReceipts] = useState<IntegrationActionReceiptV1[]>();
   const [conflict, setConflict] = useState(false);
   const frozen = useRef<IntegrationActionSubmissionV1 | undefined>(undefined);
+  const mayHaveSubmitted = useRef(false);
   const latch = useRef(false);
   const active = useRef<{ controller: AbortController; timer: ReturnType<typeof setTimeout> } | undefined>(undefined);
   const alive = useRef(true);
@@ -116,7 +118,10 @@ function ActionFormInner({ element, grantRevision, availability, displayPreferen
       }, kind === "status" ? 15000 : 45000),
     };
     active.current = attempt;
+    const previouslyMayHaveSubmitted = mayHaveSubmitted.current;
     try {
+      // Remain conservative on timeout, cancellation, malformed responses and ordinary errors.
+      if (kind === "submit") mayHaveSubmitted.current = true;
       const response = kind === "status"
         ? await onCheckStatus(run!.run_id, controller.signal)
         : await onSubmit(submission, controller.signal);
@@ -149,8 +154,13 @@ function ActionFormInner({ element, grantRevision, availability, displayPreferen
         setReceipts(merged);
         setMessage(resultCopy(parsed.data.run));
       }
-    } catch {
-      if (alive.current && active.current === attempt) setMessage(unknownCopy);
+    } catch (error) {
+      if (alive.current && active.current === attempt) {
+        if (kind === "submit" && !previouslyMayHaveSubmitted && error instanceof IntegrationActionPreflightError) {
+          mayHaveSubmitted.current = false;
+          setMessage(preflightCopy);
+        } else setMessage(unknownCopy);
+      }
     } finally {
       if (alive.current && active.current === attempt) {
         clearTimeout(attempt.timer);
@@ -237,10 +247,11 @@ function ActionFormInner({ element, grantRevision, availability, displayPreferen
     {run && <IntegrationActionRunStatus run={run} receipts={receipts} displayPreferences={displayPreferences} mode={mode} />}
     {frozen.current && !busy && !terminal && !conflict && (run ?
       <button type="button" style={secondaryButton} disabled={!ready} onClick={() => { if (frozen.current) void dispatch("status", frozen.current); }}>Check status</button> :
-      <div><p>Recovery sends the same request and key. It can execute the original action if the server never received it.</p>
-        <button type="button" style={secondaryButton} disabled={!ready} onClick={() => { if (frozen.current) void dispatch("submit", frozen.current); }}>Recover submission</button></div>)}
+      <div>{message !== preflightCopy && <p>Recovery sends the same request and key. It can execute the original action if the server never received it.</p>}
+        <button type="button" style={secondaryButton} disabled={!ready} onClick={() => { if (frozen.current) void dispatch("submit", frozen.current); }}>{message === preflightCopy ? "Retry submission" : "Recover submission"}</button></div>)}
     {terminal && !busy && <button type="button" style={secondaryButton} onClick={() => {
       frozen.current = undefined;
+      mayHaveSubmitted.current = false;
       setRun(undefined); setReceipts(undefined); setMessage(""); setConflict(false);
     }}>Start another action</button>}
   </section>;
