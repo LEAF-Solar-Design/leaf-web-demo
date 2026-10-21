@@ -2,7 +2,8 @@ import { z } from 'zod'
 import { authHeaders, noteUnauthorized } from '../api.js'
 import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetFieldV1, IntegrationRefV1,
   ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1,
-  IntegrationActionElementV1, IntegrationActionSubmissionV1, IntegrationActionSubmissionResultV1, IntegrationActionSnapshotV1 } from '../../../vendor/assistant-contract/src/integration'
+  IntegrationActionElementV1, IntegrationActionSubmissionV1, IntegrationActionSubmissionResultV1, IntegrationActionSnapshotV1,
+  IntegrationManualWorkflowSnapshotV1 } from '../../../vendor/assistant-contract/src/integration'
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/i
 const slug = z.string().regex(/^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\s\S])/).min(1).max(128)
@@ -191,6 +192,23 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
   }
   return {
     available: Boolean(destination),
+    async getManualWorkflowRun(id, runId, options) {
+      if (!UUID.test(runId)) throw invalid()
+      return setupResponse(IntegrationManualWorkflowSnapshotV1, id, `manual-workflow-runs/${runId}`, { ...options, method: 'GET', body: undefined },
+        (value) => value.run.run_id === runId)
+    },
+    async resumeManualWorkflowRun(id, runId, input, options) {
+      if (!UUID.test(runId)) throw invalid()
+      const body = parse(z.strictObject({}), input)
+      return setupResponse(IntegrationManualWorkflowSnapshotV1, id, `manual-workflow-runs/${runId}/resume`, { ...options, method: 'POST', body },
+        (value) => value.run.run_id === runId)
+    },
+    async reconcileManualWorkflowStep(id, runId, stepId, input, options) {
+      if (!UUID.test(runId)) throw invalid()
+      parse(slug, stepId)
+      const body = parse(z.strictObject({}), input)
+      return setupResponse(IntegrationActionSnapshotV1, id, `manual-workflow-runs/${runId}/steps/${stepId}/reconcile`, { ...options, method: 'POST', body })
+    },
     async importConnector(id, input, options) {
       const body = parse(z.strictObject({ document: z.record(z.string(), z.unknown()), options: z.strictObject({ id: slug, title,
         origin: ConnectionV1.shape.origin.optional() }) }), input)

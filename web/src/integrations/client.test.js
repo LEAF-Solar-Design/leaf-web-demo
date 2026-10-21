@@ -21,6 +21,13 @@ const run = { schema_version: 1, run_id: projectId, revision: 1, connection_id: 
   authority_binding_digest: 'c'.repeat(64), created_at: '2026-10-20T00:00:00Z', updated_at: '2026-10-20T00:00:00Z',
   state: 'accepted', effect_outcome: 'not_dispatched' }
 const connection = { id: action.connection_id, state: 'active', connector_ref: ref, operation_ids: ['send'], grant_revision: 7 }
+const workflow = {
+  definition: { schema_version: 1, id: 'orders', version: 1, title: 'Order workflow', trigger: 'manual', authority_mode: 'caller_bound',
+    steps: [{ id: 'send', kind: 'action', connection_id: action.connection_id, connector_ref: ref, operation_ref: action.operation_ref, arguments: {} }] },
+  run: { schema_version: 1, run_id: projectId, revision: 1, workflow_ref: ref, submission_digest: 'b'.repeat(64),
+    authority_binding_digest: 'c'.repeat(64), authority_mode: 'caller_bound', created_at: run.created_at, updated_at: run.updated_at, state: 'accepted' },
+  steps: [{ run_id: projectId, step_id: 'send', state: 'pending' }],
+}
 function response(value, { status = 200, type = 'application/json', raw, length } = {}) {
   const bytes = new TextEncoder().encode(raw ?? JSON.stringify(value))
   return { status, ok: status >= 200 && status < 300,
@@ -137,6 +144,56 @@ function setup(value = scope) {
   return { client: createIntegrationsClient({ origin: 'https://ops.example', fetchImpl }), fetchImpl,
     options: { signal: new AbortController().signal } }
 }
+describe('existing manual workflow HTTP contract', () => {
+  it('uses exact canonical GET, explicit resume and persisted-step reconcile with current bearer and empty bodies', async () => {
+    const { client, fetchImpl, options } = setup(workflow)
+    expect(await client.getManualWorkflowRun(projectId, projectId, options)).toEqual(workflow)
+    authHeaders.mockReturnValue({ Authorization: 'Bearer second' })
+    expect(await client.resumeManualWorkflowRun(projectId, projectId, {}, options)).toEqual(workflow)
+    fetchImpl.mockResolvedValueOnce(response({ run, receipts: [] }))
+    expect(await client.reconcileManualWorkflowStep(projectId, projectId, 'send', {}, options)).toEqual({ run, receipts: [] })
+    const base = `https://ops.example/api/v1/projects/${projectId}/integrations/manual-workflow-runs/${projectId}`
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([base, `${base}/resume`, `${base}/steps/send/reconcile`])
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: 'GET', headers: { Authorization: 'Bearer first' } })
+    expect(fetchImpl.mock.calls[0][1].body).toBeUndefined()
+    for (const [, request] of fetchImpl.mock.calls.slice(1)) expect(request).toMatchObject({ method: 'POST', body: '{}', headers: { Authorization: 'Bearer second' } })
+    for (const [, request] of fetchImpl.mock.calls) expect(request).toMatchObject({ credentials: 'omit', cache: 'no-store', redirect: 'error', signal: options.signal })
+  })
+  it('rejects invalid run/step identities and all caller authority or child fields before transport', async () => {
+    const { client, fetchImpl, options } = setup()
+    for (const id of ['', '../run', `${projectId}\n`]) {
+      await expect(client.getManualWorkflowRun(projectId, id, options)).rejects.toThrow('invalid')
+      await expect(client.resumeManualWorkflowRun(projectId, id, {}, options)).rejects.toThrow('invalid')
+      await expect(client.reconcileManualWorkflowStep(projectId, id, 'send', {}, options)).rejects.toThrow('invalid')
+    }
+    for (const step of ['../send', '', 'send\n', 'x'.repeat(129)]) await expect(client.reconcileManualWorkflowStep(projectId, projectId, step, {}, options)).rejects.toThrow('invalid')
+    for (const body of [undefined, null, { child_run_id: projectId }, { authority_binding_digest: 'c'.repeat(64) }]) {
+      await expect(client.resumeManualWorkflowRun(projectId, projectId, body, options)).rejects.toThrow('invalid')
+      await expect(client.reconcileManualWorkflowStep(projectId, projectId, 'send', body, options)).rejects.toThrow('invalid')
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each(['get', 'resume', 'reconcile'])('bounds and parses every %s response without leaking response details', async (operation) => {
+    const { client, fetchImpl, options } = setup()
+    const call = () => operation === 'get' ? client.getManualWorkflowRun(projectId, projectId, options) : operation === 'resume'
+      ? client.resumeManualWorkflowRun(projectId, projectId, {}, options) : client.reconcileManualWorkflowStep(projectId, projectId, 'send', {}, options)
+    for (const result of [response({ secret: 'private' }), response(null, { raw: '{' }), response(null, { raw: 'x'.repeat(262145) }),
+      response(null, { length: '262145' }), response(workflow, { type: 'text/html' })]) {
+      fetchImpl.mockResolvedValueOnce(result)
+      await expect(call()).rejects.toMatchObject({ message: 'The integration response or request was invalid.', dispatched: operation !== 'get' })
+    }
+    for (const status of [401, 403, 409, 500]) {
+      fetchImpl.mockResolvedValueOnce(response({ secret: 'private' }, { status }))
+      await expect(call()).rejects.toMatchObject({ status, dispatched: operation !== 'get' })
+    }
+  })
+  it.each(['get', 'resume'])('rejects canonical but different requested run on %s', async (operation) => {
+    const { client, options } = setup(workflow)
+    const different = '22222222-2222-4222-8222-222222222222'
+    await expect(operation === 'get' ? client.getManualWorkflowRun(projectId, different, options) :
+      client.resumeManualWorkflowRun(projectId, different, {}, options)).rejects.toMatchObject({ dispatched: operation !== 'get' })
+  })
+})
 describe('fixed integration destination and bounded authenticated transport', () => {
   it.each([undefined, '', 'http://ops.example', 'https://ops.example/', 'https://user@ops.example', 'https://ops.example/path', 'https://ops.example?q=1', 'https://ops.example#x', 'https://ops.example\\evil'])('rejects origin %s', async (origin) => {
     expect(integrationOrigin(origin)).toBeNull()

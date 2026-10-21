@@ -34,6 +34,13 @@ const actionRun = { schema_version: 1, run_id: projectId, revision: 1, connectio
   state: 'accepted', effect_outcome: 'not_dispatched' }
 const scope = { tenantId: projectId, projectId, platformUserId: projectId, bindingId: projectId,
   projectRole: 'owner', externalAuthority: 'auth0', externalSubject: 'auth0|one' }
+const workflowSnapshot = {
+  definition: { schema_version: 1, id: reference.id, version: reference.version, title: 'Existing order workflow', trigger: 'manual', authority_mode: 'caller_bound',
+    steps: [{ id: 'send', kind: 'action', connection_id: actionElement.connection_id, connector_ref: reference, operation_ref: actionElement.operation_ref, arguments: {} }] },
+  run: { schema_version: 1, run_id: otherProject, revision: 1, workflow_ref: reference, submission_digest: 'b'.repeat(64), authority_mode: 'caller_bound',
+    authority_binding_digest: 'c'.repeat(64), created_at: actionRun.created_at, updated_at: actionRun.updated_at, state: 'accepted' },
+  steps: [{ run_id: otherProject, step_id: 'send', state: 'pending' }],
+}
 const read = { schema_version: 1, dataset_ref: reference, fields,
   rows: [{ key: 'one', values: { day: '2026-10-20', total: 1234 } }], next_cursor: null, status: 'ready',
   freshness: { source_updated_at: null, synced_at: null, fetched_at: '2026-10-20T12:00:00Z' } }
@@ -631,6 +638,92 @@ it('rejects stale callback continuations even when a supplied client ignores can
   expect(actionPosts(fetchImpl)).toHaveLength(0)
   expect(fetchImpl.mock.calls.filter(([url]) => url.includes('/connections/'))).toHaveLength(1)
   expect(screen.queryByLabelText('Order note (required)')).toBeNull()
+})
+it.each(['owner', 'editor', 'reviewer', 'read_only'])('exposes the separate existing workflow viewer only to owner/editor (%s)', async (role) => {
+  const { props, authority } = setupAction()
+  authority.scope = { ...scope, projectRole: role }
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  if (['owner', 'editor'].includes(role)) {
+    expect(screen.getByRole('region', { name: 'Existing manual workflow' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Run UUID')).toBeInTheDocument()
+  } else expect(screen.queryByRole('region', { name: 'Existing manual workflow' })).toBeNull()
+})
+it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('refuses fresh workflow scope %s drift and clears protected evidence', async (field) => {
+  const { props, authority, fetchImpl } = setupAction()
+  vi.spyOn(props.client, 'getManualWorkflowRun').mockResolvedValue(workflowSnapshot)
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })
+  fireEvent.click(screen.getByRole('button', { name: 'Load', exact: true }))
+  await screen.findByRole('region', { name: 'Manual workflow run status' })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
+  authority.scope = { ...scope, [field]: field === 'projectRole' ? 'reviewer' : field === 'externalSubject' ? 'auth0|different' : field === 'externalAuthority' ? 'other' : otherProject }
+  // getScope itself rejects malformed authority or a different requested project; a
+  // parsed fresh identity still has to match every field before loading evidence.
+  if (field === 'projectId' || field === 'externalAuthority') vi.spyOn(props.client, 'getScope').mockResolvedValueOnce(authority.scope)
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(props.client.getManualWorkflowRun).toHaveBeenCalledTimes(1)
+  expect(screen.queryByRole('region', { name: 'Manual workflow run status' })).toBeNull()
+  expect(screen.queryByLabelText('Run UUID')).toBeNull()
+  expect(fetchImpl.mock.calls.some(([url]) => url.includes('manual-workflow-runs'))).toBe(false)
+})
+it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('aborts the workflow and discards late results on %s invalidation', async (change) => {
+  const { props, sessionController } = setupAction()
+  let finish
+  const get = vi.spyOn(props.client, 'getManualWorkflowRun').mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+  const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })
+  fireEvent.click(screen.getByRole('button', { name: 'Load', exact: true }))
+  await waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+  const signal = get.mock.calls[0][2].signal
+  if (change === 'unmount') unmount()
+  else if (change === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else if (change === 'status') act(() => sessionController.change({ status: 'expired' }))
+  else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } : change === 'account' ? { accountScope: 'account-b' } : { active: false })} />)
+  expect(signal.aborted).toBe(true)
+  expect(screen.queryByRole('region', { name: 'Manual workflow run status' })).toBeNull()
+  await act(async () => finish(workflowSnapshot))
+  expect(screen.queryByRole('region', { name: 'Manual workflow run status' })).toBeNull()
+})
+it('clears loaded workflow evidence immediately when the active account changes', async () => {
+  const { props } = setupAction()
+  vi.spyOn(props.client, 'getManualWorkflowRun').mockResolvedValue(workflowSnapshot)
+  const { rerender } = render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })
+  fireEvent.click(screen.getByRole('button', { name: 'Load', exact: true }))
+  await screen.findByRole('region', { name: 'Manual workflow run status' })
+  rerender(<OpsWorkspaceGround {...props} accountScope="account-b" />)
+  expect(screen.queryByRole('region', { name: 'Manual workflow run status' })).toBeNull()
+})
+it('keeps the shared display key bounded for a long verified external identity', async () => {
+  const { props, authority } = setupAction()
+  authority.scope = { ...scope, externalSubject: 's'.repeat(500) }
+  vi.spyOn(props.client, 'getManualWorkflowRun').mockResolvedValue(workflowSnapshot)
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })
+  fireEvent.click(screen.getByRole('button', { name: 'Load', exact: true }))
+  await screen.findByRole('region', { name: 'Manual workflow run status' })
+  expect(screen.queryByText('Workflow status is unavailable.')).toBeNull()
+})
+it('rejects late workflow preflight continuations when a supplied client ignores cancellation', async () => {
+  const { props } = setupAction()
+  let finish
+  vi.spyOn(props.client, 'getScope').mockResolvedValueOnce(scope).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  const get = vi.spyOn(props.client, 'getManualWorkflowRun')
+  const { rerender } = render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })
+  fireEvent.click(screen.getByRole('button', { name: 'Load', exact: true }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  rerender(<OpsWorkspaceGround {...props} active={false} />)
+  await act(async () => finish(scope))
+  expect(get).not.toHaveBeenCalled()
+  expect(screen.queryByRole('region', { name: 'Manual workflow run status' })).toBeNull()
 })
 it('offers a fixed-copy retry for failed connection reads and admits only the current connection', async () => {
   const { props, fetchImpl } = setupAction()
