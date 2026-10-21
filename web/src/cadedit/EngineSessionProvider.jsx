@@ -133,7 +133,8 @@ function propertySnapshot(op, entity) {
  * W4g-1b: engine reach, the state of opening the console's own drawing in
  * the engine (EngineHeadOpener writes it, the ribbon's reason ladder reads
  * it). A closed vocabulary; `sentence` is what the ribbon shows while the
- * engine holds no document.
+ * engine holds no document. HELD preserves a previous drawing for Save while
+ * refusing edits under a project's title; STALE still means a moved head.
  */
 export const REACH_STATE = Object.freeze({
   IDLE: 'idle',
@@ -141,6 +142,7 @@ export const REACH_STATE = Object.freeze({
   OPEN: 'open',
   FAILED: 'failed',
   STALE: 'stale',
+  HELD: 'held',
 })
 const REACH_STATES = new Set(Object.values(REACH_STATE))
 const MAX_REACH_SENTENCE = 300
@@ -170,6 +172,9 @@ export default function EngineSessionProvider({
     onSaved,
     drawingId: identity?.drawingId ?? null,
   })
+  const [reach, setReachState] = useState(REACH_IDLE)
+  // A hold must also stop callbacks captured before the next consumer render.
+  const reachRef = useRef(reach)
 
   const [{ inputs, armed, lastArmedCommand }, setEditState] = useState({ inputs: DEFAULT_EDIT_INPUTS, armed: null, lastArmedCommand: null })
   const [highlightedGroup, setHighlightedGroup] = useState(null)
@@ -210,6 +215,10 @@ export default function EngineSessionProvider({
     if (!next || typeof next !== 'object') return
     const { group, op } = next
     if (!ARMED_GROUPS.has(group) || typeof op !== 'string' || !ARMED_OP.test(op)) return
+    if (reachRef.current.state === REACH_STATE.HELD) {
+      setRefusalState(reachRef.current.sentence)
+      return
+    }
     // W4f-3: an optional chain point `from` ([x, y], two finite numbers): the
     // command continues from there (LINE's next segment starts where the
     // last one ended). Any other shape is dropped, never stored.
@@ -342,26 +351,36 @@ export default function EngineSessionProvider({
   const actions = useMemo(() => Object.fromEntries(Object.entries(session.actions).map(([name, action]) => [
     name,
     (...args) => {
+      const editsDrawing = DRAWING_EDIT_ACTIONS.has(name) || (name === 'copyToClipboard' && args[0] === true)
+      if (editsDrawing && reachRef.current.state === REACH_STATE.HELD) {
+        setRefusalState(reachRef.current.sentence)
+        return false
+      }
       setRefusalState('')
-      if (DRAWING_EDIT_ACTIONS.has(name) || (name === 'copyToClipboard' && args[0] === true)) onBeforeEditRef.current?.()
+      if (editsDrawing) onBeforeEditRef.current?.()
       return action(...args)
     },
   ])), [session.actions])
 
   // W4g-1b: engine reach. Fails closed on any shape outside the vocabulary
   // (a consumer bug never puts a non-sentence on the ribbon); bounded text.
-  const [reach, setReachState] = useState(REACH_IDLE)
   const setReach = useCallback((next) => {
     if (!next || typeof next !== 'object' || !REACH_STATES.has(next.state)) return
     const sentence = typeof next.sentence === 'string' ? next.sentence.slice(0, MAX_REACH_SENTENCE) : ''
     const version = Number.isInteger(next.version) && next.version > 0 ? next.version : null
     const head = Number.isInteger(next.head) && next.head > 0 ? next.head : null
     const source = typeof next.source === 'string' ? next.source.slice(0, 32) : ''
+    const previous = reachRef.current
+    const bounded = Object.freeze({ state: next.state, sentence, version, head, source })
+    reachRef.current = bounded
+    if (previous.state === REACH_STATE.HELD && next.state !== REACH_STATE.HELD) {
+      setRefusalState((current) => current === previous.sentence ? '' : current)
+    }
     setReachState((current) => (
       current.state === next.state && current.sentence === sentence
         && current.version === version && current.head === head && current.source === source
         ? current
-        : Object.freeze({ state: next.state, sentence, version, head, source })
+        : bounded
     ))
   }, [])
 

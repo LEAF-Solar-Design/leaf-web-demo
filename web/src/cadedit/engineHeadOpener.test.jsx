@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import CadEditSurface from './CadEditSurface.jsx'
 import EngineHeadOpener, { REACH_STATE, headDocumentId, holdsHeadDocument } from './EngineHeadOpener.jsx'
-import EngineRibbonClusters, { DRAW_REASONS, MODIFY_REASONS } from './EngineRibbonClusters.jsx'
+import EngineRibbonClusters, { DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, saveReason } from './EngineRibbonClusters.jsx'
 import EngineSessionProvider, { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import DraftingRibbon from '../site/DraftingRibbon.jsx'
 
@@ -33,7 +33,7 @@ function fileOf(name = 'hand.dxf') {
 
 let workers
 let handle
-function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchDxf, sourceKey = 'live', opener = true, saveTarget = null, onDirtyChange = null, onDocumentChange = null, strict = false } = {}) {
+function mount({ drawingId = 'rooftop_demo', enabled = true, standDown = false, headKey = 1, fetchDxf, sourceKey = 'live', opener = true, saveTarget = null, onDirtyChange = null, onDocumentChange = null, strict = false } = {}) {
   workers = []
   const wrap = (tree) => (strict ? <StrictMode>{tree}</StrictMode> : tree)
   handle = {}
@@ -43,7 +43,7 @@ function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchD
     return (
       <EngineSessionProvider createWorker={createWorker} saveTarget={props.saveTarget} onDirtyChange={props.onDirtyChange} onDocumentChange={props.onDocumentChange}>
         <Probe />
-        {props.opener !== false && <EngineHeadOpener drawingId={props.drawingId} enabled={props.enabled} headKey={props.headKey} fetchDxf={props.fetchDxf} sourceKey={props.sourceKey} />}
+        {props.opener !== false && <EngineHeadOpener drawingId={props.drawingId} enabled={props.enabled} standDown={props.standDown} headKey={props.headKey} fetchDxf={props.fetchDxf} sourceKey={props.sourceKey} />}
         <DraftingRibbon clusters={[]}>
           <EngineRibbonClusters importOpen={false} onToggleImport={() => {}} />
         </DraftingRibbon>
@@ -51,8 +51,8 @@ function mount({ drawingId = 'rooftop_demo', enabled = true, headKey = 1, fetchD
       </EngineSessionProvider>
     )
   }
-  const utils = render(wrap(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} />))
-  handle.rerender = (next) => utils.rerender(wrap(<Tree drawingId={drawingId} enabled={enabled} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} {...next} />))
+  const utils = render(wrap(<Tree drawingId={drawingId} enabled={enabled} standDown={standDown} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} />))
+  handle.rerender = (next) => utils.rerender(wrap(<Tree drawingId={drawingId} enabled={enabled} standDown={standDown} headKey={headKey} fetchDxf={fetchDxf} sourceKey={sourceKey} opener={opener} saveTarget={saveTarget} onDirtyChange={onDirtyChange} onDocumentChange={onDocumentChange} {...next} />))
   handle.unmount = utils.unmount
   return handle
 }
@@ -80,6 +80,242 @@ beforeEach(() => {
 afterEach(() => { cleanup() })
 
 describe('EngineHeadOpener', () => {
+  it('a disabled opener fetches no head and opens no document', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ enabled: false, fetchDxf })
+    await settle()
+    expect(fetchDxf).not.toHaveBeenCalled()
+    expect(workers).toHaveLength(0)
+    expect(studio.context.session.documentId).toBe('')
+    expect(studio.context.session.engineParsed).toBe(false)
+    expect(studio.context.reach.state).toBe(REACH_STATE.IDLE)
+    expect(note()).toBe(MODIFY_REASONS.noDocument)
+  })
+
+  it('disabling enabled alone preserves the document, edits and selection without reopening', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf })
+    await settle()
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    act(() => { studio.context.session.actions.select('e1') })
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, entities: [LINE], entityCount: 1, bytes: BYTES, byteLength: BYTES.length })
+    studio.rerender({ enabled: false })
+    await settle()
+    expect(workers[0].terminated).toBe(false)
+    expect(studio.context.session.documentId).toBe(headDocumentId('rooftop_demo', 1))
+    expect(studio.context.session.dirty).toBe(true)
+    expect(studio.context.session.selectedIds).toEqual(['e1'])
+    studio.rerender({ enabled: true })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    expect(workers).toHaveLength(1)
+    expect(studio.context.session.dirty).toBe(true)
+  })
+
+  it('standDown false to true retires a clean document so drafting and Save are unavailable', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const saveTarget = { headVersion: 1, save: vi.fn() }
+    const studio = mount({ fetchDxf, saveTarget })
+    await settle()
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    act(() => { studio.context.session.actions.select('e1') })
+    expect(studio.context.session.dirty).toBe(false)
+    studio.rerender({ enabled: false, standDown: true })
+    await settle()
+    expect(workers[0].terminated).toBe(true)
+    expect(studio.context.session.documentId).toBe('')
+    expect(studio.context.session.entityCount).toBe(0)
+    expect(studio.context.session.selectedIds).toEqual([])
+    expect(studio.context.session.savedBytes).toBe(null)
+    expect(studio.context.session.engineParsed).toBe(false)
+    expect(studio.context.reach.state).toBe(REACH_STATE.IDLE)
+    expect(note()).toBe(MODIFY_REASONS.noDocument)
+    expect(saveReason(studio.context.session, studio.context.canSave)).toBe(SAVE_REASONS.noDocument)
+    await act(async () => { await studio.context.session.actions.save() })
+    expect(saveTarget.save).not.toHaveBeenCalled()
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    // Leaving project mode may open the same head again after the reset.
+    studio.rerender({ enabled: true, standDown: false })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(2)
+    expect(workers).toHaveLength(2)
+  })
+
+  it('standDown false to true holds a dirty document until it is saved or the project closes', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf })
+    await settle()
+    loaded(workers[0], headDocumentId('rooftop_demo', 1))
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, entities: [LINE, { ...LINE, id: 'e2' }], entityCount: 2, bytes: BYTES, byteLength: BYTES.length })
+    const savedBytes = studio.context.session.savedBytes
+    expect(studio.context.session.dirty).toBe(true)
+    studio.rerender({ enabled: false, standDown: true })
+    await settle()
+    expect(workers[0].terminated).toBe(false)
+    expect(studio.context.session.documentId).toBe(headDocumentId('rooftop_demo', 1))
+    expect(studio.context.session.entityCount).toBe(2)
+    expect(studio.context.session.savedBytes).toBe(savedBytes)
+    expect(studio.context.session.dirty).toBe(true)
+    expect(studio.context.reach.state).toBe(REACH_STATE.HELD)
+    expect(studio.context.reach.sentence).toBe('save the edits to the previous drawing, or close the project to keep editing it, before editing this project')
+    expect(note()).toBe(studio.context.reach.sentence)
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([true, false])('defers standDown while an edit is busy, then resolves after success=%s', async (ok) => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf })
+    await settle()
+    const worker = workers[0]
+    const documentId = headDocumentId('rooftop_demo', 1)
+    loaded(worker, documentId)
+    act(() => { studio.context.session.actions.select('e1') })
+    act(() => { studio.context.session.actions.applyEdit('move', { dx: '1', dy: '0' }) })
+    expect(studio.context.session.busy).toBe(true)
+    expect(studio.context.session.dirty).toBe(false)
+    studio.rerender({ enabled: false, standDown: true })
+    await settle()
+    expect(worker.terminated).toBe(false)
+    expect(studio.context.session.documentId).toBe(documentId)
+    expect(studio.context.session.busy).toBe(true)
+    worker.emit({ type: 'editApplied', op: 'move', ok, reason: 'refused', entities: [LINE], entityCount: 1, bytes: BYTES, byteLength: BYTES.length })
+    await settle()
+    expect(studio.context.session.busy).toBe(false)
+    expect(worker.terminated).toBe(!ok)
+    expect(studio.context.session.documentId).toBe(ok ? documentId : '')
+    expect(studio.context.reach.state).toBe(ok ? REACH_STATE.HELD : REACH_STATE.IDLE)
+    expect(studio.context.session.dirty).toBe(ok)
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits for an in-flight load to finish before standing down the clean document', async () => {
+    const studio = mount({ fetchDxf: vi.fn(async () => answer(1)) })
+    await settle()
+    const worker = workers[0]
+    expect(studio.context.session.busy).toBe(true)
+    studio.rerender({ enabled: false, standDown: true })
+    await settle()
+    expect(worker.terminated).toBe(false)
+    loaded(worker, headDocumentId('rooftop_demo', 1))
+    await settle()
+    expect(worker.terminated).toBe(true)
+    expect(studio.context.session.documentId).toBe('')
+    expect(studio.context.reach.state).toBe(REACH_STATE.IDLE)
+  })
+
+  it('an ordinary surface switch preserves a clean document even after its busy load settles', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf })
+    await settle()
+    const worker = workers[0]
+    expect(studio.context.session.busy).toBe(true)
+    studio.rerender({ enabled: false })
+    loaded(worker, headDocumentId('rooftop_demo', 1))
+    await settle()
+    expect(studio.context.session.dirty).toBe(false)
+    expect(studio.context.session.documentId).toBe(headDocumentId('rooftop_demo', 1))
+    expect(worker.terminated).toBe(false)
+    studio.rerender({ enabled: true })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    expect(workers).toHaveLength(1)
+  })
+
+  it('a failed save keeps the hold and all edited bytes for retry', async () => {
+    const save = vi.fn(async () => { throw new Error('offline') })
+    const studio = mount({ fetchDxf: vi.fn(async () => answer(1)), saveTarget: { drawingId: 'rooftop_demo', headVersion: 1, save } })
+    await settle()
+    const worker = workers[0]
+    const documentId = headDocumentId('rooftop_demo', 1)
+    loaded(worker, documentId)
+    worker.emit({ type: 'editApplied', op: 'move', ok: true, entities: [LINE], entityCount: 1, bytes: BYTES, byteLength: BYTES.length })
+    studio.rerender({ enabled: false, standDown: true })
+    await act(async () => { await studio.context.session.actions.save() })
+    await settle()
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(worker.terminated).toBe(false)
+    expect(studio.context.session.documentId).toBe(documentId)
+    expect(studio.context.session.savedBytes).toBe(BYTES)
+    expect(studio.context.session.dirty).toBe(true)
+    expect(studio.context.reach.state).toBe(REACH_STATE.HELD)
+    expect(document.querySelector('[data-tool="save-version"]').disabled).toBe(false)
+  })
+
+  it('saving a held document uses its legacy target and stands down only after the save completes', async () => {
+    let resolveSave
+    const save = vi.fn(() => new Promise((resolve) => { resolveSave = resolve }))
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf, saveTarget: { drawingId: 'rooftop_demo', headVersion: 1, save } })
+    await settle()
+    const worker = workers[0]
+    loaded(worker, headDocumentId('rooftop_demo', 1))
+    worker.emit({ type: 'editApplied', op: 'move', ok: true, entities: [LINE], entityCount: 1, bytes: BYTES, byteLength: BYTES.length })
+    studio.rerender({ enabled: false, standDown: true })
+    await settle()
+    const saveButton = document.querySelector('[data-tool="save-version"]')
+    expect(saveButton.disabled).toBe(false)
+    await act(async () => { fireEvent.click(saveButton) })
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0][0]).toBe(BYTES)
+    expect(save.mock.calls[0][1]).toBe(1)
+    expect(studio.context.session.busy).toBe(true)
+    expect(studio.context.reach.state).toBe(REACH_STATE.HELD)
+    expect(worker.terminated).toBe(false)
+    await act(async () => { resolveSave({ new_version: { drawing_id: 'rooftop_demo', version: 2, parent: 1 }, head: 2 }) })
+    await settle()
+    expect(worker.terminated).toBe(true)
+    expect(studio.context.session.documentId).toBe('')
+    expect(studio.context.session.savedBytes).toBe(null)
+    expect(studio.context.reach.state).toBe(REACH_STATE.IDLE)
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+  })
+
+  it('closing the project clears the hold with the dirty document and command intact', async () => {
+    const fetchDxf = vi.fn(async () => answer(1))
+    const studio = mount({ fetchDxf })
+    await settle()
+    const worker = workers[0]
+    const documentId = headDocumentId('rooftop_demo', 1)
+    loaded(worker, documentId)
+    act(() => {
+      studio.context.session.actions.select('e1')
+      studio.context.setArmed({ group: 'modify', op: 'move' })
+    })
+    worker.emit({ type: 'editApplied', op: 'move', ok: true, entities: [LINE], entityCount: 1, bytes: BYTES, byteLength: BYTES.length })
+    const before = studio.context.session
+    studio.rerender({ enabled: false, standDown: true })
+    await settle()
+    expect(studio.context.reach.state).toBe(REACH_STATE.HELD)
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
+    studio.rerender({ enabled: true, standDown: false })
+    await settle()
+    expect(studio.context.reach.state).toBe(REACH_STATE.IDLE)
+    expect(studio.context.session.documentId).toBe(documentId)
+    expect(studio.context.session.savedBytes).toBe(before.savedBytes)
+    expect(studio.context.session.entities).toBe(before.entities)
+    expect(studio.context.session.selectedIds).toEqual(['e1'])
+    expect(studio.context.session.undoDepth).toBe(before.undoDepth)
+    expect(studio.context.session.dirty).toBe(true)
+    expect(studio.context.armed).toEqual({ group: 'modify', op: 'move' })
+    expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(false)
+    expect(worker.terminated).toBe(false)
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+  })
+
+  it('standing down abandons a pending head fetch even when it later succeeds', async () => {
+    let resolve
+    const fetchDxf = vi.fn(() => new Promise((r) => { resolve = r }))
+    const studio = mount({ fetchDxf })
+    await settle()
+    studio.rerender({ enabled: false, standDown: true })
+    await act(async () => { resolve(answer(1)) })
+    await settle()
+    expect(fetchDxf).toHaveBeenCalledTimes(1)
+    expect(workers).toHaveLength(0)
+    expect(studio.context.session.documentId).toBe('')
+    expect(studio.context.reach.state).toBe(REACH_STATE.IDLE)
+  })
+
   it('row17 reports committed head provenance, plain same-name imports, and null on unmount', async () => {
     const onDocumentChange = vi.fn()
     const studio = mount({ fetchDxf: vi.fn(async () => answer(1)), onDocumentChange })

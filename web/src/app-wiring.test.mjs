@@ -4205,6 +4205,8 @@ describe('W4g bleed-2b: profile presentation preserves the engine document', () 
     assert.ok(opener > ribbonEnd && opener > engine)
     assert.ok(guard >= 0)
     assert.doesNotMatch(appSource.slice(guard, opener), /</)
+    assert.match(appSource.slice(opener, appSource.indexOf('/>', opener)), /enabled=\{!projectMode && !!studioGround && !!drafting && !!intake\}/)
+    assert.match(appSource.slice(opener, appSource.indexOf('/>', opener)), /standDown=\{projectMode\}/)
   })
   it('mounts the engine document after the drafting ribbon under the studio and engine gates', () => {
     const ribbonStart = appSource.indexOf('{studioShell && surfaceSlots.toolbar.ribbon && studioRibbonHost && createPortal(')
@@ -5007,8 +5009,9 @@ describe('App.jsx wiring', () => {
   it('the head opener reaches the public demo through the static sample DXF', () => {
     assert.match(
       stripped,
-      /React\.createElement\(\s*EngineHeadOpener,\s*\{[^}]*enabled:\s*!!studioGround && !!drafting && !!intake/,
+      /React\.createElement\(\s*EngineHeadOpener,\s*\{[^}]*enabled:\s*!projectMode && !!studioGround && !!drafting && !!intake/,
     )
+    assert.match(stripped, /React\.createElement\(\s*EngineHeadOpener,\s*\{[^}]*standDown:\s*projectMode/)
     assert.match(stripped, /headKey:\s*drawingState\?\.head \?\? \(mock \? 1 : null\)/)
     assert.match(stripped, /fetchDxf:\s*mock \? fetchSampleDxf : fetchDrawingDxf/)
     assert.match(stripped, /sourceKey:\s*mock \? "sample" : "live"/)
@@ -5471,7 +5474,17 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
   const job = r13One(node => node.type === 'CallExpression' && node.callee.name === 'useJobController')
   assert.equal(r13Hash(r13Text(job)), '24c5eac98f2d89b5cecd2f475afd5db80b327e47cb5510d97a71eb54660efbcb')
   const head = r13One(node => node.type === 'JSXElement' && node.openingElement.name.name === 'EngineHeadOpener')
-  assert.equal(r13Hash(r13Text(head)), 'b1af9fada6edf094064979f23f9c28513ac3f21ea7a23332fce00102917502f9')
+  for (const [name, expression] of Object.entries({
+    drawingId: 'REQUESTED_DRAWING_ID',
+    enabled: '!projectMode && !!studioGround && !!drafting && !!intake',
+    standDown: 'projectMode',
+    headKey: 'drawingState?.head ?? (mock ? 1 : null)',
+    fetchDxf: 'mock ? fetchSampleDxf : fetchDrawingDxf',
+    sourceKey: "mock ? 'sample' : 'live'",
+  })) {
+    const attribute = r13One(node => node.type === 'JSXAttribute' && node.name.name === name, head.openingElement)
+    assert.equal(r13Text(attribute.value.expression), expression, name)
+  }
   let undo = 0, redo = 0
   const projectModeRef = { current: true }
   assert.equal(r13Evaluate(r13Callback('onUndo'), { projectModeRef, undoActionRef: { current: () => ++undo } })(), 1)

@@ -32,7 +32,7 @@ import EngineDocumentView from './EngineDocumentView.jsx'
 import EngineRibbonClusters, {
   DRAW_REASONS, MODIFY_REASONS, SAVE_REASONS, PROMPTS, promptKeys, drawReason, modifyReason, saveReason, historyStepReason,
 } from './EngineRibbonClusters.jsx'
-import EngineSessionProvider, { DEFAULT_EDIT_INPUTS, MAX_INPUT_CHARS, useEngineSessionContext } from './EngineSessionProvider.jsx'
+import EngineSessionProvider, { DEFAULT_EDIT_INPUTS, MAX_INPUT_CHARS, REACH_STATE, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { SESSION_ERROR } from './engineSession.js'
 import { DEFAULT_SNAP_MODES, SNAP_MODES } from './snapModes.js'
 import StatusModesBridge from './StatusModesBridge.jsx'
@@ -175,6 +175,63 @@ it('keeps prompt text beyond the scalar input limit', () => {
   const studio = mount()
   act(() => { studio.context.setInput('text', 'x'.repeat(100)) })
   expect(studio.context.inputs.text).toBe('x'.repeat(100))
+})
+
+describe('held document boundary', () => {
+  const sentence = 'save the edits to the previous drawing, or close the project to keep editing it, before editing this project'
+
+  it('refuses arming and direct edits, including callers holding old action references', async () => {
+    const onBeforeEdit = vi.fn()
+    const onBeforeArm = vi.fn()
+    const studio = mount({ onBeforeEdit, onBeforeArm })
+    await openAndLoad(studio)
+    act(() => { studio.context.session.actions.select('e1') })
+    const actions = studio.context.session.actions
+    const before = studio.context.session
+    const posted = studio.workers[0].posted.length
+    act(() => {
+      studio.context.setReach({ state: REACH_STATE.HELD, sentence })
+      studio.context.setArmed({ group: 'draw', op: 'createLine' })
+      studio.context.setArmed({ group: 'modify', op: 'move' })
+      actions.create('createLine', studio.context.inputs)
+      actions.applyEdit('delete', {})
+      actions.copyToClipboard(true)
+      actions.pasteFromClipboard({ x: '0', y: '0' })
+      actions.undo()
+      actions.redo()
+    })
+    expect(studio.context.reach).toMatchObject({ state: REACH_STATE.HELD, sentence })
+    expect(studio.context.armed).toBe(null)
+    expect(studio.context.session.status).toBe(sentence)
+    expect(studio.context.session.entities).toBe(before.entities)
+    expect(studio.context.session.documentId).toBe(before.documentId)
+    expect(studio.context.session.busy).toBe(false)
+    expect(studio.workers[0].posted).toHaveLength(posted)
+    expect(onBeforeEdit).not.toHaveBeenCalled()
+    expect(onBeforeArm).not.toHaveBeenCalled()
+    act(() => {
+      studio.context.setReach({ state: REACH_STATE.IDLE, sentence: '' })
+      studio.context.setArmed({ group: 'modify', op: 'move' })
+      actions.applyEdit('move', { dx: '1', dy: '0' })
+    })
+    expect(studio.context.armed).toEqual({ group: 'modify', op: 'move' })
+    expect(studio.context.session.busy).toBe(true)
+    expect(studio.workers[0].posted).toHaveLength(posted + 1)
+    expect(onBeforeEdit).toHaveBeenCalledTimes(1)
+    expect(onBeforeArm).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps moved-head STALE editable', async () => {
+    const studio = mount()
+    await openAndLoad(studio)
+    act(() => {
+      studio.context.setReach({ state: REACH_STATE.STALE, sentence: 'the drawing moved on the server' })
+      studio.context.setArmed({ group: 'draw', op: 'createLine' })
+      studio.context.session.actions.create('createLine', studio.context.inputs)
+    })
+    expect(studio.context.armed).toEqual({ group: 'draw', op: 'createLine' })
+    expect(studio.context.session.busy).toBe(true)
+  })
 })
 
 const ribbonTool = (op) => document.querySelector(`.drafting-ribbon [data-tool="modify:${op}"]`)

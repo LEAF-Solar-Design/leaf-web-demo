@@ -37,10 +37,10 @@ import { isCompositionKey } from '../lib/keyComposition.js'
 import { RibbonCluster, RibbonTool, RibbonWidget } from '../site/DraftingRibbon.jsx'
 import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
-import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, byId, clipboardReason, drawReason, forGroup, modifyOpReason, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
+import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, byId, clipboardReason, drawReason, forGroup as registeredForGroup, modifyOpReason, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
 
 import { ACI_NAMES, LINEWEIGHT_VALUES, SESSION_ERROR, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, buildSelectionEditPayload, formatLineweight, readNumber } from './engineSession.js'
-import { PENDING_INPUT_KEY, PENDING_WORD, useEngineSessionContext } from './EngineSessionProvider.jsx'
+import { PENDING_INPUT_KEY, PENDING_WORD, REACH_STATE, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { PROMPTS, humanizeRefusal } from './promptKeys.js'
 import { isPointExpression } from './pointExpression.js'
 import { parseDimension } from './numericExpression.js'
@@ -142,7 +142,7 @@ export function armedToolElement(group, op) {
 // W4g-7b-03c-f: the four Modify ops seated in the Properties panel (the
 // registry's own `panel === 'properties'` records), the armed prompt's cue
 // to read the property ladder instead of the full Modify one.
-const PROPERTY_OPS = new Set(forGroup('modify').filter((a) => a.panel === 'properties').map((a) => a.op))
+const PROPERTY_OPS = new Set(registeredForGroup('modify').filter((a) => a.panel === 'properties').map((a) => a.op))
 
 // S27: a layer that leaves focus on the button that opened it claims Esc
 // through the one owner stack (useEscapeOwner.js), which also yields to a
@@ -228,15 +228,21 @@ const offTool = ({ id, label, icon, reason = NOT_IN_ENGINE }, size = 'small') =>
 
 export default function EngineRibbonClusters({ importOpen = false, onToggleImport, panels = ['draw', 'modify'] }) {
   const { session, inputs, setInput, canSave, armed, setArmed, ortho, setOrtho, osnap, setOsnap, snapModes, setSnapMode, snapLimited, reach, selectGroup, refuse, pending = null, setPending } = useEngineSessionContext()
+  const held = reach?.state === REACH_STATE.HELD ? reach.sentence : ''
+  // Keep the registry's ordinary ladders (including moved-head STALE) intact.
+  // A held document retains its parsed data for Save, but offers no edits.
+  const forGroup = (group) => registeredForGroup(group).map((action) => held
+    ? { ...action, when: () => held, title: () => held, run: () => refuse(held) }
+    : action)
   // The Modify panel's note is the reason every tool in it shares. With several
   // objects selected only the document rungs are shared: each tool states its own
   // multi-selection rule (modifyOpReason), so the panel never says "select one".
-  const modify = (session?.selectedIds?.length ?? 0) > 1 ? drawReason(session, reach) : modifyReason(session, reach)
+  const modify = held || ((session?.selectedIds?.length ?? 0) > 1 ? drawReason(session, reach) : modifyReason(session, reach))
   // W4g-7b-03c-f: the Properties panel's own ladder, which waives the
   // INSERT-reference rung `modify` still refuses (a property is not
   // geometry; see actionRegistry.js's propertyReason).
-  const property = propertyReason(session, reach)
-  const draw = drawReason(session, reach)
+  const property = held || propertyReason(session, reach)
+  const draw = held || drawReason(session, reach)
   const save = saveReason(session, canSave)
   const { applyEdit, create, copyToClipboard, pasteFromClipboard } = session.actions
   const pendingRef = useRef(pending)
@@ -287,11 +293,11 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // ladder, so the prompt says "nothing on the clipboard yet" with Run held
   // exactly as the ribbon button is held, rather than a live Run that the
   // store then refuses.
-  const promptReason = armedGroup === 'draw' || armedGroup === 'groups'
+  const promptReason = held || (armedGroup === 'draw' || armedGroup === 'groups'
     ? draw
     : armedGroup === 'modify'
       ? (PROPERTY_OPS.has(armedOp) ? property : modifyOpReason(armedOp, session, reach))
-      : armedGroup === 'clipboard' ? clipboardReason(session, reach) : ''
+      : armedGroup === 'clipboard' ? clipboardReason(session, reach) : '')
   const promptOff = !!promptReason
   const fieldsOff = promptOff && promptReason !== MODIFY_REASONS.noSelection
   // W4f-6: live validation. The store's own payload builders judge the
@@ -351,7 +357,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
         : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')))
     : ''
   const runOff = promptOff || !!liveRefusal || (!!waitingStep && !gatheringMembers)
-  const runReason = humanizeRefusal(promptReason || liveRefusal, prompt)
+  const runReason = held || humanizeRefusal(promptReason || liveRefusal, prompt)
   const runHold = runReason || (waitingStep ? waitingStep.ask : '')
   const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op }, { rearm: true })
   // The one context the Draw and Modify records read: the session their reason
@@ -365,6 +371,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     // note says while the console's own drawing is opening (or failed to).
     reach,
     onActivate: (group, op) => {
+      if (held) { refuse(held); return }
       if (PROMPTS[op]) { toggleArmed(group, op); return }
       if (group === 'draw') create(op, inputs)
       // W4g-5c: CUT and COPY touch no engine op at all, so they are neither
@@ -595,12 +602,12 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // Apply is judged against the staged TARGET plus the engine's own state
   // (crashed, no document, busy, which a save in flight also sets), never the
   // live selection's ladder: the target was chosen when the change was staged.
-  const applyRung = !pending ? ''
+  const applyRung = !pending ? '' : held ? 'held'
     : session.errorKind === SESSION_ERROR.CRASHED ? 'crashed'
       : !session.engineParsed ? 'noDocument'
         : session.busy ? 'busy'
           : !pendingTarget ? 'noSelection' : ''
-  const applyHold = applyRung ? MODIFY_REASONS[applyRung] : ''
+  const applyHold = held || (applyRung ? MODIFY_REASONS[applyRung] : '')
   // The staged combo stays live (another value replaces the staged one); the
   // other two wait with the pendingChange sentence. No staged change: the
   // property ladder, exactly as before.
@@ -615,6 +622,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // so Apply applies what the user sees, and Cancel then discards it.
   const stageFocusRef = useRef(null)
   const stageProperty = (op, value) => {
+    if (held) return
     if (cancellingPropertyRef.current) return
     if (pending && pending.op !== op) return
     const entity = pending ? pendingTarget : (property ? null : selectedEntity)
@@ -634,7 +642,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // computed value, same class as the Draw/Modify/Clipboard/Annotation/
   // Properties/Block clusters' own `reason = action.when(engineCtx)` above,
   // and like them counts as one more unverifiable-but-budgeted expression.
-  const propertyControl = propertyControlReason(session, reach)
+  const propertyControl = held || propertyControlReason(session, reach)
   const propertyWidgets = [
     {
       id: 'prop-color', label: 'Color', value: colorValue,
@@ -813,7 +821,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
       text: 'Save version',
       icon: 'save',
       size: 'large',
-      title: 'Save the edited bytes to the project as a new version',
+      title: held ? 'Save the edits to the previous drawing as a new version' : 'Save the edited bytes to the project as a new version',
       disabled: !!save,
       reason: save,
       onClick: () => { session.actions.save() },
@@ -825,8 +833,8 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   // panel inline and the top band as quick-access buttons, like Open/Save.
   const undoTool = ribbonTool(byId('engine:undo'), { session }, { id: 'undo-edit' })
   const redoTool = ribbonTool(byId('engine:redo'), { session }, { id: 'redo-edit' })
-  const undoReason = undoTool.reason
-  const redoReason = redoTool.reason
+  const undoReason = held || undoTool.reason
+  const redoReason = held || redoTool.reason
   fileTools.push(
     { ...undoTool, disabled: !!undoReason, reason: undoReason },
     { ...redoTool, disabled: !!redoReason, reason: redoReason },

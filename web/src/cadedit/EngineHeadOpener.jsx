@@ -58,9 +58,11 @@ export function holdsHeadDocument(session, drawingId, openedDocumentId) {
   return session.documentOrigin === null && id === openedDocumentId
 }
 
-export default function EngineHeadOpener({ drawingId = null, enabled = false, headKey = null, fetchDxf = null, sourceKey = '' }) {
-  const { session, setReach } = useEngineSessionContext()
-  const { openBytes } = session.actions
+export default function EngineHeadOpener({ drawingId = null, enabled = false, standDown = false, headKey = null, fetchDxf = null, sourceKey = '' }) {
+  const { session, reach, setReach } = useEngineSessionContext()
+  const { openBytes, reset } = session.actions
+  const previousStandDownRef = useRef(false)
+  const pendingStandDownRef = useRef(false)
   // Latest session for the post-await checks (a state read inside the async
   // leg would be the render it was captured in).
   const sessionRef = useRef(session)
@@ -98,8 +100,40 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     generationRef.current += 1
   }, [drawingId, sourceKey])
 
+  // Only entering project mode retires a clean legacy document. Ordinary
+  // surface switches disable fetching but preserve the document and edits.
   useEffect(() => {
-    if (!enabled || !drawingId || typeof fetchRef.current !== 'function') {
+    const wasStandingDown = previousStandDownRef.current
+    previousStandDownRef.current = standDown
+    if (!standDown) {
+      pendingStandDownRef.current = false
+      if (reach && reach.state === REACH_STATE.HELD) setReach({ state: REACH_STATE.IDLE, sentence: '' })
+      return
+    }
+    if (!wasStandingDown) {
+      pendingStandDownRef.current = true
+      // Abandon head bytes now, but never terminate work already in the engine.
+      generationRef.current += 1
+      inflightRef.current = null
+    }
+    if (!pendingStandDownRef.current || sessionRef.current.busy) return
+    if (sessionRef.current.dirty === true) {
+      setReach({ state: REACH_STATE.HELD, sentence: 'save the edits to the previous drawing, or close the project to keep editing it, before editing this project' })
+      return
+    }
+    pendingStandDownRef.current = false
+    generationRef.current += 1
+    inflightRef.current = null
+    attemptRef.current = ''
+    openedSourceRef.current = null
+    savedAtOpenRef.current = null
+    openedDocumentRef.current = null
+    reset()
+    setReach({ state: REACH_STATE.IDLE, sentence: '' })
+  }, [standDown, session.busy, dirty, reach?.state, reset, setReach])
+
+  useEffect(() => {
+    if (!enabled || standDown || !drawingId || typeof fetchRef.current !== 'function') {
       // A disabled or incomplete run leaves nothing a later run may attach to.
       inflightRef.current = null
       return undefined
@@ -259,7 +293,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, he
     }
     // present/holdsHead/dirty/busy are read from the same session object the
     // effect keys on; listing the derived booleans keeps the deps honest.
-  }, [enabled, drawingId, sourceKey, headKey, present, holdsHead, dirty, session.busy, session.savedVersion, openBytes, setReach])
+  }, [enabled, standDown, drawingId, sourceKey, headKey, present, holdsHead, dirty, session.busy, session.savedVersion, openBytes, setReach])
 
   // Unmount: nothing in flight may report onto a provider that outlives it.
   useEffect(() => () => { generationRef.current += 1 }, [])

@@ -5076,7 +5076,8 @@ export default function App() {
           {ENV_CAD_EDIT && studioGround && (
             <EngineHeadOpener
               drawingId={REQUESTED_DRAWING_ID}
-              enabled={!!studioGround && !!drafting && !!intake}
+              enabled={!projectMode && !!studioGround && !!drafting && !!intake}
+              standDown={projectMode}
               headKey={drawingState?.head ?? (mock ? 1 : null)}
               fetchDxf={mock ? fetchSampleDxf : fetchDrawingDxf}
               sourceKey={mock ? 'sample' : 'live'}
