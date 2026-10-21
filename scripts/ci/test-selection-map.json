@@ -326,6 +326,7 @@
     "server-instant-catalog-metadata",
     "server-instant-session-wiring",
     "server-intake-dxf",
+    "server-intake-dxf-envelope",
     "server-ios-ship-callback-listener",
     "server-ios-ship-provider",
     "server-ios-ship-router",

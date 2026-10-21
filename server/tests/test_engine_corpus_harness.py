@@ -191,7 +191,7 @@ def test_main_cli_exits_zero_over_the_full_corpus_with_identity_adapter(capsys):
 
 # T1 through T8: source bytes, polyline count, insert count, real and unkeyed handles.
 _TRACKED_CASES = (
-    ("web/public/sample.dxf", 424391, 2345, 0, 2345, 0),
+    ("web/public/sample.dxf", 448706, 2345, 0, 2345, 0),
     ("web/e2e/fixtures/block-fixture.dxf", 280, 0, 1, 1, 0),
     ("web/e2e/fixtures/distinctive-panel.dxf", 146, 1, 0, 1, 0),
     ("vendor/acadrust-worker/fixtures/one_line.dxf", 140, 1, 0, 0, 1),
@@ -220,8 +220,8 @@ def _tracked_expected(case, adapter="identity", **changes):
         "handles_missing": [], "handles_changed": [],
         "unkeyed_before": unkeyed, "unkeyed_matched": unkeyed,
         "blocks_match": True,
-        "block_records": 3 if drawing == "web/e2e/fixtures/block-fixture.dxf" else 0,
-        "block_records_preserved": 3 if drawing == "web/e2e/fixtures/block-fixture.dxf" else 0,
+        "block_records": 4 if drawing == "web/public/sample.dxf" else 3 if drawing == "web/e2e/fixtures/block-fixture.dxf" else 0,
+        "block_records_preserved": 4 if drawing == "web/public/sample.dxf" else 3 if drawing == "web/e2e/fixtures/block-fixture.dxf" else 0,
         "block_records_missing": [], "block_records_changed": [], "layers_match": True,
         "source_untouched": True, "error": None,
     }

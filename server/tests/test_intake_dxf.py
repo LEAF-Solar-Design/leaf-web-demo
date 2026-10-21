@@ -36,6 +36,10 @@ def _roundtrip(intake):
     return dxf_intake.parse_dxf_bytes(data, source_name=intake.get("dwg", "x")), data
 
 
+def _entity_bytes(data):
+    return data.split(b"0\nSECTION\n2\nENTITIES\n", 1)[1].split(b"0\nENDSEC\n", 1)[0]
+
+
 def _bulged_square(bulges):
     return {"layers": ["A"], "polylines": [
         {"layer": "A", "closed": True, "handle": "10", "xdata": None,
@@ -46,7 +50,7 @@ def _bulged_square(bulges):
 def test_bulged_polyline_round_trips_with_42_after_its_vertex():
     intake = _bulged_square([1, 0, 0, 0])
     back, data = _roundtrip(intake)
-    lines = data.decode().splitlines()
+    lines = _entity_bytes(data).decode().splitlines()
     pairs = list(zip(lines[::2], lines[1::2]))
     assert [p for p in pairs if p[0] == "42"] == [("42", "1.0")]
     first = pairs.index(("10", "0.0"))
@@ -76,13 +80,13 @@ def test_sparse_bulge_after_last_vertex_of_closed_polyline_keeps_its_index():
 
 def test_zero_bulges_emit_no_groups_and_parse_as_absent():
     back, data = _roundtrip(_bulged_square([0, 0, 0, 0]))
-    assert b"\n42\n" not in data
+    assert b"\n42\n" not in _entity_bytes(data)
     assert "bulges" not in back["polylines"][0]
 
 
 def test_inspection_bulge_flag_emits_no_groups_and_parses_as_absent():
     back, data = _roundtrip(_bulged_square([1]))
-    assert b"\n42\n" not in data
+    assert b"\n42\n" not in _entity_bytes(data)
     assert "bulges" not in back["polylines"][0]
 
 
@@ -99,7 +103,7 @@ def test_mixed_z_polyline_cannot_carry_bulges():
     intake["polylines"][0]["pts"][1][2] = 2
     back, data = _roundtrip(intake)
     assert b"\nPOLYLINE\n" in data
-    assert b"\n42\n" not in data
+    assert b"\n42\n" not in _entity_bytes(data)
     assert "bulges" not in back["polylines"][0]
 
 
@@ -376,7 +380,11 @@ def test_identity_text_entity_bytes_are_unchanged(kind, expected):
          "text": "north", "handle": "30"}]}
     data = intake_dxf.intake_to_dxf(intake)
     entity = data.split(b"0\nSECTION\n2\nENTITIES\n", 1)[1].split(b"0\nENDSEC\n", 1)[0]
-    assert entity == expected
+    pairs = dxf_intake._group_pairs(data.decode())
+    model_owner = next(pairs[i + 1][1] for i, pair in enumerate(pairs)
+                       if pair == (0, "BLOCK_RECORD")
+                       and (2, "*Model_Space") in pairs[i:i + 7])
+    assert entity == expected.replace(b"5\n30\n", b"5\n30\n330\n" + model_owner.encode() + b"\n", 1)
     assert b"\n210\n" not in data
 
 
@@ -463,7 +471,7 @@ def test_invalid_text_point_is_refused_with_row(pt, needle):
     assert needle in str(exc.value)
 
 
-def test_dimension_round_trips_exactly_and_dimstyle_table_is_conditional():
+def test_dimension_round_trips_exactly_and_dimstyle_table_is_always_present():
     # W4g-7b-04s: one LINEAR and one ALIGNED dimension, plus the loaded
     # dimstyle catalogue; byte-identical output when neither is carried.
     intake = {
@@ -483,7 +491,8 @@ def test_dimension_round_trips_exactly_and_dimstyle_table_is_conditional():
     assert back["dimstyles"] == intake["dimstyles"]
     assert b"\n0\nDIMENSION\n" in data and b"\n0\nDIMSTYLE\n" in data
     plain = intake_dxf.intake_to_dxf({"layers": ["0"], "polylines": []})
-    assert b"DIMSTYLE" not in plain
+    assert plain.count(b"0\nTABLE\n2\nDIMSTYLE\n") == 1
+    assert b"100\nAcDbDimStyleTableRecord\n2\nStandard\n" in plain
     empty = intake_dxf.intake_to_dxf(
         {"layers": ["0"], "polylines": [], "dimensions": [], "dimstyles": []})
     assert empty == plain

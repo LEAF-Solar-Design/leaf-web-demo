@@ -151,10 +151,11 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         if section == "TABLES" and code == 0 and value == "DIMSTYLE":
             j = i + 1
             while j < n and pairs[j][0] != 0:
-                if pairs[j][0] == 2 and pairs[j][1] not in seen_dimstyles:
-                    seen_dimstyles.add(pairs[j][1])
-                    dimstyles.append(pairs[j][1])
                 j += 1
+            for code, value in pairs[i + 1:j]:
+                if code == 2 and value not in seen_dimstyles:
+                    seen_dimstyles.add(value)
+                    dimstyles.append(value)
             i = j
             continue
         if section == "BLOCKS" and code == 0 and value == "BLOCK":
@@ -321,10 +322,27 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 yield key, value.upper()
                 key = None
 
+    envelope_only = set()
+    envelope_item_count = 0
     for kind, record in objects.values():
         if kind != "DICTIONARY" or next((v for c, v in record if c == 330), "0") != "0":
             continue
         for key, dictionary in dictionary_entries(record):
+            if key == "LEAF_INTAKE_ENVELOPE":
+                marker_kind, marker = objects.get(dictionary, (None, []))
+                root_handle = next((v.upper() for c, v in record if c == 5), None)
+                owner = next((v.upper() for c, v in marker if c == 330), None)
+                if (marker_kind == "XRECORD" and root_handle is not None
+                        and owner == root_handle and (100, "AcDbXrecord") in marker
+                        and envelope_item_count < 8):
+                    for code, item in marker:
+                        if code != 1:
+                            continue
+                        if item in ("dimstyle-standard", "groups", "blocks"):
+                            envelope_only.add(item)
+                        envelope_item_count += 1
+                        if envelope_item_count == 8:
+                            break
             if key.upper() != "ACAD_GROUP":
                 continue
             group_kind, group_dictionary = objects.get(dictionary, (None, []))
@@ -356,12 +374,17 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         out["inserts"] = resolved_inserts
     if dimensions:
         out["dimensions"] = dimensions
+    if "dimstyle-standard" in envelope_only:
+        dimstyles = [name for name in dimstyles if name.casefold() != "standard"]
     if dimstyles:
         out["dimstyles"] = dimstyles
     if dimensions_unsupported:
         out["dimensions_unsupported"] = dimensions_unsupported
     if has_blocks:
         out["blocks"] = blocks
+    for item in ("groups", "blocks"):
+        if item in envelope_only:
+            out.pop(item, None)
     if block_count > 200:
         out["blocksCapped"] = block_count
     out["memberEvidenceCovered"] = True
