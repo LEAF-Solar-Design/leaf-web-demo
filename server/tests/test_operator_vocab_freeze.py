@@ -303,7 +303,7 @@ def test_roles_file_gained_no_operator_role():
 # Studio integration adds save_integration_element (rung 3) and
 # read_integration_data (rung 1), both auto with the converse capability.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "1b530e7ffdb4d7f093205c2613efd5cd31bfb7876adcefae86c16ff97f5ffb96")
+    "c91ecf3e88428b9d6fb0a75ea2139a3142a2b76430fbb5e5c03b61e2801969d0")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",

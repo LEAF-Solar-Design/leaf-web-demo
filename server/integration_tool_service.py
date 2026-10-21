@@ -149,7 +149,7 @@ def normalize(operation, value):
     elif operation == "elements":
         if set(value) - {"recipe", "expectedRevision", "confirmation_id"} or "recipe" not in value:
             raise ReadFailure("invalid_input")
-        validate("DatasetElementV1", value["recipe"])
+        validate("IntegrationElementV1", value["recipe"])
         args = {"recipe": value["recipe"]}
         if "expectedRevision" in value:
             revision = value["expectedRevision"]
@@ -511,7 +511,7 @@ class IntegrationToolService:
                             if saving:
                                 if type(value) is not dict:
                                     raise ReadFailure("invalid_response")
-                                validate("DatasetElementV1", value.get("element"))
+                                validate("IntegrationElementV1", value.get("element"))
                                 revision = value.get("revision")
                                 if (type(revision) is not int or not 1 <= revision <= 9007199254740991
                                         or json.dumps(value["element"], sort_keys=True, allow_nan=False)

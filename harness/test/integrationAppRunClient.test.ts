@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpAppRunClient, IntegrationClientError } from "../src/ports/impl/appRunClient.js";
 import { IntegrationDatasetsInput, IntegrationQueryInput, IntegrationSaveElementInput } from "../src/ports/index.js";
-import { DatasetElementV1, DatasetReadV1 } from "../src/vendor/mushy-author/contracts/integration.js";
+import { DatasetElementV1, DatasetReadV1, IntegrationActionElementV1 } from "../src/vendor/mushy-author/contracts/integration.js";
 
 const TENANT = "12345678-1234-4234-8234-123456789abc";
 const AUTH = { sessionId: "app-session", turnId: "app-turn" };
@@ -21,6 +21,12 @@ const RECIPE = DatasetElementV1.parse({
   query: QUERY.query, kind: "dataset.line", props: { x_field: "amount", y_field: "amount" },
 });
 const SAVE = IntegrationSaveElementInput.parse({ recipe: RECIPE, expectedRevision: 2 });
+const ACTION = IntegrationActionElementV1.parse({
+  schema_version: 1, id: "sales-action", title: "Create sale", kind: "integration.action",
+  connection_id: "sales", connector_ref: REF, operation_ref: { ...REF, id: "create-sale" },
+  form: { submit_label: "Create", fields: [{ id: "amount", label: "Amount", kind: "number", required: true, nullable: false, integer: false }] },
+});
+const ACTION_SAVE = IntegrationSaveElementInput.parse({ recipe: ACTION, expectedRevision: 2 });
 const DISCOVERY = { datasets: [{ dataset_ref: REF, title: "Sales", fields: READ.fields, freshness: null, status: "empty" }], next_cursor: null };
 const allow = (result: unknown) => ({ gate: { decision: "allow", rung: 0 }, result });
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -33,6 +39,40 @@ function setup(body: unknown = allow({ datasets: [], next_cursor: null }), statu
 afterEach(() => vi.useRealTimers());
 
 describe("bounded integration HTTP transport", () => {
+  it.each([undefined, 2])("saves an inert action through the fixed host endpoint (revision %s)", async (expectedRevision) => {
+    const input = IntegrationSaveElementInput.parse({ recipe: ACTION, ...(expectedRevision === undefined ? {} : { expectedRevision }) });
+    const { client, fetchImpl } = setup(allow({ element: ACTION, revision: 3 }));
+    expect((await client.integrationSaveElement(TENANT, input, AUTH)).result).toEqual({ element: ACTION, revision: 3 });
+    expect(fetchImpl).toHaveBeenCalledExactlyOnceWith("https://app.invalid/internal/integrations/elements", expect.objectContaining({
+      method: "POST", redirect: "error", body: JSON.stringify(input),
+      headers: { "content-type": "application/json", "x-tenant-id": TENANT, "x-dispatch-secret": SECRET,
+        "x-authority-session-id": AUTH.sessionId, "x-authority-turn-id": AUTH.turnId },
+    }));
+  });
+
+  it.each([
+    { ...ACTION, kind: "integration.run" }, { ...ACTION, grant: "model-grant" },
+    { ...ACTION, operation_ref: { ...REF, version: 0 } },
+    { ...ACTION, connector_ref: { ...REF, digest: "bad" } },
+    { ...ACTION, form: { ...ACTION.form, arguments: { amount: 1 } } },
+  ])("rejects invalid action recipes before fetch: %j", async (recipe) => {
+    const { client, fetchImpl } = setup();
+    await expect(client.integrationSaveElement(TENANT, { recipe } as never, AUTH)).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { element: { ...ACTION, operation_ref: { ...REF, version: 2 } }, revision: 3 },
+    { element: { ...ACTION, connector_ref: { ...REF, digest: "b".repeat(64) } }, revision: 3 },
+    { element: { ...ACTION, form: { ...ACTION.form, submit_label: "Changed" } }, revision: 3 },
+    { element: ACTION, revision: 0 }, { element: ACTION, revision: Number.MAX_SAFE_INTEGER + 1 },
+    { element: ACTION, revision: 3, secret: SECRET },
+  ])("rejects action response drift or reflection without retrying: %j", async (saved) => {
+    const { client, fetchImpl } = setup(allow(saved));
+    await expect(client.integrationSaveElement(TENANT, ACTION_SAVE, AUTH)).rejects.toMatchObject({ code: "outcome_unknown" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("uses fixed paths, POST, headers, normalized JSON, and one call per operation", async () => {
     const { client, fetchImpl } = setup();
     fetchImpl.mockResolvedValueOnce(response(allow(DISCOVERY)));

@@ -1,5 +1,5 @@
 {
-  "_note": "Operator-owned agent action catalog (agent spine Phase 1). The catalog IS the guardrail: the conversational agent can only be gated through actions defined here, at the policy tier the operator set (auto / confirm-once / always-confirm). Read at request time by server/agent_policy.py (env-overridable LEAF_AGENT_POLICY_FILE); strict-validated — unknown fields are load errors. tier_overrides may retune a tier's policy but can never loosen an action whose tenant_tightenable is false. Per-tenant overlays (agent_tenants.json beside this file) can only TIGHTEN.",
+  "_note": "Operator-owned agent action catalog (agent spine Phase 1). The catalog IS the guardrail: the conversational agent can only be gated through actions defined here, at the policy tier the operator set (auto / confirm-once / always-confirm). Read at request time by server/agent_policy.py (env-overridable LEAF_AGENT_POLICY_FILE); strict-validated \u2014 unknown fields are load errors. tier_overrides may retune a tier's policy but can never loosen an action whose tenant_tightenable is false. Per-tenant overlays (agent_tenants.json beside this file) can only TIGHTEN.",
   "version": 1,
   "approval_ttl_s": 300,
   "rate_limits": {
@@ -9,7 +9,7 @@
   },
   "actions": {
     "save_integration_element": {
-      "description": "Create or replace a native dataset element in the current project using revision checks.",
+      "description": "Create or replace a native table, line chart or inert action form in the current project using revision checks.",
       "rung": 3,
       "required_capability": "converse",
       "policy": "auto",
@@ -28,161 +28,6 @@
       ],
       "args_schema": {
         "$defs": {
-          "IntegrationRefV1": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128,
-                "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
-              },
-              "version": {
-                "type": "integer",
-                "exclusiveMinimum": 0,
-                "maximum": 9007199254740991
-              },
-              "digest": {
-                "type": "string",
-                "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
-              }
-            },
-            "required": [
-              "id",
-              "version",
-              "digest"
-            ],
-            "additionalProperties": false
-          },
-          "DatasetQueryV1": {
-            "type": "object",
-            "properties": {
-              "fields": {
-                "minItems": 1,
-                "maxItems": 100,
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128,
-                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
-                }
-              },
-              "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 1000
-              },
-              "cursor": {
-                "type": "string",
-                "maxLength": 2048
-              },
-              "filters": {
-                "maxItems": 20,
-                "type": "array",
-                "items": {
-                  "anyOf": [
-                    {
-                      "type": "object",
-                      "properties": {
-                        "field": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 128,
-                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
-                        },
-                        "op": {
-                          "type": "string",
-                          "enum": [
-                            "eq",
-                            "neq",
-                            "gt",
-                            "gte",
-                            "lt",
-                            "lte"
-                          ]
-                        },
-                        "value": {
-                          "anyOf": [
-                            {
-                              "type": "string"
-                            },
-                            {
-                              "type": "number"
-                            },
-                            {
-                              "type": "boolean"
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ]
-                        }
-                      },
-                      "required": [
-                        "field",
-                        "op",
-                        "value"
-                      ],
-                      "additionalProperties": false
-                    },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "field": {
-                          "type": "string",
-                          "minLength": 1,
-                          "maxLength": 128,
-                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
-                        },
-                        "op": {
-                          "type": "string",
-                          "const": "is_null"
-                        }
-                      },
-                      "required": [
-                        "field",
-                        "op"
-                      ],
-                      "additionalProperties": false
-                    }
-                  ]
-                }
-              },
-              "sort": {
-                "maxItems": 4,
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "field": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 128,
-                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
-                    },
-                    "direction": {
-                      "type": "string",
-                      "enum": [
-                        "asc",
-                        "desc"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "field",
-                    "direction"
-                  ],
-                  "additionalProperties": false
-                }
-              }
-            },
-            "required": [
-              "fields",
-              "limit"
-            ],
-            "additionalProperties": false
-          },
           "DatasetElementV1": {
             "anyOf": [
               {
@@ -314,12 +159,463 @@
                 "additionalProperties": false
               }
             ]
+          },
+          "DatasetQueryV1": {
+            "type": "object",
+            "properties": {
+              "fields": {
+                "minItems": 1,
+                "maxItems": 100,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                }
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000
+              },
+              "cursor": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "filters": {
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "field": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                        },
+                        "op": {
+                          "type": "string",
+                          "enum": [
+                            "eq",
+                            "neq",
+                            "gt",
+                            "gte",
+                            "lt",
+                            "lte"
+                          ]
+                        },
+                        "value": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "field",
+                        "op",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "field": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                        },
+                        "op": {
+                          "type": "string",
+                          "const": "is_null"
+                        }
+                      },
+                      "required": [
+                        "field",
+                        "op"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "sort": {
+                "maxItems": 4,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "field": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                    },
+                    "direction": {
+                      "type": "string",
+                      "enum": [
+                        "asc",
+                        "desc"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "field",
+                    "direction"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "fields",
+              "limit"
+            ],
+            "additionalProperties": false
+          },
+          "IntegrationActionElementV1": {
+            "description": "Inert action presentation bound to exact immutable connector and operation versions. The host resolves the current grant revision when submitting; this control grants no authority.",
+            "type": "object",
+            "properties": {
+              "schema_version": {
+                "type": "number",
+                "const": 1
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "kind": {
+                "type": "string",
+                "const": "integration.action"
+              },
+              "connection_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+              },
+              "connector_ref": {
+                "$ref": "#/$defs/IntegrationRefV1"
+              },
+              "operation_ref": {
+                "$ref": "#/$defs/IntegrationRefV1"
+              },
+              "form": {
+                "$ref": "#/$defs/IntegrationActionFormV1"
+              }
+            },
+            "required": [
+              "schema_version",
+              "id",
+              "title",
+              "kind",
+              "connection_id",
+              "connector_ref",
+              "operation_ref",
+              "form"
+            ],
+            "additionalProperties": false
+          },
+          "IntegrationActionFieldV1": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "required": {
+                    "type": "boolean"
+                  },
+                  "nullable": {
+                    "type": "boolean"
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "text"
+                  },
+                  "min_length": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4096
+                  },
+                  "max_length": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4096
+                  }
+                },
+                "required": [
+                  "id",
+                  "label",
+                  "required",
+                  "nullable",
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "required": {
+                    "type": "boolean"
+                  },
+                  "nullable": {
+                    "type": "boolean"
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "number"
+                  },
+                  "minimum": {
+                    "type": "number"
+                  },
+                  "maximum": {
+                    "type": "number"
+                  },
+                  "integer": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "id",
+                  "label",
+                  "required",
+                  "nullable",
+                  "kind",
+                  "integer"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "required": {
+                    "type": "boolean"
+                  },
+                  "nullable": {
+                    "type": "boolean"
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "boolean"
+                  }
+                },
+                "required": [
+                  "id",
+                  "label",
+                  "required",
+                  "nullable",
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "required": {
+                    "type": "boolean"
+                  },
+                  "nullable": {
+                    "type": "boolean"
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "choice"
+                  },
+                  "choices": {
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "label": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 120
+                        },
+                        "value": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096
+                        }
+                      },
+                      "required": [
+                        "label",
+                        "value"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "label",
+                  "required",
+                  "nullable",
+                  "kind",
+                  "choices"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "IntegrationActionFormV1": {
+            "description": "Presentation and client-validation hints, not business semantics or authority. The installed host adapter validates arguments again. Null, absent, false, zero and empty text remain distinct.",
+            "type": "object",
+            "properties": {
+              "fields": {
+                "minItems": 0,
+                "maxItems": 100,
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/IntegrationActionFieldV1"
+                }
+              },
+              "submit_label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              }
+            },
+            "required": [
+              "fields",
+              "submit_label"
+            ],
+            "additionalProperties": false
+          },
+          "IntegrationElementV1": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/DatasetElementV1"
+              },
+              {
+                "$ref": "#/$defs/IntegrationActionElementV1"
+              }
+            ]
+          },
+          "IntegrationRefV1": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+              },
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+              }
+            },
+            "required": [
+              "id",
+              "version",
+              "digest"
+            ],
+            "additionalProperties": false
           }
         },
         "type": "object",
         "properties": {
           "recipe": {
-            "$ref": "#/$defs/DatasetElementV1"
+            "$ref": "#/$defs/IntegrationElementV1"
           },
           "expectedRevision": {
             "type": "integer",
@@ -571,7 +867,7 @@
       }
     },
     "request_confirmation": {
-      "description": "UI-only consent chip: ask the user to approve something before proceeding (R0; wire contract section 5). Dispatches nowhere — the gate mints the confirmation_id and the harness renders the card, then ends the turn. always-confirm is what MAKES the id: the app's pending store is the only authority allowed to mint one (section 6), so a self-issued harness id could never be redeemed.",
+      "description": "UI-only consent chip: ask the user to approve something before proceeding (R0; wire contract section 5). Dispatches nowhere \u2014 the gate mints the confirmation_id and the harness renders the card, then ends the turn. always-confirm is what MAKES the id: the app's pending store is the only authority allowed to mint one (section 6), so a self-issued harness id could never be redeemed.",
       "rung": 0,
       "required_capability": "converse",
       "policy": "always-confirm",
@@ -813,7 +1109,7 @@
       "cost_class": "aps_usd"
     },
     "undo_drawing_version": {
-      "description": "Undo: repoint the drawing head to a prior version (R3 safety valve — never harder than the write). DISABLED in Phase-1: no spine tool dispatches it and the wire contract §0 back-edge allowlist carries only GET /api/drawings/*, so POST /api/drawings/{dwg}/undo is unreachable from the harness and would 401. The user-facing undo is unaffected (the UI calls that route directly with a tenant token). Enabling this needs a contract revision adding the route to §0 plus a spine mapping — Phase-2.",
+      "description": "Undo: repoint the drawing head to a prior version (R3 safety valve \u2014 never harder than the write). DISABLED in Phase-1: no spine tool dispatches it and the wire contract \u00a70 back-edge allowlist carries only GET /api/drawings/*, so POST /api/drawings/{dwg}/undo is unreachable from the harness and would 401. The user-facing undo is unaffected (the UI calls that route directly with a tenant token). Enabling this needs a contract revision adding the route to \u00a70 plus a spine mapping \u2014 Phase-2.",
       "rung": 3,
       "required_capability": "run_write",
       "policy": "auto",
