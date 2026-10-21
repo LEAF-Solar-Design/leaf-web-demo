@@ -29,6 +29,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { engineVersion, assertWorkerCarriesVersion } from '../web/vite-plugins/engineVersion.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PKG = path.join(ROOT, 'vendor', 'acadrust-worker', 'pkg-web')
@@ -65,11 +66,10 @@ function main(check) {
   for (const name of FILES) {
     const content = readFileSync(path.join(PKG, name))
     if (name.endsWith('.js') && /acadrust/i.test(content.toString('utf8'))) {
-      console.error('[stage_cad_engine] the glue at', name,
-        'carries a crate-name reference - this pkg-web was built without',
-        '--out-name engine (its wasm import key cannot match a renamed glue);',
-        'refusing to stage a fence-violating, unloadable asset')
-      return 2
+      throw new Error('the glue at ' + name
+        + ' carries a crate-name reference - this pkg-web was built without'
+        + ' --out-name engine (its wasm import key cannot match a renamed glue);'
+        + ' refusing to stage a fence-violating, unloadable asset')
     }
     staged[name] = content
   }
@@ -83,24 +83,35 @@ function main(check) {
     upstream: 'see vendor/acadrust-worker/Cargo.toml (rev-pinned, unmodified; MPL-2.0 per docs/CAD-ENGINE-LICENSE-REVIEW.md)',
   }
   if (check) {
-    let clean = true
     for (const [name, buf] of Object.entries(staged)) {
       const target = path.join(OUT, name)
       if (!existsSync(target) || sha256(readFileSync(target)) !== sha256(buf)) {
-        console.error('[stage_cad_engine] STALE:', name, 'differs from the built engine')
-        clean = false
+        throw new Error('STALE: ' + name + ' differs from the built engine')
       }
     }
-    return clean ? 0 : 3
+  } else {
+    mkdirSync(OUT, { recursive: true })
+    for (const [name, buf] of Object.entries(staged)) {
+      writeFileSync(path.join(OUT, name), buf)
+    }
   }
-  mkdirSync(OUT, { recursive: true })
-  for (const [name, buf] of Object.entries(staged)) {
-    writeFileSync(path.join(OUT, name), buf)
+  const version = engineVersion(PKG)
+  if (engineVersion(OUT) !== version) {
+    throw new Error('staged engine version differs from the built engine')
   }
-  writeFileSync(path.join(OUT, 'PROVENANCE.json'), JSON.stringify(provenance, null, 2) + '\n')
-  console.log('[stage_cad_engine] staged', Object.keys(staged).join(', '),
-    'crate_rev', provenance.crate_rev, '->', OUT)
+  assertWorkerCarriesVersion(path.join(ROOT, 'web', 'dist'), version)
+  if (!check) {
+    provenance.engine_version = version
+    writeFileSync(path.join(OUT, 'PROVENANCE.json'), JSON.stringify(provenance, null, 2) + '\n')
+    console.log('[stage_cad_engine] staged', Object.keys(staged).join(', '),
+      'crate_rev', provenance.crate_rev, '->', OUT)
+  }
   return 0
 }
 
-process.exitCode = main(process.argv.includes('--check'))
+try {
+  process.exitCode = main(process.argv.includes('--check'))
+} catch (error) {
+  console.error('[stage_cad_engine]', String(error.message || error).replace(/[\r\n]+/g, ' '))
+  process.exitCode = 1
+}

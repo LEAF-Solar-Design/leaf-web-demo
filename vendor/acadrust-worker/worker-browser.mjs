@@ -10,7 +10,8 @@
 //   new Worker(new URL('.../worker-browser.mjs', import.meta.url), { type: 'module' })
 //
 // Engine loading: the compiled wasm is served as crate-name-free assets at
-// /engine/engine.js + /engine/engine_bg.wasm, staged from the wasm-pack
+// /engine/engine.js + /engine/engine_bg.wasm. Both URLs carry the build's
+// engine version. The assets are staged from the wasm-pack
 // --target web output by scripts/stage_cad_engine.mjs (web/ must stay clean
 // of the crate name for the fence, so the assets are renamed on stage). The
 // import is deliberately non-analyzable (@vite-ignore on a computed string)
@@ -26,12 +27,14 @@
 const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 
 const ENGINE_BASE = '/engine'
+const ENGINE_VERSION = (typeof __LEAF_ENGINE_VERSION__ === 'string' && /^[0-9a-f]{16}$/.test(__LEAF_ENGINE_VERSION__)) ? __LEAF_ENGINE_VERSION__ : ''
+const ENGINE_QUERY = ENGINE_VERSION ? '?v=' + ENGINE_VERSION : ''
 
 let enginePromise = null
 function loadEngine() {
   if (enginePromise) return enginePromise
   enginePromise = (async () => {
-    const glueUrl = `${ENGINE_BASE}/engine.js`
+    const glueUrl = `${ENGINE_BASE}/engine.js${ENGINE_QUERY}`
     let mod
     try {
       mod = await import(/* @vite-ignore */ glueUrl)
@@ -43,7 +46,7 @@ function loadEngine() {
       reason.cause = cause
       throw reason
     }
-    await mod.default(`${ENGINE_BASE}/engine_bg.wasm`)
+    await mod.default(`${ENGINE_BASE}/engine_bg.wasm${ENGINE_QUERY}`)
     return mod
   })()
   // A failed load must not poison every later attempt with a stale promise.

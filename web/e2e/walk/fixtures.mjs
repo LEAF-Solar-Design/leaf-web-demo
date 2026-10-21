@@ -19,6 +19,7 @@ import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProo
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
 
 export { expect }
+export const ENGINE_WASM_ROUTE = /\/engine\/engine_bg\.wasm(?:\?[^#]*)?$/
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
 export const COACH_STORAGE_KEY = 'leaf.coach.dismissed.v1'
 
@@ -2245,7 +2246,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       })
       return
     case 'hold-engine-boot': {
-      runtime.cleanup.push(await holdJobRoutes(page, '**/engine/engine_bg.wasm'))
+      runtime.cleanup.push(await holdJobRoutes(page, ENGINE_WASM_ROUTE))
       return
     }
     case 'hold-solar-projection': {
