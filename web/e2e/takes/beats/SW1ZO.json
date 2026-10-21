@@ -1,0 +1,21 @@
+{
+  "schema": "leaf.studio-beats.v1",
+  "beat_id": "SW1ZO",
+  "env": "staging",
+  "origin": "https://platform-staging.leafdesign.ai",
+  "requires_signed_in": false,
+  "fixtures": [],
+  "steps": [
+    { "verb": "click", "role": "button", "name": "Zoom out" },
+    { "verb": "pause", "ms": 300 },
+    { "verb": "click", "role": "button", "name": "Zoom out" },
+    { "verb": "pause", "ms": 300 },
+    { "verb": "click", "role": "button", "name": "Zoom out" },
+    { "verb": "pause", "ms": 300 },
+    { "verb": "click", "role": "button", "name": "Zoom out" },
+    { "verb": "pause", "ms": 300 },
+    { "verb": "click", "role": "button", "name": "Zoom out" },
+    { "verb": "pause", "ms": 300 }
+  ],
+  "expect_text": []
+}

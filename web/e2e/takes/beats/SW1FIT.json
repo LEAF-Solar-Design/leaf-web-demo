@@ -1,0 +1,13 @@
+{
+  "schema": "leaf.studio-beats.v1",
+  "beat_id": "SW1FIT",
+  "env": "staging",
+  "origin": "https://platform-staging.leafdesign.ai",
+  "requires_signed_in": false,
+  "fixtures": [],
+  "steps": [
+    { "verb": "click", "role": "button", "name": "Fit drawing to view" },
+    { "verb": "pause", "ms": 300 }
+  ],
+  "expect_text": []
+}

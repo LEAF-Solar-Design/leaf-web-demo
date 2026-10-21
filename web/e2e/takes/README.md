@@ -4,6 +4,10 @@ Beat files in `beats/*.json` are portable data for both the standalone
 Playwright take and a Python runner using one persistent headed Edge context.
 They contain no CSS selectors, executable expressions, or browser scripts.
 
+`SW1ZI` (zoom in), `SW1ZO` (zoom out), and `SW1FIT` (fit drawing to view)
+are motion beats that run after the SW1 pre-roll, with the drawing already open.
+Each zoom beat clicks five times; every click is followed by a 300 ms pause.
+
 ## `leaf.studio-beats.v1`
 
 All fields below are required; unknown fields are rejected:
