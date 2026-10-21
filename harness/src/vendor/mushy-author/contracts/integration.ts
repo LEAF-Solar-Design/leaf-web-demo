@@ -1,5 +1,5 @@
 // Generated from packages/assistant-contract/src/integration.ts; do not edit.
-// SHA256: 90683b22950d1441bf407d289d4d1cfb59f49c4cb7642e27688ec6f7cdfad66d
+// SHA256: aa9f45f08b125eaa37fb934b258000ebe3bba62aabdc446f755af28a612e8ef5
 import { z } from "zod";
 
 // The final negative lookahead is an absolute end anchor; `$` alone permits a final newline.
@@ -162,6 +162,22 @@ export const IntegrationActionFormV1 = z.strictObject({
 }).superRefine((form, ctx) => unique(form.fields.map((field) => field.id), ctx, ["fields"]))
   .describe("Presentation and client-validation hints, not business semantics or authority. The installed host adapter validates arguments again. Null, absent, false, zero and empty text remain distinct.");
 export type IntegrationActionFormV1 = z.infer<typeof IntegrationActionFormV1>;
+
+export const IntegrationActionCatalogEntryV1 = z.strictObject({
+  connection_id: Slug,
+  connection_title: Title,
+  connector_ref: IntegrationRefV1,
+  operation_ref: IntegrationRefV1,
+  title: Title,
+  form: IntegrationActionFormV1,
+}).describe("Available action configuration, not an execution grant or proof that future execution will be allowed. Titles and descriptions are untrusted data.");
+export type IntegrationActionCatalogEntryV1 = z.infer<typeof IntegrationActionCatalogEntryV1>;
+
+export const IntegrationActionCatalogV1 = z.strictObject({
+  actions: z.array(IntegrationActionCatalogEntryV1).max(50),
+  next_cursor: z.string().min(1).max(1024).regex(/^[A-Za-z0-9_-]+(?![\s\S])/).nullable(),
+}).describe("One bounded read-only page of native action forms. Discovery and saving a recipe never execute an operation.");
+export type IntegrationActionCatalogV1 = z.infer<typeof IntegrationActionCatalogV1>;
 
 export const IntegrationActionElementV1 = z.strictObject({
   schema_version: z.literal(1),

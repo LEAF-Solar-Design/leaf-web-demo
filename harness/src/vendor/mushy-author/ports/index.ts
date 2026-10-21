@@ -23,9 +23,10 @@
 // Frozen data contracts
 // --------------------------------------------------------------------------- //
 
-import type { DatasetReadV1 } from "../contracts/integration.js";
+import type { DatasetReadV1, IntegrationActionCatalogV1 } from "../contracts/integration.js";
 import type {
   IntegrationAuthority,
+  IntegrationActionCatalogInput,
   IntegrationDatasetsInput,
   IntegrationDatasetsResult,
   IntegrationQueryInput,
@@ -604,6 +605,7 @@ export const SPINE_TOOL_NAMES = [
   "finish_project",
   "project_completion_status",
   "integration_datasets",
+  "integration_action_catalog",
   "integration_query",
   "integration_save_element",
 ] as const;
@@ -849,6 +851,12 @@ export interface SubmitRunResponse {
 }
 
 export interface AppRunClient {
+  /** Read-only action configuration discovery; requires the host's explicit action_discovery grant. */
+  integrationActionCatalog?(
+    tenantId: string,
+    input: IntegrationActionCatalogInput,
+    authority: IntegrationAuthority,
+  ): Promise<IntegrationToolResult<IntegrationActionCatalogV1>>;
   /** One bounded discovery page; absent means unavailable in this host. */
   integrationDatasets?(
     tenantId: string,

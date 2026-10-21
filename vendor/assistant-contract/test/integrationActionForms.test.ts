@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   IntegrationActionFieldV1, IntegrationActionFormV1, IntegrationActionElementV1,
+  IntegrationActionCatalogEntryV1, IntegrationActionCatalogV1,
   IntegrationActionSnapshotV1, IntegrationActionRunV1, IntegrationActionReceiptV1,
   IntegrationActionSubmissionV1, DatasetElementV1, IntegrationElementV1, emitJsonSchema, emitOpenApi,
 } from "../src/index";
@@ -35,6 +36,90 @@ const terminal: IntegrationActionSnapshotV1 = {
   run: { ...run, state: "succeeded", effect_outcome: "applied" },
   receipts: [{ ...receipt, effect_outcome: "applied" }],
 };
+
+describe("read-only integration action catalog", () => {
+  const entry: IntegrationActionCatalogEntryV1 = {
+    connection_id: element.connection_id, connection_title: "Sales account",
+    connector_ref: ref, operation_ref: ref, title: element.title, form,
+  };
+  const catalog: IntegrationActionCatalogV1 = { actions: [entry], next_cursor: null };
+
+  it("accepts bounded descriptors without adding arguments, defaults or executable code", () => {
+    expect(IntegrationActionCatalogEntryV1.parse(entry)).toEqual(entry);
+    expect(IntegrationActionCatalogV1.parse(catalog)).toEqual(catalog);
+    expect(IntegrationActionCatalogV1.parse({ actions: [], next_cursor: null })).toEqual({ actions: [], next_cursor: null });
+    expect(IntegrationActionCatalogV1.safeParse({ actions: Array(50).fill(entry), next_cursor: "a".repeat(1024) }).success).toBe(true);
+    expect(IntegrationActionCatalogV1.safeParse({ actions: Array(51).fill(entry), next_cursor: null }).success).toBe(false);
+    expect(IntegrationActionCatalogV1.safeParse({ actions: [{ ...entry, form: { fields: [], submit_label: "Run" } }], next_cursor: "next_1-2" }).success).toBe(true);
+    for (const next_cursor of ["", "x".repeat(1025), "cursor\n", "cursor=", "https://example.test", 1]) {
+      expect(IntegrationActionCatalogV1.safeParse({ ...catalog, next_cursor }).success).toBe(false);
+    }
+    expect(IntegrationActionCatalogV1.safeParse({ actions: [] }).success).toBe(false);
+    for (const key of Object.keys(entry)) {
+      const sample: Record<string, unknown> = { ...entry };
+      delete sample[key];
+      expect(IntegrationActionCatalogEntryV1.safeParse(sample).success).toBe(false);
+    }
+  });
+
+  it("rejects authority, transport metadata, malformed references and invalid forms", () => {
+    for (const key of ["scope", "tenant_id", "project_id", "origin", "path", "url", "method", "auth", "headers",
+      "credentials", "credential_refs", "grant_revision", "lease", "approval_token", "arguments", "result",
+      "idempotency_key", "execute", "default"]) {
+      expect(IntegrationActionCatalogV1.safeParse({ ...catalog, [key]: "denied" }).success).toBe(false);
+      expect(IntegrationActionCatalogEntryV1.safeParse({ ...entry, [key]: "denied" }).success).toBe(false);
+      expect(IntegrationActionCatalogV1.safeParse({ ...catalog, actions: [{ ...entry, [key]: "denied" }] }).success).toBe(false);
+    }
+    for (const connection_id of ["", "bad slug", "sales\n", "a".repeat(129)]) {
+      expect(IntegrationActionCatalogEntryV1.safeParse({ ...entry, connection_id }).success).toBe(false);
+    }
+    for (const key of ["title", "connection_title"]) for (const value of ["", "a".repeat(121)]) {
+      expect(IntegrationActionCatalogEntryV1.safeParse({ ...entry, [key]: value }).success).toBe(false);
+    }
+    for (const key of ["connector_ref", "operation_ref"]) for (const badRef of [
+      { ...ref, version: 0 }, { ...ref, digest: "invalid" }, { ...ref, authority: true },
+    ]) expect(IntegrationActionCatalogEntryV1.safeParse({ ...entry, [key]: badRef }).success).toBe(false);
+    for (const invalidForm of [
+      { ...form, fields: [fields[0], fields[0]] },
+      { ...form, fields: [{ ...fields[0], default: "inferred" }] },
+      { ...form, fields: [{ ...fields[0], max_length: 4097 }] },
+      { ...form, execute: "code" },
+    ]) expect(IntegrationActionCatalogV1.safeParse({ ...catalog, actions: [{ ...entry, form: invalidForm }] }).success).toBe(false);
+  });
+
+  it("emits only strict bounded descriptor fields and canonical nested references in both formats", () => {
+    const json = JSON.parse(JSON.stringify(emitJsonSchema()));
+    const openapi = JSON.parse(JSON.stringify(emitOpenApi()));
+    for (const [defs, prefix] of [
+      [json.$defs, "#/$defs/"], [openapi.components.schemas, "#/components/schemas/"],
+    ] as const) {
+      const page = defs.IntegrationActionCatalogV1;
+      const descriptor = defs.IntegrationActionCatalogEntryV1;
+      expect(page.additionalProperties).toBe(false);
+      expect(page.required).toEqual(["actions", "next_cursor"]);
+      expect(Object.keys(page.properties)).toEqual(["actions", "next_cursor"]);
+      expect(page.properties.actions).toEqual({ type: "array", maxItems: 50,
+        items: { $ref: `${prefix}IntegrationActionCatalogEntryV1` } });
+      expect(page.properties.next_cursor.anyOf).toEqual([
+        { type: "string", minLength: 1, maxLength: 1024, pattern: "^[A-Za-z0-9_-]+(?![\\s\\S])" },
+        { type: "null" },
+      ]);
+      expect(descriptor.additionalProperties).toBe(false);
+      expect(Object.keys(descriptor.properties)).toEqual(Object.keys(entry));
+      expect(descriptor.required).toEqual(Object.keys(entry));
+      expect(descriptor.properties.connection_id).toEqual(defs.IntegrationActionElementV1.properties.connection_id);
+      for (const key of ["title", "connection_title"]) {
+        expect(descriptor.properties[key]).toEqual({ type: "string", minLength: 1, maxLength: 120 });
+      }
+      for (const key of ["connector_ref", "operation_ref"]) {
+        expect(descriptor.properties[key]).toEqual({ $ref: `${prefix}IntegrationRefV1` });
+      }
+      expect(descriptor.properties.form).toEqual({ $ref: `${prefix}IntegrationActionFormV1` });
+      expect(descriptor.description).toContain("not an execution grant");
+      expect(JSON.stringify(descriptor)).not.toContain('"default":');
+    }
+  });
+});
 
 describe("inert integration action forms", () => {
   it("composes table, line and inert action recipes through the shared union", () => {

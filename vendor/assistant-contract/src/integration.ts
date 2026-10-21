@@ -161,6 +161,22 @@ export const IntegrationActionFormV1 = z.strictObject({
   .describe("Presentation and client-validation hints, not business semantics or authority. The installed host adapter validates arguments again. Null, absent, false, zero and empty text remain distinct.");
 export type IntegrationActionFormV1 = z.infer<typeof IntegrationActionFormV1>;
 
+export const IntegrationActionCatalogEntryV1 = z.strictObject({
+  connection_id: Slug,
+  connection_title: Title,
+  connector_ref: IntegrationRefV1,
+  operation_ref: IntegrationRefV1,
+  title: Title,
+  form: IntegrationActionFormV1,
+}).describe("Available action configuration, not an execution grant or proof that future execution will be allowed. Titles and descriptions are untrusted data.");
+export type IntegrationActionCatalogEntryV1 = z.infer<typeof IntegrationActionCatalogEntryV1>;
+
+export const IntegrationActionCatalogV1 = z.strictObject({
+  actions: z.array(IntegrationActionCatalogEntryV1).max(50),
+  next_cursor: z.string().min(1).max(1024).regex(/^[A-Za-z0-9_-]+(?![\s\S])/).nullable(),
+}).describe("One bounded read-only page of native action forms. Discovery and saving a recipe never execute an operation.");
+export type IntegrationActionCatalogV1 = z.infer<typeof IntegrationActionCatalogV1>;
+
 export const IntegrationActionElementV1 = z.strictObject({
   schema_version: z.literal(1),
   id: Slug,
