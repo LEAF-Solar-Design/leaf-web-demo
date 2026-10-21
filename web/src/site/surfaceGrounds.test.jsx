@@ -612,14 +612,17 @@ describe('DeviceGround', () => {
 })
 
 describe('SurfaceGrounds', () => {
-  it('keeps Ops mounted across profile switches and lets the project board occlude it', () => {
+  it('keeps Ops mounted across profile switches and lets the project board occlude it', async () => {
     const { container, rerender } = render(<SurfaceGrounds surface="ops" mock />)
-    const ops = container.querySelector('[data-ground="ops"]')
+    const loaded = await screen.findByText('Integrations are unavailable in demo mode.')
+    const ops = loaded.closest('[data-ground="ops"]')
     expect(ops).not.toHaveAttribute('hidden')
     expect(ops.textContent).toContain('Integrations are unavailable in demo mode.')
     rerender(<SurfaceGrounds surface="browser" mock />)
+    expect(container.querySelector('[data-ground="ops"]')).toBe(ops)
     expect(ops).toHaveAttribute('hidden')
     rerender(<SurfaceGrounds surface="ops" boardVisible mock />)
+    expect(container.querySelector('[data-ground="ops"]')).toBe(ops)
     expect(ops).toHaveAttribute('hidden')
     rerender(<SurfaceGrounds surface="ops" mock />)
     expect(container.querySelector('[data-ground="ops"]')).toBe(ops)
