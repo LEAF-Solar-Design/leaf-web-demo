@@ -4093,6 +4093,21 @@ def test_every_server_test_file_is_registered_or_named():
     assert not named - files, f"gap entries for files that no longer exist: {sorted(named - files)}"
 
 
+def test_drawing_bootstrap_scope_callers_is_mandatory_and_hermetic():
+    import json
+
+    g = _load_runner()
+    rows = [s for s in g.build_suites() if s.id == "server-drawings-bootstrap-scope-callers"]
+    assert len(rows) == 1
+    suite = rows[0]
+    assert suite.kind == "pytest" and suite.cwd == g.SERVER
+    assert suite.argv == g._py_pytest("tests/test_drawings_bootstrap_scope_callers.py")
+    assert suite.expected == 33
+    assert not suite.opt_in_env and not suite.db_gated and not suite.db_deferred
+    selection = json.loads((REPO / "scripts/ci/test-selection-map.json").read_text(encoding="utf-8"))
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1
+
+
 def test_web_walk_unit_is_one_mandatory_fixed_script_row():
     import json
     g = _load_runner()

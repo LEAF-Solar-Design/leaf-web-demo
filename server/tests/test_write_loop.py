@@ -245,14 +245,10 @@ def test_read_tools_unaffected(stack):
 # --------------------------------------------------------------------------- #
 # 6. unknown drawing -> clean 404 (no crash, structured envelope)
 # --------------------------------------------------------------------------- #
-def test_unknown_drawing_intake_404(stack):
-    # Contract change (gap-fill QW-C, 2026-07-21): a slug-valid first-seen id
-    # now auto-bootstraps (200) instead of 404ing — 'no-such-drawing' is a
-    # legitimate new drawing. The 404 contract survives for MALFORMED ids,
-    # which is what this test now asserts (id from test_drawings_bootstrap's
-    # BAD_IDS set).
+@pytest.mark.parametrize("drawing_id", ["UPPERCASE", "no-such-drawing"])
+def test_unknown_drawing_intake_404(stack, drawing_id):
     t = "wl-unknown"
-    r = get_intake(stack, "UPPERCASE", "head", t)
+    r = get_intake(stack, drawing_id, "head", t)
     assert r.status_code == 404
     assert r.json()["error"]["error_code"] == "BAD_PARAMS"
 
@@ -403,23 +399,23 @@ def test_a_capability_for_another_drawing_does_not_authorize_this_one(stack):
     t = "wl-cap-other-drawing"
     on_demo = take_checkout(stack, "demo", "sess-a", t)
     assert on_demo.status_code == 200
-    # a second drawing in the same tenant (any first-seen id bootstraps), same holder
-    assert requests.get(f"{stack['app']}/api/drawings/scratch/versions",
+    # A distinct allowed literal ID in the same tenant, same holder.
+    assert requests.get(f"{stack['app']}/api/drawings/rooftop_demo/versions",
                         headers=_h(t), timeout=30).status_code == 200
-    on_scratch = take_checkout(stack, "scratch", "sess-a", t)
-    assert on_scratch.status_code == 200
-    assert capability_of(on_scratch) != capability_of(on_demo)
+    on_rooftop = take_checkout(stack, "rooftop_demo", "sess-a", t)
+    assert on_rooftop.status_code == 200
+    assert capability_of(on_rooftop) != capability_of(on_demo)
 
-    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "scratch"}, t,
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "rooftop_demo"}, t,
                     capability=capability_of(on_demo))
     assert r.status_code == 403, r.text
     assert r.json()["error"]["error_code"] == "FORBIDDEN"
 
-    # ...and scratch's OWN capability publishes to scratch
-    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "scratch"}, t,
-                    capability=capability_of(on_scratch))
+    # The drawing's own capability still authorizes publication.
+    r = run_wait_as(stack, WRITE_TOOL, {"drawing_id": "rooftop_demo"}, t,
+                    capability=capability_of(on_rooftop))
     assert r.status_code == 200, r.text
-    assert r.json()["result"]["new_version"]["drawing_id"] == "scratch"
+    assert r.json()["result"]["new_version"]["drawing_id"] == "rooftop_demo"
 
 
 def test_a_capability_from_a_superseded_lease_is_refused(stack):

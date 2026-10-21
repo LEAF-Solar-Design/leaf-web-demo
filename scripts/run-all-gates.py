@@ -1451,6 +1451,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_approval_consume.py"), 20),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
               SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 23),
+        Suite("server-drawings-bootstrap-scope-callers", "server tests/test_drawings_bootstrap_scope_callers.py", "pytest",
+              SERVER, _py_pytest("tests/test_drawings_bootstrap_scope_callers.py"), 33),
         # NOT db_gated on purpose: this file's authority-selector and legacy-contract
         # tests need no database, and its DB-only tests skip themselves via
         # @requires_database. Gating the whole suite would hide the un-gated half on
