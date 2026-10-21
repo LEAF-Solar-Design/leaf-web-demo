@@ -88,6 +88,10 @@ COPY web/ /web/
 # engine at dist/engine/{engine.js,engine_bg.wasm} with a PROVENANCE.json
 # (crate rev + sha256s). Staged AFTER the vite build so the fence-relevant
 # source tree never carries the binary.
+# Web source imports these by relative path; web/scripts/check_web_container_config.mjs
+# fails when a web/src import leaves web/ without a matching COPY.
+COPY vendor/assistant-contract/ /vendor/assistant-contract/
+COPY vendor/assistant-react/ /vendor/assistant-react/
 COPY vendor/acadrust-worker/Cargo.toml /vendor/acadrust-worker/Cargo.toml
 # The worker entry itself must exist at the resolved spawn path or the vite
 # build cannot bundle the worker chunk (it fails closed, as run 33455169029
