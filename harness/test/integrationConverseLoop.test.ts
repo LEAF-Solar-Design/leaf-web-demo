@@ -6,7 +6,7 @@ import { FakeGateClient } from "../src/ports/fakes/fakeGateClient.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
 import { INTEGRATION_TOOL_INPUTS } from "../src/ports/index.js";
 import type { AppRunClient, ConverseRunInput, SpineConverseRunner, SpineToolResult } from "../src/ports/index.js";
-import { DatasetReadV1, DatasetElementV1 } from "../src/vendor/mushy-author/contracts/integration.js";
+import { DatasetReadV1, DatasetElementV1, IntegrationActionElementV1 } from "../src/vendor/mushy-author/contracts/integration.js";
 
 const TENANT = "12345678-1234-4234-8234-123456789abc";
 const CID = "0123456789abcdef";
@@ -23,10 +23,16 @@ const RECIPE = DatasetElementV1.parse({
   schema_version: 1, id: "sales-view", title: "Sales", dataset_ref: REF,
   query: QUERY, kind: "dataset.table", props: { columns: ["amount"], row_limit: 2 },
 });
+const ACTION = IntegrationActionElementV1.parse({
+  schema_version: 1, id: "sales-view", title: "Create sale", kind: "integration.action",
+  connection_id: "sales", connector_ref: REF, operation_ref: { ...REF, id: "create-sale" },
+  form: { submit_label: "Create", fields: [{ id: "amount", label: "Amount", kind: "number", required: true, nullable: false, integer: false }] },
+});
 const CASES = [
   { tool: "integration_datasets", args: {}, normalized: { limit: 50 }, result: { datasets: [], next_cursor: null } },
   { tool: "integration_query", args: { dataset_ref: REF, query: QUERY }, normalized: { dataset_ref: REF, query: QUERY }, result: READ },
   { tool: "integration_save_element", args: { recipe: RECIPE, expectedRevision: 3 }, normalized: { recipe: RECIPE, expectedRevision: 3 }, result: { element: RECIPE, revision: 4 } },
+  { tool: "integration_save_element", args: { recipe: ACTION, expectedRevision: 3 }, normalized: { recipe: ACTION, expectedRevision: 3 }, result: { element: ACTION, revision: 4 } },
 ] as const;
 
 function setup(tool: string, args: Record<string, unknown>, response: unknown, connected = true) {
@@ -89,7 +95,7 @@ describe("integration tools use the host's single permission gate", () => {
     expect(state.gate.checks).toHaveLength(0);
     const mirror = state.store.confirmations.get(CID)!;
     expect(JSON.parse(mirror.args_json)).toEqual(entry.normalized);
-    expect(mirror.args_json).not.toMatch(/operation|authority|grant|token|confirmation_id/);
+    expect(Object.keys(JSON.parse(mirror.args_json)).filter((key) => ["operation", "authority", "grant", "token", "confirmation_id"].includes(key))).toEqual([]);
     const events = state.store.events.get(session.session_id)!;
     expect(events.find((event) => event.type === "confirmation_required")?.data.payload).toEqual(entry.normalized);
     expect(events.find((event) => event.type === "turn_complete")?.data.stop_reason).toBe("awaiting_approval");
@@ -139,6 +145,19 @@ describe("integration tools use the host's single permission gate", () => {
   });
 
   it.each([
+    { ...ACTION, kind: "integration.run" },
+    { ...ACTION, authority: "model-authority" },
+    { ...ACTION, operation_ref: { ...REF, id: "../run" } },
+    { ...ACTION, form: { ...ACTION.form, arguments: { amount: 1 } } },
+  ])("rejects malformed action recipes before the host: %j", async (recipe) => {
+    const state = setup("integration_save_element", { recipe }, undefined);
+    await state.send();
+    expect(state.host).not.toHaveBeenCalled();
+    expect(state.gate.checks).toHaveLength(0);
+    expect(state.results[0]).toMatchObject({ isError: true, content: "Integration request failed: invalid_input." });
+  });
+
+  it.each([
     { operation: "datasets" }, { authoritySessionId: "model-authority" }, { limit: 51 },
     { confirmation_id: "not-a-gate-id" }, { after: "bad cursor" },
   ])("rejects malformed tool arguments before the host: %j", async (args) => {
@@ -173,6 +192,8 @@ describe("integration tools use the host's single permission gate", () => {
     { tool: "integration_query", args: CASES[1].args, result: { ...READ, rows: [{ key: "x", values: { amount: "bad" } }] } },
     { tool: "integration_save_element", args: CASES[2].args, result: { element: { ...RECIPE, title: "different" }, revision: 4 } },
     { tool: "integration_save_element", args: CASES[2].args, result: { element: RECIPE, revision: 0 } },
+    { tool: "integration_save_element", args: CASES[3].args, result: { element: { ...ACTION, operation_ref: { ...REF, version: 2 } }, revision: 4 } },
+    { tool: "integration_save_element", args: CASES[3].args, result: { element: { ...ACTION, form: { ...ACTION.form, submit_label: "Changed" } }, revision: 4 } },
   ])("validates typed results for $tool", async ({ tool, args, result }) => {
     const state = setup(tool, args, { gate: { decision: "allow" }, result });
     await state.send();

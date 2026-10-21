@@ -29,7 +29,7 @@ import type {
 import { INTEGRATION_TOOL_INPUTS } from "../index.js";
 import { z } from "zod";
 import {
-  DatasetReadV1, DatasetElementV1, IntegrationRefV1,
+  DatasetReadV1, IntegrationElementV1, IntegrationRefV1,
 } from "../../vendor/mushy-author/contracts/integration.js";
 
 export type IntegrationTool = keyof typeof INTEGRATION_TOOL_INPUTS;
@@ -76,7 +76,7 @@ const DiscoveryResult = z.strictObject({
   next_cursor: z.string().min(1).max(1024).regex(/^[A-Za-z0-9_-]+(?![\s\S])/).nullable(),
 });
 const SaveResult = z.strictObject({
-  element: DatasetElementV1,
+  element: IntegrationElementV1,
   revision: z.number().int().positive().refine(Number.isSafeInteger),
 });
 const HostEnvelope = z.strictObject({
