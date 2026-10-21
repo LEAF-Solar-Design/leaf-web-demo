@@ -85,6 +85,110 @@ def assert_alarm_without_writes(conn, before, summary, alarms, reason, key=EVENT
     }]
 
 
+def stage_intent(conn, store, key=EVENT_KEY):
+    start(store, key)
+    intent = pg_fixtures._success_intent(key)
+    store.stage_success_intent(key, "tenant-a", conn.admissions[key]["lease_token"], intent)
+    return intent
+
+
+def deny_external(*args, **kwargs):
+    pytest.fail("durable intent recovery used external evidence")
+
+
+def intent_tick(alarms, **kw):
+    client = SimpleNamespace(get_workitem_status=deny_external, cancel_workitem=deny_external)
+    return tick(client, alarms, correlation=deny_external, **kw)
+
+
+def test_valid_terminal_intent_recovers_without_correlation_or_aps(environment, monkeypatch):
+    conn, store = environment
+    intent = stage_intent(conn, store)
+    monkeypatch.setattr(broker, "_active_workitems", {})
+    monkeypatch.setattr(broker, "_get_da", deny_external)
+    monkeypatch.setattr(reconciler, "read_sidecar_correlations", deny_external)
+    alarms = []
+    assert len(intent_tick(alarms)["resolved"]) == 1
+    assert alarms == []
+    pg_fixtures._assert_intent_settled(conn, intent)
+
+
+def test_terminal_intent_alarm_only_writes_nothing(environment, monkeypatch):
+    conn, store = environment
+    stage_intent(conn, store)
+    monkeypatch.setenv("LEAF_BROKER_RECONCILER_ALARM_ONLY", "1")
+    before, alarms = snapshot(conn), []
+    summary = intent_tick(alarms)
+    assert_alarm_without_writes(conn, before, summary, alarms, "alarm_only_mode")
+
+
+@pytest.mark.parametrize("fault", ["shape", "identity", "amount", "ledger"])
+def test_invalid_terminal_intent_alarms_without_fallback(environment, fault):
+    conn, store = environment
+    intent = stage_intent(conn, store)
+    if fault == "shape":
+        conn.admissions[EVENT_KEY]["terminal_intent_json"] = []
+    elif fault == "identity":
+        intent["tenant_id"] = "other"
+        conn.admissions[EVENT_KEY]["terminal_intent_json"] = intent
+    elif fault == "amount":
+        intent["result"]["cost"]["usd_est"] = None
+        conn.admissions[EVENT_KEY]["terminal_intent_json"] = intent
+    else:
+        conn.ledger[EVENT_KEY] = dict(intent["ledger_entry"], usd_est=100)
+    before, alarms = snapshot(conn), []
+    summary = intent_tick(alarms)
+    assert_alarm_without_writes(conn, before, summary, alarms, "terminal_intent_invalid")
+
+
+def test_terminal_intent_does_not_require_job_only_disambiguation(environment):
+    conn, store = environment
+    keys = [EVENT_KEY, f"{JOB_ID}:broker-fallback"]
+    intents = {}
+    for index, key in enumerate(keys):
+        start(store, key)
+        intent = pg_fixtures._success_intent(key)
+        intent["workitem_id"] = f"workitem-{index}"
+        intent["ledger_entry"]["usd_est"] = intent["result"]["cost"]["usd_est"] = 0.02 + index
+        intent["result"]["result"] = {"event": key}
+        store.stage_success_intent(key, "tenant-a", conn.admissions[key]["lease_token"], intent)
+        intents[key] = intent
+    alarms = []
+    assert len(intent_tick(alarms)["resolved"]) == 2
+    assert alarms == [] and set(conn.ledger) == set(keys)
+    assert len(conn.audits) == 2
+    for key, intent in intents.items():
+        assert {k: conn.ledger[key][k] for k in broker_pg_store.LEDGER_KEYS} == intent["ledger_entry"]
+        assert json.loads(conn.admissions[key]["result_json"]) == intent["result"]
+
+
+def test_success_without_terminal_intent_remains_operator_gated(environment):
+    conn, store = environment
+    start(store)
+    before, alarms = snapshot(conn), []
+    summary = tick(FakeAps({"status": "success"}), alarms)
+    assert_alarm_without_writes(conn, before, summary, alarms, "aps_succeeded_needs_operator")
+
+
+def test_young_terminal_intent_preserves_existing_age_gate(environment):
+    conn, store = environment
+    stage_intent(conn, store)
+    before, alarms = snapshot(conn), []
+    summary = intent_tick(alarms, min_age_s=61)
+    assert summary["skipped_young"] == 1 and summary["resolved"] == alarms == []
+    assert snapshot(conn) == before
+
+
+def test_second_intent_recovery_pass_is_inert(environment):
+    conn, store = environment
+    stage_intent(conn, store)
+    alarms = []
+    intent_tick(alarms)
+    before = snapshot(conn)
+    assert intent_tick(alarms)["resolved"] == []
+    assert snapshot(conn) == before and alarms == []
+
+
 @pytest.mark.parametrize("status", FAILURES)
 def test_aps_failed_workitem_resolves_as_verified_workitem_failed_with_null_cost(
         environment, status):

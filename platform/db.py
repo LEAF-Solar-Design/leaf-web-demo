@@ -519,7 +519,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "event_key", "tenant_id", "request_fingerprint", "state", "lease_token",
             "lease_expires_at", "aps_live", "accounted_work", "reserved_usd",
             "execution_started_at", "result_json", "http_status", "created_at",
-            "updated_at", "terminal_at",
+            "updated_at", "terminal_at", "terminal_intent_json",
         },
         "broker_aps_slots": {
             "event_key", "tenant_id", "state", "acquired_at", "lease_expires_at",
@@ -1295,6 +1295,11 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
     "broker": {
         "broker_run_admissions_event_tenant_uq": _catalog_contract(
             "broker_run_admissions", "UNIQUE (event_key, tenant_id)"),
+        "broker_usage_ledger_pkey": _catalog_contract(
+            "broker_usage_ledger", "PRIMARY KEY (event_key)"),
+        "broker_terminal_intent_object": _catalog_contract(
+            "broker_run_admissions", "CHECK", "terminal_intent_json IS NULL",
+            "jsonb_typeof(terminal_intent_json) = 'object'"),
         "broker_run_admissions_state_allowed": _catalog_contract(
             "broker_run_admissions",
             "CHECK (state = ANY (ARRAY['leased', 'executing', 'terminal']))"),
@@ -1687,6 +1692,9 @@ _AUTHORITY_REQUIRED_INDEXES = {
 # Contracts compare against the deparse, never the migration source.
 _AUTHORITY_REQUIRED_TRIGGERS = {
     "broker": {
+        "broker_terminal_intent_write_once": _catalog_contract(
+            "broker_run_admissions", "BEFORE INSERT OR DELETE OR UPDATE", "FOR EACH ROW",
+            "EXECUTE FUNCTION leaf_guard_broker_terminal_intent()"),
         "broker_usage_ledger_immutable": _catalog_contract(
             "broker_usage_ledger", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
             "EXECUTE FUNCTION leaf_reject_broker_ledger_mutation()"),
