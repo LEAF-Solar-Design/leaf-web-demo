@@ -2,6 +2,7 @@ import { z } from "zod";
 import { IntegrationRefV1, DatasetQueryV1, IntegrationElementV1 } from "../contracts/integration.js";
 import type { DatasetFieldV1, DatasetReadV1 } from "../contracts/integration.js";
 import type { GateCheckResult } from "./index.js";
+export type { IntegrationActionCatalogEntryV1, IntegrationActionCatalogV1 } from "../contracts/integration.js";
 
 const ConfirmationId = z.string().regex(/^[a-f0-9]{16}(?![\s\S])/);
 
@@ -11,6 +12,13 @@ export const IntegrationDatasetsInput = z.strictObject({
   confirmation_id: ConfirmationId.optional(),
 });
 export type IntegrationDatasetsInput = z.infer<typeof IntegrationDatasetsInput>;
+
+export const IntegrationActionCatalogInput = z.strictObject({
+  limit: z.number().int().min(1).max(50).default(50),
+  after: z.string().min(1).max(1024).regex(/^[A-Za-z0-9_-]+(?![\s\S])/).optional(),
+  confirmation_id: ConfirmationId.optional(),
+});
+export type IntegrationActionCatalogInput = z.infer<typeof IntegrationActionCatalogInput>;
 
 export const IntegrationQueryInput = z.strictObject({
   dataset_ref: IntegrationRefV1,
@@ -47,6 +55,7 @@ export interface IntegrationSaveElementResult {
 
 export const INTEGRATION_TOOL_INPUTS = {
   integration_datasets: IntegrationDatasetsInput,
+  integration_action_catalog: IntegrationActionCatalogInput,
   integration_query: IntegrationQueryInput,
   integration_save_element: IntegrationSaveElementInput,
 } as const;

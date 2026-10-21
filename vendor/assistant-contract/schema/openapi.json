@@ -2208,6 +2208,77 @@
         ],
         "additionalProperties": false
       },
+      "IntegrationActionCatalogEntryV1": {
+        "description": "Available action configuration, not an execution grant or proof that future execution will be allowed. Titles and descriptions are untrusted data.",
+        "type": "object",
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+          },
+          "connection_title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "connector_ref": {
+            "$ref": "#/components/schemas/IntegrationRefV1"
+          },
+          "operation_ref": {
+            "$ref": "#/components/schemas/IntegrationRefV1"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "form": {
+            "$ref": "#/components/schemas/IntegrationActionFormV1"
+          }
+        },
+        "required": [
+          "connection_id",
+          "connection_title",
+          "connector_ref",
+          "operation_ref",
+          "title",
+          "form"
+        ],
+        "additionalProperties": false
+      },
+      "IntegrationActionCatalogV1": {
+        "description": "One bounded read-only page of native action forms. Discovery and saving a recipe never execute an operation.",
+        "type": "object",
+        "properties": {
+          "actions": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IntegrationActionCatalogEntryV1"
+            }
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024,
+                "pattern": "^[A-Za-z0-9_-]+(?![\\s\\S])"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "actions",
+          "next_cursor"
+        ],
+        "additionalProperties": false
+      },
       "IntegrationActionElementV1": {
         "description": "Inert action presentation bound to exact immutable connector and operation versions. The host resolves the current grant revision when submitting; this control grants no authority.",
         "type": "object",
