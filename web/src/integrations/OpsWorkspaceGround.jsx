@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { DatasetElement } from '../../../vendor/assistant-react/src/datasets/DatasetElement'
 import { IntegrationActionForm } from '../../../vendor/assistant-react/src/actions/IntegrationActionForm'
+import { IntegrationActionPreflightError } from '../../../vendor/assistant-react/src/actions'
 import { DisplayPreferencesSchema } from '../../../vendor/assistant-react/src/datasets/formatting'
 import { DatasetElementV1, DatasetQueryV1 } from '../../../vendor/assistant-contract/src/integration'
 import { actionRunMatches, createIntegrationsClient, UUID } from './client.js'
@@ -176,6 +177,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     }
   }
   async function actionCallback(binding, callerSignal, submission, runId) {
+    let submissionStarted = false
     const controller = new AbortController()
     const abort = () => controller.abort()
     const signals = [callerSignal, binding.controller.signal, binding.ctx.controller.signal]
@@ -207,14 +209,18 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         actionAvailability(binding, 'stale')
         throw new Error('This action has changed. Refresh it before continuing.')
       }
-      const result = runId
-        ? await client.getAction(projectId, runId, { signal: controller.signal })
-        : await client.submitAction(projectId, submission, { signal: controller.signal })
+      let result
+      if (runId) result = await client.getAction(projectId, runId, { signal: controller.signal })
+      else {
+        submissionStarted = true
+        result = await client.submitAction(projectId, submission, { signal: controller.signal })
+      }
       assertCurrent()
       if (result.run && !actionRunMatches(result.run, expected)) throw new Error('The integration response or request was invalid.')
       return result
     } catch (error) {
       if (error?.status === 403) actionAvailability(binding, 'forbidden')
+      if (submission && !submissionStarted && error?.name !== 'AbortError') throw new IntegrationActionPreflightError()
       throw error
     } finally { signals.forEach((signal) => signal.removeEventListener('abort', abort)) }
   }

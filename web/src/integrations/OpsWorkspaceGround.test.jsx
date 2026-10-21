@@ -344,23 +344,100 @@ it.each([
   expect(screen.queryByRole('button', { name: 'Send order now' })).toBeNull()
   expect(actionPosts(fetchImpl)).toHaveLength(0)
 })
-it.each(['scope', 'grant', 'revoked', 'ref'])('rechecks %s drift before submission and never refreshes the frozen grant', async (change) => {
+it.each(['scope', 'role', 'grant', 'revoked', 'ref', 'operation'])('rechecks %s drift before submission and never refreshes the frozen grant', async (change) => {
   const { props, fetchImpl, authority } = setupAction()
   render(<OpsWorkspaceGround {...props} />)
   await openAction()
   if (change === 'scope') authority.scope = { ...scope, bindingId: otherProject }
+  if (change === 'role') authority.scope = { ...scope, projectRole: 'reviewer' }
   if (change === 'grant') authority.connection = { ...actionConnection, grant_revision: 8 }
   if (change === 'revoked') authority.connection = { ...actionConnection, state: 'revoked' }
   if (change === 'ref') authority.connection = { ...actionConnection, connector_ref: { ...reference, version: 4 } }
+  if (change === 'operation') authority.connection = { ...actionConnection, operation_ids: ['other'] }
   submitAction()
   const retry = await screen.findByRole('button', { name: 'Retry action authority' })
   expect(actionPosts(fetchImpl)).toHaveLength(0)
   expect(screen.getByLabelText('Order note (required)')).toHaveValue('Ship today')
+  expect(await screen.findByText('The action was not submitted. Retry submission when the action is available.')).toBeInTheDocument()
+  expect(screen.queryByText(/Outcome unknown\./)).toBeNull()
+  expect(screen.getByRole('button', { name: 'Retry submission' })).toBeDisabled()
   if (change === 'grant') {
     fireEvent.click(retry)
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Recover submission' })).toBeDisabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry submission' })).toBeDisabled())
     expect(actionPosts(fetchImpl)).toHaveLength(0)
   }
+})
+it.each([
+  ['getScope', undefined], ['getConnection', undefined], ['getScope', 403], ['getConnection', 403],
+])('reports failed %s preflight reads (%s) as not submitted with fixed copy', async (method, status) => {
+  const { props, fetchImpl } = setupAction()
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  vi.spyOn(props.client, method).mockRejectedValueOnce(Object.assign(new Error('private preflight failure'), { status }))
+  submitAction()
+  await screen.findByText('The action was not submitted. Retry submission when the action is available.')
+  expect(actionPosts(fetchImpl)).toHaveLength(0)
+  expect(screen.getByLabelText('Order note (required)')).toHaveValue('Ship today')
+  expect(screen.queryByText(/Outcome unknown\./)).toBeNull()
+  expect(document.body.textContent).not.toContain('private preflight failure')
+  if (status === 403) expect(screen.getByRole('button', { name: 'Retry submission' })).toBeDisabled()
+})
+it.each([403, 503])('keeps a submission HTTP %s failure unknown after calling the client', async (status) => {
+  const { props, fetchImpl } = setupAction()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/integrations/actions')
+    ? Promise.resolve(response({ secret: 'private write failure' }, status)) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  submitAction()
+  await screen.findByText(/Outcome unknown\./)
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  expect(screen.queryByText(/The action was not submitted\./)).toBeNull()
+  expect(screen.getByLabelText('Order note (required)')).toHaveValue('Ship today')
+  expect(document.body.textContent).not.toContain('private write failure')
+  if (status === 403) expect(screen.getByRole('button', { name: 'Recover submission' })).toBeDisabled()
+})
+it('keeps a synchronous submission client failure unknown', async () => {
+  const { props, fetchImpl } = setupAction()
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  vi.spyOn(props.client, 'submitAction').mockImplementationOnce(() => { throw new Error('private client failure') })
+  submitAction()
+  await screen.findByText(/Outcome unknown\./)
+  expect(actionPosts(fetchImpl)).toHaveLength(0)
+  expect(screen.queryByText(/The action was not submitted\./)).toBeNull()
+})
+it.each(['scope', 'grant', 'revoked'])('preserves uncertainty and the original key when %s drift refuses recovery', async (change) => {
+  const { props, fetchImpl, authority } = setupAction()
+  const original = fetchImpl.getMockImplementation()
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/integrations/actions')
+    ? Promise.reject(new Error('lost response')) : original(url, options))
+  submitAction()
+  const recover = await screen.findByRole('button', { name: 'Recover submission' })
+  const originalBody = actionPosts(fetchImpl)[0][1].body
+  if (change === 'scope') authority.scope = { ...scope, bindingId: otherProject }
+  if (change === 'grant') authority.connection = { ...actionConnection, grant_revision: 8 }
+  if (change === 'revoked') authority.connection = { ...actionConnection, state: 'revoked' }
+  fireEvent.click(recover)
+  await screen.findByRole('button', { name: 'Retry action authority' })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Recover submission' })).toBeDisabled())
+  expect(screen.getByText(/Outcome unknown\./)).toBeInTheDocument()
+  expect(screen.queryByText(/The action was not submitted\./)).toBeNull()
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  expect(screen.getByLabelText('Order note (required)')).toHaveValue('Ship today')
+  authority.scope = scope
+  authority.connection = actionConnection
+  fetchImpl.mockImplementation(original)
+  fireEvent.click(screen.getByRole('button', { name: 'Retry action authority' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Recover submission' })).toBeEnabled())
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  fireEvent.click(screen.getByRole('button', { name: 'Recover submission' }))
+  await screen.findByText('Submission accepted. Execution is pending.')
+  expect(actionPosts(fetchImpl)).toHaveLength(2)
+  expect(actionPosts(fetchImpl)[1][1].body).toBe(originalBody)
+  expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1)
 })
 it('rechecks authority before known-run status and refuses grant drift without a GET', async () => {
   const { props, fetchImpl, authority } = setupAction()
@@ -372,6 +449,25 @@ it('rechecks authority before known-run status and refuses grant drift without a
   fireEvent.click(check)
   await screen.findByRole('button', { name: 'Retry action authority' })
   expect(fetchImpl.mock.calls.filter(([url]) => url.includes('/integrations/actions/'))).toHaveLength(0)
+  expect(await screen.findByText(/Outcome unknown\. The action/)).toBeInTheDocument()
+  expect(screen.queryByText(/The action was not submitted\./)).toBeNull()
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+})
+it.each([403, 503])('never reports not submitted when status lookup fails with HTTP %s', async (status) => {
+  const { props, fetchImpl } = setupAction()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.includes('/integrations/actions/')
+    ? Promise.resolve(response({ secret: 'private status failure' }, status)) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  submitAction()
+  fireEvent.click(await screen.findByRole('button', { name: 'Check status' }))
+  await screen.findByText(/Outcome unknown\. The action/)
+  expect(screen.queryByText(/The action was not submitted\./)).toBeNull()
+  expect(screen.getByRole('region', { name: 'Action run status' })).toBeInTheDocument()
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  expect(fetchImpl.mock.calls.filter(([url]) => url.includes('/integrations/actions/'))).toHaveLength(1)
+  expect(document.body.textContent).not.toContain('private status failure')
 })
 it.each(['project', 'account', 'generation', 'profile', 'unmount'])('aborts action calls and discards late responses on %s invalidation', async (change) => {
   const { props, fetchImpl, sessionController } = setupAction()
