@@ -5,6 +5,7 @@ import { IntegrationActionPreflightError } from '../../../vendor/assistant-react
 import { DisplayPreferencesSchema } from '../../../vendor/assistant-react/src/datasets/formatting'
 import { DatasetElementV1, DatasetQueryV1 } from '../../../vendor/assistant-contract/src/integration'
 import { actionRunMatches, createIntegrationsClient, UUID } from './client.js'
+import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 import './ops-workspace.css'
 
@@ -120,6 +121,27 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         setState((old) => ({ ...old, pending: '' }))
       }
     }
+  }
+  async function guardSetup(signal) {
+    const ctx = context.current
+    if (!ctx || !current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    const scope = await client.getScope(projectId, { signal })
+    if (!current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    if (scope.projectRole !== 'owner' || scopeCacheIdentity(scope, ctx.sessionGeneration) !== ctx.cacheIdentity) {
+      fail({ status: 403 }, ctx)
+      throw new DOMException('Aborted', 'AbortError')
+    }
+  }
+  async function refreshSetupDataset(reference, signal) {
+    const ctx = context.current
+    if (!ctx || !current(ctx) || signal.aborted) return
+    try {
+      const dataset = await client.getDataset(projectId, reference, { signal })
+      if (!current(ctx) || signal.aborted) return
+      setState((old) => ({ ...old, datasets: [...old.datasets.filter((item) => referenceKey(item.reference) !== referenceKey(reference)), dataset],
+        notice: `Dataset ${dataset.title} is available in the native composer.` }))
+      setForm({ ...blankForm(), dataset: referenceKey(reference), columns: dataset.fields.map((field) => field.id) })
+    } catch (error) { fail(error, ctx); throw error }
   }
   async function readView(record, historical, ctx, cursor) {
     const request = ++viewGeneration.current
@@ -283,6 +305,11 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
         {state.error && <div role="alert"><p>{state.error}</p><button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button></div>}
         {state.scope && <>
+          {state.scope.projectRole === 'owner' && context.current && <IntegrationSetupPanel
+            key={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId} scope={state.scope}
+            signal={context.current.controller.signal} guard={guardSetup}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
+            onDatasetReady={refreshSetupDataset} />}
           <section aria-label="Integration datasets"><h2>Datasets</h2>
             {!state.datasets.length && <p>No connection or dataset is available. Integration setup is needed.</p>}
             <ul>{state.datasets.map((item) => <li key={`${item.reference.id}:${item.reference.version}`}>{item.title} · version {item.reference.version}</li>)}</ul>

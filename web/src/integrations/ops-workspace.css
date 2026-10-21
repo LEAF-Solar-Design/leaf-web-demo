@@ -10,3 +10,18 @@
 .ops-workspace button { min-height: 44px; margin: 4px; padding: 8px 12px; font: inherit; cursor: pointer; }
 .ops-workspace :focus-visible { outline: 2px solid #2468c8; outline-offset: 3px; }
 .studio-ground-ops[data-studio-shell="cockpit"] .ops-workspace { position: absolute; }
+.integration-setup { min-width: 0; border-block: 1px solid var(--leaf-border, #88929d); padding-block: 12px; }
+.integration-setup-progress { display: flex; flex-wrap: wrap; gap: 8px 28px; padding-left: 24px; }
+.integration-setup-progress [aria-current="step"] { font-weight: 700; text-decoration: underline; text-underline-offset: 4px; }
+.integration-setup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 0 16px; }
+.integration-setup label { align-items: flex-start; flex-direction: column; }
+.integration-setup input, .integration-setup select, .integration-setup textarea { width: 100%; min-height: 44px; background: var(--leaf-card, #fff); color: inherit; border: 1px solid var(--leaf-border, #88929d); border-radius: 4px; }
+.integration-setup textarea { min-width: 0; max-width: 100%; padding: 8px; font: inherit; box-sizing: border-box; resize: vertical; }
+.integration-setup label:has(input[type="checkbox"]) { flex-direction: row; align-items: center; min-height: 44px; }
+.integration-setup input[type="checkbox"] { width: 24px; min-height: 24px; flex: 0 0 24px; }
+.integration-setup button:disabled { cursor: default; }
+.integration-setup :focus-visible { outline: 2px solid var(--leaf-ring, #2468c8); outline-offset: 3px; }
+@media (max-width: 600px) {
+  .integration-setup-grid { grid-template-columns: minmax(0, 1fr); }
+  .integration-setup button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+}

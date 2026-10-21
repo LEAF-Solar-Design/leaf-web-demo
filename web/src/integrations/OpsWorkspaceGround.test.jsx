@@ -91,9 +91,116 @@ function submitAction() {
   fireEvent.click(screen.getByRole('button', { name: 'Send order now' }))
 }
 const actionPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) => url.endsWith('/integrations/actions') && options.method === 'POST')
-beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder) })
+beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
+it.each(['owner', 'editor', 'reviewer', 'read_only'])('offers first dataset setup only to the verified %s scope', async (projectRole) => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/scope') ? Promise.resolve(response({ ...scope, projectRole })) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(Boolean(screen.queryByRole('heading', { name: 'Set up an HTTP dataset' }))).toBe(projectRole === 'owner')
+  expect(screen.getByRole('form', { name: 'Compose native view' })).toBeInTheDocument()
+})
+it.each(['bindingId', 'platformUserId', 'tenantId', 'externalSubject', 'projectRole'])('invalidates setup before an import on fresh %s drift', async (key) => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  let changed = false
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/scope')
+    ? Promise.resolve(response(changed ? { ...scope, [key]: key === 'projectRole' ? 'editor' : key === 'externalSubject' ? 'auth0|other' : otherProject } : scope)) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.change(screen.getByLabelText('Connector stable ID'), { target: { value: 'new-api' } })
+  fireEvent.change(screen.getByLabelText('Connector title'), { target: { value: 'New API' } })
+  fireEvent.change(screen.getByLabelText('OpenAPI JSON'), { target: { value: '{"openapi":"3.1.0"}' } })
+  changed = true
+  fireEvent.click(screen.getByRole('button', { name: 'Import JSON' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(screen.queryByRole('heading', { name: 'Set up an HTTP dataset' })).toBeNull()
+  expect(fetchImpl.mock.calls.some(([url]) => url.endsWith('/connectors/import'))).toBe(false)
+})
+it.each(['project', 'account', 'generation', 'inactive', 'unmount'])('aborts first setup and ignores late import on %s change', async (change) => {
+  const { props, fetchImpl, sessionController } = setup()
+  const original = fetchImpl.getMockImplementation()
+  let finish
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/connectors/import') ? new Promise((resolve) => { finish = resolve }) : original(url, options))
+  const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.change(screen.getByLabelText('Connector stable ID'), { target: { value: 'new-api' } })
+  fireEvent.change(screen.getByLabelText('Connector title'), { target: { value: 'Prior tenant API' } })
+  fireEvent.change(screen.getByLabelText('OpenAPI JSON'), { target: { value: '{"openapi":"3.1.0"}' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Import JSON' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = fetchImpl.mock.calls.find(([url]) => url.endsWith('/connectors/import'))[1].signal
+  if (change === 'unmount') unmount()
+  else if (change === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } : change === 'account' ? { accountScope: 'other' } : { active: false })} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish(response({ reference: { ...reference, id: 'new-api', version: 1 }, revision: 1, issues: [] })))
+  expect(screen.queryByText(/Imported connector: Prior tenant API/)).toBeNull()
+  expect(screen.queryByDisplayValue('Prior tenant API')).toBeNull()
+  expect(fetchImpl.mock.calls.some(([url]) => url.endsWith('/connectors/new-api'))).toBe(false)
+})
+it('takes a blank organization through setup and refreshes the existing native composer after explicit sync', async () => {
+  const { props, fetchImpl } = setup()
+  const connectorRef = { ...reference, id: 'new-api', version: 1 }
+  const operationRef = { ...connectorRef, id: 'normalized-read' }
+  const datasetRef = { ...connectorRef, id: 'new-data' }
+  const operation = { schema_version: 1, id: operationRef.id, title: 'Read rows', method: 'GET', path: '/rows', effect: 'read',
+    pagination: { kind: 'none', records_pointer: '' }, limits: { timeout_ms: 1000, max_response_bytes: 131072, max_records: 250, max_pages: 1 }, idempotency: { kind: 'read' } }
+  const definition = { schema_version: 1, id: connectorRef.id, version: 1, title: 'New API', state: 'draft', protocol: 'https-rest',
+    origins: ['https://source.example'], auth: { kind: 'none' }, operations: [operation] }
+  const connector = { id: connectorRef.id, title: definition.title, state: 'draft', reference: connectorRef, revision: 1, auth_kind: 'none', operation_count: 1 }
+  const dataFields = [{ id: 'key', label: 'Key', type: { kind: 'identifier' }, nullable: false, sensitivity: 'internal' }]
+  const receipt = { id: projectId, actor_id: scope.platformUserId, binding_id: scope.bindingId,
+    started_at: '2026-10-20T00:00:00Z', finished_at: '2026-10-20T00:00:01Z',
+    connector_ref: connectorRef, operation_ref: operationRef, dataset_ref: datasetRef, transform_ref: { ...connectorRef, id: 'new-transform' },
+    source_outcome: 'success', outcome: 'success', row_count: 1, failure_code: null }
+  fetchImpl.mockImplementation(async (url, options) => {
+    if (url.endsWith('/scope')) return response(scope)
+    if (url.includes('/datasets?') || url.includes('/elements?')) return response(page([]))
+    if (url.endsWith('/connectors/import')) return response({ reference: connectorRef, revision: 1, issues: [] })
+    if (url.endsWith('/connectors/new-api')) return response({ ...connector, draft_definition: definition })
+    if (url.endsWith('/publish')) return response({ reference: connectorRef, revision: 2 })
+    if (url.endsWith('/connectors/new-api/versions/1')) return response({ ...connector, revision: 2, state: 'published', definition: { ...definition, state: 'published' }, operationReferences: [operationRef] })
+    if (url.endsWith('/connections')) return response({ id: 'new-connection', title: 'New connection', revision: 1, state: 'active', connector_ref: connectorRef,
+      origin: 'https://source.example', auth_kind: 'none', credential_purposes: [], operation_ids: [operationRef.id], grant_revision: 1,
+      owner_id: projectId, provider_account_id: null, identity_verified: false, health: { checked_at: null, code: 'unknown' }, cleanup: 'complete' })
+    if (url.endsWith('/datasets')) return response({ reference: datasetRef, revision: 1 })
+    if (url.endsWith('/sync')) return response({ reference: datasetRef, revision: 2, receipt, status: 'ready' })
+    if (url.endsWith('/datasets/new-data/versions/1')) return response({ ...metadata, reference: datasetRef, title: 'New data', fields: dataFields, lastAttempt: receipt })
+    if (url.endsWith('/elements')) return response({ element: JSON.parse(options.body), revision: 1 })
+    if (url.endsWith('/query')) return response({ ...read, dataset_ref: datasetRef, fields: dataFields, rows: [{ key: 'one', values: { key: 'one' } }] })
+    throw new Error('Unexpected route')
+  })
+  render(<OpsWorkspaceGround {...props} />)
+  await screen.findByRole('heading', { name: 'Set up an HTTP dataset' })
+  const enter = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } })
+  enter('Connector stable ID', 'new-api'); enter('Connector title', 'New API'); enter('OpenAPI JSON', '{"openapi":"3.1.0"}')
+  fireEvent.click(screen.getByRole('button', { name: 'Import JSON' }))
+  await screen.findByLabelText('Supported read operation')
+  enter('Supported read operation', operationRef.id)
+  fireEvent.click(screen.getByRole('button', { name: 'Publish selected read' }))
+  await screen.findByLabelText('Connection stable ID')
+  enter('Connection stable ID', 'new-connection'); enter('Connection title', 'New connection')
+  fireEvent.click(screen.getByRole('button', { name: 'Create connection' }))
+  await screen.findByLabelText('Dataset stable ID')
+  enter('Dataset stable ID', 'new-data'); enter('Dataset title', 'New data')
+  enter('Field 1 ID', 'key'); enter('Field 1 label', 'Key'); enter('Field 1 type', 'identifier'); enter('Field 1 JSON pointer', '/id')
+  fireEvent.click(screen.getByLabelText('Field 1 stable key'))
+  fireEvent.click(screen.getByRole('button', { name: 'Register dataset' }))
+  const sync = await screen.findByRole('button', { name: 'Synchronize dataset' })
+  expect(fetchImpl.mock.calls.some(([url]) => url.endsWith('/sync'))).toBe(false)
+  fireEvent.click(sync)
+  await screen.findByRole('option', { name: 'New data · version 1' })
+  await waitFor(() => expect(screen.getByLabelText('Dataset')).toHaveValue(JSON.stringify([datasetRef.id, datasetRef.version, datasetRef.digest])))
+  enter('Title', 'First table'); enter('Stable ID', 'first-table')
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  await screen.findByRole('table', { name: 'First table data' })
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/sync'))).toHaveLength(1)
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/scope'))).toHaveLength(6)
+})
 function fill(kind = 'table') {
   fireEvent.change(screen.getByLabelText('Dataset'), { target: { value: JSON.stringify([reference.id, reference.version, reference.digest]) } })
   fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New order view' } })

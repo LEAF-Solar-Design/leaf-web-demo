@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ReadableStream } from 'node:stream/web'
 import { TextEncoder, TextDecoder } from 'node:util'
-import { createIntegrationsClient, integrationOrigin } from './client.js'
+import { createIntegrationsClient, integrationOrigin, validateDatasetRegistration } from './client.js'
 
 vi.mock('../api.js', () => ({ authHeaders: vi.fn(), noteUnauthorized: vi.fn() }))
 import { authHeaders, noteUnauthorized } from '../api.js'
@@ -29,7 +29,107 @@ function response(value, { status = 200, type = 'application/json', raw, length 
 }
 beforeEach(() => {
   vi.stubGlobal('TextDecoder', TextDecoder)
+  vi.stubGlobal('TextEncoder', TextEncoder)
   authHeaders.mockReturnValue({ Authorization: 'Bearer first' })
+})
+
+const operation = { schema_version: 1, id: 'get-normalized-orders', title: 'Read orders', method: 'GET', path: '/orders', effect: 'read',
+  pagination: { kind: 'none', records_pointer: '' }, limits: { timeout_ms: 1000, max_response_bytes: 131072, max_records: 250, max_pages: 1 }, idempotency: { kind: 'read' } }
+const connectorDefinition = { schema_version: 1, id: 'orders', title: 'Orders', version: 1, state: 'draft', protocol: 'https-rest',
+  origins: ['https://source.example'], auth: { kind: 'bearer' }, operations: [operation] }
+const connector = { id: 'orders', title: 'Orders', state: 'draft', reference: ref, revision: 1, auth_kind: 'bearer', operation_count: 1, draft_definition: connectorDefinition }
+const operationRef = { ...ref, id: operation.id }
+const ownerSummary = { ...connection, title: 'Orders connection', revision: 1, origin: 'https://source.example', auth_kind: 'bearer',
+  credential_purposes: [], health: { checked_at: null, code: 'unknown' }, cleanup: 'complete', owner_id: projectId, provider_account_id: null, identity_verified: false,
+  operation_ids: [operation.id] }
+const registration = { definition: { schema_version: 1, id: ref.id, title: 'Orders', version: 1,
+  fields: [{ id: 'key', label: 'Key', type: { kind: 'identifier' }, nullable: false, sensitivity: 'internal' }],
+  key_fields: ['key'], reporting_time_zone: 'UTC', retention_days: 30, lineage: { connection_id: connection.id, operation_ref: operationRef } },
+  mapping: { schema_version: 1, fields: [{ field_id: 'key', pointer: '/id', conversion: 'identity' }] } }
+const receipt = { id: projectId, actor_id: projectId, binding_id: projectId,
+  started_at: '2026-10-20T00:00:00Z', finished_at: '2026-10-20T00:00:01Z',
+  connector_ref: ref, operation_ref: operationRef, dataset_ref: ref, transform_ref: { ...ref, id: 'orders-transform' },
+  source_outcome: 'success', outcome: 'success', row_count: 2, failure_code: null }
+describe('first organization setup HTTP contract', () => {
+  it('uses normalized IDs, exact refs, revision bodies and safe owner projections through the complete flow', async () => {
+    const { client, fetchImpl, options } = setup({ reference: ref, revision: 1, issues: [] })
+    const imported = { document: { openapi: '3.1.0', paths: {} }, options: { id: 'orders', title: 'Orders' } }
+    await client.importConnector(projectId, imported, options)
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual(imported)
+    fetchImpl.mockResolvedValueOnce(response(connector))
+    expect((await client.getConnector(projectId, 'orders', options)).draft_definition.operations[0].id).toBe(operation.id)
+    await client.publishConnector(projectId, 'orders', { version: 1, expectedRevision: 1, readOperationIds: [operation.id] }, options)
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual({ version: 1, expectedRevision: 1, readOperationIds: [operation.id] })
+    fetchImpl.mockResolvedValueOnce(response({ ...connector, state: 'published', definition: { ...connectorDefinition, state: 'published' }, operationReferences: [operationRef] }))
+    const published = await client.getConnectorVersion(projectId, 'orders', 1, options)
+    expect(published.draft_definition).toBeUndefined()
+    fetchImpl.mockResolvedValueOnce(response({ ...ownerSummary, secret: 'must be dropped', credential_refs: ['private'] }))
+    const created = await client.createConnection(projectId, { id: connection.id, title: ownerSummary.title, connectorRef: ref, origin: ownerSummary.origin, operationIds: [operation.id] }, options)
+    expect(created).toEqual(ownerSummary)
+    fetchImpl.mockResolvedValueOnce(response({ ...ownerSummary, revision: 2, credential_purposes: ['access_token'] }))
+    await client.setConnectionCredential(projectId, connection.id, { purpose: 'access_token', value: 'transient', expectedRevision: 1 }, options)
+    expect(fetchImpl.mock.calls[5][1]).toMatchObject({ method: 'PUT', signal: options.signal })
+    fetchImpl.mockResolvedValueOnce(response(ownerSummary))
+    await client.getConnectionSummary(projectId, connection.id, options)
+    await client.registerDataset(projectId, registration, options)
+    expect(JSON.parse(fetchImpl.mock.calls[7][1].body)).toEqual(registration)
+    fetchImpl.mockResolvedValueOnce(response({ reference: ref, revision: 2, receipt, status: 'ready' }))
+    expect((await client.syncDataset(projectId, ref, options)).receipt).toEqual(receipt)
+    expect(fetchImpl.mock.calls[8][1]).toMatchObject({ method: 'POST', body: '{}' })
+    fetchImpl.mockResolvedValueOnce(response({ reference: ref, revision: 2, title: 'Orders', fields: registration.definition.fields, lastAttempt: receipt,
+      freshness: { source_updated_at: null, synced_at: null, fetched_at: '2026-10-20T00:00:00Z' } }))
+    await client.getDataset(projectId, ref, { ...options, revision: 2 })
+    expect(fetchImpl.mock.calls[9][0]).toContain('/datasets/orders/versions/1?revision=2')
+    expect(fetchImpl.mock.calls.every(([, request]) => request.credentials === 'omit' && request.cache === 'no-store' && request.redirect === 'error')).toBe(true)
+  })
+  it('rejects invalid and UTF-8 oversized public, credential and mapping inputs before fetch', async () => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.importConnector(projectId, { document: { openapi: '3.0.3', description: 'é'.repeat(140000) }, options: { id: 'orders', title: 'Orders' } }, options)).rejects.toThrow('invalid')
+    await expect(client.importConnector(projectId, { document: { openapi: '2.0' }, options: { id: 'orders', title: 'Orders' } }, options)).rejects.toThrow('invalid')
+    await expect(client.setConnectionCredential(projectId, connection.id, { purpose: 'access_token', value: 'é'.repeat(8193), expectedRevision: 1 }, options)).rejects.toThrow('invalid')
+    await expect(client.setConnectionCredential(projectId, connection.id, { purpose: 'refresh_token', value: 'private', expectedRevision: 1 }, options)).rejects.toThrow('invalid')
+    await expect(client.registerDataset(projectId, { ...registration, mapping: { schema_version: 1, fields: [{ field_id: 'other', pointer: '/id', conversion: 'identity' }] } }, options)).rejects.toThrow('invalid')
+    const fields = Array.from({ length: 100 }, (_, index) => ({ ...registration.definition.fields[0], id: `f${index}` }))
+    await expect(client.registerDataset(projectId, { definition: { ...registration.definition, fields, key_fields: ['f0'] },
+      mapping: { schema_version: 1, fields: fields.map((field) => ({ field_id: field.id, pointer: `/${'é'.repeat(900)}`, conversion: 'identity' })) } }, options)).rejects.toThrow('invalid')
+    expect(() => validateDatasetRegistration({ ...registration, definition: { ...registration.definition, key_fields: [] } })).toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it('rejects unbound resources and malformed evidence after a mutation as unknown dispatch', async () => {
+    const { client, fetchImpl, options } = setup({ reference: { ...ref, id: 'wrong' }, revision: 1 })
+    await expect(client.registerDataset(projectId, registration, options)).rejects.toMatchObject({ dispatched: true })
+    fetchImpl.mockResolvedValueOnce(response({ ...ownerSummary, connector_ref: { ...ref, digest: 'b'.repeat(64) } }))
+    await expect(client.createConnection(projectId, { id: connection.id, title: ownerSummary.title, connectorRef: ref, origin: ownerSummary.origin, operationIds: [operation.id] }, options)).rejects.toMatchObject({ dispatched: true })
+    fetchImpl.mockResolvedValueOnce(response({ reference: ref, revision: 1, status: 'ready', receipt: { ...receipt, row_count: 251 } }))
+    await expect(client.syncDataset(projectId, ref, options)).rejects.toMatchObject({ dispatched: true })
+    fetchImpl.mockRejectedValueOnce(new Error('provider credential private'))
+    await expect(client.setConnectionCredential(projectId, connection.id, { purpose: 'access_token', value: 'private', expectedRevision: 1 }, options)).rejects.toMatchObject({ dispatched: true, message: 'Integrations are unavailable. Please retry.' })
+    expect(fetchImpl).toHaveBeenCalledTimes(4)
+  })
+  it.each([
+    { dataset_ref: { ...ref, digest: 'b'.repeat(64) } },
+    { actor_id: 'invalid' }, { binding_id: 'invalid' }, { operation_ref: null },
+    { finished_at: '2026-10-19T00:00:00Z' }, { source_outcome: 'ok' },
+    { failure_code: 'timeout' }, { outcome: 'failure', failure_code: 'timeout', row_count: 0 },
+  ])('rejects malformed or inconsistent sync evidence %j', async (patch) => {
+    const { client, options } = setup({ reference: ref, revision: 2, receipt: { ...receipt, ...patch }, status: 'ready' })
+    await expect(client.syncDataset(projectId, ref, options)).rejects.toMatchObject({ dispatched: true })
+  })
+  it('accepts exact host operation reference arrays and rejects missing, duplicate and wrong-version references', async () => {
+    for (const refs of [[], [operationRef, operationRef], [{ ...operationRef, version: 2 }], { [operation.id]: operationRef }]) {
+      const { client, options } = setup({ ...connector, state: 'published',
+        definition: { ...connectorDefinition, state: 'published' }, operationReferences: refs })
+      await expect(client.getConnectorVersion(projectId, ref.id, 1, options)).rejects.toThrow('invalid')
+    }
+  })
+  it('reads an unsynchronized dataset with null freshness and rejects another dataset receipt', async () => {
+    const { client, fetchImpl, options } = setup({ reference: ref, revision: 1, title: 'Orders',
+      fields: registration.definition.fields, lastAttempt: null, freshness: null })
+    expect(await client.getDataset(projectId, ref, options)).toMatchObject({ lastAttempt: null, freshness: null })
+    fetchImpl.mockResolvedValueOnce(response({ reference: ref, revision: 2, title: 'Orders', fields: registration.definition.fields,
+      lastAttempt: { ...receipt, dataset_ref: { ...ref, id: 'other' } }, freshness: null }))
+    await expect(client.getDatasetVersion(projectId, ref.id, ref.version, options)).rejects.toThrow('invalid')
+  })
 })
 afterEach(() => vi.unstubAllGlobals())
 function setup(value = scope) {
