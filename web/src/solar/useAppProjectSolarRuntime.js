@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createProjectSolarRunController, PROJECT_SOLAR_RUN_BUDGET_MS } from './createProjectSolarRunController.js'
-import { sameSolarDrawingBinding } from './solarDrawingBinding.js'
+import { createSolarDrawingBinding, sameSolarDrawingBinding } from './solarDrawingBinding.js'
 import { projectSolarAppReason } from './solarProjectAppModel.js'
 import { PROJECT_SOLAR_RUN_REASONS } from './solarProjectCompletion.js'
 import { projectSolarDrawingView } from './solarProjectDrawingModel.js'
@@ -32,7 +32,14 @@ function catalogRows(inputs) {
 }
 
 // App supplies every owner. The bridge owns observation; this hook owns selection/readback.
-export function useAppProjectSolarRuntime(inputs) {
+export function useAppProjectSolarRuntime(props) {
+  // useWorkspaceController returns a fresh snapshot facade each render. Its
+  // observation and selection methods identify the underlying controller.
+  const workspaceController = useMemo(() => props.workspaceController, [
+    props.workspaceController.getSnapshot, props.workspaceController.subscribe,
+    props.workspaceController.rehydrate, props.workspaceController.selectCanonicalVersion,
+  ])
+  const inputs = { ...props, workspaceController }
   const latest = useRef(inputs)
   const machine = useRef({ alive: false, epoch: 0, seen: null, owner: null, run: null,
     transition: null, request: null })
@@ -186,7 +193,11 @@ export function useAppProjectSolarRuntime(inputs) {
     } else if (['failed', 'refused', 'proposal'].includes(outcome.state)) m.run = null
   }
   const a = inputs.projectSolar
-  const binding = a?.scope?.binding
+  const bindingRef = useRef(null)
+  if (!sameSolarDrawingBinding(bindingRef.current, a?.scope?.binding)) {
+    try { bindingRef.current = createSolarDrawingBinding(a?.scope?.binding) } catch { bindingRef.current = null }
+  }
+  const binding = bindingRef.current
   useEffect(() => {
     if (!inputs.projectMode || !a?.ready) {
       if (!m.transition) publish(() => m.alive && latest.current === inputs, empty())
@@ -208,17 +219,12 @@ export function useAppProjectSolarRuntime(inputs) {
       if (t && (!t.selected || !latest.current.projectMode || !transitionCurrent(t))) retire()
       if (!m.transition && m.run?.owner === owner) m.run = null
     }
-  }, [inputs.projectMode, a?.ready, a?.projectClient, binding?.organization_id, binding?.project_id,
-    binding?.drawing_id, binding?.input_version_id, a?.scope?.authorityKey,
+  }, [inputs.projectMode, a?.ready, a?.projectClient, binding, a?.scope?.authorityKey,
     inputs.workspaceController, inputs.sessionController, m.epoch])
 
   useEffect(() => {
     if (!inputs.projectMode || !a?.ready || !m.owner) return undefined
-    const owner = m.owner, epoch = m.epoch, controller = new AbortController()
-    m.request?.abort()
-    m.request = controller
-    const valid = () => !controller.signal.aborted && epoch === m.epoch &&
-      ownerCurrent(owner) && current(a.isCurrent)
+    const owner = m.owner
     // A capture rotation alone keeps the owner, so it never unlocks a pending or uncertain submission; only
     // a new owner (client, authority, binding, mode), a new identity or unmount releases it.
     const staleRun = m.run && !((m.run.submitting || m.run.uncertain || (m.run.accepted && !m.run.terminal)) && m.run.owner === m.owner) && !m.run.current() &&
@@ -226,9 +232,26 @@ export function useAppProjectSolarRuntime(inputs) {
     if (staleRun) m.run = null
     // The old capture can no longer follow or complete an accepted job; retain its lock as unknown.
     if (m.run?.owner === owner && m.run.accepted && !m.run.terminal && !m.run.current()) m.run.uncertain = true
-    publish(valid, { context: null, openTool: null, ...(staleRun
+    // A render can see the previous capture before latest's layout effect runs.
+    // Re-expose an already-read context after committing a valid replacement capture.
+    const restoredContext = contextView === null && current(state.context?.current)
+    if (staleRun || m.run?.uncertain || restoredContext) publish(() => ownerCurrent(owner), {
+      ...(staleRun || m.run?.uncertain ? { openTool: null } : {}), ...(staleRun
       ? { projectPending: null, projectOutcome: null, busy: false, notice: null } : {}),
       ...(m.run?.uncertain ? { projectPending: null, busy: false, notice: PROJECT_SOLAR_RUN_REASONS.outcome_unknown } : {}) })
+    return undefined
+  }, [inputs.projectMode, a?.ready, a?.projectClient, a?.isCurrent, binding, a?.scope?.authorityKey, revision])
+
+  useEffect(() => {
+    if (!inputs.projectMode || !a?.ready || !m.owner) return undefined
+    const owner = m.owner, epoch = m.epoch, controller = new AbortController()
+    m.request?.abort()
+    m.request = controller
+    // Capture notifications can rotate while the same canonical read is in flight.
+    // Check the live capture without making its function identity own the request.
+    const valid = () => !controller.signal.aborted && epoch === m.epoch &&
+      ownerCurrent(owner) && current(latest.current.projectSolar?.isCurrent)
+    publish(valid, { context: null, openTool: null })
     async function read() {
       let response
       try { response = await a.projectClient.readContext({ signal: controller.signal }) } catch { response = null }
@@ -256,7 +279,7 @@ export function useAppProjectSolarRuntime(inputs) {
     }
     if (valid()) void read()
     return () => controller.abort()
-  }, [inputs.projectMode, a?.ready, a?.projectClient, a?.isCurrent, binding, a?.scope?.authorityKey, revision])
+  }, [inputs.projectMode, a?.ready, a?.projectClient, binding, a?.scope?.authorityKey, revision])
 
   // Callback entry belongs to this rendered owner, but reads live mode and gates.
   const renderEpoch = m.epoch
@@ -350,7 +373,8 @@ export function useAppProjectSolarRuntime(inputs) {
   function setVisibleLayers(value) {
     publish(contextCurrent, previous => ({ visibleLayers: typeof value === 'function' ? value(previous.visibleLayers) : value }))
   }
-  return { onProjectSubmit, complete, retryReadback, contextView: contextCurrent() ? state.context.data : null,
+  const contextView = contextCurrent() ? state.context.data : null
+  return { onProjectSubmit, complete, retryReadback, contextView,
     contextCurrent, openTool: state.openTool, onOpenTool, onClose, projectRunMemory: state.projectRunMemory,
     projectPending: state.projectPending, projectOutcome: state.projectOutcome,
     submissionSignal: m.owner?.abort.signal, busy: state.busy || !!inputs.externalBusy,

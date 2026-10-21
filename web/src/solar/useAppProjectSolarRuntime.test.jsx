@@ -415,12 +415,53 @@ it('R13G-12 the owned output transition survives its intentional binding change'
   expect(fast.result.current.projectOutcome.outcome).toBe(dispatch.mock.calls[0][1])
 })
 
-it('R13G-13 exact context reads discard obsolete replies and restart after scope rotation', async () => {
+it('W1C8 retains an in-flight read across equal bindings and capture rotations', async () => {
+  const read = deferred(), h = await setup({ initialContext: read })
+  const reads = h.client.readContext.mock.calls.length
+  const signal = h.client.readContext.mock.calls.at(-1)[0].signal
+  const bridge = bridges.at(-1)
+  await h.install(V)
+  await h.install(V)
+  expect(signal.aborted).toBe(false)
+  expect(h.client.readContext).toHaveBeenCalledTimes(reads)
+  expect(bridges.at(-1)).toBe(bridge)
+  await act(async () => { read.resolve(response(context())); await drain() })
+  expect(h.result.current.contextView).toEqual(context())
+  expect(h.result.current.contextCurrent()).toBe(true)
+})
+
+it.each(['mode', 'readiness', 'client', 'authority', 'binding', 'workspace', 'session', 'unmount'])(
+  'W1C8 aborts an obsolete context for a real %s change and rejects its late reply', async change => {
+    const read = deferred(), h = await setup({ initialContext: read })
+    const signal = h.client.readContext.mock.calls.at(-1)[0].signal
+    h.client.readContext.mockImplementation(async () => response(context(h.client.getSnapshot().binding.input_version_id)))
+    if (change === 'mode') await h.update({ projectMode: false })
+    if (change === 'readiness') await h.update({ projectSolar: { ...h.props.projectSolar, ready: false } })
+    if (change === 'client') await h.update({ projectSolar: { ...h.props.projectSolar, projectClient: { ...h.client } } })
+    if (change === 'authority') await h.install(V, 'foreign')
+    if (change === 'binding') {
+      await act(async () => { h.ws.change({ canonicalVersionId: X }); await drain() })
+      await h.install(X)
+    }
+    if (change === 'workspace') await h.update({ workspaceController: store(h.ws.getSnapshot()) })
+    if (change === 'session') await h.update({ sessionController: store(h.session.getSnapshot()) })
+    if (change === 'unmount') h.unmount()
+    expect(signal.aborted).toBe(true)
+    const obsolete = { ...context(), intake: { stale: true } }
+    await act(async () => { read.resolve(response(obsolete)); await drain() })
+    expect(h.result.current.contextView).not.toBe(obsolete)
+    if (['mode', 'readiness', 'unmount'].includes(change)) expect(h.result.current.contextView).toBeNull()
+    else expect(h.result.current.contextCurrent()).toBe(true)
+  },
+)
+
+it('R13G-13 exact context reads discard obsolete replies and restart for a new ready owner', async () => {
   const gate = deferred(), h = await setup({ initialContext: gate })
   h.invalidate()
   await act(async () => { gate.resolve(response(context())); await drain() })
   expect(h.result.current.contextView).toBeNull()
   h.client.readContext.mockImplementation(async () => response(context()))
+  await h.update({ projectSolar: { ...h.props.projectSolar, ready: false } })
   await h.install(V)
   expect(h.result.current.contextCurrent()).toBe(true)
   act(() => h.result.current.onOpenTool(h.tool))
@@ -433,6 +474,7 @@ it('R13G-13 exact context reads discard obsolete replies and restart after scope
   expect(h.result.current.openTool).toBeNull()
   const stale = deferred()
   h.client.readContext.mockReturnValue(stale.promise)
+  await h.update({ projectSolar: { ...h.props.projectSolar, ready: false } })
   await h.install(V)
   const oldSignal = h.client.readContext.mock.calls.at(-1)[0].signal
   await act(async () => { h.ws.change({ canonicalVersionId: X }); h.ws.change({ canonicalVersionId: V }); await drain() })
@@ -868,15 +910,17 @@ it('R13G-27 a transport ABORTED answer becomes unknown in B2 and keeps the runti
   expect(h.client.submitRun.mock.calls.map(([intent]) => intent.idempotencyKey)).toEqual(['intent-1'])
 })
 
-it('R13G-28 a failed context read after a same-owner rotation keeps the unknown notice and the lock', async () => {
+it('R13G-28 a same-owner rotation retains context, the unknown notice and the lock without another read', async () => {
   const h = await setup()
   expect(await h.submit()).toEqual(accepted)
-  const read = deferred()
-  h.client.readContext.mockImplementationOnce(() => read.promise)
+  const reads = h.client.readContext.mock.calls.length
+  const retained = h.result.current.contextView
+  h.client.readContext.mockResolvedValueOnce(local('SIP_R7_TRANSPORT_FAILED'))
   await h.install(V)
+  expect(h.client.readContext).toHaveBeenCalledTimes(reads)
   expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
-  await act(async () => { read.resolve(local('SIP_R7_TRANSPORT_FAILED')); await drain() })
-  expect(h.result.current.contextCurrent()).toBe(false)
+  expect(h.result.current.contextView).toBe(retained)
+  expect(h.result.current.contextCurrent()).toBe(true)
   expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
   expect(h.result.current.busy).toBe(false)
   expect(h.result.current.projectPending).toBeNull()
@@ -892,7 +936,7 @@ it('R13G-29 an equal binding copy while the capture stays current keeps the acce
   const a = { ...h.props.projectSolar, scope: { ...h.props.projectSolar.scope, binding: copy } }
   await h.update({ projectSolar: a, projectCatalog: { ...h.props.projectCatalog, binding: copy } })
   expect(bridges.at(-1)).toBe(bridge)
-  expect(h.client.readContext.mock.calls.length).toBe(reads + 1)
+  expect(h.client.readContext.mock.calls.length).toBe(reads)
   expect(h.result.current.notice).toBeNull()
   expect(h.result.current.busy).toBe(true)
   expect(h.result.current.projectPending).not.toBeNull()
@@ -903,7 +947,7 @@ it('R13G-29 an equal binding copy while the capture stays current keeps the acce
 })
 
 
-it('R13G-30 a done transition cannot replace a later unknown run notice on failed context', async () => {
+it('R13G-30 a done transition cannot replace a later unknown run notice or refetch on capture rotation', async () => {
   const h = await setup()
   await h.submit(); await h.finish()
   const done = await h.complete()
@@ -914,10 +958,11 @@ it('R13G-30 a done transition cannot replace a later unknown run notice on faile
   const options = { ...h.options, binding }
   h.client.readJob.mockReturnValue(deferred().promise)
   expect(await submitWith(h, prepared, options)).toEqual(accepted)
-  const read = deferred()
-  h.client.readContext.mockReturnValueOnce(read.promise)
+  const reads = h.client.readContext.mock.calls.length
+  h.client.readContext.mockResolvedValueOnce(local('SIP_R7_TRANSPORT_FAILED'))
   await h.install(W)
-  await act(async () => { read.resolve(local('SIP_R7_TRANSPORT_FAILED')); await drain() })
+  expect(h.client.readContext).toHaveBeenCalledTimes(reads)
+  expect(h.result.current.contextCurrent()).toBe(true)
   expect.soft(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
   expect.soft(h.result.current.busy).toBe(false)
   expect.soft(h.result.current.projectPending).toBeNull()
@@ -925,7 +970,7 @@ it('R13G-30 a done transition cannot replace a later unknown run notice on faile
   expect.soft(h.client.submitRun).toHaveBeenCalledTimes(2)
 })
 
-it('R13G-31 a done transition cannot release a later run lock on successful context', async () => {
+it('R13G-31 a done transition with retained context cannot release a later run lock', async () => {
   const h = await setup()
   await h.submit(); await h.finish()
   const done = await h.complete()
@@ -936,10 +981,11 @@ it('R13G-31 a done transition cannot release a later run lock on successful cont
   const options = { ...h.options, binding }
   h.client.readJob.mockReturnValue(deferred().promise)
   expect(await submitWith(h, prepared, options)).toEqual(accepted)
-  const read = deferred()
-  h.client.readContext.mockReturnValueOnce(read.promise)
+  const reads = h.client.readContext.mock.calls.length
+  const retained = h.result.current.contextView
   await h.install(W)
-  await act(async () => { read.resolve(response(context(W))); await drain() })
+  expect(h.client.readContext).toHaveBeenCalledTimes(reads)
+  expect(h.result.current.contextView).toBe(retained)
   expect.soft(h.result.current.busy).toBe(false)
   expect.soft(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
   expect.soft((await submitWith(h, { ...prepared, idempotencyKey: 'run-three' }, options)).reason).toBe('SIP_R13B_RUN_IN_PROGRESS')
@@ -979,22 +1025,22 @@ it('R13G-33 an initial failed context read explains scope pending without a run'
   expect(h.client.submitRun).not.toHaveBeenCalled()
 })
 
-it('R13G-34 a done transition stays done after a failed same-owner context rotation', async () => {
+it('R13G-34 a done transition retains its readable context through a same-owner capture rotation', async () => {
   const h = await setup()
   await h.submit(); await h.finish()
   const done = await h.complete()
   await h.install(W)
   expect(await done.promise).toBe(true)
-  const read = deferred()
-  h.client.readContext.mockReturnValueOnce(read.promise)
+  const reads = h.client.readContext.mock.calls.length
+  const retained = h.result.current.contextView
+  h.client.readContext.mockResolvedValueOnce(local('SIP_R7_TRANSPORT_FAILED'))
   await h.install(W)
-  await act(async () => { read.resolve(local('SIP_R7_TRANSPORT_FAILED')); await drain() })
+  expect(h.client.readContext).toHaveBeenCalledTimes(reads)
+  expect(h.result.current.contextView).toBe(retained)
   const binding = h.props.projectSolar.scope.binding
   const prepared = { ...fresh(h, 'run-two'), binding }
   const options = { ...h.options, binding }
-  expect.soft(h.result.current.notice).toBe(projectSolarAppReason('scope_pending'))
-  expect.soft((await submitWith(h, prepared, options)).reason).toBe('SIP_R7_REQUEST_INVALID')
-  await h.install(W)
+  expect(h.result.current.notice).toBeNull()
   h.client.readJob.mockReturnValue(deferred().promise)
   expect(await submitWith(h, prepared, options)).toEqual(accepted)
   expect(h.client.submitRun).toHaveBeenCalledTimes(2)
