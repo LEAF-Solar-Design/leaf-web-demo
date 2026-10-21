@@ -20,6 +20,7 @@ import {
   mergeSurfaceContract,
   refreshSurfaceConfigOverlay,
   touchedSurfaceConfigSlots,
+  useSurfaceConfigOverlay,
   useSurfaceContract,
 } from './useSurfaceContract.js'
 
@@ -81,6 +82,38 @@ describe('touchedSurfaceConfigSlots', () => {
 })
 
 describe('useSurfaceContract — the session fetch', () => {
+  it('upgrades a mock-first subscription to a real fetch when mock turns false', async () => {
+    getSurfaceConfig.mockResolvedValue({ surfaces: { cad: { authoring: false } } })
+    const { result, rerender } = renderHook(({ m }) => useSurfaceConfigOverlay(m), {
+      initialProps: { m: true },
+    })
+    await waitFor(() => {
+      expect(getSurfaceConfig).toHaveBeenCalledTimes(1)
+      expect(getSurfaceConfig).toHaveBeenLastCalledWith(true)
+    })
+    rerender({ m: false })
+    await waitFor(() => {
+      expect(getSurfaceConfig).toHaveBeenCalledTimes(2)
+      expect(getSurfaceConfig).toHaveBeenLastCalledWith(false)
+    })
+    renderHook(() => useSurfaceConfigOverlay(false))
+    await act(async () => { await Promise.resolve() })
+    expect(getSurfaceConfig).toHaveBeenCalledTimes(2)
+    expect(result.current).toEqual({ cad: { authoring: false } })
+  })
+
+  it('a mock-only session fetches once and does not upgrade on its own', async () => {
+    getSurfaceConfig.mockResolvedValue({ surfaces: {} })
+    const { rerender } = renderHook(({ m }) => useSurfaceConfigOverlay(m), {
+      initialProps: { m: true },
+    })
+    await waitFor(() => expect(getSurfaceConfig).toHaveBeenCalledTimes(1))
+    rerender({ m: true })
+    await act(async () => { await Promise.resolve() })
+    expect(getSurfaceConfig).toHaveBeenCalledTimes(1)
+    expect(getSurfaceConfig).toHaveBeenLastCalledWith(true)
+  })
+
   it('refresh re-fetches and merges the committed overlay for existing subscribers', async () => {
     getSurfaceConfig.mockResolvedValueOnce({ surfaces: {} })
       .mockResolvedValueOnce({ surfaces: { cad: { authoring: false } } })

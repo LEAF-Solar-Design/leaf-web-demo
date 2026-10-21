@@ -34,6 +34,7 @@ function isPlainObject(value) {
 }
 
 let _fetchStarted = false
+let _fetchedMock = false
 let _fetchPromise = null
 let _fetchGeneration = 0
 let _overlay = {}
@@ -50,8 +51,9 @@ function _notify() {
 }
 
 function _startFetchOnce(mock) {
-  if (_fetchStarted) return _fetchPromise
+  if (_fetchStarted && !(_fetchedMock && !mock)) return _fetchPromise
   _fetchStarted = true
+  _fetchedMock = mock
   const generation = ++_fetchGeneration
   _fetchPromise = getSurfaceConfig(mock)
     .then((body) => {
@@ -89,6 +91,7 @@ export function _resetSurfaceConfigOverlayForTests() {
   ++_fetchGeneration
   _fetchPromise = null
   _fetchStarted = false
+  _fetchedMock = false
   _overlay = {}
   _source = null
   _listeners.clear()
