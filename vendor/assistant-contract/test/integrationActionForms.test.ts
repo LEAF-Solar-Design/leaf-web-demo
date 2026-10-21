@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   IntegrationActionFieldV1, IntegrationActionFormV1, IntegrationActionElementV1,
   IntegrationActionSnapshotV1, IntegrationActionRunV1, IntegrationActionReceiptV1,
-  IntegrationActionSubmissionV1, DatasetElementV1, emitJsonSchema, emitOpenApi,
+  IntegrationActionSubmissionV1, DatasetElementV1, IntegrationElementV1, emitJsonSchema, emitOpenApi,
 } from "../src/index";
 
 const ref = { id: "sales", version: 1, digest: "ab".repeat(32) };
@@ -37,6 +37,33 @@ const terminal: IntegrationActionSnapshotV1 = {
 };
 
 describe("inert integration action forms", () => {
+  it("composes table, line and inert action recipes through the shared union", () => {
+    const dataset = {
+      schema_version: 1, id: "sales-view", title: "Sales", dataset_ref: ref,
+      query: { fields: ["day", "amount"], limit: 10 },
+    };
+    const table = { ...dataset, kind: "dataset.table", props: { columns: ["amount"], row_limit: 10 } };
+    const line = { ...dataset, kind: "dataset.line", props: { x_field: "day", y_field: "amount" } };
+    expect(IntegrationElementV1.options).toEqual([DatasetElementV1, IntegrationActionElementV1]);
+    for (const recipe of [table, line, element]) {
+      expect(IntegrationElementV1.parse(JSON.parse(JSON.stringify(recipe)))).toEqual(recipe);
+      for (const key of ["arguments", "idempotency_key", "expected_grant_revision", "grant", "authority", "url", "execute"]) {
+        expect(IntegrationElementV1.safeParse({ ...recipe, [key]: "denied" }).success).toBe(false);
+      }
+    }
+    for (const recipe of [table, line]) expect(DatasetElementV1.parse(recipe)).toEqual(recipe);
+    expect(IntegrationActionElementV1.safeParse(table).success).toBe(false);
+    for (const kind of ["provider.action", "integration.submit", "unknown"]) {
+      expect(IntegrationElementV1.safeParse({ ...element, kind }).success).toBe(false);
+    }
+    for (const key of ["connector_ref", "operation_ref"]) {
+      expect(IntegrationElementV1.safeParse({ ...element, [key]: { ...ref, digest: "invalid" } }).success).toBe(false);
+      expect(IntegrationElementV1.safeParse({ ...element, [key]: { ...ref, grant: true } }).success).toBe(false);
+    }
+    expect(IntegrationElementV1.safeParse({ ...element, form: { ...form, fields: [fields[0], fields[0]] } }).success).toBe(false);
+    expect(IntegrationElementV1.safeParse({ ...element, form: { ...form, fields: [{ ...fields[0], max_length: 4097 }] } }).success).toBe(false);
+  });
+
   it("round trips all scalar field variants, complete forms and zero-field actions", () => {
     for (const field of fields) expect(IntegrationActionFieldV1.parse(field)).toEqual(field);
     expect(IntegrationActionFormV1.parse(form)).toEqual(form);
@@ -226,6 +253,12 @@ describe("action presentation and snapshot emission", () => {
     for (const [defs, prefix] of [
       [json.$defs, "#/$defs/"], [openapi.components.schemas, "#/components/schemas/"],
     ] as const) {
+      expect(defs.IntegrationElementV1.anyOf).toEqual([
+        { $ref: `${prefix}DatasetElementV1` },
+        { $ref: `${prefix}IntegrationActionElementV1` },
+      ]);
+      expect(defs.DatasetElementV1.anyOf.map((branch: { properties: { kind: { const: string } } }) => branch.properties.kind.const))
+        .toEqual(["dataset.table", "dataset.line"]);
       for (const name of ["IntegrationActionFormV1", "IntegrationActionElementV1", "IntegrationActionSnapshotV1"]) {
         expect(defs[name].type).toBe("object");
         expect(defs[name].additionalProperties).toBe(false);
