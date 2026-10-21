@@ -76,7 +76,7 @@
     "agent/tools/validateTool.ts": "df8a0522f5703a3cb76e9fbff5c3200e4a717a0ab4c99d12f912d8c44e38faee",
     "browser/conversationWorkspace.ts": "3bb8c517ff9ceb0db3510a5869e4383a4c04dcc0567268075f6db4c0dfadb7fa",
     "browser/historyFeed.ts": "504c16d2a1b2deb923b6b5ef2e0d2c12311e3966ca7c62ef2472d311e3cfa816",
-    "contracts/integration.ts": "5827686dfcd4d4fa7a9624802c3ca38d128871bece1d41d245fe6f56a39339b4",
+    "contracts/integration.ts": "077528ac8e9e439d2b94c58839997ee5ccc7be0bb421c9a2a8a12a954b2ae2bf",
     "index.ts": "b201a546958d8d25e8dd0b6e675484d564f9f716ad0baf668b7c15809b1d9d5d",
     "ports/converse.ts": "4f5fccd7162350df3fc151403633e890f7bdca05fab47a23813fcc62715b235e",
     "ports/fakes/fakeAgentRunner.ts": "bcd81974277d1934dd6a6e5a660203b248b5b3caefb0a594d32f4905a449d3ef",
@@ -135,5 +135,5 @@
   },
   "surface": "packages/author-ts/src",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "cc1afdb2b6c4d757730f572cbd9b783e752b6e2e"
+  "upstream_commit": "323cb29cbe2d2dc712db7d9168a3c91f931afae6"
 }

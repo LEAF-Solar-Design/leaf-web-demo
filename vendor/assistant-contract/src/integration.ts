@@ -329,6 +329,127 @@ export const IntegrationActionSubmissionResultV1 = z.union([
 ]);
 export type IntegrationActionSubmissionResultV1 = z.infer<typeof IntegrationActionSubmissionResultV1>;
 
+export const IntegrationManualWorkflowStepV1 = z.strictObject({
+  id: Slug,
+  kind: z.literal("action"),
+  connection_id: Slug,
+  connector_ref: IntegrationRefV1,
+  operation_ref: IntegrationRefV1,
+  arguments: ActionArguments,
+}).describe("Literal scalar business data only; argument names never grant authority. Scalar validation cannot identify secret contents: the host must keep secret values out of saved arguments.");
+export type IntegrationManualWorkflowStepV1 = z.infer<typeof IntegrationManualWorkflowStepV1>;
+
+export const IntegrationManualWorkflowDefinitionV1 = z.strictObject({
+  schema_version: z.literal(1),
+  id: Slug,
+  version: ActionRevision,
+  title: Title,
+  trigger: z.literal("manual"),
+  authority_mode: z.literal("caller_bound"),
+  steps: z.array(IntegrationManualWorkflowStepV1).min(1).max(8),
+}).superRefine((definition, ctx) => unique(definition.steps.map((step) => step.id), ctx, ["steps"]))
+  .describe("Finite ordered manual actions. Saving or parsing a definition never authorizes execution and introduces no standing or unattended authority. A separate IntegrationRefV1 pins this definition; the host owns immutable version persistence and digest equality.");
+export type IntegrationManualWorkflowDefinitionV1 = z.infer<typeof IntegrationManualWorkflowDefinitionV1>;
+
+export const IntegrationManualWorkflowSubmissionV1 = z.strictObject({
+  schema_version: z.literal(1),
+  workflow_ref: IntegrationRefV1,
+  idempotency_key: IntegrationActionSubmissionV1.shape.idempotency_key,
+  step_grants: z.array(z.strictObject({
+    step_id: Slug,
+    expected_grant_revision: ActionRevision,
+  })).min(1).max(8),
+}).superRefine((submission, ctx) => unique(submission.step_grants.map((grant) => grant.step_id), ctx, ["step_grants"]))
+  .describe("The authenticated host establishes scope and caller and rechecks membership, grants and required approvals before each step or explicit resume. The host must match the resolved definition's exact step order. No caller argument overrides, child idempotency keys or authority are accepted.");
+export type IntegrationManualWorkflowSubmissionV1 = z.infer<typeof IntegrationManualWorkflowSubmissionV1>;
+
+const WorkflowStepIdentity = { run_id: ActionUuid, step_id: Slug };
+export const IntegrationManualWorkflowStepSnapshotV1 = z.union([
+  z.strictObject({ ...WorkflowStepIdentity, state: z.literal("pending") }),
+  z.strictObject({
+    ...WorkflowStepIdentity,
+    state: z.literal("blocked"),
+    failure_code: IntegrationActionReceiptV1.shape.failure_code.unwrap().exclude(["outcome_unknown"]),
+    effect_outcome: z.literal("not_dispatched"),
+  }),
+  z.strictObject({ ...WorkflowStepIdentity, state: z.literal("action"), action: IntegrationActionSnapshotV1 }),
+]).describe("Parent-bound step evidence. Pending evidence never proves that a write did not occur; the runtime must reconcile its persisted intended child identity. No raw provider results or copied arguments.");
+export type IntegrationManualWorkflowStepSnapshotV1 = z.infer<typeof IntegrationManualWorkflowStepSnapshotV1>;
+
+export const IntegrationManualWorkflowRunV1 = z.strictObject({
+  schema_version: z.literal(1),
+  run_id: ActionUuid,
+  revision: ActionRevision,
+  workflow_ref: IntegrationRefV1,
+  submission_digest: ActionDigest,
+  authority_mode: z.literal("caller_bound"),
+  authority_binding_digest: ActionDigest,
+  created_at: Instant,
+  updated_at: Instant,
+  state: z.enum(["accepted", "running", "succeeded", "failed", "uncertain"]),
+}).superRefine((run, ctx) => {
+  if (!actionTimeOrdered(run.created_at, run.updated_at)) {
+    ctx.addIssue({ code: "custom", path: ["updated_at"], message: "Updated time must not precede creation" });
+  }
+}).describe("Host-produced evidence, never a caller capability. The host produces the authority binding digest. There is no aggregate effect outcome: a failed workflow may contain applied steps.");
+export type IntegrationManualWorkflowRunV1 = z.infer<typeof IntegrationManualWorkflowRunV1>;
+
+function workflowRefsEqual(left: IntegrationRefV1, right: IntegrationRefV1): boolean {
+  return left.id === right.id && left.version === right.version && left.digest === right.digest;
+}
+
+export const IntegrationManualWorkflowSnapshotV1 = z.strictObject({
+  definition: IntegrationManualWorkflowDefinitionV1,
+  run: IntegrationManualWorkflowRunV1,
+  steps: z.array(IntegrationManualWorkflowStepSnapshotV1).min(1).max(8),
+}).superRefine(({ definition, run, steps }, ctx) => {
+  if (definition.id !== run.workflow_ref.id || definition.version !== run.workflow_ref.version) {
+    ctx.addIssue({ code: "custom", path: ["definition"], message: "Definition must match the run reference ID and version" });
+  }
+  if (steps.length !== definition.steps.length) {
+    ctx.addIssue({ code: "custom", path: ["steps"], message: "Exact definition step count required" });
+  }
+  unique(steps.flatMap((step) => step.state === "action" ? [step.action.run.run_id.toLowerCase()] : []), ctx, ["steps"]);
+  let frontier: IntegrationManualWorkflowStepSnapshotV1 | undefined;
+  let prefixEnded = false;
+  for (const [index, step] of steps.entries()) {
+    const expected = definition.steps[index];
+    if (!expected || step.step_id !== expected.id || step.run_id !== run.run_id) {
+      ctx.addIssue({ code: "custom", path: ["steps", index], message: "Step must match definition order and parent run" });
+    }
+    if (step.state === "action" && expected) {
+      const child = step.action.run;
+      if (child.connection_id !== expected.connection_id || !workflowRefsEqual(child.connector_ref, expected.connector_ref) ||
+          !workflowRefsEqual(child.operation_ref, expected.operation_ref)) {
+        ctx.addIssue({ code: "custom", path: ["steps", index, "action"], message: "Child must match the exact definition connection and references" });
+      }
+    }
+    if (!prefixEnded && step.state === "action" && step.action.run.state === "succeeded") continue;
+    if (!prefixEnded) {
+      prefixEnded = true;
+      frontier = step;
+    } else if (step.state !== "pending") {
+      ctx.addIssue({ code: "custom", path: ["steps", index], message: "Only pending steps may follow the frontier" });
+    }
+  }
+  const frontierState = frontier?.state === "action" ? frontier.action.run.state : frontier?.state;
+  const compatible = run.state === "running" ||
+    (run.state === "accepted" && steps.every((step) => step.state === "pending")) ||
+    (run.state === "succeeded" && !prefixEnded) ||
+    (run.state === "failed" && (frontierState === "blocked" || frontierState === "failed")) ||
+    (run.state === "uncertain" && frontierState === "uncertain");
+  if (!compatible) {
+    ctx.addIssue({ code: "custom", path: ["run", "state"], message: "Parent state incompatible with the successful prefix and frontier" });
+  }
+}).describe("Successful children form an ordered prefix with at most one nonpending frontier; later steps are pending. Running permits child settlement before parent settlement, including all children succeeded, and never overrides child effects. Identity, order and state checks are runtime refinements. The host verifies definition digest, child submission digests and input equality; schema does not prove hashes, append-only history or crash safety.");
+export type IntegrationManualWorkflowSnapshotV1 = z.infer<typeof IntegrationManualWorkflowSnapshotV1>;
+
+export const IntegrationManualWorkflowSubmissionResultV1 = z.union([
+  z.strictObject({ status: z.literal("admitted"), run: IntegrationManualWorkflowRunV1, replayed: z.boolean() }),
+  z.strictObject({ status: z.literal("refused"), code: z.literal("idempotency_conflict") }),
+]);
+export type IntegrationManualWorkflowSubmissionResultV1 = z.infer<typeof IntegrationManualWorkflowSubmissionResultV1>;
+
 const MappingPointer = Pointer.refine((value) => {
   const segments = value === "" ? [] : value.slice(1).split("/");
   return segments.length <= 32 && segments.every((segment) =>

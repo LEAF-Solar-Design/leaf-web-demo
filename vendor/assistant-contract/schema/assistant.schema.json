@@ -2368,6 +2368,424 @@
         }
       ]
     },
+    "IntegrationManualWorkflowStepV1": {
+      "description": "Literal scalar business data only; argument names never grant authority. Scalar validation cannot identify secret contents: the host must keep secret values out of saved arguments.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+        },
+        "kind": {
+          "type": "string",
+          "const": "action"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+        },
+        "connector_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "operation_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "arguments": {
+          "maxProperties": 100,
+          "description": "Flat JSON record of at most 100 FieldId keys, excluding __proto__, prototype and constructor; scalar values only, strings at most 4096 characters and finite numbers. Application data, never authorization; the trusted registered adapter validates business fields and request bindings.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "connection_id",
+        "connector_ref",
+        "operation_ref",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationManualWorkflowDefinitionV1": {
+      "description": "Finite ordered manual actions. Saving or parsing a definition never authorizes execution and introduces no standing or unattended authority. A separate IntegrationRefV1 pins this definition; the host owns immutable version persistence and digest equality.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "trigger": {
+          "type": "string",
+          "const": "manual"
+        },
+        "authority_mode": {
+          "type": "string",
+          "const": "caller_bound"
+        },
+        "steps": {
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IntegrationManualWorkflowStepV1"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "id",
+        "version",
+        "title",
+        "trigger",
+        "authority_mode",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationManualWorkflowSubmissionV1": {
+      "description": "The authenticated host establishes scope and caller and rechecks membership, grants and required approvals before each step or explicit resume. The host must match the resolved definition's exact step order. No caller argument overrides, child idempotency keys or authority are accepted.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "workflow_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+(?![\\s\\S])"
+        },
+        "step_grants": {
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+              },
+              "expected_grant_revision": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "step_id",
+              "expected_grant_revision"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "workflow_ref",
+        "idempotency_key",
+        "step_grants"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationManualWorkflowStepSnapshotV1": {
+      "description": "Parent-bound step evidence. Pending evidence never proves that a write did not occur; the runtime must reconcile its persisted intended child identity. No raw provider results or copied arguments.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "minLength": 36,
+              "maxLength": 36,
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "step_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+            },
+            "state": {
+              "type": "string",
+              "const": "pending"
+            }
+          },
+          "required": [
+            "run_id",
+            "step_id",
+            "state"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "minLength": 36,
+              "maxLength": 36,
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "step_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+            },
+            "state": {
+              "type": "string",
+              "const": "blocked"
+            },
+            "failure_code": {
+              "type": "string",
+              "enum": [
+                "invalid_input",
+                "forbidden",
+                "revoked",
+                "conflict",
+                "quota",
+                "timeout",
+                "unavailable",
+                "invalid_response"
+              ]
+            },
+            "effect_outcome": {
+              "type": "string",
+              "const": "not_dispatched"
+            }
+          },
+          "required": [
+            "run_id",
+            "step_id",
+            "state",
+            "failure_code",
+            "effect_outcome"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "minLength": 36,
+              "maxLength": 36,
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "step_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+            },
+            "state": {
+              "type": "string",
+              "const": "action"
+            },
+            "action": {
+              "$ref": "#/$defs/IntegrationActionSnapshotV1"
+            }
+          },
+          "required": [
+            "run_id",
+            "step_id",
+            "state",
+            "action"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IntegrationManualWorkflowRunV1": {
+      "description": "Host-produced evidence, never a caller capability. The host produces the authority binding digest. There is no aggregate effect outcome: a failed workflow may contain applied steps.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 36,
+          "maxLength": 36,
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "workflow_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "submission_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "authority_mode": {
+          "type": "string",
+          "const": "caller_bound"
+        },
+        "authority_binding_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?Z(?![\\s\\S])"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?Z(?![\\s\\S])"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "running",
+            "succeeded",
+            "failed",
+            "uncertain"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "run_id",
+        "revision",
+        "workflow_ref",
+        "submission_digest",
+        "authority_mode",
+        "authority_binding_digest",
+        "created_at",
+        "updated_at",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationManualWorkflowSnapshotV1": {
+      "description": "Successful children form an ordered prefix with at most one nonpending frontier; later steps are pending. Running permits child settlement before parent settlement, including all children succeeded, and never overrides child effects. Identity, order and state checks are runtime refinements. The host verifies definition digest, child submission digests and input equality; schema does not prove hashes, append-only history or crash safety.",
+      "type": "object",
+      "properties": {
+        "definition": {
+          "$ref": "#/$defs/IntegrationManualWorkflowDefinitionV1"
+        },
+        "run": {
+          "$ref": "#/$defs/IntegrationManualWorkflowRunV1"
+        },
+        "steps": {
+          "minItems": 1,
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IntegrationManualWorkflowStepSnapshotV1"
+          }
+        }
+      },
+      "required": [
+        "definition",
+        "run",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationManualWorkflowSubmissionResultV1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "admitted"
+            },
+            "run": {
+              "$ref": "#/$defs/IntegrationManualWorkflowRunV1"
+            },
+            "replayed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "status",
+            "run",
+            "replayed"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "refused"
+            },
+            "code": {
+              "type": "string",
+              "const": "idempotency_conflict"
+            }
+          },
+          "required": [
+            "status",
+            "code"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "CredentialReferenceV1": {
       "type": "object",
       "properties": {
