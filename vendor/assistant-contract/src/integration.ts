@@ -106,6 +106,211 @@ export type ConnectionV1 = z.infer<typeof ConnectionV1>;
 
 const ReservedSegments = new Set(["__proto__", "prototype", "constructor"]);
 const MappingFieldId = FieldId.refine((value) => !ReservedSegments.has(value), "Reserved field ID");
+const ActionDigest = z.string().regex(/^[a-f0-9]{64}(?![\s\S])/);
+const ActionRevision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const ActionUuid = z.string().uuid().length(36);
+const ActionOutcome = z.enum(["not_dispatched", "applied", "not_applied", "unknown"]);
+const MaxActionArgumentFields = 100;
+const ActionFieldId = z.string().min(1).max(128)
+  .regex(/^(?!(?:__proto__|prototype|constructor)(?![\s\S]))[A-Za-z_][A-Za-z0-9_]*(?![\s\S])/);
+
+const ActionFieldShape = {
+  id: ActionFieldId,
+  label: Title,
+  required: z.boolean(),
+  nullable: z.boolean(),
+  description: z.string().min(1).max(500).optional(),
+};
+
+export const IntegrationActionFieldV1 = z.union([
+  z.strictObject({
+    ...ActionFieldShape,
+    kind: z.literal("text"),
+    min_length: z.number().int().min(0).max(4096).optional(),
+    max_length: z.number().int().min(0).max(4096).optional(),
+  }).superRefine((field, ctx) => {
+    if (field.min_length !== undefined && field.max_length !== undefined && field.min_length > field.max_length) {
+      ctx.addIssue({ code: "custom", path: ["max_length"], message: "Maximum length must not be less than minimum length" });
+    }
+  }),
+  z.strictObject({
+    ...ActionFieldShape,
+    kind: z.literal("number"),
+    minimum: z.number().finite().optional(),
+    maximum: z.number().finite().optional(),
+    integer: z.boolean(),
+  }).superRefine((field, ctx) => {
+    if (field.minimum !== undefined && field.maximum !== undefined && field.minimum > field.maximum) {
+      ctx.addIssue({ code: "custom", path: ["maximum"], message: "Maximum must not be less than minimum" });
+    }
+  }),
+  z.strictObject({ ...ActionFieldShape, kind: z.literal("boolean") }),
+  z.strictObject({
+    ...ActionFieldShape,
+    kind: z.literal("choice"),
+    choices: z.array(z.strictObject({ label: Title, value: z.string().min(1).max(4096) })).min(1).max(100),
+  }).superRefine((field, ctx) => unique(field.choices.map((choice) => choice.value), ctx, ["choices"])),
+]);
+export type IntegrationActionFieldV1 = z.infer<typeof IntegrationActionFieldV1>;
+
+export const IntegrationActionFormV1 = z.strictObject({
+  fields: z.array(IntegrationActionFieldV1).min(0).max(100),
+  submit_label: Title,
+  description: z.string().min(1).max(1000).optional(),
+}).superRefine((form, ctx) => unique(form.fields.map((field) => field.id), ctx, ["fields"]))
+  .describe("Presentation and client-validation hints, not business semantics or authority. The installed host adapter validates arguments again. Null, absent, false, zero and empty text remain distinct.");
+export type IntegrationActionFormV1 = z.infer<typeof IntegrationActionFormV1>;
+
+export const IntegrationActionElementV1 = z.strictObject({
+  schema_version: z.literal(1),
+  id: Slug,
+  title: Title,
+  kind: z.literal("integration.action"),
+  connection_id: Slug,
+  connector_ref: IntegrationRefV1,
+  operation_ref: IntegrationRefV1,
+  form: IntegrationActionFormV1,
+}).describe("Inert action presentation bound to exact immutable connector and operation versions. The host resolves the current grant revision when submitting; this control grants no authority.");
+export type IntegrationActionElementV1 = z.infer<typeof IntegrationActionElementV1>;
+
+// A bounded flat JSON boundary: at most 100 FieldId keys, scalar values only,
+// strings at most 4096 characters, finite numbers and no prototype-related keys.
+// Names are application data, never authority. The trusted registered adapter
+// validates business fields and request bindings after this structural check.
+const ActionArguments = z.preprocess((value, ctx) => {
+  // Check raw keys too: record parsing may omit __proto__ defensively.
+  if (value !== null && typeof value === "object") {
+    for (const key of Object.keys(value)) {
+      if (ReservedSegments.has(key)) ctx.addIssue({ code: "custom", path: [key], message: "Reserved field ID" });
+    }
+  }
+  return value;
+}, z.record(ActionFieldId, z.union([
+  z.string().max(4096), z.number().finite(), z.boolean(), z.null(),
+])).refine((args) => Object.keys(args).length <= MaxActionArgumentFields, "At most 100 argument fields"))
+  .meta({ maxProperties: MaxActionArgumentFields })
+  .describe("Flat JSON record of at most 100 FieldId keys, excluding __proto__, prototype and constructor; scalar values only, strings at most 4096 characters and finite numbers. Application data, never authorization; the trusted registered adapter validates business fields and request bindings.");
+
+export const IntegrationActionSubmissionV1 = z.strictObject({
+  schema_version: z.literal(1),
+  connection_id: Slug,
+  connector_ref: IntegrationRefV1,
+  operation_ref: IntegrationRefV1,
+  idempotency_key: z.string().min(16).max(128).regex(/^[A-Za-z0-9_-]+(?![\s\S])/),
+  expected_grant_revision: ActionRevision,
+  arguments: ActionArguments,
+});
+export type IntegrationActionSubmissionV1 = z.infer<typeof IntegrationActionSubmissionV1>;
+
+// Compare all fractional digits: Date.parse would discard sub-millisecond order.
+function actionTimeOrdered(created: string, updated: string): boolean {
+  const [createdSecond, createdFraction = ""] = created.slice(0, -1).split(".");
+  const [updatedSecond, updatedFraction = ""] = updated.slice(0, -1).split(".");
+  if (createdSecond !== updatedSecond) return createdSecond < updatedSecond;
+  const width = Math.max(createdFraction.length, updatedFraction.length);
+  return createdFraction.padEnd(width, "0") <= updatedFraction.padEnd(width, "0");
+}
+
+// Server-produced execution evidence, never permission. A claim persisted before
+// sending is conservatively unknown, even if a crash preceded network dispatch.
+export const IntegrationActionRunV1 = z.strictObject({
+  schema_version: z.literal(1),
+  run_id: ActionUuid,
+  revision: ActionRevision,
+  connection_id: Slug,
+  connector_ref: IntegrationRefV1,
+  operation_ref: IntegrationRefV1,
+  submission_digest: ActionDigest,
+  authority_binding_digest: ActionDigest,
+  grant_revision: ActionRevision,
+  created_at: Instant,
+  updated_at: Instant,
+  state: z.enum(["accepted", "running", "succeeded", "failed", "uncertain"]),
+  effect_outcome: ActionOutcome,
+}).superRefine((run, ctx) => {
+  const outcomes = {
+    accepted: ["not_dispatched"], running: ["unknown"], succeeded: ["applied"],
+    failed: ["not_dispatched", "not_applied"], uncertain: ["unknown"],
+  };
+  if (!outcomes[run.state].includes(run.effect_outcome)) {
+    ctx.addIssue({ code: "custom", path: ["effect_outcome"], message: "Outcome incompatible with run state" });
+  }
+  if (!actionTimeOrdered(run.created_at, run.updated_at)) {
+    ctx.addIssue({ code: "custom", path: ["updated_at"], message: "Updated time must not precede creation" });
+  }
+});
+export type IntegrationActionRunV1 = z.infer<typeof IntegrationActionRunV1>;
+
+// Digests refer to separately scoped material and never prove authorization.
+// The host must keep uncertain receipts append-only and add a new receipt for
+// later reconciliation; a schema cannot enforce that persistence obligation.
+export const IntegrationActionReceiptV1 = z.strictObject({
+  schema_version: z.literal(1),
+  receipt_id: ActionUuid,
+  run_id: ActionUuid,
+  sequence: ActionRevision,
+  submission_digest: ActionDigest,
+  operation_ref: IntegrationRefV1,
+  observed_at: Instant,
+  effect_outcome: ActionOutcome,
+  result_digest: ActionDigest.optional(),
+  failure_code: z.enum([
+    "invalid_input", "forbidden", "revoked", "conflict", "quota", "timeout",
+    "unavailable", "invalid_response", "outcome_unknown",
+  ]).optional(),
+  reconciliation: z.strictObject({
+    operation_ref: IntegrationRefV1,
+    observation_receipt_id: ActionUuid,
+  }).optional(),
+}).superRefine((receipt, ctx) => {
+  if (receipt.failure_code === "outcome_unknown" && receipt.effect_outcome !== "unknown") {
+    ctx.addIssue({ code: "custom", path: ["failure_code"], message: "Unknown outcome failure requires unknown outcome" });
+  }
+  if (receipt.effect_outcome === "applied" && receipt.failure_code !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["failure_code"], message: "Applied outcome cannot carry a failure" });
+  }
+  if (receipt.effect_outcome === "not_dispatched" && receipt.reconciliation !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["reconciliation"], message: "Undispatched actions cannot carry reconciliation" });
+  }
+});
+export type IntegrationActionReceiptV1 = z.infer<typeof IntegrationActionReceiptV1>;
+
+export const IntegrationActionSnapshotV1 = z.strictObject({
+  run: IntegrationActionRunV1,
+  receipts: z.array(IntegrationActionReceiptV1).max(100),
+}).superRefine((snapshot, ctx) => {
+  const { run, receipts } = snapshot;
+  unique(receipts.map((receipt) => receipt.receipt_id.toLowerCase()), ctx, ["receipts"]);
+  receipts.forEach((receipt, index) => {
+    if (receipt.run_id !== run.run_id || receipt.submission_digest !== run.submission_digest ||
+        receipt.operation_ref.id !== run.operation_ref.id ||
+        receipt.operation_ref.version !== run.operation_ref.version ||
+        receipt.operation_ref.digest !== run.operation_ref.digest) {
+      ctx.addIssue({ code: "custom", path: ["receipts", index], message: "Receipt must belong to this run, submission and exact operation" });
+    }
+    if (index > 0 && receipt.sequence <= receipts[index - 1].sequence) {
+      ctx.addIssue({ code: "custom", path: ["receipts", index, "sequence"], message: "Receipt sequences must strictly increase" });
+    }
+    if (!actionTimeOrdered(run.created_at, receipt.observed_at) || !actionTimeOrdered(receipt.observed_at, run.updated_at)) {
+      ctx.addIssue({ code: "custom", path: ["receipts", index, "observed_at"], message: "Receipt observation must be within the run lifetime" });
+    }
+  });
+  if (run.state === "accepted" || run.state === "running") {
+    if (receipts.length !== 0) {
+      ctx.addIssue({ code: "custom", path: ["receipts"], message: "Nonterminal runs cannot carry receipts" });
+    }
+  } else if (receipts.length === 0 || receipts[receipts.length - 1].effect_outcome !== run.effect_outcome) {
+    ctx.addIssue({ code: "custom", path: ["receipts"], message: "Terminal runs require a latest receipt matching their outcome" });
+  }
+});
+export type IntegrationActionSnapshotV1 = z.infer<typeof IntegrationActionSnapshotV1>;
+
+export const IntegrationActionSubmissionResultV1 = z.union([
+  z.strictObject({ status: z.literal("admitted"), run: IntegrationActionRunV1, replayed: z.boolean() }),
+  z.strictObject({ status: z.literal("refused"), code: z.literal("idempotency_conflict") }),
+]);
+export type IntegrationActionSubmissionResultV1 = z.infer<typeof IntegrationActionSubmissionResultV1>;
+
 const MappingPointer = Pointer.refine((value) => {
   const segments = value === "" ? [] : value.slice(1).split("/");
   return segments.length <= 32 && segments.every((segment) =>
@@ -183,6 +388,9 @@ export const OperationV1 = z.strictObject({
   schema_version: z.literal(1),
   id: Slug,
   title: Title,
+  // Pins reviewed semantics; the host requires a reviewed adapter for effects.
+  // This reference does not grant execution authority.
+  adapter_ref: IntegrationRefV1.optional(),
   method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
   path: Path,
   effect: z.enum(["read", "write", "external_communication", "irreversible"]),
