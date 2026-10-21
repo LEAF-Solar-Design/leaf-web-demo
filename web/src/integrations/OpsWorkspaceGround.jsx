@@ -1,12 +1,13 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { DatasetElement } from '../../../vendor/assistant-react/src/datasets/DatasetElement'
+import { IntegrationActionForm } from '../../../vendor/assistant-react/src/actions/IntegrationActionForm'
 import { DisplayPreferencesSchema } from '../../../vendor/assistant-react/src/datasets/formatting'
 import { DatasetElementV1, DatasetQueryV1 } from '../../../vendor/assistant-contract/src/integration'
-import { createIntegrationsClient, UUID } from './client.js'
+import { actionRunMatches, createIntegrationsClient, UUID } from './client.js'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 import './ops-workspace.css'
 
-const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, historical: false, pending: '', error: '', notice: '' })
+const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, action: null, historical: false, pending: '', error: '', notice: '' })
 const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null })
 const xKinds = ['date', 'instant', 'number', 'count']
 const yKinds = ['number', 'count', 'money', 'ratio', 'duration']
@@ -44,6 +45,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
 
   function invalidate() {
     generation.current += 1
+    context.current?.action?.controller.abort()
     context.current?.controller.abort()
     context.current = null
     busy.current = false
@@ -120,12 +122,101 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   }
   async function readView(record, historical, ctx, cursor) {
     const request = ++viewGeneration.current
-    setState((old) => ({ ...old, selected: record, historical, read: null }))
+    ctx.action?.controller.abort()
+    ctx.action = null
+    setState((old) => ({ ...old, selected: record, historical, read: null, action: null }))
+    if (record.element.kind === 'integration.action') {
+      if (historical || !['owner', 'editor'].includes(state.scope?.projectRole)) return
+      const binding = { record, ctx, request, controller: new AbortController(), grantRevision: null, availability: 'unavailable' }
+      ctx.action = binding
+      setState((old) => ({ ...old, action: { binding, availability: 'unavailable' } }))
+      await refreshAction(binding)
+      return
+    }
     const read = await client.queryDataset(projectId, record.element.dataset_ref,
       DatasetQueryV1.parse({ ...record.element.query, ...(cursor ? { cursor } : {}) }), { signal: ctx.controller.signal })
     if (!current(ctx) || request !== viewGeneration.current) return
     if (read.status === 'forbidden') { fail({ status: 403 }, ctx); return }
     setState((old) => ({ ...old, read }))
+  }
+  const currentAction = (binding) => current(binding.ctx) && binding.ctx.action === binding &&
+    viewGeneration.current === binding.request && !binding.controller.signal.aborted
+  function actionAvailability(binding, availability) {
+    if (!currentAction(binding)) return
+    binding.availability = availability
+    setState((old) => ({ ...old, action: { binding, availability } }))
+  }
+  function checkConnection(binding, connection) {
+    const element = binding.record.element
+    if (connection.id !== element.connection_id || connection.state !== 'active' ||
+        !connection.operation_ids?.includes(element.operation_ref.id)) return 'forbidden'
+    if (referenceKey(connection.connector_ref) !== referenceKey(element.connector_ref) ||
+        !Number.isSafeInteger(connection.grant_revision) || connection.grant_revision <= 0 ||
+        (binding.grantRevision !== null && connection.grant_revision !== binding.grantRevision)) return 'stale'
+    return 'ready'
+  }
+  async function refreshAction(binding) {
+    try {
+      if (!currentAction(binding)) return
+      if (binding.grantRevision !== null) {
+        const scope = await client.getScope(projectId, { signal: binding.controller.signal })
+        if (!currentAction(binding)) return
+        if (scopeCacheIdentity(scope, binding.ctx.sessionGeneration) !== binding.ctx.cacheIdentity) {
+          actionAvailability(binding, 'stale')
+          return
+        }
+      }
+      const connection = await client.getConnection(projectId, binding.record.element.connection_id, { signal: binding.controller.signal })
+      if (!currentAction(binding)) return
+      const availability = checkConnection(binding, connection)
+      if (availability === 'ready' && binding.grantRevision === null) binding.grantRevision = connection.grant_revision
+      actionAvailability(binding, availability)
+    } catch (error) {
+      actionAvailability(binding, error?.status === 403 ? 'forbidden' : 'unavailable')
+    }
+  }
+  async function actionCallback(binding, callerSignal, submission, runId) {
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    const signals = [callerSignal, binding.controller.signal, binding.ctx.controller.signal]
+    signals.forEach((signal) => signal.addEventListener('abort', abort, { once: true }))
+    const assertCurrent = () => {
+      if (signals.some((signal) => signal.aborted) || controller.signal.aborted || !currentAction(binding)) {
+        controller.abort()
+        throw new DOMException('Aborted', 'AbortError')
+      }
+    }
+    try {
+      assertCurrent()
+      if (binding.availability !== 'ready') throw new Error('This action is unavailable.')
+      const scope = await client.getScope(projectId, { signal: controller.signal })
+      assertCurrent()
+      if (scopeCacheIdentity(scope, binding.ctx.sessionGeneration) !== binding.ctx.cacheIdentity || !['owner', 'editor'].includes(scope.projectRole)) {
+        actionAvailability(binding, 'stale')
+        throw new Error('This action has changed. Refresh it before continuing.')
+      }
+      const connection = await client.getConnection(projectId, binding.record.element.connection_id, { signal: controller.signal })
+      assertCurrent()
+      const availability = checkConnection(binding, connection)
+      if (availability !== 'ready') {
+        actionAvailability(binding, availability)
+        throw new Error('This action has changed. Refresh it before continuing.')
+      }
+      const expected = { ...binding.record.element, expected_grant_revision: binding.grantRevision }
+      if (submission && !actionRunMatches({ ...submission, grant_revision: submission.expected_grant_revision }, expected)) {
+        actionAvailability(binding, 'stale')
+        throw new Error('This action has changed. Refresh it before continuing.')
+      }
+      const result = runId
+        ? await client.getAction(projectId, runId, { signal: controller.signal })
+        : await client.submitAction(projectId, submission, { signal: controller.signal })
+      assertCurrent()
+      if (result.run && !actionRunMatches(result.run, expected)) throw new Error('The integration response or request was invalid.')
+      return result
+    } catch (error) {
+      if (error?.status === 403) actionAvailability(binding, 'forbidden')
+      throw error
+    } finally { signals.forEach((signal) => signal.removeEventListener('abort', abort)) }
   }
   function chooseSaved(record) {
     operation('Loading saved view…', async (ctx) => {
@@ -222,16 +313,32 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             </label>)}{preferenceError && <p role="alert">{preferenceError}</p>}
           </fieldset>
           {state.selected && <section aria-label="Selected native view">
-            <p>Recipe revision {state.selected.revision}{state.historical ? ' · Historical recipe' : ''}. Views query live data; this is not an immutable evidence snapshot.</p>
-            {!state.historical && <button disabled={pending || !state.datasets.some((item) => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))} onClick={editSelected}>Edit current recipe</button>}
+            <p>Recipe revision {state.selected.revision}{state.historical ? ' · Historical recipe' : ''}. {state.selected.element.kind === 'integration.action'
+              ? (state.historical ? 'Historical actions are read-only.' : 'Actions execute with current human authority.')
+              : 'Views query live data; this is not an immutable evidence snapshot.'}</p>
+            {state.selected.element.kind !== 'integration.action' && !state.historical && <button disabled={pending || !state.datasets.some((item) => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))} onClick={editSelected}>Edit current recipe</button>}
             <form onSubmit={(event) => { event.preventDefault(); operation('Loading historical recipe…', async (ctx) => {
               const record = await client.getElement(projectId, state.selected.element.id, { revision: Number(revision), signal: ctx.controller.signal })
               if (current(ctx)) { setForm(blankForm()); await readView(record, true, ctx) }
             }) }}><label>Earlier recipe revision<input type="number" min="1" step="1" required value={revision} onChange={(event) => setRevision(event.target.value)} /></label><button disabled={pending}>Read revision</button></form>
+            {state.selected.element.kind === 'integration.action' ? <>
+              {!state.historical && !['owner', 'editor'].includes(state.scope.projectRole) && <p role="status">You do not have permission to perform this action.</p>}
+              {state.action && <>
+                {state.action.binding.grantRevision !== null ? <IntegrationActionForm
+                  element={state.selected.element} contextKey={JSON.stringify([context.current?.cacheIdentity, sessionGeneration, state.selected.revision, state.action.binding.request])}
+                  grantRevision={state.action.binding.grantRevision} availability={state.action.availability} displayPreferences={preferences}
+                  onSubmit={(submission, signal) => actionCallback(state.action.binding, signal, submission)}
+                  onCheckStatus={(runId, signal) => actionCallback(state.action.binding, signal, null, runId)} />
+                  : <p role="status">{state.action.availability === 'forbidden' ? 'You do not have permission to perform this action.' :
+                    state.action.availability === 'stale' ? 'This action has changed. Refresh it before continuing.' : 'This action is unavailable.'}</p>}
+                {state.action.availability !== 'ready' && <button disabled={pending} onClick={() => refreshAction(state.action.binding)}>Retry action authority</button>}
+              </>}
+            </> : <>
             {(state.read || pending) && <DatasetElement element={state.selected.element} read={state.read} preferences={preferences} isLoading={pending}
               onRetry={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}
               onLoadMore={(cursor) => operation('Loading view data…', (ctx) => readView(state.selected, state.historical, ctx, cursor))} />}
             {!state.read && !pending && <button onClick={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}>Retry view</button>}
+            </>}
           </section>}
         </>}
       </>}

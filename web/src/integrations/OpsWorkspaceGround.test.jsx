@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ReadableStream } from 'node:stream/web'
 import { TextDecoder, TextEncoder } from 'node:util'
+import { randomUUID } from 'node:crypto'
 import { OpsWorkspaceGround, scopeCacheIdentity } from './OpsWorkspaceGround.jsx'
 import { createIntegrationsClient } from './client.js'
 
@@ -22,6 +23,15 @@ const fields = [
 const element = { schema_version: 1, id: 'order-view', title: 'Order view', dataset_ref: reference,
   query: { fields: ['day', 'total'], limit: 100 }, kind: 'dataset.table', props: { columns: ['day', 'total'], row_limit: 100 } }
 const saved = { element, revision: 2 }
+const actionElement = { schema_version: 1, id: 'send-order', title: 'Send order', kind: 'integration.action',
+  connection_id: 'orders-connection', connector_ref: reference, operation_ref: { ...reference, id: 'send' },
+  form: { fields: [{ id: 'note', label: 'Order note', kind: 'text', required: true, nullable: false }], submit_label: 'Send order now' } }
+const savedAction = { element: actionElement, revision: 4 }
+const actionConnection = { id: actionElement.connection_id, state: 'active', connector_ref: reference, operation_ids: ['send'], grant_revision: 7 }
+const actionRun = { schema_version: 1, run_id: projectId, revision: 1, connection_id: actionElement.connection_id,
+  connector_ref: reference, operation_ref: actionElement.operation_ref, grant_revision: 7, submission_digest: 'b'.repeat(64),
+  authority_binding_digest: 'c'.repeat(64), created_at: '2026-10-20T12:00:00Z', updated_at: '2026-10-20T12:00:00Z',
+  state: 'accepted', effect_outcome: 'not_dispatched' }
 const scope = { tenantId: projectId, projectId, platformUserId: projectId, bindingId: projectId,
   projectRole: 'owner', externalAuthority: 'auth0', externalSubject: 'auth0|one' }
 const read = { schema_version: 1, dataset_ref: reference, fields,
@@ -55,6 +65,32 @@ function setup() {
     session: { ...sessionController.getSnapshot(), controller: sessionController }, client }
   return { props, fetchImpl, sessionController }
 }
+function setupAction() {
+  vi.stubGlobal('crypto', { randomUUID: vi.fn(randomUUID) })
+  const harness = setup()
+  const original = harness.fetchImpl.getMockImplementation()
+  const authority = { scope, connection: actionConnection }
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/scope')) return Promise.resolve(response(authority.scope))
+    if (url.includes('/elements?')) return Promise.resolve(response(page([saved, savedAction])))
+    if (url.includes('/connections/')) return Promise.resolve(response(authority.connection))
+    if (url.endsWith('/integrations/actions')) return Promise.resolve(response({ status: 'admitted', run: actionRun, replayed: false }))
+    if (url.includes('/integrations/actions/')) return Promise.resolve(response({ run: actionRun, receipts: [] }))
+    if (url.includes('/elements/send-order')) return Promise.resolve(response({ ...savedAction, revision: 1 }))
+    return original(url, options)
+  })
+  return { ...harness, authority }
+}
+async function openAction() {
+  await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Send order · revision 4' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send order now' })).toBeEnabled())
+}
+function submitAction() {
+  fireEvent.change(screen.getByLabelText('Order note (required)'), { target: { value: 'Ship today' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Send order now' }))
+}
+const actionPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) => url.endsWith('/integrations/actions') && options.method === 'POST')
 beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
@@ -207,4 +243,207 @@ it('partitions cache identity by verified tenant, principal, binding, role, proj
     expect(scopeCacheIdentity({ ...scope, [key]: 'different' }, 1)).not.toBe(original)
   }
   expect(scopeCacheIdentity(scope, 2)).not.toBe(original)
+})
+it('opens mixed recipes independently, shares duplicate protection and sends exact frozen action arguments', async () => {
+  const { props, fetchImpl } = setupAction()
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/query'))).toHaveLength(0)
+  expect(screen.queryByRole('button', { name: 'Edit current recipe' })).toBeNull()
+  expect(screen.queryByText(/Views query live data/)).toBeNull()
+  fireEvent.change(screen.getByLabelText('Order note (required)'), { target: { value: 'Ship today' } })
+  const form = screen.getByRole('button', { name: 'Send order now' }).closest('form')
+  fireEvent.submit(form)
+  fireEvent.submit(form)
+  await screen.findByText('Submission accepted. Execution is pending.')
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(actionPosts(fetchImpl)[0][1].body)).toEqual({ schema_version: 1,
+    connection_id: actionElement.connection_id, connector_ref: reference, operation_ref: actionElement.operation_ref,
+    expected_grant_revision: 7, arguments: { note: 'Ship today' }, idempotency_key: expect.stringMatching(/^[0-9a-f-]{36}$/i) })
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/scope'))).toHaveLength(2)
+  expect(fetchImpl.mock.calls.filter(([url]) => url.includes('/connections/'))).toHaveLength(2)
+  fireEvent.click(screen.getByRole('button', { name: 'Order view · revision 2' }))
+  await screen.findByRole('table', { name: 'Order view data' })
+  expect(screen.queryByLabelText('Order note (required)')).toBeNull()
+})
+it('retains inputs and recovers an ambiguous submission only explicitly with the identical request and key', async () => {
+  const { props, fetchImpl } = setupAction()
+  const original = fetchImpl.getMockImplementation()
+  let attempts = 0
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/integrations/actions') && ++attempts === 1
+    ? Promise.reject(new Error('private provider error')) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  submitAction()
+  const recover = await screen.findByRole('button', { name: 'Recover submission' })
+  expect(screen.getByLabelText('Order note (required)')).toHaveValue('Ship today')
+  expect(screen.getByText(/Local cancellation does not undo an action/)).toBeInTheDocument()
+  expect(screen.queryByText('private provider error')).toBeNull()
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  fireEvent.click(recover)
+  await screen.findByText('Submission accepted. Execution is pending.')
+  expect(actionPosts(fetchImpl)).toHaveLength(2)
+  expect(actionPosts(fetchImpl)[1][1].body).toBe(actionPosts(fetchImpl)[0][1].body)
+  expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1)
+})
+it('checks a known run using GET and renders canonical receipts with personal display preferences', async () => {
+  const { props, fetchImpl } = setupAction()
+  const original = fetchImpl.getMockImplementation()
+  const completed = { ...actionRun, revision: 2, state: 'succeeded', effect_outcome: 'applied' }
+  const receipt = { schema_version: 1, receipt_id: otherProject, run_id: actionRun.run_id, sequence: 1,
+    submission_digest: actionRun.submission_digest, operation_ref: actionRun.operation_ref,
+    observed_at: actionRun.updated_at, effect_outcome: 'applied' }
+  fetchImpl.mockImplementation((url, options) => url.includes('/integrations/actions/')
+    ? Promise.resolve(response({ run: completed, receipts: [receipt] })) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  submitAction()
+  fireEvent.click(await screen.findByRole('button', { name: 'Check status' }))
+  const history = await screen.findByRole('list', { name: 'Action history' })
+  expect(history).toHaveTextContent('Action applied')
+  const times = [...history.querySelectorAll('time')].map((node) => node.textContent)
+  fireEvent.change(screen.getByLabelText('Display timezone'), { target: { value: 'Asia/Tokyo' } })
+  expect([...history.querySelectorAll('time')].map((node) => node.textContent)).not.toEqual(times)
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  const statusCalls = fetchImpl.mock.calls.filter(([url]) => url.includes('/integrations/actions/'))
+  expect(statusCalls).toHaveLength(1)
+  expect(statusCalls[0][1].method).toBe('GET')
+})
+it.each(['reviewer', 'read_only'])('never loads execution authority for a %s', async (projectRole) => {
+  const { props, fetchImpl, authority } = setupAction()
+  authority.scope = { ...scope, projectRole }
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Send order · revision 4' }))
+  await screen.findByText('You do not have permission to perform this action.')
+  expect(fetchImpl.mock.calls.some(([url]) => url.includes('/connections/') || url.endsWith('/integrations/actions'))).toBe(false)
+  expect(screen.queryByRole('button', { name: 'Send order now' })).toBeNull()
+})
+it('opens historical actions read-only without reading execution authority or querying a dataset', async () => {
+  const { props, fetchImpl } = setupAction()
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  const connections = fetchImpl.mock.calls.filter(([url]) => url.includes('/connections/')).length
+  fireEvent.change(screen.getByLabelText('Earlier recipe revision'), { target: { value: '1' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Read revision' }))
+  await screen.findByText(/Historical actions are read-only/)
+  expect(screen.queryByRole('button', { name: 'Send order now' })).toBeNull()
+  expect(fetchImpl.mock.calls.filter(([url]) => url.includes('/connections/'))).toHaveLength(connections)
+  expect(fetchImpl.mock.calls.some(([url]) => url.endsWith('/query'))).toBe(false)
+})
+it.each([
+  { state: 'revoked' }, { connector_ref: { ...reference, digest: 'd'.repeat(64) } }, { operation_ids: ['other'] },
+])('refuses unavailable or mismatched current connection authority %j', async (change) => {
+  const { props, fetchImpl, authority } = setupAction()
+  authority.connection = { ...actionConnection, ...change }
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Send order · revision 4' }))
+  await screen.findByRole('button', { name: 'Retry action authority' })
+  expect(screen.queryByRole('button', { name: 'Send order now' })).toBeNull()
+  expect(actionPosts(fetchImpl)).toHaveLength(0)
+})
+it.each(['scope', 'grant', 'revoked', 'ref'])('rechecks %s drift before submission and never refreshes the frozen grant', async (change) => {
+  const { props, fetchImpl, authority } = setupAction()
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  if (change === 'scope') authority.scope = { ...scope, bindingId: otherProject }
+  if (change === 'grant') authority.connection = { ...actionConnection, grant_revision: 8 }
+  if (change === 'revoked') authority.connection = { ...actionConnection, state: 'revoked' }
+  if (change === 'ref') authority.connection = { ...actionConnection, connector_ref: { ...reference, version: 4 } }
+  submitAction()
+  const retry = await screen.findByRole('button', { name: 'Retry action authority' })
+  expect(actionPosts(fetchImpl)).toHaveLength(0)
+  expect(screen.getByLabelText('Order note (required)')).toHaveValue('Ship today')
+  if (change === 'grant') {
+    fireEvent.click(retry)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Recover submission' })).toBeDisabled())
+    expect(actionPosts(fetchImpl)).toHaveLength(0)
+  }
+})
+it('rechecks authority before known-run status and refuses grant drift without a GET', async () => {
+  const { props, fetchImpl, authority } = setupAction()
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  submitAction()
+  const check = await screen.findByRole('button', { name: 'Check status' })
+  authority.connection = { ...actionConnection, grant_revision: 8 }
+  fireEvent.click(check)
+  await screen.findByRole('button', { name: 'Retry action authority' })
+  expect(fetchImpl.mock.calls.filter(([url]) => url.includes('/integrations/actions/'))).toHaveLength(0)
+})
+it.each(['project', 'account', 'generation', 'profile', 'unmount'])('aborts action calls and discards late responses on %s invalidation', async (change) => {
+  const { props, fetchImpl, sessionController } = setupAction()
+  const original = fetchImpl.getMockImplementation()
+  let finish
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/integrations/actions')
+    ? new Promise((resolve) => { finish = resolve }) : original(url, options))
+  const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  submitAction()
+  await waitFor(() => expect(actionPosts(fetchImpl)).toHaveLength(1))
+  const signal = actionPosts(fetchImpl)[0][1].signal
+  if (change === 'unmount') unmount()
+  else if (change === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } :
+    change === 'account' ? { accountScope: 'account-b' } : { active: false })} />)
+  expect(signal.aborted).toBe(true)
+  expect(screen.queryByLabelText('Order note (required)')).toBeNull()
+  await act(async () => finish(response({ status: 'admitted', run: actionRun, replayed: false })))
+  expect(screen.queryByRole('region', { name: 'Action run status' })).toBeNull()
+})
+it('links the shared caller timeout to host I/O and rejects an ignored late response without claiming rollback', async () => {
+  const { props, fetchImpl } = setupAction()
+  const original = fetchImpl.getMockImplementation()
+  let finish
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/integrations/actions')
+    ? new Promise((resolve) => { finish = resolve }) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  vi.useFakeTimers()
+  try {
+    await act(async () => submitAction())
+    expect(actionPosts(fetchImpl)).toHaveLength(1)
+    const signal = actionPosts(fetchImpl)[0][1].signal
+    await act(async () => vi.advanceTimersByTime(45000))
+    expect(signal.aborted).toBe(true)
+    expect(screen.getByText(/Local cancellation does not undo an action/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Recover submission' })).toBeEnabled()
+    await act(async () => finish(response({ status: 'admitted', run: actionRun, replayed: false })))
+    expect(actionPosts(fetchImpl)).toHaveLength(1)
+    expect(screen.queryByText('Submission accepted. Execution is pending.')).toBeNull()
+  } finally { vi.useRealTimers() }
+})
+it('rejects stale callback continuations even when a supplied client ignores cancellation', async () => {
+  const { props, fetchImpl } = setupAction()
+  let finish
+  vi.spyOn(props.client, 'getScope').mockResolvedValueOnce(scope).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  const { rerender } = render(<OpsWorkspaceGround {...props} />)
+  await openAction()
+  submitAction()
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  rerender(<OpsWorkspaceGround {...props} active={false} />)
+  await act(async () => finish(scope))
+  expect(actionPosts(fetchImpl)).toHaveLength(0)
+  expect(fetchImpl.mock.calls.filter(([url]) => url.includes('/connections/'))).toHaveLength(1)
+  expect(screen.queryByLabelText('Order note (required)')).toBeNull()
+})
+it('offers a fixed-copy retry for failed connection reads and admits only the current connection', async () => {
+  const { props, fetchImpl } = setupAction()
+  const original = fetchImpl.getMockImplementation()
+  let failConnection = true
+  fetchImpl.mockImplementation((url, options) => url.includes('/connections/') && failConnection
+    ? Promise.resolve(response({ secret: 'provider secret' }, 503)) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Send order · revision 4' }))
+  const retry = await screen.findByRole('button', { name: 'Retry action authority' })
+  await waitFor(() => expect(retry).toBeEnabled())
+  expect(screen.getByText('This action is unavailable.')).toBeInTheDocument()
+  expect(screen.queryByText('provider secret')).toBeNull()
+  failConnection = false
+  fireEvent.click(retry)
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send order now' })).toBeEnabled())
+  expect(actionPosts(fetchImpl)).toHaveLength(0)
 })
