@@ -15,8 +15,10 @@ import unicodedata
 
 if __package__:
     from .platform_link import _ensure_platform_package
+    from .integration_config import IntegrationConfigError, load_integration_config
 else:
     from platform_link import _ensure_platform_package
+    from integration_config import IntegrationConfigError, load_integration_config
 
 _ensure_platform_package()
 from leaf_platform.integration_turn_grant_store import Binding, PURPOSE, SCHEMA
@@ -45,7 +47,14 @@ class KmsKeyService:
     def canonical_key_arn(self):
         if self._arn is not None:
             return self._arn
-        key = os.environ.get("LEAF_INTEGRATION_TURN_GRANTS_KMS_KEY_ID", "")
+        settings = None
+        try:
+            settings = load_integration_config()
+        except IntegrationConfigError:
+            pass
+        if settings is None:
+            raise GrantCryptoError("GRANT_CRYPTO_CONFIG") from None
+        key = settings.kms_key_id
         region = os.environ.get("AWS_REGION", "")
         if (not re.fullmatch(r"[A-Za-z0-9:/_-]{1,2048}", key)
                 or not re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-[0-9]+", region)):

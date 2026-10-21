@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 import json
 import math
-import os
 from pathlib import Path
 import re
 import time
@@ -28,8 +27,10 @@ import agent_gate
 
 try:
     from . import integration_turn_grant_crypto as crypto
+    from .integration_config import IntegrationConfigError, load_integration_config
 except ImportError:
     import integration_turn_grant_crypto as crypto
+    from integration_config import IntegrationConfigError, load_integration_config
 
 platform_link._ensure_platform_package()
 from leaf_platform.integration_turn_grant_store import (
@@ -201,7 +202,12 @@ class Current:
 
 
 def resolve_current(tenant_id, session_id, turn_id, *, write=False):
-    if os.environ.get("LEAF_INTEGRATION_TURN_GRANTS_ENABLED") != "1":
+    settings = None
+    try:
+        settings = load_integration_config()
+    except IntegrationConfigError:
+        pass
+    if settings is None or not settings.enabled:
         raise ReadFailure("unavailable")
     if not deps.auth_live():
         raise ReadFailure("unauthenticated")
@@ -236,7 +242,7 @@ def resolve_current(tenant_id, session_id, turn_id, *, write=False):
         raise ReadFailure("denied")
     authority = Authority(tenant_id, project, str(binding.platform_user_id), str(binding.binding_id),
                           "auth0", subject, session_id, turn_id,
-                          os.environ.get("LEAF_INTEGRATION_SERVICE_ORIGIN", ""),
+                          settings.api_origin,
                           operations=CURRENT_OPERATIONS)
     return Current(authority, tier, caps)
 

@@ -165,8 +165,8 @@ def test_authority_and_snapshot_fail_closed(custody, case):
     "LEAF_INTEGRATION_TURN_GRANTS_ENABLED", "LEAF_INTEGRATION_SERVICE_ORIGIN",
     "LEAF_INTEGRATION_TURN_GRANTS_KMS_KEY_ID", "AWS_REGION", "DATABASE_URL",
 ])
-def test_missing_configuration_does_no_adapter_work(custody, monkeypatch, name):
-    monkeypatch.delenv(name)
+def test_empty_configuration_does_no_adapter_work(custody, monkeypatch, name):
+    monkeypatch.setenv(name, "")
     monkeypatch.setattr(grants, "_adapters", lambda: pytest.fail("adapter touched"))
     assert custody.capture().code == "unavailable"
 
@@ -371,7 +371,7 @@ def test_optional_failure_preserves_dispatch_body_and_response(dispatch, monkeyp
     h.start()
     before = h.wire[-1]
     def boom(*a): raise RuntimeError(TOKEN)
-    if case == "disabled": monkeypatch.delenv("LEAF_INTEGRATION_TURN_GRANTS_ENABLED")
+    if case == "disabled": monkeypatch.setenv("LEAF_INTEGRATION_TURN_GRANTS_ENABLED", "0")
     if case == "import": monkeypatch.setattr(grants, "_adapters", boom)
     if case == "seal": monkeypatch.setattr(grants, "_adapters", lambda: (Authority, Binding, h.store, boom))
     if case == "put": monkeypatch.setattr(h.store, "put_once", boom)

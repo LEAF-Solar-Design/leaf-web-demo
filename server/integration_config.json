@@ -1,0 +1,6 @@
+{
+  "schema": "leaf.studio-integration-config.v1",
+  "enabled": true,
+  "apiOrigin": "https://ops-dashboard-seven.vercel.app",
+  "kmsKeyArn": "arn:aws:kms:us-east-1:807034087062:key/187d5443-18be-4e51-99c5-f9fdbda4cc87"
+}

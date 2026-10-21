@@ -3493,7 +3493,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_mcp_tool_projection.py"), 6),
         Suite("server-integration-turn-grants", "encrypted Studio turn grant unit checks", "pytest", SERVER,
               _py_pytest("tests/test_integration_turn_grant_crypto.py")
-              + ["tests/test_integration_turn_grant_store.py"], 61),
+              + ["tests/test_integration_turn_grant_store.py", "tests/test_integration_config.py"], 103),
         Suite("server-integration-turn-grant-capture", "accepted direct turn custody", "pytest", SERVER,
               _py_pytest("tests/test_integration_turn_grant_capture.py"), 1),
         Suite("server-integration-turn-grant-lifecycle", "exact turn custody cleanup", "pytest", SERVER,

@@ -19,6 +19,11 @@ import threading
 import time
 from uuid import UUID, uuid4
 
+if __package__:
+    from .integration_config import IntegrationConfigError, load_integration_config
+else:
+    from integration_config import IntegrationConfigError, load_integration_config
+
 
 @dataclass(frozen=True)
 class CaptureOutcome:
@@ -55,13 +60,16 @@ def _uuid(value):
 
 
 def _configuration():
-    if os.environ.get("LEAF_INTEGRATION_TURN_GRANTS_ENABLED") != "1":
+    try:
+        settings = load_integration_config()
+    except IntegrationConfigError:
         return None
-    origin = os.environ.get("LEAF_INTEGRATION_SERVICE_ORIGIN", "")
-    # Full origin validation is S10 Authority's responsibility, before any I/O.
+    if not settings.enabled:
+        return None
+    origin = settings.api_origin
+    # Authority also validates the origin before any privileged I/O.
     if (not origin or not os.environ.get("DATABASE_URL")
-            or not re.fullmatch(r"[A-Za-z0-9:/_-]{1,2048}", os.environ.get(
-                "LEAF_INTEGRATION_TURN_GRANTS_KMS_KEY_ID", ""))
+            or not re.fullmatch(r"[A-Za-z0-9:/_-]{1,2048}", settings.kms_key_id)
             or not re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-[0-9]+",
                                 os.environ.get("AWS_REGION", ""))):
         return None

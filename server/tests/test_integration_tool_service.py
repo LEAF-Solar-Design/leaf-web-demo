@@ -304,8 +304,13 @@ def test_legacy_binding_serves_original_operations_under_current_authority_uncha
     assert rig.custody.binding.authority.operations == LEGACY_OPERATIONS
 
 
-def test_production_current_resolution_explicitly_includes_action_discovery(custody, monkeypatch):
+@pytest.mark.parametrize("source_defaults", [False, True])
+def test_production_current_resolution_explicitly_includes_action_discovery(custody, monkeypatch, source_defaults):
     h = custody
+    if source_defaults:
+        for name in ("LEAF_INTEGRATION_TURN_GRANTS_ENABLED", "LEAF_INTEGRATION_SERVICE_ORIGIN",
+                     "LEAF_INTEGRATION_TURN_GRANTS_KMS_KEY_ID"):
+            monkeypatch.delenv(name)
     # Public session reads decode the PostgreSQL project storage marker.
     h.session["tenant_id"] = str(h.tenant)
     monkeypatch.setattr(service.deps, "auth_live", lambda: True)
@@ -315,8 +320,22 @@ def test_production_current_resolution_explicitly_includes_action_discovery(cust
     monkeypatch.setattr(service.turn_runner, "turn_max_s", lambda: 300)
     current = service.resolve_current(str(h.tenant), "s", "t", write=True)
     assert current.authority.operations == CURRENT_OPERATIONS
+    assert current.authority.origin == ("https://ops-dashboard-seven.vercel.app" if source_defaults
+                                        else "https://integration.example")
     assert h.capture().code == "captured"
     assert h.puts[0].authority == current.authority
+
+
+@pytest.mark.parametrize("name,value", [
+    ("LEAF_INTEGRATION_TURN_GRANTS_ENABLED", "0"),
+    ("LEAF_INTEGRATION_SERVICE_ORIGIN", ""),
+    ("LEAF_INTEGRATION_TURN_GRANTS_KMS_KEY_ID", ""),
+])
+def test_configuration_unavailable_precedes_authority(custody, monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    monkeypatch.setattr(service.deps, "auth_live", lambda: pytest.fail("authority touched"))
+    with pytest.raises(service.ReadFailure, match="^unavailable$"):
+        service.resolve_current(str(custody.tenant), "s", "t")
 
 
 @pytest.mark.parametrize("stored_ops,current_ops,required,allowed", [

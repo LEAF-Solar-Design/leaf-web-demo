@@ -247,3 +247,32 @@ def test_invalid_config_precedes_sdk_creation(monkeypatch, key, region):
 
 
 _REAL_RESOLVE = crypto.KmsKeyService.canonical_key_arn
+
+
+def test_kms_source_default_and_existing_cache_are_lazy(monkeypatch):
+    import types
+    source_arn = "arn:aws:kms:us-east-1:807034087062:key/187d5443-18be-4e51-99c5-f9fdbda4cc87"
+    for name in ("LEAF_INTEGRATION_TURN_GRANTS_ENABLED", "LEAF_INTEGRATION_SERVICE_ORIGIN",
+                 "LEAF_INTEGRATION_TURN_GRANTS_KMS_KEY_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    calls = []
+    def describe(**kwargs):
+        calls.append(kwargs)
+        return {"KeyMetadata": {"Arn": source_arn, "Enabled": True, "KeyState": "Enabled",
+                                "KeySpec": "SYMMETRIC_DEFAULT", "KeyUsage": "ENCRYPT_DECRYPT"}}
+    def client(*args, **kwargs):
+        calls.append((args, kwargs))
+        return types.SimpleNamespace(describe_key=describe)
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=client))
+    monkeypatch.setattr(crypto.KmsKeyService, "canonical_key_arn", _REAL_RESOLVE)
+    service = crypto.KmsKeyService()
+    assert calls == []
+    assert service.canonical_key_arn() == source_arn
+    assert calls[1] == {"KeyId": source_arn}
+    monkeypatch.setenv("LEAF_INTEGRATION_TURN_GRANTS_KMS_KEY_ID", "")
+    assert service.canonical_key_arn() == source_arn
+    assert len(calls) == 2
+    with pytest.raises(crypto.GrantCryptoError, match="^GRANT_CRYPTO_CONFIG$"):
+        crypto.KmsKeyService().canonical_key_arn()
+    assert len(calls) == 2
