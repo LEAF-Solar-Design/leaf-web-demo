@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import path from 'node:path'
 
-const dockerfile = readFileSync('../deploy/Dockerfile.web', 'utf8')
+const dockerfile = readFileSync(process.argv[2] ?? '../deploy/Dockerfile.web', 'utf8')
 const workflow = readFileSync('../.github/workflows/build-platform-images.yml', 'utf8')
 const index = readFileSync('index.html', 'utf8')
 const api = readFileSync('src/api.js', 'utf8')
@@ -137,4 +138,84 @@ assert.doesNotMatch(index, /\/runtime.flags\.js/,
 assert.match(index, /<script type="module" src="\/src\/main\.jsx">/,
   'index.html must still load the bundle')
 
-console.log('web container config: page assets, API, integration origin producers and fingerprints, Auth0 SPA values, Solar flow flags, and the absence of a shell rail are pinned')
+// Match the filesystem layout supplied to Vite by the build stage, including
+// relative imports made by the vendored files reached from web/src.
+const buildStart = /^FROM\s+\S+\s+AS\s+build\s*$/im.exec(dockerfile)
+const buildTail = buildStart ? dockerfile.slice(buildStart.index + buildStart[0].length) : ''
+const nextStage = /^FROM /im.exec(buildTail)
+const buildStage = (nextStage ? buildTail.slice(0, nextStage.index) : buildTail)
+  .replace(/\\\r?\n/g, ' ')
+const stripTrailingSlashes = value => value.replace(/\/+$/, '')
+const copies = [...buildStage.matchAll(/^\s*COPY\s+([^\r\n]+)/gim)].map(match => {
+  const tokens = match[1].trim().split(/\s+/)
+  const operands = tokens.filter(token => !token.startsWith('--'))
+  return {
+    stage: tokens.some(token => token.startsWith('--from=')),
+    source: stripTrailingSlashes(operands.at(-2)),
+    destination: stripTrailingSlashes(operands.at(-1)),
+  }
+})
+const containsPath = (parent, candidate) => candidate === parent || candidate.startsWith(parent + '/')
+const stageProvides = repoPath => copies.some(copy =>
+  copy.stage && containsPath(copy.destination, '/' + repoPath))
+const contextProvides = repoPath => copies.some(copy =>
+  !copy.stage && copy.destination === '/' + copy.source && containsPath(copy.source, repoPath))
+const repoRoot = path.resolve('..')
+const repoPathOf = file => path.relative(repoRoot, file).split(path.sep).join('/')
+const queue = []
+function collectWebSources(directory) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const file = path.join(directory, entry.name)
+    if (entry.isDirectory() && entry.name !== '__tests__') collectWebSources(file)
+    else if (entry.isFile() && /\.(js|jsx|mjs|ts|tsx)$/.test(entry.name)
+      && !/\.(test|spec)\.[^.]+$/.test(entry.name)) {
+      queue.push({ file, importer: repoPathOf(file), specifier: './' + entry.name })
+    }
+  }
+}
+collectWebSources(path.join(repoRoot, 'web/src'))
+const suffixes = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs',
+  '/index.ts', '/index.tsx', '/index.js', '/index.jsx', '/index.mjs']
+const specifierPatterns = [
+  /\bfrom\s*(['"])([^'"\r\n]+)\1/g,
+  /\bimport\s*(['"])([^'"\r\n]+)\1/g,
+  /\bimport\s*\(\s*(['"])([^'"\r\n]+)\1\s*\)/g,
+  /\bnew\s+URL\s*\(\s*(['"])([^'"\r\n]+)\1\s*,\s*import\.meta\.url\s*\)/g,
+]
+const missing = []
+const walked = new Set()
+let walkLimitExceeded = false
+const describeFailure = (repoPath, importer, specifier) =>
+  `${repoPath} (imported by ${importer} as '${specifier}')`
+for (let cursor = 0; cursor < queue.length; cursor += 1) {
+  const { file, importer, specifier } = queue[cursor]
+  if (walked.has(file)) continue
+  if (walked.size >= 5000) {
+    walkLimitExceeded = true
+    missing.push(describeFailure(repoPathOf(file), importer, specifier))
+    break
+  }
+  walked.add(file)
+  const source = readFileSync(file, 'utf8')
+  for (const pattern of specifierPatterns) {
+    for (const match of source.matchAll(pattern)) {
+      const dependency = match[2]
+      if (!dependency.startsWith('./') && !dependency.startsWith('../')) continue
+      const resolved = path.resolve(path.dirname(file), dependency)
+      const repoPath = repoPathOf(resolved)
+      if (containsPath('web', repoPath) || stageProvides(repoPath)) continue
+      if (!contextProvides(repoPath)) {
+        missing.push(describeFailure(repoPath, repoPathOf(file), dependency))
+        continue
+      }
+      const target = suffixes.map(suffix => resolved + suffix)
+        .find(candidate => existsSync(candidate) && statSync(candidate).isFile())
+      if (!target) missing.push(describeFailure(repoPath, repoPathOf(file), dependency))
+      else queue.push({ file: target, importer: repoPathOf(file), specifier: dependency })
+    }
+  }
+}
+assert.equal(missing.length, 0,
+  `build stage is missing imports${walkLimitExceeded ? ' (walk exceeds 5000 files)' : ''}: ${missing.join('; ')}`)
+
+console.log(`web container config: page assets, API, integration origin producers and fingerprints, Auth0 SPA values, Solar flow flags, and the absence of a shell rail are pinned; the build stage provides every out-of-tree import; checked ${walked.size} files`)
