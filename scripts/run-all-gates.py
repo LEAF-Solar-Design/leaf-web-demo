@@ -1796,6 +1796,10 @@ def build_suites() -> List[Suite]:
               "server PostgreSQL startup and production env-shape boot", "pytest", SERVER,
               _py_pytest("tests/test_platform_postgres_startup.py") +
               ["tests/test_production_env_shape_boot.py"], 38),
+        # Floor 35: 7 unparametrized tests + (2 + 5 + 3 + 2 + 9 + 3 + 4) parametrized cases.
+        Suite("server-boot-probe-implicit-constraints",
+              "server boot probe pending implicit constraints", "pytest", SERVER,
+              _py_pytest("tests/test_boot_probe_implicit_constraints.py"), 35),
         # Floor 46, re-measured 2026-08-07 after merging origin/main. THE MERGE
         # IS WHY THIS LINE NEEDS READING TWICE: this branch raised it 43 -> 45
         # for two new cases, main separately added
