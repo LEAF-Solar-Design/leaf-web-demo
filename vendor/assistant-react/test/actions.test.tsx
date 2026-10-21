@@ -5,7 +5,7 @@ import {
   IntegrationActionElementV1, IntegrationActionRunV1, IntegrationActionSnapshotV1,
   IntegrationActionSubmissionV1, type IntegrationActionReceiptV1,
 } from "../../assistant-contract/src/integration";
-import { IntegrationActionForm, IntegrationActionRunStatus, type IntegrationActionFormProps } from "../src/actions";
+import { IntegrationActionForm, IntegrationActionPreflightError, IntegrationActionRunStatus, type IntegrationActionFormProps } from "../src/actions";
 import { formatDatasetValue, resolveDisplayPreferences } from "../src/datasets/formatting";
 
 const ref = { id: "sales", version: 1, digest: "ab".repeat(32) };
@@ -133,6 +133,130 @@ describe("native integration action form", () => {
     const calls = vi.mocked(input.onSubmit).mock.calls;
     expect(calls).toHaveLength(2); expect(calls[1][0]).toBe(calls[0][0]);
     expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["unavailable", "forbidden", "stale"] as const)("retries a proven preflight refusal explicitly after %s clears", async (availability) => {
+    const error = new IntegrationActionPreflightError();
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe("The action was not submitted. Retry submission when the action is available.");
+    const input = props({ onSubmit: vi.fn().mockRejectedValueOnce(error).mockResolvedValueOnce(admitted()) });
+    const view = render(<IntegrationActionForm {...input} />); fill(); submit(); await settle();
+    expect(screen.getByText(error.message)).toHaveFocus();
+    expect(screen.queryByText(/Outcome unknown\./)).toBeNull();
+    expect(screen.queryByText(/It can execute the original action/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Recover submission" })).toBeNull();
+    expect(field("Amount")).toHaveValue("0"); expect(field("Amount")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Retry submission" })).toHaveAttribute("type", "button");
+    const request = vi.mocked(input.onSubmit).mock.calls[0][0];
+    expect(Object.isFrozen(request)).toBe(true);
+    view.rerender(<IntegrationActionForm {...input} availability={availability} />);
+    expect(screen.getByRole("button", { name: "Retry submission" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry submission" }));
+    view.rerender(<IntegrationActionForm {...input} />); await settle();
+    expect(input.onSubmit).toHaveBeenCalledTimes(1);
+    expect(input.onCheckStatus).not.toHaveBeenCalled();
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry submission" }));
+      submit();
+    });
+    await settle();
+    expect(input.onSubmit).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(input.onSubmit).mock.calls[1][0]).toBe(request);
+    expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Accepted. Awaiting execution.")).toBeTruthy();
+    expect(screen.queryByText(error.message)).toBeNull();
+  });
+
+  it.each(["throw", "reject"])("keeps repeated preflight refusals safe when callbacks %s", async (kind) => {
+    const input = props({ onSubmit: vi.fn(() => {
+      if (kind === "throw") throw new IntegrationActionPreflightError();
+      return Promise.reject(new IntegrationActionPreflightError());
+    }) });
+    render(<IntegrationActionForm {...input} />); fill(); submit(); await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Retry submission" })); await settle();
+    expect(screen.getByText(/The action was not submitted\./)).toBeTruthy();
+    expect(screen.queryByText(/Outcome unknown\./)).toBeNull();
+    expect(vi.mocked(input.onSubmit).mock.calls[1][0]).toBe(vi.mocked(input.onSubmit).mock.calls[0][0]);
+  });
+
+  it("switches from proven refusal to unknown if the explicit retry loses its response", async () => {
+    const input = props({ onSubmit: vi.fn()
+      .mockRejectedValueOnce(new IntegrationActionPreflightError())
+      .mockRejectedValueOnce(new Error("private lost response"))
+      .mockRejectedValueOnce(new IntegrationActionPreflightError()) });
+    render(<IntegrationActionForm {...input} />); fill(); submit(); await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Retry submission" })); await settle();
+    expect(screen.getByText(/Outcome unknown\./)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Recover submission" })); await settle();
+    expect(screen.getByText(/Outcome unknown\./)).toBeTruthy();
+    expect(screen.queryByText(/The action was not submitted\./)).toBeNull();
+    const calls = vi.mocked(input.onSubmit).mock.calls;
+    expect(calls[1][0]).toBe(calls[0][0]); expect(calls[2][0]).toBe(calls[0][0]);
+    expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["lost response", "malformed response", "cancellation", "lookalike error"])("preserves uncertainty after %s followed by a preflight refusal", async (failure) => {
+    const onSubmit = vi.fn();
+    if (failure === "malformed response") onSubmit.mockResolvedValueOnce({});
+    else onSubmit.mockRejectedValueOnce(failure === "lookalike error"
+      ? Object.assign(new Error("private provider exception"), { name: "IntegrationActionPreflightError", status: 403 })
+      : failure === "cancellation" ? new DOMException("private cancellation", "AbortError") : new Error("private lost response"));
+    onSubmit.mockRejectedValueOnce(new IntegrationActionPreflightError());
+    const input = props({ onSubmit });
+    render(<IntegrationActionForm {...input} />); fill(); submit(); await settle();
+    expect(screen.getByText(/Outcome unknown\./)).toBeTruthy();
+    expect(screen.queryByText(/The action was not submitted\./)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Recover submission" })); await settle();
+    expect(screen.getByText(/Outcome unknown\./)).toBeTruthy();
+    expect(screen.queryByText(/The action was not submitted\./)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry submission" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Recover submission" })).toBeTruthy();
+    expect(onSubmit.mock.calls[1][0]).toBe(onSubmit.mock.calls[0][0]);
+    expect(document.body.textContent).not.toContain("private");
+  });
+
+  it("preserves uncertainty after timeout and ignores a late preflight refusal", async () => {
+    vi.useFakeTimers(); const host = deferred();
+    const input = props({ onSubmit: vi.fn().mockReturnValueOnce(host.promise).mockRejectedValueOnce(new IntegrationActionPreflightError()) });
+    render(<IntegrationActionForm {...input} />); fill(); submit();
+    await act(async () => { vi.advanceTimersByTime(45000); });
+    expect(vi.mocked(input.onSubmit).mock.calls[0][1].aborted).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Recover submission" })); await settle();
+    await act(async () => host.reject(new IntegrationActionPreflightError()));
+    expect(screen.getByText(/Outcome unknown\./)).toBeTruthy();
+    expect(screen.queryByText(/The action was not submitted\./)).toBeNull();
+    expect(vi.mocked(input.onSubmit).mock.calls[1][0]).toBe(vi.mocked(input.onSubmit).mock.calls[0][0]);
+  });
+
+  it("retains the admitted run and receipt when a status read throws a preflight error", async () => {
+    const uncertain = { ...run, state: "uncertain" as const, effect_outcome: "unknown" as const, revision: 2 };
+    const input = props({ onCheckStatus: vi.fn()
+      .mockResolvedValueOnce({ run: uncertain, receipts: [receipt("unknown")] })
+      .mockRejectedValueOnce(new IntegrationActionPreflightError()) });
+    render(<IntegrationActionForm {...input} />); fill(); submit(); await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Check status" })); await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Check status" })); await settle();
+    expect(screen.getByText(/Outcome unknown\. The action/)).toBeTruthy();
+    expect(screen.getByText("Uncertain. Outcome unknown.")).toBeTruthy();
+    expect(within(screen.getByRole("list", { name: "Action history" })).getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.queryByText(/The action was not submitted\./)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry submission" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Check status" })).toBeTruthy();
+    expect(input.onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["terminal", "scope"])("resets submission knowledge only on the existing %s reset", async (reset) => {
+    const input = props({ onSubmit: vi.fn()
+      .mockResolvedValueOnce(admitted({ ...run, state: "succeeded", effect_outcome: "applied" }))
+      .mockRejectedValueOnce(new IntegrationActionPreflightError()) });
+    const view = render(<IntegrationActionForm {...input} />); fill(); submit(); await settle();
+    if (reset === "terminal") fireEvent.click(screen.getByRole("button", { name: "Start another action" }));
+    else { view.rerender(<IntegrationActionForm {...input} contextKey="new identity" />); fill(); }
+    submit(); await settle();
+    expect(screen.getByText(/The action was not submitted\./)).toBeTruthy();
+    expect(screen.queryByText(/Outcome unknown\./)).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry submission" })).toBeTruthy();
+    expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(2);
   });
 
   it.each([{}, admitted({ ...run, grant_revision: 2 }), admitted({ ...run, connection_id: "other" }),
