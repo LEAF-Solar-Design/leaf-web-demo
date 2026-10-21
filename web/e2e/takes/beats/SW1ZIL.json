@@ -7,19 +7,23 @@
   "fixtures": [],
   "steps": [
     { "verb": "click", "role": "button", "name": "Zoom in" },
-    { "verb": "pause", "ms": 400 },
+    { "verb": "pause", "ms": 300 },
     { "verb": "click", "role": "button", "name": "Zoom in" },
-    { "verb": "pause", "ms": 400 },
+    { "verb": "pause", "ms": 300 },
     { "verb": "click", "role": "button", "name": "Zoom in" },
-    { "verb": "pause", "ms": 400 },
+    { "verb": "pause", "ms": 300 },
     { "verb": "click", "role": "button", "name": "Zoom in" },
-    { "verb": "pause", "ms": 400 },
+    { "verb": "pause", "ms": 300 },
     { "verb": "click", "role": "button", "name": "Zoom in" },
-    { "verb": "pause", "ms": 400 },
+    { "verb": "pause", "ms": 300 },
     { "verb": "click", "role": "button", "name": "Zoom in" },
-    { "verb": "pause", "ms": 400 },
+    { "verb": "pause", "ms": 300 },
     { "verb": "click", "role": "button", "name": "Zoom in" },
-    { "verb": "pause", "ms": 400 }
+    { "verb": "pause", "ms": 300 },
+    { "verb": "click", "role": "button", "name": "Zoom in" },
+    { "verb": "pause", "ms": 300 },
+    { "verb": "click", "role": "button", "name": "Zoom in" },
+    { "verb": "pause", "ms": 300 }
   ],
   "expect_text": []
 }
