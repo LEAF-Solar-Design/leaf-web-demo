@@ -626,8 +626,10 @@ _OPERATOR_FLOORS = {
     "server-operator-authority": 7,
     "server-operator-credential-rotate": 19,
     "server-operator-egress-boundary": 27,
+    "server-operator-external-router-contract": 33,
     "server-operator-external-write": 22,
     "server-operator-identity-bindings": 12,
+    "server-operator-identity-bindings-auth-contract": 16,
     "server-operator-integration-drills": 4,
     "server-operator-overlay-runbook": 11,
     "server-operator-principals": 3,
@@ -639,6 +641,7 @@ _OPERATOR_FLOORS = {
     "server-operator-vocab-freeze": 13,
     "server-operator-worker-boundary": 12,
     "server-operator-worker-cancel": 10,
+    "server-operator-worker-router-contract": 21,
 }
 
 # Files whose own source carries NO conditional-skip construct. Their suites
@@ -646,7 +649,9 @@ _OPERATOR_FLOORS = {
 # the suite instead of quietly eroding its floor.
 _OPERATOR_NO_SKIP_FILES = frozenset({
     "server-operator-egress-boundary",
+    "server-operator-external-router-contract",
     "server-operator-identity-bindings",
+    "server-operator-identity-bindings-auth-contract",
     "server-operator-integration-drills",
     "server-operator-principals-static",
     "server-operator-production-unreachable",
@@ -654,6 +659,7 @@ _OPERATOR_NO_SKIP_FILES = frozenset({
     "server-operator-vocab-freeze",
     "server-operator-worker-boundary",
     "server-operator-worker-cancel",
+    "server-operator-worker-router-contract",
 })
 
 

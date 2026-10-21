@@ -2250,6 +2250,9 @@ def build_suites() -> List[Suite]:
         Suite("server-operator-egress-boundary",
               "server tests/test_operator_egress_boundary.py", "pytest",
               SERVER, _py_pytest("tests/test_operator_egress_boundary.py"), 27),
+        Suite("server-operator-external-router-contract",
+              "server tests/test_operator_external_router_contract.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_external_router_contract.py"), 33),
         Suite("server-operator-external-write",
               "server tests/test_operator_external_write.py", "pytest",
               SERVER, _py_pytest("tests/test_operator_external_write.py"), 22,
@@ -2257,6 +2260,9 @@ def build_suites() -> List[Suite]:
         Suite("server-operator-identity-bindings",
               "server tests/test_operator_identity_bindings.py", "pytest",
               SERVER, _py_pytest("tests/test_operator_identity_bindings.py"), 12),
+        Suite("server-operator-identity-bindings-auth-contract",
+              "server tests/test_operator_identity_bindings_auth_contract.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_identity_bindings_auth_contract.py"), 16),
         Suite("server-operator-integration-drills",
               "server tests/test_operator_integration_drills.py", "pytest",
               SERVER, _py_pytest("tests/test_operator_integration_drills.py"), 4),
@@ -2294,6 +2300,9 @@ def build_suites() -> List[Suite]:
         Suite("server-operator-worker-cancel",
               "server tests/test_operator_worker_cancel.py", "pytest",
               SERVER, _py_pytest("tests/test_operator_worker_cancel.py"), 10),
+        Suite("server-operator-worker-router-contract",
+              "server tests/test_operator_worker_router_contract.py", "pytest",
+              SERVER, _py_pytest("tests/test_operator_worker_router_contract.py"), 21),
         # --- platform (cwd=repo parent; DB-gated) --- #
         # Floor 236 is a MEASURED, GREEN, pristine-database baseline: 236
         # passed, 0 skipped, 0 failed, pytest exit 0, taken 2026-07-27 against
