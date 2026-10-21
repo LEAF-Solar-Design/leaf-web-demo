@@ -1,4 +1,4 @@
-import { createRunSubmissionRequest, projectSolarIntentExtras } from '../runIntent.js'
+import { createRunSubmissionRequest, projectSolarIntentExtras, projectSolarRequestExtras } from '../runIntent.js'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, sameSolarCheckoutBinding } from './solarDrawingBinding.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -346,7 +346,8 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         const intent = checkIntent(supplied)
         assert(!Object.hasOwn(entries, intent.tool))
         Object.defineProperty(entries, intent.tool, { enumerable: true, value: {
-          params: intent.params, catalog_digest: intent.catalogDigest, idempotency_key: intent.idempotencyKey } })
+          params: intent.params, catalog_digest: intent.catalogDigest, idempotency_key: intent.idempotencyKey,
+          ...projectSolarRequestExtras(intent.tool, intent) } })
       }
       const serialized = JSON.stringify(entries)
       assert(utf8(serialized) <= MAX_BODY)

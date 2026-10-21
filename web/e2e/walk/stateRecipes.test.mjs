@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
@@ -11,6 +12,271 @@ import { resolveProbe } from './probes.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
 import { seedSolarChain } from './fixtures.mjs'
 import { solarChainSteps } from './probes.mjs'
+import { projectSolarResponse, projectSolarStep, switchProjectSolarForms, assertProjectSolarDrawing, observeProjectSolarResponses, setupRequestHeaders, observeProbeRequests } from './fixtures.mjs'
+import { inspectJob, inspectContext } from '../local/solarProjectWalk.mjs'
+
+function authHeader(token) { const headers = {}; headers.Authorization = `Bearer ${token}`; return headers }
+
+test('WL16n setup headers preserve the tenant and read the current page bearer only for its own origin under live auth', async () => {
+  const originalStorage = globalThis.localStorage
+  let token = 'page-token', reads = 0
+  globalThis.localStorage = { getItem: (key) => {
+    assert.equal(key, 'leaf.jwt')
+    reads++
+    return token
+  } }
+  const runtime = { stack: { baseURL: 'https://walk.example:8230' }, workerFacts: {}, page: {
+    url: () => 'https://walk.example:8230/app?surface=cad', evaluate: async (callback) => callback(),
+  } }
+  const tenant = { 'X-Tenant-Id': 'demo-tenant' }
+  try {
+    for (const authLive of [undefined, false]) {
+      runtime.workerFacts.authLive = authLive
+      assert.deepEqual(await setupRequestHeaders(runtime, '/api/orgs'), tenant)
+    }
+    assert.equal(reads, 0)
+    runtime.workerFacts.authLive = true
+    for (const path of ['/api/drawings/upload', '/api/drawings/private/upload-status',
+      '/api/orgs', 'https://walk.example:8230/api/orgs']) {
+      assert.deepEqual(await setupRequestHeaders(runtime, path), { ...tenant, ...authHeader('page-token') })
+    }
+    token = 'refreshed-page-token'
+    assert.deepEqual(await setupRequestHeaders(runtime, '/api/orgs'), { ...tenant, ...authHeader('refreshed-page-token') })
+    for (const path of ['https://elsewhere.example/api/orgs', '//elsewhere.example/api/orgs',
+      'http://walk.example:8230/api/orgs', 'https://walk.example:8231/api/orgs']) {
+      assert.deepEqual(await setupRequestHeaders(runtime, path), tenant)
+    }
+    assert.equal(reads, 5, 'foreign origins must not read the bearer')
+    runtime.page.url = () => 'https://elsewhere.example/app'
+    assert.deepEqual(await setupRequestHeaders(runtime, '/api/orgs'), tenant,
+      'relative API requests resolve against the stack baseURL, not a foreign page')
+    assert.equal(reads, 5)
+    runtime.page.url = () => 'https://walk.example:8230/app'
+    for (const missing of [null, '', '   ']) {
+      token = missing
+      await assert.rejects(setupRequestHeaders(runtime, '/api/orgs'), {
+        name: 'WalkSetupAuthError', message: /setup_auth_token_missing: \/api\/orgs requires leaf.jwt/,
+      })
+    }
+    delete runtime.workerFacts
+    runtime.evidence = { workerFacts: { authLive: true } }
+    token = 'evidence-page-token'
+    assert.deepEqual(await setupRequestHeaders(runtime, '/api/orgs'), { ...tenant, ...authHeader('evidence-page-token') })
+  } finally { globalThis.localStorage = originalStorage }
+})
+
+test('WL16n project recipe uploads and extraction reads use setup headers, loading the page origin before live-auth uploads', async () => {
+  const map = buildFeatureMap()
+  const solar = map.entries.find((entry) => entry.id === 'surface:solar')
+  const probes = ['project-solar-open', 'project-solar-published', 'project-solar-form-switch']
+    .map((state) => resolveProbe(solar, state))
+  probes.push(resolveProbe(map.entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open'))
+  for (const probe of probes) for (const authLive of [false, true]) {
+    const calls = []
+    let currentURL = 'about:blank'
+    const runtime = { stack: { baseURL: 'http://walk' }, workerFacts: { authLive }, evidence: {}, cleanup: [],
+      ...(probe.setup.context.projectSolar ? { projectSolar: {} } : {}), page: {
+        url: () => currentURL,
+        goto: async (path) => { calls.push(['navigate', path]); currentURL = new URL(path, 'http://walk').href },
+        evaluate: async () => {
+          assert.equal(new URL(currentURL).origin, 'http://walk')
+          return 'upload-page-token'
+        },
+        request: {
+          post: async (path, options) => {
+            calls.push(['upload', path])
+            assert.equal(path, '/api/drawings/upload')
+            assert.deepEqual(options.headers, { 'X-Tenant-Id': 'demo-tenant',
+              ...(authLive ? authHeader('upload-page-token') : {}) })
+            assert.equal(options.timeout, 60_000)
+            return { status: () => 202, json: async () => ({ drawing_id: 'private-drawing' }) }
+          },
+          get: async (path, options) => {
+            calls.push(['extraction', path])
+            assert.equal(path, '/api/drawings/private-drawing/upload-status')
+            assert.deepEqual(options.headers, { 'X-Tenant-Id': 'demo-tenant',
+              ...(authLive ? authHeader('upload-page-token') : {}) })
+            assert.equal(options.timeout, 30_000)
+            return { ok: () => true, json: async () => ({ status: 'ready' }) }
+          },
+        },
+        getByRole: () => ({ locator: () => ({ boundingBox: async () => ({ width: 100, height: 100 }) }) }),
+      } }
+    await setupStep(probe, runtime, probe.setup.steps[0])
+    assert.deepEqual(calls, [
+      ...(authLive ? [['navigate', '/try?surface=cad']] : []),
+      ['upload', '/api/drawings/upload'], ['extraction', '/api/drawings/private-drawing/upload-status'],
+      ['navigate', '/app?drawing=private-drawing&surface=cad'],
+    ])
+    assert.equal(runtime.evidence.drawingId, 'private-drawing')
+  }
+})
+
+test('WL16b canonical publication requires a complete bound job, a distinct output and the current head', () => {
+  const ids = [1, 2, 3, 4, 5, 6].map((id) => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`)
+  const binding = { organization_id: ids[0], project_id: ids[1], drawing_id: ids[2], input_version_id: ids[3] }
+  const job = { job_id: ids[4], org_id: ids[0], project_id: ids[1], input_version_id: ids[3], tool_name: 'solar-settings',
+    execution_context: { schema: 'leaf.solar-project-graph-job.v1', drawing_id: ids[2] }, status: 'complete', error: null,
+    result: { output_version_id: ids[5] } }
+  assert.equal(inspectJob(job, binding, ids[4], 'solar-settings'), ids[5])
+  assert.equal(inspectJob({ ...job, status: 'running' }, binding, ids[4], 'solar-settings'), null)
+  for (const patch of [{ status: 'failed' }, { project_id: ids[0] }, { input_version_id: ids[5] },
+    { result: { output_version_id: ids[3] } }, { error: { reason_code: 'FAILED' } }]) {
+    assert.throws(() => inspectJob({ ...job, ...patch }, binding, ids[4], 'solar-settings'), /job/)
+  }
+  const next = { ...binding, input_version_id: ids[5] }
+  const context = { context: { ...next, head_version_id: ids[5], is_head: true, intake_sha256: 'a'.repeat(64) },
+    intake: { solar_design_graph: { rev: 1, panels: [], strings: [], inverters: [], routes: [], schedules: [] },
+      solar_design_graph_sha256: 'b'.repeat(64) } }
+  assert.equal(inspectContext(context, next).head, ids[5])
+  for (const patch of [{ head_version_id: ids[3] }, { is_head: false }, { drawing_id: ids[0] }]) {
+    assert.throws(() => inspectContext({ ...context, context: { ...context.context, ...patch } }, next), /context binding/)
+  }
+})
+
+test('WL16b setup failures name the step and real server response without becoming unavailable', async () => {
+  for (const [status, body] of [[403, { error: { reason_code: 'PROJECT_FORBIDDEN' } }],
+    [409, { detail: 'checkout held elsewhere' }], [503, { detail: 'worker offline' }]]) {
+    const runtime = { evidence: {} }
+    await assert.rejects(projectSolarStep(runtime, 'publish-project-solar', () => projectSolarResponse({
+      status: () => status, json: async () => body,
+    }, 'POST /api/run', [202])), (error) => {
+      assert.ok(!(error instanceof UnsupportedLocalError))
+      assert.match(error.message, /publish-project-solar: POST \/api\/run: HTTP/)
+      assert.ok(error.message.includes(String(status)))
+      assert.ok(error.message.includes(JSON.stringify(body)))
+      return true
+    })
+    assert.equal(runtime.evidence.projectSolar.steps[0].complete, undefined)
+    assert.ok(runtime.evidence.projectSolar.steps[0].error)
+  }
+  const response = { status: () => 202, json: async () => ({ job_id: 'accepted' }) }
+  assert.deepEqual(await projectSolarResponse(response, 'run', [202]), { job_id: 'accepted' })
+  await assert.rejects(projectSolarResponse({ status: () => 500, json: async () => { throw new Error('not JSON') } },
+    'canonical import', [201]), /canonical import: HTTP 500.*response JSON unreadable/)
+  const runtime = { evidence: {}, projectSolar: { drainDiagnostics: async () => {
+    runtime.evidence.projectSolar.serverFailure = { path: '/api/jobs/id', status: 500, body: { error: 'real failure' } }
+  } } }
+  await assert.rejects(projectSolarStep(runtime, 'job publication', async () => { throw new Error('read failed') }),
+    /job publication: read failed; server response.*real failure/)
+  const apiRuntime = { evidence: {} }
+  await assert.rejects(projectSolarStep(apiRuntime, 'create org', async () => {
+    await projectSolarResponse({ status: () => 201, json: async () => ({ org: null }) }, 'org receipt', [201], apiRuntime)
+    throw new Error('org identity missing')
+  }), /create org: org identity missing; server response.*"status":201.*"org":null/)
+})
+
+test('WL16b diagnostics observe drawing and project setup before canonical import and release listeners', async () => {
+  for (const [path, status, body] of [
+    ['/api/drawings/upload', 403, { error: 'upload refused' }],
+    ['/api/drawings/private/upload-status', 200, { status: 'failed', error: 'extraction failed' }],
+    ['/api/orgs', 500, { detail: 'workspace failed' }],
+    ['/api/projects', 409, { detail: 'project refused' }],
+    ['/api/projects/project/drawing-versions/import', 422, { detail: 'import refused' }],
+    ['/api/jobs/00000000-0000-4000-8000-000000000001', 200, { status: 'failed', error: 'worker failed' }],
+    ['/api/projects/project/drawing-versions/version/context', 404, { detail: 'context missing' }],
+  ]) {
+    const page = new EventEmitter()
+    const runtime = { page, stack: { baseURL: 'http://127.0.0.1:8230' }, evidence: {}, cleanup: [] }
+    observeProjectSolarResponses(runtime)
+    const response = { url: () => `${runtime.stack.baseURL}${path}`, status: () => status, json: async () => body }
+    page.emit('response', response)
+    await assert.rejects(projectSolarStep(runtime, 'setup under test', async () => { throw new Error('step failed') }),
+      (error) => error.message.includes(path) && error.message.includes(body.error || body.detail))
+    const proof = runtime.evidence.projectSolar
+    assert.equal(proof.serverFailure.status, status)
+    assert.equal(proof.steps[0].complete, undefined)
+    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+    assert.equal(page.listenerCount('response'), 0)
+  }
+  const page = new EventEmitter()
+  const runtime = { page, stack: { baseURL: 'http://127.0.0.1:8230' }, evidence: {}, cleanup: [] }
+  observeProjectSolarResponses(runtime)
+  page.emit('response', { url: () => `${runtime.stack.baseURL}/api/projects/project/drawings/drawing/checkout`,
+    status: () => 200, json: async () => assert.fail('successful checkout capabilities must not enter diagnostics') })
+  await runtime.projectSolar.drainDiagnostics()
+  assert.equal(runtime.evidence.projectSolar.lastCanonicalResponse, undefined)
+  for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+})
+
+test('WL16b drawing oracle refuses an old displayed UUID or an empty canonical canvas', async () => {
+  const binding = { input_version_id: 'published-uuid' }
+  for (const fault of [null, 'old-title', 'empty-canvas']) {
+    const runtime = { projectSolar: { binding }, page: {
+      locator: (selector) => ({ selector, evaluate: async () => fault !== 'empty-canvas' }),
+      getByTestId: (selector) => ({ selector }),
+    } }
+    const checked = []
+    const assertions = (value) => ({
+      toBeVisible: async () => checked.push(value.selector),
+      toHaveCount: async (count) => assert.equal(count, 1),
+      toContainText: async (uuid) => assert.equal(uuid, fault === 'old-title' ? 'old-uuid' : binding.input_version_id),
+      toBe: (expected) => assert.equal(value, expected),
+    })
+    if (fault) await assert.rejects(assertProjectSolarDrawing(runtime, assertions), assert.AssertionError)
+    else {
+      await assertProjectSolarDrawing(runtime, assertions)
+      assert.deepEqual(checked, ['.project-solar-workspace', 'solar-flow-rail', 'solar-flow-seat', '.studio-ground .viewer-canvas canvas'])
+    }
+  }
+})
+
+test('WL16b form switching detects stale drafts and never clicks a submit control', async () => {
+  for (const retainDraft of [false, true]) {
+    let active = null
+    const edits = [], clicks = []
+    const phases = ['initial', 'background']
+    const fields = () => ({ 'Grant ref': '', Request: '', Frame: '', Phase: 'initial', Memberships: '' })
+    let values = fields()
+    const solveNames = ['Grant ref', 'Request', 'Frame', 'Phase']
+    const node = (kind, name) => ({
+      isVisible: async () => kind === 'editor' ? active !== null : kind !== 'more',
+      getByRole: (role, options) => node(role, options.name),
+      getByLabel: (label) => node('field', label),
+      locator: (selector) => selector === 'option:checked' ? node('option', name)
+        : node('tool', selector.match(/data-tool="([^"]+)"/)[1]),
+      click: async () => {
+        clicks.push(name)
+        if (name instanceof RegExp) active = null
+        if (kind === 'tool') { active = name; if (!retainDraft) values = fields() }
+        assert.ok(!['Run solve', 'Correct strings'].includes(name), 'form switch must never submit')
+      },
+      fill: async (value) => { edits.push(name); values[name] = value },
+      selectOption: async ({ label }) => {
+        assert.equal(name, 'Phase')
+        assert.ok(phases.includes(label), `unknown Phase option: ${label}`)
+        edits.push(name); values[name] = label
+      },
+      value: () => values[name],
+      count: () => kind === 'editor' ? Number(active !== null)
+        : Number(active === (solveNames.includes(name) ? 'solar-solve-proposal' : 'solar-correct-string')),
+    })
+    const runtime = { evidence: { projectSolar: { steps: [] } }, projectSolar: { traffic: { runCount: 1 } }, page: {
+      locator: () => node('editor', 'editor'), getByTestId: () => node('ribbon', 'ribbon'),
+      getByLabel: (name) => node('field', name),
+      getByRole: (role, options) => node(options.name === 'More panels' ? 'more' : role, options.name),
+    } }
+    const assertions = (value) => ({
+      toBe: (expected) => assert.equal(value, expected),
+      toBeEnabled: async () => {},
+      toBeDisabled: async () => assert.equal(values.Frame, ''),
+      toHaveCount: async (count) => assert.equal(value.count(), count),
+      toHaveValue: async (expected) => assert.equal(value.value(), expected),
+      toHaveText: async (expected) => assert.equal(value.value(), expected),
+    })
+    assertions.poll = (read) => ({ toBe: async (expected) => assert.equal(await read(), expected) })
+    if (retainDraft) await assert.rejects(switchProjectSolarForms(runtime, assertions), /switch Solve to Correct strings and back/)
+    else {
+      await switchProjectSolarForms(runtime, assertions)
+      assert.deepEqual(edits, ['Grant ref', 'Request', 'Frame', 'Phase', 'Memberships'])
+      assert.deepEqual(runtime.evidence.projectSolar.formSwitch, {
+        solveFieldsReset: true, membershipsReset: true, runSolveDisabled: true, submittedRuns: 0,
+      })
+    }
+    assert.ok(clicks.includes('solar-correct-string'))
+    assert.ok(!clicks.some((name) => name instanceof RegExp), 'switch tools directly without closing their editors first')
+  }
+})
 
 function solarChainRuntime({ failTool, staleVersion = false, staleGraph = false, releaseFails = false,
   missingPanels = false, unconfirmedSizing = false, missingStrings = false, missingZone = false,
@@ -223,6 +489,24 @@ const censusAssertions = (value) => ({
 })
 
 const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+
+test('WL16b canonical import opens material intake through the Upload drawing ribbon action', () => {
+  const source = fixtureSource.slice(fixtureSource.indexOf('export async function openProjectSolar('),
+    fixtureSource.indexOf('export async function openProjectSolarTool('))
+  const steps = [
+    "await page.getByRole('tab', { name: 'Browser', exact: true }).click()",
+    "await page.getByRole('button', { name: 'Upload drawing', exact: true }).click()",
+    'const material = page.locator(\'[data-pane="material-intake"]\')',
+    "await assertions(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()",
+  ]
+  let previous = -1
+  for (const step of steps) {
+    const position = source.indexOf(step)
+    assert.ok(position > previous, `canonical material import must perform in order: ${step}`)
+    previous = position
+  }
+})
+
 const activationSource = fixtureSource.slice(fixtureSource.indexOf('async function activate('),
   fixtureSource.indexOf('export async function assertEffect('))
 const extractedActivate = (assertions) => new Function('expect', `${activationSource}; return activate`)(assertions)
@@ -803,7 +1087,7 @@ test('History fault is removed before R and its oracle rejects duplicate recover
 })
 
 test('project Escape observes UI creation and rejects refused or cross-org receipts while retaining cleanup', async () => {
-  for (const fault of [null, 'refused', 'wrong-org']) {
+  for (const authLive of [false, true]) for (const fault of [null, 'refused', 'wrong-org']) {
     const events = []
     const board = { visible: true, attributes: { 'data-project-state': 'project' },
       getByRole: (role, options) => {
@@ -817,11 +1101,14 @@ test('project Escape observes UI creation and rejects refused or cross-org recei
       },
     }
     const project = { project_id: 'ui-project', org_id: fault === 'wrong-org' ? 'other-org' : 'org', name: 'walk.dxf' }
-    const runtime = { cleanup: [], evidence: {}, page: {
+    const runtime = { cleanup: [], evidence: {}, workerFacts: { authLive }, stack: { baseURL: 'http://walk' }, page: {
+      url: () => 'http://walk/app',
       request: { post: async (path, options) => {
         // Project creation must come from the browser, never the fixture's API client.
         assert.equal(path, '/api/orgs')
         assert.equal(options.timeout, 15_000)
+        assert.deepEqual(options.headers, { 'X-Tenant-Id': 'demo-tenant',
+          ...(authLive ? authHeader('org-page-token') : {}) })
         events.push(path)
         return { ok: () => true, json: async () => ({ org: { org_id: 'org' } }) }
       } },
@@ -832,7 +1119,10 @@ test('project Escape observes UI creation and rejects refused or cross-org recei
         return { ok: () => fault !== 'refused', request: () => ({ headers: () => ({ 'x-org-id': 'org' }) }),
           json: async () => ({ project }) }
       },
-      evaluate: async (callback, value) => { events.push(['storage', value]); return 'previous-org' },
+      evaluate: async (callback, value) => {
+        if (value === undefined) return 'org-page-token'
+        events.push(['storage', value]); return 'previous-org'
+      },
       reload: async (options) => { assert.equal(options.timeout, 60_000); events.push('reload') },
       getByRole: (role, options) => {
         if (role === 'region') return board
@@ -1095,15 +1385,15 @@ const expect = (value) => ({
 })
 
 test('failed drawing setup accepts an empty canvas and requires the product no-drawing signal on each surface', async () => {
-  for (const surface of ['cad', 'solar', 'browser', 'ios']) {
+  for (const surface of ['cad', 'solar', 'browser', 'ios']) for (const status of [400, 404]) {
     const undo = { visible: true, disabled: true }
-    const page = {
-      goto: async (url) => assert.equal(url, `/app?surface=${surface}&drawing=missing.invalid`),
-      waitForResponse: async (predicate) => {
+    const page = Object.assign(new EventEmitter(), {
+      goto: async (url) => {
+        assert.equal(url, `/app?surface=${surface}&drawing=missing.invalid`)
         const response = { url: () => 'http://walk/api/session?dwg=missing.invalid',
-          status: () => 404, json: async () => ({ error: 'missing drawing' }) }
-        assert.equal(predicate(response), true)
-        return response
+          status: () => status, json: async () => ({ error: 'missing drawing' }) }
+        page.emit('response', response)
+        page.emit('requestfailed', timedRequest('/api/session?dwg=missing.invalid', { failure: 'late failure' }))
       },
       locator: () => assert.fail('canvas count cannot establish drawing readiness'),
       getByRole: (role, options) => {
@@ -1116,7 +1406,7 @@ test('failed drawing setup accepts an empty canvas and requires the product no-d
           return undo
         } }
       },
-    }
+    })
     const assertions = (value) => ({ ...expect(value),
       toContain: (expected) => assert.ok(value.includes(expected)),
       toBeDisabled: async () => assert.equal(value.disabled, true),
@@ -1125,13 +1415,206 @@ test('failed drawing setup accepts an empty canvas and requires the product no-d
     await setupStep({}, runtime, { kind: 'open-failed-drawing',
       url: `/app?surface=${surface}&drawing=missing.invalid` }, assertions)
     assert.equal(runtime.failedDrawing, true)
-    assert.equal(runtime.evidence.failedDrawing.status, 404)
+    assert.equal(runtime.evidence.failedDrawing.status, status)
+    for (const event of ['request', 'response', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
     undo.disabled = false
     await assert.rejects(requireNoDrawing(page, assertions), assert.AssertionError)
     undo.disabled = true
     undo.visible = false
     await assert.rejects(requireNoDrawing(page, assertions), assert.AssertionError)
   }
+})
+
+function timedRequest(path, { startTime = Date.now(), durationMs = 2500, status = 200, failure = null,
+  method = 'GET' } = {}) {
+  return { url: () => `http://walk${path}`, method: () => method,
+    timing: () => ({ startTime, responseEnd: durationMs }),
+    failure: () => failure ? { errorText: failure } : null,
+    response: async () => ({ status: () => status }),
+    headers: () => assert.fail('request evidence must not read headers'),
+    postData: () => assert.fail('request evidence must not read bodies'),
+  }
+}
+
+test('WL19 failed drawing setup rejects a matching abort during navigation with its reason and elapsed time', { timeout: 1000 }, async () => {
+  const page = Object.assign(new EventEmitter(), { goto: async () => {
+    await Promise.resolve()
+    for (const path of ['/api/tools', '/api/session?dwg=other', '/elsewhere?dwg=missing.invalid']) {
+      const unrelated = timedRequest(path, { failure: 'unrelated failure' })
+      page.emit('request', unrelated)
+      page.emit('requestfailed', unrelated)
+    }
+    page.emit('response', { url: () => 'http://walk/api/session?dwg=other' })
+    const request = timedRequest('/api/session?dwg=missing.invalid', {
+      startTime: Date.now() - 5100, durationMs: -1, failure: 'net::ERR_ABORTED',
+    })
+    page.emit('request', request)
+    page.emit('requestfailed', request)
+    page.emit('response', { url: () => 'http://walk/api/session?dwg=missing.invalid', status: () => 404 })
+    return new Promise(() => {})
+  } })
+  const runtime = { page, evidence: {} }
+  await assert.rejects(setupStep({}, runtime, { kind: 'open-failed-drawing', url: '/app?drawing=missing.invalid' }),
+    (error) => {
+      assert.match(error.message, /^open-failed-drawing: GET \/api\/session failed after \d+ ms: net::ERR_ABORTED$/)
+      assert.ok(Number(error.message.match(/after (\d+) ms/)[1]) >= 5100)
+      assert.ok(!(error instanceof UnsupportedLocalError))
+      return true
+    })
+  assert.equal(runtime.failedDrawing, undefined)
+  assert.equal(runtime.evidence.result, undefined)
+  for (const event of ['request', 'response', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
+})
+
+test('WL19b a matching response wins over a later failure and awaits navigation before drawing assertions', { timeout: 1000 }, async () => {
+  let rejectNavigation, responseReceived
+  const responseSeen = new Promise((resolve) => { responseReceived = resolve })
+  const navigation = new Promise((_resolve, reject) => { rejectNavigation = reject })
+  const page = Object.assign(new EventEmitter(), { goto: async () => {
+    await Promise.resolve()
+    page.emit('response', { url: () => 'http://walk/api/session?dwg=missing.invalid', status: () => 404 })
+    page.emit('requestfailed', timedRequest('/api/session?dwg=missing.invalid', { failure: 'late failure' }))
+    responseReceived()
+    return navigation
+  } })
+  let assertionsStarted = false
+  const navigationFailure = new Error('navigation failed after response')
+  const setup = setupStep({}, { page, evidence: {} }, { kind: 'open-failed-drawing', url: '/app' }, () => {
+    assertionsStarted = true
+    assert.fail('drawing assertions must wait for navigation')
+  })
+  const rejected = assert.rejects(setup, navigationFailure)
+  await responseSeen
+  assert.equal(assertionsStarted, false)
+  // A navigation rejection must still be observed after the response wins.
+  rejectNavigation(navigationFailure)
+  await rejected
+  assert.equal(assertionsStarted, false)
+  for (const event of ['request', 'response', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
+})
+
+test('WL19 failed drawing waiter releases listeners after navigation failure', async () => {
+  const failure = new Error('navigation failed')
+  const page = Object.assign(new EventEmitter(), { goto: async () => { throw failure } })
+  await assert.rejects(setupStep({}, { page, evidence: {} }, { kind: 'open-failed-drawing', url: '/app' }), failure)
+  for (const event of ['request', 'response', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
+})
+
+test('WL19 runner preserves setup failure and per-probe request evidence, then releases observers', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find((entry) => entry.id === 'control:more-panels'), 'failed-load')
+  const page = Object.assign(new EventEmitter(), { goto: async () => {
+    const slow = timedRequest('/api/tools?private=hidden')
+    page.emit('request', slow)
+    page.emit('requestfinished', slow)
+    const failed = timedRequest('/api/session?dwg=missing.invalid', { durationMs: 5100, failure: 'net::ERR_ABORTED' })
+    page.emit('request', failed)
+    page.emit('requestfailed', failed)
+  } })
+  const records = []
+  for (let index = 0; index < 2; index++) {
+    const runtime = { page, evidence: { steps: [] }, runStep: async (_name, callback) => callback() }
+    await assert.rejects(runProbe(probe, runtime), /open-failed-drawing: GET \/api\/session failed after 5100 ms: net::ERR_ABORTED/)
+    assert.match(runtime.evidence.failure.message, /net::ERR_ABORTED/)
+    assert.equal(runtime.evidence.result, undefined)
+    assert.equal(runtime.evidence.cleanupCompleted, true)
+    assert.equal(runtime.evidence.requestTimings.length, 2)
+    assert.equal(runtime.evidence.requestTimings[0].path, '/api/tools')
+    assert.equal(runtime.evidence.requestTimings[0].status, 200)
+    assert.equal(runtime.evidence.requestTimings[1].path, '/api/session')
+    assert.equal(runtime.evidence.requestTimings[1].durationMs, 5100)
+    assert.equal(runtime.evidence.requestTimings[1].failure, 'net::ERR_ABORTED')
+    assert.deepEqual(runtime.evidence.abortedRequests, [runtime.evidence.requestTimings[1]])
+    assert.deepEqual(runtime.evidence.failedRequests, [])
+    records.push(runtime.evidence.requestTimings)
+    for (const event of ['request', 'response', 'requestfinished', 'requestfailed']) assert.equal(page.listenerCount(event), 0)
+  }
+  assert.notEqual(records[0], records[1])
+})
+
+test('WL19 request evidence records slow completions and all failures with redacted paths and request timing', async () => {
+  const context = new EventEmitter()
+  const page = { context: () => context }
+  const evidence = {}, startedAt = Date.now()
+  const stop = observeProbeRequests(page, evidence, startedAt)
+  for (const path of ['/api/session', '/api/tools', '/api/capabilities', '/api/builds']) {
+    const request = timedRequest(`${path}?secret=never-record-this`, { startTime: startedAt + 120, status: 503 })
+    context.emit('request', request)
+    context.emit('requestfinished', request)
+  }
+  for (const durationMs of [0, 1999, 2000]) {
+    const fast = timedRequest('/api/tools', { durationMs })
+    context.emit('request', fast)
+    context.emit('requestfinished', fast)
+  }
+  const failed = timedRequest('/api/session?dwg=private', {
+    startTime: startedAt + 300, durationMs: 25, failure: 'net::ERR_CONNECTION_RESET', method: 'POST',
+  })
+  context.emit('request', failed)
+  context.emit('requestfailed', failed)
+  context.emit('requestfinished', timedRequest('/not-started-in-this-probe'))
+  await stop()
+  assert.deepEqual(evidence.requestTimings, [
+    ...['/api/session', '/api/tools', '/api/capabilities', '/api/builds'].map((path) => ({
+      method: 'GET', path, startOffsetMs: 120, durationMs: 2500, status: 503,
+    })),
+    { method: 'POST', path: '/api/session', startOffsetMs: 300, durationMs: 25, failure: 'net::ERR_CONNECTION_RESET' },
+  ])
+  assert.deepEqual(evidence.failedRequests, [
+    { method: 'POST', path: '/api/session', startOffsetMs: 300, durationMs: 25, failure: 'net::ERR_CONNECTION_RESET' },
+  ])
+  assert.deepEqual(evidence.abortedRequests, [])
+  assert.ok(!JSON.stringify(evidence).includes('never-record-this'))
+  for (const event of ['request', 'requestfinished', 'requestfailed']) assert.equal(context.listenerCount(event), 0)
+})
+
+test('WL19b request failures are classified with bounded, query-free timing fields', async () => {
+  for (const failure of ['net::ERR_ABORTED', 'NS_BINDING_ABORTED', 'cancelled', 'canceled',
+    'net::ERR_CONNECTION_RESET', null]) {
+    const page = new EventEmitter(), evidence = { failedRequests: [{ stale: true }], abortedRequests: [{ stale: true }] }
+    const startedAt = Date.now()
+    const stop = observeProbeRequests(page, evidence, startedAt)
+    for (let index = 0; index < 60; index++) {
+      const request = timedRequest('/api/session?dwg=private', { startTime: startedAt + 5, durationMs: 10, failure })
+      page.emit('request', request)
+      page.emit('requestfailed', request)
+    }
+    await stop()
+    const aborted = ['net::ERR_ABORTED', 'NS_BINDING_ABORTED', 'cancelled', 'canceled'].includes(failure)
+    const records = evidence[aborted ? 'abortedRequests' : 'failedRequests']
+    assert.equal(records.length, 50)
+    assert.deepEqual(records, evidence.requestTimings)
+    assert.deepEqual(records[0], { method: 'GET', path: '/api/session', startOffsetMs: 5,
+      durationMs: 10, failure: failure || 'request failed' })
+    assert.deepEqual(evidence[aborted ? 'failedRequests' : 'abortedRequests'], [])
+    assert.ok(!JSON.stringify(evidence).includes('private'))
+  }
+})
+
+test('WL19 request evidence is capped at 50 and metadata errors cannot change a verdict', async () => {
+  const page = new EventEmitter(), evidence = {}
+  const stop = observeProbeRequests(page, evidence)
+  const broken = timedRequest('/api/tools')
+  broken.timing = () => { throw new Error('timing unavailable') }
+  page.emit('request', broken)
+  assert.doesNotThrow(() => page.emit('requestfinished', broken))
+  const noResponse = timedRequest('/api/builds', { durationMs: 2001 })
+  noResponse.response = async () => { throw new Error('page closed') }
+  page.emit('request', noResponse)
+  page.emit('requestfinished', noResponse)
+  for (let index = 0; index < 60; index++) {
+    const request = timedRequest(`/api/tools?index=${index}`, { failure: 'cancelled', durationMs: 1 })
+    page.emit('request', request)
+    page.emit('requestfailed', request)
+  }
+  await stop()
+  assert.equal(evidence.requestTimings.length, 50)
+  assert.equal(evidence.requestTimings[0].durationMs, 2001)
+  assert.equal(evidence.requestTimings[1].failure, 'cancelled')
+  assert.equal(evidence.abortedRequests.length, 49)
+  assert.deepEqual(evidence.failedRequests, [])
+  const before = JSON.stringify(evidence)
+  page.emit('requestfailed', timedRequest('/after-stop', { failure: 'cancelled' }))
+  assert.equal(JSON.stringify(evidence), before)
 })
 
 test('ready Solar catalog setup requires the browser drawing query and exact enabled tool', async () => {

@@ -331,7 +331,7 @@ def test_mleader_dxf_probe_group_sequence_and_references():
     ml, = _dxf_records(raw, "MULTILEADER")
     # probe6 entget sequence, expanded from point groups into DXF triples.
     expected = [int(c) for c in (
-        "0 330 5 100 67 410 8 100 270 300 40 10 20 30 41 140 145 "
+        "0 5 330 100 67 410 8 100 270 300 40 10 20 30 41 140 145 "
         "174 175 176 177 290 304 11 21 31 340 12 22 32 13 23 33 "
         "42 43 44 45 170 90 171 172 91 141 92 291 292 173 293 142 143 "
         "294 295 296 110 120 130 111 121 131 112 122 132 297 "
@@ -362,9 +362,10 @@ def test_mleader_dxf_probe_group_sequence_and_references():
     base_start = ml.index((300, "CONTEXT_DATA{")) + 2
     assert ml[base_start:base_start + 3] == [(10, "5.36"), (20, "4.0"), (30, "0.0")]
     dictionaries = _dxf_records(raw, "DICTIONARY")
-    root = next(dict(r) for r in dictionaries if dict(r).get(330) == "0")
-    assert root[3] == "ACAD_MLEADERSTYLE"
-    catalogue = next(dict(r) for r in dictionaries if dict(r)[5] == root[350])
+    root = next(r for r in dictionaries if dict(r).get(330) == "0")
+    entries = {root[i][1]: root[i + 1][1] for i in range(len(root) - 1) if root[i][0] == 3}
+    assert set(entries) == {"ACAD_GROUP", "ACAD_PLOTSTYLENAME", "ACAD_MLEADERSTYLE", "LEAF_INTAKE_ENVELOPE"}
+    catalogue = next(dict(r) for r in dictionaries if dict(r)[5] == entries["ACAD_MLEADERSTYLE"])
     assert catalogue[3] == "Standard" and catalogue[350] == dict(ms)[5]
 
 

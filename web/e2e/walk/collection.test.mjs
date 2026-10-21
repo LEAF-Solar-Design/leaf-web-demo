@@ -29,6 +29,19 @@ test('unsupported worker option sets fail collection loudly', () => {
   }
 })
 
+test('project Solar live recipes receive enough time for extraction and publication', async () => {
+  const entry = buildFeatureMap().entries.find((row) => row.id === 'surface:solar')
+  const cases = entry.states.filter((state) => state.startsWith('project-solar-'))
+    .map((state) => ({ entry, state, probe: resolveProbe(entry, state) }))
+  const rows = []
+  declareProbes((title, _options, callback) => rows.push({ title, callback }), async () => {}, cases)
+  for (const row of rows) {
+    const timeouts = []
+    await row.callback({ page: {}, stack: {}, walkEvidence: {} }, { setTimeout: (value) => timeouts.push(value) })
+    assert.deepEqual(timeouts, row.title.includes('project-solar-proposal-offline') ? [] : [300_000])
+  }
+})
+
 test('feature spec files apply PostgreSQL options at top level and share declarations', async () => {
   const entries = [
     { id: 'action:fit', states: ['ready', 'project-open'], viewports: ['desktop'],
@@ -99,6 +112,10 @@ test('feature spec files apply PostgreSQL options at top level and share declara
 test('the feature map assigns every project probe to the PostgreSQL spec exactly once', () => {
   const entries = buildFeatureMap().entries
   const cases = collectProbeCases(entries, resolveProbe)
+  const solar = ['project-solar-open', 'project-solar-published', 'project-solar-form-switch', 'project-solar-proposal-offline']
+  assert.deepEqual(cases.postgres.filter(({ entry }) => entry.id === 'surface:solar').map(({ state }) => state).sort(), solar.sort())
+  assert.ok(cases.ordinary.some(({ entry, state }) => entry.id === 'surface:solar' && state === 'ready'))
+  assert.ok(!cases.ordinary.some(({ state }) => solar.includes(state)))
   assert.ok(cases.postgres.length > 0)
   const all = [...cases.ordinary, ...cases.postgres]
   assert.equal(all.length, entries.reduce((count, entry) => count + entry.states.length, 0))

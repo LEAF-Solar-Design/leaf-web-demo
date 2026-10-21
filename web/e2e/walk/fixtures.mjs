@@ -16,10 +16,29 @@ import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
 import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
+import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
 
 export { expect }
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
 export const COACH_STORAGE_KEY = 'leaf.coach.dismissed.v1'
+
+export async function setupRequestHeaders(runtime, path) {
+  const headers = { 'X-Tenant-Id': LOCAL_IDENTITY.tenant }
+  const facts = runtime.workerFacts || runtime.evidence?.workerFacts
+  if (facts?.authLive !== true) return headers
+  const { page, stack } = runtime
+  const pageURL = new URL(page.url())
+  const requestURL = new URL(path, stack.baseURL)
+  if (requestURL.origin !== pageURL.origin) return headers
+  const token = await page.evaluate(() => localStorage.getItem('leaf.jwt'))
+  if (!token?.trim()) {
+    const error = new Error(`setup_auth_token_missing: ${requestURL.pathname} requires leaf.jwt on the live-auth page`)
+    error.name = 'WalkSetupAuthError'
+    throw error
+  }
+  headers.Authorization = `Bearer ${token}`
+  return headers
+}
 
 export function injectWalkEntities(source) {
   // Walk selection targets stay outside the panel polygon in the pinned corpus fixture.
@@ -154,6 +173,55 @@ export async function previewVersion(probe, runtime, assertions = expect, worksp
   return
 }
 
+function requestTiming(request, observedStart) {
+  const timing = request.timing()
+  const startTime = timing.startTime > 0 ? timing.startTime : observedStart
+  const durationMs = Math.max(0, Math.round(timing.responseEnd >= 0 ? timing.responseEnd : Date.now() - startTime))
+  return { startTime, durationMs }
+}
+
+export function observeProbeRequests(page, evidence, startedAt = Date.now()) {
+  // Context events also cover recipes that replace the ordinary page.
+  const source = typeof page.context === 'function' ? page.context() : page
+  const starts = new WeakMap()
+  const pending = []
+  evidence.requestTimings = []
+  evidence.failedRequests = []
+  evidence.abortedRequests = []
+  const request = (request) => { starts.set(request, Date.now()) }
+  const complete = (request, failed) => {
+    try {
+      const observedStart = starts.get(request)
+      if (observedStart === undefined || evidence.requestTimings.length >= 50) return
+      starts.delete(request)
+      const { startTime, durationMs } = requestTiming(request, observedStart)
+      if (!failed && durationMs <= 2000) return
+      const record = { method: request.method(), path: new URL(request.url()).pathname,
+        startOffsetMs: Math.max(0, Math.round(startTime - startedAt)), durationMs }
+      if (failed) {
+        record.failure = request.failure()?.errorText || 'request failed'
+        const aborted = /abort|cancelled|canceled/i.test(record.failure)
+        evidence[aborted ? 'abortedRequests' : 'failedRequests'].push(record)
+      }
+      evidence.requestTimings.push(record)
+      if (!failed) pending.push(Promise.resolve().then(() => request.response()).then((response) => {
+        record.status = response?.status() ?? null
+      }).catch(() => {}))
+    } catch { /* Optional request evidence never changes the probe verdict. */ }
+  }
+  const finished = (request) => complete(request, false)
+  const failed = (request) => complete(request, true)
+  source.on('request', request)
+  source.on('requestfinished', finished)
+  source.on('requestfailed', failed)
+  return async () => {
+    source.off('request', request)
+    source.off('requestfinished', finished)
+    source.off('requestfailed', failed)
+    await Promise.allSettled(pending)
+  }
+}
+
 export const test = base.extend({
   firstRun: [false, { option: true }],
   walkPostgres: [false, { option: true, scope: 'worker' }],
@@ -179,9 +247,13 @@ export const test = base.extend({
           workerFacts.postgresDiagnostic = error.message
           stack = await startStack(options)
         }
+        // Use the launched stack's environment, not the host's auth setting.
+        // Match server/deps.py's auth_live() spellings.
+        workerFacts.authLive = ['1', 'true', 'yes', 'on'].includes((stack.env?.LEAF_AUTH_LIVE || '0').trim().toLowerCase())
         const bootTimeMs = Date.now()
         const readiness = JSON.parse(await readFile(join(stack.root, 'ready.json'), 'utf8'))
         witness = { ready: true, instance: stackInstanceRef(stack.root, readiness.launcher_pid, bootTimeMs),
+          ...(stack.canonicalWorkerTools?.length ? { canonicalWorkerTools: stack.canonicalWorkerTools } : {}),
           ...stack.postgres, ...(workerFacts.postgresUnavailableReason ? {
             postgres: 'unavailable', reason: workerFacts.postgresUnavailableReason, diagnostic: workerFacts.postgresDiagnostic,
           } : {}) }
@@ -226,6 +298,7 @@ export const test = base.extend({
     }
     const pageError = (error) => { walkEvidence.pageErrors.push({ message: error.message, stack: error.stack }) }
     const requestFailed = (request) => {
+      if (walkEvidence.requestTimings) return // The probe observer owns bounded request evidence while probes run.
       const record = { url: request.url(), method: request.method(), error: request.failure()?.errorText }
       const aborted = ['net::ERR_ABORTED', 'NS_BINDING_ABORTED', 'cancelled'].includes(record.error)
       walkEvidence[aborted ? 'abortedRequests' : 'failedRequests'].push(record)
@@ -1055,9 +1128,13 @@ export async function assertHistoryRecovery(runtime, assertions = expect) {
 
 export async function setupRealProject(runtime, assertions = expect) {
   const { page, evidence } = runtime
-  const orgResponse = await page.request.post('/api/orgs', { data: { name: `Walk Escape ${Date.now()}` }, timeout: 15_000 })
-  assertions(orgResponse.ok()).toBe(true)
-  const { org } = await orgResponse.json()
+  const orgResponse = await page.request.post('/api/orgs', {
+    headers: await setupRequestHeaders(runtime, '/api/orgs'),
+    data: { name: `Walk Escape ${Date.now()}` }, timeout: 15_000,
+  })
+  if (!runtime.projectSolar) assertions(orgResponse.ok()).toBe(true)
+  const { org } = runtime.projectSolar
+    ? await projectSolarResponse(orgResponse, 'open-real-project create org', [200, 201], runtime) : await orgResponse.json()
   assertions(org.org_id).toBeTruthy()
   const previousOrg = await page.evaluate((orgId) => {
     const previous = localStorage.getItem('leaf.org_id')
@@ -1084,9 +1161,10 @@ export async function setupRealProject(runtime, assertions = expect) {
   created.catch(() => {})
   await create.click({ timeout: 15_000 })
   const response = await created
-  assertions(response.ok()).toBe(true)
+  if (!runtime.projectSolar) assertions(response.ok()).toBe(true)
   assertions(response.request().headers()['x-org-id']).toBe(org.org_id)
-  const { project } = await response.json()
+  const { project } = runtime.projectSolar
+    ? await projectSolarResponse(response, 'open-real-project create project', [200, 201], runtime) : await response.json()
   assertions(project.project_id).toBeTruthy()
   assertions(project.org_id).toBe(org.org_id)
   const name = project.name
@@ -1103,6 +1181,235 @@ export async function setupRealProject(runtime, assertions = expect) {
   await assertions(page.locator('.strip-failed, .strip-running')).toHaveCount(0)
   await assertions(page.getByRole('button', { name: /^Run / })).toHaveCount(0)
   await assertions(page.getByTestId('cockpit-status').locator('.cockpit-sel')).toHaveText('no selection')
+}
+
+export async function projectSolarResponse(response, label, statuses, runtime) {
+  let body
+  try { body = await response.json() } catch {
+    throw new Error(`${label}: HTTP ${response.status()} response JSON unreadable`)
+  }
+  // APIRequestContext calls do not emit page response events. Record these
+  // public setup receipts explicitly, including malformed successful bodies.
+  if (runtime) {
+    const proof = runtime.evidence.projectSolar ||= { steps: [] }
+    const record = { step: label, status: response.status(), body }
+    proof.lastCanonicalResponse = record
+    if (!statuses.includes(response.status())) proof.serverFailure = record
+  }
+  if (!statuses.includes(response.status())) throw new Error(`${label}: HTTP ${response.status()} ${JSON.stringify(body)}`)
+  return body
+}
+
+export async function projectSolarStep(runtime, label, action) {
+  const proof = runtime.evidence.projectSolar ||= { steps: [] }
+  const record = { step: label }
+  proof.steps.push(record)
+  try { await action(); record.complete = true } catch (error) {
+    await runtime.projectSolar?.drainDiagnostics?.()
+    record.error = `${label}: ${error.message}; server response ${JSON.stringify(proof.serverFailure ?? proof.lastCanonicalResponse ?? proof.lastResponse ?? null)}`
+    throw new Error(record.error, { cause: error })
+  }
+}
+
+export async function assertProjectSolarDrawing(runtime, assertions = expect) {
+  const { page, projectSolar: { binding } } = runtime
+  await assertions(page.locator('.project-solar-workspace')).toBeVisible()
+  await assertions(page.getByTestId('solar-flow-rail')).toBeVisible()
+  await assertions(page.getByTestId('solar-flow-seat')).toBeVisible()
+  await assertions(page.locator('.viewer-title')).toContainText(binding.input_version_id, { timeout: 30_000 })
+  const drawing = page.locator('.studio-ground .viewer-canvas canvas')
+  await assertions(drawing).toHaveCount(1)
+  await assertions(drawing).toBeVisible()
+  assertions(await drawing.evaluate((node) => node.width > 0 && node.height > 0)).toBe(true)
+}
+
+export function observeProjectSolarResponses(runtime) {
+  const { page, stack, evidence } = runtime
+  const solar = runtime.projectSolar ||= {}
+  const proof = evidence.projectSolar ||= { steps: [] }
+  solar.apiBase = stack.baseURL
+  const pending = new Set()
+  solar.drainDiagnostics = () => Promise.all([...pending])
+  const observe = (response) => {
+    const path = new URL(response.url()).pathname
+    if (!path.startsWith('/api/')) return
+    const record = { path, status: response.status() }
+    proof.lastResponse = record
+    const job = /^\/api\/jobs\/[0-9a-f-]{36}$/.test(path)
+    const context = path.endsWith('/context')
+    const imported = path.endsWith('/drawing-versions/import')
+    // Include HTTP-200 job failures and stale context responses in diagnostics.
+    // Keep only public job/context fields and never successful checkout bodies.
+    if (response.status() >= 400 || path === '/api/run' || job || context || imported
+      || path === '/api/orgs' || path === '/api/projects' || path === '/api/drawings/upload'
+      || path.endsWith('/upload-status')) {
+      const work = response.json().then((body) => {
+        record.body = response.status() >= 400 ? body
+          : job ? { job_id: body?.job_id, status: body?.status, error: body?.error,
+            input_version_id: body?.input_version_id, output_version_id: body?.result?.output_version_id }
+          : context ? { context: body?.context, graphRev: body?.intake?.solar_design_graph?.rev,
+              graphSha256: body?.intake?.solar_design_graph_sha256 } : body
+        proof.lastCanonicalResponse = record
+        if (response.status() >= 400 || job && body?.status === 'failed'
+          || path.endsWith('/upload-status') && body?.status === 'failed') proof.serverFailure = record
+      }, () => {})
+      pending.add(work)
+      work.finally(() => pending.delete(work))
+    }
+  }
+  page.on('response', observe)
+  runtime.cleanup.push(async () => { page.off('response', observe); await Promise.all([...pending]) })
+}
+
+export async function openProjectSolar(runtime, assertions = expect) {
+  const { page, evidence, projectSolar: solar } = runtime
+  const proof = evidence.projectSolar
+  solar.traffic = observeProjectTraffic(page, solar.apiBase)
+  runtime.cleanup.push(async () => { try { await solar.traffic.drain() } finally { solar.traffic.dispose() } })
+  await projectSolarStep(runtime, 'canonical material import', async () => {
+    await page.getByRole('tab', { name: 'Browser', exact: true }).click()
+    await page.getByRole('button', { name: 'Upload drawing', exact: true }).click()
+    const material = page.locator('[data-pane="material-intake"]')
+    await assertions(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()
+    const path = `/api/projects/${evidence.escapeProject.projectId}/drawing-versions/import`
+    // Import can finish before the upload response is inspected. Install both
+    // listeners before selecting the real material, as the local walk does.
+    const imported = page.waitForResponse(drawingRequest(path, 'POST'), { timeout: 120_000 })
+    const settled = imported.then((response) => ({ response }), (error) => ({ error }))
+    const source = await readFile(new URL('../fixtures/distinctive-panel.dxf', import.meta.url))
+    const uploaded = await actionResponse(page, solar.apiBase, 'POST', '/api/drawings/upload',
+      () => material.getByLabel('Drawing file', { exact: true }).setInputFiles({
+        name: 'walk-project-solar.dxf', mimeType: 'application/dxf', buffer: source,
+      }), 120_000)
+    const upload = await projectSolarResponse(uploaded, 'project upload', [202])
+    assertions(isUuid(upload.drawing_id)).toBe(true)
+    const result = await settled
+    if (result.error) throw result.error
+    const body = await projectSolarResponse(result.response, 'canonical import', [201])
+    const version = body.drawing_version
+    solar.binding = projectBinding({ organization_id: evidence.escapeProject.orgId,
+      project_id: evidence.escapeProject.projectId, drawing_id: version?.drawing_id, input_version_id: version?.version_id })
+    assertions(version.org_id).toBe(solar.binding.organization_id)
+    assertions(version.project_id).toBe(solar.binding.project_id)
+    assertions(version.drawing_id).toBe(upload.drawing_id)
+    assertions(body.replayed).toBe(false)
+    const headers = result.response.request().headers()
+    assertions(headers['x-org-id']).toBe(solar.binding.organization_id)
+    assertions(/^Bearer \S+$/i.test(headers.authorization || '')).toBe(true)
+    assertions(typeof headers['idempotency-key']).toBe('string')
+    await solar.traffic.drain()
+    const ready = solar.traffic.readyUploads.findLast((row) => row.drawing_id === upload.drawing_id)
+    assertions(ready).toBeTruthy()
+    const input = result.response.request().postDataJSON()
+    assertions(input.source).toEqual({ drawing_id: upload.drawing_id, version: ready.version })
+    await assertions(material).toContainText('Attached', { timeout: 30_000 })
+    proof.binding = { kind: 'project', ...solar.binding }
+    proof.importedVersionId = solar.binding.input_version_id
+    runtime.drawingId = solar.binding.drawing_id
+  })
+  await projectSolarStep(runtime, 'select canonical version and open Solar CAD', async () => {
+    await page.getByRole('button', { name: 'Open versions', exact: true }).click()
+    await page.locator('[data-pane="versions"]').getByRole('button', {
+      name: new RegExp(`^v\\d+ .*${solar.binding.input_version_id}$`),
+    }).click()
+    await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+    await assertProjectSolarDrawing(runtime, assertions)
+    solar.context = await readContext(page, solar.apiBase, solar.binding, { graphRequired: false })
+    assertions(solar.context.graph).toBe(null)
+    proof.open = { head: solar.context.head, binding: { ...solar.binding }, workspaceVisible: true, projectRailVisible: true }
+  })
+}
+
+export async function openProjectSolarTool(runtime, tool, assertions = expect, { closeEditor = true } = {}) {
+  const { page } = runtime
+  const editor = page.locator('.project-solar-workspace-editor')
+  if (closeEditor && await editor.isVisible()) {
+    await editor.getByRole('button', { name: /^(Close|Cancel)$/ }).click()
+    await assertions(editor).toHaveCount(0)
+  }
+  await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+  const ribbon = page.getByTestId('drafting-ribbon').locator(`button[data-tool="${tool}"]`)
+  const rail = page.locator(`#solar-step-${tool}`)
+  const more = page.getByRole('button', { name: 'More panels', exact: true })
+  await assertions.poll(async () => await ribbon.isVisible() || await more.isVisible() || await rail.isVisible(),
+    { timeout: 30_000, message: `project Solar control ${tool} must render` }).toBe(true)
+  if (!await ribbon.isVisible() && await more.isVisible()) await more.click()
+  const control = await ribbon.isVisible() ? ribbon : rail
+  await assertions(control).toBeEnabled()
+  await control.click()
+}
+
+export async function publishProjectSolar(runtime, assertions = expect) {
+  const { page, projectSolar: solar, evidence: { projectSolar: proof } } = runtime
+  const checkout = () => page.getByRole('group', { name: 'Project checkout', exact: true })
+  const path = `/api/projects/${solar.binding.project_id}/drawings/${solar.binding.drawing_id}/checkout`
+  await projectSolarStep(runtime, 'take Project checkout', async () => {
+    const response = await actionResponse(page, solar.apiBase, 'POST', path,
+      () => checkout().getByRole('button', { name: 'Take', exact: true }).click())
+    const lease = await projectSolarResponse(response, 'Project checkout', [200])
+    // Register release before validating the lease body so a later assertion
+    // failure still relinquishes an acquired checkout through the UI.
+    if (lease.acquired === true) runtime.cleanup.push(async () => {
+      const released = await actionResponse(page, solar.apiBase, 'DELETE', path,
+        () => checkout().getByRole('button', { name: 'Release', exact: true }).click())
+      const body = await projectSolarResponse(released, 'release Project checkout', [200])
+      assertions(body.released).toBe(true)
+      assertions(body.checkout).toBe(null)
+    })
+    assertions(lease.acquired).toBe(true)
+    for (const key of ['organization_id', 'project_id', 'drawing_id']) assertions(lease[key]).toBe(solar.binding[key])
+    assertions(lease.checkout.fence).toMatch(/^[0-9]+$/)
+    proof.checkoutFence = lease.checkout.fence
+    await assertions(checkout().getByRole('button', { name: 'Release', exact: true })).toBeEnabled()
+  })
+  await projectSolarStep(runtime, 'publish solar-settings canonical job', async () => {
+    await openProjectSolarTool(runtime, 'solar-settings', assertions)
+    const settings = page.getByTestId('solar-settings-form')
+    await assertions(settings).toHaveAttribute('data-mode', 'initialize')
+    await settings.getByLabel('Drawing units', { exact: true }).selectOption('m')
+    await settings.getByLabel('Panels in sequence', { exact: true }).fill('1')
+    const start = settings.getByRole('button', { name: 'Start Solar design', exact: true })
+    await assertions(start).toBeEnabled({ timeout: 30_000 })
+    const result = await runProjectTool({ page, expect: assertions, apiBase: solar.apiBase, traffic: solar.traffic,
+      binding: solar.binding, before: solar.context, tool: 'solar-settings', action: () => start.click(), checkParams: (params) => {
+        assertions(params.initialize?.units?.drawing_units).toBe('m')
+        assertions(params.changes?.panels_in_sequence).toBe(1)
+      } })
+    solar.binding = result.binding
+    solar.context = result.context
+    proof.publication = result.step
+    proof.jobStatus = 'complete'
+    proof.binding = { kind: 'project', ...solar.binding }
+    proof.publishedHead = result.context.head
+    await assertProjectSolarDrawing(runtime, assertions)
+    proof.drawingFollowedVersionId = solar.binding.input_version_id
+  })
+}
+
+export async function switchProjectSolarForms(runtime, assertions = expect) {
+  const { page, projectSolar: solar, evidence: { projectSolar: proof } } = runtime
+  const runCount = solar.traffic.runCount
+  await projectSolarStep(runtime, 'switch Solve to Correct strings and back', async () => {
+    await openProjectSolarTool(runtime, 'solar-solve-proposal', assertions)
+    const solve = page.getByRole('form', { name: 'Solve', exact: true })
+    await solve.getByLabel('Grant ref', { exact: true }).fill('walk-unsent-grant')
+    await solve.getByLabel('Request', { exact: true }).fill('{"grid":{}}')
+    await solve.getByLabel('Frame', { exact: true }).fill('walk-unsent-frame')
+    // SchemaForm encodes enum option values as indices; use the schema labels.
+    await solve.getByLabel('Phase', { exact: true }).selectOption({ label: 'background' })
+    await openProjectSolarTool(runtime, 'solar-correct-string', assertions, { closeEditor: false })
+    const correction = page.getByRole('form', { name: 'Correct strings', exact: true })
+    for (const name of ['Grant ref', 'Request', 'Frame', 'Phase']) await assertions(page.getByLabel(name, { exact: true })).toHaveCount(0)
+    await assertions(correction.getByLabel('Memberships', { exact: true })).toHaveValue('')
+    await correction.getByLabel('Memberships', { exact: true }).fill('[{"string_ref":"unsent","ordered_panel_refs":["unsent-panel"]}]')
+    await openProjectSolarTool(runtime, 'solar-solve-proposal', assertions, { closeEditor: false })
+    await assertions(page.getByLabel('Memberships', { exact: true })).toHaveCount(0)
+    for (const name of ['Grant ref', 'Request', 'Frame']) await assertions(solve.getByLabel(name, { exact: true })).toHaveValue('')
+    await assertions(solve.getByLabel('Phase', { exact: true }).locator('option:checked')).toHaveText('initial')
+    await assertions(solve.getByRole('button', { name: 'Run solve', exact: true })).toBeDisabled()
+    assertions(solar.traffic.runCount).toBe(runCount)
+    proof.formSwitch = { solveFieldsReset: true, membershipsReset: true, runSolveDisabled: true, submittedRuns: 0 }
+  })
 }
 
 export const CENSUS_DISCLOSURES = Object.freeze({
@@ -1596,6 +1903,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'properties-state', 'properties-section-state', 'properties-close-state', 'layer-visible-state',
   'job-monitor-collapsed', 'overview-expanded-state', 'overview-pan-state', 'open-start',
   'open-escape-owner', 'find-submit-state', 'open-real-project',
+  'open-project-solar', 'publish-project-solar', 'switch-project-solar-forms',
   'open-history', 'slash-menu', 'open-route', 'catalog-tool', 'foreign-checkout', 'private-policy',
   'create-line', 'hold-engine-edit', 'start-pending-run', 'require-authoring-off', 'fresh-history',
   'undo-edit', 'preview-version', 'zoom-before-fit', 'require-engine-state', 'crash-engine-worker',
@@ -1664,6 +1972,7 @@ export const UI_UNREACHABLE_STATES = Object.freeze(new Set(['no-versioned-drawin
 export const VERSIONLESS_DRAWING_REASON = 'The product creates a saved root version for every private drawing and renders the ribbon only with a drawing open, so no-versioned-drawing is unreachable through the UI.'
 export const SOLAR_PANEL_CALIBRATION_REASON = 'The private DXF fixture has no two uncovered calibration points for solar panel placement.'
 export const CATALOG_SOLAR_FLAG_REASON = 'catalog drawing context requires VITE_SOLAR_SETTINGS_FORM=1; this build has it off'
+export const PROJECT_SOLAR_AUTH_REASON = 'authenticated_subject_required: canonical project Solar needs an authenticated subject (server/platform_link.py:159-161, server/deps.py:1300-1302); walked signed in on staging (F1)'
 
 export function catalogSolarNeedsDrawing(probe) {
   return probe.kind === 'tool' && probe.sourceId?.startsWith('solar-')
@@ -1679,6 +1988,10 @@ export function requireSeededSolarReady(probe, catalog) {
   }
 }
 export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailability = true) {
+  // Canonical Solar needs a verified subject even when PostgreSQL is ready.
+  // Keep the authenticated recipes intact for staging (F1).
+  if (['open', 'published', 'form-switch'].includes(probe.setup?.context?.projectSolar)
+    && workerFacts.authLive !== true) return PROJECT_SOLAR_AUTH_REASON
   if (probe.setup?.context?.openProjectId) {
     if (workerFacts.postgresUnavailableReason) return workerFacts.postgresUnavailableReason
     if (workerFacts.walkPostgres !== true) return 'walk_postgres_required'
@@ -1831,7 +2144,11 @@ export async function seedSolarChain(runtime, recipe) {
 
 export async function setupStep(probe, runtime, recipe, assertions = runtime.recipeAssertions || expect) {
   const { page, stack, evidence } = runtime
+  if (probe.setup?.context?.projectSolar && !runtime.projectSolar) observeProjectSolarResponses(runtime)
   switch (recipe.kind) {
+    case 'open-project-solar': await openProjectSolar(runtime, assertions); return
+    case 'publish-project-solar': await publishProjectSolar(runtime, assertions); return
+    case 'switch-project-solar-forms': await switchProjectSolarForms(runtime, assertions); return
     case 'census-disclosure': await setupCensusDisclosure(runtime, recipe, assertions); return
     case 'census-script': await setupCensusScript(runtime, recipe, assertions); return
     case 'census-download-only': await setupCensusDownloadOnly(runtime, assertions); return
@@ -1942,12 +2259,37 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     case 'require-solar-document': await requireSolarDocument(probe, runtime, assertions); return
     case 'navigate': await page.goto(recipe.url); return
     case 'open-failed-drawing': {
-      const sessionReply = page.waitForResponse((response) => {
-        const url = new URL(response.url())
+      const starts = new WeakMap()
+      const matches = (request) => {
+        const url = new URL(request.url())
         return url.pathname === '/api/session' && url.searchParams.get('dwg') === 'missing.invalid'
+      }
+      let timer, onResponse, onFailed
+      const onRequest = (request) => { if (matches(request)) starts.set(request, Date.now()) }
+      const sessionReply = new Promise((resolve, reject) => {
+        onResponse = (response) => { if (matches(response)) resolve(response) }
+        onFailed = (request) => {
+          if (!matches(request)) return
+          const { durationMs } = requestTiming(request, starts.get(request) ?? Date.now())
+          reject(new Error(`${recipe.kind}: ${request.method()} /api/session failed after ${durationMs} ms: ${request.failure()?.errorText || 'request failed'}`))
+        }
+        timer = setTimeout(() => reject(new Error(`${recipe.kind}: /api/session response timed out after 15000 ms`)), 15_000)
+        page.on('request', onRequest)
+        page.on('response', onResponse)
+        page.on('requestfailed', onFailed)
       })
-      await page.goto(recipe.url)
-      const response = await sessionReply
+      // Observe failure immediately, including while navigation is still pending.
+      let response
+      try {
+        const navigation = page.goto(recipe.url)
+        response = await Promise.race([sessionReply, navigation.then(() => sessionReply)])
+        await navigation
+      } finally {
+        clearTimeout(timer)
+        page.off('request', onRequest)
+        page.off('response', onResponse)
+        page.off('requestfailed', onFailed)
+      }
       assertions([400, 404]).toContain(response.status())
       evidence.failedDrawing = { drawingId: 'missing.invalid', status: response.status(), response: await response.json() }
       await assertions(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
@@ -1978,19 +2320,32 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       if (selected?.type !== 'INSERT') {
         source = injectWalkEntities(source)
       }
+      // Setup uploads precede the drawing navigation. Live auth needs the
+      // page's own origin loaded before its localStorage can supply the JWT.
+      if ((runtime.workerFacts || evidence.workerFacts)?.authLive === true && page.url() === 'about:blank') {
+        await page.goto(`/try?surface=${recipe.surface}`, { timeout: 60_000 })
+      }
       // Explicit bounds: these setup reads must not inherit the 15 s actionTimeout on a loaded host.
       const uploaded = await page.request.post('/api/drawings/upload', {
+        headers: await setupRequestHeaders(runtime, '/api/drawings/upload'),
         multipart: { file: { name: 'walk.dxf', mimeType: 'application/dxf', buffer: Buffer.from(source) } },
         timeout: 60_000,
       })
-      expect(uploaded.status()).toBe(202)
-      const receipt = await uploaded.json()
+      if (!probe.setup.context.projectSolar) expect(uploaded.status()).toBe(202)
+      const receipt = probe.setup.context.projectSolar
+        ? await projectSolarResponse(uploaded, 'open-private-drawing upload', [202], runtime) : await uploaded.json()
       expect(receipt.drawing_id).toBeTruthy()
       runtime.drawingId = receipt.drawing_id
       await expect.poll(async () => {
-        const response = await page.request.get(`/api/drawings/${receipt.drawing_id}/upload-status`, { timeout: 30_000 })
+        const path = `/api/drawings/${receipt.drawing_id}/upload-status`
+        const response = await page.request.get(path, {
+          headers: await setupRequestHeaders(runtime, path), timeout: 30_000,
+        })
         // A transient non-OK read is still pending; only a 'failed' status fails the setup.
-        if (!response.ok()) return `http-${response.status()}`
+        if (!response.ok()) {
+          if (probe.setup.context.projectSolar) await projectSolarResponse(response, 'open-private-drawing extraction', [200], runtime)
+          return `http-${response.status()}`
+        }
         const status = await response.json()
         expect(status.status, JSON.stringify(status)).not.toBe('failed')
         return status.status
@@ -2443,7 +2798,9 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       return
     }
     case 'open-real-project':
-      await setupRealProject(runtime, assertions)
+      if (probe.setup.context.projectSolar) {
+        await projectSolarStep(runtime, 'open-real-project', () => setupRealProject(runtime, assertions))
+      } else await setupRealProject(runtime, assertions)
       return
     case 'require-local-state':
       // No synthetic React state, mocked response or silent ready-state
@@ -2940,6 +3297,25 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await expect(page.getByRole('toolbar', { name: 'Drafting tools', exact: true })).toBeVisible()
     return
   }
+  if (target === 'project-solar-workspace') {
+    const proof = runtime.evidence.projectSolar
+    await assertProjectSolarDrawing(runtime, assertions)
+    expect(proof.open.workspaceVisible).toBe(true)
+    expect(proof.open.projectRailVisible).toBe(true)
+    expect(proof.importedVersionId).toBe(proof.open.head)
+    if (['published', 'form-switch'].includes(effect.phase)) {
+      expect(isUuid(proof.publication.job_id)).toBe(true)
+      expect(proof.publication.run_status).toBe(202)
+      expect(proof.jobStatus).toBe('complete')
+      expect(proof.publication.output_version_id).not.toBe(proof.importedVersionId)
+      expect(proof.publishedHead).toBe(proof.publication.output_version_id)
+      expect(proof.drawingFollowedVersionId).toBe(proof.publishedHead)
+    }
+    if (effect.phase === 'form-switch') expect(proof.formSwitch).toEqual({
+      solveFieldsReset: true, membershipsReset: true, runSolveDisabled: true, submittedRuns: 0,
+    })
+    return
+  }
   if (target.startsWith('surface:')) {
     if (probe.state === 'signed-out') {
       await expect(page.getByRole('heading', { name: 'You are not signed in', exact: true })).toBeVisible()
@@ -3020,6 +3396,9 @@ export async function runProbe(probe, runtime) {
   const setupStartedAt = Date.now()
   let originalError
   try {
+    if (typeof observeProbeRequests === 'function' && typeof page.on === 'function') {
+      runtime.cleanup.push(observeProbeRequests(page, evidence, setupStartedAt))
+    }
     const initialReason = (probe.setup?.context?.openProjectId
       || typeof UI_UNREACHABLE_STATES !== 'undefined' && UI_UNREACHABLE_STATES.has(probe.state))
       && typeof unsupportedBeforeSetup === 'function'
@@ -3052,7 +3431,11 @@ export async function runProbe(probe, runtime) {
       || probe.assertion.target?.startsWith('drawing-version-'))) await page.addInitScript(installGeometryObserver)
     for (const recipe of probe.setup.steps) {
       await (runtime.runStep || test.step)(`Setup: ${recipe.kind}`, async () => {
-        try { await setupStep(probe, runtime, recipe) } catch (error) {
+        try {
+          if (probe.setup.context?.projectSolar && typeof projectSolarStep === 'function') {
+            await projectSolarStep(runtime, recipe.kind, () => setupStep(probe, runtime, recipe))
+          } else await setupStep(probe, runtime, recipe)
+        } catch (error) {
           if (typeof solarCalibrationFailure === 'function' && solarCalibrationFailure(probe, recipe, error)) {
             await unsupported(probe, runtime, SOLAR_PANEL_CALIBRATION_REASON)
           }

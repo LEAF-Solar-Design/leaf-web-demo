@@ -923,8 +923,8 @@ def sp_reconstruct():
     raw = (REPO / "data/rooftop_unsplit.intake.json").read_bytes()
     assert digest(raw) == "52506008e5cde459c8d3f695eb787a8021f2cacf4a02f499ea390cdc4d891a9a"
     dxf = intake_to_dxf(json.loads(raw))
-    assert len(dxf) == 159118
-    assert digest(dxf) == "942433cd03fb585263060e552871bafe00316520136605352072e9d027d7e75d"
+    assert len(dxf) == 170266
+    assert digest(dxf) == "18cfed23a3fd45d0bc6382b6f274c85c22dd717f4cf63a1ac10c1f30f76d9bda"
     intake = parse_dxf_bytes(dxf, source_name="rooftop-unsplit.dxf")
     upload = json.dumps(intake).encode()
     assert len(upload) == 177010

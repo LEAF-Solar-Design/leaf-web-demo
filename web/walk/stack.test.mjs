@@ -146,6 +146,8 @@ test('start and stop a real stack three times in a row without teardown errors',
     try {
       assert.equal(await portListening(stack.ports.app), true)
       assert.equal(await portListening(stack.ports.harness), true)
+      assert.equal(stack.env.LEAF_SOLAR_PROJECT_RUN_ENABLED, undefined)
+      assert.deepEqual(stack.canonicalWorkerTools, [])
     } finally {
       record = await stack.stop()
     }
@@ -205,6 +207,10 @@ test('ephemeral stack uses real private PostgreSQL when binaries are installed',
   try {
     assert.deepEqual(await queryPostgres(stack.database.url, 'SELECT current_database() AS name'), [{ name: stack.database.name }])
     assert.equal(stack.postgres.migrated, true)
+    assert.equal(stack.env.LEAF_SOLAR_PROJECT_RUN_ENABLED, '1')
+    assert.deepEqual(stack.canonicalWorkerTools, ['solar-settings'])
+    const ready = expectStatus(await request(stack, '/api/ready'), 200)
+    assert.equal(ready.dependencies.worker.state, 'ready', JSON.stringify(ready))
     const org = expectStatus(await request(stack, '/api/orgs', { method: 'POST', json: { name: 'ephemeral walk' } }), 200).org
     const project = expectStatus(await request(stack, '/api/projects', { method: 'POST',
       headers: { 'X-Org-Id': org.org_id, 'X-Tenant-Id': org.org_id }, json: { name: 'private walk project' } }), 200).project
@@ -570,7 +576,7 @@ test('two PostgreSQL-backed stacks isolate projects and run authored work', { ti
       process.env.LEAF_WALK_PG_ADMIN_URL = adminUrl
       process.env.DATABASE_URL = 'postgresql://must-not-leak.invalid/host'
       process.env.LEAF_HARNESS_DATABASE_URL = 'postgresql://must-not-leak.invalid/harness'
-      boots = await Promise.allSettled([firstSlot, firstSlot + 1].map((slot) => startStack({ slot, admission, postgres: true })))
+      boots = await Promise.allSettled([firstSlot, firstSlot + 1].map((slot) => startStack({ slot, admission, postgres: true, canonicalWorkerTool: null })))
     } finally {
       for (const [key, value] of [['LEAF_WALK_PG_ADMIN_URL', previous.admin], ['DATABASE_URL', previous.database], ['LEAF_HARNESS_DATABASE_URL', previous.harness]]) {
         if (value === undefined) delete process.env[key]

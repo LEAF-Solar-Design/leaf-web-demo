@@ -28,6 +28,22 @@ test('WL16 project-open declares a private PostgreSQL fixture while retaining th
   assert.equal(entry.certify, 'both')
 })
 
+test('WL16b project Solar states extend only Solar and preserve standalone readiness', () => {
+  const entry = entryFor('surface:solar')
+  const states = ['project-solar-open', 'project-solar-published', 'project-solar-form-switch', 'project-solar-proposal-offline']
+  assert.deepEqual(entry.states.filter((state) => state.startsWith('project-solar-')).sort(), states.sort())
+  for (const state of states) {
+    assert.equal(entry.state_contexts[state].openProjectId, 'walk-project')
+    assert.deepEqual(entry.expected_effect[state], { kind: 'renders', target: 'project-solar-workspace',
+      phase: state.slice('project-solar-'.length) })
+    assert.ok(!map.entries.some((row) => row.id !== entry.id && row.states.includes(state)))
+  }
+  assert.equal(entry.state_contexts.ready.openProjectId, undefined)
+  assert.equal(entry.expected_effect.ready.target, 'surface:solar')
+  assert.equal(entry.expected_effect.ready.state, 'available')
+  assert.ok(entry.sources.includes('web/src/solar/ProjectSolarWorkspace.jsx'))
+})
+
 test('WL14 Find-submit is a distinct certified control with a search-result effect', () => {
   const entry = entryFor('control:find-drawing-submit')
   assert.equal(entry.source_id, 'find-drawing-submit')
@@ -268,9 +284,10 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   // C3 adds three Object snap modes disclosure states: 852 + 3 = 855, 818 + 3 = 821.
   // S27 adds the bar:escape owner-open state for the Escape owner rung: 855 + 1 = 856, 821 + 1 = 822.
   // WL14 adds one desktop Find-submit ready triple.
+  // WL16b adds four desktop project Solar states to both inventories.
   // Ops adds ready/desktop and signed-out/desktop triples.
-  assert.equal(previousTriples.length, 859)
-  assert.equal(triples(map).length, 825)
+  assert.equal(previousTriples.length, 863)
+  assert.equal(triples(map).length, 829)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))

@@ -11,6 +11,33 @@ import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, disc
 
 const map = buildFeatureMap()
 
+test('WL16b project Solar recipes import, select, publish and switch in order', () => {
+  const entry = map.entries.find((row) => row.id === 'surface:solar')
+  const open = ['open-private-drawing', 'open-real-project', 'open-project-solar']
+  for (const [state, steps] of [
+    ['project-solar-open', open],
+    ['project-solar-published', [...open, 'publish-project-solar']],
+    ['project-solar-form-switch', [...open, 'publish-project-solar', 'switch-project-solar-forms']],
+  ]) {
+    const probe = resolveProbe(entry, state)
+    assert.deepEqual(probe.setup.steps.map((row) => row.kind), steps)
+    assert.deepEqual(probe.setup.steps[0], { kind: 'open-private-drawing', surface: 'cad' })
+    assert.deepEqual(probe.workerOptions, { walkPostgres: true })
+    assert.equal(probe.locator.role, 'tab')
+    assert.equal(probe.locator.name, 'Solar CAD')
+    assert.equal(probe.locator.scope.name, 'Workspace profile')
+    assert.equal(probe.assertion.target, 'project-solar-workspace')
+    assert.match(unsupportedBeforeSetup(probe, { walkPostgres: true }), /^authenticated_subject_required:/)
+    assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true, authLive: true }), null)
+  }
+  assert.equal(resolveProbe(entry, 'ready').workerOptions, undefined)
+  assert.equal(unsupportedBeforeSetup(resolveProbe(entry, 'ready'), { authLive: false }), null)
+  const offline = resolveProbe(entry, 'project-solar-proposal-offline')
+  assert.deepEqual(offline.workerOptions, { walkPostgres: true })
+  assert.deepEqual(offline.setup.steps.map((row) => row.kind), ['require-local-state'])
+  assert.match(unsupportedBeforeSetup(offline, { walkPostgres: true }), /^cloud_service_offline:.*server\/solar_project_solve\.py/)
+})
+
 test('WL15 solar stage prefixes are closed, ordered and contain each earlier stage once', () => {
   assert.deepEqual(SOLAR_CHAIN_STAGES, ['panels', 'sized', 'strung', 'equipped', 'routed'])
   const expected = [

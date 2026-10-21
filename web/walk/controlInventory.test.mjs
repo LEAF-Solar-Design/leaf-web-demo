@@ -10,6 +10,18 @@ import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, locatorRecipe, normali
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/control-census.${name}.json`, import.meta.url), 'utf8'))
 const resolve = (data, context) => resolveCensus(data.controls, data.derivedMappings, data.map, data.inventory, context)
 
+test('WL16b project Solar keeps the existing Solar CAD control identity', () => {
+  const map = buildFeatureMap()
+  assert.doesNotThrow(() => readControlInventory(map))
+  const solar = map.entries.find((row) => row.id === 'surface:solar')
+  const standalone = locatorRecipe(solar, 'ready')
+  for (const state of ['project-solar-open', 'project-solar-published', 'project-solar-form-switch', 'project-solar-proposal-offline']) {
+    const probe = resolveProbe(solar, state)
+    assert.deepEqual(probe.locator, standalone)
+    assert.deepEqual(probe.workerOptions, { walkPostgres: true })
+  }
+})
+
 test('WL16 project Escape keeps its mapped control and requests only the project worker fixture', () => {
   const entry = buildFeatureMap().entries.find((row) => row.id === 'action:bar-escape')
   const project = resolveProbe(entry, 'project-open')
