@@ -8,6 +8,11 @@ They contain no CSS selectors, executable expressions, or browser scripts.
 are motion beats that run after the SW1 pre-roll, with the drawing already open.
 Each zoom beat clicks five times; every click is followed by a 300 ms pause.
 
+`SW1R` is SW1 followed by closing the import pane (a second click on the
+"Open a DXF in the browser engine" tab), the Properties pane and the notification
+inbox, then fitting the drawing so it is visible in a 984 px split pane before
+the motion beats run. Both closed panes reset on the next page load.
+
 ## `leaf.studio-beats.v1`
 
 All fields below are required; unknown fields are rejected:
