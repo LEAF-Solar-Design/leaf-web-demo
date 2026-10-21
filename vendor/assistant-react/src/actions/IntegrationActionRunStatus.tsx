@@ -38,7 +38,7 @@ const timestampField: DatasetFieldV1 = {
 
 /** Renders canonical evidence only, retaining earlier observations during reconciliation. */
 export function IntegrationActionRunStatus({ run: rawRun, receipts, displayPreferences, mode = "light" }: IntegrationActionRunStatusProps) {
-  const history = useRef<{ run: IntegrationActionRunV1; receipts: IntegrationActionReceiptV1[] }>();
+  const history = useRef<{ run: IntegrationActionRunV1; receipts: IntegrationActionReceiptV1[] } | undefined>(undefined);
   const parsed = IntegrationActionRunV1.safeParse(rawRun);
   const snapshot = receipts === undefined ? undefined : IntegrationActionSnapshotV1.safeParse({ run: rawRun, receipts });
   let preferences: DisplayPreferences;
