@@ -72,9 +72,9 @@ function ActionFormInner({ element, grantRevision, availability, displayPreferen
   const [run, setRun] = useState<IntegrationActionRunV1>();
   const [receipts, setReceipts] = useState<IntegrationActionReceiptV1[]>();
   const [conflict, setConflict] = useState(false);
-  const frozen = useRef<IntegrationActionSubmissionV1>();
+  const frozen = useRef<IntegrationActionSubmissionV1 | undefined>(undefined);
   const latch = useRef(false);
-  const active = useRef<{ controller: AbortController; timer: ReturnType<typeof setTimeout> }>();
+  const active = useRef<{ controller: AbortController; timer: ReturnType<typeof setTimeout> } | undefined>(undefined);
   const alive = useRef(true);
   const summary = useRef<HTMLDivElement>(null);
   const controls = useRef<Record<string, HTMLInputElement | HTMLSelectElement | null>>({});
