@@ -492,7 +492,7 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
                          'required': ['recipe'],
                          'additionalProperties': False}},
         "read_integration_data": {
-            "description": "Discover project datasets or query an existing materialization.",
+            "description": "Discover project datasets and native action forms or query an existing materialization.",
             "rung": 1,
             "required_capability": "converse",
             "policy": "auto",
@@ -502,6 +502,7 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
                 "kind": "app_api",
                 "routes": [
                     "POST /internal/integrations/datasets",
+                    "POST /internal/integrations/action-catalog",
                     "POST /internal/integrations/query"
                 ]
             },
@@ -669,6 +670,34 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
                     }
                 },
                 "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "operation": {
+                                "const": "action_catalog"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 50
+                            },
+                            "after": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1024,
+                                "pattern": "^[A-Za-z0-9_-]+(?![\\s\\S])"
+                            },
+                            "confirmation_id": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{16}(?![\\s\\S])"
+                            }
+                        },
+                        "required": [
+                            "operation",
+                            "limit"
+                        ],
+                        "additionalProperties": False
+                    },
                     {
                         "type": "object",
                         "properties": {

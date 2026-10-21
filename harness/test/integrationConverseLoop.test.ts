@@ -28,11 +28,18 @@ const ACTION = IntegrationActionElementV1.parse({
   connection_id: "sales", connector_ref: REF, operation_ref: { ...REF, id: "create-sale" },
   form: { submit_label: "Create", fields: [{ id: "amount", label: "Amount", kind: "number", required: true, nullable: false, integer: false }] },
 });
+const CATALOG = {
+  actions: [{ connection_id: ACTION.connection_id, connection_title: "Sales", connector_ref: ACTION.connector_ref,
+    operation_ref: ACTION.operation_ref, title: ACTION.title, form: ACTION.form }],
+  next_cursor: "opaque_1",
+};
 const CASES = [
   { tool: "integration_datasets", args: {}, normalized: { limit: 50 }, result: { datasets: [], next_cursor: null } },
   { tool: "integration_query", args: { dataset_ref: REF, query: QUERY }, normalized: { dataset_ref: REF, query: QUERY }, result: READ },
   { tool: "integration_save_element", args: { recipe: RECIPE, expectedRevision: 3 }, normalized: { recipe: RECIPE, expectedRevision: 3 }, result: { element: RECIPE, revision: 4 } },
   { tool: "integration_save_element", args: { recipe: ACTION, expectedRevision: 3 }, normalized: { recipe: ACTION, expectedRevision: 3 }, result: { element: ACTION, revision: 4 } },
+  { tool: "integration_action_catalog", args: {}, normalized: { limit: 50 }, result: CATALOG },
+  { tool: "integration_action_catalog", args: { limit: 1, after: "opaque_0" }, normalized: { limit: 1, after: "opaque_0" }, result: { actions: [], next_cursor: "opaque_1" } },
 ] as const;
 
 function setup(tool: string, args: Record<string, unknown>, response: unknown, connected = true) {
@@ -43,6 +50,7 @@ function setup(tool: string, args: Record<string, unknown>, response: unknown, c
   const wrongMethod = vi.fn(async () => { throw new Error("wrong integration method"); });
   if (connected) {
     appRun.integrationDatasets = tool === "integration_datasets" ? host : wrongMethod;
+    appRun.integrationActionCatalog = tool === "integration_action_catalog" ? host : wrongMethod;
     appRun.integrationQuery = tool === "integration_query" ? host : wrongMethod;
     appRun.integrationSaveElement = tool === "integration_save_element" ? host : wrongMethod;
   }
@@ -85,7 +93,7 @@ describe("integration tools use the host's single permission gate", () => {
     expect(state.results).toEqual([{ content: JSON.stringify(entry.result) }]);
     const events = [...state.store.events.values()].flat();
     const summaries = events.filter((event) => event.type === "tool_result").map((event) => event.data.summary);
-    expect(summaries).toEqual([entry.tool === "integration_datasets" ? "0 datasets" : entry.tool === "integration_query" ? "2 rows (ready)" : "element sales-view revision 4"]);
+    expect(summaries).toEqual([entry.tool === "integration_action_catalog" ? `${entry.result.actions.length} action forms` : entry.tool === "integration_datasets" ? "0 datasets" : entry.tool === "integration_query" ? "2 rows (ready)" : "element sales-view revision 4"]);
   });
 
   it.each(CASES)("$tool mirrors exact normalized arguments and replays with fresh authority", async (entry) => {
@@ -127,6 +135,59 @@ describe("integration tools use the host's single permission gate", () => {
     expect(state.gate.checks[0].action).toBe("read_platform_state");
     expect(state.host).not.toHaveBeenCalled();
     expect(state.results[0].isError).not.toBe(true);
+  });
+
+  it("catalog pending mirrors discard a previous confirmation id", async () => {
+    const state = setup("integration_action_catalog", { after: "opaque_0", confirmation_id: CID },
+      { gate: { decision: "awaiting_approval", confirmation_id: CID } });
+    await state.send();
+    expect(JSON.parse(state.store.confirmations.get(CID)!.args_json)).toEqual({ limit: 50, after: "opaque_0" });
+    expect(state.host).toHaveBeenCalledTimes(1);
+    expect(state.gate.checks).toHaveLength(0);
+  });
+
+  it.each([{}, { authoritySessionId: "app-session" }, { authoritySessionId: "app-session", authorityTurnId: "bad\n" }])("catalog requires trusted authority: %j", async (authority) => {
+    const state = setup("integration_action_catalog", {}, undefined);
+    await state.send(authority);
+    expect(state.host).not.toHaveBeenCalled();
+    expect(state.gate.checks).toHaveLength(0);
+    expect(state.results[0].content).toBe("Integration request failed: unavailable.");
+  });
+
+  it.each([
+    { limit: 0 }, { limit: 51 }, { limit: 1.5 }, { after: "" }, { after: "bad\n" },
+    { after: "a".repeat(1025) }, { authorityTurnId: "forged" }, { operation: "action_catalog" },
+    { url: "https://foreign.invalid" }, { confirmation_id: "invalid" },
+  ])("rejects catalog argument injection: %j", async (args) => {
+    const state = setup("integration_action_catalog", args, undefined);
+    await state.send();
+    expect(state.host).not.toHaveBeenCalled();
+    expect(state.gate.checks).toHaveLength(0);
+    expect(state.results[0].content).toBe("Integration request failed: invalid_input.");
+  });
+
+  it.each([
+    { datasets: [], next_cursor: null }, { element: ACTION, revision: 1 },
+    { ...CATALOG, actions: [CATALOG.actions[0], CATALOG.actions[0]] },
+    { ...CATALOG, next_cursor: "bad cursor" },
+    { ...CATALOG, actions: [{ ...CATALOG.actions[0], authority: "forged" }] },
+    { ...CATALOG, actions: [{ ...CATALOG.actions[0], form: { ...ACTION.form, arguments: {} } }] },
+  ])("rejects malformed catalog results without a second host call: %j", async (result) => {
+    const state = setup("integration_action_catalog", { limit: 1 }, { gate: { decision: "allow" }, result });
+    await state.send();
+    expect(state.results[0].content).toBe("Integration request failed: invalid_response.");
+    expect(state.host).toHaveBeenCalledTimes(1);
+    expect(state.gate.checks).toHaveLength(0);
+  });
+
+  it("catalog transport failure is safe and never automatically retried", async () => {
+    const state = setup("integration_action_catalog", {}, undefined);
+    state.host.mockRejectedValueOnce(new Error("synthetic-private-token"));
+    await state.send();
+    expect(state.results[0].content).toBe("Integration request failed: unavailable.");
+    expect(state.host).toHaveBeenCalledTimes(1);
+    expect(state.gate.checks).toHaveLength(0);
+    expect(JSON.stringify([...state.store.events.values()])).not.toContain("synthetic-private-token");
   });
 
   it.each([{}, { authoritySessionId: "app-session" }, { authorityTurnId: "app-turn" }, { authoritySessionId: "bad\n", authorityTurnId: "turn" }])("requires trusted authority: %j", async (authority) => {

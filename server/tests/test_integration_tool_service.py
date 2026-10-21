@@ -34,6 +34,11 @@ REF = {"id": "sales", "version": 1, "digest": "a" * 64}
 QUERY = {"fields": ["amount"], "limit": 5}
 FIELD = {"id": "amount", "label": "Amount", "type": {"kind": "number", "unit": "kWh"},
          "nullable": False, "sensitivity": "internal"}
+ACTION = {"connection_id": "sales", "connection_title": "Sales", "connector_ref": REF,
+          "operation_ref": {**REF, "id": "create-sale"}, "title": "Create sale",
+          "form": {"submit_label": "Create", "fields": [
+              {"id": "amount", "label": "Amount", "kind": "number", "integer": False,
+               "required": True, "nullable": False}]}}
 
 
 def read():
@@ -93,6 +98,135 @@ def rig(monkeypatch):
         {"dataset_ref": deepcopy(REF), "query": deepcopy(QUERY)}, auth.tenant_id, auth.session_id, auth.turn_id)
     state.auth, state.keys = auth, keys
     return state
+
+
+@pytest.fixture
+def catalog(rig):
+    rig.auth = replace(rig.auth, operations=CURRENT_OPERATIONS)
+    rig.current = replace(rig.current, authority=rig.auth)
+    binding = replace(rig.custody.binding, authority=rig.auth)
+    rig.custody = EncryptedGrant(binding, service.crypto.seal(TOKEN, binding, rig.keys))
+    rig.svc.resolve_write = rig.svc.resolve
+    rig.response = {"actions": [deepcopy(ACTION)], "next_cursor": "opaque_1"}
+    rig.catalog_call = lambda value=None: rig.svc.execute("action_catalog", {} if value is None else value,
+        rig.auth.tenant_id, rig.auth.session_id, rig.auth.turn_id)
+    return rig
+
+
+def test_catalog_canonical_wire_one_read_gate_and_no_effect(catalog):
+    result = catalog.catalog_call({"limit": 1, "after": "opaque_0"})
+    assert result["result"] == catalog.response
+    assert len(catalog.gates) == len(catalog.requests) == 1
+    args, kwargs = catalog.gates[0]
+    assert args[:4] == (catalog.auth.tenant_id, "app-session", "turn-1", "read_integration_data")
+    assert args[4] == {"operation": "action_catalog", "limit": 1, "after": "opaque_0"}
+    assert kwargs["subject"] == catalog.auth.subject
+    request = catalog.requests[0]
+    assert request.method == "GET" and request.content == b""
+    assert str(request.url) == (catalog.auth.origin + "/api/v1/projects/" + catalog.auth.project_id
+                                + "/integrations/action-catalog?limit=1&after=opaque_0")
+    assert request.headers["authorization"] == "Bearer " + TOKEN.decode()
+    assert "if-match" not in request.headers
+    assert catalog.resolutions >= 5
+    assert all(not any(buf) for buf in catalog.keys.buffers)
+
+
+def test_catalog_empty_page_can_advance(catalog):
+    catalog.response = {"actions": [], "next_cursor": "opaque_1"}
+    assert catalog.catalog_call()["result"] == catalog.response
+    assert catalog.gates[0][0][4] == {"operation": "action_catalog", "limit": 50}
+
+
+@pytest.mark.parametrize("decision", ["deny", "awaiting_approval"])
+def test_catalog_gate_nonallow_does_not_request_ops(catalog, decision):
+    catalog.decision = decision
+    output = catalog.catalog_call({"after": "opaque_0", "confirmation_id": "a" * 16})
+    assert set(output) == {"gate"} and output["gate"]["decision"] == decision
+    assert not catalog.requests and len(catalog.gates) == 1
+    assert catalog.gates[0][0][4] == {"operation": "action_catalog", "limit": 50,
+                                      "after": "opaque_0", "confirmation_id": "a" * 16}
+
+
+@pytest.mark.parametrize("stored,current", [(LEGACY_OPERATIONS, CURRENT_OPERATIONS),
+                                           (LEGACY_OPERATIONS, LEGACY_OPERATIONS),
+                                           (CURRENT_OPERATIONS, LEGACY_OPERATIONS)])
+def test_catalog_checks_both_grants_before_decryption(catalog, stored, current):
+    binding = replace(catalog.custody.binding, authority=replace(catalog.auth, operations=stored))
+    catalog.custody = EncryptedGrant(binding, b"must-not-decrypt")
+    catalog.current = replace(catalog.current, authority=replace(catalog.auth, operations=current))
+    decrypts = []
+    catalog.svc.decrypt = lambda *args: decrypts.append(args)
+    assert catalog.catalog_call()["error"]["code"] == "denied"
+    assert not decrypts and not catalog.gates and not catalog.requests
+
+
+@pytest.mark.parametrize("value", [
+    {"limit": 0}, {"limit": 51}, {"limit": True}, {"limit": 1.5}, {"after": ""},
+    {"after": "bad cursor"}, {"after": "bad\n"}, {"after": "a" * 1025},
+    {"confirmation_id": "A" * 16}, {"authority": {}}, {"tenant_id": "forged"},
+    {"url": "https://foreign"}, {"headers": {}}, {"operation": "action_catalog"},
+])
+def test_catalog_invalid_input_precedes_authority(catalog, value):
+    assert catalog.catalog_call(value)["error"]["code"] == "invalid_input"
+    assert catalog.resolutions == 0 and not catalog.gates and not catalog.requests
+
+
+@pytest.mark.parametrize("change", ["over_limit", "extra_envelope", "extra_entry", "bad_ref", "bad_cursor",
+    "empty_cursor", "long_cursor", "bad_form", "duplicate_fields", "reserved_field", "number_bounds",
+    "text_bounds", "duplicate_choices", "wrong_tool", "reflected"])
+def test_catalog_rejects_malformed_canonical_data(catalog, change):
+    action = catalog.response["actions"][0]
+    field = action["form"]["fields"][0]
+    if change == "over_limit":
+        catalog.response["actions"].append(deepcopy(action))
+    elif change == "extra_envelope":
+        catalog.response["authority"] = "forged"
+    elif change == "extra_entry":
+        action["url"] = "https://foreign"
+    elif change == "bad_ref":
+        action["operation_ref"]["digest"] = "bad"
+    elif change == "bad_cursor":
+        catalog.response["next_cursor"] = "bad="
+    elif change == "empty_cursor":
+        catalog.response["next_cursor"] = ""
+    elif change == "long_cursor":
+        catalog.response["next_cursor"] = "a" * 1025
+    elif change == "bad_form":
+        action["form"]["arguments"] = {"amount": 1}
+    elif change == "duplicate_fields":
+        action["form"]["fields"].append(deepcopy(field))
+    elif change == "reserved_field":
+        field["id"] = "__proto__"
+    elif change == "number_bounds":
+        field.update(minimum=2, maximum=1)
+    elif change == "text_bounds":
+        field.pop("integer")
+        field.update(kind="text", min_length=2, max_length=1)
+    elif change == "duplicate_choices":
+        field.pop("integer")
+        field.update(kind="choice", choices=[{"label": "A", "value": "a"}, {"label": "B", "value": "a"}])
+    elif change == "wrong_tool":
+        catalog.response = {"datasets": [], "next_cursor": None}
+    else:
+        action["connection_title"] = TOKEN.decode()
+    result = catalog.catalog_call({"limit": 1})
+    assert result["error"]["code"] == "invalid_response"
+    assert len(catalog.requests) == len(catalog.gates) == 1
+    assert TOKEN.decode() not in json.dumps(result)
+
+
+@pytest.mark.parametrize("status,body,code", [
+    (302, b"", "invalid_response"), (403, b"", "denied"), (409, b"", "conflict"),
+    (200, b"x" * (service.RESPONSE_CAP + 1), "response_too_large"),
+], ids=["redirect", "denied", "conflict", "oversized"])
+def test_catalog_bounded_transport_never_reports_unknown_save(catalog, status, body, code):
+    requests = []
+    async def mock(request):
+        requests.append(request)
+        return httpx.Response(status, content=body, headers={"content-type": "application/json"})
+    catalog.svc.transport = httpx.MockTransport(mock)
+    assert catalog.catalog_call()["error"]["code"] == code
+    assert len(requests) == 1
 
 
 def test_query_fixed_wire_and_exactly_one_gate(rig):
@@ -205,16 +339,12 @@ def test_bound_capability_condition_directly(rig, stored_ops, current_ops, requi
             service._check_bound_authority(binding, current, current, required, 1001)
 
 
-def test_missing_action_capability_denies_before_decrypt_gate_or_http(rig, monkeypatch):
+def test_missing_action_capability_denies_before_decrypt_gate_or_http(rig):
     rig.current = replace(rig.current, authority=replace(rig.auth, operations=CURRENT_OPERATIONS))
-    check = service._check_bound_authority
-    # Exercise the future required capability at the existing check boundary;
-    # no host route or tool accepts action discovery in this slice.
-    def require_action(binding, current, fresh, required, now):
-        return check(binding, current, fresh, "action_discovery", now)
-    monkeypatch.setattr(service, "_check_bound_authority", require_action)
+    rig.svc.resolve_write = rig.svc.resolve
     rig.svc.decrypt = lambda *args: pytest.fail("decryption before capability check")
-    assert rig.call()["error"]["code"] == "denied"
+    result = rig.svc.execute("action_catalog", {}, rig.auth.tenant_id, rig.auth.session_id, rig.auth.turn_id)
+    assert result["error"]["code"] == "denied"
     assert not rig.gates and not rig.requests
 
 
@@ -368,6 +498,74 @@ def test_real_gate_plan_first_replay_and_argument_drift(rig, tmp_path, monkeypat
     assert "confirmation_id" not in approved
     assert rig.call(value)["gate"]["decision"] == "deny"
     assert len(rig.requests) == 1
+
+
+def test_real_catalog_gate_approval_binds_limit_cursor_and_is_consumed_once(catalog, tmp_path, monkeypatch):
+    for env, path in {"LEAF_AGENT_KILL_FILE": "kill", "LEAF_AGENT_APPROVALS_DIR": "approvals",
+                      "LEAF_AGENT_GRANTS_FILE": "grants.json", "LEAF_AGENT_RATE_FILE": "rate.json",
+                      "LEAF_AGENT_AUDIT": "audit.jsonl", "LEAF_AGENT_LEDGER": "ledger.jsonl",
+                      "LEAF_AGENT_TENANTS_FILE": "tenants.json"}.items():
+        monkeypatch.setenv(env, str(tmp_path / path))
+    monkeypatch.setenv("LEAF_AGENT_STORE", "legacy")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.delenv("LEAF_AGENT_POLICY_FILE", raising=False)
+    monkeypatch.setattr(session_policy, "get_policy", lambda session, tenant: "plan_first")
+    calls = []
+    def gate(*args, **kwargs):
+        calls.append(deepcopy(args))
+        return agent_gate.gate(*args, **kwargs)
+    catalog.svc.gate = gate
+    original = {"limit": 1, "after": "opaque_0"}
+    pending = catalog.catalog_call(original)["gate"]
+    assert pending["decision"] == "awaiting_approval"
+    assert len(calls) == 1 and not catalog.requests
+    confirmation = pending["confirmation_id"]
+    record = agent_gate.read_pending(confirmation)
+    assert record["action"] == "read_integration_data"
+    assert record["args"] == {"operation": "action_catalog", **original}
+    ok, _, _ = agent_gate.grant_approval(confirmation, by=catalog.auth.subject)
+    assert ok
+    approved_args = {**original, "confirmation_id": confirmation}
+    assert catalog.catalog_call({**approved_args, "limit": 2})["gate"]["decision"] == "deny"
+    assert catalog.catalog_call({**approved_args, "after": "opaque_1"})["gate"]["decision"] == "deny"
+    assert not catalog.requests
+    approved = catalog.catalog_call(approved_args)
+    assert approved["gate"]["decision"] == "allow" and approved["result"] == catalog.response
+    assert catalog.catalog_call(approved_args)["gate"]["decision"] == "deny"
+    assert len(calls) == 5 and len(catalog.requests) == 1
+    assert catalog.requests[0].method == "GET" and catalog.requests[0].content == b""
+
+
+@pytest.mark.parametrize("phase", [2, 3, 4, 5, 6])
+@pytest.mark.parametrize("mutation", ["revoked", "expired", "identity", "operations"])
+def test_catalog_rechecks_authority_and_expiry_at_each_boundary(catalog, phase, mutation):
+    original = catalog.svc.resolve_write
+    resolutions = 0
+    def resolve(*headers):
+        nonlocal resolutions
+        resolutions += 1
+        if resolutions == phase:
+            if mutation == "revoked":
+                raise service.ReadFailure("denied")
+            if mutation == "expired":
+                catalog.svc.clock = lambda: 1100
+            elif mutation == "identity":
+                catalog.current = replace(catalog.current, authority=replace(catalog.auth, subject="auth0|other"))
+            elif mutation == "operations":
+                catalog.current = replace(catalog.current, authority=replace(catalog.auth, operations=LEGACY_OPERATIONS))
+        return original(*headers)
+    catalog.svc.resolve_write = resolve
+    decrypts = []
+    decrypt = catalog.svc.decrypt
+    def tracked(*args):
+        decrypts.append(True)
+        return decrypt(*args)
+    catalog.svc.decrypt = tracked
+    assert catalog.catalog_call()["error"]["code"] == "denied"
+    assert len(catalog.gates) == (0 if phase <= 3 else 1)
+    assert len(catalog.requests) == (0 if phase <= 4 else 1)
+    if phase == 2:
+        assert not decrypts
 
 
 def test_real_gate_early_denial_projects_nullable_metadata(rig, tmp_path, monkeypatch):

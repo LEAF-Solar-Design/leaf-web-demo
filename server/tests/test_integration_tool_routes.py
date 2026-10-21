@@ -25,12 +25,12 @@ REF = {"id": "sales", "version": 1, "digest": "a" * 64}
 BODY = {"dataset_ref": REF, "query": {"fields": ["id"], "limit": 10}}
 
 
-@pytest.fixture
-def host(monkeypatch):
+@pytest.fixture(params=["query", "action_catalog"])
+def host(monkeypatch, request):
     tenant, project, user, binding_id = (str(uuid4()) for _ in range(4))
     state = SimpleNamespace(tenant=tenant, project=project, subject="auth0|person", turn="turn-1",
                             role=True, write_access=True, write_checks=[], ops=[], gates=[],
-                            decision="allow", on_http=lambda: None)
+                            decision="allow", on_http=lambda: None, operation=request.param, decrypts=0)
     state.session = {"session_id": "app-session", "tenant_id": tenant,
                      "org_id": tenant, "project_id": project}
     state.binding = SimpleNamespace(platform_tenant_id=UUID(tenant), binding_id=UUID(binding_id),
@@ -66,6 +66,7 @@ def host(monkeypatch):
         # A collision in another project cannot select this project record.
         return state.custody if state.custody and state.custody.binding.authority == authority else None
     def decrypt(envelope, binding, callback, keys):
+        state.decrypts += 1
         token = bytearray(b"route-synthetic-bearer")
         try:
             return callback(token)
@@ -80,6 +81,8 @@ def host(monkeypatch):
         state.on_http()
         if "/integrations/elements" in request.url.path:
             return httpx.Response(200, json={"element": json.loads(request.content), "revision": 1})
+        if request.url.path.endswith("/integrations/action-catalog"):
+            return httpx.Response(200, json={"actions": [], "next_cursor": "opaque_1"})
         return httpx.Response(200, json={
             "schema_version": 1, "dataset_ref": REF,
             "fields": [{"id": "id", "label": "ID", "type": {"kind": "identifier"},
@@ -94,15 +97,24 @@ def host(monkeypatch):
     app = FastAPI()
     app.include_router(integration_tools.router)
     state.client = TestClient(app)
-    state.post = lambda **kwargs: state.client.post("/internal/integrations/query", headers=state.headers,
-                                                   json=kwargs.get("body", BODY))
+    path = "/internal/integrations/" + ("action-catalog" if request.param == "action_catalog" else "query")
+    state.post = lambda **kwargs: state.client.post(path, headers=state.headers,
+                                                   json=kwargs.get("body", {} if request.param == "action_catalog" else BODY))
+    state.write_checks.clear()
     return state
 
 
-def test_authenticated_query(host):
+def test_authenticated_read(host):
     response = host.post()
     assert response.status_code == 200
-    assert response.json()["result"]["dataset_ref"] == REF
+    if host.operation == "action_catalog":
+        assert response.json()["result"] == {"actions": [], "next_cursor": "opaque_1"}
+        assert host.write_checks and all(host.write_checks)
+        assert host.ops[0].method == "GET" and host.ops[0].content == b""
+        assert str(host.ops[0].url).endswith("/integrations/action-catalog?limit=50")
+        assert host.gates[0][0][3:5] == ("read_integration_data", {"operation": "action_catalog", "limit": 50})
+    else:
+        assert response.json()["result"]["dataset_ref"] == REF
     assert len(host.ops) == len(host.gates) == 1
     assert response.headers["cache-control"] == "no-store, private"
 
@@ -242,4 +254,42 @@ def test_content_type_and_duplicate_authority_headers(host):
 def test_no_additional_methods_or_routes(host):
     assert host.client.get("/internal/integrations/query", headers=host.headers).status_code == 405
     assert host.client.post("/internal/integrations/save", headers=host.headers, json={}).status_code == 404
+    assert not host.ops and not host.gates
+
+
+def test_catalog_requires_owner_or_editor_before_decrypt(host):
+    host.write_access = False
+    response = host.client.post("/internal/integrations/action-catalog", headers=host.headers, json={})
+    assert response.status_code == 403
+    assert host.write_checks == [True]
+    assert not host.decrypts and not host.ops and not host.gates
+
+
+def test_catalog_write_access_is_rechecked_after_http(host):
+    host.on_http = lambda: setattr(host, "write_access", False)
+    response = host.client.post("/internal/integrations/action-catalog", headers=host.headers, json={})
+    assert response.status_code == 403
+    assert "result" not in response.json()
+    assert host.write_checks and all(host.write_checks)
+    assert len(host.ops) == len(host.gates) == 1
+
+
+@pytest.mark.parametrize("header", ["X-Tenant-Id", "X-Dispatch-Secret", "X-Authority-Session-Id", "X-Authority-Turn-Id"])
+def test_duplicate_catalog_authority_headers(host, header):
+    headers = list(host.headers.items()) + [(header, host.headers[header])]
+    response = host.client.post("/internal/integrations/action-catalog", headers=headers, json={})
+    assert response.status_code in {400, 401}
+    assert not host.decrypts and not host.ops and not host.gates
+
+
+@pytest.mark.parametrize("body", [{"tenant_id": "foreign"}, {"authority": {}}, {"operation": "elements"},
+                                  {"url": "https://foreign"}, {"limit": 51}, {"after": "bad="}])
+def test_catalog_route_rejects_model_authority_and_transport(host, body):
+    response = host.client.post("/internal/integrations/action-catalog", headers=host.headers, json=body)
+    assert response.status_code == 400
+    assert not host.decrypts and not host.ops and not host.gates
+
+
+def test_catalog_route_has_only_post(host):
+    assert host.client.get("/internal/integrations/action-catalog", headers=host.headers).status_code == 405
     assert not host.ops and not host.gates

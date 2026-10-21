@@ -19,6 +19,7 @@ import type {
   SubmitRunRequest,
   SubmitRunResponse,
   IntegrationAuthority,
+  IntegrationActionCatalogInput,
   IntegrationDatasetsInput,
   IntegrationDatasetsResult,
   IntegrationQueryInput,
@@ -29,16 +30,18 @@ import type {
 import { INTEGRATION_TOOL_INPUTS } from "../index.js";
 import { z } from "zod";
 import {
-  DatasetReadV1, IntegrationElementV1, IntegrationRefV1,
+  DatasetReadV1, IntegrationActionCatalogV1, IntegrationElementV1, IntegrationRefV1,
 } from "../../vendor/mushy-author/contracts/integration.js";
 
 export type IntegrationTool = keyof typeof INTEGRATION_TOOL_INPUTS;
 type IntegrationInputs = {
+  integration_action_catalog: IntegrationActionCatalogInput;
   integration_datasets: IntegrationDatasetsInput;
   integration_query: IntegrationQueryInput;
   integration_save_element: IntegrationSaveElementInput;
 };
 type IntegrationResults = {
+  integration_action_catalog: IntegrationActionCatalogV1;
   integration_datasets: IntegrationDatasetsResult;
   integration_query: DatasetReadV1;
   integration_save_element: IntegrationSaveElementResult;
@@ -115,11 +118,16 @@ export function validateIntegrationResponse<K extends IntegrationTool>(
   const { rung, ...metadata } = gate;
   const portGate = { ...metadata, ...(rung !== undefined ? { rung: typeof rung === "number" ? `R${rung}` : rung } : {}) };
   if (gate.decision !== "allow") return { gate: portGate };
-  const schema = tool === "integration_datasets" ? DiscoveryResult : tool === "integration_query" ? DatasetReadV1 : SaveResult;
+  const schema = tool === "integration_action_catalog" ? IntegrationActionCatalogV1
+    : tool === "integration_datasets" ? DiscoveryResult : tool === "integration_query" ? DatasetReadV1 : SaveResult;
   const checked = schema.safeParse(result);
   if (!checked.success) throw new IntegrationClientError("invalid_response");
   if (tool === "integration_datasets") {
     if ((checked.data as IntegrationDatasetsResult).datasets.length > (input as IntegrationDatasetsInput).limit) {
+      throw new IntegrationClientError("invalid_response");
+    }
+  } else if (tool === "integration_action_catalog") {
+    if ((checked.data as IntegrationActionCatalogV1).actions.length > (input as IntegrationActionCatalogInput).limit) {
       throw new IntegrationClientError("invalid_response");
     }
   } else if (tool === "integration_query") {
@@ -199,6 +207,10 @@ export class HttpAppRunClient implements AppRunClient {
     return this.integrationRequest("integration_datasets", tenantId, input, authority);
   }
 
+  integrationActionCatalog(tenantId: string, input: IntegrationActionCatalogInput, authority: IntegrationAuthority) {
+    return this.integrationRequest("integration_action_catalog", tenantId, input, authority);
+  }
+
   integrationQuery(tenantId: string, input: IntegrationQueryInput, authority: IntegrationAuthority) {
     return this.integrationRequest("integration_query", tenantId, input, authority);
   }
@@ -221,6 +233,7 @@ export class HttpAppRunClient implements AppRunClient {
     if (!this.secret) throw new IntegrationClientError("unavailable");
     const paths = {
       integration_datasets: "/internal/integrations/datasets",
+      integration_action_catalog: "/internal/integrations/action-catalog",
       integration_query: "/internal/integrations/query",
       integration_save_element: "/internal/integrations/elements",
     } as const;

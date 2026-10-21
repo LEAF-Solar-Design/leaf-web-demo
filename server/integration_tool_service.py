@@ -135,13 +135,13 @@ def normalize(operation, value):
     if "confirmation_id" in value and (type(confirmation) is not str
                                         or re.fullmatch(r"[0-9a-f]{16}", confirmation) is None):
         raise ReadFailure("invalid_input")
-    if operation == "datasets":
+    if operation in {"datasets", "action_catalog"}:
         if set(value) - {"limit", "after", "confirmation_id"}:
             raise ReadFailure("invalid_input")
         limit = value.get("limit", 50)
         if type(limit) is not int or not 1 <= limit <= 50:
             raise ReadFailure("invalid_input")
-        args = {"operation": "datasets", "limit": limit}
+        args = {"operation": operation, "limit": limit}
         if "after" in value:
             after = value["after"]
             if (type(after) is not str or not 1 <= len(after) <= 1024
@@ -312,6 +312,28 @@ def validate_read(value, reference):
     return value
 
 
+def validate_action_catalog(value, limit):
+    validate("IntegrationActionCatalogV1", value)
+    if len(value["actions"]) > limit:
+        raise ReadFailure("invalid_response")
+    # The generated JSON schema carries the closed shapes; mirror the
+    # canonical contract's cross-field refinements as well.
+    for action in value["actions"]:
+        fields = action["form"]["fields"]
+        if len({field["id"] for field in fields}) != len(fields):
+            raise ReadFailure("invalid_response")
+        for field in fields:
+            bounds = (("min_length", "max_length") if field["kind"] == "text" else
+                      ("minimum", "maximum") if field["kind"] == "number" else None)
+            if bounds and all(key in field for key in bounds) and field[bounds[0]] > field[bounds[1]]:
+                raise ReadFailure("invalid_response")
+            if field["kind"] == "choice":
+                choices = field["choices"]
+                if len({choice["value"] for choice in choices}) != len(choices):
+                    raise ReadFailure("invalid_response")
+    return value
+
+
 def project_discovery(value, limit):
     """Project the Ops application-service discovery envelope, without receipts."""
     if type(value) is not dict or set(value) != {"records", "nextCursor"}:
@@ -444,7 +466,7 @@ class IntegrationToolService:
             args = normalize(operation, value)
             saving = operation == "elements"
             def resolve():
-                if saving:
+                if saving or operation == "action_catalog":
                     if self.resolve_write is not None:
                         return self.resolve_write(tenant, session, turn)
                     return resolve_current(tenant, session, turn, write=True)
@@ -456,6 +478,7 @@ class IntegrationToolService:
             binding = custody.binding
             binding.__post_init__()
             required = ("element_save" if saving else
+                        "action_discovery" if operation == "action_catalog" else
                         "dataset_discovery" if operation == "datasets" else "dataset_query")
 
             def check():
@@ -490,8 +513,10 @@ class IntegrationToolService:
                             if method == "PUT":
                                 url += "/" + args["recipe"]["id"]
                             body = json.dumps(args["recipe"], allow_nan=False, separators=(",", ":")).encode("utf-8")
-                        elif operation == "datasets":
+                        elif operation in {"datasets", "action_catalog"}:
                             method, body = "GET", None
+                            if operation == "action_catalog":
+                                base = fresh.authority.origin + "/api/v1/projects/" + fresh.authority.project_id + "/integrations/action-catalog"
                             url = base + "?limit=" + str(args["limit"])
                             if "after" in args:
                                 url += "&after=" + quote(args["after"], safe="")
@@ -526,6 +551,8 @@ class IntegrationToolService:
                                         != json.dumps(args["recipe"], sort_keys=True, allow_nan=False)):
                                     raise ReadFailure("invalid_response")
                                 projected = {"element": value["element"], "revision": revision}
+                            elif operation == "action_catalog":
+                                projected = validate_action_catalog(value, args["limit"])
                             else:
                                 projected = (project_discovery(value, args["limit"]) if operation == "datasets"
                                              else validate_read(value, args["dataset_ref"]))
