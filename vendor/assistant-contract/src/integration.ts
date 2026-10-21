@@ -68,7 +68,7 @@ export type IntegrationRefV1 = z.infer<typeof IntegrationRefV1>;
 
 export const CredentialReferenceV1 = z.strictObject({
   id: z.string().uuid(),
-  purpose: z.enum(["access_token", "refresh_token", "api_key"]),
+  purpose: z.enum(["access_token", "refresh_token", "api_key", "webhook_signing_secret"]),
   version: z.number().int().min(1).max(2147483647),
 });
 export type CredentialReferenceV1 = z.infer<typeof CredentialReferenceV1>;
@@ -82,7 +82,9 @@ export const ConnectionV1 = z.strictObject({
   origin: Origin,
   state: z.enum(["setup", "active", "degraded", "reconnect_required", "disabled", "revoked"]),
   operation_ids: z.array(Slug).min(1).max(100),
-  credential_refs: z.array(CredentialReferenceV1).max(3),
+  credential_refs: z.array(CredentialReferenceV1.extend({
+    purpose: z.enum(["access_token", "refresh_token", "api_key"]),
+  })).max(3),
   provider_account_id: z.string().min(1).max(256).nullable(),
   identity_verified: z.boolean(),
   grant_revision: z.number().int().positive(),

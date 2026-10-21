@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ConnectionV1, CredentialReferenceV1, SCHEMA_DEFS, TransformMappingV1 } from "../src/index";
 
-const credential: CredentialReferenceV1 = {
+const credential: ConnectionV1["credential_refs"][number] = {
   id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", purpose: "access_token", version: 1,
 };
 const connection: ConnectionV1 = {
@@ -32,7 +32,7 @@ describe("connection metadata", () => {
     expect(SCHEMA_DEFS.TransformMappingV1).toBe(TransformMappingV1);
   });
 
-  it("accepts lifecycle states, empty credentials, all purposes and health codes", () => {
+  it("accepts lifecycle states, empty credentials, all outbound purposes and health codes", () => {
     for (const state of ["setup", "active", "degraded", "reconnect_required", "disabled", "revoked"] as const) {
       const sample = { ...connection, state, credential_refs: [], health: { checked_at: null, code: state === "revoked" ? "revoked" : "unknown" } };
       expect(ConnectionV1.safeParse(sample).success).toBe(true);
@@ -47,6 +47,19 @@ describe("connection metadata", () => {
       }).success).toBe(true);
     }
     expect(CredentialReferenceV1.safeParse({ ...credential, version: 2147483647 }).success).toBe(true);
+  });
+
+  it("round trips inbound signing references while refusing them as outbound credentials", () => {
+    const inbound: CredentialReferenceV1 = { ...credential, purpose: "webhook_signing_secret" };
+    expect(CredentialReferenceV1.parse(JSON.parse(JSON.stringify(inbound)))).toEqual(inbound);
+    expect(ConnectionV1.safeParse({ ...connection, credential_refs: [inbound] }).success).toBe(false);
+    for (const patch of [
+      { id: "key-1" }, { purpose: "webhook_secret" }, { purpose: "password" },
+      { version: 0 }, { version: 1.5 }, { version: 2147483648 },
+    ]) expect(CredentialReferenceV1.safeParse({ ...inbound, ...patch }).success).toBe(false);
+    for (const key of ["value", "secret", "signing_secret", "webhook_signing_secret", "token"]) {
+      expect(CredentialReferenceV1.safeParse({ ...inbound, [key]: "forbidden" }).success).toBe(false);
+    }
   });
 
   it("rejects invalid identity, lifecycle, revisions, health times and connector references", () => {

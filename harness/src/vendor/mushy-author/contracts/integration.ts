@@ -1,5 +1,5 @@
 // Generated from packages/assistant-contract/src/integration.ts; do not edit.
-// SHA256: aa9f45f08b125eaa37fb934b258000ebe3bba62aabdc446f755af28a612e8ef5
+// SHA256: 748aa07e8ff3df74d27205dff9f472cea715bb93720d28271425361d0cfd3006
 import { z } from "zod";
 
 // The final negative lookahead is an absolute end anchor; `$` alone permits a final newline.
@@ -70,7 +70,7 @@ export type IntegrationRefV1 = z.infer<typeof IntegrationRefV1>;
 
 export const CredentialReferenceV1 = z.strictObject({
   id: z.string().uuid(),
-  purpose: z.enum(["access_token", "refresh_token", "api_key"]),
+  purpose: z.enum(["access_token", "refresh_token", "api_key", "webhook_signing_secret"]),
   version: z.number().int().min(1).max(2147483647),
 });
 export type CredentialReferenceV1 = z.infer<typeof CredentialReferenceV1>;
@@ -84,7 +84,9 @@ export const ConnectionV1 = z.strictObject({
   origin: Origin,
   state: z.enum(["setup", "active", "degraded", "reconnect_required", "disabled", "revoked"]),
   operation_ids: z.array(Slug).min(1).max(100),
-  credential_refs: z.array(CredentialReferenceV1).max(3),
+  credential_refs: z.array(CredentialReferenceV1.extend({
+    purpose: z.enum(["access_token", "refresh_token", "api_key"]),
+  })).max(3),
   provider_account_id: z.string().min(1).max(256).nullable(),
   identity_verified: z.boolean(),
   grant_revision: z.number().int().positive(),

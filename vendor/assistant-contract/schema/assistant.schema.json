@@ -2381,7 +2381,8 @@
           "enum": [
             "access_token",
             "refresh_token",
-            "api_key"
+            "api_key",
+            "webhook_signing_secret"
           ]
         },
         "version": {
@@ -2450,7 +2451,33 @@
           "maxItems": 3,
           "type": "array",
           "items": {
-            "$ref": "#/$defs/CredentialReferenceV1"
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "purpose": {
+                "type": "string",
+                "enum": [
+                  "access_token",
+                  "refresh_token",
+                  "api_key"
+                ]
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              }
+            },
+            "required": [
+              "id",
+              "purpose",
+              "version"
+            ],
+            "additionalProperties": false
           }
         },
         "provider_account_id": {

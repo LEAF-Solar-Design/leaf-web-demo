@@ -3,14 +3,14 @@
   "contract_files": {
     "assistant.schema.json": {
       "path": "contract/assistant.schema.json",
-      "sha256": "4720852ad790b0513a9bb627ba3d56a75be6ae084b0813e910beebffd5332e67",
-      "upstream_commit": "5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0",
+      "sha256": "01fbf077326dd1a1b538456679b2019405fe04da77b864d9eee7eaf947c4a412",
+      "upstream_commit": "cc1afdb2b6c4d757730f572cbd9b783e752b6e2e",
       "upstream_path": "packages/assistant-contract/schema/assistant.schema.json"
     },
     "surface-config.v1.schema.json": {
       "path": "contract/surface-config.v1.schema.json",
       "sha256": "a7b94b169ec259715ea1731135c330eeefcbad69bc962b81abc1df953d9bde33",
-      "upstream_commit": "5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0",
+      "upstream_commit": "cc1afdb2b6c4d757730f572cbd9b783e752b6e2e",
       "upstream_path": "contract/surface-config.v1.schema.json"
     }
   },
@@ -25,5 +25,5 @@
   },
   "surface": "packages/fold-py/src/mushy_fold",
   "upstream": "LEAF-Solar-Design/mushy-code",
-  "upstream_commit": "5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0"
+  "upstream_commit": "cc1afdb2b6c4d757730f572cbd9b783e752b6e2e"
 }
