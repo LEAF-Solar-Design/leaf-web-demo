@@ -16,11 +16,56 @@
 //     an unmount): the drawing ground survives tab switches with its WebGL
 //     context, lock, and job state, exactly as the workspace card always
 //     did (`display: none`, not unmount).
+import { Component, lazy, Suspense, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, surfaceGround } from './productSurfaces.js'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
 import { DeviceGround } from '../ios/DeviceGround.jsx'
-import { OpsWorkspaceGround } from '../integrations/OpsWorkspaceGround.jsx'
-import { NO_OCCLUDERS } from './groundWindow.js'
+import { NO_OCCLUDERS, useGroundWindow, windowStyle } from './groundWindow.js'
+import '../integrations/ops-workspace.css'
+
+const OpsWorkspaceGround = lazy(() => import('../integrations/OpsWorkspaceGround.jsx')
+  .then((module) => ({ default: module.OpsWorkspaceGround })))
+
+function OpsLoadState({ active, leavingGround, studioShell, occluders, failed = false }) {
+  const boardRef = useRef(null)
+  const leaving = leavingGround === 'integrations'
+  const win = useGroundWindow(active || leaving, studioShell, boardRef, occluders)
+  return <section ref={boardRef} className="studio-ground-ops" data-ground="ops" hidden={!active && !leaving}
+    data-studio-shell={studioShell ? 'cockpit' : undefined} aria-label="Ops workspace"
+    aria-hidden={leaving ? 'true' : undefined} inert={leaving ? '' : undefined}
+    data-ground-phase={leaving ? 'leaving' : active && leavingGround ? 'entering' : undefined}>
+    <div className="ops-workspace" data-measured={Boolean(win)}
+      style={win ? windowStyle(win) : { visibility: 'hidden' }}>
+      <h1>Ops workspace</h1>
+      <p role={failed ? 'alert' : 'status'}>{failed ? 'Ops workspace could not be loaded. Reload the page to try again.' : 'Loading Ops workspace…'}</p>
+    </div>
+  </section>
+}
+
+class OpsLoadBoundary extends Component {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  render() {
+    return this.state.failed ? <OpsLoadState {...this.props.groundProps} failed /> : this.props.children
+  }
+}
+
+// Latch only the mount, never the authority props. Ops retains responsibility
+// for invalidating its own project/session state as those props change.
+function LazyOpsGround(props) {
+  const [activated, setActivated] = useState(props.active)
+  if (props.active && !activated) setActivated(true)
+  if (!activated && !props.active) return null
+  return <OpsLoadBoundary groundProps={props}>
+    <Suspense fallback={<OpsLoadState {...props} />}>
+      <OpsWorkspaceGround {...props} />
+    </Suspense>
+  </OpsLoadBoundary>
+}
 
 export { ProjectBoardGround } from './ProjectBoardGround.jsx'
 export { DeviceGround } from '../ios/DeviceGround.jsx'
@@ -99,7 +144,7 @@ export default function SurfaceGrounds({
         ship={ship}
         onLaunch={onLaunch}
       />
-      <OpsWorkspaceGround
+      <LazyOpsGround
         active={!boardVisible && surfaceGround(surface) === 'integrations'}
         projectId={projectId}
         projectLabel={projectLabel}
