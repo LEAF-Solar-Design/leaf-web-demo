@@ -17,6 +17,13 @@ from ci.native_release_producer import image_build_command, SERVICES, FRESHNESS,
 from ci import native_release_producer as producer
 
 
+def write_integration_config(root, origin=""):
+    (root / "deploy").mkdir(exist_ok=True)
+    (root / "deploy/web-integration-config.json").write_text(json.dumps({
+        "schema": "leaf.web-integration-config.v1", "apiOrigin": origin,
+    }), encoding="utf-8")
+
+
 REAL_VERIFY_GIT_IMAGES = producer.verify_git_images
 
 
@@ -318,7 +325,7 @@ def forge_case(tmp_path, monkeypatch):
         root.mkdir()
         (root / ".git").mkdir()
     source = roots["source_snapshot"]
-    (source / "deploy").mkdir()
+    write_integration_config(source)
     (source / "deploy/autofill-solver-sources.json").write_text(
         json.dumps({producer.FORGE_SOLVER_REVISION: "d" * 64}))
     adapter = source / "server/solver_adapters/autofill.py"
@@ -450,7 +457,8 @@ def forge_case(tmp_path, monkeypatch):
                                  "bytes": len(content)}
                           for name, content in files.items()},
             }))
-            (dist / "build-config.json").write_text(json.dumps(producer.WEB_BUILD_CONFIG))
+            (dist / "build-config.json").write_text(json.dumps(dict(
+                producer.WEB_BUILD_CONFIG, vite_integrations_api_origin="")))
             (dist / "health.json").write_text(json.dumps({"ok": True, "source_sha": "a" * 40}))
         elif "pack-web-dist" in command:
             archive = Path(command[command.index("--output") + 1])
@@ -710,6 +718,7 @@ def test_stage_release_writes_only_exact_archive_members(tmp_path):
 
 def recipe(service, **kwargs):
     freshness = {name: "b" * 64 for name in FRESHNESS.get(service, TRIXIE)}
+    kwargs.setdefault("integration_origin", "")
     return image_build_command(service, "a" * 40, 7, freshness, Path("image.json"), **kwargs)
 
 
@@ -722,6 +731,7 @@ def test_preserves_image_recipe_and_uses_native_tag(service):
     assert command[-1] == "."
     assert f":native-7-{'a' * 40}" in command[-2]
     assert command.count("--build-context") == (7 if service == "canonical-worker" else 6)
+    assert sum(arg.startswith("VITE_INTEGRATIONS_API_ORIGIN=") for arg in command) == (1 if service == "web" else 0)
     if service == "app":
         assert "--push" not in command
         assert "type=image,push=true,compression=zstd,force-compression=true,oci-mediatypes=true" in command
@@ -736,17 +746,17 @@ def test_solver_is_required_not_invented():
 
 def test_missing_freshness_cannot_silently_build():
     with pytest.raises(ValueError, match="freshness"):
-        image_build_command("app", "a" * 40, 7, {}, Path("image.json"))
+        image_build_command("app", "a" * 40, 7, {}, Path("image.json"), integration_origin="")
 
 
 def test_invalid_source_cannot_enter_shell_or_tag():
     with pytest.raises(ValueError, match="source"):
-        image_build_command("app", "main;echo unsafe", 7, {}, Path("image.json"))
+        image_build_command("app", "main;echo unsafe", 7, {}, Path("image.json"), integration_origin="")
 
 
 def test_bool_is_not_a_native_build_number():
     with pytest.raises(ValueError, match="number"):
-        image_build_command("app", "a" * 40, True, {}, Path("image.json"))
+        image_build_command("app", "a" * 40, True, {}, Path("image.json"), integration_origin="")
 
 
 def fake_gate(monkeypatch, *, fail_shard=None, emit=True):
@@ -1061,7 +1071,9 @@ def test_native_gate_prints_failures_in_shard_order(tmp_path, monkeypatch, capsy
     assert "--emit-proof" in original_calls[-1][0]
 
 
-def test_web_package_reads_exact_image_without_starting_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize("origin", ["", "https://integrations.example:8443"])
+def test_web_package_reads_exact_image_without_starting_it(tmp_path, monkeypatch, origin):
+    write_integration_config(tmp_path, origin)
     calls = []
     container = "d" * 64
 
@@ -1079,7 +1091,7 @@ def test_web_package_reads_exact_image_without_starting_it(tmp_path, monkeypatch
                       for name, content in files.items()},
         }), encoding="utf-8")
         (dist / "build-config.json").write_text(
-            json.dumps(producer.WEB_BUILD_CONFIG), encoding="utf-8")
+            json.dumps(dict(producer.WEB_BUILD_CONFIG, vite_integrations_api_origin=origin)), encoding="utf-8")
         (dist / "health.json").write_text(
             json.dumps({"ok": True, "source_sha": "a" * 40}), encoding="utf-8")
 
@@ -1106,17 +1118,21 @@ def test_web_image_recipe_materializes_engine_and_reviewed_build_config():
         encoding="utf-8")
     assert "test -f /web/dist/engine/engine.js" in dockerfile
     assert "test -f /web/dist/engine/engine_bg.wasm" in dockerfile
-    assert "\"schema\":\"leaf.web-build-config.v1\"" in dockerfile
-    assert "\"vite_cad_edit\":\"%s\"" in dockerfile
-    assert '"$VITE_CAD_EDIT" > /web/dist/build-config.json' in dockerfile
+    assert 'JSON.stringify({schema:"leaf.web-build-config.v1"' in dockerfile
+    assert 'vite_cad_edit:process.env.VITE_CAD_EDIT' in dockerfile
+    assert 'vite_integrations_api_origin:process.env.VITE_INTEGRATIONS_API_ORIGIN' in dockerfile
+    assert '"/web/dist/build-config.json"' in dockerfile
 
 
-@pytest.mark.parametrize("failure", ["engine.js", "engine_bg.wasm", "provenance", "config"])
+@pytest.mark.parametrize("failure", ["engine.js", "engine_bg.wasm", "provenance", "config", "origin", "missing-origin", "schema", "source"])
 def test_web_package_refuses_incomplete_engine_or_disabled_build_config(
         tmp_path, monkeypatch, failure):
+    write_integration_config(tmp_path)
     container = "d" * 64
+    calls = []
 
     def run(command, **kwargs):
+        calls.append(command)
         if command[1] == "create":
             return SimpleNamespace(stdout=container)
         if command[1] == "cp":
@@ -1135,12 +1151,18 @@ def test_web_package_refuses_incomplete_engine_or_disabled_build_config(
             (engine / "PROVENANCE.json").write_text(json.dumps({
                 "contract": "leaf.cad-engine-stage.v1", "files": records,
             }), encoding="utf-8")
-            config = dict(producer.WEB_BUILD_CONFIG)
+            config = dict(producer.WEB_BUILD_CONFIG, vite_integrations_api_origin="")
             if failure == "config":
                 config["vite_cad_edit"] = "0"
+            if failure == "origin":
+                config["vite_integrations_api_origin"] = "https://unexpected.example"
+            if failure == "missing-origin":
+                del config["vite_integrations_api_origin"]
+            if failure == "schema":
+                config["schema"] = "unknown"
             (dist / "build-config.json").write_text(json.dumps(config), encoding="utf-8")
             (dist / "health.json").write_text(
-                json.dumps({"ok": True, "source_sha": "a" * 40}), encoding="utf-8")
+                json.dumps({"ok": True, "source_sha": ("b" if failure == "source" else "a") * 40}), encoding="utf-8")
         if "pack-web-dist" in command:
             pytest.fail("an invalid web artifact must not be packed")
         return SimpleNamespace(stdout="")
@@ -1149,9 +1171,11 @@ def test_web_package_refuses_incomplete_engine_or_disabled_build_config(
     with pytest.raises((FileNotFoundError, ValueError)):
         producer.package_web_image(
             tmp_path, "sha256:" + "e" * 64, "a" * 40, tmp_path / "web")
+    assert ["docker", "rm", container] in calls
 
 
 def test_web_package_cleans_container_after_copy_failure(tmp_path, monkeypatch):
+    write_integration_config(tmp_path)
     calls = []
 
     def run(command, **kwargs):
@@ -1180,6 +1204,7 @@ def test_runtime_identity_rejects_gate_on_publisher_role():
 def test_external_solver_context_preserves_exact_revision():
     command = producer.image_build_command(
         "canonical-worker", "a" * 40, 7, {key: "b" * 64 for key in TRIXIE}, Path("metadata.json"),
+        integration_origin="",
         solver_revision="c" * 40, solver_root=Path("/secondary/solver"),
     )
     assert "autofill_solver=" + str(Path("/secondary/solver")) in command
@@ -1319,6 +1344,75 @@ def test_build_logs_print_only_the_bounded_tail(tmp_path, capsys):
     assert "HEAD" not in printed and "TAIL" in printed
     assert printed.index("==== image build log: app ====") < printed.index("==== image build log: web ====")
     assert printed.rstrip().endswith("(no log)")
+
+
+@pytest.mark.parametrize("origin", ["", "https://integrations.example", "https://api.example:8443"])
+def test_web_build_uses_exact_reviewed_origin(tmp_path, monkeypatch, origin):
+    write_integration_config(tmp_path, origin)
+    calls = fake_buildx(monkeypatch, tmp_path)
+    producer.build_image(tmp_path, "web", "a" * 40, 7,
+        {name: "b" * 64 for name in FRESHNESS["web"]}, tmp_path / "image.json")
+    command = calls[-1][0]
+    assert [arg for arg in command if arg.startswith("VITE_INTEGRATIONS_API_ORIGIN=")] == [
+        "VITE_INTEGRATIONS_API_ORIGIN=" + origin]
+    assert command[command.index("VITE_INTEGRATIONS_API_ORIGIN=" + origin) - 1] == "--build-arg"
+
+
+@pytest.mark.parametrize("origin", [
+    None, 1, True, [], {}, " https://api.example", "https://api.example ",
+    "https://api.example\n", "https://api.\texample", "http://api.example",
+    "https://user:pass@api.example", "https://api.example/", "https://api.example/path",
+    "https://api.example?x=1", "https://api.example#x", "https://", "https://api.example:",
+    "https://api.example:abc", "https://api.example:65536", "https://api.example:443",
+    "https://api.example:08443", "HTTPS://api.example", "https://API.example",
+    "https://api%2eexample", "https://api.example\\evil", "https://127.1",
+    "https://0x7f000001", "https://é.example", "https://xn--a.example", "https://api.example\x00",
+])
+def test_bad_web_origin_is_rejected_before_docker(tmp_path, monkeypatch, origin):
+    write_integration_config(tmp_path, origin)
+    monkeypatch.setattr(producer.subprocess, "run", lambda *a, **k: pytest.fail("no command before validation"))
+    with pytest.raises(ValueError, match="integration"):
+        producer.build_image(tmp_path, "web", "a" * 40, 7,
+            {name: "b" * 64 for name in FRESHNESS["web"]}, tmp_path / "image.json")
+    assert not (tmp_path / "image.json").exists()
+
+
+@pytest.mark.parametrize("config", [None, [], {}, {"schema": "wrong", "apiOrigin": ""},
+    {"schema": "leaf.web-integration-config.v1"},
+    {"schema": "leaf.web-integration-config.v1", "apiOrigin": "", "extra": ""}])
+def test_bad_web_config_is_rejected_before_docker(tmp_path, monkeypatch, config):
+    write_integration_config(tmp_path)
+    (tmp_path / "deploy/web-integration-config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(producer.subprocess, "run", lambda *a, **k: pytest.fail("no Docker"))
+    with pytest.raises(ValueError, match="integration"):
+        producer.build_image(tmp_path, "web", "a" * 40, 7,
+            {name: "b" * 64 for name in FRESHNESS["web"]}, tmp_path / "image.json")
+
+
+@pytest.mark.parametrize("origin", ["", "https://integrations.example:8443"])
+def test_web_origin_cli_uses_script_root_without_providers(tmp_path, origin):
+    write_integration_config(tmp_path, origin)
+    script = tmp_path / "scripts/ci/native_release_producer.py"
+    script.parent.mkdir(parents=True)
+    script.write_text(Path(producer.__file__).read_text(encoding="utf-8"), encoding="utf-8")
+    # -S removes installed cloud packages; poisoned admission inputs must be ignored.
+    result = subprocess.run([producer.sys.executable, "-S", str(script), "web-origin"],
+        cwd=tmp_path.parent, env=dict(os.environ, LEAF_NATIVE_REQUEST_B64="invalid",
+            LEAF_FORGE_REQUEST="invalid", CODEBUILD_SRC_DIR="missing"),
+        check=True, text=True, capture_output=True)
+    assert result.stdout == origin + "\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("raw", [None, "{", ""])
+def test_missing_or_unreadable_web_config_precedes_docker(tmp_path, monkeypatch, raw):
+    if raw is not None:
+        write_integration_config(tmp_path)
+        (tmp_path / "deploy/web-integration-config.json").write_text(raw)
+    monkeypatch.setattr(producer.subprocess, "run", lambda *a, **k: pytest.fail("no Docker"))
+    with pytest.raises((FileNotFoundError, ValueError)):
+        producer.build_image(tmp_path, "web", "a" * 40, 7,
+            {name: "b" * 64 for name in FRESHNESS["web"]}, tmp_path / "image.json")
 
 
 def fake_buildx(monkeypatch, tmp_path):

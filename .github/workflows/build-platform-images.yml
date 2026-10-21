@@ -1114,7 +1114,15 @@ jobs:
 
           echo "from=$cache_from" >> "$GITHUB_OUTPUT"
           echo "to=$cache_to" >> "$GITHUB_OUTPUT"
+      - name: Resolve the source integration origin for cache warming
+        id: surface
+        if: steps.chain.outputs.skip != 'true' && matrix.image == 'web'
+        run: |
+          set -euo pipefail
+          VITE_INTEGRATIONS_API_ORIGIN="$(python scripts/ci/native_release_producer.py web-origin)"
+          echo "integration_origin=$VITE_INTEGRATIONS_API_ORIGIN" >> "$GITHUB_OUTPUT"
       - name: Warm the layer cache for ${{ matrix.image }}
+        id: warm-image
         if: steps.chain.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
@@ -1128,6 +1136,7 @@ jobs:
             ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.security_sha256) || '' }}
             ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.updates_sha256) || '' }}
             ${{ matrix.image == 'web' && format('WEB_ALPINE_MAIN_APKINDEX_SHA256={0}', steps.web_alpine.outputs.main_sha256) || '' }}
+            ${{ matrix.image == 'web' && format('VITE_INTEGRATIONS_API_ORIGIN={0}', steps.surface.outputs.integration_origin) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
           # reference WITHOUT editing the Dockerfile, which matters here: the
@@ -1388,6 +1397,10 @@ jobs:
           FORCE_REBUILD_ALL: ${{ inputs.force_rebuild_all }}
         run: |
           set -euo pipefail
+          if [ "${{ matrix.image }}" = "web" ]; then
+            VITE_INTEGRATIONS_API_ORIGIN="$(python scripts/ci/native_release_producer.py web-origin)"
+            echo "integration_origin=$VITE_INTEGRATIONS_API_ORIGIN" >> "$GITHUB_OUTPUT"
+          fi
           echo "reuse=false" >> "$GITHUB_OUTPUT"
           case "${{ matrix.image }}" in
             app) bases=(python:3.12-slim) ;;
@@ -1453,6 +1466,7 @@ jobs:
               exit 1
             }
             build_args+=(--build-arg "WEB_ALPINE_MAIN_APKINDEX_SHA256=$WEB_ALPINE_MAIN_APKINDEX_SHA256")
+            build_args+=(--build-arg "VITE_INTEGRATIONS_API_ORIGIN=$VITE_INTEGRATIONS_API_ORIGIN")
           fi
           buildkit_version="$(docker buildx version | head -n 1)"
           python scripts/platform_release_manifest.py surface-fingerprint \
@@ -1868,6 +1882,7 @@ jobs:
             ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.security_sha256) || '' }}
             ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.updates_sha256) || '' }}
             ${{ matrix.image == 'web' && format('WEB_ALPINE_MAIN_APKINDEX_SHA256={0}', steps.web_alpine.outputs.main_sha256) || '' }}
+            ${{ matrix.image == 'web' && format('VITE_INTEGRATIONS_API_ORIGIN={0}', steps.surface.outputs.integration_origin) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
           # reference WITHOUT editing the Dockerfile, which matters here: the
@@ -1936,6 +1951,7 @@ jobs:
         working-directory: web
         env:
           VITE_API_BASE: ""
+          VITE_INTEGRATIONS_API_ORIGIN: ${{ steps.surface.outputs.integration_origin }}
           VITE_MOCK: "0"
           VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
           VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
@@ -2539,6 +2555,10 @@ jobs:
           WEB_ALPINE_MAIN_APKINDEX_SHA256: ${{ steps.web_alpine.outputs.main_sha256 }}
         run: |
           set -euo pipefail
+          if [ "${{ matrix.image }}" = "web" ]; then
+            VITE_INTEGRATIONS_API_ORIGIN="$(python scripts/ci/native_release_producer.py web-origin)"
+            echo "integration_origin=$VITE_INTEGRATIONS_API_ORIGIN" >> "$GITHUB_OUTPUT"
+          fi
           case "${{ matrix.image }}" in
             app) bases=(python:3.12-slim) ;;
             broker) bases=(node:20-slim python:3.12-slim) ;;
@@ -2603,6 +2623,7 @@ jobs:
               exit 1
             }
             build_args+=(--build-arg "WEB_ALPINE_MAIN_APKINDEX_SHA256=$WEB_ALPINE_MAIN_APKINDEX_SHA256")
+            build_args+=(--build-arg "VITE_INTEGRATIONS_API_ORIGIN=$VITE_INTEGRATIONS_API_ORIGIN")
           fi
           python scripts/platform_release_manifest.py surface-fingerprint \
             --repo-root . \
@@ -2753,6 +2774,7 @@ jobs:
             ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.security_sha256) || '' }}
             ${{ (matrix.image == 'app' || matrix.image == 'broker' || matrix.image == 'canonical-worker') && format('TRIXIE_DEBIAN_UPDATES_INRELEASE_SHA256={0}', steps.trixie_debian.outputs.updates_sha256) || '' }}
             ${{ matrix.image == 'web' && format('WEB_ALPINE_MAIN_APKINDEX_SHA256={0}', steps.web_alpine.outputs.main_sha256) || '' }}
+            ${{ matrix.image == 'web' && format('VITE_INTEGRATIONS_API_ORIGIN={0}', steps.spec-surface.outputs.integration_origin) || '' }}
           # Every upstream base resolves through this account's ECR pull-through
           # cache instead of Docker Hub. buildx named contexts override an image
           # reference WITHOUT editing the Dockerfile, which matters here: the
@@ -2801,6 +2823,7 @@ jobs:
         working-directory: web
         env:
           VITE_API_BASE: ""
+          VITE_INTEGRATIONS_API_ORIGIN: ${{ steps.spec-surface.outputs.integration_origin }}
           VITE_MOCK: "0"
           VITE_AUTH0_DOMAIN: leafautomation.us.auth0.com
           VITE_AUTH0_CLIENT_ID: zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O

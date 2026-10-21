@@ -51,6 +51,31 @@ WEB_BUILD_CONFIG = {"schema": "leaf.web-build-config.v1", "vite_cad_edit": "1"}
 WEB_ENGINE_FILES = ("engine.js", "engine_bg.wasm")
 
 
+def read_web_integration_origin(root: Path) -> str:
+    """Read the reviewed, exact browser origin; never normalize into acceptance."""
+    config = json.loads((root / "deploy/web-integration-config.json").read_text(encoding="utf-8"))
+    if (not isinstance(config, dict) or set(config) != {"schema", "apiOrigin"}
+            or config["schema"] != "leaf.web-integration-config.v1"
+            or not isinstance(config["apiOrigin"], str)):
+        raise ValueError("invalid web integration config")
+    origin = config["apiOrigin"]
+    if origin == "":
+        return origin
+    # Narrow DNS ASCII subset excludes URL escapes, credentials and browser
+    # IPv4 shorthand. Canonical IPv4 literals are deliberately not accepted.
+    match = re.fullmatch(
+        r"https://([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+        r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)(?::([1-9][0-9]{0,4}))?", origin)
+    if not match:
+        raise ValueError("invalid web integration origin")
+    host, port = match.groups()
+    if (len(host) > 253 or any(label.startswith("xn--") for label in host.split("."))
+            or re.fullmatch(r"[0-9]+|0x[0-9a-f]+", host.rsplit(".", 1)[-1])
+            or (port is not None and (int(port) > 65535 or int(port) == 443))):
+        raise ValueError("noncanonical web integration origin")
+    return origin
+
+
 def _hex(value, length, label):
     if not isinstance(value, str) or not re.fullmatch(rf"[0-9a-f]{{{length}}}", value):
         raise ValueError(f"invalid {label}")
@@ -306,6 +331,7 @@ def run_gate(root: Path, results_dir: Path, *, env: dict[str, str],
 
 def image_build_command(service: str, source: str, build_number: int,
                         freshness: dict[str, str], metadata: Path, *,
+                        integration_origin: str,
                         solver_revision: str | None = None,
                         solver_root: Path | None = None) -> list[str]:
     """Construct the current canonical image recipe for one native build.
@@ -328,6 +354,10 @@ def image_build_command(service: str, source: str, build_number: int,
                "--metadata-file", str(metadata), "--build-arg", f"LEAF_SOURCE_SHA={source}"]
     for name in required:
         command += ["--build-arg", f"{name}={freshness[name]}"]
+    if service == "web":
+        if not isinstance(integration_origin, str):
+            raise ValueError("web requires a validated integration origin")
+        command += ["--build-arg", f"VITE_INTEGRATIONS_API_ORIGIN={integration_origin}"]
     for base in BASE_IMAGES:
         command += ["--build-context", f"{base}=docker-image://{REGISTRY}/public-ecr/docker/library/{base}"]
     if service == "canonical-worker":
@@ -395,8 +425,10 @@ def build_image(root: Path, service: str, source: str, build_number: int,
     This function never discovers credentials or launches another AWS build.
     With log_path, buildx output goes to that new file instead of the console.
     """
+    integration_origin = read_web_integration_origin(root) if service == "web" else ""
     command = image_build_command(service, source, build_number, freshness,
-                                  metadata, solver_revision=solver_revision, solver_root=solver_root)
+                                  metadata, integration_origin=integration_origin,
+                                  solver_revision=solver_revision, solver_root=solver_root)
     actual = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
                             text=True, capture_output=True, timeout=10).stdout.strip()
     if actual != source:
@@ -440,6 +472,7 @@ def package_web_image(root: Path, image_digest: str, source: str,
             or not re.fullmatch(r"[0-9a-f]{40}", source)):
         raise ValueError("web package requires exact image and source")
     root, output_dir = root.resolve(), output_dir.resolve()
+    integration_origin = read_web_integration_origin(root)
     output_dir.mkdir(parents=True, exist_ok=False)
     dist = output_dir / "dist"
     dist.mkdir()
@@ -461,7 +494,7 @@ def package_web_image(root: Path, image_digest: str, source: str,
     if health.get("source_sha") != source or health.get("ok") is not True:
         raise ValueError("web image files do not carry the admitted source")
     config = json.loads((dist / "build-config.json").read_text(encoding="utf-8"))
-    if config != WEB_BUILD_CONFIG:
+    if config != dict(WEB_BUILD_CONFIG, vite_integrations_api_origin=integration_origin):
         raise ValueError("web image files do not carry the reviewed build config")
     provenance = json.loads(
         (dist / "engine" / "PROVENANCE.json").read_text(encoding="utf-8")
@@ -1055,10 +1088,13 @@ def produce_forge(env: dict, codebuild, s3, *, admit_only=False):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("gate", "release", "forge"))
+    parser.add_argument("mode", choices=("gate", "release", "forge", "web-origin"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--admit-only", action="store_true")
     args = parser.parse_args()
+    if args.mode == "web-origin":
+        print(read_web_integration_origin(Path(__file__).resolve().parents[2]))
+        return 0
     env = dict(os.environ)
     if args.mode == "forge":
         if args.output is not None:

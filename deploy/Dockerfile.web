@@ -31,6 +31,7 @@ FROM node:22-slim AS build
 WORKDIR /web
 
 ARG VITE_API_BASE=
+ARG VITE_INTEGRATIONS_API_ORIGIN=
 ARG VITE_MOCK=0
 ARG VITE_AUTH0_DOMAIN=leafautomation.us.auth0.com
 ARG VITE_AUTH0_CLIENT_ID=zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O
@@ -60,6 +61,7 @@ ARG VITE_CAD_EDIT=1
 ARG VITE_SOLAR_FLOW_RAIL=1
 ARG VITE_SOLAR_SETTINGS_FORM=1
 ENV VITE_API_BASE=${VITE_API_BASE} \
+    VITE_INTEGRATIONS_API_ORIGIN=${VITE_INTEGRATIONS_API_ORIGIN} \
     VITE_MOCK=${VITE_MOCK} \
     VITE_AUTH0_DOMAIN=${VITE_AUTH0_DOMAIN} \
     VITE_AUTH0_CLIENT_ID=${VITE_AUTH0_CLIENT_ID} \
@@ -98,8 +100,7 @@ RUN npm run build && \
     test -f /web/dist/engine/engine.js && \
     test -f /web/dist/engine/engine_bg.wasm && \
     test -n "$(find /web/dist/assets -name 'worker-browser*.js' -print -quit)" && \
-    printf '{"schema":"leaf.web-build-config.v1","vite_cad_edit":"%s"}\n' \
-      "$VITE_CAD_EDIT" > /web/dist/build-config.json && \
+    node -e 'require("node:fs").writeFileSync("/web/dist/build-config.json", JSON.stringify({schema:"leaf.web-build-config.v1",vite_cad_edit:process.env.VITE_CAD_EDIT,vite_integrations_api_origin:process.env.VITE_INTEGRATIONS_API_ORIGIN}) + "\n")' && \
     printf '{"ok":true,"service":"leaf-platform-web","component":"frontend","source_sha":"%s"}\n' \
       "$LEAF_SOURCE_SHA" > /web/dist/health.json
 

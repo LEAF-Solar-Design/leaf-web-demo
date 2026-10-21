@@ -2247,7 +2247,16 @@ def main() -> None:
     assert len(speculate_builds) == 1, "speculate holds exactly one build step"
     speculate_with = _with_mapping(speculate_builds[0])
     for key in ("context:", "file:", "build-args:", "build-contexts:"):
-        assert _with_input(speculate_with, key) == _with_input(build_with, key), (
+        speculative_input = _with_input(speculate_with, key)
+        if key == "build-args:":
+            # The two job-local steps validate the same source configuration.
+            # Their distinct IDs do not change the value sent to Docker.
+            # check_web_container_config.mjs binds both output producers.
+            speculative_input = speculative_input.replace(
+                "steps.spec-surface.outputs.integration_origin",
+                "steps.surface.outputs.integration_origin",
+            )
+        assert speculative_input == _with_input(build_with, key), (
             "speculate and build must carry a byte-identical %s input" % key
         )
 
