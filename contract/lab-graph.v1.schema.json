@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leaf.internal/contract/lab-graph.v1.schema.json",
+  "title": "Lab graph",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "blocks", "pipes", "outputs"],
+  "properties": {
+    "schema": {"const": "leaf.lab-graph.v1"},
+    "blocks": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/block"}},
+    "pipes": {"type": "array", "maxItems": 400, "uniqueItems": true, "items": {"$ref": "#/$defs/pipe"}},
+    "outputs": {"type": "object", "maxProperties": 200, "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/endpoint"}}
+  },
+  "$defs": {
+    "id": {"$ref": "fixtures/lab/leaf-block-manifest.v1.schema.json#/$defs/id"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "block": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "registry", "settings"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "registry": {
+          "type": "object", "additionalProperties": false, "required": ["id", "version", "code_sha256"],
+          "properties": {
+            "id": {"$ref": "#/$defs/id"},
+            "version": {"$ref": "fixtures/lab/leaf-block-manifest.v1.schema.json#/properties/version/properties/semver"},
+            "code_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "settings": {"type": "object", "additionalProperties": {"$ref": "#/$defs/setting"}, "propertyNames": {"$ref": "#/$defs/settingKey"}}
+      }
+    },
+    "settingKey": {"type": "string", "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*$", "not": {"pattern": "(^|_)(secret|token|password|credential|key|jwt|authorization|cookie|sub|selector|run_id|mount_alias)(_|$)"}},
+    "setting": {
+      "anyOf": [
+        {"type": ["null", "boolean", "number", "string"]},
+        {"type": "array", "items": {"$ref": "#/$defs/setting"}},
+        {"type": "object", "propertyNames": {"$ref": "#/$defs/settingKey"}, "additionalProperties": {"$ref": "#/$defs/setting"}}
+      ]
+    },
+    "endpoint": {"type": "object", "additionalProperties": false, "required": ["node", "port"], "properties": {"node": {"$ref": "#/$defs/id"}, "port": {"$ref": "#/$defs/id"}}},
+    "pipe": {"type": "object", "additionalProperties": false, "required": ["from", "to"], "properties": {"from": {"$ref": "#/$defs/endpoint"}, "to": {"$ref": "#/$defs/endpoint"}}}
+  }
+}
