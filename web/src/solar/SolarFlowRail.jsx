@@ -35,7 +35,7 @@ export default function SolarFlowRail(props) {
 }
 
 function ProjectSolarFlowRail({ solarBinding, authorityKey, projectClient, projectCatalog, projectRunMemory, projectPending,
-  openName = null, busy = false, onOpenStep, onFlowChange }) {
+  openName = null, busy = false, onOpenStep, onFlowChange, openSettingsForm }) {
   const [flowId, setFlowId] = useState(DEFAULT_SOLAR_FLOW)
   const [, refresh] = useState(0)
   useEffect(() => {
@@ -64,7 +64,7 @@ function ProjectSolarFlowRail({ solarBinding, authorityKey, projectClient, proje
   }
   const saved = memory.current
   const { items, resumeIndex } = projectSolarFlowDisplay({ selection, current, busy,
-    previousReady: saved.everReady, pending: projectPending, runs, binding: solarBinding, authorityKey })
+    previousReady: saved.everReady, pending: projectPending, runs, binding: solarBinding, authorityKey, openSettingsForm })
   const [, announce] = useState(0)
   useEffect(() => {
     if (memory.current !== saved || !catalogCurrent()) return
