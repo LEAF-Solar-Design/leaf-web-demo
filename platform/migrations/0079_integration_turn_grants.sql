@@ -2,10 +2,14 @@
 -- Deliberately independent of the project-session storage tenant namespace.
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='leaf_integration_grant_app') THEN
-    CREATE ROLE leaf_integration_grant_app NOLOGIN NOSUPERUSER NOBYPASSRLS;
+    CREATE ROLE leaf_integration_grant_app NOLOGIN NOSUPERUSER NOBYPASSRLS
+      NOCREATEROLE NOCREATEDB NOREPLICATION;
+  ELSIF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='leaf_integration_grant_app'
+      AND (rolcanlogin OR rolsuper OR rolbypassrls OR rolcreaterole
+        OR rolcreatedb OR rolreplication)) THEN
+    RAISE EXCEPTION 'INTEGRATION_RUNTIME_ROLE_UNSAFE';
   END IF;
 END $$;
-ALTER ROLE leaf_integration_grant_app NOLOGIN NOSUPERUSER NOBYPASSRLS;
 
 CREATE TABLE public.integration_turn_grants (
   tenant_id UUID NOT NULL,

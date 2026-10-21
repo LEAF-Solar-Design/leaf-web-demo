@@ -31,8 +31,10 @@ def test_exact_mapping_preserves_every_other_byte():
     assert mapped.count(SCHEMA + ".guard_integration_turn_grant") == 2
     assert f"GRANT USAGE ON SCHEMA {SCHEMA} TO {role};" in mapped
     assert f"rolname='{role}'" in mapped
-    assert f"CREATE ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS;" in mapped
-    assert f"ALTER ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS;" in mapped
+    assert (f"CREATE ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS\n"
+            "      NOCREATEROLE NOCREATEDB NOREPLICATION;") in mapped
+    assert f"ALTER ROLE {role}" not in mapped
+    assert "RAISE EXCEPTION 'INTEGRATION_RUNTIME_ROLE_UNSAFE';" in mapped
     assert f"FOR ALL TO {role}" in mapped
     assert f"GRANT SELECT, INSERT, UPDATE ON {SCHEMA}.integration_turn_grants TO {role};" in mapped
     assert "public." not in mapped
