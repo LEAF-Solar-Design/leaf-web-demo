@@ -22,7 +22,7 @@ import integration_tool_service as service
 import integration_turn_grant_crypto as crypto
 import integration_turn_grants as grants
 import session_store
-from leaf_platform.integration_turn_grant_store import Authority, IntegrationTurnGrantStore
+from leaf_platform.integration_turn_grant_store import Authority, CURRENT_OPERATIONS, IntegrationTurnGrantStore
 from server.tests.integration_project_postgres_fixture import (
     connection_factory, project_database, scoped,
 )
@@ -100,7 +100,7 @@ def test_project_producer_custody_and_current_authority(
         assert session_store.active_turn_subject(sid, TURN, other.org, 300) is None
         assert session_store.active_turn_subject(sid, "wrong-turn", scope.org, 300) is None
         authority = Authority(scope.org, scope.project, scope.user, scope.binding,
-                              "auth0", scope.subject, sid, TURN, ORIGIN)
+                              "auth0", scope.subject, sid, TURN, ORIGIN, operations=CURRENT_OPERATIONS)
         authorities.append(authority)
         token = "S13P-SYNTHETIC-PRIVATE-BEARER-" + str(index)
         tokens.append(token)

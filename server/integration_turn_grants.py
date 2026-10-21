@@ -131,6 +131,7 @@ def cleanup_turn(session_id, turn_id):
 def _authority(tenant, snapshot, session_id, turn_id, max_s, origin, authority_type):
     import platform_link
     import session_store
+    from leaf_platform.integration_turn_grant_store import CURRENT_OPERATIONS
     tenant_id = _uuid(tenant)
     if (not getattr(tenant, "authority_resolved", False)
             or getattr(tenant, "backedge", False)
@@ -163,7 +164,7 @@ def _authority(tenant, snapshot, session_id, turn_id, max_s, origin, authority_t
         tenant_id=tenant_id, project_id=project_id,
         platform_user_id=_uuid(binding.platform_user_id), binding_id=_uuid(binding.binding_id),
         external_authority="auth0", subject=snapshot.subject,
-        session_id=session_id, turn_id=turn_id, origin=origin,
+        session_id=session_id, turn_id=turn_id, origin=origin, operations=CURRENT_OPERATIONS,
     )
     return authority, started + max_s
 

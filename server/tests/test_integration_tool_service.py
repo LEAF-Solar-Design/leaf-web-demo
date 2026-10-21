@@ -23,7 +23,10 @@ import integration_tool_service as service
 import agent_gate
 import agent_policy
 import session_policy
-from leaf_platform.integration_turn_grant_store import Authority, Binding, EncryptedGrant
+from test_integration_turn_grant_capture import custody
+from leaf_platform.integration_turn_grant_store import (
+    Authority, Binding, EncryptedGrant, LEGACY_OPERATIONS, CURRENT_OPERATIONS,
+)
 
 TOKEN = b'synthetic-bearer/plus+quote"secret'
 ARN = "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-4234-8234-123456789012"
@@ -139,6 +142,93 @@ def test_missing_and_expired_custody(rig):
 
 def test_expiry_checked_even_if_store_returns_expired(rig):
     rig.svc.clock = lambda: 1100
+    assert rig.call()["error"]["code"] == "denied"
+    assert not rig.gates and not rig.requests
+
+
+@pytest.mark.parametrize("operation", ["query", "datasets", "elements"])
+def test_legacy_binding_serves_original_operations_under_current_authority_unchanged(rig, operation):
+    original = rig.custody
+    rig.current = replace(rig.current, authority=replace(rig.auth, operations=CURRENT_OPERATIONS))
+    if operation == "query":
+        result = rig.call()
+    else:
+        if operation == "datasets":
+            value = {}
+            rig.response = {"records": [], "nextCursor": None}
+        else:
+            recipe = {"schema_version": 1, "id": "sales-view", "title": "Sales",
+                      "dataset_ref": deepcopy(REF), "query": deepcopy(QUERY),
+                      "kind": "dataset.table", "props": {"columns": ["amount"], "row_limit": 5}}
+            value = {"recipe": recipe}
+            rig.response = {"element": recipe, "revision": 1}
+            rig.svc.resolve_write = rig.svc.resolve
+        result = rig.svc.execute(operation, value, rig.auth.tenant_id, rig.auth.session_id, rig.auth.turn_id)
+    assert "result" in result
+    assert len(rig.gates) == len(rig.requests) == 1
+    assert rig.custody is original
+    assert rig.custody.binding.authority.operations == LEGACY_OPERATIONS
+
+
+def test_production_current_resolution_explicitly_includes_action_discovery(custody, monkeypatch):
+    h = custody
+    # Public session reads decode the PostgreSQL project storage marker.
+    h.session["tenant_id"] = str(h.tenant)
+    monkeypatch.setattr(service.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(service.deps, "resolve_active_platform_tenant_authority",
+                        lambda subject: (str(h.tenant), "pro"))
+    monkeypatch.setattr(service.entitlements, "entitlements_for", lambda tier: {"converse": True})
+    monkeypatch.setattr(service.turn_runner, "turn_max_s", lambda: 300)
+    current = service.resolve_current(str(h.tenant), "s", "t", write=True)
+    assert current.authority.operations == CURRENT_OPERATIONS
+    assert h.capture().code == "captured"
+    assert h.puts[0].authority == current.authority
+
+
+@pytest.mark.parametrize("stored_ops,current_ops,required,allowed", [
+    (LEGACY_OPERATIONS, CURRENT_OPERATIONS, "dataset_discovery", True),
+    (LEGACY_OPERATIONS, CURRENT_OPERATIONS, "dataset_query", True),
+    (LEGACY_OPERATIONS, CURRENT_OPERATIONS, "element_save", True),
+    (LEGACY_OPERATIONS, CURRENT_OPERATIONS, "action_discovery", False),
+    (LEGACY_OPERATIONS, LEGACY_OPERATIONS, "action_discovery", False),
+    (CURRENT_OPERATIONS, CURRENT_OPERATIONS, "action_discovery", True),
+    (CURRENT_OPERATIONS, LEGACY_OPERATIONS, "dataset_query", False),
+    (CURRENT_OPERATIONS, CURRENT_OPERATIONS, "unknown", False),
+])
+def test_bound_capability_condition_directly(rig, stored_ops, current_ops, required, allowed):
+    binding = replace(rig.custody.binding, authority=replace(rig.auth, operations=stored_ops))
+    current = replace(rig.current, authority=replace(rig.auth, operations=current_ops))
+    if allowed:
+        assert service._check_bound_authority(binding, current, current, required, 1001) is current
+    else:
+        with pytest.raises(service.ReadFailure, match="denied"):
+            service._check_bound_authority(binding, current, current, required, 1001)
+
+
+def test_missing_action_capability_denies_before_decrypt_gate_or_http(rig, monkeypatch):
+    rig.current = replace(rig.current, authority=replace(rig.auth, operations=CURRENT_OPERATIONS))
+    check = service._check_bound_authority
+    # Exercise the future required capability at the existing check boundary;
+    # no host route or tool accepts action discovery in this slice.
+    def require_action(binding, current, fresh, required, now):
+        return check(binding, current, fresh, "action_discovery", now)
+    monkeypatch.setattr(service, "_check_bound_authority", require_action)
+    rig.svc.decrypt = lambda *args: pytest.fail("decryption before capability check")
+    assert rig.call()["error"]["code"] == "denied"
+    assert not rig.gates and not rig.requests
+
+
+@pytest.mark.parametrize("field,value", [
+    ("tenant_id", "11111111-1111-4111-8111-111111111111"),
+    ("project_id", "11111111-1111-4111-8111-111111111111"),
+    ("platform_user_id", "11111111-1111-4111-8111-111111111111"),
+    ("binding_id", "11111111-1111-4111-8111-111111111111"),
+    ("subject", "auth0|other"), ("session_id", "other-session"),
+    ("turn_id", "other-turn"), ("origin", "https://foreign.example.com"),
+])
+def test_legacy_binding_denies_every_current_identity_mismatch_before_decrypt(rig, monkeypatch, field, value):
+    rig.current = replace(rig.current, authority=replace(rig.auth, operations=CURRENT_OPERATIONS, **{field: value}))
+    rig.svc.decrypt = lambda *args: pytest.fail("foreign authority decrypted")
     assert rig.call()["error"]["code"] == "denied"
     assert not rig.gates and not rig.requests
 
