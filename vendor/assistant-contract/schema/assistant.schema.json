@@ -1692,6 +1692,611 @@
       ],
       "additionalProperties": false
     },
+    "IntegrationActionFieldV1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": {
+              "type": "boolean"
+            },
+            "nullable": {
+              "type": "boolean"
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "kind": {
+              "type": "string",
+              "const": "text"
+            },
+            "min_length": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "max_length": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "required",
+            "nullable",
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": {
+              "type": "boolean"
+            },
+            "nullable": {
+              "type": "boolean"
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "kind": {
+              "type": "string",
+              "const": "number"
+            },
+            "minimum": {
+              "type": "number"
+            },
+            "maximum": {
+              "type": "number"
+            },
+            "integer": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "required",
+            "nullable",
+            "kind",
+            "integer"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": {
+              "type": "boolean"
+            },
+            "nullable": {
+              "type": "boolean"
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "kind": {
+              "type": "string",
+              "const": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "required",
+            "nullable",
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": {
+              "type": "boolean"
+            },
+            "nullable": {
+              "type": "boolean"
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "kind": {
+              "type": "string",
+              "const": "choice"
+            },
+            "choices": {
+              "minItems": 1,
+              "maxItems": 100,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "label",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "required",
+            "nullable",
+            "kind",
+            "choices"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IntegrationActionFormV1": {
+      "description": "Presentation and client-validation hints, not business semantics or authority. The installed host adapter validates arguments again. Null, absent, false, zero and empty text remain distinct.",
+      "type": "object",
+      "properties": {
+        "fields": {
+          "minItems": 0,
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IntegrationActionFieldV1"
+          }
+        },
+        "submit_label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "fields",
+        "submit_label"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationActionElementV1": {
+      "description": "Inert action presentation bound to exact immutable connector and operation versions. The host resolves the current grant revision when submitting; this control grants no authority.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "kind": {
+          "type": "string",
+          "const": "integration.action"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+        },
+        "connector_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "operation_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "form": {
+          "$ref": "#/$defs/IntegrationActionFormV1"
+        }
+      },
+      "required": [
+        "schema_version",
+        "id",
+        "title",
+        "kind",
+        "connection_id",
+        "connector_ref",
+        "operation_ref",
+        "form"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationActionSnapshotV1": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "$ref": "#/$defs/IntegrationActionRunV1"
+        },
+        "receipts": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IntegrationActionReceiptV1"
+          }
+        }
+      },
+      "required": [
+        "run",
+        "receipts"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationActionSubmissionV1": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+        },
+        "connector_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "operation_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+(?![\\s\\S])"
+        },
+        "expected_grant_revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "arguments": {
+          "maxProperties": 100,
+          "description": "Flat JSON record of at most 100 FieldId keys, excluding __proto__, prototype and constructor; scalar values only, strings at most 4096 characters and finite numbers. Application data, never authorization; the trusted registered adapter validates business fields and request bindings.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^(?!(?:__proto__|prototype|constructor)(?![\\s\\S]))[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "connection_id",
+        "connector_ref",
+        "operation_ref",
+        "idempotency_key",
+        "expected_grant_revision",
+        "arguments"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationActionRunV1": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 36,
+          "maxLength": 36,
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+        },
+        "connector_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "operation_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "submission_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "authority_binding_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "grant_revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?Z(?![\\s\\S])"
+        },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?Z(?![\\s\\S])"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "running",
+            "succeeded",
+            "failed",
+            "uncertain"
+          ]
+        },
+        "effect_outcome": {
+          "type": "string",
+          "enum": [
+            "not_dispatched",
+            "applied",
+            "not_applied",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "run_id",
+        "revision",
+        "connection_id",
+        "connector_ref",
+        "operation_ref",
+        "submission_digest",
+        "authority_binding_digest",
+        "grant_revision",
+        "created_at",
+        "updated_at",
+        "state",
+        "effect_outcome"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationActionReceiptV1": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "receipt_id": {
+          "type": "string",
+          "minLength": 36,
+          "maxLength": 36,
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 36,
+          "maxLength": 36,
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "sequence": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "submission_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "operation_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "observed_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?Z(?![\\s\\S])"
+        },
+        "effect_outcome": {
+          "type": "string",
+          "enum": [
+            "not_dispatched",
+            "applied",
+            "not_applied",
+            "unknown"
+          ]
+        },
+        "result_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "failure_code": {
+          "type": "string",
+          "enum": [
+            "invalid_input",
+            "forbidden",
+            "revoked",
+            "conflict",
+            "quota",
+            "timeout",
+            "unavailable",
+            "invalid_response",
+            "outcome_unknown"
+          ]
+        },
+        "reconciliation": {
+          "type": "object",
+          "properties": {
+            "operation_ref": {
+              "$ref": "#/$defs/IntegrationRefV1"
+            },
+            "observation_receipt_id": {
+              "type": "string",
+              "minLength": 36,
+              "maxLength": 36,
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            }
+          },
+          "required": [
+            "operation_ref",
+            "observation_receipt_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "receipt_id",
+        "run_id",
+        "sequence",
+        "submission_digest",
+        "operation_ref",
+        "observed_at",
+        "effect_outcome"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationActionSubmissionResultV1": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "admitted"
+            },
+            "run": {
+              "$ref": "#/$defs/IntegrationActionRunV1"
+            },
+            "replayed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "status",
+            "run",
+            "replayed"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "const": "refused"
+            },
+            "code": {
+              "type": "string",
+              "const": "idempotency_conflict"
+            }
+          },
+          "required": [
+            "status",
+            "code"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "CredentialReferenceV1": {
       "type": "object",
       "properties": {
@@ -2225,6 +2830,9 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 120
+        },
+        "adapter_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
         },
         "method": {
           "type": "string",

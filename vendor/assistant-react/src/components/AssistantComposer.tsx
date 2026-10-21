@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent, RefObject } from "react";
+import type { FormEvent, KeyboardEvent } from "react";
 import { TurnRequestV1, clientReason } from "../../../assistant-contract/src/index";
 import type { ReasonV1 } from "../../../assistant-contract/src/index";
 import { newRequestId, reasonCopy } from "../states";
@@ -21,7 +21,7 @@ export interface AssistantComposerProps {
   timeoutMs?: number;
   /** Defaults to navigator.onLine. */
   isOnline?: () => boolean;
-  textareaRef?: RefObject<HTMLTextAreaElement | null>;
+  textareaRef?: { readonly current: HTMLTextAreaElement | null };
   /** A starter the user picked: fills the draft. `nonce` changes per pick. */
   seed?: { readonly text: string; readonly nonce: number } | null;
 }
