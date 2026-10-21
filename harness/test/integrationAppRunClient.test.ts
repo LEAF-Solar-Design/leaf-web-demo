@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpAppRunClient, IntegrationClientError } from "../src/ports/impl/appRunClient.js";
-import { IntegrationDatasetsInput, IntegrationQueryInput, IntegrationSaveElementInput } from "../src/ports/index.js";
+import { IntegrationActionCatalogInput, IntegrationDatasetsInput, IntegrationQueryInput, IntegrationSaveElementInput } from "../src/ports/index.js";
 import { DatasetElementV1, DatasetReadV1, IntegrationActionElementV1 } from "../src/vendor/mushy-author/contracts/integration.js";
 
 const TENANT = "12345678-1234-4234-8234-123456789abc";
@@ -27,6 +27,11 @@ const ACTION = IntegrationActionElementV1.parse({
   form: { submit_label: "Create", fields: [{ id: "amount", label: "Amount", kind: "number", required: true, nullable: false, integer: false }] },
 });
 const ACTION_SAVE = IntegrationSaveElementInput.parse({ recipe: ACTION, expectedRevision: 2 });
+const CATALOG = {
+  actions: [{ connection_id: ACTION.connection_id, connection_title: "Sales", connector_ref: ACTION.connector_ref,
+    operation_ref: ACTION.operation_ref, title: ACTION.title, form: ACTION.form }],
+  next_cursor: "opaque_1",
+};
 const DISCOVERY = { datasets: [{ dataset_ref: REF, title: "Sales", fields: READ.fields, freshness: null, status: "empty" }], next_cursor: null };
 const allow = (result: unknown) => ({ gate: { decision: "allow", rung: 0 }, result });
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -39,6 +44,91 @@ function setup(body: unknown = allow({ datasets: [], next_cursor: null }), statu
 afterEach(() => vi.useRealTimers());
 
 describe("bounded integration HTTP transport", () => {
+  it.each([
+    { args: {}, normalized: { limit: 50 } },
+    { args: { limit: 1, after: "opaque_0", confirmation_id: CID }, normalized: { limit: 1, after: "opaque_0", confirmation_id: CID } },
+  ])("reads the canonical catalog through one fixed authenticated POST: $args", async ({ args, normalized }) => {
+    const { client, fetchImpl } = setup(allow(CATALOG));
+    expect((await client.integrationActionCatalog(TENANT, args as never, AUTH)).result).toEqual(CATALOG);
+    expect(fetchImpl).toHaveBeenCalledExactlyOnceWith("https://app.invalid/internal/integrations/action-catalog", expect.objectContaining({
+      method: "POST", redirect: "error", body: JSON.stringify(normalized), signal: expect.any(AbortSignal),
+      headers: { "content-type": "application/json", "x-tenant-id": TENANT, "x-dispatch-secret": SECRET,
+        "x-authority-session-id": AUTH.sessionId, "x-authority-turn-id": AUTH.turnId },
+    }));
+  });
+
+  it("accepts an empty catalog page that advances the cursor", async () => {
+    const page = { actions: [], next_cursor: "opaque_1" };
+    const { client } = setup(allow(page));
+    expect((await client.integrationActionCatalog(TENANT, IntegrationActionCatalogInput.parse({}), AUTH)).result).toEqual(page);
+  });
+
+  it.each(["deny", "awaiting_approval"] as const)("catalog %s carries only its host gate", async (decision) => {
+    const gate = { decision, ...(decision === "awaiting_approval" ? { confirmation_id: CID } : {}) };
+    const { client, fetchImpl } = setup({ gate });
+    expect(await client.integrationActionCatalog(TENANT, { limit: 50 }, AUTH)).toEqual({ gate });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { limit: 0 }, { limit: 51 }, { limit: true }, { after: "" }, { after: "a".repeat(1025) },
+    { after: "bad\n" }, { after: "bad=" }, { confirmation_id: "forged" },
+    { authority: AUTH }, { tenant_id: TENANT }, { url: "https://foreign.invalid" },
+    { headers: {} }, { operation: "action_catalog" }, { recipe: ACTION },
+  ])("rejects malformed catalog input before fetch: %j", async (input) => {
+    const { client, fetchImpl } = setup();
+    await expect(client.integrationActionCatalog(TENANT, input as never, AUTH)).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { datasets: [], next_cursor: null }, { element: ACTION, revision: 1 }, READ,
+    { ...CATALOG, actions: [CATALOG.actions[0], CATALOG.actions[0]] },
+    { ...CATALOG, next_cursor: "bad cursor" }, { ...CATALOG, next_cursor: "" },
+    { ...CATALOG, authority: "forged" },
+    { ...CATALOG, actions: [{ ...CATALOG.actions[0], token: "private" }] },
+    { ...CATALOG, actions: [{ ...CATALOG.actions[0], connector_ref: { ...REF, digest: "bad" } }] },
+    { ...CATALOG, actions: [{ ...CATALOG.actions[0], operation_ref: { ...REF, id: "../run" } }] },
+    { ...CATALOG, actions: [{ ...CATALOG.actions[0], form: { ...ACTION.form, arguments: {} } }] },
+    { ...CATALOG, actions: [{ ...CATALOG.actions[0], form: { ...ACTION.form, fields: [ACTION.form.fields[0], ACTION.form.fields[0]] } }] },
+    { ...CATALOG, actions: [{ ...CATALOG.actions[0], connection_title: SECRET }] },
+  ])("rejects noncanonical catalog pages without save fallthrough or retry: %j", async (page) => {
+    const { client, fetchImpl } = setup(allow(page));
+    await expect(client.integrationActionCatalog(TENANT, { limit: 1 }, AUTH)).rejects.toMatchObject({ code: "invalid_response" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds catalog response bytes and cancels the stream", async () => {
+    const cancel = vi.fn();
+    const { client, fetchImpl } = setup();
+    fetchImpl.mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(256 * 1024 + 1)); }, cancel,
+    })));
+    await expect(client.integrationActionCatalog(TENANT, { limit: 50 }, AUTH)).rejects.toMatchObject({ code: "response_too_large" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("catalog deadline aborts without retry or unknown-save guidance", async () => {
+    vi.useFakeTimers();
+    const { client, fetchImpl } = setup();
+    fetchImpl.mockImplementationOnce(() => new Promise(() => {}));
+    const assertion = expect(client.integrationActionCatalog(TENANT, { limit: 50 }, AUTH)).rejects.toMatchObject({ code: "timeout" });
+    await vi.advanceTimersByTimeAsync(15_000);
+    await assertion;
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("catalog network failure never retries or exposes transport details", async () => {
+    const { client, fetchImpl } = setup();
+    fetchImpl.mockRejectedValueOnce(new Error(SECRET));
+    await expect(client.integrationActionCatalog(TENANT, { limit: 50 }, AUTH)).rejects.toMatchObject({ code: "unavailable", message: "Integration request failed: unavailable." });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it.each([undefined, 2])("saves an inert action through the fixed host endpoint (revision %s)", async (expectedRevision) => {
     const input = IntegrationSaveElementInput.parse({ recipe: ACTION, ...(expectedRevision === undefined ? {} : { expectedRevision }) });
     const { client, fetchImpl } = setup(allow({ element: ACTION, revision: 3 }));

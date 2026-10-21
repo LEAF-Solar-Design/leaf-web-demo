@@ -64,6 +64,11 @@ def query(parsed=Depends(_request)):
     return _execute("query", parsed)
 
 
+@router.post("/internal/integrations/action-catalog")
+def action_catalog(parsed=Depends(_request)):
+    return _execute("action_catalog", parsed)
+
+
 @router.post("/internal/integrations/elements")
 def elements(parsed=Depends(_request)):
     return _execute("elements", parsed)

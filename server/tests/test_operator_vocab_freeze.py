@@ -302,8 +302,9 @@ def test_roles_file_gained_no_operator_role():
 # not grant deployment authority; existing project and stage grants still apply.
 # Studio integration adds save_integration_element (rung 3) and
 # read_integration_data (rung 1), both auto with the converse capability.
+# S35 extends only read_integration_data with bounded native action discovery.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "c91ecf3e88428b9d6fb0a75ea2139a3142a2b76430fbb5e5c03b61e2801969d0")
+    "5b7b5bfc6cc90a78b87610ddcf70853e982ab6411daa308097b06a2851d4fdf7")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",

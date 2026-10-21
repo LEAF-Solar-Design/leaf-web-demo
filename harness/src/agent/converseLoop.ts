@@ -44,6 +44,7 @@ import type {
   InstantSessionAssignment,
   GateCheckResult,
   IntegrationDatasetsInput,
+  IntegrationActionCatalogInput,
   IntegrationQueryInput,
   IntegrationSaveElementInput,
   IntegrationToolResult,
@@ -716,6 +717,7 @@ export class ConverseLoop {
     ): Promise<{ action: string; args: Record<string, unknown> }> => {
       switch (tool) {
         case "integration_datasets":
+        case "integration_action_catalog":
         case "integration_query":
         case "integration_save_element":
           throw new IntegrationClientError("unavailable");
@@ -953,6 +955,10 @@ export class ConverseLoop {
               if (!appRun.integrationDatasets) throw new IntegrationClientError("unavailable");
               hosted = await appRun.integrationDatasets(tenantId, args as IntegrationDatasetsInput, authority);
               break;
+            case "integration_action_catalog":
+              if (!appRun.integrationActionCatalog) throw new IntegrationClientError("unavailable");
+              hosted = await appRun.integrationActionCatalog(tenantId, args as IntegrationActionCatalogInput, authority);
+              break;
             case "integration_query":
               if (!appRun.integrationQuery) throw new IntegrationClientError("unavailable");
               hosted = await appRun.integrationQuery(tenantId, args as IntegrationQueryInput, authority);
@@ -1107,6 +1113,7 @@ export class ConverseLoop {
 
     switch (tool) {
       case "integration_datasets":
+      case "integration_action_catalog":
       case "integration_query":
       case "integration_save_element":
         return err(integrationErrorMessage("unavailable"));
@@ -1553,7 +1560,7 @@ function isSpineTool(name: string): name is SpineToolName {
 }
 
 function isIntegrationTool(name: string): name is IntegrationTool {
-  return name === "integration_datasets" || name === "integration_query" || name === "integration_save_element";
+  return name === "integration_datasets" || name === "integration_action_catalog" || name === "integration_query" || name === "integration_save_element";
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -1640,6 +1647,8 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
   switch (tool) {
     case "integration_datasets":
       return "discover datasets";
+    case "integration_action_catalog":
+      return "discover action forms";
     case "integration_query":
       return "query dataset";
     case "integration_save_element":
@@ -1788,6 +1797,7 @@ function resultSummary(tool: SpineToolName, result: SpineToolResult): string {
     if (parsed.proposed) return `proposed (confirmation ${String(parsed.confirmation_id)})`;
     if (parsed.pending) return `pending (confirmation ${String(parsed.confirmation_id)})`;
     if (tool === "integration_datasets") return `${Array.isArray(parsed.datasets) ? parsed.datasets.length : 0} datasets`;
+    if (tool === "integration_action_catalog") return `${Array.isArray(parsed.actions) ? parsed.actions.length : 0} action forms`;
     if (tool === "integration_query") return `${Array.isArray(parsed.rows) ? parsed.rows.length : 0} rows (${String(parsed.status)})`;
     if (tool === "integration_save_element") return `element ${String(asRecord(parsed.element).id)} revision ${String(parsed.revision)}`;
     if (typeof parsed.job_id === "string" && parsed.job_id) {
