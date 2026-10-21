@@ -78,6 +78,10 @@ def export_org(
     idempotency_key = project_lifecycle._validate_idempotency_key(idempotency_key)
 
     listed = list_projects(org_id)
+    for project in listed:
+        owner = getattr(project, "org_id", None)
+        if not isinstance(owner, uuid.UUID) or owner != org_id:
+            raise OrgExportForbidden("project does not belong to this organisation")
     truncated = len(listed) > max_projects
     rows: List[Dict[str, Any]] = []
     for project in listed[:max_projects]:
