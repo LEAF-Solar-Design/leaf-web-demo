@@ -228,3 +228,41 @@ def test_identity_auth_off_has_no_identity_echo_or_drawing_access(identity_clien
     response = identity_client.get("/api/session/identity", headers={"X-Tenant-Id": "demo-tenant"})
     assert response.status_code == 200
     assert response.json() == {}
+
+
+@pytest.mark.parametrize("live_setting", ["1", "true", "yes", "on"])
+@pytest.mark.parametrize("tenant_header", [None, "", "demo-tenant", "g4-synthetic-other-tenant"])
+def test_identity_ignores_x_tenant_id_under_live_auth(
+    identity_client, monkeypatch, live_setting, tenant_header,
+):
+    from test_auth import bearer, mint
+
+    monkeypatch.setenv("LEAF_AUTH_LIVE", live_setting)
+    monkeypatch.setattr(deps, "admin_subjects", lambda: frozenset())
+    subjects = []
+
+    def resolve_authority(subject):
+        assert subject == "auth0|tester"
+        subjects.append(subject)
+        return "platform-canonical", "hosted_pro"
+
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", resolve_authority)
+    tenant_headers = {} if tenant_header is None else {"X-Tenant-Id": tenant_header}
+    response = identity_client.get(
+        "/api/session/identity",
+        headers={
+            **tenant_headers,
+            "Authorization": bearer(mint(tenant_id="platform-canonical")),
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "tenant_id": "platform-canonical",
+        "org_id": "platform-canonical",
+        "tier": "hosted_pro",
+    }
+    assert subjects == ["auth0|tester"]
+
+    unauthenticated = identity_client.get("/api/session/identity", headers=tenant_headers)
+    assert unauthenticated.status_code == 401, unauthenticated.text
+    assert subjects == ["auth0|tester"]
