@@ -86,6 +86,7 @@ const STATES = Object.freeze({
   cad: { state: 'available', label: 'Ready' },
   solar: { state: 'beta', label: 'Beta' },
   ios: { state: 'setup', label: 'Setup required' },
+  ops: { state: 'available', label: 'Ready' },
 })
 
 const ENTITLEMENTS = Object.freeze({
@@ -526,6 +527,33 @@ const DIVERGENCES = {
     'span||',
     'p|tc-product-note|',
   ] },
+}
+
+// Ops intentionally adds one tab after the four captured profiles in each
+// historical case. Assert that exact prefix before inserting at its boundary;
+// keep the captured continuity rail, sign-out and every other slot untouched.
+if (!CAPTURE) {
+  const capturedTabPrefix = [
+    'nav|tc-product-nav|',
+    'div|tc-product-tabs|',
+    'button||', 'span||', 'small||',
+    'button||', 'span||', 'small||',
+    'button||', 'span||', 'small||',
+    'button||', 'span||', 'small||',
+  ]
+  for (const { key } of CASES) {
+    const tabs = FIXTURE[key].tabs
+    expect(tabs.slice(0, capturedTabPrefix.length)).toEqual(capturedTabPrefix)
+    expect(tabs[capturedTabPrefix.length]).toBe('div|tc-continuity|continuity-rail')
+    DIVERGENCES[key] = {
+      ...DIVERGENCES[key],
+      tabs: [
+        ...tabs.slice(0, capturedTabPrefix.length),
+        'button||', 'span||', 'small||',
+        ...tabs.slice(capturedTabPrefix.length),
+      ],
+    }
+  }
 }
 
 /** The expectation for one slot: the frozen fixture, unless this slot is a

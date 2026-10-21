@@ -1,0 +1,97 @@
+{
+  "name": "rate-limited",
+  "title": "A turn refused by the hourly quota, with the reset time",
+  "thread": {
+    "session_id": "sess-tenant-06",
+    "scope": { "kind": "tenant", "label": "Your account" },
+    "provider": { "kind": "claude-code-cli", "label": "Claude", "model": "claude-sonnet-5" },
+    "quota": { "used": 30, "limit": 30, "window": "hour", "resets_at": "2026-09-23T21:12:00Z" },
+    "items": [
+      {
+        "seq": 1,
+        "item_id": "item-u1",
+        "turn_id": "turn-1",
+        "role": "user",
+        "at": "2026-09-23T20:40:00Z",
+        "blocks": [{ "type": "text", "text": "What's my win rate this week?" }]
+      },
+      {
+        "seq": 3,
+        "item_id": "item-s1",
+        "turn_id": "turn-1",
+        "role": "server",
+        "at": "2026-09-23T20:40:00.080Z",
+        "blocks": [
+          {
+            "type": "notice",
+            "origin": "server",
+            "reason": {
+              "code": "rate_limited",
+              "text": "You can ask again at 4:12 PM CT.",
+              "next": { "label": "Wait", "action": "wait" },
+              "retry_at": "2026-09-23T21:12:00Z"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "type": "item",
+      "session_id": "sess-tenant-06",
+      "seq": 1,
+      "at": "2026-09-23T20:40:00Z",
+      "requires_action": false,
+      "item": {
+        "seq": 1,
+        "item_id": "item-u1",
+        "turn_id": "turn-1",
+        "role": "user",
+        "at": "2026-09-23T20:40:00Z",
+        "blocks": [{ "type": "text", "text": "What's my win rate this week?" }]
+      }
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-tenant-06",
+      "seq": 2,
+      "at": "2026-09-23T20:40:00.080Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "failed",
+      "reason": {
+        "code": "rate_limited",
+        "text": "You can ask again at 4:12 PM CT.",
+        "next": { "label": "Wait", "action": "wait" },
+        "retry_at": "2026-09-23T21:12:00Z"
+      }
+    },
+    {
+      "type": "item",
+      "session_id": "sess-tenant-06",
+      "seq": 3,
+      "at": "2026-09-23T20:40:00.080Z",
+      "requires_action": false,
+      "item": {
+        "seq": 3,
+        "item_id": "item-s1",
+        "turn_id": "turn-1",
+        "role": "server",
+        "at": "2026-09-23T20:40:00.080Z",
+        "blocks": [
+          {
+            "type": "notice",
+            "origin": "server",
+            "reason": {
+              "code": "rate_limited",
+              "text": "You can ask again at 4:12 PM CT.",
+              "next": { "label": "Wait", "action": "wait" },
+              "retry_at": "2026-09-23T21:12:00Z"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

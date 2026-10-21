@@ -14,6 +14,7 @@
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  resolve: { dedupe: ['react', 'react-dom', 'zod', 'recharts'] },
   // The automatic JSX runtime, matching how vite builds the app. Without it
   // JSX compiles to React.createElement and every spec dies on "React is not
   // defined" — a failure about the runner, not the component.

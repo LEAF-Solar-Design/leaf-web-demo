@@ -1154,6 +1154,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_demo_actor_postgres.py"), 31,
               uses_database=True, db_gated=True,
               database_skip_reasons=(r"PostgreSQL race test requires explicit DATABASE_URL",)),
+        Suite("server-migration-fixture-sql", "server isolated migration fixture mapping", "pytest",
+              SERVER, _py_pytest("tests/test_migration_fixture_sql.py"), 21),
         Suite("server-mcp-gateway-authority",
               "server tests/test_mcp_gateway_authority.py", "pytest", SERVER,
               _py_pytest("tests/test_mcp_gateway_authority.py"), 55),
@@ -3480,6 +3482,30 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_mcp_status.py"), 4),
         Suite("server-mcp-tool-projection", "server tests/test_mcp_tool_projection.py", "pytest", SERVER,
               _py_pytest("tests/test_mcp_tool_projection.py"), 6),
+        Suite("server-integration-turn-grants", "encrypted Studio turn grant unit checks", "pytest", SERVER,
+              _py_pytest("tests/test_integration_turn_grant_crypto.py")
+              + ["tests/test_integration_turn_grant_store.py"], 61),
+        Suite("server-integration-turn-grant-capture", "accepted direct turn custody", "pytest", SERVER,
+              _py_pytest("tests/test_integration_turn_grant_capture.py"), 1),
+        Suite("server-integration-turn-grant-lifecycle", "exact turn custody cleanup", "pytest", SERVER,
+              _py_pytest("tests/test_integration_turn_grant_lifecycle.py"), 1),
+        Suite("server-integration-tools", "turn-bound integration read endpoints", "pytest", SERVER,
+              _py_pytest("tests/test_integration_tool_service.py")
+              + ["tests/test_integration_tool_routes.py"], 30),
+        Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
+              _py_pytest("tests/test_integration_element_save.py"), 1),
+        # This proof owns an EMPTY named disposable database. Never alias the
+        # general gate DSN to it. opt_in_env normally accepts boolean flags;
+        # a present dedicated DSN selects this suite directly instead.
+        Suite("server-integration-turn-grants-postgres", "disposable PostgreSQL grant isolation", "pytest", SERVER,
+              _py_pytest("tests/test_integration_turn_grant_postgres.py"), 1,
+              opt_in_env=("" if os.environ.get("INTEGRATION_GRANT_TEST_DATABASE_URL", "").strip()
+                          else "INTEGRATION_GRANT_TEST_DATABASE_URL")),
+        Suite("server-integration-project-turn-postgres", "real project producer PostgreSQL custody", "pytest", SERVER,
+              _py_pytest("tests/test_integration_project_turn_postgres.py"), 1,
+              allowed_skip_reasons=(r"INTEGRATION_GRANT_TEST_DATABASE_URL absent: PostgreSQL isolation unverified",),
+              opt_in_env=("" if os.environ.get("INTEGRATION_GRANT_TEST_DATABASE_URL", "").strip()
+                          else "INTEGRATION_GRANT_TEST_DATABASE_URL")),
         Suite("server-multi-claude-grants", "server tests/test_multi_claude_grants.py", "pytest", SERVER,
               _py_pytest("tests/test_multi_claude_grants.py"), 1),
         Suite("server-plan-first", "server tests/test_plan_first.py", "pytest", SERVER,

@@ -285,8 +285,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   // S27 adds the bar:escape owner-open state for the Escape owner rung: 855 + 1 = 856, 821 + 1 = 822.
   // WL14 adds one desktop Find-submit ready triple.
   // WL16b adds four desktop project Solar states to both inventories.
-  assert.equal(previousTriples.length, 861)
-  assert.equal(triples(map).length, 827)
+  // Ops adds ready/desktop and signed-out/desktop triples.
+  assert.equal(previousTriples.length, 863)
+  assert.equal(triples(map).length, 829)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))

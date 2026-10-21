@@ -71,7 +71,8 @@ def test_post_commits_exact_bytes_fresh_receipt_and_evicts_cache(monkeypatch, tm
     import deps
     path = _post_setup(monkeypatch, tmp_path, {"cad": {"authoring": False}})
     assert deps.effective_surface_config("t1") == {"cad": {"authoring": False}}
-    overlay = {"cad": {"authoring": True}, "sheets": {"chrome": {"tab": "My sheets"}}}
+    overlay = {"cad": {"authoring": True}, "sheets": {"chrome": {"tab": "My sheets"}},
+               "ops": {"authoring": False, "chrome": {"tab": "Ops"}}}
     response = _client().post("/api/surface-config", headers=_h("t1"), json={"overlay": overlay})
     assert response.status_code == 200, response.text
     assert path.read_bytes() == (json.dumps(overlay, indent=2, ensure_ascii=False) + "\n").encode("utf-8")

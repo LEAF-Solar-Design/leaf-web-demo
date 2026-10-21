@@ -1,0 +1,12 @@
+{
+  "name": "idle",
+  "title": "A new session with nothing asked yet",
+  "thread": {
+    "session_id": "sess-idle-01",
+    "scope": { "kind": "tenant", "label": "Your account" },
+    "provider": { "kind": "claude-code-cli", "label": "Claude", "model": "claude-sonnet-5" },
+    "quota": { "used": 0, "limit": 30, "window": "hour", "resets_at": "2026-09-23T17:00:00Z" },
+    "items": []
+  },
+  "events": []
+}

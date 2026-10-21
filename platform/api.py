@@ -33,6 +33,8 @@ from . import org_export
 router = APIRouter(prefix="/api", tags=["platform"])
 from .binding_grant_issuance import router as binding_grant_router
 router.include_router(binding_grant_router)
+from .workspace_scope import router as workspace_scope_router
+router.include_router(workspace_scope_router)
 LOGGER = logging.getLogger(__name__)
 
 

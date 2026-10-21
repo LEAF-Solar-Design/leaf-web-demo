@@ -18,7 +18,151 @@ import type {
   CapabilityEntry,
   SubmitRunRequest,
   SubmitRunResponse,
+  IntegrationAuthority,
+  IntegrationActionCatalogInput,
+  IntegrationDatasetsInput,
+  IntegrationDatasetsResult,
+  IntegrationQueryInput,
+  IntegrationSaveElementInput,
+  IntegrationSaveElementResult,
+  IntegrationToolResult,
 } from "../index.js";
+import { INTEGRATION_TOOL_INPUTS } from "../index.js";
+import { z } from "zod";
+import {
+  DatasetReadV1, IntegrationActionCatalogV1, IntegrationElementV1, IntegrationRefV1,
+} from "../../vendor/mushy-author/contracts/integration.js";
+
+export type IntegrationTool = keyof typeof INTEGRATION_TOOL_INPUTS;
+type IntegrationInputs = {
+  integration_action_catalog: IntegrationActionCatalogInput;
+  integration_datasets: IntegrationDatasetsInput;
+  integration_query: IntegrationQueryInput;
+  integration_save_element: IntegrationSaveElementInput;
+};
+type IntegrationResults = {
+  integration_action_catalog: IntegrationActionCatalogV1;
+  integration_datasets: IntegrationDatasetsResult;
+  integration_query: DatasetReadV1;
+  integration_save_element: IntegrationSaveElementResult;
+};
+
+const IntegrationErrorCode = z.enum([
+  "invalid_input", "unauthenticated", "denied", "unavailable", "conflict",
+  "invalid_response", "timeout", "response_too_large", "outcome_unknown", "not_found",
+]);
+type IntegrationErrorCode = z.infer<typeof IntegrationErrorCode>;
+export function integrationErrorMessage(code: IntegrationErrorCode): string {
+  const safeCode = IntegrationErrorCode.safeParse(code);
+  if (!safeCode.success) return "Integration request failed: unavailable.";
+  return safeCode.data === "outcome_unknown"
+    ? "The save outcome is unknown. Inspect saved views before retrying."
+    : `Integration request failed: ${safeCode.data}.`;
+}
+
+/** Fixed messages only; never retain a transport exception or response body. */
+export class IntegrationClientError extends Error {
+  constructor(readonly code: IntegrationErrorCode) {
+    super(integrationErrorMessage(code));
+    this.name = "IntegrationClientError";
+  }
+}
+
+const DiscoveryResult = z.strictObject({
+  datasets: z.array(z.strictObject({
+    dataset_ref: IntegrationRefV1,
+    title: z.string().min(1).max(120),
+    fields: DatasetReadV1.shape.fields,
+    freshness: DatasetReadV1.shape.freshness.nullable(),
+    status: z.enum(["ready", "empty", "stale", "unavailable"]),
+  })).max(50),
+  next_cursor: z.string().min(1).max(1024).regex(/^[A-Za-z0-9_-]+(?![\s\S])/).nullable(),
+});
+const SaveResult = z.strictObject({
+  element: IntegrationElementV1,
+  revision: z.number().int().positive().refine(Number.isSafeInteger),
+});
+const HostEnvelope = z.strictObject({
+  gate: z.strictObject({
+    decision: z.enum(["allow", "deny", "awaiting_approval"]),
+    confirmation_id: z.string().regex(/^[a-f0-9]{16}(?![\s\S])/).optional(),
+    reason: z.string().max(512).optional(),
+    policy: z.string().max(128).optional(),
+    rung: z.union([z.number().int().min(0).max(7), z.string().regex(/^R[0-7](?![\s\S])/)]).optional(),
+  }),
+  result: z.unknown().optional(),
+});
+
+function sameJson(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) !== Array.isArray(right)) return false;
+  const a = Object.keys(left), b = Object.keys(right);
+  return a.length === b.length && a.every((key) => Object.hasOwn(right, key) &&
+    sameJson((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key]));
+}
+
+/** Also used at the executor seam: injected clients must obey the same contract. */
+export function validateIntegrationResponse<K extends IntegrationTool>(
+  tool: K, input: IntegrationInputs[K], value: unknown, wire = false,
+): IntegrationToolResult<IntegrationResults[K]> {
+  const parsed = HostEnvelope.safeParse(value);
+  if (!parsed.success) throw new IntegrationClientError("invalid_response");
+  const { gate, result } = parsed.data;
+  if ((wire && gate.rung !== undefined && typeof gate.rung !== "number") ||
+      (gate.decision === "awaiting_approval") !== (gate.confirmation_id !== undefined) ||
+      (gate.decision === "allow") !== Object.hasOwn(parsed.data, "result") ||
+      (gate.decision === "allow" && result === undefined)) {
+    throw new IntegrationClientError("invalid_response");
+  }
+  const { rung, ...metadata } = gate;
+  const portGate = { ...metadata, ...(rung !== undefined ? { rung: typeof rung === "number" ? `R${rung}` : rung } : {}) };
+  if (gate.decision !== "allow") return { gate: portGate };
+  const schema = tool === "integration_action_catalog" ? IntegrationActionCatalogV1
+    : tool === "integration_datasets" ? DiscoveryResult : tool === "integration_query" ? DatasetReadV1 : SaveResult;
+  const checked = schema.safeParse(result);
+  if (!checked.success) throw new IntegrationClientError("invalid_response");
+  if (tool === "integration_datasets") {
+    if ((checked.data as IntegrationDatasetsResult).datasets.length > (input as IntegrationDatasetsInput).limit) {
+      throw new IntegrationClientError("invalid_response");
+    }
+  } else if (tool === "integration_action_catalog") {
+    if ((checked.data as IntegrationActionCatalogV1).actions.length > (input as IntegrationActionCatalogInput).limit) {
+      throw new IntegrationClientError("invalid_response");
+    }
+  } else if (tool === "integration_query") {
+    if (!sameJson((checked.data as DatasetReadV1).dataset_ref, (input as IntegrationQueryInput).dataset_ref)) {
+      throw new IntegrationClientError("invalid_response");
+    }
+  } else if (!sameJson((checked.data as IntegrationSaveElementResult).element, (input as IntegrationSaveElementInput).recipe)) {
+    throw new IntegrationClientError("invalid_response");
+  }
+  return { gate: portGate, result: checked.data as IntegrationResults[K] };
+}
+
+function reflectsSecret(value: unknown, secret: string): boolean {
+  if (!secret) return false;
+  const variants = [secret, encodeURIComponent(secret), Buffer.from(secret).toString("base64"),
+    Buffer.from(secret).toString("base64url"), Buffer.from(secret).toString("hex"), Buffer.from(secret).toString("hex").toUpperCase(),
+    [...secret].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")];
+  const visit = (item: unknown): boolean => {
+    if (typeof item === "string") {
+      let decoded = item;
+      for (let i = 0; i < 3; i++) {
+        if (variants.some((variant) => decoded.includes(variant))) return true;
+        try { decoded = decodeURIComponent(decoded); } catch { /* inspect original below */ }
+        decoded = decoded.replace(/&#(?:x([a-f0-9]+)|([0-9]+));/gi,
+          (_match, hex: string, decimal: string) => {
+            const point = parseInt(hex ?? decimal, hex ? 16 : 10);
+            return point <= 0x10ffff ? String.fromCodePoint(point) : "";
+          });
+      }
+      return false;
+    }
+    return !!item && typeof item === "object" && Object.entries(item).some(([key, nested]) => visit(key) || visit(nested));
+  };
+  return visit(value);
+}
 
 export interface HttpAppRunClientOptions {
   /** App base URL, e.g. http://127.0.0.1:8130 (from LEAF_APP_URL or equivalent). */
@@ -57,6 +201,121 @@ export class HttpAppRunClient implements AppRunClient {
       "x-tenant-id": tenantId,
       "x-dispatch-secret": this.secret,
     };
+  }
+
+  integrationDatasets(tenantId: string, input: IntegrationDatasetsInput, authority: IntegrationAuthority) {
+    return this.integrationRequest("integration_datasets", tenantId, input, authority);
+  }
+
+  integrationActionCatalog(tenantId: string, input: IntegrationActionCatalogInput, authority: IntegrationAuthority) {
+    return this.integrationRequest("integration_action_catalog", tenantId, input, authority);
+  }
+
+  integrationQuery(tenantId: string, input: IntegrationQueryInput, authority: IntegrationAuthority) {
+    return this.integrationRequest("integration_query", tenantId, input, authority);
+  }
+
+  integrationSaveElement(tenantId: string, input: IntegrationSaveElementInput, authority: IntegrationAuthority) {
+    return this.integrationRequest("integration_save_element", tenantId, input, authority);
+  }
+
+  /** One request, one total deadline, bounded streaming body, and no redirects. */
+  private async integrationRequest<K extends IntegrationTool>(
+    tool: K, tenantId: string, input: IntegrationInputs[K], authority: IntegrationAuthority,
+  ): Promise<IntegrationToolResult<IntegrationResults[K]>> {
+    const normalized = INTEGRATION_TOOL_INPUTS[tool].safeParse(input);
+    const validId = (id: unknown): id is string => typeof id === "string" &&
+      id.length > 0 && id.length <= 200 && id.trim() === id && !/[\u0000-\u001f\u007f-\u009f]/.test(id);
+    if (!z.string().uuid().safeParse(tenantId).success || tenantId === "00000000-0000-0000-0000-000000000000" || tenantId !== tenantId.toLowerCase() ||
+        !normalized.success || !validId(authority?.sessionId) || !validId(authority?.turnId)) {
+      throw new IntegrationClientError("invalid_input");
+    }
+    if (!this.secret) throw new IntegrationClientError("unavailable");
+    const paths = {
+      integration_datasets: "/internal/integrations/datasets",
+      integration_action_catalog: "/internal/integrations/action-catalog",
+      integration_query: "/internal/integrations/query",
+      integration_save_element: "/internal/integrations/elements",
+    } as const;
+    const body = JSON.stringify(normalized.data);
+    if (Buffer.byteLength(body, "utf8") > 128 * 1024) throw new IntegrationClientError("invalid_input");
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let timedOut = false;
+    let failed = true;
+    let definiteFailure = false;
+    const cancel = () => {
+      controller.abort();
+      void reader?.cancel().catch(() => {});
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        cancel();
+        reject(new IntegrationClientError(tool === "integration_save_element" ? "outcome_unknown" : "timeout"));
+      }, 15_000);
+    });
+    try {
+      const work = async () => {
+        const response = await this.fetchImpl(`${this.baseUrl}${paths[tool]}`, {
+          method: "POST", redirect: "error", signal: controller.signal,
+          headers: {
+            ...this.headers(tenantId),
+            "x-authority-session-id": authority.sessionId,
+            "x-authority-turn-id": authority.turnId,
+          },
+          body,
+        });
+        // A non-cooperating injected fetch must not leave a late body open.
+        if (controller.signal.aborted) {
+          void response.body?.cancel().catch(() => {});
+          throw new IntegrationClientError("timeout");
+        }
+        if (!response.body) throw new IntegrationClientError("invalid_response");
+        reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          size += next.value.byteLength;
+          if (size > 256 * 1024) throw new IntegrationClientError("response_too_large");
+          chunks.push(next.value);
+        }
+        let text: string;
+        try { text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)); }
+        catch { throw new IntegrationClientError("invalid_response"); }
+        if (reflectsSecret(text, this.secret)) throw new IntegrationClientError("invalid_response");
+        let json: unknown;
+        try { json = JSON.parse(text); } catch { throw new IntegrationClientError("invalid_response"); }
+        if (reflectsSecret(json, this.secret)) throw new IntegrationClientError("invalid_response");
+        if (!response.ok) {
+          const failure = z.strictObject({ error: z.strictObject({
+            code: IntegrationErrorCode, correlationId: z.string().uuid(),
+          }) }).safeParse(json);
+          if (!failure.success) throw new IntegrationClientError("invalid_response");
+          definiteFailure = [400, 401, 403, 404, 409].includes(response.status);
+          throw new IntegrationClientError(response.status === 409 ? "conflict" : failure.data.error.code);
+        }
+        return validateIntegrationResponse(tool, normalized.data as IntegrationInputs[K], json, true);
+      };
+      const result = await Promise.race([work(), deadline]);
+      failed = false;
+      return result;
+    } catch (error) {
+      if (timedOut) throw new IntegrationClientError(tool === "integration_save_element" ? "outcome_unknown" : "timeout");
+      // Once submitted, malformed or lost success cannot prove no save occurred.
+      if (tool === "integration_save_element" && !definiteFailure) {
+        throw new IntegrationClientError("outcome_unknown");
+      }
+      if (error instanceof IntegrationClientError) throw error;
+      throw new IntegrationClientError(tool === "integration_save_element" ? "outcome_unknown" : "unavailable");
+    } finally {
+      clearTimeout(timer);
+      if (failed) cancel();
+      try { reader?.releaseLock(); } catch { /* pending reads are cancelled above */ }
+    }
   }
 
   private async request(

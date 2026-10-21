@@ -78,6 +78,7 @@ export default defineConfig(({ mode }) => {
   const ref = elementRefEnabled()
   return {
   plugins: [react(), cadEngineDevServer(), ...(source || ref ? [elementSourceStamp({ root: HERE, source, ref })] : [])],
+  resolve: { dedupe: ['react', 'react-dom', 'zod', 'recharts'] },
   define: {
     __BUILD_HASH__: JSON.stringify(buildHash()),
   },

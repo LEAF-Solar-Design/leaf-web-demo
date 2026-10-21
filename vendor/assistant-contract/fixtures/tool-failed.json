@@ -1,0 +1,129 @@
+{
+  "name": "tool-failed",
+  "title": "A failed read rendered as failed, never as an empty success",
+  "thread": {
+    "session_id": "sess-owner-03",
+    "scope": { "kind": "owner", "label": "Owner" },
+    "provider": { "kind": "claude-code-cli", "label": "Claude", "model": "claude-sonnet-5" },
+    "quota": null,
+    "items": [
+      {
+        "seq": 1,
+        "item_id": "item-u1",
+        "turn_id": "turn-1",
+        "role": "user",
+        "at": "2026-09-23T16:10:00Z",
+        "blocks": [{ "type": "text", "text": "What's my open exposure?" }]
+      },
+      {
+        "seq": 4,
+        "item_id": "item-a1",
+        "turn_id": "turn-1",
+        "role": "assistant",
+        "at": "2026-09-23T16:10:04Z",
+        "blocks": [
+          {
+            "type": "tools",
+            "tools": [
+              {
+                "invocation_id": "inv-101",
+                "name": "positions.read",
+                "label": "Read open positions",
+                "state": "failed",
+                "reason": {
+                  "code": "tool_failed",
+                  "text": "Couldn't read your open positions.",
+                  "next": { "label": "Try again", "action": "retry" }
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "I couldn't read your open positions just now, so I can't give you an exposure figure."
+          }
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "type": "item",
+      "session_id": "sess-owner-03",
+      "seq": 1,
+      "at": "2026-09-23T16:10:00Z",
+      "requires_action": false,
+      "item": {
+        "seq": 1,
+        "item_id": "item-u1",
+        "turn_id": "turn-1",
+        "role": "user",
+        "at": "2026-09-23T16:10:00Z",
+        "blocks": [{ "type": "text", "text": "What's my open exposure?" }]
+      }
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-owner-03",
+      "seq": 2,
+      "at": "2026-09-23T16:10:00.150Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "queued"
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-owner-03",
+      "seq": 3,
+      "at": "2026-09-23T16:10:01Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "running"
+    },
+    {
+      "type": "item",
+      "session_id": "sess-owner-03",
+      "seq": 4,
+      "at": "2026-09-23T16:10:04Z",
+      "requires_action": false,
+      "item": {
+        "seq": 4,
+        "item_id": "item-a1",
+        "turn_id": "turn-1",
+        "role": "assistant",
+        "at": "2026-09-23T16:10:04Z",
+        "blocks": [
+          {
+            "type": "tools",
+            "tools": [
+              {
+                "invocation_id": "inv-101",
+                "name": "positions.read",
+                "label": "Read open positions",
+                "state": "failed",
+                "reason": {
+                  "code": "tool_failed",
+                  "text": "Couldn't read your open positions.",
+                  "next": { "label": "Try again", "action": "retry" }
+                }
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "text": "I couldn't read your open positions just now, so I can't give you an exposure figure."
+          }
+        ]
+      }
+    },
+    {
+      "type": "turn",
+      "session_id": "sess-owner-03",
+      "seq": 5,
+      "at": "2026-09-23T16:10:05Z",
+      "requires_action": false,
+      "turn_id": "turn-1",
+      "state": "done"
+    }
+  ]
+}

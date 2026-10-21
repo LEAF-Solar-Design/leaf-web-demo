@@ -14,6 +14,18 @@ test('re-exports DeviceGround from ios/DeviceGround.jsx by identity', async () =
   expect(shim.DeviceGround).toBe(ground.DeviceGround)
 })
 
+test('mounts the native Ops ground once in the shared ground switch', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/site/SurfaceGrounds.jsx'), 'utf8')
+  expect(source.match(/<OpsWorkspaceGround\b/g)).toHaveLength(1)
+  expect(source).not.toMatch(/import\s+(?:[^'";]+\s+from\s*)?['"][^'"]*OpsWorkspaceGround\.jsx['"]/)
+  expect(source).toMatch(/lazy\(\(\) => import\(['"]\.\.\/integrations\/OpsWorkspaceGround\.jsx['"]\)/)
+  expect(source).toContain('default: module.OpsWorkspaceGround')
+  expect(source).toContain("surfaceGround(surface) === 'integrations'")
+  const app = readFileSync(resolve(process.cwd(), 'src/App.jsx'), 'utf8')
+  const portal = app.slice(app.indexOf('<SurfaceGrounds'))
+  for (const prop of ['projectId={openProjectId || null}', 'session={session}', 'signedIn={signedIn}', 'accountScope={projectSolarAccountScope}']) expect(portal).toContain(prop)
+})
+
 test('re-exports measureGroundWindow and measureContainedWindow from groundWindow.js by identity', async () => {
   const shim = await import('./SurfaceGrounds.jsx')
   const windowMath = await import('./groundWindow.js')

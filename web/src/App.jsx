@@ -4656,6 +4656,10 @@ export default function App() {
             the ground attaches on the first render none of this renders. */}
         {studioGround && createPortal(
           <SurfaceGrounds
+            projectId={openProjectId || null}
+            session={session}
+            signedIn={signedIn}
+            accountScope={projectSolarAccountScope}
             occluders={STUDIO_DRAWING_OCCLUDERS}
             studioPresentation={Boolean(studioGround)}
             studioShell={studioShell}

@@ -1387,12 +1387,19 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         }
 
     # 5. dispatch the turn.
+    integration_capture = None
+    try:
+        import integration_turn_grants
+        integration_capture = integration_turn_grants.for_request(request, tenant)
+    except Exception:
+        pass  # Optional host custody must never change ordinary Converse.
     try:
         turn_id = turn_runner.start_turn(
             tenant, session_id,
             text=req.text, confirm=confirm_payload, classifier_hint=req.classifier_hint,
             model=req.model, credential_grant=validated_grant, images=images,
             request_id=journal_request_id,
+            **({"integration_capture": integration_capture} if integration_capture is not None else {}),
             **({"entity_scope": frozen_scope} if frozen_scope is not None else {}),
         )
     except turn_runner.TurnBusy:
@@ -1508,6 +1515,14 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
                     if current is not None and current["state"] != "admitted":
                         return _journal_response(current, tenant)
         return response
+
+    finally:
+        if integration_capture is not None:
+            try:
+                integration_capture.discard()
+            except Exception:
+                pass
+        integration_capture = None
 
     if journal_request_id is not None:
         row = request_journal.get_request(journal_request_id)

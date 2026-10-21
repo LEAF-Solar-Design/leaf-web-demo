@@ -25,6 +25,7 @@ import pytest
 from starlette.requests import Request
 
 import demo_sessions as demo
+from migration_fixture_sql import fixture_grant_role, translate_migration_sql
 
 
 requires_database = pytest.mark.skipif(
@@ -49,6 +50,7 @@ def postgres_registry(monkeypatch):
     from psycopg import sql
 
     schema = "demo_test_" + uuid.uuid4().hex
+    grant_role = fixture_grant_role(schema)
     url = os.environ["DATABASE_URL"]
     with psycopg.connect(url, autocommit=True) as conn:
         conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
@@ -77,7 +79,8 @@ def postgres_registry(monkeypatch):
         with connect() as conn:
             migrations = Path(__file__).resolve().parents[2] / "platform/migrations"
             for migration in sorted(migrations.glob("[0-9][0-9][0-9][0-9]_*.sql")):
-                conn.execute(migration.read_text(), prepare=False)
+                conn.execute(translate_migration_sql(
+                    migration.name, migration.read_text(), schema), prepare=False)
         monkeypatch.setenv("LEAF_DEMO_LIVE_ENABLED", "1")
         monkeypatch.setenv("LEAF_DEMO_SESSION_SECRET", "postgres-test-signing")
         monkeypatch.setenv("LEAF_DEMO_IP_HASH_SECRET", "postgres-test-address")
@@ -91,6 +94,7 @@ def postgres_registry(monkeypatch):
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+            conn.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(grant_role)))
 
 
 def totals(state):

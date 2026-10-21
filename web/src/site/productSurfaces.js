@@ -506,6 +506,34 @@ export const PRODUCT_SURFACES = Object.freeze([
       tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: null },
     }),
   }),
+  Object.freeze({
+    id: 'ops',
+    label: 'Ops',
+    eyebrow: 'Project operations',
+    title: 'Work with project datasets and native views',
+    description: 'Explore authorized datasets and compose saved views in this project.',
+    familyIds: Object.freeze([]),
+    contract: deepFreeze({
+      ground: 'integrations',
+      scene: 'app',
+      chrome: { shell: 'cockpit', productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true },
+      toolbar: { profile: 'project', ribbon: true, home: 'project', quick: null },
+      rails: { left: 'spine', right: 'job-spine', dock: null },
+      groundMaterial: { layerAccent: null, solarStrings: false },
+      commandLine: true,
+      authoring: true,
+      versions: 'none',
+      conversations: { scope: 'drawing' },
+      integrations: { link: 'standard-flow' },
+      builds: { routes: ['one-shot'], card: 'job-rail' },
+      contextMenu: ['turn', 'approval', 'item'],
+      shortcuts: null,
+      entitlements: ['build', 'run_read', 'run_write'],
+      resetOn: null,
+      a11y: null,
+      tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: null },
+    }),
+  }),
   // -------------------------------------------------------------------------
   // SHEETS (standardization slice 5b). The fifth surface, and the first one
   // the studio does NOT host: /sheets is its own SiteRoot arm
@@ -662,6 +690,9 @@ export function searchForProductSurface(search, surfaceId) {
 
 export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosReady = false, solarReady = false } = {}) {
   return {
+    ops: sessionActive
+      ? { state: 'available', label: 'Ready' }
+      : { state: 'sign-in', label: 'Sign in' },
     browser: sessionActive
       ? { state: 'available', label: 'Ready' }
       : { state: 'sign-in', label: 'Sign in' },

@@ -36,7 +36,7 @@ import { groundShowsDrawing } from './SurfaceGrounds.jsx'
 
 // Every id the module ships, as a literal, so a surface added without a row
 // here fails the completeness test below rather than quietly going unpinned.
-const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'sheets']
+const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'ops', 'sheets']
 
 it('A1B2-S01 stored graph surface admission', () => {
   const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
@@ -81,6 +81,7 @@ it('pins the server capability baseline for every surface', () => {
     cad: ['build', 'run_read', 'run_write', 'solve'],
     solar: ['build', 'run_read', 'run_write', 'solve'],
     ios: ['build', 'run_read', 'run_write', 'solve'],
+    ops: ['build', 'run_read', 'run_write'],
     sheets: [],
   }
   expect(Object.fromEntries(PRODUCT_SURFACES.map(({ id }) =>
@@ -93,6 +94,17 @@ it('pins the server capability baseline for every surface', () => {
 // a fabricated oracle, not a stricter one. Slice 5b's fifth surface gets its
 // own column instead, further down, written from the sheets arm.
 const STUDIO_SURFACE_IDS = ['browser', 'cad', 'solar', 'ios']
+
+it('Ops uses the shared project shell with a native integration ground and no drawing or device runtime', () => {
+  const contract = surfaceContract('ops')
+  expect(contract.ground).toBe('integrations')
+  expect(contract.scene).toBe('app')
+  expect(contract.chrome).toEqual({ shell: 'cockpit', productFrame: true, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true })
+  expect(contract.toolbar).toEqual({ profile: 'project', ribbon: true, home: 'project', quick: null })
+  expect(contract.conversations).toEqual(surfaceContract('browser').conversations)
+  expect(groundShowsDrawing('ops')).toBe(false)
+  expect(normalizeProductSurface('ops')).toBe('ops')
+})
 
 // ---------------------------------------------------------------------------
 // The old predicates, verbatim from the pre-slice-2 source. Each cites the

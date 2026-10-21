@@ -11,6 +11,7 @@ import pytest
 
 # Reuse the isolated schema and full migration chain, never shared table truncation.
 from test_demo_sessions_postgres import postgres_registry, request
+from migration_fixture_sql import fixture_grant_role, translate_migration_sql
 import demo_sessions as demo
 
 
@@ -192,7 +193,7 @@ def test_twenty_independent_mints_and_concurrent_refusal(postgres_registry, monk
     assert set(counters.values()) == {1}
 
 
-def test_real_shared_loader_mint_round_trip(postgres_registry, monkeypatch):
+def test_real_shared_loader_mint_round_trip(postgres_registry, monkeypatch, tmp_path):
     import psycopg
     from psycopg import sql
     from psycopg.rows import dict_row
@@ -200,11 +201,20 @@ def test_real_shared_loader_mint_round_trip(postgres_registry, monkeypatch):
     db = real_loader()
     db.reset_pool()
     database_url = os.environ["DATABASE_URL"]
-    schema = "demo_loader_test_" + uuid.uuid4().hex
+    schema = "demo_test_" + uuid.uuid4().hex
+    grant_role = fixture_grant_role(schema)
+    package = tmp_path / "platform"
+    migrations = package / "migrations"
+    migrations.mkdir(parents=True)
+    for migration in sorted((db._PKG_DIR / "migrations").glob(db.MIGRATION_GLOB)):
+        (migrations / migration.name).write_text(translate_migration_sql(
+            migration.name, migration.read_text(encoding="utf-8"), schema),
+            encoding="utf-8")
     url = _schema_url(database_url, schema)
     with psycopg.connect(database_url, autocommit=True) as conn:
         conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     try:
+        monkeypatch.setattr(db, "_PKG_DIR", package)
         monkeypatch.setattr(db, "get_database_url", lambda: url)
         monkeypatch.setattr(demo, "_db", real_loader)
         db.apply_migration()
@@ -217,6 +227,7 @@ def test_real_shared_loader_mint_round_trip(postgres_registry, monkeypatch):
         db.reset_pool()
         with psycopg.connect(database_url, autocommit=True) as conn:
             conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+            conn.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(grant_role)))
 
 
 def test_disabled_mint_never_calls_database_or_provisioning(monkeypatch):

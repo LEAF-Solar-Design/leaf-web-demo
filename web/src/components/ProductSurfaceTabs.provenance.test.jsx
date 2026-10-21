@@ -3,7 +3,7 @@
 // Standardization slice 7b: the provenance chip on the product tab band.
 // It renders ONLY on a tab whose overlay actually touched `chrome` (the slot
 // that gates this tab's existence), never on a default tenant — an empty
-// overlay must render the same four tabs, no chip, byte-identical to today.
+// overlay must render the same five default tabs, no chip.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 
@@ -31,7 +31,9 @@ describe('slice 7b: surface-config provenance chip', () => {
     render(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} mock={false} />)
     await vi.waitFor(() => expect(getSurfaceConfig).toHaveBeenCalledTimes(1))
     expect(screen.queryByTestId('surface-config-provenance')).toBeNull()
-    expect(screen.getAllByRole('tab')).toHaveLength(4)
+    const tabs = screen.getAllByRole('tab')
+    expect(tabs).toHaveLength(5)
+    expect(tabs.map((tab) => tab.dataset.surface)).toEqual(['browser', 'cad', 'solar', 'ios', 'ops'])
   })
 
   it('renders the chip with the sha8 on the tab whose overlay flips chrome.tab', async () => {
@@ -44,7 +46,7 @@ describe('slice 7b: surface-config provenance chip', () => {
     const chip = screen.getByTestId('surface-config-provenance')
     expect(sheetsTab.contains(chip)).toBe(true)
     expect(chip.textContent).toBe('surface config authored by Claude · abcdef01')
-    // Only the newly-authored tab carries a chip — the four default tabs stay quiet.
+    // Only the newly-authored tab carries a chip — the five default tabs stay quiet.
     expect(screen.getAllByTestId('surface-config-provenance')).toHaveLength(1)
   })
 })

@@ -1,0 +1,74 @@
+{
+  "schema": "leaf.assistant-contract.walk-proposals.v1",
+  "source": "claudewalk core/claudewalk/concierge/walk_proposals.py at 9cf3a65d (AD6, PR #1036)",
+  "chat_id": "777",
+  "proposals": [
+    {
+      "proposal": {
+        "proposal_id": "5f1c0e7a2b3d4c5e8f9a0b1c2d3e4f50",
+        "session_id": "w1",
+        "turn_id": "tg-1",
+        "created_at": "2026-09-24T12:00:00Z",
+        "expires_at": "2026-09-24T14:00:00Z",
+        "kind": "walk.resume",
+        "walk": {
+          "walk_id": "w1",
+          "device": "vm-b",
+          "item_id": "tg-1",
+          "field": "instruction",
+          "text": "Build with Expo SDK 50."
+        },
+        "proposal_digest": "2f9bdece28f65ce5a935b0fadc227e6e3c4148d7f0c5acbd5b66e44f8e1611da"
+      },
+      "card_digest": "b98ef8f89b1cb6f9403858f49fee2482aac6cf8ec2bf77567b65c4543b34e21b"
+    },
+    {
+      "proposal": {
+        "proposal_id": "9a8b7c6d5e4f30211203f4e5d6c7b8a9",
+        "session_id": "w1",
+        "turn_id": "none",
+        "created_at": "2026-09-24T12:00:00Z",
+        "expires_at": "2026-09-24T14:00:00Z",
+        "kind": "walk.side_quest",
+        "walk": {
+          "walk_id": "w1",
+          "device": "vm-b",
+          "item_id": "",
+          "field": "side_quest_brief",
+          "text": "R\u00e9sum\u00e9 \u2014 check \u2713 \ud83d\ude80\n\ttab\u0001 \"q\"  </x>",
+          "child_walk_id": "w1-sq-01"
+        },
+        "proposal_digest": "de1743babb07781d2cbf9e3c2a9921ebe553ddbaa41673415df4f2b32ba82609"
+      },
+      "card_digest": "c362d93f2157fbd9b2b21add5cfdccb1bad23a865294c92ff8871b2bbb2a2a5a"
+    }
+  ],
+  "digest_vectors": [
+    {
+      "kind": "walk.resume",
+      "payload": {
+        "walk_id": "w1",
+        "device": "vm-b",
+        "item_id": "tg-1",
+        "field": "instruction",
+        "text": "Build with Expo SDK 50."
+      },
+      "expires_at": "2026-09-24T14:00:00Z",
+      "tenant_id": "777",
+      "card_digest": "b98ef8f89b1cb6f9403858f49fee2482aac6cf8ec2bf77567b65c4543b34e21b"
+    },
+    {
+      "kind": "walk.side_quest",
+      "payload": {
+        "walk_id": "w1",
+        "device": "vm-b",
+        "item_id": "tg-1",
+        "field": "side_quest_brief",
+        "text": "R\u00e9sum\u00e9 \u2014 check \u2713 \ud83d\ude80\n\ttab\u0001 \"q\"  </x>"
+      },
+      "expires_at": "2026-09-24T14:00:00Z",
+      "tenant_id": "777",
+      "card_digest": "1f970ace33ce0ec86d497c35bb12a435affe9d94274eec3888c5bbd7266a17fa"
+    }
+  ]
+}
