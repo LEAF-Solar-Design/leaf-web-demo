@@ -1,4 +1,5 @@
 -- Accept explicit action discovery on new grants without rewriting stored bindings.
+-- expand-contract: contract-of=0079
 ALTER TABLE public.integration_turn_grants
   DROP CONSTRAINT integration_turn_grants_check2,
   ADD CONSTRAINT integration_turn_grants_binding_authority_check
