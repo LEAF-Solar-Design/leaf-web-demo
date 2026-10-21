@@ -14,6 +14,323 @@ import { seedSolarChain } from './fixtures.mjs'
 import { solarChainSteps } from './probes.mjs'
 import { projectSolarResponse, projectSolarStep, switchProjectSolarForms, assertProjectSolarDrawing, observeProjectSolarResponses } from './fixtures.mjs'
 import { inspectJob, inspectContext } from '../local/solarProjectWalk.mjs'
+import { expect as walkExpect, selectProjectSolarVersion, openProjectSolarTool,
+  takeProjectSolarCheckout, publishProjectSolar } from './fixtures.mjs'
+import { canonicalProjectVersion, proposalCatalogState, proposalFormValues, refusalCode,
+  stagingAction, stagingRead, stagingContext, stagingRun, reviewStagingProposal } from '../walk-staging/projectSolarSteps.mjs'
+import { monitorStagingSolar, withStagingProject } from '../walk-staging/projectSolarSteps.mjs'
+
+function fakeAuth(value) {
+  const headers = {}
+  headers.Authorization = `Bearer ${value}`
+  return headers
+}
+
+const stagingBase = 'https://platform-staging.leafdesign.ai'
+const stagingIds = [1, 2, 3, 4, 5, 6].map(id => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`)
+const stagingBinding = { organization_id: stagingIds[0], project_id: stagingIds[1],
+  drawing_id: stagingIds[2], input_version_id: stagingIds[3] }
+const stagingResponse = (path, body, status = 200, method = 'GET') => ({
+  url: () => `${stagingBase}${path}`, status: () => status, ok: () => status < 400,
+  json: async () => body, request: () => ({ method: () => method, headers: () => ({ authorization: 'Bearer unit-only' }) }),
+})
+const stagingGraph = () => ({ rev: 1, panels: [], strings: [], inverters: [], routes: [], schedules: [],
+  settings: { panels_in_sequence: 1 } })
+const stagingContextBody = (binding = stagingBinding, graph = stagingGraph()) => ({
+  context: { ...binding, is_head: true, head_version_id: binding.input_version_id, intake_sha256: 'a'.repeat(64) },
+  intake: { solar_design_graph: graph, solar_design_graph_sha256: 'b'.repeat(64) },
+})
+
+test('staging fixture selects the newest canonical version and rejects ambiguous or foreign bindings', () => {
+  const row = { org_id: stagingIds[0], project_id: stagingIds[1], drawing_id: stagingIds[2], version_id: stagingIds[3], seq: 1 }
+  const workspace = { project: { project_id: stagingIds[1], org_id: stagingIds[0] },
+    drawing_versions: [row, { ...row, seq: 2, version_id: stagingIds[5] }] }
+  assert.deepEqual(canonicalProjectVersion(workspace, stagingIds[1]), { ...stagingBinding, input_version_id: stagingIds[5] })
+  for (const changed of [
+    { ...workspace, project: { ...workspace.project, project_id: stagingIds[0] } },
+    { ...workspace, drawing_versions: [] },
+    { ...workspace, drawing_versions: [row, { ...row, drawing_id: stagingIds[4] }] },
+    { ...workspace, drawing_versions: [{ ...row, org_id: stagingIds[4] }] },
+    { ...workspace, drawing_versions: [{ ...row, version_id: 3 }] },
+  ]) assert.throws(() => canonicalProjectVersion(changed, stagingIds[1]))
+})
+
+test('staging refusal annotations retain public catalog reasons and omit private fields', () => {
+  const secret = 'private'
+  const privateReason = fakeAuth(secret).Authorization
+  const tool = { name: 'solar-solve-proposal', params: { grant_ref: 'private' }, availability: {
+    entitled: false, runnable: false, admission: { status_code: 403, error: { reason_code: 'ENTITLEMENT_REQUIRED' } },
+    refusal_reasons: ['cloud_offline', privateReason], authorization: secret,
+  } }
+  const expected = [{ name: tool.name, entitled: false, runnable: false, admission_status: 403,
+    reason_code: 'ENTITLEMENT_REQUIRED', refusal_reasons: ['cloud_offline'] }]
+  assert.deepEqual(proposalCatalogState({ families: [{ capabilities: [tool] }] }), expected)
+  assert.deepEqual(proposalCatalogState({ tools: [tool] }), expected)
+  assert.deepEqual(proposalCatalogState({}), [])
+  for (const body of [{ error: { reason_code: 'CLOUD_OFFLINE' } }, { detail: { error: { reason_code: 'CLOUD_OFFLINE' } } },
+    { detail: { reason_code: 'CLOUD_OFFLINE' } }, { reason_code: 'CLOUD_OFFLINE' }, { reason: 'CLOUD_OFFLINE' }]) {
+    assert.equal(refusalCode(body), 'CLOUD_OFFLINE')
+  }
+  assert.equal(refusalCode({ error: { reason_code: privateReason } }, 'run_http_503'), 'run_http_503')
+})
+
+test('staging Solve request uses the canonical frame cells and panel coordinates', () => {
+  const graph = { settings: { panels_in_sequence: 2 }, panels: [
+    { id: 'panel-1', centre: [5, 8], angle: 90 }, { id: 'panel-2', centre: [6, 8], angle: 90 },
+    { id: 'panel-3', centre: [7, 8], angle: 90 },
+  ], frames: [{ id: 'frame-1', matrix: [[{ panel_ref: 'panel-1' }, { panel_ref: null, x: 1, y: 2 }],
+    [{ panel_ref: 'panel-2' }, { panel_ref: 'panel-3' }]] }] }
+  const values = proposalFormValues(graph)
+  assert.equal(values.frame, 'frame-1')
+  assert.deepEqual(values.request.grid.Sequences, [[2, 1], [1, 1]])
+  assert.deepEqual(values.request.grid.Rows[0].Panels[0], { Code: 1, Id: 'panel-1', Seq: 0,
+    InverterId: -1, StringInputNumber: 0, X: 5, Y: 8, Angle: 90 })
+  assert.deepEqual(values.request.grid.Rows[0].Panels[1], { Code: 0, Id: '', Seq: 0,
+    InverterId: -1, StringInputNumber: 0, X: 1, Y: 2, Angle: 0 })
+  assert.equal(proposalFormValues(null).frame, 'walk-staging-frame')
+})
+
+test('staging action arms its listener before clicking and refuses an unapproved page or base', async () => {
+  const events = [], response = stagingResponse('/api/run', {}, 202, 'POST')
+  const page = { url: () => stagingBase, waitForResponse: async predicate => {
+    events.push('listen')
+    assert.equal(predicate(response), true)
+    assert.equal(predicate(stagingResponse('/api/run', {}, 200, 'GET')), false)
+    return response
+  } }
+  assert.equal(await stagingAction(page, stagingBase, 'POST', '/api/run', () => events.push('click')), response)
+  assert.deepEqual(events, ['listen', 'click'])
+  for (const [browser, base] of [[{ ...page, url: () => 'https://example.com' }, stagingBase], [page, 'https://app.leafdesign.ai']]) {
+    await assert.rejects(stagingAction(browser, base, 'POST', '/api/run', () => assert.fail('must not click')))
+  }
+})
+
+test('staging monitor drains every bearer response and rejects request leakage or off-origin navigation', async () => {
+  for (const fault of ['none', 'request', 'response', 'navigation']) {
+    const page = new EventEmitter(), solar = { traffic: { runCount: 0 }, catalog: [] }
+    page.url = () => fault === 'navigation' ? 'https://example.com' : stagingBase
+    const finish = monitorStagingSolar(page, solar)
+    page.emit('request', { url: () => `${fault === 'request' ? 'https://example.com' : stagingBase}/api/run`,
+      method: () => 'POST', headers: () => ({ authorization: 'Bearer unit-only' }) })
+    const response = stagingResponse('/api/capabilities', { families: [{ capabilities: [
+      { name: 'solar-solve-proposal', availability: { runnable: false, refusal_reasons: ['cloud_offline'] } },
+    ] }] })
+    if (fault === 'response') response.url = () => 'https://example.com/api/capabilities'
+    page.emit('response', response)
+    if (fault === 'none') {
+      await finish()
+      assert.equal(solar.traffic.runCount, 1)
+      assert.equal(solar.catalog[0].runnable, false)
+    } else await assert.rejects(finish())
+    assert.equal(page.listenerCount('response'), 0)
+  }
+})
+
+test('staging project session rejects an unsafe target or unverifiable principal before using the page', async () => {
+  await assert.rejects(withStagingProject({}, 'https://app.leafdesign.ai', stagingIds[1], '', {}, () => assert.fail('unsafe origin')))
+  await assert.rejects(withStagingProject({}, stagingBase, stagingIds[1], 'invalid-token', {}, () => assert.fail('invalid identity')))
+})
+
+test('staging suite declares four tests and skips absent credentials or fixture ids before opening a project', async () => {
+  const source = readFileSync(new URL('../walk-staging/project-solar.spec.mjs', import.meta.url), 'utf8')
+    .replace(/^import .*\n/gm, '')
+  for (const env of [{}, { LEAF_E2E_STAGING_JWT: 'unit-only' },
+    { LEAF_E2E_STAGING_JWT: 'unit-only', LEAF_WALK_STAGING_SCRATCH_PROJECT_ID: stagingIds[1] }]) {
+    const rows = [], annotations = []
+    let collecting = true
+    const declare = (title, callback) => rows.push({ title, callback })
+    declare.skip = (condition, reason) => {
+      if (typeof condition === 'function') condition = condition({}, { config: { metadata: { stagingWalk: true } } })
+      if (collecting) { if (condition) annotations.push(reason); return }
+      if (condition) throw new Error(`SKIP: ${reason}`)
+    }
+    const fail = () => assert.fail('a missing credential or fixture must never open a project')
+    new Function('test', 'expect', 'process', 'withStagingProject', 'publishProjectSolar', 'switchProjectSolarForms',
+      'reviewStagingProposal', 'stagingAction', 'stagingRun', source)(declare, walkExpect, { env }, fail, fail, fail, fail, fail, fail)
+    assert.deepEqual(rows.map(row => row.title), ['project-solar-open', 'project-solar-form-switch',
+      'project-solar-published', 'project-solar-proposal-review'])
+    if (!env.LEAF_E2E_STAGING_JWT) assert.match(annotations[0], /LEAF_E2E_STAGING_JWT/)
+    collecting = false
+    for (const row of rows) await assert.rejects(row.callback({}, {}), /SKIP: LEAF_/)
+  }
+})
+
+test('staging browser reads bind authority and refuse off-origin responses, bad paths and stale heads', async () => {
+  const context = stagingContextBody()
+  const page = { url: () => stagingBase, evaluate: async (_fn, args) => {
+    assert.deepEqual(args.binding, stagingBinding)
+    assert.equal(args.origin, stagingBase)
+    return { url: `${stagingBase}${args.path}`, status: 200, body: context }
+  } }
+  assert.equal((await stagingContext(page, stagingBase, stagingBinding, true)).head, stagingIds[3])
+  await assert.rejects(stagingRead(page, stagingBase, '//example.com/api', stagingBinding))
+  await assert.rejects(stagingRead({ ...page, evaluate: async () => ({ url: 'https://example.com/api', status: 200 }) },
+    stagingBase, '/api/jobs/unit', stagingBinding))
+  await assert.rejects(stagingContext({ ...page, evaluate: async () => ({ url: stagingBase, status: 200,
+    body: { ...context, context: { ...context.context, head_version_id: stagingIds[5] } } }) }, stagingBase, stagingBinding))
+})
+
+test('staging publication requires a bound complete job and follows its distinct output head', async () => {
+  const next = { ...stagingBinding, input_version_id: stagingIds[5] }
+  const requestBody = { tool: 'solar-settings', dwg: stagingIds[3], params: { drawing_id: stagingIds[2], expected_rev: 0 } }
+  const response = stagingResponse('/api/run', { job_id: stagingIds[4], status: 'submitted' }, 202, 'POST')
+  response.request = () => ({ method: () => 'POST', postDataJSON: () => requestBody, headers: () => ({
+    'x-org-id': stagingIds[0], 'x-project-id': stagingIds[1], authorization: 'Bearer unit-only',
+    'x-checkout-capability': 'unit-only', 'idempotency-key': 'unit-only',
+  }) })
+  const job = { job_id: stagingIds[4], org_id: stagingIds[0], project_id: stagingIds[1], input_version_id: stagingIds[3],
+    tool_name: 'solar-settings', status: 'complete', execution_context: { schema: 'leaf.solar-project-graph-job.v1', drawing_id: stagingIds[2] },
+    result: { output_version_id: stagingIds[5] } }
+  const paths = []
+  const page = { url: () => stagingBase, waitForResponse: async predicate => { assert.ok(predicate(response)); return response },
+    evaluate: async (_fn, args) => {
+      paths.push(args.path)
+      return { url: `${stagingBase}${args.path}`, status: 200,
+        body: args.path.startsWith('/api/jobs/') ? job : stagingContextBody(next) }
+    } }
+  const run = () => stagingRun({ page, expect: walkExpect, apiBase: stagingBase, binding: stagingBinding,
+    before: { graph: null }, tool: 'solar-settings', action: async () => {} })
+  const result = await run()
+  assert.equal(result.binding.input_version_id, stagingIds[5])
+  assert.equal(result.context.head, stagingIds[5])
+  assert.deepEqual(paths, [`/api/jobs/${stagingIds[4]}`,
+    `/api/projects/${stagingIds[1]}/drawing-versions/${stagingIds[5]}/context?drawing_id=${stagingIds[2]}`])
+  requestBody.dwg = stagingIds[5]
+  await assert.rejects(run())
+})
+
+const stagingAssertions = value => ({
+  toBe: expected => assert.equal(value, expected),
+  toMatch: expected => assert.match(value, expected),
+  toHaveCount: async expected => assert.equal(value.count ?? 0, expected),
+  toBeVisible: async () => assert.notEqual(value.visible, false),
+  toContainText: async expected => assert.ok(value.text.includes(expected)),
+  toBeEnabled: async () => assert.equal(await value.isEnabled(), true),
+  toHaveAttribute: async (key, expected) => {
+    const actual = await value.getAttribute(key)
+    if (expected instanceof RegExp) assert.match(actual, expected)
+    else assert.equal(actual, expected)
+  },
+})
+stagingAssertions.poll = callback => ({ toBe: async expected => assert.equal(await callback(), expected) })
+
+test('shared staging version selection traverses Versions and Solar CAD before checking the bound canvas', async () => {
+  const events = [], canvas = { visible: true, count: 1, evaluate: async () => true }
+  const page = { getByRole: (_role, { name }) => ({ click: async () => events.push(name) }),
+    getByTestId: () => ({ visible: true }), locator: selector => selector === '[data-pane="versions"]'
+      ? { getByRole: (_role, { name }) => ({ click: async () => {
+        assert.ok(name.test(`v2 · ${stagingIds[3]}`)); events.push('version')
+      } }) } : selector.includes('canvas') ? canvas : { visible: true, text: stagingIds[3] } }
+  await selectProjectSolarVersion({ page, projectSolar: { binding: stagingBinding } }, stagingAssertions)
+  assert.deepEqual(events, ['Open versions', 'version', 'Solar CAD'])
+})
+
+test('shared checkout adapter always registers UI release once the lease is acquired', async () => {
+  for (const badBinding of [false, true]) {
+    const events = []
+    const runtime = { projectSolar: { binding: stagingBinding, apiBase: stagingBase }, evidence: { projectSolar: { steps: [] } },
+      cleanup: [], page: { getByRole: () => ({ getByRole: (_role, { name }) => ({
+        click: async () => events.push(name), isEnabled: async () => true,
+      }) }) } }
+    const action = async (_page, base, method, path, click) => {
+      assert.equal(base, stagingBase)
+      assert.equal(path, `/api/projects/${stagingIds[1]}/drawings/${stagingIds[2]}/checkout`)
+      await click()
+      return stagingResponse(path, method === 'POST' ? { acquired: true, ...stagingBinding,
+        project_id: badBinding ? stagingIds[0] : stagingIds[1], checkout: { fence: '1' } }
+        : { released: true, checkout: null })
+    }
+    if (badBinding) await assert.rejects(takeProjectSolarCheckout(runtime, stagingAssertions, action))
+    else await takeProjectSolarCheckout(runtime, stagingAssertions, action)
+    assert.equal(runtime.cleanup.length, 1)
+    await runtime.cleanup[0]()
+    assert.deepEqual(events, ['Take', 'Release'])
+  }
+})
+
+test('shared tool opener reports a disabled Solve control only when refusal is permitted', async () => {
+  const control = { isVisible: async () => true, isEnabled: async () => false, click: () => assert.fail('disabled tool') }
+  const page = { locator: selector => selector.includes('editor') ? { isVisible: async () => false } : control,
+    getByRole: (role) => role === 'tab' ? { click: async () => {} } : { isVisible: async () => false },
+    getByTestId: () => ({ locator: () => control }) }
+  assert.equal(await openProjectSolarTool({ page }, 'solar-solve-proposal', stagingAssertions, { allowDisabled: true }), false)
+  await assert.rejects(openProjectSolarTool({ page }, 'solar-solve-proposal', stagingAssertions))
+})
+
+test('shared publication supports initialize and existing scratch graphs through the staging adapters', async () => {
+  for (const mode of ['initialize', 'edit']) {
+    const events = [], values = {}
+    const next = { ...stagingBinding, input_version_id: stagingIds[5] }
+    const clickable = name => ({ isVisible: async () => true, isEnabled: async () => true,
+      click: async () => events.push(name) })
+    const settings = { getAttribute: async () => mode,
+      getByLabel: name => ({ fill: async value => { values[name] = value }, selectOption: async value => { values[name] = value } }),
+      getByRole: (_role, { name }) => clickable(name) }
+    const runtime = { cleanup: [], evidence: { projectSolar: { steps: [] } }, projectSolar: {
+      binding: stagingBinding, apiBase: stagingBase, context: { graph: mode === 'edit' ? stagingGraph() : null },
+    } }
+    runtime.page = {
+      getByRole: (role, { name }) => role === 'group' ? { getByRole: (_role, { name }) => clickable(name) } : clickable(name),
+      getByTestId: name => name === 'solar-settings-form' ? settings : name === 'drafting-ribbon'
+        ? { locator: () => clickable('settings') } : { visible: true },
+      locator: selector => selector.includes('editor') ? { isVisible: async () => false } : selector.includes('canvas')
+        ? { count: 1, visible: true, evaluate: async () => true } : { visible: true, text: stagingIds[5] },
+    }
+    await publishProjectSolar(runtime, stagingAssertions, { allowExistingGraph: true,
+      action: async (_page, _base, method, path, click) => {
+        await click()
+        return stagingResponse(path, method === 'POST' ? { acquired: true, ...stagingBinding, checkout: { fence: '7' } }
+          : { released: true, checkout: null })
+      }, run: async options => {
+        await options.action()
+        options.checkParams({ changes: { panels_in_sequence: mode === 'edit' ? 2 : 1 },
+          ...(mode === 'initialize' ? { initialize: { units: { drawing_units: 'm' } } } : {}) })
+        return { binding: next, context: { head: stagingIds[5] }, step: { output_version_id: stagingIds[5] } }
+      } })
+    assert.equal(values['Panels in sequence'], mode === 'edit' ? '2' : '1')
+    assert.equal(values['Drawing units'], mode === 'initialize' ? 'm' : undefined)
+    assert.ok(events.includes(mode === 'edit' ? 'Apply settings' : 'Start Solar design'))
+    assert.equal(runtime.evidence.projectSolar.publishedHead, stagingIds[5])
+    await runtime.cleanup[0]()
+    assert.equal(events.at(-1), 'Release')
+  }
+})
+
+test('proposal review attempts an enabled UI solve even when the catalog says not runnable; never commits', async () => {
+  for (const scenario of ['disabled-control', 'disabled-fields', 'disabled-submit', 'ui-refusal', 'http-refusal', 'job-refusal', 'review']) {
+    const events = [], fields = {}
+    const page = new EventEmitter()
+    let status = ''
+    const submit = { isEnabled: async () => scenario !== 'disabled-submit', click: async () => {
+      events.push('Run solve')
+      if (scenario === 'ui-refusal') { status = 'The server refused this Solar request. (SOLVE_CONTEXT_REQUIRED)'; return }
+      page.emit('response', stagingResponse('/api/run', scenario === 'http-refusal'
+        ? { error: { reason_code: 'CLOUD_OFFLINE' } } : { job_id: stagingIds[4] }, scenario === 'http-refusal' ? 403 : 202, 'POST'))
+    } }
+    page.getByRole = (role, { name } = {}) => role === 'form' ? {
+      getByLabel: label => ({ isEnabled: async () => scenario !== 'disabled-fields',
+        fill: async value => { fields[label] = value }, selectOption: async value => { fields[label] = value } }),
+      getByRole: role => role === 'status' ? { allTextContents: async () => [status] } : submit,
+    } : { visible: true, click: () => assert.fail(`must never click ${name}`) }
+    const runtime = { page, projectSolar: { apiBase: stagingBase, binding: stagingBinding, context: { graph: null },
+      catalog: [{ runnable: false, reason_code: 'SOLVE_CONTEXT_REQUIRED' }] } }
+    const result = await reviewStagingProposal(runtime, { assertions: stagingAssertions,
+      open: async (_runtime, tool, _assertions, options) => {
+        assert.equal(tool, 'solar-solve-proposal'); assert.equal(options.allowDisabled, true)
+        return scenario !== 'disabled-control'
+      }, checkout: async () => events.push('checkout'), read: async () => ({
+        job_id: stagingIds[4], org_id: stagingIds[0], project_id: stagingIds[1], input_version_id: stagingIds[3],
+        tool_name: 'solar-solve-proposal', status: scenario === 'job-refusal' ? 'failed' : 'complete',
+        error: scenario === 'job-refusal' ? { reason_code: 'CLOUD_OFFLINE' } : null,
+      }) })
+    const expected = scenario.startsWith('disabled') ? 'run_solve_disabled' : scenario === 'ui-refusal' ? 'SOLVE_CONTEXT_REQUIRED'
+      : scenario === 'review' ? undefined : 'CLOUD_OFFLINE'
+    assert.equal(result.reason, expected)
+    assert.equal(events.includes('Run solve'), !scenario.startsWith('disabled'))
+    assert.equal(page.listenerCount('response'), 0)
+    if (scenario === 'review') assert.equal(result.reviewVisible, true)
+  }
+})
 
 test('WL16b canonical publication requires a complete bound job, a distinct output and the current head', () => {
   const ids = [1, 2, 3, 4, 5, 6].map((id) => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`)
