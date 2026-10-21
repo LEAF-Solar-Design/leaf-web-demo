@@ -5,3 +5,4 @@ server/start-app.sh text eol=lf
 # never let checkout translation touch them (the cat_oracle pattern above).
 engine/corpus/*.dxf -text -diff
 vendor/acadrust-worker/fixtures/*.dxf -text -diff
+contract/fixtures/lab/** -text

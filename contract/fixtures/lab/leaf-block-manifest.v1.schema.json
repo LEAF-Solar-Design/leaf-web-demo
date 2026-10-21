@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leaf.internal/contract/leaf-block-manifest.v1.schema.json",
+  "title": "Shared block manifest v1",
+  "description": "Data only. Validation never grants execution authority. Profiles constrain this definition; they do not replace it. Embedded schemas use the fail-closed vocabulary supported by the conformance validators. Graph compatibility, samples, defaults and trusted registry constraints also require semantic validation.",
+  "$comment": "Stable lowercase IDs and RFC6901 diagnostics follow layout-contract. Defaults are explicit data, never inferred or applied by validation. Legacy microseconds retain their values: ns = us * 1000; display ms = us / 1000, per STD-4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "title", "profile", "version", "kind", "inputs", "outputs", "settings_schema", "ui_schema", "sample_input", "sample_output", "latency_budget_us", "lane", "effect", "execution_target", "residency", "permissions", "state", "tests"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"$ref": "#/$defs/id"},
+    "title": {"type": "string", "minLength": 1, "maxLength": 120},
+    "profile": {"enum": ["lab-registry", "mushy-tool", "studio-catalog"]},
+    "version": {
+      "type": "object", "additionalProperties": false,
+      "required": ["semver", "code_sha256"],
+      "properties": {
+        "semver": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"},
+        "code_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "kind": {"enum": ["builtin", "settings", "rust"]},
+    "inputs": {"$ref": "#/$defs/ports"},
+    "outputs": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/port"}},
+    "settings_schema": {"type": "object"},
+    "ui_schema": {"type": "object", "description": "Presentation hints only; cannot change settings validation, ports, effect, target, residency or permissions."},
+    "sample_input": {"type": "object"},
+    "sample_output": {"type": "object"},
+    "latency_budget_us": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "p50", "p99"],
+      "properties": {
+        "profile": {"const": "legacy-us-to-std4-ns-ms-v1"},
+        "p50": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+        "p99": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+      }
+    },
+    "lane": {"enum": ["processing", "ordering", "cashout", "engines", "sizing", "admission", "observation", "capture", "lifecycle"]},
+    "effect": {"enum": ["pure", "read", "write", "trade"]},
+    "execution_target": {"enum": ["browser", "server", "runner", "mac"]},
+    "residency": {"enum": ["local", "tenant", "regional"]},
+    "permissions": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9]*([.-][a-z0-9]+)*$"}},
+    "state": {"enum": ["stateless", "stateful"]},
+    "tests": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"},
+    "ports": {"type": "object", "additionalProperties": {"$ref": "#/$defs/port"}},
+    "port": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "schema", "unit", "nullable", "required", "has_default"],
+      "properties": {
+        "mode": {"enum": ["scalar", "stream"]},
+        "schema": {"type": "object", "description": "Schema of one scalar or one stream event; explicit top-level type required. Unsupported schema keywords fail closed."},
+        "unit": {"enum": ["none", "ns", "us", "ms", "s", "usd", "usd_cents", "ratio", "percent", "count", "m"]},
+        "nullable": {"type": "boolean"},
+        "required": {"type": "boolean"},
+        "has_default": {"type": "boolean"},
+        "default": {}
+      }
+    },
+    "endpoint": {
+      "type": "object", "additionalProperties": false, "required": ["node", "port"],
+      "properties": {"node": {"$ref": "#/$defs/id"}, "port": {"$ref": "#/$defs/id"}}
+    },
+    "graph": {
+      "type": "object", "additionalProperties": false, "required": ["nodes", "edges", "inputs"],
+      "properties": {
+        "nodes": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/id"}},
+        "inputs": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/endpoint"}},
+        "edges": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false, "required": ["from", "to"],
+          "properties": {"from": {"$ref": "#/$defs/endpoint"}, "to": {"$ref": "#/$defs/endpoint"}}
+        }}
+      }
+    }
+  }
+}
