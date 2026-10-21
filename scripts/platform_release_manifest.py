@@ -113,6 +113,10 @@ SURFACE_INPUTS: dict[str, tuple[str, ...]] = {
         # fingerprint (a wrapper edit ships different wasm bytes).
         "vendor/acadrust-worker",
         "scripts/stage_cad_engine.mjs",
+        # Web source imports these packages by relative path, so the web
+        # build stage copies them and their content must move the fingerprint.
+        "vendor/assistant-contract",
+        "vendor/assistant-react",
     ),
 }
 

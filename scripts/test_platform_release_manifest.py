@@ -168,6 +168,12 @@ def _surface_repository(tmp_path: Path) -> tuple[Path, str]:
     (repo / "scripts").mkdir()
     (repo / "scripts" / "stage_cad_engine.mjs").write_text(
         "// stub\n", encoding="utf-8")
+    (repo / "vendor" / "assistant-contract" / "src").mkdir(parents=True)
+    (repo / "vendor" / "assistant-contract" / "src" / "index.ts").write_text(
+        "// stub\n", encoding="utf-8")
+    (repo / "vendor" / "assistant-react" / "src").mkdir(parents=True)
+    (repo / "vendor" / "assistant-react" / "src" / "index.ts").write_text(
+        "// stub\n", encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "surface")
     return repo, _git(repo, "rev-parse", "HEAD")
