@@ -64,6 +64,7 @@ const STATES = Object.freeze({
   cad: { state: 'available', label: 'Ready' },
   solar: { state: 'beta', label: 'Beta' },
   ios: { state: 'setup', label: 'Setup required' },
+  ops: { state: 'available', label: 'Ready' },
 })
 const CATALOG = Object.freeze({
   source: 'server',
@@ -251,16 +252,20 @@ describe('2. the never-remounts contract, across a surface switch and across the
     expect(signOut(container)).toBeNull()
   })
 
-  it('the sign-out is the same node across a surface switch and invokes the published handler', () => {
+  it('the rail and sign-out are the same nodes through Ops and back, and invoke the published handler', () => {
     const calls = []
     const onSignOut = () => calls.push(true)
     const { container, rerender } = render(
       <ContinuityStore search="?surface=browser"><Scene scene="stage" surface="browser" data={DATA['empty+catalog']} signedIn onSignOut={onSignOut} /></ContinuityStore>,
     )
     const btn = signOut(container)
+    const before = rail(container)
     expect(btn).toBeTruthy()
-    rerender(<ContinuityStore search="?surface=browser"><Scene scene="stage" surface="solar" data={DATA['empty+catalog']} signedIn onSignOut={onSignOut} /></ContinuityStore>)
-    expect(signOut(container)).toBe(btn)
+    for (const surface of ['solar', 'ops', 'browser']) {
+      rerender(<ContinuityStore search="?surface=browser"><Scene scene="stage" surface={surface} data={DATA['empty+catalog']} signedIn onSignOut={onSignOut} /></ContinuityStore>)
+      expect(rail(container)).toBe(before)
+      expect(signOut(container)).toBe(btn)
+    }
     fireEvent.click(btn)
     expect(calls).toEqual([true])
     // The console publishes no sign-out (App's header owns its own control),
