@@ -2716,18 +2716,161 @@ pub fn parse_dxf(bytes: &[u8]) -> Result<ParsedDxf, JsValue> {
 /// oracle asks for.
 #[wasm_bindgen(js_name = writeDxf)]
 pub fn write_dxf(doc: &ParsedDxf) -> Result<Vec<u8>, JsValue> {
+    write_dxf_core(doc).map_err(js_err)
+}
+
+fn write_dxf_core(doc: &ParsedDxf) -> Result<Vec<u8>, String> {
     let bytes = DxfWriter::new(&doc.inner)
         .write_to_vec()
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        .map_err(|e| e.to_string())?;
     let (bytes, patched) = if doc.block_bases_unknown { (bytes, false) } else { patch_block_bases(&doc.inner, bytes) };
     doc.block_base_patched.set(patched && doc.unknown_block_bases.is_empty());
-    Ok(bytes)
+    Ok(conform_for_autocad(bytes))
+}
+
+/// Remove only pre-R2004 CLASSES group 91 and empty DIMENSION group 2.
+/// Invalid UTF-8 or an odd number of lines is returned unchanged. After a
+/// validation/version preflight, filter pairs in one O(n) pass with no per-pair
+/// allocations; retained lines (including padding/CR) and the final LF are exact.
+fn conform_for_autocad(bytes: Vec<u8>) -> Vec<u8> {
+    let text = match std::str::from_utf8(&bytes) { Ok(text) => text, Err(_) => return bytes };
+    let final_newline = text.ends_with('\n');
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    let mut lines = body.split('\n');
+    let mut acadver = "";
+    let mut next_is_version = false;
+    while let Some(code) = lines.next() {
+        let value = match lines.next() { Some(value) => value, None => return bytes };
+        if next_is_version { acadver = value.trim(); }
+        next_is_version = code.trim() == "9" && value.trim() == "$ACADVER";
+    }
+    let old_version = matches!(acadver, "AC1009" | "AC1012" | "AC1014" | "AC1015");
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut lines = body.split('\n');
+    let mut section = "";
+    let mut record = "";
+    let mut after_section = false;
+    let mut kept_pair = false;
+    while let (Some(code_line), Some(value_line)) = (lines.next(), lines.next()) {
+        let code = code_line.trim();
+        let value = value_line.trim();
+        if after_section && code == "2" { section = value; }
+        after_section = code == "0" && value == "SECTION";
+        if code == "0" {
+            record = value;
+            if value == "ENDSEC" { section = ""; }
+        }
+        if (old_version && section == "CLASSES" && code == "91")
+            || (record == "DIMENSION" && code == "2" && value.is_empty()) {
+            continue;
+        }
+        if kept_pair { output.push(b'\n'); }
+        output.extend_from_slice(code_line.as_bytes());
+        output.push(b'\n');
+        output.extend_from_slice(value_line.as_bytes());
+        kept_pair = true;
+    }
+    if final_newline { output.push(b'\n'); }
+    output
 }
 
 /// Byte-for-byte comparison, the stand-in's `bytesEqual` twin.
 #[wasm_bindgen(js_name = bytesEqual)]
 pub fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
     a == b
+}
+
+#[cfg(test)]
+mod autocad_writer_conformance {
+    use super::*;
+    use acadrust::types::DxfVersion;
+
+    fn empty_doc() -> ParsedDxf {
+        ParsedDxf { inner: CadDocument::new(), group_names: Vec::new(), block_base_patched: Cell::new(false), block_bases_unknown: false, unknown_block_bases: HashSet::new(), mlstyle_segments: HashMap::new() }
+    }
+
+    fn pairs(bytes: &[u8]) -> Vec<(&str, &str)> {
+        let text = std::str::from_utf8(bytes).unwrap();
+        let lines: Vec<_> = text.strip_suffix('\n').unwrap_or(text).split('\n').collect();
+        assert_eq!(lines.len() % 2, 0);
+        lines.chunks_exact(2).map(|p| (p[0].trim(), p[1].trim())).collect()
+    }
+
+    #[test]
+    fn empty_document_keeps_classes_and_writer_line_endings() {
+        let mut doc = empty_doc();
+        doc.inner = CadDocument::with_version(DxfVersion::AC1015);
+        let raw = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        let written = write_dxf_core(&doc).unwrap();
+        let written_pairs = pairs(&written);
+        assert!(written_pairs.windows(2).any(|p| p[0] == ("9", "$ACADVER") && p[1].1 == "AC1015"));
+        let classes = written_pairs.windows(2).position(|p| p == [("0", "SECTION"), ("2", "CLASSES")]).expect("CLASSES section retained") + 2;
+        let end = written_pairs[classes..].iter().position(|p| *p == ("0", "ENDSEC")).unwrap() + classes;
+        assert!(written_pairs[classes..end].iter().all(|p| p.0 != "91"));
+        if raw.windows(2).any(|p| p == b"\r\n") {
+            assert!(written.iter().enumerate().filter(|(_, b)| **b == b'\n').all(|(i, _)| i > 0 && written[i - 1] == b'\r'));
+        }
+        assert_eq!(conform_for_autocad(written.clone()), written);
+    }
+
+    #[test]
+    fn empty_default_document_keeps_class_instance_counts() {
+        let doc = empty_doc();
+        let raw = DxfWriter::new(&doc.inner).write_to_vec().unwrap();
+        let written = write_dxf_core(&doc).unwrap();
+        let written_pairs = pairs(&written);
+        assert!(written_pairs.windows(2).any(|p| p[0] == ("9", "$ACADVER") && p[1].1 == "AC1032"));
+        let classes = written_pairs.windows(2).position(|p| p == [("0", "SECTION"), ("2", "CLASSES")]).expect("CLASSES section retained") + 2;
+        let end = written_pairs[classes..].iter().position(|p| *p == ("0", "ENDSEC")).unwrap() + classes;
+        assert!(written_pairs[classes..end].iter().any(|p| p.0 == "91"));
+        assert_eq!(written, raw);
+    }
+
+    #[test]
+    fn created_dimension_writes_and_reparses_without_empty_block_name() {
+        let mut doc = empty_doc();
+        doc.create_dimension_core("ALIGNED", 0.0, 0.0, 100.0, 0.0, 0.0, 10.0, 0.0, "Standard", "0").unwrap();
+        let written = write_dxf_core(&doc).unwrap();
+        let mut dimension = false;
+        let mut found = false;
+        for (code, value) in pairs(&written) {
+            if code == "0" {
+                dimension = value == "DIMENSION";
+                found |= dimension;
+            }
+            assert!(!(dimension && code == "2" && value.is_empty()));
+        }
+        assert!(found);
+        let back = parse_dxf_core(&written).unwrap();
+        assert_eq!(back.inner.entities().filter(|e| matches!(e, EntityType::Dimension(_))).count(), 1);
+    }
+
+    #[test]
+    fn version_controls_class_counts_and_other_pairs_are_exact() {
+        for version in ["AC1009", "AC1012", "AC1014", "AC1015", "AC1018", "AC1032", "UNKNOWN"] {
+            for ending in ["\n", "\r\n"] {
+                for final_lf in [false, true] {
+                    let prefix = format!(" 0\nSECTION\n2\nHEADER\n9\n $ACADVER \n1\n{version}\n0\nENDSEC\n0\nSECTION\n2\nCLASSES\n0\nCLASS\n");
+                    let count = " 91 \n 7 \n";
+                    let suffix = "0\nENDSEC\n0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n 2 \n \n91\n8\n0\nDIMENSION\n2\n  \n2\n *D1 \n0\nLINE\n2\n \n0\nENDSEC\n0\nEOF";
+                    let expected_suffix = suffix.replacen("0\nDIMENSION\n2\n  \n", "0\nDIMENSION\n", 1);
+                    let old = matches!(version, "AC1009" | "AC1012" | "AC1014" | "AC1015");
+                    let input = format!("{prefix}{count}{suffix}{}", if final_lf { "\n" } else { "" }).replace('\n', ending).into_bytes();
+                    let expected = format!("{prefix}{}{expected_suffix}{}", if old { "" } else { count }, if final_lf { "\n" } else { "" }).replace('\n', ending).into_bytes();
+                    let result = conform_for_autocad(input);
+                    assert_eq!(result, expected, "{version}, {ending:?}, final LF {final_lf}");
+                    assert_eq!(conform_for_autocad(result.clone()), result);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_input_is_unchanged() {
+        for input in [b"0\nDIMENSION\n2\n\n0".to_vec(), b"0\nDIMENSION\n2\n\n0\n".to_vec(), vec![0xff, b'\n'], Vec::new()] {
+            assert_eq!(conform_for_autocad(input.clone()), input);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
