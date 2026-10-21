@@ -33,6 +33,22 @@
    "frozen_path": "contract/fixtures/widget/sources/leaf-glossary.v1.json",
    "sha256": "fd90f747d222a386243cb3d89c210f48f2fdc7f3f0f099dbb9e753caa47d4335",
    "bytes": 12104
+  },
+  {
+   "repo": "program studio-engine-lab-20260930 inputs",
+   "head": "frozen program input (not a git object)",
+   "upstream_path": "inputs/widget-builder/README.md",
+   "frozen_path": "contract/fixtures/widget/sources/README.md",
+   "sha256": "89ad68d3d09b50793033660a46a97963503515544fa9b9cd58d141f8def1bc46",
+   "bytes": 3012
+  },
+  {
+   "repo": "program studio-engine-lab-20260930 inputs",
+   "head": "frozen program input (not a git object)",
+   "upstream_path": "inputs/widget-builder/kashbot-widget-designer-v2.html",
+   "frozen_path": "contract/fixtures/widget/sources/kashbot-widget-designer-v2.html",
+   "sha256": "587d48f05b2164677438be7e4d82c39f244cac9a92950d53999997f086129639",
+   "bytes": 63200
   }
  ]
 }
