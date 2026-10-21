@@ -21,6 +21,7 @@
     "proof:prod": "node scripts/run_prod_readonly.mjs",
     "proof:prod:readonly": "node scripts/run_prod_readonly.mjs",
     "proof:staging": "playwright test --config playwright.staging.config.mjs",
+    "walk:staging": "playwright test --config playwright.walk-staging.config.mjs",
     "proof:live-surface": "playwright test --config playwright.live-service.config.mjs",
     "check:unified-pins": "node scripts/check_unified_behavior_pins.mjs",
     "proof:cat:api": "node e2e/catProofApi.mjs",

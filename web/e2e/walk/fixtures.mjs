@@ -1214,6 +1214,11 @@ export async function projectSolarStep(runtime, label, action) {
 
 export async function assertProjectSolarDrawing(runtime, assertions = expect) {
   const { page, projectSolar: { binding } } = runtime
+  const toggle = page.locator('[data-testid="solar-flow-seat"] button.solar-flow-seat-toggle')
+  if (await toggle.count() && await toggle.getAttribute('aria-expanded') === 'false') {
+    await toggle.click()
+    await assertions(toggle).toHaveAttribute('aria-expanded', 'true')
+  }
   await assertions(page.locator('.project-solar-workspace')).toBeVisible()
   await assertions(page.getByTestId('solar-flow-rail')).toBeVisible()
   await assertions(page.getByTestId('solar-flow-seat')).toBeVisible()
@@ -1309,19 +1314,24 @@ export async function openProjectSolar(runtime, assertions = expect) {
     runtime.drawingId = solar.binding.drawing_id
   })
   await projectSolarStep(runtime, 'select canonical version and open Solar CAD', async () => {
-    await page.getByRole('button', { name: 'Open versions', exact: true }).click()
-    await page.locator('[data-pane="versions"]').getByRole('button', {
-      name: new RegExp(`^v\\d+ .*${solar.binding.input_version_id}$`),
-    }).click()
-    await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
-    await assertProjectSolarDrawing(runtime, assertions)
+    await selectProjectSolarVersion(runtime, assertions)
     solar.context = await readContext(page, solar.apiBase, solar.binding, { graphRequired: false })
     assertions(solar.context.graph).toBe(null)
     proof.open = { head: solar.context.head, binding: { ...solar.binding }, workspaceVisible: true, projectRailVisible: true }
   })
 }
 
-export async function openProjectSolarTool(runtime, tool, assertions = expect, { closeEditor = true } = {}) {
+export async function selectProjectSolarVersion(runtime, assertions = expect) {
+  const { page, projectSolar: solar } = runtime
+  await page.getByRole('button', { name: 'Open versions', exact: true }).click()
+  await page.locator('[data-pane="versions"]').getByRole('button', {
+    name: new RegExp(`^v\\d+ .*${solar.binding.input_version_id}$`),
+  }).click()
+  await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+  await assertProjectSolarDrawing(runtime, assertions)
+}
+
+export async function openProjectSolarTool(runtime, tool, assertions = expect, { closeEditor = true, allowDisabled = false } = {}) {
   const { page } = runtime
   const editor = page.locator('.project-solar-workspace-editor')
   if (closeEditor && await editor.isVisible()) {
@@ -1336,22 +1346,24 @@ export async function openProjectSolarTool(runtime, tool, assertions = expect, {
     { timeout: 30_000, message: `project Solar control ${tool} must render` }).toBe(true)
   if (!await ribbon.isVisible() && await more.isVisible()) await more.click()
   const control = await ribbon.isVisible() ? ribbon : rail
+  if (allowDisabled && !await control.isEnabled()) return false
   await assertions(control).toBeEnabled()
   await control.click()
+  return true
 }
 
-export async function publishProjectSolar(runtime, assertions = expect) {
+export async function takeProjectSolarCheckout(runtime, assertions = expect, action = actionResponse) {
   const { page, projectSolar: solar, evidence: { projectSolar: proof } } = runtime
   const checkout = () => page.getByRole('group', { name: 'Project checkout', exact: true })
   const path = `/api/projects/${solar.binding.project_id}/drawings/${solar.binding.drawing_id}/checkout`
   await projectSolarStep(runtime, 'take Project checkout', async () => {
-    const response = await actionResponse(page, solar.apiBase, 'POST', path,
+    const response = await action(page, solar.apiBase, 'POST', path,
       () => checkout().getByRole('button', { name: 'Take', exact: true }).click())
     const lease = await projectSolarResponse(response, 'Project checkout', [200])
     // Register release before validating the lease body so a later assertion
     // failure still relinquishes an acquired checkout through the UI.
     if (lease.acquired === true) runtime.cleanup.push(async () => {
-      const released = await actionResponse(page, solar.apiBase, 'DELETE', path,
+      const released = await action(page, solar.apiBase, 'DELETE', path,
         () => checkout().getByRole('button', { name: 'Release', exact: true }).click())
       const body = await projectSolarResponse(released, 'release Project checkout', [200])
       assertions(body.released).toBe(true)
@@ -1363,18 +1375,28 @@ export async function publishProjectSolar(runtime, assertions = expect) {
     proof.checkoutFence = lease.checkout.fence
     await assertions(checkout().getByRole('button', { name: 'Release', exact: true })).toBeEnabled()
   })
+}
+
+export async function publishProjectSolar(runtime, assertions = expect, {
+  action = actionResponse, run = runProjectTool, allowExistingGraph = false,
+} = {}) {
+  const { page, projectSolar: solar, evidence: { projectSolar: proof } } = runtime
+  await takeProjectSolarCheckout(runtime, assertions, action)
   await projectSolarStep(runtime, 'publish solar-settings canonical job', async () => {
     await openProjectSolarTool(runtime, 'solar-settings', assertions)
     const settings = page.getByTestId('solar-settings-form')
-    await assertions(settings).toHaveAttribute('data-mode', 'initialize')
-    await settings.getByLabel('Drawing units', { exact: true }).selectOption('m')
-    await settings.getByLabel('Panels in sequence', { exact: true }).fill('1')
-    const start = settings.getByRole('button', { name: 'Start Solar design', exact: true })
+    await assertions(settings).toHaveAttribute('data-mode', allowExistingGraph ? /^(initialize|edit)$/ : 'initialize')
+    const initializing = await settings.getAttribute('data-mode') === 'initialize'
+    if (initializing) await settings.getByLabel('Drawing units', { exact: true }).selectOption('m')
+    // A scratch fixture can already contain a graph from an earlier run.
+    const sequence = allowExistingGraph && solar.context.graph?.settings?.panels_in_sequence === 1 ? 2 : 1
+    await settings.getByLabel('Panels in sequence', { exact: true }).fill(String(sequence))
+    const start = settings.getByRole('button', { name: initializing ? 'Start Solar design' : 'Apply settings', exact: true })
     await assertions(start).toBeEnabled({ timeout: 30_000 })
-    const result = await runProjectTool({ page, expect: assertions, apiBase: solar.apiBase, traffic: solar.traffic,
+    const result = await run({ page, expect: assertions, apiBase: solar.apiBase, traffic: solar.traffic,
       binding: solar.binding, before: solar.context, tool: 'solar-settings', action: () => start.click(), checkParams: (params) => {
-        assertions(params.initialize?.units?.drawing_units).toBe('m')
-        assertions(params.changes?.panels_in_sequence).toBe(1)
+        if (initializing) assertions(params.initialize?.units?.drawing_units).toBe('m')
+        assertions(params.changes?.panels_in_sequence).toBe(sequence)
       } })
     solar.binding = result.binding
     solar.context = result.context
