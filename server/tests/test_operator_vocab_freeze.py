@@ -300,8 +300,10 @@ def test_roles_file_gained_no_operator_role():
 # run-all-gates.py Suite executes this file.
 # PR #1110 adds the tenant's finish_project action. Its auto admission does
 # not grant deployment authority; existing project and stage grants still apply.
+# Studio integration adds save_integration_element (rung 3) and
+# read_integration_data (rung 1), both auto with the converse capability.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "3a0083db78a44346583d18f48b805d3913737f44f6ae0335f25fd8f28bbf181a")
+    "1b530e7ffdb4d7f093205c2613efd5cd31bfb7876adcefae86c16ff97f5ffb96")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",
@@ -316,6 +318,8 @@ FROZEN_TENANT_ACTIONS = {
     "customize_platform": "always-confirm",
     "propose_overlay": "auto",
     "finish_project": "auto",
+    "save_integration_element": "auto",
+    "read_integration_data": "auto",
 }
 
 
