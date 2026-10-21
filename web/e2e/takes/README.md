@@ -7,6 +7,7 @@ They contain no CSS selectors, executable expressions, or browser scripts.
 `SW1ZI` (zoom in), `SW1ZO` (zoom out), and `SW1FIT` (fit drawing to view)
 are motion beats that run after the SW1 pre-roll, with the drawing already open.
 Each zoom beat clicks five times; every click is followed by a 300 ms pause.
+`SW1ZIL` and `SW1ZOL` are the same zooms with seven clicks 400 ms apart, used by the split film so the Studio pane keeps moving.
 
 `SW1R` is SW1 followed by closing the import pane (a second click on the
 "Open a DXF in the browser engine" tab), the Properties pane and the notification
