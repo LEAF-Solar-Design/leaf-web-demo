@@ -477,20 +477,19 @@ describe('F-7: surface frames render the live tenant catalog', () => {
 
 // ---------------------------------------------------------------------------
 // Slice 5b: the band renders one tab per surface that DECLARES one, and Sheets
-// declares none. The point of these rows is that the fifth manifest record
-// changed no pixel here.
+// declares none. Sheets remains absent alongside the five studio profiles.
 // ---------------------------------------------------------------------------
 describe('slice 5b: the tab band renders only tab-declaring surfaces', () => {
-  it('renders exactly the four studio tabs, in manifest order, and no Sheets tab', () => {
+  it('renders exactly the five studio tabs, in default order, and no Sheets tab', () => {
     render(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs.map((tab) => tab.dataset.surface)).toEqual(['browser', 'cad', 'solar', 'ios'])
-    expect(tabs).toHaveLength(4)
+    expect(tabs.map((tab) => tab.dataset.surface)).toEqual(['browser', 'cad', 'solar', 'ios', 'ops'])
+    expect(tabs).toHaveLength(5)
     expect(screen.queryByRole('tab', { name: 'Sheets' })).toBeNull()
     expect(document.querySelector('[data-surface="sheets"]')).toBeNull()
   })
 
-  it('renders one tab per tab-declaring record, derived, not a hardcoded four', () => {
+  it('renders one tab per tab-declaring record, derived, not a hardcoded five', () => {
     // Derived on BOTH sides, so flipping chrome.tab on any record makes this
     // row follow it instead of failing as a stale count.
     const declared = PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab)

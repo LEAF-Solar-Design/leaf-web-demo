@@ -19,10 +19,14 @@ describe('surface entitlement declarations', () => {
   })
 
   for (const { id } of PRODUCT_SURFACES) {
-    it(`${id} declares its catalog fold and authoring capabilities`, () => {
+    it(`${id} declares its catalog fold, authoring and integration capabilities`, () => {
       const contract = surfaceContract(id)
       const required = new Set(catalogCapabilities(id))
       if (contract.authoring === true) required.add('build')
+      if (id === 'ops') {
+        required.add('run_read')
+        required.add('run_write')
+      }
       expect(contract.entitlements).toEqual([...required].sort())
       expect(Object.isFrozen(contract.entitlements)).toBe(true)
       expect(contract.entitlements).toEqual([...contract.entitlements].sort())
@@ -40,5 +44,15 @@ describe('surface entitlement declarations', () => {
     const withoutAuthoring = [...new Set(catalogCapabilities('browser'))].sort()
     expect(withoutAuthoring).toEqual(['run_read', 'run_write'])
     expect(withoutAuthoring).not.toEqual(surfaceContract('browser').entitlements)
+  })
+
+  it('the catalog-only fold omits the Ops integration read/write requirements', () => {
+    const catalogOnly = [...new Set(catalogCapabilities('ops'))].sort()
+    expect(familiesForSurface(families, 'ops')).toEqual([])
+    expect(catalogOnly).toEqual([])
+    expect(catalogOnly).not.toContain('run_read')
+    expect(catalogOnly).not.toContain('run_write')
+    expect(surfaceContract('ops').entitlements).toEqual(['build', 'run_read', 'run_write'])
+    expect(catalogOnly).not.toEqual(surfaceContract('ops').entitlements)
   })
 })
