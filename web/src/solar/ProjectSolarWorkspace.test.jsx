@@ -252,6 +252,62 @@ async function expectGraphRefusal(h, code, sentence) {
 }
 
 describe('Project Solar workspace composition', () => {
+  it('W1C12 keeps the full catalog available and opens Solve with a generic row without availability', () => {
+    const solve = Row('solar-solve-proposal'), commit = Row('solar-commit-solve')
+    const generic = { name: 'count-by-layer', label: 'Count by layer', catalog_digest: D,
+      params: { type: 'object', properties: { layer: { type: 'string' } } } }
+    const h = fixture(solve.name, { rows: [solve, commit, Row('solar-settings'), generic] })
+    h.mount()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(last(h.rails).projectCatalog).toBe(h.catalog)
+    expect(last(h.rails).projectCatalog.families[0].capabilities).toContain(generic)
+    expect(typeof last(h.rails).onOpenStep).toBe('function')
+    h.open(solve)
+    expect(h.props.onOpenTool).toHaveBeenCalledWith(solve)
+    expect(screen.getByRole('form', { name: 'Solve' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Run solve' })).toBeInTheDocument()
+    expect(last(h.rails).projectCatalog).toBe(h.catalog)
+  })
+
+  it.each(['digest', 'schema', 'availability'])('W1C12 still rejects a hostable row with malformed %s', (field) => {
+    const solve = Row('solar-solve-proposal'), malformed = Row('solar-settings')
+    if (field === 'digest') malformed.catalog_digest = 'invalid'
+    if (field === 'schema') malformed.params = { type: 'array', items: { type: 'string' } }
+    if (field === 'availability') delete malformed.availability
+    const h = fixture(solve.name, { rows: [solve, malformed] })
+    h.mount()
+    expect(screen.getByRole('status').textContent).toBe(projectSolarWorkspaceReason('catalog_unavailable'))
+    expect(last(h.rails).projectCatalog).toBeNull()
+    expect(last(h.rails).onOpenStep).toBeUndefined()
+    h.open(solve)
+    expect(h.props.onOpenTool).not.toHaveBeenCalled()
+    expect(screen.queryByRole('form', { name: 'Solve' })).toBeNull()
+  })
+
+  it('W1C12 excludes unhostable rows and their declarations from the hosted scope', async () => {
+    const h = fixture('solar-string-add')
+    const generic = Row('count-by-layer')
+    h.rows.push(generic)
+    h.mount({ openTool: h.row })
+    const draft = screen.getByRole('textbox', { name: 'Fixture draft' })
+    fireEvent.change(draft, { target: { value: 'Keep this draft' } })
+    const submit = last(h.steps).onProjectSubmit, prepared = h.intent(), options = optionsFor(h)
+    h.open(generic)
+    expect(h.props.onOpenTool).not.toHaveBeenCalled()
+    // Neither conflicting generic declarations nor generic row identities belong to the hosted scope.
+    h.rows.push({ ...generic, catalog_digest: 'sha256:' + 'd'.repeat(64) })
+    delete generic.availability
+    h.update()
+    expect(last(h.rails).projectCatalog).toBe(h.catalog)
+    expect(screen.getByRole('textbox', { name: 'Fixture draft' })).toBe(draft)
+    expect(draft.value).toBe('Keep this draft')
+    h.rows.splice(1)
+    h.update()
+    expect(screen.getByRole('textbox', { name: 'Fixture draft' })).toBe(draft)
+    expect(await submit(prepared, options)).toBe(h.outcome)
+    expect(h.submit).toHaveBeenCalledOnce()
+  })
+
   it('R13E-30 settings dispatches to the existing R8 project host', async () => {
     const h = fixture('solar-settings')
     h.graphless = true
