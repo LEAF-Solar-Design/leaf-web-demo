@@ -403,7 +403,7 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
       <label>Optional time field<select value={form.timeField} onChange={(e) => setForm({ ...form, timeField: e.target.value })}>
         <option value="">No time field</option>{form.fields.filter((field) => ['instant', 'date'].includes(field.kind) && field.id).map((field, i) => <option key={i} value={field.id}>{field.label || field.id}</option>)}
       </select></label>
-      <p>1–100 fields; choose 1–8 non-null text, identifier or count keys. JSON pointers: at most 1024 characters and 32 segments. Registration limit: 160 KiB.</p>
+      <p>1 to 100 fields; choose 1 to 8 non-null text, identifier or count keys. JSON pointers: at most 1024 characters and 32 segments. Registration limit: 160 KiB.</p>
       <button type="submit">Register dataset</button>
       <button type="button" onClick={() => recoverChosen('dataset')}>Recover chosen dataset version</button>
     </fieldset></form>}
