@@ -8,11 +8,12 @@ from migration_fixture_sql import fixture_grant_role, translate_migration_sql
 
 MIGRATIONS = Path(__file__).resolve().parents[2] / "platform" / "migrations"
 NAME = "0079_integration_turn_grants.sql"
+ACTION_NAME = "0080_integration_turn_grant_action_discovery.sql"
 SCHEMA = "demo_test_" + "a" * 32
 
 
-def source():
-    return (MIGRATIONS / NAME).read_text(encoding="utf-8")
+def source(name=NAME):
+    return (MIGRATIONS / name).read_text(encoding="utf-8")
 
 
 def test_exact_mapping_preserves_every_other_byte():
@@ -65,10 +66,49 @@ def test_unsafe_schema_is_refused(schema):
 
 def test_other_real_migrations_pass_unchanged():
     for migration in MIGRATIONS.glob("*.sql"):
-        if migration.name != NAME:
+        if migration.name not in (NAME, ACTION_NAME):
             original = migration.read_text(encoding="utf-8")
             assert translate_migration_sql(migration.name, original, SCHEMA) == original
     assert translate_migration_sql("0080_other.sql", source(), SCHEMA) == source()
+
+
+def test_action_migration_mapping_is_exact_and_isolated():
+    original = source(ACTION_NAME)
+    mapped = translate_migration_sql(ACTION_NAME, original, SCHEMA)
+    assert mapped == original.replace("public.integration_turn_grants", SCHEMA + ".integration_turn_grants")
+    assert mapped.count(SCHEMA + ".integration_turn_grants") == 1
+    second = "demo_test_" + "b" * 32
+    assert translate_migration_sql(ACTION_NAME, original, second) == mapped.replace(SCHEMA, second)
+    with pytest.raises(ValueError, match="expected 1 occurrences"):
+        translate_migration_sql(ACTION_NAME, original.replace("public.integration_turn_grants", "missing"), SCHEMA)
+    with pytest.raises(ValueError, match="expected 1 occurrences"):
+        translate_migration_sql(ACTION_NAME, original + "\nALTER TABLE public.integration_turn_grants;", SCHEMA)
+
+
+@pytest.mark.parametrize("extra", [
+    "SELECT * FROM public.other;", 'SELECT * FROM "public".other;',
+    "SELECT * FROM PUBLIC . other;", "-- leaf_integration_grant_app",
+])
+def test_action_migration_refuses_unmapped_production_references(extra):
+    with pytest.raises(ValueError, match="unmapped production"):
+        translate_migration_sql(ACTION_NAME, source(ACTION_NAME) + "\n" + extra, SCHEMA)
+
+
+def test_action_migration_only_replaces_final_check_operation_expression():
+    original = source()
+    expanded = source(ACTION_NAME)
+    legacy_check = original.split("  CHECK ((", 1)[1].split("\n);", 1)[0]
+    current_check = expanded.split("  CHECK ((", 1)[1].removesuffix(";\n")
+    new_expression = """binding->'operations' IN (
+      '["dataset_discovery","dataset_query","element_save"]'::jsonb,
+      '["dataset_discovery","dataset_query","element_save","action_discovery"]'::jsonb)"""
+    old_expression = "binding->'operations' = '[\"dataset_discovery\",\"dataset_query\",\"element_save\"]'::jsonb"
+    assert new_expression in current_check
+    assert current_check.replace(new_expression, old_expression) == legacy_check
+    assert expanded.count("ALTER TABLE public.integration_turn_grants") == 1
+    assert expanded.count(";") == 1
+    assert "DROP CONSTRAINT integration_turn_grants_check2," in expanded
+    assert "ADD CONSTRAINT integration_turn_grants_binding_authority_check" in expanded
 
 
 @pytest.mark.parametrize("token", [

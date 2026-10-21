@@ -19,7 +19,9 @@ from uuid import UUID
 
 PURPOSE = "studio-integration-turn-grant"
 SCHEMA = 1
-OPERATIONS = ("dataset_discovery", "dataset_query", "element_save")
+LEGACY_OPERATIONS = ("dataset_discovery", "dataset_query", "element_save")
+OPERATIONS = LEGACY_OPERATIONS
+CURRENT_OPERATIONS = LEGACY_OPERATIONS + ("action_discovery",)
 MAX_ENVELOPE_BYTES = 32768
 
 
@@ -117,8 +119,21 @@ class Authority:
                 _invalid()
         except ValueError:
             _invalid()
-        if type(self.operations) is not tuple or self.operations != OPERATIONS:
+        if (type(self.operations) is not tuple
+                or any(type(operation) is not str for operation in self.operations)
+                or self.operations not in (LEGACY_OPERATIONS, CURRENT_OPERATIONS)):
             _invalid()
+
+
+def authority_compatible(stored: Authority, current: Authority):
+    """Require exact identity and all stored capabilities in current policy."""
+    for authority in (stored, current):
+        if type(authority) is not Authority:
+            _invalid()
+        authority.__post_init__()
+    return (all(getattr(stored, name) == getattr(current, name)
+                for name in Authority.__dataclass_fields__ if name != "operations")
+            and set(stored.operations).issubset(current.operations))
 
 
 @dataclass(frozen=True)
@@ -303,7 +318,8 @@ class IntegrationTurnGrantStore:
             if not row:
                 return None
             binding = Binding.from_dict(row["binding"])
-            if binding.authority != a or not binding.issued_at <= now < binding.expires_at:
+            if (not authority_compatible(binding.authority, a)
+                    or not binding.issued_at <= now < binding.expires_at):
                 return None
             return EncryptedGrant(binding, envelope_bytes(bytes(row["envelope"])))
 

@@ -11,7 +11,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from server import integration_turn_grant_crypto as crypto
-from leaf_platform.integration_turn_grant_store import Authority, Binding, GrantStoreError
+from leaf_platform.integration_turn_grant_store import (
+    Authority, Binding, GrantStoreError, LEGACY_OPERATIONS, CURRENT_OPERATIONS,
+)
 
 ARN = "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-4234-8234-123456789012"
 
@@ -54,8 +56,10 @@ def no_real_kms(monkeypatch):
     monkeypatch.setattr(crypto.KmsKeyService, "canonical_key_arn", forbidden)
 
 
-def test_round_trip_context_and_scrubbing(caplog, capsys):
+@pytest.mark.parametrize("operations", [LEGACY_OPERATIONS, CURRENT_OPERATIONS])
+def test_round_trip_context_and_scrubbing(caplog, capsys, operations):
     b, keys = binding(), FakeKeys()
+    b = replace(b, authority=replace(b.authority, operations=operations))
     token = b"secret-test-bearer"
     envelope = crypto.seal(token, b, keys)
     exposed = []
@@ -70,6 +74,22 @@ def test_round_trip_context_and_scrubbing(caplog, capsys):
     assert all(not any(buf) for buf in keys.buffers + exposed)
     assert token not in envelope
     assert token.decode() not in caplog.text + str(capsys.readouterr())
+
+
+@pytest.mark.parametrize("operations,altered_operations", [
+    (LEGACY_OPERATIONS, CURRENT_OPERATIONS), (CURRENT_OPERATIONS, LEGACY_OPERATIONS),
+])
+def test_changing_only_bound_operations_fails_authentication(operations, altered_operations):
+    b = binding()
+    b = replace(b, authority=replace(b.authority, operations=operations))
+    keys = FakeKeys()
+    envelope = crypto.seal(b"synthetic-bearer", b, keys)
+    altered = replace(b, authority=replace(b.authority, operations=altered_operations))
+    # Use a synthetic provider that returns the same key even for changed AAD,
+    # proving AES-GCM itself rejects the altered binding as well as KMS context.
+    keys.decrypt_data_key = lambda *args: bytearray(keys.key)
+    with pytest.raises(crypto.GrantCryptoError):
+        crypto.with_decrypted(envelope, altered, lambda _: pytest.fail("altered binding"), keys)
 
 
 @pytest.mark.parametrize("field", list(Authority.__dataclass_fields__))

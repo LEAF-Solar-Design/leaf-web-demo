@@ -32,7 +32,9 @@ except ImportError:
     import integration_turn_grant_crypto as crypto
 
 platform_link._ensure_platform_package()
-from leaf_platform.integration_turn_grant_store import Authority, IntegrationTurnGrantStore
+from leaf_platform.integration_turn_grant_store import (
+    Authority, CURRENT_OPERATIONS, IntegrationTurnGrantStore, authority_compatible,
+)
 
 REQUEST_CAP = 128 * 1024
 RESPONSE_CAP = 256 * 1024
@@ -234,8 +236,18 @@ def resolve_current(tenant_id, session_id, turn_id, *, write=False):
         raise ReadFailure("denied")
     authority = Authority(tenant_id, project, str(binding.platform_user_id), str(binding.binding_id),
                           "auth0", subject, session_id, turn_id,
-                          os.environ.get("LEAF_INTEGRATION_SERVICE_ORIGIN", ""))
+                          os.environ.get("LEAF_INTEGRATION_SERVICE_ORIGIN", ""),
+                          operations=CURRENT_OPERATIONS)
     return Current(authority, tier, caps)
+
+
+def _check_bound_authority(binding, current, fresh, required, now):
+    if (fresh != current or not authority_compatible(binding.authority, fresh.authority)
+            or required not in binding.authority.operations
+            or required not in fresh.authority.operations
+            or not binding.issued_at <= now < binding.expires_at):
+        raise ReadFailure("denied")
+    return fresh
 
 
 def _date(value, instant=False):
@@ -449,11 +461,7 @@ class IntegrationToolService:
             def check():
                 fresh = resolve()
                 now = self.clock()
-                if (fresh != current or binding.authority != fresh.authority
-                        or required not in fresh.authority.operations
-                        or not binding.issued_at <= now < binding.expires_at):
-                    raise ReadFailure("denied")
-                return fresh
+                return _check_bound_authority(binding, current, fresh, required, now)
 
             check()
 

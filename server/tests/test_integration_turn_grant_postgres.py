@@ -21,7 +21,9 @@ from server.tests.test_integration_turn_grant_crypto import binding, FakeKeys
 from server.integration_turn_grant_crypto import seal, with_decrypted
 from leaf_platform.integration_turn_grant_store import (
     IntegrationTurnGrantStore, GrantStoreError, TenantProject,
+    CURRENT_OPERATIONS, LEGACY_OPERATIONS, authority_compatible,
 )
+from server.tests.test_integration_turn_grant_capture import custody
 
 DSN_ENV = "INTEGRATION_GRANT_TEST_DATABASE_URL"
 
@@ -107,6 +109,27 @@ def scoped(conn, authority):
         yield
 
 
+def apply_action_migration(owner):
+    migration = (Path(__file__).resolve().parents[2]
+                 / "platform/migrations/0080_integration_turn_grant_action_discovery.sql")
+    with owner.transaction():
+        owner.execute(migration.read_text(encoding="utf-8"))
+
+
+def security_state(owner):
+    return (
+        owner.execute("""SELECT relrowsecurity, relforcerowsecurity, relacl::text
+            FROM pg_class WHERE oid='public.integration_turn_grants'::regclass""").fetchall(),
+        owner.execute("""SELECT polname, polpermissive, polroles,
+            pg_get_expr(polqual, polrelid), pg_get_expr(polwithcheck, polrelid)
+            FROM pg_policy WHERE polrelid='public.integration_turn_grants'::regclass""").fetchall(),
+        owner.execute("""SELECT pg_get_triggerdef(oid) FROM pg_trigger
+            WHERE tgrelid='public.integration_turn_grants'::regclass AND NOT tgisinternal""").fetchall(),
+        owner.execute("""SELECT rolname, rolcanlogin, rolsuper, rolbypassrls
+            FROM pg_roles WHERE rolname='leaf_integration_grant_app'""").fetchall(),
+    )
+
+
 def test_real_restricted_postgres_custody_and_isolation(database, caplog, capsys):
     import psycopg
     owner, (c1, c2) = database
@@ -118,6 +141,20 @@ def test_real_restricted_postgres_custody_and_isolation(database, caplog, capsys
     token = b"postgres-proof-private-bearer"
     envelope = seal(token, b, keys)
     assert s1.put_once(b, envelope) == "created"
+    # The real restricted legacy row predates 0080, including its ciphertext.
+    before = owner.execute("SELECT binding::text, envelope FROM public.integration_turn_grants").fetchone()
+    before_security = security_state(owner)
+    apply_action_migration(owner)
+    assert owner.execute("SELECT binding::text, envelope FROM public.integration_turn_grants").fetchone() == before
+    assert security_state(owner) == before_security
+    current = replace(b.authority, operations=CURRENT_OPERATIONS)
+    compatible = s2.load_active(current, now + 1)
+    assert compatible.binding.canonical_bytes() == b.canonical_bytes()
+    assert compatible.envelope == envelope and compatible.binding.authority.operations == LEGACY_OPERATIONS
+    assert authority_compatible(compatible.binding.authority, current)
+    for operation in LEGACY_OPERATIONS:
+        assert operation in compatible.binding.authority.operations and operation in current.operations
+    assert "action_discovery" not in compatible.binding.authority.operations
     assert s2.put_once(b, envelope) == "already_present"
     loaded = s2.load_active(b.authority, now + 1)
     assert loaded.binding == b and loaded.envelope == envelope
@@ -222,3 +259,62 @@ def test_real_restricted_postgres_custody_and_isolation(database, caplog, capsys
     with pytest.raises(GrantStoreError, match="GRANT_UNSAFE_DATABASE") as exc:
         s2.load_active(b.authority, now + 1)
     assert token.decode() not in str(exc.value) + caplog.text + str(capsys.readouterr())
+
+
+def test_real_postgres_duplicate_capture_preserves_legacy_and_new_turn_gets_explicit_capability(
+        database, custody, monkeypatch):
+    import integration_turn_grants as grants
+    import psycopg
+    from leaf_platform.integration_turn_grant_store import Authority, Binding
+    from server.tests.test_integration_turn_grant_capture import ORG, PROJECT, USER, BINDING, TOKEN
+    h = custody
+    owner, (c1, c2) = database
+    writer = IntegrationTurnGrantStore(_factory(c1))
+    reader = IntegrationTurnGrantStore(_factory(c2))
+    legacy = Binding(Authority(ORG, PROJECT, USER, BINDING, "auth0", h.author,
+                              "s", "t", "https://integration.example"),
+                     str(uuid4()), 1000, 1250, 1290, 1120)
+    keys = FakeKeys()
+    envelope = seal(TOKEN.encode(), legacy, keys)
+    assert writer.put_once(legacy, envelope) == "created"
+    before = owner.execute("SELECT binding::text, envelope FROM public.integration_turn_grants").fetchone()
+    apply_action_migration(owner)
+    capture_keys = {}
+    def seal_capture(token, binding):
+        capture_keys[binding.grant_id] = FakeKeys()
+        return seal(token, binding, capture_keys[binding.grant_id])
+    monkeypatch.setattr(grants, "_adapters", lambda: (Authority, Binding, writer, seal_capture))
+    # Empty local registry simulates another replica attempting the same turn.
+    assert h.capture().code == "unavailable"
+    assert owner.execute("SELECT binding::text, envelope FROM public.integration_turn_grants").fetchone() == before
+    loaded = reader.load_active(replace(legacy.authority, operations=CURRENT_OPERATIONS), 1001)
+    assert loaded.binding == legacy and loaded.envelope == envelope
+    assert with_decrypted(loaded.envelope, loaded.binding, lambda value: value == TOKEN.encode(), keys)
+
+    h.session["active_turn_id"] = "new-turn"
+    assert grants._capture(TOKEN, h.snapshot, h.tenant, "s", "new-turn", 300).code == "captured"
+    current = replace(legacy.authority, turn_id="new-turn", operations=CURRENT_OPERATIONS)
+    captured = reader.load_active(current, 1001)
+    assert captured.binding.authority.operations == CURRENT_OPERATIONS
+    assert with_decrypted(captured.envelope, captured.binding, lambda value: value == TOKEN.encode(),
+                          capture_keys[captured.binding.grant_id])
+    assert reader.load_active(replace(current, operations=LEGACY_OPERATIONS), 1001) is None
+
+    # Direct SQL cannot bypass the exact array constraint after the migration.
+    for operations in ([], ["dataset_query"], list(reversed(CURRENT_OPERATIONS)),
+                       list(CURRENT_OPERATIONS) + ["action_discovery"],
+                       list(LEGACY_OPERATIONS) + ["unknown"], None):
+        invalid = replace(legacy, grant_id=str(uuid4()),
+                          authority=replace(legacy.authority, turn_id="invalid-turn"))
+        data = invalid.to_dict()
+        data["operations"] = operations
+        with pytest.raises(psycopg.errors.CheckViolation):
+            with scoped(c1, invalid.authority):
+                c1.execute("""INSERT INTO public.integration_turn_grants
+                    (tenant_id,project_id,session_id,turn_id,grant_id,binding,created_at,expires_at,envelope)
+                    VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)""",
+                    (ORG, PROJECT, "s", "invalid-turn", invalid.grant_id,
+                     json.dumps(data), 1000, 1120, envelope))
+    grants.cleanup_turn("s", "new-turn")
+    assert reader.load_active(current, 1001) is None
+    assert reader.load_active(replace(legacy.authority, operations=CURRENT_OPERATIONS), 1001) is not None
