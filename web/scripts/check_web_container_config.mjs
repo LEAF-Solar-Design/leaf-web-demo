@@ -46,6 +46,60 @@ assert.equal((workflow.match(/VITE_SOLAR_FLOW_RAIL: "1"/g) || []).length, 2,
 assert.equal((workflow.match(/VITE_SOLAR_SETTINGS_FORM: "1"/g) || []).length, 2,
   'both web-build env blocks must enable VITE_SOLAR_SETTINGS_FORM')
 
+// Integration origin must agree across Docker, reuse fingerprints, and the
+// prebuilt static artifacts. Scope each check to its producer role.
+const webBuildStage = dockerfile.match(/^FROM node:22-slim AS build\n([\s\S]*?)(?=^FROM )/m)?.[1]
+assert.ok(webBuildStage, 'the web Docker build stage must exist')
+assert.match(webBuildStage, /^ARG VITE_INTEGRATIONS_API_ORIGIN=$/m,
+  'an unset integration origin must stay disabled by default')
+const viteEnv = webBuildStage.match(/^ENV VITE_API_BASE=[^\n]*(?:\n[^\n]*)*?(?=\n\n)/m)?.[0]
+assert.ok(viteEnv, 'the Vite build ENV block must exist')
+assert.match(viteEnv, /^    VITE_INTEGRATIONS_API_ORIGIN=\$\{VITE_INTEGRATIONS_API_ORIGIN\}(?: \\)?$/m,
+  'the integration origin ARG must reach Vite through the build ENV')
+
+const workflowSteps = workflow.split(/^      - name: /m).slice(1)
+function stepById(id) {
+  const matches = workflowSteps.filter(step => step.split('\n').includes(`        id: ${id}`))
+  assert.equal(matches.length, 1, `exactly one ${id} step must exist`)
+  return matches[0]
+}
+function stepEnv(step) {
+  const env = step.match(/^        env:\n((?:^          [^\n]*\n)+)/m)?.[1]
+  assert.ok(env, 'the producer step must have an env block')
+  return env
+}
+const originEnv = '          VITE_INTEGRATIONS_API_ORIGIN: ${{ vars.VITE_INTEGRATIONS_API_ORIGIN }}'
+for (const id of ['build-image', 'spec-build-image']) {
+  const step = stepById(id)
+  assert.match(step, /^        uses: docker\/build-push-action@v6$/m)
+  assert.match(step, /^          file: deploy\/Dockerfile\.\$\{\{ matrix\.image \}\}$/m)
+  const args = step.match(/^          build-args: \|\n((?:^            [^\n]*\n)+)/m)?.[1]
+  assert.ok(args, `${id} must pass Docker build arguments`)
+  assert.ok(args.split('\n').includes("            ${{ matrix.image == 'web' && format('VITE_INTEGRATIONS_API_ORIGIN={0}', vars.VITE_INTEGRATIONS_API_ORIGIN) || '' }}"),
+    `${id} must pass the repository integration origin only to web`)
+}
+for (const id of ['surface', 'spec-surface']) {
+  const step = stepById(id)
+  assert.ok(stepEnv(step).split('\n').includes(originEnv),
+    `${id} must forward the repository integration origin through step env`)
+  const run = step.split('        run: |\n')[1]
+  assert.ok(run, `${id} must calculate a surface fingerprint`)
+  const webArgs = run.split('if [ "${{ matrix.image }}" = "web" ]; then')[1]?.split('\n          fi')[0]
+  assert.ok(webArgs?.includes('build_args+=(--build-arg "VITE_INTEGRATIONS_API_ORIGIN=$VITE_INTEGRATIONS_API_ORIGIN")'),
+    `${id} must fingerprint the same integration origin build argument for web`)
+  const fingerprint = run.match(/python scripts\/platform_release_manifest\.py surface-fingerprint \\\n(?:[^\n]*\\\n)*[^\n]*/)?.[0]
+  assert.ok(fingerprint?.includes('"${build_args[@]}"'),
+    `${id} must pass the web build arguments into the fingerprint calculation`)
+}
+for (const id of ['surface-web', 'spec-web']) {
+  const step = stepById(id)
+  assert.match(step, /^        working-directory: web$/m)
+  assert.match(step, /^        if: matrix\.image == 'web' &&/m)
+  assert.ok(stepEnv(step).split('\n').includes(originEnv),
+    `${id} must bake the same repository integration origin into the static artifact`)
+  assert.match(step, /^          npm run build$/m)
+}
+
 // W7 (docs/convergence/ACCEPTANCE.md, Version 3): the old shell and its
 // runtime rail are deleted, so the app always renders the studio shell. The
 // image must not install the flags entrypoint drop-in, and the page must not
@@ -60,4 +114,4 @@ assert.doesNotMatch(index, /\/runtime.flags\.js/,
 assert.match(index, /<script type="module" src="\/src\/main\.jsx">/,
   'index.html must still load the bundle')
 
-console.log('web container config: page assets, API, Auth0 SPA values, Solar flow flags, and the absence of a shell rail are pinned')
+console.log('web container config: page assets, API, integration origin producers and fingerprints, Auth0 SPA values, Solar flow flags, and the absence of a shell rail are pinned')
