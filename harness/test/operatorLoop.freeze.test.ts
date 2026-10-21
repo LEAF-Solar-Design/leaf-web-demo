@@ -61,7 +61,7 @@ describe("operator wire vocabulary is pinned", () => {
   });
 
   it("tenant spine includes integration tools and stays separate from the operator loop", () => {
-    expect(SPINE_TOOL_NAMES).toHaveLength(15);
+    expect(SPINE_TOOL_NAMES).toHaveLength(16);
     for (const name of SPINE_TOOL_NAMES) {
       expect(name.startsWith("operator")).toBe(false);
     }

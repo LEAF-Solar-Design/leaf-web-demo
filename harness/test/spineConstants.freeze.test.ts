@@ -27,6 +27,7 @@ const FROZEN_SPINE_TOOL_NAMES = [
   "finish_project",
   "project_completion_status",
   "integration_datasets",
+  "integration_action_catalog",
   "integration_query",
   "integration_save_element",
 ] as const;
