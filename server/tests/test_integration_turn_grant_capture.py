@@ -17,7 +17,9 @@ import session_store
 import turn_runner
 
 platform_link._ensure_platform_package()
-from leaf_platform.integration_turn_grant_store import Authority, Binding
+from leaf_platform.integration_turn_grant_store import (
+    Authority, Binding, LEGACY_OPERATIONS, CURRENT_OPERATIONS,
+)
 
 ORG = "11111111-1111-4111-8111-111111111111"
 PROJECT = "22222222-2222-4222-8222-222222222222"
@@ -90,12 +92,27 @@ def test_capture_uses_current_canonical_authority_and_fixed_deadline(custody):
     assert result.code == "captured" and result.grant_id == h.puts[0].grant_id
     b = h.puts[0]
     assert b.authority == Authority(ORG, PROJECT, USER, BINDING, "auth0", h.author,
-                                    "s", "t", "https://integration.example")
+                                    "s", "t", "https://integration.example",
+                                    operations=CURRENT_OPERATIONS)
+    assert b.authority.operations == CURRENT_OPERATIONS
     assert (b.issued_at, b.verified_jwt_exp, b.turn_deadline, b.expires_at) == (
         1000, 1250, 1290, 1120)
     assert TOKEN not in repr(grants._references) and ENVELOPE.decode() not in repr(grants._references)
     assert h.capture().code == "unavailable"  # Never renew the same turn.
     assert len(h.puts) == len(h.seals) == 1
+
+
+def test_duplicate_capture_cannot_upgrade_reserved_legacy_turn(custody):
+    h = custody
+    legacy = Binding(Authority(ORG, PROJECT, USER, BINDING, "auth0", h.author,
+                              "s", "t", "https://integration.example"),
+                     "55555555-5555-4555-8555-555555555555", 1000, 1250, 1290, 1120)
+    original = legacy.canonical_bytes()
+    assert grants._reserve(legacy, h.now) is not None
+    assert h.capture().code == "unavailable"
+    assert not h.puts and not h.seals and not h.revokes
+    assert grants._references[("s", "t")].authority.operations == LEGACY_OPERATIONS
+    assert legacy.canonical_bytes() == original
 
 
 @pytest.mark.parametrize("exp,started,expected", [(1050, 990, 1050), (1250, 710, 1010)])

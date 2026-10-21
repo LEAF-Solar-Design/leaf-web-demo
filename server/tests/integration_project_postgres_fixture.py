@@ -17,6 +17,7 @@ MIGRATIONS = (
     "0035_session_request_journal", "0038_project_lifecycle", "0039_project_session_scope",
     "0050_live_project_guard", "0051_unit_economics", "0053_session_scope",
     "0075_org_acceptance_classification", "0079_integration_turn_grants",
+    "0080_integration_turn_grant_action_discovery",
 )
 
 
