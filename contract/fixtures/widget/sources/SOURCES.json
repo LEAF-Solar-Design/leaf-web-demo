@@ -1,0 +1,38 @@
+{
+ "schema": "leaf.frozen-sources.v1",
+ "slice": "SEL-206",
+ "sources": [
+  {
+   "repo": "mushy-code",
+   "head": "cd2bcfb8f017f2c090f5040a2b90cb826708c47f",
+   "upstream_path": "contract/leaf-tokens.v1.json",
+   "frozen_path": "contract/fixtures/widget/sources/leaf-tokens.v1.json",
+   "sha256": "d4d59287ebda4bce8bf4188eadbe3e8f1fbe356ff52be3ba482f72c67b53cd3c",
+   "bytes": 10066
+  },
+  {
+   "repo": "mushy-code",
+   "head": "cd2bcfb8f017f2c090f5040a2b90cb826708c47f",
+   "upstream_path": "contract/generated/leaf-tokens.css",
+   "frozen_path": "contract/fixtures/widget/sources/leaf-tokens.css",
+   "sha256": "9eaf6c04927cefb5e021261f83fef0a01bc9525be2363687f8b3cda999ef72f5",
+   "bytes": 42432
+  },
+  {
+   "repo": "mushy-code",
+   "head": "cd2bcfb8f017f2c090f5040a2b90cb826708c47f",
+   "upstream_path": "contract/leaf-figures.v1.json",
+   "frozen_path": "contract/fixtures/widget/sources/leaf-figures.v1.json",
+   "sha256": "8af1df35aa97f2d4d870c43c028a9dcbfa4ea19b2fc661a682138d2f726ac7c3",
+   "bytes": 3104
+  },
+  {
+   "repo": "mushy-code",
+   "head": "cd2bcfb8f017f2c090f5040a2b90cb826708c47f",
+   "upstream_path": "contract/leaf-glossary.v1.json",
+   "frozen_path": "contract/fixtures/widget/sources/leaf-glossary.v1.json",
+   "sha256": "fd90f747d222a386243cb3d89c210f48f2fdc7f3f0f099dbb9e753caa47d4335",
+   "bytes": 12104
+  }
+ ]
+}
