@@ -1,0 +1,33 @@
+{
+ "schema": "leaf.frozen-sources.v1",
+ "slice": "SEL-002",
+ "sources": [
+  {
+   "repo": "mushy-code",
+   "head": "c5bed536690380d637a668d97b6b0fe5f5451af5",
+   "upstream_path": "contract/leaf-glossary.v1.json",
+   "frozen_path": "contract/fixtures/lab/glossary.json",
+   "sha256": "fd90f747d222a386243cb3d89c210f48f2fdc7f3f0f099dbb9e753caa47d4335",
+   "bytes": 12104,
+   "standard": "STD-1"
+  },
+  {
+   "repo": "mushy-code",
+   "head": "c5bed536690380d637a668d97b6b0fe5f5451af5",
+   "upstream_path": "contract/leaf-block-manifest.v1.schema.json",
+   "frozen_path": "contract/fixtures/lab/leaf-block-manifest.v1.schema.json",
+   "sha256": "a4b2c4a327294a03afd1f302473b959361595f865d3ec15a8df3fa8b76b40cd1",
+   "bytes": 4938,
+   "standard": "STD-5"
+  },
+  {
+   "repo": "claude-config",
+   "head": "af70a2c37ed4c5f8f1fd0b7a56d81eebfb9735b1",
+   "upstream_path": "scripts/release-train/kashbot-lanes.json",
+   "frozen_path": "contract/fixtures/lab/lanes.json",
+   "sha256": "586405de7277ac9e47cf291291623be143d67a894c2193a667609f9a6e25f3da",
+   "bytes": 6929,
+   "standard": "lanes"
+  }
+ ]
+}
