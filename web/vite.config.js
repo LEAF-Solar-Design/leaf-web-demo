@@ -1,10 +1,11 @@
 import { execSync } from 'node:child_process'
-import { createReadStream, existsSync, readdirSync } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import elementSourceStamp from './vite-plugins/elementSourceStamp.js'
+import { engineVersion, findEnginePkgDir } from './vite-plugins/engineVersion.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 
@@ -29,19 +30,11 @@ function cadEngineDevServer() {
   return {
     name: 'cad-engine-dev-server',
     configureServer(server) {
-      const vendorRoot = path.resolve(HERE, '..', 'vendor')
       // Managed local proofs compile the same wasm-pack output as production
       // into their isolated run directory. Normal developer runs keep the
       // shape-based vendor discovery below, so no generated engine bytes need
       // to be written into or retained by the checkout.
-      const managedPkgDir = process.env.LEAF_CAD_ENGINE_PKG_DIR
-      const pkgDir = managedPkgDir
-        ? path.resolve(managedPkgDir)
-        : existsSync(vendorRoot)
-          ? readdirSync(vendorRoot)
-            .map((name) => path.join(vendorRoot, name, 'pkg-web'))
-            .find((candidate) => existsSync(candidate))
-          : undefined
+      const pkgDir = findEnginePkgDir(HERE)
       server.middlewares.use('/engine', (req, res, next) => {
         if (!pkgDir) { next(); return }
         // The pkg is built with --out-name engine (see the Dockerfile's
@@ -81,6 +74,7 @@ export default defineConfig(({ mode }) => {
   resolve: { dedupe: ['react', 'react-dom', 'zod', 'recharts'] },
   define: {
     __BUILD_HASH__: JSON.stringify(buildHash()),
+    __LEAF_ENGINE_VERSION__: JSON.stringify(engineVersion(findEnginePkgDir(HERE))),
   },
   server: {
     port: 5175,

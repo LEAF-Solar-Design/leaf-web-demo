@@ -6,10 +6,17 @@ import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCens
   SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { observeSolarEditorRequests, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
+import { ENGINE_WASM_ROUTE, observeSolarEditorRequests, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+test('engine wasm route matches versioned and unversioned wasm URLs only', () => {
+  assert.ok(ENGINE_WASM_ROUTE.test('https://h/engine/engine_bg.wasm'))
+  assert.ok(ENGINE_WASM_ROUTE.test('https://h/engine/engine_bg.wasm?v=0123456789abcdef'))
+  assert.ok(!ENGINE_WASM_ROUTE.test('https://h/engine/engine_bg.wasm.map'))
+  assert.ok(!ENGINE_WASM_ROUTE.test('https://h/engine/engine.js?v=0123456789abcdef'))
+})
 
 test('WL16b project Solar recipes import, select, publish and switch in order', () => {
   const entry = map.entries.find((row) => row.id === 'surface:solar')
@@ -820,7 +827,7 @@ test('WASM hold drains concurrent and late continuations before idempotent unrou
   const calls = [0, 0, 0]
   const blocked = new Promise((resolve) => { finish = resolve })
   const page = {
-    route: async (pattern, callback) => { assert.equal(pattern, '**/engine/engine_bg.wasm'); handler = callback },
+    route: async (pattern, callback) => { assert.equal(pattern, ENGINE_WASM_ROUTE); handler = callback },
     unroute: async (pattern, callback) => {
       assert.equal(callback, handler)
       assert.deepEqual(calls, [1, 1, 1])
@@ -1060,7 +1067,7 @@ test('a failing WASM continuation never masks the original assertion and all cle
   const probe = { setup: { steps: [{ kind: 'hold-engine-boot' }] }, assertion: { assertionId: 'unit/oracle' } }
   await assert.rejects(probeRunner(probe, runtime, { step: async (_name, fn) => fn() }, async (_probe, current) => {
     current.cleanup.push(async () => { otherCleanup++ })
-    const cleanup = await holdJobRoutes(page, '**/engine/engine_bg.wasm')
+    const cleanup = await holdJobRoutes(page, ENGINE_WASM_ROUTE)
     current.cleanup.push(cleanup)
     handler({ continue: async () => { continued++; throw new Error('continuation failed') } }).catch(() => {})
     throw original
