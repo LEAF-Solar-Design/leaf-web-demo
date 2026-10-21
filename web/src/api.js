@@ -229,6 +229,14 @@ export function isWorkspaceBootstrapRequired(error) {
 }
 
 // --- Session / intake ---------------------------------------------------
+export async function getSessionIdentity(mock) {
+  conversationMock = mock === true
+  if (mock) return { tenant: null, tier: null, org: null }
+  // Identity proof must be fresh, independently of any selected drawing.
+  const data = await http('/api/session/identity', { cache: 'no-store' }, STARTUP_FETCH_TIMEOUT_MS)
+  return { tenant: data.tenant_id || null, tier: data.tier || null, org: data.org_id || null }
+}
+
 // Returns {intake, tenant}. `tenant` is the resolved tenant id echoed by
 // /api/session when auth is live (deps.tenant_echo adds tenant_id/org_id);
 // null in mock or when auth is off. The UI uses it for the honest tier chip
@@ -249,9 +257,7 @@ export async function getSession(mock, dwg = 'rooftop_demo') {
     track('session.started', { mock: true, catalog_source: catalogSource })
     return { intake, tenant: null, tier: null, org: null }
   }
-  // no-store: this 200 is the sole proof that clears the auth gate, so it
-  // must never be a replay. The server sends no validators today (nothing to
-  // revalidate against), making this insurance rather than a fix.
+  // Always read current intake; account identity is proven separately.
   const data = await http(`/api/session?dwg=${encodeURIComponent(dwg)}`, { cache: 'no-store' }, STARTUP_FETCH_TIMEOUT_MS)
   // P2 funnel top: how many people open the product, and as who.
   track('session.started', {

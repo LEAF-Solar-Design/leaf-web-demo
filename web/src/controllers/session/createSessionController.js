@@ -5,6 +5,7 @@ const initialState = Object.freeze({
   generation: 0,
   session: null,
   recoveries: 0,
+  tokenRevision: 0,
 })
 
 // A 401 latches `required` and nothing re-runs getSession, which is correct for
@@ -33,6 +34,7 @@ export function createSessionController({
   // The token in play when the latest refusal landed. Null when the refusal
   // arrived with no token stored at all, which is exactly the race window.
   let latchedToken = null
+  let observedToken
   const listeners = new Set()
 
   const publish = (next) => {
@@ -132,6 +134,7 @@ export function createSessionController({
       generation: state.generation + 1,
       session: session || null,
       recoveries: state.recoveries,
+      tokenRevision: state.tokenRevision,
     })
     return state
   }
@@ -152,7 +155,21 @@ export function createSessionController({
       )
     }
     if (!unsubscribeTokenStored && subscribeTokenStored) {
-      unsubscribeTokenStored = subscribeTokenStored(() => { recoverWithStoredToken() })
+      observedToken = readToken()
+      unsubscribeTokenStored = subscribeTokenStored(() => {
+        const token = readToken()
+        if (state.status === 'required') {
+          observedToken = token
+          recoverWithStoredToken()
+          return
+        }
+        if (token === observedToken) return
+        observedToken = token
+        // Notify proof owners of a refresh even without a refusal. The
+        // console's identity effect owns checking; other consumers retain
+        // their existing drawing-driven lifecycle.
+        publish({ ...state, tokenRevision: state.tokenRevision + 1 })
+      })
     }
   }
 

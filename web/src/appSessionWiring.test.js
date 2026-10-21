@@ -20,13 +20,79 @@
 // reverse: the exact defect class W2b exists to retire.
 
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { parse } from '@babel/parser'
 
 import esbuild from 'esbuild'
 
 const appSource = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+const tok = `Bearer ${'valid-token'}`
 const landingCss = readFileSync(new URL('./site/landing.css', import.meta.url), 'utf8')
 const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
+
+// Select executable effects by their API call, as appSessionBootstrap does,
+// so a matching comment or a call in the drawing effect cannot satisfy a pin.
+const tree = parse(appSource, { sourceType: 'module', plugins: ['jsx'] })
+function find(root, predicate) {
+  const found = []
+  function walk(node) {
+    if (!node || typeof node.type !== 'string') return
+    if (predicate(node)) found.push(node)
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(walk)
+      else if (value?.type) walk(value)
+    }
+  }
+  walk(root)
+  return found
+}
+function effectCalling(name) {
+  const effects = find(tree, node => node.type === 'CallExpression' && node.callee.name === 'useEffect'
+    && find(node.arguments[0], child => child.type === 'CallExpression' && child.callee.name === name).length > 0)
+  expect(effects, `unique ${name} effect`).toHaveLength(1)
+  return effects[0]
+}
+const proof = effectCalling('getSessionIdentity')
+const drawing = effectCalling('getSession')
+const text = node => appSource.slice(node.start, node.end)
+
+function proofHarness(mock = false, effect = proof) {
+  let resolve, reject
+  const pending = new Promise((yes, no) => { resolve = yes; reject = no })
+  const scope = {}
+  const snapshot = { tokenRevision: 0, recoveries: 0, reason: null, status: 'checking' }
+  const sessionActions = {
+    checking: vi.fn(), activate: vi.fn(() => { snapshot.status = 'active' }), requireAuth: vi.fn(),
+  }
+  const context = {
+    mock, sessionProofScope: scope, sessionProofScopeRef: { current: scope },
+    session: { ...snapshot, controller: { getSnapshot: () => snapshot } }, sessionActions,
+    sessionAuthorization: tok, authHeaders: () => ({ Authorization: tok }),
+    getSessionIdentity: vi.fn(() => pending), setTenant: vi.fn(), setTier: vi.fn(), setOrg: vi.fn(),
+    setSignedIn: vi.fn(), isSignedIn: () => true, adoptOrgId: vi.fn(),
+    setLoadErr: vi.fn(), humanizeError: String, is401: error => error?.status === 401,
+    shouldAutoDemo: () => false, authConfigured: true, setMock: vi.fn(),
+    useMemo: fn => fn(), REQUESTED_DRAWING_ID: 'legacy', DRAWING_SOURCE: 'legacy',
+    requestedDrawingIdRef: { current: 'legacy' }, isScopeCurrent: () => true,
+    hasDrawingSelection: () => true, isEditFixture: false,
+    resetDrawing: vi.fn(), setDrawingLoad: vi.fn(), resetCatalogTransient: vi.fn(),
+    clearToast: vi.fn(), setDrawer: vi.fn(), clearAgentSession: vi.fn(),
+    mockVersions: { reset: vi.fn(), seedBase: vi.fn() }, seatIntake: vi.fn(),
+    getSession: vi.fn(() => pending), getDrawingVersions: vi.fn(async () => ({ head: 1 })),
+    classifyDrawingLoadFailure: () => 'transient',
+  }
+  const shared = find(tree, node => node.type === 'VariableDeclarator' && node.id.name === 'sessionProof')[0]
+  context.sessionProof = Function(...Object.keys(context), `return (${text(shared.init)})`)(...Object.values(context))
+  const run = Function(...Object.keys(context), `return (${text(effect.arguments[0])})`)(...Object.values(context))
+  const cleanup = run()
+  const settle = async (value, refused = false) => {
+    if (refused) reject(value)
+    else resolve(value)
+    await Promise.resolve()
+    await Promise.resolve()
+  }
+  return { context, snapshot, cleanup, settle }
+}
 
 describe('App.jsx session controller adoption', () => {
   it('mounts exactly one session controller', () => {
@@ -51,13 +117,19 @@ describe('App.jsx session controller adoption', () => {
     )
   })
 
-  it('reports a session refusal without claiming the token is bad', () => {
+  it.each([['/api/session/identity', proof], ['/api/session', drawing]])('reports a refusal from %s without claiming the token is bad', async (path, effect) => {
     // createSessionController "WHO MAY DELETE THE TOKEN": only api.js's own 401
     // verdict and an explicit sign-out may wipe leaf.jwt. A `tokenInvalidated:
     // true` here re-opens the 2026-08-08 hole where the surface destroyed a
     // token the transport had deliberately kept.
-    expect(stripped).toMatch(/requireAuth\("\/api\/session"\)/)
+    const h = proofHarness(false, effect)
+    await h.settle({ status: 401 }, true)
+    if (effect === proof) expect(h.context.getSessionIdentity).toHaveBeenCalledExactlyOnceWith(false)
+    else expect(h.context.getSession).toHaveBeenCalledExactlyOnceWith(false, 'legacy')
+    expect(h.context.sessionActions.requireAuth).toHaveBeenCalledExactlyOnceWith(path)
+    expect(h.context.sessionActions.activate).not.toHaveBeenCalled()
     expect(stripped).not.toMatch(/requireAuth\([^)]*tokenInvalidated/)
+    h.cleanup()
   })
 
   it('forwards only the RISING edge of the jobs auth signal', () => {
@@ -69,24 +141,72 @@ describe('App.jsx session controller adoption', () => {
     )
   })
 
-  it('re-runs the session load on the controller bounded recovery', () => {
-    // Without `session.recoveries` in the dep list nothing re-runs getSession
-    // when a token lands after the 401 burst, and the recovery is inert.
-    expect(stripped).toMatch(/sessionActions,\s*session\.recoveries\s*\]/)
+  it('re-runs the identity proof on the controller bounded recovery', () => {
+    // Recovery must invalidate both proof effects and their shared render fence.
+    expect(proof.arguments[1].type).toBe('ArrayExpression')
+    expect(proof.arguments[1].elements.map(text)).toContain('session.recoveries')
+    expect(drawing.arguments[1].elements.map(text)).toContain('session.recoveries')
+    const scopes = find(tree, node => node.type === 'VariableDeclarator' && node.id.name === 'sessionProofScope')
+    expect(scopes).toHaveLength(1)
+    expect(scopes[0].init.arguments[1].elements.map(text)).toContain('session.recoveries')
   })
 
-  it('activates only on a live 200 and never touches the machine in mock', () => {
-    expect(stripped).toMatch(/if \(!mock\) sessionActions\.checking\(\)/)
-    expect(stripped).toMatch(
-      /if \(!mock\) sessionActions\.activate\(\{ tenant: t, tier: ti, org: o \}\)/,
-    )
+  it.each([['identity', proof], ['legacy', drawing]])('activates on a live %s proof and never touches the machine in mock', async (_, effect) => {
+    const identity = { tenant: 'tenant-a', tier: 'hosted_pro', org: 'org-a' }
+    const live = proofHarness(false, effect)
+    expect(live.context.sessionActions.checking).toHaveBeenCalledTimes(effect === proof ? 1 : 0)
+    expect(live.context.sessionActions.activate).not.toHaveBeenCalled()
+    await live.settle(identity)
+    expect(live.context.sessionActions.activate).toHaveBeenCalledExactlyOnceWith(identity)
+    live.cleanup()
+
+    const stale = proofHarness(false, effect)
+    stale.cleanup()
+    await stale.settle(identity)
+    expect(stale.context.sessionActions.activate).not.toHaveBeenCalled()
+
+    const demo = proofHarness(true, effect)
+    expect(demo.context.getSessionIdentity).not.toHaveBeenCalled()
+    await demo.settle(identity)
+    for (const action of Object.values(demo.context.sessionActions)) expect(action).not.toHaveBeenCalled()
+    demo.cleanup()
   })
 
-  it('publishes the session 200 before a secondary versions request can refuse auth', () => {
-    const activation = stripped.indexOf('sessionActions.activate({ tenant: t, tier: ti, org: o })')
-    const versionsRead = stripped.indexOf('await getDrawingVersions(false, REQUESTED_DRAWING_ID)')
-    expect(activation).toBeGreaterThan(-1)
-    expect(versionsRead).toBeGreaterThan(activation)
+  it.each([['identity', proof], ['legacy', drawing]])('fences %s success and refusal across token revisions, recoveries, sign-out and scope changes', async (_, effect) => {
+    for (const fence of ['tokenRevision', 'recoveries', 'signout', 'scope']) {
+      for (const refused of [false, true]) {
+        const h = proofHarness(false, effect)
+        if (fence === 'scope') h.context.sessionProofScopeRef.current = {}
+        else if (fence === 'signout') h.snapshot.reason = 'signed_out'
+        else h.snapshot[fence] += 1
+        await h.settle(refused ? { status: 401 } : { tenant: 'stale' }, refused)
+        expect(h.context.sessionActions.activate).not.toHaveBeenCalled()
+        expect(h.context.sessionActions.requireAuth).not.toHaveBeenCalled()
+        expect(h.context.setLoadErr).not.toHaveBeenCalledWith(expect.any(String))
+        h.cleanup()
+      }
+    }
+  })
+
+  it.each([404, 'network', 'non-json', 'timeout'])('keeps identity failure %s silent', async status => {
+    const h = proofHarness()
+    await h.settle({ status }, true)
+    expect(h.context.setLoadErr).not.toHaveBeenCalled()
+    expect(h.context.sessionActions.requireAuth).not.toHaveBeenCalled()
+    expect(h.context.sessionActions.activate).not.toHaveBeenCalled()
+    h.cleanup()
+  })
+
+  it('proves identity independently of a secondary drawing versions request', () => {
+    expect(proof).not.toBe(drawing)
+    expect(find(proof, node => node.type === 'CallExpression'
+      && ['getSession', 'getDrawingVersions'].includes(node.callee.name))).toHaveLength(0)
+    for (const effect of [proof, drawing]) {
+      expect(find(effect, node => node.type === 'CallExpression'
+        && node.callee.object?.name === 'sessionProof' && node.callee.property.name === 'activate')).toHaveLength(1)
+    }
+    expect(find(drawing, node => node.type === 'CallExpression'
+      && node.callee.name === 'getDrawingVersions')).toHaveLength(1)
   })
 
   it('keeps the auto-demo escape hatch on the same 401 branch', () => {
@@ -156,10 +276,10 @@ describe('App.jsx session controller adoption', () => {
     )
   })
 
-  it('fails when the surface claims deletion authority over the token', () => {
+  it.each(['/api/session/identity', '/api/session'])('fails when the %s surface claims deletion authority over the token', path => {
     const mutated = appSource.replace(
-      "sessionActions.requireAuth('/api/session')",
-      "sessionActions.requireAuth('/api/session', { tokenInvalidated: true })",
+      `sessionActions.requireAuth('${path}')`,
+      `sessionActions.requireAuth('${path}', { tokenInvalidated: true })`,
     )
     expect(mutated).not.toEqual(appSource)
     const mutatedStripped = esbuild.transformSync(mutated, { loader: 'jsx' }).code

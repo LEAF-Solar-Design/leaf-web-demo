@@ -4049,10 +4049,14 @@ describe('Solar rooftop starter', () => {
     const end = appSource.indexOf('  }, [mock, isEditFixture, intakeRetryKey', start)
     assert.ok(start > 0 && end > start)
     const body = appSource.slice(start, end)
+    const proofStart = appSource.indexOf('  const sessionProof = useMemo(')
+    const proofBody = appSource.slice(proofStart, appSource.indexOf('  useEffect(() => {', proofStart))
     for (const result of ['success', 'absent', 'failed']) {
-      const loads = [], seats = [], requests = []
+      const loads = [], seats = [], requests = [], proofs = []
       const requestedDrawingIdRef = { current: 'A' }
       const noop = () => {}
+      const scope = {}
+      const snapshot = { status: 'checking', tokenRevision: 0, recoveries: 0, reason: null }
       const context = {
         REQUESTED_DRAWING_ID: 'A', DRAWING_SOURCE: 'A', requestedDrawingIdRef,
         isScopeCurrent: () => true, hasDrawingSelection,
@@ -4061,11 +4065,16 @@ describe('Solar rooftop starter', () => {
         resetCatalogTransient: noop, clearToast: noop, setDrawer: noop,
         setTenant: noop, setTier: noop, setOrg: noop, clearAgentSession: noop,
         mockVersions: { reset: noop }, seatIntake: (value) => seats.push(value),
-        sessionActions: { checking: noop, activate: noop },
+        sessionActions: { checking: noop, activate: value => { proofs.push(value); snapshot.status = 'active' } },
+        useMemo: fn => fn(), sessionProofScope: scope, sessionProofScopeRef: { current: scope },
+        session: { ...snapshot, controller: { getSnapshot: () => snapshot } },
+        sessionAuthorization: 'Bearer token', authHeaders: () => ({ Authorization: 'Bearer token' }),
+        setSignedIn: noop, isSignedIn: () => true,
         getSession: (_, source) => new Promise((resolve, reject) => requests.push({ source, resolve, reject })),
         getDrawingVersions: async () => ({ head: 1 }), adoptOrgId: noop,
         humanizeError: () => 'failed', is401: () => false,
       }
+      context.sessionProof = new Function(...Object.keys(context), `${proofBody}; return sessionProof`)(...Object.values(context))
       const run = () => new Function(...Object.keys(context), body)(...Object.values(context))
       const cleanA = run()
       requestedDrawingIdRef.current = 'B'
@@ -4077,11 +4086,13 @@ describe('Solar rooftop starter', () => {
       await new Promise((done) => setImmediate(done))
       assert.deepEqual(loads, [{ drawingId: 'A', state: 'pending' }, { drawingId: 'B', state: 'pending' }])
       assert.deepEqual(seats, [])
+      assert.deepEqual(proofs, [])
       assert.deepEqual(requests.map((request) => request.source), ['A', 'B'])
-      requests[1].resolve({ intake: { dwg: 'B' } })
+      requests[1].resolve({ intake: { dwg: 'B' }, tenant: 'tenant-b', tier: 'hosted_pro', org: 'org-b' })
       await new Promise((done) => setImmediate(done))
       assert.deepEqual(loads.at(-1), { drawingId: 'B', state: 'seated' })
       assert.deepEqual(seats, [{ dwg: 'B' }])
+      assert.deepEqual(proofs, [{ tenant: 'tenant-b', tier: 'hosted_pro', org: 'org-b' }])
       cleanA(); cleanB()
     }
   })
@@ -4151,12 +4162,35 @@ describe('W4g S08-a: an explicit demo starts in mock', () => {
     assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && <OperatorEntry />}')))
   })
   it('preserves the live session transitions and the 401 auto-demo hatch', () => {
+    const identityStart = appSource.indexOf('    getSessionIdentity(false)')
+    const drawingStart = appSource.indexOf('// load session (intake + sign-in proof)')
+    assert.ok(identityStart > 0 && drawingStart > identityStart)
+    const proof = appSource.slice(appSource.lastIndexOf('  useEffect(', identityStart), drawingStart)
     for (const literal of [
-      'if (!mock) sessionActions.checking()',
-      'if (!mock) sessionActions.activate({ tenant: t, tier: ti, org: o })',
-      'if (!mock && is401(e)) {',
+      'if (mock) return',
+      'sessionActions.checking()',
+      'sessionProof.activate(identity)',
+      "sessionActions.requireAuth('/api/session/identity')",
+      'if (is401(e)) {',
       'if (shouldAutoDemo({ authRequired: true, authConfigured, mock, signedIn: isSignedIn() })) setMock(true)',
-    ]) assert.ok(appSource.includes(literal), `missing session contract: ${literal}`)
+    ]) assert.ok(proof.includes(literal), `missing session contract: ${literal}`)
+    assert.doesNotMatch(proof, /REQUESTED_DRAWING_ID|DRAWING_SOURCE|getDrawingVersions/)
+    const shared = appSource.slice(appSource.indexOf('  const sessionProof = useMemo('), appSource.lastIndexOf('  useEffect(', identityStart))
+    for (const literal of ['sessionProofScopeRef.current === sessionProofScope',
+      'getSnapshot().tokenRevision === session.tokenRevision',
+      'getSnapshot().recoveries === session.recoveries',
+      "getSnapshot().reason !== 'signed_out'", 'authHeaders().Authorization === sessionAuthorization',
+      'sessionActions.activate({ tenant: t, tier: ti, org: o })']) {
+      assert.ok(shared.includes(literal), `missing shared proof fence: ${literal}`)
+    }
+    assert.ok(proof.indexOf('if (is401(e)) {') < proof.indexOf('setLoadErr(humanizeError(e))'))
+    const drawingEnd = appSource.indexOf('// Auth0 return leg:', drawingStart)
+    const drawing = appSource.slice(drawingStart, drawingEnd)
+    assert.ok(drawing.includes('sessionProof.current(true)'))
+    assert.ok(drawing.includes('sessionProof.activate({ tenant: t, tier: ti, org: o })'))
+    assert.ok(drawing.indexOf('sessionProof.activate(') < drawing.indexOf('await getDrawingVersions('))
+    assert.ok(drawing.includes("sessionActions.requireAuth('/api/session')"))
+    assert.doesNotMatch(drawing, /setTenant|setTier|setOrg/)
   })
 })
 

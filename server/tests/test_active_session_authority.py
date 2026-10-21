@@ -7,7 +7,8 @@ import deps
 import session_store
 import tenancy
 import turn_runner
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from routers import agent, session, sessions
 
@@ -29,12 +30,14 @@ def test_intake_and_conversation_routes_use_active_platform_tenant():
         "/api/sessions/{session_id}/transcript",
     }
     dependencies = {
-        **_route_dependencies(session.router, {"/api/session"}),
+        **_route_dependencies(session.router, {"/api/session", "/api/session/identity"}),
         **_route_dependencies(sessions.router, session_paths),
     }
 
     assert set(dependencies) == {
         ("GET", "/api/session"),
+        ("GET", "/api/session/identity"),
+        ("GET", "/api/sessions"),
         ("POST", "/api/sessions"),
         ("POST", "/api/sessions/{session_id}/messages"),
         ("GET", "/api/sessions/{session_id}/stream"),
@@ -133,3 +136,95 @@ def test_stale_jwt_claim_cannot_split_intake_session_and_turn_tenant(monkeypatch
     assert message.status_code == 202, message.text
     assert captured["turn_tenant"] == "platform-canonical"
     assert captured["turn_session"] == "canonical-session"
+
+
+@pytest.fixture
+def identity_client(monkeypatch):
+    # Reuse the real offline RS256 verifier fixture, not a require_tenant
+    # override: missing, invalid and expired credentials must reach auth.py.
+    from test_auth import _ENV
+
+    for name, value in _ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority",
+        lambda subject: ("platform-canonical", "hosted_pro"),
+    )
+    monkeypatch.setattr(
+        tenancy, "get_store",
+        lambda: SimpleNamespace(resolve_workspace=lambda tenant_id: None),
+    )
+
+    def drawing_access(*args, **kwargs):
+        pytest.fail("identity proof must not access drawings, APS or the broker")
+
+    for name in ("curated_identity", "store_id", "source_id"):
+        monkeypatch.setattr(session.drawing_identity, name, drawing_access)
+    monkeypatch.setattr(session, "_stored_drawing_intake", drawing_access)
+    monkeypatch.setattr(deps, "load_cached_intake", drawing_access)
+    monkeypatch.setattr(session.requests, "post", drawing_access)
+    app = FastAPI()
+    app.include_router(session.router)
+    return TestClient(app)
+
+
+def test_identity_proves_tenant_without_drawing_access(identity_client, monkeypatch):
+    from test_auth import bearer, mint
+
+    # Both APS modes must remain drawing-independent.
+    for aps_live in (False, True):
+        monkeypatch.setattr(deps, "APS_LIVE", aps_live)
+        response = identity_client.get(
+            "/api/session/identity",
+            headers={"Authorization": bearer(mint(tenant_id="platform-canonical"))},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "tenant_id": "platform-canonical",
+            "org_id": "platform-canonical",
+            "tier": "hosted_pro",
+        }
+
+
+@pytest.mark.parametrize("credential", ["missing", "invalid", "expired"])
+def test_identity_requires_valid_token_like_intake(identity_client, credential):
+    from test_auth import bearer, mint
+
+    headers = {} if credential == "missing" else {
+        "Authorization": bearer("invalid" if credential == "invalid" else mint(exp_delta=-30)),
+    }
+    identity = identity_client.get("/api/session/identity", headers=headers)
+    intake = identity_client.get("/api/session", headers=headers)
+    assert identity.status_code == intake.status_code == 401
+    assert identity.json() == intake.json()
+
+
+def test_identity_preserves_active_authority_refusal(identity_client, monkeypatch):
+    from test_auth import bearer, mint
+
+    def refuse(subject):
+        raise HTTPException(403, "verified subject has no active platform tenant authority")
+
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", refuse)
+    headers = {"Authorization": bearer(mint(tenant_id="platform-canonical"))}
+    identity = identity_client.get("/api/session/identity", headers=headers)
+    intake = identity_client.get("/api/session", headers=headers)
+    assert identity.status_code == intake.status_code == 403
+    assert identity.json() == intake.json()
+
+
+def test_identity_preserves_conflicting_tenant_refusal(identity_client):
+    from test_auth import bearer, mint
+
+    headers = {"Authorization": bearer(mint(tenant_id="old-tenant"))}
+    identity = identity_client.get("/api/session/identity", headers=headers)
+    intake = identity_client.get("/api/session", headers=headers)
+    assert identity.status_code == intake.status_code == 409
+    assert identity.json() == intake.json()
+
+
+def test_identity_auth_off_has_no_identity_echo_or_drawing_access(identity_client, monkeypatch):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    response = identity_client.get("/api/session/identity", headers={"X-Tenant-Id": "demo-tenant"})
+    assert response.status_code == 200
+    assert response.json() == {}

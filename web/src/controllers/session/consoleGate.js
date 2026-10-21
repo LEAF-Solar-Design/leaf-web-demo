@@ -18,7 +18,8 @@
  *
  * The controller's `required` status IS this, and it is the ONLY status that
  * means it: `checking` is the pre-answer state (the console renders its normal
- * loading surfaces), and `active` is a proven /api/session 200.
+ * loading surfaces), and `active` is a proven /api/session/identity 200 in
+ * the console, independent of drawing intake.
  */
 export function consoleAuthRequired(status) {
   return status === 'required'

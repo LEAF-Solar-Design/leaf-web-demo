@@ -1,4 +1,4 @@
-"""GET /api/session — Intake JSON (contract section 1)."""
+"""Drawing intake (contract section 1) and drawing-independent identity proof."""
 from __future__ import annotations
 
 import requests
@@ -11,6 +11,12 @@ import drawing_identity
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
+
+
+@router.get("/api/session/identity")
+def session_identity(tenant=Depends(deps.require_active_tenant)):
+    """Prove the active account identity without reading a drawing."""
+    return deps.tenant_echo({}, tenant)
 
 
 def _stored_drawing_intake(tenant: str, drawing_id: str):

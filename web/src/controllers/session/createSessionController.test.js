@@ -257,6 +257,26 @@ describe('transport and controller together', () => {
 // proof that answers AFTER a token-invalidating refusal latched the gate is
 // stale by construction and must not clear it.
 describe('activate guard', () => {
+  it('a refreshed token notifies proof owners without changing other consumers or spending recovery', () => {
+    const { controller: c, storeToken } = harness({ storage: fakeStorage({ 'leaf.jwt': 'old' }) })
+    c.actions.activate({ tenant: 'old-tenant' })
+    storeToken('new')
+    expect(c.getSnapshot()).toMatchObject({ status: 'active', session: { tenant: 'old-tenant' }, tokenRevision: 1, recoveries: 0 })
+    storeToken('new')
+    expect(c.getSnapshot().tokenRevision).toBe(1)
+    c.actions.checking() // the console's identity effect owns this transition
+    c.actions.activate({ tenant: 'new-tenant' })
+    expect(c.getSnapshot()).toMatchObject({ status: 'active', tokenRevision: 1, generation: 2 })
+    c.destroy()
+  })
+
+  it('a token change during checking requests a new proof', () => {
+    const { controller: c, storeToken } = harness()
+    storeToken('fresh')
+    expect(c.getSnapshot()).toMatchObject({ status: 'checking', tokenRevision: 1, recoveries: 0 })
+    c.destroy()
+  })
+
   it('a 200 landing after a 401 latch does not clear the gate', () => {
     const { controller: c } = harness()
     c.actions.checking()

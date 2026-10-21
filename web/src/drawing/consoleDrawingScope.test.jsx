@@ -12,6 +12,8 @@ const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8').replace(/\r\
 const start = source.indexOf('    let alive = true', source.indexOf('// load session (intake'))
 const end = source.indexOf('  }, [mock, isEditFixture, intakeRetryKey', start)
 const body = source.slice(start, end)
+const proofStart = source.indexOf('  const sessionProof = useMemo(')
+const proofBody = source.slice(proofStart, source.indexOf('  useEffect(() => {', proofStart))
 const workspaceEnd = source.indexOf('  } = workspaceController')
 const projectHook = source.slice(workspaceEnd, source.indexOf('  const [projectPane, setProjectPane]', workspaceEnd))
   .split('\n').find((line) => line.includes('useDrawingScopeReset('))
@@ -47,6 +49,8 @@ function mount(projectId = 'p') {
 }
 function loader(overrides = {}) {
   const noop = vi.fn()
+  const scope = {}
+  const snapshot = { status: 'checking', tokenRevision: 0, recoveries: 0, reason: null }
   const context = {
     REQUESTED_DRAWING_ID: identity.drawingId, DRAWING_SOURCE: identity.source,
     requestedDrawingIdRef: { current: identity.drawingId },
@@ -55,12 +59,17 @@ function loader(overrides = {}) {
     setDrawingLoad: vi.fn(), setLoadErr: vi.fn(), resetCatalogTransient: noop,
     clearToast: noop, setDrawer: noop, setTenant: noop, setTier: noop,
     setOrg: noop, clearAgentSession: noop, mockVersions: { reset: noop },
-    seatIntake: vi.fn(), sessionActions: { checking: vi.fn(), activate: vi.fn(), requireAuth: vi.fn() },
+    seatIntake: vi.fn(), sessionActions: { checking: vi.fn(), activate: vi.fn(() => { snapshot.status = 'active' }), requireAuth: vi.fn() },
+    useMemo: fn => fn(), sessionProofScope: scope, sessionProofScopeRef: { current: scope },
+    session: { ...snapshot, controller: { getSnapshot: () => snapshot } },
+    sessionAuthorization: 'Bearer token', authHeaders: () => ({ Authorization: 'Bearer token' }),
+    setSignedIn: noop, isSignedIn: () => true,
     getSession: vi.fn(async () => ({ intake: { dwg: 'u-upload' } })),
     getDrawingVersions: vi.fn(async () => ({ head: 1 })), adoptOrgId: noop,
     humanizeError: String, is401: () => false, classifyDrawingLoadFailure: () => 'transient',
     ...overrides,
   }
+  context.sessionProof = new Function(...Object.keys(context), `${proofBody}; return sessionProof`)(...Object.values(context))
   const run = () => new Function(...Object.keys(context), body)(...Object.values(context))
   return { context, run }
 }
@@ -80,7 +89,10 @@ it('URL307B-11 late boot version summary cannot seat U', async () => {
   const oldCleanup = h.run()
   await Promise.resolve()
   expect(h.context.getDrawingVersions).toHaveBeenCalledExactlyOnceWith(false, 'u-upload')
-  expect(h.context.sessionActions.activate).toHaveBeenCalledOnce()
+  // The legacy 200 proves sign-in before the secondary versions request finishes.
+  expect(h.context.sessionActions.activate).toHaveBeenCalledExactlyOnceWith({ tenant: undefined, tier: undefined, org: undefined })
+  expect(h.context.sessionActions.checking).not.toHaveBeenCalled()
+  expect(h.context.sessionActions.requireAuth).not.toHaveBeenCalled()
   act(() => { identity.reset() })
   assertReset()
   // Settle before oldCleanup; the requested id ref still names the old drawing.
@@ -90,6 +102,8 @@ it('URL307B-11 late boot version summary cannot seat U', async () => {
   await Promise.resolve()
   expect(h.context.seatIntake).not.toHaveBeenCalled()
   expect(h.context.setDrawingLoad).toHaveBeenCalledExactlyOnceWith({ drawingId: 'u-upload', state: 'pending' })
+  expect(h.context.sessionActions.activate).toHaveBeenCalledOnce()
+  expect(h.context.sessionActions.requireAuth).not.toHaveBeenCalled()
   oldCleanup()
 })
 

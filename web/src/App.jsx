@@ -151,7 +151,7 @@ import useExit from './useExit.js'
 import DetailsDrawer from './components/DetailsDrawer.jsx'
 import ShortcutSheet from './components/ShortcutSheet.jsx'
 import {
-  config, getSession, getTools, getCapabilities, runTool, runToolAsync,
+  config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync,
   getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
@@ -583,7 +583,7 @@ export default function App() {
   // surface as NT2 toasts (showToast), never as a persistent amber note.
 
   // --- platform session state ---
-  const [tenant, setTenant] = useState(null)             // /api/session tenant echo (else "demo")
+  const [tenant, setTenant] = useState(null)             // identity tenant echo (else "demo")
   const [tier, setTier] = useState(null)                 // real tier from the session echo (auth-live)
   const [org, setOrg] = useState(null)                   // org_id from the session echo (auth-live)
   // Real entitlements (GET /api/entitlements): drives the write-tool + build gates.
@@ -609,7 +609,7 @@ export default function App() {
   const authRequired = consoleAuthRequired(session.status)
   // NOT the session gate: this mirrors TOKEN PRESENCE (auth.js localStorage),
   // which is a different truth from "the platform session resolved". It is true
-  // at boot before /api/session has answered, and the three surfaces below
+  // at boot before identity has answered, and the three surfaces below
   // (converse mount, Customize entry, CustomizePanel) all want the token, not
   // the session. The controller publishes no token-presence signal, so folding
   // these into `status` would change three truth tables; they stay here.
@@ -1309,13 +1309,69 @@ export default function App() {
     return (layer) => map[layer] || '#9fb3c8'
   }, [intake])
 
-  // load session (intake + tenant echo) + reset transient state on mode/fixture change
+  // Either session route proves sign-in; identity also covers empty workspaces
+  // and canonical project deep links. Share reply fences and publish only the
+  // first proof, so an old token/project cannot publish into a new one.
+  const sessionAuthorization = authHeaders().Authorization
+  const sessionProofScope = useMemo(() => ({}), [mock, orgId, openProjectId,
+    sessionAuthorization, session.tokenRevision, session.recoveries, intakeRetryKey])
+  const sessionProofScopeRef = useRef(sessionProofScope)
+  sessionProofScopeRef.current = sessionProofScope
+  const sessionProof = useMemo(() => {
+    let proven = false
+    // A 401 may arrive after the transport cleared its rejected token. A
+    // different stored token always belongs to a new proof.
+    const current = (allowClearedToken = false) => sessionProofScopeRef.current === sessionProofScope
+      && (mock || (session.controller.getSnapshot().tokenRevision === session.tokenRevision
+        && session.controller.getSnapshot().recoveries === session.recoveries
+        && session.controller.getSnapshot().reason !== 'signed_out'
+        && (authHeaders().Authorization === sessionAuthorization
+          || (allowClearedToken && !authHeaders().Authorization))))
+    const activate = ({ tenant: t, tier: ti, org: o }) => {
+      if (mock || proven || !current()) return
+      sessionActions.activate({ tenant: t, tier: ti, org: o })
+      if (session.controller.getSnapshot().status !== 'active') return
+      proven = true
+      setTenant(t); setTier(ti); setOrg(o)
+      setSignedIn(isSignedIn())
+      if (o) adoptOrgId(o)
+    }
+    return { current, activate }
+  }, [mock, sessionProofScope, sessionAuthorization, session.tokenRevision, session.recoveries,
+      session.controller, sessionActions, adoptOrgId])
+  useEffect(() => {
+    let alive = true
+    const current = () => alive && sessionProof.current(true)
+    setTenant(null); setTier(null); setOrg(null)
+    if (mock) return () => { alive = false }
+    if (session.controller.getSnapshot().reason === 'signed_out') return () => { alive = false }
+    sessionActions.checking()
+    getSessionIdentity(false)
+      .then((identity) => {
+        if (!current()) return
+        sessionProof.activate(identity)
+      })
+      .catch((e) => {
+        if (!current()) return
+        if (is401(e)) {
+          setLoadErr(humanizeError(e))
+          // Only the transport can invalidate a token; this reports the gate.
+          sessionActions.requireAuth('/api/session/identity')
+          if (shouldAutoDemo({ authRequired: true, authConfigured, mock, signedIn: isSignedIn() })) setMock(true)
+        }
+      })
+    return () => { alive = false }
+  }, [mock, sessionProof, session.recoveries,
+      session.controller, sessionActions, intakeRetryKey])
+
+  // load session (intake + sign-in proof) and reset transient state on mode/fixture change
   useEffect(() => {
     let alive = true
     const loadDrawingId = REQUESTED_DRAWING_ID
     const current = () => alive
       && loadDrawingId === requestedDrawingIdRef.current
       && isScopeCurrent()
+      && sessionProof.current(true)
     if (!current()) return undefined
     resetDrawing(); setLoadErr(null)
     if (!hasDrawingSelection({ drawingId: loadDrawingId, source: DRAWING_SOURCE })) {
@@ -1324,8 +1380,7 @@ export default function App() {
     }
     setDrawingLoad({ drawingId: loadDrawingId, state: 'pending' })
     resetCatalogTransient()
-    clearToast(); setDrawer(null); setTenant(null)
-    setTier(null); setOrg(null)
+    clearToast(); setDrawer(null)
     clearAgentSession()
     mockVersions.reset()
     const seat = (d, options = {}) => {
@@ -1340,18 +1395,12 @@ export default function App() {
       seat(editFixture) // synchronous local fixture — no backend
       return () => { alive = false }
     }
-    // The controller is told about the LIVE session only. Mock has no platform
-    // session to check, activate or refuse, and touching the state machine from
-    // the demo would let a mock round trip clear a live latch.
-    if (!mock) sessionActions.checking()
     getSession(mock, DRAWING_SOURCE)
       .then(async ({ intake: d, tenant: t, tier: ti, org: o }) => {
         if (!current()) return
-        // A 200 from /api/session IS the platform session, so publish it before
-        // any secondary request can report a newer auth failure. In particular,
-        // a /versions 401 must remain `required` instead of being overwritten by
-        // a late activation after the await. Live only: a mock 200 proves nothing.
-        if (!mock) sessionActions.activate({ tenant: t, tier: ti, org: o })
+        // Either route proves the same authority, before secondary drawing I/O.
+        sessionProof.activate({ tenant: t, tier: ti, org: o })
+        if (!mock && session.controller.getSnapshot().status === 'required') return
         let drawingSummary = null
         if (!mock) {
           try {
@@ -1362,45 +1411,25 @@ export default function App() {
           }
         }
         if (!current()) return
+        if (!mock && session.controller.getSnapshot().status === 'required') return
         seat(d, {
           drawingId: loadDrawingId,
           ...(drawingSummary ? { drawingState: drawingSummary } : {}),
         })
-        setTenant(t); setTier(ti); setOrg(o)
-        // Live auth resolves workspace identity from the verified subject.
-        // Persist that server-owned org id so an already-bound account never
-        // sees the create-org affordance or attempts a duplicate bootstrap.
-        if (!mock && o) adoptOrgId(o)
       })
       .catch((e) => {
         if (!current()) return
         setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed', failure: classifyDrawingLoadFailure(e) })
         setLoadErr(humanizeError(e))
         if (!mock && is401(e)) {
-          // `tokenInvalidated` stays FALSE on purpose: this is render state
-          // reporting a refusal, never a verdict on the token. api.js already
-          // wiped (and published) any token its own 401 proved bad, and the
-          // controller's subscription latched on that. A refusal that indicts
-          // nothing deletes nothing — see createSessionController.js's
-          // "WHO MAY DELETE THE TOKEN".
           sessionActions.requireAuth('/api/session')
-          // Auto-fallback (B1): a VITE_MOCK=0 build that hits a 401 with Auth0
-          // unconfigured can't sign in — flip to the demo instead of parking on
-          // the gate, so the deployed link lands zero-click. SignedOutGate is
-          // kept only for the authConfigured build (the user CAN sign in there).
           if (shouldAutoDemo({ authRequired: true, authConfigured, mock, signedIn: isSignedIn() })) setMock(true)
         }
       })
     return () => { alive = false }
-    // `session.recoveries` is the bounded re-entry, and the ONLY dep that
-    // changes when localStorage gains a token. The controller re-opens
-    // `checking` at most MAX_TOKEN_RECOVERIES times, and only for a token that
-    // is present and DIFFERENT from the one the refusal latched on; that bump
-    // is what re-runs getSession after a post-callback 401 instead of stranding
-    // this page holding a valid token behind a signed-out surface. Identical
-    // wiring to ToolCast's session effect.
+    // Both proofs share token, recovery and workspace fencing.
   }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
-      sessionActions, session.recoveries])
+      session.recoveries, sessionProof, sessionActions])
 
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
   // finish the exchange + store leaf.jwt, then reload so the fresh loads send
