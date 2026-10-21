@@ -1,0 +1,58 @@
+{
+  "schema": "leaf.studio-beats.v1",
+  "beat_id": "SW1R",
+  "env": "staging",
+  "origin": "https://platform-staging.leafdesign.ai",
+  "requires_signed_in": false,
+  "fixtures": [
+    {
+      "path": "web/public/sample.dxf",
+      "sha256": "a4985dc952b58154fd08c0a885d40e46670c51cd4f432df440a52a92d6ca03f4",
+      "bytes": 448706
+    }
+  ],
+  "steps": [
+    { "verb": "goto", "path": "/try?demo=1" },
+    { "verb": "wait_text", "text": "Step 1 of 9", "timeout_ms": 30000 },
+    { "verb": "pause", "ms": 1000 },
+    { "verb": "click", "role": "button", "name": "Skip" },
+    { "verb": "click", "role": "button", "name": "Open a DXF in the browser engine" },
+    { "verb": "upload", "target": { "text": "DXF file" }, "fixture": "web/public/sample.dxf" },
+    { "verb": "wait_text", "text": "Loaded sample.dxf: 2345 entities.", "timeout_ms": 60000 },
+    { "verb": "scroll_to", "target": { "testid": "properties-dock" } },
+    { "verb": "wait_text", "text": "browser drawing", "timeout_ms": 30000 },
+    { "verb": "assert_text", "text": "Properties" },
+    { "verb": "assert_text", "text": "Source" },
+    { "verb": "assert_text", "text": "browser drawing" },
+    { "verb": "assert_text", "text": "Panels" },
+    { "verb": "assert_text", "text": "Layers" },
+    { "verb": "assert_text", "text": "1" },
+    { "verb": "assert_text", "text": "Entities" },
+    { "verb": "assert_text", "text": "2,345" },
+    { "verb": "assert_text", "text": "Extents X" },
+    { "verb": "assert_text", "text": "13940.33 … 21108.48" },
+    { "verb": "assert_text", "text": "Extents Y" },
+    { "verb": "assert_text", "text": "1125.41 … 4856.63" },
+    { "verb": "pause", "ms": 1000 },
+    { "verb": "click", "role": "button", "name": "Open a DXF in the browser engine" },
+    { "verb": "pause", "ms": 400 },
+    { "verb": "click", "role": "button", "name": "Close the properties pane" },
+    { "verb": "click", "role": "button", "name": "Collapse the notification inbox" },
+    { "verb": "click", "role": "button", "name": "Fit drawing to view" },
+    { "verb": "pause", "ms": 1000 }
+  ],
+  "expect_text": [
+    "Properties",
+    "Source",
+    "browser drawing",
+    "Panels",
+    "Layers",
+    "1",
+    "Entities",
+    "2,345",
+    "Extents X",
+    "13940.33 … 21108.48",
+    "Extents Y",
+    "1125.41 … 4856.63"
+  ]
+}
