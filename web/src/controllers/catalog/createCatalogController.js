@@ -192,12 +192,27 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
   const subscribeProject = () => {
     if (unsubscribeProject || !services.projectSolarClient) return
-    let previous = services.projectSolarClient.getSnapshot()
-    unsubscribeProject = services.projectSolarClient.subscribe(() => {
-      const next = services.projectSolarClient.getSnapshot()
-      if (projectScope() && (next.leaseRevision !== previous.leaseRevision ||
-          next.binding !== previous.binding || next.authorityKey !== previous.authorityKey)) invalidateProject()
+    const projectClient = services.projectSolarClient
+    let previous = projectClient.getSnapshot()
+    unsubscribeProject = projectClient.subscribe(() => {
+      const next = projectClient.getSnapshot()
+      const prior = previous
+      // Advance before publishing: an invalidation subscriber can re-enter the client.
       previous = next
+      if (projectScope() && (next.leaseRevision !== prior.leaseRevision ||
+          next.binding !== prior.binding || next.authorityKey !== prior.authorityKey)) {
+        const recover = started && projectClient === services.projectSolarClient &&
+          next.leaseRevision !== prior.leaseRevision &&
+          sameSolarDrawingBinding(next.binding, prior.binding) && next.authorityKey === prior.authorityKey &&
+          sameSolarDrawingBinding(next.binding, current.solarBinding) && next.authorityKey === current.authorityKey
+        const request = catalogRequest
+        const fingerprint = projectFingerprint()
+        invalidateProject()
+        // Old receipts remain stale. Only a fresh request can authorize the new lease.
+        // A subscriber may already have loaded, changed scope, or destroyed us.
+        if (recover && started && catalogRequest === request + 1 &&
+            projectClient === services.projectSolarClient && fingerprint === projectFingerprint()) void loadCatalog()
+      }
     })
   }
   subscribeProject()

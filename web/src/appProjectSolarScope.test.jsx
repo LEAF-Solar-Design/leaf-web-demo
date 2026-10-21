@@ -754,10 +754,22 @@ describe('App project Solar scope ownership', () => {
     const leaseResponse = deferred()
     run.services.getCapabilities.mockImplementationOnce(() => leaseResponse.promise)
     act(() => { pending = hook.result.current.catalogActions.loadCatalog() })
+    const capabilitiesBeforeRotation = run.services.getCapabilities.mock.calls.length
     await act(async () => { await run.clients[0].acquireCheckout({ holder: 'fixture holder' }) })
     expect(next.isCurrent()).toBe(false)
     await act(async () => { leaseResponse.resolve(catalogData('obsolete-lease')); expect(await pending).toBeUndefined() })
-    expect(hook.result.current.catalogState.projectCatalog).toBeNull()
+    await act(async () => {})
+    const recovered = hook.result.current.catalogState.projectCatalog
+    expect(recovered).not.toBe(next)
+    expect(recovered.client).toBe(run.clients[0])
+    expect(recovered.binding).toEqual(next.binding)
+    expect(recovered.authorityKey).toBe(next.authorityKey)
+    expect(recovered.families).toBe(hook.result.current.catalogState.catalog.families)
+    expect(recovered.families[0].family_id).toBe('original')
+    expect(recovered.families.some((family) => family.family_id === 'obsolete-lease')).toBe(false)
+    expect(recovered.isCurrent()).toBe(true)
+    expect(Object.isFrozen(recovered)).toBe(true)
+    expect(run.services.getCapabilities).toHaveBeenCalledTimes(capabilitiesBeforeRotation + 1)
     await act(async () => { await hook.result.current.catalogActions.loadCatalog() })
     const current = hook.result.current.catalogState.projectCatalog
     expect(current.client).toBe(run.clients[0])
