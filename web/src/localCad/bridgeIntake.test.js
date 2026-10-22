@@ -47,3 +47,30 @@ it('skips malformed geometry and returns an empty, usable intake', () => {
     circles: [{ c: [0, 0], r: -1 }], arcs: [{ c: [0, 0], r: 1 }], inserts: [{ pt: [] }] })
   expect(mapped.points).toBe(0)
 })
+
+it('skips null and malformed rows and continues to later valid geometry and text', () => {
+  const mapped = bridgeToIntake({ lines: [null, { pts: 'ab' }, { pts: {} },
+    { pts: [[0, 0], [1, 1]], handle: 'valid' }],
+  texts: [null, {}, { text: 'bad', pt: [0, 0] }, { text: 'PV', pt: [0, 0], height: 1, handle: 'text' }],
+  polylines: [null], circles: [null], arcs: [null], inserts: [null] })
+  expect(mapped.polylines.some(row => row.handle === 'valid')).toBe(true)
+  expect(mapped.polylines.some(row => row.handle === 'text')).toBe(true)
+  expect(mapped.truncated).toBe(false)
+})
+
+it('caps long text at 256 characters before expansion', () => {
+  const text = { text: 'W'.repeat(100000), pt: [0, 0], height: 1 }
+  const mapped = bridgeToIntake({ texts: [text] })
+  const capped = bridgeToIntake({ texts: [{ ...text, text: 'W'.repeat(256) }] })
+  expect(mapped.polylines).toEqual(capped.polylines)
+  expect(mapped.points).toBe(capped.points)
+  expect(mapped.truncated).toBe(true)
+})
+
+it('reserves the remaining text budget without allocating a whole over-budget label', () => {
+  const mapped = bridgeToIntake({ polylines: [{ pts: Array.from({ length: 199980 }, (_, i) => [i, 0]) }],
+    texts: [{ text: 'B'.repeat(256), pt: [0, 0], height: 1 }] })
+  expect(mapped.points).toBeLessThanOrEqual(200000)
+  expect(mapped.polylines.reduce((n, row) => n + row.pts.length, 0)).toBe(mapped.points)
+  expect(mapped.truncated).toBe(true)
+})

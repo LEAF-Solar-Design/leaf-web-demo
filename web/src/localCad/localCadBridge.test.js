@@ -23,7 +23,7 @@ describe('local bridge polling', () => {
       'http://127.0.0.1:8125/api/live/intake?since=0&epoch=',
       'http://127.0.0.1:8126/api/live/intake?since=0&epoch=',
     ])
-    expect(fetchImpl.mock.calls[1][1]).toEqual({ method: 'GET', cache: 'no-store' })
+    expect(fetchImpl.mock.calls[1][1]).toEqual({ method: 'GET', cache: 'no-store', signal: expect.any(AbortSignal) })
     expect(onUpdate.mock.calls[0][0]).toMatchObject({ rev: 7, epoch: 'boot-a', drawing: 'site.dwg',
       summary: 'LEAFGENERATE added 108 objects', intake: { source: 'bridge', documentId: 'autocad:site.dwg' } })
     await vi.advanceTimersByTimeAsync(400)
@@ -97,5 +97,67 @@ describe('local bridge polling', () => {
     await vi.advanceTimersByTimeAsync(20_000)
     expect(fetchImpl).toHaveBeenCalledTimes(2)
     expect(bridge.snapshot()).toMatchObject({ running: false, status: 'stopped' })
+  })
+
+  it('aborts an in-flight request on stop, including its deadline', async () => {
+    const fetchImpl = vi.fn(() => new Promise(() => {}))
+    const bridge = createLocalCadBridge({ fetchImpl })
+    bridge.start()
+    const signal = fetchImpl.mock.calls[0][1].signal
+    expect(signal.aborted).toBe(false)
+    bridge.stop(); await flush()
+    expect(signal.aborted).toBe(true)
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('times out even a fetch that ignores abort and polls again after backoff', async () => {
+    const fetchImpl = vi.fn().mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValue(response(payload()))
+    const bridge = createLocalCadBridge({ fetchImpl })
+    bridge.start()
+    await vi.advanceTimersByTimeAsync(3999)
+    expect(bridge.snapshot().status).toBe('connecting')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true)
+    expect(bridge.snapshot()).toMatchObject({ status: 'unreachable', error: 'Bridge request timed out' })
+    await vi.advanceTimersByTimeAsync(800)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(bridge.snapshot().status).toBe('connected')
+    bridge.stop()
+  })
+
+  it('reports conversion exceptions without changing status or losing the next poll', async () => {
+    const badIntake = { get drawing() { throw new Error('cannot convert') } }
+    const fetchImpl = vi.fn().mockResolvedValueOnce(response(payload({ intake: badIntake })))
+      .mockResolvedValue(response(payload()))
+    const onStatus = vi.fn(), onUpdate = vi.fn()
+    const bridge = createLocalCadBridge({ fetchImpl, onStatus, onUpdate })
+    bridge.start(); await flush()
+    expect(onStatus.mock.calls.at(-1)[0]).toMatchObject({ status: 'connecting', error: 'cannot convert' })
+    expect(onUpdate).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(onUpdate).toHaveBeenCalledTimes(1)
+    bridge.stop()
+  })
+
+  it('rejects malformed payloads and ignores lower revisions until the epoch changes', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(response({ rev: 1, epoch: 'boot-a' }))
+      .mockResolvedValueOnce(response(payload()))
+      .mockResolvedValueOnce(response(payload({ rev: 6, drawing: 'stale.dwg' })))
+      .mockResolvedValue(response(payload({ rev: 1, epoch: 'boot-b' })))
+    const onUpdate = vi.fn()
+    const bridge = createLocalCadBridge({ fetchImpl, onUpdate })
+    bridge.start(); await flush()
+    expect(bridge.snapshot().status).toBe('unreachable')
+    await vi.advanceTimersByTimeAsync(800)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(onUpdate).toHaveBeenCalledTimes(1)
+    expect(bridge.snapshot()).toMatchObject({ rev: 7, drawing: 'site.dwg' })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(onUpdate).toHaveBeenCalledTimes(2)
+    expect(bridge.snapshot()).toMatchObject({ rev: 1, epoch: 'boot-b' })
+    bridge.stop()
   })
 })
