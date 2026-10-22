@@ -174,6 +174,7 @@ class ProjectHeartbeat:
         self._stop = stop_event if stop_event is not None else threading.Event()
         self._started = threading.Event()
         self._reported: set[tuple[str, type[Exception]]] = set()
+        self.still_running_after_close = False
         self._thread = threading.Thread(
             target=self._beat, name="canonical-project-heartbeat", daemon=True)
 
@@ -182,15 +183,23 @@ class ProjectHeartbeat:
         self._started.wait()
 
     def close(self) -> None:
+        # Stop new heartbeat calls; one in-flight call may outlive the bounded join.
         self._stop.set()
         self._thread.join(timeout=self._interval + 1.0)
+        self.still_running_after_close = self._thread.is_alive()
+        if self.still_running_after_close:
+            print("canonical worker: project heartbeat thread still finishing one in-flight call at shutdown",
+                  file=sys.stderr)
 
     def _beat(self) -> None:
         while not self._stop.is_set():
             for descriptor in self._descriptors:
                 tool = descriptor["tool_name"]
                 try:
-                    platform_link._canonical_jobs_module().record_worker_heartbeat(
+                    canonical_jobs = platform_link._canonical_jobs_module()
+                    if self._stop.is_set():
+                        return
+                    canonical_jobs.record_worker_heartbeat(
                         self._owner, tool, descriptor["runtime"],
                         descriptor["source_revision"], descriptor["source_sha256"])
                 except Exception as exc:  # noqa: BLE001 - isolate optional project tools

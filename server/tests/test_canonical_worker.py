@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 from threading import Event
+from time import monotonic
 from types import SimpleNamespace
 
 import pytest
@@ -405,6 +406,68 @@ def test_worker_project_heartbeat_interval(monkeypatch, interval):
     assert not heartbeat._thread.is_alive()
     assert waits == [5.0 if interval is None else interval] * 3
     assert beats == [("w1", *descriptor.values()) for _ in range(3) for descriptor in descriptors]
+
+
+def test_project_heartbeat_close_during_in_flight_call(monkeypatch, capsys):
+    entered, released, stop = Event(), Event(), Event()
+    beats, join_timeouts = [], []
+    tools = ("solar-settings", "solar-feeders")
+
+    def record(owner, tool, *args):
+        beats.append(tool)
+        if tool == tools[0]:
+            entered.set()
+            assert released.wait(timeout=10)
+
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=record))
+    heartbeat = canonical_worker.ProjectHeartbeat("w1", tuple(
+        {**_graph_descriptor(), "tool_name": tool} for tool in tools),
+        interval=0.01, stop_event=stop)
+    real_join = heartbeat._thread.join
+
+    def join(timeout):
+        join_timeouts.append(timeout)
+        real_join(timeout=timeout)
+
+    monkeypatch.setattr(heartbeat._thread, "join", join)
+    # start() waits for the first round, so start the thread directly to block that round.
+    heartbeat._thread.start()
+    try:
+        assert entered.wait(timeout=1)
+        started = monotonic()
+        heartbeat.close()
+        assert monotonic() - started < heartbeat._interval + 2.0
+        assert join_timeouts == [heartbeat._interval + 1.0]
+        assert stop.is_set()
+        assert heartbeat.still_running_after_close is True
+        assert heartbeat._thread.is_alive()
+        assert capsys.readouterr().err == (
+            "canonical worker: project heartbeat thread still finishing one in-flight call at shutdown\n")
+    finally:
+        stop.set()
+        released.set()
+        real_join(timeout=1)
+    assert not heartbeat._thread.is_alive()
+    assert beats == [tools[0]]
+    assert capsys.readouterr().err == ""
+
+
+def test_project_heartbeat_normal_close(monkeypatch, capsys):
+    beats = []
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=lambda *args: beats.append(args)))
+    descriptors = tuple({**_graph_descriptor(), "tool_name": tool}
+                        for tool in ("solar-settings", "solar-feeders"))
+    heartbeat = canonical_worker.ProjectHeartbeat("w1", descriptors, stop_event=Event())
+    try:
+        heartbeat.start()
+    finally:
+        heartbeat.close()
+    assert heartbeat.still_running_after_close is False
+    assert not heartbeat._thread.is_alive()
+    assert beats == [("w1", *descriptor.values()) for descriptor in descriptors]
+    assert capsys.readouterr().err == ""
 
 
 def test_worker_project_idle_sleep(monkeypatch):
