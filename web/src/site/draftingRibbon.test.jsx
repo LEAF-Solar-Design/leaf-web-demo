@@ -411,6 +411,85 @@ describe('DraftingRibbon', () => {
     expect(document.querySelector('.workspace-card')).toBeNull()
   })
 
+  describe('measured document band bottom', () => {
+    const width = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    const height = Object.getOwnPropertyDescriptor(window, 'innerHeight')
+
+    afterEach(() => {
+      cleanup()
+      vi.restoreAllMocks()
+      vi.unstubAllGlobals()
+      Object.defineProperty(window, 'innerWidth', width)
+      Object.defineProperty(window, 'innerHeight', height)
+    })
+
+    const renderBand = (viewportWidth, initialBottom) => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: viewportWidth })
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 })
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+        callback(0)
+        return 1
+      })
+      let bottom = initialBottom
+      const originalRect = HTMLElement.prototype.getBoundingClientRect
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        return this.classList.contains('viewer-toolbar')
+          ? { ...originalRect.call(this), bottom }
+          : originalRect.call(this)
+      })
+      const view = render(
+        <div className="studio-shell">
+          <div className="app">
+            <div className="workspace-card">
+              <div className="viewer-toolbar" />
+              <DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {} })} />
+            </div>
+          </div>
+        </div>,
+      )
+      return {
+        ...view,
+        shell: view.container.querySelector('.studio-shell'),
+        toolbar: view.container.querySelector('.viewer-toolbar'),
+        setBottom: value => { bottom = value },
+      }
+    }
+
+    it('floors the desktop band bottom and removes it on unmount', () => {
+      const { shell, unmount } = renderBand(1280, 288.7)
+      expect(shell.style.getPropertyValue('--cockpit-band-bottom')).toBe('288px')
+      unmount()
+      expect(shell.style.getPropertyValue('--cockpit-band-bottom')).toBe('')
+    })
+
+    it('keeps the narrow stack measurement without a desktop band bottom', () => {
+      const { shell } = renderBand(800, 288.7)
+      expect(shell.style.getPropertyValue('--cockpit-band-bottom')).toBe('')
+      expect(shell.style.getPropertyValue('--cockpit-stack-top')).toBe('288.7px')
+    })
+
+    it('republishes when a sibling inserted above the band pushes it down', async () => {
+      const observe = vi.fn()
+      const unobserve = vi.fn()
+      vi.stubGlobal('ResizeObserver', class {
+        observe = observe
+        unobserve = unobserve
+        disconnect = vi.fn()
+      })
+      const { shell, toolbar, setBottom } = renderBand(1280, 155)
+      expect(shell.style.getPropertyValue('--cockpit-band-bottom')).toBe('155px')
+      setBottom(260)
+      const sibling = document.createElement('div')
+      toolbar.parentElement.prepend(sibling)
+      await Promise.resolve()
+      expect(shell.style.getPropertyValue('--cockpit-band-bottom')).toBe('260px')
+      expect(observe).toHaveBeenCalledWith(sibling)
+      sibling.remove()
+      await Promise.resolve()
+      expect(unobserve).toHaveBeenCalledWith(sibling)
+    })
+  })
+
   it('a pressed toggle carries aria-pressed and an expander carries aria-expanded + aria-controls', () => {
     render(
       <DraftingRibbon clusters={[{
