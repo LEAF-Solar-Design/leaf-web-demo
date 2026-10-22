@@ -182,6 +182,31 @@ This driver does not provision secrets, run migrations, deploy images, enable
 authored execution, or promote production. Those actions need their own
 reviewed workflows and receipts.
 
+## Candidate evidence and served evidence
+
+Candidate evidence proves the candidate answers with the expected source before
+the route flip. The production activation adapter in leaf-automation-aws-terraform,
+`.codebuild/deploy/native-production-activation.py`, probes through the ALB rule
+matching `X-Leaf-Deploy-Verify: web-candidate` before routes move. Its receipt's
+`probes` record `candidate_header: true`, HTTP status, and `source_matches`.
+`http_verified` is true only when every required host, pass, and header/path
+combination returns 200 with the expected source. A skipped, unresolvable host
+leaves `http_verified` false even if activation otherwise succeeds; a skip is
+not HTTP proof. G3 activation `g3b-1384bc25` is the first full candidate example.
+
+Served evidence proves the currently served production build passes read-only
+checks after the route flip. The tools are
+`web/e2e/prod/unified-prod-readonly.spec.mjs` and
+`web/e2e/prod/open-project-prod-readonly.spec.mjs`, with the twelve-test inventory
+in `web/e2e/prod/prodInventory.mjs`. Their `prod-readonly-v1` receipt requires
+`status: passed`, `code: PROD_OK`, and twelve `tests` rows with `id`, `started: 1`,
+and `status: passed`; `denials` records guard denials, with no nonzero counts on
+success. Served app/web SHAs and the expected SHA are reported as annotations.
+The first served example is `su-a4` on served `1384bc25`, 12 of 12 on 2026-10-22.
+
+A release needs both: candidate evidence before promotion and served evidence
+after promotion. Served proof never substitutes for the candidate probes.
+
 The receipt marks these items as `external_evidence.status = required` because
 the browser driver cannot prove them honestly: time-expired approval rejection,
 service restart persistence, canonical worker lease ownership, CloudWatch logs
