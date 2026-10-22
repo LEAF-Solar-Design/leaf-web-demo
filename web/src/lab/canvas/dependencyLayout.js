@@ -1,13 +1,12 @@
-import ELK from 'elkjs/lib/elk.bundled.js'
-
-const browserEngineLoader = () => {
+const browserEngineLoader = async () => {
   if (import.meta.env?.MODE === 'test') throw new Error('Inject a layout engine under Vitest')
+  const { default: ELK } = await import('elkjs/lib/elk.bundled.js')
   return new ELK()
 }
 let layoutEngineLoader = browserEngineLoader
 
-// Tests also mock the ELK module boundary, so its GWT bundle is never loaded.
-// Keep the browser import in the existing lazy canvas chunk and its stem cap.
+// The guard precedes even the import: injecting an engine never evaluates ELK.
+// The bundle gate includes the lazy engine chunk in the canvas's existing cap.
 export function setLayoutEngineLoader(loader = browserEngineLoader) {
   layoutEngineLoader = loader
 }
@@ -30,25 +29,36 @@ export function createDependencyLayoutRunner(createElk = layoutEngineLoader) {
     if (!active) return
     const job = active
     active = null
-    releaseWorker(job.elk)
+    if (job.elk) releaseWorker(job.elk)
     job.reject(new DOMException('Layout cancelled', 'AbortError'))
   }
   return {
     cancel,
     run(document, dimensions = {}) {
       cancel()
-      const elk = createElk()
       return new Promise((resolve, reject) => {
-        const job = { elk, reject }
+        const job = { elk: null, reject }
         active = job
         const finish = (settle, value) => {
           if (active !== job) return
           active = null
-          releaseWorker(elk)
+          if (job.elk) releaseWorker(job.elk)
           settle(value)
         }
-        layoutWithElk(document, dimensions, elk).then(
-          result => finish(resolve, result), error => finish(reject, error))
+        const loaded = elk => {
+          // Imports cannot be aborted, but an engine arriving after cancellation
+          // must be released without starting another layout.
+          if (active !== job) { releaseWorker(elk); return }
+          job.elk = elk
+          layoutWithElk(document, dimensions, elk).then(
+            result => finish(resolve, result), error => finish(reject, error))
+        }
+        try {
+          const engine = createElk()
+          if (typeof engine?.then === 'function') {
+            Promise.resolve(engine).then(loaded).catch(error => finish(reject, error))
+          } else loaded(engine)
+        } catch (error) { finish(reject, error) }
       })
     },
   }

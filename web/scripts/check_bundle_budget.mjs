@@ -23,10 +23,11 @@ const BASELINE_PATH = join(ROOT, 'scripts', 'bundle-baseline.json')
 // "vendor-viewer" into "vendor"; panel W0) nor last-dash (Rollup hashes may
 // CONTAIN dashes, so the split lands mid-hash) is stable: strip the
 // fixed-width trailing "-<8 hash chars>" instead.
-const stem = (name) => {
+export const stem = (name) => {
   const dot = name.lastIndexOf('.')
   return name.slice(0, dot).replace(/-[A-Za-z0-9_-]{8}$/, '') + name.slice(dot)
 }
+const isCanvasStem = name => /^(LabCanvas|elk[^/]*|xyflow[^/]*)\.(js|css)$/.test(name)
 
 export function beforeReference(args, mergeBase) {
   const index = args.indexOf('--before')
@@ -59,14 +60,20 @@ export function isolatedChunks(previous, before, after) {
 
 export function stemFailures(chunks, baseline) {
   const failures = []
+  // Older baselines include ELK inside LabCanvas.js. Until an explicit reseed
+  // caps the new lazy stem separately, enforce that same combined byte ceiling.
+  const sharedElkCap = Object.hasOwn(baseline.stem_caps || {}, 'LabCanvas.js') &&
+    !Object.hasOwn(baseline.stem_caps || {}, 'elk.bundled.js')
   for (const key of new Set([...(baseline.required_stems || []), ...Object.keys(baseline.stem_caps || {})])) {
     if (!Object.hasOwn(chunks, key)) failures.push(`required dependency stem ${key} missing from the production build`)
   }
   for (const [key, cap] of Object.entries(baseline.stem_caps || {})) {
-    if (!Number.isSafeInteger(cap) || cap < 0 || chunks[key] > cap) failures.push(`${key} ${chunks[key]} > hard stem cap ${cap}`)
+    const size = chunks[key] + (key === 'LabCanvas.js' && sharedElkCap ? (chunks['elk.bundled.js'] || 0) : 0)
+    if (!Number.isSafeInteger(cap) || cap < 0 || size > cap) failures.push(`${key} ${size} > hard stem cap ${cap}`)
   }
   for (const key of Object.keys(chunks)) {
-    if (/^(LabCanvas|elk[^.]*|xyflow[^.]*)\.(js|css)$/.test(key) && !Object.hasOwn(baseline.stem_caps || {}, key)) {
+    if (isCanvasStem(key) && !Object.hasOwn(baseline.stem_caps || {}, key) &&
+      !(key === 'elk.bundled.js' && sharedElkCap)) {
       failures.push(`canvas stem ${key} has no hard cap`)
     }
   }
@@ -111,7 +118,7 @@ if (process.argv.includes('--write-baseline')) {
   const before = await measure(true)
   const after = await measure(false)
   const { chunks, deltas, required_stems } = isolatedChunks(previous, before, after)
-  const canvas = Object.entries(after.chunks).filter(([name]) => /^(LabCanvas|elk[^.]*|xyflow[^.]*)\.(js|css)$/.test(name))
+  const canvas = Object.entries(after.chunks).filter(([name]) => isCanvasStem(name))
   if (!['LabCanvas.js', 'LabCanvas.css'].every(name => Object.hasOwn(after.chunks, name))) {
     throw new Error(`Lazy LabCanvas.js or LabCanvas.css chunk missing; wire LabWorkbench into the production app before reseeding. Observed before ${before.total}, after ${after.total} gzip bytes.`)
   }

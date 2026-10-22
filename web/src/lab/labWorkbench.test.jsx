@@ -8,11 +8,22 @@ import WidgetsView from './widgets/WidgetsView.jsx'
 import glossary from './contract/sources/leaf-glossary.v1.json'
 import { setLayoutEngineLoader } from './canvas/dependencyLayout.js'
 
-// Do not resolve or evaluate the multi-megabyte ELK implementation in jsdom.
 // The shell proves the lazy mount; one Node gate proves real ELK.
-vi.mock('elkjs/lib/elk.bundled.js', () => ({ default: class {
-  constructor() { throw new Error('Real ELK is forbidden under Vitest') }
-} }))
+const elkImport = vi.hoisted(() => vi.fn())
+vi.mock('elkjs/lib/elk.bundled.js', () => {
+  elkImport()
+  throw new Error('Real ELK is forbidden under Vitest')
+})
+// Shell tests have no geometry. Keep React Flow's resize/zoom animation work
+// out of jsdom rather than mounting it with an inert ResizeObserver.
+vi.mock('@xyflow/react', () => ({
+  ReactFlowProvider: ({ children }) => children,
+  useReactFlow: () => ({ screenToFlowPosition: point => point, getNodes: () => [], fitView: () => {} }),
+  ReactFlow: ({ children }) => <div>{children}</div>,
+  Background: () => null, Controls: () => null, Handle: () => null,
+  Position: { Top: 'top', Bottom: 'bottom' }, BaseEdge: () => null,
+  EdgeLabelRenderer: ({ children }) => children, getBezierPath: () => ['', 0, 0],
+}))
 const fakeEngine = {
   pending: new Set(),
   pendingCount() { return this.pending.size },
@@ -34,13 +45,13 @@ const fakeEngine = {
 
 beforeEach(() => {
   setLayoutEngineLoader(fakeEngine.load)
-  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
 })
 
 afterEach(async () => {
   cleanup()
   await act(async () => {})
   expect(fakeEngine.pendingCount()).toBe(0)
+  expect(elkImport).not.toHaveBeenCalled()
   setLayoutEngineLoader()
   vi.unstubAllGlobals()
 })
@@ -74,8 +85,9 @@ describe('LabWorkbench', () => {
     expect(within(screen.getByRole('navigation', { name: 'Lab views' })).getAllByRole('link')).toHaveLength(5)
   }, 20000)
 
-  it('retains every view DOM instance through navigation, dormancy and hiding', () => {
+  it('retains every view DOM instance through navigation, dormancy and hiding', async () => {
     const { container, rerender } = render(<LabWorkbench route={route('graph')} status={on} />)
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     const panels = [...container.querySelectorAll('[data-lab-view]')]
     expect(panels).toHaveLength(5)
     const editor = container.querySelector('.widgets-view')
@@ -122,6 +134,7 @@ describe('LabWorkbench', () => {
     vi.stubGlobal('fetch', fetchImpl)
     const { rerender } = render(<LabWorkbench route={route('graph')} />)
     await waitFor(() => expect(screen.getByRole('navigation', { name: 'Lab views' })).toBeVisible())
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     rerender(<LabWorkbench route={route('history')} hidden />)
     expect(fetchImpl).toHaveBeenCalledTimes(1)
     expect(fetchImpl.mock.calls[0][0]).toMatch(/\/api\/lab\/status$/)

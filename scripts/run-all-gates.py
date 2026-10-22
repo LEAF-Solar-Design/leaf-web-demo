@@ -5049,6 +5049,7 @@ _SERIAL_SUITE_REASONS = {
         "server-operator-stage-release",
     ), "shared PostgreSQL schema"),
     "server-sessions-e2e": "rebuilds shared harness/dist with npm",
+    "web-elk-rank": "node --test shares web/node_modules and build outputs in its cwd",
     "web-demo-gate": "nested runner rebuilds web/dist and may unpack node_modules",
     "studio-walk-regressions": "nested stack boots services and rebuilds shared production bundle",
     "harness-container-smoke": "fixed compose project and container ports 8130/8150",

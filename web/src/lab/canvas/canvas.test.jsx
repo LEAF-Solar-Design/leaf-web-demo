@@ -12,11 +12,12 @@ import { addBlock, connectPipe, emptyGraph } from './graphDoc.js'
 import { dependencyLayout, dependencyRanks } from './dependencyLayout.js'
 import * as layout from './dependencyLayout.js'
 
-// Intercept the import before Vitest touches the GWT bundle. Engines are injected
-// below; the real package runs only in scripts/elk_rank.test.mjs under Node.
-vi.mock('elkjs/lib/elk.bundled.js', () => ({ default: class {
-  constructor() { throw new Error('Real ELK is forbidden under Vitest') }
-} }))
+// Detect even an attempted import, not just construction of the real engine.
+const elkImport = vi.hoisted(() => vi.fn())
+vi.mock('elkjs/lib/elk.bundled.js', () => {
+  elkImport()
+  throw new Error('Real ELK is forbidden under Vitest')
+})
 
 // Exercise our UI and callbacks independently of browser geometry.
 vi.mock('@xyflow/react', () => ({
@@ -44,6 +45,7 @@ afterEach(async () => {
   cleanup()
   await act(async () => {})
   expect(fakeEngine.pendingCount()).toBe(0)
+  expect(elkImport).not.toHaveBeenCalled()
   layout.setLayoutEngineLoader()
   vi.unstubAllGlobals()
 })
@@ -207,6 +209,14 @@ describe('canvas authoring', () => {
     expect(screen.getByText(/Value not measured/)).toBeVisible()
     const { container } = render(<Measurement measurement={{ value: 3, count: 1, p50_us: 5, p99_us: 11 }} budget={{ p50: 5, p99: 10 }} />)
     expect(container.querySelector('[data-budget-state="over-budget"]')).toBeInTheDocument()
+  })
+
+  it.each(['pure', 'write'])('renders the manifest effect %s on the card', effect => {
+    const entry = { ...manifest, effect }
+    render(<LabCanvas initialDocument={addBlock(emptyGraph(), entry)} entries={entriesOf(entry)} />)
+    const card = within(screen.getByRole('article', { name: entry.title }))
+    expect(card.getByLabelText(`Effect: ${effect}`)).toHaveTextContent(effect)
+    expect(card.getByText('Strategies')).toHaveClass('lab-lane-chip')
   })
 
   it('keeps missing required settings local until the inspector supplies valid values', () => {
@@ -404,6 +414,42 @@ describe('canvas authoring', () => {
 })
 
 describe('layout runner cancellation', () => {
+  it('rejects the default loader under Vitest before importing ELK', async () => {
+    layout.setLayoutEngineLoader()
+    await expect(dependencyLayout(documentOf(1))).rejects.toThrow('Inject a layout engine under Vitest')
+    expect(elkImport).not.toHaveBeenCalled()
+  })
+
+  it('releases an engine loaded after cancellation without starting layout', async () => {
+    const loading = deferred()
+    const engine = { layout: vi.fn(), terminateWorker: vi.fn() }
+    const runner = layout.createDependencyLayoutRunner(() => loading.promise)
+    const result = runner.run(documentOf(1))
+    const rejection = expect(result).rejects.toMatchObject({ name: 'AbortError' })
+    runner.cancel()
+    await rejection
+    loading.resolve(engine)
+    await loading.promise
+    expect(engine.layout).not.toHaveBeenCalled()
+    expect(engine.terminateWorker).toHaveBeenCalledTimes(1)
+    runner.cancel()
+    expect(engine.terminateWorker).toHaveBeenCalledTimes(1)
+  })
+
+  it('handles a cancelled loader rejecting after a newer layout completes', async () => {
+    const loading = deferred()
+    const runner = layout.createDependencyLayoutRunner(vi.fn()
+      .mockReturnValueOnce(loading.promise).mockImplementationOnce(fakeEngine.load))
+    const result = runner.run(documentOf(1))
+    const rejection = expect(result).rejects.toMatchObject({ name: 'AbortError' })
+    const newer = runner.run(documentOf(1))
+    await rejection
+    await expect(newer).resolves.toEqual({ 'adjust-none-1': { x: 30, y: 30 } })
+    loading.reject(new Error('Old import failed'))
+    await expect(loading.promise).rejects.toThrow('Old import failed')
+    runner.cancel()
+  })
+
   it('releases bundled workers without terminate on completion and cancellation', async () => {
     const pending = deferred()
     const completedWorker = { onmessage: vi.fn() }

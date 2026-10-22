@@ -1,6 +1,22 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { beforeReference, isolatedChunks, stemFailures } from './check_bundle_budget.mjs'
+import { beforeReference, isolatedChunks, stem, stemFailures } from './check_bundle_budget.mjs'
+
+test('the lazy ELK chunk is charged to the full canvas dependency cap', () => {
+  const chunks = {}
+  for (const [name, bytes] of [['LabCanvas-Abc_1234.js', 40], ['elk.bundled-aB_-1234.js', 61]]) {
+    const key = stem(name)
+    chunks[key] = (chunks[key] || 0) + bytes
+  }
+  assert.deepEqual(chunks, { 'LabCanvas.js': 40, 'elk.bundled.js': 61 })
+  assert.match(stemFailures(chunks, { stem_caps: { 'LabCanvas.js': 100 } }).join('\n'), /hard stem cap/)
+  assert.deepEqual(stemFailures(chunks, { stem_caps: { 'LabCanvas.js': 101 } }), [])
+  assert.match(stemFailures({ 'elk.bundled.js': 61 }, { stem_caps: { 'LabCanvas.js': 101 } }).join('\n'), /LabCanvas.js missing/)
+  assert.match(stemFailures(chunks, { stem_caps: { 'LabCanvas.js': 40, 'elk.bundled.js': 60 } }).join('\n'), /elk.bundled.js.*hard stem cap/)
+  assert.match(stemFailures({ 'elk.bundled.js': 61 }, { stem_caps: {} }).join('\n'), /no hard cap/)
+  assert.equal(stem('LabCanvas-Abc_1234.css'), 'LabCanvas.css')
+  assert.equal(stem('vendor-react-Abc_1234.js'), 'vendor-react.js')
+})
 
 test('before overlay uses the merge-base or an explicit ref, with no HEAD fallback', () => {
   assert.equal(beforeReference([], 'merge-base-sha'), 'merge-base-sha')
