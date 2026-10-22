@@ -1,4 +1,4 @@
-"""Managed project proof, records A and B: runtime and isolated authority.
+"""Managed project proof, records A through C: preparation and execution evidence.
 
 There is intentionally no CLI or success-receipt path. Later records implement
 the lifecycle against these seams. Importing this module performs no host work.
@@ -80,6 +80,14 @@ class FailureCode(str, Enum):
     SCHEMA = "SCHEMA"
     IDENTITY = "IDENTITY"
     BINDING = "BINDING"
+    LAUNCH = "LAUNCH"
+    OWNERSHIP = "OWNERSHIP"
+    READINESS = "READINESS"
+    HEARTBEAT = "HEARTBEAT"
+    AUTH = "AUTH"
+    BROWSER_EXIT = "BROWSER_EXIT"
+    BROWSER_EVIDENCE = "BROWSER_EVIDENCE"
+    CANONICAL = "CANONICAL"
 
 
 @dataclass(frozen=True)
@@ -156,10 +164,17 @@ class WorkerDescriptor:
     source_manifest: tuple[str, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class CanonicalRequest:
     purpose: str = "descriptor"
     tool_name: str = WORKER_TOOL
+    environment: Mapping[str, str] = field(default_factory=dict, repr=False)
+    evidence: CanonicalEvidence | None = None
+    deadline: float = 0.0
+    worker_id: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
 
 
 @dataclass(frozen=True, repr=False)
@@ -258,10 +273,12 @@ class ResourceKind(str, Enum):
     MIGRATION_PROCESS = "migration_process"
     SEED_PROCESS = "seed_process"
     IDENTITY = "identity"
+    STACK_PROCESS = "stack_process"
+    BROWSER_PROCESS = "browser_process"
 
 
 class RunScope(Protocol):
-    """D supplies lifetime management; A/B synchronously register acquisitions."""
+    """D supplies lifetime management; A/B/C synchronously register acquisitions."""
     def acquire(self, name: ResourceKind, cleanup: Callable[[], None]) -> None: ...
     def close(self) -> Any: ...
 
@@ -319,6 +336,10 @@ class Host(Protocol):
     def cleanup_authority(self, run_id: str) -> Any: ...
     def close_identity(self, lease: IdentityLease) -> None: ...
     def read_child_result(self, path: Path) -> Any: ...
+    def read_stack_ready(self, path: Path) -> Any: ...
+    def app_readiness(self, request: ReadyRequest) -> Any: ...
+    def worker_heartbeat(self, request: ReadyRequest) -> Any: ...
+    def organization_read(self, request: ReadyRequest, *, authenticated: bool) -> Any: ...
 
 
 class ReceiptWriter(Protocol):
@@ -329,15 +350,15 @@ class ReceiptWriter(Protocol):
 
 @dataclass(frozen=True, repr=False)
 class Effects:
-    # Later request/result types belong to B/C/D/E, without changing these seams.
+    # D/E add lifetime management and receipts without replacing these seams.
     authority_factory: Callable[[str], Any]
     issuer_factory: Callable[[str], Any]
     migration_runner: Callable[..., Any]
     seed_operation: Callable[..., Any]
     process_launcher: Callable[..., OwnedProcess]
-    readiness_probe: Callable[[Any], Any]
-    browser_runner: Callable[..., Any]
-    canonical_reader: Callable[[CanonicalRequest], WorkerDescriptor]
+    readiness_probe: Callable[[ReadyRequest], ReadyProof]
+    browser_runner: Callable[..., OwnedBrowser] | None
+    canonical_reader: Callable[[CanonicalRequest], WorkerDescriptor | CanonicalProof]
     clock: Clock
     host: Host
     receipt_writer: ReceiptWriter
@@ -722,6 +743,7 @@ class PreparedAuthority:
     database: DatabaseProof
     identity: IdentityProof
     binding: BindingProof
+    plan: Plan | None = field(default=None, repr=False)
 
 
 def _manifest_hash(files):
@@ -956,11 +978,583 @@ def prepare_authority(plan: Plan, *, effects: Effects, scope: RunScope) -> Prepa
             _manifest_hash(plan.migrations), migration, allocated - start, relayed - allocated, migrated - relayed)
         identity = IdentityProof(issuer.thumbprint, issuer.issuer, issuer.audience, binding.organization_id,
                                  binding.binding_id, binding.subject, binding.tier)
-        return PreparedAuthority(authority, dsn, lease, database, identity, binding)
+        return PreparedAuthority(authority, dsn, lease, database, identity, binding, plan)
     except ProofRefused:
         raise
     except Exception:
         _refuse(code, stage)
+
+
+STACK_TIMEOUT_S = 120.0
+BROWSER_TIMEOUT_S = 300.0
+HEARTBEAT_MAX_AGE_S = 30.0
+STACK_ROLES = ("broker", "worker", "harness", "app", "web")
+APP_DEPENDENCIES = ("broker", "harness", "database", "worker", "durable_stores", "build")
+CHECKPOINTS = ("ui_project_created", "ui_dxf_imported", "bearer_present",
+    "actor_header_absent", "bearerless_read_refused", "bearerless_mutation_refused",
+    "bearerless_no_mutation", "ui_checkout_acquired", "settings_submitted",
+    "worker_published", "settings_readback", "settings_reopened")
+
+
+@dataclass(frozen=True, repr=False)
+class ReadyRequest:
+    plan: Plan
+    launcher: OwnedProcess = field(repr=False)
+    environment: Mapping[str, str] = field(repr=False)
+    organization_id: str
+    binding_id: str
+    public_key_thumbprint: str
+    bearer: _SecretToken = field(repr=False)
+    deadline: float
+    expected_identities: tuple[ProcessIdentity, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
+
+    @property
+    def worker_id(self):
+        return "project:" + self.plan.config.run_id
+
+
+@dataclass(frozen=True)
+class HeartbeatProof:
+    worker_id: str
+    tool_name: str
+    runtime: str
+    source_revision: str
+    source_sha256: str
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
+class AppReadiness:
+    source_revision: str
+    dependencies: tuple[tuple[str, str, bool], ...]
+
+
+@dataclass(frozen=True)
+class ReadyProof:
+    owned_process_identities: tuple[ProcessIdentity, ...]
+    source_revision: str
+    app_readiness: AppReadiness
+    heartbeat: HeartbeatProof
+    authenticated_org: bool
+    bearerless_refused: bool
+
+
+@dataclass(frozen=True)
+class CanonicalEvidence:
+    organization_id: str
+    project_id: str
+    drawing_id: str
+    input_version_id: str
+    output_version_id: str
+    job_id: str
+    binding_id: str
+    worker_id: str
+    checkout_fence: int
+    before_settings_sha256: str
+    settings_sha256: str
+    reopened_settings_sha256: str
+
+
+@dataclass(frozen=True)
+class CanonicalProof:
+    evidence: CanonicalEvidence
+    stored_settings_sha256: str
+    reopened_settings_sha256: str
+
+
+@dataclass(frozen=True, repr=False)
+class BrowserRequest:
+    run_id: str
+    source_binding: SourceProof
+    public_key_thumbprint: str
+    organization_id: str
+    binding_id: str
+    worker_id: str
+    web_origin: str
+    app_origin: str
+    required_test_ids: tuple[str, ...]
+    environment: Mapping[str, str] = field(repr=False)
+    output_root: Path
+    deadline: float
+
+    def __post_init__(self):
+        object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
+
+
+@dataclass(frozen=True)
+class TestOutcome:
+    test_id: str
+    status: str
+    retry: int
+
+
+@dataclass(frozen=True)
+class BrowserResult:
+    run_id: str
+    source_binding: SourceProof
+    public_key_thumbprint: str
+    exit_code: int
+    selected_test_ids: tuple[str, ...]
+    started_test_ids: tuple[str, ...]
+    completed_test_ids: tuple[str, ...]
+    outcomes: tuple[TestOutcome, ...]
+    annotation_types: tuple[str, ...]
+    checkpoints: Mapping[str, bool]
+    canonical: CanonicalEvidence
+
+    def __post_init__(self):
+        object.__setattr__(self, "checkpoints", MappingProxyType(dict(self.checkpoints)))
+
+
+class OwnedBrowser(Protocol):
+    process: OwnedProcess
+    def poll(self) -> BrowserResult | None: ...
+    def stop(self, deadline: float) -> bool: ...
+
+
+@dataclass(frozen=True)
+class ExecutionProof:
+    stack: ReadyProof
+    worker_identity: str
+    initial_heartbeat: HeartbeatProof
+    final_heartbeat: HeartbeatProof
+    playwright: BrowserResult
+    canonical: CanonicalProof
+    stack_seconds: float
+    browser_seconds: float
+    observed_rows: tuple[str, ...] = ("P01", "P04", "P08", "P09", "P11")
+
+
+def _remaining(deadline, effects, code, stage):
+    remaining = deadline - effects.clock.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0:
+        _refuse(code, stage)
+    return remaining
+
+
+def _owned_stack(request, effects):
+    launcher = request.launcher
+    if launcher.poll() is not None:
+        _refuse(FailureCode.LAUNCH, Stage.STACK)
+    raw = effects.host.read_stack_ready(request.plan.config.run_root / "stack-ready.json")
+    if raw is None:
+        return None
+    if (type(raw) is not dict or set(raw) != {"launcher_pid", "pids", "ports"}
+            or type(raw["pids"]) is not dict or set(raw["pids"]) != set(STACK_ROLES)
+            or raw["ports"] != dict(zip(("web", "app", "broker", "harness"), request.plan.config.ports.values()))):
+        _refuse(FailureCode.LAUNCH, Stage.STACK)
+    if (type(raw["launcher_pid"]) is not int or raw["launcher_pid"] != launcher.identity.pid
+            or launcher.identity.role != "stack-launcher"):
+        _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+    if (any(type(pid) is not int or pid <= 0 for pid in raw["pids"].values())
+            or len(set(raw["pids"].values())) != len(STACK_ROLES)):
+        _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+    try:
+        children = launcher.children(raw["pids"])
+    except Exception:
+        _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+    identities = (launcher.identity, *sorted(children, key=lambda item: item.role))
+    if (len(children) != len(STACK_ROLES) or {c.role for c in children} != set(STACK_ROLES)
+            or any(c.pid != raw["pids"][c.role] or not c.start_id
+                   or c.parent_pid != launcher.identity.pid for c in children)
+            or (request.expected_identities and identities != request.expected_identities)):
+        _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+    return identities
+
+
+def _heartbeat(request, effects):
+    try:
+        raw = effects.host.worker_heartbeat(request)
+        if raw is None:
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        if type(raw) is not HeartbeatProof:
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        if raw.worker_id != request.worker_id:
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        descriptor = request.plan.descriptor
+        if (raw.tool_name, raw.runtime, raw.source_revision, raw.source_sha256) != (
+                descriptor.tool, descriptor.runtime, descriptor.source_revision, descriptor.source_sha256):
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        age = (effects.clock.utc_now() - raw.observed_at).total_seconds()
+        if not math.isfinite(age) or not 0 <= age <= HEARTBEAT_MAX_AGE_S:
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        return raw
+    except ProofRefused:
+        _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+    except Exception:
+        _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+
+
+def check_readiness(request: ReadyRequest, *, effects: Effects) -> ReadyProof:
+    """Validate OS custody, exact authority heartbeat and both auth controls."""
+    code, stage = FailureCode.LAUNCH, Stage.STACK
+    try:
+        while True:
+            _remaining(request.deadline, effects, code, stage)
+            identities = _owned_stack(request, effects)
+            if identities is not None:
+                break
+            effects.clock.wait(min(0.1, _remaining(request.deadline, effects, code, stage)))
+        code, stage = FailureCode.READINESS, Stage.READINESS
+        app = effects.host.app_readiness(request)
+        if (type(app) is not AppReadiness or len(app.dependencies) != len(APP_DEPENDENCIES)
+                or {item[0] for item in app.dependencies} != set(APP_DEPENDENCIES)
+                or any(state != "ready" or type(required) is not bool for _, state, required in app.dependencies)):
+            _refuse(FailureCode.READINESS, Stage.READINESS)
+        if app.source_revision != request.plan.source.commit:
+            _refuse(FailureCode.READINESS, Stage.READINESS)
+        heartbeat = _heartbeat(request, effects)
+        code = FailureCode.AUTH
+        auth = effects.host.organization_read(request, authenticated=True)
+        if auth != (200, request.organization_id, TIER, "active"):
+            _refuse(FailureCode.AUTH, Stage.READINESS)
+        denied = effects.host.organization_read(request, authenticated=False)
+        if type(denied) is not int or denied not in (401, 403):
+            _refuse(FailureCode.AUTH, Stage.READINESS)
+        _remaining(request.deadline, effects, FailureCode.READINESS, Stage.READINESS)
+        if _owned_stack(request, effects) != identities:
+            _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+        return ReadyProof(identities, app.source_revision, app, heartbeat, True, True)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(code, stage)
+
+
+def _validate_browser(result, request):
+    if type(result) is not BrowserResult:
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    if type(result.exit_code) is not int or result.exit_code != 0:
+        _refuse(FailureCode.BROWSER_EXIT, Stage.BROWSER)
+    ids = REQUIRED_TEST_IDS
+    if (request.required_test_ids != ids or result.run_id != request.run_id
+            or result.source_binding != request.source_binding
+            or result.public_key_thumbprint != request.public_key_thumbprint
+            or any(type(values) is not tuple or len(values) != len(ids) or set(values) != set(ids)
+                   for values in (result.selected_test_ids, result.started_test_ids, result.completed_test_ids))
+            or len(result.outcomes) != len(ids) or {o.test_id for o in result.outcomes} != set(ids)
+            or any(type(o) is not TestOutcome or o.status != "passed" or type(o.retry) is not int
+                   or o.retry != 0 for o in result.outcomes) or result.annotation_types):
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    if set(result.checkpoints) != set(CHECKPOINTS) or any(v is not True for v in result.checkpoints.values()):
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    evidence = result.canonical
+    if (type(evidence) is not CanonicalEvidence
+            or evidence.organization_id != request.organization_id or evidence.binding_id != request.binding_id
+            or evidence.worker_id != request.worker_id or type(evidence.checkout_fence) is not int
+            or not 1 <= evidence.checkout_fence <= 9223372036854775807
+            or evidence.input_version_id == evidence.output_version_id
+            or any(type(value) is not str or re.fullmatch(r"[A-Za-z0-9:|_-]{1,128}", value) is None
+                   for value in (evidence.organization_id, evidence.project_id, evidence.drawing_id,
+                       evidence.input_version_id, evidence.output_version_id, evidence.job_id,
+                       evidence.binding_id, evidence.worker_id))
+            or any(not _hash_ok(value) for value in (evidence.before_settings_sha256,
+                evidence.settings_sha256, evidence.reopened_settings_sha256))
+            or evidence.before_settings_sha256 == evidence.settings_sha256
+            or evidence.settings_sha256 != evidence.reopened_settings_sha256):
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    return result
+
+
+def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope: RunScope) -> ExecutionProof:
+    """Return execution evidence only; D/E still own teardown and success publication."""
+    code, stage = FailureCode.LAUNCH, Stage.STACK
+    try:
+        plan = prepared.plan
+        if plan is None or plan.reservation is None or plan.required_test_ids != REQUIRED_TEST_IDS:
+            _refuse(FailureCode.LAUNCH, Stage.STACK)
+        if effects.browser_runner is None or effects.browser_runner is _browser_unavailable:
+            _refuse(FailureCode.BROWSER_UNAVAILABLE, Stage.BROWSER)
+        env = project_environment(plan, os_env=plan.host.environment, dsn=prepared.dsn,
+            profile_env=prepared.identity_lease.profile, organization_id=prepared.binding.organization_id)
+        start = effects.clock.monotonic()
+        deadline = start + STACK_TIMEOUT_S
+        root, ports = plan.config.run_root, plan.config.ports
+        argv = (sys.executable, "-B", str(REPO / "scripts/start-leaf.py"), "--strict-ports",
+            "--with-harness", "--canonical-worker-tool", WORKER_TOOL,
+            "--canonical-worker-id", "project:" + plan.config.run_id,
+            "--ready-file", str(root / "stack-ready.json"),
+            "--web-port", str(ports.web), "--app-port", str(ports.app),
+            "--broker-port", str(ports.broker), "--harness-port", str(ports.harness))
+        plan.reservation.release_ports()
+        launcher = effects.process_launcher(ProcessSpec("stack-launcher", argv, REPO, env, deadline), scope=scope)
+        bearer = prepared.identity_lease.mint(now=int(effects.clock.utc_now().timestamp()), lifetime_s=180)
+        request = ReadyRequest(plan, launcher, env, prepared.binding.organization_id,
+            prepared.binding.binding_id, prepared.identity.public_key_thumbprint, bearer, deadline)
+        ready = effects.readiness_probe(request)
+        if type(ready) is not ReadyProof or not ready.authenticated_org or not ready.bearerless_refused:
+            _refuse(FailureCode.READINESS, Stage.READINESS)
+        _remaining(deadline, effects, FailureCode.READINESS, Stage.READINESS)
+        stack_ready = effects.clock.monotonic()
+        code, stage = FailureCode.BROWSER_EXIT, Stage.BROWSER
+        browser_deadline = stack_ready + BROWSER_TIMEOUT_S
+        # This distinct late mint is never added to the shared stack environment.
+        token = prepared.identity_lease.mint(now=int(effects.clock.utc_now().timestamp()), lifetime_s=360)
+        browser_env = _PrivateEnvironment(_essential_environment(plan.host.environment))
+        browser_env.update({"LEAF_E2E_TOKEN": token.reveal(), "LEAF_E2E_MANAGED": "1",
+            "LEAF_PROOF_PROJECT_RUN_ID": plan.config.run_id})
+        browser_request = BrowserRequest(plan.config.run_id, plan.source, prepared.identity.public_key_thumbprint,
+            prepared.binding.organization_id, prepared.binding.binding_id, request.worker_id,
+            f"http://127.0.0.1:{ports.web}", f"http://127.0.0.1:{ports.app}", REQUIRED_TEST_IDS,
+            browser_env, plan.config.artifact_root, browser_deadline)
+        request = replace(request, deadline=browser_deadline, expected_identities=ready.owned_process_identities)
+        browser = effects.browser_runner(browser_request, scope=scope)
+        while True:
+            _remaining(browser_deadline, effects, FailureCode.BROWSER_EXIT, Stage.BROWSER)
+            if _owned_stack(request, effects) != ready.owned_process_identities:
+                _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+            final_heartbeat = _heartbeat(request, effects)
+            result = browser.poll()
+            exit_code = browser.process.poll()
+            if exit_code is not None and (type(exit_code) is not int or exit_code != 0):
+                _refuse(FailureCode.BROWSER_EXIT, Stage.BROWSER)
+            if result is not None:
+                if exit_code != 0:
+                    _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+                code = FailureCode.BROWSER_EVIDENCE
+                result = _validate_browser(result, browser_request)
+                break
+            if exit_code is not None:
+                _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+            effects.clock.wait(min(0.1, _remaining(browser_deadline, effects, code, stage)))
+        _remaining(browser_deadline, effects, code, stage)
+        code, stage = FailureCode.CANONICAL, Stage.VERIFICATION
+        canonical = effects.canonical_reader(CanonicalRequest("execution", WORKER_TOOL, env,
+            result.canonical, browser_deadline))
+        if type(canonical) is not CanonicalProof or canonical.evidence != result.canonical:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        if (canonical.stored_settings_sha256 != result.canonical.settings_sha256
+                or canonical.reopened_settings_sha256 != result.canonical.reopened_settings_sha256):
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        _remaining(browser_deadline, effects, code, stage)
+        if _owned_stack(request, effects) != ready.owned_process_identities:
+            _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+        final_heartbeat = _heartbeat(request, effects)
+        return ExecutionProof(ready, request.worker_id, ready.heartbeat, final_heartbeat,
+            result, canonical, stack_ready - start, effects.clock.monotonic() - stack_ready)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(code, stage)
+
+
+def _process_child(owner, role, pid):
+    """Observe live OS identities; a JSON PID alone never establishes custody."""
+    if os.name != "nt":
+        parts = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if parts[0] in {"Z", "X"} or int(parts[1]) != owner.identity.pid or int(parts[3]) != owner.identity.pid:
+            raise RuntimeError("child custody unavailable")
+        return ProcessIdentity(role, pid, parts[19], int(parts[1]))
+    import ctypes
+    from ctypes import wintypes
+    kernel = owner.job.kernel
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    handle = kernel.OpenProcess(0x1000 | 0x0400, False, pid)
+    if not handle:
+        raise RuntimeError("child identity unavailable")
+    try:
+        class Basic(ctypes.Structure):
+            _fields_ = [("reserved1", ctypes.c_void_p), ("peb", ctypes.c_void_p),
+                ("reserved2", ctypes.c_void_p * 2), ("pid", ctypes.c_size_t), ("parent", ctypes.c_size_t)]
+        query = ctypes.WinDLL("ntdll").NtQueryInformationProcess
+        query.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p]
+        query.restype = ctypes.c_long
+        basic, member, status = Basic(), wintypes.BOOL(), wintypes.DWORD()
+        times = [ctypes.c_uint64() for _ in range(4)]
+        if (query(handle, 0, ctypes.byref(basic), ctypes.sizeof(basic), None) != 0
+                or basic.pid != pid or basic.parent != owner.identity.pid
+                or not kernel.IsProcessInJob(handle, owner.job.handle, ctypes.byref(member)) or not member.value
+                or not kernel.GetExitCodeProcess(handle, ctypes.byref(status)) or status.value != 259
+                or not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times))):
+            raise RuntimeError("child custody unavailable")
+        return ProcessIdentity(role, pid, str(times[0].value), basic.parent)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _project_http(request, path, *, bearer=None):
+    import http.client
+    remaining = request.deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("readiness deadline")
+    connection = http.client.HTTPConnection("127.0.0.1", request.plan.config.ports.app,
+                                           timeout=min(2.0, remaining))
+    transport, timer = None, None
+    def interrupt_read():
+        try:
+            if transport is not None:
+                transport.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    # A peer that trickles headers/body must not extend the absolute deadline.
+    try:
+        connection.connect()
+        transport = connection.sock
+        remaining = request.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("readiness deadline")
+        transport.settimeout(min(2.0, remaining))
+        timer = threading.Timer(min(2.0, remaining), interrupt_read)
+        timer.daemon = True
+        timer.start()
+        headers = {} if bearer is None else {"Authorization": "Bearer " + bearer.reveal()}
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        raw = response.read(65537)
+        if len(raw) > 65536 or time.monotonic() >= request.deadline:
+            raise ValueError("readiness response bound")
+        return response.status, json.loads(raw)
+    finally:
+        if timer is not None:
+            timer.cancel()
+        connection.close()
+
+
+def _project_connection(environment, deadline):
+    # Explicit connection authority; no pool and no mutation of parent environment.
+    dsn = _nonempty_dsn(environment)
+    if _clean_libpq(os.environ) != dict(os.environ):
+        raise RuntimeError("database child environment mismatch")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("database deadline")
+    import psycopg
+    from psycopg.rows import dict_row
+    return psycopg.connect(dsn, row_factory=dict_row, connect_timeout=max(1, math.ceil(min(2, remaining))),
+        options=f"-c statement_timeout={max(1, int(min(2, remaining) * 1000))} -c default_transaction_read_only=on")
+
+
+def _settings_hash(context, *, digest):
+    settings = context.graph["settings"] if context.graph is not None else None
+    return digest(settings)
+
+
+def _canonical_database_proof(request, *, graph, connection):
+    """Verify stored job and historical publication via the canonical verifier."""
+    from uuid import UUID
+    evidence = request.evidence
+    with connection(request.environment, request.deadline) as conn:
+        job = conn.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL",
+                           (evidence.job_id,)).fetchone()
+        if (job is None or job["status"] != "succeeded" or job["tool_name"] != WORKER_TOOL
+                or str(job["org_id"]) != evidence.organization_id
+                or str(job["project_id"]) != evidence.project_id
+                or job["request_tenant_id"] != evidence.organization_id
+                or str(job["input_version_id"]) != evidence.input_version_id
+                or str(job["output_version_id"]) != evidence.output_version_id
+                or (job.get("provenance") or {}).get("worker_id") != evidence.worker_id):
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        commit = job["result"]["graph_commit"]
+        expected = {key: commit[key] for key in ("schema", "attempt", "tool", "tool_manifest_sha256",
+            "parameters", "parent_intake_sha256", "before_graph_sha256", "graph_project_id", "initialized")}
+        expected.update(organization_id=evidence.organization_id, project_id=evidence.project_id,
+            drawing_id=evidence.drawing_id, parent_version_id=evidence.input_version_id,
+            actor_binding_id=evidence.binding_id, checkout_fence=str(evidence.checkout_fence), job_id=evidence.job_id)
+        proof = graph.project_graph_job_provenance(UUID(evidence.job_id), commit, expected=expected, conn=conn)
+        if proof["output_version_id"] != evidence.output_version_id:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        before, _ = graph._stored_context(expected, UUID(evidence.input_version_id), conn)
+        stored, _ = graph._stored_context(expected, UUID(evidence.output_version_id), conn)
+        if _settings_hash(before, digest=graph.local.digest) != evidence.before_settings_sha256:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        stored_hash = _settings_hash(stored, digest=graph.local.digest)
+    # Reopen on an independent connection after releasing the first read transaction.
+    with connection(request.environment, request.deadline) as conn:
+        reopened, _ = graph._stored_context(expected, UUID(evidence.output_version_id), conn)
+        reopened_hash = _settings_hash(reopened, digest=graph.local.digest)
+    return CanonicalProof(evidence, stored_hash, reopened_hash)
+
+
+def _canonical_child_entry():
+    # Fresh interpreter: server imports may read the scrubbed, run-local environment.
+    db = None
+    try:
+        environment = _PrivateEnvironment(_clean_libpq(os.environ))
+        _nonempty_dsn(environment)
+        raw = json.loads(environment.pop("LEAF_PROJECT_CANONICAL_REQUEST"))
+        evidence = None if raw["evidence"] is None else CanonicalEvidence(**raw["evidence"])
+        request = CanonicalRequest(raw["purpose"], WORKER_TOOL, environment, evidence, raw["deadline"], raw["worker_id"])
+        with open(os.devnull, "w") as sink, redirect_stdout(sink):
+            if request.purpose == "heartbeat":
+                with _project_connection(environment, request.deadline) as conn:
+                    row = conn.execute("SELECT worker_id, tool_name, runtime, source_revision, source_sha256, observed_at "
+                        "FROM canonical_worker_heartbeats WHERE worker_id = %s", (request.worker_id,)).fetchone()
+                    public = None if row is None else {"worker_id": row["worker_id"], "tool_name": row["tool_name"],
+                        "runtime": row["runtime"], "source_revision": row["source_revision"],
+                        "source_sha256": row["source_sha256"], "observed_at": row["observed_at"].isoformat()}
+            elif request.purpose == "execution":
+                db = _Host.database_module(environment)
+                sys.path.insert(0, str(REPO / "server"))
+                try:
+                    graph = importlib.import_module("solar_project_graph")
+                    proof = _canonical_database_proof(request, graph=graph, connection=_project_connection)
+                    public = {"stored_settings_sha256": proof.stored_settings_sha256,
+                              "reopened_settings_sha256": proof.reopened_settings_sha256}
+                finally:
+                    sys.path.remove(str(REPO / "server"))
+                    db.reset_pool()
+                    db = None
+            else:
+                return 1
+        print(json.dumps(public))
+        return 0
+    except Exception:
+        return 1
+    finally:
+        if db is not None:
+            with open(os.devnull, "w") as sink, redirect_stdout(sink):
+                db.reset_pool()
+
+
+def _canonical_execution(request):
+    _nonempty_dsn(request.environment)
+    if (request.purpose not in {"execution", "heartbeat"}
+            or (request.purpose == "execution" and type(request.evidence) is not CanonicalEvidence)):
+        _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+    environment = _PrivateEnvironment(request.environment)
+    evidence = request.evidence
+    # Explicit public fields only; never serialize runtime state or a capability.
+    public = None if evidence is None else {name: getattr(evidence, name) for name in ("organization_id", "project_id", "drawing_id",
+        "input_version_id", "output_version_id", "job_id", "binding_id", "worker_id", "checkout_fence",
+        "before_settings_sha256", "settings_sha256", "reopened_settings_sha256")}
+    environment["LEAF_PROJECT_CANONICAL_REQUEST"] = json.dumps({"evidence": public, "deadline": request.deadline,
+        "purpose": request.purpose, "worker_id": request.worker_id})
+    output = Path(environment["LEAF_STORE_DIR"]).parent / (request.purpose + "-readback.json")
+    code = ("import runpy,sys; m=runpy.run_path(sys.argv[1]); "
+            "sys.exit(m['_canonical_child_entry']())")
+    process = _RuntimeProcess(ProcessSpec("canonical-child", (sys.executable, "-B", "-c", code,
+        str(REPO / "scripts/proof_project.py")), REPO.parent, environment, request.deadline, output))
+    try:
+        process.start()
+        while process.poll() is None:
+            remaining = request.deadline - time.monotonic()
+            if remaining <= 0:
+                _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+            time.sleep(min(0.05, remaining))
+        if process.poll() != 0 or time.monotonic() >= request.deadline:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        raw = _Host.read_child_result(output)
+        if request.purpose == "heartbeat":
+            if raw is None:
+                return None
+            heartbeat = HeartbeatProof(**dict(raw, observed_at=datetime.fromisoformat(raw["observed_at"])))
+            return heartbeat
+        if (type(raw) is not dict or set(raw) != {"stored_settings_sha256", "reopened_settings_sha256"}
+                or any(not _hash_ok(value) for value in raw.values())):
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        return CanonicalProof(evidence, raw["stored_settings_sha256"], raw["reopened_settings_sha256"])
+    finally:
+        stopped = process.stop(request.deadline)
+        if stopped:
+            output.unlink(missing_ok=True)
+        if not stopped or time.monotonic() >= request.deadline:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
 
 
 def _later(record):
@@ -984,7 +1578,7 @@ class _Clock:
 
 def _canonical_reader(request):
     if request.purpose != "descriptor":
-        return _later("C")(request)
+        return _canonical_execution(request)
     # No sys.path change; exact dependency bindings are restored even on error.
     names = ("platform_link", "solar_project_tools", "solver_adapters",
              "solver_adapters.arlo_design", "solver_adapters.autofill", "_leaf_project_worker")
@@ -1063,6 +1657,37 @@ def _private_directory(path):
 
 
 class _Host:
+    @staticmethod
+    def read_stack_ready(path):
+        try:
+            return _Host.read_child_result(path)
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def app_readiness(request):
+        status, payload = _project_http(request, "/api/ready")
+        if status != 200 or payload.get("ready") is not True or payload.get("status") != "ready":
+            _refuse(FailureCode.READINESS, Stage.READINESS)
+        dependencies = payload["dependencies"]
+        return AppReadiness(payload["source_revision"], tuple(sorted(
+            (name, value["state"], value["required"]) for name, value in dependencies.items())))
+
+    @staticmethod
+    def organization_read(request, *, authenticated):
+        status, payload = _project_http(request, "/api/orgs/" + request.organization_id,
+                                       bearer=request.bearer if authenticated else None)
+        if not authenticated:
+            return status
+        org = payload.get("org", {})
+        return status, org.get("org_id"), org.get("tier"), org.get("status")
+
+    @staticmethod
+    def worker_heartbeat(request):
+        # Exact owner selection: the same-tool newest-worker helper is insufficient.
+        return _canonical_execution(CanonicalRequest("heartbeat", WORKER_TOOL, request.environment,
+            deadline=min(request.deadline, time.monotonic() + 5.0), worker_id=request.worker_id))
+
     scrub = staticmethod(_later("D"))
 
     @staticmethod
@@ -1334,8 +1959,8 @@ class _RuntimeProcess:
 
     def start(self):
         spec = self.spec
-        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child"}:
-            return _later("C")(spec)
+        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child", "stack-launcher", "canonical-child"}:
+            raise RuntimeError("unknown process role")
         try:
             if spec.output_path is not None:
                 self.output = spec.output_path.open("xb")
@@ -1362,7 +1987,7 @@ class _RuntimeProcess:
         return self.process.poll()
 
     def children(self, pids):
-        return _later("C")(pids)
+        return tuple(_process_child(self, role, pid) for role, pid in pids.items())
 
     def stop(self, deadline):
         try:
@@ -1391,7 +2016,8 @@ def _launch_runtime(spec, *, scope):
     process = _RuntimeProcess(spec)
     # Registration is synchronous and precedes the first possible child.
     kind = {"migration-child": ResourceKind.MIGRATION_PROCESS,
-            "seed-child": ResourceKind.SEED_PROCESS}.get(spec.role, ResourceKind.RUNTIME_PROCESS)
+            "seed-child": ResourceKind.SEED_PROCESS,
+            "stack-launcher": ResourceKind.STACK_PROCESS}.get(spec.role, ResourceKind.RUNTIME_PROCESS)
     scope.acquire(kind, lambda: process.stop(time.monotonic() + 5.0))
     process.start()
     return process
@@ -1544,8 +2170,9 @@ def _run_database_child(request, *, effects, scope):
 def production_effects() -> Effects:
     """Adapters are lazy: construction imports no worker and acquires nothing."""
     effects = Effects(_authority_factory, _issuer_factory, None, None,
-                   _launch_runtime, _later("C"), _browser_unavailable, _canonical_reader,
+                   _launch_runtime, None, _browser_unavailable, _canonical_reader,
                    _Clock(), _Host(), _ReceiptWriter())
     return replace(effects,
+        readiness_probe=lambda request: check_readiness(request, effects=effects),
         migration_runner=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope),
         seed_operation=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope))
