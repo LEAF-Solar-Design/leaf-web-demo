@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import threading
+from time import monotonic
 import uuid
 from typing import Any, Dict
 
@@ -173,22 +174,34 @@ class ProjectHeartbeat:
         self._interval = interval
         self._stop = stop_event if stop_event is not None else threading.Event()
         self._started = threading.Event()
+        self._lock = threading.Lock()
+        self._in_flight: str | None = None
         self._reported: set[tuple[str, type[Exception]]] = set()
         self.still_running_after_close = False
         self._thread = threading.Thread(
             target=self._beat, name="canonical-project-heartbeat", daemon=True)
 
-    def start(self) -> None:
+    def start(self, *, stop_event: threading.Event | None = None) -> None:
+        deadline = monotonic() + self._interval + 1.0
         self._thread.start()
-        self._started.wait()
+        while not self._started.is_set() and not self._stop.is_set():
+            if stop_event is not None and stop_event.is_set():
+                return
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return
+            self._started.wait(timeout=min(remaining, 0.05))
 
     def close(self) -> None:
-        # Stop new heartbeat calls; one in-flight call may outlive the bounded join.
-        self._stop.set()
+        # After stop is set, no heartbeat is admitted; at most the admitted call completes, so worker_health can look live for at most 15 s.
+        with self._lock:
+            self._stop.set()
+            in_flight = self._in_flight
         self._thread.join(timeout=self._interval + 1.0)
         self.still_running_after_close = self._thread.is_alive()
         if self.still_running_after_close:
-            print("canonical worker: project heartbeat thread still finishing one in-flight call at shutdown",
+            print("canonical worker: project heartbeat thread still finishing one in-flight call at shutdown "
+                  f"(tool={in_flight})",
                   file=sys.stderr)
 
     def _beat(self) -> None:
@@ -197,11 +210,17 @@ class ProjectHeartbeat:
                 tool = descriptor["tool_name"]
                 try:
                     canonical_jobs = platform_link._canonical_jobs_module()
-                    if self._stop.is_set():
-                        return
-                    canonical_jobs.record_worker_heartbeat(
-                        self._owner, tool, descriptor["runtime"],
-                        descriptor["source_revision"], descriptor["source_sha256"])
+                    with self._lock:
+                        if self._stop.is_set():
+                            return
+                        self._in_flight = tool
+                    try:
+                        canonical_jobs.record_worker_heartbeat(
+                            self._owner, tool, descriptor["runtime"],
+                            descriptor["source_revision"], descriptor["source_sha256"])
+                    finally:
+                        with self._lock:
+                            self._in_flight = None
                 except Exception as exc:  # noqa: BLE001 - isolate optional project tools
                     key = (tool, type(exc))
                     if key not in self._reported:
@@ -307,7 +326,7 @@ def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SEC
     # With N project tools, an idle cycle makes N+1 claim calls and at most N/5 heartbeats per second.
     try:
         if heartbeat is not None:
-            heartbeat.start()
+            heartbeat.start(stop_event=stop)
         while not stop.is_set():
             if descriptor is not None:
                 platform_link._canonical_jobs_module().record_worker_heartbeat(

@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from time import monotonic
 from types import SimpleNamespace
 
@@ -431,7 +431,7 @@ def test_project_heartbeat_close_during_in_flight_call(monkeypatch, capsys):
         real_join(timeout=timeout)
 
     monkeypatch.setattr(heartbeat._thread, "join", join)
-    # start() waits for the first round, so start the thread directly to block that round.
+    # Start directly to exercise close() while the first round is blocked.
     heartbeat._thread.start()
     try:
         assert entered.wait(timeout=1)
@@ -443,7 +443,8 @@ def test_project_heartbeat_close_during_in_flight_call(monkeypatch, capsys):
         assert heartbeat.still_running_after_close is True
         assert heartbeat._thread.is_alive()
         assert capsys.readouterr().err == (
-            "canonical worker: project heartbeat thread still finishing one in-flight call at shutdown\n")
+            "canonical worker: project heartbeat thread still finishing one in-flight call at shutdown "
+            "(tool=solar-settings)\n")
     finally:
         stop.set()
         released.set()
@@ -451,6 +452,139 @@ def test_project_heartbeat_close_during_in_flight_call(monkeypatch, capsys):
     assert not heartbeat._thread.is_alive()
     assert beats == [tools[0]]
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("stop_during_start", [False, True])
+def test_project_heartbeat_start_is_bounded(monkeypatch, stop_during_start):
+    entered, released, stop, returned = Event(), Event(), Event(), Event()
+    beats = []
+
+    def record(owner, tool, *args):
+        beats.append(tool)
+        entered.set()
+        assert released.wait(timeout=5)
+
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=record))
+    heartbeat = canonical_worker.ProjectHeartbeat(
+        "w1", (_graph_descriptor(),), interval=0.01, stop_event=stop)
+    elapsed = []
+
+    def start():
+        started = monotonic()
+        heartbeat.start()
+        elapsed.append(monotonic() - started)
+        returned.set()
+
+    starter = Thread(target=start, daemon=True)
+    starter.start()
+    try:
+        assert entered.wait(timeout=1)
+        if stop_during_start:
+            stop.set()
+        wait_bound = 0.5 if stop_during_start else heartbeat._interval + 1.5
+        assert returned.wait(timeout=wait_bound)
+        assert elapsed[0] < heartbeat._interval + 1.5
+        assert not heartbeat._started.is_set()
+        assert heartbeat._thread.is_alive()
+        assert beats == ["solar-settings"]
+    finally:
+        stop.set()
+        released.set()
+        starter.join(timeout=2)
+        heartbeat.close()
+    assert not starter.is_alive()
+    assert not heartbeat._thread.is_alive()
+
+
+def test_worker_stop_unblocks_first_project_heartbeat(monkeypatch):
+    _project_posture(monkeypatch)
+    _project_polling_stubs(monkeypatch)
+    entered, released, stop = Event(), Event(), Event()
+    start_returned, close_reached = Event(), Event()
+    heartbeats, failures, claims = [], [], []
+    real_heartbeat = canonical_worker.ProjectHeartbeat
+
+    class ObservedHeartbeat(real_heartbeat):
+        def __init__(self, owner, descriptors):
+            super().__init__(owner, descriptors, interval=0.01)
+            heartbeats.append(self)
+
+        def start(self, **kwargs):
+            super().start(**kwargs)
+            start_returned.set()
+
+        def close(self):
+            close_reached.set()
+            super().close()
+
+    def record(*args):
+        entered.set()
+        assert released.wait(timeout=5)
+
+    def serve():
+        try:
+            canonical_worker.serve(worker_id="w1", project_tools=("solar-settings",), stop_event=stop)
+        except BaseException as exc:
+            failures.append(exc)
+
+    monkeypatch.setattr(canonical_worker, "ProjectHeartbeat", ObservedHeartbeat)
+    monkeypatch.setattr(canonical_worker, "run_once", lambda *args, **kwargs: claims.append(kwargs))
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=record))
+    worker = Thread(target=serve, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(timeout=1)
+        stop.set()
+        assert start_returned.wait(timeout=1)
+        assert close_reached.wait(timeout=1)
+        assert heartbeats[0]._thread.is_alive()
+        assert claims == []
+    finally:
+        stop.set()
+        released.set()
+        worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert not heartbeats[0]._thread.is_alive()
+    assert failures == []
+
+
+def test_project_heartbeat_close_after_admission(monkeypatch):
+    admitted, released, stop = Event(), Event(), Event()
+    beats = []
+    tools = ("solar-settings", "solar-feeders")
+
+    class PausedStore:
+        @property
+        def record_worker_heartbeat(self):
+            # Attribute lookup occurs after admission and outside the lock, before the call.
+            admitted.set()
+            assert released.wait(timeout=5)
+            return lambda owner, tool, *args: beats.append(tool)
+
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", PausedStore)
+    heartbeat = canonical_worker.ProjectHeartbeat("w1", tuple(
+        {**_graph_descriptor(), "tool_name": tool} for tool in tools), stop_event=stop)
+    heartbeat._thread.start()
+    closer = Thread(target=heartbeat.close, daemon=True)
+    try:
+        assert admitted.wait(timeout=1)
+        assert heartbeat._in_flight == tools[0]
+        assert beats == []
+        closer.start()
+        assert stop.wait(timeout=1)
+    finally:
+        released.set()
+        if closer.ident is not None:
+            closer.join(timeout=2)
+        else:
+            heartbeat.close()
+        heartbeat._thread.join(timeout=1)
+    assert not closer.is_alive()
+    assert not heartbeat._thread.is_alive()
+    assert heartbeat._in_flight is None
+    assert beats == [tools[0]]
 
 
 def test_project_heartbeat_normal_close(monkeypatch, capsys):
