@@ -613,6 +613,38 @@ def test_global_projection_already_matches_capture_emits_no_store(inputs):
     assert _plan(captured, after)["operations"] == []
 
 
+@pytest.mark.parametrize("change", ["undeclared", "mixed", "added", "removed"])
+def test_global_uncovered_leaf_refuses(inputs, change):
+    captured, field, _ = _global_store_inputs(inputs)
+    if change == "removed":
+        captured[0]["settings"]["custom_setting"] = "Before"
+    after = copy.deepcopy(captured[0])
+    if change in {"undeclared", "mixed"}:
+        after["settings"]["panel_group_layer"] = "Changed group layer"
+    if change == "mixed":
+        after["settings"][field] = "Changed string layer"
+    if change == "added":
+        after["settings"]["custom_setting"] = "New setting"
+    if change == "removed":
+        del after["settings"]["custom_setting"]
+    with pytest.raises(GraphValidationError, match="GLOBAL_STORE_FIELD_UNDECLARED"):
+        _plan(captured, after)
+
+
+@pytest.mark.parametrize("source", ["/node", "/graph/settings", "/graph/settings/string_layer"])
+def test_global_source_ancestor_or_graph_path_covers_changed_leaf(inputs, source):
+    captured, field, _ = _global_store_inputs(inputs)
+    captured[1]["write_fields"]["global"][0]["source"] = source
+    after = copy.deepcopy(captured[0])
+    after["settings"][field] = "Changed string layer"
+    plan = _plan(captured, after)
+    assert len(plan["operations"]) == 1
+    store = plan["operations"][0]
+    assert store["op_id"] == "store:global:settings:global"
+    value = json.loads(store["payload"]["documents"][0])["Value"]
+    assert value == (after["settings"][field] if source.endswith("/" + field) else after["settings"])
+
+
 @pytest.mark.parametrize("declaration", [None, {}, {"settings": []}])
 def test_global_undeclared_change_refuses(inputs, declaration):
     if declaration is not None:

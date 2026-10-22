@@ -379,6 +379,23 @@ def _leaves(value, prefix=""):
         yield prefix, value
 
 
+def _resolved_source_paths(context, pointer):
+    paths = [(context, ())]
+    for token in _tokens(pointer):
+        following = []
+        for value, path in paths:
+            if token == "*":
+                if type(value) is list:
+                    following.extend((child, path + (str(i),)) for i, child in enumerate(value))
+            elif type(value) is dict and token in value:
+                following.append((value[token], path + (token,)))
+            elif (type(value) is list and re.fullmatch(r"0|[1-9][0-9]*", token)
+                  and int(token) < len(value)):
+                following.append((value[int(token)], path + (token,)))
+        paths = following
+    return [path for _, path in paths]
+
+
 def reconcile_identity(mapping, inspection, adapter, drawing_key):
     """Resolve only committed, scoped carrier identities. Never mint on failure."""
     _closed(mapping, {"drawing_key", "entities"})
@@ -710,6 +727,20 @@ def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
     for key in changed_globals:
         if not adapter.get("global_stores", {}).get(key):
             refuse("GLOBAL_STORE_UNDECLARED")
+        old_leaves = dict(_leaves(_semantic(before[key])))
+        new_leaves = dict(_leaves(_semantic(after[key])))
+        context = {"node": after[key], "graph": after, "resolved": {}}
+        sources = [path for spec in adapter["global_stores"][key]
+                   for rule in adapter["write_fields"][spec["fields"]]
+                   for path in _resolved_source_paths(context, rule["source"])]
+        for pointer in old_leaves.keys() | new_leaves.keys():
+            if (pointer in old_leaves and pointer in new_leaves
+                    and old_leaves[pointer] == new_leaves[pointer]):
+                continue
+            leaf = tuple(_tokens(pointer))
+            if not any(target[:len(path)] == path for path in sources
+                       for target in (("node",) + leaf, ("graph", key) + leaf)):
+                refuse("GLOBAL_STORE_FIELD_UNDECLARED")
     prior = {n["id"]: n for c in COLLECTIONS for n in before[c]}
     index = {n["id"]: n for c in COLLECTIONS for n in after[c]}
     changed = []
