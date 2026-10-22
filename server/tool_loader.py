@@ -900,6 +900,8 @@ def _run_source_in_sandbox_e2b(source: str, filename: str,
     computed_result_hash = hashlib.sha256(canonical_json_bytes(result)).hexdigest()
     if receipt.get("resultHash") != computed_result_hash:
         return ("infra_error", "e2b-microvm result hash mismatch; result refused")
+    from e2b_cost_meter import record_e2b_cost
+    record_e2b_cost(tenant_id, receipt)
     if result.get("error"):
         e = result["error"]
         return ("tool_error", f"{e.get('type', 'Error')}: {e.get('msg', '')}")
