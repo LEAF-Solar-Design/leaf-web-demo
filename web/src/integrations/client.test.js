@@ -159,6 +159,56 @@ function setup(value = scope) {
   return { client: createIntegrationsClient({ origin: 'https://ops.example', fetchImpl }), fetchImpl,
     options: { signal: new AbortController().signal } }
 }
+describe('manual workflow definition HTTP contract', () => {
+  const entry = { connection_id: action.connection_id, connection_title: 'Orders', connector_ref: ref,
+    operation_ref: action.operation_ref, title: 'Send', form: action.form }
+  it('reads canonical bounded catalog pages only on request', async () => {
+    const catalog = { actions: [entry], next_cursor: 'page_2' }
+    const { client, fetchImpl, options } = setup(catalog)
+    expect(await client.getActionCatalog(projectId, options)).toEqual(catalog)
+    expect(fetchImpl.mock.calls[0][0]).toBe(`https://ops.example/api/v1/projects/${projectId}/integrations/action-catalog?limit=25`)
+    await client.getActionCatalog(projectId, { ...options, after: 'page_2', limit: 50 })
+    expect(fetchImpl.mock.calls[1][0]).toContain('?limit=50&after=page_2')
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: 'GET', credentials: 'omit', cache: 'no-store', signal: options.signal })
+  })
+  it.each([{ limit: 0 }, { limit: 51 }, { limit: 1.5 }, { after: '' }, { after: 'a=' }, { after: 'a\n' }, { after: 'a'.repeat(1025) }])('rejects catalog parameters before I/O: %j', async (query) => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.getActionCatalog(projectId, { ...options, ...query })).rejects.toMatchObject({ dispatched: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([{ records: [], nextCursor: null }, { actions: [], next_cursor: 'bad=' }, { actions: Array(51).fill(entry), next_cursor: null },
+    { actions: [{ ...entry, operation_ref: {} }], next_cursor: null }])('rejects malformed catalog: %j', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.getActionCatalog(projectId, options)).rejects.toMatchObject({ dispatched: false })
+  })
+  it('registers a plain definition and accepts only its plain immutable reference', async () => {
+    const { client, fetchImpl, options } = setup(ref)
+    expect(await client.registerManualWorkflow(projectId, workflow.definition, options)).toEqual(ref)
+    expect(fetchImpl.mock.calls[0]).toEqual([`https://ops.example/api/v1/projects/${projectId}/integrations/manual-workflows`,
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(workflow.definition), signal: options.signal, credentials: 'omit', redirect: 'error' })])
+  })
+  it.each([{ reference: ref }, { ...ref, id: 'other' }, { ...ref, version: 2 }, { ...ref, digest: 'invalid' }])('marks invalid dispatched registration responses ambiguous: %j', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.registerManualWorkflow(projectId, workflow.definition, options)).rejects.toMatchObject({ dispatched: true })
+  })
+  it('bounds UTF-8 bytes before registration even when character counts fit', async () => {
+    const { client, fetchImpl, options } = setup(ref)
+    const input = { ...workflow.definition, steps: [{ ...workflow.definition.steps[0], arguments:
+      Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`field_${index}`, 'é'.repeat(4096)])) }] }
+    expect(JSON.stringify(input).length).toBeLessThan(65536)
+    expect(new TextEncoder().encode(JSON.stringify(input)).length).toBeGreaterThan(65536)
+    await expect(client.registerManualWorkflow(projectId, input, options)).rejects.toMatchObject({ dispatched: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it('rejects duplicate step IDs and unsafe versions before registration', async () => {
+    const { client, fetchImpl, options } = setup(ref)
+    for (const input of [{ ...workflow.definition, version: Number.MAX_SAFE_INTEGER + 1 },
+      { ...workflow.definition, steps: [workflow.definition.steps[0], workflow.definition.steps[0]] }]) {
+      await expect(client.registerManualWorkflow(projectId, input, options)).rejects.toMatchObject({ dispatched: false })
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
 describe('manual workflow start HTTP contract', () => {
   const input = { schema_version: 1, workflow_ref: ref, idempotency_key: projectId,
     step_grants: [{ step_id: 'send', expected_grant_revision: 7 }] }
