@@ -33,6 +33,10 @@
       "reason": "Held at mushy-code 52e8a36 bytes: ad209705 asserts harness_confirmations.consumed_at, consumed_by and a status CHECK including 'consumed', which no platform migration adds yet. Retired by slice AD4b (platform migration plus consumeApproved adoption).",
       "sha256": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4"
     },
+    "ports/impl/oauthGrantProvider.ts": {
+      "reason": "P-182: EnvelopeTenantGrantStore seals tenant grants at rest for LEAF_GRANT_STORE=vault; retire when upstream includes equivalent behavior.",
+      "sha256": "f88db8916046d01ecfdf0ec52f29830dee11b7e9f898bd87b9660b998246f097"
+    },
     "ports/impl/pgSessionStore.ts": {
       "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
       "sha256": "f5b97239f0e615109aa7a1efbfbef2bbe4a47a012f5167eaa887ce476efb6ee2"
@@ -54,8 +58,8 @@
       "sha256": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691"
     },
     "ports/index.ts": {
-      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0",
-      "sha256": "641d9911af12b0f13cf6deb6abf84d25931fd12e7f0a35391f4c3d4f72529d84"
+      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault.",
+      "sha256": "6f4c53818e22245bfb7ed5b15188bce33daa009a23874ef2f23b4e95fda56e48"
     },
     "ports/modelAllowlist.ts": {
       "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8; claude-haiku-5-5 allowlist entry from mushy-code 74e50286 carried too ahead of a re-pin; retire at the next re-pin past 74e50286; absorbed upstream at cd637b434f7f1c103160f93c3c0119122c746a67; provenance retained",
@@ -103,7 +107,7 @@
     "ports/impl/httpUpstreamSink.ts": "ec12e8d499bbe9968f8df4cab181d752dad220e4f0e7a78c87c70dade4e5624e",
     "ports/impl/mcpNetworkPolicy.ts": "298ac12f2c6a76acaf30aa18459d3aba1a8a3082eb0024f5c8deb48f6b4dc7a2",
     "ports/impl/mcpProxy.ts": "62f34ba8837d0b90ea066b944c2b88f69920e92a9bc2376f95cc3eb9bdb4df1b",
-    "ports/impl/oauthGrantProvider.ts": "f63af7109359ac361b3ab7e6867e7fc91fba92a5abd248483397fff3a33800e7",
+    "ports/impl/oauthGrantProvider.ts": "f88db8916046d01ecfdf0ec52f29830dee11b7e9f898bd87b9660b998246f097",
     "ports/impl/pgSessionStore.ts": "f5b97239f0e615109aa7a1efbfbef2bbe4a47a012f5167eaa887ce476efb6ee2",
     "ports/impl/repoEditRunner.ts": "d924a9f2cc131676a7b1aadd966c8176a6186b03d1c4b0caf05f9fbca10595bb",
     "ports/impl/requestJournal.ts": "f17dbd7e7a9ce79a864034ba4a04a3b0ae276235ec2ead4f1b147497e72af1e6",
@@ -118,7 +122,7 @@
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "32740d32b3dce694ec1c7f35a4191517da9d91cea6b23906438ba1a8624b5888",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantRepoProvider.ts": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691",
-    "ports/index.ts": "641d9911af12b0f13cf6deb6abf84d25931fd12e7f0a35391f4c3d4f72529d84",
+    "ports/index.ts": "6f4c53818e22245bfb7ed5b15188bce33daa009a23874ef2f23b4e95fda56e48",
     "ports/integrationTools.ts": "5dd38008c3abeae5b84235c84fa5f2465f85a78110f8ef79814251e0b6dc7735",
     "ports/modelAllowlist.ts": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
