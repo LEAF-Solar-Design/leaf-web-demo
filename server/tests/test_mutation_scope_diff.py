@@ -94,6 +94,7 @@ def test_identity_is_ok_for_every_tracked_drawing(drawings):
             "untouched_changed": [], "unexpected_removed": [], "unexpected_added": [],
             "expected_removed_missing": [], "touched_changed": [], "handleless_changed": False,
             "blocks_changed": [],
+            "unexpected_blocks_changed": [], "expected_blocks_missing": [],
             "unsupported_kinds": [], "unsupported_changed": False,
             "kind_counts_before": ledger["counts"], "kind_counts_after": ledger["counts"],
         }
@@ -360,3 +361,99 @@ def test_cli_exit_codes(entity_case, tmp_path, capsys):
     )
     assert run.returncode == 0, run.stderr
     assert json.loads(run.stdout)["ok"] is True
+
+
+def _with_block_definitions(case, *names):
+    template = (PROJECT_ROOT / "web/e2e/fixtures/block-fixture.dxf").read_text(encoding="ascii")
+    definition = template.split("0\nSECTION\n2\nBLOCKS\n", 1)[1].split("0\nENDSEC\n", 1)[0]
+    definitions = []
+    for index, name in enumerate(names):
+        block = definition.replace("\nFixture\n", f"\n{name}\n")
+        block = re.sub(
+            r"(?m)^(5\n)([^\n]+)",
+            lambda match: match.group(1) + format(int(match.group(2), 16) + 0x1000 * index, "X"),
+            block,
+        )
+        definitions.append(block)
+    section = "0\nSECTION\n2\nBLOCKS\n" + "".join(definitions) + "0\nENDSEC\n"
+    return (section + case["text"]).encode("ascii")
+
+
+def test_new_declared_block_definition_is_ok(entity_case):
+    result = _compare(entity_case, _with_block_definitions(entity_case, "Foo"), changed_blocks=("Foo",))
+    assert result["ok"] is True
+    assert result["blocks_changed"] == ["Foo"]
+    assert result["unexpected_blocks_changed"] == []
+    assert result["expected_blocks_missing"] == []
+
+
+def test_new_undeclared_block_definition_is_rejected(entity_case):
+    result = _compare(entity_case, _with_block_definitions(entity_case, "Foo"))
+    assert result["ok"] is False
+    assert result["blocks_changed"] == ["Foo"]
+    assert result["unexpected_blocks_changed"] == ["Foo"]
+
+
+def test_declared_block_name_is_case_insensitive(entity_case):
+    scope = MutationScope.from_iterables(changed_blocks=("Foo",))
+    assert scope.changed_blocks == frozenset(("foo",))
+    result = _compare(entity_case, _with_block_definitions(entity_case, "FOO"), changed_blocks=("Foo",))
+    assert result["ok"] is True
+    assert result["blocks_changed"] == ["FOO"]
+    assert result["unexpected_blocks_changed"] == []
+    assert result["expected_blocks_missing"] == []
+
+
+def test_declared_block_missing_after_is_rejected(entity_case):
+    result = _compare(entity_case, entity_case["before"], changed_blocks=("Foo",))
+    assert result["ok"] is False
+    assert result["blocks_changed"] == []
+    assert result["expected_blocks_missing"] == ["foo"]
+
+
+def test_undeclared_block_alongside_declared_block_is_rejected(entity_case):
+    result = _compare(
+        entity_case, _with_block_definitions(entity_case, "Foo", "Other"), changed_blocks=("Foo",),
+    )
+    assert result["ok"] is False
+    assert result["blocks_changed"] == ["Foo", "Other"]
+    assert result["unexpected_blocks_changed"] == ["Other"]
+    assert result["expected_blocks_missing"] == []
+
+
+def test_cli_accepts_repeated_changed_block(entity_case, tmp_path, capsys):
+    before, after = tmp_path / "before.dxf", tmp_path / "after.dxf"
+    before.write_bytes(entity_case["before"])
+    after.write_bytes(_with_block_definitions(entity_case, "FOO", "Other"))
+    assert main([
+        "--before", str(before), "--after", str(after),
+        "--changed-block", "Foo", "--changed-block", "Other",
+    ]) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["blocks_changed"] == ["FOO", "Other"]
+    assert receipt["unexpected_blocks_changed"] == []
+    assert receipt["expected_blocks_missing"] == []
+
+
+def test_existing_declared_block_change_is_ok(entity_case):
+    before = _with_block_definitions(entity_case, "Foo")
+    after = before.replace(b"11\n4\n", b"11\n5\n", 1)
+    assert after != before
+    result = compare_scoped(
+        before, after, MutationScope.from_iterables(changed_blocks=("FOO",)),
+        source_name=entity_case["name"],
+    )
+    assert result["ok"] is True
+    assert result["blocks_changed"] == ["Foo"]
+    assert result["unexpected_blocks_changed"] == []
+
+
+def test_removed_declared_block_is_missing(entity_case):
+    result = compare_scoped(
+        _with_block_definitions(entity_case, "Foo"), entity_case["before"],
+        MutationScope.from_iterables(changed_blocks=("Foo",)), source_name=entity_case["name"],
+    )
+    assert result["ok"] is False
+    assert result["blocks_changed"] == ["Foo"]
+    assert result["unexpected_blocks_changed"] == []
+    assert result["expected_blocks_missing"] == ["foo"]
