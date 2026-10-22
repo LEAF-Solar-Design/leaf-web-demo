@@ -1765,6 +1765,8 @@ def build_suites() -> List[Suite]:
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_addon_settings_api.py"), 30,
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("server-e2b-cost-meter", "server tests/test_e2b_cost_meter.py", "pytest",
+              SERVER, _py_pytest("tests/test_e2b_cost_meter.py"), 34),
         # Ops usage scoreboard (M6). Registered WITH the file, per the #29
         # fix-then-register rule. Both files are hermetic -- every authority is
         # monkeypatched, no DB, no subprocess, no skipif -- so these floors are
