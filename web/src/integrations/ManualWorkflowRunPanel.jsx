@@ -7,8 +7,10 @@ import { UUID } from './client.js'
 let nextContext = 0
 const childIdentity = (run) => JSON.stringify([run.run_id, run.connection_id, run.connector_ref, run.operation_ref,
   run.grant_revision, run.submission_digest, run.authority_binding_digest, run.created_at])
+const workflowIdentity = (run) => JSON.stringify([run.run_id, run.workflow_ref.id, run.workflow_ref.version,
+  run.workflow_ref.digest, run.submission_digest, run.authority_mode, run.authority_binding_digest, run.created_at])
 
-export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onForbidden, displayPreferences }) {
+export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onForbidden, displayPreferences, requestedRunId, admittedBinding }) {
   const [input, setInput] = useState('')
   const [selected, setSelected] = useState('')
   const [stepId, setStepId] = useState('')
@@ -20,20 +22,37 @@ export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onFor
   useLayoutEffect(() => {
     const ctx = { key: `workflow-${++nextContext}`, busy: false, history: undefined, selected: '', controller: new AbortController() }
     binding.current = ctx
-    const abort = () => ctx.controller.abort()
+    setInput(''); setSelected(''); setStepId(''); setEvidence(null); setPending(''); setError(''); setUncertain(false)
+    const abort = () => {
+      ctx.controller.abort(); ctx.history = undefined; ctx.anchor = null
+      setInput(''); setSelected(''); setStepId(''); setEvidence(null); setPending(''); setError(''); setUncertain(false)
+    }
     signal.addEventListener('abort', abort, { once: true })
     if (signal.aborted) abort()
     return () => { abort(); signal.removeEventListener('abort', abort); if (binding.current === ctx) binding.current = null }
   }, [client, projectId, signal])
+  useLayoutEffect(() => {
+    const ctx = binding.current
+    if (!ctx || !requestedRunId || ctx.consumed === requestedRunId || ctx.controller.signal.aborted) return
+    ctx.consumed = requestedRunId
+    ctx.operation?.abort()
+    ctx.busy = false
+    ctx.selected = ''
+    ctx.history = undefined
+    ctx.anchor = admittedBinding
+    setEvidence(null); setInput(requestedRunId)
+    operate('Load', requestedRunId)
+  }, [client, projectId, signal, requestedRunId, admittedBinding])
 
-  async function operate(kind) {
+  async function operate(kind, requestedId) {
     const ctx = binding.current
     if (!ctx || ctx.busy || ctx.controller.signal.aborted) return
-    const runId = kind === 'Load' ? input.trim() : ctx.selected
+    const runId = requestedId || (kind === 'Load' ? input.trim() : ctx.selected)
     if (!UUID.test(runId)) { setError('Enter a valid run UUID.'); return }
     if (kind === 'Reconcile' && !ctx.history?.snapshot.steps.some((step) => step.step_id === stepId)) return
     ctx.busy = true
     if (runId !== ctx.selected) {
+      if (!requestedId) ctx.anchor = null
       ctx.selected = runId
       ctx.key = `workflow-${++nextContext}`
       ctx.history = undefined
@@ -46,9 +65,10 @@ export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onFor
     setError('')
     let mutationStarted = false
     const controller = new AbortController()
+    ctx.operation = controller
     const abort = () => controller.abort()
     ctx.controller.signal.addEventListener('abort', abort, { once: true })
-    const current = () => binding.current === ctx && !ctx.controller.signal.aborted
+    const current = () => binding.current === ctx && !ctx.controller.signal.aborted && ctx.operation === controller
     const assertCurrent = () => { if (!current() || controller.signal.aborted) throw new DOMException('Aborted', 'AbortError') }
     let timer
     let cancel
@@ -76,6 +96,7 @@ export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onFor
         assertCurrent()
         const parsed = IntegrationManualWorkflowSnapshotV1.parse(result)
         if (parsed.run.run_id !== runId) throw new Error('invalid')
+        if (ctx.anchor && (workflowIdentity(parsed.run) !== workflowIdentity(ctx.anchor) || parsed.run.revision < ctx.anchor.revision)) throw new Error('invalid')
         const history = updateManualWorkflowStatus(ctx.history, ctx.key, parsed)
         if (!history || history.unverified) throw new Error('invalid')
         ctx.history = history

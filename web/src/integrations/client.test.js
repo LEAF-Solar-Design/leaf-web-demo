@@ -144,6 +144,56 @@ function setup(value = scope) {
   return { client: createIntegrationsClient({ origin: 'https://ops.example', fetchImpl }), fetchImpl,
     options: { signal: new AbortController().signal } }
 }
+describe('manual workflow start HTTP contract', () => {
+  const input = { schema_version: 1, workflow_ref: ref, idempotency_key: projectId,
+    step_grants: [{ step_id: 'send', expected_grant_revision: 7 }] }
+  it('loads only an exact definition and submits canonical identical bodies with private transport', async () => {
+    const { client, fetchImpl, options } = setup(workflow.definition)
+    expect(await client.getManualWorkflowDefinition(projectId, ref, options)).toEqual(workflow.definition)
+    expect(fetchImpl.mock.calls[0]).toEqual([
+      `https://ops.example/api/v1/projects/${projectId}/integrations/manual-workflows/orders/versions/1?digest=${ref.digest}`,
+      expect.objectContaining({ method: 'GET', signal: options.signal, cache: 'no-store', credentials: 'omit', redirect: 'error', headers: expect.objectContaining({ Authorization: 'Bearer first' }) }),
+    ])
+    fetchImpl.mockImplementation(async () => response({ status: 'admitted', run: workflow.run, replayed: false }))
+    await client.submitManualWorkflow(projectId, input, options)
+    await client.submitManualWorkflow(projectId, input, options)
+    expect(fetchImpl.mock.calls[1][0]).toBe(`https://ops.example/api/v1/projects/${projectId}/integrations/manual-workflow-runs`)
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: 'POST', signal: options.signal, credentials: 'omit', redirect: 'error', cache: 'no-store', body: JSON.stringify(input) })
+    expect(fetchImpl.mock.calls[2][1].body).toBe(fetchImpl.mock.calls[1][1].body)
+  })
+  it.each([{ arguments: {} }, { authority: {} }, { children: [] }, { step_grants: [{ step_id: 'send', expected_grant_revision: 0 }] }])('rejects invalid submissions before fetch: %j', async (patch) => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.submitManualWorkflow(projectId, { ...input, ...patch }, options)).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([{ id: '../bad' }, { version: 0 }, { digest: 'bad' }])('rejects invalid references before fetch: %j', async (patch) => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.getManualWorkflowDefinition(projectId, { ...ref, ...patch }, options)).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([{ id: 'another' }, { version: 2 }, { credentials: 'private' }])('binds strict definition identity: %j', async (patch) => {
+    const { client, options } = setup({ ...workflow.definition, ...patch })
+    await expect(client.getManualWorkflowDefinition(projectId, ref, options)).rejects.toThrow('invalid')
+  })
+  it('marks admitted reference mismatches as dispatched and preserves conflict privacy', async () => {
+    const { client, fetchImpl, options } = setup({ status: 'admitted', run: { ...workflow.run, workflow_ref: { ...ref, digest: 'd'.repeat(64) } }, replayed: false })
+    await expect(client.submitManualWorkflow(projectId, input, options)).rejects.toMatchObject({ dispatched: true })
+    fetchImpl.mockImplementation(async () => response({ status: 'refused', code: 'idempotency_conflict' }))
+    expect(await client.submitManualWorkflow(projectId, input, options)).toEqual({ status: 'refused', code: 'idempotency_conflict' })
+    fetchImpl.mockImplementation(async () => response({ status: 'refused', code: 'idempotency_conflict', run_id: projectId }))
+    await expect(client.submitManualWorkflow(projectId, input, options)).rejects.toThrow('invalid')
+  })
+  it('never retries lost submissions or dispatches an aborted intent', async () => {
+    const { client, fetchImpl, options } = setup()
+    fetchImpl.mockRejectedValue(new Error('private'))
+    await expect(client.submitManualWorkflow(projectId, input, options)).rejects.toMatchObject({ dispatched: true })
+    const controller = new AbortController()
+    controller.abort()
+    await expect(client.submitManualWorkflow(projectId, input, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  })
+})
+
 describe('existing manual workflow HTTP contract', () => {
   it('uses exact canonical GET, explicit resume and persisted-step reconcile with current bearer and empty bodies', async () => {
     const { client, fetchImpl, options } = setup(workflow)
