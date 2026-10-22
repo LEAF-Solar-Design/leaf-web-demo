@@ -1,0 +1,36 @@
+{
+  "schema": "leaf-figures.v1",
+  "version": "v1",
+  "definitions": {
+    "realized": "settle + exit, after normalizing each field to net fees using its fee_basis",
+    "marked": "realized + open_mark_cents - open_exposure_cents - open_uncounted_fee_cents",
+    "fee_basis": {"net": "The field already includes its fee. Do not subtract it again.", "gross": "Subtract the corresponding fee exactly once before adding to realized."},
+    "cash_out": "Complete yes/no pairs = min(yes,no), including fractional pairs. Each pair pays 100 USD cents before fees. Unmatched legs receive no paired payout. revenue_includes_pairs declares whether revenue_cents already contains that payout. revenue_cents and cost_cents exclude fee_cents; fee_cents is an uncounted fee, deducted once. net_cents = revenue_cents + uncounted paired payout - cost_cents - fee_cents.",
+    "open_uncounted_fee_cents": "Only fees not included in settle, exit, open mark or open exposure. Never repeat a counted fee."
+  },
+  "numeric": {
+    "input": "Unformatted signed decimal strings, at most 6 fractional digits, absolute value <= 1000000. No exponent, whitespace, grouping, plus sign or negative zero. Null means missing; never coerce to zero.",
+    "computation": "Exact fixed point, scale 1000000. No formatted string is a numeric input. Keep full precision through computation; round only for display.",
+    "money": {"currency": "USD", "minor": "cents", "major": "dollars", "minor_per_major": 100, "decimal_places": 2, "rounding": "half away from zero", "display": "ASCII $1,234.56 or -$1,234.56; rounded zero has no minus sign"},
+    "ratio": {"input": "fraction", "display": "multiply by 100 exactly once, round to 2 decimal places, trim trailing fractional zeros, append %"},
+    "missing_display": "Not reported",
+    "invalid": {"error": "refused"}
+  },
+  "day": {
+    "timezone": "UTC",
+    "interval": "[00:00:00Z,next 00:00:00Z)",
+    "duration_seconds": 86400,
+    "input": "ISO 8601 Gregorian timestamps, years 2000 through 2099, seconds required, optional 1-3 millisecond digits, Z or explicit numeric offset. Offset magnitude <= 14:00.",
+    "label": "Today UTC [YYYY-MM-DDT00:00:00Z, YYYY-MM-DDT00:00:00Z)",
+    "date_window_label": "Every date-window label must show UTC and its explicit inclusive start and exclusive end.",
+    "presentation": "Central, Eastern and browser locale may format timestamps only. They never change membership or the UTC range label."
+  },
+  "operations": {
+    "figures": ["settle_cents", "exit_cents", "settle_fee_cents", "exit_fee_cents", "settle_fee_basis", "exit_fee_basis", "open_mark_cents", "open_exposure_cents", "open_uncounted_fee_cents"],
+    "cash_out": ["yes", "no", "revenue_cents", "revenue_includes_pairs", "cost_cents", "fee_cents"],
+    "money": ["value", "unit"],
+    "percent": ["value"],
+    "day": ["now", "instants"]
+  },
+  "null_propagation": "A missing required operand makes only its dependent result null. A net settle/exit does not depend on its already-counted fee. Missing display values read Not reported. Invalid inputs refuse the whole operation."
+}

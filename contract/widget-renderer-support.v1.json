@@ -1,0 +1,288 @@
+{
+  "schema": "widget-renderer-support.v1",
+  "version": "1.0.0",
+  "targets": [
+    "web",
+    "ios",
+    "watch"
+  ],
+  "primitives": {
+    "text": {
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "box": {
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "svg-path": {
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    }
+  },
+  "bindings": {
+    "total": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "todayPnl": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "openPnlSum": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "cash": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "exposure": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "winRate": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ],
+      "window": "today-utc"
+    },
+    "heroPnl": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "symbols": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "pnl": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "pnlPct": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "odds": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "oddsBar": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "toWin": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "side": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "size": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "label": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "closes": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "spark": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "history": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "historyList": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "streak": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "live": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "updated": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "countdown": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "openCount": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "topOdds": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    },
+    "todayPct": {
+      "source": "kashbot.board",
+      "min_renderer": "1.0.0",
+      "targets": [
+        "web",
+        "ios",
+        "watch"
+      ]
+    }
+  },
+  "limits": {
+    "elements_per_format": 32,
+    "board_rows": 3,
+    "ledger_rows": 4
+  },
+  "figures": "sources/leaf-figures.v1.json",
+  "geometry": "Point coordinates; no target-specific rescaling of document geometry. Runtime checks additionally enforce containment and unique IDs."
+}
