@@ -31,6 +31,13 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
   const search = useRef(null)
   const flow = useReactFlow()
   const validation = useMemo(() => validateGraph(document, entries), [document, entries])
+  const initialReported = useRef(false)
+  useEffect(() => {
+    if (initialReported.current) return
+    initialReported.current = true
+    const { ready, problems } = validation
+    onChange?.({ document: roundTrip(document), ready, problems })
+  }, [document, onChange, validation])
   const commit = next => {
     // Deliver every draft so the host cannot retain an earlier valid graph.
     contract.schema(next, 'lab-graph.v1.schema.json')

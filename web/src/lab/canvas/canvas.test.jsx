@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { StrictMode } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LabCanvas from './LabCanvas.jsx'
@@ -8,7 +9,7 @@ import { Measurement } from './LatencyPipe.jsx'
 import { BLOCK_MIME } from './Palette.jsx'
 import { contract, manifests } from './registry.js'
 import { ELEMENT_FAMILIES, LANES } from './elementCatalog.js'
-import { addBlock, connectPipe, emptyGraph } from './graphDoc.js'
+import { addBlock, connectPipe, emptyGraph, validateGraph } from './graphDoc.js'
 import { dependencyLayout, dependencyRanks } from './dependencyLayout.js'
 import * as layout from './dependencyLayout.js'
 
@@ -135,9 +136,58 @@ describe('registry and deterministic dependencies', () => {
 })
 
 describe('canvas authoring', () => {
+  it('reports the initial document exactly once through rerenders and Strict Mode effect replay, then reports edits', async () => {
+    const initial = documentOf(1)
+    const changed = vi.fn()
+    const view = render(<StrictMode><LabCanvas initialDocument={initial} onChange={changed} /></StrictMode>)
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(changed.mock.calls[0][0]).toEqual({ document: initial, ready: true, problems: [] })
+    expect(changed.mock.calls[0][0].document).not.toBe(initial)
+    await waitFor(() => expect(screen.getByText('Layout updated')).toBeVisible())
+    const replacement = vi.fn()
+    view.rerender(<StrictMode><LabCanvas initialDocument={documentOf(1)} entries={entriesOf(manifest)} onChange={replacement} /></StrictMode>)
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(replacement).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Strategy' }))
+    expect(replacement).toHaveBeenCalledTimes(1)
+    expect(replacement.mock.calls[0][0]).toEqual({ document: documentOf(2), ready: true, problems: [] })
+  })
+
+  it('enables the host Run for a valid loaded graph without editing', async () => {
+    const initial = documentOf(1)
+    const onRun = vi.fn()
+    render(<GraphView initialDocument={initial} onRun={onRun} />)
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    expect(readiness.getByRole('status')).toHaveTextContent('Ready')
+    expect(readiness.queryByRole('list')).not.toBeInTheDocument()
+    const run = readiness.getByRole('button', { name: 'Run graph' })
+    expect(run).toBeEnabled()
+    fireEvent.click(run)
+    expect(onRun).toHaveBeenCalledTimes(1)
+    expect(onRun).toHaveBeenCalledWith(initial)
+  }, 20000)
+
+  it('reports a loaded graph with invalid settings and shows its problems before editing', async () => {
+    const required = manifests.find(item => item.id === 'level-fast-index')
+    const initial = addBlock(emptyGraph(), required)
+    const entries = entriesOf(required)
+    const { problems } = validateGraph(initial, entries)
+    expect(problems).not.toHaveLength(0)
+    const onRun = vi.fn()
+    render(<GraphView initialDocument={initial} entries={entries} onRun={onRun} />)
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    expect(readiness.getByRole('status')).toHaveTextContent('No valid graph')
+    expect(readiness.getAllByRole('listitem').map(item => item.textContent)).toEqual(problems)
+    expect(readiness.getByRole('button', { name: 'Run graph' })).toBeDisabled()
+    expect(onRun).not.toHaveBeenCalled()
+  }, 20000)
+
   it('adds from the keyboard-accessible palette, focuses slash search and preserves positions until Relayout', async () => {
     const changed = vi.fn()
     const { container } = render(<LabCanvas entries={entriesOf(manifest)} onChange={changed} />)
+    changed.mockClear() // Subsequent assertions count edits after the initial report.
     const search = screen.getByRole('searchbox')
     fireEvent.keyDown(container.querySelector('[data-canvas-editor]'), { key: '/' })
     expect(search).toHaveFocus()
@@ -223,6 +273,7 @@ describe('canvas authoring', () => {
     const required = manifests.find(item => item.id === 'level-fast-index')
     const changed = vi.fn()
     render(<LabCanvas entries={entriesOf(required)} onChange={changed} />)
+    changed.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Market' }))
     const card = within(screen.getByTestId('level-fast-index-1'))
     expect(card.getByRole('status')).toHaveTextContent(/Not ready/)
@@ -247,6 +298,7 @@ describe('canvas authoring', () => {
       properties: { max_tokens: { type: 'integer', minimum: 0, maximum: 4096, default: 128 } }, required: ['max_tokens'] } }
     const changed = vi.fn()
     render(<LabCanvas entries={entriesOf(defaults)} onChange={changed} />)
+    changed.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Strategy' }))
     expect(changed).toHaveBeenCalledTimes(1)
     const { document, ready, problems } = changed.mock.calls[0][0]
@@ -262,6 +314,7 @@ describe('canvas authoring', () => {
       properties: { max_tokens: { type: 'integer', maximum: 4096, default: 5000 } }, required: ['max_tokens'] } }
     const changed = vi.fn()
     render(<LabCanvas entries={entriesOf(invalid)} onChange={changed} />)
+    changed.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Strategy' }))
     expect(within(screen.getByTestId('adjust-none-1')).getByRole('status')).toHaveTextContent(/Not ready/)
     expect(changed).toHaveBeenCalledTimes(1)
@@ -274,6 +327,7 @@ describe('canvas authoring', () => {
     const incompatible = { ...manifest, inputs: { ...manifest.inputs, value: { ...manifest.inputs.value, mode: 'stream' } } }
     const changed = vi.fn()
     render(<LabCanvas initialDocument={documentOf(2)} entries={entriesOf(incompatible)} onChange={changed} />)
+    changed.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
     expect(screen.getByText('Scalar and stream modes differ')).toBeVisible()
     expect(screen.getByTestId('pipe-count')).toHaveTextContent('0')
@@ -297,6 +351,7 @@ describe('canvas authoring', () => {
     const pipe = { from: { node: initial.blocks[0].id, port: 'result' }, to: { node: initial.blocks[1].id, port: 'value' } }
     const changed = vi.fn()
     render(<LabCanvas initialDocument={initial} entries={entries} onChange={changed} />)
+    changed.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
     const connected = changed.mock.calls[0][0]
     expect(connected).toEqual({ document: { ...initial, pipes: [pipe] }, ready: true, problems: [] })
@@ -440,6 +495,7 @@ describe('canvas authoring', () => {
     vi.spyOn(layout, 'createDependencyLayoutRunner').mockReturnValue(runner)
     const changed = vi.fn()
     const view = render(<LabCanvas initialDocument={documentOf(1)} onChange={changed} />)
+    changed.mockClear()
     expect(runner.run).toHaveBeenCalledTimes(1)
     view.unmount()
     expect(runner.cancel).toHaveBeenCalledTimes(1)
