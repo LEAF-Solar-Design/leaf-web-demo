@@ -118,7 +118,13 @@ export async function installBrowserGuard(context, policy, ledger, { offline = f
         ledger.record('REDIRECT')
         await route.abort('blockedbyclient')
       } else await route.fulfill({ response })
-    } catch {
+    } catch (error) {
+      // A closed target cannot be an unreviewed transport; it is teardown.
+      if (error?.name === 'TargetClosedError' || (typeof error?.message === 'string'
+          && /^(?:route\.(?:fetch|fulfill|abort): )?Target page, context or browser has been closed/u.test(error.message))) {
+        try { await route.abort('blockedbyclient') } catch {}
+        return
+      }
       ledger.record('TRANSPORT')
       await route.abort('blockedbyclient')
     }
