@@ -355,6 +355,7 @@
     "server-jobs-terminal-mirror-durable",
     "server-kit-stream-superset",
     "server-lab-contract",
+    "server-lab-surface",
     "server-live-lsp-resolution",
     "server-live-mutation-plan",
     "server-marathon-orchestration",
