@@ -215,6 +215,58 @@ def test_check_reports_missing_action_as_drift(capsys):
     assert fake.writes == []
 
 
+@pytest.mark.parametrize("drift,missing", [(False, False), (True, False), (True, True)])
+def test_dry_run_prints_plan_without_deploying(drift, missing, capsys):
+    fake = FakeTransport(drift=drift, missing=missing)
+    _, expected = _check(fake, capsys)
+    fake.calls.clear()
+    assert sync.main(["--dry-run", "--domain", DOMAIN], transport=fake) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    report_line, digest_line = captured.out.splitlines()
+    report = json.loads(report_line)
+    assert report == dict(expected, mode="dry-run")
+    assert (report["plan_digest"] is not None) == (drift or missing)
+    assert digest_line == "digest: " + (report["plan_digest"] or hashlib.sha256(b"[]").hexdigest())
+    assert fake.writes == []
+    assert fake.calls[0][2]["scope"] == sync.CHECK_SCOPES
+    assert SECRET not in captured.out and TOKEN not in captured.out
+
+
+def test_buildspec_requires_both_deploy_authorizations():
+    text = (sync.REPO_ROOT / ".codebuild/auth0-action-deploy.yml").read_text(encoding="utf-8")
+    assert text.startswith("version: 0.2\n")
+    assert "env:\n  shell: bash\n" in text
+    assert "commands:\n      - |\n        set -euo pipefail\n" in text
+    assert '''        if [ "${AUTH0_ACTIONS_DEPLOY:-}" = "1" ] && [ -n "${AUTH0_ACTIONS_CONFIRM_DIGEST:-}" ]; then
+          python3 scripts/deploy_auth0_actions.py --deploy --domain "$LEAF_AUTH0_DOMAIN" --confirm "$AUTH0_ACTIONS_CONFIRM_DIGEST"
+        else
+          echo "check only; deploy not authorized"
+          python3 scripts/deploy_auth0_actions.py --dry-run --domain "$LEAF_AUTH0_DOMAIN"
+        fi''' in text
+    assert text.count("python3 scripts/deploy_auth0_actions.py --deploy") == 1
+    assert "set -x" not in text
+    assert "CLIENT_SECRET=" not in text
+    assert "secrets-manager" not in text and "aws secretsmanager" not in text
+
+
+@pytest.mark.parametrize("drift", [False, True])
+def test_dry_run_digest_satisfies_deploy_confirmation(drift, capsys):
+    fake = FakeTransport(drift=drift)
+    assert sync.main(["--dry-run", "--domain", DOMAIN], transport=fake) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    _, digest_line = captured.out.splitlines()
+    assert digest_line.startswith("digest: ")
+    digest = digest_line.removeprefix("digest: ")
+    assert len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
+    assert fake.writes == []
+    assert _deploy(fake, digest) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out)["result"] == ("deployed" if drift else "match")
+
+
 def test_check_normalizes_line_endings_before_hashing(capsys):
     fake = FakeTransport()
     fake.actions["action-0"]["code"] = fake.actions["action-0"]["code"].replace("\n", "\r\n") + "\r\n \t"
@@ -232,6 +284,7 @@ def test_deploy_refuses_without_matching_confirm_digest(capsys):
     assert capsys.readouterr().err == "LEAF_AUTH0_ACTIONS_ERROR=confirm_mismatch\n"
     assert fake.writes == []
     for args in (["--check", "--confirm", "0" * 64], ["--check", "--deploy"],
+                 ["--dry-run", "--deploy"], ["--dry-run", "--confirm", "0" * 64],
                  ["--deploy", "--confirm", "A" * 64]):
         fresh = FakeTransport()
         assert sync.main(["--domain", DOMAIN] + args, transport=fresh) == 2

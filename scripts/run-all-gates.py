@@ -2800,6 +2800,10 @@ def build_suites() -> List[Suite]:
         # parametrize, so 14 = its 14 test functions on every runner.
         Suite("auth0-action-drift-check", "scripts test_check_auth0_action_drift.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_check_auth0_action_drift.py"), 14),
+        # 33 cases: 19 original functions (27 parametrized cases), plus three
+        # dry-run plans, two digest round trips and the CI deploy contract. No network.
+        Suite("auth0-action-deploy", "scripts test_deploy_auth0_actions.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_deploy_auth0_actions.py"), 33),
         # Actions cache bucket prune (2026-08-31). The bucket was at 92.7% of
         # its 10 GiB ceiling with 87% of the bytes in unreachable CodeQL
         # overlay-base databases, and the merge gate's 279 MB Playwright entry

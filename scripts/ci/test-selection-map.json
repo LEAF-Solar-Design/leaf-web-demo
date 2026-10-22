@@ -80,6 +80,7 @@
     "server-c1a-project-read",
     "platform-sip-r1-checkout",
     "auth0-action-drift-check",
+    "auth0-action-deploy",
     "build-platform-images-workflow",
     "da-client-credentials",
     "da-extract-dxf-activity",
