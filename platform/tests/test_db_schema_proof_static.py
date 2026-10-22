@@ -142,6 +142,30 @@ def test_every_postgres_selector_adds_its_complete_authority_contract():
             required = db.required_columns_for_selected_authorities({selector: value})
             for table, columns in db._AUTHORITY_REQUIRED_COLUMNS[authority].items():
                 assert columns <= required[table], (selector, value, table)
+    _assert_lab_immutable_ledger_contract()
+
+
+def _assert_lab_immutable_ledger_contract():
+    selected = {"LEAF_LAB_STORE": "postgres"}
+    columns = db.required_columns_for_selected_authorities(selected)
+    assert columns["lab_blobs"] == {
+        "tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count",
+    }
+    assert columns["lab_revisions"] == {
+        "tenant_id", "doc_id", "revision", "parent_revision", "author", "created_at", "sha256",
+    }
+    catalog = db.required_catalog_for_selected_authorities(selected)
+    for table in ("lab_blobs", "lab_revisions", "lab_publish_receipts"):
+        assert catalog["triggers"][table + "_immutable"] == db._catalog_contract(
+            table, "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+            "EXECUTE FUNCTION leaf_reject_lab_mutation()")
+        assert table + "_pkey" in catalog["constraints"]
+        assert table not in db.required_columns_for_selected_authorities({})
+    migration = (db._PKG_DIR / "migrations/0081_lab_artifacts.sql").read_text(encoding="utf-8")
+    assert "canonical_bytes BYTEA NOT NULL" in migration
+    assert "canonical_text TEXT NOT NULL" in migration
+    assert "FROM pg_trigger" in migration
+    assert "CREATE TABLE IF NOT EXISTS lab_publish_receipts" in migration
 
 
 def test_every_shipped_table_has_a_readiness_contract():

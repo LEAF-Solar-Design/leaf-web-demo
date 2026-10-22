@@ -355,6 +355,8 @@
     "server-jobs-terminal-mirror-durable",
     "server-kit-stream-superset",
     "server-lab-contract",
+    "server-lab-artifacts",
+    "server-lab-diff",
     "server-lab-surface",
     "server-live-lsp-resolution",
     "server-live-mutation-plan",

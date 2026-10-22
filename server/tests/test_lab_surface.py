@@ -13,6 +13,17 @@ from route_flatten import iter_leaf_routes
 import deps
 from routers import lab_router, lab_surface
 
+LAB_PATHS = [
+    "/api/lab/status",
+    "/api/lab/docs/{doc_id}/save",
+    "/api/lab/docs/{doc_id}/head",
+    "/api/lab/docs/{doc_id}/revisions",
+    "/api/lab/docs/{doc_id}/revisions/{revision}",
+    "/api/lab/docs/{doc_id}/diff",
+    "/api/lab/docs/{doc_id}/restore",
+    "/api/lab/docs/{doc_id}/publish",
+]
+
 
 @pytest.fixture(autouse=True)
 def _environment(monkeypatch):
@@ -179,12 +190,12 @@ def test_pinned_routers_match_the_included_set():
     app.include_router(lab_router.router)
     routes = [route for path, route in iter_leaf_routes(app.router.routes)
               if isinstance(route, APIRoute) and path.startswith("/api/lab")]
-    assert lab_router.PINNED_ROUTERS == ("lab_surface",)
+    assert lab_router.PINNED_ROUTERS == ("lab_surface", "lab_artifacts")
     assert {route.endpoint.__module__.rsplit(".", 1)[-1]
             for route in routes} == set(lab_router.PINNED_ROUTERS)
     assert {tag for route in routes for tag in route.tags} == {
-        "lab_surface"}
-    assert [route.path for route in routes] == ["/api/lab/status"]
+        "lab_surface", "lab_artifacts"}
+    assert [route.path for route in routes] == LAB_PATHS
 
 
 def test_every_lab_route_has_the_ordered_admission_dependencies():
@@ -207,7 +218,7 @@ def test_every_lab_route_has_the_ordered_admission_dependencies():
                     dependency.call for dependency in route.dependant.dependencies]
 
     routes = list(admission_dependencies(app.router.routes))
-    assert [path for path, _ in routes] == ["/api/lab/status"]
+    assert [path for path, _ in routes] == LAB_PATHS
     for _, dependencies in routes:
         assert dependencies[:3] == [
             lab_surface.lab_rail, lab_surface.require_auth_live, deps.require_tenant,

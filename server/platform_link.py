@@ -290,6 +290,7 @@ _AUTHORITY_SELECTORS = {
     "LEAF_GUEST_CAP_STORE": ({"memory", "postgres"}, {"postgres"}),
     "LEAF_DRAWING_STORE": ({"legacy", "postgres"}, {"postgres"}),
     "LEAF_UPLOAD_STORE": ({"legacy", "postgres"}, {"postgres"}),
+    "LEAF_LAB_STORE": ({"sqlite", "postgres"}, {"postgres"}),
 }
 
 
@@ -298,6 +299,8 @@ def postgres_authorities_selected() -> bool:
     selected = False
     for name, (allowed, postgres_values) in _AUTHORITY_SELECTORS.items():
         default = "memory" if name == "LEAF_GUEST_CAP_STORE" else "legacy"
+        if name == "LEAF_LAB_STORE":
+            default = "sqlite"
         value = os.environ.get(name, default).strip().lower()
         if value not in allowed:
             choices = ", ".join(sorted(allowed))
