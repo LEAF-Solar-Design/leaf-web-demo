@@ -1,24 +1,51 @@
 # APS Design Automation — Flex concurrency-limit raise request
 
-> **Status: SUBMITTED VIA APS ONBOARDING FALLBACK (2026-07-18).** Autodesk's
-> logged-in Assistant confirmed that direct API tickets require an active ADN
-> membership, which this account does not have. The complete concurrency request
-> below was therefore submitted in the special-request field for an official APS
-> Onboarding call with Peter Schlipf on **Thursday, 2026-07-23 at 5:30 AM Central**.
-> Microsoft Bookings confirmed the appointment and will send the calendar receipt
-> to `ehaug@leafautomation.ai`. This path does not issue a support ticket number.
-> **App identity changed on 2026-07-19:** the clean-cutover app below replaced the
-> inaccessible legacy app as the target of this request. At the onboarding call,
-> ask Autodesk to apply any concurrency grant to the new client ID below, not the
-> legacy `iBZF...` app referenced in the original booking text.
-> **Updated request emailed 2026-07-19:** sent from
-> `ehaug@leafautomation.ai` to
-> `AutodeskPlatformServicesAPSSupport@autodesk.com`, requesting 25 concurrent
-> WorkItems (10 then 25 acceptable) for the new app and asking Autodesk to attach
-> it to the July 23 onboarding call. Awaiting reply/reference number.
+> **Status: RESOLVED IN WRITING 2026-09-09. Autodesk says Design Automation has NO fixed
+> WorkItem concurrency limit and no raise process exists, so this request will NOT be filed
+> (stamp corrected 2026-09-09).** Madhukar Moogala (Autodesk, Gmail `1a08497a802e0b7d`, echoing
+> Julia Brun `1a08220848f47758`): WorkItems queue and the service scales workers; nothing is a
+> concurrency setting tied to the client_id; the only per-client limits are 100 Activities and
+> 100 AppBundles (DA rate-limits doc). Our ceiling of 1 is our own env cap, `APS_MAX_CONCURRENCY`
+> in `da/queue.py` (default 1); lifting it is a deploy-time env change, staged 10 then 25.
+> The 2026-09-09 onboarding call was CANCELED by Autodesk 2026-09-08T17:46Z (`1a082210a46bbcbb`);
+> Madhu offers a follow-up call instead. Reply draft: `docs/aps-madhu-reply-draft-20260909.md`.
+> A Gmail draft of that reply now sits in the thread (draft `1a0a973a947cb94d`, created
+> 2026-09-16T09:02Z) and is NOT SENT as of 2026-09-21 (still in Drafts); sending it is an operator action.
+> Superseded facts, do not reinstate: the 2026-07-23 Peter Schlipf onboarding slot is
+> past and produced no ceiling answer, and the direct email alias has not replied since
+> 2026-07-19 despite a third nudge sent 2026-09-02 (thread `19f7b19edf45b8bd`).
+> **Current route.** Shruthi ArunKumar (Autodesk ADN) directed the concurrency question
+> to https://aps.autodesk.com/get-help on 2026-09-03 (thread `19fa4d9252cc2aa7`).
+> That filing was never made and is now MOOT (2026-09-09): the written answer above means
+> there is nothing to file.
+> **Former channel (call CANCELED, answered by email instead).** APS Onboarding call with Julia Brun, Wednesday **2026-09-09,
+> 8:00-8:30 AM Central** (9:00 AM Eastern), Microsoft Teams, booked under "Learn more
+> about APS pricing" (Gmail `1a0658a73ae03d45`). Ask: (a) does raising Design Automation
+> WorkItem concurrency to ~25 require ADN membership or is it a separate commercial line,
+> (b) is the limit per-app or per-account, (c) what does ~25 cost and what is the lead time.
+> **ADN invoice PAID and membership ACTIVE, confirmed by Autodesk 2026-09-21T07:47Z.** Payment notice 2026DEVR7357, US$1,500.00
+> (50% prorated for calendar 2026; the older $1,750 figure is superseded), signed and
+> returned 2026-09-02, submitted to Autodesk order processing 2026-09-03. Autodesk invoice
+> 9863264012 arrived 2026-09-05T01:04Z (Gmail `1a06f1818c33ef20`, PDF attached): subtotal
+> US$1,500.00 plus US$120.00 tax = **US$1,620.00 due 2026-10-04** (net 30, sales order
+> 7550280587, item ADN STANDARD 2-5PK DISC50). Paying it is an OPERATOR action; Shruthi ArunKumar gave the
+> route on 2026-09-07 (Gmail `1a079f17cba5c178`): accounts.autodesk.com > Billing and Orders
+> > Invoices and Credit Memos > Pay, then email her so she can verify the payment status.
+> PAID 2026-09-17 ~09:16Z by domestic wire from the operator's Banc of California account to
+> Autodesk Inc. at Citibank N.A., reference `5152452773 9863264012` (operator pressed Transmit;
+> bank confirmation number not captured). Reply to Shruthi sent the same morning (Gmail
+> `1a0aea6f31032096`, follow-up `1a0aeaff87a06483`, cc Eswar K). CONFIRMED 2026-09-21T07:47Z:
+> Shruthi ArunKumar wrote that Autodesk received the payment and activated the ADN Membership 2026,
+> with ADN Extranet access at https://adn.autodesk.io/ (Gmail `1a0c2efb1f0d311c`, thread `19fa4d9252cc2aa7`).
+> Lane `aps-adn-spend-watch` RETIRED 2026-09-21 on that evidence (both terminal halves met).
+> The Madhu reply above is still unsent and is no longer tracked by any lane.
+> **Trigger has FIRED.** The operator reported demand above `APS_MAX_CONCURRENCY=1`
+> in writing on 2026-09-02 ("~25 over the next few weeks"). This request is no longer parked.
+> **App identity:** the clean-cutover app `czjIu4W9...` below is the target, not the
+> legacy `iBZF...` app referenced in the original July booking text.
 >
-> Send via: APS support ticket at https://aps.autodesk.com/en/support/get-help
-> (category: Design Automation API), or your Autodesk account/partner contact.
+> Send via: NOT SENT. Superseded 2026-09-09 by Autodesk's written answer (see status). Kept for the record.
+> (category: Design Automation API), or the 2026-09-09 onboarding call.
 
 ---
 
