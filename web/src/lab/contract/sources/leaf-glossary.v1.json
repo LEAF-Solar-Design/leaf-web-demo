@@ -1,0 +1,713 @@
+{
+  "schema": "leaf.glossary.v1",
+  "terms": [
+    {
+      "id": "exchange",
+      "plain": "Exchange",
+      "means": "Where orders go: Kalshi.",
+      "forms": {},
+      "replaces": [
+        "venue"
+      ],
+      "code_names": [
+        "venue"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "market",
+      "plain": "Market",
+      "means": "One coin and time window, such as BTC 15m. A Market holds many Contracts.",
+      "forms": {},
+      "replaces": [
+        "book",
+        "symbol unit"
+      ],
+      "code_names": [
+        "book",
+        "symbol"
+      ],
+      "notes": "The app's Markets tab lists Markets; one yes or no question inside a Market is a Contract."
+    },
+    {
+      "id": "contract",
+      "plain": "Contract",
+      "means": "One yes or no question with a target price and a close time (one Kalshi ticker).",
+      "forms": {},
+      "replaces": [
+        "ticker",
+        "market (one Kalshi ticker)"
+      ],
+      "code_names": [
+        "ticker",
+        "market"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "target_price",
+      "plain": "Target price",
+      "means": "The price a Contract asks about.",
+      "forms": {},
+      "replaces": [
+        "strike"
+      ],
+      "code_names": [
+        "strike",
+        "strike_i"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "strategy",
+      "plain": "Strategy",
+      "means": "The rule that decides when to buy.",
+      "forms": {},
+      "replaces": [
+        "engine"
+      ],
+      "code_names": [
+        "engine",
+        "engine_id"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "assignment",
+      "plain": "Assignment",
+      "means": "Which Strategy runs on which Market.",
+      "forms": {},
+      "replaces": [
+        "engine binding",
+        "binding"
+      ],
+      "code_names": [
+        "engine-bindings",
+        "assignments"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "trade",
+      "plain": "Trade",
+      "means": "One position from Buy to Cash out or Result.",
+      "forms": {},
+      "replaces": [
+        "episode",
+        "round trip"
+      ],
+      "code_names": [
+        "episode"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "buy",
+      "plain": "Buy",
+      "means": "Opening a Trade.",
+      "forms": {
+        "done": "Bought"
+      },
+      "replaces": [
+        "entry",
+        "enter"
+      ],
+      "code_names": [
+        "entry"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "cash_out",
+      "plain": "Cash out",
+      "means": "Selling before the Contract closes.",
+      "forms": {
+        "action": "Cash out",
+        "done": "Cashed out"
+      },
+      "replaces": [
+        "exit",
+        "cashout",
+        "sell early"
+      ],
+      "code_names": [
+        "exit"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "result",
+      "plain": "Result",
+      "means": "The Contract closes and pays 100c or 0.",
+      "forms": {
+        "won": "Won",
+        "lost": "Lost"
+      },
+      "replaces": [
+        "settlement",
+        "settle"
+      ],
+      "code_names": [
+        "settle",
+        "settlement"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "bet_size",
+      "plain": "Bet size",
+      "means": "How much one order buys.",
+      "forms": {},
+      "replaces": [
+        "Kelly cap",
+        "stake cap",
+        "conviction",
+        "favorite multiplier",
+        "zone sizing",
+        "size fraction"
+      ],
+      "code_names": [
+        "kelly_fraction",
+        "size_fraction",
+        "stake_ceiling_cents"
+      ],
+      "notes": "Sizing internals are not shown to people; only the Bet size is."
+    },
+    {
+      "id": "max_per_trade",
+      "plain": "Max per trade",
+      "means": "The most one order may spend.",
+      "forms": {},
+      "replaces": [
+        "per-order cap",
+        "per order fraction"
+      ],
+      "code_names": [
+        "per_order_fraction"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "money_at_risk",
+      "plain": "Money at risk",
+      "means": "Money in open Trades and waiting orders, against its limit.",
+      "forms": {
+        "used": "In use",
+        "limit": "Limit"
+      },
+      "replaces": [
+        "risk room",
+        "exposure budget",
+        "room"
+      ],
+      "code_names": [
+        "room",
+        "at_risk"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "risk_level",
+      "plain": "Risk level",
+      "means": "The one percent setting that sets an account's Money at risk limit.",
+      "forms": {},
+      "replaces": [
+        "risk fraction",
+        "slider"
+      ],
+      "code_names": [
+        "slider"
+      ],
+      "notes": "The Daily stop is derived from the Risk level (operator decision, 2026-10)."
+    },
+    {
+      "id": "daily_stop",
+      "plain": "Daily stop",
+      "means": "Trading pauses for the rest of the day after a set loss.",
+      "forms": {
+        "state": "Stopped for today"
+      },
+      "replaces": [
+        "daily loss limit"
+      ],
+      "code_names": [
+        "daily_loss",
+        "daily_loss_fraction"
+      ],
+      "notes": "Stops entries after a set loss in one day. A drop from the best balance is Slowdown or Drop stop, not this."
+    },
+    {
+      "id": "your_account",
+      "plain": "Your account",
+      "means": "The account you own.",
+      "forms": {},
+      "replaces": [
+        "owner",
+        "owner account"
+      ],
+      "code_names": [
+        "owner"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "client_account",
+      "plain": "Client account",
+      "means": "An account Kashbot trades for someone else.",
+      "forms": {},
+      "replaces": [
+        "tenant",
+        "tenant lane"
+      ],
+      "code_names": [
+        "tenant",
+        "lane"
+      ],
+      "notes": "The word lane never names an account."
+    },
+    {
+      "id": "change",
+      "plain": "Change",
+      "means": "Something that is turned on or off, or set to a value.",
+      "forms": {
+        "on": "On",
+        "off": "Off"
+      },
+      "replaces": [
+        "feature",
+        "dial",
+        "switch",
+        "flag"
+      ],
+      "code_names": [
+        "feature",
+        "gate",
+        "dial"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "change_log",
+      "plain": "Change log",
+      "means": "The record of every Change, with who made it and when.",
+      "forms": {},
+      "replaces": [
+        "feature rail",
+        "rail receipts"
+      ],
+      "code_names": [
+        "feature_rail",
+        "feature-receipts"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "release",
+      "plain": "Release",
+      "means": "A new version of the bot's code.",
+      "forms": {},
+      "replaces": [
+        "cut",
+        "owner cut"
+      ],
+      "code_names": [
+        "cut"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "test",
+      "plain": "Test",
+      "means": "A Change on probation for 4 hours on the Markets it touches.",
+      "forms": {
+        "passed": "Kept",
+        "failed": "Undone"
+      },
+      "replaces": [
+        "trial"
+      ],
+      "code_names": [
+        "trial"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "keeper",
+      "plain": "Keeper",
+      "means": "A Change that passed its Test and waits to be combined with other Keepers.",
+      "forms": {},
+      "replaces": [
+        "marked change"
+      ],
+      "code_names": [
+        "keepers"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "best_so_far",
+      "plain": "Best so far",
+      "means": "The best result per day to beat.",
+      "forms": {},
+      "replaces": [
+        "champion"
+      ],
+      "code_names": [
+        "champion"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "undo",
+      "plain": "Undo",
+      "means": "Turning a Change back off.",
+      "forms": {
+        "done": "Undone"
+      },
+      "replaces": [
+        "rollback",
+        "revert"
+      ],
+      "code_names": [
+        "rollback"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "test_order",
+      "plain": "Test order",
+      "means": "A small order that checks a Market.",
+      "forms": {},
+      "replaces": [
+        "probe"
+      ],
+      "code_names": [
+        "probe"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "refill",
+      "plain": "Refill",
+      "means": "Buying the unfilled rest of an order.",
+      "forms": {
+        "done": "Refilled"
+      },
+      "replaces": [
+        "requote",
+        "top-up"
+      ],
+      "code_names": [
+        "requote",
+        "top_up"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "partly_filled",
+      "plain": "Partly filled",
+      "means": "Only part of an order was bought.",
+      "forms": {},
+      "replaces": [
+        "partial fill"
+      ],
+      "code_names": [
+        "partial"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "practice",
+      "plain": "Practice",
+      "means": "Trading with pretend money.",
+      "forms": {},
+      "replaces": [
+        "paper",
+        "paper trading",
+        "shadow capital",
+        "shadow money"
+      ],
+      "code_names": [
+        "paper",
+        "shadow_capital"
+      ],
+      "notes": "Shadow is pretend money: Practice money per strategy."
+    },
+    {
+      "id": "connect_kalshi",
+      "plain": "Connect Kalshi",
+      "means": "Giving Kashbot access to your Kalshi account.",
+      "forms": {
+        "done": "Kalshi connected"
+      },
+      "replaces": [
+        "runner key",
+        "import your runner key",
+        "API key"
+      ],
+      "code_names": [
+        "runner_key"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "this_iphone",
+      "plain": "This iPhone",
+      "means": "Letting this phone control the bot.",
+      "forms": {
+        "done": "Connected",
+        "checking": "Checking this iPhone's connection",
+        "connecting_account": "Connecting this account"
+      },
+      "replaces": [
+        "pairing",
+        "pair this iPhone",
+        "pairing status",
+        "dashboard binding",
+        "account binding"
+      ],
+      "code_names": [
+        "pairing"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "lane",
+      "plain": "Lane",
+      "means": "A family of Changes, such as ordering or cash out, used to compare and combine Tests.",
+      "forms": {},
+      "replaces": [
+        "change family"
+      ],
+      "code_names": [
+        "lane (kashbot-lanes.json)"
+      ],
+      "notes": "Lanes are ordering, processing, cashout, strategies, sizing, admission, observation, capture and lifecycle."
+    },
+    {
+      "id": "short_name",
+      "plain": "Short name",
+      "means": "A Strategy's two to five letter code.",
+      "forms": {},
+      "replaces": [
+        "ticker (strategy short code)",
+        "engine ticker"
+      ],
+      "code_names": [
+        "ticker"
+      ],
+      "notes": "Contract keeps the Kalshi ticker; this is the Strategy's code."
+    },
+    {
+      "id": "slowdown",
+      "plain": "Slowdown",
+      "means": "Smaller Bets after a drop from the best balance; nothing stops.",
+      "forms": {
+        "state": "Slowed down"
+      },
+      "replaces": [
+        "drawdown brake"
+      ],
+      "code_names": [
+        "drawdown_brake_fraction"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "drop_stop",
+      "plain": "Drop stop",
+      "means": "No new Buys after a set drop from the best balance.",
+      "forms": {
+        "state": "Stopped after a drop"
+      },
+      "replaces": [
+        "drawdown stop"
+      ],
+      "code_names": [
+        "drawdown_stop_fraction"
+      ],
+      "notes": "Not per day; see Daily stop."
+    },
+    {
+      "id": "buy_rule",
+      "plain": "Buy rule",
+      "means": "A check that can block a Buy.",
+      "forms": {
+        "blocked": "Blocked by a Buy rule"
+      },
+      "replaces": [
+        "gate (buy blocker)",
+        "entry gate"
+      ],
+      "code_names": [
+        "gate"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "check",
+      "plain": "Check",
+      "means": "A yes or no verdict before something runs.",
+      "forms": {
+        "passed": "Check passed",
+        "failed": "Check failed"
+      },
+      "replaces": [
+        "gate (verdict)",
+        "approval gate"
+      ],
+      "code_names": [],
+      "notes": ""
+    },
+    {
+      "id": "setup_check",
+      "plain": "Setup check",
+      "means": "A run of the setup with no real orders.",
+      "forms": {
+        "done": "Setup check passed"
+      },
+      "replaces": [
+        "test run",
+        "dry run"
+      ],
+      "code_names": [
+        "dry_run"
+      ],
+      "notes": "Not a Test, which is a 4 hour probation of a Change."
+    },
+    {
+      "id": "autotuner",
+      "plain": "Autotuner",
+      "means": "The part of the bot that proposes setting changes.",
+      "forms": {},
+      "replaces": [
+        "Autotune",
+        "tuner",
+        "Autopilot"
+      ],
+      "code_names": [
+        "autotune",
+        "tuner",
+        "autopilot"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "suggested_change",
+      "plain": "Suggested change",
+      "means": "A setting change the Autotuner proposes.",
+      "forms": {},
+      "replaces": [
+        "tune suggestion",
+        "tune advice"
+      ],
+      "code_names": [
+        "tune_advice"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "the_bot",
+      "plain": "The bot",
+      "means": "The program that places orders.",
+      "forms": {
+        "re_arm": "Restarts trading"
+      },
+      "replaces": [
+        "runner",
+        "re-arm"
+      ],
+      "code_names": [
+        "runner",
+        "rearm"
+      ],
+      "notes": ""
+    }
+  ],
+  "provenance": {
+    "repository": "leaf-hft",
+    "commit": "42f704cab6663bd421941e572990918418989ab9",
+    "path": "docs/glossary.json",
+    "source_schema": "leaf.kashbot-glossary.v1",
+    "blob_sha1": "3015a61341d7155de0b06e540d5e9c406591e298"
+  },
+  "display_forms": {
+    "strategy": {
+      "plural": "Strategies"
+    },
+    "slowdown": {
+      "state": "Slowed down"
+    },
+    "drop_stop": {
+      "state": "Stopped after a drop"
+    },
+    "buy_rule": {
+      "blocked": "Blocked by a Buy rule"
+    },
+    "check": {
+      "passed": "Check passed",
+      "failed": "Check failed"
+    },
+    "setup_check": {
+      "done": "Setup check passed"
+    },
+    "the_bot": {
+      "re_arm": "Restarts trading"
+    }
+  },
+  "feature_labels": {
+    "test_trade": {
+      "plain": "Test trade",
+      "context": "Operator-approved trade feature; distinct from a four-hour Test."
+    }
+  },
+  "lanes": [
+    {
+      "id": "processing",
+      "title": "Processing (feed)",
+      "covers": "How market data reaches a decision."
+    },
+    {
+      "id": "ordering",
+      "title": "Ordering (execution)",
+      "covers": "How an order is sent, retried, re-quoted and filled."
+    },
+    {
+      "id": "cashout",
+      "title": "Cash out (exits)",
+      "covers": "When and how a position is exited or settled."
+    },
+    {
+      "id": "engines",
+      "title": "Strategies (strategy)",
+      "covers": "The model and the entry rule."
+    },
+    {
+      "id": "sizing",
+      "title": "Sizing (risk)",
+      "covers": "How much is staked."
+    },
+    {
+      "id": "admission",
+      "title": "Admission (authority)",
+      "covers": "Which requests may trade at all."
+    },
+    {
+      "id": "observation",
+      "title": "Observation (state)",
+      "covers": "Account and market state the bot reads."
+    },
+    {
+      "id": "capture",
+      "title": "Capture (archive)",
+      "covers": "Recording raw events, with no trading effect."
+    },
+    {
+      "id": "lifecycle",
+      "title": "Lifecycle (ops)",
+      "covers": "Renewals, signing, storage and governance."
+    }
+  ],
+  "identifier_policy": "Display labels only. Preserve engine_id, ticker, rollback and all Lane IDs, feature assignments, tags and coverage.",
+  "adoption": "Canonical Mushy contract. Consumer adapters and release-train title updates follow in separate records."
+}
