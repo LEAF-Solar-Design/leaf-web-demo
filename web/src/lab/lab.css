@@ -57,7 +57,7 @@
   border-radius: var(--leaf-radius-panel);
 }
 .lab-palette, .lab-inspector { max-height: 75vh; overflow: auto; }
-.lab-canvas-editor button, .lab-canvas-editor input, .lab-canvas-editor select, .lab-canvas-editor textarea {
+.lab-graph-status button, .lab-canvas-editor button, .lab-canvas-editor input, .lab-canvas-editor select, .lab-canvas-editor textarea {
   color: var(--leaf-color-foreground);
   background: var(--leaf-color-background);
   border: 1px solid var(--leaf-color-border);
@@ -67,9 +67,9 @@
   min-height: var(--leaf-spacing-target-min);
   max-width: 100%;
 }
-.lab-canvas-editor button { cursor: pointer; }
-.lab-canvas-editor button:disabled { cursor: default; opacity: 0.6; }
-.lab-canvas-editor :focus-visible { outline: 2px solid var(--leaf-color-primary); outline-offset: 2px; }
+.lab-graph-status button, .lab-canvas-editor button { cursor: pointer; }
+.lab-graph-status button:disabled, .lab-canvas-editor button:disabled { cursor: default; opacity: 0.6; }
+.lab-graph-status :focus-visible, .lab-canvas-editor :focus-visible { outline: 2px solid var(--leaf-color-primary); outline-offset: 2px; }
 .lab-palette button, .lab-inspector label, .lab-palette label { display: block; width: 100%; margin-bottom: var(--leaf-spacing-control-gap); }
 .lab-inspector input, .lab-inspector select, .lab-inspector textarea, .lab-palette input, .lab-palette select { display: block; width: 100%; box-sizing: border-box; }
 .lab-inspector textarea { min-height: 8rem; font-family: var(--leaf-font-mono); }

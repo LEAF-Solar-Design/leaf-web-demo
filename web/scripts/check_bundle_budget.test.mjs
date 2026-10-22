@@ -1,6 +1,41 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { gzipSync } from 'node:zlib'
 import { beforeReference, isolatedChunks, stem, stemFailures } from './check_bundle_budget.mjs'
+
+test('the CLI enforces the ceiling when invoked through an aliased directory', () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'bundle-gate-alias-'))
+  try {
+    const root = join(temporary, 'real')
+    const alias = join(temporary, 'alias')
+    const scripts = join(root, 'scripts')
+    const assets = join(root, 'dist', 'assets')
+    mkdirSync(scripts, { recursive: true })
+    mkdirSync(assets, { recursive: true })
+    copyFileSync(fileURLToPath(new URL('./check_bundle_budget.mjs', import.meta.url)), join(scripts, 'check_bundle_budget.mjs'))
+    symlinkSync(root, alias, 'junction')
+    const buffer = Buffer.from('export const budgetFixture = "aliased directory";\n')
+    const bytes = gzipSync(buffer, { level: 9 }).length
+    writeFileSync(join(assets, 'index-ABCDEFGH.js'), buffer)
+    const baseline = { chunks: {}, total: bytes, total_allowance_bytes: 0, _ref: 'test' }
+    const run = () => spawnSync(process.execPath, [join(alias, 'scripts', 'check_bundle_budget.mjs')], { encoding: 'utf8', timeout: 30000 })
+    writeFileSync(join(scripts, 'bundle-baseline.json'), JSON.stringify(baseline))
+    const exact = run()
+    assert.equal(exact.error, undefined)
+    assert.equal(exact.status, 0, exact.stderr)
+    assert.match(exact.stdout, /bundle budget ok/)
+    writeFileSync(join(scripts, 'bundle-baseline.json'), JSON.stringify({ ...baseline, total: bytes - 1 }))
+    const over = run()
+    assert.equal(over.error, undefined)
+    assert.equal(over.status, 1, over.stderr)
+    assert.match(over.stderr, /bundle budget EXCEEDED/)
+  } finally { rmSync(temporary, { recursive: true, force: true }) }
+})
 
 test('the lazy ELK chunk is charged to the full canvas dependency cap', () => {
   const chunks = {}

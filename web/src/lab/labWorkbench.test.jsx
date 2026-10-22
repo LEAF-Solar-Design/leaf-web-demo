@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LabWorkbench from './LabWorkbench.jsx'
 import { LAB_VIEWS, registerLabViews } from './views.js'
@@ -108,6 +108,23 @@ describe('LabWorkbench', () => {
     rerender(<LabWorkbench route={route('widgets')} status={on} />)
     expect(container.querySelector('.widgets-view')).toBe(editor)
     expect(editor).toBeVisible()
+  })
+
+  it('replaces the last valid graph with the latest not-ready draft and shows its problems', async () => {
+    render(<LabWorkbench route={route('graph')} status={on} />)
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    const palette = within(screen.getByRole('region', { name: 'Strategy palette' }))
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    fireEvent.click(palette.getAllByRole('button', { name: 'Strategy' })[0])
+    expect(readiness.getByRole('status')).toHaveTextContent('Ready')
+    fireEvent.click(palette.getAllByRole('button', { name: 'Market' })[0])
+    expect(readiness.getByRole('status')).toHaveTextContent('No valid graph')
+    expect(readiness.getByRole('listitem')).not.toBeEmptyDOMElement()
+    expect(readiness.getByRole('button', { name: 'Run graph' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('mean_fast_index (required)'), { target: { value: '1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    expect(readiness.getByRole('status')).toHaveTextContent('Ready')
+    expect(readiness.queryByRole('list')).not.toBeInTheDocument()
   })
 
   it.each([

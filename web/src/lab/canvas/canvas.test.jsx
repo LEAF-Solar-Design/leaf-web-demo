@@ -153,7 +153,7 @@ describe('canvas authoring', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Relayout' })).not.toBeDisabled())
     fireEvent.click(screen.getByRole('button', { name: 'Move adjust-none-1' }))
     expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 777, y: 888 }))
-    expect(changed.mock.calls.at(-1)[0].blocks[0]).not.toHaveProperty('position')
+    expect(changed.mock.calls.at(-1)[0].document.blocks[0]).not.toHaveProperty('position')
     fireEvent.click(screen.getByRole('button', { name: 'Relayout' }))
     await waitFor(() => expect(screen.getByTestId('adjust-none-1')).not.toHaveAttribute('data-position', JSON.stringify({ x: 777, y: 888 })))
     expect(screen.getByText(/Validation .* ms/)).toHaveClass('leaf-timing')
@@ -194,7 +194,7 @@ describe('canvas authoring', () => {
     expect(changed).toHaveBeenCalledTimes(calls)
     fireEvent.change(screen.getByLabelText('Settings JSON'), { target: { value: '{"max_tokens":128}' } })
     fireEvent.click(screen.getByRole('button', { name: 'Apply settings JSON' }))
-    expect(changed.mock.calls.at(-1)[0].blocks[1].settings).toEqual({ max_tokens: 128 })
+    expect(changed.mock.calls.at(-1)[0].document.blocks[1].settings).toEqual({ max_tokens: 128 })
     fireEvent.click(screen.getByRole('tab', { name: 'Test' }))
     fireEvent.click(screen.getByRole('button', { name: 'Validate graph' }))
     expect(screen.getByText('Validation checks wiring and settings. Execution is unavailable here.')).toBeVisible()
@@ -219,19 +219,25 @@ describe('canvas authoring', () => {
     expect(card.getByText('Strategies')).toHaveClass('lab-lane-chip')
   })
 
-  it('keeps missing required settings local until the inspector supplies valid values', () => {
+  it('delivers missing required settings as not ready until the inspector supplies valid values', () => {
     const required = manifests.find(item => item.id === 'level-fast-index')
     const changed = vi.fn()
     render(<LabCanvas entries={entriesOf(required)} onChange={changed} />)
     fireEvent.click(screen.getByRole('button', { name: 'Market' }))
     const card = within(screen.getByTestId('level-fast-index-1'))
     expect(card.getByRole('status')).toHaveTextContent(/Not ready/)
-    expect(changed).not.toHaveBeenCalled()
+    expect(changed).toHaveBeenCalledTimes(1)
+    const incomplete = changed.mock.calls[0][0]
+    expect(incomplete.ready).toBe(false)
+    expect(incomplete.problems).not.toHaveLength(0)
+    expect(incomplete.document.blocks[0].settings).toEqual({})
     fireEvent.change(screen.getByLabelText('mean_fast_index (required)'), { target: { value: '1' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
     expect(card.getByRole('status')).toHaveTextContent('Ready')
-    expect(changed).toHaveBeenCalledTimes(1)
-    const document = changed.mock.calls[0][0]
+    expect(changed).toHaveBeenCalledTimes(2)
+    const { document, ready, problems } = changed.mock.calls[1][0]
+    expect(ready).toBe(true)
+    expect(problems).toEqual([])
     expect(document.blocks[0].settings).toEqual({ mean_fast_index: 1 })
     expect(contract.graph(document, entriesOf(required))).toBe(true)
   })
@@ -243,20 +249,25 @@ describe('canvas authoring', () => {
     render(<LabCanvas entries={entriesOf(defaults)} onChange={changed} />)
     fireEvent.click(screen.getByRole('button', { name: 'Strategy' }))
     expect(changed).toHaveBeenCalledTimes(1)
-    const document = changed.mock.calls[0][0]
+    const { document, ready, problems } = changed.mock.calls[0][0]
+    expect(ready).toBe(true)
+    expect(problems).toEqual([])
     expect(document.blocks[0].settings).toEqual({ max_tokens: 128 })
     expect(contract.graph(document, entriesOf(defaults))).toBe(true)
     expect(within(screen.getByTestId('adjust-none-1')).getByRole('status')).toHaveTextContent('Ready')
   })
 
-  it('still refuses settings defaults that violate their schema', () => {
+  it('delivers settings defaults that violate their schema as not ready', () => {
     const invalid = { ...manifest, settings_schema: { type: 'object', additionalProperties: false,
       properties: { max_tokens: { type: 'integer', maximum: 4096, default: 5000 } }, required: ['max_tokens'] } }
     const changed = vi.fn()
     render(<LabCanvas entries={entriesOf(invalid)} onChange={changed} />)
     fireEvent.click(screen.getByRole('button', { name: 'Strategy' }))
     expect(within(screen.getByTestId('adjust-none-1')).getByRole('status')).toHaveTextContent(/Not ready/)
-    expect(changed).not.toHaveBeenCalled()
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(changed.mock.calls[0][0]).toMatchObject({ ready: false,
+      document: { blocks: [{ settings: { max_tokens: 5000 } }] } })
+    expect(changed.mock.calls[0][0].problems).not.toHaveLength(0)
   })
 
   it('refuses incompatible connections through the actual onConnect handler', () => {
@@ -273,10 +284,67 @@ describe('canvas authoring', () => {
     const changed = vi.fn()
     render(<LabCanvas initialDocument={documentOf(2)} onChange={changed} />)
     fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
-    expect(changed.mock.calls.at(-1)[0].pipes).toEqual([edge(1, 2)])
+    expect(changed.mock.calls.at(-1)[0].document.pipes).toEqual([edge(1, 2)])
     fireEvent.click(screen.getByRole('button', { name: 'Delete first pipe' }))
-    expect(changed.mock.calls.at(-1)[0].pipes).toEqual([])
+    expect(changed.mock.calls.at(-1)[0].document.pipes).toEqual([])
   })
+
+  it.each(['React Flow', 'inspector'])('delivers the latest not-ready draft after a required pipe is disconnected through %s', path => {
+    const required = { ...manifest, id: 'required-strategy',
+      inputs: { value: { ...manifest.inputs.value, required: true } } }
+    const entries = entriesOf(manifest, required)
+    const initial = addBlock(documentOf(1), required)
+    const pipe = { from: { node: initial.blocks[0].id, port: 'result' }, to: { node: initial.blocks[1].id, port: 'value' } }
+    const changed = vi.fn()
+    render(<LabCanvas initialDocument={initial} entries={entries} onChange={changed} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
+    const connected = changed.mock.calls[0][0]
+    expect(connected).toEqual({ document: { ...initial, pipes: [pipe] }, ready: true, problems: [] })
+
+    if (path === 'inspector') {
+      fireEvent.click(screen.getByRole('button', { name: `Select ${initial.blocks[1].id}` }))
+      fireEvent.click(screen.getByRole('tab', { name: 'Configure' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Disconnect value' }))
+    } else fireEvent.click(screen.getByRole('button', { name: 'Delete first pipe' }))
+    expect(changed).toHaveBeenCalledTimes(2)
+    expect(changed.mock.calls[1][0]).toEqual({ document: initial, ready: false, problems: ['Test: input required'] })
+    expect(connected.document.pipes).toEqual([pipe])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
+    expect(changed).toHaveBeenCalledTimes(3)
+    expect(changed.mock.calls[2][0]).toEqual(connected)
+    expect(contract.graph(changed.mock.calls[2][0].document, entries)).toBe(true)
+  })
+
+  it('revokes the host run document when a required pipe is disconnected and restores it on reconnect', async () => {
+    const required = { ...manifest, id: 'required-strategy',
+      inputs: { value: { ...manifest.inputs.value, required: true } } }
+    const onRun = vi.fn()
+    render(<GraphView initialDocument={addBlock(documentOf(1), required)} entries={entriesOf(manifest, required)} onRun={onRun} />)
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    const run = readiness.getByRole('button', { name: 'Run graph' })
+    expect(run).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
+    expect(readiness.getByRole('status')).toHaveTextContent('Ready')
+    expect(run).toBeEnabled()
+    fireEvent.click(run)
+    expect(onRun).toHaveBeenCalledTimes(1)
+    expect(onRun.mock.calls[0][0].pipes).toHaveLength(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete first pipe' }))
+    expect(readiness.getByRole('status')).toHaveTextContent('No valid graph')
+    expect(readiness.getByRole('listitem')).toHaveTextContent('Test: input required')
+    expect(run).toBeDisabled()
+    fireEvent.click(run)
+    expect(onRun).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
+    expect(run).toBeEnabled()
+    expect(readiness.queryByRole('list')).not.toBeInTheDocument()
+    fireEvent.click(run)
+    expect(onRun).toHaveBeenCalledTimes(2)
+  }, 20000)
 
   it('uses only the supplied registry for click, keyboard, slash search and drop', () => {
     const second = manifests.find(item => item.id === 'gates-price-v1')

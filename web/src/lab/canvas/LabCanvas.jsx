@@ -32,12 +32,13 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
   const flow = useReactFlow()
   const validation = useMemo(() => validateGraph(document, entries), [document, entries])
   const commit = next => {
-    // Incomplete drafts stay local; only a fully valid contract document leaves.
+    // Deliver every draft so the host cannot retain an earlier valid graph.
     contract.schema(next, 'lab-graph.v1.schema.json')
     current.current = roundTrip(next)
     request.current += 1; layoutRunner.cancel(); setLayoutBusy(false)
     setDocument(current.current)
-    if (validateGraph(current.current, entries).ready) onChange?.(roundTrip(current.current))
+    const { ready, problems } = validateGraph(current.current, entries)
+    onChange?.({ document: roundTrip(current.current), ready, problems })
   }
   const connect = pipe => { commit(connectPipe(current.current, pipe, entries)); setMessage('Pipe connected') }
   const disconnect = id => { commit(disconnectPipe(current.current, id)); setMessage('Pipe disconnected') }

@@ -8,7 +8,7 @@
 //   node scripts/check_bundle_budget.mjs                  # gate against baseline
 //   node scripts/check_bundle_budget.mjs --write-baseline # reseed after a deliberate change
 //   node scripts/check_bundle_budget.mjs --write-baseline --before <ref> # explicit pre-canvas source
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -169,6 +169,8 @@ if (failures.length) process.exit(1)
 console.log('bundle budget ok')
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Node resolves module URLs through symlinks, while argv can retain an alias
+// such as macOS /var instead of /private/var. Compare the same real paths.
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))) {
   main().catch(error => { console.error(error.message); process.exitCode = 1 })
 }

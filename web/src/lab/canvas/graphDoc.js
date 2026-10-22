@@ -64,6 +64,6 @@ export function inputValues(document, block, upstream = {}, entries = registry) 
 }
 export function validateGraph(document, entries = registry) {
   const started = performance.now()
-  try { contract.graph(document, entries); return { ready: true, message: 'Ready', ms: performance.now() - started } }
-  catch (error) { return { ready: false, message: error.message, ms: performance.now() - started } }
+  try { contract.graph(document, entries); return { ready: true, problems: [], message: 'Ready', ms: performance.now() - started } }
+  catch (error) { return { ready: false, problems: [error.message], message: error.message, ms: performance.now() - started } }
 }
