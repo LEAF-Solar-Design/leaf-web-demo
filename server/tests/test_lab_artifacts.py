@@ -205,6 +205,22 @@ def test_sqlite_refused_when_postgres_required(monkeypatch, local_store):
     assert not local_store.exists()
 
 
+@pytest.mark.parametrize("value", [None, "", " \t\n"])
+def test_sqlite_requires_explicit_db_path(monkeypatch, local_store, value):
+    if value is None:
+        monkeypatch.delenv("LEAF_LAB_DB", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_LAB_DB", value)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unset SQLite path reached persistence")
+
+    monkeypatch.setattr(ledger.sqlite3, "connect", forbidden)
+    with pytest.raises(ledger.StoreUnavailable, match="^lab_db_unset$"):
+        save()
+    assert not local_store.exists()
+
+
 def test_sqlite_forbidden_volume(monkeypatch):
     for path in ("/data/state/lab.db", "/data/state"):
         monkeypatch.setenv("LEAF_LAB_DB", path)

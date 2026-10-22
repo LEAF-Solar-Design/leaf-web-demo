@@ -15,7 +15,6 @@ import time
 import uuid
 
 import platform_link
-from deps import SERVER_DIR
 from lab_doc_validators import InvalidGraph, TooLarge, expected_head as validate_head, identifier, validate_graph
 
 MAX_TENANT_DOCS = 100
@@ -116,7 +115,10 @@ def _run(tenant, operation, *, write=False):
             return operation(sql)
 
         return platform_link.platform_db().run_transaction(transaction)
-    path = Path(os.environ.get("LEAF_LAB_DB", str(SERVER_DIR / "lab_artifacts.db"))).resolve()
+    db_path = os.environ.get("LEAF_LAB_DB")
+    if not db_path or not db_path.strip():
+        raise StoreUnavailable("lab_db_unset")
+    path = Path(db_path).resolve()
     # Resolve symlinks before checking the forbidden durable filesystem root.
     state_root = Path("/data/state").resolve()
     if path == state_root or state_root in path.parents:
