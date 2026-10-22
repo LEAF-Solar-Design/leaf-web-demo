@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from typing import Any, Dict
 
@@ -224,9 +226,11 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS,
 def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SECONDS,
           once: bool = False, stop_event: threading.Event | None = None,
           tool_name: str = autofill.TOOL_NAME, worker_id: str | None = None,
-          project_readiness: bool = False) -> None:
+          project_readiness: bool = False, graph_heartbeat: bool = False) -> None:
     owner = worker_id if worker_id is not None else globals()["worker_id"]()
-    descriptor = graph_worker_descriptor(tool_name) if project_readiness else None
+    descriptor = (graph_worker_descriptor(tool_name)
+                  if project_readiness or (graph_heartbeat and tool_name in SUPPORTED_TOOLS)
+                  else None)
     ready_printed = False
     stop = stop_event or threading.Event()
     while not stop.is_set():
@@ -236,7 +240,7 @@ def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SEC
                 descriptor["source_revision"], descriptor["source_sha256"])
         claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool_name)
         # Ready only once one full cycle (heartbeat and claim) has completed.
-        if descriptor is not None and not ready_printed:
+        if project_readiness and descriptor is not None and not ready_printed:
             print("LEAF_CANONICAL_WORKER_READY " + json.dumps({
                 "worker_id": owner, "tool_name": descriptor["tool_name"],
                 "source_revision": descriptor["source_revision"]}, separators=(",", ":")),
@@ -248,6 +252,44 @@ def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SEC
             stop.wait(poll_seconds)
 
 
+def _serve_tools(worker_ids: Dict[str, str], *, stop_event: threading.Event,
+                 poll_seconds: float, lease_seconds: float) -> None:
+    failures = []
+    failure_lock = threading.Lock()
+
+    def run(tool_name):
+        failure_class = "RuntimeError"  # An unsolicited return also loses this loop.
+        try:
+            serve(tool_name=tool_name, worker_id=worker_ids[tool_name],
+                  stop_event=stop_event, poll_seconds=poll_seconds,
+                  lease_seconds=lease_seconds, graph_heartbeat=True)
+        except BaseException as exc:  # A thread's SystemExit must also restart the task.
+            failure_class = type(exc).__name__
+        with failure_lock:
+            if not stop_event.is_set():
+                failures.append((tool_name, failure_class))
+                stop_event.set()
+
+    threads = [threading.Thread(target=run, args=(tool,),
+                                name=f"canonical-worker-{tool}", daemon=True)
+               for tool in worker_ids]
+    try:
+        for thread in threads:
+            thread.start()
+        stop_event.wait()
+    finally:
+        stop_event.set()
+        # One deadline for all loops; blocked adapters cannot hold process shutdown open.
+        deadline = time.monotonic() + poll_seconds + lease_seconds
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    if failures:
+        tool, failure_class = failures[0]
+        print(f"canonical worker loop failed: {tool} {failure_class}", file=sys.stderr, flush=True)
+        raise SystemExit(1)
+
+
 def main() -> None:
     import solar_project_graph
 
@@ -257,24 +299,62 @@ def main() -> None:
     # parser accepted (--p for --poll-seconds) still resolves to the same option.
     parser.add_argument("--readiness", dest="project_readiness", action="store_true")
     parser.add_argument("--worker-id", type=_worker_id_argument)
-    parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS), default=autofill.TOOL_NAME)
+    parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS), action="append")
+    parser.add_argument("--health", action="store_true")
+    parser.add_argument("--max-age-seconds", type=float)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--lease-seconds", type=float, default=float(
         os.environ.get("LEAF_CANONICAL_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)))
     args = parser.parse_args()
-    if args.project_readiness and args.tool not in solar_project_graph.SUPPORTED_TOOLS:
+    tools = args.tool or [autofill.TOOL_NAME]
+    multi_tool = len(tools) > 1
+    if len(set(tools)) != len(tools):
+        parser.error("duplicate --tool values are refused even with LEAF_CANONICAL_MULTI_TOOL=1")
+    if multi_tool and os.environ.get("LEAF_CANONICAL_MULTI_TOOL") != "1":
+        parser.error("multiple --tool values require LEAF_CANONICAL_MULTI_TOOL=1")
+    if multi_tool and (args.project_readiness or args.once):
+        parser.error("multiple --tool values cannot be used with --readiness or --once")
+    if args.project_readiness and tools[0] not in solar_project_graph.SUPPORTED_TOOLS:
         parser.error("--readiness requires a graph tool")
     if args.project_readiness and not project_posture_ok():
         parser.error("--readiness requires a local or test runtime with project Solar runs enabled")
+    if multi_tool or args.health:
+        if not math.isfinite(args.lease_seconds) or not math.isfinite(args.poll_seconds):
+            parser.error("multi-tool and health modes require finite lease and poll seconds")
+        base = args.worker_id if args.worker_id is not None else socket.gethostname()
+        try:
+            worker_ids = {tool: _worker_id_argument(f"{base}:{tool}") for tool in tools}
+        except argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+    if args.health:
+        max_age = args.max_age_seconds
+        if max_age is None:
+            max_age = 3 * max(args.lease_seconds, 1.0)
+        if not math.isfinite(max_age):
+            parser.error("--max-age-seconds must be finite")
+        canonical_jobs = platform_link._canonical_jobs_module()
+        unhealthy = []
+        for tool, owner in worker_ids.items():
+            row = canonical_jobs.worker_heartbeat(owner, max_age_seconds=max(15.0, max_age))
+            if row is None or row["tool_name"] != tool:
+                unhealthy.append(tool)
+        if unhealthy:
+            print("canonical worker heartbeat stale or missing: " + ", ".join(unhealthy),
+                  file=sys.stderr, flush=True)
+        raise SystemExit(1 if unhealthy else 0)
     # A process that can only heartbeat against part of the expected schema is
     # not ready. Refuse to claim work until every required relation is present.
     platform_link._load_platform()[1].assert_schema_current()
     stop = threading.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda _signum, _frame: stop.set())
+    if multi_tool:
+        _serve_tools(worker_ids, stop_event=stop, poll_seconds=max(args.poll_seconds, 0.05),
+                     lease_seconds=max(args.lease_seconds, 1.0))
+        return
     serve(poll_seconds=max(args.poll_seconds, 0.05),
           lease_seconds=max(args.lease_seconds, 1.0), once=args.once, stop_event=stop,
-          tool_name=args.tool, worker_id=args.worker_id, project_readiness=args.project_readiness)
+          tool_name=tools[0], worker_id=args.worker_id, project_readiness=args.project_readiness)
 
 
 if __name__ == "__main__":

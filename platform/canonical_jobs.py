@@ -954,3 +954,19 @@ def worker_health(tool_name: str, *, max_age_seconds: float = 15,
                 {"tool": tool_name, "cutoff": cutoff},
             )
             return _record(cur.fetchone())
+
+
+def worker_heartbeat(worker_id: str, *, max_age_seconds: float,
+                     now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    """Read a fresh heartbeat for exactly one worker, without claiming work."""
+    current = _now(now)
+    cutoff = current - timedelta(seconds=max_age_seconds)
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT worker_id, tool_name, runtime, source_revision, source_sha256, observed_at "
+                "FROM canonical_worker_heartbeats WHERE worker_id = %(worker)s "
+                "AND observed_at >= %(cutoff)s",
+                {"worker": worker_id, "cutoff": cutoff},
+            )
+            return _record(cur.fetchone())
