@@ -290,6 +290,17 @@ def _serve_tools(worker_ids: Dict[str, str], *, stop_event: threading.Event,
         raise SystemExit(1)
 
 
+class _ToolAction(argparse.Action):
+    """Replace the default tool on first use, then collect explicit tools in order."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        tools = getattr(namespace, self.dest)
+        if not isinstance(tools, list):
+            tools = []
+        tools.append(values)
+        setattr(namespace, self.dest, tools)
+
+
 def main() -> None:
     import solar_project_graph
 
@@ -299,14 +310,15 @@ def main() -> None:
     # parser accepted (--p for --poll-seconds) still resolves to the same option.
     parser.add_argument("--readiness", dest="project_readiness", action="store_true")
     parser.add_argument("--worker-id", type=_worker_id_argument)
-    parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS), action="append")
+    parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS),
+                        action=_ToolAction, default=autofill.TOOL_NAME)
     parser.add_argument("--health", action="store_true")
     parser.add_argument("--max-age-seconds", type=float)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     parser.add_argument("--lease-seconds", type=float, default=float(
         os.environ.get("LEAF_CANONICAL_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)))
     args = parser.parse_args()
-    tools = args.tool or [autofill.TOOL_NAME]
+    tools = [args.tool] if isinstance(args.tool, str) else args.tool
     multi_tool = len(tools) > 1
     if len(set(tools)) != len(tools):
         parser.error("duplicate --tool values are refused even with LEAF_CANONICAL_MULTI_TOOL=1")

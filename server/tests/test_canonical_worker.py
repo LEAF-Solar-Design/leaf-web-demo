@@ -313,6 +313,33 @@ def test_worker_id_default_generator():
     assert first != second
 
 
+@pytest.mark.parametrize("selected", [
+    [], ["solar-settings"], ["string-autofill-opt"], ["solar-settings", "arlo-design"],
+], ids=["default", "single", "explicit-default", "repeat"])
+def test_main_tool_default_and_explicit_selections(monkeypatch, selected):
+    parsers, parsed, served = [], [], []
+    parse_args = canonical_worker.argparse.ArgumentParser.parse_args
+
+    def capture(parser, *args, **kwargs):
+        parsers.append(parser)
+        namespace = parse_args(parser, *args, **kwargs)
+        parsed.append(namespace.tool)
+        return namespace
+
+    monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    monkeypatch.setattr(canonical_worker.argparse.ArgumentParser, "parse_args", capture)
+    monkeypatch.setattr(canonical_worker, "serve", lambda **kwargs: served.append(kwargs["tool_name"]))
+    monkeypatch.setattr(canonical_worker, "_serve_tools", lambda worker_ids, **kwargs: served.extend(worker_ids))
+    _project_main(monkeypatch, [arg for tool in selected for arg in ("--tool", tool)], lambda: None)
+
+    canonical_worker.main()
+
+    action = next(action for action in parsers[0]._actions if action.dest == "tool")
+    assert action.default == canonical_worker.autofill.TOOL_NAME
+    assert parsed == [selected if selected else canonical_worker.autofill.TOOL_NAME]
+    assert served == (selected or [canonical_worker.autofill.TOOL_NAME])
+
+
 @pytest.mark.parametrize("opt_in", [False, True], ids=["off", "on"])
 def test_main_default_loop(monkeypatch, capsys, opt_in):
     calls, schema, handlers = [], [], {}
