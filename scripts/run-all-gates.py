@@ -3239,8 +3239,10 @@ def build_suites() -> List[Suite]:
         # real-wasm harness case, sixteen editing-surface cases and the W4g-6
         # batch-atomicity case. An opted-in machine (local wasm build present)
         # executes them instead.
+        # PR 2131 probes 2144 to 2147 (2026-10-22) measured worker RPC stalls
+        # from oversubscription: four gate jobs share eight CPUs. Cap workers.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 752,
+              [_npm(), "run", "test:unit", "--", "--maxWorkers=2"], 752,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
