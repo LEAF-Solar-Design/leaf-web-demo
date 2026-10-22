@@ -361,6 +361,7 @@
     "server-mcp-gateway-authority",
     "server-mcp-gateway-telemetry",
     "server-mcp-staging-probe",
+    "server-probe-staging-async-job",
     "server-mcp-status",
     "server-mcp-tenant-registry",
     "server-mcp-tool-projection",
