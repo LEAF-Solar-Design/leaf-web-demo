@@ -5,6 +5,18 @@ import LocalCadConnect from './LocalCadConnect.jsx'
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
+it('announces update errors and unavailable labels inside the live region, then returns to the exact connected line', () => {
+  const { rerender } = render(<LocalCadConnect status="connected" drawing="site.dwg" error="conversion failed" textPending />)
+  const live = screen.getByTestId('local-cad-status').closest('[aria-live]')
+  expect(live.textContent).toContain('Connected to AutoCAD · site.dwg. The last update failed: conversion failed')
+  expect(live.textContent).toContain('labels unavailable')
+  rerender(<LocalCadConnect status="connected" drawing="site.dwg" textPending />)
+  expect(live.textContent).toContain('labels unavailable')
+  expect(live.textContent).not.toContain('failed')
+  rerender(<LocalCadConnect status="connected" drawing="site.dwg" />)
+  expect(live.textContent).toBe('Connected to AutoCAD · site.dwg')
+})
+
 it('toggles connect and disconnect through the owner callbacks', () => {
   const connected = vi.fn(), disconnected = vi.fn()
   function Owner() {

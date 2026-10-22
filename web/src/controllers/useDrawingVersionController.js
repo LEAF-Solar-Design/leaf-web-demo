@@ -68,6 +68,45 @@ export default function useDrawingVersionController({
   // is readable. This is drawing state, not drawer state: closing history must
   // not make the stale viewer eligible to mutate the newer server head.
   const [unreadableHead, setUnreadableHead] = useState(null)
+  const snapshotsRef = useRef(new WeakSet())
+  const captureSnapshot = useCallback(() => {
+    const snapshot = Object.freeze({ intake, versionIntake, drawingState, visibleLayers,
+      overlayStale, versionError, historyOpen, history, historyError, previewing,
+      previewIntake, refreshFailure, unreadableHead })
+    snapshotsRef.current.add(snapshot)
+    return snapshot
+  }, [intake, versionIntake, drawingState, visibleLayers, overlayStale, versionError,
+    historyOpen, history, historyError, previewing, previewIntake, refreshFailure, unreadableHead])
+  const restoreSnapshot = useCallback((snapshot) => {
+    if (!snapshot || !snapshotsRef.current.has(snapshot)) return
+    operationGenerationRef.current += 1
+    restoreGenerationRef.current += 1
+    setIntake(snapshot.intake)
+    setVersionIntake(snapshot.versionIntake)
+    setDrawingState(snapshot.drawingState)
+    setVisibleLayers(snapshot.visibleLayers)
+    setOverlayStale(snapshot.overlayStale)
+    setVersionError(snapshot.versionError)
+    setHistoryOpen(snapshot.historyOpen)
+    setHistory(snapshot.history)
+    setHistoryError(snapshot.historyError)
+    setPreviewing(snapshot.previewing)
+    setPreviewIntake(snapshot.previewIntake)
+    setRefreshFailure(snapshot.refreshFailure)
+    setUnreadableHead(snapshot.unreadableHead)
+    setVersionBusy(false)
+    setHistoryLoading(false)
+    setRefreshing(false)
+  }, [])
+  const updateIntake = useCallback((nextIntake) => {
+    if (previewIntake) setPreviewIntake(nextIntake)
+    else if (versionIntake) setVersionIntake(nextIntake)
+    else setIntake(nextIntake)
+    setVisibleLayers(previous => Object.fromEntries((nextIntake?.layers || [])
+      .map(layer => [layer, previous[layer] ?? true])))
+    onApplyIntake?.(nextIntake, { source: 'update' })
+    return nextIntake
+  }, [previewIntake, versionIntake, onApplyIntake])
 
   const shown = previewIntake || versionIntake || intake
   const activeVersion = previewing?.version ?? drawingState?.head ?? drawingState?.version ?? null
@@ -127,6 +166,7 @@ export default function useDrawingVersionController({
 
   const reset = useCallback(() => {
     operationGenerationRef.current += 1
+    snapshotsRef.current = new WeakSet()
     setIntake(null)
     setVersionIntake(null)
     setVisibleLayers({})
@@ -536,6 +576,9 @@ export default function useDrawingVersionController({
   }, [operationCurrent, loadHead, onError, refreshFailure, refreshing, seatVersion])
 
   const actions = useMemo(() => ({
+    captureSnapshot,
+    restoreSnapshot,
+    updateIntake,
     reset,
     seatIntake,
     seatVersion,
@@ -556,6 +599,9 @@ export default function useDrawingVersionController({
     recordCommittedUnreadableHead,
     retryUnreadableHead,
   }), [
+    captureSnapshot,
+    restoreSnapshot,
+    updateIntake,
     backToHead,
     closeHistory,
     loadHistory,
@@ -575,6 +621,9 @@ export default function useDrawingVersionController({
   ])
 
   return {
+    captureSnapshot,
+    restoreSnapshot,
+    updateIntake,
     intake,
     versionIntake,
     shown,

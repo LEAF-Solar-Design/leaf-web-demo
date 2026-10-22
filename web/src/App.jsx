@@ -102,7 +102,7 @@ import { useIosShipController } from './ios/useIosShipController.js'
 import { shipLaunchReason, shipErrorSentence } from './lib/ribbonClusters.js'
 import { ENV_IOS_SURFACE } from './ios/flag.js'
 import CadEditSurface from './cadedit/CadEditSurface.jsx'
-import EngineSessionProvider from './cadedit/EngineSessionProvider.jsx'
+import EngineSessionProvider, { useEngineSessionContext, REACH_STATE } from './cadedit/EngineSessionProvider.jsx'
 import EngineRibbonClusters from './cadedit/EngineRibbonClusters.jsx'
 // W4g-7b-03c-d: the dock's Color/Linetype/Lineweight rows portal into the
 // slot below from a consumer INSIDE the provider (App itself sits outside
@@ -459,6 +459,18 @@ function ConsoleDrawingObjects({ index, selectedHandle }) {
   return null
 }
 
+const LOCAL_CAD_EDIT_REASON = 'AutoCAD is connected. Disconnect to edit this drawing.'
+function LocalCadEngineHold({ active }) {
+  const { reach, setReach, setArmed } = useEngineSessionContext()
+  useLayoutEffect(() => {
+    if (!active) return undefined
+    setArmed(null)
+    setReach({ state: REACH_STATE.HELD, sentence: LOCAL_CAD_EDIT_REASON })
+    return () => setReach(reach)
+  }, [active, setReach, setArmed])
+  return null
+}
+
 export default function App() {
   // W1 (convergence): the console's drawing identity is now owned by
   // DrawingIdentityProvider, seeded from the SAME rule these two module
@@ -542,10 +554,16 @@ export default function App() {
   const localCadSnapshotRef = useRef(null)
   const localCadRestoreRef = useRef(null)
   const localCadStartedRef = useRef(false)
+  const localCadLoadGenerationRef = useRef(0)
+  const localCadEpochRef = useRef(null)
+  const localCadHistoryRestoredRef = useRef(false)
   const [localCadStatus, setLocalCadStatus] = useState({ status: 'stopped' })
   const stopLocalCad = useCallback(({ discard = false, clear = false } = {}) => {
     const seated = !!localCadSnapshotRef.current
-    if (discard) localCadSnapshotRef.current = null
+    if (discard) {
+      localCadSnapshotRef.current = null
+      localCadEpochRef.current = null
+    }
     localCadBridgeRef.current?.stop()
     if (!discard || (seated && clear)) localCadRestoreRef.current?.({ discard })
     setLocalCadActive(false)
@@ -553,13 +571,18 @@ export default function App() {
   }, [])
   const connectLocalCad = useCallback(() => {
     localCadStartedRef.current = true
+    localCadLoadGenerationRef.current = requestedDrawingIdRef.loadGeneration ?? 0
     try { localStorage.setItem('leaf.localCad.connect', '1') } catch { /* connection still works */ }
     localCadBridgeRef.current?.start()
   }, [])
   // The drawing loader's existing selection fence also hands ownership back
   // from a running local source. It never invalidates a pending drawing read.
-  requestedDrawingIdRef.onDrawingLoad = () => {
-    if (localCadBridgeRef.current?.snapshot().running) stopLocalCad({ discard: true })
+  requestedDrawingIdRef.onDrawingLoad = (generation = (requestedDrawingIdRef.loadGeneration ?? 0) + 1) => {
+    if (localCadBridgeRef.current?.snapshot().running) {
+      if (generation <= localCadLoadGenerationRef.current) return false
+      stopLocalCad({ discard: true })
+    }
+    return true
   }
   const settingsRunRef = useRef(null)
   const [settingsRunResult, setSettingsRunResult] = useState(null)
@@ -1404,7 +1427,9 @@ export default function App() {
       && isScopeCurrent()
       && sessionProof.current(true)
     if (!current()) return undefined
-    requestedDrawingIdRef.onDrawingLoad?.()
+    const loadGeneration = (requestedDrawingIdRef.loadGeneration ?? 0) + 1
+    requestedDrawingIdRef.loadGeneration = loadGeneration
+    requestedDrawingIdRef.onDrawingLoad?.(loadGeneration)
     resetDrawing(); setLoadErr(null)
     if (!hasDrawingSelection({ drawingId: loadDrawingId, source: DRAWING_SOURCE })) {
       setDrawingLoad({ drawingId: null, state: 'idle' })
@@ -1417,7 +1442,7 @@ export default function App() {
     mockVersions.reset()
     const seat = (d, options = {}) => {
       if (!current()) return
-      requestedDrawingIdRef.onDrawingLoad?.()
+      if (requestedDrawingIdRef.onDrawingLoad?.(loadGeneration) === false) return
       seatIntake(d, options)
       setDrawingLoad({ drawingId: loadDrawingId, state: d != null ? 'seated' : 'absent' })
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
@@ -1452,6 +1477,7 @@ export default function App() {
       })
       .catch((e) => {
         if (!current()) return
+        if (requestedDrawingIdRef.onDrawingLoad?.(loadGeneration) === false) return
         setDrawingLoad({ drawingId: loadDrawingId, state: e?.status === 404 ? 'absent' : 'failed', failure: classifyDrawingLoadFailure(e) })
         setLoadErr(humanizeError(e))
         if (!mock && is401(e)) {
@@ -1477,32 +1503,56 @@ export default function App() {
     const snapshot = localCadSnapshotRef.current
     if (!snapshot) return
     localCadSnapshotRef.current = null
+    localCadEpochRef.current = null
     setLocalCadActive(false)
-    seatIntake(snapshot.shown, { apply: true, drawingId: snapshot.drawingId, drawingState: snapshot.drawingState })
-    setStandaloneVisibleLayers(snapshot.visibleLayers)
-    setOverlayStale(snapshot.overlayStale)
+    drawing.restoreSnapshot(snapshot.controller)
+    applyDrawingIntake(snapshot.activeIntake || snapshot.controller.previewIntake
+      || snapshot.controller.versionIntake || snapshot.controller.intake)
     setActiveIntake(snapshot.activeIntake)
+    setLoadErr(snapshot.loadErr)
+    setDrawingLoad(snapshot.drawingLoad)
+    setSelectedHandle(snapshot.selectedHandle)
+    setPendingEdit(snapshot.pendingEdit)
+    setEngineHistory(snapshot.engineHistory)
+    setResultCandidate(snapshot.resultCandidate)
+    setOffscreenResult(snapshot.offscreenResult)
+    viewHistoryRef.current = snapshot.viewHistory
+    setViewHistorySize(snapshot.viewHistory.size())
+    localCadHistoryRestoredRef.current = true
+    setLocalCadStatus(status => ({ ...status, truncated: false }))
   }
   localCadUpdateRef.current = (update) => {
     if (!localCadEligible || localCadBridgeRef.current?.snapshot().status === 'stopped') return
     if (!localCadSnapshotRef.current) {
-      localCadSnapshotRef.current = { shown: activeIntake || shown, drawingId: drawingState?.drawing_id ?? null,
-        drawingState, visibleLayers: standaloneVisibleLayers, overlayStale, activeIntake }
+      // The first seat also clears load errors, selection/pending edits,
+      // navigation history and the engine view's history/result annotations.
+      localCadSnapshotRef.current = { controller: drawing.captureSnapshot(), activeIntake, loadErr,
+        drawingLoad: !shown && !loadErr ? { ...drawingLoad, state: 'idle' } : drawingLoad,
+        selectedHandle, pendingEdit, engineHistory, resultCandidate, offscreenResult,
+        viewHistory: viewHistoryRef.current }
+      viewHistoryRef.current = createViewHistory()
+      // Invalidate reads started against the suspended drawing before seating.
+      drawing.restoreSnapshot(localCadSnapshotRef.current.controller)
     }
     setLocalCadActive(true)
     setActiveIntake(null)
     setLoadErr(null)
     closeStartForChange()
-    seatIntake(update.intake, { apply: true })
-    setLocalCadStatus(status => ({ ...status, truncated: !!update.intake.truncated }))
+    if (localCadEpochRef.current === null || localCadEpochRef.current !== (update.epoch ?? '')) {
+      seatIntake(update.intake, { apply: true })
+    } else drawing.updateIntake(update.intake)
+    localCadEpochRef.current = update.epoch ?? ''
+    setLocalCadStatus(status => ({ ...status, truncated: !!update.intake.truncated,
+      textPending: !!update.intake.textPending }))
   }
   useEffect(() => {
     const bridge = createLocalCadBridge({
       onStatus: (status) => {
-        setLocalCadStatus(previous => ({ ...status, truncated: status.status === 'stopped' ? false : previous.truncated }))
+        setLocalCadStatus(previous => ({ ...status, truncated: status.status === 'connected' ? previous.truncated : false }))
         if (status.status === 'stopped') localCadRestoreRef.current?.()
       },
       onUpdate: (update) => localCadUpdateRef.current(update),
+      onLoss: () => localCadRestoreRef.current?.(),
     })
     localCadBridgeRef.current = bridge
     return () => {
@@ -1930,7 +1980,14 @@ export default function App() {
   } = viewNavigation
   // An engine document opened, closed or swapped is a new drawing scope: the
   // CAD engine path sets activeIntake without resetDrawingSelection.
-  useEffect(() => { clearViewHistory() }, [activeIntake?.documentId, clearViewHistory])
+  useEffect(() => {
+    if (localCadActive) return
+    if (localCadHistoryRestoredRef.current) {
+      localCadHistoryRestoredRef.current = false
+      return
+    }
+    clearViewHistory()
+  }, [activeIntake?.documentId, localCadActive, clearViewHistory])
   // W4c-V2: the raw intake entity behind the selection, resolved in place -
   // selectEntity deliberately drops geometry and its descriptor shape is
   // pinned by exact-shape tests, so the dock derives from the intake here.
@@ -4320,9 +4377,12 @@ export default function App() {
     // to the plan route, where the SERVER picks the commit leg and says so
     // in the receipt; a hand-imported document keeps the F-3 sidecar route.
     save: async (bytes, parent, digest, plan = null, onStatus = null) => {
+      // Retained save callbacks may resume after Connect seats a drawing.
+      if (localCadSnapshotRef.current) throw new Error(LOCAL_CAD_EDIT_REASON)
       // A hand import has no committed head, so fetch the chain head at save
       // time; a head document always carries its committed version.
       if (parent == null) parent = (await getDrawingVersions(false, REQUESTED_DRAWING_ID)).head
+      if (localCadSnapshotRef.current) throw new Error(LOCAL_CAD_EDIT_REASON)
       // The store publishes ONLY under a live single-writer checkout (the
       // postgres authority fails closed without one — staging's exact
       // first-save refusal). Use the session's held capability when there
@@ -4351,6 +4411,7 @@ export default function App() {
       const cap = held || acquired.checkout_capability
       let keepLock = false
       try {
+        if (localCadSnapshotRef.current) throw new Error(LOCAL_CAD_EDIT_REASON)
         if (plan && plan.mutations) {
           return await saveDrawingVersionPlan(
             REQUESTED_DRAWING_ID, bytes, parent, digest, plan.mutations, cap, { onStatus })
@@ -4377,7 +4438,7 @@ export default function App() {
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={localCadActive ? null : engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}><LocalCadEngineHold active={localCadActive} />{node}</EngineSessionProvider>
   ) : node)
 
   return (
@@ -5446,7 +5507,7 @@ export default function App() {
             )}
             </>}
             {signedOut && !localCadActive && <div className="overlay-msg">Sign in or explore the demo to load a drawing.</div>}
-            {!intake && !loadErr && !signedOut && (
+            {!intake && !loadErr && !signedOut && !localCadActive && drawingLoad.state === 'pending' && (
               // Indeterminate load: content-shaped pulse dot + verb, top-left —
               // the centered takeover position is reserved for failures (X3).
               <div className="loading-line dim" style={{ position: 'absolute', top: 14, left: 14 }}>

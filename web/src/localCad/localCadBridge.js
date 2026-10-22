@@ -1,7 +1,7 @@
 import { bridgeToIntake } from './bridgeIntake.js'
 
 export function createLocalCadBridge({ fetchImpl = globalThis.fetch, ports = [8126], intervalMs = 400,
-  maxBackoffMs = 5000, onUpdate, onStatus, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout,
+  maxBackoffMs = 5000, onUpdate, onLoss, onStatus, setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout,
   loadTextGlyphs = () => import('./bridgeText.js') } = {}) {
   let running = false
   let generation = 0
@@ -14,6 +14,18 @@ export function createLocalCadBridge({ fetchImpl = globalThis.fetch, ports = [81
   let textPromise = null
   let textError = null
   let textRetryAt = 0
+  let pendingTextPayload = null
+  let conversionError = null
+  let seated = false
+  const loseDrawing = () => {
+    const wasSeated = seated
+    seated = false
+    rev = 0
+    epoch = ''
+    pendingTextPayload = null
+    conversionError = null
+    if (wasSeated) onLoss?.()
+  }
   const ensureTextGlyphs = () => {
     if (textGlyphs || Date.now() < textRetryAt) return textPromise
     if (!textPromise) {
@@ -83,41 +95,59 @@ export function createLocalCadBridge({ fetchImpl = globalThis.fetch, ports = [81
     if (!current()) return
     if (payload) {
       const restarted = payload.epoch !== epoch
+      if (!payload.intake && (restarted || payload.status === 'offline' || payload.status === 'busy')) {
+        loseDrawing()
+        if (!current()) return
+      }
       if (!restarted && payload.rev < rev) {
         timer = setTimeoutImpl(() => { timer = null; void poll(token) }, intervalMs)
         return
       }
       let intake
-      let textLoadError = null
+      let textLoadError = pendingTextPayload ? textError : null
+      let convertedPayload = payload
       try {
-        if ((!payload.unchanged || restarted) && payload.intake) {
-          if (Array.isArray(payload.intake.texts) && payload.intake.texts.length) {
+        const freshIntake = (!seated || !payload.unchanged || restarted) && payload.intake
+        // Retry labels only for the revision still reported by the bridge;
+        // an older payload must not overwrite a newer conversion failure.
+        const retryText = pendingTextPayload && pendingTextPayload.rev === payload.rev
+          && pendingTextPayload.epoch === payload.epoch && Date.now() >= textRetryAt
+        if (freshIntake || retryText) {
+          convertedPayload = freshIntake ? payload : pendingTextPayload
+          if (Array.isArray(convertedPayload.intake.texts) && convertedPayload.intake.texts.length) {
             await ensureTextGlyphs()
             if (!current()) return
             textLoadError = textError
             if (textLoadError) report({ ...state, error: textLoadError })
             if (!current()) return
           }
-          intake = bridgeToIntake(payload.intake, { textGlyphs })
+          intake = bridgeToIntake(convertedPayload.intake, { textGlyphs })
+          conversionError = null
+          pendingTextPayload = intake.textPending ? convertedPayload : null
+          textLoadError = pendingTextPayload ? textError : null
         }
       } catch (failure) {
-        report({ ...state, error: String(failure?.message || failure) })
+        conversionError = String(failure?.message || failure)
+        report({ ...state, error: conversionError })
         if (current()) timer = setTimeoutImpl(() => { timer = null; void poll(token) }, delay)
         return
       }
-      rev = payload.rev
-      epoch = payload.epoch
+      // A lost cursor stays empty until a full intake is available.
+      if (intake || seated) { rev = payload.rev; epoch = payload.epoch }
       const summary = payload.change?.summary ?? (restarted || payload.drawing !== state.drawing ? null : state.summary)
       const connected = payload.status === 'connected' && !!payload.drawing
       report({ status: connected ? 'connected' : 'waiting', drawing: payload.drawing ?? null,
-        summary, error: textLoadError ?? payload.error ?? null })
+        summary, error: conversionError ?? textLoadError ?? payload.error ?? null, textPending: !!pendingTextPayload })
       if (!current()) return
       if (intake) {
-        onUpdate?.({ intake, rev, epoch, drawing: payload.drawing,
-          summary: payload.change?.summary ?? null, payload })
+        seated = true
+        onUpdate?.({ intake, rev, epoch, drawing: convertedPayload.drawing,
+          summary: convertedPayload.change?.summary ?? null, payload: convertedPayload })
       }
       delay = connected ? intervalMs : Math.min(maxBackoffMs, delay * 2)
     } else {
+      loseDrawing()
+      if (!current()) return
       report({ status: 'unreachable', drawing: null, summary: null, error })
       delay = Math.min(maxBackoffMs, delay * 2)
     }
@@ -131,6 +161,7 @@ export function createLocalCadBridge({ fetchImpl = globalThis.fetch, ports = [81
       running = true
       const token = ++generation
       rev = 0; epoch = ''; delay = intervalMs
+      seated = false; pendingTextPayload = null; conversionError = null
       report({ status: 'connecting', drawing: null, summary: null, error: null })
       if (running && token === generation) void poll(token)
     },
