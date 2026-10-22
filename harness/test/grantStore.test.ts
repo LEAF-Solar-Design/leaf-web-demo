@@ -17,6 +17,7 @@ import type { AgentGrant } from "../src/ports/index.js";
 import type { TenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
 import { LocalKeyProvider } from "../src/security/grantEnvelope/keyProvider.js";
 import type { KeyProvider } from "../src/security/grantEnvelope/keyProvider.js";
+import { sealGrant } from "../src/security/grantEnvelope/envelope.js";
 
 const FAKE = "FAKE-OAUTH-not-a-real-token-000111222";
 const FAKE2 = "FAKE-OAUTH-second-333444555";
@@ -56,6 +57,7 @@ describe("FileTenantGrantStore", () => {
     expect(persisted.accounts).toHaveLength(1);
     expect(persisted.accounts[0]).toMatchObject({ kind: "oauth", token: FAKE });
     expect(persisted.active_account_id).toBe(persisted.accounts[0].id);
+    expect(await store.diagnostic("acme")).toMatchObject({ backend: "file", record_format: "v3" });
   });
 
   it("status NEVER returns the token (only linked + linked_at + kind)", async () => {
@@ -324,6 +326,39 @@ describe("EnvelopeTenantGrantStore", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it.each([1, 2, 3])("reports vault and the opened v%s format without plaintext", async version => {
+    const account = {
+      id: "private-account-id", label: "private-account-label", kind: "oauth", token: FAKE,
+      linked_at: "2026-01-01T00:00:00.000Z", plan: "team", usage_tokens: 0,
+      selection_count: 0, last_used_at: null, cooldown_until: null, leases: [],
+    };
+    const record = version === 1
+      ? { version, kind: "oauth", token: FAKE }
+      : { version, active_account_id: account.id, accounts: [account] };
+    const plaintext = JSON.stringify(record);
+    const sealed = await sealGrant(plaintext, { tenantId: "acme", grantId: "acme.grant.json" }, keyProvider);
+    writeFileSync(join(dir, "acme.grant.json"), JSON.stringify(sealed), "utf8");
+
+    const diagnostic = await store.diagnostic("acme");
+    expect(diagnostic).toMatchObject({
+      schema: "leaf.grant-diagnostic.v1", backend: "vault", linked: true,
+      kind: "oauth", record_format: `v${version}`, degraded: false,
+    });
+    const json = JSON.stringify(diagnostic);
+    expect(json).not.toContain(FAKE);
+    expect(json).not.toContain(plaintext);
+    expect(json).not.toContain(account.id);
+    expect(json).not.toContain(account.label);
+    expect(json).not.toContain('"token"');
+    expect(json).not.toContain('"accounts"');
+  });
+
+  it("reports a missing vault record", async () => {
+    expect(await store.diagnostic("missing")).toMatchObject({
+      backend: "vault", linked: false, record_format: "missing", degraded: false,
+    });
+  });
+
   it("rejects traversal / separator tenant ids (cannot escape the grants dir)", async () => {
     await expect(store.put("../evil", FAKE)).rejects.toThrow(/invalid tenant id/);
     await expect(store.get("a/b")).rejects.toThrow(/invalid tenant id/);
@@ -371,6 +406,12 @@ describe("EnvelopeTenantGrantStore", () => {
       sealed[field] = bytes.toString("base64url");
     }
     writeFileSync(path, JSON.stringify(sealed), "utf8");
+    const diagnostic = await store.diagnostic("acme");
+    expect(diagnostic).toMatchObject({
+      backend: "vault", linked: false, record_format: "invalid", degraded: true,
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(FAKE);
+    expect(JSON.stringify(diagnostic)).not.toContain(FAKE2);
     writeFileSync(join(dir, "acme.token"), FAKE2, "utf8");
     await expect(store.get("acme")).rejects.toThrow(/invalid persisted grant record/);
     await expect(store.status("acme")).rejects.toThrow(/invalid persisted grant record/);
@@ -402,6 +443,7 @@ describe("EnvelopeTenantGrantStore", () => {
     });
     await expect(wrongKey.get("acme")).rejects.toThrow(/invalid persisted grant record/);
     await expect(wrongKey.status("acme")).rejects.toThrow(/invalid persisted grant record/);
+    expect(await wrongKey.diagnostic("acme")).toMatchObject({ backend: "vault", record_format: "invalid" });
     expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE });
   });
 

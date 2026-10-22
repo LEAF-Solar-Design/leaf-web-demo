@@ -837,6 +837,10 @@ export class EnvelopeTenantGrantStore extends FileTenantGrantStore {
     this.keys = opts.keyProvider;
   }
 
+  override async diagnostic(tenantId: string): Promise<GrantDiagnostic> {
+    return { ...await super.diagnostic(tenantId), backend: "vault" };
+  }
+
   protected override async readRecordPayload(tenantId: string, path: string): Promise<unknown> {
     if (!existsSync(path)) {
       this.readToken(tenantId);
