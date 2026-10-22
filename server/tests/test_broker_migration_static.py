@@ -42,7 +42,7 @@ def test_broker_migration_has_shared_tenant_state_and_idempotent_ledger():
 
 
 def test_terminal_intent_migration_is_additive_and_write_once():
-    sql = (MIGRATION.parent / "0081_broker_terminal_intent.sql").read_text(encoding="utf-8")
+    sql = (MIGRATION.parent / "0082_broker_terminal_intent.sql").read_text(encoding="utf-8")
     assert "ADD COLUMN terminal_intent_json JSONB" in sql
     assert "terminal_intent_json IS NULL OR jsonb_typeof(terminal_intent_json) = 'object'" in sql
     assert "OLD.state <> 'executing' OR NEW.state <> 'executing'" in sql
