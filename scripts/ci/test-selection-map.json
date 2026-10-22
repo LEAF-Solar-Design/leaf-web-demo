@@ -108,6 +108,7 @@
     "mq-review-codebuild",
     "platform",
     "platform-tenant-cost-store",
+    "platform-aps-cost-sync",
     "platform-ios-ship-source-catalog",
     "platform-ios-ship-source-catalog-static",
     "platform-org-acceptance",
