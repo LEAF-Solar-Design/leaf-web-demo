@@ -4,8 +4,10 @@ param(
   [int]$BrokerPort = 8240,
   [int]$HarnessPort = 8250,
   [string]$TestGrep = '',
-  [ValidateSet('account', 'guest')]
+  [ValidateSet('account', 'guest', 'project')]
   [string]$Mode = 'account',
+  [string]$ProjectRunRoot = '',
+  [string]$ProjectArtifactRoot = '',
   [switch]$KeepRunRoot,
   [switch]$SyntheticStringSizing,
   [switch]$SyntheticRooftop
@@ -34,6 +36,40 @@ if ($SyntheticStringSizing -or $SyntheticRooftop) {
   }
 }
 
+# >>> project dispatch (PP-3A2 F)
+if ($Mode -ne 'project' -and ($ProjectRunRoot -or $ProjectArtifactRoot)) {
+  throw 'ProjectRunRoot and ProjectArtifactRoot apply to project mode only'
+}
+if ($Mode -eq 'project') {
+  if ($TestGrep) { throw 'TestGrep does not apply to project mode' }
+  foreach ($ppOverride in @($ProjectRunRoot, $ProjectArtifactRoot)) {
+    if ($ppOverride -and -not [System.IO.Path]::IsPathRooted($ppOverride)) {
+      throw 'Project overrides must be absolute paths'
+    }
+  }
+  $ppRun = 'pp3-' + [guid]::NewGuid().ToString('N')
+  $ppRunRoot = if ($ProjectRunRoot) { $ProjectRunRoot } else {
+    Join-Path ([System.IO.Path]::GetTempPath()) "leaf-unified-project-e2e-$ppRun"
+  }
+  $ppArtifactRoot = if ($ProjectArtifactRoot) { $ProjectArtifactRoot } else {
+    Join-Path $repoRoot "artifacts\unified-surface-proof\project\stack-$ppRun"
+  }
+  $ppRequirements = @(
+    (Join-Path $repoRoot 'server\requirements.txt'),
+    (Join-Path $repoRoot 'platform\requirements.txt'),
+    (Join-Path $repoRoot 'server\requirements-auth.txt')
+  )
+  $python = Get-ProofRuntime -RequirementFiles $ppRequirements
+  $ppKeepArgs = @()
+  if ($KeepRunRoot) { $ppKeepArgs += '--keep-run-root' }
+  & $python -B (Join-Path $repoRoot 'scripts\proof_project.py') supervise --run-id $ppRun --run-root $ppRunRoot --artifact-root $ppArtifactRoot --web-port $WebPort --app-port $AppPort --broker-port $BrokerPort --harness-port $HarnessPort @ppKeepArgs
+  $ppExit = $LASTEXITCODE
+  & $python -B (Join-Path $repoRoot 'scripts\proof_project.py') verify-receipt --run-id $ppRun --receipt (Join-Path $ppArtifactRoot 'project-proof.json')
+  $ppReceiptExit = $LASTEXITCODE
+  if ($ppReceiptExit -ne 0) { throw 'Project proof receipt failed verification' }
+  exit $ppExit
+}
+# <<< project dispatch
 function Test-PortOpen([int]$Port) {
   $client = [System.Net.Sockets.TcpClient]::new()
   try {

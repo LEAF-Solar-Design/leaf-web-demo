@@ -3025,7 +3025,7 @@ def build_suites() -> List[Suite]:
               # 2026-10-13: PP-2 adds one registration row (234 -> 235); R3e-2 one more (235 -> 236).
               # 2026-10-13: R14-E adds one registration row; measured 237 passing.
               # 2026-10-14: PP-3 record A adds one registration row (237 -> 238).
-              ["test_studio_walk_regression_gate.py"], 238),
+              ["test_studio_walk_regression_gate.py"], 250),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
