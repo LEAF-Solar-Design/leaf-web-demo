@@ -53,6 +53,7 @@ import { redactTokens } from "./redact.js";
 import { createFileStoreProbe, createReadinessCheck } from "./storeReadiness.js";
 import type { StoreReadiness } from "./storeReadiness.js";
 import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
+import { MeteredAgentRunner, meteringConfigFromEnv, withMeteringIdentity } from "./ports/impl/meteredAgentRunner.js";
 import { GitRefConflictError } from "./ports/impl/tenantChangeRepo.js";
 import { ForgePublicationError } from "./vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 import { classifyRoute } from "./routing.js";
@@ -1319,11 +1320,15 @@ export function createHarness(ports: HarnessPorts, opts?: {
         }
         const route = classifyRoute({ path, body });
         if (route === "one-off") {
-          const out = await loop.oneOff(tenant, description);
+          const out = await withMeteringIdentity({ orgId: auth.enabled ? tenant : undefined },
+            () => loop.oneOff(tenant, description));
           return send(res, 200, out);
         }
         // default author route = build (author + register + one commit)
-        const out = await loop.build(tenant, description);
+        // Platform TenantContext's verified tenant id is its org UUID (server/deps.py).
+        // Local/auth-disabled calls have no verified platform org and must be skipped.
+        const out = await withMeteringIdentity({ orgId: auth.enabled ? tenant : undefined },
+          () => loop.build(tenant, description));
         return send(res, 200, out);
       }
 
@@ -1348,9 +1353,9 @@ export function createHarness(ports: HarnessPorts, opts?: {
               ? {}
               : { targetToolName: requiredText(body, "targetToolName") }),
           });
-        const out = authority
+        const out = await withMeteringIdentity({ orgId: auth.enabled ? tenant : undefined }, async () => authority
           ? await withAuthorStandardServicesAuthority(authority, stage)
-          : await stage();
+          : await stage());
         return send(res, 200, out);
       }
 
@@ -1667,9 +1672,35 @@ export async function startReal(port = 8130): Promise<Server> {
   // when the queue is slow, down, or unconfigured.
   const upstreamSink = upstreamSinkFromEnv();
 
+  const metering = meteringConfigFromEnv(process.env);
+  let costPool: import("pg").Pool | undefined;
+  let meteredRunner: MeteredAgentRunner | undefined;
+  if (metering.enabled) {
+    const { Pool } = await import("pg");
+    const { E2bAgentRunner } = await import("./ports/impl/e2bAgentRunner.js");
+    const { PgCostEventSink, COST_EVENT_STATEMENT_TIMEOUT_MS } = await import("./ports/impl/pgCostEventSink.js");
+    // Use the same pg client and database selection as the harness session store.
+    // This pool is separately owned because the session-store handle hides its pool
+    // and may be a file store (or absent) on author-only deployments.
+    costPool = new Pool({
+      connectionString: (process.env.LEAF_HARNESS_DATABASE_URL ?? process.env.DATABASE_URL ?? "").trim(),
+      max: 5,
+      application_name: "leaf-platform-harness-cost-metering",
+      connectionTimeoutMillis: COST_EVENT_STATEMENT_TIMEOUT_MS,
+      statement_timeout: COST_EVENT_STATEMENT_TIMEOUT_MS,
+    });
+    costPool.on("error", () => console.warn("[cost-metering] postgres_pool_error"));
+    meteredRunner = new MeteredAgentRunner(new E2bAgentRunner(), {
+      rate: metering.rate, sink: new PgCostEventSink(costPool),
+    });
+    console.info("[cost-metering] enabled for E2B author execution");
+  } else {
+    console.info(`[cost-metering] disabled: ${metering.reason}`);
+  }
+
   const basePorts = {
     agentRunner: new AuthorStandardServicesRunner(
-      new AgentSdkRunner({
+      meteredRunner ?? new AgentSdkRunner({
         ...(standardServicesResolver ? { standardServicesResolver } : {}),
       }),
       Boolean(standardServicesResolver),
@@ -1719,6 +1750,10 @@ export async function startReal(port = 8130): Promise<Server> {
   }).listen(port);
   if (sessionStore) {
     server.once("close", () => { void sessionStore.close(); });
+  }
+  if (costPool) {
+    const pool = costPool;
+    server.once("close", () => { void pool.end(); });
   }
   if (instantExecutor) {
     server.once("close", () => { instantExecutor.close(); });
