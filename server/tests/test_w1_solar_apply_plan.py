@@ -690,3 +690,24 @@ def test_global_invalid_declaration_refuses(inputs, defect):
         spec["role"] = "primary"
     with pytest.raises(GraphValidationError, match="INVALID_TEMPLATE_STORE"):
         validate_adapter(adapter)
+
+
+@pytest.mark.parametrize("document_index", [0, 1])
+def test_global_changed_field_must_land_in_captured_payload(inputs, document_index):
+    captured, field, raw = _global_store_inputs(inputs)
+    adapter = captured[1]
+    destination = "/documents/" + str(document_index) + "/Value"
+    adapter["write_fields"]["global"][0]["destination"] = destination
+    adapter["preservation"]["allowed_changed_paths"]["global"] = [destination]
+    assert adapter["store_codecs"]["global"]["document_count"] == 1
+    after = copy.deepcopy(captured[0])
+    after["settings"][field] = "Changed layer"
+    if document_index == 1:
+        with pytest.raises(GraphValidationError, match="GLOBAL_STORE_FIELD_UNAPPLIED"):
+            _plan(captured, after)
+    else:
+        operations = _plan(captured, after)["operations"]
+        assert len(operations) == 1
+        assert operations[0]["op"] == "set_store"
+        assert operations[0]["payload"]["documents"] == [
+            raw.replace(json.dumps(captured[0]["settings"][field]), '"Changed layer"', 1)]

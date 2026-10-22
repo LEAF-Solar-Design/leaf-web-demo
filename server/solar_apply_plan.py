@@ -605,7 +605,8 @@ def _native_changes(entity, previous, projected, kind):
 
 
 def _store_operation(spec, adapter, captured, context, handles, index, scale,
-                     target, carrier_targets, op_id, *, require_capture=False):
+                     target, carrier_targets, op_id, *, require_capture=False,
+                     changed_leaves=()):
     codec = adapter["store_codecs"][spec["codec"]]
     address = {k: copy.deepcopy(codec[k]) for k in ("scope", "dictionary_path", "key", "app")}
     address.update(entity_handle=target.get("handle"), entity_create_ref=target.get("create_ref"))
@@ -663,6 +664,23 @@ def _store_operation(spec, adapter, captured, context, handles, index, scale,
                 refuse("TYPED_STORE_LAYOUT_MISMATCH")
             projected["records"].extend(old_records[len(projected["records"]):])
         payload = {"encoding": encoding, "records": projected["records"]}
+    if changed_leaves:
+        # Global changes must survive the captured-store patch, even when
+        # projection created destinations outside the captured documents.
+        decoded_payload = copy.deepcopy(payload)
+        if "documents" in decoded_payload:
+            decoded_payload["documents"] = [parse_json(d) for d in decoded_payload["documents"]]
+        for rule in fields:
+            sources = _resolved_source_paths(context, rule["source"])
+            for source, (value, indices) in zip(sources, _expand(context, rule["source"])):
+                if not any(leaf[:len(source)] == source for leaf in changed_leaves):
+                    continue
+                destination = rule["destination"]
+                for i, token in enumerate(indices):
+                    destination = destination.replace("{" + str(i) + "}", token)
+                if (not _resolved_source_paths(decoded_payload, destination)
+                        or _get(decoded_payload, destination) != _convert(value, rule, context, handles, index, scale)):
+                    refuse("GLOBAL_STORE_FIELD_UNAPPLIED")
     if old_store:
         old_encoding, old_payload = _decode_store(old_store, codec)
         if payload == {"encoding": old_encoding, **old_payload} and not any("create_ref" in b["source"] for b in bindings):
@@ -724,6 +742,7 @@ def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
             refuse("UNTOUCHED_CONTENT_CHANGED")
     changed_globals = [key for key in ("project", "settings")
                        if _semantic(before[key]) != _semantic(after[key])]
+    changed_global_leaves = {}
     for key in changed_globals:
         if not adapter.get("global_stores", {}).get(key):
             refuse("GLOBAL_STORE_UNDECLARED")
@@ -733,11 +752,13 @@ def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
         sources = [path for spec in adapter["global_stores"][key]
                    for rule in adapter["write_fields"][spec["fields"]]
                    for path in _resolved_source_paths(context, rule["source"])]
+        changed_global_leaves[key] = []
         for pointer in old_leaves.keys() | new_leaves.keys():
             if (pointer in old_leaves and pointer in new_leaves
                     and old_leaves[pointer] == new_leaves[pointer]):
                 continue
             leaf = tuple(_tokens(pointer))
+            changed_global_leaves[key].extend((("node",) + leaf, ("graph", key) + leaf))
             if not any(target[:len(path)] == path for path in sources
                        for target in (("node",) + leaf, ("graph", key) + leaf)):
                 refuse("GLOBAL_STORE_FIELD_UNDECLARED")
@@ -784,7 +805,7 @@ def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
             operation = _store_operation(
                 spec, adapter, captured, {"node": after[key], "graph": after, "resolved": {}},
                 handles, index, scale, {}, {}, "store:global:" + key + ":" + spec["codec"],
-                require_capture=True)
+                require_capture=True, changed_leaves=changed_global_leaves[key])
             if operation is not None:
                 stores.append(operation)
     for node in changed:
