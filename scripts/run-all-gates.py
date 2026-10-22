@@ -1748,6 +1748,11 @@ def build_suites() -> List[Suite]:
         Suite("server-unit-economics-ops",
               "server tests/test_unit_economics_ops.py", "pytest", SERVER,
               _py_pytest("tests/test_unit_economics_ops.py"), 5),  # +1 org attribution
+        # Explicit file target keeps 19 pure tests running without DATABASE_URL.
+        Suite("platform-tenant-cost-store", "platform tenant cost ledger and add-on settings", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_tenant_cost_store.py"), 19,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         # Ops usage scoreboard (M6). Registered WITH the file, per the #29
         # fix-then-register rule. Both files are hermetic -- every authority is
         # monkeypatched, no DB, no subprocess, no skipif -- so these floors are
