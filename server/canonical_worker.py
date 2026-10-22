@@ -16,9 +16,8 @@ import socket
 import subprocess
 import sys
 import threading
-import time
 import uuid
-from typing import Any, Callable, Dict
+from typing import Any, Dict
 
 import platform_link
 from solar_project_tools import SUPPORTED_TOOLS
@@ -164,6 +163,47 @@ class LeaseGuard:
                 return
 
 
+class ProjectHeartbeat:
+    """Keep project descriptors live independently of synchronous claims."""
+
+    def __init__(self, owner: str, descriptors: tuple[Dict[str, str], ...], *,
+                 interval: float = 5.0, stop_event: threading.Event | None = None) -> None:
+        self._owner = owner
+        self._descriptors = descriptors
+        self._interval = interval
+        self._stop = stop_event if stop_event is not None else threading.Event()
+        self._started = threading.Event()
+        self._reported: set[tuple[str, type[Exception]]] = set()
+        self._thread = threading.Thread(
+            target=self._beat, name="canonical-project-heartbeat", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+        self._started.wait()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=self._interval + 1.0)
+
+    def _beat(self) -> None:
+        while not self._stop.is_set():
+            for descriptor in self._descriptors:
+                tool = descriptor["tool_name"]
+                try:
+                    platform_link._canonical_jobs_module().record_worker_heartbeat(
+                        self._owner, tool, descriptor["runtime"],
+                        descriptor["source_revision"], descriptor["source_sha256"])
+                except Exception as exc:  # noqa: BLE001 - isolate optional project tools
+                    key = (tool, type(exc))
+                    if key not in self._reported:
+                        self._reported.add(key)
+                        print(f"canonical worker: project tool {tool}: {type(exc).__name__}",
+                              file=sys.stderr)
+            self._started.set()
+            if self._stop.wait(self._interval):
+                return
+
+
 def worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4()}"
 
@@ -243,8 +283,7 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS,
 def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SECONDS,
           once: bool = False, stop_event: threading.Event | None = None,
           tool_name: str = autofill.TOOL_NAME, worker_id: str | None = None,
-          project_readiness: bool = False, project_tools: tuple[str, ...] = (),
-          monotonic: Callable[[], float] = time.monotonic) -> None:
+          project_readiness: bool = False, project_tools: tuple[str, ...] = ()) -> None:
     owner = worker_id if worker_id is not None else globals()["worker_id"]()
     descriptor = graph_worker_descriptor(tool_name) if project_readiness else None
     ready_printed = False
@@ -253,49 +292,39 @@ def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SEC
         print("canonical worker: project tool polling disabled: project posture not met "
               f"(runtime={os.environ.get('LEAF_RUNTIME_ENV', '')})", file=sys.stderr)
         project_tools = ()
-    project_descriptors = {tool: graph_worker_descriptor(tool) for tool in project_tools}
-    last_heartbeats = {}
-
-    def project_heartbeat(tool):
-        now = monotonic()
-        if tool in last_heartbeats and now - last_heartbeats[tool] < 5.0:
-            return
-        last_heartbeats[tool] = now
-        project_descriptor = project_descriptors[tool]
-        platform_link._canonical_jobs_module().record_worker_heartbeat(
-            owner, project_descriptor["tool_name"], project_descriptor["runtime"],
-            project_descriptor["source_revision"], project_descriptor["source_sha256"])
-
-    for tool in project_tools:
-        try:
-            project_heartbeat(tool)
-        except Exception as exc:  # noqa: BLE001 - isolate optional project tools
-            print(f"canonical worker: project tool {tool}: {type(exc).__name__}", file=sys.stderr)
+    project_descriptors = tuple(graph_worker_descriptor(tool) for tool in project_tools)
+    heartbeat = ProjectHeartbeat(owner, project_descriptors) if project_tools else None
+    # Project tools stay live while a synchronous claim runs, because jobs queue durably and are claimed when the loop returns.
     # With N project tools, an idle cycle makes N+1 claim calls and at most N/5 heartbeats per second.
-    while not stop.is_set():
-        if descriptor is not None:
-            platform_link._canonical_jobs_module().record_worker_heartbeat(
-                owner, descriptor["tool_name"], descriptor["runtime"],
-                descriptor["source_revision"], descriptor["source_sha256"])
-        claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool_name)
-        # Ready only once one full cycle (heartbeat and claim) has completed.
-        if descriptor is not None and not ready_printed:
-            print("LEAF_CANONICAL_WORKER_READY " + json.dumps({
-                "worker_id": owner, "tool_name": descriptor["tool_name"],
-                "source_revision": descriptor["source_revision"]}, separators=(",", ":")),
-                flush=True)
-            ready_printed = True
-        for tool in project_tools:
-            try:
-                project_heartbeat(tool)
-                project_claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool)
-                claimed = project_claimed or claimed
-            except Exception as exc:  # noqa: BLE001 - isolate optional project tools
-                print(f"canonical worker: project tool {tool}: {type(exc).__name__}", file=sys.stderr)
-        if once:
-            return
-        if not claimed:
-            stop.wait(poll_seconds)
+    try:
+        if heartbeat is not None:
+            heartbeat.start()
+        while not stop.is_set():
+            if descriptor is not None:
+                platform_link._canonical_jobs_module().record_worker_heartbeat(
+                    owner, descriptor["tool_name"], descriptor["runtime"],
+                    descriptor["source_revision"], descriptor["source_sha256"])
+            claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool_name)
+            # Ready only once one full cycle (heartbeat and claim) has completed.
+            if descriptor is not None and not ready_printed:
+                print("LEAF_CANONICAL_WORKER_READY " + json.dumps({
+                    "worker_id": owner, "tool_name": descriptor["tool_name"],
+                    "source_revision": descriptor["source_revision"]}, separators=(",", ":")),
+                    flush=True)
+                ready_printed = True
+            for tool in project_tools:
+                try:
+                    project_claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool)
+                    claimed = project_claimed or claimed
+                except Exception as exc:  # noqa: BLE001 - isolate optional project tools
+                    print(f"canonical worker: project tool {tool}: {type(exc).__name__}", file=sys.stderr)
+            if once:
+                return
+            if not claimed:
+                stop.wait(poll_seconds)
+    finally:
+        if heartbeat is not None:
+            heartbeat.close()
 
 
 def main() -> None:

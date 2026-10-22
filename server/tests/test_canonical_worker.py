@@ -358,7 +358,7 @@ def test_worker_polls_opted_in_project_tools_in_order(monkeypatch, capsys):
     descriptors, heartbeats, claims = _project_polling_stubs(monkeypatch)
     tools = ("solar-settings", "solar-feeders")
     canonical_worker.serve(once=True, worker_id="w1", lease_seconds=12,
-                           project_tools=tools, monotonic=lambda: 0)
+                           project_tools=tools)
     assert descriptors == list(tools)
     assert heartbeats == [("w1", *{**_graph_descriptor(), "tool_name": tool}.values())
                           for tool in tools]
@@ -383,60 +383,71 @@ def test_worker_disables_project_polling_without_posture(monkeypatch, capsys, ru
         f"(runtime={runtime})\n")
 
 
-def test_worker_project_heartbeat_interval_and_idle_sleep(monkeypatch):
-    _project_posture(monkeypatch)
-    descriptors, _, _ = _project_polling_stubs(monkeypatch)
-    times = iter((0, 4.9, 5, 9.9, 10))
-    now, beats, claims, waits = [0], [], [], []
+@pytest.mark.parametrize("interval", [None, 0.25])
+def test_worker_project_heartbeat_interval(monkeypatch, interval):
+    beats, waits = [], []
     stop = Event()
 
-    def heartbeat(owner, tool, *args):
-        beats.append((tool, now[0]))
+    def wait(interval):
+        waits.append(interval)
+        return len(waits) == 3
+
+    monkeypatch.setattr(stop, "wait", wait)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=lambda *args: beats.append(args)))
+    tools = ("solar-settings", "solar-feeders")
+    descriptors = tuple({**_graph_descriptor(), "tool_name": tool} for tool in tools)
+    kwargs = {} if interval is None else {"interval": interval}
+    heartbeat = canonical_worker.ProjectHeartbeat("w1", descriptors, stop_event=stop, **kwargs)
+    heartbeat.start()
+    heartbeat._thread.join(timeout=1)
+    heartbeat.close()
+    assert not heartbeat._thread.is_alive()
+    assert waits == [5.0 if interval is None else interval] * 3
+    assert beats == [("w1", *descriptor.values()) for _ in range(3) for descriptor in descriptors]
+
+
+def test_worker_project_idle_sleep(monkeypatch):
+    _project_posture(monkeypatch)
+    descriptors, _, _ = _project_polling_stubs(monkeypatch)
+    cycles, claims, waits = [0], [], []
+    stop = Event()
 
     def run(owner, **kwargs):
         tool = kwargs["tool_name"]
         if tool == canonical_worker.autofill.TOOL_NAME:
-            now[0] = next(times)
-        claims.append((tool, now[0]))
-        if tool == "solar-feeders" and now[0] == 10:
+            cycles[0] += 1
+        claims.append((tool, cycles[0]))
+        if tool == "solar-feeders" and cycles[0] == 5:
             stop.set()
         # Both base and project claims suppress sleeping, without skipping other tools.
-        return ((tool == "solar-settings" and now[0] == 4.9)
-                or (tool == canonical_worker.autofill.TOOL_NAME and now[0] == 5))
+        return ((tool == "solar-settings" and cycles[0] == 2)
+                or (tool == canonical_worker.autofill.TOOL_NAME and cycles[0] == 3))
 
     monkeypatch.setattr(stop, "wait", lambda seconds: waits.append(seconds))
     monkeypatch.setattr(canonical_worker, "run_once", run)
-    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
-        record_worker_heartbeat=heartbeat))
     tools = ("solar-settings", "solar-feeders")
     canonical_worker.serve(worker_id="w1", project_tools=tools, stop_event=stop,
-                           poll_seconds=0.25, monotonic=lambda: now[0])
+                           poll_seconds=0.25)
     assert descriptors == list(tools)
-    assert beats == [(tool, time) for time in (0, 5, 10) for tool in tools]
-    assert claims == [(tool, time) for time in (0, 4.9, 5, 9.9, 10)
+    assert claims == [(tool, cycle) for cycle in range(1, 6)
                       for tool in (canonical_worker.autofill.TOOL_NAME, *tools)]
     assert waits == [0.25, 0.25, 0.25]
 
 
-@pytest.mark.parametrize("failure", ["startup_heartbeat", "heartbeat", "claim"])
-def test_worker_project_failure_does_not_stop_next_tool(monkeypatch, capsys, failure):
+def test_worker_project_failure_does_not_stop_next_tool(monkeypatch, capsys):
     _project_posture(monkeypatch)
     descriptors, _, _ = _project_polling_stubs(monkeypatch)
-    calls, beats, now = [], [], [0]
+    calls, beats = [], []
     stop = Event()
 
     def heartbeat(owner, tool, *args):
         beats.append(tool)
-        if tool == "solar-settings" and (
-                failure == "startup_heartbeat" or (failure == "heartbeat" and now[0] == 5)):
-            raise ConnectionError("unavailable")
 
     def run(owner, **kwargs):
         tool = kwargs["tool_name"]
         calls.append(tool)
-        if tool == canonical_worker.autofill.TOOL_NAME and failure == "heartbeat":
-            now[0] = 5
-        if tool == "solar-settings" and failure == "claim":
+        if tool == "solar-settings":
             raise TimeoutError("unavailable")
         if tool == "solar-feeders":
             stop.set()
@@ -447,26 +458,117 @@ def test_worker_project_failure_does_not_stop_next_tool(monkeypatch, capsys, fai
     monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
         record_worker_heartbeat=heartbeat))
     canonical_worker.serve(worker_id="w1", project_tools=("solar-settings", "solar-feeders"),
-                           stop_event=stop, monotonic=lambda: now[0])
+                           stop_event=stop)
     assert descriptors == ["solar-settings", "solar-feeders"]
     assert calls[0] == canonical_worker.autofill.TOOL_NAME
     assert calls[-1] == "solar-feeders"
     assert "solar-feeders" in beats
-    error_type = "TimeoutError" if failure == "claim" else "ConnectionError"
-    assert capsys.readouterr().err == f"canonical worker: project tool solar-settings: {error_type}\n"
+    assert capsys.readouterr().err == "canonical worker: project tool solar-settings: TimeoutError\n"
+
+
+def test_project_heartbeat_errors_are_isolated_and_reported_once(monkeypatch, capsys):
+    beats, waits = [], []
+    stop = Event()
+
+    def wait(interval):
+        waits.append(interval)
+        return len(waits) == 4
+
+    def record(owner, tool, *args):
+        beats.append(tool)
+        if tool == "solar-settings":
+            error = ConnectionError if len(waits) < 2 else TimeoutError
+            raise error("secret connection string")
+
+    monkeypatch.setattr(stop, "wait", wait)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=record))
+    tools = ("solar-settings", "solar-feeders")
+    heartbeat = canonical_worker.ProjectHeartbeat("w1", tuple(
+        {**_graph_descriptor(), "tool_name": tool} for tool in tools), stop_event=stop)
+    heartbeat.start()
+    heartbeat._thread.join(timeout=1)
+    heartbeat.close()
+    assert not heartbeat._thread.is_alive()
+    assert beats == list(tools) * 4
+    assert capsys.readouterr().err == (
+        "canonical worker: project tool solar-settings: ConnectionError\n"
+        "canonical worker: project tool solar-settings: TimeoutError\n")
+
+
+@pytest.mark.parametrize("blocked_tool", [canonical_worker.autofill.TOOL_NAME, "solar-settings"])
+def test_worker_project_heartbeats_continue_during_claim(monkeypatch, blocked_tool):
+    _project_posture(monkeypatch)
+    _project_polling_stubs(monkeypatch)
+    claim_started, released, heartbeat_stop = Event(), Event(), Event()
+    beats, claims, threads, waits = [], [], [], []
+    tools = ("solar-settings", "solar-feeders")
+    real_heartbeat = canonical_worker.ProjectHeartbeat
+    real_wait = heartbeat_stop.wait
+
+    def wait(interval):
+        waits.append(interval)
+        if len(waits) == 1:
+            assert claim_started.wait(timeout=1)
+            return False
+        return real_wait(interval)
+
+    def heartbeat_factory(owner, descriptors):
+        heartbeat = real_heartbeat(owner, descriptors, stop_event=heartbeat_stop)
+        threads.append(heartbeat._thread)
+        return heartbeat
+
+    def record(owner, tool, *args):
+        beats.append(tool)
+        if beats == list(tools) * 2:
+            released.set()
+
+    def run(owner, **kwargs):
+        tool = kwargs["tool_name"]
+        claims.append(tool)
+        assert beats[:2] == list(tools)
+        if tool == blocked_tool:
+            claim_started.set()
+            assert released.wait(timeout=1)
+        return False
+
+    monkeypatch.setattr(heartbeat_stop, "wait", wait)
+    monkeypatch.setattr(canonical_worker, "ProjectHeartbeat", heartbeat_factory)
+    monkeypatch.setattr(canonical_worker, "run_once", run)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=record))
+    canonical_worker.serve(once=True, worker_id="w1", project_tools=tools)
+    assert beats == list(tools) * 2
+    assert claims == [canonical_worker.autofill.TOOL_NAME, *tools]
+    assert heartbeat_stop.is_set()
+    assert len(threads) == 1
+    assert threads[0].daemon
+    assert not threads[0].is_alive()
+    assert waits == [5.0, 5.0]
 
 
 def test_worker_base_failure_still_propagates_with_project_tools(monkeypatch, capsys):
     _project_posture(monkeypatch)
     _project_polling_stubs(monkeypatch)
+    heartbeats = []
+    real_heartbeat = canonical_worker.ProjectHeartbeat
+
+    def heartbeat_factory(owner, descriptors):
+        heartbeat = real_heartbeat(owner, descriptors)
+        heartbeats.append(heartbeat)
+        return heartbeat
 
     def failed(owner, **kwargs):
         assert kwargs["tool_name"] == canonical_worker.autofill.TOOL_NAME
         raise ConnectionError("base claim failed")
 
     monkeypatch.setattr(canonical_worker, "run_once", failed)
+    monkeypatch.setattr(canonical_worker, "ProjectHeartbeat", heartbeat_factory)
     with pytest.raises(ConnectionError, match="base claim failed"):
         canonical_worker.serve(once=True, project_tools=("solar-settings",))
+    assert len(heartbeats) == 1
+    assert heartbeats[0]._stop.is_set()
+    assert not heartbeats[0]._thread.is_alive()
     assert capsys.readouterr().err == ""
 
 
