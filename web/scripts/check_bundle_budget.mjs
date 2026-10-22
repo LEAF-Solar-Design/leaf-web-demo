@@ -7,11 +7,12 @@
 // Usage:
 //   node scripts/check_bundle_budget.mjs                  # gate against baseline
 //   node scripts/check_bundle_budget.mjs --write-baseline # reseed after a deliberate change
+//   node scripts/check_bundle_budget.mjs --write-baseline --before <ref> # explicit pre-canvas source
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(ROOT, 'dist', 'assets')
@@ -27,6 +28,52 @@ const stem = (name) => {
   return name.slice(0, dot).replace(/-[A-Za-z0-9_-]{8}$/, '') + name.slice(dot)
 }
 
+export function beforeReference(args, mergeBase) {
+  const index = args.indexOf('--before')
+  if (index !== -1) {
+    if (!args[index + 1] || args[index + 1].startsWith('--')) throw new Error('--before requires a git ref')
+    return args[index + 1]
+  }
+  if (!mergeBase) throw new Error('Cannot resolve merge-base with origin/main; supply --before <ref>')
+  return mergeBase
+}
+
+export function isolatedChunks(previous, before, after) {
+  const names = new Set([...Object.keys(before.chunks), ...Object.keys(after.chunks)])
+  if ([...names].every(name => before.chunks[name] === after.chunks[name])) {
+    throw new Error('Before and after bundles are identical; refusing to reseed')
+  }
+  const chunks = { ...previous.chunks }
+  const deltas = {}
+  for (const name of names) {
+    const delta = (after.chunks[name] || 0) - (before.chunks[name] || 0)
+    if (!delta) continue
+    deltas[name] = delta
+    chunks[name] = (chunks[name] || 0) + delta
+    if (chunks[name] < 0) throw new Error(`Cannot isolate ${name} from the old baseline`)
+    if (!chunks[name]) delete chunks[name]
+  }
+  return { chunks, deltas,
+    required_stems: [...new Set([...(previous.required_stems || []), 'LabCanvas.js', 'LabCanvas.css'])] }
+}
+
+export function stemFailures(chunks, baseline) {
+  const failures = []
+  for (const key of new Set([...(baseline.required_stems || []), ...Object.keys(baseline.stem_caps || {})])) {
+    if (!Object.hasOwn(chunks, key)) failures.push(`required dependency stem ${key} missing from the production build`)
+  }
+  for (const [key, cap] of Object.entries(baseline.stem_caps || {})) {
+    if (!Number.isSafeInteger(cap) || cap < 0 || chunks[key] > cap) failures.push(`${key} ${chunks[key]} > hard stem cap ${cap}`)
+  }
+  for (const key of Object.keys(chunks)) {
+    if (/^(LabCanvas|elk[^.]*|xyflow[^.]*)\.(js|css)$/.test(key) && !Object.hasOwn(baseline.stem_caps || {}, key)) {
+      failures.push(`canvas stem ${key} has no hard cap`)
+    }
+  }
+  return failures
+}
+
+async function main() {
 if (process.argv.includes('--write-baseline')) {
   // Isolate SEL-102 from unrelated drift since the older total baseline. Both
   // builds use identical dependencies/configuration; only the original graph
@@ -34,9 +81,16 @@ if (process.argv.includes('--write-baseline')) {
   // No checkout edits, dist writes or temporary files are needed.
   const { build } = await import('vite')
   const previous = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'))
+  let mergeBase = null
+  if (!process.argv.includes('--before')) {
+    try { mergeBase = execFileSync('git', ['merge-base', 'HEAD', 'origin/main'], { cwd: ROOT, encoding: 'utf8' }).trim() }
+    catch { /* beforeReference reports the required explicit fallback. */ }
+  }
+  const beforeRef = beforeReference(process.argv, mergeBase)
+  const sourceRef = execFileSync('git', ['rev-parse', '--verify', beforeRef], { cwd: ROOT, encoding: 'utf8' }).trim()
   const original = new Map(['src/lab/canvas/GraphView.jsx', 'src/lab/lab.css'].map(path => [
     join(ROOT, path).replaceAll('\\', '/'),
-    execSync(`git show HEAD:web/${path}`, { cwd: ROOT, encoding: 'utf8' }),
+    execFileSync('git', ['show', `${sourceRef}:web/${path}`], { cwd: ROOT, encoding: 'utf8' }),
   ]))
   const measure = async before => {
     const result = await build({ root: ROOT, logLevel: 'warn',
@@ -56,27 +110,18 @@ if (process.argv.includes('--write-baseline')) {
   }
   const before = await measure(true)
   const after = await measure(false)
-  const chunks = { ...previous.chunks }
-  const deltas = {}
-  for (const name of new Set([...Object.keys(before.chunks), ...Object.keys(after.chunks)])) {
-    const delta = (after.chunks[name] || 0) - (before.chunks[name] || 0)
-    if (!delta) continue
-    deltas[name] = delta
-    chunks[name] = (chunks[name] || 0) + delta
-    if (chunks[name] < 0) throw new Error(`Cannot isolate ${name} from the old baseline`)
-    if (!chunks[name]) delete chunks[name]
-  }
+  const { chunks, deltas, required_stems } = isolatedChunks(previous, before, after)
   const canvas = Object.entries(after.chunks).filter(([name]) => /^(LabCanvas|elk[^.]*|xyflow[^.]*)\.(js|css)$/.test(name))
-  if (!canvas.some(([name]) => name === 'LabCanvas.js')) {
-    throw new Error(`Lazy LabCanvas.js chunk missing; wire LabWorkbench into the production app before reseeding. Observed before ${before.total}, after ${after.total} gzip bytes.`)
+  if (!['LabCanvas.js', 'LabCanvas.css'].every(name => Object.hasOwn(after.chunks, name))) {
+    throw new Error(`Lazy LabCanvas.js or LabCanvas.css chunk missing; wire LabWorkbench into the production app before reseeding. Observed before ${before.total}, after ${after.total} gzip bytes.`)
   }
-  const ref = execSync('git rev-parse --short HEAD', { cwd: ROOT, encoding: 'utf8' }).trim()
+  const ref = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
   const total = Object.values(chunks).reduce((sum, bytes) => sum + bytes, 0)
-  writeFileSync(BASELINE_PATH, JSON.stringify({ ...previous, _ref: ref, chunks, total,
+  writeFileSync(BASELINE_PATH, JSON.stringify({ ...previous, _ref: ref, chunks, total, required_stems,
     stem_caps: { ...previous.stem_caps, ...Object.fromEntries(canvas.map(([name, bytes]) => [name, bytes + 4096])) },
     isolated_canvas_measurement: {
-      method: 'gzip-9, complete JS/CSS, Vite in-memory builds; HEAD graph entry and shell CSS before, working tree after',
-      source_ref: ref, before_total: before.total, after_total: after.total,
+      method: 'gzip-9, complete JS/CSS, Vite in-memory builds; merge-base or explicit --before graph entry and shell CSS before, working tree after',
+      source_ref: sourceRef, before_total: before.total, after_total: after.total,
       delta: after.total - before.total, deltas,
       baseline_before_total: previous.total,
       unrelated_drift_bytes: before.total - previous.total,
@@ -87,7 +132,7 @@ if (process.argv.includes('--write-baseline')) {
   console.log(`SEL-102 isolated: before ${before.total}, after ${after.total}, delta ${after.total - before.total} gzip bytes`)
   console.log(`bundle baseline ${previous.total} -> ${total}; unrelated drift ${before.total - previous.total} bytes was not reseeded`)
   console.log(`canvas hard caps: ${JSON.stringify(Object.fromEntries(canvas.map(([name, bytes]) => [name, bytes + 4096])))}`)
-  process.exit(0)
+  return
 }
 
 const chunks = {}
@@ -101,25 +146,8 @@ const total = Object.values(chunks).reduce((a, b) => a + b, 0)
 
 const baseline = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'))
 const ceiling = baseline.total + baseline.total_allowance_bytes
-let failed = false
-for (const key of baseline.required_stems || []) {
-  if (!Object.hasOwn(chunks, key)) {
-    console.error(`bundle budget EXCEEDED: required dependency stem ${key} missing from the production build`)
-    failed = true
-  }
-}
-for (const [key, cap] of Object.entries(baseline.stem_caps || {})) {
-  if (!Number.isSafeInteger(cap) || cap < 0 || (chunks[key] || 0) > cap) {
-    console.error(`bundle budget EXCEEDED: ${key} ${chunks[key] || 0} > hard stem cap ${cap}`)
-    failed = true
-  }
-}
-for (const key of Object.keys(chunks)) {
-  if (/^(LabCanvas|elk[^.]*|xyflow[^.]*)\.(js|css)$/.test(key) && !Object.hasOwn(baseline.stem_caps || {}, key)) {
-    console.error(`bundle budget EXCEEDED: canvas stem ${key} has no hard cap`)
-    failed = true
-  }
-}
+const failures = stemFailures(chunks, baseline)
+for (const failure of failures) console.error(`bundle budget EXCEEDED: ${failure}`)
 for (const [key, size] of Object.entries(chunks).sort()) {
   const was = baseline.chunks[key]
   const delta = was == null ? ' (new)' : ` (${size - was >= 0 ? '+' : ''}${size - was})`
@@ -130,5 +158,10 @@ if (total > ceiling) {
   console.error(`bundle budget EXCEEDED: total ${total} > ceiling ${ceiling} (baseline ${baseline.total} @ ${baseline._ref} + allowance ${baseline.total_allowance_bytes}). Either shrink the bundle or, for a DELIBERATE budgeted increase, reseed with --write-baseline in the same PR and say why in its body.`)
   process.exit(1)
 }
-if (failed) process.exit(1)
+if (failures.length) process.exit(1)
 console.log('bundle budget ok')
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(error => { console.error(error.message); process.exitCode = 1 })
+}

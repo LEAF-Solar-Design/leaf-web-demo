@@ -6,6 +6,16 @@ export const emptyGraph = () => ({ schema: 'leaf.lab-graph.v1', blocks: [], pipe
 export const pipeId = pipe => `${pipe.from.node}/${pipe.from.port}>${pipe.to.node}/${pipe.to.port}`
 export const roundTrip = document => JSON.parse(canonicalJSON(document))
 
+function settingsDefaults(schema) {
+  if (Object.hasOwn(schema, 'default')) return roundTrip(schema.default)
+  if (schema.type !== 'object') return undefined
+  const defaults = Object.fromEntries(Object.entries(schema.properties || {}).flatMap(([name, property]) => {
+    const value = settingsDefaults(property)
+    return value === undefined ? [] : [[name, value]]
+  }))
+  return Object.keys(defaults).length ? defaults : undefined
+}
+
 export function addBlock(document, manifest) {
   if (document.blocks.length >= 200) throw new Error('Graph has 200 blocks')
   let index = 1
@@ -13,7 +23,7 @@ export function addBlock(document, manifest) {
   return { ...document, blocks: [...document.blocks, {
     id: `${manifest.id}-${index}`,
     registry: { id: manifest.id, version: manifest.version.semver, code_sha256: manifest.version.code_sha256 },
-    settings: {},
+    settings: settingsDefaults(manifest.settings_schema) ?? {},
   }] }
 }
 

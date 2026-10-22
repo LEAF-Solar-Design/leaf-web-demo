@@ -32,6 +32,7 @@
     "LabCanvas.js": 508102,
     "LabCanvas.css": 6643
   },
+  "required_stems": ["LabCanvas.js", "LabCanvas.css"],
   "isolated_canvas_measurement": {
     "method": "gzip-9, complete JS/CSS, Vite in-memory builds; HEAD graph entry and shell CSS before, working tree after",
     "source_ref": "46bfc02a",

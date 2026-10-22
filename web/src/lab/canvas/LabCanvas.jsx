@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Background, Controls, ReactFlow, ReactFlowProvider, useReactFlow } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import Palette, { BLOCK_MIME } from './Palette.jsx'
 import Inspector from './Inspector.jsx'
 import NodeCard from './NodeCard.jsx'
 import LatencyPipe from './LatencyPipe.jsx'
-import { contract, manifests, manifestFor, registry } from './registry.js'
+import { contract, manifestFor, registry } from './registry.js'
 import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, roundTrip, updateSettings, validateGraph } from './graphDoc.js'
 import { connectionStatus } from './portCompat.js'
-import { dependencyLayout } from './dependencyLayout.js'
+import { createDependencyLayoutRunner } from './dependencyLayout.js'
 
 const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
@@ -16,6 +16,8 @@ const asPipe = connection => ({ from: { node: connection.source, port: connectio
 
 function Editor({ initialDocument, onChange, entries, measurements, upstream }) {
   const [document, setDocument] = useState(() => roundTrip(initialDocument || emptyGraph()))
+  const [initialLayoutDocument] = useState(document)
+  const [layoutRunner] = useState(createDependencyLayoutRunner)
   const current = useRef(document)
   const [positions, setPositions] = useState({})
   const [selected, setSelected] = useState(null)
@@ -26,21 +28,23 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
   const request = useRef(0)
   const lastRefusal = useRef('')
   const canvas = useRef(null)
+  const search = useRef(null)
   const flow = useReactFlow()
   const validation = useMemo(() => validateGraph(document, entries), [document, entries])
   const commit = next => {
-    // Drafts may have required inputs missing, but never gain presentation fields.
+    // Incomplete drafts stay local; only a fully valid contract document leaves.
     contract.schema(next, 'lab-graph.v1.schema.json')
     current.current = roundTrip(next)
-    request.current += 1; setLayoutBusy(false)
+    request.current += 1; layoutRunner.cancel(); setLayoutBusy(false)
     setDocument(current.current)
-    onChange?.(roundTrip(current.current))
+    if (validateGraph(current.current, entries).ready) onChange?.(roundTrip(current.current))
   }
   const connect = pipe => { commit(connectPipe(current.current, pipe, entries)); setMessage('Pipe connected') }
   const disconnect = id => { commit(disconnectPipe(current.current, id)); setMessage('Pipe disconnected') }
   const remove = id => { commit(removeBlock(current.current, id)); setSelected(null) }
   const add = (manifest, position) => {
     try {
+      if (!Object.values(entries).includes(manifest)) throw new Error('Block kind is not in this canvas registry')
       const bounds = canvas.current.getBoundingClientRect()
       const centre = position || flow.screenToFlowPosition({ x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 })
       const next = addBlock(current.current, manifest)
@@ -49,23 +53,26 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
       commit(next); setSelected(id); setMessage(`${manifest.title} added`)
     } catch (error) { setMessage(error.message) }
   }
-  const relayout = async () => {
+  const runLayout = useCallback(async (layoutDocument, dimensions) => {
     const token = ++request.current
-    setLayoutBusy(true)
     const started = performance.now()
     try {
-      const dimensions = Object.fromEntries(flow.getNodes().map(node => [node.id, node.measured || {}]))
-      const next = await dependencyLayout(current.current, dimensions)
+      const next = await layoutRunner.run(layoutDocument, dimensions)
       if (token !== request.current) return
       setPositions(next); setLayoutMs(performance.now() - started); setMessage('Layout updated')
     } catch (error) { if (token === request.current) setMessage(error.message) }
     finally { if (token === request.current) setLayoutBusy(false) }
+  }, [layoutRunner])
+  const relayout = () => {
+    setLayoutBusy(true)
+    const dimensions = Object.fromEntries(flow.getNodes().map(node => [node.id, node.measured || {}]))
+    runLayout(current.current, dimensions)
   }
   useEffect(() => {
-    relayout()
-    return () => { request.current += 1 }
+    runLayout(initialLayoutDocument, {})
+    return () => { request.current += 1; layoutRunner.cancel() }
     // Initial layout only. Editing never discards user positions.
-  }, [])
+  }, [initialLayoutDocument, layoutRunner, runLayout])
 
   const nodes = document.blocks.map((block, index) => {
     const manifest = manifestFor(block, entries)
@@ -86,16 +93,21 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
   const edges = document.pipes.map(pipe => ({ id: pipeId(pipe), type: 'latency',
     source: pipe.from.node, sourceHandle: pipe.from.port, target: pipe.to.node, targetHandle: pipe.to.port,
     data: { measurement: measurements.pipes?.[pipeId(pipe)], budget: manifestFor(document.blocks.find(block => block.id === pipe.from.node), entries).latency_budget_us, disconnect } }))
-  return <div className="lab-home lab-canvas-editor" data-canvas-editor>
-    <Palette onAdd={add} />
+  return <div className="lab-home lab-canvas-editor" data-canvas-editor tabIndex={-1} onKeyDown={event => {
+    if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey ||
+      event.target.closest?.('input,textarea,select,[contenteditable="true"]') || event.currentTarget.closest('[hidden]')) return
+    event.preventDefault(); search.current?.focus()
+  }}>
+    <Palette entries={entries} onAdd={add} searchRef={search} />
     <section className="lab-canvas-region" aria-label="Dependency canvas">
       <header><h2>Dependency canvas</h2><button type="button" disabled={layoutBusy} onClick={relayout}>Relayout</button>
         <button type="button" onClick={() => flow.fitView({ padding: 0.2 })}>Fit cards</button></header>
       <div className="lab-flow" ref={canvas} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' }}
         onDrop={event => {
           event.preventDefault()
-          const manifest = manifests.find(item => item.id === event.dataTransfer.getData(BLOCK_MIME))
+          const manifest = Object.values(entries).find(item => item.id === event.dataTransfer.getData(BLOCK_MIME))
           if (manifest) add(manifest, flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }))
+          else setMessage('Block kind is not in this canvas registry')
         }}>
         <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           minZoom={0.1} maxZoom={3} fitView nodesConnectable edgesReconnectable={false}
@@ -107,7 +119,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
             }
             const moved = changes.filter(change => change.type === 'position' && change.position)
             if (moved.length) {
-              request.current += 1; setLayoutBusy(false)
+              request.current += 1; layoutRunner.cancel(); setLayoutBusy(false)
               setPositions(previous => ({ ...previous, ...Object.fromEntries(moved.map(change => [change.id, change.position])) }))
             }
             for (const change of changes) if (change.type === 'select' && change.selected) setSelected(change.id)

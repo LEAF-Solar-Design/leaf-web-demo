@@ -1,6 +1,47 @@
 import ELK from 'elkjs/lib/elk.bundled.js'
 
-const elk = new ELK()
+function releaseWorker(elk) {
+  const worker = elk.worker?.worker
+  if (worker && typeof worker.terminate !== 'function') {
+    // The bundled in-process worker has no terminate method. Drop its result
+    // handler and our reference; its remaining work can then be collected.
+    worker.onmessage = () => {}
+    elk.worker.worker = null
+  } else elk.terminateWorker()
+}
+
+// Each canvas owns its runner. Cancellation rejects the dropped request and
+// releases ELK's worker instead of merely ignoring its eventual result.
+export function createDependencyLayoutRunner(createElk = () => new ELK()) {
+  let active = null
+  const cancel = () => {
+    if (!active) return
+    const job = active
+    active = null
+    releaseWorker(job.elk)
+    job.reject(new DOMException('Layout cancelled', 'AbortError'))
+  }
+  return {
+    cancel,
+    run(document, dimensions = {}) {
+      cancel()
+      const elk = createElk()
+      return new Promise((resolve, reject) => {
+        const job = { elk, reject }
+        active = job
+        const finish = (settle, value) => {
+          if (active !== job) return
+          active = null
+          releaseWorker(elk)
+          settle(value)
+        }
+        layoutWithElk(document, dimensions, elk).then(
+          result => finish(resolve, result), error => finish(reject, error))
+      })
+    },
+  }
+}
+
 export function dependencyRanks(document) {
   const ids = document.blocks.map(block => block.id).sort()
   const ranks = Object.fromEntries(ids.map(id => [id, 0]))
@@ -25,7 +66,11 @@ export function dependencyRanks(document) {
   return ranks
 }
 
-export async function dependencyLayout(document, dimensions = {}) {
+export function dependencyLayout(document, dimensions = {}) {
+  return createDependencyLayoutRunner().run(document, dimensions)
+}
+
+async function layoutWithElk(document, dimensions, elk) {
   const ranks = dependencyRanks(document)
   if (!document.blocks.length) return {}
   const ids = document.blocks.map(block => block.id).sort()

@@ -58,11 +58,11 @@ export default function BlockPanel({ block, document, onSettings, onConnect, onD
         {!order.length && <p>No settings required.</p>}<button type="submit">Save settings</button>
       </form>}
       {tab === 'Configure' && <>
-        <h3>Upstream data picker</h3>
+        <h3>Source</h3>
         <label>Input<select value={target} onChange={event => { setTarget(event.target.value); setSource('') }}>
           <option value="">Choose input</option>{Object.keys(manifest.inputs).map(port => <option key={port}>{port}</option>)}
         </select></label>
-        <label>Compatible upstream output<select value={source} onChange={event => setSource(event.target.value)}>
+        <label>Source<select value={source} onChange={event => setSource(event.target.value)}>
           <option value="">Choose output</option>{options.map(from => <option key={`${from.node}/${from.port}`} value={JSON.stringify(from)}>{from.node} / {from.port}</option>)}
         </select></label>
         <button type="button" disabled={!source || !target} onClick={() => {

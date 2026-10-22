@@ -14,7 +14,7 @@ export const ELEMENT_FAMILIES = Object.freeze([...new Set(manifests.map(m => fam
 export const strategySection = manifest => manifest.lane === 'engines'
   ? (manifest.id.startsWith('adjust-') ? 'Rules' : 'Signals') : null
 export const laneLabel = id => LANES.find(lane => lane.id === id)?.title || id
-export const blockLabel = manifest => `${manifest.title} · ${manifest.id}`
+export const blockLabel = manifest => manifest.title
 
 // Original implementation; no Activepieces code, ee files or React Flow Pro assets copied.
 // Design reference only: activepieces/activepieces, LICENSE (MIT), packages/react-ui/.

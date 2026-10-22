@@ -1,21 +1,24 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LabCanvas from './LabCanvas.jsx'
-import NodeCard from './NodeCard.jsx'
+import GraphView from './GraphView.jsx'
 import { Measurement } from './LatencyPipe.jsx'
 import { BLOCK_MIME } from './Palette.jsx'
 import { contract, manifests } from './registry.js'
 import { ELEMENT_FAMILIES, LANES } from './elementCatalog.js'
 import { addBlock, connectPipe, emptyGraph } from './graphDoc.js'
 import { dependencyLayout, dependencyRanks } from './dependencyLayout.js'
+import * as layout from './dependencyLayout.js'
 
 // Exercise our UI and callbacks independently of browser geometry. ELK remains real.
 vi.mock('@xyflow/react', () => ({
   ReactFlowProvider: ({ children }) => children,
   useReactFlow: () => ({ screenToFlowPosition: point => point, getNodes: () => [], fitView: () => {} }),
-  ReactFlow: ({ nodes, edges, nodeTypes, onNodeClick, onNodesChange, children }) => <div data-testid="flow">
+  ReactFlow: ({ nodes, edges, nodeTypes, onNodeClick, onNodesChange, onConnect, onEdgesChange, children }) => <div data-testid="flow">
+    {nodes.length > 1 && <button onClick={() => onConnect({ source: nodes[0].id, sourceHandle: 'result', target: nodes[1].id, targetHandle: 'value' })}>Connect first pair</button>}
+    {edges.length > 0 && <button onClick={() => onEdgesChange([{ type: 'remove', id: edges[0].id }])}>Delete first pipe</button>}
     {nodes.map(node => { const Card = nodeTypes[node.type]; return <div key={node.id} data-testid={node.id} data-position={JSON.stringify(node.position)}>
       <button onClick={() => onNodeClick(null, node)}>Select {node.id}</button>
       <button onClick={() => onNodesChange([{ type: 'position', id: node.id, position: { x: 777, y: 888 } }])}>Move {node.id}</button>
@@ -31,6 +34,13 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 const manifest = manifests.find(item => item.id === 'adjust-none')
 const documentOf = count => Array.from({ length: count }).reduce(document => addBlock(document, manifest), emptyGraph())
 const edge = (from, to) => ({ from: { node: `adjust-none-${from}`, port: 'result' }, to: { node: `adjust-none-${to}`, port: 'value' } })
+const entriesOf = (...items) => Object.fromEntries(items.map(item => [`${item.id}@${item.version.semver}`, item]))
+const deferred = () => {
+  let resolve
+  let reject
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
+}
 
 describe('registry and deterministic dependencies', () => {
   it('retains the trusted fixture manifests and exactly twelve families and nine Lanes', () => {
@@ -60,16 +70,17 @@ describe('registry and deterministic dependencies', () => {
 describe('canvas authoring', () => {
   it('adds from the keyboard-accessible palette, focuses slash search and preserves positions until Relayout', async () => {
     const changed = vi.fn()
-    render(<LabCanvas onChange={changed} />)
+    const { container } = render(<LabCanvas entries={entriesOf(manifest)} onChange={changed} />)
     const search = screen.getByRole('searchbox')
-    fireEvent.keyDown(window, { key: '/' })
+    fireEvent.keyDown(container.querySelector('[data-canvas-editor]'), { key: '/' })
     expect(search).toHaveFocus()
-    fireEvent.change(search, { target: { value: 'adjust-none' } })
-    const button = screen.getByRole('button', { name: 'Strategy · adjust-none' })
+    fireEvent.change(search, { target: { value: 'Strategy' } })
+    vi.spyOn(screen.getByTestId('flow').parentElement, 'getBoundingClientRect').mockReturnValue({ left: 100, top: 60, width: 600, height: 400 })
+    const button = screen.getByRole('button', { name: 'Strategy' })
     button.focus()
-    // A native button dispatches click for Enter; test the resulting accessible action.
-    fireEvent.click(button)
+    fireEvent.keyDown(button, { key: 'Enter' })
     await waitFor(() => expect(screen.getByTestId('adjust-none-1')).toBeInTheDocument())
+    expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 400, y: 260 }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Relayout' })).not.toBeDisabled())
     fireEvent.click(screen.getByRole('button', { name: 'Move adjust-none-1' }))
     expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 777, y: 888 }))
@@ -82,7 +93,7 @@ describe('canvas authoring', () => {
     const { container } = render(<LabCanvas />)
     expect(container.querySelectorAll('[data-element-family]')).toHaveLength(12)
     const dataTransfer = { setData: vi.fn(), getData: vi.fn(() => 'adjust-none'), effectAllowed: '' }
-    fireEvent.dragStart(screen.getByRole('button', { name: 'Strategy · adjust-none' }), { dataTransfer })
+    fireEvent.dragStart(within(container.querySelector('[data-element-family="adjust"]')).getAllByRole('button', { name: 'Strategy' })[0], { dataTransfer })
     expect(dataTransfer.setData).toHaveBeenCalledWith(BLOCK_MIME, 'adjust-none')
     fireEvent.drop(screen.getByTestId('flow').parentElement, { dataTransfer, clientX: 120, clientY: 90 })
     await waitFor(() => expect(screen.getByTestId('adjust-none-1')).toBeInTheDocument())
@@ -101,7 +112,7 @@ describe('canvas authoring', () => {
     for (const name of ['Setup', 'Configure', 'Test', 'Code']) expect(within(inspector).getByRole('tab', { name })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: 'Configure' }))
     fireEvent.change(screen.getByLabelText('Input'), { target: { value: 'value' } })
-    const picker = screen.getByLabelText('Compatible upstream output')
+    const picker = screen.getByLabelText('Source')
     expect(within(picker).queryByText('adjust-none-2 / result')).not.toBeInTheDocument()
     fireEvent.change(picker, { target: { value: JSON.stringify({ node: 'adjust-none-1', port: 'result' }) } })
     fireEvent.click(screen.getByRole('button', { name: 'Connect pipe' }))
@@ -123,11 +134,249 @@ describe('canvas authoring', () => {
   })
   it('shows missing required pipes, declared defaults and explicit measurement states', () => {
     const required = { ...manifest, inputs: { value: { ...manifest.inputs.value, required: true }, optional: { ...manifest.inputs.value, has_default: true, default: 7 } } }
-    render(<NodeCard id="example" data={{ manifest: required, missing: ['value'] }} />)
+    render(<LabCanvas initialDocument={addBlock(emptyGraph(), required)} entries={entriesOf(required)} />)
     expect(screen.getByText('Not ready: pipe required for value')).toBeVisible()
     expect(screen.getByText(/default 7/)).toBeVisible()
     expect(screen.getByText(/Value not measured/)).toBeVisible()
     const { container } = render(<Measurement measurement={{ value: 3, count: 1, p50_us: 5, p99_us: 11 }} budget={{ p50: 5, p99: 10 }} />)
     expect(container.querySelector('[data-budget-state="over-budget"]')).toBeInTheDocument()
+  })
+
+  it('keeps missing required settings local until the inspector supplies valid values', () => {
+    const required = manifests.find(item => item.id === 'level-fast-index')
+    const changed = vi.fn()
+    render(<LabCanvas entries={entriesOf(required)} onChange={changed} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Market' }))
+    const card = within(screen.getByTestId('level-fast-index-1'))
+    expect(card.getByRole('status')).toHaveTextContent(/Not ready/)
+    expect(changed).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('mean_fast_index (required)'), { target: { value: '1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    expect(card.getByRole('status')).toHaveTextContent('Ready')
+    expect(changed).toHaveBeenCalledTimes(1)
+    const document = changed.mock.calls[0][0]
+    expect(document.blocks[0].settings).toEqual({ mean_fast_index: 1 })
+    expect(contract.graph(document, entriesOf(required))).toBe(true)
+  })
+
+  it('fills declared settings defaults and emits a valid document immediately', () => {
+    const defaults = { ...manifest, settings_schema: { type: 'object', additionalProperties: false,
+      properties: { max_tokens: { type: 'integer', minimum: 0, maximum: 4096, default: 128 } }, required: ['max_tokens'] } }
+    const changed = vi.fn()
+    render(<LabCanvas entries={entriesOf(defaults)} onChange={changed} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Strategy' }))
+    expect(changed).toHaveBeenCalledTimes(1)
+    const document = changed.mock.calls[0][0]
+    expect(document.blocks[0].settings).toEqual({ max_tokens: 128 })
+    expect(contract.graph(document, entriesOf(defaults))).toBe(true)
+    expect(within(screen.getByTestId('adjust-none-1')).getByRole('status')).toHaveTextContent('Ready')
+  })
+
+  it('still refuses settings defaults that violate their schema', () => {
+    const invalid = { ...manifest, settings_schema: { type: 'object', additionalProperties: false,
+      properties: { max_tokens: { type: 'integer', maximum: 4096, default: 5000 } }, required: ['max_tokens'] } }
+    const changed = vi.fn()
+    render(<LabCanvas entries={entriesOf(invalid)} onChange={changed} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Strategy' }))
+    expect(within(screen.getByTestId('adjust-none-1')).getByRole('status')).toHaveTextContent(/Not ready/)
+    expect(changed).not.toHaveBeenCalled()
+  })
+
+  it('refuses incompatible connections through the actual onConnect handler', () => {
+    const incompatible = { ...manifest, inputs: { ...manifest.inputs, value: { ...manifest.inputs.value, mode: 'stream' } } }
+    const changed = vi.fn()
+    render(<LabCanvas initialDocument={documentOf(2)} entries={entriesOf(incompatible)} onChange={changed} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
+    expect(screen.getByText('Scalar and stream modes differ')).toBeVisible()
+    expect(screen.getByTestId('pipe-count')).toHaveTextContent('0')
+    expect(changed).not.toHaveBeenCalled()
+  })
+
+  it('connects and deletes a drawn pipe through ReactFlow callbacks', () => {
+    const changed = vi.fn()
+    render(<LabCanvas initialDocument={documentOf(2)} onChange={changed} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
+    expect(changed.mock.calls.at(-1)[0].pipes).toEqual([edge(1, 2)])
+    fireEvent.click(screen.getByRole('button', { name: 'Delete first pipe' }))
+    expect(changed.mock.calls.at(-1)[0].pipes).toEqual([])
+  })
+
+  it('uses only the supplied registry for click, keyboard, slash search and drop', () => {
+    const second = manifests.find(item => item.id === 'gates-price-v1')
+    const changed = vi.fn()
+    const { container } = render(<LabCanvas entries={entriesOf(manifest, second)} onChange={changed} />)
+    const palette = screen.getByRole('region', { name: 'Strategy palette' })
+    expect(within(palette).getAllByRole('button')).toHaveLength(2)
+    expect(within(palette).queryByRole('button', { name: 'Market' })).not.toBeInTheDocument()
+    fireEvent.click(within(palette).getByRole('button', { name: 'Strategy' }))
+    const allowed = within(palette).getByRole('button', { name: 'Target price' })
+    allowed.focus()
+    fireEvent.keyDown(allowed, { key: 'Enter' })
+    expect(screen.getByTestId('gates-price-v1-1')).toBeInTheDocument()
+    fireEvent.keyDown(container.querySelector('[data-canvas-editor]'), { key: '/' })
+    expect(screen.getByRole('searchbox')).toHaveFocus()
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Market' } })
+    expect(within(palette).queryAllByRole('button')).toHaveLength(0)
+    const calls = changed.mock.calls.length
+    fireEvent.drop(screen.getByTestId('flow').parentElement, {
+      dataTransfer: { getData: () => 'level-fast-index' }, clientX: 120, clientY: 90,
+    })
+    expect(screen.getByText('Block kind is not in this canvas registry')).toBeVisible()
+    expect(screen.queryByTestId('level-fast-index-1')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('article')).toHaveLength(2)
+    expect(changed).toHaveBeenCalledTimes(calls)
+  })
+
+  it('scopes slash search to the canvas receiving the key', () => {
+    const first = render(<LabCanvas />)
+    const second = render(<LabCanvas />)
+    const firstRoot = first.container.querySelector('[data-canvas-editor]')
+    const secondRoot = second.container.querySelector('[data-canvas-editor]')
+    const firstSearch = within(first.container).getByRole('searchbox')
+    const secondSearch = within(second.container).getByRole('searchbox')
+    fireEvent.keyDown(firstRoot, { key: '/' })
+    expect(firstSearch).toHaveFocus()
+    fireEvent.keyDown(secondRoot, { key: '/' })
+    expect(secondSearch).toHaveFocus()
+    fireEvent.keyDown(firstSearch, { key: '/' })
+    expect(secondSearch).toHaveFocus()
+    firstRoot.setAttribute('hidden', '')
+    fireEvent.keyDown(firstRoot, { key: '/' })
+    expect(secondSearch).toHaveFocus()
+    fireEvent.keyDown(window, { key: '/' })
+    expect(secondSearch).toHaveFocus()
+  })
+
+  it('mounts only on the first reveal and preserves the editor through hide and show', async () => {
+    const runner = { run: vi.fn(async () => ({})), cancel: vi.fn() }
+    vi.spyOn(layout, 'createDependencyLayoutRunner').mockReturnValue(runner)
+    const view = render(<GraphView hidden />)
+    expect(view.container.querySelector('[data-canvas-editor]')).toBeNull()
+    expect(runner.run).not.toHaveBeenCalled()
+
+    view.rerender(<GraphView />)
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    const editor = view.container.querySelector('[data-canvas-editor]')
+    const search = within(editor).getByRole('searchbox')
+    fireEvent.change(search, { target: { value: 'Market' } })
+    await waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1))
+
+    view.rerender(<GraphView hidden />)
+    expect(editor).not.toBeVisible()
+    view.rerender(<GraphView />)
+    expect(view.container.querySelector('[data-canvas-editor]')).toBe(editor)
+    expect(search).toHaveValue('Market')
+    expect(editor).toBeVisible()
+    expect(runner.run).toHaveBeenCalledTimes(1)
+    expect(runner.cancel).not.toHaveBeenCalled()
+  }, 20000)
+
+  it('keeps initial layout stable through prop rerenders and lays out the current draft explicitly', async () => {
+    const runner = { run: vi.fn(async () => ({ 'adjust-none-1': { x: 30, y: 30 } })), cancel: vi.fn() }
+    const createRunner = vi.spyOn(layout, 'createDependencyLayoutRunner').mockReturnValue(runner)
+    const entries = entriesOf(manifest)
+    const view = render(<LabCanvas initialDocument={documentOf(1)} entries={entries} />)
+    await waitFor(() => expect(screen.getByText('Layout updated')).toBeVisible())
+    view.rerender(<LabCanvas initialDocument={documentOf(1)} entries={entries} measurements={{}} upstream={{}} onChange={vi.fn()} />)
+    expect(createRunner).toHaveBeenCalledTimes(1)
+    expect(runner.run).toHaveBeenCalledTimes(1)
+    expect(runner.cancel).not.toHaveBeenCalled()
+
+    fireEvent.click(within(screen.getByRole('region', { name: 'Strategy palette' })).getByRole('button', { name: 'Strategy' }))
+    expect(runner.run).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Relayout' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Relayout' })).not.toBeDisabled())
+    expect(runner.run).toHaveBeenCalledTimes(2)
+    expect(runner.run.mock.calls[1][0].blocks.map(block => block.id)).toEqual(['adjust-none-1', 'adjust-none-2'])
+  })
+
+  it('cancels pending layout on unmount and ignores its late resolution', async () => {
+    const pending = deferred()
+    const runner = { run: vi.fn(() => pending.promise), cancel: vi.fn() }
+    vi.spyOn(layout, 'createDependencyLayoutRunner').mockReturnValue(runner)
+    const changed = vi.fn()
+    const view = render(<LabCanvas initialDocument={documentOf(1)} onChange={changed} />)
+    expect(runner.run).toHaveBeenCalledTimes(1)
+    view.unmount()
+    expect(runner.cancel).toHaveBeenCalledTimes(1)
+    await act(async () => pending.resolve({ 'adjust-none-1': { x: 999, y: 999 } }))
+    expect(view.container).toBeEmptyDOMElement()
+    expect(changed).not.toHaveBeenCalled()
+  })
+
+  it('ignores an older layout after editing and a newer request complete', async () => {
+    const older = deferred()
+    const newer = deferred()
+    const runner = { run: vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise), cancel: vi.fn() }
+    vi.spyOn(layout, 'createDependencyLayoutRunner').mockReturnValue(runner)
+    render(<LabCanvas initialDocument={documentOf(1)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Move adjust-none-1' }))
+    expect(runner.cancel).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Relayout' }))
+    expect(runner.run).toHaveBeenCalledTimes(2)
+    await act(async () => newer.resolve({ 'adjust-none-1': { x: 20, y: 40 } }))
+    await act(async () => older.resolve({ 'adjust-none-1': { x: 999, y: 999 } }))
+    expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 20, y: 40 }))
+    expect(screen.getByRole('button', { name: 'Relayout' })).not.toBeDisabled()
+  })
+
+  it('keeps a newer layout pending when the cancelled request rejects late', async () => {
+    const older = deferred()
+    const newer = deferred()
+    const runner = { run: vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise), cancel: vi.fn() }
+    vi.spyOn(layout, 'createDependencyLayoutRunner').mockReturnValue(runner)
+    render(<LabCanvas initialDocument={documentOf(1)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Relayout' }))
+    expect(runner.run).toHaveBeenCalledTimes(2)
+    await act(async () => older.reject(new DOMException('Layout cancelled', 'AbortError')))
+    expect(screen.queryByText('Layout cancelled')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Relayout' })).toBeDisabled()
+    await act(async () => newer.resolve({ 'adjust-none-1': { x: 20, y: 40 } }))
+    expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 20, y: 40 }))
+    expect(screen.getByRole('button', { name: 'Relayout' })).not.toBeDisabled()
+  })
+})
+
+describe('layout runner cancellation', () => {
+  it('releases bundled workers without terminate on completion and cancellation', async () => {
+    const pending = deferred()
+    const completedWorker = { onmessage: vi.fn() }
+    const cancelledWorker = { onmessage: vi.fn() }
+    const completed = { worker: { worker: completedWorker },
+      layout: async () => ({ children: [{ id: 'adjust-none-1', x: 30 }] }), terminateWorker: vi.fn() }
+    const cancelled = { worker: { worker: cancelledWorker },
+      layout: () => pending.promise, terminateWorker: vi.fn() }
+    const runner = layout.createDependencyLayoutRunner(vi.fn().mockReturnValueOnce(completed).mockReturnValueOnce(cancelled))
+    expect(await runner.run(documentOf(1))).toEqual({ 'adjust-none-1': { x: 30, y: 30 } })
+    expect(completed.worker.worker).toBeNull()
+    expect(completed.terminateWorker).not.toHaveBeenCalled()
+    const result = runner.run(documentOf(1))
+    const rejection = expect(result).rejects.toMatchObject({ name: 'AbortError' })
+    runner.cancel()
+    await rejection
+    expect(cancelled.worker.worker).toBeNull()
+    expect(cancelled.terminateWorker).not.toHaveBeenCalled()
+    expect(() => cancelledWorker.onmessage({ data: {} })).not.toThrow()
+    pending.resolve({ children: [{ id: 'adjust-none-1', x: 999 }] })
+    await pending.promise
+    runner.cancel()
+  })
+
+  it('terminates the worker on cancellation and on successful completion', async () => {
+    const pending = deferred()
+    const firstWorker = { layout: () => pending.promise, terminateWorker: vi.fn() }
+    const secondWorker = { layout: async () => ({ children: [{ id: 'adjust-none-1', x: 30 }] }), terminateWorker: vi.fn() }
+    const createElk = vi.fn().mockReturnValueOnce(firstWorker).mockReturnValueOnce(secondWorker)
+    const runner = layout.createDependencyLayoutRunner(createElk)
+    const first = runner.run(documentOf(1))
+    const cancelled = expect(first).rejects.toMatchObject({ name: 'AbortError' })
+    const second = runner.run(documentOf(1))
+    await cancelled
+    expect(firstWorker.terminateWorker).toHaveBeenCalledTimes(1)
+    expect(await second).toEqual({ 'adjust-none-1': { x: 30, y: 30 } })
+    expect(secondWorker.terminateWorker).toHaveBeenCalledTimes(1)
+    pending.resolve({ children: [{ id: 'adjust-none-1', x: 999 }] })
+    runner.cancel()
+    expect(secondWorker.terminateWorker).toHaveBeenCalledTimes(1)
   })
 })

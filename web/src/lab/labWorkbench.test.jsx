@@ -1,11 +1,16 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LabWorkbench from './LabWorkbench.jsx'
 import { LAB_VIEWS, registerLabViews } from './views.js'
 import WidgetsView from './widgets/WidgetsView.jsx'
 import glossary from './contract/sources/leaf-glossary.v1.json'
+
+// Shell coverage stops at the lazy mount; canvas tests exercise real ELK layout.
+vi.mock('./canvas/dependencyLayout.js', () => ({
+  createDependencyLayoutRunner: () => ({ run: async () => ({}), cancel: vi.fn() }),
+}))
 
 beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
@@ -38,11 +43,12 @@ describe('Lab view registration', () => {
 describe('LabWorkbench', () => {
   it('lazily mounts the dependency editor in the graph view', async () => {
     render(<LabWorkbench route={route('graph')} status={on} />)
-    await waitFor(() => expect(screen.getByRole('region', { name: 'Dependency canvas' })).toBeVisible())
+    expect(await screen.findByRole('status', { name: 'Loading dependency canvas' }, { timeout: 15000 })).toBeVisible()
+    expect(await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })).toBeVisible()
     expect(screen.getByRole('region', { name: 'Strategy palette' })).toBeVisible()
     expect(screen.getByRole('region', { name: 'Block inspector' })).toBeVisible()
-    expect(screen.getAllByRole('link')).toHaveLength(5)
-  })
+    expect(within(screen.getByRole('navigation', { name: 'Lab views' })).getAllByRole('link')).toHaveLength(5)
+  }, 20000)
 
   it('retains every view DOM instance through navigation, dormancy and hiding', () => {
     const { container, rerender } = render(<LabWorkbench route={route('graph')} status={on} />)

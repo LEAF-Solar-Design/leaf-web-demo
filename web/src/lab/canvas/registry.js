@@ -4,12 +4,27 @@ import pinSchema from '../contract/lab-pin.v1.schema.json'
 import graphSchema from '../contract/lab-graph.v1.schema.json'
 import manifestSchema from '../contract/leaf-block-manifest.v1.schema.json'
 
-export const contract = createContract({
+const dataContract = createContract({
   'lab-block.v1.schema.json': blockSchema,
   'lab-pin.v1.schema.json': pinSchema,
   'lab-graph.v1.schema.json': graphSchema,
   'fixtures/lab/leaf-block-manifest.v1.schema.json': manifestSchema,
 })
+
+// `default` is an authoring annotation, absent from the frozen validator's
+// vocabulary. Remove only that annotation; retain every validation constraint.
+function validationSchema(schema) {
+  if (!schema || typeof schema !== 'object') return schema
+  return Object.fromEntries(Object.entries(schema).filter(([key]) => key !== 'default').map(([key, value]) => [key,
+    key === 'properties' ? Object.fromEntries(Object.entries(value).map(([name, child]) => [name, validationSchema(child)]))
+      : key === 'items' ? validationSchema(value) : value]))
+}
+export const contract = {
+  ...dataContract,
+  validate: (value, schema) => dataContract.validate(value, validationSchema(schema)),
+  graph: (document, entries, ...args) => dataContract.graph(document, Object.fromEntries(Object.entries(entries).map(([key, manifest]) =>
+    [key, { ...manifest, settings_schema: validationSchema(manifest.settings_schema) }])), ...args),
+}
 
 // Data snapshot of contract/fixtures/lab/blocks.json. Browser builds contain web/ only.
 // The source receipt is retained; canvas.test.jsx checks equality with the fixture.
