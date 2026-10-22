@@ -54,6 +54,8 @@ def build_parser():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--deploy", action="store_true")
+    mode.add_argument("--dry-run", action="store_true",
+                      help="print the digest and planned changes without deploying")
     parser.add_argument("--domain", required=True, metavar="HOST")
     parser.add_argument("--confirm", metavar="DIGEST")
     return parser
@@ -308,10 +310,14 @@ def main(argv=None, *, transport=None, sleep=time.sleep) -> int:
             _deploy(active, token, targets, sleep)
             result = "deployed" if all(target["state"] == "match" for target in targets) else "readback_mismatch"
         print(json.dumps({"schema": "leaf.auth0-actions-sync.v1",
-                          "mode": "deploy" if args.deploy else "check", "domain": args.domain,
+                          "mode": "deploy" if args.deploy else "dry-run" if args.dry_run else "check",
+                          "domain": args.domain,
                           "targets": [{key: target[key] for key in REPORT_KEYS} for target in targets],
                           "plan_digest": digest, "result": result}, separators=(",", ":")))
-        return 0 if result in ("match", "deployed") else 1
+        if args.dry_run:
+            # A matching plan has no changes; still print a valid confirmation.
+            print("digest: " + (digest if digest is not None else hashlib.sha256(b"[]").hexdigest()))
+        return 0 if args.dry_run or result in ("match", "deployed") else 1
     except SyncError as exc:
         print("LEAF_AUTH0_ACTIONS_ERROR=" + str(exc), file=sys.stderr)
         if exc.diagnostic is not None:
