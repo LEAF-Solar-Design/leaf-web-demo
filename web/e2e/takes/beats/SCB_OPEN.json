@@ -1,0 +1,17 @@
+{
+  "schema": "leaf.studio-beats.v1",
+  "beat_id": "SCB_OPEN",
+  "env": "staging",
+  "origin": "https://platform-staging.leafdesign.ai",
+  "requires_signed_in": false,
+  "fixtures": [],
+  "steps": [
+    { "verb": "goto", "path": "/app?surface=solar" },
+    { "verb": "wait_text", "text": "Connect AutoCAD", "timeout_ms": 60000 },
+    { "verb": "pause", "ms": 1500 },
+    { "verb": "click", "testid": "local-cad-connect" },
+    { "verb": "wait_text", "text": "Connected to AutoCAD · cad-bridge-live-site.dwg", "timeout_ms": 30000 },
+    { "verb": "pause", "ms": 2000 }
+  ],
+  "expect_text": []
+}
