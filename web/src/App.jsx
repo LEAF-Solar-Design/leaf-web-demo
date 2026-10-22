@@ -16,6 +16,8 @@ import { buildDrawingObjectIndex } from './lib/drawingObjectIndex.js'
 import EngineObjectBridge from './cadedit/EngineObjectBridge.jsx'
 import { useLeavingGround, useStudioTransition } from './site/useStudioTransition.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
+import { useLabSurfaceStatus } from './lab/useLabSurfaceStatus.js'
+import { parseLabRoute } from './lab/labRoute.js'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
 import { CockpitStatus, FootRegion, StatusTabs, ViewCluster, useViewNavigation } from './site/DrawingCockpit.jsx'
 import { createViewHistory } from './lib/viewHistory.js'
@@ -528,6 +530,8 @@ export default function App() {
   const onReturnToDrawing = useCallback(() => returnToDrawing(true), [returnToDrawing])
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
+  const labStatus = useLabSurfaceStatus(mock)
+  useEffect(() => { setActiveSurface(window.location.pathname.startsWith('/app/lab') && parseLabRoute(window.location.pathname, window.location.search) ? 'lab' : productSurfaceFromSearch(window.location.search, labStatus)) }, [labStatus])
   const [loadErr, setLoadErr] = useState(null)
   const [drawingLoad, setDrawingLoad] = useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect

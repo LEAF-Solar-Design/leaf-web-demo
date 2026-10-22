@@ -11,7 +11,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
 import ContinuityStore from '../site/ContinuityStore.jsx'
 import SurfaceFrame from '../site/SurfaceFrame.jsx'
-import { PRODUCT_SURFACES, productSurfaceStates } from '../site/productSurfaces.js'
+import { PRODUCT_SURFACES, productSurfaceStates, surfaceRailState } from '../site/productSurfaces.js'
 import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
@@ -490,9 +490,8 @@ describe('slice 5b: the tab band renders only tab-declaring surfaces', () => {
   })
 
   it('renders one tab per tab-declaring record, derived, not a hardcoded five', () => {
-    // Derived on BOTH sides, so flipping chrome.tab on any record makes this
-    // row follow it instead of failing as a stale count.
-    const declared = PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab)
+    // Derive the default band with the same pending-rail visibility rule.
+    const declared = PRODUCT_SURFACES.filter(({ id, contract }) => contract.chrome.tab && surfaceRailState(id, null))
     render(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
     expect(screen.getAllByRole('tab').map((tab) => tab.dataset.surface))
       .toEqual(declared.map(({ id }) => id))

@@ -1,5 +1,31 @@
 # The Surface Contract
 
+SEL-005 adds Lab after Ops and before Sheets. Lab declares `ground: 'lab'`,
+`scene: 'app'`, `chrome.tab: true`, `chrome.rail: 'lab'`, and no drafting ribbon.
+`surfaceRailState(id, status)` reads the frozen rail declaration. Only a status
+with `state: 'on'` enables the tab and studio selection; null means the first
+probe is pending and hides Lab without an error or a dormant tab-bar message.
+Off, auth-off, signed-out and unavailable also hide it. An overlay can author
+chrome or authoring but cannot remove this rail gate. An off-rail
+`?surface=lab` falls back to CAD just like an unknown selector. Direct Lab
+routes keep their dormant explanation inside LabWorkbench.
+
+LabGround is lazy until first activation and remains mounted through tab
+switches. The project board takes precedence. LabWorkbench receives `hidden`
+so every retained view can suspend work while another ground is visible.
+Lab uses its own Strategy and Assignment workspace, so it declares no drawing
+card, cockpit, command line, dock, shared rails, build routes, build card,
+context menu, conversation scope, integrations or versions. Its console tour
+anchors follow the shared app shell; it declares no stage walk.
+
+Lab authoring is pending upstream of the shared build lane. The frozen
+`PENDING_UPSTREAM_ENTITLEMENT_EXEMPTIONS` map in `surfaceRails.js` exempts only
+Lab's matching rail declaration from authoring requiring `build`. This grants
+no capability and never bypasses an off rail. `surfaceEntitlements.test.js`
+requires removal when Lab declares build entitlement or build routes, loses
+its rail or authoring declaration, or disappears. No tripwire reads runtime
+probe status, so a pending probe cannot fire it.
+
 Standardization slices 1-2, 4b, 5a and 5b of 13. Plan: `C:/Users/ehaug/.claude/plans/staged-wiggling-fairy.md`,
 section "The Surface Contract", element table row 1.
 
@@ -67,6 +93,7 @@ the sheets arm rather than against the console predicates, which never ran for i
 
 | field | type | meaning | where it is read (and the literal it replaced) |
 | --- | --- | --- | --- |
+| `chrome.rail` | optional rail id | runtime availability required in addition to tab configuration | `surfaceRailState` reads the frozen declaration for selection and ProductSurfaceTabs; only Lab declares this slot, and an unreported or dormant rail stays hidden regardless of overlay authoring |
 | `ground` | `'drawing' \| 'board' \| 'device-stage' \| 'sheet'` | the canvas kind under the shell | `web/src/site/SurfaceGrounds.jsx:111` derives `DRAWING_SURFACES` from the contract (`contract.ground === 'drawing'`), read by `groundShowsDrawing()` at `:116`; it replaced the literal `new Set(['cad','solar'])`; the two non-drawing kinds are named in `web/e2e/local/one-shell-mount.spec.mjs:131` and rendered by `ProjectBoardGround` (`SurfaceGrounds.jsx:137`, active on `surfaceGround(surface) === 'board'` at `:303`, was `surface === 'browser'`) and `DeviceGround` (`:226`, active on `=== 'device-stage'` at `:311`, was `surface === 'ios'`) |
 | `chrome.productFrame` | boolean | the `<ProductSurfaceFrame>` wrapper renders | `web/src/App.jsx:2898` `surfaceSlots.chrome.productFrame`; replaced `activeSurface !== 'cad'` |
 | `chrome.workspaceCard` | boolean | the drawing workspace card is visible | `web/src/App.jsx:2859` `display: surfaceSlots.chrome.workspaceCard ? undefined : 'none'`; replaced `activeSurface === 'cad' \|\| activeSurface === 'solar'` |

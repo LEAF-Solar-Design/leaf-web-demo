@@ -25,6 +25,14 @@ import '../integrations/ops-workspace.css'
 
 const OpsWorkspaceGround = lazy(() => import('../integrations/OpsWorkspaceGround.jsx')
   .then((module) => ({ default: module.OpsWorkspaceGround })))
+const LabGround = lazy(() => import('../lab/LabGround.jsx'))
+
+function LazyLabGround(props) {
+  const [activated, setActivated] = useState(props.active)
+  if (props.active && !activated) setActivated(true)
+  if (!activated && !props.active) return null
+  return <Suspense fallback={null}><LabGround {...props} /></Suspense>
+}
 
 function OpsLoadState({ active, leavingGround, studioShell, occluders, failed = false }) {
   const boardRef = useRef(null)
@@ -144,6 +152,8 @@ export default function SurfaceGrounds({
         ship={ship}
         onLaunch={onLaunch}
       />
+      <LazyLabGround active={!boardVisible && surfaceGround(surface) === 'lab'}
+        mock={mock} studioShell={studioShell} occluders={occluders} />
       <LazyOpsGround
         active={!boardVisible && surfaceGround(surface) === 'integrations'}
         projectId={projectId}
