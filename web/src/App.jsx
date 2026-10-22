@@ -184,6 +184,8 @@ import usePlatformTrustController from './controllers/platform/usePlatformTrustC
 import useWorkspaceController from './controllers/workspace/useWorkspaceController.js'
 import useDrawingUploadController from './controllers/upload/useDrawingUploadController.js'
 import DrawingUploadControl from './components/DrawingUploadControl.jsx'
+import LocalCadConnect from './localCad/LocalCadConnect.jsx'
+import { createLocalCadBridge } from './localCad/localCadBridge.js'
 import ProjectWorkspacePanels, { paneForCapability, deriveBoardPaneSeats, BoardPaneState, PersistentSeat, useBoardConversation, ConversationOpening, AnnotationPaneState } from './workspace/ProjectWorkspacePanels.jsx'
 import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
@@ -472,6 +474,7 @@ export default function App() {
   // shell promotes an upload only through the standalone adapter below.
   const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, setFromUpload, isScopeCurrent } = useDrawingIdentity()
   const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
+  // The same load fence carries local-source ownership and its generation.
   requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
   // W3 one-shell: the studio ground node, which the Viewer portals into.
   // null only until SiteRoot's ground attaches on the first render
@@ -533,7 +536,21 @@ export default function App() {
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
   const [selectedTool, setSelectedTool] = useState(null)
   const [solarFormTool, setSolarFormTool] = useState(null)
-  const projectModeRef = useRef(false)
+  const projectModeRef = useRef(false),
+    [localCadActive, setLocalCadActive] = React.useState(false)
+  const localCadBridgeRef = useRef(null)
+  const [localCadStatus, setLocalCadStatus] = useState({ status: 'stopped' })
+  const stopLocalCad = useCallback(() => {
+    requestedDrawingIdRef.localCadGeneration = (requestedDrawingIdRef.localCadGeneration || 0) + 1
+    localCadBridgeRef.current?.stop()
+    setLocalCadActive(false)
+    try { localStorage.removeItem('leaf.localCad.connect') } catch { /* storage may be unavailable */ }
+  }, [])
+  const connectLocalCad = useCallback(() => {
+    requestedDrawingIdRef.localCadGeneration = (requestedDrawingIdRef.localCadGeneration || 0) + 1
+    try { localStorage.setItem('leaf.localCad.connect', '1') } catch { /* connection still works */ }
+    localCadBridgeRef.current?.start()
+  }, [])
   const settingsRunRef = useRef(null)
   const [settingsRunResult, setSettingsRunResult] = useState(null)
   // The settings run result belongs to one open form: any change of the open Solar form (a close from the ribbon,
@@ -820,6 +837,10 @@ export default function App() {
   const applyDrawingIntake = useCallback((nextIntake) => {
     if (!projectModeRef.current) viewerRef.current?.applyVersion(nextIntake)
   }, [])
+  const applySelectedDrawingIntake = useCallback((nextIntake) => {
+    if (nextIntake?.source !== 'bridge') stopLocalCad()
+    applyDrawingIntake(nextIntake)
+  }, [applyDrawingIntake, stopLocalCad])
   const resetDrawingSelection = useCallback(() => {
     setSelectedHandle(null)
     setPendingEdit(null)
@@ -838,7 +859,7 @@ export default function App() {
   const drawing = useDrawingVersionController({
     ...drawingAdapters,
     formatError: humanizeError,
-    onApplyIntake: applyDrawingIntake,
+    onApplyIntake: applySelectedDrawingIntake,
     onResetSelection: resetDrawingSelection,
     onError: reportDrawingError,
   })
@@ -1023,7 +1044,7 @@ export default function App() {
   }), [tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState])
   const catalogRunContextRef = useRef(catalogRunContext)
   catalogRunContextRef.current = catalogRunContext
-  const projectMode = !mock && !!openProjectId
+  const projectMode = !mock && !!openProjectId && !localCadActive
   projectModeRef.current = projectMode
   const projectSolarAccountScope = composerDraftAccountScope()
   const projectSolarSession = {
@@ -1368,10 +1389,13 @@ export default function App() {
   useEffect(() => {
     let alive = true
     const loadDrawingId = REQUESTED_DRAWING_ID
+    const localCadGeneration = requestedDrawingIdRef.localCadGeneration
     const current = () => alive
       && loadDrawingId === requestedDrawingIdRef.current
       && isScopeCurrent()
       && sessionProof.current(true)
+      && localCadGeneration === requestedDrawingIdRef.localCadGeneration
+      && !requestedDrawingIdRef.localCadRunning
     if (!current()) return undefined
     resetDrawing(); setLoadErr(null)
     if (!hasDrawingSelection({ drawingId: loadDrawingId, source: DRAWING_SOURCE })) {
@@ -1430,6 +1454,42 @@ export default function App() {
     // Both proofs share token, recovery and workspace fencing.
   }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
       session.recoveries, sessionProof, sessionActions])
+
+  // App owns the transport; controls only express the user's choice.
+  const localCadUpdateRef = useRef(null)
+  localCadUpdateRef.current = (update) => {
+    setLocalCadActive(true)
+    projectModeRef.current = false
+    setLoadErr(null)
+    closeStartForChange()
+    seatIntake(update.intake, { apply: true })
+  }
+  useEffect(() => {
+    const bridge = createLocalCadBridge({
+      onStatus: (status) => {
+        requestedDrawingIdRef.localCadRunning = status.status !== 'stopped'
+        setLocalCadStatus(status)
+      },
+      onUpdate: (update) => localCadUpdateRef.current(update),
+    })
+    localCadBridgeRef.current = bridge
+    try {
+      if (localStorage.getItem('leaf.localCad.connect') === '1') connectLocalCad()
+    } catch { /* reconnect is optional when storage is unavailable */ }
+    return () => {
+      bridge.stop()
+      if (localCadBridgeRef.current === bridge) localCadBridgeRef.current = null
+    }
+  }, [connectLocalCad])
+  const localCadSelectionRef = useRef({ mock, drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE,
+    projectId: openProjectId, versionId: canonicalVersionId })
+  useLayoutEffect(() => {
+    const next = { mock, drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE,
+      projectId: openProjectId, versionId: canonicalVersionId }
+    const previous = localCadSelectionRef.current
+    if (Object.keys(next).some(key => next[key] !== previous[key])) stopLocalCad()
+    localCadSelectionRef.current = next
+  }, [mock, REQUESTED_DRAWING_ID, DRAWING_SOURCE, openProjectId, canonicalVersionId, stopLocalCad])
 
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
   // finish the exchange + store leaf.jwt, then reload so the fresh loads send
@@ -4430,6 +4490,7 @@ export default function App() {
         }
       }}
       onChangeCapture={(event) => {
+        if (event.target?.type === 'file' && Array.from(event.target.files || []).some(file => /\.(dwg|dxf)$/i.test(file.name))) stopLocalCad()
         if (event.target instanceof Element && event.target.closest('.drafting-ribbon, .cockpit-quick, #cockpit-import-pane input[type="file"]')) returnToDrawing()
       }}
     >
@@ -4802,6 +4863,20 @@ export default function App() {
           id={studioGround && drafting ? 'cockpit-import-pane' : undefined}
           data-import-open={studioGround && drafting && importOpen ? 'true' : undefined}
         >
+            <section aria-label="Workspace controls" className="local-cad-operator"
+              style={{ padding: 12, background: 'var(--ck-chrome, var(--card))', color: 'var(--ck-ink, inherit)',
+                border: '1px solid var(--ck-edge, var(--border))', borderRadius: 4, overflowWrap: 'anywhere',
+                ...(studioGround && !phoneViewport ? { position: 'fixed', top: 'calc(var(--ck-canvas-top, 160px) + 12px)',
+                  left: 12, width: 260, maxHeight: '50vh', overflowY: 'auto', zIndex: 6 } : {}) }}>
+              <h3 style={{ margin: '0 0 8px' }}>Operator</h3>
+              <button type="button" className="chip-act" onClick={() => {
+                stopLocalCad()
+                setProjectPane('material')
+                returnToDrawing()
+                request('browser')
+              }}>Upload DWG or DXF</button>
+              <LocalCadConnect {...localCadStatus} onConnect={connectLocalCad} onDisconnect={stopLocalCad} />
+            </section>
           {unreadableHead && unreadableHead.pending && (
             // The routine post-restore load: calm progress, not a failure —
             // no alert role, no retry (the load is already in flight).
@@ -5031,6 +5106,7 @@ export default function App() {
               applyVersion seam (the console drawing returns on close);
               the card carries data-engine-document for the pins. */}
           {ENV_CAD_EDIT && <EngineObjectBridge active={!projectMode && !!studioGround && groundShowsDrawing(activeSurface)} intake={activeIntake} />}
+          {localCadStatus.status === 'stopped' && <>
           {ENV_CAD_EDIT && studioGround && !projectMode && engineViewArmed && (
             <EngineDocumentView
               viewerRef={viewerRef}
@@ -5092,6 +5168,7 @@ export default function App() {
               onStarterState={setSolarStarter}
             />
           )}
+          </>}
           <div className="viewer-toolbar">
             {/* W4e: the toolbar is the reference's document-tab band. Start
                 is the project board (the Browser tab, a real surface switch);
@@ -5310,6 +5387,7 @@ export default function App() {
               </div>
             )}
             {/* X3 whole-pane takeover: red dot + what failed + quiet reason + Retry. */}
+            {!localCadActive && <>
             {loadErr && !signedOut && (
               <div className="pane-fail" role="alert" style={{ position: 'absolute', inset: 0 }}>
                 <span className="pane-fail-title"><span className="dot red" aria-hidden="true" />Couldn’t load drawing</span>
@@ -5325,7 +5403,8 @@ export default function App() {
                 )}
               </div>
             )}
-            {signedOut && <div className="overlay-msg">Sign in or explore the demo to load a drawing.</div>}
+            </>}
+            {signedOut && !localCadActive && <div className="overlay-msg">Sign in or explore the demo to load a drawing.</div>}
             {!intake && !loadErr && !signedOut && (
               // Indeterminate load: content-shaped pulse dot + verb, top-left —
               // the centered takeover position is reserved for failures (X3).
