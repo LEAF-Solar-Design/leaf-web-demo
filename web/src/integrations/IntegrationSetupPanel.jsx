@@ -100,7 +100,9 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
       if (!alive()) return
       if (dispatched && attempt) {
         setUnknown(attempt); setRecovery(null)
-        setError('Outcome unknown. The request may have taken effect. Read status before choosing an existing resource or a new ID. No request will be repeated automatically.')
+        setError(attempt.kind === 'retirement' ?
+          'Outcome unknown. Read this exact connection status before an explicit cleanup retry. No DELETE will be repeated automatically.' :
+          'Outcome unknown. The request may have taken effect. Read status before choosing an existing resource or a new ID. No request will be repeated automatically.')
       } else setError('Setup could not continue. Check the nonsecret inputs and current authorization, then try again.')
       if (failure?.status === 403) onForbidden?.()
     } finally {
@@ -179,6 +181,42 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
       resource.auth_kind === published.auth_kind && resource.operation_ids.length === 1 && resource.operation_ids[0] === submitted.operationIds[0] &&
       !['revoked', 'disabled'].includes(resource.state)
   }
+  function retirementMatches(resource, reviewed) {
+    return resource.id === reviewed.id && sameRef(resource.connector_ref, reviewed.connector_ref) &&
+      resource.origin === reviewed.origin && JSON.stringify(resource.operation_ids) === JSON.stringify(reviewed.operation_ids)
+  }
+  function retirementComplete(resource) {
+    return resource.state === 'revoked' && resource.cleanup === 'complete' && resource.credential_purposes.length === 0
+  }
+  function useRetirement(resource) {
+    setConnection(resource)
+    if (resource.state === 'revoked') setCustody(false)
+    setMessage(retirementComplete(resource) ?
+      'Connection revoked and stored credential erased. Dataset records remain. Revoke the provider token separately with its provider.' :
+      resource.state === 'revoked' ? 'Connection revoked. Stored credential cleanup needs attention. Retry cleanup explicitly for this same connection.' :
+        'Readback shows this connection is not revoked. No DELETE was repeated. You may explicitly revoke this same connection.')
+  }
+  function revokeConnection() {
+    if (password.current) password.current.value = ''
+    if (!connection || busy.current || unknown || !alive() || retirementComplete(connection)) return
+    const attempt = { kind: 'retirement', id: connection.id, binding: {
+      id: connection.id, connector_ref: { ...connection.connector_ref }, origin: connection.origin,
+      operation_ids: [...connection.operation_ids],
+    } }
+    run('Revoking connection and erasing stored credential…', async (send) => {
+      const fresh = await client.getConnectionSummary(projectId, attempt.id, options)
+      if (!alive()) return
+      if (!retirementMatches(fresh, attempt.binding)) throw new Error()
+      if (retirementComplete(fresh)) { useRetirement(fresh); return }
+      // The normal owner/session guard is fresh after readback and immediately before DELETE.
+      await guard(lifetime.signal)
+      if (!alive()) return
+      const revoked = await send(() => client.revokeConnection(projectId, attempt.id, fresh.revision, options))
+      if (!alive()) return
+      if (!retirementMatches(revoked, attempt.binding)) throw new Error()
+      useRetirement(revoked)
+    }, attempt)
+  }
   function createConnection(event) {
     event.preventDefault()
     if (!validSlug(connectionForm.id) || !validName(connectionForm.title) || !published.definition.origins.includes(connectionForm.origin) || abandoned.includes(`connection:${connectionForm.id}`)) { localError(); return }
@@ -192,7 +230,7 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
   }
   function saveCredential(event) {
     event.preventDefault()
-    if (busy.current || unknown || !alive()) return
+    if (busy.current || unknown || !alive() || connection?.state === 'revoked') return
     // Keep entry in the DOM during authority preflight, so disposal can clear it immediately.
     if (!password.current?.value || new TextEncoder().encode(password.current.value).byteLength > 16384) {
       if (password.current) password.current.value = ''
@@ -212,6 +250,7 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
   }
   function register(event) {
     event.preventDefault()
+    if (connection?.state === 'revoked') return
     let input
     try {
       if (abandoned.includes(`dataset:${form.id}:${form.version}`)) throw new Error()
@@ -224,6 +263,7 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
     }, { kind: 'dataset', id: input.definition.id, version: input.definition.version, input })
   }
   function sync() {
+    if (connection?.state === 'revoked') return
     run('Synchronizing up to 250 records / 128 KiB…', async (send) => {
       setResult(null)
       const synced = await send(() => client.syncDataset(projectId, dataset.reference, options))
@@ -246,6 +286,9 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
         resource = await client.getConnectorVersion(projectId, attempt.id, attempt.version, options)
         compatible = attempt.kind === 'publish' ? publicationMatches(resource, attempt) :
           resource.definition.operations.length === 1 && supported(resource.definition.operations[0])
+      } else if (attempt.kind === 'retirement') {
+        resource = await client.getConnectionSummary(projectId, attempt.id, options)
+        compatible = retirementMatches(resource, attempt.binding)
       } else if (attempt.kind === 'connection' || attempt.kind === 'credential') {
         resource = await client.getConnectionSummary(projectId, attempt.id, options)
         compatible = connectionMatches(resource, attempt.input || { ...connectionForm, connectorRef: published.reference, operationIds: [operationId] }) &&
@@ -269,6 +312,7 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
       if (kind === 'publish') usePublication(resource)
       if (kind === 'existingPublish') { setOperationId(resource.definition.operations[0].id); setDraft({ id: resource.id, title: resource.title, revision: resource.revision }); usePublication(resource) }
       if (kind === 'connection' || kind === 'credential') { setConnection(resource); setCustody(kind === 'credential' || resource.auth_kind === 'none') }
+      if (kind === 'retirement') useRetirement(resource)
       if (kind === 'dataset') setDataset({ reference: resource.reference, revision: resource.revision })
       if (kind === 'sync') {
         setResult(resource.lastAttempt ? { receipt: resource.lastAttempt, status: 'readback' } : null)
@@ -276,11 +320,12 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
         catch { if (alive()) setError('Status was read, but the composer refresh was unavailable. Read status again without synchronizing.') }
         if (!alive()) return
       }
-      setUnknown(null); setRecovery(null); setMessage('Using the displayed existing resource by your explicit choice.')
+      setUnknown(null); setRecovery(null)
+      if (kind !== 'retirement') setMessage('Using the displayed existing resource by your explicit choice.')
     })
   }
   function chooseNewId() {
-    if (busy.current) return
+    if (busy.current || unknown?.kind === 'retirement') return
     const kind = unknown.kind
     setAbandoned((old) => [...old, kind === 'dataset' ? `dataset:${unknown.id}:${unknown.version}` :
       ['connection', 'credential'].includes(kind) ? `connection:${unknown.id}` : `connector:${unknown.id}`])
@@ -359,14 +404,21 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
       <button type="button" onClick={() => recoverChosen('connection')}>Recover chosen connection</button>
     </fieldset></form>}
     {connection && <p>Connection: {connection.title} · {connection.id} · revision {connection.revision} · {connection.state} · health {connection.health.code} · cleanup {connection.cleanup}. Configured custody does not verify provider identity.</p>}
-    {connection && purpose && !custody && <form onSubmit={saveCredential} aria-label="Private credential"><fieldset disabled={locked}>
+    {connection && <section aria-label="Retire selected connection"><h3>Retire selected connection</h3>
+      <p>Revocation disables this connection and erases its stored credential. Dataset records and references remain. The provider token must still be revoked separately with its provider.</p>
+      {connection.state === 'revoked' && <p>{retirementComplete(connection) ? 'Retirement complete: connection revoked, cleanup complete, no stored credential purposes.' : `Connection revoked. Cleanup: ${connection.cleanup}. Stored credential cleanup needs attention.`}</p>}
+      {!retirementComplete(connection) && <button type="button" disabled={locked} onClick={revokeConnection}>
+        {connection.state === 'revoked' ? 'Retry stored credential cleanup' : 'Revoke connection and erase stored credential'}
+      </button>}
+    </section>}
+    {connection && connection.state !== 'revoked' && purpose && !custody && <form onSubmit={saveCredential} aria-label="Private credential"><fieldset disabled={locked}>
       <legend>Private credential custody</legend>
       <label>{purpose === 'access_token' ? 'Bearer token' : 'Header API key'}<input ref={password} type="password" autoComplete="off" required maxLength={16384} /></label>
       <p>Transient entry, up to 16 KiB UTF-8. Cleared after settlement. Provider authentication is observed at explicit sync.</p>
       <button type="submit">Save private credential</button>
       <button type="button" onClick={() => { if (password.current) password.current.value = ''; setUnknown({ kind: 'credential', id: connection.id }); setRecovery(null) }}>Read configured custody without upload</button>
     </fieldset></form>}
-    {connection && custody && !dataset && <form onSubmit={register} aria-label="Define typed dataset"><fieldset disabled={locked}>
+    {connection && connection.state !== 'revoked' && custody && !dataset && <form onSubmit={register} aria-label="Define typed dataset"><fieldset disabled={locked}>
       <legend>4. Define typed dataset and mapping</legend>
       <p>Choose meaning explicitly. Reporting timezone belongs to this dataset and is separate from personal display preferences.</p>
       <div className="integration-setup-grid">
@@ -410,7 +462,7 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
     {dataset && <section aria-label="First synchronization"><h3>5. Synchronize explicitly</h3>
       <p>Registered dataset: {refText(dataset.reference)} · revision {dataset.revision}.</p>
       <p>This first synchronization reads at most 250 records / 128 KiB from a top-level JSON array. It is bounded and does not claim a complete scan. No pagination or action execution is available.</p>
-      <button disabled={locked} onClick={sync}>Synchronize dataset</button>
+      <button disabled={locked || connection?.state === 'revoked'} onClick={sync}>Synchronize dataset</button>
       <button disabled={locked} onClick={() => { setUnknown({ kind: 'sync', reference: dataset.reference }); setRecovery(null) }}>Read dataset status without sync</button>
       {result && <div role="status" aria-live="polite"><p>Dataset status: {result.status}. {result.status === 'readback' ? 'Latest recorded attempt; this does not prove the unknown request completed.' : ''}</p>
         <p>Outcome: {result.receipt.outcome} · source: {result.receipt.source_outcome} · rows: {result.receipt.row_count}{result.receipt.failure_code ? ` · failure: ${result.receipt.failure_code}` : ''}{result.receipt.retryAfterMs !== undefined ? ` · retry after ${result.receipt.retryAfterMs} ms (manual only)` : ''}.</p>
@@ -429,12 +481,13 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
           <ul>{(recovery.resource.definition || recovery.resource.draft_definition).operations.map((op) => <li key={op.id}>{op.id} · {op.method} {op.path} · {supported(op) ? 'supported read' : 'unsupported in this setup'}</li>)}</ul>
         </>}
         {recovery.resource.connector_ref && <p>Connector: {refText(recovery.resource.connector_ref)} · destination {recovery.resource.origin} · operations {recovery.resource.operation_ids.join(', ')} · state {recovery.resource.state} · credential purposes {recovery.resource.credential_purposes.join(', ') || 'none'}.</p>}
+        {recovery.kind === 'retirement' && <p>Retirement readback: state {recovery.resource.state}, cleanup {recovery.resource.cleanup}, stored credential purposes {recovery.resource.credential_purposes.length}. No DELETE was repeated. Records remain.</p>}
         {recovery.resource.fields && <ul>{recovery.resource.fields.map((field) => <li key={field.id}>{field.id} · {field.label} · {field.type.kind} · {field.nullable ? 'nullable' : 'required'} · {field.sensitivity}</li>)}</ul>}
         {recovery.kind === 'sync' && <p>{recovery.resource.lastAttempt ? `Latest recorded outcome: ${recovery.resource.lastAttempt.outcome}.` : 'No synchronization attempt is recorded.'} This read cannot prove the unknown synchronization completed.</p>}
         <p>{recovery.kind === 'credential' ? 'Configured custody cannot prove the submitted credential value. It does not verify provider identity.' : recovery.kind === 'dataset' ? 'Metadata cannot prove the submitted mapping, keys, reporting timezone, retention or lineage.' : recovery.kind === 'import' ? 'Draft existence cannot prove which JSON document was imported. Review its normalized definition after explicitly choosing it.' : 'Compare the displayed resource and reviewed configuration. Existence alone does not confirm the original request.'}</p>
-        {recovery.compatible ? <button disabled={Boolean(pending)} onClick={acceptRecovery}>Use displayed existing resource</button> : <p>The existing resource does not match this setup. Choose a new ID.</p>}
+        {recovery.compatible ? <button disabled={Boolean(pending)} onClick={acceptRecovery}>Use displayed existing resource</button> : <p>{recovery.kind === 'retirement' ? 'The connection binding changed. Retirement is blocked for this resource.' : 'The existing resource does not match this setup. Choose a new ID.'}</p>}
       </>}
-      {unknown.kind !== 'sync' && <button disabled={Boolean(pending)} onClick={chooseNewId}>Choose a new resource ID</button>}
+      {!['sync', 'retirement'].includes(unknown.kind) && <button disabled={Boolean(pending)} onClick={chooseNewId}>Choose a new resource ID</button>}
     </section>}
   </section>
 }

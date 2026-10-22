@@ -4815,11 +4815,11 @@ export default function App() {
         </>)}
 
         <SurfaceFrame.Tabs />
-        {!boardHostsProject && !mock && openProjectId && (
+        {surfaceSlots.ground !== 'integrations' && !boardHostsProject && !mock && openProjectId && (
           <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
         )}
 
-        {!boardHostsProject && !mock && openProjectId && (
+        {surfaceSlots.ground !== 'integrations' && !boardHostsProject && !mock && openProjectId && (
           <WorkspaceSummary
             workspace={workspace}
             loading={wsLoading}
