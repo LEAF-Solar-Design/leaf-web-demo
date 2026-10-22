@@ -1,0 +1,1318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leaf.internal/contract/widget-doc.v1.schema.json",
+  "title": "Closed widget document",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "min_renderer",
+    "active",
+    "formats"
+  ],
+  "properties": {
+    "schema": {
+      "const": "widget-doc.v1"
+    },
+    "min_renderer": {
+      "$ref": "#/$defs/version"
+    },
+    "active": {
+      "enum": [
+        "la",
+        "diExp",
+        "diCompact",
+        "diMin",
+        "standby",
+        "lockRect",
+        "lockCirc",
+        "lockInline",
+        "homeS",
+        "homeM",
+        "homeL",
+        "watchStack",
+        "watchCorner"
+      ]
+    },
+    "formats": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "la": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 361
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 361
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "diExp": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 371
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 371
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "diCompact": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 250
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 250
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "diMin": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 37
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 37
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "standby": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 852
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 852
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "lockRect": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 170
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 170
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "lockCirc": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 72
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 72
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "lockInline": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 234
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 234
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "homeS": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 170
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 170
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "homeM": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 364
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 364
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "homeL": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 364
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 364
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "watchStack": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 188
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 188
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "watchCorner": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/format"
+            },
+            {
+              "properties": {
+                "els": {
+                  "items": {
+                    "properties": {
+                      "x": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 62
+                      },
+                      "w": {
+                        "type": "number",
+                        "minimum": 0.01,
+                        "maximum": 62
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d{1,4}\\.\\d{1,4}\\.\\d{1,4}$"
+    },
+    "element": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "min_renderer",
+        "x",
+        "y",
+        "w",
+        "h",
+        "scale",
+        "weight",
+        "color",
+        "align",
+        "visible"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,64}$"
+        },
+        "kind": {
+          "enum": [
+            "text",
+            "box",
+            "svg-path"
+          ]
+        },
+        "min_renderer": {
+          "$ref": "#/$defs/version"
+        },
+        "x": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "w": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1024
+        },
+        "h": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1024
+        },
+        "scale": {
+          "type": "number",
+          "minimum": 0.4,
+          "maximum": 2
+        },
+        "weight": {
+          "enum": [
+            400,
+            500,
+            600,
+            700,
+            800,
+            900
+          ]
+        },
+        "color": {
+          "enum": [
+            "auto",
+            "ink",
+            "leaf",
+            "slate",
+            "loss"
+          ]
+        },
+        "align": {
+          "enum": [
+            "left",
+            "center",
+            "right"
+          ]
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "path": {
+          "type": "string",
+          "maxLength": 8192,
+          "pattern": "^[MmLlHhVvCcSsQqTtAaZz0-9., +\\-]+$"
+        },
+        "preset": {
+          "enum": [
+            "brand",
+            "leafIcon",
+            "total",
+            "todayPnl",
+            "openPnlSum",
+            "cash",
+            "exposure",
+            "winRate",
+            "text",
+            "heroPnl",
+            "symbols",
+            "pnl",
+            "pnlPct",
+            "odds",
+            "oddsBar",
+            "toWin",
+            "side",
+            "size",
+            "label",
+            "closes",
+            "spark",
+            "ring",
+            "history",
+            "historyList",
+            "streak",
+            "live",
+            "updated",
+            "countdown",
+            "openCount",
+            "divider"
+          ]
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "arrows": {
+          "type": "boolean"
+        },
+        "showPct": {
+          "type": "boolean"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "maxRows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "tracking": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "opacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "text"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "svg-path"
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "path"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "enum": [
+                  "history",
+                  "historyList"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "count": {
+                "maximum": 4
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "brand"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "leafIcon"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "svg-path"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "total"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "todayPnl"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "openPnlSum"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "cash"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "exposure"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "winRate"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "text"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "heroPnl"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "symbols"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "pnl"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "pnlPct"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "odds"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "oddsBar"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "box"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "toWin"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "side"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "size"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "label"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "closes"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "spark"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "svg-path"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "ring"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "svg-path"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "history"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "historyList"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "streak"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "live"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "updated"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "countdown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "openCount"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "preset"
+            ],
+            "properties": {
+              "preset": {
+                "const": "divider"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "box"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "format": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "h",
+        "radius",
+        "bg",
+        "vibrant",
+        "ship",
+        "els"
+      ],
+      "properties": {
+        "h": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 512
+        },
+        "bg": {
+          "enum": [
+            "black",
+            "blur",
+            "none"
+          ]
+        },
+        "vibrant": {
+          "type": "boolean"
+        },
+        "ship": {
+          "type": "boolean"
+        },
+        "els": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/element"
+          }
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "field",
+        "min_renderer",
+        "scale",
+        "tone"
+      ],
+      "properties": {
+        "source": {
+          "const": "kashbot.board"
+        },
+        "field": {
+          "enum": [
+            "total",
+            "todayPnl",
+            "openPnlSum",
+            "cash",
+            "exposure",
+            "winRate",
+            "heroPnl",
+            "symbols",
+            "pnl",
+            "pnlPct",
+            "odds",
+            "oddsBar",
+            "toWin",
+            "side",
+            "size",
+            "label",
+            "closes",
+            "spark",
+            "history",
+            "historyList",
+            "streak",
+            "live",
+            "updated",
+            "countdown",
+            "openCount",
+            "topOdds",
+            "todayPct"
+          ]
+        },
+        "min_renderer": {
+          "$ref": "#/$defs/version"
+        },
+        "scale": {
+          "enum": [
+            "fraction",
+            "today-percent",
+            "open-count",
+            "identity"
+          ]
+        },
+        "tone": {
+          "enum": [
+            "auto",
+            "ink",
+            "leaf",
+            "slate",
+            "loss"
+          ]
+        },
+        "window": {
+          "const": "today-utc"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "field": {
+                "const": "winRate"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "window"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}
