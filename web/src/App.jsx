@@ -3583,6 +3583,18 @@ export default function App() {
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
   // white screen it was written for. Was groundShowsDrawing(activeSurface).
   const drafting = surfaceSlots.chrome.cockpit
+  const { solarOverlay, reason: solarOverlayReason } = useSolarGraphOverlay({
+    enabled: Boolean(!projectMode && studioGround && drafting && surfaceSlots.toolbar.profile === 'solar'),
+    shown: shown ?? null,
+    drawingKey: consoleDrawingKey,
+    sceneCurrent: Boolean(isScopeCurrent() && drawingLoad.state === 'seated' && drawingLoad.drawingId === REQUESTED_DRAWING_ID),
+    refreshPending: Boolean(refreshFail || unreadableHead),
+    activeIntake: solarOverlayCanvasIntake(viewerOverride, intake ?? SOLAR_STARTER_EMPTY_INTAKE),
+    engineDocument: engineDocument ?? null,
+    engineDirty,
+    activeVersion: drawing.activeVersion,
+    requestedDrawingId: REQUESTED_DRAWING_ID ?? null,
+  })
   const localCadEligible = !!studioGround && drafting && !projectMode
   useEffect(() => {
     if (!localCadEligible) {
@@ -3600,18 +3612,6 @@ export default function App() {
     })
     return () => { cancelled = true }
   }, [localCadEligible, connectLocalCad, stopLocalCad])
-  const { solarOverlay, reason: solarOverlayReason } = useSolarGraphOverlay({
-    enabled: Boolean(!projectMode && studioGround && drafting && surfaceSlots.toolbar.profile === 'solar'),
-    shown: shown ?? null,
-    drawingKey: consoleDrawingKey,
-    sceneCurrent: Boolean(isScopeCurrent() && drawingLoad.state === 'seated' && drawingLoad.drawingId === REQUESTED_DRAWING_ID),
-    refreshPending: Boolean(refreshFail || unreadableHead),
-    activeIntake: solarOverlayCanvasIntake(viewerOverride, intake ?? SOLAR_STARTER_EMPTY_INTAKE),
-    engineDocument: engineDocument ?? null,
-    engineDirty,
-    activeVersion: drawing.activeVersion,
-    requestedDrawingId: REQUESTED_DRAWING_ID ?? null,
-  })
   // A refusal belongs to the project scope it was raised in. It shows only while that scope, its
   // client and its catalog receipt are still the ones on screen, so a scope or receipt change
   // retires it during render. Clearing it from a layout effect keyed on render-time objects took

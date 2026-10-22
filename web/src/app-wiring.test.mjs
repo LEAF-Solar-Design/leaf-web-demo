@@ -5539,7 +5539,8 @@ it('R13G2A-11 standalone arms and captures retain their predecessor bytes', () =
   assert.equal(r13Hash(interior(titleBranch.alternate)), 'd37ef2de2b3b6c413842e7fc8f117bb71a717de5571446fe23310acf3177cd9a')
   const wrap = r13One(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-wrap'))
   const status = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode' && n.consequent.type === 'JSXFragment', wrap)
-  assert.equal(r13Hash(interior(status.alternate)), 'a8dcf463cbb3c6fe50d2d60b43098b2bc7d5f5f8be736aa727afc841abf83bd5')
+  // The standalone branch hides the load-failure pane and signed-out overlay while Connect AutoCAD has a bridge drawing seated (studio-launch-20261019 SCB3b).
+  assert.equal(r13Hash(interior(status.alternate)), '21a1b53458f5cd0e9604d628be57356aef3e6604c3fbee3d101a09fc490ac5e9')
   assert.equal(r13Text(attribute(viewer, 'onIntakeOverride')), 'onViewerIntakeOverride')
   assert.equal(r13Text(attribute(viewer, 'onSceneReady')), 'onDrawingSceneReady')
   const onSelect = r13Evaluate(attribute(viewer, 'onSelectEntity'), {

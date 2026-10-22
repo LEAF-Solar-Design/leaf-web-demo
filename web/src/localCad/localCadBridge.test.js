@@ -32,6 +32,80 @@ describe('local bridge polling', () => {
     bridge.stop()
   })
 
+  it('never loads text support for geometry-only payloads', async () => {
+    const loadTextGlyphs = vi.fn()
+    const onUpdate = vi.fn()
+    const bridge = createLocalCadBridge({ fetchImpl: vi.fn().mockResolvedValue(response(payload())),
+      loadTextGlyphs, onUpdate })
+    bridge.start(); await flush()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(loadTextGlyphs).not.toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledTimes(2)
+    expect(onUpdate.mock.calls[0][0].intake.polylines).toHaveLength(1)
+    bridge.stop()
+  })
+
+  it('loads text support once and seats glyphs on successive payloads', async () => {
+    const helper = await import('./bridgeText.js')
+    const loadTextGlyphs = vi.fn().mockResolvedValue(helper)
+    const intake = { ...payload().intake,
+      texts: [{ handle: 'text', text: 'PV', pt: [2, 2], height: 1 }] }
+    const onUpdate = vi.fn()
+    const bridge = createLocalCadBridge({ fetchImpl: vi.fn().mockResolvedValue(response(payload({ intake }))),
+      loadTextGlyphs, onUpdate })
+    bridge.start(); await flush(); await flush()
+    expect(loadTextGlyphs).toHaveBeenCalledTimes(1)
+    expect(onUpdate.mock.calls[0][0].intake.polylines.some(row => row.handle === 'text' && row.strokeOnly)).toBe(true)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(loadTextGlyphs).toHaveBeenCalledTimes(1)
+    expect(onUpdate).toHaveBeenCalledTimes(2)
+    bridge.stop()
+  })
+
+  it('seats geometry and keeps polling after a text load failure, retrying only after 30 seconds', async () => {
+    const helper = await import('./bridgeText.js')
+    const loadTextGlyphs = vi.fn().mockRejectedValueOnce(new Error('font unavailable')).mockResolvedValue(helper)
+    const intake = { ...payload().intake, texts: [{ text: 'PV', pt: [0, 0], height: 1 }] }
+    const fetchImpl = vi.fn().mockResolvedValue(response(payload({ intake })))
+    const onUpdate = vi.fn(), onStatus = vi.fn()
+    const bridge = createLocalCadBridge({ fetchImpl, loadTextGlyphs, onUpdate, onStatus, intervalMs: 1000 })
+    bridge.start(); await flush(); await flush()
+    expect(onStatus.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
+      status: 'connecting', error: 'font unavailable',
+    }))
+    expect(bridge.snapshot()).toMatchObject({ status: 'connected', error: 'font unavailable', rev: 7 })
+    expect(onUpdate.mock.calls[0][0].intake).toMatchObject({ textPending: 1, points: 2 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(onUpdate).toHaveBeenCalledTimes(2)
+    expect(loadTextGlyphs).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(28999)
+    expect(loadTextGlyphs).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(loadTextGlyphs).toHaveBeenCalledTimes(2)
+    expect(bridge.snapshot()).toMatchObject({ status: 'connected', error: null })
+    expect(onUpdate.mock.calls.at(-1)[0].intake.polylines.some(row => row.strokeOnly)).toBe(true)
+    bridge.stop()
+  })
+
+  it('shares a pending text load across stop/start and ignores the stopped poll', async () => {
+    const helper = await import('./bridgeText.js')
+    let finish
+    const loadTextGlyphs = vi.fn(() => new Promise(resolve => { finish = resolve }))
+    const intake = { texts: [{ text: 'PV', pt: [0, 0], height: 1 }] }
+    const onUpdate = vi.fn()
+    const bridge = createLocalCadBridge({ fetchImpl: vi.fn().mockResolvedValue(response(payload({ intake }))),
+      loadTextGlyphs, onUpdate })
+    bridge.start(); await flush()
+    bridge.stop(); bridge.start(); await flush()
+    expect(loadTextGlyphs).toHaveBeenCalledTimes(1)
+    expect(onUpdate).not.toHaveBeenCalled()
+    finish(helper); await flush(); await flush()
+    expect(onUpdate).toHaveBeenCalledTimes(1)
+    expect(onUpdate.mock.calls[0][0].intake.polylines.some(row => row.strokeOnly)).toBe(true)
+    bridge.stop()
+  })
+
   it('skips unchanged updates and accepts a restarted epoch at the same revision', async () => {
     const fetchImpl = vi.fn().mockResolvedValueOnce(response(payload()))
       .mockResolvedValueOnce(response(payload({ unchanged: true, intake: undefined })))

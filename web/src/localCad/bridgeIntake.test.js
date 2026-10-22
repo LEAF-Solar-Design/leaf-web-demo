@@ -1,6 +1,26 @@
 import { expect, it } from 'vitest'
 import { bridgeToIntake } from './bridgeIntake.js'
+import { textGlyphs } from './bridgeText.js'
+import { textGlyphPolylines } from '../components/viewerIntake.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
+
+it('matches viewerIntake glyph contours point for point without its shape machinery', () => {
+  for (const text of ['PV-01', 'Az 180°', '?']) {
+    const row = { text, pt: [3, 7, 2], height: 2.5, handle: 'label', layer: 'Notes' }
+    const actual = bridgeToIntake({ texts: [row] }, { textGlyphs }).polylines
+    const expected = textGlyphPolylines(row)
+    expect(actual).toHaveLength(expected.length)
+    for (let i = 0; i < expected.length; i += 1) {
+      expect(actual[i]).toMatchObject({ handle: row.handle, layer: row.layer, closed: false, strokeOnly: true })
+      expect(actual[i].pts).toHaveLength(expected[i].pts.length)
+      for (let j = 0; j < expected[i].pts.length; j += 1) {
+        expect(Math.abs(actual[i].pts[j][0] - expected[i].pts[j][0])).toBeLessThanOrEqual(1e-6)
+        expect(Math.abs(actual[i].pts[j][1] - expected[i].pts[j][1])).toBeLessThanOrEqual(1e-6)
+        expect(actual[i].pts[j][2]).toBe(expected[i].pts[j][2])
+      }
+    }
+  }
+})
 
 it('maps every bridge entity into the existing Viewer conventions without mutating the input', () => {
   const input = { drawing: 'site.dwg', geometry: true,
@@ -12,7 +32,7 @@ it('maps every bridge entity into the existing Viewer conventions without mutati
     texts: [{ handle: '6', layer: 'Notes', pt: [2, 2, 0], text: 'PV', height: 1 }],
     layers: [{ name: 'Roof', count: 3 }, { name: 'Empty', count: 0 }] }
   const before = JSON.stringify(input)
-  const mapped = bridgeToIntake(input)
+  const mapped = bridgeToIntake(input, { textGlyphs })
   expect(mapped).toMatchObject({ source: 'bridge', documentId: 'autocad:site.dwg', truncated: false })
   expect(mapped.polylines[0]).toEqual({ ...input.lines[0], closed: false })
   expect(mapped.polylines[1]).toEqual(input.polylines[0])
@@ -52,7 +72,7 @@ it('skips null and malformed rows and continues to later valid geometry and text
   const mapped = bridgeToIntake({ lines: [null, { pts: 'ab' }, { pts: {} },
     { pts: [[0, 0], [1, 1]], handle: 'valid' }],
   texts: [null, {}, { text: 'bad', pt: [0, 0] }, { text: 'PV', pt: [0, 0], height: 1, handle: 'text' }],
-  polylines: [null], circles: [null], arcs: [null], inserts: [null] })
+  polylines: [null], circles: [null], arcs: [null], inserts: [null] }, { textGlyphs })
   expect(mapped.polylines.some(row => row.handle === 'valid')).toBe(true)
   expect(mapped.polylines.some(row => row.handle === 'text')).toBe(true)
   expect(mapped.truncated).toBe(false)
@@ -60,8 +80,8 @@ it('skips null and malformed rows and continues to later valid geometry and text
 
 it('caps long text at 256 characters before expansion', () => {
   const text = { text: 'W'.repeat(100000), pt: [0, 0], height: 1 }
-  const mapped = bridgeToIntake({ texts: [text] })
-  const capped = bridgeToIntake({ texts: [{ ...text, text: 'W'.repeat(256) }] })
+  const mapped = bridgeToIntake({ texts: [text] }, { textGlyphs })
+  const capped = bridgeToIntake({ texts: [{ ...text, text: 'W'.repeat(256) }] }, { textGlyphs })
   expect(mapped.polylines).toEqual(capped.polylines)
   expect(mapped.points).toBe(capped.points)
   expect(mapped.truncated).toBe(true)
@@ -69,8 +89,19 @@ it('caps long text at 256 characters before expansion', () => {
 
 it('reserves the remaining text budget without allocating a whole over-budget label', () => {
   const mapped = bridgeToIntake({ polylines: [{ pts: Array.from({ length: 199980 }, (_, i) => [i, 0]) }],
-    texts: [{ text: 'B'.repeat(256), pt: [0, 0], height: 1 }] })
+    texts: [{ text: 'B'.repeat(256), pt: [0, 0], height: 1 }] }, { textGlyphs })
   expect(mapped.points).toBeLessThanOrEqual(200000)
   expect(mapped.polylines.reduce((n, row) => n + row.pts.length, 0)).toBe(mapped.points)
   expect(mapped.truncated).toBe(true)
+})
+
+it('leaves text pending without a helper and preserves the geometry conversion', () => {
+  const geometry = { lines: [{ handle: 'line', pts: [[0, 0], [1, 1]] }],
+    circles: [{ c: [2, 2], r: 1 }] }
+  const mapped = bridgeToIntake({ ...geometry, texts: [
+    { text: 'TEXT', pt: [0, 0], height: 1 }, { text: 'MTEXT', pt: [1, 1], height: 2 },
+  ] })
+  expect(mapped).toEqual({ ...bridgeToIntake(geometry), textPending: 2 })
+  expect(mapped.polylines).toHaveLength(1)
+  expect(mapped.points).toBe(50)
 })
