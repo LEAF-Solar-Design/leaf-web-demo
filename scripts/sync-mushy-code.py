@@ -86,6 +86,14 @@ def downstream_overlays(manifest: dict) -> dict[str, str]:
     return overlays
 
 
+def contract_overlay_entry(manifest: dict, rel: str) -> dict | None:
+    """Resolve a contract overlay by manifest name or repository path."""
+    contracts = manifest.get("contract_files", {})
+    if rel in contracts:
+        return contracts[rel]
+    return next((entry for entry in contracts.values() if entry.get("path") == rel), None)
+
+
 def check_sync_preflight(upstream: Path) -> list[str]:
     """Find overlay loss before ``do_sync`` changes any vendored path."""
     problems = []
@@ -107,25 +115,33 @@ def check_sync_preflight(upstream: Path) -> list[str]:
             current = vendored / rel
             incoming = src / rel
             pinned_hash = pinned_files.get(rel)
+            contract = contract_overlay_entry(manifest, rel) if rel not in pinned_files else None
+            if contract is not None:
+                current = REPO / contract["path"]
+                incoming = upstream / contract["upstream_path"] if contract.get("upstream_path") else None
+                pinned_hash = contract.get("sha256")
+
+            def overlay_hash(path: Path) -> str:
+                return hashlib.sha256(path.read_bytes()).hexdigest() if contract is not None else sha256(path)
 
             if pinned_hash != declared_hash:
                 problems.append(
                     f"{pin.relative_to(REPO)}: overlay {rel} does not match its pinned file hash"
                 )
                 continue
-            if not current.is_file() or sha256(current) != declared_hash:
+            if not current.is_file() or overlay_hash(current) != declared_hash:
                 problems.append(
                     f"{current.relative_to(REPO)}: declared overlay bytes are missing or changed"
                 )
                 continue
-            if not incoming.is_file():
+            if incoming is None or not incoming.is_file():
                 problems.append(
                     f"{upstream_rel}/{rel}: incoming checkout omits a declared overlay"
                 )
                 continue
-            if sha256(incoming) != declared_hash:
+            if overlay_hash(incoming) != declared_hash:
                 problems.append(
-                    f"{vendored.relative_to(REPO)}/{rel}: incoming checkout would replace a downstream overlay"
+                    f"{current.relative_to(REPO)}: incoming checkout would replace a downstream overlay"
                 )
     return problems
 
@@ -214,7 +230,10 @@ def do_verify() -> int:
         commits.append(manifest.get("upstream_commit", ""))
         actual = tree_manifest(vendored) if vendored.is_dir() else {}
         for rel, declared_hash in downstream_overlays(manifest).items():
-            if manifest.get("files", {}).get(rel) != declared_hash:
+            pinned_files = manifest.get("files", {})
+            contract = contract_overlay_entry(manifest, rel) if rel not in pinned_files else None
+            pinned_hash = contract.get("sha256") if contract is not None else pinned_files.get(rel)
+            if pinned_hash != declared_hash:
                 print(f"INVALID downstream overlay declaration: {pin.relative_to(REPO)}/{rel}")
                 bad += 1
         for rel, want in manifest["files"].items():

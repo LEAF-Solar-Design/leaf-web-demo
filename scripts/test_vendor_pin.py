@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 SYNC = REPO / "scripts" / "sync-mushy-code.py"
 
@@ -233,6 +235,75 @@ def test_verify_flags_contract_file_drift(tmp_path, capsys):
     schema.unlink()
     assert sync.do_verify() == 1
     assert "DRIFT schema.json" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("overlay_key", ["schema.json", "contract/schema.json"])
+def test_contract_overlay_verifies_by_name_or_path(tmp_path, capsys, overlay_key):
+    sync = _scratch_sync(tmp_path)
+    schema = sync.REPO / "contract/schema.json"
+    schema.parent.mkdir(parents=True)
+    blob = b'{"contract": true}\r\n'
+    schema.write_bytes(blob)
+    digest = hashlib.sha256(blob).hexdigest()
+    pin = sync.SURFACES[1][2]
+    manifest = json.loads(pin.read_text())
+    manifest["contract_files"] = {"schema.json": {
+        "path": "contract/schema.json", "upstream_path": "schemas/schema.json",
+        "sha256": digest,
+    }}
+    manifest["downstream_overlays"] = {overlay_key: {"sha256": digest}}
+    pin.write_text(json.dumps(manifest))
+
+    assert sync.do_verify() == 0
+    capsys.readouterr()
+    manifest["downstream_overlays"][overlay_key]["sha256"] = "0" * 64
+    pin.write_text(json.dumps(manifest))
+    assert sync.do_verify() == 1
+    assert "INVALID downstream overlay declaration" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("overlay_key", ["schema.json", "contract/schema.json"])
+def test_sync_protects_contract_overlay_without_writing(tmp_path, overlay_key):
+    sync = _scratch_sync(tmp_path)
+    upstream = tmp_path / "upstream"
+    for name, _, _ in sync.SURFACES:
+        (upstream / name).mkdir(parents=True)
+    schema = sync.REPO / "contract/schema.json"
+    schema.parent.mkdir(parents=True)
+    blob = b'{"contract": true}\r\n'
+    schema.write_bytes(blob)
+    incoming = upstream / "schemas/schema.json"
+    incoming.parent.mkdir(parents=True)
+    incoming.write_bytes(blob)
+    digest = hashlib.sha256(blob).hexdigest()
+    pin = sync.SURFACES[1][2]
+    manifest = json.loads(pin.read_text())
+    manifest["contract_files"] = {"schema.json": {
+        "path": "contract/schema.json", "upstream_path": "schemas/schema.json",
+        "sha256": digest,
+    }}
+    manifest["downstream_overlays"] = {overlay_key: digest}
+    pin.write_text(json.dumps(manifest))
+    assert sync.check_sync_preflight(upstream) == []
+
+    # Contracts use raw bytes: even line-ending-only replacement loses an overlay.
+    incoming.write_bytes(blob.replace(b"\r\n", b"\n"))
+    subprocess.run(["git", "init"], cwd=upstream, check=True, capture_output=True)
+    subprocess.run(["git", "config", "core.autocrlf", "false"],
+                   cwd=upstream, check=True, capture_output=True)
+    subprocess.run(["git", "add", "."], cwd=upstream, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Vendor Test", "-c", "user.email=vendor@example.com",
+         "commit", "-m", "fixture"],
+        cwd=upstream, check=True, capture_output=True,
+    )
+    before_pins = {p: p.read_bytes() for _, _, p in sync.SURFACES}
+    assert any("would replace a downstream overlay" in problem
+               for problem in sync.check_sync_preflight(upstream))
+    assert sync.do_sync(upstream) == 1
+    assert schema.read_bytes() == blob
+    assert all(p.read_bytes() == content for p, content in before_pins.items())
+    assert all(list(vendored.iterdir()) == [] for _, vendored, _ in sync.SURFACES)
 
 
 def test_verify_flags_split_pins(tmp_path, capsys):

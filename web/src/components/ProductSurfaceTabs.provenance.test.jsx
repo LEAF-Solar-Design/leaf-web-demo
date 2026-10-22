@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 
-vi.mock('../api.js', () => ({ getSurfaceConfig: vi.fn() }))
+vi.mock('../api.js', async (importOriginal) => ({ ...(await importOriginal()), getSurfaceConfig: vi.fn() }))
 
 import { getSurfaceConfig } from '../api.js'
 import ProductSurfaceTabs from './ProductSurfaceTabs.jsx'

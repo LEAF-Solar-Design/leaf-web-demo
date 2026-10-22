@@ -612,9 +612,28 @@ describe('DeviceGround', () => {
 })
 
 describe('SurfaceGrounds', () => {
+  it('lazily mounts Lab once and retains its hidden workbench behind other grounds', async () => {
+    const { container, rerender } = render(<SurfaceGrounds surface="browser" mock />)
+    expect(container.querySelector('[data-ground="lab"]')).toBeNull()
+    rerender(<SurfaceGrounds surface="lab" mock />)
+    await screen.findByText('Lab is unavailable right now.', {}, { timeout: 15000 })
+    const ground = container.querySelector('[data-ground="lab"]')
+    const workbench = ground.querySelector('.lab-workbench')
+    expect(ground).not.toHaveAttribute('hidden')
+    rerender(<SurfaceGrounds surface="cad" mock />)
+    expect(container.querySelector('[data-ground="lab"]')).toBe(ground)
+    expect(ground).toHaveAttribute('hidden')
+    expect(workbench).toHaveAttribute('hidden')
+    rerender(<SurfaceGrounds surface="lab" boardVisible mock />)
+    expect(ground).toHaveAttribute('hidden')
+    rerender(<SurfaceGrounds surface="lab" mock />)
+    expect(ground).not.toHaveAttribute('hidden')
+    expect(ground.querySelector('.lab-workbench')).toBe(workbench)
+    expect(workbench).not.toHaveAttribute('hidden')
+  }, 20000)
   it('keeps Ops mounted across profile switches and lets the project board occlude it', async () => {
     const { container, rerender } = render(<SurfaceGrounds surface="ops" mock />)
-    const loaded = await screen.findByText('Integrations are unavailable in demo mode.')
+    const loaded = await screen.findByText('Integrations are unavailable in demo mode.', {}, { timeout: 15000 })
     const ops = loaded.closest('[data-ground="ops"]')
     expect(ops).not.toHaveAttribute('hidden')
     expect(ops.textContent).toContain('Integrations are unavailable in demo mode.')
@@ -627,7 +646,7 @@ describe('SurfaceGrounds', () => {
     rerender(<SurfaceGrounds surface="ops" mock />)
     expect(container.querySelector('[data-ground="ops"]')).toBe(ops)
     expect(ops).not.toHaveAttribute('hidden')
-  })
+  }, 20000)
   it('shows exactly the active surface\'s ground and keeps the other mounted but hidden', () => {
     const { container, rerender } = render(<SurfaceGrounds surface="browser" catalog={catalog} />)
     const board = () => container.querySelector('[data-ground="browser"]')

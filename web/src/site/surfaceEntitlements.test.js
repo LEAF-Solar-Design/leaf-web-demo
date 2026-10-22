@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PRODUCT_SURFACES, surfaceContract } from './productSurfaces.js'
-import { familiesForSurface } from '../lib/surfaceRails.js'
+import { familiesForSurface, PENDING_UPSTREAM_ENTITLEMENT_EXEMPTIONS } from '../lib/surfaceRails.js'
 import fixture from './familyCapabilities.json'
 
 const families = Object.keys(fixture).map((family_id) => ({ family_id }))
@@ -10,6 +10,17 @@ function catalogCapabilities(id) {
 }
 
 describe('surface entitlement declarations', () => {
+  it('removes the pending-upstream exemption when Lab joins the shared build lane', () => {
+    expect(PENDING_UPSTREAM_ENTITLEMENT_EXEMPTIONS).toEqual({ lab: 'lab' })
+    for (const [id, rail] of Object.entries(PENDING_UPSTREAM_ENTITLEMENT_EXEMPTIONS)) {
+      expect(PRODUCT_SURFACES.some((surface) => surface.id === id)).toBe(true)
+      const contract = surfaceContract(id)
+      expect(contract.chrome.rail).toBe(rail)
+      expect(contract.authoring).toBe(true)
+      expect(contract.entitlements, 'Remove the exemption once build is declared').not.toContain('build')
+      expect(contract.builds.routes, 'Remove the exemption once build routes land').toEqual([])
+    }
+  })
   it('every tool fixture value is a supported capability', () => {
     for (const tools of Object.values(fixture)) {
       for (const capability of Object.values(tools)) {
@@ -22,7 +33,9 @@ describe('surface entitlement declarations', () => {
     it(`${id} declares its catalog fold, authoring and integration capabilities`, () => {
       const contract = surfaceContract(id)
       const required = new Set(catalogCapabilities(id))
-      if (contract.authoring === true) required.add('build')
+      const pendingUpstream = Boolean(contract.chrome.rail)
+        && PENDING_UPSTREAM_ENTITLEMENT_EXEMPTIONS[id] === contract.chrome.rail
+      if (contract.authoring === true && !pendingUpstream) required.add('build')
       if (id === 'ops') {
         required.add('run_read')
         required.add('run_write')
