@@ -597,7 +597,8 @@ describe('R13F project Solar execution and form ingresses', () => {
     for (const [name, count] of Object.entries(sites)) assert.equal(r13Find(refusal, r13Callback(name)).length, count, name)
     assert.equal(r13Find(refusal).length, 20)
     for (const [name, hash] of Object.entries({
-      engineSaveTarget: '26a17ccb4d7be496f12ac3a83d049b6e4b46c03351bc788bd3d132cc8919835d',
+      // SCB3e adds suspension guards so retained saves cannot write while AutoCAD owns the canvas.
+      engineSaveTarget: '554d758464edee7a4a66e37073b5644e4cd6d6a4023b2a07a34061c118a70702',
       onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
       onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
       retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
@@ -4364,8 +4365,15 @@ describe('Studio navigation shared wiring', () => {
   })
 })
 describe('S3 viewer Back and Up history wiring', () => {
-  it('owns one bounded history plus a size counter, and the live hook survives comment stripping', () => {
-    assert.equal((appNoComments.match(/createViewHistory\(\)/g) || []).length, 1)
+  it('owns one current bounded history, suspends it for AutoCAD, and the live hook survives comment stripping', () => {
+    // SCB3e allocates a temporary history for AutoCAD and restores the browser history by reference.
+    assert.equal((appNoComments.match(/createViewHistory\(\)/g) || []).length, 2)
+    assert.ok(appNoComments.includes('if (!viewHistoryRef.current) viewHistoryRef.current = createViewHistory()'))
+    const update = appNoComments.slice(appNoComments.indexOf('localCadUpdateRef.current = (update)'),
+      appNoComments.indexOf('const bridge = createLocalCadBridge('))
+    assert.match(update, /if \(!localCadSnapshotRef.current\) \x7b[\s\S]*?viewHistory: viewHistoryRef.current[\s\S]*?viewHistoryRef.current = createViewHistory\(\)/)
+    assert.ok(appNoComments.includes('viewHistoryRef.current = snapshot.viewHistory'))
+    assert.ok(appNoComments.includes('setViewHistorySize(snapshot.viewHistory.size())'))
     assert.ok(appNoComments.includes('const [viewHistorySize, setViewHistorySize] = useState(0)'))
     assert.ok(appNoComments.includes('history: viewHistoryRef.current, setHistorySize: setViewHistorySize'))
     assert.ok(stripped.includes('useViewNavigation({'))
@@ -4391,7 +4399,8 @@ describe('S3 viewer Back and Up history wiring', () => {
     const end = appNoComments.indexOf('const reportDrawingError', start)
     assert.ok(start >= 0 && end > start)
     assert.ok(appNoComments.slice(start, end).includes('clearViewHistory()'))
-    const effects = appNoComments.match(/useEffect\(\(\) => \{ clearViewHistory\(\) \}, \[activeIntake\?\.documentId, clearViewHistory\]\)/g) || []
+    // SCB3e suspends the browser drawing's navigation history while the bridge owns the canvas.
+    const effects = appNoComments.match(/useEffect\(\(\) => \{\s*if \(localCadActive\) return\s*if \(localCadHistoryRestoredRef.current\) \{\s*localCadHistoryRestoredRef.current = false\s*return\s*\}\s*clearViewHistory\(\)\s*\}, \[activeIntake\?\.documentId, localCadActive, clearViewHistory\]\)/g) || []
     assert.equal(effects.length, 1)
   })
 })
@@ -5462,7 +5471,8 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
   const hashes = {
     onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
     onRedo: '6061cdf05fef2e3119473e0e3639a1a6997c90e4d2b73c7b514508468853ecff',
-    engineSaveTarget: '26a17ccb4d7be496f12ac3a83d049b6e4b46c03351bc788bd3d132cc8919835d',
+    // SCB3e adds suspension guards so retained saves cannot write while AutoCAD owns the canvas.
+    engineSaveTarget: '554d758464edee7a4a66e37073b5644e4cd6d6a4023b2a07a34061c118a70702',
     onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
     onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
     retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
@@ -5539,7 +5549,8 @@ it('R13G2A-11 standalone arms and captures retain their predecessor bytes', () =
   assert.equal(r13Hash(interior(titleBranch.alternate)), 'd37ef2de2b3b6c413842e7fc8f117bb71a717de5571446fe23310acf3177cd9a')
   const wrap = r13One(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-wrap'))
   const status = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode' && n.consequent.type === 'JSXFragment', wrap)
-  assert.equal(r13Hash(interior(status.alternate)), 'a8dcf463cbb3c6fe50d2d60b43098b2bc7d5f5f8be736aa727afc841abf83bd5')
+  // SCB3e: the loading line must require a pending load so restoring an empty pre-bridge workspace never claims to be loading forever.
+  assert.equal(r13Hash(interior(status.alternate)), '8aea0ee4efecd819546bca1fc8a77535e59993819bc56783a489297a102c006a')
   assert.equal(r13Text(attribute(viewer, 'onIntakeOverride')), 'onViewerIntakeOverride')
   assert.equal(r13Text(attribute(viewer, 'onSceneReady')), 'onDrawingSceneReady')
   const onSelect = r13Evaluate(attribute(viewer, 'onSelectEntity'), {

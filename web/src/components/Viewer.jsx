@@ -361,10 +361,10 @@ const Viewer = forwardRef(function Viewer(
     const inserts = activeIntake.inserts || []
     const faces3d = activeIntake.faces3d || []
     // W4f slice A0: an ENGINE document (the browser engine's imported DXF,
-    // shown through applyVersion) draws its open polylines, lines and arcs
-    // as strokes only; the console drawing keeps its panel fills exactly as
-    // before (this flag is false for every intake the server seats).
-    const strokeOnlyOpen = activeIntake.source === 'engine'
+    // shown through applyVersion) and a live AutoCAD (bridge) drawing draw
+    // open polylines, lines and arcs as strokes only; the console drawing
+    // keeps its panel fills (this flag is false for every intake the server seats).
+    const strokeOnlyOpen = activeIntake.source === 'engine' || activeIntake.source === 'bridge'
 
     // bounds — include polylines, insert points, and face corners so the
     // whole drawing (not just polylines) is framed.
@@ -450,7 +450,8 @@ const Viewer = forwardRef(function Viewer(
         addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts, strokeOnly: !!pl.strokeOnly })
         // fan-triangulate (panels are convex quads) for a subtle fill; an
         // engine document's OPEN polyline (a line, an arc) is a stroke only.
-        const fillThis = !(strokeOnlyOpen && !pl.closed) && !pl.strokeOnly
+        // AutoCAD shows bridge drawings as wireframe, including closed shapes.
+        const fillThis = activeIntake.source !== 'bridge' && !(strokeOnlyOpen && !pl.closed) && !pl.strokeOnly
         for (let i = 1; fillThis && i < pts.length - 1; i++) {
           fillPos.push(pts[0][0], pts[0][1], topZ)
           fillPos.push(pts[i][0], pts[i][1], topZ)
