@@ -1,0 +1,23 @@
+{
+  "schema": "leaf.pricebook.v1",
+  "version": 1,
+  "placeholder": true,
+  "management_fee_pct": "15",
+  "plans": {
+    "free": {"runs_per_month": 1},
+    "platform": {"monthly_usd": "0", "runs_per_month": null}
+  },
+  "addons": {
+    "aps_solve": {"billable": true},
+    "e2b_exec": {"billable": true},
+    "marathon": {"billable": true},
+    "forge_hosting": {"billable": true},
+    "aws_resources": {"billable": true},
+    "storage": {"billable": true},
+    "canonical_solve": {"billable": true},
+    "tool_ci": {"billable": true},
+    "gpu_inference": {"billable": true},
+    "ios_build": {"billable": true},
+    "app_auth": {"billable": true}
+  }
+}

@@ -29,6 +29,8 @@ from .models import JOB_KINDS, TIERS
 from .mutation_fence import drawing_mutation_refusal_guard, fence_refusal_message
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 from . import org_export
+from . import billing_statement, db
+from .pricebook import load_pricebook
 
 router = APIRouter(prefix="/api", tags=["platform"])
 from .binding_grant_issuance import router as binding_grant_router
@@ -1053,6 +1055,26 @@ def billing_org_resolve(body: BillingOrgResolveBody,
     if org is None or org.status != "active" or org.account_class == "production_acceptance":
         raise HTTPException(status_code=404, detail="no platform org for this identity")
     return {"org_id": str(org.org_id)}
+
+
+@router.get("/orgs/{org_id}/billing/statement")
+def get_billing_statement(org_id: uuid.UUID, period: str,
+                          caller_org: uuid.UUID = Depends(get_org_id)):
+    if org_id != caller_org or store.get_org(org_id) is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    try:
+        billing_statement.month_window(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=billing_statement.PERIOD_MESSAGE) from exc
+    pricebook = load_pricebook()
+    try:
+        with db.connection() as conn:
+            statement = billing_statement.build_statement(conn, org_id, period, pricebook)
+    except ValueError as exc:
+        if str(exc) == billing_statement.EVENT_LIMIT_MESSAGE:
+            raise HTTPException(status_code=409, detail=billing_statement.EVENT_LIMIT_MESSAGE) from exc
+        raise
+    return {"statement": statement}
 
 
 @router.post("/orgs/{org_id}/billing/tier-sync")

@@ -109,6 +109,7 @@
     "platform",
     "platform-tenant-cost-store",
     "platform-aps-cost-sync",
+    "platform-billing-statement",
     "platform-ios-ship-source-catalog",
     "platform-ios-ship-source-catalog-static",
     "platform-org-acceptance",
