@@ -11,14 +11,14 @@ import json
 import re
 
 try:
-    from .solar_design_graph import validate_graph, COLLECTIONS
+    from .solar_design_graph import GraphValidationError, validate_graph, COLLECTIONS
     from .solar_inspection import (
         canonical_bytes, digest, normalize_handle, parse_json, refuse,
         store_address, validate_geometry, validate_inspection, validate_schema,
         validate_units,
     )
 except ImportError:
-    from solar_design_graph import validate_graph, COLLECTIONS
+    from solar_design_graph import GraphValidationError, validate_graph, COLLECTIONS
     from solar_inspection import (
         canonical_bytes, digest, normalize_handle, parse_json, refuse,
         store_address, validate_geometry, validate_inspection, validate_schema,
@@ -579,8 +579,19 @@ def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
     checked, never trusted as labels. Site revision remains a source precondition;
     allocating the next GUID is part of the parked native transaction.
     """
-    before = validate_graph(before_graph)
-    after = validate_graph(after_graph)
+    graphs = []
+    for graph in (before_graph, after_graph):
+        try:
+            graphs.append(validate_graph(graph))
+        except GraphValidationError as error:
+            # Graph validation checks input references before projection can.
+            if error.code == "INVERTER_ASSIGNMENT_MISMATCH":
+                string_ids = {node["id"] for node in graph["strings"]}
+                if any(a["string_ref"] not in string_ids
+                       for node in graph["inverters"] for a in node["input_assignments"]):
+                    refuse("CIRCUIT_ASSIGNMENT_MISMATCH")
+            raise
+    before, after = graphs
     adapter = validate_adapter(adapter)
     inspection = validate_inspection(inspection)
     _closed(expected_revision, {"graph_rev", "site_revision"})
@@ -623,14 +634,20 @@ def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
             raise NotImplementedError(kind + " removal (entity erasure is outside W1)")
         changed.append(new)
     changed_ids = {node["id"] for node in changed}
+    reassigned_ids = set()
     for node in after["inverters"]:
         old = prior.get(node["id"])
         if old and old["input_assignments"] != node["input_assignments"]:
             old_inputs = {a["string_ref"]: a for a in old["input_assignments"]}
             new_inputs = {a["string_ref"]: a for a in node["input_assignments"]}
-            if any(old_inputs.get(key) != new_inputs.get(key) and key not in changed_ids
-                   for key in set(old_inputs) | set(new_inputs)):
-                raise NotImplementedError("inverter input_assignments without string projection")
+            reassigned_ids.update(key for key in set(old_inputs) | set(new_inputs)
+                                  if old_inputs.get(key) != new_inputs.get(key))
+    for app_id in sorted(reassigned_ids):
+        node = index.get(app_id)
+        if node is None or node["kind"] != "string":
+            refuse("CIRCUIT_ASSIGNMENT_MISMATCH")
+        if app_id not in changed_ids:
+            changed.append(node)
     resolved = reconcile_identity(mapping, inspection, adapter, drawing_key)
     handles = {}
     for (app_id, role), entity in resolved.items():
