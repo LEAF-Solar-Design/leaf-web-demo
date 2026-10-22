@@ -5,16 +5,45 @@
  * detection: when the tenant catalog changes, each tab's rendered content
  * changes with it.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
 import ContinuityStore from '../site/ContinuityStore.jsx'
 import SurfaceFrame from '../site/SurfaceFrame.jsx'
-import { PRODUCT_SURFACES, productSurfaceStates, surfaceRailState } from '../site/productSurfaces.js'
+import { DEFAULT_PRODUCT_SURFACE, PRODUCT_SURFACES, productSurfaceFromSearch, productSurfaceStates, setLabSurfaceStatus, surfaceRailState } from '../site/productSurfaces.js'
+import * as labSurfaceStatus from '../lab/useLabSurfaceStatus.js'
 import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
+
+it.each([
+  ['console', '/app', true],
+  ['stage', '/try', false],
+  ['stage', '/app', false],
+])('gates a live Lab tab to its mounted ground: %s at %s', (scene, path, visible) => {
+  const originalUrl = window.location.href
+  const status = { state: 'on', posture: 'local' }
+  const probe = vi.spyOn(labSurfaceStatus, 'useLabSurfaceStatus').mockReturnValue(status)
+  window.history.replaceState({}, '', `${path}?surface=lab`)
+  setLabSurfaceStatus(status)
+  try {
+    render(<SurfaceFrame scene={scene} activeSurface="cad" states={states} onSelect={() => {}} mock={false}>
+      <SurfaceFrame.Tabs />
+    </SurfaceFrame>)
+    expect(Boolean(screen.queryByRole('tab', { name: 'Lab' }))).toBe(visible)
+    expect(probe).toHaveBeenCalledWith(false)
+    if (path === '/try') {
+      expect(productSurfaceFromSearch(window.location.search)).toBe(DEFAULT_PRODUCT_SURFACE)
+      expect(productSurfaceFromSearch(window.location.search)).toBe(productSurfaceFromSearch('?surface=unknown'))
+    }
+  } finally {
+    cleanup()
+    probe.mockRestore()
+    setLabSurfaceStatus(null)
+    window.history.replaceState({}, '', originalUrl)
+  }
+})
 
 it('puts the studio demo creation limit at the board heading and associates one reason', () => {
   const workspaceProject = deriveWorkspaceProjectState({ drawingName: 'demo', mock: true })

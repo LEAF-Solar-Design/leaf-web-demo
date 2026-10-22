@@ -1,3 +1,5 @@
+import { sceneForPath } from './routeScene.js'
+
 export const DEFAULT_PRODUCT_SURFACE = 'cad'
 
 export const SHARED_WORKSPACE_CAPABILITIES = Object.freeze([
@@ -705,9 +707,12 @@ export function setLabSurfaceStatus(status) {
 
 // Rail authority comes from the frozen record, never an authored overlay.
 // A pending probe is hidden just like an off or unavailable rail.
-export function surfaceRailState(id, status = labSurfaceStatus) {
-  const rail = productSurface(id).contract.chrome.rail
-  return rail ? rail === 'lab' && status?.state === 'on' : true
+// URL selection uses the route scene; mounted tabs supply their frame's scene.
+export function surfaceRailState(id, status = labSurfaceStatus,
+  scene = typeof window === 'undefined' ? 'app' : sceneForPath(window.location.pathname)) {
+  const contract = productSurface(id).contract
+  const rail = contract.chrome.rail
+  return rail ? contract.scene === scene && rail === 'lab' && status?.state === 'on' : true
 }
 
 export function normalizeProductSurface(value, status = labSurfaceStatus) {

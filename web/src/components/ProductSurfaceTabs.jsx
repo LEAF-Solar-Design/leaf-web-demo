@@ -3,6 +3,7 @@ import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, produc
 import { useLabSurfaceStatus } from '../lab/useLabSurfaceStatus.js'
 import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { useContinuityHost } from '../site/continuityStore.js'
+import { useSurfaceFrame } from '../site/SurfaceFrame.jsx'
 import { START_BOARD_COPY } from '../site/startBoardCopy.js'
 import { moveRovingTab } from '../lib/roving.js'
 import {
@@ -84,6 +85,8 @@ export function AccountSignOut({ signedIn = false, onSignOut = null }) {
 // host is null and the nav renders its tablist and nothing else: fails closed.
 export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mock = true }) {
   const host = useContinuityHost()
+  const frame = useSurfaceFrame()
+  const scene = frame ? (frame.scene === 'console' ? 'app' : 'tool') : undefined
   const navRef = useRef(null)
   // Slice 7b: which tabs render is the tenant's OVERLAID chrome.tab, not the
   // frozen default — a mock-tenant overlay that flips `chrome.tab` true for a
@@ -114,7 +117,7 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mo
             Sheets can be a manifest row without appearing here. All four
             studio surfaces declare true, so this renders what it rendered. */}
         {PRODUCT_SURFACES
-          .filter((surface) => mergeSurfaceContract(surface.id, overlay).chrome.tab && surfaceRailState(surface.id, labStatus))
+          .filter((surface) => mergeSurfaceContract(surface.id, overlay).chrome.tab && surfaceRailState(surface.id, labStatus, scene))
           .map((surface) => {
             const contract = mergeSurfaceContract(surface.id, overlay)
             const selected = surface.id === activeSurface
