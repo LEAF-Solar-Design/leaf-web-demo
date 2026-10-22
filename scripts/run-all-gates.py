@@ -1294,6 +1294,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_contract_freeze.py"), 14),
         Suite("server-lab-contract", "server tests/test_lab_contract.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_contract.py"), 117),
+        Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_surface.py"), 36),
         # AD4b: the Kit stream map is a superset of the harness stream events.
         Suite("server-kit-stream-superset", "server tests/test_kit_stream_superset.py", "pytest", SERVER,
               _py_pytest("tests/test_kit_stream_superset.py"), 6),

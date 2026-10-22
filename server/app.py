@@ -67,6 +67,7 @@ from routers import (
     ios_ship,
     ios_ship_provider as ios_ship_provider_router,
     ios_surface,
+    lab_router,
     jobs as jobs_router,
     mcp_gateway,
     integration_tools,
@@ -373,6 +374,7 @@ app.include_router(telemetry.router)  # P2 product-event ingest (always 202; ide
 app.include_router(templates_router.router)  # Wave C solar template beta, fail-closed behind LEAF_SOLAR_TEMPLATE_BETA_ENABLED
 app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens
 app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
+app.include_router(lab_router.router)  # SEL-003: Lab surface behind LEAF_LAB_SURFACE_ENABLED
 app.include_router(campaigns.router)
 app.include_router(campaign_conversation.router)
 app.include_router(campaign_mcp.router)
