@@ -310,6 +310,36 @@ def test_http_save_restore_publish_diff_and_tenant_boundary():
     assert other.post("/api/lab/docs/strategy/publish", json={"expected_head": 1}).status_code == 404
 
 
+def test_http_status_completes_while_save_is_pending(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    original_save = ledger.save
+
+    def blocked_save(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=10), "save was not released"
+        return original_save(*args, **kwargs)
+
+    monkeypatch.setattr(ledger, "save", blocked_save)
+    # A context-managed client shares one event loop across both requests.
+    with client() as http, ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(http.post, "/api/lab/docs/strategy/save",
+                              json={"graph": GRAPH, "expected_head": None})
+        try:
+            assert entered.wait(timeout=5), "save did not reach the store"
+            status = pool.submit(http.get, "/api/lab/status").result(timeout=3)
+            assert status.status_code == 200
+            assert status.json()["ok"] is True
+            assert not release.is_set()
+            assert not pending.done()
+        finally:
+            release.set()
+        saved = pending.result(timeout=5)
+        assert saved.status_code == 200
+        assert saved.json()["revision"] == 1
+        assert saved.json()["sha256"] == graph_digest(GRAPH)
+
+
 def test_http_invalid_and_oversize_never_create_database(local_store):
     http = client()
     endpoint = "/api/lab/docs/strategy/save"

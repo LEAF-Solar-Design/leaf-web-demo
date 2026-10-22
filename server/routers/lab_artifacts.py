@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 import deps
 import entitlements
@@ -69,7 +70,7 @@ async def _body(request, required):
 async def save(doc_id: str, request: Request, tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
     body = await _body(request, ("graph", "expected_head"))
-    return _call(ledger.save, str(tenant), doc_id, body["graph"], body["expected_head"], _actor(tenant))
+    return await run_in_threadpool(_call, ledger.save, str(tenant), doc_id, body["graph"], body["expected_head"], _actor(tenant))
 
 
 @router.get("/{doc_id}/head")
@@ -104,7 +105,7 @@ def diff(doc_id: str, before: int, after: int, tenant=Depends(deps.require_tenan
 async def restore(doc_id: str, request: Request, tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
     body = await _body(request, ("revision", "expected_head"))
-    return _call(ledger.restore, str(tenant), doc_id, body["revision"], body["expected_head"], _actor(tenant))
+    return await run_in_threadpool(_call, ledger.restore, str(tenant), doc_id, body["revision"], body["expected_head"], _actor(tenant))
 
 
 @router.post("/{doc_id}/publish")
@@ -112,4 +113,4 @@ async def publish(doc_id: str, request: Request, tenant=Depends(deps.require_ten
     _admit(tenant, "build")
     _admit(tenant, "deploy")
     body = await _body(request, ("expected_head",))
-    return _call(ledger.publish, str(tenant), doc_id, body["expected_head"], _actor(tenant))
+    return await run_in_threadpool(_call, ledger.publish, str(tenant), doc_id, body["expected_head"], _actor(tenant))
