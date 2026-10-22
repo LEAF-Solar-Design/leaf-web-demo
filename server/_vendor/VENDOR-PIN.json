@@ -9,8 +9,8 @@
     },
     "surface-config.v1.schema.json": {
       "path": "contract/surface-config.v1.schema.json",
-      "sha256": "a7b94b169ec259715ea1731135c330eeefcbad69bc962b81abc1df953d9bde33",
-      "upstream_commit": "323cb29cbe2d2dc712db7d9168a3c91f931afae6",
+      "sha256": "30f8e0ed306e5a1ec4337f9823c57ee1294ffa275cc42e957b1f7f1ea7e41450",
+      "upstream_commit": "fe795a268626e828ee1e4509285825a385fa5ca7",
       "upstream_path": "contract/surface-config.v1.schema.json"
     }
   },
