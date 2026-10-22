@@ -14,7 +14,7 @@ export interface CostEvent {
   cost_basis: "estimated";
   event_key: string;
   occurred_at: string;
-  provenance: { source: "harness-e2b"; run_ref: string };
+  provenance: { source: "harness-e2b"; run_ref: string; request_ref?: string };
 }
 
 export interface CostEventSink {
@@ -34,7 +34,7 @@ export function meteringConfigFromEnv(env: NodeJS.ProcessEnv): MeteringConfig {
   return { enabled: true, rate };
 }
 
-export interface MeteringIdentity { orgId?: string; runRef?: string }
+export interface MeteringIdentity { orgId?: string; requestRef?: string }
 const identity = new AsyncLocalStorage<MeteringIdentity>();
 
 /** Only the authenticated platform request boundary may supply this identity. */
@@ -96,8 +96,14 @@ export class MeteredAgentRunner implements AgentRunner {
           this.logOnce("skipped_unresolved");
         } else {
           const milliseconds = (end - start + 500000n) / 1000000n;
-          // AgentRunInput has no id, so assign this execution its own run id.
-          const runRef = context.runRef ?? randomUUID();
+          // One cost event per real sandbox execution: E2B bills every execution.
+          // Retries that execute again are separate costs, so always add a fresh nonce.
+          const nonce = randomUUID();
+          const requestRef = context.requestRef || undefined;
+          // Escape non-ASCII UTF-16 code units so request ids cannot invalidate the key.
+          const asciiRequestRef = requestRef?.replace(/[^\x00-\x7f]/g,
+            char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+          const runRef = asciiRequestRef ? `${asciiRequestRef}:${nonce}` : nonce;
           const orgId = context.orgId.toLowerCase();
           await this.options.sink.record({
             org_id: orgId, addon: "e2b_exec", mode: "managed", vendor: "e2b",
@@ -106,7 +112,8 @@ export class MeteredAgentRunner implements AgentRunner {
             unit_cost_usd: this.options.rate,
             cost_usd: e2bCostUsd(milliseconds, this.options.rate), cost_basis: "estimated",
             event_key: e2bCostEventKey(orgId, runRef), occurred_at: occurredAt,
-            provenance: { source: "harness-e2b", run_ref: runRef },
+            provenance: { source: "harness-e2b", run_ref: runRef,
+              ...(requestRef === undefined ? {} : { request_ref: requestRef }) },
           });
         }
       } catch (error) {

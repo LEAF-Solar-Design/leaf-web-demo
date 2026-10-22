@@ -28,6 +28,7 @@ export class PgCostEventSink implements CostEventSink {
          ON CONFLICT (event_key) DO NOTHING RETURNING id`, values,
       );
       if (!inserted.rows.length) {
+        // A1 ledger rule: identical replays are duplicates; any differing fact conflicts.
         // Separate statement sees a competing committed insert under READ COMMITTED.
         const existing = await client.query(
           `SELECT id FROM tenant_cost_events WHERE

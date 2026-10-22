@@ -1320,14 +1320,16 @@ export function createHarness(ports: HarnessPorts, opts?: {
         }
         const route = classifyRoute({ path, body });
         if (route === "one-off") {
-          const out = await withMeteringIdentity({ orgId: auth.enabled ? tenant : undefined },
+          const out = await withMeteringIdentity({ orgId: auth.enabled ? tenant : undefined,
+            requestRef: authorityHeader(req, "x-request-id") },
             () => loop.oneOff(tenant, description));
           return send(res, 200, out);
         }
         // default author route = build (author + register + one commit)
         // Platform TenantContext's verified tenant id is its org UUID (server/deps.py).
         // Local/auth-disabled calls have no verified platform org and must be skipped.
-        const out = await withMeteringIdentity({ orgId: auth.enabled ? tenant : undefined },
+        const out = await withMeteringIdentity({ orgId: auth.enabled ? tenant : undefined,
+          requestRef: authorityHeader(req, "x-request-id") },
           () => loop.build(tenant, description));
         return send(res, 200, out);
       }
@@ -1353,7 +1355,8 @@ export function createHarness(ports: HarnessPorts, opts?: {
               ? {}
               : { targetToolName: requiredText(body, "targetToolName") }),
           });
-        const out = await withMeteringIdentity({ orgId: auth.enabled ? tenant : undefined }, async () => authority
+        const out = await withMeteringIdentity({ orgId: auth.enabled ? tenant : undefined,
+          requestRef: authorityHeader(req, "x-request-id") }, async () => authority
           ? await withAuthorStandardServicesAuthority(authority, stage)
           : await stage());
         return send(res, 200, out);

@@ -32,7 +32,7 @@ function setup(inner: AgentRunner = { run: async () => RESULT }, overrides: Part
   let tick = 0n;
   const runner = new MeteredAgentRunner(inner, {
     rate: "0.000014", sink: { record: async event => { events.push(event); } },
-    identityFor: () => ({ orgId: ORG, runRef: "run-1" }),
+    identityFor: () => ({ orgId: ORG, requestRef: "request-1" }),
     monotonicNow: () => { const value = tick; tick += 2500000000n; return value; },
     endTime: () => new Date(ENDED), log, ...overrides,
   });
@@ -48,9 +48,34 @@ describe("E2B cost metering", () => {
     expect(events).toEqual([{
       org_id: ORG, addon: "e2b_exec", mode: "managed", vendor: "e2b", unit: "sandbox_seconds",
       quantity: "2.500", unit_cost_usd: "0.000014", cost_usd: "0.000035", cost_basis: "estimated",
-      event_key: "93d6941c0d1da035f8fafeb675cd2f575fc8bc5d1b5894c3d04f136c55e301f6",
-      occurred_at: ENDED, provenance: { source: "harness-e2b", run_ref: "run-1" },
+      event_key: e2bCostEventKey(ORG, events[0].provenance.run_ref),
+      occurred_at: ENDED, provenance: { source: "harness-e2b",
+        run_ref: expect.stringMatching(/^request-1:[0-9a-f-]{36}$/), request_ref: "request-1" },
     }]);
+  });
+
+  it("bills two real executions of the same request as distinct events", async () => {
+    const { runner, events } = setup();
+    await runner.run(INPUT);
+    await runner.run(INPUT);
+    expect(events).toHaveLength(2);
+    expect(events.map(event => event.provenance.request_ref)).toEqual(["request-1", "request-1"]);
+    expect(events[0].provenance.run_ref).not.toBe(events[1].provenance.run_ref);
+    expect(events[0].event_key).not.toBe(events[1].event_key);
+    for (const event of events) {
+      expect(event.provenance.run_ref).toMatch(/^request-1:[0-9a-f-]{36}$/);
+      expect(event.event_key).toBe(e2bCostEventKey(ORG, event.provenance.run_ref));
+    }
+  });
+
+  it("preserves a Unicode request ref in provenance while keeping run_ref ASCII", async () => {
+    const { runner, events } = setup(undefined, {
+      identityFor: () => ({ orgId: ORG, requestRef: "request-\u00e9" }),
+    });
+    await runner.run(INPUT);
+    expect(events[0].provenance.request_ref).toBe("request-\u00e9");
+    expect(events[0].provenance.run_ref).toMatch(/^request-\\u00e9:[0-9a-f-]{36}$/);
+    expect(events[0].event_key).toBe(e2bCostEventKey(ORG, events[0].provenance.run_ref));
   });
 
   it.each([false, true])("records failures and preserves the original error (synchronous=%s)", async synchronous => {
@@ -114,12 +139,14 @@ describe("E2B cost metering", () => {
     const { runner, events } = setup(undefined, { identityFor: undefined });
     const other = "00000000-0000-4000-8000-000000000002";
     await Promise.all([
-      withMeteringIdentity({ orgId: ORG, runRef: "request-1" }, () => runner.run(INPUT)),
+      withMeteringIdentity({ orgId: ORG, requestRef: "request-1" }, () => runner.run(INPUT)),
       withMeteringIdentity({ orgId: other }, () => runner.run(INPUT)),
     ]);
     expect(events.map(event => event.org_id)).toEqual([ORG, other]);
-    expect(events[0].provenance.run_ref).toBe("request-1");
+    expect(events[0].provenance.run_ref).toMatch(/^request-1:[0-9a-f-]{36}$/);
+    expect(events[0].provenance.request_ref).toBe("request-1");
     expect(events[1].provenance.run_ref).toMatch(/^[0-9a-f-]{36}$/);
+    expect(events[1].provenance).not.toHaveProperty("request_ref");
     await runner.run(INPUT);
     expect(runner.counters.skipped_unresolved).toBe(1);
   });
@@ -140,20 +167,28 @@ describe("E2B cost metering", () => {
 });
 
 describe("Postgres cost event sink with a fake client", () => {
-  async function fixture(inserted: boolean, identical: boolean) {
+  async function fixture() {
     const { runner, events } = setup();
     await runner.run(INPUT);
-    const query = vi.fn(async (sql: string, _values?: unknown[]) => ({
-      rows: sql.includes("INSERT INTO") ? (inserted ? [{ id: 1 }] : [])
-        : sql.includes("SELECT id FROM") ? (identical ? [{ id: 1 }] : []) : [],
-    }));
+    let stored: unknown[] | undefined;
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes("INSERT INTO")) {
+        if (stored) return { rows: [] };
+        stored = values;
+        return { rows: [{ id: 1 }] };
+      }
+      if (sql.includes("SELECT id FROM")) {
+        return { rows: JSON.stringify(stored) === JSON.stringify(values) ? [{ id: 1 }] : [] };
+      }
+      return { rows: [] };
+    });
     const release = vi.fn();
     const pool = { connect: async () => ({ query, release }) } as unknown as Pick<Pool, "connect">;
     return { sink: new PgCostEventSink(pool), event: events[0], query, release };
   }
 
   it("inserts parameterized facts with a bounded transaction-local timeout", async () => {
-    const { sink, event, query, release } = await fixture(true, false);
+    const { sink, event, query, release } = await fixture();
     await sink.record(event);
     expect(query.mock.calls[1]).toEqual([
       "SELECT set_config('statement_timeout', $1, true)", [String(COST_EVENT_STATEMENT_TIMEOUT_MS)],
@@ -168,15 +203,22 @@ describe("Postgres cost event sink with a fake client", () => {
   });
 
   it("accepts identical replays using a separate snapshot statement", async () => {
-    const { sink, event, query } = await fixture(false, true);
+    const { sink, event, query } = await fixture();
+    await sink.record(event);
+    query.mockClear();
     await sink.record(event);
     expect(query.mock.calls[3][0]).toContain("provenance IS NOT DISTINCT FROM $12::jsonb");
     expect(query).toHaveBeenLastCalledWith("COMMIT");
   });
 
-  it("rejects differing replays and releases the connection after rollback", async () => {
-    const { sink, event, query, release } = await fixture(false, false);
-    await expect(sink.record(event)).rejects.toBeInstanceOf(CostEventConflict);
+  it("rejects a same-key replay with a different occurred_at per the A1 ledger rule", async () => {
+    const { sink, event, query, release } = await fixture();
+    await sink.record(event);
+    query.mockClear();
+    release.mockClear();
+    await expect(sink.record({ ...event, occurred_at: "2026-10-22T12:00:01.000Z" }))
+      .rejects.toBeInstanceOf(CostEventConflict);
+    expect(query.mock.calls[3][0]).toContain("occurred_at IS NOT DISTINCT FROM $11::timestamptz");
     expect(query).toHaveBeenLastCalledWith("ROLLBACK");
     expect(release).toHaveBeenCalledOnce();
   });
