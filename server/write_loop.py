@@ -49,6 +49,7 @@ from mutation_plan import (
     MAX_OPERATIONS,
     canonical_json_bytes,
     emit_plan,
+    mutation_scope,
     plan_sha256,
     validate_mutations,
     world_to_ocs,
@@ -70,6 +71,13 @@ _DA_DIR = str(PROJECT_ROOT / "da")
 if _DA_DIR not in sys.path:
     sys.path.append(_DA_DIR)
 
+# Append engine/ so its standalone oracle modules resolve in server-only entrypoints.
+_ENGINE_DIR = str(PROJECT_ROOT / "engine")
+if _ENGINE_DIR not in sys.path:
+    sys.path.append(_ENGINE_DIR)
+import export_fidelity  # noqa: E402
+from mutation_scope_diff import MutationScope, compare_scoped  # noqa: E402
+
 # Credential stripper for report urls. Imported eagerly (leaf-pure: stdlib only,
 # no da/client import) so no error path can forget it and emit a raw presigned
 # url into an envelope, a log line, or a receipt.
@@ -90,6 +98,7 @@ DATA_PLAN_TOOL_NAME = "cad-edit-plan"
 DATA_PLAN_TOOL_VERSION = "1.0.0"
 DATA_PLAN_PROVENANCE_CONTRACT = "leaf.data-plan.v1"
 MAX_OUTPUT_INTAKE_BYTES = 64 * 1024 * 1024
+MAX_ORACLE_DXF_BYTES = export_fidelity.MAX_OUTPUT_BYTES
 USD_PER_HR = float(os.environ.get("APS_USD_PER_HR", "10"))
 
 
@@ -3080,18 +3089,21 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
     """Apply one validated plan, verify its WorkItem output, and publish it."""
     import store
     import mutation_apply
+    oracle_enabled = os.environ.get("LEAF_MUTATION_DXF_ORACLE") == "1"
     contract = int(plan_bytes.splitlines()[0].split(b"|")[1])
     if contract == 1:
         contract = 2
-    if contract == 3:
+    if oracle_enabled and contract in (2, 3):
+        contract = 4
+    if contract in (3, 4):
         try:
-            ready = mutation_apply.readiness(contract=3).get("ready") is True
+            ready = mutation_apply.readiness(contract=contract).get("ready") is True
         except Exception:
             ready = False
         if not ready:
             return (err_envelope(
                 ErrorCode.APS_UNAVAILABLE,
-                "mutation Activity not ready: contract v3 Activity is not provisioned",
+                f"mutation Activity not ready: contract v{contract} Activity is not provisioned",
                 retryable=True, tool=name, version=tool_version,
             ), 503)
     output_inspection_ms = None
@@ -3151,6 +3163,20 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
         "Result": {"url": out_url, "verb": "put"},
         "Intake": {"url": intake_url, "verb": "put"},
     }
+    oracle_outputs = {}
+    if oracle_enabled:
+        for artifact, suffix in (("BeforeDxf", "before"), ("AfterDxf", "after")):
+            key = (
+                da.ephemeral_output_key(
+                    f"{output_name}_{suffix}", tenant_id=tenant_id, ts=ts,
+                    suffix=".dxf")
+                if hasattr(da, "ephemeral_output_key")
+                else f"t/{store.sanitize_id(tenant_id)}/out/{ts}_{output_name}_{suffix}.dxf"
+            )
+            scratch_keys.append(key)
+            token, url = _scratch_upload_url(da, key)
+            oracle_outputs[artifact] = (key, token)
+            arguments[artifact] = {"url": url, "verb": "put"}
     submit_kwargs: Dict[str, Any] = {
         "dry_run": False, "poll": True, "tenant_id": tenant_id,
     }
@@ -3210,6 +3236,47 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
         # too rather than publish a version whose property effects were
         # never actually confirmed.
         raise LiveMutationEffectMismatch(properties_note)
+    oracle_result = None
+    if oracle_enabled:
+        artifacts = {}
+        for artifact, (key, token) in oracle_outputs.items():
+            try:
+                raw = _scratch_download_bytes(da, key, token)
+            except Exception as exc:
+                raise LiveMutationEffectMismatch(
+                    f"oracle {artifact} download failed") from exc
+            if not raw:
+                raise LiveMutationEffectMismatch(f"oracle {artifact} is missing or empty")
+            if not isinstance(raw, (bytes, bytearray)):
+                raise LiveMutationEffectMismatch(f"oracle {artifact} is not DXF bytes")
+            if len(raw) > MAX_ORACLE_DXF_BYTES:
+                raise LiveMutationEffectMismatch(f"oracle {artifact} exceeds the size limit")
+            artifacts[artifact] = raw
+        declared_scope = mutation_scope(canonical, base_intake)
+        scope = MutationScope.from_iterables(
+            touched=declared_scope["touched"],
+            removed=declared_scope["removed"],
+            added_layers=declared_scope["added_layers"],
+            changed_blocks=declared_scope["changed_blocks"],
+        )
+        try:
+            verdict = compare_scoped(
+                artifacts["BeforeDxf"], artifacts["AfterDxf"], scope,
+                source_name=drawing_id)
+        except ValueError as exc:
+            raise LiveMutationEffectMismatch("oracle DXF artifacts are malformed") from exc
+        if not verdict["ok"]:
+            reasons = [key for key in (
+                "untouched_changed", "unexpected_removed", "unexpected_added",
+                "expected_removed_missing", "unexpected_blocks_changed",
+                "expected_blocks_missing", "handleless_changed", "unsupported_changed",
+            ) if verdict.get(key)]
+            raise LiveMutationEffectMismatch(
+                "oracle mismatch: " + (", ".join(reasons) or "ok=false"))
+        oracle_result = {
+            "ok": True, "untouched_total": verdict["untouched_total"],
+            "touched_changed": len(verdict["touched_changed"]),
+        }
     output_inspection_ms = int(
         (time.perf_counter() - output_inspection_started) * 1000)
 
@@ -3259,6 +3326,8 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
         "workitem_id": status.get("id"),
         "output_dwg_bytes": len(out_bytes),
     })
+    if oracle_result is not None:
+        result["oracle"] = oracle_result
     envelope["result"] = result
     envelope["cost"] = cost
     total_ms = int((time.perf_counter() - t0) * 1000)
