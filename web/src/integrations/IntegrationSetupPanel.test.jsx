@@ -42,7 +42,11 @@ function setup({ auth = 'bearer', syncStatus = 'ready' } = {}) {
       definition: { ...draft.draft_definition, state: 'published' }, operationReferences: [operationRef] })
     if (url.endsWith('/connections')) return response(connection)
     if (url.endsWith('/credential')) { connection = { ...connection, revision: 2, credential_purposes: [auth === 'api_key' ? 'api_key' : 'access_token'] }; return response(connection) }
-    if (url.endsWith('/connections/sample-connection')) return response(connection)
+    if (url.endsWith('/connections/sample-connection')) {
+      if (request.method === 'DELETE') connection = { ...connection, state: 'revoked', revision: connection.revision + 1,
+        health: { checked_at: null, code: 'revoked' }, cleanup: 'complete', credential_purposes: [] }
+      return response(connection)
+    }
     if (url.endsWith('/datasets')) return response({ reference: datasetRef, revision: 1 })
     if (url.endsWith('/sync')) return response({ reference: datasetRef, revision: 2, status: syncStatus,
       receipt: syncStatus === 'ready' || syncStatus === 'empty' ? { ...receipt, row_count: syncStatus === 'empty' ? 0 : 1 } : { ...receipt, outcome: 'failure', source_outcome: 'failure', failure_code: 'timeout', row_count: 0 } })
@@ -85,6 +89,126 @@ function fillDataset() {
 }
 beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+
+const retired = (patch = {}) => ({ ...summary, state: 'revoked', revision: 2,
+  health: { checked_at: null, code: 'revoked' }, cleanup: 'complete', credential_purposes: [], ...patch })
+const deletes = (fetchImpl) => fetchImpl.mock.calls.filter(([, request]) => request.method === 'DELETE')
+const retireButton = () => screen.getByRole('button', { name: 'Revoke connection and erase stored credential' })
+
+it('clears local private input and deduplicates retirement while obtaining the fresh revision', async () => {
+  const { props, fetchImpl } = setup()
+  render(<IntegrationSetupPanel {...props} />)
+  const input = await createConnection()
+  change('Bearer token', 'synthetic-local-entry')
+  const original = fetchImpl.getMockImplementation()
+  let finish
+  fetchImpl.mockImplementation((url, request) => {
+    if (url.endsWith('/connections/sample-connection')) return request.method === 'DELETE' ? response(retired({ revision: 8 })) :
+      new Promise((resolve) => { finish = resolve })
+    return original(url, request)
+  })
+  const button = retireButton()
+  fireEvent.click(button); fireEvent.click(button)
+  expect(input).toHaveValue('')
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  expect(deletes(fetchImpl)).toHaveLength(0)
+  await act(async () => finish(response({ ...summary, revision: 7 })))
+  await screen.findByText(/Retirement complete:/)
+  expect(deletes(fetchImpl)).toHaveLength(1)
+  expect(deletes(fetchImpl)[0][1].headers['If-Match']).toBe('7')
+  expect(screen.queryByRole('form', { name: 'Private credential' })).toBeNull()
+  expect(screen.queryByRole('form', { name: 'Define typed dataset' })).toBeNull()
+  expect(document.body.textContent).not.toContain('synthetic-local-entry')
+})
+
+it.each([
+  { id: 'different-connection' }, { connector_ref: { ...reference, digest: 'b'.repeat(64) } },
+  { origin: 'https://different.example' }, { operation_ids: ['different-read'] },
+])('refuses retirement on fresh binding drift %j', async (patch) => {
+  const { props, fetchImpl } = setup()
+  render(<IntegrationSetupPanel {...props} />)
+  await createConnection()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, request) => url.endsWith('/connections/sample-connection') ? response({ ...summary, ...patch }) : original(url, request))
+  fireEvent.click(retireButton())
+  await screen.findByText(/Setup could not continue/)
+  expect(deletes(fetchImpl)).toHaveLength(0)
+})
+
+it('keeps unknown DELETE readback-only and accepts a matching revoked result without another DELETE', async () => {
+  const { props, fetchImpl } = setup()
+  render(<IntegrationSetupPanel {...props} />)
+  await createConnection()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation(async (url, request) => {
+    const result = await original(url, request)
+    if (request.method === 'DELETE') throw new Error('Response unavailable')
+    return result
+  })
+  fireEvent.click(retireButton())
+  await screen.findByText(/Outcome unknown/)
+  expect(retireButton()).toBeDisabled()
+  expect(screen.queryByRole('button', { name: 'Choose a new resource ID' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Read existing resource status' }))
+  await screen.findByText(/Retirement readback: state revoked/)
+  fireEvent.click(screen.getByRole('button', { name: 'Use displayed existing resource' }))
+  await screen.findByText(/Retirement complete:/)
+  expect(deletes(fetchImpl)).toHaveLength(1)
+})
+
+it('retries incomplete cleanup explicitly on the same connection using another fresh GET revision', async () => {
+  const { props, fetchImpl } = setup()
+  render(<IntegrationSetupPanel {...props} />)
+  await createConnection()
+  const original = fetchImpl.getMockImplementation()
+  let attempts = 0, reads = 0
+  fetchImpl.mockImplementation((url, request) => {
+    if (!url.endsWith('/connections/sample-connection')) return original(url, request)
+    if (request.method === 'DELETE') {
+      attempts += 1
+      return response(attempts === 1 ? retired({ cleanup: 'needs-attention', credential_purposes: ['access_token'] }) : retired({ revision: 10 }))
+    }
+    reads += 1
+    return response(reads === 1 ? summary : retired({ revision: 9, cleanup: 'needs-attention', credential_purposes: ['access_token'] }))
+  })
+  fireEvent.click(retireButton())
+  const retry = await screen.findByRole('button', { name: 'Retry stored credential cleanup' })
+  expect(attempts).toBe(1)
+  expect(screen.queryByRole('form', { name: 'Private credential' })).toBeNull()
+  expect(screen.queryByRole('form', { name: 'Define typed dataset' })).toBeNull()
+  fireEvent.click(retry)
+  await screen.findByText(/Retirement complete:/)
+  expect(reads).toBe(2)
+  expect(deletes(fetchImpl).map(([, request]) => request.headers['If-Match'])).toEqual(['1', '9'])
+})
+
+it('retains dataset evidence after retirement and prevents further synchronization or registration', async () => {
+  const { props, fetchImpl } = setup({ auth: 'none' })
+  render(<IntegrationSetupPanel {...props} />)
+  await createConnection('none'); fillDataset()
+  fireEvent.click(screen.getByRole('button', { name: 'Register dataset' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Synchronize dataset' }))
+  await screen.findByText(/Dataset status: ready/)
+  fireEvent.click(retireButton())
+  await screen.findByText(/Retirement complete:/)
+  expect(screen.getByText(/Registered dataset: sample-data/)).toBeInTheDocument()
+  expect(screen.getByText(/Dataset status: ready/)).toBeInTheDocument()
+  const sync = screen.getByRole('button', { name: 'Synchronize dataset' })
+  expect(sync).toBeDisabled(); fireEvent.click(sync)
+  expect(screen.queryByRole('button', { name: 'Register dataset' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Save private credential' })).toBeNull()
+  expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/sync'))).toHaveLength(1)
+})
+
+it('rechecks the normal authority guard after GET and sends no DELETE if it fails', async () => {
+  const { props, fetchImpl } = setup()
+  render(<IntegrationSetupPanel {...props} />)
+  await createConnection()
+  props.guard.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Authorization changed'))
+  fireEvent.click(retireButton())
+  await screen.findByText(/Setup could not continue/)
+  expect(deletes(fetchImpl)).toHaveLength(0)
+})
 
 it.each(['bearer', 'api_key', 'none'])('walks a blank %s integration using normalized IDs and explicit provider sync', async (auth) => {
   const { props, fetchImpl } = setup({ auth })

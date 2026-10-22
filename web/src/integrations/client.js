@@ -263,6 +263,12 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       parse(slug, connectionId)
       return setupResponse(ownerConnection, id, `connections/${connectionId}`, options, (value) => value.id === connectionId)
     },
+    async revokeConnection(id, connectionId, expectedRevision, options) {
+      parse(slug, connectionId); parse(revision, expectedRevision)
+      return setupResponse(ownerConnection, id, `connections/${connectionId}`,
+        { ...options, method: 'DELETE', match: expectedRevision, body: undefined },
+        (value) => value.id === connectionId && value.state === 'revoked' && value.revision >= expectedRevision)
+    },
     async setConnectionCredential(id, connectionId, input, options) {
       parse(slug, connectionId)
       const body = parse(z.strictObject({ purpose: z.enum(['access_token', 'api_key']), value: z.string().min(1), expectedRevision: revision }), input)
