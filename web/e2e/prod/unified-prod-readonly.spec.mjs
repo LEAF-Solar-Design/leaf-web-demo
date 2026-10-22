@@ -162,8 +162,8 @@ test('P-062 production CAD edit surface shows the engine NOTICE', async ({ page,
     const notice = surface.getByTestId('cad-edit-engine-notice')
     await expect(notice).toBeVisible({ timeout: 30000 })
     // Stable identifying substrings of server/routers/capabilities.py CAD_ENGINE_NOTICE.
-    await expect(notice).toContainText('This product includes acadrust')
-    await expect(notice).toContainText('licensed under the Mozilla Public License 2.0.')
+    await expect(notice).toContainText('licensed under the Mozilla Public License 2.0')
+    await expect(notice).toContainText('Source for the exact revision used is available at the upstream repository')
     assertProdResponse(page.url())
   } finally {
     await page.close()
