@@ -1,0 +1,26 @@
+{
+  "schema": "leaf.surface-config-live-proof.v1",
+  "ok": true,
+  "mutation": "readback_verified",
+  "restoration": "verified",
+  "failure": null,
+  "checks": [
+    "staging_identity_and_source",
+    "rendered_control_bound",
+    "exact_candidate_and_source",
+    "visible_change",
+    "application_source_unchanged",
+    "baseline_get_and_visible_restored"
+  ],
+  "expectedSourceSha": "a6da0e3341361b0e562ada845fb994db76428b00",
+  "baseUrl": "https://platform-staging.leafdesign.ai",
+  "ranAt": "2026-10-21T18:29:49.784Z",
+  "driver": "run_surface_config_proof_staging.mjs",
+  "current": {
+    "readable": true,
+    "overlayDigest": "1655dca0f28eb6405426703fb66eed18abd50864ffad5618b57223194290b304",
+    "sourceDigest": "cfc6964ef9b0c3eeff0c310d8bf2ccb06eef1f2afd61c9044858faaec45d7d30",
+    "equalsBaseline": true,
+    "equalsCandidate": false
+  }
+}

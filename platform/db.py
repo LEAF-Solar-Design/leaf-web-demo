@@ -425,6 +425,12 @@ _REQUIRED_COLUMNS = {
 # Legacy values intentionally add nothing. Session shadow and dual-write modes
 # still write PostgreSQL, so they require the same proof as canonical reads.
 _AUTHORITY_REQUIRED_COLUMNS = {
+    "lab": {
+        "lab_blobs": {"tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count"},
+        "lab_revisions": {"tenant_id", "doc_id", "revision", "parent_revision", "author", "created_at", "sha256"},
+        "lab_documents": {"tenant_id", "doc_id", "head", "published_revision"},
+        "lab_publish_receipts": {"receipt_id", "tenant_id", "doc_id", "expected_head", "new_head", "sha256", "author", "created_at"},
+    },
     "jobs": {
         "async_jobs": {
             "job_id", "tenant_id", "tool", "params_json", "dwg", "status",
@@ -1115,6 +1121,30 @@ _REQUIRED_TRIGGERS = {
 # Names below are stable database API. They enforce idempotency, fencing, state
 # shape, referential integrity, and immutable audit records used by callers.
 _AUTHORITY_REQUIRED_CONSTRAINTS = {
+    "lab": {
+        "lab_blobs_pkey": _catalog_contract("lab_blobs", "PRIMARY KEY (tenant_id, sha256)"),
+        "lab_revisions_pkey": _catalog_contract("lab_revisions", "PRIMARY KEY (tenant_id, doc_id, revision)"),
+        "lab_documents_pkey": _catalog_contract("lab_documents", "PRIMARY KEY (tenant_id, doc_id)"),
+        "lab_publish_receipts_pkey": _catalog_contract("lab_publish_receipts", "PRIMARY KEY (receipt_id)"),
+        "lab_blobs_bytes_check": _catalog_contract(
+            "lab_blobs", "CHECK", "canonical_bytes = convert_to(canonical_text, 'UTF8')",
+            "byte_count = octet_length(canonical_bytes)", "byte_count <= 262144",
+            "sha256 = encode(sha256(canonical_bytes), 'hex')"),
+        "lab_revisions_parent_check": _catalog_contract(
+            "lab_revisions", "CHECK", "parent_revision IS NULL", "parent_revision < revision"),
+        "lab_revisions_tenant_id_sha256_fkey": _catalog_contract(
+            "lab_revisions", "FOREIGN KEY (tenant_id, sha256)", "REFERENCES lab_blobs(tenant_id, sha256)"),
+        "lab_revisions_tenant_id_doc_id_parent_revision_fkey": _catalog_contract(
+            "lab_revisions", "FOREIGN KEY (tenant_id, doc_id, parent_revision)", "REFERENCES lab_revisions(tenant_id, doc_id, revision)"),
+        "lab_documents_tenant_id_doc_id_head_fkey": _catalog_contract(
+            "lab_documents", "FOREIGN KEY (tenant_id, doc_id, head)", "REFERENCES lab_revisions(tenant_id, doc_id, revision)"),
+        "lab_documents_tenant_id_doc_id_published_revision_fkey": _catalog_contract(
+            "lab_documents", "FOREIGN KEY (tenant_id, doc_id, published_revision)", "REFERENCES lab_revisions(tenant_id, doc_id, revision)"),
+        "lab_publish_receipts_tenant_id_doc_id_new_head_fkey": _catalog_contract(
+            "lab_publish_receipts", "FOREIGN KEY (tenant_id, doc_id, new_head)", "REFERENCES lab_revisions(tenant_id, doc_id, revision)"),
+        "lab_publish_receipts_tenant_id_sha256_fkey": _catalog_contract(
+            "lab_publish_receipts", "FOREIGN KEY (tenant_id, sha256)", "REFERENCES lab_blobs(tenant_id, sha256)"),
+    },
     "annotations": {
         "annotation_targets_pkey": _catalog_contract(
             "annotation_targets",
@@ -1691,6 +1721,12 @@ _AUTHORITY_REQUIRED_INDEXES = {
 # ``BEFORE DELETE OR UPDATE`` (confirmed against a live PostgreSQL 16 catalog).
 # Contracts compare against the deparse, never the migration source.
 _AUTHORITY_REQUIRED_TRIGGERS = {
+    "lab": {
+        name + "_immutable": _catalog_contract(
+            name, "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+            "EXECUTE FUNCTION leaf_reject_lab_mutation()")
+        for name in ("lab_blobs", "lab_revisions", "lab_publish_receipts")
+    },
     "broker": {
         "broker_terminal_intent_write_once": _catalog_contract(
             "broker_run_admissions", "BEFORE INSERT OR DELETE OR UPDATE", "FOR EACH ROW",
@@ -1713,6 +1749,7 @@ _AUTHORITY_REQUIRED_TRIGGERS = {
 _TRIGGER_ENABLED_MODES = frozenset({"O", "A"})
 
 _AUTHORITY_SELECTORS = {
+    "LEAF_LAB_STORE": {"postgres": "lab"},
     "LEAF_JOBS_STORE": {"postgres": "jobs"},
     "LEAF_CALLBACK_REPLAY_STORE": {"postgres": "callback_replay"},
     "LEAF_SESSIONS_STORE": {

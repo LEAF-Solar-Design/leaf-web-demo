@@ -44,7 +44,7 @@ router = APIRouter()
 # ONLY -- the panel's client-side track() calls are TEL-2b) ----------------- #
 #
 # PLATFORM_TELEMETRY.md conventions: domain.action names, string labels, no
-# secrets or prompt text (only ids and the allowlisted `role` metadata value,
+# secrets or prompt text (only ids and the bounded telemetry role vocabulary,
 # never `content`). No natural interactive-session id exists for a
 # conversation resource event, so `session_id="server"` -- the same
 # placeholder drawing.uploaded/org.created use for the same
@@ -96,12 +96,16 @@ def record_conversation_message_appended(*, tenant_id: str, tenant_kind: str,
                                          role: Optional[str] = None) -> None:
     """Emit conversation.message_appended {role}. Wired below at this card's
     own real choke point: api_post_message's successful, non-replayed
-    insert. ``role`` is the message's own allowlisted metadata value (never
-    free text), omitted from labels when the caller did not supply one."""
+    insert. Only exact built-in strings user/assistant/server survive the
+    telemetry projection; every other present role becomes other. An absent
+    role stays absent, and the original message metadata is unchanged."""
     try:  # telemetry never touches the response
         labels: Dict[str, Any] = {"conversation_id": conversation_id}
         if role is not None:
-            labels["role"] = role
+            labels["role"] = (
+                role if type(role) is str and role in ("user", "assistant", "server")
+                else "other"
+            )
         telemetry_sink.emit(
             "conversation.message_appended", tenant_id=tenant_id,
             tenant_kind=tenant_kind, session_id="server", labels=labels,

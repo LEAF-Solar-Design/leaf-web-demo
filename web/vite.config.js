@@ -92,6 +92,8 @@ export default defineConfig(({ mode }) => {
         // palette does not load the viewer through the entry's renderer.
         manualChunks(id) {
           if (!id.includes('node_modules')) return undefined
+          // Keep the text typeface in the lazy bridgeText chunk, off the first load.
+          if (/[/\\]node_modules[/\\]three[/\\]examples[/\\]fonts[/\\]/.test(id)) return undefined
           if (/[/\\]node_modules[/\\]three([/\\]|$)/.test(id)) return 'vendor-viewer'
           if (/[/\\]node_modules[/\\](react|react-dom|scheduler)([/\\]|$)/.test(id)) return 'vendor-react'
           return undefined

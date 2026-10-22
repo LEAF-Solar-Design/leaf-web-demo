@@ -11,6 +11,11 @@ import { PRODUCT_SURFACES } from '../site/productSurfaces.js'
 
 const BY_ID = new Map(PRODUCT_SURFACES.map((surface) => [surface.id, surface]))
 
+// SEL-005: Lab authoring is owned upstream of the shared build lane. Remove
+// this exemption when Lab declares build; the entitlement tripwire then fails.
+// This is a declaration exception, never a runtime grant or an off-rail bypass.
+export const PENDING_UPSTREAM_ENTITLEMENT_EXEMPTIONS = Object.freeze({ lab: 'lab' })
+
 /**
  * The families a surface's rail and ribbon carry. `familyIds: null` means
  * the whole catalog (CAD); a non-empty fold filters AND orders by the list.

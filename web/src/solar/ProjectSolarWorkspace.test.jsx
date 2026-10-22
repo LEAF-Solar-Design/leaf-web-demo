@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import ProjectSolarWorkspace from './ProjectSolarWorkspace.jsx'
+import SolarFlowRail from './SolarFlowRail.jsx'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
@@ -252,6 +253,62 @@ async function expectGraphRefusal(h, code, sentence) {
 }
 
 describe('Project Solar workspace composition', () => {
+  it('W1C12 keeps the full catalog available and opens Solve with a generic row without availability', () => {
+    const solve = Row('solar-solve-proposal'), commit = Row('solar-commit-solve')
+    const generic = { name: 'count-by-layer', label: 'Count by layer', catalog_digest: D,
+      params: { type: 'object', properties: { layer: { type: 'string' } } } }
+    const h = fixture(solve.name, { rows: [solve, commit, Row('solar-settings'), generic] })
+    h.mount()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(last(h.rails).projectCatalog).toBe(h.catalog)
+    expect(last(h.rails).projectCatalog.families[0].capabilities).toContain(generic)
+    expect(typeof last(h.rails).onOpenStep).toBe('function')
+    h.open(solve)
+    expect(h.props.onOpenTool).toHaveBeenCalledWith(solve)
+    expect(screen.getByRole('form', { name: 'Solve' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Run solve' })).toBeInTheDocument()
+    expect(last(h.rails).projectCatalog).toBe(h.catalog)
+  })
+
+  it.each(['digest', 'schema', 'availability'])('W1C12 still rejects a hostable row with malformed %s', (field) => {
+    const solve = Row('solar-solve-proposal'), malformed = Row('solar-settings')
+    if (field === 'digest') malformed.catalog_digest = 'invalid'
+    if (field === 'schema') malformed.params = { type: 'array', items: { type: 'string' } }
+    if (field === 'availability') delete malformed.availability
+    const h = fixture(solve.name, { rows: [solve, malformed] })
+    h.mount()
+    expect(screen.getByRole('status').textContent).toBe(projectSolarWorkspaceReason('catalog_unavailable'))
+    expect(last(h.rails).projectCatalog).toBeNull()
+    expect(last(h.rails).onOpenStep).toBeUndefined()
+    h.open(solve)
+    expect(h.props.onOpenTool).not.toHaveBeenCalled()
+    expect(screen.queryByRole('form', { name: 'Solve' })).toBeNull()
+  })
+
+  it('W1C12 excludes unhostable rows and their declarations from the hosted scope', async () => {
+    const h = fixture('solar-string-add')
+    const generic = Row('count-by-layer')
+    h.rows.push(generic)
+    h.mount({ openTool: h.row })
+    const draft = screen.getByRole('textbox', { name: 'Fixture draft' })
+    fireEvent.change(draft, { target: { value: 'Keep this draft' } })
+    const submit = last(h.steps).onProjectSubmit, prepared = h.intent(), options = optionsFor(h)
+    h.open(generic)
+    expect(h.props.onOpenTool).not.toHaveBeenCalled()
+    // Neither conflicting generic declarations nor generic row identities belong to the hosted scope.
+    h.rows.push({ ...generic, catalog_digest: 'sha256:' + 'd'.repeat(64) })
+    delete generic.availability
+    h.update()
+    expect(last(h.rails).projectCatalog).toBe(h.catalog)
+    expect(screen.getByRole('textbox', { name: 'Fixture draft' })).toBe(draft)
+    expect(draft.value).toBe('Keep this draft')
+    h.rows.splice(1)
+    h.update()
+    expect(screen.getByRole('textbox', { name: 'Fixture draft' })).toBe(draft)
+    expect(await submit(prepared, options)).toBe(h.outcome)
+    expect(h.submit).toHaveBeenCalledOnce()
+  })
+
   it('R13E-30 settings dispatches to the existing R8 project host', async () => {
     const h = fixture('solar-settings')
     h.graphless = true
@@ -268,6 +325,26 @@ describe('Project Solar workspace composition', () => {
     expect(h.client.readIntake).not.toHaveBeenCalled()
     expect(h.client.readVersions).not.toHaveBeenCalled()
     expect(h.client.submitRun).not.toHaveBeenCalled()
+  })
+
+  it('W1C13 the project rail opens seed-openable Settings without starting a run', async () => {
+    const h = fixture('solar-settings', { code: 'persisted_graph_unavailable' })
+    h.row.label = 'Settings'
+    h.row.solar = { schema: 'leaf.solar-tool-view.v1', name: h.row.name, family: 'settings',
+      wave: 1, order: 10, entitlement: 'run_write', interaction: { mode: 'form' } }
+    h.graphless = true
+    h.mount({ FlowRail: SolarFlowRail })
+    const settings = screen.getByRole('button', { name: /Settings Ready/ })
+    expect(settings).toBeEnabled()
+    expect(settings.closest('li')).toHaveAttribute('data-status', 'ready')
+    fireEvent.click(settings)
+    await waitFor(() => expect(screen.getByTestId('solar-settings-form')).toHaveAttribute('data-mode', 'initialize'))
+    expect(screen.getByRole('button', { name: 'Start Solar design' })).toBeInTheDocument()
+    expect(h.props.onOpenTool).toHaveBeenCalledWith(h.row)
+    expect(h.client.readContext).toHaveBeenCalledOnce()
+    expect(h.client.prepareRun).not.toHaveBeenCalled()
+    expect(h.client.submitRun).not.toHaveBeenCalled()
+    expect(h.submit).not.toHaveBeenCalled()
   })
 
   it('R13E-31 sizing dispatches to the manual-global R9 project host', () => {
@@ -968,7 +1045,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {

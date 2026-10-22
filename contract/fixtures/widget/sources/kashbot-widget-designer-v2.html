@@ -1,0 +1,779 @@
+<title>Kashbot Lock Board Designer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a working bench. Top = format picker, left rail = add / layers / inspector, right = the surface at true iOS point scale. */
+:root{
+  --bg:#eef1ef; --panel:#ffffff; --fg:#141a17; --muted:#56615b; --line:#d5dcd8;
+  --accent:#1f8a58; --accent-ink:#ffffff; --danger:#c2412f; --chip:#e3ebe7;
+  --ui:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+  --ios:-apple-system,"SF Pro Display","SF Pro Text",system-ui,"Segoe UI",Roboto,sans-serif;
+  /* Kashbot brand, AAA on black (matches KashbotBrand in the app) */
+  --k-ground:#000000; --k-ink:#ffffff; --k-leaf:#4CC38A; --k-slate:#B8BEC7; --k-loss:#FF7A6B;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0d1110; --panel:#161c1a; --fg:#e6ece9; --muted:#9aa6a0; --line:#2a3330;
+  --accent:#4CC38A; --accent-ink:#04140c; --danger:#ff7a6b; --chip:#1f2926; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0d1110; --panel:#161c1a; --fg:#e6ece9; --muted:#9aa6a0; --line:#2a3330;
+  --accent:#4CC38A; --accent-ink:#04140c; --danger:#ff7a6b; --chip:#1f2926; color-scheme:dark}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 var(--ui);padding-inline:16px;padding-block:12px;box-sizing:border-box}
+*{box-sizing:border-box}
+button,select,input,textarea{font:inherit;color:inherit}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-bottom:10px}
+.top h1{font-size:17px;font-weight:600;margin:0 8px 0 0}
+.top h1 small{font-weight:400;color:var(--muted);font-size:13px;margin-left:6px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
+.seg button{border:0;background:none;padding:5px 10px;cursor:pointer;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.btn{border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:5px 11px;cursor:pointer}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn:focus-visible,.seg button:focus-visible,.layer:focus-visible,.fmt:focus-visible,.add:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.spacer{flex:1}
+.status{font-size:12.5px;color:var(--muted);min-width:0}
+.ok{color:var(--accent)}.err{color:var(--danger)}
+.formats{display:flex;flex-wrap:wrap;gap:10px 18px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px}
+.fgroup{display:flex;flex-direction:column;gap:5px;min-width:0}
+.fgroup h3{margin:0;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.fgroup .row{display:flex;flex-wrap:wrap;gap:5px}
+.fmt{border:1px solid var(--line);background:var(--bg);border-radius:7px;padding:4px 9px;cursor:pointer;display:flex;align-items:center;gap:6px;font-size:13px}
+.fmt[aria-pressed="true"]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent);font-weight:600}
+.tag{font-size:10px;border-radius:4px;padding:0 4px;background:var(--chip);color:var(--muted);font-weight:500}
+.tag.new{background:color-mix(in srgb,var(--accent) 22%,transparent);color:var(--fg)}
+.ship{width:7px;height:7px;border-radius:50%;background:var(--line)}
+.ship.on{background:var(--accent)}
+.grid{display:grid;grid-template-columns:310px minmax(0,1fr);gap:14px;align-items:start}
+@media (max-width:860px){.grid{grid-template-columns:1fr}.stage{order:-1}}
+.rail{display:flex;flex-direction:column;gap:12px;min-width:0}
+.card-ui{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.card-ui h2{font-size:11.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 8px;font-weight:600;display:flex;justify-content:space-between;gap:8px}
+details.card-ui summary{cursor:pointer;list-style:none;font-size:11.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
+details.card-ui summary::-webkit-details-marker{display:none}
+details.card-ui summary::after{content:"▾";float:right}
+details.card-ui:not([open]) summary::after{content:"▸"}
+.addgrid{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.addgrp h4{margin:0 0 4px;font-size:11px;color:var(--muted);font-weight:600}
+.addgrp .row{display:flex;flex-wrap:wrap;gap:4px}
+.add{border:1px dashed var(--line);background:var(--bg);border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12.5px}
+.add:hover{border-style:solid;border-color:var(--accent)}
+.add::before{content:"+ ";color:var(--accent);font-weight:600}
+.layers{display:flex;flex-direction:column;gap:2px;max-height:260px;overflow:auto}
+.layer{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer;border:1px solid transparent}
+.layer:hover{background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.layer[aria-selected="true"]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.layer .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.layer.off .nm{color:var(--muted);text-decoration:line-through}
+.eye,.del{border:0;background:none;cursor:pointer;color:var(--muted);padding:0 3px;font-size:13px}
+.del:hover{color:var(--danger)}
+.fields{display:grid;grid-template-columns:auto 1fr;gap:7px 10px;align-items:center}
+.fields label{color:var(--muted);font-size:12.5px}
+.fields input[type=number],.fields select,.fields input[type=text]{width:100%;border:1px solid var(--line);border-radius:6px;padding:3px 6px;background:var(--bg)}
+.fields input[type=range]{width:100%;accent-color:var(--accent)}
+.xywh{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.xywh label{display:flex;flex-direction:column;font-size:11px;color:var(--muted)}
+.xywh input{border:1px solid var(--line);border-radius:6px;padding:3px 5px;background:var(--bg);font-family:var(--mono);font-size:12.5px;width:100%}
+.hint{font-size:12px;color:var(--muted);margin:8px 0 0}
+.warn{font-size:12px;color:var(--danger);margin:8px 0 0}
+kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px}
+textarea{width:100%;min-height:64px;border:1px solid var(--line);border-radius:6px;padding:6px;background:var(--bg);resize:vertical}
+.stage{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0;overflow:hidden;display:flex;flex-direction:column;align-items:center;gap:10px}
+.stagebar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;width:100%}
+.stagebar .lbl{font-size:12px;color:var(--muted)}
+.fmtnote{font-size:12.5px;color:var(--muted);text-align:center;max-width:60ch;margin:0}
+.fit{width:100%;display:flex;justify-content:center;overflow:hidden}
+.fit-inner{transform-origin:top left}
+.frame{position:relative;overflow:hidden;background:radial-gradient(120% 70% at 30% 10%,#23372d 0%,#0f1a15 45%,#050807 100%)}
+.frame.portrait{border-radius:55px;box-shadow:0 0 0 10px #111,0 0 0 11px #333}
+.frame.landscape{border-radius:55px;box-shadow:0 0 0 10px #111,0 0 0 11px #333;background:#000}
+.frame.watch{border-radius:52px;box-shadow:0 0 0 12px #1b1b1b,0 0 0 13px #3a3a3a;background:#000}
+.frame.closeup{border-radius:24px;box-shadow:none;background:repeating-conic-gradient(#1a1f1d 0 25%,#141816 0 50%) 0 0/16px 16px}
+.chrome{position:absolute;pointer-events:none}
+.c-time{left:0;right:0;top:92px;text-align:center;color:rgba(255,255,255,.92);font:600 96px/1 var(--ios);letter-spacing:-2px}
+.c-date{left:0;right:0;top:60px;text-align:center;color:rgba(255,255,255,.85);font:600 21px var(--ios)}
+.c-island{top:11px;height:37px;border-radius:20px;background:#000}
+.c-btn{bottom:48px;width:50px;height:50px;border-radius:50%;background:rgba(255,255,255,.14)}
+.c-home{bottom:8px;left:50%;transform:translateX(-50%);width:139px;height:5px;border-radius:3px;background:rgba(255,255,255,.85)}
+.c-icon{width:62px;height:62px;border-radius:15px;background:rgba(255,255,255,.12)}
+.c-status{top:18px;font:600 16px var(--ios);color:#fff}
+.c-wtime{top:14px;right:22px;font:600 17px var(--ios);color:#fff}
+.frame.closeup .chrome{display:none}
+.lcard{position:absolute;overflow:visible;touch-action:none;font-family:var(--ios);font-variant-numeric:tabular-nums;user-select:none;-webkit-user-select:none}
+.lcard .clip{position:absolute;inset:0;overflow:hidden;border-radius:inherit}
+.lcard.bg-black{background:var(--k-ground)}
+.lcard.bg-blur{background:rgba(30,34,32,.55);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+.lcard.bg-none{background:transparent;outline:1px dashed rgba(255,255,255,.18)}
+.lcard.vibrant .clip{filter:grayscale(1) brightness(1.18)}
+.cutout{position:absolute;background:#0b0b0b;border-radius:19px;pointer-events:none;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}
+.cutout span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:9px var(--mono);color:#555}
+.limit{position:absolute;left:-8px;right:-8px;border-top:1px dashed var(--k-loss);pointer-events:none}
+.limit span{position:absolute;right:0;top:2px;font:10px var(--mono);color:var(--k-loss)}
+.el{position:absolute;cursor:move;display:flex}
+.el.hiddenel{display:none}
+.el .box{width:100%;height:100%;display:flex;overflow:hidden}
+.sel-outline{position:absolute;border:1.5px solid #6fe0a8;pointer-events:none}
+.sel-outline.hover{border:1px dashed rgba(111,224,168,.6)}
+.h{position:absolute;width:10px;height:10px;background:#fff;border:1.5px solid #2fb872;border-radius:2px;pointer-events:auto}
+.h.nw{left:-6px;top:-6px;cursor:nwse-resize}.h.ne{right:-6px;top:-6px;cursor:nesw-resize}
+.h.sw{left:-6px;bottom:-6px;cursor:nesw-resize}.h.se{right:-6px;bottom:-6px;cursor:nwse-resize}
+.h.e{right:-6px;top:calc(50% - 5px);cursor:ew-resize}.h.w{left:-6px;top:calc(50% - 5px);cursor:ew-resize}
+.h.n{top:-6px;left:calc(50% - 5px);cursor:ns-resize}.h.s{bottom:-6px;left:calc(50% - 5px);cursor:ns-resize}
+.guide{position:absolute;background:#ff5fd2;pointer-events:none}
+.sizetag{position:absolute;font:10px var(--mono);color:#6fe0a8;white-space:nowrap;pointer-events:none}
+.row1{display:flex;align-items:center;gap:.3em;white-space:nowrap;line-height:1.05}
+.col{display:flex;flex-direction:column;justify-content:space-around;width:100%}
+.hist{display:grid;width:100%;align-items:center}
+.hist .ent{display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.08;min-width:0;overflow:hidden}
+.bar{width:100%;border-radius:99px;overflow:hidden;background:rgba(184,190,199,.25)}
+.bar i{display:block;height:100%;border-radius:99px}
+.dot{border-radius:50%;flex:none}
+.pulse{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+.tick{animation:tick .7s ease-out}
+@keyframes tick{0%{filter:brightness(1.9);transform:scale(1.06)}100%{filter:none;transform:none}}
+@media (prefers-reduced-motion:reduce){.tick,.pulse{animation:none}}
+</style>
+
+<div class="top">
+  <h1>Kashbot board designer <small>pick a format, drag and resize, then save for Claude</small></h1>
+  <div class="seg" role="group" aria-label="Open positions in the sample">
+    <button id="n0" type="button">0 open</button><button id="n1" type="button">1</button><button id="n2" type="button">2</button><button id="n3" type="button" aria-pressed="true">3</button>
+  </div>
+  <button class="btn" id="liveBtn" type="button" aria-pressed="true">Live ticks: on</button>
+  <button class="btn" id="undoBtn" type="button" title="Undo (Ctrl+Z)">Undo</button>
+  <button class="btn" id="redoBtn" type="button" title="Redo (Ctrl+Shift+Z)">Redo</button>
+  <span class="spacer"></span>
+  <span class="status" id="status" aria-live="polite">Draft kept in this browser.</span>
+  <button class="btn" id="copyBtn" type="button">Copy JSON</button>
+  <button class="btn primary" id="saveBtn" type="button" disabled>Save for Claude</button>
+</div>
+
+<div class="formats" id="formats" role="group" aria-label="Formats"></div>
+
+<div class="grid">
+  <div class="rail">
+    <details class="card-ui" id="addBox" open>
+      <summary>Add an element</summary>
+      <div class="addgrid" id="addGrid"></div>
+      <p class="hint">Open-position columns line up row by row when they share the same top and height, so a new one lands beside the existing columns.</p>
+    </details>
+    <div class="card-ui">
+      <h2><span>Layers</span><span id="layerFmt" style="text-transform:none;letter-spacing:0"></span></h2>
+      <div class="layers" id="layers"></div>
+    </div>
+    <div class="card-ui" id="inspector"></div>
+    <div class="card-ui">
+      <h2>Note for Claude</h2>
+      <textarea id="note" placeholder="Anything the layout can't say: 'P/L should pulse on change', 'hide total when nothing is open'..."></textarea>
+      <p class="hint"><kbd>Arrows</kbd> nudge 1 pt, <kbd>Shift</kbd> 8 pt. <kbd>Del</kbd> removes, <kbd>Ctrl+D</kbd> duplicates. Hold <kbd>Alt</kbd> while dragging to skip snapping.</p>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="stagebar">
+      <div class="seg" role="group" aria-label="View">
+        <button id="vCtx" type="button" aria-pressed="true">In context</button><button id="vClose" type="button">Close-up</button>
+      </div>
+      <span class="lbl" id="zoomLbl"></span>
+    </div>
+    <p class="fmtnote" id="fmtNote"></p>
+    <div class="fit" id="fit"><div class="fit-inner" id="fitInner">
+      <div class="frame" id="frame"><div id="chrome"></div><div class="lcard" id="card"><div class="clip" id="clip"></div></div></div>
+    </div></div>
+  </div>
+</div>
+
+<script>
+(() => {
+"use strict";
+const $ = id => document.getElementById(id);
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+
+// Formats: sizes in iPhone 17 / Apple Watch 46 mm points (approximate where Apple publishes none).
+const FORMATS = {
+  la:        { name:"Lock screen", group:"Live Activity", w:361, h:160, hMin:60, hMax:220, limit:160, ctx:"lockBottom", radius:22, bg:"black", inApp:true,
+               note:"The board on the lock screen. iOS gives it the full width and cuts it off below 160 pt." },
+  diExp:     { name:"Island expanded", group:"Live Activity", w:371, h:160, hMin:84, hMax:200, limit:160, ctx:"island", radius:44, bg:"black", inApp:true, cutout:{x:122.5,y:0,w:126,h:37},
+               note:"What opens when you long-press the Dynamic Island. Keep content clear of the camera in the top middle." },
+  diCompact: { name:"Island compact", group:"Live Activity", w:250, h:37, ctx:"island", radius:19, bg:"black", inApp:true, cutout:{x:62,y:0,w:126,h:37},
+               note:"The Island when Kashbot is the only live activity. Only the left and right ears show; the middle is the camera." },
+  diMin:     { name:"Island minimal", group:"Live Activity", w:37, h:37, ctx:"islandMin", radius:19, bg:"black", inApp:true,
+               note:"The small circle Kashbot gets when another app also has a live activity (a timer, a ride). Room for one glyph or number." },
+  standby:   { name:"StandBy", group:"Live Activity", w:852, h:393, ctx:"standby", radius:0, bg:"black", inApp:true, auto:true,
+               note:"Charging on its side at night: iOS blows the Live Activity up to full screen. Today it just scales the lock screen board; this would be a custom layout." },
+  lockRect:  { name:"Rectangular", group:"Lock screen widget", w:170, h:72, ctx:"lockUnder", radius:14, bg:"none", accessory:true, inApp:true,
+               note:"Sits under the clock. iOS draws it in one tint (no green or coral), so contrast has to come from weight and size." },
+  lockCirc:  { name:"Circular", group:"Lock screen widget", w:72, h:72, ctx:"lockUnder", radius:36, bg:"none", accessory:true, inApp:true,
+               note:"Small round slot under the clock. Gauges and one number work best." },
+  lockInline:{ name:"Inline", group:"Lock screen widget", w:234, h:22, ctx:"lockInline", radius:0, bg:"none", accessory:true, inApp:true, textOnly:true,
+               note:"One line of text next to the date above the clock. iOS allows text and one small symbol only." },
+  homeS:     { name:"Small", group:"Home screen widget", w:170, h:170, ctx:"home", radius:22, bg:"black", inApp:true, note:"2×2 app icons on the home screen." },
+  homeM:     { name:"Medium", group:"Home screen widget", w:364, h:170, ctx:"home", radius:22, bg:"black", inApp:true, note:"4×2 app icons on the home screen." },
+  homeL:     { name:"Large", group:"Home screen widget", w:364, h:382, ctx:"home", radius:22, bg:"black", note:"4×4 app icons. Room for a chart and the full ledger." },
+  watchStack:{ name:"Smart Stack", group:"Apple Watch", w:188, h:88, ctx:"watch", radius:22, bg:"black", note:"A new surface: Kashbot has no Watch app yet. iOS can mirror a Live Activity to the Watch Smart Stack." },
+  watchCorner:{ name:"Complication", group:"Apple Watch", w:62, h:62, ctx:"watch", radius:31, bg:"none", accessory:true, note:"A round complication on a watch face. New surface, needs a Watch extension." },
+};
+const GROUPS = ["Live Activity","Lock screen widget","Home screen widget","Apple Watch"];
+
+// Element catalog.
+const COLORS = { auto:null, ink:"var(--k-ink)", leaf:"var(--k-leaf)", slate:"var(--k-slate)", loss:"var(--k-loss)" };
+const K = {
+  brand:      { n:"Brand (leaf + KASHBOT)", g:"Headline", w:132, h:18, color:"leaf", weight:800, tracking:3 },
+  leafIcon:   { n:"Leaf icon", g:"Headline", w:24, h:24, color:"leaf" },
+  total:      { n:"Portfolio total", g:"Headline", w:120, h:22, color:"ink", weight:600 },
+  todayPnl:   { n:"Today P/L", g:"Headline", w:140, h:18, color:"auto", weight:600, showPct:true },
+  openPnlSum: { n:"Open P/L (all positions)", g:"Headline", w:120, h:22, color:"auto", weight:700, arrows:true },
+  cash:       { n:"Cash available", g:"Headline", w:140, h:16, color:"slate", weight:500 },
+  exposure:   { n:"At risk now", g:"Headline", w:130, h:16, color:"slate", weight:500 },
+  winRate:    { n:"Win rate", g:"Headline", w:90, h:16, color:"ink", weight:600 },
+  text:       { n:"Custom text", g:"Headline", w:120, h:16, color:"slate", weight:500, text:"Kashbot" },
+  heroPnl:    { n:"Hero position", g:"Open positions", w:200, h:90, color:"auto", weight:800, arrows:true },
+  symbols:    { n:"Symbols", g:"Open positions", col:true, f:.62, w:110, h:84, color:"ink", weight:600 },
+  pnl:        { n:"Live P/L", g:"Open positions", col:true, f:.75, w:130, h:84, color:"auto", weight:700, arrows:true, align:"right" },
+  pnlPct:     { n:"P/L %", g:"Open positions", col:true, f:.6, w:70, h:84, color:"auto", weight:600, align:"right" },
+  odds:       { n:"Odds %", g:"Open positions", col:true, f:.62, w:60, h:84, color:"ink", weight:600, align:"right" },
+  oddsBar:    { n:"Odds bar", g:"Open positions", col:true, w:80, h:84, color:"leaf" },
+  toWin:      { n:"To win", g:"Open positions", col:true, f:.55, w:80, h:84, color:"leaf", weight:600, align:"right" },
+  side:       { n:"Side (YES / NO)", g:"Open positions", col:true, f:.5, w:40, h:84, color:"slate", weight:700 },
+  size:       { n:"Size (contracts)", g:"Open positions", col:true, f:.5, w:50, h:84, color:"slate", weight:500, align:"right" },
+  label:      { n:"Market name", g:"Open positions", col:true, f:.42, w:170, h:84, color:"slate", weight:500 },
+  closes:     { n:"Closes in", g:"Open positions", col:true, f:.45, w:60, h:84, color:"slate", weight:500, align:"right" },
+  spark:      { n:"P/L sparkline (today)", g:"Charts", w:200, h:44, color:"auto" },
+  ring:       { n:"Ring gauge", g:"Charts", w:64, h:64, color:"leaf", weight:700, source:"winRate" },
+  history:    { n:"History strip", g:"History", w:333, h:32, color:"auto", weight:500, count:4 },
+  historyList:{ n:"History list", g:"History", w:160, h:80, color:"auto", weight:600, count:4 },
+  streak:     { n:"Win / loss dots", g:"History", w:140, h:12, count:10 },
+  live:       { n:"Live dot", g:"Status", w:52, h:14, color:"leaf", weight:700 },
+  updated:    { n:"Updated time", g:"Status", w:120, h:12, color:"slate", weight:500 },
+  countdown:  { n:"Next settle countdown", g:"Status", w:140, h:14, color:"slate", weight:500 },
+  openCount:  { n:"Open count", g:"Status", w:70, h:14, color:"slate", weight:500 },
+  divider:    { n:"Divider", g:"Decoration", w:200, h:1, color:"slate", opacity:.35 },
+};
+const KGROUPS = ["Headline","Open positions","Charts","History","Status","Decoration"];
+const RING_SOURCES = { winRate:"Win rate", topOdds:"Top position odds", todayPct:"Today %", openCount:"Open positions" };
+
+function mk(kind, id, x, y, w, h, over={}){
+  const d = K[kind];
+  const e = { id, kind, x, y, w: w ?? d.w, h: h ?? d.h, scale:1, weight:d.weight ?? 600, color:d.color ?? "ink", align:d.align ?? "left", visible:true };
+  for (const k of ["arrows","count","tracking","showPct","source","text","opacity"]) if (d[k] !== undefined) e[k] = d[k];
+  if (d.col) e.maxRows = 3;
+  return Object.assign(e, over);
+}
+
+// Starting layouts. "la" matches the board the app ships today (#940); the rest are starters to push around.
+function defaultFormat(id){
+  const F = FORMATS[id], base = { h:F.h, radius:F.radius, bg:F.bg, vibrant:!!F.accessory, ship:!!F.inApp };
+  const els = {
+    la: [ mk("brand","brand",14,10,132,18), mk("total","total",227,9,120,20,{align:"right"}),
+          mk("symbols","symbols",14,34,150,84), mk("pnl","pnl",166,34,181,84),
+          mk("divider","divider",14,122,333,1), mk("history","history",14,125,333,32) ],
+    diExp: [ mk("leafIcon","leaf",22,10,22,22), mk("total","total",48,11,70,20,{scale:.9}), mk("openPnlSum","openPnl",256,10,94,22,{align:"right"}),
+             mk("symbols","symbols",22,46,150,70), mk("pnl","pnl",176,46,174,70), mk("history","history",22,122,327,32) ],
+    diCompact: [ mk("leafIcon","leaf",16,8,21,21), mk("openPnlSum","openPnl",192,9,50,19,{align:"right",scale:.85,arrows:false}) ],
+    diMin: [ mk("ring","ring",3,3,31,31,{source:"topOdds"}) ],
+    standby: [ mk("brand","brand",48,40,200,26), mk("total","total",560,36,250,36,{align:"right"}),
+               mk("heroPnl","hero",48,110,460,190), mk("symbols","symbols",560,110,120,170), mk("pnl","pnl",680,110,130,170),
+               mk("streak","streak",48,330,760,18,{count:10}) ],
+    lockRect: [ mk("total","total",0,0,170,20), mk("symbols","symbols",0,24,84,46,{maxRows:2}), mk("pnl","pnl",86,24,84,46,{maxRows:2}) ],
+    lockCirc: [ mk("ring","ring",4,4,64,64,{source:"winRate"}) ],
+    lockInline: [ mk("openCount","count",0,3,64,16,{color:"ink"}), mk("openPnlSum","openPnl",66,3,120,16,{arrows:false}) ],
+    homeS: [ mk("brand","brand",14,14,110,13), mk("total","total",14,34,142,26), mk("todayPnl","today",14,64,142,15),
+             mk("spark","spark",14,88,142,44), mk("streak","streak",14,144,142,12,{count:8}) ],
+    homeM: [ mk("brand","brand",16,14,120,14), mk("total","total",214,12,134,20,{align:"right"}),
+             mk("symbols","symbols",16,42,110,84), mk("odds","odds",128,42,56,84), mk("oddsBar","oddsbar",190,42,60,84), mk("pnl","pnl",254,42,94,84),
+             mk("history","history",16,134,332,30) ],
+    homeL: [ mk("brand","brand",18,18,130,16), mk("live","live",294,18,52,14), mk("total","total",18,44,220,36), mk("todayPnl","today",18,84,220,18),
+             mk("spark","spark",18,112,328,70), mk("symbols","symbols",18,196,100,90), mk("odds","odds",120,196,50,90), mk("toWin","towin",176,196,80,90), mk("pnl","pnl",258,196,88,90),
+             mk("divider","divider",18,294,328,1), mk("historyList","hlist",18,302,328,62,{count:3}) ],
+    watchStack: [ mk("leafIcon","leaf",12,10,16,16), mk("total","total",34,9,142,18,{align:"right",scale:.9}),
+                  mk("symbols","symbols",12,32,80,50,{maxRows:2}), mk("pnl","pnl",94,32,82,50,{maxRows:2}) ],
+    watchCorner: [ mk("ring","ring",2,2,58,58,{source:"todayPct"}) ],
+  }[id];
+  return { ...base, els };
+}
+function defaultDoc(){ const formats = {}; for (const id in FORMATS) formats[id] = defaultFormat(id); return { v:2, active:"la", formats }; }
+
+// Sample data, clearly a sample, never the operator's real figures.
+const sample = {
+  open:[
+    { sym:"KXBTC",    label:"BTC above $118k at 4pm", side:"YES", size:40, odds:62, cost:2480, pnl:152, closes:14*60+12 },
+    { sym:"KXFED",    label:"Fed holds in October",   side:"NO",  size:25, odds:71, cost:1775, pnl:11,  closes:3*3600+20*60 },
+    { sym:"KXHIGHNY", label:"NYC high above 72°F",    side:"YES", size:12, odds:38, cost:456,  pnl:-8,  closes:26*3600 },
+  ],
+  hist:[ {sym:"KXBTC",c:184},{sym:"KXFED",c:-210},{sym:"KXETH",c:42},{sym:"KXHIGHNY",c:-38},{sym:"KXSPX",c:95},{sym:"KXRAIN",c:-12},{sym:"KXBTC",c:61},{sym:"KXETH",c:130},{sym:"KXCPI",c:-75},{sym:"KXBTC",c:22} ],
+  total:12436, cash:8420, today:-80, nOpen:3,
+  spark:[0,12,8,20,34,28,40,52,44,38,30,18,6,-4,-12,-20,-8,4,-2,-14,-26,-40,-52,-60,-48,-66,-72,-80,-74,-80],
+};
+let changed = new Set();
+const openRows = (limit=3) => sample.open.slice(0, sample.nOpen).slice(0, limit);
+const openPnl = () => openRows(9).reduce((a,p) => a + p.pnl, 0);
+const winRate = () => Math.round(100 * sample.hist.filter(h => h.c > 0).length / sample.hist.length);
+const todayPct = () => sample.today / (sample.total - sample.today) * 100;
+
+// State.
+let doc = load() || defaultDoc();
+let selId = null, hoverId = null, view = "ctx", zoom = 1, live = true;
+const undo = [], redo = [];
+let lastCommitted = JSON.stringify(doc);
+const cur = () => doc.formats[doc.active];
+const F = () => FORMATS[doc.active];
+const el = id => cur().els.find(e => e.id === id);
+
+function migrate(o){
+  if (!o) return null;
+  if (o.v === 2 && o.formats){ const d = defaultDoc(); for (const id in FORMATS) if (o.formats[id] && Array.isArray(o.formats[id].els)) d.formats[id] = { ...d.formats[id], ...o.formats[id], els:o.formats[id].els.filter(e => e && K[e.kind]) }; d.active = FORMATS[o.active] ? o.active : "la"; return d; }
+  if (o.v === 1 && o.card && Array.isArray(o.els)){ const d = defaultDoc(); d.formats.la = { ...d.formats.la, h:o.card.h, radius:o.card.radius, els:o.els.filter(e => e && K[e.kind]) }; return d; }
+  return null;
+}
+function load(){
+  try { for (const key of ["kashbot-board-draft-v2","kashbot-lock-draft"]){ const s = localStorage.getItem(key); if (!s) continue; const o = JSON.parse(s); const d = migrate(o.doc || o.layout); if (d) return d; } } catch {}
+  return null;
+}
+function persistLocal(){ try { localStorage.setItem("kashbot-board-draft-v2", JSON.stringify({ doc, note:$("note").value, at:Date.now() })); } catch {} }
+function commit(){
+  const now = JSON.stringify(doc);
+  if (now === lastCommitted) return;
+  undo.push(lastCommitted); if (undo.length > 150) undo.shift();
+  redo.length = 0; lastCommitted = now; persistLocal(); dirty(); syncUndo();
+}
+function restore(json){ doc = JSON.parse(json); lastCommitted = json; if (selId && !el(selId)) selId = null; persistLocal(); dirty(); renderAll(); syncUndo(); }
+function syncUndo(){ $("undoBtn").disabled = !undo.length; $("redoBtn").disabled = !redo.length; }
+
+// Formatting.
+const money = c => (c < 0 ? "-" : "+") + "$" + (Math.abs(c)/100).toFixed(2);
+const dollars = c => "$" + (c/100).toLocaleString("en-US",{minimumFractionDigits:2, maximumFractionDigits:2});
+const tone = c => c < 0 ? "var(--k-loss)" : "var(--k-leaf)";
+const col = (e, fallback) => COLORS[e.color] || fallback;
+const dur = s => s < 3600 ? `${Math.floor(s/60)}m` : s < 86400 ? `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m` : `${Math.floor(s/86400)}d ${Math.floor(s%86400/3600)}h`;
+const mmss = s => s >= 3600 ? dur(s) : `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+const escapeHTML = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const arrowSVG = (neg, c) => `<svg viewBox="0 0 10 10" width=".62em" height=".62em" aria-hidden="true" style="flex:none"><path fill="${c}" d="${neg ? "M0 1h10L5 9z" : "M5 1l5 8H0z"}"/></svg>`;
+const LEAF = c => `<svg viewBox="0 0 24 24" width="1em" height="1em" aria-hidden="true" style="flex:none"><path fill="${c}" d="M20.5 3.5C11 3.2 4.6 8 4.3 15.2c-.1 1.4.2 2.7.8 3.8L3 21.1l1.2 1.2 2.1-2.1c1.1.6 2.4.9 3.8.8 7.2-.3 12-6.7 11.7-16.2l-1.3-1.3zM9.8 18.1c-.5 0-1-.1-1.4-.2l6.8-6.8-1.2-1.2-6.8 6.8c-.1-.4-.2-.9-.2-1.4.3-5.5 4.9-9.4 11.6-9.9-.5 6.8-4.4 11.4-9.9 11.7z"/></svg>`;
+const IOS_FONT = "-apple-system, SF Pro Display, system-ui, Segoe UI, sans-serif";
+
+// Render one element.
+function contentHTML(e){
+  const just = e.align === "right" ? "flex-end" : e.align === "center" ? "center" : "flex-start";
+  const box = (inner, extra="") => `<div class="box" style="justify-content:${just};align-items:center;${extra}">${inner}</div>`;
+  const line = (html, fallback, cls="") => box(`<div class="row1 ${cls}" style="font-size:${e.h*.8*e.scale}px;font-weight:${e.weight};color:${col(e, fallback)}">${html}</div>`);
+  const d = K[e.kind];
+  if (d.col){
+    const rows = openRows(e.maxRows ?? 3), n = Math.max(rows.length, 1), rowH = e.h / n, fs = rowH * (d.f ?? .6) * e.scale;
+    if (!rows.length) return e.kind === "symbols" ? box(`<div class="row1" style="font-size:${Math.min(rowH*.3, 16)*e.scale}px;color:var(--k-slate);font-weight:500">No open positions</div>`) : box("");
+    const t = (html, fb, cls="") => `<div class="row1 ${cls}" style="font-size:${fs}px;font-weight:${e.weight};color:${col(e, fb)}">${html}</div>`;
+    const cell = (p, i) => {
+      switch (e.kind){
+        case "symbols": return t(p.sym, "var(--k-ink)");
+        case "pnl": { const c = col(e, tone(p.pnl)); return `<div class="row1 ${changed.has("pnl"+i)?"tick":""}" style="font-size:${fs}px;font-weight:${e.weight};color:${c}">${e.arrows ? arrowSVG(p.pnl < 0, c) : ""}<span>${money(p.pnl)}</span></div>`; }
+        case "pnlPct": { const v = p.pnl / p.cost * 100; return t(`${v >= 0 ? "+" : ""}${v.toFixed(1)}%`, tone(v)); }
+        case "odds": return t(`${p.odds}%`, "var(--k-ink)", changed.has("odds"+i) ? "tick" : "");
+        case "oddsBar": return `<div class="bar" style="height:${Math.max(3, rowH*.26*e.scale)}px"><i style="width:${p.odds}%;background:${col(e,"var(--k-leaf)")}"></i></div>`;
+        case "toWin": return t(money(p.size*100 - p.cost), "var(--k-leaf)");
+        case "side": return t(`<span style="letter-spacing:.06em">${p.side}</span>`, "var(--k-slate)");
+        case "size": return t(`×${p.size}`, "var(--k-slate)");
+        case "label": return `<div class="row1" style="font-size:${fs}px;font-weight:${e.weight};color:${col(e,"var(--k-slate)")};display:block;overflow:hidden;text-overflow:ellipsis;max-width:100%">${escapeHTML(p.label)}</div>`;
+        case "closes": return t(dur(p.closes), "var(--k-slate)");
+      }
+      return "";
+    };
+    return box(`<div class="col" style="align-items:${e.kind === "oddsBar" ? "stretch" : just}">${rows.map(cell).join("")}</div>`, "align-items:stretch");
+  }
+  switch (e.kind){
+    case "brand": { const c = col(e,"var(--k-leaf)"); return box(`<div class="row1" style="font-size:${e.h*.8*e.scale}px;font-weight:${e.weight};color:${c};letter-spacing:${(e.tracking ?? 3)/10}em;gap:.35em">${LEAF(c)}<span>KASHBOT</span></div>`); }
+    case "leafIcon": return box(`<div class="row1" style="font-size:${Math.min(e.w,e.h)*.95*e.scale}px">${LEAF(col(e,"var(--k-leaf)"))}</div>`);
+    case "total": return line(dollars(sample.total), "var(--k-ink)", changed.has("total") ? "tick" : "");
+    case "todayPnl": { const tp = todayPct(); return line(`Today ${money(sample.today)}${e.showPct ? ` <span style="opacity:.8">(${tp >= 0 ? "+" : ""}${tp.toFixed(1)}%)</span>` : ""}`, tone(sample.today)); }
+    case "openPnlSum": { const v = openPnl(), c = col(e, tone(v)); return line(`${e.arrows ? arrowSVG(v < 0, c) : ""}<span>${money(v)}</span>`, tone(v), changed.has("total") ? "tick" : ""); }
+    case "cash": return line(`Cash ${dollars(sample.cash)}`, "var(--k-slate)");
+    case "exposure": return line(`At risk ${dollars(openRows(9).reduce((a,p) => a + p.cost, 0))}`, "var(--k-slate)");
+    case "winRate": return line(`${winRate()}% won`, "var(--k-ink)");
+    case "text": return line(escapeHTML(e.text || ""), "var(--k-slate)");
+    case "openCount": return line(`${openRows(9).length} open`, "var(--k-slate)");
+    case "updated": return line(`Updated ${new Date().toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",second:"2-digit"})}`, "var(--k-slate)");
+    case "countdown": { const s = openRows(9).map(p => p.closes).sort((a,b) => a-b)[0]; return line(s == null ? "Nothing settling" : `Settles in ${mmss(s)}`, "var(--k-slate)"); }
+    case "live": { const c = col(e,"var(--k-leaf)"); return box(`<div class="row1" style="font-size:${e.h*.8*e.scale}px;font-weight:${e.weight};color:${c};letter-spacing:.08em"><span class="dot pulse" style="width:.62em;height:.62em;background:${c}"></span>LIVE</div>`); }
+    case "divider": return `<div class="box" style="background:${col(e,"var(--k-slate)")};opacity:${e.opacity ?? .35}"></div>`;
+    case "heroPnl": {
+      const rows = openRows(9);
+      if (!rows.length) return box(`<div class="row1" style="font-size:${e.h*.18*e.scale}px;color:var(--k-slate)">No open positions</div>`);
+      const p = rows.reduce((a,b) => b.cost > a.cost ? b : a), i = sample.open.indexOf(p), c = col(e, tone(p.pnl));
+      return box(`<div style="display:flex;flex-direction:column;align-items:${just};gap:${e.h*.04}px">
+        <div class="row1" style="font-size:${e.h*.2*e.scale}px;font-weight:600;color:var(--k-slate)">${p.sym} · ${p.side} · ${p.odds}%</div>
+        <div class="row1 ${changed.has("pnl"+i)?"tick":""}" style="font-size:${e.h*.55*e.scale}px;font-weight:${e.weight};color:${c}">${e.arrows ? arrowSVG(p.pnl < 0, c) : ""}<span>${money(p.pnl)}</span></div></div>`);
+    }
+    case "spark": {
+      const s = sample.spark, W = e.w, H = e.h, lo = Math.min(...s, 0), hi = Math.max(...s, 0), span = (hi - lo) || 1;
+      const pts = s.map((v,i) => [i/(s.length-1)*(W-4)+2, H-2-(v-lo)/span*(H-4)]);
+      const last = s[s.length-1], c = col(e, tone(last)), zy = H-2-(0-lo)/span*(H-4);
+      const path = pts.map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" "), end = pts[pts.length-1];
+      return `<div class="box"><svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">
+        <line x1="0" x2="${W}" y1="${zy}" y2="${zy}" stroke="rgba(184,190,199,.3)" stroke-dasharray="2 3"/>
+        <polygon points="2,${zy} ${path} ${W-2},${zy}" fill="${c}" opacity=".16"/>
+        <polyline points="${path}" fill="none" stroke="${c}" stroke-width="${Math.max(1.5, H/30)*e.scale}" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="${end[0]}" cy="${end[1]}" r="${Math.max(2.5, H/16)}" fill="${c}"/></svg></div>`;
+    }
+    case "ring": {
+      const src = e.source || "winRate", rows = openRows(9);
+      let v = 0, label = "";
+      if (src === "winRate"){ v = winRate(); label = v + "%"; }
+      else if (src === "topOdds"){ v = rows[0]?.odds ?? 0; label = rows.length ? v + "%" : "--"; }
+      else if (src === "todayPct"){ const t = todayPct(); v = clamp(50 + t*10, 0, 100); label = (t >= 0 ? "+" : "") + t.toFixed(1) + "%"; }
+      else { v = rows.length/3*100; label = String(rows.length); }
+      const S = Math.min(e.w, e.h), sw = S*.11, r = (S - sw)/2, C = 2*Math.PI*r;
+      const c = src === "todayPct" ? col(e, tone(sample.today)) : col(e, "var(--k-leaf)");
+      return `<div class="box" style="align-items:center;justify-content:center"><svg width="${S}" height="${S}" viewBox="0 0 ${S} ${S}" aria-hidden="true">
+        <circle cx="${S/2}" cy="${S/2}" r="${r}" fill="none" stroke="rgba(184,190,199,.25)" stroke-width="${sw}"/>
+        <circle cx="${S/2}" cy="${S/2}" r="${r}" fill="none" stroke="${c}" stroke-width="${sw}" stroke-linecap="round" stroke-dasharray="${(v/100*C).toFixed(1)} ${C.toFixed(1)}" transform="rotate(-90 ${S/2} ${S/2})"/>
+        <text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" fill="var(--k-ink)" font-family="${IOS_FONT}" font-weight="${e.weight}" font-size="${S*.27*e.scale}">${label}</text></svg></div>`;
+    }
+    case "history": {
+      const k = clamp(e.count ?? 4, 1, 8), hs = sample.hist.slice(0, k), sf = e.h*.36*e.scale, cf = e.h*.44*e.scale;
+      return `<div class="box"><div class="hist" style="grid-template-columns:repeat(${k},minmax(0,1fr))">${hs.map(h => `<div class="ent"><span style="font-size:${sf}px;color:var(--k-slate);font-weight:500">${h.sym}</span><span style="font-size:${cf}px;font-weight:${e.weight};color:${col(e,tone(h.c))}">${money(h.c)}</span></div>`).join("")}</div></div>`;
+    }
+    case "historyList": {
+      const k = clamp(e.count ?? 4, 1, 10), hs = sample.hist.slice(0, k), fs = (e.h/k)*.62*e.scale;
+      return `<div class="box"><div class="col">${hs.map(h => `<div style="display:flex;justify-content:space-between;align-items:center;font-size:${fs}px;line-height:1"><span style="color:var(--k-slate);font-weight:500">${h.sym}</span><span style="font-weight:${e.weight};color:${col(e,tone(h.c))}">${money(h.c)}</span></div>`).join("")}</div></div>`;
+    }
+    case "streak": {
+      const k = clamp(e.count ?? 10, 2, 10), hs = sample.hist.slice(0, k).reverse(), dsz = Math.min(e.h, e.w/k*.7) * e.scale;
+      return `<div class="box" style="justify-content:space-between;align-items:center">${hs.map(h => `<span class="dot" style="width:${dsz}px;height:${dsz}px;background:${h.c > 0 ? "var(--k-leaf)" : "var(--k-loss)"}"></span>`).join("")}</div>`;
+    }
+  }
+  return "";
+}
+
+// The device frame around the surface.
+function context(){
+  const f = F(), c = cur(), w = f.w, h = c.h;
+  if (view === "close") return { cls:"closeup", W:w+48, H:h+48, x:24, y:24, chrome:"" };
+  const island = (x,wd) => `<div class="chrome c-island" style="left:${x}px;width:${wd}px"></div>`;
+  const lock = (hideDate) => `${hideDate ? "" : `<div class="chrome c-date">Wednesday, September 30</div>`}<div class="chrome c-time">9:41</div><div class="chrome c-btn" style="left:46px"></div><div class="chrome c-btn" style="right:46px"></div><div class="chrome c-home"></div>`;
+  const status = `<div class="chrome c-status" style="left:44px">9:41</div>`;
+  switch (f.ctx){
+    case "lockBottom": return { cls:"portrait", W:393, H:852, x:16, y:852-132-h, chrome: island(133.5,126) + lock() };
+    case "lockUnder":  return { cls:"portrait", W:393, H:852, x:(393-w)/2, y:206, chrome: island(133.5,126) + lock() };
+    case "lockInline": return { cls:"portrait", W:393, H:852, x:(393-w)/2, y:60, chrome: island(133.5,126) + lock(true) };
+    case "island":     return { cls:"portrait", W:393, H:852, x:(393-w)/2, y:11, chrome: status + lock() };
+    case "islandMin":  return { cls:"portrait", W:393, H:852, x:268, y:11, chrome: island(126,134) + status + lock() };
+    case "home": {
+      let icons = ""; for (let r = 0; r < 7; r++) for (let q = 0; q < 4; q++) icons += `<div class="chrome c-icon" style="left:${28+q*88}px;top:${70+r*104}px"></div>`;
+      return { cls:"portrait", W:393, H:852, x:(393-w)/2, y:70, chrome: status + island(133.5,126) + icons + `<div class="chrome c-home"></div>` };
+    }
+    case "standby": return { cls:"landscape", W:852, H:393, x:0, y:0, chrome:"" };
+    case "watch": return { cls:"watch", W:205, H:251, x:(205-w)/2, y:f.accessory ? 150 : 90, chrome:`<div class="chrome c-wtime">10:09</div>` };
+  }
+  return { cls:"closeup", W:w+48, H:h+48, x:24, y:24, chrome:"" };
+}
+
+function renderCard(){
+  const f = F(), c = cur(), card = $("card"), frame = $("frame"), ctx = context();
+  frame.className = "frame " + ctx.cls; frame.style.width = ctx.W + "px"; frame.style.height = ctx.H + "px";
+  const key = doc.active + "|" + view + "|" + c.h;
+  if ($("chrome").dataset.k !== key){ $("chrome").innerHTML = ctx.chrome; $("chrome").dataset.k = key; }
+  card.className = `lcard bg-${c.bg}${f.accessory && c.vibrant ? " vibrant" : ""}`;
+  Object.assign(card.style, { left:ctx.x+"px", top:ctx.y+"px", width:f.w+"px", height:c.h+"px", borderRadius:c.radius+"px" });
+  $("clip").innerHTML = c.els.map(e => `<div class="el ${e.visible ? "" : "hiddenel"}" data-id="${e.id}" style="left:${e.x}px;top:${e.y}px;width:${e.w}px;height:${e.h}px">${contentHTML(e)}</div>`).join("");
+  card.querySelectorAll(".sel-outline,.limit,.guide,.cutout").forEach(n => n.remove());
+  if (f.cutout){ const k = document.createElement("div"); k.className = "cutout"; Object.assign(k.style, { left:f.cutout.x+"px", top:f.cutout.y+"px", width:f.cutout.w+"px", height:f.cutout.h+"px" }); k.innerHTML = "<span>camera</span>"; card.appendChild(k); }
+  if (f.limit && c.h > f.limit){ const l = document.createElement("div"); l.className = "limit"; l.style.top = f.limit + "px"; l.innerHTML = `<span>iOS cuts off below ${f.limit} pt</span>`; card.appendChild(l); }
+  if (hoverId && hoverId !== selId) outline(el(hoverId), true);
+  if (selId) outline(el(selId), false);
+}
+function outline(e, hover){
+  if (!e || !e.visible) return;
+  const o = document.createElement("div");
+  o.className = "sel-outline" + (hover ? " hover" : "");
+  Object.assign(o.style, { left:e.x+"px", top:e.y+"px", width:e.w+"px", height:Math.max(e.h,1)+"px" });
+  if (!hover){
+    for (const d of (e.kind === "divider" ? ["w","e"] : ["nw","n","ne","e","se","s","sw","w"])){ const h = document.createElement("div"); h.className = "h "+d; h.dataset.h = d; o.appendChild(h); }
+    const t = document.createElement("div"); t.className = "sizetag"; t.style.left = "0"; t.style.top = (Math.max(e.h,1)+4)+"px";
+    t.textContent = `${e.w}×${e.h} pt @ ${e.x},${e.y}`; o.appendChild(t);
+  }
+  $("card").appendChild(o);
+}
+function renderAll(){ renderFormats(); renderCard(); renderLayers(); renderInspector(); $("fmtNote").textContent = F().note; fit(); }
+
+// Format picker.
+function renderFormats(){
+  $("formats").innerHTML = GROUPS.map(g => `<div class="fgroup"><h3>${g}</h3><div class="row">${Object.entries(FORMATS).filter(([,f]) => f.group === g).map(([id,f]) =>
+    `<button class="fmt" type="button" data-fmt="${id}" aria-pressed="${id === doc.active}" title="${f.w}×${doc.formats[id].h} pt"><span class="ship ${doc.formats[id].ship ? "on" : ""}"></span>${f.name}${f.inApp ? `<span class="tag">${f.auto ? "auto" : "in app"}</span>` : `<span class="tag new">new</span>`}</button>`).join("")}</div></div>`).join("")
+    + `<p class="hint" style="flex-basis:100%;margin:0">Green dot = you want this format built. "In app" formats exist in Kashbot today, "auto" is drawn by iOS from the lock screen board, "new" would be added.</p>`;
+}
+$("formats").addEventListener("click", ev => { const b = ev.target.closest("[data-fmt]"); if (!b) return; doc.active = b.dataset.fmt; selId = null; hoverId = null; persistLocal(); renderAll(); });
+
+// Add palette.
+$("addGrid").innerHTML = KGROUPS.map(g => `<div class="addgrp"><h4>${g}</h4><div class="row">${Object.entries(K).filter(([,d]) => d.g === g).map(([k,d]) => `<button class="add" type="button" data-add="${k}">${d.n}</button>`).join("")}</div></div>`).join("");
+$("addGrid").addEventListener("click", ev => {
+  const b = ev.target.closest("[data-add]"); if (!b) return;
+  const kind = b.dataset.add, d = K[kind], f = F(), c = cur();
+  let n = 1; while (c.els.some(e => e.id === kind + n)) n++;
+  let w = Math.min(d.w, f.w - 8), h = Math.min(d.h, c.h - 8), x = Math.round((f.w - w)/2), y = Math.round((c.h - h)/2);
+  const cols = c.els.filter(e => K[e.kind].col && e.visible);
+  if (d.col && cols.length){ y = cols[0].y; h = cols[0].h; x = clamp(Math.max(...cols.map(e => e.x + e.w)) + 6, 0, Math.max(0, f.w - w)); }
+  const e = mk(kind, kind + n, x, y, w, h);
+  if (d.col && cols.length) e.maxRows = cols[0].maxRows;
+  c.els.push(e); selId = e.id; commit(); renderAll();
+  say(`Added ${d.n}. Drag it into place.`);
+});
+
+// Layers and inspector.
+function renderLayers(){
+  $("layerFmt").textContent = F().group + " · " + F().name;
+  $("layers").innerHTML = cur().els.length ? cur().els.map(e => `<div class="layer ${e.visible?"":"off"}" role="option" tabindex="0" aria-selected="${e.id===selId}" data-id="${e.id}"><button class="eye" type="button" data-eye="${e.id}" aria-label="${e.visible?"Hide":"Show"} ${K[e.kind].n}">${e.visible?"◉":"○"}</button><span class="nm">${K[e.kind].n}</span><button class="del" type="button" data-del="${e.id}" aria-label="Remove ${K[e.kind].n}">✕</button></div>`).join("")
+    : `<p class="hint" style="margin:0">Empty. Add something from the list above.</p>`;
+}
+function field(label, html){ return `<label>${label}</label><div>${html}</div>`; }
+function renderInspector(){
+  const box = $("inspector"), e = selId && el(selId), f = F(), c = cur();
+  if (document.activeElement && box.contains(document.activeElement) && box.dataset.for === (selId || "card:" + doc.active)){ syncInspectorValues(); return; }
+  box.dataset.for = selId || "card:" + doc.active;
+  if (!e){
+    box.innerHTML = `<h2>${f.group} · ${f.name}</h2><div class="fields">
+      ${field("Size", `<span style="font-family:var(--mono);font-size:12.5px">${f.w} × <span id="i-chv">${c.h}</span> pt</span>`)}
+      ${f.hMin ? field("Height", `<input type="range" id="i-ch" min="${f.hMin}" max="${f.hMax}" step="1" value="${c.h}">`) : ""}
+      ${field("Corners", `<input type="range" id="i-cr" min="0" max="${Math.floor(Math.min(f.w, c.h)/2)}" step="1" value="${c.radius}">`)}
+      ${field("Background", `<select id="i-bg">${["black","blur","none"].map(b => `<option value="${b}" ${b===c.bg?"selected":""}>${{black:"Kashbot black",blur:"Frosted glass",none:"None (wallpaper)"}[b]}</option>`).join("")}</select>`)}
+      ${f.accessory ? field("iOS tint", `<label style="display:flex;gap:6px;align-items:center;color:var(--fg)"><input type="checkbox" id="i-vib" ${c.vibrant?"checked":""}> Preview one-color</label>`) : ""}
+      ${field("Build it", `<label style="display:flex;gap:6px;align-items:center;color:var(--fg)"><input type="checkbox" id="i-ship" ${c.ship?"checked":""}> Include this format</label>`)}
+    </div>
+    ${f.textOnly ? `<p class="warn">Inline widgets can only show one line of text. Charts, bars and dots won't render there.</p>` : ""}
+    ${f.limit && c.h > f.limit ? `<p class="warn">Over the ${f.limit} pt limit: iOS will cut off the bottom.</p>` : ""}
+    <p class="hint">${f.note}</p>
+    <p class="hint"><button class="btn" type="button" id="i-reset">Reset this format</button></p>`;
+    return;
+  }
+  const d = K[e.kind];
+  const autoOk = ["pnl","pnlPct","openPnlSum","todayPnl","history","historyList","spark","heroPnl","ring"].includes(e.kind);
+  const colorOpts = (autoOk ? ["auto"] : []).concat(["ink","leaf","slate","loss"]);
+  const graphic = ["divider","oddsBar","spark","streak","ring","leafIcon"].includes(e.kind);
+  box.innerHTML = `<h2>${d.n}</h2>
+    <div class="xywh">${["x","y","w","h"].map(k => `<label>${k.toUpperCase()}<input type="number" id="i-${k}" value="${e[k]}" step="1"></label>`).join("")}</div>
+    <div class="fields" style="margin-top:10px">
+      ${e.kind === "divider" ? field("Opacity", `<input type="range" id="i-op" min=".1" max="1" step=".05" value="${e.opacity ?? .35}">`) : field(graphic && e.kind !== "ring" ? "Scale" : "Text size", `<input type="range" id="i-scale" min=".4" max="2" step=".02" value="${e.scale}">`)}
+      ${graphic && e.kind !== "ring" ? "" : field("Weight", `<select id="i-weight">${[400,500,600,700,800,900].map(w => `<option ${w==e.weight?"selected":""}>${w}</option>`).join("")}</select>`)}
+      ${e.kind === "streak" ? "" : field("Color", `<select id="i-color">${colorOpts.map(v => `<option value="${v}" ${v===e.color?"selected":""}>${v==="auto"?"auto (green up, coral down)":v}</option>`).join("")}</select>`)}
+      ${["divider","history","historyList","streak","spark","ring","oddsBar"].includes(e.kind) ? "" : field("Align", `<select id="i-align">${["left","center","right"].map(a => `<option ${a===e.align?"selected":""}>${a}</option>`).join("")}</select>`)}
+      ${d.col ? field("Rows", `<input type="range" id="i-rows" min="1" max="3" step="1" value="${e.maxRows ?? 3}">`) : ""}
+      ${e.arrows !== undefined ? field("Arrows", `<input type="checkbox" id="i-arrows" ${e.arrows?"checked":""}>`) : ""}
+      ${e.showPct !== undefined ? field("Show %", `<input type="checkbox" id="i-pct" ${e.showPct?"checked":""}>`) : ""}
+      ${e.count !== undefined ? field("Entries", `<input type="range" id="i-count" min="${e.kind==="streak"?2:1}" max="${e.kind==="history"?8:10}" step="1" value="${e.count}">`) : ""}
+      ${e.kind === "brand" ? field("Spacing", `<input type="range" id="i-track" min="0" max="8" step="1" value="${e.tracking ?? 3}">`) : ""}
+      ${e.kind === "ring" ? field("Shows", `<select id="i-src">${Object.entries(RING_SOURCES).map(([k,v]) => `<option value="${k}" ${k===e.source?"selected":""}>${v}</option>`).join("")}</select>`) : ""}
+      ${e.kind === "text" ? field("Text", `<input type="text" id="i-text" maxlength="40" value="${escapeHTML(e.text || "")}">`) : ""}
+      ${field("Visible", `<input type="checkbox" id="i-vis" ${e.visible?"checked":""}>`)}
+    </div>
+    ${F().textOnly && graphic ? `<p class="warn">iOS can't draw this in an inline widget.</p>` : ""}
+    <p class="hint">Text grows with the box height.${d.col ? " Columns with the same top and height line up row by row." : ""}</p>
+    <p class="hint"><button class="btn" type="button" id="i-dup">Duplicate</button> <button class="btn" type="button" id="i-del">Remove</button></p>`;
+}
+function syncInspectorValues(){
+  const e = selId && el(selId);
+  if (!e){ const v = $("i-chv"); if (v) v.textContent = cur().h; return; }
+  for (const k of ["x","y","w","h"]){ const i = $("i-"+k); if (i && document.activeElement !== i) i.value = e[k]; }
+}
+$("inspector").addEventListener("input", ev => {
+  const t = ev.target, e = selId && el(selId), c = cur();
+  if (!e){
+    if (t.id === "i-ch"){ c.h = +t.value; renderCard(); fit(); syncInspectorValues(); return; }
+    if (t.id === "i-cr") c.radius = +t.value;
+    if (t.id === "i-bg") c.bg = t.value;
+    if (t.id === "i-vib") c.vibrant = t.checked;
+    if (t.id === "i-ship"){ c.ship = t.checked; renderFormats(); }
+    renderCard(); return;
+  }
+  const num = v => Number.isFinite(+v) ? Math.round(+v) : 0;
+  switch (t.id){
+    case "i-x": e.x = num(t.value); break; case "i-y": e.y = num(t.value); break;
+    case "i-w": e.w = Math.max(6, num(t.value)); break; case "i-h": e.h = Math.max(e.kind==="divider"?1:6, num(t.value)); break;
+    case "i-scale": e.scale = +t.value; break; case "i-weight": e.weight = +t.value; break;
+    case "i-color": e.color = t.value; break; case "i-align": e.align = t.value; break;
+    case "i-arrows": e.arrows = t.checked; break; case "i-count": e.count = +t.value; break;
+    case "i-track": e.tracking = +t.value; break; case "i-op": e.opacity = +t.value; break;
+    case "i-rows": e.maxRows = +t.value; break; case "i-pct": e.showPct = t.checked; break;
+    case "i-src": e.source = t.value; break; case "i-text": e.text = t.value.slice(0,40); break;
+    case "i-vis": e.visible = t.checked; renderLayers(); break;
+  }
+  renderCard();
+});
+$("inspector").addEventListener("change", ev => { commit(); if (ev.target.type !== "text"){ $("inspector").dataset.for = ""; renderInspector(); } });
+$("inspector").addEventListener("click", ev => {
+  if (ev.target.id === "i-dup") duplicate();
+  else if (ev.target.id === "i-del") removeSel();
+  else if (ev.target.id === "i-reset"){
+    const b = ev.target;
+    if (b.dataset.armed !== "1"){ b.dataset.armed = "1"; b.textContent = "Click again to reset"; setTimeout(() => { if (b.isConnected){ b.dataset.armed = ""; b.textContent = "Reset this format"; } }, 3000); return; }
+    doc.formats[doc.active] = defaultFormat(doc.active); selId = null; commit(); renderAll(); say(`Reset ${F().name} to its starting layout.`);
+  }
+});
+function duplicate(){ const e = selId && el(selId); if (!e) return; let n = 1; while (cur().els.some(z => z.id === e.kind + n)) n++; const c = { ...e, id:e.kind + n, x:e.x + 8, y:e.y + 8 }; cur().els.push(c); selId = c.id; commit(); renderAll(); }
+function removeSel(){ if (!selId) return; cur().els = cur().els.filter(e => e.id !== selId); selId = null; commit(); renderAll(); say("Removed. Undo brings it back."); }
+
+$("layers").addEventListener("click", ev => {
+  const eye = ev.target.closest("[data-eye]"), del = ev.target.closest("[data-del]");
+  if (eye){ const e = el(eye.dataset.eye); e.visible = !e.visible; if (!e.visible && selId === e.id) selId = null; commit(); renderAll(); return; }
+  if (del){ selId = del.dataset.del; removeSel(); return; }
+  const row = ev.target.closest(".layer"); if (!row) return;
+  selId = row.dataset.id; const e = el(selId); if (!e.visible){ e.visible = true; commit(); } renderAll();
+});
+$("layers").addEventListener("keydown", ev => { if ((ev.key === "Enter" || ev.key === " ") && ev.target.classList.contains("layer")){ ev.preventDefault(); ev.target.click(); } });
+
+// Drag, resize, snapping.
+let drag = null;
+function cardPoint(ev){ const r = $("card").getBoundingClientRect(); return { x:(ev.clientX - r.left)/zoom, y:(ev.clientY - r.top)/zoom }; }
+function snapTargets(skip){
+  const W = F().w, H = cur().h, m = W > 200 ? 14 : 6;
+  const xs = [0, m, W/2, W-m, W], ys = [0, H/2, H];
+  if (F().cutout){ const k = F().cutout; xs.push(k.x, k.x + k.w); ys.push(k.y + k.h); }
+  for (const o of cur().els){ if (o.id === skip || !o.visible) continue; xs.push(o.x, o.x+o.w/2, o.x+o.w); ys.push(o.y, o.y+o.h/2, o.y+o.h); }
+  return { xs, ys };
+}
+function snap1(vals, targets){ let best = null; for (const v of vals) for (const t of targets){ const d = t - v; if (Math.abs(d) <= 4 && (!best || Math.abs(d) < Math.abs(best.d))) best = { d, t }; } return best; }
+function showGuides(gx, gy){
+  const card = $("card"); card.querySelectorAll(".guide").forEach(n => n.remove());
+  if (gx != null){ const g = document.createElement("div"); g.className="guide"; Object.assign(g.style,{left:gx+"px",top:"-12px",width:"1px",height:(cur().h+24)+"px"}); card.appendChild(g); }
+  if (gy != null){ const g = document.createElement("div"); g.className="guide"; Object.assign(g.style,{top:gy+"px",left:"-12px",height:"1px",width:(F().w+24)+"px"}); card.appendChild(g); }
+}
+$("card").addEventListener("pointerdown", ev => {
+  const handle = ev.target.closest(".h"), node = ev.target.closest(".el");
+  if (!handle && !node){ selId = null; renderCard(); renderLayers(); renderInspector(); return; }
+  const id = handle ? selId : node.dataset.id; if (!id) return;
+  selId = id; const e = el(id);
+  drag = { id, mode: handle ? handle.dataset.h : "move", start: cardPoint(ev), orig: { x:e.x, y:e.y, w:e.w, h:e.h } };
+  $("card").setPointerCapture(ev.pointerId); ev.preventDefault(); renderCard(); renderLayers(); renderInspector();
+});
+$("card").addEventListener("pointermove", ev => {
+  if (!drag){ const n = ev.target.closest(".el"); const id = n ? n.dataset.id : null; if (id !== hoverId){ hoverId = id; renderCard(); } return; }
+  const p = cardPoint(ev), e = el(drag.id), o = drag.orig, dx = p.x - drag.start.x, dy = p.y - drag.start.y;
+  const T = snapTargets(e.id), free = ev.altKey; let gx = null, gy = null;
+  const minH = e.kind === "divider" ? 1 : 6;
+  if (drag.mode === "move"){
+    let x = o.x + dx, y = o.y + dy;
+    if (!free){ const sx = snap1([x, x+o.w/2, x+o.w], T.xs); if (sx){ x += sx.d; gx = sx.t; } const sy = snap1([y, y+o.h/2, y+o.h], T.ys); if (sy){ y += sy.d; gy = sy.t; } }
+    e.x = Math.round(x); e.y = Math.round(y);
+  } else {
+    let { x, y, w, h } = o; const m = drag.mode;
+    if (m.includes("e")) w = o.w + dx;
+    if (m.includes("s")) h = o.h + dy;
+    if (m.includes("w")){ x = o.x + dx; w = o.w - dx; }
+    if (m.includes("n")){ y = o.y + dy; h = o.h - dy; }
+    if (!free){
+      if (m.includes("e")){ const s = snap1([x+w], T.xs); if (s){ w += s.d; gx = s.t; } }
+      if (m.includes("w")){ const s = snap1([x], T.xs); if (s){ x += s.d; w -= s.d; gx = s.t; } }
+      if (m.includes("s")){ const s = snap1([y+h], T.ys); if (s){ h += s.d; gy = s.t; } }
+      if (m.includes("n")){ const s = snap1([y], T.ys); if (s){ y += s.d; h -= s.d; gy = s.t; } }
+    }
+    if (w < 6){ if (m.includes("w")) x -= 6 - w; w = 6; }
+    if (h < minH){ if (m.includes("n")) y -= minH - h; h = minH; }
+    Object.assign(e, { x:Math.round(x), y:Math.round(y), w:Math.round(w), h:Math.round(h) });
+  }
+  renderCard(); showGuides(gx, gy); syncInspectorValues();
+});
+function endDrag(){ if (!drag) return; drag = null; showGuides(null, null); commit(); renderCard(); renderInspector(); }
+$("card").addEventListener("pointerup", endDrag);
+$("card").addEventListener("pointercancel", endDrag);
+$("card").addEventListener("pointerleave", () => { if (!drag && hoverId){ hoverId = null; renderCard(); } });
+
+let keyT = 0;
+document.addEventListener("keydown", ev => {
+  const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || "");
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z" && !typing){ ev.preventDefault(); ev.shiftKey ? doRedo() : doUndo(); return; }
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "d" && !typing && selId){ ev.preventDefault(); duplicate(); return; }
+  if (typing || !selId) return;
+  const e = el(selId), step = ev.shiftKey ? 8 : 1;
+  const mv = { ArrowLeft:[-step,0], ArrowRight:[step,0], ArrowUp:[0,-step], ArrowDown:[0,step] }[ev.key];
+  if (mv){ ev.preventDefault(); e.x += mv[0]; e.y += mv[1]; renderCard(); syncInspectorValues(); clearTimeout(keyT); keyT = setTimeout(commit, 400); }
+  else if (ev.key === "Delete" || ev.key === "Backspace"){ ev.preventDefault(); removeSel(); }
+  else if (ev.key === "Escape"){ selId = null; renderAll(); }
+});
+function doUndo(){ if (!undo.length) return; redo.push(JSON.stringify(doc)); restore(undo.pop()); }
+function doRedo(){ if (!redo.length) return; undo.push(JSON.stringify(doc)); restore(redo.pop()); }
+$("undoBtn").onclick = doUndo; $("redoBtn").onclick = doRedo;
+
+// Toolbar.
+for (const k of [0,1,2,3]) $("n"+k).onclick = () => { sample.nOpen = k; for (const j of [0,1,2,3]) $("n"+j).setAttribute("aria-pressed", String(j===k)); renderCard(); };
+$("liveBtn").onclick = () => { live = !live; $("liveBtn").setAttribute("aria-pressed", String(live)); $("liveBtn").textContent = "Live ticks: " + (live ? "on" : "off"); };
+$("vCtx").onclick = () => setView("ctx"); $("vClose").onclick = () => setView("close");
+function setView(v){ view = v; $("vCtx").setAttribute("aria-pressed", String(v==="ctx")); $("vClose").setAttribute("aria-pressed", String(v==="close")); renderCard(); fit(); }
+$("note").addEventListener("input", () => { persistLocal(); dirty(); });
+
+function exportObj(){
+  const formats = {};
+  for (const id in FORMATS) formats[id] = { name:`${FORMATS[id].group}: ${FORMATS[id].name}`, widthPt:FORMATS[id].w, inAppToday:!!FORMATS[id].inApp, ...doc.formats[id] };
+  return { v:2, formats, shipping:Object.keys(FORMATS).filter(id => doc.formats[id].ship), note:$("note").value.trim(), savedAt:new Date().toISOString() };
+}
+$("copyBtn").onclick = async () => {
+  const txt = JSON.stringify(exportObj(), null, 2);
+  try { await navigator.clipboard.writeText(txt); say("Copied the design JSON.", "ok"); }
+  catch { let t = $("copyFallback"); if (!t){ t = document.createElement("textarea"); t.id = "copyFallback"; t.style.cssText = "width:100%;height:160px;margin-top:12px"; document.body.appendChild(t); } t.value = txt; t.select(); say("Copy was blocked, so the JSON is selected at the bottom of the page. Press Ctrl+C.", "err"); }
+};
+function say(msg, cls=""){ const s = $("status"); s.textContent = msg; s.className = "status " + cls; }
+function dirty(){ if (db) say("Unsaved changes. Save when it looks right."); }
+
+// Zoom to fit.
+function fit(){
+  const wrap = $("fit"), inner = $("fitInner"), frame = $("frame");
+  const w = frame.offsetWidth, h = frame.offsetHeight;
+  const availW = wrap.clientWidth - 28, availH = Math.max(320, window.innerHeight - wrap.getBoundingClientRect().top - 40);
+  const close = view === "close";
+  zoom = clamp(Math.min(availW / w, close ? 4 : availH / h, close ? 4 : 2.2), .3, 4);
+  inner.style.transform = `scale(${zoom})`; inner.style.width = w + "px"; inner.style.height = h + "px";
+  wrap.style.height = (h * zoom + 26) + "px";
+  $("zoomLbl").textContent = `${Math.round(zoom*100)}% · ${F().w}×${cur().h} pt`;
+}
+addEventListener("resize", () => fit());
+
+// Live ticks on the sample data.
+setInterval(() => {
+  for (const p of sample.open) p.closes = p.closes > 1 ? p.closes - 1 : 26*3600;
+  if (drag) return;
+  if (!live){ if (cur().els.some(e => e.kind === "countdown" || e.kind === "updated")) renderCard(); return; }
+  changed = new Set();
+  const open = openRows(9);
+  if (open.length && Math.random() < .75){
+    const i = Math.floor(Math.random() * open.length), d = Math.round((Math.random() - .5) * 14);
+    if (d){
+      open[i].pnl += d; sample.total += d; sample.today += d; changed.add("pnl"+i); changed.add("total");
+      if (Math.random() < .5){ open[i].odds = clamp(open[i].odds + Math.sign(d), 1, 99); changed.add("odds"+i); }
+      sample.spark.push(sample.today); if (sample.spark.length > 40) sample.spark.shift();
+    }
+  }
+  renderCard(); changed = new Set();
+}, 1000);
+
+// Save for Claude.
+let db = null;
+(async () => {
+  try { db = await window.claude?.use?.("db"); } catch { db = null; }
+  if (!db){ say("Saving for Claude needs the page opened on claude.ai while signed in. Copy JSON still works."); return; }
+  $("saveBtn").disabled = false;
+  try {
+    const snap = await db.doc("layouts/kashbot-lock").get();
+    if (snap.exists){
+      const d = snap.data(); let localAt = 0;
+      try { localAt = JSON.parse(localStorage.getItem("kashbot-board-draft-v2") || "{}").at || 0; } catch {}
+      const m = migrate(d.doc || d.layout);
+      if (m && (d.savedAtMs || 0) > localAt){ doc = m; $("note").value = d.note || ""; lastCommitted = JSON.stringify(doc); persistLocal(); renderAll(); }
+      say("Loaded your last saved design (" + new Date(d.savedAtMs).toLocaleString() + ").", "ok");
+    } else say("Nothing saved yet. Arrange the formats you want, then Save for Claude.");
+  } catch (e){ say("Could not read the saved design (" + (e?.code || "unavailable") + "). Your draft is still here.", "err"); }
+})();
+$("saveBtn").onclick = async () => {
+  if (!db) return;
+  const b = $("saveBtn"); b.disabled = true; say("Saving…");
+  const body = { doc, export:exportObj(), note:$("note").value.trim(), savedAtMs:Date.now() };
+  try {
+    await db.doc("layouts/kashbot-lock").set(body);
+    await db.doc("versions/v" + body.savedAtMs).set(body);
+    persistLocal(); say("Saved. Tell Claude “build my board design”.", "ok");
+  } catch (e){
+    const c = e?.code;
+    say(c === "not_granted" ? "Saving was declined. Copy JSON and paste it to Claude instead." : c === "quota_exceeded" || c === "resource_exhausted" ? "Storage is full or busy. Try again in a minute, or Copy JSON." : "Save failed (" + (c || "unavailable") + "). Your draft is safe in this browser; try again.", "err");
+  } finally { b.disabled = false; }
+};
+
+syncUndo(); renderAll();
+})();
+</script>

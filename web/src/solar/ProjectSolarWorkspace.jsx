@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 import SolarSettingsForm from './SolarSettingsForm.jsx'
+import { canOpenSolarSettingsForm } from './solarSettingsWire.js'
 import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
 
@@ -102,7 +103,10 @@ function describeScope(props) {
         if (!denseArray(capabilities)) throw new TypeError('Invalid catalog family')
         for (let position = 0; position < capabilities.length; position += 1) collected.push(capabilities[position])
       }
-      rows = collected
+      rows = collected.filter((row) => {
+        if (!plain(row) || typeof row.name !== 'string' || !TOOL_NAME.test(row.name)) throw new TypeError('Invalid catalog row')
+        return hostFor(row, props) !== 'unsupported'
+      })
       const declarations = new Map()
       const keys = rows.map((row) => {
         const key = rowDeclaration(row)
@@ -229,7 +233,7 @@ export default function ProjectSolarWorkspace(props) {
   let reason = owner.reason || (!FlowRail ? 'host_unavailable' : null)
   let host = null
   if (!reason && selected) {
-    if (!owner.rows.includes(selected)) reason = 'catalog_unavailable'
+    if (!owner.rows.includes(selected)) reason = hostFor(selected, props) === 'unsupported' ? 'unsupported' : 'catalog_unavailable'
     else {
       host = hostFor(selected, props)
       if (host === 'unsupported' || host === 'host_unavailable') { reason = host; host = null }
@@ -300,6 +304,7 @@ export default function ProjectSolarWorkspace(props) {
     {FlowRail && <FlowRail solarBinding={owner.binding} authorityKey={owner.authorityKey} projectClient={owner.projectClient}
       projectCatalog={owner.reason ? null : owner.projectCatalog} projectRunMemory={projectRunMemory}
       projectPending={projectPending} busy={busy} openName={editor ? selected.name : null}
+      openSettingsForm={canOpenSolarSettingsForm}
       onOpenStep={opening && !busy ? open : undefined} onFlowChange={(flow) => retire(flow, true)} />}
     {inspectionRows.map((row) => <button type="button" key={row.name}
       disabled={!opening || busy || hostFor(row, props) === 'host_unavailable'} onClick={() => open(row)}>

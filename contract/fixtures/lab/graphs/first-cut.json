@@ -1,0 +1,72 @@
+{
+  "schema": "leaf.lab-graph.v1",
+  "blocks": [
+    {
+      "id": "market",
+      "registry": {
+        "id": "level-fast-index",
+        "version": "1.0.0",
+        "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "settings": {
+        "mean_fast_index": 0
+      }
+    },
+    {
+      "id": "strategy",
+      "registry": {
+        "id": "variance-ew600",
+        "version": "1.0.0",
+        "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "settings": {}
+    },
+    {
+      "id": "bet-size",
+      "registry": {
+        "id": "sizing-policy-v1",
+        "version": "1.0.0",
+        "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "settings": {
+        "fixed_count": 0.25,
+        "all_in_max_legs": 2,
+        "all_in_value_fraction": 0,
+        "conviction_max": 1,
+        "conviction_min": 0.1,
+        "favorite_mult": 1,
+        "risk_resize_live": 0,
+        "size_fraction": 0,
+        "target_win_cents": 0
+      }
+    }
+  ],
+  "pipes": [
+    {
+      "from": {
+        "node": "market",
+        "port": "result"
+      },
+      "to": {
+        "node": "strategy",
+        "port": "value"
+      }
+    },
+    {
+      "from": {
+        "node": "strategy",
+        "port": "result"
+      },
+      "to": {
+        "node": "bet-size",
+        "port": "value"
+      }
+    }
+  ],
+  "outputs": {
+    "bet-size": {
+      "node": "bet-size",
+      "port": "result"
+    }
+  }
+}

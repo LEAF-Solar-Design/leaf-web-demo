@@ -26,6 +26,7 @@ INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
 EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 82)]
 EXPECTED_SELECTOR_DEFAULTS = {
+    "LEAF_LAB_STORE": "sqlite",
     "tenant_authority_modes.authority_mode": "legacy_sqlite",
     "project_authority_modes.authority_mode": "legacy_sqlite",
     "LEAF_JOBS_STORE": "legacy",
@@ -58,6 +59,7 @@ EXPECTED_SELECTOR_DEPENDENCIES = [
     },
 ]
 REQUIRED_COVERAGE = {
+    "lab_graph_ledger",
     "jobs",
     "sessions_approvals",
     "session_annex",
@@ -101,6 +103,7 @@ REQUIRED_AUTHORITY_FIELDS = {
     "current_selection",
 }
 REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
+    "LEAF_LAB_STORE": {"lab_documents", "lab_blobs", "lab_revisions", "lab_publish_receipts"},
     "LEAF_DEMO_LIVE_ENABLED": {"demo_sessions", "demo_mint_counters", "identity_bindings",
                                "orgs", "projects", "project_member_bindings"},
     "project_authority_modes.authority_mode": {

@@ -71,6 +71,139 @@ test('guard denies every write before transport', async () => {
   assert.throws(() => ledger.assertClean(), /^Error: PROD_POLICY_DENIED$/)
 })
 
+test('allowed browser requests end quietly when fetch loses its target', async () => {
+  for (const error of [
+    Object.assign(new Error('closed'), { name: 'TargetClosedError' }),
+    new Error('route.fetch: Target page, context or browser has been closed'),
+    new Error('Target page, context or browser has been closed'),
+  ]) for (const abortThrows of [false, true]) {
+    const fake = double()
+    const ledger = denialLedger()
+    await installBrowserGuard(fake.context, policy, ledger)
+    const { route, sent } = routeDouble(`${origin}/read`)
+    route.fetch = async () => { sent.push({ kind: 'fetch' }); throw error }
+    route.abort = async (reason) => {
+      assert.equal(reason, 'blockedbyclient')
+      sent.push({ kind: 'abort' })
+      if (abortThrows) throw Object.assign(new Error('closed'), { name: 'TargetClosedError' })
+    }
+    await assert.doesNotReject(() => fake.handlers.http(route))
+    assert.deepEqual(sent, [{ kind: 'fetch' }, { kind: 'abort' }])
+    assert.deepEqual(ledger.snapshot(), {})
+    ledger.assertClean()
+  }
+})
+
+test('target-closed message lookalikes still record TRANSPORT', async () => {
+  for (const prefix of ['', 'route.fetch: ', 'route.fulfill: ', 'route.abort: ']) {
+    for (const suffix of [' unexpectedly', 'Extra']) {
+      const fake = double()
+      const ledger = denialLedger()
+      await installBrowserGuard(fake.context, policy, ledger)
+      const { route, sent } = routeDouble(`${origin}/read`)
+      route.fetch = async () => {
+        sent.push({ kind: 'fetch' })
+        throw new Error(`${prefix}Target page, context or browser has been closed${suffix}`)
+      }
+      await fake.handlers.http(route)
+      assert.deepEqual(sent, [{ kind: 'fetch' }, { kind: 'abort' }])
+      assert.deepEqual(ledger.snapshot(), { TRANSPORT: 1 })
+      assert.throws(() => ledger.assertClean(), /^Error: PROD_POLICY_DENIED$/)
+    }
+  }
+})
+
+test('target-closed messages admit diagnostic lines after a newline', async () => {
+  for (const prefix of ['', 'route.fetch: ', 'route.fulfill: ', 'route.abort: ']) {
+    const fake = double()
+    const ledger = denialLedger()
+    await installBrowserGuard(fake.context, policy, ledger)
+    const { route, sent } = routeDouble(`${origin}/read`)
+    route.fetch = async () => {
+      sent.push({ kind: 'fetch' })
+      throw new Error(`${prefix}Target page, context or browser has been closed\nCall log:`)
+    }
+    route.abort = async (reason) => {
+      assert.equal(reason, 'blockedbyclient')
+      sent.push({ kind: 'abort' })
+      throw new Error('route.abort: Target page, context or browser has been closed\nCall log:')
+    }
+    await assert.doesNotReject(() => fake.handlers.http(route))
+    assert.deepEqual(sent, [{ kind: 'fetch' }, { kind: 'abort' }])
+    assert.deepEqual(ledger.snapshot(), {})
+    ledger.assertClean()
+  }
+})
+
+test('cleanup abort transport failures are recorded and propagated', async () => {
+  const fake = double()
+  const ledger = denialLedger()
+  await installBrowserGuard(fake.context, policy, ledger)
+  const { route, sent } = routeDouble(`${origin}/read`)
+  const abortError = new Error('connect ECONNRESET')
+  route.fetch = async () => {
+    sent.push({ kind: 'fetch' })
+    throw Object.assign(new Error('closed'), { name: 'TargetClosedError' })
+  }
+  route.abort = async (reason) => {
+    assert.equal(reason, 'blockedbyclient')
+    sent.push({ kind: 'abort' })
+    throw abortError
+  }
+  await assert.rejects(() => fake.handlers.http(route), (error) => error === abortError)
+  assert.deepEqual(sent, [{ kind: 'fetch' }, { kind: 'abort' }])
+  assert.deepEqual(ledger.snapshot(), { TRANSPORT: 1 })
+  assert.throws(() => ledger.assertClean(), /^Error: PROD_POLICY_DENIED$/)
+})
+
+test('target closure during fulfill or redirect abort preserves policy denials', async () => {
+  for (const operation of ['fulfill', 'abort']) {
+    const fake = double()
+    const ledger = denialLedger()
+    await installBrowserGuard(fake.context, policy, ledger)
+    const { route, sent } = routeDouble(`${origin}/read`, 'GET', {}, operation === 'abort' ? 302 : 200)
+    route[operation] = async () => {
+      sent.push({ kind: operation })
+      throw new Error(`route.${operation}: Target page, context or browser has been closed`)
+    }
+    await assert.doesNotReject(() => fake.handlers.http(route))
+    assert.deepEqual(sent.map(({ kind }) => kind), ['fetch', operation, 'abort'])
+    assert.deepEqual(ledger.snapshot(), operation === 'abort' ? { REDIRECT: 1 } : {})
+    if (operation === 'fulfill') ledger.assertClean()
+    else assert.throws(() => ledger.assertClean(), /^Error: PROD_POLICY_DENIED$/)
+  }
+})
+
+test('other browser transport errors still record TRANSPORT', async () => {
+  for (const message of [
+    'connect ECONNRESET',
+    'other: Target page, context or browser has been closed',
+    'route.fetch: other Target page, context or browser has been closed',
+    'route.fetch: target page, context or browser has been closed',
+  ]) {
+    const fake = double()
+    const ledger = denialLedger()
+    await installBrowserGuard(fake.context, policy, ledger)
+    const { route, sent } = routeDouble(`${origin}/read`)
+    route.fetch = async () => { sent.push({ kind: 'fetch' }); throw new Error(message) }
+    await fake.handlers.http(route)
+    assert.deepEqual(sent, [{ kind: 'fetch' }, { kind: 'abort' }])
+    assert.deepEqual(ledger.snapshot(), { TRANSPORT: 1 })
+    assert.throws(() => ledger.assertClean(), /^Error: PROD_POLICY_DENIED$/)
+  }
+})
+
+test('browser origin denials abort before fetch', async () => {
+  const fake = double()
+  const ledger = denialLedger()
+  await installBrowserGuard(fake.context, policy, ledger)
+  const { route, sent } = routeDouble('https://evil.example.test/read')
+  await fake.handlers.http(route)
+  assert.deepEqual(sent, [{ kind: 'abort' }])
+  assert.deepEqual(ledger.snapshot(), { ORIGIN: 1 })
+  assert.throws(() => ledger.assertClean(), /^Error: PROD_POLICY_DENIED$/)
+})
+
 test('guard admits only explicit read destinations', () => {
   assert.deepEqual(READ_ONLY_EXTERNAL_ORIGINS, [])
   assert.ok(Object.isFrozen(READ_ONLY_EXTERNAL_ORIGINS))

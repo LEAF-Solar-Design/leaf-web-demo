@@ -1,0 +1,250 @@
+{
+  "schema": "leaf.lab-port-compat.v1",
+  "cases": [
+    {
+      "name": "same",
+      "output": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "expected": true
+    },
+    {
+      "name": "unit",
+      "output": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "usd",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "expected": false
+    },
+    {
+      "name": "stream",
+      "output": {
+        "mode": "stream",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "expected": false
+    },
+    {
+      "name": "nullable",
+      "output": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": true,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "expected": false
+    },
+    {
+      "name": "accept-null",
+      "output": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": true,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": true,
+        "required": false,
+        "has_default": false
+      },
+      "expected": true
+    },
+    {
+      "name": "integer-widens",
+      "output": {
+        "mode": "scalar",
+        "schema": {
+          "type": "integer"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "expected": true
+    },
+    {
+      "name": "number-narrows",
+      "output": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "integer"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "expected": false
+    },
+    {
+      "name": "bounded",
+      "output": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "expected": true
+    },
+    {
+      "name": "unbounded",
+      "output": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number",
+          "minimum": 0
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "expected": false
+    },
+    {
+      "name": "required-optional",
+      "output": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": false,
+        "has_default": false
+      },
+      "input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": true,
+        "has_default": false
+      },
+      "expected": true
+    }
+  ]
+}

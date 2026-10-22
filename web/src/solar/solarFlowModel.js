@@ -211,7 +211,10 @@ export function deriveProjectSolarFlowState({ steps, current, previousReady, pen
           && Array.isArray(availability.refusal_reasons) && availability.refusal_reasons.length === 1
           && availability.refusal_reasons[0] === 'project_request_required'
       })
-      const enabled = ready || reviewable
+      const seedOpenable = !ready && matching.every((entry) =>
+        typeof entry.catalog_digest === 'string' && PROJECT_FLOW_DIGEST.test(entry.catalog_digest)
+          && entry.catalog_digest === row.catalog_digest && settingsOpenable(entry, openSettingsForm))
+      const enabled = ready || reviewable || seedOpenable
       const codes = []
       let graphRefusal = false
       for (const entry of matching) {
@@ -237,7 +240,7 @@ export function deriveProjectSolarFlowState({ steps, current, previousReady, pen
       const sameRun = runOutcome?.authorityKey === authorityKey && sameSolarDrawingBinding(runOutcome?.binding, binding)
       const pendingHere = pending?.tool === row.name && pending.authorityKey === authorityKey && sameSolarDrawingBinding(pending.binding, binding)
       const status = pendingHere ? 'pending' : sameRun && runOutcome.ok === false ? 'failed'
-        : ready ? 'ready' : enabled ? 'review' : 'blocked'
+        : ready || seedOpenable ? 'ready' : enabled ? 'review' : 'blocked'
       if (enabled) resumeIndex = index
       if (!ready && firstBlocked === -1) firstBlocked = index
       return { name: row.name, label: typeof row.label === 'string' && row.label ? row.label : row.name,
@@ -339,11 +342,11 @@ export function projectSolarFlowOptions(families) {
 // Display gaps are separate from capability rows. Scope and catalog failures never
 // acquire run history, readiness or admission through a placeholder.
 export function projectSolarFlowDisplay({ selection, current, binding, authorityKey, busy = false,
-  previousReady, pending, runs } = {}) {
+  previousReady, pending, runs, openSettingsForm } = {}) {
   const scope = projectSolarFlowScope(binding, authorityKey)
   const active = current === true && !!scope && !!selection && selection.reasonKey !== 'catalog_unreadable'
   const derived = deriveProjectSolarFlowState({ steps: active ? selection.steps : [], current: active,
-    binding, authorityKey, previousReady, pending, runs })
+    binding, authorityKey, previousReady, pending, runs, openSettingsForm })
   const byName = new Map(derived.items.map((item) => [item.name, item]))
   const usableNames = new Set((selection?.positions ?? [])
     .filter((position) => position.usable && !position.formUnavailable).map((position) => position.name))

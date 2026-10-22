@@ -16,6 +16,7 @@ const schema = JSON.parse(readFileSync(SCHEMA_PATH, 'utf8'))
 describe('Surface Contract — schema', () => {
   it('admits the native Ops profile through the same closed overlay definition', () => {
     expect(schema.properties.ops).toEqual({ $ref: '#/$defs/surfaceOverlay' })
+    expect(schema.properties.lab).toEqual({ $ref: '#/$defs/surfaceOverlay' })
   })
   it('declares exactly the surface ids productSurfaces.js ships', () => {
     const schemaIds = Object.keys(schema.properties).sort()

@@ -1101,6 +1101,25 @@
       }
     },
     {
+      "id": "lab_graphs",
+      "coverage": ["lab_graph_ledger"],
+      "selectors": [{
+        "name": "LEAF_LAB_STORE",
+        "allowed_modes": ["sqlite", "postgres"],
+        "repository_default": "sqlite"
+      }],
+      "postgres_tables": ["lab_documents", "lab_blobs", "lab_revisions", "lab_publish_receipts"],
+      "legacy_source": ["LEAF_LAB_DB local SQLite; forbidden in deployed runtimes and under /data/state."],
+      "backfill": {"command": null, "status": "not_applicable", "note": "New graph-only authority. Local SQLite is not a deployed migration source."},
+      "parity": {"command": null, "status": "not_run", "note": "Canonical digest vectors and the DATABASE_URL two-writer proof are in server/tests/test_lab_artifacts.py; planner verification is required."},
+      "cutover_modes": ["postgres"],
+      "rollback_mode": "Disable LEAF_LAB_SURFACE_ENABLED; retain all PostgreSQL ledger tables and immutable bytes. Never fall back to SQLite in deployment.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "No live deployment selection recorded by SEL-101."},
+        "production": {"value": null, "status": "unknown", "evidence": "No live deployment selection recorded by SEL-101."}
+      }
+    },
+    {
       "id": "demo_sessions",
       "coverage": ["demo_identity"],
       "selectors": [{

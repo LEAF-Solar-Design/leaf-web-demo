@@ -11,7 +11,8 @@
     "solar": { "$ref": "#/$defs/surfaceOverlay" },
     "ios": { "$ref": "#/$defs/surfaceOverlay" },
     "sheets": { "$ref": "#/$defs/surfaceOverlay" },
-    "ops": { "$ref": "#/$defs/surfaceOverlay" }
+    "ops": { "$ref": "#/$defs/surfaceOverlay" },
+    "lab": { "$ref": "#/$defs/surfaceOverlay" }
   },
   "$defs": {
     "surfaceOverlay": {
