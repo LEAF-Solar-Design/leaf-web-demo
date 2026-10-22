@@ -81,7 +81,8 @@
       "0077",
       "0078",
       "0079",
-      "0080"
+      "0080",
+      "0081"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -540,7 +541,7 @@
       "backfill": {
         "command": null,
         "status": "not_implemented",
-        "note": "No tenant, ledger, admission, or slot backfill command exists."
+        "note": "No tenant, ledger, admission, or slot backfill command exists. Migration 0081_broker_terminal_intent.sql expands this LEAF_BROKER_STORE authority's broker_run_admissions table with nullable JSONB terminal_intent_json and CHECK constraint broker_terminal_intent_object, which permits SQL NULL or a JSON object. The broker_terminal_intent_write_once trigger runs BEFORE INSERT OR UPDATE OR DELETE for each row using leaf_guard_broker_terminal_intent(): inserts must have no terminal intent; setting it requires both the old and new admission state to be executing with event_key, tenant_id, request_fingerprint, lease_token, and aps_live unchanged. Once set, the intent and those identity/fence fields cannot change, and the row cannot be deleted; subsequent state transitions remain allowed. Existing admissions retain NULL; no terminal intent backfill is supplied."
       },
       "parity": {
         "command": "python -m pytest -q server/tests/test_broker_usage_postgres.py",
