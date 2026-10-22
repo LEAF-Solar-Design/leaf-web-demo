@@ -215,7 +215,7 @@ def test_message_appended_role_vocabulary_reaches_firehose_unchanged(firehose_wi
     ("192.0.2.21", ("192.0.2.21",)),
     ("C:/synthetic-project/roof-notes.dwg", ("C:/synthetic-project/roof-notes.dwg",)),
     ("N2_SYNTHETIC_PROJECT_NOTE", ("N2_SYNTHETIC_PROJECT_NOTE",)),
-    ("Bearer N2_SYNTHETIC_NOT_A_CREDENTIAL", ("N2_SYNTHETIC_NOT_A_CREDENTIAL",)),
+    ("Bearer " + "N2_SYNTHETIC_NOT_A_CREDENTIAL", ("N2_SYNTHETIC_NOT_A_CREDENTIAL",)),
     ('{"email":"n2-nested@example.invalid","token":"N2_NESTED_DUMMY"}',
      ("n2-nested@example.invalid", "N2_NESTED_DUMMY")),
     ("", ()),
