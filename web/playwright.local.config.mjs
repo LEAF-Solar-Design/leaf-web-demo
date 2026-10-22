@@ -58,8 +58,15 @@ if (linkFlowBoot) {
     }
     process.env.LEAF_LINK_FLOW_PORTS_CLEARED = '1'
   }
+  // /try?proof=1 selects cat-panels, which is deliberately NOT a curated
+  // bootstrap alias. Provision this fixture explicitly in this run's store;
+  // ordinary reads must continue to refuse missing, unlisted drawing IDs.
+  execFileSync('python', ['-B', '-c', [
+    'import write_loop, store',
+    'store.ingest_drawing(write_loop.default_backend(), "demo-tenant", str(write_loop.CACHED_INTAKE_PATH), drawing_id="cat-panels")',
+  ].join('\n')], { cwd: join(repo, 'server'), env: { ...process.env, APS_LIVE: '0' }, stdio: 'inherit', timeout: 30_000 })
   webServer = {
-    command: 'npm --prefix harness run build && python scripts/start-leaf.py --with-harness --broker-port 8240 --app-port 8230 --harness-port 8250 --web-port 5275',
+    command: 'npm --prefix harness run build && python scripts/start-leaf.py --strict-ports --with-harness --broker-port 8240 --app-port 8230 --harness-port 8250 --web-port 5275',
     cwd: repo,
     url: 'http://127.0.0.1:5275',
     reuseExistingServer: false,

@@ -10,6 +10,9 @@ const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof'
 
 test('trust rail reflects real health, plan, usage, and Claude grant state', async ({ page, request }, testInfo) => {
   await requireLocalReady(request, test, API_BASE)
+  const drawing = await request.get(`${API_BASE}/api/drawings/cat-panels/intake`, { headers: TENANT_HEADERS })
+  expect(drawing.status(), 'provision the proof drawing explicitly; cat-panels is not a bootstrap alias').toBe(200)
+  expect((await drawing.json()).intake).toBeTruthy()
 
   const [healthResponse, usageResponse, entitlementResponse, grantResponse] = await Promise.all([
     request.get(`${API_BASE}/api/health`),

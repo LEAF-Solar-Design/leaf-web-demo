@@ -44,6 +44,37 @@ WRITE_TOOL = "delete-marked-panel"
 # --------------------------------------------------------------------------- #
 # process harness
 # --------------------------------------------------------------------------- #
+@pytest.mark.skipif(os.name == "nt", reason="POSIX reusable-port semantics")
+def test_launcher_keeps_fixed_port_after_connection_closes():
+    """A listener is busy; its closed TIME_WAIT connections are reusable."""
+    import errno
+    import importlib.util
+
+    path = PROJECT_ROOT / "scripts" / "start-leaf.py"
+    spec = importlib.util.spec_from_file_location("start_leaf_port_test", path)
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    with socket.socket() as listener, socket.socket() as client:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.listen()
+        assert not launcher.is_port_free(port, exclusive=True)
+        with pytest.raises(SystemExit, match="busy"):
+            launcher.pick_port("app", port, set(), strict=True)
+        client.settimeout(5)
+        listener.settimeout(5)
+        client.connect(("127.0.0.1", port))
+        connection, _ = listener.accept()
+        connection.close()  # Server closes first, leaving server-side TIME_WAIT.
+        assert client.recv(1) == b""
+    with socket.socket() as plain_probe:
+        with pytest.raises(OSError) as busy:
+            plain_probe.bind(("127.0.0.1", port))
+        assert busy.value.errno == errno.EADDRINUSE
+    assert launcher.pick_port("app", port, set(), strict=True) == port
+
+
 def free_port() -> int:
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
