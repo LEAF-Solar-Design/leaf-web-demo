@@ -106,8 +106,15 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Optional
 from urllib.parse import quote
+
+# Keep audit backoff instrumentation local to this runner. Patching the shared
+# time module also patches subprocess's POSIX timeout wait, whose internal
+# sleeps must not be mistaken for audit backoffs. Suites use subprocess.run.
+time = SimpleNamespace(sleep=time.sleep, perf_counter=time.perf_counter,
+                       strftime=time.strftime)
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO = SCRIPTS_DIR.parent               # .../leaf-web-demo
