@@ -1,3 +1,5 @@
+import { sceneForPath } from './routeScene.js'
+
 export const DEFAULT_PRODUCT_SURFACE = 'cad'
 
 export const SHARED_WORKSPACE_CAPABILITIES = Object.freeze([
@@ -534,6 +536,34 @@ export const PRODUCT_SURFACES = Object.freeze([
       tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: null },
     }),
   }),
+  Object.freeze({
+    id: 'lab',
+    label: 'Lab',
+    eyebrow: 'Strategy',
+    title: 'Strategy and Assignment',
+    description: 'Check a Strategy, review a Suggested change, and follow The bot.',
+    familyIds: Object.freeze([]),
+    contract: deepFreeze({
+      ground: 'lab',
+      scene: 'app',
+      chrome: { shell: 'cockpit', productFrame: false, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true, rail: 'lab' },
+      toolbar: { profile: 'project', ribbon: false, home: null, quick: null },
+      rails: { left: 'none', right: 'none', dock: null },
+      groundMaterial: { layerAccent: null, solarStrings: false },
+      commandLine: false,
+      authoring: true,
+      versions: 'none',
+      conversations: { scope: null },
+      integrations: null,
+      builds: { routes: [], card: null },
+      contextMenu: [],
+      shortcuts: null,
+      entitlements: [],
+      resetOn: null,
+      a11y: null,
+      tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: null },
+    }),
+  }),
   // -------------------------------------------------------------------------
   // SHEETS (standardization slice 5b). The fifth surface, and the first one
   // the studio does NOT host: /sheets is its own SiteRoot arm
@@ -650,7 +680,7 @@ const SURFACE_IDS = new Set(PRODUCT_SURFACES.map(({ id }) => id))
 
 // The ids the STUDIO can select, derived from the same slot the tab band
 // renders from (`chrome.tab`), so a selector can only ever name a tab that
-// exists. Computed once at module load; `has` stays O(1) on every route parse.
+// exists. This static set is also checked against surfaceRailState at runtime.
 //
 // Slice 5b decision, and the reason these are two sets rather than one:
 // /app never hosts sheets (`scene: 'sheets'`), so `?surface=sheets` on /app
@@ -669,13 +699,29 @@ const SELECTABLE_SURFACE_IDS = new Set(
   PRODUCT_SURFACES.filter(({ contract }) => contract.chrome.tab).map(({ id }) => id),
 )
 
-export function normalizeProductSurface(value) {
-  return SELECTABLE_SURFACE_IDS.has(value) ? value : DEFAULT_PRODUCT_SURFACE
+let labSurfaceStatus = null
+
+export function setLabSurfaceStatus(status) {
+  labSurfaceStatus = status
 }
 
-export function productSurfaceFromSearch(search = '') {
+// Rail authority comes from the frozen record, never an authored overlay.
+// A pending probe is hidden just like an off or unavailable rail.
+// URL selection uses the route scene; mounted tabs supply their frame's scene.
+export function surfaceRailState(id, status = labSurfaceStatus,
+  scene = typeof window === 'undefined' ? 'app' : sceneForPath(window.location.pathname)) {
+  const contract = productSurface(id).contract
+  const rail = contract.chrome.rail
+  return rail ? contract.scene === scene && rail === 'lab' && status?.state === 'on' : true
+}
+
+export function normalizeProductSurface(value, status = labSurfaceStatus) {
+  return SELECTABLE_SURFACE_IDS.has(value) && surfaceRailState(value, status) ? value : DEFAULT_PRODUCT_SURFACE
+}
+
+export function productSurfaceFromSearch(search = '', status = labSurfaceStatus) {
   try {
-    return normalizeProductSurface(new URLSearchParams(search).get('surface'))
+    return normalizeProductSurface(new URLSearchParams(search).get('surface'), status)
   } catch {
     return DEFAULT_PRODUCT_SURFACE
   }
@@ -688,8 +734,11 @@ export function searchForProductSurface(search, surfaceId) {
   return encoded ? `?${encoded}` : ''
 }
 
-export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosReady = false, solarReady = false } = {}) {
+export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosReady = false, solarReady = false, labStatus = labSurfaceStatus } = {}) {
   return {
+    lab: surfaceRailState('lab', labStatus)
+      ? { state: 'available', label: 'Ready' }
+      : { state: 'hidden', label: 'Lab is unavailable right now.' },
     ops: sessionActive
       ? { state: 'available', label: 'Ready' }
       : { state: 'sign-in', label: 'Sign in' },

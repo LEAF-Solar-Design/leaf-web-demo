@@ -1,0 +1,13 @@
+{
+  "schema": "leaf.studio-beats.v1",
+  "beat_id": "SCB_REDO",
+  "env": "staging",
+  "origin": "https://platform-staging.leafdesign.ai",
+  "requires_signed_in": false,
+  "fixtures": [],
+  "steps": [
+    { "verb": "wait_text", "text": "REDO added 108 objects", "timeout_ms": 30000 },
+    { "verb": "pause", "ms": 2500 }
+  ],
+  "expect_text": []
+}

@@ -9,12 +9,19 @@
     },
     "surface-config.v1.schema.json": {
       "path": "contract/surface-config.v1.schema.json",
-      "sha256": "a7b94b169ec259715ea1731135c330eeefcbad69bc962b81abc1df953d9bde33",
+      "sha256": "30f8e0ed306e5a1ec4337f9823c57ee1294ffa275cc42e957b1f7f1ea7e41450",
       "upstream_commit": "323cb29cbe2d2dc712db7d9168a3c91f931afae6",
       "upstream_path": "contract/surface-config.v1.schema.json"
     }
   },
   "disposition": "wired-core: deps.load_tenant_repo_tools delegates the call-time registry read to the vendored mushy_fold core (deps.py imports _vendor.mushy_fold.registry.load_repo_registry_tools; PR #474). deps.effective_surface_config does the same against mushy_fold.surface_config.load_repo_surface_config (standardization slice 7b). Tenant resolution and the malformed-registry/surface-config stderr diagnostics stay in-repo. The 08-31 capability audit misreported this as never-imported; refuted against deps.py:180. Changing what deps.py imports from this package re-records this disposition (test_mushy_fold_vendor_disposition.py is the tripwire). Recorded 2026-08-31, card F-7; extended 2026-09-04 for surface_config.py. Re-pinned 2026-09-24 by magpie AD4 to mushy-code ad209705 together with the harness pin (one Kit commit for both); surface_config.py is now at the package-wide pin, so file_upstream_commits is gone. contract_files also pins the Kit contract schema (contract/assistant.schema.json) that server/tests/test_kit_stream_superset.py reads.",
+  "downstream_overlays": {
+    "contract/surface-config.v1.schema.json": {
+      "sha256": "30f8e0ed306e5a1ec4337f9823c57ee1294ffa275cc42e957b1f7f1ea7e41450",
+      "upstream_commit": "fe795a268626e828ee1e4509285825a385fa5ca7",
+      "why": "SEL-001 added the lab surface upstream; vendored ahead of the SEL-302 three-way re-vendor"
+    }
+  },
   "files": {
     "__init__.py": "de4fececea6d1a85d3de51ae4699cdcf243e826d76dcba3dbe69a6c8ea97c6cd",
     "entry.py": "d84999d615490dcc09b1984e260700e1c136fc98f56aab977f2d94ce658afa37",

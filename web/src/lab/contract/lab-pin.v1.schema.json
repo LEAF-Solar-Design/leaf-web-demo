@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leaf.internal/contract/lab-pin.v1.schema.json",
+  "title": "Lab pin",
+  "allOf": [
+    {"$ref": "fixtures/lab/leaf-block-manifest.v1.schema.json#/$defs/port"},
+    {
+      "properties": {"schema": {"required": ["type"]}},
+      "if": {"properties": {"has_default": {"const": true}}},
+      "then": {"required": ["default"]},
+      "else": {"not": {"required": ["default"]}}
+    }
+  ]
+}

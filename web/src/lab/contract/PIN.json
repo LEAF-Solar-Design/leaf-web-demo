@@ -1,0 +1,28 @@
+{
+  "files": {
+    "lab-block.v1.schema.json": {
+      "source": "contract/lab-block.v1.schema.json",
+      "sha256": "dc96f9f34c463c6d08ef58eadee60312bbd5d95d77b15c31419a98b3e6ecc310"
+    },
+    "lab-pin.v1.schema.json": {
+      "source": "contract/lab-pin.v1.schema.json",
+      "sha256": "c35af782a1d5ebfc166234b223769a8f3a983a2e51065690d6124d51d59f7096"
+    },
+    "lab-graph.v1.schema.json": {
+      "source": "contract/lab-graph.v1.schema.json",
+      "sha256": "ddae47ab74f94fcc9c05ad64a2bb7a346b703c0a9a4e1b9625ad7b92ed02cafb"
+    },
+    "lab-embed.v1.schema.json": {
+      "source": "contract/lab-embed.v1.schema.json",
+      "sha256": "63ff890988df06c06bac1f2f188833dfb433558d1b89fc60c842024e597d5726"
+    },
+    "leaf-block-manifest.v1.schema.json": {
+      "source": "contract/fixtures/lab/leaf-block-manifest.v1.schema.json",
+      "sha256": "a4b2c4a327294a03afd1f302473b959361595f865d3ec15a8df3fa8b76b40cd1"
+    },
+    "fixtures/ops-conformance.json": {
+      "source": "contract/fixtures/lab/ops-conformance.json",
+      "sha256": "269474f04573149d90c9ba8202d22d6cf133f851912b42c28e4b26f245cd0b24"
+    }
+  }
+}

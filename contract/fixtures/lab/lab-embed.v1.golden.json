@@ -1,0 +1,86 @@
+{
+  "context": {
+    "authenticated": true,
+    "origin": "https://ops.example.invalid",
+    "eventOrigin": "https://ops.example.invalid",
+    "source": "parent-window",
+    "eventSource": "parent-window",
+    "channel": "00000000000000000000000000000000",
+    "principal_proof": "0000000000000000000000000000000000000000000000000000000000000000",
+    "source_sha": "0000000000000000000000000000000000000000000000000000000000000000",
+    "proposal_revision": 0,
+    "proposal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "now_ms": 1500
+  },
+  "state": {
+    "sequence": 0,
+    "accepted_at_ms": []
+  },
+  "messages": [
+    {
+      "schema": "leaf.lab-embed.v1",
+      "channel": "00000000000000000000000000000000",
+      "version": 1,
+      "principal_proof": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source_sha": "0000000000000000000000000000000000000000000000000000000000000000",
+      "proposal_revision": 0,
+      "proposal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sequence": 1,
+      "sent_at_ms": 1000,
+      "expires_at_ms": 2000,
+      "latency_us": 10,
+      "kind": "shell.ready",
+      "payload": {}
+    },
+    {
+      "schema": "leaf.lab-embed.v1",
+      "channel": "00000000000000000000000000000000",
+      "version": 1,
+      "principal_proof": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source_sha": "0000000000000000000000000000000000000000000000000000000000000000",
+      "proposal_revision": 0,
+      "proposal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sequence": 1,
+      "sent_at_ms": 1000,
+      "expires_at_ms": 2000,
+      "latency_us": 10,
+      "kind": "proposal",
+      "payload": {}
+    },
+    {
+      "schema": "leaf.lab-embed.v1",
+      "channel": "00000000000000000000000000000000",
+      "version": 1,
+      "principal_proof": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source_sha": "0000000000000000000000000000000000000000000000000000000000000000",
+      "proposal_revision": 0,
+      "proposal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sequence": 1,
+      "sent_at_ms": 1000,
+      "expires_at_ms": 2000,
+      "latency_us": 10,
+      "kind": "signed-request",
+      "payload": {
+        "request_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "handoff": "server-sign"
+      }
+    },
+    {
+      "schema": "leaf.lab-embed.v1",
+      "channel": "00000000000000000000000000000000",
+      "version": 1,
+      "principal_proof": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source_sha": "0000000000000000000000000000000000000000000000000000000000000000",
+      "proposal_revision": 0,
+      "proposal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sequence": 1,
+      "sent_at_ms": 1000,
+      "expires_at_ms": 2000,
+      "latency_us": 10,
+      "kind": "source.value",
+      "payload": {
+        "rows": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+ "schema": "leaf.frozen-sources.v1",
+ "slice": "SEL-004",
+ "sources": [
+  {
+   "repo": "mushy-code",
+   "head": "fe795a268626e828ee1e4509285825a385fa5ca7",
+   "upstream_path": "contract/generated/leaf-tokens.css",
+   "frozen_path": "web/src/lab/contract/sources/leaf-tokens.css",
+   "sha256": "9eaf6c04927cefb5e021261f83fef0a01bc9525be2363687f8b3cda999ef72f5",
+   "bytes": 42432
+  },
+  {
+   "repo": "mushy-code",
+   "head": "fe795a268626e828ee1e4509285825a385fa5ca7",
+   "upstream_path": "contract/leaf-glossary.v1.json",
+   "frozen_path": "web/src/lab/contract/sources/leaf-glossary.v1.json",
+   "sha256": "f17b3321665a8119e5161215dda27386b35e487f749a432d1592646dcbb46308",
+   "bytes": 15919
+  }
+ ]
+}

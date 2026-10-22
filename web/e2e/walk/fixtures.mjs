@@ -1323,10 +1323,21 @@ export async function openProjectSolar(runtime, assertions = expect) {
 
 export async function selectProjectSolarVersion(runtime, assertions = expect) {
   const { page, projectSolar: solar } = runtime
+  // web/src/site/BoardTiles.jsx:41,59-61 renders this count only from workspace versions;
+  // web/src/controllers/workspace/createWorkspaceController.js:139-149 clears workspace on open,
+  // then publishes only the requested project's current response. The Versions pane mounts
+  // only after selection (web/src/workspace/ProjectWorkspacePanels.jsx:189,204).
+  await assertions(page.getByRole('region', { name: 'Project workspace', exact: true })
+    .locator('[data-tile="versions"] > strong'),
+  `project ${solar.binding.project_id ?? solar.binding.input_version_id} did not open in the UI within 30 s`)
+    .toHaveCount(1, { timeout: 30_000 })
   await page.getByRole('button', { name: 'Open versions', exact: true }).click()
-  await page.locator('[data-pane="versions"]').getByRole('button', {
+  const version = page.locator('[data-pane="versions"]').getByRole('button', {
     name: new RegExp(`^v\\d+ .*${solar.binding.input_version_id}$`),
-  }).click()
+  })
+  await assertions(version, `version ${solar.binding.input_version_id} is not listed in the Versions pane within 30 s`)
+    .toBeVisible({ timeout: 30_000 })
+  await version.click({ timeout: 30_000 })
   await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
   await assertProjectSolarDrawing(runtime, assertions)
 }

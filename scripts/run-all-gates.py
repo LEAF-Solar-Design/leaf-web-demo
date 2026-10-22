@@ -1162,6 +1162,9 @@ def build_suites() -> List[Suite]:
         Suite("server-mcp-staging-probe",
               "server tests/test_mcp_staging_probe.py", "pytest", SERVER,
               _py_pytest("tests/test_mcp_staging_probe.py"), 24),
+        Suite("server-probe-staging-async-job",
+              "server tests/test_probe_staging_async_job.py", "pytest", SERVER,
+              _py_pytest("tests/test_probe_staging_async_job.py"), 16),
         Suite("server-mcp-tenant-registry",
               "server tests/test_tenant_mcp.py", "pytest", SERVER,
               _py_pytest("tests/test_tenant_mcp.py"), 33,
@@ -1289,6 +1292,15 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_context_packet.py"), 17),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
               _py_pytest("tests/test_contract_freeze.py"), 14),
+        Suite("server-lab-contract", "server tests/test_lab_contract.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_contract.py"), 117),
+        Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_surface.py"), 36),
+        Suite("server-lab-artifacts", "server tests/test_lab_artifacts.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_artifacts.py"), 51, uses_database=True,
+              database_skip_reasons=(r"platform DB unreachable: .+",)),
+        Suite("server-lab-diff", "server tests/test_lab_diff.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_diff.py"), 7),
         # AD4b: the Kit stream map is a superset of the harness stream events.
         Suite("server-kit-stream-superset", "server tests/test_kit_stream_superset.py", "pytest", SERVER,
               _py_pytest("tests/test_kit_stream_superset.py"), 6),
@@ -1798,6 +1810,10 @@ def build_suites() -> List[Suite]:
               "server PostgreSQL startup and production env-shape boot", "pytest", SERVER,
               _py_pytest("tests/test_platform_postgres_startup.py") +
               ["tests/test_production_env_shape_boot.py"], 38),
+        # Floor 35: 7 unparametrized tests + (2 + 5 + 3 + 2 + 9 + 3 + 4) parametrized cases.
+        Suite("server-boot-probe-implicit-constraints",
+              "server boot probe pending implicit constraints", "pytest", SERVER,
+              _py_pytest("tests/test_boot_probe_implicit_constraints.py"), 35),
         # Floor 46, re-measured 2026-08-07 after merging origin/main. THE MERGE
         # IS WHY THIS LINE NEEDS READING TWICE: this branch raised it 43 -> 45
         # for two new cases, main separately added

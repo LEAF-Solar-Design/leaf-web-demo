@@ -3,6 +3,7 @@ import copy
 import io
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -271,7 +272,7 @@ def test_real_resolver_checks_persisted_rows(lane,monkeypatch,defect):
 def test_named_claim_never_uses_generic_claim(lane,monkeypatch):
     import campaign_bridge
     import campaign_worker_service
-    task={**lane.task,'task_key':'native-plan'}
+    task={**lane.task,'task_key':'native-plan','status':'pending'}
     calls=[]
     class Cursor:
         def execute(self,sql,args):
@@ -288,6 +289,159 @@ def test_named_claim_never_uses_generic_claim(lane,monkeypatch):
     response=lane.adapter.handle('native_claim',dict(enrollment_id=ENROLL,campaign_id=CAMPAIGN,task_key='native-plan'),'worker')
     assert calls==[dict(worker_id='enrollment-'+ENROLL,lease=900,task_key='native-plan')]
     assert 'attempt_token' not in response['result'] and not lane.state['calls']
+
+
+@pytest.fixture
+def claim_lane(lane, monkeypatch):
+    import campaign_bridge
+    import campaign_worker_service
+    from routers import campaigns
+    monkeypatch.setattr(campaigns, '_STORE', None)
+    campaigns._store()  # Install the real platform alias without opening a database.
+    from leaf_platform import campaign_execution as execution
+    from threading import RLock
+
+    now = datetime(2026, 9, 11, 12, tzinfo=timezone.utc)
+    task = {**lane.task, 'task_id': uuid.UUID(TASK), 'task_key': 'native-plan'}
+    attempt = dict(task_id=uuid.UUID(TASK), attempt_id=uuid.UUID(PARENT),
+                   fence=1, stage='implementation', deadline_at=now + timedelta(seconds=900),
+                   worker_id='enrollment-' + ENROLL, status='active', **SCOPE)
+    state = dict(task=task, attempt=attempt, queries=[], generic_calls=[], events=0,
+                 creations=0, admission=True, scope=copy.deepcopy(SCOPE))
+    lock = RLock()
+    public_attempt = execution._public_attempt
+
+    class Cursor:
+        def __init__(self):
+            self.task_locked = False
+
+        def execute(self, sql, args):
+            state['queries'].append((sql, copy.deepcopy(args)))
+            assert sql.startswith('SELECT ') and sql.endswith('FOR UPDATE')
+            assert execution.SCOPE in sql
+            if 'FROM campaign_tasks ' in sql:
+                assert 'task_key=%(key)s' in sql and args['key'] == 'native-plan'
+                self.task_locked = True
+                self.result = copy.deepcopy(state['task'])
+            else:
+                assert self.task_locked and 'FROM campaign_task_attempts ' in sql
+                for predicate in ('task_id=%(task)s', 'fence=%(fence)s', 'worker_id=%(worker)s',
+                                  "stage='implementation'", "status='active'",
+                                  'deadline_at>clock_timestamp()'):
+                    assert predicate in sql
+                a = state['attempt']
+                matches = a is not None and all(a[k] == args[k] for k in SCOPE)
+                matches = matches and (a['task_id'] == args['task'] and a['fence'] == args['fence']
+                    and a['worker_id'] == args['worker'] and a['stage'] == 'implementation'
+                    and a['status'] == 'active' and a['deadline_at'] > now)
+                self.result = ({k: a[k] for k in ('task_id', 'attempt_id', 'fence', 'stage', 'deadline_at')}
+                               if matches else None)
+
+        def fetchone(self):
+            return copy.deepcopy(self.result)
+
+    @contextmanager
+    def cursor():
+        # Transaction-lock model, not a claim of live PostgreSQL verification.
+        with lock:
+            yield Cursor()
+
+    def claim(cur, scope, **kw):
+        assert cur.task_locked
+        state['generic_calls'].append(kw)
+        if not state['admission'] or state['task']['status'] != 'pending':
+            return None
+        state['task']['status'] = 'claimed'
+        state['task']['fence'] += 1
+        state['attempt']['fence'] = state['task']['fence']
+        state['creations'] += 1
+        state['events'] += 1
+        return public_attempt(state['attempt'])
+
+    def scope(cur, enrollment, enrollment_id, subject):
+        b._require(subject == 'worker' and enrollment_id == ENROLL and not lane.state['revoked'], 403)
+        return copy.deepcopy(state['scope'])
+
+    fake = SimpleNamespace(_cursor=cursor, SCOPE=execution.SCOPE,
+                           _public_attempt=public_attempt, _claim_task_cursor=claim)
+    monkeypatch.setattr(campaign_worker_service, '_platform', lambda: (object(), fake, None))
+    monkeypatch.setattr(campaign_bridge, '_scope', scope)
+    body = dict(enrollment_id=ENROLL, campaign_id=CAMPAIGN, task_key='native-plan')
+    return SimpleNamespace(lane=lane, state=state, now=now, body=body,
+                           invoke=lambda: lane.adapter.handle('native_claim', body, 'worker'))
+
+
+@pytest.mark.parametrize('admission', [True, False])
+def test_native_claim_replays_custody_without_admission_or_lease_change(claim_lane, admission):
+    x = claim_lane
+    x.state['admission'] = admission  # False models paused/full fresh admission.
+    before = copy.deepcopy(x.state['attempt'])
+    first, second = x.invoke(), x.invoke()
+    assert first == second == dict(ok=True, result=dict(task_id=TASK, attempt_id=PARENT,
+        fence=1, stage='implementation', deadline_at=before['deadline_at'].isoformat()))
+    assert x.state['attempt'] == before
+    assert x.state['generic_calls'] == []
+    assert x.state['creations'] == x.state['events'] == 0
+    assert x.lane.ledger.reserves == 0 and not x.lane.state['calls']
+
+
+def test_native_claim_lost_response_serialized_callers_create_once(claim_lane):
+    from concurrent.futures import ThreadPoolExecutor
+    x = claim_lane
+    x.state['task'].update(status='pending', fence=0)
+    deadline = x.state['attempt']['deadline_at']
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, replay = list(pool.map(lambda _: x.invoke(), range(2)))
+    # Losing first at the transport boundary does not change the replay result.
+    assert first == replay
+    assert x.state['creations'] == x.state['events'] == len(x.state['generic_calls']) == 1
+    assert x.state['task']['fence'] == 1
+    assert x.state['attempt']['deadline_at'] == deadline
+
+
+@pytest.mark.parametrize('delta', [
+    {'worker_id': 'enrollment-other'}, {'task_id': uuid.uuid4()}, {'fence': 0},
+    {'stage': 'build_test'}, {'status': 'settled'}, {'status': 'expired'},
+    {'org': str(uuid.uuid4())}, {'project': str(uuid.uuid4())}, {'campaign': str(uuid.uuid4())},
+    {'deadline_at': datetime(2026, 9, 11, 12, tzinfo=timezone.utc)},
+    {'deadline_at': datetime(2026, 9, 11, 11, tzinfo=timezone.utc)},
+])
+def test_native_claim_ineligible_attempt_keeps_original_claim_path(claim_lane, delta):
+    x = claim_lane
+    x.state['attempt'].update(delta)
+    before = copy.deepcopy(x.state['attempt'])
+    assert x.invoke() == dict(ok=True, result=None)
+    assert x.state['generic_calls'] == [dict(worker_id='enrollment-' + ENROLL,
+                                            lease=900, task_key='native-plan')]
+    assert x.state['attempt'] == before
+    assert x.state['creations'] == 0
+
+
+@pytest.mark.parametrize('delta', [None, {'source_sha': 'b' * 40}, {'kind': 'capability'},
+                                  {'capability': 'other'}, {'current_stage': 'build_test'}])
+def test_native_claim_task_validation_precedes_replay(claim_lane, delta):
+    x = claim_lane
+    if delta is None:
+        x.state['task'] = None
+    else:
+        x.state['task'].update(delta)
+    with pytest.raises(b.BridgeError):
+        x.invoke()
+    assert len(x.state['queries']) == 1 and not x.state['generic_calls']
+
+
+@pytest.mark.parametrize('failure', ['disabled', 'revoked', 'subject', 'enrollment', 'campaign'])
+def test_native_claim_authorization_precedes_replay(claim_lane, failure):
+    x = claim_lane
+    if failure == 'disabled':
+        x.lane.adapter.config['enabled'] = False
+    elif failure == 'revoked':
+        x.lane.state['revoked'] = True
+    elif failure in {'enrollment', 'campaign'}:
+        x.body[failure + '_id'] = str(uuid.uuid4())
+    with pytest.raises(b.BridgeError):
+        x.lane.adapter.handle('native_claim', x.body, 'other' if failure == 'subject' else 'worker')
+    assert x.state['queries'] == [] and x.state['generic_calls'] == []
 
 
 @pytest.mark.parametrize('field', ['mode', 'authority', 'plan', 'apply_refs', 'role_arn', 'commands', 'buildspec'])

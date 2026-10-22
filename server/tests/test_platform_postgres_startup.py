@@ -89,6 +89,17 @@ def test_selected_postgres_authority_requires_url_and_schema_without_live_auth(
         "ok": True, "migration_count": 17}
 
 
+def test_lab_postgres_authority_requires_startup_with_master_gate_off(monkeypatch):
+    monkeypatch.setenv("LEAF_PLATFORM_POSTGRES_REQUIRED", "0")
+    for name in platform_link._AUTHORITY_SELECTORS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LEAF_LAB_STORE", "postgres")
+    assert platform_link.postgres_startup_required() is True
+
+    monkeypatch.setenv("LEAF_LAB_STORE", "sqlite")
+    assert platform_link.postgres_startup_required() is False
+
+
 def test_invalid_authority_selector_fails_startup(monkeypatch):
     monkeypatch.delenv("LEAF_PLATFORM_POSTGRES_REQUIRED", raising=False)
     monkeypatch.setenv("LEAF_UPLOAD_STORE", "typo")

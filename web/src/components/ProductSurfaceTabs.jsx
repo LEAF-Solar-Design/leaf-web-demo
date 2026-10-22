@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, surfaceContract } from '../site/productSurfaces.js'
+import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, productSurfaceStates, surfaceContract, surfaceRailState } from '../site/productSurfaces.js'
+import { useLabSurfaceStatus } from '../lab/useLabSurfaceStatus.js'
 import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { useContinuityHost } from '../site/continuityStore.js'
+import { useSurfaceFrame } from '../site/SurfaceFrame.jsx'
 import { START_BOARD_COPY } from '../site/startBoardCopy.js'
 import { moveRovingTab } from '../lib/roving.js'
 import {
@@ -83,6 +85,8 @@ export function AccountSignOut({ signedIn = false, onSignOut = null }) {
 // host is null and the nav renders its tablist and nothing else: fails closed.
 export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mock = true }) {
   const host = useContinuityHost()
+  const frame = useSurfaceFrame()
+  const scene = frame ? (frame.scene === 'console' ? 'app' : 'tool') : undefined
   const navRef = useRef(null)
   // Slice 7b: which tabs render is the tenant's OVERLAID chrome.tab, not the
   // frozen default — a mock-tenant overlay that flips `chrome.tab` true for a
@@ -91,6 +95,7 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mo
   // so a bare render (a unit test that mounts this component directly)
   // renders the SAME tabs an empty overlay would produce.
   const overlay = useSurfaceConfigOverlay(mock)
+  const labStatus = useLabSurfaceStatus(mock)
   // Layout effect: the host is in place before paint, in the same commit the
   // frame publishes (also a layout effect, and an ancestor's, so it runs
   // after this one). On unmount the host is detached with its children
@@ -112,11 +117,11 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mo
             Sheets can be a manifest row without appearing here. All four
             studio surfaces declare true, so this renders what it rendered. */}
         {PRODUCT_SURFACES
-          .filter((surface) => mergeSurfaceContract(surface.id, overlay).chrome.tab)
+          .filter((surface) => mergeSurfaceContract(surface.id, overlay).chrome.tab && surfaceRailState(surface.id, labStatus, scene))
           .map((surface) => {
             const contract = mergeSurfaceContract(surface.id, overlay)
             const selected = surface.id === activeSurface
-            const status = states[surface.id]
+            const status = surface.contract.chrome.rail ? productSurfaceStates({ labStatus })[surface.id] : states[surface.id]
             // aria-controls points at #product-surface-panel, which is the
             // ProductSurfaceFrame — and a surface that declares no frame
             // renders no such element. A tab whose aria-controls names a

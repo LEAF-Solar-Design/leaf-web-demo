@@ -36,7 +36,7 @@ import { groundShowsDrawing } from './SurfaceGrounds.jsx'
 
 // Every id the module ships, as a literal, so a surface added without a row
 // here fails the completeness test below rather than quietly going unpinned.
-const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'ops', 'sheets']
+const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'ops', 'lab', 'sheets']
 
 it('A1B2-S01 stored graph surface admission', () => {
   const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
@@ -82,6 +82,7 @@ it('pins the server capability baseline for every surface', () => {
     solar: ['build', 'run_read', 'run_write', 'solve'],
     ios: ['build', 'run_read', 'run_write', 'solve'],
     ops: ['build', 'run_read', 'run_write'],
+    lab: [],
     sheets: [],
   }
   expect(Object.fromEntries(PRODUCT_SURFACES.map(({ id }) =>
