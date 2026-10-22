@@ -1309,7 +1309,7 @@ def build_suites() -> List[Suite]:
         Suite("server-billing-tiers", "server tests/test_billing_tiers.py", "pytest", SERVER,
               _py_pytest("tests/test_billing_tiers.py"), 30),
         Suite("server-broker-admission-reconciler", "server tests/test_broker_admission_reconciler.py", "pytest", SERVER,
-              _py_pytest("tests/test_broker_admission_reconciler.py"), 54),
+              _py_pytest("tests/test_broker_admission_reconciler.py"), 64),
         # The per-tenant DAILY AUTHORING cap. Shipped without a gate entry, the
         # same gap the site-demo lane above had: only the WEB half of this
         # feature (web-author-quota-gate) was registered, so every server-side
@@ -1703,7 +1703,7 @@ def build_suites() -> List[Suite]:
         Suite("server-agent-metering-hook", "server tests/test_agent_metering_hook.py",
               "pytest", SERVER, _py_pytest("tests/test_agent_metering_hook.py"), 2),
         Suite("server-broker-migration-static", "server tests/test_broker_migration_static.py",
-              "pytest", SERVER, _py_pytest("tests/test_broker_migration_static.py"), 1),
+              "pytest", SERVER, _py_pytest("tests/test_broker_migration_static.py"), 6),
         Suite("server-canonical-worker-deploy-contract",
               "server tests/test_canonical_worker_deploy_contract.py", "pytest", SERVER,
               _py_pytest("tests/test_canonical_worker_deploy_contract.py"), 3),
@@ -1873,7 +1873,7 @@ def build_suites() -> List[Suite]:
         Suite("server-broker-demo-guard", "server tests/test_broker_demo_guard.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_demo_guard.py"), 413),
         Suite("server-broker-pg-store", "server tests/test_broker_pg_store.py",
-              "pytest", SERVER, _py_pytest("tests/test_broker_pg_store.py"), 28,
+              "pytest", SERVER, _py_pytest("tests/test_broker_pg_store.py"), 58,
               uses_database=True, database_skip_reasons=(r"DATABASE_URL is not configured",)),
         Suite("server-broker-usage-postgres", "server tests/test_broker_usage_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_usage_postgres.py"), 4),
@@ -3456,7 +3456,7 @@ def build_suites() -> List[Suite]:
         Suite("server-engine-corpus-harness", "server tests/test_engine_corpus_harness.py", "pytest", SERVER,
               _py_pytest("tests/test_engine_corpus_harness.py"), 24),
         Suite("server-broker-metering-crash-window", "server tests/test_broker_metering_crash_window.py", "pytest", SERVER,
-              _py_pytest("tests/test_broker_metering_crash_window.py"), 9),
+              _py_pytest("tests/test_broker_metering_crash_window.py"), 25),
         Suite("server-drawings-cross-tenant-canary", "server tests/test_drawings_cross_tenant_canary.py", "pytest", SERVER,
               _py_pytest("tests/test_drawings_cross_tenant_canary.py"), 10),
         Suite("server-mutation-scope-diff", "server tests/test_mutation_scope_diff.py", "pytest", SERVER,
