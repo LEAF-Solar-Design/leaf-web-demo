@@ -152,13 +152,16 @@ def worker_id() -> str:
 
 
 def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS,
-             tool_name: str = autofill.TOOL_NAME) -> bool:
+             tool_name: str = autofill.TOOL_NAME, on_renew=None) -> bool:
     import solar_project_graph
     import solar_project_jobs
 
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
     if tool_name in solar_project_graph.SUPPORTED_TOOLS:
+        if on_renew is not None:
+            return solar_project_jobs.run_once(
+                owner, tool_name=tool_name, lease_seconds=lease_seconds, on_renew=on_renew)
         return solar_project_jobs.run_once(owner, tool_name=tool_name, lease_seconds=lease_seconds)
     canonical_jobs = platform_link._canonical_jobs_module()
     if tool_name == autofill.TOOL_NAME:
@@ -233,12 +236,16 @@ def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SEC
                   else None)
     ready_printed = False
     stop = stop_event or threading.Event()
-    while not stop.is_set():
-        if descriptor is not None:
+    if descriptor is not None:
+        def on_renew():
             platform_link._canonical_jobs_module().record_worker_heartbeat(
                 owner, descriptor["tool_name"], descriptor["runtime"],
                 descriptor["source_revision"], descriptor["source_sha256"])
-        claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool_name)
+    while not stop.is_set():
+        if descriptor is not None:
+            on_renew()
+        claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool_name,
+                           **({"on_renew": on_renew} if descriptor is not None else {}))
         # Ready only once one full cycle (heartbeat and claim) has completed.
         if project_readiness and descriptor is not None and not ready_printed:
             print("LEAF_CANONICAL_WORKER_READY " + json.dumps({
