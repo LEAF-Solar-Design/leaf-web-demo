@@ -147,7 +147,9 @@ class TestProjectBoundary:
             "ALLOCATION", "TRANSPORT", "MIGRATION_ENTRY", "MIGRATION_CORPUS", "MIGRATION_TIMEOUT",
             "MIGRATION_EXIT", "MIGRATION_RESULT", "SCHEMA", "IDENTITY", "BINDING",
             "LAUNCH", "OWNERSHIP", "READINESS", "HEARTBEAT", "AUTH", "BROWSER_EXIT",
-            "BROWSER_EVIDENCE", "CANONICAL"}
+            "BROWSER_EVIDENCE", "CANONICAL", "CANCELLED", "GUARDIAN", "CLEANUP_PROCESS",
+            "CLEANUP_IDENTITY", "CLEANUP_POOL", "CLEANUP_AUTHORITY", "CLEANUP_PRIVATE",
+            "RECEIPT", "INTERNAL", "USAGE"}
 
     def test_deployed_posture(self):
         for facts in ({"posture": "production"}, {"legacy_posture": "staging"}, {"synthetic": True}):
@@ -660,7 +662,7 @@ class TestProjectAuthority:
     def test_allocation_journal(self, monkeypatch):
         c = authority_case()
         prepared = prepare(c)
-        assert c.events.index("corpus") < c.events.index("acquire:authority") < c.events.index("authority-planned") < c.events.index("allocate")
+        assert c.events.index("corpus") < c.events.index("authority-planned") < c.events.index("allocate") < c.events.index("acquire:authority")
         assert c.events.index("allocate") < c.events.index("authority-observed") < c.events.index("launch:migration-child")
         assert prepared.database.authority_run_id == "run-test"
         assert prepared.database.ownership.containers == ("a" * 12, "b" * 12)
@@ -677,8 +679,8 @@ class TestProjectAuthority:
         c.effects = replace(c.effects, authority_factory=fail)
         error = authority_refused(c, p.FailureCode.ALLOCATION)
         assert "fakedb" not in str(error)
-        c.scope.cleanups[0][1]()
-        assert c.events[-1] == "emergency-cleanup" and c.launches == []
+        assert c.scope.cleanups == [] and c.launches == []
+        assert "emergency-cleanup" not in c.events
         c = authority_case()
         original_inventory = c.host.authority_inventory
         c.host.authority_inventory = lambda run_id: replace(original_inventory(run_id), run_id="run-else")
@@ -1464,3 +1466,1183 @@ def assert_redacted_mapping(mapping, values, capsys):
     assert dict(mapping) == values
     with pytest.raises(TypeError):
         mapping["TOKEN"] = "changed"
+
+# D's injected operation handles never spawn a thread, process or listener.
+class ImmediateOperation:
+    def __init__(self, callback):
+        self.value, self.error = None, None
+        try:
+            self.value = callback()
+        except BaseException as error:
+            self.error = error
+
+    def done(self):
+        return True
+
+    def result(self):
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+def lifetime_case():
+    c = authority_case()
+    c.teardown, c.leases = [], []
+    c.private = True
+    c.host.begin_operation = ImmediateOperation
+    def scrub(reservation, *, keep_safe):
+        c.teardown.append("private")
+        c.private = False
+        return True
+    def cleanup(run_id):
+        c.teardown.append("authority")
+        c.allocated = False
+    def close_identity(lease):
+        c.teardown.append("identity")
+        c.leases.append(lease)
+        object.__setattr__(lease, "issuer", None)
+        c.published.discard(lease.jwks_path)
+    c.host.scrub = scrub
+    c.host.private_absent = lambda reservation: not c.private
+    c.host.cleanup_authority = cleanup
+    c.host.cleanup_owned_authority = lambda run_id, ownership: cleanup(run_id)
+    c.host.close_identity = close_identity
+    c.scope = p.RunScope(effects=c.effects)
+    return c
+
+
+def cancelled_stage(stage):
+    c = lifetime_case()
+    c.scope.own_reservation(c.plan.reservation)
+    clock = c.effects.clock
+    # An outstanding external operation becomes ready only after cancellation.
+    task = SimpleNamespace(done=lambda: clock.now >= 0.1, result=lambda: "done")
+    original = c.host.begin_operation
+    c.host.begin_operation = lambda callback: task
+    c.scope.cancelled = lambda: clock.now >= 0.05
+    with pytest.raises(p.ProofRefused) as error:
+        c.scope.perform(stage, lambda: None, deadline=1.0)
+    assert error.value.failure == p.Failure(stage, p.FailureCode.CANCELLED)
+    assert clock.now == 0.05  # Refused while pending, not after it completed.
+    c.host.begin_operation = original
+    proof = c.scope.close()
+    assert proof.ok and c.teardown == ["private"]
+    assert c.scope.failure == error.value.failure
+    assert 0.1 <= clock.now < 0.2
+    with pytest.raises(p.ProofRefused):
+        c.scope.commit_guard(lambda: pytest.fail("cancelled publication"))
+
+
+def acquisition_child(monkeypatch, role, kind):
+    c = lifetime_case()
+    stops = []
+    def start():
+        raise RuntimeError("fakedb")
+    child = SimpleNamespace(start=start, stop=lambda deadline: (stops.append(deadline), True)[1])
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: child)
+    spec = p.ProcessSpec(role, ("fake",), ROOT, {}, 1)
+    with pytest.raises(RuntimeError):
+        p._launch_runtime(spec, scope=c.scope)
+    assert [name for name, _ in c.scope._actions] == [kind]
+    proof = c.scope.close()
+    assert proof.processes_stopped and len(stops) == 1
+    assert stops[0] == p.CLEANUP_TIMEOUT_S or stops[0] > 0
+    assert c.scope.close() is proof and len(stops) == 1
+
+
+def cleanup_failure(kind, expected):
+    c = lifetime_case()
+    def fail():
+        c.teardown.append("failed")
+        raise RuntimeError("faketok")
+    c.scope.acquire(kind, fail)
+    c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("pool")))
+    c.scope.acquire(p.ResourceKind.AUTHORITY, lambda: c.teardown.append("authority"))
+    c.scope.own_reservation(c.plan.reservation)
+    proof = c.scope.close()
+    assert c.teardown[-2:] == ["authority", "private"]
+    assert "pool" in c.teardown and "failed" in c.teardown
+    assert proof.failures == (p.Failure(p.Stage.TEARDOWN, expected),)
+    assert not proof.ok and proof.observed_rows == ()
+    assert "faketok" not in repr(proof)
+    return c, proof
+
+
+class TestProjectLifetime:
+    def test_d_c1_disarm_live_job(self, monkeypatch):
+        c = lifetime_case()
+        c.private = False
+        child = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        child.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        child.process = SimpleNamespace(poll=lambda: 0)
+        checked, acknowledged = [], []
+        child.job = SimpleNamespace(
+            stop=lambda deadline: (checked.append(deadline), False)[1], close=lambda: None)
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (child,), 1)
+        assert child.poll() == 0
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert acknowledged == [] and checked == [p.CLEANUP_TIMEOUT_S]
+        assert not child._stopped
+
+    def test_d_c1_disarm_stopped_job(self, monkeypatch):
+        c = lifetime_case()
+        c.private = False
+        child = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        child.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        child.process = SimpleNamespace(poll=lambda: 0)
+        checked, acknowledged = [], []
+        child.job = SimpleNamespace(
+            stop=lambda deadline: (checked.append(deadline), True)[1], close=lambda: None)
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (child,), 1)
+        assert child.poll() == 0
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert acknowledged == [True] and checked == [p.CLEANUP_TIMEOUT_S]
+        assert child._stopped
+
+    def test_d_c1_deadline_before_pool(self):
+        c = lifetime_case()
+        calls = []
+        assert c.effects.clock.now == 0
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: calls.append("operation"), deadline=0)
+        primary = p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert error.value.failure == primary
+        c.scope.own_pool(SimpleNamespace(close=lambda: False))
+        proof = c.scope.close()
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_POOL),)
+        assert c.scope.failure == primary and calls == []
+
+    def test_d_c1_deadline_blocks_commit(self):
+        c = lifetime_case()
+        calls = []
+        assert c.effects.clock.now == 0
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: calls.append("operation"), deadline=0)
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: (calls.append("commit"), "COMMITTED")[1])
+        assert calls == [] and c.scope.failure == error.value.failure
+
+    def test_d_c1_begin_operation_error(self):
+        c = lifetime_case()
+        calls = []
+        def begin(operation):
+            raise OSError("fake begin failure")
+        c.host.begin_operation = begin
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: calls.append("operation"), deadline=1)
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert c.scope.failure == error.value.failure
+        assert calls == [] and c.scope._pending == []
+        assert c.scope.close().ok
+
+    def test_d_c1_begin_operation_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        def begin(operation):
+            raise p.ProofRefused(primary)
+        c.host.begin_operation = begin
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: pytest.fail("operation ran"), deadline=1)
+        assert error.value.failure == primary and c.scope.failure == primary
+
+    def test_d_c1_acquire_refusal(self):
+        c = lifetime_case()
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.acquire(p.ResourceKind.POOL, lambda: None)
+        assert error.value.failure == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        assert c.scope.failure == error.value.failure
+
+    def test_d_c1_checkpoint_refusal(self):
+        c = lifetime_case()
+        c.scope.cancel()
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.checkpoint(p.Stage.MIGRATION)
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.CANCELLED)
+        assert c.scope.failure == error.value.failure
+        with pytest.raises(p.ProofRefused):
+            c.scope.checkpoint(p.Stage.ALLOCATION)
+        assert c.scope.failure == error.value.failure
+
+    def test_d_c1_close_refusal(self):
+        c = lifetime_case()
+        refused = []
+        def close_again():
+            with pytest.raises(p.ProofRefused) as error:
+                c.scope.close()
+            refused.append(error.value.failure)
+        c.scope.own_pool(SimpleNamespace(close=close_again))
+        assert c.scope.close().ok
+        assert refused == [p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)]
+        assert c.scope.failure == refused[0]
+
+    def test_d_c1_commit_guard_refusal(self):
+        c = lifetime_case()
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(lambda: pytest.fail("commit before cleanup"))
+        assert error.value.failure == p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_PRIVATE)
+        assert c.scope.failure == error.value.failure
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("forgotten refusal"))
+
+    def test_d_c1_guardian_arm_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.ALLOCATION, p.FailureCode.GUARDIAN)
+        def arm():
+            raise p.ProofRefused(primary)
+        guardian = SimpleNamespace(arm=arm, disarm=lambda: c.teardown.append("disarm"))
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.own_guardian(guardian)
+        assert error.value.failure == primary and c.scope.failure == primary
+        assert c.scope.close().ok and c.teardown == ["disarm"]
+
+    def test_d_c1_commit_callback_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        def commit():
+            raise p.ProofRefused(primary)
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(commit)
+        assert error.value.failure == primary and c.scope.failure == primary
+
+    def test_d_c1_planned_journal_collision(self):
+        c = lifetime_case()
+        assert not c.allocated
+        def journal(path, value):
+            assert path.name == "authority-planned.json"
+            assert value.authority.containers == value.authority.networks == ()
+            c.allocated = True  # Another allocation wins after the empty inventory.
+            raise OSError("fake planned journal failure")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=journal))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        assert error.value.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        c.scope.close()
+        assert c.allocated and "authority" not in c.teardown
+        assert "allocate" not in c.events
+        assert c.scope.failure == error.value.failure
+
+    def test_d_c1_owned_authority_cleanup(self):
+        c = lifetime_case()
+        journal = c.effects.receipt_writer.ownership
+        def fail_observed(path, value):
+            journal(path, value)
+            if path.name == "authority-observed.json":
+                assert c.allocated
+                raise OSError("fake observed journal failure")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=fail_observed))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        assert error.value.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        assert "allocate" in c.events
+        proof = c.scope.close()
+        assert proof.authority_removed and not c.allocated
+        assert c.teardown == ["authority"] and c.scope.failure == error.value.failure
+
+    def test_d_c1_migration_before_runtime(self, monkeypatch):
+        c = lifetime_case()
+        def child(spec):
+            return SimpleNamespace(start=lambda: None,
+                stop=lambda deadline: (c.teardown.append(spec.role), True)[1])
+        monkeypatch.setattr(p, "_RuntimeProcess", child)
+        for role in ("migration-child", "runtime-build"):
+            p._launch_runtime(p.ProcessSpec(role, ("fake",), ROOT, {}, 1), scope=c.scope)
+        assert c.scope.close().processes_stopped
+        assert c.teardown == ["migration-child", "runtime-build"]
+
+    def test_reverse_cleanup_order(self):
+        c = lifetime_case()
+        expected = ["browser_process", "stack_process", "seed_process", "migration_process",
+                    "runtime_process", "identity", "pool", "authority", "root", "guardian"]
+        # Scramble registration: order must follow dependencies, then LIFO.
+        for name in reversed(expected):
+            c.scope.acquire(p.ResourceKind(name), lambda name=name: c.teardown.append(name))
+        c.scope.acquire(p.ResourceKind.STACK_PROCESS, lambda: c.teardown.append("new-stack"))
+        proof = c.scope.close()
+        assert c.teardown == [expected[0], "new-stack", *expected[1:]]
+        assert proof.ok and proof.observed_rows == ("P10",) and proof.teardown_seconds == 0
+        assert c.scope.close() is proof
+        with pytest.raises(p.ProofRefused):
+            c.scope.acquire(p.ResourceKind.POOL, lambda: None)
+
+    def test_failure_after_root(self):
+        c = lifetime_case()
+        def journal(*args):
+            raise RuntimeError("fake")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=journal))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused):
+            p.preflight(c.config, effects=c.scope.bind_effects())
+        assert c.scope.close().private_material_removed
+        assert c.teardown == ["private"] and not c.private
+
+    def test_failure_after_guardian(self):
+        c = lifetime_case()
+        def arm():
+            c.teardown.append("arm")
+            raise RuntimeError("fake")
+        guardian = SimpleNamespace(arm=arm, disarm=lambda: c.teardown.append("disarm"))
+        with pytest.raises(RuntimeError):
+            c.scope.own_guardian(guardian)
+        assert c.scope.close().guardian_disarmed
+        assert c.teardown == ["arm", "disarm"]
+
+    def test_partial_allocation_failure(self):
+        c = lifetime_case()
+        def allocate(run_id):
+            c.allocated = True
+            # Match PP-2: failed startup cleans only its own creation receipt.
+            created = c.host.authority_inventory(run_id)
+            try:
+                raise RuntimeError("fakedb")
+            finally:
+                c.host.cleanup_owned_authority(run_id, created)
+        c.effects = replace(c.effects, authority_factory=allocate)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            prepare(c)
+        c.scope.remember(error.value.failure)
+        proof = c.scope.close()
+        assert proof.authority_removed and not c.allocated
+        assert c.teardown == ["authority"]
+        assert c.scope.failure.fixed_code == p.FailureCode.ALLOCATION
+
+    def test_failure_after_migration_child(self, monkeypatch):
+        acquisition_child(monkeypatch, "migration-child", p.ResourceKind.MIGRATION_PROCESS)
+
+    def test_failure_after_issuer(self, monkeypatch):
+        c = lifetime_case()
+        monkeypatch.setattr(Path, "unlink", lambda *args, **kw: None)
+        monkeypatch.setattr(p, "_path_absent", lambda path: True)
+        def close(lease):
+            c.leases.append(lease)
+            c.teardown.append("identity")
+            p._Host.close_identity(lease)
+        c.host.close_identity = close
+        c.issuer.thumbprint = ""
+        with pytest.raises(p.ProofRefused):
+            prepare(c)
+        assert c.scope.close().identity_delivery_closed
+        assert len(c.leases) == 1 and c.leases[0].issuer is None
+        assert c.teardown == ["identity", "authority"]
+
+    def test_failure_after_jwks(self, monkeypatch):
+        c = lifetime_case()
+        lease = p.IdentityLease(c.issuer, "run-test", ROOT / "public-jwks.json", {})
+        exists = [True]
+        monkeypatch.setattr(Path, "unlink", lambda *args, **kw: exists.__setitem__(0, False))
+        monkeypatch.setattr(p, "_path_absent", lambda path: not exists[0])
+        c.scope.acquire(p.ResourceKind.IDENTITY, lambda: p._Host.close_identity(lease))
+        assert c.scope.close().identity_delivery_closed
+        assert lease.issuer is None and exists == [False]
+
+    def test_failure_after_seed_pool(self):
+        c = lifetime_case()
+        pool = SimpleNamespace(close=lambda: c.teardown.append("pool"))
+        c.scope.own_pool(pool)
+        c.scope.remember(p.Failure(p.Stage.BINDING, p.FailureCode.BINDING))
+        assert c.scope.close().pools_closed and c.teardown == ["pool"]
+
+    def test_failure_after_launcher(self, monkeypatch):
+        acquisition_child(monkeypatch, "stack-launcher", p.ResourceKind.STACK_PROCESS)
+
+    def test_failure_after_browser(self):
+        c = lifetime_case()
+        stops = []
+        browser = SimpleNamespace(stop=lambda deadline: (stops.append(deadline), True)[1])
+        c.scope.own_browser(browser)
+        c.scope.remember(p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT))
+        assert c.scope.close().processes_stopped
+        assert stops == [p.CLEANUP_TIMEOUT_S]
+
+    def test_cancel_allocation(self):
+        cancelled_stage(p.Stage.ALLOCATION)
+
+    def test_cancel_migration(self):
+        cancelled_stage(p.Stage.MIGRATION)
+
+    def test_cancel_identity(self):
+        cancelled_stage(p.Stage.IDENTITY)
+
+    def test_cancel_readiness(self):
+        cancelled_stage(p.Stage.READINESS)
+
+    def test_cancel_browser(self):
+        cancelled_stage(p.Stage.BROWSER)
+
+    def test_cancel_publication(self):
+        c = lifetime_case()
+        assert c.scope.close().ok
+        c.scope.cancel()
+        commits = []
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(lambda: commits.append("commit"))
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert commits == []
+        c = lifetime_case()
+        c.scope.close()
+        assert c.scope.commit_guard(lambda: "committed") == "committed"
+
+    def test_process_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.STACK_PROCESS, p.FailureCode.CLEANUP_PROCESS)
+        assert not proof.processes_stopped
+
+    def test_identity_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.IDENTITY, p.FailureCode.CLEANUP_IDENTITY)
+        assert not proof.identity_delivery_closed
+
+    def test_pool_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.POOL, p.FailureCode.CLEANUP_POOL)
+        assert not proof.pools_closed
+
+    def test_authority_stop_failure(self):
+        c = lifetime_case()
+        original = c.effects.authority_factory
+        def allocate(run_id):
+            authority = original(run_id)
+            def stop():
+                raise RuntimeError("fakedb")
+            authority.stop = stop
+            return authority
+        c.effects = replace(c.effects, authority_factory=allocate)
+        c.scope = p.RunScope(effects=c.effects)
+        prepare(c)
+        proof = c.scope.close()
+        assert not c.allocated and "authority" in c.teardown
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert not proof.authority_removed and not proof.ok
+
+    def test_removal_verification(self, monkeypatch):
+        reservation = p.Reservation(ROOT, ROOT / "artifacts", root_identity=(1, 2))
+        removals = []
+        monkeypatch.setattr(p, "_path_safe", lambda path: True)
+        original_stat = Path.stat
+        monkeypatch.setattr(Path, "stat", lambda path, *args, **kw:
+            SimpleNamespace(st_dev=1, st_ino=2) if path == ROOT else original_stat(path, *args, **kw))
+        assert not p._path_absent(SimpleNamespace(lstat=lambda: SimpleNamespace()))
+        def denied():
+            raise PermissionError("fake")
+        assert not p._path_absent(SimpleNamespace(lstat=denied))
+        def missing():
+            raise FileNotFoundError("fake")
+        assert p._path_absent(SimpleNamespace(lstat=missing))
+        monkeypatch.setattr(p.os.path, "lexists", lambda path: True)
+        monkeypatch.setattr(p, "_path_absent", lambda path: False)
+        monkeypatch.setattr(p.shutil, "rmtree", lambda path: removals.append(path))
+        assert p._Host.scrub(reservation, keep_safe=False) is False
+        assert removals == [ROOT]
+        # Identity replacement refuses before removal too.
+        assert p._Host.scrub(replace(reservation, root_identity=(1, 3)), keep_safe=False) is False
+        assert removals == [ROOT]
+
+    def test_scrub_failure(self):
+        c = lifetime_case()
+        c.host.scrub = lambda *args, **kw: False
+        c.scope.own_reservation(c.plan.reservation)
+        proof = c.scope.close()
+        assert not proof.private_material_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_PRIVATE),)
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("success despite scrub failure"))
+
+    def test_primary_failure_preserved(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.MIGRATION, p.FailureCode.MIGRATION_EXIT)
+        c.scope.remember(primary)
+        for kind in (p.ResourceKind.ROOT, p.ResourceKind.POOL, p.ResourceKind.STACK_PROCESS):
+            c.scope.acquire(kind, lambda: False)
+        proof = c.scope.close()
+        assert c.scope.failure is primary
+        assert [f.fixed_code for f in proof.failures] == [p.FailureCode.CLEANUP_PROCESS,
+            p.FailureCode.CLEANUP_POOL, p.FailureCode.CLEANUP_PRIVATE]
+
+    def test_reused_process_identity(self):
+        c = lifetime_case()
+        owner = p.ProcessIdentity("fake", 7, "old", 1)
+        signals = []
+        request = p.StopRequest(owner, lambda: replace(owner, start_id="new"),
+            lambda: signals.append("terminate"), lambda: signals.append("kill"), lambda timeout: True)
+        assert p.stop_owned(request, effects=c.effects, deadline=5)
+        assert signals == []
+        identities = iter((owner, replace(owner, start_id="new")))
+        request = replace(request, observe=lambda: next(identities), wait=lambda timeout: False)
+        assert p.stop_owned(request, effects=c.effects, deadline=5)
+        assert signals == ["terminate"]
+
+    def test_guardian_parent_loss(self):
+        c = lifetime_case()
+        c.allocated = True
+        ownership = c.host.authority_inventory("run-test")
+        def receive(timeout):
+            assert 0 < timeout <= 0.1
+            raise EOFError
+        channel = SimpleNamespace(receive=receive, acknowledge=lambda: pytest.fail("EOF disarmed"))
+        process = SimpleNamespace(stop=lambda deadline: (c.teardown.append("process"), True)[1])
+        request = p.GuardianRequest("run-test", c.plan.reservation, ownership, channel, (process,), 1)
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert c.teardown == ["process", "authority", "private"] and not c.allocated
+        assert c.effects.clock.now == 0  # EOF triggers immediate emergency cleanup.
+        # A stale guardian may not remove resources belonging to a later run.
+        c.allocated, c.private = True, True
+        c.teardown.clear()
+        stale = replace(request, ownership=replace(ownership, containers=("d" * 12,)))
+        assert p.guardian_main(stale, effects=c.effects) == 1
+        assert c.allocated and "authority" not in c.teardown
+
+    def test_guardian_early_disarm(self):
+        c = lifetime_case()
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None, disarm=lambda: c.teardown.append("disarm")))
+        c.scope.acquire(p.ResourceKind.ROOT, lambda: False)
+        proof = c.scope.close()
+        assert not proof.guardian_disarmed and c.teardown == []
+        assert [f.fixed_code for f in proof.failures] == [p.FailureCode.CLEANUP_PRIVATE, p.FailureCode.GUARDIAN]
+        c = lifetime_case()
+        channel = SimpleNamespace(receive=lambda timeout: "disarm", acknowledge=lambda: c.teardown.append("ack"))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, deadline=1)
+        assert p.guardian_main(request, effects=c.effects) == 1 and c.teardown == []
+        c.private = False
+        assert p.guardian_main(request, effects=c.effects) == 0 and c.teardown == ["ack"]
+
+    def test_preexisting_run_collision(self, monkeypatch):
+        c = lifetime_case()
+        c.allocated = True
+        with pytest.raises(p.ProofRefused) as error:
+            prepare(c)
+        assert error.value.failure.fixed_code == p.FailureCode.ALLOCATION
+        c.scope.close()
+        assert c.allocated and c.teardown == [] and "allocate" not in c.events
+        # Collision after the empty inventory but inside PP-2's start lock.
+        c = lifetime_case()
+        def collide(run_id):
+            c.allocated = True
+            raise RuntimeError("run already exists")
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(
+            PgAuthority=SimpleNamespace(start=collide)))
+        c.effects = replace(c.effects, authority_factory=p._authority_factory)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused):
+            prepare(c)
+        c.scope.close()
+        assert c.allocated and c.teardown == []
+
+    def test_bounded_escalation(self, monkeypatch):
+        c = lifetime_case()
+        owner = p.ProcessIdentity("fake", 7, "old", 1)
+        calls = []
+        def wait(timeout):
+            assert timeout is not None and 0 < timeout <= 3
+            calls.append(("wait", timeout))
+            c.effects.clock.wait(timeout)
+            return len(calls) > 3
+        request = p.StopRequest(owner, lambda: owner, lambda: calls.append("terminate"),
+            lambda: calls.append("kill"), wait)
+        assert p.stop_owned(request, effects=c.effects, deadline=3)
+        assert calls == ["terminate", ("wait", 1.0), "kill", ("wait", 2.0)]
+        assert c.effects.clock.now == 3
+        # An uncooperative pending operation stays owned and prevents deletion.
+        c = lifetime_case()
+        c.scope._pending.append(SimpleNamespace(done=lambda: False))
+        c.scope.own_reservation(c.plan.reservation)
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None, disarm=lambda: c.teardown.append("disarm")))
+        proof = c.scope.close()
+        assert not proof.ok and not proof.guardian_disarmed and c.private
+        assert c.teardown == [] and c.effects.clock.now == p.CLEANUP_TIMEOUT_S
+        # A parent exit does not establish absence of its owned descendants.
+        spec = p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 5)
+        owned = p._RuntimeProcess(spec)
+        owned.identity = owner
+        owned.process = SimpleNamespace(poll=lambda: 0)
+        jobs = []
+        owned.job = SimpleNamespace(stop=lambda deadline: (jobs.append("verify-job"), False)[1],
+                                    close=lambda: jobs.append("close-job"))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        assert owned.stop(c.effects.clock.now + 3) is False
+        assert jobs == ["verify-job", "close-job"]
+        owned = p._RuntimeProcess(spec)
+        owned.identity = owner
+        owned.process = SimpleNamespace(poll=lambda: 0)
+        jobs.clear()
+        owned.job = SimpleNamespace(stop=lambda deadline: (jobs.append("verify-job"), True)[1],
+                                    close=lambda: jobs.append("close-job"))
+        assert owned.stop(c.effects.clock.now + 3)
+        assert owned.stop(c.effects.clock.now + 3)
+        assert jobs == ["verify-job", "close-job"]
+        # Acquisitions completed while settling a cancelled stage join teardown.
+        c = lifetime_case()
+        registered = []
+        def done():
+            if c.effects.clock.now >= 0.05 and not registered:
+                c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("late-pool")))
+                registered.append(True)
+            return c.effects.clock.now >= 0.1
+        c.scope._pending.append(SimpleNamespace(done=done))
+        assert c.scope.close().ok and c.teardown == ["late-pool"]
+
+
+# E: every external operation, including receipt filesystem operations, is fake.
+class ReceiptFiles:
+    def __init__(self):
+        self.files, self.directories, self.next_inode = {}, {}, 0
+        self.root = ReceiptPath(self, ROOT / "receipt-files")
+        for path in reversed((self.root.path, *self.root.path.parents)):
+            self.next_inode += 1
+            self.directories[path] = self.next_inode
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(p, "_private_directory", lambda path: path.mkdir())
+        real_lexists, real_rmtree = p.os.path.lexists, p.shutil.rmtree
+        monkeypatch.setattr(p.os.path, "lexists", lambda path: path.exists() if isinstance(path, ReceiptPath) else real_lexists(path))
+        def remove(root):
+            if not isinstance(root, ReceiptPath):
+                return real_rmtree(root)
+            assert root.path.is_relative_to(self.root.path) and root.path != self.root.path
+            self.files = {path: value for path, value in self.files.items() if not path.is_relative_to(root.path)}
+            self.directories = {path: value for path, value in self.directories.items() if not path.is_relative_to(root.path)}
+        monkeypatch.setattr(p.shutil, "rmtree", remove)
+        rename, overwrite = p.os.rename, p.os.replace
+        def move(source, target, *, replace=False):
+            if not isinstance(source, ReceiptPath):
+                return (overwrite if replace else rename)(source, target)
+            if target.exists() and not replace:
+                raise FileExistsError("fake collision")
+            self.files[target.path] = self.files.pop(source.path)
+        monkeypatch.setattr(p.os, "rename", move)
+        monkeypatch.setattr(p.os, "replace", lambda source, target: move(source, target, replace=True))
+        monkeypatch.setattr(p.os, "fsync", lambda fd: None)
+
+
+class ReceiptPath:
+    def __init__(self, files, path):
+        self.files, self.path = files, path
+    def __str__(self):
+        return str(self.path)
+    def __fspath__(self):
+        return str(self.path)
+    def __repr__(self):
+        return "<fake receipt path>"
+    def __hash__(self):
+        return hash(self.path)
+    def __eq__(self, other):
+        return self.path == (other.path if isinstance(other, ReceiptPath) else other)
+    def __truediv__(self, part):
+        return ReceiptPath(self.files, self.path / part)
+    def __getattr__(self, name):
+        return getattr(self.path, name)
+    @property
+    def parent(self):
+        return ReceiptPath(self.files, self.path.parent)
+    @property
+    def parents(self):
+        return tuple(ReceiptPath(self.files, path) for path in self.path.parents)
+    def with_name(self, name):
+        return ReceiptPath(self.files, self.path.with_name(name))
+    def exists(self):
+        return self.path in self.files.files or self.path in self.files.directories
+    def stat(self):
+        if self.path in self.files.directories:
+            return SimpleNamespace(st_dev=1, st_ino=self.files.directories[self.path],
+                st_mode=p.stat.S_IFDIR, st_file_attributes=0, st_size=0)
+        if self.path in self.files.files:
+            return SimpleNamespace(st_dev=1, st_ino=1000, st_mode=p.stat.S_IFREG,
+                st_file_attributes=0, st_size=len(self.files.files[self.path]))
+        raise FileNotFoundError("fake missing")
+    lstat = stat
+    def mkdir(self, **kwargs):
+        if self.exists() or self.path.parent not in self.files.directories:
+            raise FileExistsError("fake collision")
+        self.files.next_inode += 1
+        self.files.directories[self.path] = self.files.next_inode
+    def unlink(self, *, missing_ok=False):
+        if self.path not in self.files.files and not missing_ok:
+            raise FileNotFoundError("fake missing")
+        self.files.files.pop(self.path, None)
+    def write_bytes(self, value):
+        self.files.files[self.path] = value
+    def read_bytes(self):
+        if self.path not in self.files.files:
+            raise FileNotFoundError("fake missing")
+        return self.files.files[self.path]
+    def write_text(self, value, **kwargs):
+        self.write_bytes(value.encode("utf-8"))
+    def open(self, mode):
+        if mode == "rb":
+            return io.BytesIO(self.read_bytes())
+        assert mode == "xb"
+        if self.exists():
+            raise FileExistsError("fake collision")
+        path = self
+        class Stream(io.BytesIO):
+            def fileno(self):
+                return 7
+            def close(self):
+                if not self.closed:
+                    path.write_bytes(self.getvalue())
+                super().close()
+        return Stream()
+
+
+def receipt_case():
+    from contextlib import nullcontext
+    c = execution_case()
+    c.allocated, c.private = False, True
+    c.published.clear()
+    c.launches.clear()
+    c.events.clear()
+    c.journals.clear()
+    c.receipts, c.leases, c.retained = {}, [], []
+    c.on_publish = lambda: None
+    c.host.begin_operation = ImmediateOperation
+    def cancellation(scope):
+        c.run_scope = scope
+        return nullcontext()
+    c.host.cancellation = cancellation
+    def scrub(reservation, *, keep_safe):
+        c.events.append("scrub")
+        c.private = False
+        c.published.clear()
+        c.retained.clear()
+        return True
+    c.host.scrub = scrub
+    c.host.private_absent = lambda reservation: not c.private
+    def remove(run_id):
+        c.events.append("remove-authority")
+        c.allocated = False
+    c.host.cleanup_authority = remove
+    c.host.cleanup_owned_authority = lambda run_id, ownership: remove(run_id)
+    def close_identity(lease):
+        c.events.append("close-identity")
+        c.leases.append(lease)
+        object.__setattr__(lease, "issuer", None)
+        c.published.discard(lease.jwks_path)
+    c.host.close_identity = close_identity
+    def disarm():
+        c.events.append("disarm")
+        return not c.private and not c.allocated
+    c.guardian = SimpleNamespace(arm=lambda: c.events.append("arm"), disarm=disarm,
+        own_process=lambda child: c.events.append("own-process"),
+        observe=lambda ownership: c.events.append("guardian-authority"))
+    c.host.guardian = lambda plan: c.guardian
+    c.host.receipt_binding = lambda run_id, path, writer: p.ReceiptBinding(run_id, c.plan.source, "fakekey")
+    original_launcher = c.effects.process_launcher
+    def launch(spec, *, scope):
+        if spec.role == "stack-launcher":
+            return original_launcher(spec, scope=scope)
+        c.launches.append(spec)
+        kind = p.ResourceKind.MIGRATION_PROCESS if spec.role == "migration-child" else p.ResourceKind.RUNTIME_PROCESS
+        scope.acquire(kind, lambda: c.events.append("stop:" + spec.role))
+        return SimpleNamespace(poll=lambda: 0, stop=lambda deadline: True)
+    def canonical(request):
+        return c.descriptor if request.purpose == "descriptor" else c.canonical
+    def journal(path, value):
+        c.journals.append((path, value))
+        c.events.append("intent" if type(value) is p.PublicationIntent else path.stem)
+        if type(value) is p.PublicationIntent:
+            c.intent = value
+    def publish(path, publication):
+        c.events.append("publish-prepare")
+        c.on_publish()
+        def commit():
+            c.events.append("publish-commit")
+            if path in c.receipts:
+                raise FileExistsError("fake")
+            c.receipts[path] = json.loads(json.dumps(publication.document))
+        publication.commit(commit)
+    def read(path):
+        if path not in c.receipts:
+            raise FileNotFoundError("fake")
+        return c.receipts[path]
+    c.effects = replace(c.effects, process_launcher=launch, canonical_reader=canonical,
+        receipt_writer=SimpleNamespace(ownership=journal, publish=publish, read=read))
+    return c
+
+
+def successful_receipt():
+    c = receipt_case()
+    c.outcome = p.supervise(c.config, effects=c.effects)
+    assert c.outcome.exit_code == 0, c.outcome
+    c.document = c.receipts[c.outcome.receipt_path]
+    c.expected = p.ReceiptBinding(c.config.run_id, c.plan.source, "fakekey")
+    assert p.verify_receipt(c.outcome.receipt_path, expected=c.expected, effects=c.effects).ok
+    return c
+
+
+def verify_document(c, value):
+    c.receipts[c.outcome.receipt_path] = value
+    return p.verify_receipt(c.outcome.receipt_path, expected=c.expected, effects=c.effects)
+
+
+def clone_document(value):
+    return json.loads(json.dumps(value))
+
+
+def disk_publication(c, tmp_path, monkeypatch):
+    root = tmp_path / "owned-run"
+    root.mkdir()
+    (root / "artifacts").mkdir()
+    info = root.stat()
+    reservation = p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+    intent = replace(c.intent, reservation=reservation,
+        journal=replace(c.intent.journal, run_root=root, artifact_root=root / "artifacts"))
+    writer = p._ReceiptWriter()
+    writer.ownership(root / "publication-intent.json", intent)
+    assert p._Host.scrub(reservation, keep_safe=False)
+    return writer, root / "artifacts" / p.RECEIPT_NAME
+
+
+def canary_world(value, capsys):
+    from urllib.parse import quote
+    c = receipt_case()
+    c.retained.append(value)
+    c.host.facts = replace(c.host.facts, environment={"PATH": "fake", "PGPASSWORD": value,
+        "UNUSED_DATABASE_URL": value, "TOKEN": value, "CHECKOUT": value})
+    allocate = c.effects.authority_factory
+    def authority(run_id):
+        result = allocate(run_id)
+        result.dsn = lambda: value
+        return result
+    c.effects = replace(c.effects, authority_factory=authority)
+    c.host.database_module = lambda environment: c.db
+    c.issuer.private_key = value
+    result = p.supervise(c.config, effects=c.effects)
+    assert result.exit_code == 0 and not c.private and not c.retained
+    event = p._RetainedOutput(p._approved_event)
+    raw = json.dumps({"stage": "browser", "fixed_code": "BROWSER_EXIT", "diagnostic": value}).encode()
+    event.feed(raw)
+    retained = event.finish()
+    assert retained == b""
+    assert value not in repr(event)
+    good = p._RetainedOutput(p._approved_event)
+    good.feed(b'{"stage":"browser","fixed_code":"BROWSER_EXIT"}')
+    assert json.loads(good.finish()) == {"stage": "browser", "fixed_code": "BROWSER_EXIT"}
+    spec = p.ProcessSpec("runtime-build", ("fake",), ROOT,
+        {"DATABASE_URL": value, "TOKEN": value, "CHECKOUT": value, "KEY": value}, 1)
+    objects = (spec, spec.environment, p._SecretToken(value),
+        p.CanonicalRequest(environment={"DATABASE_URL": value}),
+        p.ReceiptBinding("run-test", c.plan.source, value))
+    rendered = repr(objects) + repr(spec.argv) + repr(c.journals) + json.dumps(list(c.receipts.values()))
+    assert value not in rendered and quote(value, safe="") not in rendered
+    # The parser must not echo arbitrary subcommands, options, values or an
+    # unambiguous prefix. Injection remains a Python API, not a CLI switch.
+    for argv in ([value], ["supervise", "--run-id", "run-test", "--run-root", str(ROOT), "--effects", value],
+                 ["supervise", "--run", value], ["verify-receipt", "--receipt", value]):
+        assert p.main(argv, effects=c.effects) == 2
+        output = capsys.readouterr()
+        assert output.out == "" and output.err == "USAGE: Invalid project proof command.\n"
+    # Raw exceptions can originate at any seam; no diagnostic string is kept.
+    failed = receipt_case()
+    failed.stack_ready["ports"] = dict(web=5275, app=8230, broker=8240, harness=8250)
+    def crash(*args, **kwargs):
+        raise RuntimeError(value)
+    failed.effects = replace(failed.effects, browser_runner=crash)
+    assert p.main(["supervise", "--run-id", "run-test", "--run-root", str(ROOT)], effects=failed.effects) == 1
+    output = capsys.readouterr()
+    assert output.out == "BROWSER_EXIT: Project proof command failed.\n" and output.err == ""
+    assert value not in repr(failed.journals) + json.dumps(list(failed.receipts.values()))
+    assert not failed.private and not failed.retained
+
+
+class TestProjectReceipt:
+    def test_success_after_cleanup(self, monkeypatch):
+        c = successful_receipt()
+        assert c.events.index("intent") < c.events.index("scrub") < c.events.index("disarm") < c.events.index("publish-commit")
+        assert c.document["ok"] is True and c.document["failure"] is None
+        assert all(c.document["rows"].values())
+        assert all(c.document["cleanup"][name] for name in p._CLEANUP_FIELDS)
+        assert not c.allocated and not c.private and all(lease.issuer is None for lease in c.leases)
+        c = receipt_case()
+        c.on_publish = lambda: c.run_scope.cancel()
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert outcome.receipt_path is None and c.receipts == {} and not c.private
+        c = receipt_case()
+        c.host.facts = replace(c.host.facts, output_owned=False)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code != 0 and not c.journals and not c.receipts
+        assert c.events == []
+        # The private guardian entry receives only public ownership over a
+        # fake pipe. Its adapter must actually reach D's guardian_main.
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        root = files.root / "guardian"
+        root.mkdir()
+        info = root.stat()
+        messages = [{"event": "init", "run_id": "run-test", "run_root": str(root),
+            "root_identity": [info.st_dev, info.st_ino], "deadline": 10}, {"event": "disarm"}]
+        output = io.StringIO()
+        monkeypatch.setattr(p, "sys", SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(
+            b"".join((json.dumps(item) + "\n").encode() for item in messages))), stdout=output))
+        monkeypatch.setattr(p, "threading", SimpleNamespace(Thread=lambda *, target, daemon: SimpleNamespace(start=target)))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        real_path = p.Path
+        monkeypatch.setattr(p, "Path", lambda value: root if value == str(root) else real_path(value))
+        calls = []
+        def guardian(request, *, effects):
+            calls.append(request.run_id)
+            assert request.channel.receive(1) == "disarm"
+            request.channel.acknowledge()
+            return 0
+        monkeypatch.setattr(p, "guardian_main", guardian)
+        assert p._guardian_entry() == 0 and calls == ["run-test"] and output.getvalue() == "OK\nOK\n"
+
+    def test_receipt_missing(self, capsys):
+        c = successful_receipt()
+        c.receipts.clear()
+        result = p.verify_receipt(c.outcome.receipt_path, expected=c.expected, effects=c.effects)
+        assert result == p.Verification(False, p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT))
+        with pytest.raises(Exception):
+            result.ok = True
+        assert p.main(["verify-receipt", "--run-id", "run-test", "--receipt", str(c.outcome.receipt_path)], effects=c.effects) == 1
+        assert capsys.readouterr().out == "RECEIPT: Project proof command failed.\n"
+
+    def test_receipt_malformed(self, monkeypatch):
+        c = successful_receipt()
+        for malformed in (None, [], {}, {"schema": p.SCHEMA}):
+            assert not verify_document(c, malformed).ok
+        for field, value in (("checkout_fence", "1"), ("settings_readback_sha256", "bad")):
+            malformed = clone_document(c.document)
+            malformed["canonical"][field] = value
+            assert not verify_document(c, malformed).ok
+        malformed = clone_document(c.document)
+        malformed["timings"]["migration"] = float("nan")
+        assert not verify_document(c, malformed).ok
+        malformed = clone_document(c.document)
+        malformed["stack"]["owned_process_identities"][1]["parent_pid"] = 999
+        assert not verify_document(c, malformed).ok
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        path = files.root / "receipt.json"
+        for raw in (b"{broken", b'{"ok":true,"ok":false}', b"x" * (p.RECEIPT_LIMIT + 1)):
+            path.write_bytes(raw)
+            effects = replace(c.effects, receipt_writer=p._ReceiptWriter())
+            assert not p.verify_receipt(path, expected=c.expected, effects=effects).ok
+
+    def test_receipt_binding(self):
+        c = successful_receipt()
+        expected = (replace(c.expected, run_id="run-other"), replace(c.expected, profile="account"),
+            replace(c.expected, schema=p.MIGRATION_SCHEMA), replace(c.expected, public_key_thumbprint="otherkey"),
+            replace(c.expected, source=replace(c.plan.source, commit="d" * 40)),
+            replace(c.expected, source=replace(c.plan.source, dirty_tree_sha256=OTHER_HASH)),
+            replace(c.expected, source=replace(c.plan.source, tested_source_manifest_sha256=HASH)))
+        for binding in expected:
+            assert not p.verify_receipt(c.outcome.receipt_path, expected=binding, effects=c.effects).ok
+
+    def test_receipt_unknown_fields(self, monkeypatch):
+        c = successful_receipt()
+        assert set(c.document) == p._RECEIPT_FIELDS
+        for key in (None, "source", "identity", "database", "stack", "worker", "playwright", "rows", "canonical", "timings", "cleanup"):
+            malformed = clone_document(c.document)
+            (malformed if key is None else malformed[key])["diagnostic"] = "raw@key"
+            assert not verify_document(c, malformed).ok
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        writer, path = disk_publication(c, files.root, monkeypatch)
+        malformed = dict(c.document, diagnostic="raw@key")
+        with pytest.raises(p.ProofRefused):
+            writer.publish(path, p._Publication(malformed, lambda commit: commit()))
+        assert not path.exists()
+
+    def test_receipt_no_clobber(self, monkeypatch):
+        c = successful_receipt()
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        writer, path = disk_publication(c, files.root, monkeypatch)
+        events = []
+        sync = p.os.fsync
+        def fsync(fd):
+            events.append("fsync")
+            sync(fd)
+        monkeypatch.setattr(p.os, "fsync", fsync)
+        def race(commit):
+            assert len(events) == 3  # Recreated intent, absence marker, sibling temp.
+            path.write_bytes(b"older")
+            events.append("race")
+            return commit()
+        with pytest.raises((OSError, p.ProofRefused)):
+            writer.publish(path, p._Publication(c.document, race))
+        assert path.read_bytes() == b"older" and events[-1] == "race"
+        assert not path.with_name(path.name + ".pending").exists()
+        with pytest.raises(p.ProofRefused):
+            writer.publish(path.parent / "foreign.json", p._Publication(c.document, lambda commit: commit()))
+        # The same production decision path uses fake no-replace filesystem effects.
+        other = files.root / "control"
+        other.mkdir()
+        writer, path = disk_publication(c, other, monkeypatch)
+        writer.publish(path, p._Publication(c.document, lambda commit: commit()))
+        assert p.verify_receipt(path, expected=c.expected, effects=replace(c.effects, receipt_writer=writer)).ok
+
+    def test_receipt_failed_rows(self):
+        c = successful_receipt()
+        for name in p.REQUIRED_ROWS:
+            malformed = clone_document(c.document)
+            malformed["rows"][name] = False
+            assert not verify_document(c, malformed).ok
+        for name in p._CLEANUP_FIELDS:
+            malformed = clone_document(c.document)
+            malformed["cleanup"][name] = False
+            assert not verify_document(c, malformed).ok
+        for key in ("runtime", "database", "stack", "worker", "playwright", "canonical"):
+            malformed = clone_document(c.document)
+            malformed[key] = None
+            assert not verify_document(c, malformed).ok
+        for status in ("skipped", "flaky", "failed"):
+            malformed = clone_document(c.document)
+            malformed["playwright"]["outcomes"][0]["status"] = status
+            assert not verify_document(c, malformed).ok
+        failed = receipt_case()
+        def browser(*args, **kwargs):
+            raise p.ProofRefused(p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT))
+        failed.effects = replace(failed.effects, browser_runner=browser)
+        failed.host.scrub = lambda *args, **kwargs: False
+        outcome = p.supervise(failed.config, effects=failed.effects)
+        assert outcome.failure == p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT)
+        assert [item.fixed_code for item in outcome.cleanup_failures] == [p.FailureCode.CLEANUP_PRIVATE, p.FailureCode.GUARDIAN]
+        assert not failed.receipts
+
+    def test_migration_not_project(self):
+        c = receipt_case()
+        def forbidden(*args, **kwargs):
+            pytest.fail("migration-only command acquired identity or a stack")
+        c.effects = replace(c.effects, issuer_factory=forbidden, seed_operation=forbidden, browser_runner=forbidden)
+        result = p.measure_migration(c.config, effects=c.effects)
+        assert result.exit_code == 0 and result.receipt_path.name == p.MIGRATION_RECEIPT_NAME
+        document = c.receipts[result.receipt_path]
+        assert document["schema"] == p.MIGRATION_SCHEMA and document["ok"] is True
+        assert document["rows"]["P04"] and document["rows"]["P10"] and not document["rows"]["P09"]
+        assert document["identity"] is None and document["runtime"] is None
+        assert all(spec.role == "migration-child" for spec in c.launches)
+        assert not p.verify_receipt(result.receipt_path,
+            expected=p.ReceiptBinding(c.config.run_id, c.plan.source, "fakekey"), effects=c.effects).ok
+        assert not c.private and not c.allocated and c.mints == []
+
+    def test_raw_dsn_canary(self, capsys):
+        canary_world("db@:/pw", capsys)
+
+    def test_encoded_dsn_canary(self, capsys):
+        from urllib.parse import quote
+        canary_world(quote("db@:/pw", safe=""), capsys)
+
+    def test_bearer_canary(self, capsys):
+        canary_world("br+/?x", capsys)
+
+    def test_encoded_bearer_canary(self, capsys):
+        from urllib.parse import quote
+        canary_world(quote("br+/?x", safe=""), capsys)
+
+    def test_capability_canary(self, capsys):
+        canary_world("cp+/?x", capsys)
+
+    def test_encoded_capability_canary(self, capsys):
+        from urllib.parse import quote
+        canary_world(quote("cp+/?x", safe=""), capsys)
+
+    def test_private_key_canary(self, capsys):
+        canary_world("key+/=", capsys)
+        c = receipt_case()
+        c.issuer.private_key = "key+/="
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code == 0 and c.leases and all(lease.issuer is None for lease in c.leases)
+        assert "key+/=" not in json.dumps(list(c.receipts.values())) + repr(c.journals)
+
+    def test_split_chunk_canaries(self, capsys):
+        from urllib.parse import quote
+        values = ("db@:/pw", "br+/?x", "cp+/?x", "key+/=")
+        for value in (*values, *(quote(item, safe="") for item in values)):
+            payload = json.dumps({"stage": "browser", "fixed_code": "BROWSER_EXIT", "diagnostic": value}).encode()
+            for split in range(1, len(value)):
+                boundary = payload.index(value.encode()) + split
+                output = p._RetainedOutput(p._approved_event)
+                output.feed(payload[:boundary])
+                output.feed(payload[boundary:])
+                retained = output.finish()
+                assert value.encode() not in retained
+                assert retained == b""
+                assert not output._raw
+            canary_world(value, capsys)
+
+    def test_bounded_output(self, monkeypatch):
+        output = p._RetainedOutput(p._approved_event, limit=64)
+        for _ in range(10000):
+            output.feed(b"x" * 32)
+            assert len(output._raw) <= 64
+        assert output.overflow and output.finish() == b"" and not output._raw
+        # Overflow cannot recover by accepting a later valid suffix.
+        output.feed(b'{"stage":"browser","fixed_code":"BROWSER_EXIT"}')
+        assert output.finish() == b""
+        output = p._RetainedOutput(p._approved_event)
+        output.feed(b'{"stage":"browser","fixed_code":"BROWSER_EXIT"}')
+        assert len(output.finish()) <= p.MAX_OUTPUT_BYTES
+        # Exercise the production launcher wiring with fake handles and pipes.
+        sinks = []
+        class Pipe:
+            def __init__(self, spec):
+                self.capture = p._RetainedOutput(lambda raw: p._child_public(spec, raw))
+                self.closed, self.retained, self.launched_count = False, None, 0
+                sinks.append(self)
+            def launched(self):
+                self.launched_count += 1
+            def close(self):
+                if not self.closed:
+                    self.retained = self.capture.finish()
+                    self.closed = True
+        def spawn(argv, **kwargs):
+            assert kwargs["stdout"] is sinks[0] and kwargs["stderr"] == p.subprocess.DEVNULL
+            kwargs["stdout"].capture.feed(b'{"diagnostic":"db@:/pw"}')
+            return SimpleNamespace(pid=77, poll=lambda: 0)
+        monkeypatch.setattr(p, "_OutputPipe", Pipe)
+        monkeypatch.setattr(p.subprocess, "Popen", spawn)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt", getpid=lambda: 66))
+        monkeypatch.setattr(p, "_WindowsJob", lambda: SimpleNamespace(attach_and_resume=lambda child: "start77"))
+        child = p._RuntimeProcess(p.ProcessSpec("migration-child", ("fake",), ROOT, {}, 5, ROOT / "result.json"))
+        child.start()
+        assert child.poll() == 0 and sinks[0].launched_count == 1 and sinks[0].retained == b""
+
+    def test_safe_retention(self, monkeypatch):
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        for keep in (False, True):
+            for fail in (False, True):
+                c = receipt_case()
+                c.config = replace(c.config, keep_run_root=keep)
+                c.retained.extend(("db@:/pw", "br+/?x", "cp+/?x", "key+/="))
+                if fail:
+                    def crash(*args, **kwargs):
+                        raise RuntimeError("key+/=")
+                    c.effects = replace(c.effects, browser_runner=crash)
+                outcome = p.supervise(c.config, effects=c.effects)
+                assert (outcome.exit_code != 0) == fail
+                assert not c.private and not c.retained and all(lease.issuer is None for lease in c.leases)
+                assert all("key+/=" not in json.dumps(value) for value in c.receipts.values())
+                root = files.root / (str(keep) + str(fail))
+                root.mkdir()
+                (root / "artifacts").mkdir()
+                (root / "artifacts" / "raw.json").write_text("key+/=", encoding="utf-8")
+                info = root.stat()
+                reservation = p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+                assert p._SupervisorHost().scrub(reservation, keep_safe=keep)
+                assert not root.exists()
+        c = receipt_case()
+        c.host.recovery = lambda run_id, root: (c.plan.reservation, c.host.authority_inventory(run_id))
+        c.host.recovery_processes_absent = lambda run_id, root: True
+        proof = p.cleanup("run-test", run_root=ROOT, effects=c.effects)
+        assert proof.ok and not c.private and not c.allocated and c.receipts == {}
+        c = receipt_case()
+        c.host.recovery = lambda run_id, root: (c.plan.reservation, c.host.authority_inventory(run_id))
+        c.host.recovery_processes_absent = lambda run_id, root: False
+        proof = p.cleanup("run-test", run_root=ROOT, effects=c.effects)
+        assert not proof.ok and proof.failures[0].fixed_code == p.FailureCode.CLEANUP_PROCESS
+        assert c.private and c.receipts == {} and "remove-authority" not in c.events
