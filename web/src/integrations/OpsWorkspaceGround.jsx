@@ -7,6 +7,7 @@ import { DatasetElementV1, DatasetQueryV1 } from '../../../vendor/assistant-cont
 import { actionRunMatches, createIntegrationsClient, UUID } from './client.js'
 import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
+import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 import './ops-workspace.css'
 
@@ -29,6 +30,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const [revision, setRevision] = useState('')
   const [preferences, setPreferences] = useState({ locale: 'en-US', timezone: 'UTC', hourFormat: '24h' })
   const [preferenceError, setPreferenceError] = useState('')
+  const [handoff, setHandoff] = useState(null)
   const boardRef = useRef(null)
   const resultRef = useRef(null)
   const generation = useRef(0)
@@ -47,6 +49,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const win = useGroundWindow(active || leaving, studioShell, boardRef, occluders)
 
   function invalidate() {
+    setHandoff(null)
     generation.current += 1
     context.current?.action?.controller.abort()
     context.current?.controller.abort()
@@ -316,9 +319,16 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
         {state.error && <div role="alert"><p>{state.error}</p><button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button></div>}
         {state.scope && <>
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ManualWorkflowStartPanel
+            key={JSON.stringify(['manual-workflow-start', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
+            signal={context.current.controller.signal} guard={guardWorkflow}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
+            onAdmitted={(run) => { const ctx = context.current; if (ctx && current(ctx)) setHandoff({ run, generation: ctx.generation }) }} />}
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ManualWorkflowRunPanel
             key={JSON.stringify(['manual-workflow', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow} displayPreferences={preferences}
+            requestedRunId={handoff?.generation === context.current.generation ? handoff.run.run_id : undefined}
+            admittedBinding={handoff?.generation === context.current.generation ? handoff.run : undefined}
             onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
           {state.scope.projectRole === 'owner' && context.current && <IntegrationSetupPanel
             key={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId} scope={state.scope}

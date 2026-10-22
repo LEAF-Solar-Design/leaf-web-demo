@@ -383,15 +383,56 @@ const stagingAssertions = value => ({
 })
 stagingAssertions.poll = callback => ({ toBe: async expected => assert.equal(await callback(), expected) })
 
-test('shared staging version selection traverses Versions and Solar CAD before checking the bound canvas', async () => {
+function stagingVersionSelectionFake({ loads = true } = {}) {
   const events = [], canvas = { visible: true, count: 1, evaluate: async () => true }
-  const page = { getByRole: (_role, { name }) => ({ click: async () => events.push(name) }),
+  let loaded = false, polls = 0
+  const versionCount = { count: async () => {
+    loaded = loads && ++polls > 1
+    events.push(loaded ? 'versions:loaded' : 'versions:loading')
+    return loaded ? 1 : 0
+  } }
+  const assertions = (value, message) => value === versionCount ? {
+    toHaveCount: async (expected, options) => {
+      assert.deepEqual(options, { timeout: 30_000 })
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (await value.count() === expected) return
+      }
+      assert.fail(message)
+    },
+  } : stagingAssertions(value)
+  const page = { getByRole: (role, { name, exact }) => {
+    if (role === 'region') {
+      assert.equal(name, 'Project workspace')
+      assert.equal(exact, true)
+      return { locator: selector => {
+        assert.equal(selector, '[data-tile="versions"] > strong')
+        return versionCount
+      } }
+    }
+    return { click: async () => {
+      assert.equal(loaded, true, 'navigation must wait for loaded versions')
+      events.push(name)
+    } }
+  },
     getByTestId: () => ({ visible: true }), locator: selector => selector === '[data-pane="versions"]'
       ? { getByRole: (_role, { name }) => ({ click: async () => {
         assert.ok(name.test(`v2 · ${stagingIds[3]}`)); events.push('version')
       } }) } : selector.includes('canvas') ? canvas : { count: async () => 0, visible: true, text: stagingIds[3] } }
-  await selectProjectSolarVersion({ page, projectSolar: { binding: stagingBinding } }, stagingAssertions)
-  assert.deepEqual(events, ['Open versions', 'version', 'Solar CAD'])
+  return { runtime: { page, projectSolar: { binding: stagingBinding } }, assertions, events }
+}
+
+test('shared staging version selection traverses Versions and Solar CAD before checking the bound canvas', async () => {
+  const { runtime, assertions, events } = stagingVersionSelectionFake()
+  await selectProjectSolarVersion(runtime, assertions)
+  assert.deepEqual(events, ['versions:loading', 'versions:loaded', 'Open versions', 'version', 'Solar CAD'])
+})
+
+test('shared staging version selection rejects a project that never loads before opening Versions', async () => {
+  const { runtime, assertions, events } = stagingVersionSelectionFake({ loads: false })
+  await assert.rejects(selectProjectSolarVersion(runtime, assertions), {
+    message: `project ${stagingBinding.project_id} did not open in the UI within 30 s`,
+  })
+  assert.deepEqual(events, ['versions:loading', 'versions:loading'])
 })
 
 test('shared checkout adapter always registers UI release once the lease is acquired', async () => {

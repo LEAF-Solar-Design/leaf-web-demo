@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 import SolarSettingsForm from './SolarSettingsForm.jsx'
+import { canOpenSolarSettingsForm } from './solarSettingsWire.js'
 import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
 
@@ -303,6 +304,7 @@ export default function ProjectSolarWorkspace(props) {
     {FlowRail && <FlowRail solarBinding={owner.binding} authorityKey={owner.authorityKey} projectClient={owner.projectClient}
       projectCatalog={owner.reason ? null : owner.projectCatalog} projectRunMemory={projectRunMemory}
       projectPending={projectPending} busy={busy} openName={editor ? selected.name : null}
+      openSettingsForm={canOpenSolarSettingsForm}
       onOpenStep={opening && !busy ? open : undefined} onFlowChange={(flow) => retire(flow, true)} />}
     {inspectionRows.map((row) => <button type="button" key={row.name}
       disabled={!opening || busy || hostFor(row, props) === 'host_unavailable'} onClick={() => open(row)}>

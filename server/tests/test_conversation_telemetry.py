@@ -24,9 +24,13 @@ checkpoint.created/restored precedent.
 """
 from __future__ import annotations
 
+import json
 import re
+import socket
 import sys
 import uuid
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -103,6 +107,204 @@ def _fake_create_message(*, replayed: bool, metadata: Dict[str, Any]):
         return {"message": message, "replayed": replayed, "quarantine": None}
 
     return _create_message
+
+
+@pytest.fixture()
+def firehose_wire(monkeypatch):
+    """Keep the real sink path, with isolated state and no provider access."""
+    with telemetry_sink._wake:
+        monkeypatch.setattr(telemetry_sink, "_queue", deque(maxlen=telemetry_sink._QUEUE_MAX))
+        monkeypatch.setattr(telemetry_sink, "_stats", {
+            "enqueued": 0, "flushed": 0, "dropped_overflow": 0, "dropped_flush": 0,
+        })
+        monkeypatch.setattr(telemetry_sink, "_noted", set())
+    monkeypatch.setenv("LEAF_TELEMETRY_BACKEND", "firehose")
+    monkeypatch.setenv("LEAF_TELEMETRY_FIREHOSE_STREAM", "n2-synthetic-firehose")
+    monkeypatch.setenv("LEAF_METRICS_ENVIRONMENT", "test")
+    monkeypatch.setenv("LEAF_APP_VERSION", "n2-test")
+    monkeypatch.setattr(telemetry_sink, "disabled_reason", lambda: None)
+    monkeypatch.setattr(telemetry_sink, "_ensure_flusher", lambda: None)
+    calls = []
+
+    class Recorder:
+        def put_record_batch(self, **kwargs):
+            calls.append(kwargs)
+            return {"FailedPutCount": 0, "RequestResponses": [{"RecordId": "n2-record"}]}
+
+    def unexpected_external_call(*args, **kwargs):
+        pytest.fail("unexpected SDK construction or network call in N2 wire test")
+
+    monkeypatch.setattr(telemetry_sink, "_get_firehose_client", lambda: Recorder())
+    for name in ("_make_firehose_client", "_make_client", "_get_client"):
+        monkeypatch.setattr(telemetry_sink, name, unexpected_external_call)
+    monkeypatch.setattr(socket, "create_connection", unexpected_external_call)
+    monkeypatch.setattr(socket, "getaddrinfo", unexpected_external_call)
+    return calls
+
+
+def _assert_message_wire(calls, *, role, tenant_id="n2-synthetic-tenant",
+                         conversation_id="n2-synthetic-conversation", forbidden=()):
+    with telemetry_sink._wake:
+        assert len(telemetry_sink._queue) == 1
+        queued = dict(telemetry_sink._queue[0])
+    assert telemetry_sink.stats() == {
+        "enqueued": 1, "flushed": 0, "dropped_overflow": 0, "dropped_flush": 0,
+    }
+    assert calls == []
+    telemetry_sink._drain_once(0)
+    assert len(calls) == 1
+    assert set(calls[0]) == {"DeliveryStreamName", "Records"}
+    assert calls[0]["DeliveryStreamName"] == "n2-synthetic-firehose"
+    records = calls[0]["Records"]
+    assert len(records) == 1
+    assert set(records[0]) == {"Data"}
+    data = records[0]["Data"]
+    assert type(data) is bytes
+    text = data.decode("utf-8")
+    assert text.endswith("\n") and text.count("\n") == 1
+    wire = json.loads(text)
+    assert wire == queued
+    assert set(wire) == {
+        "timestamp", "event_type", "event_name", "tenant_id", "tenant_kind",
+        "user_email", "session_id", "environment", "app_version", "labels",
+    }
+    assert wire["event_name"] == "conversation.message_appended"
+    assert wire["event_type"] == "custom_event"
+    assert wire["tenant_id"] == tenant_id
+    assert wire["tenant_kind"] == "account"
+    assert wire["user_email"] is None
+    assert wire["session_id"] == "server"
+    assert wire["environment"] == "test"
+    assert wire["app_version"] == "n2-test"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z", wire["timestamp"])
+    stamped = datetime.fromisoformat(wire["timestamp"].replace("Z", "+00:00"))
+    assert abs((datetime.now(timezone.utc) - stamped).total_seconds()) < 60
+    assert type(wire["labels"]) is str
+    labels = json.loads(wire["labels"])
+    expected_keys = {"conversation_id", "schema_version", "event_id"}
+    if role is not None:
+        expected_keys.add("role")
+        assert labels["role"] == role
+    assert set(labels) == expected_keys
+    assert all(type(value) is str for value in labels.values())
+    assert labels["conversation_id"] == conversation_id
+    assert labels["schema_version"] == "1"
+    event_id = uuid.UUID(labels["event_id"])
+    assert str(event_id) == labels["event_id"] and event_id.version == 4
+    for marker in forbidden:
+        assert marker not in json.dumps(queued, ensure_ascii=False)
+        assert marker not in json.dumps(wire, ensure_ascii=False)
+        assert marker not in wire["labels"]
+    with telemetry_sink._wake:
+        assert not telemetry_sink._queue
+    assert telemetry_sink.stats() == {
+        "enqueued": 1, "flushed": 1, "dropped_overflow": 0, "dropped_flush": 0,
+    }
+
+
+@pytest.mark.parametrize("role", ["user", "assistant", "server"])
+def test_message_appended_role_vocabulary_reaches_firehose_unchanged(firehose_wire, role):
+    conversations_router.record_conversation_message_appended(
+        tenant_id="n2-synthetic-tenant", tenant_kind="account",
+        conversation_id="n2-synthetic-conversation", role=role)
+    _assert_message_wire(firehose_wire, role=role)
+
+
+@pytest.mark.parametrize("role,markers", [
+    ("synthetic-user@example.invalid", ("synthetic-user@example.invalid",)),
+    ("192.0.2.21", ("192.0.2.21",)),
+    ("C:/synthetic-project/roof-notes.dwg", ("C:/synthetic-project/roof-notes.dwg",)),
+    ("N2_SYNTHETIC_PROJECT_NOTE", ("N2_SYNTHETIC_PROJECT_NOTE",)),
+    ("Bearer " + "N2_SYNTHETIC_NOT_A_CREDENTIAL", ("N2_SYNTHETIC_NOT_A_CREDENTIAL",)),
+    ('{"email":"n2-nested@example.invalid","token":"N2_NESTED_DUMMY"}',
+     ("n2-nested@example.invalid", "N2_NESTED_DUMMY")),
+    ("", ()),
+    ("USER", ("USER",)),
+    (" user ", (" user ",)),
+    ("x" * 500, ("x" * 500,)),
+    ("合成" * 80, ("合成" * 80,)),
+])
+def test_message_appended_unrecognized_role_reaches_firehose_as_other(firehose_wire, role, markers):
+    assert len(role.encode("utf-8")) <= 500
+    conversations_router.record_conversation_message_appended(
+        tenant_id="n2-synthetic-tenant", tenant_kind="account",
+        conversation_id="n2-synthetic-conversation", role=role)
+    _assert_message_wire(firehose_wire, role="other", forbidden=markers)
+
+
+@pytest.mark.parametrize("omit_role", [False, True])
+def test_message_appended_absent_role_remains_absent_on_firehose(firehose_wire, omit_role):
+    kwargs = {} if omit_role else {"role": None}
+    conversations_router.record_conversation_message_appended(
+        tenant_id="n2-synthetic-tenant", tenant_kind="account",
+        conversation_id="n2-synthetic-conversation", **kwargs)
+    _assert_message_wire(firehose_wire, role=None)
+
+
+class _N2StringSubclass(str):
+    def __eq__(self, other):
+        raise AssertionError("role subclass must not be compared")
+
+    def __hash__(self):
+        raise AssertionError("role subclass must not be hashed")
+
+    def __str__(self):
+        raise AssertionError("role subclass must not be coerced")
+
+
+class _N2Unstringifiable:
+    def __str__(self):
+        raise AssertionError("role object must not be coerced")
+
+
+@pytest.mark.parametrize("role", [
+    {"nested": ["n2-dict@example.invalid", {"token": "N2_DICT_DUMMY"}]},
+    [{"email": "n2-list@example.invalid", "token": "N2_LIST_DUMMY"}],
+    42, True, _N2StringSubclass("user"), _N2Unstringifiable(),
+], ids=["dict", "list", "int", "bool", "str-subclass", "unstringifiable"])
+def test_message_appended_malformed_direct_role_preserves_event_without_coercion(firehose_wire, role):
+    conversations_router.record_conversation_message_appended(
+        tenant_id="n2-synthetic-tenant", tenant_kind="account",
+        conversation_id="n2-synthetic-conversation", role=role)
+    _assert_message_wire(firehose_wire, role="other", forbidden=(
+        "n2-dict@example.invalid", "N2_DICT_DUMMY", "n2-list@example.invalid", "N2_LIST_DUMMY",
+    ))
+
+
+def test_message_route_preserves_original_metadata_while_redacting_telemetry_role(monkeypatch, firehose_wire):
+    _stub_message_write(monkeypatch, org_id="n2-synthetic-org", conversation_id="conv-1")
+    monkeypatch.setattr(conversations, "_actor_binding_id", lambda *a, **k: "n2-synthetic-actor")
+    writes = []
+    content = "N2_SYNTHETIC_MESSAGE_CONTENT"
+    metadata = {"role": "n2-route@example.invalid"}
+
+    def create_message(*args, **kwargs):
+        writes.append((args, kwargs))
+        return {"message": {
+            "message_id": "n2-synthetic-message", "conversation_id": args[2],
+            "content": kwargs["content"], "metadata": dict(kwargs["metadata"]),
+            "created_at": "2026-08-20T00:00:00Z",
+        }, "replayed": False, "quarantine": None}
+
+    monkeypatch.setattr(conversations, "create_message", create_message)
+    client, tenant = _client(monkeypatch)
+    with client:
+        response = client.post(
+            _message_url(), json={"content": content, "metadata": metadata},
+            headers={"Idempotency-Key": "n2-synthetic-key"},
+        )
+    assert response.status_code == 201
+    assert writes == [(
+        ("n2-synthetic-org", "proj-1", "conv-1", "n2-synthetic-actor"),
+        {"idempotency_key": "n2-synthetic-key", "content": content, "metadata": metadata},
+    )]
+    body = response.json()
+    assert body["content"] == content
+    assert body["metadata"] == metadata
+    assert body["conversation_id"] == "conv-1"
+    assert body["message_id"] == "n2-synthetic-message"
+    _assert_message_wire(firehose_wire, role="other", tenant_id=str(tenant),
+                         conversation_id="conv-1", forbidden=(metadata["role"], content))
 
 
 # --------------------------------------------------------------------------- #

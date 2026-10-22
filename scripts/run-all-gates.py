@@ -1162,6 +1162,9 @@ def build_suites() -> List[Suite]:
         Suite("server-mcp-staging-probe",
               "server tests/test_mcp_staging_probe.py", "pytest", SERVER,
               _py_pytest("tests/test_mcp_staging_probe.py"), 24),
+        Suite("server-probe-staging-async-job",
+              "server tests/test_probe_staging_async_job.py", "pytest", SERVER,
+              _py_pytest("tests/test_probe_staging_async_job.py"), 16),
         Suite("server-mcp-tenant-registry",
               "server tests/test_tenant_mcp.py", "pytest", SERVER,
               _py_pytest("tests/test_tenant_mcp.py"), 33,
@@ -1291,6 +1294,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_contract_freeze.py"), 14),
         Suite("server-lab-contract", "server tests/test_lab_contract.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_contract.py"), 117),
+        Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_surface.py"), 36),
         # AD4b: the Kit stream map is a superset of the harness stream events.
         Suite("server-kit-stream-superset", "server tests/test_kit_stream_superset.py", "pytest", SERVER,
               _py_pytest("tests/test_kit_stream_superset.py"), 6),

@@ -30,6 +30,49 @@ async function load() {
   await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled())
 }
 afterEach(() => { cleanup(); vi.useRealTimers() })
+it('retains the admitted UUID after first GET failure and recovers only through explicit Refresh', async () => {
+  const { props, client } = setup()
+  client.getManualWorkflowRun.mockRejectedValueOnce(new Error('lost'))
+  const view = render(<ManualWorkflowRunPanel {...props} requestedRunId={runId} admittedBinding={snapshot.run} />)
+  await screen.findByRole('alert')
+  expect(screen.getByLabelText('Run UUID')).toHaveValue(runId)
+  view.rerender(<ManualWorkflowRunPanel {...props} requestedRunId={runId} admittedBinding={{ ...snapshot.run }} />)
+  expect(client.getManualWorkflowRun).toHaveBeenCalledOnce()
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+  await screen.findByRole('region', { name: 'Manual workflow run status' })
+  expect(client.getManualWorkflowRun).toHaveBeenCalledTimes(2)
+  expect(client.resumeManualWorkflowRun).not.toHaveBeenCalled()
+})
+it.each(['workflow_ref', 'submission_digest', 'authority_binding_digest', 'created_at', 'revision'])('checks the admitted %s anchor on the first GET', async (field) => {
+  const { props, client } = setup()
+  const patch = { workflow_ref: { ...ref, digest: 'f'.repeat(64) }, submission_digest: 'f'.repeat(64),
+    authority_binding_digest: 'f'.repeat(64), created_at: '2026-10-19T00:00:00Z', revision: 2 }
+  const anchor = { ...snapshot.run, [field]: patch[field] }
+  render(<ManualWorkflowRunPanel {...props} requestedRunId={runId} admittedBinding={anchor} />)
+  await screen.findByRole('alert')
+  expect(screen.queryByRole('region', { name: 'Manual workflow run status' })).toBeNull()
+  expect(client.getManualWorkflowRun).toHaveBeenCalledWith(runId, runId, { signal: expect.any(AbortSignal) })
+})
+it('aborts A for rapid B handoff, ignores late A, and leaves later manual selection alone', async () => {
+  const { props, client } = setup()
+  let finishA
+  client.getManualWorkflowRun.mockImplementationOnce(() => new Promise((resolve) => { finishA = resolve }))
+  const other = { ...snapshot, run: { ...snapshot.run, run_id: childId }, steps: [{ ...snapshot.steps[0], run_id: childId }] }
+  client.getManualWorkflowRun.mockResolvedValueOnce(other)
+  const view = render(<ManualWorkflowRunPanel {...props} requestedRunId={runId} admittedBinding={snapshot.run} />)
+  await waitFor(() => expect(client.getManualWorkflowRun).toHaveBeenCalledOnce())
+  const firstSignal = client.getManualWorkflowRun.mock.calls[0][2].signal
+  view.rerender(<ManualWorkflowRunPanel {...props} requestedRunId={childId} admittedBinding={other.run} />)
+  await screen.findByRole('region', { name: 'Manual workflow run status' })
+  expect(firstSignal.aborted).toBe(true)
+  await act(async () => finishA(snapshot))
+  expect(screen.getByLabelText('Run UUID')).toHaveValue(childId)
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Load', exact: true })).toBeEnabled())
+  await load()
+  view.rerender(<ManualWorkflowRunPanel {...props} requestedRunId={childId} admittedBinding={{ ...other.run }} />)
+  expect(screen.getByLabelText('Run UUID')).toHaveValue(runId)
+  expect(client.getManualWorkflowRun).toHaveBeenCalledTimes(3)
+})
 it('loads and refreshes without dispatch, and resumes only on explicit request', async () => {
   const { props, client } = setup()
   render(<ManualWorkflowRunPanel {...props} />)

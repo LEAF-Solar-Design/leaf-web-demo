@@ -6,3 +6,5 @@ server/start-app.sh text eol=lf
 engine/corpus/*.dxf -text -diff
 vendor/acadrust-worker/fixtures/*.dxf -text -diff
 contract/fixtures/lab/** -text
+contract/fixtures/widget/sources/** -text
+web/src/lab/contract/sources/** -text
