@@ -1,11 +1,15 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LabWorkbench from './LabWorkbench.jsx'
 import { LAB_VIEWS, registerLabViews } from './views.js'
 import WidgetsView from './widgets/WidgetsView.jsx'
 import glossary from './contract/sources/leaf-glossary.v1.json'
+
+beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+})
 
 afterEach(() => {
   cleanup()
@@ -32,14 +36,11 @@ describe('Lab view registration', () => {
 })
 
 describe('LabWorkbench', () => {
-  it('shows the three unavailable home areas and their owners', () => {
+  it('lazily mounts the dependency editor in the graph view', async () => {
     render(<LabWorkbench route={route('graph')} status={on} />)
-    for (const title of ['Strategy palette', 'Dependency canvas', 'Tests and Keepers']) {
-      expect(screen.getByRole('region', { name: title })).toHaveAttribute('data-state', 'unavailable')
-    }
-    for (const text of ['Palette lands with SEL-102', 'Canvas lands with SEL-102', 'Tests and Keepers land with SEL-218']) {
-      expect(screen.getByText(text)).toBeVisible()
-    }
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Dependency canvas' })).toBeVisible())
+    expect(screen.getByRole('region', { name: 'Strategy palette' })).toBeVisible()
+    expect(screen.getByRole('region', { name: 'Block inspector' })).toBeVisible()
     expect(screen.getAllByRole('link')).toHaveLength(5)
   })
 

@@ -1,11 +1,13 @@
-import Placeholder from '../Placeholder.jsx'
+import { lazy, Suspense, useEffect, useState } from 'react'
+
+const LabCanvas = lazy(() => import('./LabCanvas.jsx'))
 
 export default function GraphView({ hidden = false }) {
+  const [opened, setOpened] = useState(!hidden)
+  useEffect(() => { if (!hidden) setOpened(true) }, [hidden])
   return (
-    <div className="lab-home" hidden={hidden}>
-      <Placeholder title="Strategy palette" owner="Palette lands with SEL-102" state="unavailable" />
-      <Placeholder title="Dependency canvas" owner="Canvas lands with SEL-102" state="unavailable" />
-      <Placeholder title="Tests and Keepers" owner="Tests and Keepers land with SEL-218" state="unavailable" />
+    <div className="lab-graph-view" hidden={hidden}>
+      {opened && <Suspense fallback={<p role="status">Loading dependency canvas…</p>}><LabCanvas /></Suspense>}
     </div>
   )
 }

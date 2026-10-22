@@ -1,26 +1,59 @@
 {
   "_comment": "gzip -9 bytes per chunk-stem (hash-stripped) from `npm run build` at the commit named in _ref. Regenerate with: node scripts/check_bundle_budget.mjs --write-baseline",
-  "_ref": "97a2ab42",
+  "_ref": "46bfc02a",
   "chunks": {
     "App.css": 10405,
-    "App.js": 121004,
+    "App.js": 121031,
     "ElementContextMenu.js": 34274,
     "LeafPlatformScene.css": 494,
-    "LeafPlatformScene.js": 9064,
-    "OpsWorkspaceGround.js": 158735,
+    "LeafPlatformScene.js": 9067,
+    "OpsWorkspaceGround.js": 154358,
     "SheetsPage.css": 2583,
     "SheetsPage.js": 5421,
     "Viewer.js": 13582,
     "bridgeText.js": 21274,
     "index.css": 40176,
-    "index.js": 222646,
+    "index.js": 222651,
     "mockStageAuthority.js": 258,
-    "useAnnotations.js": 2030,
-    "vendor-react.js": 45846,
+    "useAnnotations.js": 2031,
+    "vendor-react.js": 45884,
     "vendor-viewer.js": 123469,
-    "worker-browser.js": 3824
+    "worker-browser.js": 3824,
+    "LabGround.js": 568,
+    "LabGround.css": 752,
+    "LabCanvas.js": 504006,
+    "string.js": 4533,
+    "LabCanvas.css": 2547
   },
-  "total": 815085,
+  "total": 1323188,
   "total_allowance_bytes": 16384,
-  "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers."
+  "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers.",
+  "stem_caps": {
+    "LabCanvas.js": 508102,
+    "LabCanvas.css": 6643
+  },
+  "isolated_canvas_measurement": {
+    "method": "gzip-9, complete JS/CSS, Vite in-memory builds; HEAD graph entry and shell CSS before, working tree after",
+    "source_ref": "46bfc02a",
+    "before_total": 826481,
+    "after_total": 1334584,
+    "delta": 508103,
+    "deltas": {
+      "index.js": 5,
+      "vendor-react.js": 38,
+      "App.js": 27,
+      "LeafPlatformScene.js": 3,
+      "useAnnotations.js": 1,
+      "OpsWorkspaceGround.js": -4377,
+      "LabGround.js": 568,
+      "LabGround.css": 752,
+      "LabCanvas.js": 504006,
+      "string.js": 4533,
+      "LabCanvas.css": 2547
+    },
+    "baseline_before_total": 815085,
+    "unrelated_drift_bytes": 11396,
+    "canvas_dependency_gzip_bytes": 506553,
+    "cap_headroom_bytes": 4096
+  }
 }

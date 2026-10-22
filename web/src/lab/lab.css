@@ -47,3 +47,84 @@
 @media (max-width: 48rem) {
   .lab-home { grid-template-columns: minmax(0, 1fr); }
 }
+
+.lab-canvas-editor { grid-template-columns: minmax(12rem, 1fr) minmax(0, 3fr) minmax(16rem, 1.3fr); }
+.lab-palette, .lab-inspector, .lab-canvas-region {
+  min-width: 0;
+  padding: var(--leaf-spacing-panel-padding);
+  background: var(--leaf-color-surface);
+  border: 1px solid var(--leaf-color-border);
+  border-radius: var(--leaf-radius-panel);
+}
+.lab-palette, .lab-inspector { max-height: 75vh; overflow: auto; }
+.lab-canvas-editor button, .lab-canvas-editor input, .lab-canvas-editor select, .lab-canvas-editor textarea {
+  color: var(--leaf-color-foreground);
+  background: var(--leaf-color-background);
+  border: 1px solid var(--leaf-color-border);
+  border-radius: var(--leaf-radius-control);
+  padding: var(--leaf-spacing-control-gap);
+  font-family: var(--leaf-font-sans);
+  min-height: var(--leaf-spacing-target-min);
+  max-width: 100%;
+}
+.lab-canvas-editor button { cursor: pointer; }
+.lab-canvas-editor button:disabled { cursor: default; opacity: 0.6; }
+.lab-canvas-editor :focus-visible { outline: 2px solid var(--leaf-color-primary); outline-offset: 2px; }
+.lab-palette button, .lab-inspector label, .lab-palette label { display: block; width: 100%; margin-bottom: var(--leaf-spacing-control-gap); }
+.lab-inspector input, .lab-inspector select, .lab-inspector textarea, .lab-palette input, .lab-palette select { display: block; width: 100%; box-sizing: border-box; }
+.lab-inspector textarea { min-height: 8rem; font-family: var(--leaf-font-mono); }
+.lab-inspector pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--leaf-font-mono); }
+.lab-flow { height: 65vh; min-height: 28rem; }
+.lab-node-card {
+  box-sizing: border-box;
+  width: 310px;
+  padding: var(--leaf-spacing-panel-padding);
+  border: 1px solid var(--leaf-color-border);
+  border-radius: var(--leaf-radius-panel);
+  color: var(--leaf-color-foreground);
+  background: var(--leaf-color-surface);
+  font-family: var(--leaf-font-sans);
+}
+.lab-node-card.is-selected { outline: 2px solid var(--leaf-color-primary); }
+.lab-node-card h3 { margin-block: var(--leaf-spacing-control-gap); }
+.lab-lane-chip { color: var(--leaf-color-data-series-1); font-family: var(--leaf-font-label); }
+.lab-lane-chip.lane-cashout, .lab-lane-chip.lane-admission { color: var(--leaf-color-data-series-2); }
+.lab-lane-chip.lane-engines, .lab-lane-chip.lane-observation { color: var(--leaf-color-data-series-3); }
+.lab-lane-chip.lane-sizing, .lab-lane-chip.lane-capture { color: var(--leaf-color-data-series-4); }
+.lab-lane-chip.lane-ordering, .lab-lane-chip.lane-lifecycle { color: var(--leaf-color-data-series-5); }
+.lab-node-pin { font-family: var(--leaf-font-mono); overflow-wrap: anywhere; }
+.lab-measurement, .leaf-timing { font-family: var(--leaf-font-mono); overflow-wrap: anywhere; }
+.lab-measurement[data-budget-state="over-budget"] { outline: 2px solid var(--leaf-color-command); }
+.lab-pipe-label {
+  position: absolute;
+  max-width: 19rem;
+  pointer-events: all;
+  padding: var(--leaf-spacing-control-gap);
+  color: var(--leaf-color-foreground);
+  background: var(--leaf-color-surface);
+  border: 1px solid var(--leaf-color-border);
+  border-radius: var(--leaf-radius-control);
+}
+.lab-canvas-editor .react-flow {
+  --xy-background-color: var(--leaf-color-background);
+  --xy-node-color: var(--leaf-color-foreground);
+  --xy-node-border: 1px solid var(--leaf-color-border);
+  --xy-controls-button-background-color: var(--leaf-color-surface);
+  --xy-controls-button-color: var(--leaf-color-foreground);
+  --xy-controls-button-border-color: var(--leaf-color-border);
+  --xy-edge-stroke: var(--leaf-color-primary);
+  --xy-handle-background-color: var(--leaf-color-primary);
+  --xy-handle-border-color: var(--leaf-color-surface);
+}
+.lab-canvas-editor .react-flow__handle { width: 12px; height: 12px; }
+.lab-canvas-editor .react-flow__handle:not(.connectable) { opacity: 0.3; }
+.lab-inspector [role="tablist"] { display: flex; flex-wrap: wrap; gap: var(--leaf-spacing-control-gap); }
+.lab-inspector [aria-selected="true"] { border-color: var(--leaf-color-primary); }
+@media (max-width: 75rem) {
+  .lab-canvas-editor { grid-template-columns: minmax(10rem, 1fr) minmax(0, 3fr); }
+  .lab-inspector { grid-column: 1 / -1; }
+}
+@media (max-width: 48rem) {
+  .lab-canvas-editor { grid-template-columns: minmax(0, 1fr); }
+  .lab-inspector, .lab-palette { max-height: none; }
+}
