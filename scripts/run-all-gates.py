@@ -1753,6 +1753,10 @@ def build_suites() -> List[Suite]:
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_tenant_cost_store.py"), 19,
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-aps-cost-sync", "platform APS broker cost ledger adapter", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_aps_cost_sync.py"), 11,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         # Ops usage scoreboard (M6). Registered WITH the file, per the #29
         # fix-then-register rule. Both files are hermetic -- every authority is
         # monkeypatched, no DB, no subprocess, no skipif -- so these floors are
