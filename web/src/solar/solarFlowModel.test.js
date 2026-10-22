@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { createRunSubmissionRequest } from '../runIntent.js'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
+import { canOpenSolarSettingsForm } from './solarSettingsWire.js'
 import { PROJECT_EQUIPMENT_TOOL, deriveProjectEquipmentState, buildProjectEquipmentRequest,
   exactProjectEquipmentPreview, projectSolarFlowScope, recordProjectSolarFlowRun,
   projectSolarFlowRunsFor, deriveProjectSolarFlowState, projectSolarFlowReason,
@@ -1285,6 +1286,42 @@ function r13dRow(name, ready = false) {
 function r13dDisplay(selection, extra = {}) {
   return projectSolarFlowDisplay({ selection, current: true, binding: equipmentBinding, authorityKey: 'epoch-1', ...extra })
 }
+
+it.each(['persisted_graph_unavailable', 'graph_seed_required'])('W1C13 opens Settings only for the seed refusal %s', (code) => {
+  const settings = { ...r13dRow('solar-settings'), availability: {
+    ...READY, input_ready: false, runnable: false, admission_checked: true,
+    admission: { status_code: 409, error: { reason_code: code } }, refusal_reasons: [code],
+  } }
+  const opener = { openSettingsForm: canOpenSolarSettingsForm }
+  const display = (entries, extra = {}) => r13dDisplay(
+    projectSolarFlowSelect([{ capabilities: entries }], 'rooftop'), extra)
+  for (const derive of [equipmentFlow, display]) {
+    const enabled = derive([settings], opener)
+    expect(enabled.items[0]).toMatchObject({ ready: false, enabled: true, status: 'ready', codes: [] })
+    expect(enabled.resumeIndex).toBe(0)
+    expect(derive([settings]).items[0]).toMatchObject({ enabled: false, status: 'blocked' })
+    const multiple = { ...settings, availability: { ...settings.availability,
+      refusal_reasons: [code, 'entitlement_required'] } }
+    const refused = { ...settings, availability: { ...settings.availability,
+      refusal_reasons: ['entitlement_required'] } }
+    for (const candidate of [multiple, refused]) {
+      expect(derive([candidate], opener).items[0]).toMatchObject({ enabled: false, status: 'blocked' })
+    }
+    const other = { ...settings, name: 'solar-panels-from-drawing',
+      solar: { ...settings.solar, name: 'solar-panels-from-drawing' } }
+    expect(derive([other], opener).items.find((item) => item.name === other.name))
+      .toMatchObject({ enabled: false, status: 'blocked' })
+    expect(derive([settings, { ...settings }], opener).items[0])
+      .toMatchObject({ enabled: true, status: 'ready' })
+    for (const duplicate of [multiple, refused, r13dRow('solar-settings', true),
+      { ...settings, catalog_digest: 'invalid' },
+      { ...settings, catalog_digest: 'sha256:' + 'e'.repeat(64) }]) {
+      expect(derive([settings, duplicate], opener).items[0]).toMatchObject({ enabled: false, status: 'blocked' })
+    }
+    expect(derive([settings], { ...opener, current: false }).items.every((item) => !item.enabled)).toBe(true)
+    expect(derive([settings], { ...opener, authorityKey: null }).items.every((item) => !item.enabled)).toBe(true)
+  }
+})
 
 it('R13D-01 project selection follows the manual chain', () => {
   const rows = R13D_NAMES.map((name) => r13dRow(name))

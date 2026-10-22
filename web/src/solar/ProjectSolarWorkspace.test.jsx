@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import ProjectSolarWorkspace from './ProjectSolarWorkspace.jsx'
+import SolarFlowRail from './SolarFlowRail.jsx'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
@@ -324,6 +325,26 @@ describe('Project Solar workspace composition', () => {
     expect(h.client.readIntake).not.toHaveBeenCalled()
     expect(h.client.readVersions).not.toHaveBeenCalled()
     expect(h.client.submitRun).not.toHaveBeenCalled()
+  })
+
+  it('W1C13 the project rail opens seed-openable Settings without starting a run', async () => {
+    const h = fixture('solar-settings', { code: 'persisted_graph_unavailable' })
+    h.row.label = 'Settings'
+    h.row.solar = { schema: 'leaf.solar-tool-view.v1', name: h.row.name, family: 'settings',
+      wave: 1, order: 10, entitlement: 'run_write', interaction: { mode: 'form' } }
+    h.graphless = true
+    h.mount({ FlowRail: SolarFlowRail })
+    const settings = screen.getByRole('button', { name: /Settings Ready/ })
+    expect(settings).toBeEnabled()
+    expect(settings.closest('li')).toHaveAttribute('data-status', 'ready')
+    fireEvent.click(settings)
+    await waitFor(() => expect(screen.getByTestId('solar-settings-form')).toHaveAttribute('data-mode', 'initialize'))
+    expect(screen.getByRole('button', { name: 'Start Solar design' })).toBeInTheDocument()
+    expect(h.props.onOpenTool).toHaveBeenCalledWith(h.row)
+    expect(h.client.readContext).toHaveBeenCalledOnce()
+    expect(h.client.prepareRun).not.toHaveBeenCalled()
+    expect(h.client.submitRun).not.toHaveBeenCalled()
+    expect(h.submit).not.toHaveBeenCalled()
   })
 
   it('R13E-31 sizing dispatches to the manual-global R9 project host', () => {
@@ -1024,7 +1045,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {
