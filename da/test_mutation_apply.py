@@ -1049,3 +1049,100 @@ def test_leafextract_script_matches_the_pre_catalogue_pinned_text():
         "(command \"_.QUIT\" \"_Y\")\r\n"
     )
     assert build_scr().encode("utf-8") == expected.encode("utf-8")
+
+
+def test_v4_activity_exports_reopened_drawings_around_v3_apply_and_inspect():
+    v3 = subject.activity_spec(3)
+    spec = subject.activity_spec(4)
+    assert spec["id"] == "LeafApplyMutationsV4"
+    assert spec["engine"] == v3["engine"]
+    assert "appbundles" not in spec
+    assert spec["commandLine"] == [
+        r'$(engine.path)\accoreconsole.exe /i "$(args[HostDwg].path)" '
+        r'/s "$(settings[exportBeforeScript].path)"',
+        *v3["commandLine"],
+        r'$(engine.path)\accoreconsole.exe /i "$(args[Result].path)" '
+        r'/s "$(settings[exportAfterScript].path)"',
+    ]
+    assert spec["parameters"] == {
+        **v3["parameters"],
+        "BeforeDxf": {"verb": "put", "required": False, "localName": "before.dxf"},
+        "AfterDxf": {"verb": "put", "required": False, "localName": "after.dxf"},
+    }
+    assert spec["settings"]["script"] == v3["settings"]["script"]
+    assert spec["settings"]["inspectScript"] == v3["settings"]["inspectScript"]
+    assert subject.CONTRACTS[4].build_apply is subject.CONTRACTS[3].build_apply
+    assert subject.CONTRACTS[4].inspect_blocks is subject.CONTRACTS[3].inspect_blocks
+    assert "v4" in spec["description"]
+    assert "BeforeDxf" in spec["description"] and "AfterDxf" in spec["description"]
+
+
+def test_v4_export_scripts_share_the_exact_console_dxfout_settings():
+    settings = subject.activity_spec(4)["settings"]
+    before = settings["exportBeforeScript"]["value"]
+    after = settings["exportAfterScript"]["value"]
+    assert before == subject.build_dxfout_scr("before.dxf")
+    assert after == subject.build_dxfout_scr("after.dxf")
+    assert before.replace("before.dxf", "after.dxf") == after
+    assert before == (
+        '(setvar "CMDECHO" 0)\r\n'
+        '(setvar "FILEDIA" 0)\r\n'
+        '(command "_.DXFOUT" "before.dxf" "16")\r\n'
+    )
+
+
+# Canonical JSON digests from origin/main base 800c40d4e1ee01a3ce55288e0d9e9de5ae8255bd.
+@pytest.mark.parametrize("contract,digest", [
+    (2, "6f2eedbe211a7295b5b5dc17a39119070cb8ee834541973d6ce35eb3e92af2b9"),
+    (3, "7a51daeaa804ea506b8e3c01f7971ce59d7e94c965bc514de8b318982b49fbd0"),
+])
+def test_legacy_activity_specs_match_base_canonical_json(contract, digest):
+    canonical = json.dumps(subject.activity_spec(contract), sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == digest
+
+
+def test_v4_source_stamp_changes_only_description():
+    spec = subject.activity_spec(4)
+    stamped = subject.activity_spec(4, source_revision="a" * 40)
+    assert stamped.pop("description") == spec.pop("description") + " leaf-source=" + "a" * 40
+    assert stamped == spec
+
+
+def test_v4_readiness_resolves_its_own_activity(monkeypatch):
+    http = Http(get=[Response(200, {"version": 9}), Response(200, subject.activity_spec(4))])
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.readiness(4) == {
+        "ready": True, "contract": 4, "mismatches": [],
+        "activity": {"alias": "prod", "version": 9},
+    }
+    assert [call[1] for call in http.calls] == [
+        f"{subject.client.DA}/activities/LeafApplyMutationsV4/aliases/prod",
+        f"{subject.client.DA}/activities/LeafApplyMutationsV4/versions/9",
+    ]
+
+
+@pytest.mark.parametrize("advanced", [False, True])
+def test_v4_provision_resolves_its_own_activity(monkeypatch, advanced):
+    http = Http(
+        post=([Response(409)] if advanced else []) + [
+            Response(201, {"version": 2}), Response(409),
+        ],
+        patch=[Response(200)],
+    )
+    monkeypatch.setattr(subject, "requests", http)
+    assert subject.provision_activity(4) == {
+        "id": "LeafApplyMutationsV4", "alias": "prod", "version": 2,
+        "advanced": advanced, "source_revision": None,
+    }
+    spec = subject.activity_spec(4)
+    assert http.calls[0][1] == f"{subject.client.DA}/activities"
+    assert json.loads(http.calls[0][2]["data"]) == spec
+    if advanced:
+        assert http.calls[1][1] == f"{subject.client.DA}/activities/LeafApplyMutationsV4/versions"
+        assert json.loads(http.calls[1][2]["data"]) == {
+            key: value for key, value in spec.items() if key != "id"
+        }
+    assert http.calls[-2][1] == f"{subject.client.DA}/activities/LeafApplyMutationsV4/aliases"
+    assert json.loads(http.calls[-2][2]["data"]) == {"id": "prod", "version": 2}
+    assert http.calls[-1][1] == f"{subject.client.DA}/activities/LeafApplyMutationsV4/aliases/prod"
+    assert json.loads(http.calls[-1][2]["data"]) == {"version": 2}
