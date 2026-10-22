@@ -34,7 +34,7 @@ it('maps every bridge entity into the existing Viewer conventions without mutati
   const before = JSON.stringify(input)
   const mapped = bridgeToIntake(input, { textGlyphs })
   expect(mapped).toMatchObject({ source: 'bridge', documentId: 'autocad:site.dwg', truncated: false })
-  expect(mapped.polylines[0]).toEqual({ ...input.lines[0], closed: false })
+  expect(mapped.polylines[0]).toEqual({ ...input.lines[0], closed: false, strokeOnly: true })
   expect(mapped.polylines[1]).toEqual(input.polylines[0])
   expect(mapped.circles).toEqual(input.circles)
   expect(mapped.arcs).toEqual(input.arcs)
@@ -46,6 +46,20 @@ it('maps every bridge entity into the existing Viewer conventions without mutati
   expect(expanded[1].pts.some(p => Math.abs(p[1]) > 0.5)).toBe(true)
   expect(intakeRoundPolylines(mapped)).toHaveLength(2)
   expect(JSON.stringify(input)).toBe(before)
+})
+
+it('marks bridge lines and open polylines as strokes while preserving closed polylines', () => {
+  const pts = [[0, 0, 0], [2, 0, 0], [2, 2, 0]]
+  const mapped = bridgeToIntake({
+    lines: [{ pts: pts.slice(0, 2) }],
+    polylines: [{ pts, closed: false }, { pts }, { pts, closed: true }],
+  })
+  expect(mapped.source).toBe('bridge')
+  expect(mapped.polylines[0]).toMatchObject({ closed: false, strokeOnly: true })
+  expect(mapped.polylines[1]).toMatchObject({ closed: false, strokeOnly: true })
+  expect(mapped.polylines[2]).toMatchObject({ closed: false, strokeOnly: true })
+  expect(mapped.polylines[3]).toMatchObject({ closed: true })
+  expect(mapped.polylines[3]).not.toHaveProperty('strokeOnly')
 })
 
 it('limits total points, including the sampling the Viewer will perform', () => {

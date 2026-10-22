@@ -361,10 +361,10 @@ const Viewer = forwardRef(function Viewer(
     const inserts = activeIntake.inserts || []
     const faces3d = activeIntake.faces3d || []
     // W4f slice A0: an ENGINE document (the browser engine's imported DXF,
-    // shown through applyVersion) draws its open polylines, lines and arcs
-    // as strokes only; the console drawing keeps its panel fills exactly as
-    // before (this flag is false for every intake the server seats).
-    const strokeOnlyOpen = activeIntake.source === 'engine'
+    // shown through applyVersion) and a live AutoCAD (bridge) drawing draw
+    // open polylines, lines and arcs as strokes only; the console drawing
+    // keeps its panel fills (this flag is false for every intake the server seats).
+    const strokeOnlyOpen = activeIntake.source === 'engine' || activeIntake.source === 'bridge'
 
     // bounds — include polylines, insert points, and face corners so the
     // whole drawing (not just polylines) is framed.

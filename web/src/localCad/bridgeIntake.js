@@ -23,7 +23,7 @@ export function bridgeToIntake(payload = {}, options = {}) {
   for (const row of list(payload.lines)) {
     if (!Array.isArray(row?.pts) || row.pts.length !== 2) continue
     const pts = row.pts.map(point)
-    if (pts.every(Boolean)) append('polylines', { ...identity(row), pts, closed: false }, 2)
+    if (pts.every(Boolean)) append('polylines', { ...identity(row), pts, closed: false, strokeOnly: true }, 2)
   }
   for (const row of list(payload.polylines)) {
     if (!Array.isArray(row?.pts) || row.pts.length < 2) continue
@@ -33,7 +33,8 @@ export function bridgeToIntake(payload = {}, options = {}) {
     const bulges = pts.map((_, i) => Number.isFinite(row.bulges?.[i]) ? row.bulges[i] : 0)
     // Each bulged segment samples at most 48 interior points.
     const cost = pts.length + bulges.reduce((n, b, i) => n + (b && (row.closed || i < pts.length - 1) ? 48 : 0), 0)
-    append('polylines', { ...identity(row), pts, closed: !!row.closed, bulges }, cost)
+    append('polylines', { ...identity(row), pts, closed: !!row.closed, bulges,
+      ...(row.closed !== true ? { strokeOnly: true } : {}) }, cost)
   }
   for (const kind of ['circles', 'arcs']) {
     for (const row of list(payload[kind])) {
