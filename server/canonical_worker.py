@@ -330,14 +330,19 @@ def main() -> None:
         parser.error("--readiness requires a graph tool")
     if args.project_readiness and not project_posture_ok():
         parser.error("--readiness requires a local or test runtime with project Solar runs enabled")
+    if args.health and not multi_tool and args.worker_id is None:
+        parser.error("single-tool --health requires --worker-id")
     if multi_tool or args.health:
         if not math.isfinite(args.lease_seconds) or not math.isfinite(args.poll_seconds):
             parser.error("multi-tool and health modes require finite lease and poll seconds")
+    if multi_tool:
         base = args.worker_id if args.worker_id is not None else socket.gethostname()
         try:
             worker_ids = {tool: _worker_id_argument(f"{base}:{tool}") for tool in tools}
         except argparse.ArgumentTypeError as exc:
             parser.error(str(exc))
+    elif args.health:
+        worker_ids = {tools[0]: args.worker_id}
     if args.health:
         max_age = args.max_age_seconds
         if max_age is None:

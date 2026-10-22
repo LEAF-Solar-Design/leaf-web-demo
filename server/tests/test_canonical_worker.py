@@ -366,12 +366,16 @@ def test_main_default_loop(monkeypatch, capsys, opt_in):
 
 
 @pytest.mark.parametrize("flag", [None, "0", "true", " 1", "1 "], ids=["none", "zero", "true", "lead", "tail"])
-def test_multi_needs_opt_in(monkeypatch, capsys, flag):
+@pytest.mark.parametrize("health", [False, True], ids=["serve", "health"])
+def test_multi_needs_opt_in(monkeypatch, capsys, flag, health):
     if flag is None:
         monkeypatch.delenv("LEAF_CANONICAL_MULTI_TOOL", raising=False)
     else:
         monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", flag)
-    _project_main(monkeypatch, ["--tool", "string-autofill-opt", "--tool", "solar-settings"],
+    argv = ["--tool", "string-autofill-opt", "--tool", "solar-settings"]
+    if health:
+        argv.append("--health")
+    _project_main(monkeypatch, argv,
                   lambda: pytest.fail("refused arguments reached schema"))
     with pytest.raises(SystemExit) as exc:
         canonical_worker.main()
@@ -526,9 +530,8 @@ def test_multi_bounded_join(monkeypatch, capsys):
 @pytest.mark.parametrize("state,count,base,extra,age", [
     ("ok", 2, None, [], 90), ("missing", 2, None, [], 90),
     ("stale", 2, "manual", ["--max-age-seconds", "40"], 40),
-    ("wrong", 2, None, [], 90), ("ok", 1, None, ["--lease-seconds", "2"], 15),
-    ("ok", 1, "manual", ["--max-age-seconds", "1"], 15),
-], ids=["all", "missing", "stale", "wrong", "one", "floor"])
+    ("wrong", 2, None, [], 90),
+], ids=["all", "missing", "stale", "wrong"])
 def test_task_health(monkeypatch, capsys, state, count, base, extra, age):
     tools = ["string-autofill-opt", "solar-settings"][:count]
     queries = []
@@ -568,12 +571,86 @@ def test_task_health(monkeypatch, capsys, state, count, base, extra, age):
                                   "canonical worker heartbeat stale or missing: solar-settings\n")
 
 
+@pytest.mark.parametrize("state", ["ok", "missing", "stale", "wrong"])
+@pytest.mark.parametrize("owner", ["task1", "w" * 128], ids=["explicit", "limit"])
+def test_single_tool_health(monkeypatch, capsys, state, owner):
+    queries = []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("health probe claimed or mutated state")
+
+    def heartbeat(worker_id, *, max_age_seconds):
+        queries.append((worker_id, max_age_seconds))
+        if state in {"missing", "stale"}:
+            return None
+        return {"worker_id": owner,
+                "tool_name": "solar-solve" if state == "wrong" else "solar-settings"}
+
+    monkeypatch.delenv("LEAF_CANONICAL_MULTI_TOOL", raising=False)
+    _project_main(monkeypatch, ["--health", "--tool", "solar-settings", "--worker-id", owner,
+                               "--max-age-seconds", "1"], forbidden)
+    monkeypatch.setattr(canonical_worker, "serve", forbidden)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        worker_heartbeat=heartbeat, record_worker_heartbeat=forbidden, claim_next=forbidden))
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == (0 if state == "ok" else 1)
+    assert queries == [(owner, 15.0)]
+    assert capsys.readouterr() == ("", "" if state == "ok" else
+                                  "canonical worker heartbeat stale or missing: solar-settings\n")
+
+
+@pytest.mark.parametrize("tools", [[], ["--tool", "solar-settings"]], ids=["default", "explicit"])
+def test_single_tool_health_requires_worker_id(monkeypatch, capsys, tools):
+    def forbidden(*args, **kwargs):
+        pytest.fail("health without worker id reached the database or loop")
+
+    _project_main(monkeypatch, ["--health", *tools], forbidden)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", forbidden)
+    monkeypatch.setattr(canonical_worker, "serve", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 2
+    assert "single-tool --health requires --worker-id" in capsys.readouterr().err
+
+
+def test_single_tool_run_and_health_use_same_id(monkeypatch, capsys):
+    import solar_project_jobs
+
+    store = FakeCanonicalJobs()
+    queries = []
+
+    def heartbeat(owner, *, max_age_seconds):
+        queries.append(owner)
+        return next(({"worker_id": row[0], "tool_name": row[1]}
+                     for row in store.heartbeats if row[0] == owner), None)
+
+    monkeypatch.setattr(store, "worker_heartbeat", heartbeat, raising=False)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
+    monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", lambda tool: _graph_descriptor())
+    monkeypatch.setattr(solar_project_jobs, "run_once", store.claim_next)
+    monkeypatch.setenv("LEAF_CANONICAL_LEASE_SECONDS", "30")
+    _project_posture(monkeypatch)
+    argv = ["--tool", "solar-settings", "--worker-id", "task1"]
+    _project_main(monkeypatch, [*argv, "--readiness", "--once"], lambda: None)
+    canonical_worker.main()
+    assert store.heartbeats == [("task1", *_graph_descriptor().values())]
+    assert store.claim_requests == [("task1", 30.0, "solar-settings")]
+    capsys.readouterr()
+    _project_main(monkeypatch, [*argv, "--health"], lambda: pytest.fail("health checked schema"))
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 0
+    assert queries == ["task1"]
+    assert capsys.readouterr() == ("", "")
+
+
 @pytest.mark.parametrize("health", [False, True], ids=["multi", "health"])
 @pytest.mark.parametrize("base", ["w" * 128, "bad host"], ids=["long", "invalid"])
 def test_task_id_refusal(monkeypatch, capsys, health, base):
     monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
-    argv = ["--tool", "string-autofill-opt"]
-    argv += ["--health"] if health else ["--tool", "solar-settings"]
+    argv = ["--tool", "string-autofill-opt", "--tool", "solar-settings"]
+    argv += ["--health"] if health else []
     _project_main(monkeypatch, argv, lambda: pytest.fail("invalid id reached schema"))
     monkeypatch.setattr(canonical_worker.socket, "gethostname", lambda: base)
     monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module",
