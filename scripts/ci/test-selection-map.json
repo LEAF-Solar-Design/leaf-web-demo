@@ -298,6 +298,7 @@
     "server-engine-corpus-harness",
     "server-broker-metering-crash-window",
     "server-drawings-cross-tenant-canary",
+    "server-router-authz-negative",
     "server-mutation-scope-diff",
     "server-engine-registry-scripts",
     "server-cost-internal",
