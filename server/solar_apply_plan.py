@@ -101,7 +101,8 @@ def _expand(context, pointer):
 def validate_adapter(adapter):
     canonical_bytes(adapter)
     _closed(adapter, {"schema", "version", "write_version", "entity_kinds", "native_templates",
-                      "store_codecs", "write_fields", "identity", "preservation", "evidence"})
+                      "store_codecs", "write_fields", "identity", "preservation", "evidence"},
+            {"global_stores"})
     if adapter["schema"] != "leaf.solar-adapter.v1" or type(adapter["write_version"]) is not int or adapter["write_version"] != 1:
         refuse("UNSUPPORTED_WRITE_ADAPTER")
     if type(adapter["version"]) is not int or adapter["version"] < 1:
@@ -154,6 +155,22 @@ def validate_adapter(adapter):
                     or rule["destination"] in destinations):
                 refuse("INVALID_WRITE_FIELDS")
             destinations.add(rule["destination"])
+    global_stores = adapter.get("global_stores", {})
+    if type(global_stores) is not dict or set(global_stores) - {"project", "settings"}:
+        refuse("INVALID_TEMPLATE_STORE")
+    for specs in global_stores.values():
+        if type(specs) is not list:
+            refuse("INVALID_TEMPLATE_STORE")
+        for spec in specs:
+            if (type(spec) is not dict or set(spec) != {"codec", "fields"}
+                    or type(spec["codec"]) is not str or type(spec["fields"]) is not str
+                    or spec["codec"] not in adapter["store_codecs"]
+                    or adapter["store_codecs"][spec["codec"]]["scope"] != "named-dictionary"
+                    or spec["codec"] in adapter["preservation"]["read_only_codecs"]
+                    or spec["fields"] not in adapter["write_fields"]
+                    or any(rule["destination"] not in adapter["preservation"]["allowed_changed_paths"].get(spec["codec"], [])
+                           for rule in adapter["write_fields"][spec["fields"]])):
+                refuse("INVALID_TEMPLATE_STORE")
     for kind, template in adapter["native_templates"].items():
         _closed(template, {"carriers", "stores"}, {"circuit"})
         if type(template["carriers"]) is not list or type(template["stores"]) is not list:
@@ -570,6 +587,77 @@ def _native_changes(entity, previous, projected, kind):
     return changes
 
 
+def _store_operation(spec, adapter, captured, context, handles, index, scale,
+                     target, carrier_targets, op_id, *, require_capture=False):
+    codec = adapter["store_codecs"][spec["codec"]]
+    address = {k: copy.deepcopy(codec[k]) for k in ("scope", "dictionary_path", "key", "app")}
+    address.update(entity_handle=target.get("handle"), entity_create_ref=target.get("create_ref"))
+    old_store = captured.get(store_address(address))
+    if require_capture and old_store is None:
+        refuse("GLOBAL_STORE_NOT_CAPTURED")
+    encoding = codec["encoding"]
+    defaults = copy.deepcopy(codec["defaults"])
+    fields = adapter["write_fields"][spec["fields"]]
+    allowed = adapter["preservation"]["allowed_changed_paths"].get(spec["codec"], [])
+    if any(rule["destination"] not in allowed for rule in fields):
+        refuse("UNDECLARED_CHANGED_PATH")
+    projected = _project(defaults, fields, context, handles, index, scale)
+    bindings = []
+    # References to sibling carriers are explicit plan bindings. No
+    # allocation or deferred serialization is executed in this module.
+    for i, record in enumerate(projected.get("records", [])):
+        value = record["value"]
+        if type(value) is str and value.startswith("@role:"):
+            source_ref = carrier_targets.get(value[6:])
+            if source_ref is None or record["code"] != 1005:
+                refuse("UNRESOLVED_CARRIER_BINDING")
+            record["value"] = source_ref.get("handle", "0")
+            bindings.append({"pointer": "/records/" + str(i) + "/value", "source": source_ref,
+                             "representation": "handle"})
+    if encoding != "xdata-typed":
+        documents = [canonical_bytes(d).decode("ascii") for d in projected["documents"]]
+        if old_store:
+            encoding, decoded = _decode_store(old_store, codec)
+            documents = []
+            # Expand just the declared fields, not defaults or whole
+            # objects. Unrelated fields and original number lexemes stay.
+            for i, raw in enumerate(decoded["documents"]):
+                updates = {}
+                for rule in fields:
+                    for value, indices in _expand(context, rule["source"]):
+                        pointer = rule["destination"]
+                        for j, token in enumerate(indices):
+                            pointer = pointer.replace("{" + str(j) + "}", token)
+                        prefix = "/documents/" + str(i)
+                        if pointer.startswith(prefix + "/"):
+                            converted = _convert(value, rule, context, handles, index, scale)
+                            updates[pointer[len(prefix):]] = converted
+                documents.append(patch_document(raw, updates))
+            if encoding == "json" and any(len(d.encode("utf-16-le")) // 2 > 240 for d in documents):
+                encoding = "chunked-ascii(240)"
+        payload = {"encoding": encoding, "documents": documents}
+    else:
+        if old_store:
+            _, decoded = _decode_store(old_store, codec)
+            old_records = decoded["records"]
+            if len(old_records) < len(projected["records"]):
+                refuse("MALFORMED_TYPED_STORE")
+            if any(a["code"] != b["code"] for a, b in zip(old_records, projected["records"])):
+                refuse("TYPED_STORE_LAYOUT_MISMATCH")
+            projected["records"].extend(old_records[len(projected["records"]):])
+        payload = {"encoding": encoding, "records": projected["records"]}
+    if old_store:
+        old_encoding, old_payload = _decode_store(old_store, codec)
+        if payload == {"encoding": old_encoding, **old_payload} and not any("create_ref" in b["source"] for b in bindings):
+            return None
+    payload_text = canonical_bytes(payload).decode("ascii")
+    if any(identifier in payload_text for identifier in index):
+        refuse("APPLICATION_ID_IN_NATIVE_STORE")
+    return {"op": "set_store", "op_id": op_id,
+            **address, "expected_payload_sha256": old_store["sha256"] if old_store else None,
+            "payload": payload, "bindings": bindings}
+
+
 def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
                      drawing_key, expected_revision, idempotency_key,
                      dwg_sha256=None, adapter_sha256=None, mapping_sha256=None):
@@ -617,9 +705,11 @@ def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
     for key in ("opaque_stores", "orphaned_xdata"):
         if before[key] != after[key]:
             refuse("UNTOUCHED_CONTENT_CHANGED")
-    for key in ("project", "settings"):
-        if _semantic(before[key]) != _semantic(after[key]):
-            raise NotImplementedError(key)
+    changed_globals = [key for key in ("project", "settings")
+                       if _semantic(before[key]) != _semantic(after[key])]
+    for key in changed_globals:
+        if not adapter.get("global_stores", {}).get(key):
+            refuse("GLOBAL_STORE_UNDECLARED")
     prior = {n["id"]: n for c in COLLECTIONS for n in before[c]}
     index = {n["id"]: n for c in COLLECTIONS for n in after[c]}
     changed = []
@@ -658,6 +748,14 @@ def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
     operations, stores = [], []
     scale = units["meters_per_unit"]
     captured = {store_address(s): s for s in inspection["stores"]}
+    for key in changed_globals:
+        for spec in adapter["global_stores"][key]:
+            operation = _store_operation(
+                spec, adapter, captured, {"node": after[key], "graph": after, "resolved": {}},
+                handles, index, scale, {}, {}, "store:global:" + key + ":" + spec["codec"],
+                require_capture=True)
+            if operation is not None:
+                stores.append(operation)
     for node in changed:
         app_id, kind = node["id"], node["kind"]
         template = adapter["native_templates"][kind]
@@ -702,72 +800,11 @@ def build_apply_plan(before_graph, after_graph, adapter, inspection, mapping, *,
                                    "geometry": geometry, "attributes": attributes,
                                    "block_name": geometry["definition"]["name"] if carrier["kind"] == "block_reference" else None})
         for spec in template["stores"]:
-            codec = adapter["store_codecs"][spec["codec"]]
-            target = carrier_targets[spec["role"]]
-            address = {k: copy.deepcopy(codec[k]) for k in ("scope", "dictionary_path", "key", "app")}
-            address.update(entity_handle=target.get("handle"), entity_create_ref=target.get("create_ref"))
-            old_store = captured.get(store_address(address))
-            encoding = codec["encoding"]
-            defaults = copy.deepcopy(codec["defaults"])
-            fields = adapter["write_fields"][spec["fields"]]
-            allowed = adapter["preservation"]["allowed_changed_paths"].get(spec["codec"], [])
-            if any(rule["destination"] not in allowed for rule in fields):
-                refuse("UNDECLARED_CHANGED_PATH")
-            projected = _project(defaults, fields, context, handles, index, scale)
-            bindings = []
-            # References to sibling carriers are explicit plan bindings. No
-            # allocation or deferred serialization is executed in this module.
-            for i, record in enumerate(projected.get("records", [])):
-                value = record["value"]
-                if type(value) is str and value.startswith("@role:"):
-                    source_ref = carrier_targets.get(value[6:])
-                    if source_ref is None or record["code"] != 1005:
-                        refuse("UNRESOLVED_CARRIER_BINDING")
-                    record["value"] = source_ref.get("handle", "0")
-                    bindings.append({"pointer": "/records/" + str(i) + "/value", "source": source_ref,
-                                     "representation": "handle"})
-            if encoding != "xdata-typed":
-                documents = [canonical_bytes(d).decode("ascii") for d in projected["documents"]]
-                if old_store:
-                    encoding, decoded = _decode_store(old_store, codec)
-                    documents = []
-                    # Expand just the declared fields, not defaults or whole
-                    # objects. Unrelated fields and original number lexemes stay.
-                    for i, raw in enumerate(decoded["documents"]):
-                        updates = {}
-                        for rule in fields:
-                            for value, indices in _expand(context, rule["source"]):
-                                pointer = rule["destination"]
-                                for j, token in enumerate(indices):
-                                    pointer = pointer.replace("{" + str(j) + "}", token)
-                                prefix = "/documents/" + str(i)
-                                if pointer.startswith(prefix + "/"):
-                                    converted = _convert(value, rule, context, handles, index, scale)
-                                    updates[pointer[len(prefix):]] = converted
-                        documents.append(patch_document(raw, updates))
-                    if encoding == "json" and any(len(d.encode("utf-16-le")) // 2 > 240 for d in documents):
-                        encoding = "chunked-ascii(240)"
-                payload = {"encoding": encoding, "documents": documents}
-            else:
-                if old_store:
-                    _, decoded = _decode_store(old_store, codec)
-                    old_records = decoded["records"]
-                    if len(old_records) < len(projected["records"]):
-                        refuse("MALFORMED_TYPED_STORE")
-                    if any(a["code"] != b["code"] for a, b in zip(old_records, projected["records"])):
-                        refuse("TYPED_STORE_LAYOUT_MISMATCH")
-                    projected["records"].extend(old_records[len(projected["records"]):])
-                payload = {"encoding": encoding, "records": projected["records"]}
-            if old_store:
-                old_encoding, old_payload = _decode_store(old_store, codec)
-                if payload == {"encoding": old_encoding, **old_payload} and not any("create_ref" in b["source"] for b in bindings):
-                    continue
-            payload_text = canonical_bytes(payload).decode("ascii")
-            if any(identifier in payload_text for identifier in index):
-                refuse("APPLICATION_ID_IN_NATIVE_STORE")
-            stores.append({"op": "set_store", "op_id": "store:" + app_id + ":" + spec["codec"],
-                           **address, "expected_payload_sha256": old_store["sha256"] if old_store else None,
-                           "payload": payload, "bindings": bindings})
+            operation = _store_operation(
+                spec, adapter, captured, context, handles, index, scale,
+                carrier_targets[spec["role"]], carrier_targets, "store:" + app_id + ":" + spec["codec"])
+            if operation is not None:
+                stores.append(operation)
     plan = {"schema": "leaf.solar-apply.v1", "graph_id": before["project"]["id"],
             "drawing_key": drawing_key, "expected_revision": copy.deepcopy(expected_revision),
             "dwg_sha256": source, "adapter_sha256": digest(adapter), "mapping_sha256": digest(mapping),
