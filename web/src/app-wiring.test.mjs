@@ -4371,7 +4371,7 @@ describe('S3 viewer Back and Up history wiring', () => {
     assert.ok(appNoComments.includes('if (!viewHistoryRef.current) viewHistoryRef.current = createViewHistory()'))
     const update = appNoComments.slice(appNoComments.indexOf('localCadUpdateRef.current = (update)'),
       appNoComments.indexOf('const bridge = createLocalCadBridge('))
-    assert.match(update, /if \(!localCadSnapshotRef.current\) \{[\s\S]*?viewHistory: viewHistoryRef.current[\s\S]*?viewHistoryRef.current = createViewHistory\(\)/)
+    assert.match(update, /if \(!localCadSnapshotRef.current\) \x7b[\s\S]*?viewHistory: viewHistoryRef.current[\s\S]*?viewHistoryRef.current = createViewHistory\(\)/)
     assert.ok(appNoComments.includes('viewHistoryRef.current = snapshot.viewHistory'))
     assert.ok(appNoComments.includes('setViewHistorySize(snapshot.viewHistory.size())'))
     assert.ok(appNoComments.includes('const [viewHistorySize, setViewHistorySize] = useState(0)'))
