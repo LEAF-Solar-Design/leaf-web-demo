@@ -13,6 +13,13 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   const drawing = await request.get(`${API_BASE}/api/drawings/cat-panels/intake`, { headers: TENANT_HEADERS })
   expect(drawing.status(), 'provision the proof drawing explicitly; cat-panels is not a bootstrap alias').toBe(200)
   expect((await drawing.json()).intake).toBeTruthy()
+  // ToolCast's proof mode opens "cat" through getSession before it reads
+  // "cat-panels" versions. getSession sends no tenant header under auth-off.
+  // A missing session fixture keeps the Trust transport in mock mode, so no
+  // usage request is made even when the cat-panels intake above is available.
+  const session = await request.get(`${API_BASE}/api/session?dwg=cat`)
+  expect(session.status(), 'provision cat for the auth-off session tenant as well as cat-panels').toBe(200)
+  expect((await session.json()).intake).toBeTruthy()
 
   const [healthResponse, usageResponse, entitlementResponse, grantResponse] = await Promise.all([
     request.get(`${API_BASE}/api/health`),

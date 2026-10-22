@@ -58,12 +58,14 @@ if (linkFlowBoot) {
     }
     process.env.LEAF_LINK_FLOW_PORTS_CLEARED = '1'
   }
-  // /try?proof=1 selects cat-panels, which is deliberately NOT a curated
-  // bootstrap alias. Provision this fixture explicitly in this run's store;
-  // ordinary reads must continue to refuse missing, unlisted drawing IDs.
+  // /try?proof=1 loads /api/session?dwg=cat before reading cat-panels
+  // versions. Both use demo-tenant (the session's auth-off default and
+  // VITE_TENANT_ID above). Neither ID is a curated bootstrap alias, so
+  // provision both fixtures explicitly; ordinary unknown reads still fail.
   execFileSync('python', ['-B', '-c', [
     'import write_loop, store',
-    'store.ingest_drawing(write_loop.default_backend(), "demo-tenant", str(write_loop.CACHED_INTAKE_PATH), drawing_id="cat-panels")',
+    'for drawing_id in ("cat", "cat-panels"):',
+    '    store.ingest_drawing(write_loop.default_backend(), "demo-tenant", str(write_loop.CACHED_INTAKE_PATH), drawing_id=drawing_id)',
   ].join('\n')], { cwd: join(repo, 'server'), env: { ...process.env, APS_LIVE: '0' }, stdio: 'inherit', timeout: 30_000 })
   webServer = {
     command: 'npm --prefix harness run build && python scripts/start-leaf.py --strict-ports --with-harness --broker-port 8240 --app-port 8230 --harness-port 8250 --web-port 5275',
