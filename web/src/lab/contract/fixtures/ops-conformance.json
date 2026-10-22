@@ -1,0 +1,1694 @@
+{
+  "schema": "leaf.lab-conformance.v1",
+  "cases": [
+    {
+      "name": "first-cut",
+      "target": "graph",
+      "changes": [],
+      "expected": true
+    },
+    {
+      "name": "max-tokens",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/registry/id",
+          "value": "adjust-none"
+        },
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "max_tokens": 128
+          }
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "settings-api_token",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "nested": [
+              {
+                "api_token": "withheld"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "settings-nested_api_token",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "nested": [
+              {
+                "nested_api_token": "withheld"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "settings-password",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "nested": [
+              {
+                "password": "withheld"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "settings-access_jwt",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "nested": [
+              {
+                "access_jwt": "withheld"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "settings-raw_sub",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "nested": [
+              {
+                "raw_sub": "withheld"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "settings-host_selector",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "nested": [
+              {
+                "host_selector": "withheld"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "settings-run_id",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "nested": [
+              {
+                "run_id": "withheld"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "settings-mount_alias",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "nested": [
+              {
+                "mount_alias": "withheld"
+              }
+            ]
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "unknown-setting",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "unknown": 1
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "fractional-size",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/2/settings",
+          "value": {
+            "fixed_count": 0.25,
+            "all_in_max_legs": 2,
+            "all_in_value_fraction": 0,
+            "conviction_max": 1,
+            "conviction_min": 0.1,
+            "favorite_mult": 1,
+            "risk_resize_live": 0,
+            "size_fraction": 0,
+            "target_win_cents": 0
+          }
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "size-bound",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/2/settings",
+          "value": {
+            "fixed_count": 1.01,
+            "all_in_max_legs": 2,
+            "all_in_value_fraction": 0,
+            "conviction_max": 1,
+            "conviction_min": 0.1,
+            "favorite_mult": 1,
+            "risk_resize_live": 0,
+            "size_fraction": 0,
+            "target_win_cents": 0
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "fractional-integer",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/2/settings",
+          "value": {
+            "fixed_count": 0.25,
+            "all_in_max_legs": 2.5,
+            "all_in_value_fraction": 0,
+            "conviction_max": 1,
+            "conviction_min": 0.1,
+            "favorite_mult": 1,
+            "risk_resize_live": 0,
+            "size_fraction": 0,
+            "target_win_cents": 0
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "cycle",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "append",
+          "path": "/pipes",
+          "value": {
+            "from": {
+              "node": "bet-size",
+              "port": "result"
+            },
+            "to": {
+              "node": "market",
+              "port": "value"
+            }
+          }
+        }
+      ],
+      "expected": false,
+      "contains": "market -> strategy -> bet-size -> market"
+    },
+    {
+      "name": "duplicate-block",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/1/id",
+          "value": "market"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "missing-pin",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/pipes/0/from/port",
+          "value": "missing"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "duplicate-input",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "append",
+          "path": "/pipes",
+          "value": {
+            "from": {
+              "node": "bet-size",
+              "port": "result"
+            },
+            "to": {
+              "node": "strategy",
+              "port": "value"
+            }
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "immutable-slug",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "delete",
+          "path": "/outputs/bet-size"
+        }
+      ],
+      "expected": false,
+      "previous": true,
+      "contains": "output changed"
+    },
+    {
+      "name": "immutable-output-target",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/outputs/bet-size/node",
+          "value": "market"
+        }
+      ],
+      "expected": false,
+      "previous": true,
+      "contains": "output changed"
+    },
+    {
+      "name": "stale-code",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/registry/code_sha256",
+          "value": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "unknown-version",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/registry/version",
+          "value": "99.0.0"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "document-effect",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/effect",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "document-residency",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/residency",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "document-execution_target",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/execution_target",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "document-code",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/code",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "document-run_id",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/run_id",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "document-values",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/values",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "document-mount_alias",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/mount_alias",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "bounds-200-400",
+      "target": "graph",
+      "changes": [],
+      "expected": true,
+      "generate": {
+        "blocks": 200,
+        "pipes": 400
+      }
+    },
+    {
+      "name": "bounds-201-400",
+      "target": "graph",
+      "changes": [],
+      "expected": false,
+      "generate": {
+        "blocks": 201,
+        "pipes": 400
+      }
+    },
+    {
+      "name": "bounds-200-401",
+      "target": "graph",
+      "changes": [],
+      "expected": false,
+      "generate": {
+        "blocks": 200,
+        "pipes": 401
+      }
+    },
+    {
+      "name": "graph-byte-limit",
+      "target": "graph",
+      "changes": [],
+      "expected": false,
+      "wire_bytes": 262145
+    },
+    {
+      "name": "graph-byte-boundary",
+      "target": "graph",
+      "changes": [],
+      "expected": true,
+      "wire_bytes": 262144
+    },
+    {
+      "name": "valid-block",
+      "target": "block",
+      "changes": [],
+      "expected": true
+    },
+    {
+      "name": "spoof-effect",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/effect",
+          "value": "trade"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "spoof-residency",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/residency",
+          "value": "local"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "spoof-execution_target",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/execution_target",
+          "value": "browser"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "spoof-lane",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/lane",
+          "value": "unknown"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "output-renamed",
+      "target": "block",
+      "changes": [
+        {
+          "op": "delete",
+          "path": "/outputs/result"
+        },
+        {
+          "op": "set",
+          "path": "/outputs/renamed",
+          "value": {
+            "mode": "scalar",
+            "schema": {
+              "type": "number"
+            },
+            "unit": "none",
+            "nullable": false,
+            "required": false,
+            "has_default": false
+          }
+        },
+        {
+          "op": "set",
+          "path": "/sample_output",
+          "value": {
+            "renamed": 0
+          }
+        }
+      ],
+      "expected": false,
+      "previous": true,
+      "contains": "output changed"
+    },
+    {
+      "name": "bad-budget",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/latency_budget_us/p50",
+          "value": 101
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "sample-type",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/sample_output/result",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "default-type",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/inputs/value/has_default",
+          "value": true
+        },
+        {
+          "op": "set",
+          "path": "/inputs/value/default",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "missing-default",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/inputs/value/has_default",
+          "value": true
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "executable-schema",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/settings_schema/format",
+          "value": "code"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "spoof-ui",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/ui_schema/effect",
+          "value": "pure"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-origin",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/context/eventOrigin",
+          "value": "https://other.example.invalid"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-source",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/context/eventSource",
+          "value": "other-window"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-principal",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/principal_proof",
+          "value": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-channel",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/channel",
+          "value": "11111111111111111111111111111111"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-source-sha",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/source_sha",
+          "value": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-revision",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/proposal_revision",
+          "value": 1
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-hash",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/proposal_hash",
+          "value": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-version",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/version",
+          "value": 2
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-expired",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/expires_at_ms",
+          "value": 1499
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-future",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/sent_at_ms",
+          "value": 1501
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-replay",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/state/sequence",
+          "value": 1
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-unsigned",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/context/authenticated",
+          "value": false
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-wildcard",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/context/origin",
+          "value": "*"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-ttl",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/expires_at_ms",
+          "value": 31001
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "embed-golden",
+      "target": "embed",
+      "changes": [],
+      "expected": true
+    },
+    {
+      "name": "shell-4097",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/context/wire_bytes",
+          "value": 4097
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "shell-4096",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/context/wire_bytes",
+          "value": 4096
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "rate-20",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/state/accepted_at_ms",
+          "value": [
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499
+          ]
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "rate-21",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/state/accepted_at_ms",
+          "value": [
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499,
+            1499
+          ]
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "rate-window",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/state/accepted_at_ms",
+          "value": [
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500,
+            500
+          ]
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "source-200",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/kind",
+          "value": "source.value"
+        },
+        {
+          "op": "set",
+          "path": "/message/payload",
+          "value": {
+            "rows": [
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {}
+            ]
+          }
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "source-201",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/kind",
+          "value": "source.value"
+        },
+        {
+          "op": "set",
+          "path": "/message/payload",
+          "value": {
+            "rows": [
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {}
+            ]
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "source-262144",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/kind",
+          "value": "source.value"
+        },
+        {
+          "op": "set",
+          "path": "/message/payload",
+          "value": {
+            "rows": []
+          }
+        },
+        {
+          "op": "set",
+          "path": "/context/wire_bytes",
+          "value": 262144
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "source-262145",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/kind",
+          "value": "source.value"
+        },
+        {
+          "op": "set",
+          "path": "/message/payload",
+          "value": {
+            "rows": []
+          }
+        },
+        {
+          "op": "set",
+          "path": "/context/wire_bytes",
+          "value": 262145
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "handoff",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/kind",
+          "value": "signed-request"
+        },
+        {
+          "op": "set",
+          "path": "/message/payload",
+          "value": {
+            "request_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "handoff": "server-sign"
+          }
+        }
+      ],
+      "expected": true
+    },
+    {
+      "name": "handoff-unsigned",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/kind",
+          "value": "signed-request"
+        },
+        {
+          "op": "set",
+          "path": "/message/payload",
+          "value": {
+            "request_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "handoff": "client-sign"
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "telemetry-field",
+      "target": "embed",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/message/telemetry",
+          "value": {
+            "value": "withheld"
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "schema-bounds-type",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/inputs/value/schema/minimum",
+          "value": "withheld"
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "schema-nullability",
+      "target": "block",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/inputs/value/schema/type",
+          "value": [
+            "number",
+            "null"
+          ]
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "secret-segment-key",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/blocks/0/settings",
+          "value": {
+            "api_key": "withheld"
+          }
+        }
+      ],
+      "expected": false
+    },
+    {
+      "name": "required-input",
+      "target": "graph",
+      "changes": [],
+      "expected": false,
+      "registry_input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": true,
+        "has_default": false
+      },
+      "contains": "input required"
+    },
+    {
+      "name": "default-input",
+      "target": "graph",
+      "changes": [],
+      "expected": true,
+      "registry_input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": false,
+        "required": true,
+        "has_default": true,
+        "default": 0
+      }
+    },
+    {
+      "name": "nullable-default",
+      "target": "graph",
+      "changes": [],
+      "expected": true,
+      "registry_input": {
+        "mode": "scalar",
+        "schema": {
+          "type": "number"
+        },
+        "unit": "none",
+        "nullable": true,
+        "required": true,
+        "has_default": true,
+        "default": null
+      }
+    },
+    {
+      "name": "prototype-pin",
+      "target": "graph",
+      "changes": [
+        {
+          "op": "set",
+          "path": "/outputs/bet-size/port",
+          "value": "constructor"
+        }
+      ],
+      "expected": false,
+      "contains": "pin missing"
+    },
+    {
+      "name": "graph-negative-wire-length",
+      "target": "graph",
+      "changes": [],
+      "wire_bytes": -1,
+      "expected": false,
+      "contains": "byte limit"
+    },
+    {
+      "name": "graph-boolean-wire-length",
+      "target": "graph",
+      "changes": [],
+      "wire_bytes": true,
+      "expected": false,
+      "contains": "byte limit"
+    },
+    {
+      "name": "embed-authentication-type",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/context/authenticated", "value": "false"}],
+      "expected": false,
+      "contains": "host mismatch"
+    },
+    {
+      "name": "embed-exact-expiry",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/context/now_ms", "value": 2000}],
+      "expected": false,
+      "contains": "replay refused"
+    },
+    {
+      "name": "embed-negative-now",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/context/now_ms", "value": -1}],
+      "expected": false,
+      "contains": "replay refused"
+    },
+    {
+      "name": "embed-integral-json-number",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/context/now_ms", "value": 1500.0}],
+      "expected": true
+    },
+    {
+      "name": "embed-boolean-replay-sequence",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/state/sequence", "value": false}],
+      "expected": false,
+      "contains": "replay refused"
+    },
+    {
+      "name": "embed-fractional-replay-sequence",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/state/sequence", "value": 0.5}],
+      "expected": false,
+      "contains": "replay refused"
+    },
+    {
+      "name": "embed-future-replay-time",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/state/accepted_at_ms", "value": [1501]}],
+      "expected": false,
+      "contains": "replay refused"
+    },
+    {
+      "name": "embed-string-replay-time",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/state/accepted_at_ms", "value": ["1499"]}],
+      "expected": false,
+      "contains": "replay refused"
+    },
+    {
+      "name": "embed-negative-wire-length",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/context/wire_bytes", "value": -1}],
+      "expected": false,
+      "contains": "byte limit"
+    },
+    {
+      "name": "embed-null-wire-length",
+      "target": "embed",
+      "changes": [{"op": "set", "path": "/context/wire_bytes", "value": null}],
+      "expected": false,
+      "contains": "byte limit"
+    }
+  ]
+}
