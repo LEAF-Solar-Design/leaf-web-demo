@@ -16,8 +16,9 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import uuid
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 import platform_link
 from solar_project_tools import SUPPORTED_TOOLS
@@ -28,15 +29,33 @@ DEFAULT_LEASE_SECONDS = 30.0
 PROJECT_POSTURE_RUNTIMES = frozenset({"local", "test"})
 
 
+def project_tools_from_env(environ=None) -> tuple[str, ...]:
+    """Return validated, distinct project tools in configured polling order."""
+    env = os.environ if environ is None else environ
+    tools = []
+    for item in env.get("LEAF_CANONICAL_PROJECT_TOOLS", "").split(","):
+        name = item.strip()
+        if not name:
+            continue
+        if name not in SUPPORTED_TOOLS:
+            raise ValueError(f"unknown project tool: {name}")
+        if name not in tools:
+            tools.append(name)
+    return tuple(tools)
+
+
 def project_posture_ok(environ=None) -> bool:
-    """The managed project proof's posture: a local or test runtime with project Solar runs on.
+    """Allow enabled local/test runs or explicitly allowed staging, never production.
 
     Mirrors solar_project_admission.project_runs_enabled() (exactly "1") without importing
     that module, which pulls in the whole server.
     """
     env = os.environ if environ is None else environ
-    runtime = env.get("LEAF_RUNTIME_ENV", "")
-    return (runtime.strip().lower() in PROJECT_POSTURE_RUNTIMES
+    runtime = env.get("LEAF_RUNTIME_ENV", "").strip().lower()
+    allowed = {item.strip().lower() for item in
+               env.get("LEAF_SOLAR_PROJECT_RUN_ALLOWED_RUNTIMES", "").split(",")}
+    return ((runtime in PROJECT_POSTURE_RUNTIMES
+             or (runtime == "staging" and runtime in allowed))
             and env.get("LEAF_SOLAR_PROJECT_RUN_ENABLED", "0") == "1")
 
 # Frozen server-relative source scope. The selected declaration is added below.
@@ -224,11 +243,35 @@ def run_once(owner: str, *, lease_seconds: float = DEFAULT_LEASE_SECONDS,
 def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SECONDS,
           once: bool = False, stop_event: threading.Event | None = None,
           tool_name: str = autofill.TOOL_NAME, worker_id: str | None = None,
-          project_readiness: bool = False) -> None:
+          project_readiness: bool = False, project_tools: tuple[str, ...] = (),
+          monotonic: Callable[[], float] = time.monotonic) -> None:
     owner = worker_id if worker_id is not None else globals()["worker_id"]()
     descriptor = graph_worker_descriptor(tool_name) if project_readiness else None
     ready_printed = False
     stop = stop_event or threading.Event()
+    if project_tools and not project_posture_ok():
+        print("canonical worker: project tool polling disabled: project posture not met "
+              f"(runtime={os.environ.get('LEAF_RUNTIME_ENV', '')})", file=sys.stderr)
+        project_tools = ()
+    project_descriptors = {tool: graph_worker_descriptor(tool) for tool in project_tools}
+    last_heartbeats = {}
+
+    def project_heartbeat(tool):
+        now = monotonic()
+        if tool in last_heartbeats and now - last_heartbeats[tool] < 5.0:
+            return
+        last_heartbeats[tool] = now
+        project_descriptor = project_descriptors[tool]
+        platform_link._canonical_jobs_module().record_worker_heartbeat(
+            owner, project_descriptor["tool_name"], project_descriptor["runtime"],
+            project_descriptor["source_revision"], project_descriptor["source_sha256"])
+
+    for tool in project_tools:
+        try:
+            project_heartbeat(tool)
+        except Exception as exc:  # noqa: BLE001 - isolate optional project tools
+            print(f"canonical worker: project tool {tool}: {type(exc).__name__}", file=sys.stderr)
+    # With N project tools, an idle cycle makes N+1 claim calls and at most N/5 heartbeats per second.
     while not stop.is_set():
         if descriptor is not None:
             platform_link._canonical_jobs_module().record_worker_heartbeat(
@@ -242,6 +285,13 @@ def serve(*, poll_seconds: float = 1.0, lease_seconds: float = DEFAULT_LEASE_SEC
                 "source_revision": descriptor["source_revision"]}, separators=(",", ":")),
                 flush=True)
             ready_printed = True
+        for tool in project_tools:
+            try:
+                project_heartbeat(tool)
+                project_claimed = run_once(owner, lease_seconds=lease_seconds, tool_name=tool)
+                claimed = project_claimed or claimed
+            except Exception as exc:  # noqa: BLE001 - isolate optional project tools
+                print(f"canonical worker: project tool {tool}: {type(exc).__name__}", file=sys.stderr)
         if once:
             return
         if not claimed:
@@ -262,6 +312,10 @@ def main() -> None:
     parser.add_argument("--lease-seconds", type=float, default=float(
         os.environ.get("LEAF_CANONICAL_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)))
     args = parser.parse_args()
+    try:
+        project_tools = project_tools_from_env()
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.project_readiness and args.tool not in solar_project_graph.SUPPORTED_TOOLS:
         parser.error("--readiness requires a graph tool")
     if args.project_readiness and not project_posture_ok():
@@ -274,7 +328,8 @@ def main() -> None:
         signal.signal(signum, lambda _signum, _frame: stop.set())
     serve(poll_seconds=max(args.poll_seconds, 0.05),
           lease_seconds=max(args.lease_seconds, 1.0), once=args.once, stop_event=stop,
-          tool_name=args.tool, worker_id=args.worker_id, project_readiness=args.project_readiness)
+          tool_name=args.tool, worker_id=args.worker_id, project_readiness=args.project_readiness,
+          project_tools=project_tools)
 
 
 if __name__ == "__main__":

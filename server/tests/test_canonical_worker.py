@@ -265,6 +265,211 @@ def test_project_posture_matches_admission_flag(monkeypatch):
         assert canonical_worker.project_posture_ok() is solar_project_admission.project_runs_enabled(), flag
 
 
+def test_project_tools_from_env(monkeypatch):
+    monkeypatch.delenv("LEAF_CANONICAL_PROJECT_TOOLS", raising=False)
+    assert canonical_worker.project_tools_from_env() == ()
+    for value in ("", " , , "):
+        assert canonical_worker.project_tools_from_env({"LEAF_CANONICAL_PROJECT_TOOLS": value}) == ()
+    assert canonical_worker.project_tools_from_env({
+        "LEAF_CANONICAL_PROJECT_TOOLS": " solar-settings, ,solar-feeders,solar-settings"
+    }) == ("solar-settings", "solar-feeders")
+    with pytest.raises(ValueError, match="bad-project-tool"):
+        canonical_worker.project_tools_from_env({
+            "LEAF_CANONICAL_PROJECT_TOOLS": "solar-settings,bad-project-tool"})
+
+
+def test_worker_unknown_project_tool_fails_before_schema(monkeypatch, capsys):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid project tools reached schema or execution")
+
+    monkeypatch.setenv("LEAF_CANONICAL_PROJECT_TOOLS", "solar-settings,bad-project-tool")
+    _project_main(monkeypatch, ["--once"], forbidden)
+    monkeypatch.setattr(canonical_worker, "serve", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 2
+    assert "unknown project tool: bad-project-tool" in capsys.readouterr().err
+
+
+def test_worker_main_passes_project_tools(monkeypatch):
+    calls = []
+    monkeypatch.setenv("LEAF_CANONICAL_PROJECT_TOOLS", " solar-feeders,solar-settings,solar-feeders ")
+    _project_main(monkeypatch, ["--once"], lambda: calls.append("schema"))
+    monkeypatch.setattr(canonical_worker, "serve", lambda **kwargs: calls.append(kwargs))
+    canonical_worker.main()
+    assert calls[0] == "schema"
+    assert calls[1]["project_tools"] == ("solar-feeders", "solar-settings")
+
+
+@pytest.mark.parametrize("runtime,allowed,flag,expected", [
+    ("staging", "production, STAGING ", "1", True),
+    (" Staging ", "staging", "1", True),
+    ("staging", "", "1", False),
+    ("staging", "test", "1", False),
+    ("staging", "staging", "0", False),
+    ("staging", "staging", " 1", False),
+    ("production", "production,staging", "1", False),
+    ("prod", "prod,production,staging", "1", False),
+    (" PRODUCTION ", "production,staging", "1", False),
+    ("local", "", "1", True),
+    ("test", "", "1", True),
+    ("local", "local", "0", False),
+    ("test", "test", "0", False),
+    ("dev", "dev,staging", "1", False),
+])
+def test_project_posture_staging_opt_in(runtime, allowed, flag, expected):
+    assert canonical_worker.project_posture_ok({
+        "LEAF_RUNTIME_ENV": runtime,
+        "LEAF_SOLAR_PROJECT_RUN_ALLOWED_RUNTIMES": allowed,
+        "LEAF_SOLAR_PROJECT_RUN_ENABLED": flag,
+    }) is expected
+
+
+def test_worker_readiness_accepts_allowed_staging(monkeypatch):
+    calls = []
+    _project_posture(monkeypatch, "staging")
+    monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ALLOWED_RUNTIMES", "production, STAGING ")
+    _project_main(monkeypatch, ["--tool", "solar-settings", "--readiness", "--once"],
+                  lambda: calls.append("schema"))
+    monkeypatch.setattr(canonical_worker, "serve", lambda **kwargs: calls.append(kwargs))
+    canonical_worker.main()
+    assert calls[0] == "schema"
+    assert calls[1]["project_readiness"] is True
+
+
+def _project_polling_stubs(monkeypatch):
+    descriptors, heartbeats, claims = [], [], []
+
+    def descriptor(tool):
+        descriptors.append(tool)
+        return {**_graph_descriptor(), "tool_name": tool}
+
+    monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", descriptor)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=lambda *args: heartbeats.append(args)))
+    monkeypatch.setattr(canonical_worker, "run_once",
+                        lambda owner, **kwargs: claims.append((owner, kwargs)) or False)
+    return descriptors, heartbeats, claims
+
+
+def test_worker_polls_opted_in_project_tools_in_order(monkeypatch, capsys):
+    _project_posture(monkeypatch, "staging")
+    monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ALLOWED_RUNTIMES", "staging")
+    descriptors, heartbeats, claims = _project_polling_stubs(monkeypatch)
+    tools = ("solar-settings", "solar-feeders")
+    canonical_worker.serve(once=True, worker_id="w1", lease_seconds=12,
+                           project_tools=tools, monotonic=lambda: 0)
+    assert descriptors == list(tools)
+    assert heartbeats == [("w1", *{**_graph_descriptor(), "tool_name": tool}.values())
+                          for tool in tools]
+    assert claims == [("w1", {"lease_seconds": 12, "tool_name": tool})
+                      for tool in (canonical_worker.autofill.TOOL_NAME, *tools)]
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("runtime,allowed,flag", [
+    ("staging", "", "1"), ("staging", "staging", "0"),
+    ("production", "production,staging", "1"), ("prod", "prod,staging", "1"),
+])
+def test_worker_disables_project_polling_without_posture(monkeypatch, capsys, runtime, allowed, flag):
+    _project_posture(monkeypatch, runtime, flag)
+    monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ALLOWED_RUNTIMES", allowed)
+    descriptors, heartbeats, claims = _project_polling_stubs(monkeypatch)
+    canonical_worker.serve(once=True, worker_id="w1", project_tools=("solar-settings", "solar-feeders"))
+    assert descriptors == heartbeats == []
+    assert claims == [("w1", {"lease_seconds": 30.0, "tool_name": canonical_worker.autofill.TOOL_NAME})]
+    assert capsys.readouterr().err == (
+        "canonical worker: project tool polling disabled: project posture not met "
+        f"(runtime={runtime})\n")
+
+
+def test_worker_project_heartbeat_interval_and_idle_sleep(monkeypatch):
+    _project_posture(monkeypatch)
+    descriptors, _, _ = _project_polling_stubs(monkeypatch)
+    times = iter((0, 4.9, 5, 9.9, 10))
+    now, beats, claims, waits = [0], [], [], []
+    stop = Event()
+
+    def heartbeat(owner, tool, *args):
+        beats.append((tool, now[0]))
+
+    def run(owner, **kwargs):
+        tool = kwargs["tool_name"]
+        if tool == canonical_worker.autofill.TOOL_NAME:
+            now[0] = next(times)
+        claims.append((tool, now[0]))
+        if tool == "solar-feeders" and now[0] == 10:
+            stop.set()
+        # Both base and project claims suppress sleeping, without skipping other tools.
+        return ((tool == "solar-settings" and now[0] == 4.9)
+                or (tool == canonical_worker.autofill.TOOL_NAME and now[0] == 5))
+
+    monkeypatch.setattr(stop, "wait", lambda seconds: waits.append(seconds))
+    monkeypatch.setattr(canonical_worker, "run_once", run)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=heartbeat))
+    tools = ("solar-settings", "solar-feeders")
+    canonical_worker.serve(worker_id="w1", project_tools=tools, stop_event=stop,
+                           poll_seconds=0.25, monotonic=lambda: now[0])
+    assert descriptors == list(tools)
+    assert beats == [(tool, time) for time in (0, 5, 10) for tool in tools]
+    assert claims == [(tool, time) for time in (0, 4.9, 5, 9.9, 10)
+                      for tool in (canonical_worker.autofill.TOOL_NAME, *tools)]
+    assert waits == [0.25, 0.25, 0.25]
+
+
+@pytest.mark.parametrize("failure", ["startup_heartbeat", "heartbeat", "claim"])
+def test_worker_project_failure_does_not_stop_next_tool(monkeypatch, capsys, failure):
+    _project_posture(monkeypatch)
+    descriptors, _, _ = _project_polling_stubs(monkeypatch)
+    calls, beats, now = [], [], [0]
+    stop = Event()
+
+    def heartbeat(owner, tool, *args):
+        beats.append(tool)
+        if tool == "solar-settings" and (
+                failure == "startup_heartbeat" or (failure == "heartbeat" and now[0] == 5)):
+            raise ConnectionError("unavailable")
+
+    def run(owner, **kwargs):
+        tool = kwargs["tool_name"]
+        calls.append(tool)
+        if tool == canonical_worker.autofill.TOOL_NAME and failure == "heartbeat":
+            now[0] = 5
+        if tool == "solar-settings" and failure == "claim":
+            raise TimeoutError("unavailable")
+        if tool == "solar-feeders":
+            stop.set()
+        return False
+
+    monkeypatch.setattr(stop, "wait", lambda seconds: None)
+    monkeypatch.setattr(canonical_worker, "run_once", run)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        record_worker_heartbeat=heartbeat))
+    canonical_worker.serve(worker_id="w1", project_tools=("solar-settings", "solar-feeders"),
+                           stop_event=stop, monotonic=lambda: now[0])
+    assert descriptors == ["solar-settings", "solar-feeders"]
+    assert calls[0] == canonical_worker.autofill.TOOL_NAME
+    assert calls[-1] == "solar-feeders"
+    assert "solar-feeders" in beats
+    error_type = "TimeoutError" if failure == "claim" else "ConnectionError"
+    assert capsys.readouterr().err == f"canonical worker: project tool solar-settings: {error_type}\n"
+
+
+def test_worker_base_failure_still_propagates_with_project_tools(monkeypatch, capsys):
+    _project_posture(monkeypatch)
+    _project_polling_stubs(monkeypatch)
+
+    def failed(owner, **kwargs):
+        assert kwargs["tool_name"] == canonical_worker.autofill.TOOL_NAME
+        raise ConnectionError("base claim failed")
+
+    monkeypatch.setattr(canonical_worker, "run_once", failed)
+    with pytest.raises(ConnectionError, match="base claim failed"):
+        canonical_worker.serve(once=True, project_tools=("solar-settings",))
+    assert capsys.readouterr().err == ""
+
+
 def test_worker_id_grammar(monkeypatch, capsys):
     calls, schema = [], []
     monkeypatch.setattr(canonical_worker, "serve", lambda **kwargs: calls.append(kwargs))
