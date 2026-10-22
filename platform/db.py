@@ -291,6 +291,14 @@ _REQUIRED_COLUMNS = {
         "previous_tier", "derived_tier", "tier_changed", "payload_sha256",
         "observed_at", "recorded_at",
     },
+    "tenant_cost_events": {
+        "id", "org_id", "addon", "mode", "vendor", "unit", "quantity",
+        "unit_cost_usd", "cost_usd", "cost_basis", "event_key", "occurred_at",
+        "recorded_at", "provenance",
+    },
+    "tenant_addon_settings": {
+        "org_id", "addon", "mode", "byo_ref", "updated_at", "updated_by",
+    },
     "unit_economics_observations": {
         "org_id", "org_account_class",
         "observation_key", "period_start", "period_end", "kind", "category",
@@ -704,6 +712,54 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "tenant_cost_events_pkey": _catalog_contract(
+        "tenant_cost_events", "PRIMARY KEY (id)"),
+    "tenant_cost_events_org_id_fkey": _catalog_contract(
+        "tenant_cost_events", "FOREIGN KEY (org_id)", "REFERENCES orgs(org_id)"),
+    "tenant_cost_events_event_key_key": _catalog_contract(
+        "tenant_cost_events", "UNIQUE (event_key)"),
+    "tenant_cost_events_addon_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth'])"),
+    "tenant_cost_events_mode_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "mode = ANY (ARRAY['managed', 'byo'])"),
+    # Vendor names have 1 to 100 characters; units have 1 to 50 characters.
+    "tenant_cost_events_vendor_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "char_length(btrim(vendor)) >= 1", "char_length(btrim(vendor)) <= 100"),
+    "tenant_cost_events_unit_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "char_length(btrim(unit)) >= 1", "char_length(btrim(unit)) <= 50"),
+    # Quantities and costs have a zero lower bound and exclude numeric specials.
+    "tenant_cost_events_quantity_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "quantity >= 0", "quantity <> 'Infinity'::numeric", "quantity <> 'NaN'::numeric"),
+    "tenant_cost_events_unit_cost_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "unit_cost_usd >= 0", "unit_cost_usd <> 'Infinity'::numeric", "unit_cost_usd <> 'NaN'::numeric"),
+    "tenant_cost_events_cost_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "cost_usd >= 0", "cost_usd <> 'Infinity'::numeric", "cost_usd <> 'NaN'::numeric"),
+    "tenant_cost_events_basis_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "cost_basis = ANY (ARRAY['measured', 'estimated', 'allocated'])"),
+    # SHA-256 keys have 64 lowercase hexadecimal characters.
+    "tenant_cost_events_key_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "event_key ~ '^[0-9a-f]{64}$'"),
+    "tenant_cost_events_provenance_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "jsonb_typeof(provenance) = 'object'"),
+    # BYO costs the platform zero dollars.
+    "tenant_cost_events_byo_check": _catalog_contract(
+        "tenant_cost_events", "CHECK", "mode <> 'byo'", "cost_usd = 0"),
+    "tenant_addon_settings_pkey": _catalog_contract(
+        "tenant_addon_settings", "PRIMARY KEY (org_id, addon)"),
+    "tenant_addon_settings_org_id_fkey": _catalog_contract(
+        "tenant_addon_settings", "FOREIGN KEY (org_id)", "REFERENCES orgs(org_id)"),
+    "tenant_addon_settings_addon_check": _catalog_contract(
+        "tenant_addon_settings", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth'])"),
+    "tenant_addon_settings_mode_check": _catalog_contract(
+        "tenant_addon_settings", "CHECK", "mode = ANY (ARRAY['managed', 'byo', 'off'])"),
+    # Credential names have 1 to 128 characters.
+    "tenant_addon_settings_ref_check": _catalog_contract(
+        "tenant_addon_settings", "CHECK", "byo_ref IS NULL", "byo_ref ~ '^[A-Za-z0-9_./:-]{1,128}$'"),
+    "tenant_addon_settings_byo_check": _catalog_contract(
+        "tenant_addon_settings", "CHECK", "mode = 'byo' AND byo_ref IS NOT NULL", "mode <> 'byo' AND byo_ref IS NULL"),
+    # Audit actors have 1 to 200 characters.
+    "tenant_addon_settings_actor_check": _catalog_contract(
+        "tenant_addon_settings", "CHECK", "char_length(btrim(updated_by)) >= 1", "char_length(btrim(updated_by)) <= 200"),
     "project_solve_exchanges_pkey": _catalog_contract(
         "project_solve_exchanges", "PRIMARY KEY (job_id)"),
     "project_solve_exchanges_job_fk": _catalog_contract(
@@ -1024,6 +1080,12 @@ _REQUIRED_CONSTRAINTS = {
 }
 
 _REQUIRED_INDEXES = {
+    "idx_tenant_cost_events_org_period": _catalog_contract(
+        "tenant_cost_events", "(org_id, occurred_at)"),
+    "idx_tenant_cost_events_org_addon_period": _catalog_contract(
+        "tenant_cost_events", "(org_id, addon, occurred_at)"),
+    "tenant_addon_settings_pkey": _catalog_contract(
+        "tenant_addon_settings", "CREATE UNIQUE INDEX", "(org_id, addon)"),
     "idx_project_solve_exchanges_scope": _catalog_contract(
         "project_solve_exchanges", "(org_id, project_id, drawing_id, job_id)"),
     "idx_project_sizing_exchanges_scope": _catalog_contract(
@@ -1066,6 +1128,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "tenant_cost_events_immutable": _catalog_contract(
+        "tenant_cost_events", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_tenant_cost_mutation()"),
     "project_solve_exchanges_guard": _catalog_contract(
         "project_solve_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION guard_project_solve_exchange()"),
