@@ -5,7 +5,7 @@ import { textGlyphPolylines } from '../components/viewerIntake.js'
 import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
 
 it('matches viewerIntake glyph contours point for point without its shape machinery', () => {
-  for (const text of ['PV-01', 'Az 180°', '?']) {
+  for (const text of ['AB', 'PV-01', 'Az 180°', '?']) {
     const row = { text, pt: [3, 7, 2], height: 2.5, handle: 'label', layer: 'Notes' }
     const actual = bridgeToIntake({ texts: [row] }, { textGlyphs }).polylines
     const expected = textGlyphPolylines(row)
@@ -35,7 +35,7 @@ it('maps every bridge entity into the existing Viewer conventions without mutati
   const mapped = bridgeToIntake(input, { textGlyphs })
   expect(mapped).toMatchObject({ source: 'bridge', documentId: 'autocad:site.dwg', truncated: false })
   expect(mapped.polylines[0]).toEqual({ ...input.lines[0], closed: false, strokeOnly: true })
-  expect(mapped.polylines[1]).toEqual(input.polylines[0])
+  expect(mapped.polylines[1]).toEqual({ ...input.polylines[0], strokeOnly: true })
   expect(mapped.circles).toEqual(input.circles)
   expect(mapped.arcs).toEqual(input.arcs)
   expect(mapped.inserts[0]).toEqual({ handle: '5', layer: 'Equipment', name: 'Panel', pt: [1, 2, 0], rot: 90, scale: [1, 2, 1] })
@@ -48,7 +48,7 @@ it('maps every bridge entity into the existing Viewer conventions without mutati
   expect(JSON.stringify(input)).toBe(before)
 })
 
-it('marks bridge lines and open polylines as strokes while preserving closed polylines', () => {
+it('marks bridge lines and both open and closed polylines as strokes', () => {
   const pts = [[0, 0, 0], [2, 0, 0], [2, 2, 0]]
   const mapped = bridgeToIntake({
     lines: [{ pts: pts.slice(0, 2) }],
@@ -58,8 +58,49 @@ it('marks bridge lines and open polylines as strokes while preserving closed pol
   expect(mapped.polylines[0]).toMatchObject({ closed: false, strokeOnly: true })
   expect(mapped.polylines[1]).toMatchObject({ closed: false, strokeOnly: true })
   expect(mapped.polylines[2]).toMatchObject({ closed: false, strokeOnly: true })
-  expect(mapped.polylines[3]).toMatchObject({ closed: true })
-  expect(mapped.polylines[3]).not.toHaveProperty('strokeOnly')
+  expect(mapped.polylines[3]).toMatchObject({ closed: true, strokeOnly: true })
+})
+
+it('lays out newline and MTEXT paragraph glyphs on separate baselines without substitute glyphs', () => {
+  const row = { pt: [3, 7, 2], height: 2.5, handle: 'label', layer: 'Notes' }
+  const convert = text => bridgeToIntake({ texts: [{ ...row, text }] }, { textGlyphs }).polylines
+  const first = convert('A')
+  const second = convert('B')
+  const spacing = row.height * 5 / 3
+  for (const text of ['A\nB', 'A\\PB', 'A\r\nB']) {
+    const actual = convert(text)
+    expect(actual).toHaveLength(first.length + second.length)
+    expect(actual.slice(0, first.length)).toEqual(first)
+    for (let i = 0; i < second.length; i += 1) {
+      const contour = actual[first.length + i]
+      expect(contour.pts).toHaveLength(second[i].pts.length)
+      for (let j = 0; j < contour.pts.length; j += 1) {
+        expect(contour.pts[j][0]).toBe(second[i].pts[j][0])
+        expect(second[i].pts[j][1] - contour.pts[j][1]).toBeCloseTo(spacing, 12)
+        expect(contour.pts[j][2]).toBe(second[i].pts[j][2])
+      }
+    }
+  }
+})
+
+it('removes MTEXT formatting while preserving spaces and escaped literals', () => {
+  const row = { pt: [3, 7, 2], height: 2.5 }
+  const convert = text => bridgeToIntake({ texts: [{ ...row, text }] }, { textGlyphs }).polylines
+  expect(convert('{\\fArial|b0;Hi}')).toEqual(convert('Hi'))
+  expect(convert('\\LHi\\l\\O!\\o\\K!\\k\\~AB')).toEqual(convert('Hi!! AB'))
+  for (const [encoded, text] of [['\\\\P', '\\P'], ['\\{Hi\\}', '{Hi}']]) {
+    const actual = convert(encoded)
+    const expected = textGlyphPolylines({ ...row, text })
+    expect(actual).toHaveLength(expected.length)
+    for (let i = 0; i < expected.length; i += 1) {
+      expect(actual[i].pts).toHaveLength(expected[i].pts.length)
+      for (let j = 0; j < expected[i].pts.length; j += 1) {
+        for (let axis = 0; axis < 3; axis += 1) {
+          expect(actual[i].pts[j][axis]).toBeCloseTo(expected[i].pts[j][axis], 12)
+        }
+      }
+    }
+  }
 })
 
 it('limits total points, including the sampling the Viewer will perform', () => {
@@ -99,6 +140,12 @@ it('caps long text at 256 characters before expansion', () => {
   expect(mapped.polylines).toEqual(capped.polylines)
   expect(mapped.points).toBe(capped.points)
   expect(mapped.truncated).toBe(true)
+})
+
+it('applies the text cap after removing MTEXT formatting', () => {
+  const row = { pt: [0, 0], height: 1 }
+  const convert = text => bridgeToIntake({ texts: [{ ...row, text }] }, { textGlyphs })
+  expect(convert('{\\fArial|b0;Hi}'.repeat(128))).toEqual(convert('Hi'.repeat(128)))
 })
 
 it('reserves the remaining text budget without allocating a whole over-budget label', () => {

@@ -450,7 +450,8 @@ const Viewer = forwardRef(function Viewer(
         addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts, strokeOnly: !!pl.strokeOnly })
         // fan-triangulate (panels are convex quads) for a subtle fill; an
         // engine document's OPEN polyline (a line, an arc) is a stroke only.
-        const fillThis = !(strokeOnlyOpen && !pl.closed) && !pl.strokeOnly
+        // AutoCAD shows bridge drawings as wireframe, including closed shapes.
+        const fillThis = activeIntake.source !== 'bridge' && !(strokeOnlyOpen && !pl.closed) && !pl.strokeOnly
         for (let i = 1; fillThis && i < pts.length - 1; i++) {
           fillPos.push(pts[0][0], pts[0][1], topZ)
           fillPos.push(pts[i][0], pts[i][1], topZ)

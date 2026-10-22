@@ -73,18 +73,23 @@ export function textGlyphs(rows, { result, layers, reserve, identity, point, max
     if (!row || typeof row.text !== 'string' || !point(row.pt)
       || !Number.isFinite(row.height) || row.height <= 0) continue
     if (result.points >= maxPoints) { result.truncated = true; break }
-    if (row.text.length > 256) result.truncated = true
+    // Match escapes together so literal backslashes and braces survive MTEXT cleanup.
+    const normalized = row.text.replace(/\\([\\\x7b\x7d])|\\P|\r\n?|\n|\\~|\\[ACcFfHhQqTtWwp][^;]*;|\\[LlOoKk]|[\x7b\x7d]/g,
+      (code, escaped) => escaped ?? (code === '\\P' || code[0] === '\r' || code === '\n' ? '\n' : code === '\\~' ? ' ' : ''))
+    if (normalized.length > 256) result.truncated = true
     // Expand one bounded, origin glyph at a time, then reserve its exact cost
     // BEFORE allocating positioned contours. Never expand the whole text first.
     let offset = 0
-    for (const char of row.text.slice(0, 256)) {
+    let line = 0
+    for (const char of normalized.slice(0, 256)) {
+      if (char === '\n') { offset = 0; line += 1; continue }
       const text = Object.prototype.hasOwnProperty.call(typeface.glyphs, char) ? char : '?'
       const template = glyphContours(typeface.glyphs[text])
       const cost = template.reduce((n, pl) => n + pl.pts.length, 0)
       if (!reserve(cost)) break
       const pt = point(row.pt)
       const glyphs = template.map(pl => ({ ...pl, ...identity(row),
-        pts: pl.pts.map(p => [pt[0] + offset + p[0] * row.height, pt[1] + p[1] * row.height, pt[2]]) }))
+        pts: pl.pts.map(p => [pt[0] + offset + p[0] * row.height, pt[1] - line * row.height * 5 / 3 + p[1] * row.height, pt[2]]) }))
       result.polylines.push(...glyphs)
       if (glyphs.length) layers.add(String(row.layer || '0'))
       offset += typeface.glyphs[text].ha / typeface.resolution * row.height / 1.013
