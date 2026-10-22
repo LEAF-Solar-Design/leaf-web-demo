@@ -53,7 +53,11 @@ function useBandHeight(ref) {
     const shell = el.closest('.studio-shell')
     const app = el.closest('.app')
     const toolbar = host.querySelector('.viewer-toolbar')
+    let bandToolbar = host.querySelector('.viewer-toolbar') || app?.querySelector('.viewer-toolbar') || shell?.querySelector('.viewer-toolbar') || null
+    let bandObserved = false
     const publish = () => {
+      if (!bandToolbar) bandToolbar = host.querySelector('.viewer-toolbar') || app?.querySelector('.viewer-toolbar') || shell?.querySelector('.viewer-toolbar') || null
+      observeBand()
       host.style.setProperty(RIBBON_HEIGHT_VAR, `${Math.round(el.offsetHeight)}px`)
       // The narrow ground is a sibling of the app. Publish its real band
       // edge on their shared shell, including the document tabs and nav.
@@ -61,11 +65,10 @@ function useBandHeight(ref) {
         shell.style.setProperty('--cockpit-stack-top', `${toolbar.getBoundingClientRect().bottom}px`)
       } else shell?.style.removeProperty('--cockpit-stack-top')
       // Desktop canvas top follows a pushed-down band bottom; overlays never move up.
-      if (shell && toolbar && window.innerWidth >= 981) {
-        shell.style.setProperty('--cockpit-band-bottom', `${Math.floor(toolbar.getBoundingClientRect().bottom)}px`)
+      if (shell && bandToolbar && window.innerWidth >= 981) {
+        shell.style.setProperty('--cockpit-band-bottom', `${Math.floor(bandToolbar.getBoundingClientRect().bottom)}px`)
       } else shell?.style.removeProperty('--cockpit-band-bottom')
     }
-    publish()
     let frame = null
     let scheduled = false
     const schedulePublish = () => {
@@ -84,7 +87,6 @@ function useBandHeight(ref) {
     }
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedulePublish)
     observer?.observe(el)
-    if (toolbar) observer?.observe(toolbar)
     for (const band of app?.querySelectorAll('header.top, .tc-product-nav') || []) observer?.observe(band)
     const mutations = typeof MutationObserver === 'undefined' ? null : new MutationObserver(records => {
       for (const record of records) {
@@ -97,13 +99,19 @@ function useBandHeight(ref) {
       }
       schedulePublish()
     })
-    if (shell && toolbar) {
-      for (let ancestor = toolbar.parentElement; ancestor; ancestor = ancestor.parentElement) {
-        mutations?.observe(ancestor, { childList: true })
-        for (const child of ancestor.children) observer?.observe(child)
-        if (ancestor === shell) break
+    const observeBand = () => {
+      if (!bandToolbar || bandObserved) return
+      bandObserved = true
+      observer?.observe(bandToolbar)
+      if (shell) {
+        for (let ancestor = bandToolbar.parentElement; ancestor; ancestor = ancestor.parentElement) {
+          mutations?.observe(ancestor, { childList: true })
+          for (const child of ancestor.children) observer?.observe(child)
+          if (ancestor === shell) break
+        }
       }
     }
+    publish()
     window.addEventListener('resize', publish)
     return () => {
       mutations?.disconnect()

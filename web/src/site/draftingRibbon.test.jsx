@@ -468,6 +468,41 @@ describe('DraftingRibbon', () => {
       expect(shell.style.getPropertyValue('--cockpit-stack-top')).toBe('288.7px')
     })
 
+    it('measures the document band beside the Studio ribbon portal host', async () => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 })
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 })
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+        callback(0)
+        return 1
+      })
+      let bottom = 288.7
+      const originalRect = HTMLElement.prototype.getBoundingClientRect
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        return this.classList.contains('viewer-toolbar')
+          ? { ...originalRect.call(this), bottom }
+          : originalRect.call(this)
+      })
+      const { container } = render(
+        <div className="studio-shell">
+          <div className="app">
+            <div className="studio-chrome-host">
+              <DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {} })} />
+            </div>
+            <div className="workspace-card">
+              <div className="viewer-toolbar" />
+            </div>
+          </div>
+        </div>,
+      )
+      const shell = container.querySelector('.studio-shell')
+      expect(shell.style.getPropertyValue('--cockpit-band-bottom')).toBe('288px')
+      bottom = 260
+      const card = container.querySelector('.workspace-card')
+      card.parentElement.insertBefore(document.createElement('div'), card)
+      await Promise.resolve()
+      expect(shell.style.getPropertyValue('--cockpit-band-bottom')).toBe('260px')
+    })
+
     it('republishes when a sibling inserted above the band pushes it down', async () => {
       const observe = vi.fn()
       const unobserve = vi.fn()
