@@ -7,6 +7,7 @@ import { LAB_VIEWS, registerLabViews } from './views.js'
 import WidgetsView from './widgets/WidgetsView.jsx'
 import glossary from './contract/sources/leaf-glossary.v1.json'
 import { setLayoutEngineLoader } from './canvas/dependencyLayout.js'
+import { setGraphCanvasLoader } from './canvas/GraphView.jsx'
 
 // The shell proves the lazy mount; one Node gate proves real ELK.
 const elkImport = vi.hoisted(() => vi.fn())
@@ -42,8 +43,11 @@ const fakeEngine = {
     }
   },
 }
+const canvasImport = vi.fn(() => import('./canvas/LabCanvas.jsx'))
 
 beforeEach(() => {
+  canvasImport.mockClear()
+  setGraphCanvasLoader(canvasImport)
   setLayoutEngineLoader(fakeEngine.load)
 })
 
@@ -52,6 +56,7 @@ afterEach(async () => {
   await act(async () => {})
   expect(fakeEngine.pendingCount()).toBe(0)
   expect(elkImport).not.toHaveBeenCalled()
+  setGraphCanvasLoader()
   setLayoutEngineLoader()
   vi.unstubAllGlobals()
 })
@@ -76,6 +81,28 @@ describe('Lab view registration', () => {
 })
 
 describe('LabWorkbench', () => {
+  it.each([
+    ['hidden', { route: route('graph'), status: on, hidden: true }],
+    ['inactive', { route: route('widgets'), status: on }],
+    ['dormant', { route: route('graph'), status: { state: 'off' } }],
+  ])('starts no canvas import while %s and imports once on first reveal', async (_, props) => {
+    const { container, rerender } = render(<LabWorkbench {...props} />)
+    await act(async () => {})
+    expect(container.querySelector('[data-graph-placeholder]')).toBeInTheDocument()
+    expect(container.querySelector('[data-canvas-editor]')).toBeNull()
+    expect(canvasImport).not.toHaveBeenCalled()
+
+    rerender(<LabWorkbench route={route('graph')} status={on} />)
+    expect(screen.getByRole('status', { name: 'Loading dependency canvas' })).toBeVisible()
+    const editor = await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    expect(canvasImport).toHaveBeenCalledTimes(1)
+    rerender(<LabWorkbench route={route('graph')} status={on} hidden />)
+    expect(editor).not.toBeVisible()
+    rerender(<LabWorkbench route={route('graph')} status={on} />)
+    expect(screen.getByRole('region', { name: 'Dependency canvas' })).toBe(editor)
+    expect(canvasImport).toHaveBeenCalledTimes(1)
+  }, 20000)
+
   it('lazily mounts the dependency editor in the graph view', async () => {
     render(<LabWorkbench route={route('graph')} status={on} />)
     expect(await screen.findByRole('status', { name: 'Loading dependency canvas' }, { timeout: 15000 })).toBeVisible()
@@ -141,6 +168,7 @@ describe('LabWorkbench', () => {
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Strategy palette' })).not.toBeInTheDocument()
     expect(fetchImpl).not.toHaveBeenCalled()
+    expect(canvasImport).not.toHaveBeenCalled()
   })
 
   it('fetches only the status probe when status is not provided', async () => {
