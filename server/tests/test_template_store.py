@@ -138,7 +138,7 @@ def test_authority_inventory_advanced_to_the_head() -> None:
         (PROJECT_ROOT / "platform" / "authority-inventory.json")
         .read_text(encoding="utf-8"))
     ids = inventory["scope"]["migration_ids"]
-    assert ids[-1] == "0080"
+    assert ids[-1] == "0081"
     assert ids == [f"{n:04d}" for n in range(1, 82)]
     files = sorted(
         p.name.split("_", 1)[0]
@@ -149,7 +149,7 @@ def test_authority_inventory_advanced_to_the_head() -> None:
 def test_conversation_model_pin_advanced() -> None:
     src = (SERVER_DIR / "tests" / "test_conversation_model.py").read_text(
         encoding="utf-8")
-    assert 'migration_ids[-1] == "0080"' in src
+    assert 'migration_ids[-1] == "0081"' in src
     assert "range(1, 82)" in src
 
 
