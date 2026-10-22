@@ -92,6 +92,7 @@ def test_downstream_overlay_inventory_matches_current_vendor():
         "ports/impl/agentSdkTurnRunner.ts",
         "ports/impl/converseSdkRunner.ts",
         "ports/impl/harnessSchema.ts",
+        "ports/impl/oauthGrantProvider.ts",
         "ports/impl/pgSessionStore.ts",
         "ports/impl/sessionStore.ts",
         "ports/impl/tenantBrokerStandardServiceProvider.ts",

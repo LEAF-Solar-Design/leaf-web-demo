@@ -33,6 +33,10 @@
       "reason": "Held at mushy-code 52e8a36 bytes: ad209705 asserts harness_confirmations.consumed_at, consumed_by and a status CHECK including 'consumed', which no platform migration adds yet. Retired by slice AD4b (platform migration plus consumeApproved adoption).",
       "sha256": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4"
     },
+    "ports/impl/oauthGrantProvider.ts": {
+      "reason": "P-182: EnvelopeTenantGrantStore seals tenant grants at rest for LEAF_GRANT_STORE=vault; retire when upstream includes equivalent behavior.",
+      "sha256": "6ed9b3254319ee20952c911960252a4fc3e7803124e2eec564c770e5fe752ad3"
+    },
     "ports/impl/pgSessionStore.ts": {
       "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
       "sha256": "f5b97239f0e615109aa7a1efbfbef2bbe4a47a012f5167eaa887ce476efb6ee2"
@@ -103,7 +107,7 @@
     "ports/impl/httpUpstreamSink.ts": "ec12e8d499bbe9968f8df4cab181d752dad220e4f0e7a78c87c70dade4e5624e",
     "ports/impl/mcpNetworkPolicy.ts": "298ac12f2c6a76acaf30aa18459d3aba1a8a3082eb0024f5c8deb48f6b4dc7a2",
     "ports/impl/mcpProxy.ts": "62f34ba8837d0b90ea066b944c2b88f69920e92a9bc2376f95cc3eb9bdb4df1b",
-    "ports/impl/oauthGrantProvider.ts": "f63af7109359ac361b3ab7e6867e7fc91fba92a5abd248483397fff3a33800e7",
+    "ports/impl/oauthGrantProvider.ts": "6ed9b3254319ee20952c911960252a4fc3e7803124e2eec564c770e5fe752ad3",
     "ports/impl/pgSessionStore.ts": "f5b97239f0e615109aa7a1efbfbef2bbe4a47a012f5167eaa887ce476efb6ee2",
     "ports/impl/repoEditRunner.ts": "d924a9f2cc131676a7b1aadd966c8176a6186b03d1c4b0caf05f9fbca10595bb",
     "ports/impl/requestJournal.ts": "f17dbd7e7a9ce79a864034ba4a04a3b0ae276235ec2ead4f1b147497e72af1e6",

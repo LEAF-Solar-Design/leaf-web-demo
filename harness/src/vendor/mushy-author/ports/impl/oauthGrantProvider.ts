@@ -32,7 +32,9 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { GrantEnvelopeError, openGrant, sealGrant } from "../../../../security/grantEnvelope/envelope.js";
+import type { KeyProvider } from "../../../../security/grantEnvelope/keyProvider.js";
 import { DEFAULT_TENANT } from "../index.js";
 import type {
   AgentGrant,
@@ -229,6 +231,9 @@ const LEASE_TTL_MS = 5 * 60 * 1000;
 const LEASE_RESERVATION_TOKENS = 100_000;
 const ELIGIBLE_OAUTH_PLANS: ReadonlySet<GrantPlan> = new Set(["pro", "max", "team", "enterprise"]);
 const DEFAULT_QUOTA_COOLDOWN_S = 15 * 60;
+// Key-provider calls yield. Keep each read/modify/publish transaction exclusive,
+// including when multiple store instances address the same record in this process.
+const grantRecordMutations = new Map<string, Promise<unknown>>();
 
 function cleanLabel(label: string | undefined, kind: GrantKind): string {
   const value = (label ?? "").trim();
@@ -303,27 +308,43 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     this.defaultTenant = opts.defaultTenant ?? DEFAULT_TENANT;
   }
 
-  private file(tenantId: string): string {
+  protected file(tenantId: string): string {
     return join(this.dir, grantFileName(tenantId));
   }
 
-  private kindFile(tenantId: string): string {
+  protected kindFile(tenantId: string): string {
     return join(this.dir, grantKindFileName(tenantId));
   }
 
-  private recordFile(tenantId: string): string {
+  protected recordFile(tenantId: string): string {
     return join(this.dir, grantRecordFileName(tenantId));
   }
 
-  private readRecord(tenantId: string): PersistedGrantRecord | null {
-    const p = this.recordFile(tenantId);
-    if (!existsSync(p)) return null;
+  private mutate<T>(tenantId: string, operation: () => Promise<T>): Promise<T> {
+    const path = resolve(this.recordFile(tenantId));
+    const previous = grantRecordMutations.get(path) ?? Promise.resolve();
+    const pending = previous.catch(() => {}).then(operation);
+    grantRecordMutations.set(path, pending);
+    return pending.finally(() => {
+      if (grantRecordMutations.get(path) === pending) grantRecordMutations.delete(path);
+    });
+  }
+
+  /** Undefined means absent; a JSON null record must still fail validation. */
+  protected async readRecordPayload(_tenantId: string, p: string): Promise<unknown> {
+    if (!existsSync(p)) return undefined;
+    return JSON.parse(readFileSync(p, "utf8"));
+  }
+
+  private async readRecord(tenantId: string): Promise<PersistedGrantRecord | null> {
+    const path = this.recordFile(tenantId);
     let raw: unknown;
     try {
-      raw = JSON.parse(readFileSync(p, "utf8"));
+      raw = await this.readRecordPayload(tenantId, path);
     } catch {
       throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
     }
+    if (raw === undefined) return null;
     const candidate = raw as Record<string, unknown>;
     if (typeof raw !== "object" || raw === null) {
       throw new Error(`invalid persisted grant record for tenant ${JSON.stringify(tenantId)}`);
@@ -444,11 +465,11 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     };
   }
 
-  private writeRecord(tenantId: string, record: PersistedGrantRecordV3): void {
+  protected async writeRecord(tenantId: string, record: PersistedGrantRecordV3): Promise<void> {
     writePrivateFileAtomic(this.recordFile(tenantId), JSON.stringify(record) + "\n");
   }
 
-  private readToken(tenantId: string): string | null {
+  protected readToken(tenantId: string): string | null {
     const p = this.file(tenantId);
     if (!existsSync(p)) return null;
     const raw = readFileSync(p, "utf8").trim();
@@ -464,7 +485,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
   }
 
   async get(tenantId: string): Promise<AgentGrant | null> {
-    const record = this.readRecord(tenantId);
+    const record = await this.readRecord(tenantId);
     if (record) {
       if (record.version === 1) return grantFor(record.kind, record.token);
       const active = record.accounts.find((account) => account.id === record.active_account_id)!;
@@ -482,11 +503,15 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
   }
 
   async put(tenantId: string, token: string, kind?: GrantKind, label?: string, plan?: GrantPlan): Promise<GrantStatus> {
+    return this.mutate(tenantId, () => this.putRecord(tenantId, token, kind, label, plan));
+  }
+
+  private async putRecord(tenantId: string, token: string, kind?: GrantKind, label?: string, plan?: GrantPlan): Promise<GrantStatus> {
     const t = (token ?? "").trim();
     if (!t) throw new Error("grant token must not be empty");
     const k: GrantKind = kind ?? detectGrantKind(t);
     mkdirSync(this.dir, { recursive: true });
-    const existing = this.readRecord(tenantId);
+    const existing = await this.readRecord(tenantId);
     const record = existing ? this.asV3(tenantId, existing) : {
       version: 3 as const,
       active_account_id: "",
@@ -507,24 +532,32 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
       leases: [],
     });
     record.active_account_id = id;
-    this.writeRecord(tenantId, record);
+    await this.writeRecord(tenantId, record);
     return this.status(tenantId);
   }
 
   async activate(tenantId: string, accountId: string): Promise<GrantStatus> {
-    const existing = this.readRecord(tenantId);
+    return this.mutate(tenantId, () => this.activateRecord(tenantId, accountId));
+  }
+
+  private async activateRecord(tenantId: string, accountId: string): Promise<GrantStatus> {
+    const existing = await this.readRecord(tenantId);
     if (!existing) throw new Error("grant account not found");
     const record = this.asV3(tenantId, existing);
     if (!record.accounts.some((account) => account.id === accountId)) {
       throw new Error("grant account not found");
     }
     record.active_account_id = accountId;
-    this.writeRecord(tenantId, record);
+    await this.writeRecord(tenantId, record);
     return this.status(tenantId);
   }
 
   async acquire(tenantId: string): Promise<GrantLease> {
-    const existing = this.readRecord(tenantId);
+    return this.mutate(tenantId, () => this.acquireRecord(tenantId));
+  }
+
+  private async acquireRecord(tenantId: string): Promise<GrantLease> {
+    const existing = await this.readRecord(tenantId);
     if (!existing) throw new GrantRequiredError(tenantId);
     const record = this.asV3(tenantId, existing);
     const now = Date.now();
@@ -539,7 +572,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
         (account.plan !== null && ELIGIBLE_OAUTH_PLANS.has(account.plan)),
     );
     if (!attested.length) {
-      if (changed) this.writeRecord(tenantId, record);
+      if (changed) await this.writeRecord(tenantId, record);
       throw new GrantRequiredError(
         tenantId,
         `tenant ${tenantId} must mount an attested Claude subscription or API key before live conversation`,
@@ -549,7 +582,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
       (account) => account.cooldown_until === null || Date.parse(account.cooldown_until) <= now,
     );
     if (!eligible.length) {
-      if (changed) this.writeRecord(tenantId, record);
+      if (changed) await this.writeRecord(tenantId, record);
       const next = Math.min(...attested
         .map((account) => account.cooldown_until ? Date.parse(account.cooldown_until) : now)
         .filter(Number.isFinite));
@@ -567,7 +600,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     selected.selection_count += 1;
     selected.last_used_at = new Date(now).toISOString();
     record.active_account_id = selected.id;
-    this.writeRecord(tenantId, record);
+    await this.writeRecord(tenantId, record);
     return {
       grant: grantFor(selected.kind, selected.token),
       account_id: selected.id,
@@ -576,7 +609,11 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
   }
 
   async settle(tenantId: string, leaseId: string, outcome: GrantSettlement): Promise<void> {
-    const existing = this.readRecord(tenantId);
+    return this.mutate(tenantId, () => this.settleRecord(tenantId, leaseId, outcome));
+  }
+
+  private async settleRecord(tenantId: string, leaseId: string, outcome: GrantSettlement): Promise<void> {
+    const existing = await this.readRecord(tenantId);
     if (!existing) return;
     const record = this.asV3(tenantId, existing);
     const account = record.accounts.find((candidate) =>
@@ -596,12 +633,12 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
         : DEFAULT_QUOTA_COOLDOWN_S;
       account.cooldown_until = new Date(Date.now() + retryAfterS * 1000).toISOString();
     }
-    this.writeRecord(tenantId, record);
+    await this.writeRecord(tenantId, record);
   }
 
   async status(tenantId: string): Promise<GrantStatus> {
     const recordPath = this.recordFile(tenantId);
-    const record = this.readRecord(tenantId);
+    const record = await this.readRecord(tenantId);
     if (record) {
       if (record.version === 1) {
         const linkedAt = statSync(recordPath).mtime.toISOString();
@@ -636,7 +673,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
 
     const p = this.file(tenantId);
     if (existsSync(p)) {
-      const raw = readFileSync(p, "utf8").trim();
+      const raw = this.readToken(tenantId);
       if (raw) {
         const kind = this.readKind(tenantId) ?? detectGrantKind(raw);
         return { linked: true, linked_at: statSync(p).mtime.toISOString(), kind };
@@ -666,7 +703,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     };
     try {
       const recordPath = this.recordFile(tenantId);
-      const record = this.readRecord(tenantId);
+      const record = await this.readRecord(tenantId);
       if (record) {
         const diagnosticKind = record.version === 1
           ? record.kind
@@ -758,8 +795,12 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
   }
 
   async remove(tenantId: string, accountId?: string): Promise<void> {
+    return this.mutate(tenantId, () => this.removeRecord(tenantId, accountId));
+  }
+
+  private async removeRecord(tenantId: string, accountId?: string): Promise<void> {
     if (accountId) {
-      const existing = this.readRecord(tenantId);
+      const existing = await this.readRecord(tenantId);
       if (!existing) throw new Error("grant account not found");
       const record = this.asV3(tenantId, existing);
       const accounts = record.accounts.filter((account) => account.id !== accountId);
@@ -767,7 +808,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
       if (accounts.length) {
         record.accounts = accounts;
         if (record.active_account_id === accountId) record.active_account_id = accounts[0].id;
-        this.writeRecord(tenantId, record);
+        await this.writeRecord(tenantId, record);
         return;
       }
     }
@@ -778,16 +819,64 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
 }
 
 /**
- * GRANT-STORE SEAM (F18, security-audit 2026-07-18) — the backing store for grants at
+ * The vault backend seals the entire tenant record, including account and lease
+ * metadata, before the same private atomic publish used by the file backend.
+ * The record filename is its grant id. Neither legacy files nor the demo fallback
+ * are accepted here; plaintext migration must be an explicit operator action.
+ */
+export interface EnvelopeTenantGrantStoreOptions extends FileTenantGrantStoreOptions {
+  keyProvider: KeyProvider;
+}
+
+export class EnvelopeTenantGrantStore extends FileTenantGrantStore {
+  private readonly keys: KeyProvider;
+
+  constructor(opts: EnvelopeTenantGrantStoreOptions) {
+    super({ ...opts, envFallback: { get: async () => null } });
+    if (!opts.keyProvider) throw new Error("LEAF_GRANT_STORE=vault requires a configured key provider");
+    this.keys = opts.keyProvider;
+  }
+
+  protected override async readRecordPayload(tenantId: string, path: string): Promise<unknown> {
+    if (!existsSync(path)) {
+      this.readToken(tenantId);
+      return undefined;
+    }
+    const sealed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    const plaintext = await openGrant(sealed, {
+      tenantId: safeBase(tenantId), grantId: grantRecordFileName(tenantId),
+    }, this.keys);
+    try {
+      return JSON.parse(plaintext.toString("utf8"));
+    } finally {
+      plaintext.fill(0);
+    }
+  }
+
+  protected override async writeRecord(tenantId: string, record: PersistedGrantRecordV3): Promise<void> {
+    const sealed = await sealGrant(JSON.stringify(record), {
+      tenantId: safeBase(tenantId), grantId: grantRecordFileName(tenantId),
+    }, this.keys);
+    writePrivateFileAtomic(this.recordFile(tenantId), JSON.stringify(sealed) + "\n");
+  }
+
+  protected override readToken(tenantId: string): null {
+    if (existsSync(this.file(tenantId)) || existsSync(this.kindFile(tenantId))) {
+      throw new GrantEnvelopeError();
+    }
+    return null;
+  }
+}
+
+/**
+ * GRANT-STORE SEAM (F18, security-audit 2026-07-18) - the backing store for grants at
  * rest is selectable via env `LEAF_GRANT_STORE`, so a production deployment can swap the
  * on-disk file store for a sealed secret store WITHOUT touching call sites:
  *
  *   - `file`  (DEFAULT): `FileTenantGrantStore` — one mode-0600 grant record per tenant
  *             under `$LEAF_GRANTS_DIR`. The demo / single-operator default.
- *   - `vault`: a production secret store (HashiCorp Vault / AWS Secrets Manager /
- *             Windows DPAPI). NOT IMPLEMENTED here — this is the documented seam.
- *             Implement `TenantGrantStore & TenantGrantAdminStore` against your vault
- *             and return it from the `case "vault"` branch below.
+ *   - `vault`: `EnvelopeTenantGrantStore`, using an explicitly injected KeyProvider.
+ *             Production key-provider and transport wiring is external to this store.
  *
  * WHY a seam and not just the file store: a token on local disk is not a production
  * secret boundary even at mode 0600 (any process running as the service user can read
@@ -799,28 +888,28 @@ export type GrantStoreBackend = "file" | "vault";
 
 /** The configured grant-store backend (env `LEAF_GRANT_STORE`, default `file`). */
 export function resolveGrantStoreBackend(): GrantStoreBackend {
-  return (process.env.LEAF_GRANT_STORE ?? "file").trim().toLowerCase() === "vault" ? "vault" : "file";
+  const backend = (process.env.LEAF_GRANT_STORE ?? "file").trim().toLowerCase();
+  if (backend === "file" || backend === "vault") return backend;
+  throw new Error(`unknown LEAF_GRANT_STORE backend: ${JSON.stringify(backend)}`);
+}
+
+export interface TenantGrantStoreOptions extends FileTenantGrantStoreOptions {
+  keyProvider?: KeyProvider;
 }
 
 /**
  * Construct the tenant grant store for the configured backend. Default `file` yields the
- * mode-0600 `FileTenantGrantStore`; `vault` is the documented-but-unwired production seam.
+ * mode-0600 `FileTenantGrantStore`; `vault` requires an explicitly configured key provider.
  */
 export function createTenantGrantStore(
-  opts: FileTenantGrantStoreOptions = {},
+  opts: TenantGrantStoreOptions = {},
 ): TenantGrantStore & TenantGrantAdminStore {
   const backend = resolveGrantStoreBackend();
   switch (backend) {
     case "vault":
-      // SEAM: wire a real vault / DPAPI-backed `TenantGrantStore & TenantGrantAdminStore`
-      // here for production. Intentionally unimplemented — fail loudly rather than fall
-      // back to on-disk tokens when an operator explicitly asked for the sealed store.
-      throw new Error(
-        "LEAF_GRANT_STORE=vault is a documented seam, not yet implemented — provide a " +
-          "vault/DPAPI-backed TenantGrantStore (see F18 in docs/security-audit-2026-07-18.md).",
-      );
+      if (!opts.keyProvider) throw new Error("LEAF_GRANT_STORE=vault requires a configured key provider");
+      return new EnvelopeTenantGrantStore({ ...opts, keyProvider: opts.keyProvider });
     case "file":
-    default:
       return new FileTenantGrantStore(opts);
   }
 }
