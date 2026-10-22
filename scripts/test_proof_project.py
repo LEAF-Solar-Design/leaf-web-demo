@@ -1,4 +1,4 @@
-"""Records A/B; B uses only fake effects (no database, processes or listeners)."""
+"""Records A/B/C; authority and execution rows use fake effects only."""
 from dataclasses import replace
 from datetime import datetime, timezone
 import importlib.util
@@ -144,7 +144,10 @@ class TestProjectBoundary:
         assert {code.value for code in p.FailureCode} == {
             "PREFLIGHT", "ENVIRONMENT", "SOURCE", "RUNTIME", "BROWSER_UNAVAILABLE",
             "ALLOCATION", "TRANSPORT", "MIGRATION_ENTRY", "MIGRATION_CORPUS", "MIGRATION_TIMEOUT",
-            "MIGRATION_EXIT", "MIGRATION_RESULT", "SCHEMA", "IDENTITY", "BINDING"}
+            "MIGRATION_EXIT", "MIGRATION_RESULT", "SCHEMA", "IDENTITY", "BINDING",
+            "LAUNCH", "OWNERSHIP", "READINESS", "HEARTBEAT", "AUTH", "BROWSER_EXIT",
+            "BROWSER_EVIDENCE", "CANONICAL", "CANCELLED", "GUARDIAN", "CLEANUP_PROCESS",
+            "CLEANUP_IDENTITY", "CLEANUP_POOL", "CLEANUP_AUTHORITY", "CLEANUP_PRIVATE"}
 
     def test_deployed_posture(self):
         for facts in ({"posture": "production"}, {"legacy_posture": "staging"}, {"synthetic": True}):
@@ -235,8 +238,9 @@ class TestProjectBoundary:
         with pytest.raises(p.ProofRefused) as error:
             effects.browser_runner(None, scope=c.scope)
         assert error.value.failure == p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_UNAVAILABLE)
-        with pytest.raises(RuntimeError, match="record C"):
+        with pytest.raises(p.ProofRefused) as readiness_error:
             effects.readiness_probe(None)
+        assert readiness_error.value.failure == p.Failure(p.Stage.STACK, p.FailureCode.LAUNCH)
 
     def test_unapproved_dotenv(self):
         c = case()
@@ -965,6 +969,427 @@ class TestProjectAuthority:
         authority_refused(c, p.FailureCode.BINDING)
 
 
+def execution_case():
+    c = authority_case()
+    c.prepared = prepare(c)
+    c.launches.clear()
+    c.mints.clear()
+    c.events.clear()
+    c.launcher_exit, c.browser_exit, c.browser_polls = None, 0, 0
+    c.dead, c.foreign = False, False
+    c.identity = p.ProcessIdentity("stack-launcher", 100, "start100", 50)
+    c.pids = dict(zip(p.STACK_ROLES, range(101, 106)))
+    c.stack_ready = {"launcher_pid": 100, "pids": dict(c.pids),
+        "ports": dict(zip(("web", "app", "broker", "harness"), c.plan.config.ports.values()))}
+    c.app = p.AppReadiness(c.plan.source.commit, tuple((name, "ready", True) for name in p.APP_DEPENDENCIES))
+    d = c.plan.descriptor
+    c.heartbeat = p.HeartbeatProof("project:run-test", d.tool, d.runtime, d.source_revision,
+        d.source_sha256, c.effects.clock.utc_now())
+    c.auth, c.denied = (200, "fakeorg", "hosted_pro", "active"), 401
+    c.browser_requests, c.canonical_requests, c.readiness_requests = [], [], []
+    c.evidence = p.CanonicalEvidence("fakeorg", "project", "drawing", "input", "output", "job",
+        "fakebind", "project:run-test", 1, HASH, OTHER_HASH, OTHER_HASH)
+    c.result = p.BrowserResult("run-test", c.plan.source, "fakekey", 0,
+        p.REQUIRED_TEST_IDS, p.REQUIRED_TEST_IDS, p.REQUIRED_TEST_IDS,
+        tuple(p.TestOutcome(name, "passed", 0) for name in p.REQUIRED_TEST_IDS), (),
+        dict.fromkeys(p.CHECKPOINTS, True), c.evidence)
+    c.canonical = p.CanonicalProof(c.evidence, OTHER_HASH, OTHER_HASH)
+    def children(pids):
+        if c.dead:
+            raise RuntimeError("dead")
+        return tuple(p.ProcessIdentity(role, pid, "start" + str(pid), 999 if c.foreign else 100)
+                     for role, pid in pids.items())
+    c.launcher = SimpleNamespace(identity=c.identity, poll=lambda: c.launcher_exit,
+        children=children, stop=lambda deadline: True)
+    def launch(spec, *, scope):
+        c.launches.append(spec)
+        scope.acquire(p.ResourceKind.STACK_PROCESS, lambda: c.launcher.stop(5))
+        return c.launcher
+    def readiness(request):
+        c.readiness_requests.append(request)
+        c.events.append("ready-start")
+        result = p.check_readiness(request, effects=c.effects)
+        c.effects.clock.now += 1
+        c.events.append("ready-done")
+        return result
+    def browser(request, *, scope):
+        c.events.append("browser")
+        c.browser_requests.append(request)
+        handle = SimpleNamespace(process=SimpleNamespace(poll=lambda: c.browser_exit),
+            poll=lambda: c.result, stop=lambda deadline: True)
+        scope.acquire(p.ResourceKind.BROWSER_PROCESS, lambda: handle.stop(5))
+        return handle
+    def canonical(request):
+        c.canonical_requests.append(request)
+        return c.canonical
+    c.host.read_stack_ready = lambda path: c.stack_ready
+    c.host.app_readiness = lambda request: c.app
+    c.host.worker_heartbeat = lambda request: c.heartbeat
+    c.host.organization_read = lambda request, *, authenticated: c.auth if authenticated else c.denied
+    c.effects = replace(c.effects, process_launcher=launch, readiness_probe=readiness,
+        browser_runner=browser, canonical_reader=canonical)
+    return c
+
+
+def execute(c):
+    return p.run_project_pipeline(c.prepared, effects=c.effects, scope=c.scope)
+
+
+def execution_refused(c, code):
+    with pytest.raises(p.ProofRefused) as error:
+        execute(c)
+    assert error.value.failure.fixed_code == code
+    assert "fakedb" not in str(error.value) and "faketok" not in str(error.value)
+
+
+def canonical_case():
+    import hashlib
+    from uuid import UUID
+    from contextlib import contextmanager
+    c = SimpleNamespace(connections=0, closes=0, verifications=[], reads=[])
+    ids = [str(UUID(int=i)) for i in range(1, 8)]
+    c.before = SimpleNamespace(graph={"settings": {"pitch": 10}})
+    c.stored = SimpleNamespace(graph={"settings": {"pitch": 20}})
+    c.reopened = c.stored
+    c.digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    c.evidence = p.CanonicalEvidence(*ids[:6], ids[6], "project:run-test", 2,
+        p._settings_hash(c.before, digest=c.digest), p._settings_hash(c.stored, digest=c.digest),
+        p._settings_hash(c.stored, digest=c.digest))
+    e = c.evidence
+    c.commit = dict(schema="fake", attempt=1, tool="solar-settings", tool_manifest_sha256=HASH,
+        parameters={"pitch": 20}, parent_intake_sha256=HASH, before_graph_sha256=HASH,
+        graph_project_id="graph", initialized=True, organization_id=e.organization_id,
+        project_id=e.project_id, drawing_id=e.drawing_id, parent_version_id=e.input_version_id,
+        actor_binding_id=e.binding_id, checkout_fence="2", job_id=e.job_id)
+    c.job = dict(status="succeeded", tool_name="solar-settings", org_id=e.organization_id,
+        project_id=e.project_id, request_tenant_id=e.organization_id, input_version_id=e.input_version_id,
+        output_version_id=e.output_version_id, provenance={"worker_id": e.worker_id},
+        result={"graph_commit": c.commit})
+    def verify(job_id, result, *, expected, conn):
+        c.verifications.append((job_id, result, expected))
+        assert expected == c.commit and result is c.commit
+        return {"output_version_id": e.output_version_id}
+    def context(expected, version_id, conn):
+        c.reads.append(str(version_id))
+        return (c.before if str(version_id) == e.input_version_id else
+                c.stored if c.connections == 1 else c.reopened), None
+    c.graph = SimpleNamespace(project_graph_job_provenance=verify, _stored_context=context,
+                              local=SimpleNamespace(digest=c.digest))
+    @contextmanager
+    def connection(environment, deadline):
+        assert environment["DATABASE_URL"] == "fakedb" and deadline == 10
+        c.connections += 1
+        try:
+            yield SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: c.job))
+        finally:
+            c.closes += 1
+    c.connection = connection
+    c.request = p.CanonicalRequest("execution", p.WORKER_TOOL, {"DATABASE_URL": "fakedb"}, e, 10)
+    return c
+
+
+class TestProjectExecution:
+    def test_launcher_contract(self, monkeypatch):
+        c = execution_case()
+        proof = execute(c)
+        spec = c.launches[0]
+        assert spec.role == "stack-launcher" and spec.cwd == p.REPO
+        assert spec.argv == (sys.executable, "-B", str(p.REPO / "scripts/start-leaf.py"),
+            "--strict-ports", "--with-harness", "--canonical-worker-tool", "solar-settings",
+            "--canonical-worker-id", "project:run-test", "--ready-file", str(ROOT / "stack-ready.json"),
+            "--web-port", "8101", "--app-port", "8102", "--broker-port", "8103", "--harness-port", "8104")
+        assert spec.environment["DATABASE_URL"] == spec.environment["LEAF_HARNESS_DATABASE_URL"] == "fakedb"
+        assert "fakedb" not in repr(spec) + repr(spec.argv) + repr(spec.environment)
+        assert isinstance(proof, p.ExecutionProof) and not hasattr(proof, "ok")
+        assert proof.observed_rows == ("P01", "P04", "P08", "P09", "P11")
+        assert proof.stack_seconds == 1 and proof.browser_seconds == 0
+        assert proof.initial_heartbeat == proof.final_heartbeat == c.heartbeat
+        assert len(proof.stack.owned_process_identities) == 6
+        calls = []
+        child = SimpleNamespace(start=lambda: calls.append("start"), stop=lambda deadline: True)
+        monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: child)
+        scope = fake_scope()
+        p._launch_runtime(spec, scope=scope)
+        assert scope.cleanups[0][0] == p.ResourceKind.STACK_PROCESS and calls == ["start"]
+
+    def test_partial_launch(self):
+        c = execution_case()
+        del c.stack_ready["pids"]["harness"]
+        execution_refused(c, p.FailureCode.LAUNCH)
+        assert c.browser_requests == []
+        c = execution_case()
+        c.stack_ready = None
+        execution_refused(c, p.FailureCode.LAUNCH)
+        assert p.STACK_TIMEOUT_S <= c.effects.clock.now <= p.STACK_TIMEOUT_S + 0.1
+        c = execution_case()
+        c.stack_ready["ports"]["app"] += 1
+        execution_refused(c, p.FailureCode.LAUNCH)
+
+    def test_wrong_launcher_identity(self):
+        c = execution_case()
+        c.stack_ready["launcher_pid"] = 999
+        execution_refused(c, p.FailureCode.OWNERSHIP)
+        assert c.browser_requests == []
+
+    def test_foreign_child(self):
+        c = execution_case()
+        c.foreign = True
+        execution_refused(c, p.FailureCode.OWNERSHIP)
+        assert c.browser_requests == []
+        c = execution_case()
+        c.stack_ready["pids"]["worker"] = c.stack_ready["pids"]["app"]
+        execution_refused(c, p.FailureCode.OWNERSHIP)
+
+    def test_dead_child(self):
+        c = execution_case()
+        c.dead = True
+        execution_refused(c, p.FailureCode.OWNERSHIP)
+        assert c.browser_requests == []
+        c = execution_case()
+        c.launcher_exit = 0
+        execution_refused(c, p.FailureCode.LAUNCH)
+
+    def test_degraded_app_dependency(self, monkeypatch):
+        for dependency in p.APP_DEPENDENCIES:
+            c = execution_case()
+            c.app = replace(c.app, dependencies=tuple((name, "degraded" if name == dependency else state, required)
+                for name, state, required in c.app.dependencies))
+            execution_refused(c, p.FailureCode.READINESS)
+            assert c.browser_requests == []
+        c = execution_case()
+        c.app = replace(c.app, dependencies=())
+        execution_refused(c, p.FailureCode.READINESS)
+        c = execution_case()
+        execute(c)
+        payload = {"ready": True, "status": "ready", "source_revision": c.plan.source.commit,
+            "dependencies": {name: {"state": "ready", "required": True, "latency_ms": 1}
+                             for name in p.APP_DEPENDENCIES}, "unknown": "fakedb"}
+        monkeypatch.setattr(p, "_project_http", lambda *args: (200, payload))
+        projected = p._Host.app_readiness(c.readiness_requests[0])
+        assert "fakedb" not in repr(projected) and set(x[0] for x in projected.dependencies) == set(p.APP_DEPENDENCIES)
+        payload["status"] = "degraded"
+        with pytest.raises(p.ProofRefused):
+            p._Host.app_readiness(c.readiness_requests[0])
+
+    def test_wrong_app_source(self):
+        c = execution_case()
+        c.app = replace(c.app, source_revision="d" * 40)
+        execution_refused(c, p.FailureCode.READINESS)
+
+    def test_missing_heartbeat(self, monkeypatch, capsys):
+        c = execution_case()
+        c.heartbeat = None
+        execution_refused(c, p.FailureCode.HEARTBEAT)
+        assert c.browser_requests == []
+        # The actual child selects the owner, not the latest worker for the tool.
+        from contextlib import nullcontext
+        queries = []
+        connection = SimpleNamespace(execute=lambda sql, args:
+            (queries.append((sql, args)) or SimpleNamespace(fetchone=lambda: None)))
+        monkeypatch.setattr(p, "_project_connection", lambda *args: nullcontext(connection))
+        monkeypatch.setattr(p, "open", lambda *args, **kw: io.StringIO(), raising=False)
+        environment = {"DATABASE_URL": "fakedb", "LEAF_PROJECT_CANONICAL_REQUEST": json.dumps(
+            {"purpose": "heartbeat", "worker_id": "project:run-test", "deadline": 10, "evidence": None})}
+        monkeypatch.setattr(p.os, "environ", environment)
+        assert p._canonical_child_entry() == 0 and json.loads(capsys.readouterr().out) is None
+        assert "WHERE worker_id = %s" in queries[0][0] and queries[0][1] == ("project:run-test",)
+
+    def test_wrong_heartbeat_owner(self):
+        c = execution_case()
+        c.heartbeat = replace(c.heartbeat, worker_id="foreign")
+        execution_refused(c, p.FailureCode.HEARTBEAT)
+
+    def test_invalid_heartbeat_age(self):
+        from datetime import timedelta
+        for seconds in (-31, 1):
+            c = execution_case()
+            c.heartbeat = replace(c.heartbeat, observed_at=c.heartbeat.observed_at + timedelta(seconds=seconds))
+            execution_refused(c, p.FailureCode.HEARTBEAT)
+        c = execution_case()
+        c.heartbeat = replace(c.heartbeat, observed_at=c.heartbeat.observed_at.replace(tzinfo=None))
+        execution_refused(c, p.FailureCode.HEARTBEAT)
+
+    def test_wrong_worker_descriptor(self):
+        for field in ("tool_name", "runtime", "source_revision", "source_sha256"):
+            c = execution_case()
+            c.heartbeat = replace(c.heartbeat, **{field: "foreign"})
+            execution_refused(c, p.FailureCode.HEARTBEAT)
+
+    def test_authenticated_org_read(self, monkeypatch):
+        for auth in ((403, None, None, None), (200, "other", "hosted_pro", "active"),
+                     (200, "fakeorg", "free", "active"), (200, "fakeorg", "hosted_pro", "revoked")):
+            c = execution_case()
+            c.auth = auth
+            execution_refused(c, p.FailureCode.AUTH)
+            assert c.browser_requests == []
+        c = execution_case()
+        execute(c)
+        seen = []
+        monkeypatch.setattr(p, "_project_http", lambda request, path, **kw:
+            (seen.append((path, kw)) or (200, {"org": {"org_id": "fakeorg", "tier": "hosted_pro", "status": "active"}})))
+        assert p._Host.organization_read(c.readiness_requests[0], authenticated=True) == c.auth
+        assert seen[0][0] == "/api/orgs/fakeorg" and seen[0][1]["bearer"].reveal() == "faketok"
+
+    def test_bearerless_refusal(self):
+        for status in (200, 404, 500, True):
+            c = execution_case()
+            c.denied = status
+            execution_refused(c, p.FailureCode.AUTH)
+            assert c.browser_requests == []
+        c = execution_case()
+        c.denied = 403
+        assert execute(c).stack.bearerless_refused
+
+    def test_late_browser_token(self):
+        c = execution_case()
+        order = []
+        old_mint = c.prepared.identity_lease.issuer.mint
+        def mint(*args, **kwargs):
+            order.append(tuple(c.events))
+            return old_mint(*args, **kwargs)
+        c.prepared.identity_lease.issuer.mint = mint
+        execute(c)
+        assert len(c.mints) == 2 and c.mints[0][1]["lifetime_s"] == 180 and c.mints[1][1]["lifetime_s"] == 360
+        assert "ready-done" not in order[0] and "ready-done" in order[1]
+        assert "LEAF_E2E_TOKEN" not in c.launches[0].environment
+        request = c.browser_requests[0]
+        assert request.environment["LEAF_E2E_TOKEN"] == "faketok"
+        assert "DATABASE_URL" not in request.environment
+        assert "faketok" not in repr(request) + repr(request.environment) + repr(c.readiness_requests[0])
+        assert request.web_origin == "http://127.0.0.1:8101" and request.app_origin == "http://127.0.0.1:8102"
+
+    def test_missing_browser_runner(self):
+        for runner in (None, p.production_effects().browser_runner):
+            c = execution_case()
+            c.effects = replace(c.effects, browser_runner=runner)
+            execution_refused(c, p.FailureCode.BROWSER_UNAVAILABLE)
+            assert c.launches == [] and c.mints == []
+
+    def test_stack_exit_during_browser(self):
+        c = execution_case()
+        original = c.effects.browser_runner
+        def browser(request, *, scope):
+            handle = original(request, scope=scope)
+            c.launcher_exit = 1
+            return handle
+        c.effects = replace(c.effects, browser_runner=browser)
+        execution_refused(c, p.FailureCode.LAUNCH)
+        assert c.canonical_requests == []
+        c = execution_case()
+        original = c.effects.browser_runner
+        def browser(request, *, scope):
+            handle = original(request, scope=scope)
+            c.launcher.children = lambda pids: tuple(p.ProcessIdentity(role, pid, "reused", 100) for role, pid in pids.items())
+            return handle
+        c.effects = replace(c.effects, browser_runner=browser)
+        execution_refused(c, p.FailureCode.OWNERSHIP)
+
+    def test_heartbeat_loss_during_browser(self):
+        c = execution_case()
+        original = c.effects.browser_runner
+        def browser(request, *, scope):
+            handle = original(request, scope=scope)
+            c.heartbeat = None
+            return handle
+        c.effects = replace(c.effects, browser_runner=browser)
+        execution_refused(c, p.FailureCode.HEARTBEAT)
+        assert c.canonical_requests == []
+
+    def test_browser_nonzero(self):
+        c = execution_case()
+        c.browser_exit = 1
+        execution_refused(c, p.FailureCode.BROWSER_EXIT)
+        c = execution_case()
+        c.result = replace(c.result, exit_code=1)
+        execution_refused(c, p.FailureCode.BROWSER_EXIT)
+        c = execution_case()
+        c.result, c.browser_exit = None, None
+        execution_refused(c, p.FailureCode.BROWSER_EXIT)
+        assert c.effects.clock.now == 1 + p.BROWSER_TIMEOUT_S
+
+    def test_execution_completeness(self):
+        for field in ("selected_test_ids", "started_test_ids", "completed_test_ids"):
+            for ids in ((), p.REQUIRED_TEST_IDS[:-1], p.REQUIRED_TEST_IDS + (p.REQUIRED_TEST_IDS[0],)):
+                c = execution_case()
+                c.result = replace(c.result, **{field: ids})
+                execution_refused(c, p.FailureCode.BROWSER_EVIDENCE)
+        for changes in ({"outcomes": ()}, {"annotation_types": ("skip",)}, {"run_id": "foreign"},
+                        {"public_key_thumbprint": "other"}, {"source_binding": None},
+                        {"outcomes": tuple(p.TestOutcome(name, "passed", 1) for name in p.REQUIRED_TEST_IDS)}):
+            c = execution_case()
+            c.result = replace(c.result, **changes)
+            execution_refused(c, p.FailureCode.BROWSER_EVIDENCE)
+        for result in (None, {}, {"ok": True}, SimpleNamespace(exit_code=0)):
+            c = execution_case()
+            c.result = result
+            execution_refused(c, p.FailureCode.BROWSER_EVIDENCE)
+        c = execution_case()
+        c.result = replace(c.result, canonical=replace(c.evidence, checkout_fence=True))
+        execution_refused(c, p.FailureCode.BROWSER_EVIDENCE)
+        for changes in ({"outcomes": None}, {"outcomes": ({"status": "passed"},)},
+                        {"selected_test_ids": None}, {"canonical": {"secret": "faketok"}}):
+            c = execution_case()
+            c.result = replace(c.result, **changes)
+            execution_refused(c, p.FailureCode.BROWSER_EVIDENCE)
+
+    def test_missing_checkpoint(self):
+        for name in p.CHECKPOINTS:
+            c = execution_case()
+            checkpoints = dict(c.result.checkpoints)
+            del checkpoints[name]
+            c.result = replace(c.result, checkpoints=checkpoints)
+            execution_refused(c, p.FailureCode.BROWSER_EVIDENCE)
+        c = execution_case()
+        c.result = replace(c.result, checkpoints=dict(c.result.checkpoints, extra=True))
+        execution_refused(c, p.FailureCode.BROWSER_EVIDENCE)
+
+    def test_canonical_relationships(self):
+        c = execution_case()
+        c.canonical = replace(c.canonical, evidence=replace(c.evidence, job_id="foreign"))
+        execution_refused(c, p.FailureCode.CANONICAL)
+        c = execution_case()
+        c.canonical = {"ok": True}
+        execution_refused(c, p.FailureCode.CANONICAL)
+        c = execution_case()
+        proof = execute(c)
+        assert len(c.canonical_requests) == 1
+        request = c.canonical_requests[0]
+        assert request.purpose == "execution" and request.environment["DATABASE_URL"] == "fakedb"
+        assert request.evidence == c.evidence and proof.canonical is c.canonical
+        assert "fakedb" not in repr(request) + repr(request.environment)
+        # Exercise the independent production verifier with fake SQL and canonical library.
+        c = canonical_case()
+        proof = p._canonical_database_proof(c.request, graph=c.graph, connection=c.connection)
+        assert proof.evidence == c.evidence and len(c.verifications) == 1
+        assert c.connections == c.closes == 2
+        for field, value in (("status", "running"), ("tool_name", "other"), ("org_id", "other"),
+                             ("project_id", "other"), ("request_tenant_id", "other"),
+                             ("input_version_id", "other"), ("output_version_id", "other"),
+                             ("provenance", {"worker_id": "foreign"})):
+            c = canonical_case()
+            c.job[field] = value
+            with pytest.raises(p.ProofRefused) as error:
+                p._canonical_database_proof(c.request, graph=c.graph, connection=c.connection)
+            assert error.value.failure.fixed_code == p.FailureCode.CANONICAL
+            assert c.connections == c.closes == 1 and c.verifications == []
+
+    def test_persisted_settings_readback(self):
+        for field in ("stored_settings_sha256", "reopened_settings_sha256"):
+            c = execution_case()
+            c.canonical = replace(c.canonical, **{field: HASH})
+            execution_refused(c, p.FailureCode.CANONICAL)
+        c = execution_case()
+        c.result = replace(c.result, canonical=replace(c.evidence, reopened_settings_sha256=HASH))
+        execution_refused(c, p.FailureCode.BROWSER_EVIDENCE)
+        c = canonical_case()
+        c.reopened = SimpleNamespace(graph={"settings": {"pitch": 30}})
+        proof = p._canonical_database_proof(c.request, graph=c.graph, connection=c.connection)
+        assert proof.stored_settings_sha256 == c.evidence.settings_sha256
+        assert proof.reopened_settings_sha256 != c.evidence.settings_sha256
+        assert c.reads == [c.evidence.input_version_id, c.evidence.output_version_id, c.evidence.output_version_id]
+        assert c.closes == 2
+
+
 def assert_redacted_mapping(mapping, values, capsys):
     print(mapping)
     rendered = (repr(mapping), str(mapping), capsys.readouterr().out)
@@ -974,3 +1399,428 @@ def assert_redacted_mapping(mapping, values, capsys):
     assert dict(mapping) == values
     with pytest.raises(TypeError):
         mapping["TOKEN"] = "changed"
+
+# D's injected operation handles never spawn a thread, process or listener.
+class ImmediateOperation:
+    def __init__(self, callback):
+        self.value, self.error = None, None
+        try:
+            self.value = callback()
+        except BaseException as error:
+            self.error = error
+
+    def done(self):
+        return True
+
+    def result(self):
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+def lifetime_case():
+    c = authority_case()
+    c.teardown, c.leases = [], []
+    c.private = True
+    c.host.begin_operation = ImmediateOperation
+    def scrub(reservation, *, keep_safe):
+        c.teardown.append("private")
+        c.private = False
+        return True
+    def cleanup(run_id):
+        c.teardown.append("authority")
+        c.allocated = False
+    def close_identity(lease):
+        c.teardown.append("identity")
+        c.leases.append(lease)
+        object.__setattr__(lease, "issuer", None)
+        c.published.discard(lease.jwks_path)
+    c.host.scrub = scrub
+    c.host.private_absent = lambda reservation: not c.private
+    c.host.cleanup_authority = cleanup
+    c.host.cleanup_owned_authority = lambda run_id, ownership: cleanup(run_id)
+    c.host.close_identity = close_identity
+    c.scope = p.RunScope(effects=c.effects)
+    return c
+
+
+def cancelled_stage(stage):
+    c = lifetime_case()
+    c.scope.own_reservation(c.plan.reservation)
+    clock = c.effects.clock
+    # An outstanding external operation becomes ready only after cancellation.
+    task = SimpleNamespace(done=lambda: clock.now >= 0.1, result=lambda: "done")
+    original = c.host.begin_operation
+    c.host.begin_operation = lambda callback: task
+    c.scope.cancelled = lambda: clock.now >= 0.05
+    with pytest.raises(p.ProofRefused) as error:
+        c.scope.perform(stage, lambda: None, deadline=1.0)
+    assert error.value.failure == p.Failure(stage, p.FailureCode.CANCELLED)
+    assert clock.now == 0.05  # Refused while pending, not after it completed.
+    c.host.begin_operation = original
+    proof = c.scope.close()
+    assert proof.ok and c.teardown == ["private"]
+    assert c.scope.failure == error.value.failure
+    assert 0.1 <= clock.now < 0.2
+    with pytest.raises(p.ProofRefused):
+        c.scope.commit_guard(lambda: pytest.fail("cancelled publication"))
+
+
+def acquisition_child(monkeypatch, role, kind):
+    c = lifetime_case()
+    stops = []
+    def start():
+        raise RuntimeError("fakedb")
+    child = SimpleNamespace(start=start, stop=lambda deadline: (stops.append(deadline), True)[1])
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: child)
+    spec = p.ProcessSpec(role, ("fake",), ROOT, {}, 1)
+    with pytest.raises(RuntimeError):
+        p._launch_runtime(spec, scope=c.scope)
+    proof = c.scope.close()
+    assert proof.processes_stopped and len(stops) == 1
+    assert stops[0] == p.CLEANUP_TIMEOUT_S or stops[0] > 0
+    assert c.scope.close() is proof and len(stops) == 1
+
+
+def cleanup_failure(kind, expected):
+    c = lifetime_case()
+    def fail():
+        c.teardown.append("failed")
+        raise RuntimeError("faketok")
+    c.scope.acquire(kind, fail)
+    c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("pool")))
+    c.scope.acquire(p.ResourceKind.AUTHORITY, lambda: c.teardown.append("authority"))
+    c.scope.own_reservation(c.plan.reservation)
+    proof = c.scope.close()
+    assert c.teardown[-2:] == ["authority", "private"]
+    assert "pool" in c.teardown and "failed" in c.teardown
+    assert proof.failures == (p.Failure(p.Stage.TEARDOWN, expected),)
+    assert not proof.ok and proof.observed_rows == ()
+    assert "faketok" not in repr(proof)
+    return c, proof
+
+
+class TestProjectLifetime:
+    def test_reverse_cleanup_order(self):
+        c = lifetime_case()
+        expected = ["browser_process", "stack_process", "seed_process", "migration_process",
+                    "runtime_process", "identity", "pool", "authority", "root", "guardian"]
+        # Scramble registration: order must follow dependencies, then LIFO.
+        for name in reversed(expected):
+            c.scope.acquire(p.ResourceKind(name), lambda name=name: c.teardown.append(name))
+        c.scope.acquire(p.ResourceKind.STACK_PROCESS, lambda: c.teardown.append("new-stack"))
+        proof = c.scope.close()
+        assert c.teardown == [expected[0], "new-stack", *expected[1:]]
+        assert proof.ok and proof.observed_rows == ("P10",) and proof.teardown_seconds == 0
+        assert c.scope.close() is proof
+        with pytest.raises(p.ProofRefused):
+            c.scope.acquire(p.ResourceKind.POOL, lambda: None)
+
+    def test_failure_after_root(self):
+        c = lifetime_case()
+        def journal(*args):
+            raise RuntimeError("fake")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=journal))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused):
+            p.preflight(c.config, effects=c.scope.bind_effects())
+        assert c.scope.close().private_material_removed
+        assert c.teardown == ["private"] and not c.private
+
+    def test_failure_after_guardian(self):
+        c = lifetime_case()
+        def arm():
+            c.teardown.append("arm")
+            raise RuntimeError("fake")
+        guardian = SimpleNamespace(arm=arm, disarm=lambda: c.teardown.append("disarm"))
+        with pytest.raises(RuntimeError):
+            c.scope.own_guardian(guardian)
+        assert c.scope.close().guardian_disarmed
+        assert c.teardown == ["arm", "disarm"]
+
+    def test_partial_allocation_failure(self):
+        c = lifetime_case()
+        def allocate(run_id):
+            c.allocated = True
+            raise RuntimeError("fakedb")
+        c.effects = replace(c.effects, authority_factory=allocate)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            prepare(c)
+        c.scope.remember(error.value.failure)
+        proof = c.scope.close()
+        assert proof.authority_removed and not c.allocated
+        assert c.teardown == ["authority"]
+        assert c.scope.failure.fixed_code == p.FailureCode.ALLOCATION
+
+    def test_failure_after_migration_child(self, monkeypatch):
+        acquisition_child(monkeypatch, "migration-child", p.ResourceKind.MIGRATION_PROCESS)
+
+    def test_failure_after_issuer(self, monkeypatch):
+        c = lifetime_case()
+        monkeypatch.setattr(Path, "unlink", lambda *args, **kw: None)
+        monkeypatch.setattr(p, "_path_absent", lambda path: True)
+        def close(lease):
+            c.leases.append(lease)
+            c.teardown.append("identity")
+            p._Host.close_identity(lease)
+        c.host.close_identity = close
+        c.issuer.thumbprint = ""
+        with pytest.raises(p.ProofRefused):
+            prepare(c)
+        assert c.scope.close().identity_delivery_closed
+        assert len(c.leases) == 1 and c.leases[0].issuer is None
+        assert c.teardown == ["identity", "authority"]
+
+    def test_failure_after_jwks(self, monkeypatch):
+        c = lifetime_case()
+        lease = p.IdentityLease(c.issuer, "run-test", ROOT / "public-jwks.json", {})
+        exists = [True]
+        monkeypatch.setattr(Path, "unlink", lambda *args, **kw: exists.__setitem__(0, False))
+        monkeypatch.setattr(p, "_path_absent", lambda path: not exists[0])
+        c.scope.acquire(p.ResourceKind.IDENTITY, lambda: p._Host.close_identity(lease))
+        assert c.scope.close().identity_delivery_closed
+        assert lease.issuer is None and exists == [False]
+
+    def test_failure_after_seed_pool(self):
+        c = lifetime_case()
+        pool = SimpleNamespace(close=lambda: c.teardown.append("pool"))
+        c.scope.own_pool(pool)
+        c.scope.remember(p.Failure(p.Stage.BINDING, p.FailureCode.BINDING))
+        assert c.scope.close().pools_closed and c.teardown == ["pool"]
+
+    def test_failure_after_launcher(self, monkeypatch):
+        acquisition_child(monkeypatch, "stack-launcher", p.ResourceKind.STACK_PROCESS)
+
+    def test_failure_after_browser(self):
+        c = lifetime_case()
+        stops = []
+        browser = SimpleNamespace(stop=lambda deadline: (stops.append(deadline), True)[1])
+        c.scope.own_browser(browser)
+        c.scope.remember(p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT))
+        assert c.scope.close().processes_stopped
+        assert stops == [p.CLEANUP_TIMEOUT_S]
+
+    def test_cancel_allocation(self):
+        cancelled_stage(p.Stage.ALLOCATION)
+
+    def test_cancel_migration(self):
+        cancelled_stage(p.Stage.MIGRATION)
+
+    def test_cancel_identity(self):
+        cancelled_stage(p.Stage.IDENTITY)
+
+    def test_cancel_readiness(self):
+        cancelled_stage(p.Stage.READINESS)
+
+    def test_cancel_browser(self):
+        cancelled_stage(p.Stage.BROWSER)
+
+    def test_cancel_publication(self):
+        c = lifetime_case()
+        assert c.scope.close().ok
+        c.scope.cancel()
+        commits = []
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(lambda: commits.append("commit"))
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert commits == []
+        c = lifetime_case()
+        c.scope.close()
+        assert c.scope.commit_guard(lambda: "committed") == "committed"
+
+    def test_process_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.STACK_PROCESS, p.FailureCode.CLEANUP_PROCESS)
+        assert not proof.processes_stopped
+
+    def test_identity_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.IDENTITY, p.FailureCode.CLEANUP_IDENTITY)
+        assert not proof.identity_delivery_closed
+
+    def test_pool_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.POOL, p.FailureCode.CLEANUP_POOL)
+        assert not proof.pools_closed
+
+    def test_authority_stop_failure(self):
+        c = lifetime_case()
+        original = c.effects.authority_factory
+        def allocate(run_id):
+            authority = original(run_id)
+            def stop():
+                raise RuntimeError("fakedb")
+            authority.stop = stop
+            return authority
+        c.effects = replace(c.effects, authority_factory=allocate)
+        c.scope = p.RunScope(effects=c.effects)
+        prepare(c)
+        proof = c.scope.close()
+        assert not c.allocated and "authority" in c.teardown
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert not proof.authority_removed and not proof.ok
+
+    def test_removal_verification(self, monkeypatch):
+        reservation = p.Reservation(ROOT, ROOT / "artifacts", root_identity=(1, 2))
+        removals = []
+        monkeypatch.setattr(p, "_path_safe", lambda path: True)
+        original_stat = Path.stat
+        monkeypatch.setattr(Path, "stat", lambda path, *args, **kw:
+            SimpleNamespace(st_dev=1, st_ino=2) if path == ROOT else original_stat(path, *args, **kw))
+        assert not p._path_absent(SimpleNamespace(lstat=lambda: SimpleNamespace()))
+        def denied():
+            raise PermissionError("fake")
+        assert not p._path_absent(SimpleNamespace(lstat=denied))
+        def missing():
+            raise FileNotFoundError("fake")
+        assert p._path_absent(SimpleNamespace(lstat=missing))
+        monkeypatch.setattr(p.os.path, "lexists", lambda path: True)
+        monkeypatch.setattr(p, "_path_absent", lambda path: False)
+        monkeypatch.setattr(p.shutil, "rmtree", lambda path: removals.append(path))
+        assert p._Host.scrub(reservation, keep_safe=False) is False
+        assert removals == [ROOT]
+        # Identity replacement refuses before removal too.
+        assert p._Host.scrub(replace(reservation, root_identity=(1, 3)), keep_safe=False) is False
+        assert removals == [ROOT]
+
+    def test_scrub_failure(self):
+        c = lifetime_case()
+        c.host.scrub = lambda *args, **kw: False
+        c.scope.own_reservation(c.plan.reservation)
+        proof = c.scope.close()
+        assert not proof.private_material_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_PRIVATE),)
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("success despite scrub failure"))
+
+    def test_primary_failure_preserved(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.MIGRATION, p.FailureCode.MIGRATION_EXIT)
+        c.scope.remember(primary)
+        for kind in (p.ResourceKind.ROOT, p.ResourceKind.POOL, p.ResourceKind.STACK_PROCESS):
+            c.scope.acquire(kind, lambda: False)
+        proof = c.scope.close()
+        assert c.scope.failure is primary
+        assert [f.fixed_code for f in proof.failures] == [p.FailureCode.CLEANUP_PROCESS,
+            p.FailureCode.CLEANUP_POOL, p.FailureCode.CLEANUP_PRIVATE]
+
+    def test_reused_process_identity(self):
+        c = lifetime_case()
+        owner = p.ProcessIdentity("fake", 7, "old", 1)
+        signals = []
+        request = p.StopRequest(owner, lambda: replace(owner, start_id="new"),
+            lambda: signals.append("terminate"), lambda: signals.append("kill"), lambda timeout: True)
+        assert p.stop_owned(request, effects=c.effects, deadline=5)
+        assert signals == []
+        identities = iter((owner, replace(owner, start_id="new")))
+        request = replace(request, observe=lambda: next(identities), wait=lambda timeout: False)
+        assert p.stop_owned(request, effects=c.effects, deadline=5)
+        assert signals == ["terminate"]
+
+    def test_guardian_parent_loss(self):
+        c = lifetime_case()
+        c.allocated = True
+        ownership = c.host.authority_inventory("run-test")
+        def receive(timeout):
+            assert 0 < timeout <= 0.1
+            raise EOFError
+        channel = SimpleNamespace(receive=receive, acknowledge=lambda: pytest.fail("EOF disarmed"))
+        process = SimpleNamespace(stop=lambda deadline: (c.teardown.append("process"), True)[1])
+        request = p.GuardianRequest("run-test", c.plan.reservation, ownership, channel, (process,), 1)
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert c.teardown == ["process", "authority", "private"] and not c.allocated
+        assert c.effects.clock.now == 0  # EOF triggers immediate emergency cleanup.
+        # A stale guardian may not remove resources belonging to a later run.
+        c.allocated, c.private = True, True
+        c.teardown.clear()
+        stale = replace(request, ownership=replace(ownership, containers=("d" * 12,)))
+        assert p.guardian_main(stale, effects=c.effects) == 1
+        assert c.allocated and "authority" not in c.teardown
+
+    def test_guardian_early_disarm(self):
+        c = lifetime_case()
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None, disarm=lambda: c.teardown.append("disarm")))
+        c.scope.acquire(p.ResourceKind.ROOT, lambda: False)
+        proof = c.scope.close()
+        assert not proof.guardian_disarmed and c.teardown == []
+        assert [f.fixed_code for f in proof.failures] == [p.FailureCode.CLEANUP_PRIVATE, p.FailureCode.GUARDIAN]
+        c = lifetime_case()
+        channel = SimpleNamespace(receive=lambda timeout: "disarm", acknowledge=lambda: c.teardown.append("ack"))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, deadline=1)
+        assert p.guardian_main(request, effects=c.effects) == 1 and c.teardown == []
+        c.private = False
+        assert p.guardian_main(request, effects=c.effects) == 0 and c.teardown == ["ack"]
+
+    def test_preexisting_run_collision(self, monkeypatch):
+        c = lifetime_case()
+        c.allocated = True
+        with pytest.raises(p.ProofRefused) as error:
+            prepare(c)
+        assert error.value.failure.fixed_code == p.FailureCode.ALLOCATION
+        c.scope.close()
+        assert c.allocated and c.teardown == [] and "allocate" not in c.events
+        # Collision after the empty inventory but inside PP-2's start lock.
+        c = lifetime_case()
+        def collide(run_id):
+            c.allocated = True
+            raise RuntimeError("run already exists")
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(
+            PgAuthority=SimpleNamespace(start=collide)))
+        c.effects = replace(c.effects, authority_factory=p._authority_factory)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused):
+            prepare(c)
+        c.scope.close()
+        assert c.allocated and c.teardown == []
+
+    def test_bounded_escalation(self, monkeypatch):
+        c = lifetime_case()
+        owner = p.ProcessIdentity("fake", 7, "old", 1)
+        calls = []
+        def wait(timeout):
+            assert timeout is not None and 0 < timeout <= 3
+            calls.append(("wait", timeout))
+            c.effects.clock.wait(timeout)
+            return len(calls) > 3
+        request = p.StopRequest(owner, lambda: owner, lambda: calls.append("terminate"),
+            lambda: calls.append("kill"), wait)
+        assert p.stop_owned(request, effects=c.effects, deadline=3)
+        assert calls == ["terminate", ("wait", 1.0), "kill", ("wait", 2.0)]
+        assert c.effects.clock.now == 3
+        # An uncooperative pending operation stays owned and prevents deletion.
+        c = lifetime_case()
+        c.scope._pending.append(SimpleNamespace(done=lambda: False))
+        c.scope.own_reservation(c.plan.reservation)
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None, disarm=lambda: c.teardown.append("disarm")))
+        proof = c.scope.close()
+        assert not proof.ok and not proof.guardian_disarmed and c.private
+        assert c.teardown == [] and c.effects.clock.now == p.CLEANUP_TIMEOUT_S
+        # A parent exit does not establish absence of its owned descendants.
+        spec = p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 5)
+        owned = p._RuntimeProcess(spec)
+        owned.identity = owner
+        owned.process = SimpleNamespace(poll=lambda: 0)
+        jobs = []
+        owned.job = SimpleNamespace(stop=lambda deadline: (jobs.append("verify-job"), False)[1],
+                                    close=lambda: jobs.append("close-job"))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        assert owned.stop(c.effects.clock.now + 3) is False
+        assert jobs == ["verify-job", "close-job"]
+        owned = p._RuntimeProcess(spec)
+        owned.identity = owner
+        owned.process = SimpleNamespace(poll=lambda: 0)
+        jobs.clear()
+        owned.job = SimpleNamespace(stop=lambda deadline: (jobs.append("verify-job"), True)[1],
+                                    close=lambda: jobs.append("close-job"))
+        assert owned.stop(c.effects.clock.now + 3)
+        assert owned.stop(c.effects.clock.now + 3)
+        assert jobs == ["verify-job", "close-job"]
+        # Acquisitions completed while settling a cancelled stage join teardown.
+        c = lifetime_case()
+        registered = []
+        def done():
+            if c.effects.clock.now >= 0.05 and not registered:
+                c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("late-pool")))
+                registered.append(True)
+            return c.effects.clock.now >= 0.1
+        c.scope._pending.append(SimpleNamespace(done=done))
+        assert c.scope.close().ok and c.teardown == ["late-pool"]
