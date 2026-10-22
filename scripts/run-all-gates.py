@@ -1754,7 +1754,7 @@ def build_suites() -> List[Suite]:
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("platform-aps-cost-sync", "platform APS broker cost ledger adapter", "pytest",
-              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_aps_cost_sync.py"), 11,
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_aps_cost_sync.py"), 14,
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # Ops usage scoreboard (M6). Registered WITH the file, per the #29

@@ -40,6 +40,17 @@ class FakeConnection:
         return self.rows
 
 
+class PagingConnection(FakeConnection):
+    def fetchall(self):
+        _, params = self.queries[-1]
+        rows = sorted(self.rows, key=lambda item: (item["ts"], item["event_key"]))
+        return [item for item in rows
+                if item["ts"] < params["until_ts"]
+                and ((item["ts"], item["event_key"]) >
+                     (params["since_ts"], params["after_event_key"])
+                     if "after_event_key" in params else item["ts"] >= params["since_ts"])][:params["limit"]]
+
+
 @pytest.fixture
 def recorded(monkeypatch):
     events = []
@@ -62,7 +73,8 @@ def test_filters_count_each_skip_reason(recorded):
                   row(org_id=None), row()])
     assert result == {"read": 6, "inserted": 1, "duplicate": 0,
                       "skipped_not_live": 1, "skipped_incomplete": 3,
-                      "skipped_unresolved_tenant": 1, "next_since_ts": 10.0}
+                      "skipped_unresolved_tenant": 1,
+                      "next": {"since_ts": 10.0, "after_event_key": "broker-event"}, "more": False}
     assert len(recorded) == 1
 
 
@@ -119,11 +131,57 @@ def test_read_query_is_bounded_ordered_and_preserves_unresolved_rows():
     assert conn.queries[0][1]["limit"] == 5000
 
 
-def test_watermark_tracks_last_read_even_when_skipped(recorded):
-    assert run([])["next_since_ts"] == 0
+def test_cursor_tracks_last_read_even_when_skipped(recorded):
+    assert run([])["next"] is None
     result = run([row(), row(ts=15, aps_live=False)])
-    assert result["next_since_ts"] == 15
+    assert result["next"] == {"since_ts": 15, "after_event_key": "broker-event"}
     assert result["read"] == 2
+
+
+def test_cursor_query_uses_strict_row_value_comparison():
+    conn = FakeConnection([])
+    sync.sync_aps_cost_events(conn, since_ts=10, until_ts=20, after_event_key="broker-event", limit=2)
+    sql, params = conn.queries[0]
+    assert "(l.ts, l.event_key) > (%(since_ts)s, %(after_event_key)s)" in sql
+    assert "AND l.ts < %(until_ts)s" in sql
+    assert "ORDER BY l.ts, l.event_key LIMIT %(limit)s" in sql
+    assert params == {"since_ts": 10, "until_ts": 20, "after_event_key": "broker-event", "limit": 2}
+
+
+def test_cursor_pages_all_rows_sharing_one_timestamp_once(recorded):
+    rows = [row(event_key=f"event-{index}") for index in range(7)]
+    conn = PagingConnection([row(ts=9), *reversed(rows), row(ts=20)])
+    cursor = {"since_ts": 10}
+    pages = []
+    for _ in range(5):
+        start = len(recorded)
+        result = sync.sync_aps_cost_events(conn, until_ts=20, limit=2, **cursor)
+        page = tuple(event["provenance"]["broker_event_key"] for event in recorded[start:])
+        assert page not in pages
+        pages.append(page)
+        assert result["duplicate"] == 0
+        if not result["more"]:
+            break
+        cursor = result["next"]
+    else:
+        pytest.fail("cursor did not finish paging")
+    assert pages == [("event-0", "event-1"), ("event-2", "event-3"),
+                     ("event-4", "event-5"), ("event-6",)]
+    assert result["next"] == {"since_ts": 10.0, "after_event_key": "event-6"}
+
+
+def test_more_reports_full_short_and_empty_pages(recorded):
+    conn = PagingConnection([row(event_key="a"), row(event_key="b")])
+    full = sync.sync_aps_cost_events(conn, since_ts=10, until_ts=20, limit=2)
+    assert full["read"] == 2
+    assert full["more"] is True
+    empty = sync.sync_aps_cost_events(conn, until_ts=20, limit=2, **full["next"])
+    assert empty["read"] == 0
+    assert empty["next"] is None
+    assert empty["more"] is False
+    short = sync.sync_aps_cost_events(conn, since_ts=10, until_ts=20, after_event_key="a", limit=2)
+    assert short["read"] == 1
+    assert short["more"] is False
 
 
 def test_duplicate_results_are_counted(monkeypatch):
@@ -150,7 +208,7 @@ def test_timestamp_validation_precedes_database_access():
             sync.sync_aps_cost_events(None, since_ts=since, until_ts=until)
 
 
-def test_cli_prints_json_and_parses_aware_iso(monkeypatch, capsys):
+def test_cli_prints_json_and_parses_aware_iso(monkeypatch, capsys, recorded):
     conn = FakeConnection([])
 
     @contextmanager
@@ -161,6 +219,13 @@ def test_cli_prints_json_and_parses_aware_iso(monkeypatch, capsys):
     sync.main(["--since", "1970-01-01T00:00:00Z", "--until", "1970-01-01T01:00:00+00:00"])
     assert json.loads(capsys.readouterr().out) == run([])
     assert conn.queries[0][1]["until_ts"] == 3600
+    conn.rows = [row()]
+    sync.main(["--since", "1970-01-01T00:00:10Z", "--until", "1970-01-01T01:00:00Z",
+               "--after-key", "broker-a"])
+    result = json.loads(capsys.readouterr().out)
+    assert result["next"] == {"since_ts": 10.0, "after_event_key": "broker-event"}
+    assert result["more"] is False
+    assert conn.queries[-1][1]["after_event_key"] == "broker-a"
     for value in ("invalid", "2026-01-01T00:00:00"):
         with pytest.raises(argparse.ArgumentTypeError):
             sync._iso_epoch(value)

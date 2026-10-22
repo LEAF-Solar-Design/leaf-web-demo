@@ -15,11 +15,12 @@ MAX_LIMIT = 5000
 ENGINE_TERMINAL_STATUSES = frozenset({"ok", "WORKITEM_FAILED"})
 
 
-def sync_aps_cost_events(conn, *, since_ts: float, until_ts: float, limit: int = MAX_LIMIT) -> dict:
+def sync_aps_cost_events(conn, *, since_ts: float, until_ts: float,
+                         after_event_key=None, limit: int = MAX_LIMIT) -> dict:
     """Read a bounded half-open period; identical broker events are safe to replay.
 
-    next_since_ts is inclusive: replay its timestamp to avoid losing timestamp
-    ties. It is an observation watermark, not a unique pagination cursor.
+    Pass next's since_ts and after_event_key back until more is false to page
+    through timestamp ties without repeating rows.
     """
     for name, value in (("since_ts", since_ts), ("until_ts", until_ts)):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -30,7 +31,12 @@ def sync_aps_cost_events(conn, *, since_ts: float, until_ts: float, limit: int =
         raise ValueError("limit must be between 1 and 5000")
 
     result = dict(read=0, inserted=0, duplicate=0, skipped_not_live=0,
-                  skipped_unresolved_tenant=0, skipped_incomplete=0, next_since_ts=since_ts)
+                  skipped_unresolved_tenant=0, skipped_incomplete=0, next=None, more=False)
+    lower_bound = "l.ts >= %(since_ts)s"
+    params = {"since_ts": since_ts, "until_ts": until_ts, "limit": limit}
+    if after_event_key is not None:
+        lower_bound = "(l.ts, l.event_key) > (%(since_ts)s, %(after_event_key)s)"
+        params["after_event_key"] = after_event_key
     with conn.cursor() as cur:
         # Match the broker/org attribution used by unit_economics.fleet_report.
         # LEFT JOIN retains unresolved rows so they are counted, never billed.
@@ -38,13 +44,14 @@ def sync_aps_cost_events(conn, *, since_ts: float, until_ts: float, limit: int =
             "SELECT l.event_key, l.ts, l.tenant_id, l.tool, l.engine_op, l.aps_live, "
             "l.status, l.engine_seconds, l.usd_est, o.org_id "
             "FROM broker_usage_ledger l LEFT JOIN orgs o ON o.org_id::text = l.tenant_id "
-            "WHERE l.ts >= %(since_ts)s AND l.ts < %(until_ts)s "
+            f"WHERE {lower_bound} AND l.ts < %(until_ts)s "
             "ORDER BY l.ts, l.event_key LIMIT %(limit)s",
-            {"since_ts": since_ts, "until_ts": until_ts, "limit": limit})
+            params)
         rows = cur.fetchall()
+    result["more"] = len(rows) == limit
     for row in rows:
         result["read"] += 1
-        result["next_since_ts"] = row["ts"]
+        result["next"] = {"since_ts": row["ts"], "after_event_key": row["event_key"]}
         if row["aps_live"] is not True:
             result["skipped_not_live"] += 1
             continue
@@ -87,11 +94,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--since", required=True, type=_iso_epoch)
     parser.add_argument("--until", required=True, type=_iso_epoch)
+    parser.add_argument("--after-key")
     args = parser.parse_args(argv)
     from .db import connection
 
     with connection() as conn:
-        result = sync_aps_cost_events(conn, since_ts=args.since, until_ts=args.until)
+        result = sync_aps_cost_events(conn, since_ts=args.since, until_ts=args.until,
+                                     after_event_key=args.after_key)
     print(json.dumps(result, sort_keys=True))
 
 
