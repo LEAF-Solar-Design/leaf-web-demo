@@ -310,6 +310,22 @@ describe('local bridge polling', () => {
     bridge.stop()
   })
 
+  it('ignores stale offline responses before handling loss at the current revision', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(response(payload()))
+      .mockResolvedValueOnce(response({ rev: 6, epoch: 'boot-a', status: 'offline' }))
+      .mockResolvedValue(response({ rev: 7, epoch: 'boot-a', status: 'offline' }))
+    const onLoss = vi.fn(), onUpdate = vi.fn()
+    const bridge = createLocalCadBridge({ fetchImpl, onLoss, onUpdate })
+    bridge.start(); await flush()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(onLoss).not.toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledTimes(1)
+    expect(bridge.snapshot()).toMatchObject({ rev: 7, epoch: 'boot-a' })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(onLoss).toHaveBeenCalledTimes(1)
+    bridge.stop()
+  })
+
   it('rejects malformed payloads and ignores lower revisions until the epoch changes', async () => {
     const fetchImpl = vi.fn().mockResolvedValueOnce(response({ rev: 1, epoch: 'boot-a' }))
       .mockResolvedValueOnce(response(payload()))

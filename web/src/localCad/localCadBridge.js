@@ -95,13 +95,13 @@ export function createLocalCadBridge({ fetchImpl = globalThis.fetch, ports = [81
     if (!current()) return
     if (payload) {
       const restarted = payload.epoch !== epoch
-      if (!payload.intake && (restarted || payload.status === 'offline' || payload.status === 'busy')) {
-        loseDrawing()
-        if (!current()) return
-      }
       if (!restarted && payload.rev < rev) {
         timer = setTimeoutImpl(() => { timer = null; void poll(token) }, intervalMs)
         return
+      }
+      if (!payload.intake && (restarted || payload.status === 'offline' || payload.status === 'busy')) {
+        loseDrawing()
+        if (!current()) return
       }
       let intake
       let textLoadError = pendingTextPayload ? textError : null
