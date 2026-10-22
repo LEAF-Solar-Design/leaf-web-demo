@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -2329,3 +2331,26 @@ def test_dxf_oracle_block_plan_limits_definition_changes(monkeypatch, tmp_path, 
         assert status == 200
         assert env["result"]["oracle"] == {"ok": True, "untouched_total": 2, "touched_changed": 0}
         assert store.load_manifest(backend, "tenant", "drawing")["head"] == 2
+
+
+def test_dxf_oracle_byte_bound_matches_export_fidelity(monkeypatch):
+    engine_dir = str(Path(__file__).resolve().parents[2] / "engine")
+    if engine_dir not in sys.path:
+        monkeypatch.setattr(sys, "path", [*sys.path, engine_dir])
+    import export_fidelity
+
+    assert write_loop.MAX_ORACLE_DXF_BYTES == export_fidelity.MAX_OUTPUT_BYTES
+
+
+def test_write_loop_import_without_oracle_does_not_load_engine(monkeypatch):
+    monkeypatch.delenv("LEAF_MUTATION_DXF_ORACLE", raising=False)
+    probe = subprocess.run(
+        [sys.executable, "-B", "-c",
+         "import sys\n"
+         "import write_loop\n"
+         "assert 'mutation_scope_diff' not in sys.modules\n"
+         "assert 'export_fidelity' not in sys.modules\n"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr

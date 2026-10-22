@@ -71,13 +71,6 @@ _DA_DIR = str(PROJECT_ROOT / "da")
 if _DA_DIR not in sys.path:
     sys.path.append(_DA_DIR)
 
-# Append engine/ so its standalone oracle modules resolve in server-only entrypoints.
-_ENGINE_DIR = str(PROJECT_ROOT / "engine")
-if _ENGINE_DIR not in sys.path:
-    sys.path.append(_ENGINE_DIR)
-import export_fidelity  # noqa: E402
-from mutation_scope_diff import MutationScope, compare_scoped  # noqa: E402
-
 # Credential stripper for report urls. Imported eagerly (leaf-pure: stdlib only,
 # no da/client import) so no error path can forget it and emit a raw presigned
 # url into an envelope, a log line, or a receipt.
@@ -98,8 +91,24 @@ DATA_PLAN_TOOL_NAME = "cad-edit-plan"
 DATA_PLAN_TOOL_VERSION = "1.0.0"
 DATA_PLAN_PROVENANCE_CONTRACT = "leaf.data-plan.v1"
 MAX_OUTPUT_INTAKE_BYTES = 64 * 1024 * 1024
-MAX_ORACLE_DXF_BYTES = export_fidelity.MAX_OUTPUT_BYTES
+# Keep equal to engine/export_fidelity.py's MAX_OUTPUT_BYTES without eager imports.
+MAX_ORACLE_DXF_BYTES = 67_108_864
 USD_PER_HR = float(os.environ.get("APS_USD_PER_HR", "10"))
+_SCOPE_ORACLE = None
+
+
+def _scope_oracle():
+    global _SCOPE_ORACLE
+    if _SCOPE_ORACLE is None:
+        # Append engine/ only when the opted-in oracle needs its standalone modules.
+        engine_dir = str(PROJECT_ROOT / "engine")
+        if engine_dir not in sys.path:
+            sys.path.append(engine_dir)
+        import export_fidelity  # noqa: F401
+        from mutation_scope_diff import MutationScope, compare_scoped
+
+        _SCOPE_ORACLE = (MutationScope, compare_scoped)
+    return _SCOPE_ORACLE
 
 
 class ProofStateUnreadable(RuntimeError):
@@ -3238,6 +3247,7 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
         raise LiveMutationEffectMismatch(properties_note)
     oracle_result = None
     if oracle_enabled:
+        MutationScope, compare_scoped = _scope_oracle()
         artifacts = {}
         for artifact, (key, token) in oracle_outputs.items():
             try:
