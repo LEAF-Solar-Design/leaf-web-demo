@@ -265,10 +265,13 @@ class PgAuthority:
                         raise RuntimeError("proof database readiness timed out") from None
                     time.sleep(0.2)
         except BaseException:
-            try:
-                self._stop_transport()
-                self._cleanup_created()
-            except Exception:
+            failed = False
+            for cleanup_step in (self._stop_transport, self._cleanup_created):
+                try:
+                    cleanup_step()
+                except BaseException:
+                    failed = True
+            if failed:
                 raise RuntimeError("proof database start and cleanup failed") from None
             raise RuntimeError("proof database start failed") from None
 
