@@ -1,4 +1,4 @@
-"""Managed project proof, records A and B: runtime and isolated authority.
+"""Managed project proof, records A through C: preparation and execution evidence.
 
 There is intentionally no CLI or success-receipt path. Later records implement
 the lifecycle against these seams. Importing this module performs no host work.
@@ -80,6 +80,21 @@ class FailureCode(str, Enum):
     SCHEMA = "SCHEMA"
     IDENTITY = "IDENTITY"
     BINDING = "BINDING"
+    LAUNCH = "LAUNCH"
+    OWNERSHIP = "OWNERSHIP"
+    READINESS = "READINESS"
+    HEARTBEAT = "HEARTBEAT"
+    AUTH = "AUTH"
+    BROWSER_EXIT = "BROWSER_EXIT"
+    BROWSER_EVIDENCE = "BROWSER_EVIDENCE"
+    CANONICAL = "CANONICAL"
+    CANCELLED = "CANCELLED"
+    GUARDIAN = "GUARDIAN"
+    CLEANUP_PROCESS = "CLEANUP_PROCESS"
+    CLEANUP_IDENTITY = "CLEANUP_IDENTITY"
+    CLEANUP_POOL = "CLEANUP_POOL"
+    CLEANUP_AUTHORITY = "CLEANUP_AUTHORITY"
+    CLEANUP_PRIVATE = "CLEANUP_PRIVATE"
 
 
 @dataclass(frozen=True)
@@ -156,10 +171,17 @@ class WorkerDescriptor:
     source_manifest: tuple[str, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class CanonicalRequest:
     purpose: str = "descriptor"
     tool_name: str = WORKER_TOOL
+    environment: Mapping[str, str] = field(default_factory=dict, repr=False)
+    evidence: CanonicalEvidence | None = None
+    deadline: float = 0.0
+    worker_id: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
 
 
 @dataclass(frozen=True, repr=False)
@@ -215,6 +237,7 @@ class Reservation:
     run_root: Path
     artifact_root: Path
     port_handles: tuple[Any, ...] = field(default=(), repr=False)
+    root_identity: tuple[int, int] | None = field(default=None, repr=False)
 
     def release_ports(self):
         for handle in self.port_handles:
@@ -258,12 +281,318 @@ class ResourceKind(str, Enum):
     MIGRATION_PROCESS = "migration_process"
     SEED_PROCESS = "seed_process"
     IDENTITY = "identity"
+    STACK_PROCESS = "stack_process"
+    BROWSER_PROCESS = "browser_process"
+    ROOT = "root"
+    POOL = "pool"
+    GUARDIAN = "guardian"
 
 
-class RunScope(Protocol):
-    """D supplies lifetime management; A/B synchronously register acquisitions."""
-    def acquire(self, name: ResourceKind, cleanup: Callable[[], None]) -> None: ...
-    def close(self) -> Any: ...
+# Within a dependency group, the newest acquisition is closed first.
+_CLEANUP_ORDER = (
+    ResourceKind.BROWSER_PROCESS, ResourceKind.STACK_PROCESS,
+    ResourceKind.SEED_PROCESS, ResourceKind.MIGRATION_PROCESS, ResourceKind.RUNTIME_PROCESS,
+    ResourceKind.IDENTITY, ResourceKind.POOL, ResourceKind.AUTHORITY,
+    ResourceKind.ROOT, ResourceKind.GUARDIAN)
+_CLEANUP_CODES = {
+    **{kind: FailureCode.CLEANUP_PROCESS for kind in _CLEANUP_ORDER[:5]},
+    ResourceKind.IDENTITY: FailureCode.CLEANUP_IDENTITY,
+    ResourceKind.POOL: FailureCode.CLEANUP_POOL,
+    ResourceKind.AUTHORITY: FailureCode.CLEANUP_AUTHORITY,
+    ResourceKind.ROOT: FailureCode.CLEANUP_PRIVATE,
+    ResourceKind.GUARDIAN: FailureCode.GUARDIAN}
+CLEANUP_TIMEOUT_S = 5.0  # Policy, not a host measurement.
+
+
+@dataclass(frozen=True)
+class CleanupProof:
+    processes_stopped: bool
+    identity_delivery_closed: bool
+    pools_closed: bool
+    authority_removed: bool
+    private_material_removed: bool
+    guardian_disarmed: bool
+    failures: tuple[Failure, ...]
+    teardown_seconds: float
+    observed_rows: tuple[str, ...]
+
+    @property
+    def ok(self):
+        return (self.processes_stopped and self.identity_delivery_closed and self.pools_closed
+                and self.authority_removed and self.private_material_removed
+                and self.guardian_disarmed and not self.failures)
+
+
+class RunScope:
+    """D's lifetime owner. E supplies the stage driver and final atomic writer.
+
+    All callbacks, including a potentially blocked allocator, run through the
+    injected begin_operation seam. A timed-out callback is retained, never
+    described as stopped. Destructive cleanup refuses while such work is live.
+    """
+    def __init__(self, *, effects: Effects, cancelled: Callable[[], bool] = lambda: False):
+        self.effects = effects
+        self.cancelled = cancelled
+        self.failure = None
+        self._actions = []
+        self._pending = []
+        self._closed = None
+        self._closing = False
+        self._draining = False
+        self._lock = threading.RLock()
+        self._commit_lock = threading.RLock()
+        self._cancelled = False
+
+    def __repr__(self):
+        return "<project run scope>"
+
+    def acquire(self, name: ResourceKind, cleanup: Callable[[], None]) -> None:
+        if not isinstance(name, ResourceKind) or not callable(cleanup):
+            raise TypeError("invalid cleanup registration")
+        with self._lock:
+            if (self._closing and not self._draining) or self._closed is not None:
+                _refuse(FailureCode.GUARDIAN, Stage.TEARDOWN)
+            self._actions.append((name, cleanup))
+
+    def remember(self, failure: Failure):
+        with self._lock:
+            if self.failure is None:
+                self.failure = failure
+
+    def cancel(self):
+        # E's final atomic rename/link must run inside commit_guard. This lock
+        # defines ordering with an in-process cancellation request.
+        with self._commit_lock:
+            self._cancelled = True
+
+    def checkpoint(self, stage: Stage):
+        if self._cancelled or self.cancelled():
+            failure = Failure(stage, FailureCode.CANCELLED)
+            self.remember(failure)
+            raise ProofRefused(failure)
+
+    def perform(self, stage: Stage, operation: Callable[[], Any], *, deadline: float):
+        """Run a stage through a pollable injected operation, including allocation.
+
+        A cancelled/overdue operation stays owned by this scope until close.
+        Production threads are not killable: unresolved work forbids success
+        and guardian disarm. Process-backed adapters retain their own handles.
+        """
+        self.checkpoint(stage)
+        if not math.isfinite(deadline) or deadline <= self.effects.clock.monotonic():
+            _refuse(FailureCode.GUARDIAN, stage)
+        task = self.effects.host.begin_operation(operation)
+        self._pending.append(task)
+        try:
+            while not task.done():
+                self.checkpoint(stage)
+                remaining = deadline - self.effects.clock.monotonic()
+                if remaining <= 0:
+                    _refuse(FailureCode.GUARDIAN, stage)
+                self.effects.clock.wait(min(0.05, remaining))
+            self.checkpoint(stage)
+            return task.result()
+        except ProofRefused as exc:
+            self.remember(exc.failure)
+            raise
+        except BaseException:
+            self.remember(Failure(stage, FailureCode.GUARDIAN))
+            _refuse(FailureCode.GUARDIAN, stage)
+
+    def bind_effects(self):
+        scope, host = self, self.effects.host
+        class ScopedHost:
+            def __getattr__(self, name):
+                return getattr(host, name)
+
+            def reserve(self, plan):
+                if isinstance(host, _Host):
+                    return host.reserve(plan, scope=scope)
+                reservation = host.reserve(plan)
+                scope.own_reservation(reservation, keep_safe=plan.config.keep_run_root)
+                return reservation
+        return replace(self.effects, host=ScopedHost())
+
+    def own_reservation(self, reservation: Reservation, *, keep_safe=False):
+        def remove():
+            reservation.release_ports()
+            if not self._settled():
+                return False
+            return self.effects.host.scrub(reservation, keep_safe=keep_safe)
+        self.acquire(ResourceKind.ROOT, remove)
+
+    def own_guardian(self, guardian):
+        # Register before arming so partial arming is recoverable too.
+        self.acquire(ResourceKind.GUARDIAN, guardian.disarm)
+        guardian.arm()
+
+    def own_pool(self, pool):
+        self.acquire(ResourceKind.POOL, pool.close)
+
+    def own_browser(self, browser):
+        self.acquire(ResourceKind.BROWSER_PROCESS,
+                     lambda: browser.stop(self.effects.clock.monotonic() + CLEANUP_TIMEOUT_S))
+
+    def _settled(self):
+        return all(task.done() for task in self._pending)
+
+    def _cleanup_call(self, callback):
+        task = self.effects.host.begin_operation(callback)
+        deadline = self.effects.clock.monotonic() + CLEANUP_TIMEOUT_S
+        while not task.done():
+            remaining = deadline - self.effects.clock.monotonic()
+            if remaining <= 0:
+                self._pending.append(task)
+                return False
+            self.effects.clock.wait(min(0.05, remaining))
+        return task.result() is not False
+
+    def close(self) -> CleanupProof:
+        with self._lock:
+            if self._closed is not None:
+                return self._closed
+            if self._closing:
+                _refuse(FailureCode.GUARDIAN, Stage.TEARDOWN)
+            self._closing = True
+            self._draining = True
+        started = self.effects.clock.monotonic()
+        failures = []
+        failed = set()
+        # Settle pending stages before teardown. No unbounded joins, and no
+        # success claim if a producer could still allocate or write material.
+        deadline = started + CLEANUP_TIMEOUT_S
+        while not self._settled() and self.effects.clock.monotonic() < deadline:
+            self.effects.clock.wait(min(0.05, deadline - self.effects.clock.monotonic()))
+        with self._lock:
+            self._draining = False
+            actions = tuple(self._actions)
+        if not self._settled():
+            failed.add(ResourceKind.RUNTIME_PROCESS)
+            failures.append(Failure(Stage.TEARDOWN, FailureCode.CLEANUP_PROCESS))
+            self.remember(failures[0])
+        for kind in _CLEANUP_ORDER:
+            for name, callback in reversed(actions):
+                if name != kind:
+                    continue
+                try:
+                    # A guardian must stay armed if any teardown was unverified.
+                    if kind == ResourceKind.GUARDIAN and (failures or not self._settled()):
+                        raise RuntimeError("cleanup unverified")
+                    if not self._cleanup_call(callback):
+                        raise RuntimeError("cleanup unverified")
+                except BaseException:
+                    failed.add(kind)
+                    failure = Failure(Stage.TEARDOWN, _CLEANUP_CODES[kind])
+                    failures.append(failure)
+                    self.remember(failure)
+        if failures:
+            self.remember(failures[0])
+        processes = not failed.intersection(_CLEANUP_ORDER[:5])
+        proof = CleanupProof(processes, ResourceKind.IDENTITY not in failed,
+            ResourceKind.POOL not in failed, ResourceKind.AUTHORITY not in failed,
+            ResourceKind.ROOT not in failed, ResourceKind.GUARDIAN not in failed,
+            tuple(failures), self.effects.clock.monotonic() - started,
+            () if failures else ("P10",))
+        self._closed = proof
+        self._actions.clear()  # Drop leases/callback closures after teardown.
+        self._pending = [task for task in self._pending if not task.done()]
+        return proof
+
+    def commit_guard(self, atomic_commit: Callable[[], Any]):
+        """E calls this around only its final atomic receipt filesystem action."""
+        with self._commit_lock:
+            self.checkpoint(Stage.VERIFICATION)
+            if self._closed is None or not self._closed.ok or self.failure is not None:
+                _refuse(FailureCode.CLEANUP_PRIVATE, Stage.TEARDOWN)
+            return atomic_commit()
+
+
+@dataclass(frozen=True, repr=False)
+class GuardianRequest:
+    run_id: str
+    reservation: Reservation
+    ownership: AuthorityOwnership
+    channel: Any = field(repr=False)
+    processes: tuple[OwnedProcess, ...] = field(default=(), repr=False)
+    deadline: float = 0.0
+
+
+def guardian_main(request: GuardianRequest, *, effects: Effects) -> int:
+    """Bounded liveness channel; EOF triggers cleanup, never a normal disarm.
+
+    The caller transfers retained owned handles, never bare PIDs. A public
+    journal alone is insufficient to authorize this request.
+    """
+    try:
+        # This is a capability transferred over the owned parent channel, not
+        # an inventory discovered after parent loss. Unknown/new IDs are refused.
+        _validate_ownership(replace(request.ownership, containers=(), networks=()),
+                            request.run_id, allocated=False)
+        ids = request.ownership.containers + request.ownership.networks
+        if (len(set(ids)) != len(ids)
+                or any(not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{12,64}", value) is None
+                       for value in ids)):
+            return 1
+        if (request.reservation.artifact_root != request.reservation.run_root / "artifacts"
+                or not math.isfinite(request.deadline)):
+            return 1
+        while effects.clock.monotonic() < request.deadline:
+            remaining = request.deadline - effects.clock.monotonic()
+            try:
+                event = request.channel.receive(min(0.1, remaining))
+            except EOFError:
+                break
+            if event == "disarm":
+                # Independently observe absence; a sender's claim is not proof.
+                owned = effects.host.authority_inventory(request.run_id)
+                _validate_ownership(owned, request.run_id, allocated=False)
+                if (not effects.host.private_absent(request.reservation)
+                        or any(process.poll() is None for process in request.processes)):
+                    return 1
+                request.channel.acknowledge()
+                return 0
+            if event not in (None, "alive"):
+                return 1
+            effects.clock.wait(min(0.05, max(0.0, request.deadline - effects.clock.monotonic())))
+        scope = RunScope(effects=effects)
+        scope.own_reservation(request.reservation)
+        def remove_authority():
+            observed = effects.host.authority_inventory(request.run_id)
+            if (observed.run_id != request.ownership.run_id
+                    or observed.names != request.ownership.names
+                    or observed.labels != request.ownership.labels
+                    or not set(observed.containers).issubset(request.ownership.containers)
+                    or not set(observed.networks).issubset(request.ownership.networks)):
+                return False
+            return _cleanup_authority(None, request.run_id, effects=effects, verify=True,
+                                      ownership=request.ownership)
+        scope.acquire(ResourceKind.AUTHORITY, remove_authority)
+        for process in request.processes:
+            scope.acquire(ResourceKind.STACK_PROCESS,
+                lambda process=process: process.stop(effects.clock.monotonic() + CLEANUP_TIMEOUT_S))
+        return 0 if scope.close().ok else 1
+    except BaseException:
+        return 1
+
+
+def _cleanup_authority(authority, run_id, *, effects, verify=False, ownership=None):
+    failed = False
+    try:
+        if authority is not None:
+            authority.stop()
+    except BaseException:
+        failed = True
+    finally:
+        # PP-2 stop can throw before cleanup. This fallback is unconditional,
+        # including partially allocated runs with no returned authority object.
+        if ownership is None:
+            effects.host.cleanup_authority(run_id)
+        else:
+            effects.host.cleanup_owned_authority(run_id, ownership)
+    if verify:
+        _validate_ownership(effects.host.authority_inventory(run_id), run_id, allocated=False)
+    if failed:
+        raise RuntimeError("authority stop failed") from None
 
 
 @dataclass(frozen=True)
@@ -311,14 +640,21 @@ class Host(Protocol):
     def source_snapshot(self) -> SourceProof: ...
     def authority_inventory(self, run_id: str) -> Any: ...
     def scrub(self, reservation: Reservation, *, keep_safe: bool) -> bool: ...
+    def private_absent(self, reservation: Reservation) -> bool: ...
+    def begin_operation(self, callback: Callable[[], Any]) -> Any: ...
     # B's host operations keep imports, file reads and teardown behind a seam.
     def migration_entry_present(self) -> bool: ...
     def migration_corpus(self) -> tuple[tuple[FileProof, ...], tuple[str, ...]]: ...
     def database_module(self, environment: Mapping[str, str]) -> Any: ...
     def store_module(self) -> Any: ...
     def cleanup_authority(self, run_id: str) -> Any: ...
+    def cleanup_owned_authority(self, run_id: str, ownership: AuthorityOwnership) -> Any: ...
     def close_identity(self, lease: IdentityLease) -> None: ...
     def read_child_result(self, path: Path) -> Any: ...
+    def read_stack_ready(self, path: Path) -> Any: ...
+    def app_readiness(self, request: ReadyRequest) -> Any: ...
+    def worker_heartbeat(self, request: ReadyRequest) -> Any: ...
+    def organization_read(self, request: ReadyRequest, *, authenticated: bool) -> Any: ...
 
 
 class ReceiptWriter(Protocol):
@@ -329,15 +665,15 @@ class ReceiptWriter(Protocol):
 
 @dataclass(frozen=True, repr=False)
 class Effects:
-    # Later request/result types belong to B/C/D/E, without changing these seams.
+    # D/E add lifetime management and receipts without replacing these seams.
     authority_factory: Callable[[str], Any]
     issuer_factory: Callable[[str], Any]
     migration_runner: Callable[..., Any]
     seed_operation: Callable[..., Any]
     process_launcher: Callable[..., OwnedProcess]
-    readiness_probe: Callable[[Any], Any]
-    browser_runner: Callable[..., Any]
-    canonical_reader: Callable[[CanonicalRequest], WorkerDescriptor]
+    readiness_probe: Callable[[ReadyRequest], ReadyProof]
+    browser_runner: Callable[..., OwnedBrowser] | None
+    canonical_reader: Callable[[CanonicalRequest], WorkerDescriptor | CanonicalProof]
     clock: Clock
     host: Host
     receipt_writer: ReceiptWriter
@@ -722,6 +1058,7 @@ class PreparedAuthority:
     database: DatabaseProof
     identity: IdentityProof
     binding: BindingProof
+    plan: Plan | None = field(default=None, repr=False)
 
 
 def _manifest_hash(files):
@@ -898,12 +1235,18 @@ def prepare_authority(plan: Plan, *, effects: Effects, scope: RunScope) -> Prepa
         stage, code = Stage.ALLOCATION, FailureCode.ALLOCATION
         ownership = _validate_ownership(effects.host.authority_inventory(run_id), run_id, allocated=False)
         authority = None
-        scope.acquire(ResourceKind.AUTHORITY, lambda: authority.stop() if authority is not None
-                      else effects.host.cleanup_authority(run_id))
+        allocation_collision = False
+        scope.acquire(ResourceKind.AUTHORITY, lambda: None if allocation_collision else _cleanup_authority(
+            authority, run_id, effects=effects, verify=isinstance(scope, RunScope))
+            if not isinstance(scope, RunScope) or scope._settled() else False)
         effects.receipt_writer.ownership(root / "authority-planned.json", OwnershipJournal(
             run_id, root, plan.config.artifact_root, effects.clock.utc_now(), ownership))
         start = effects.clock.monotonic()
-        authority = effects.authority_factory(run_id)
+        try:
+            authority = effects.authority_factory(run_id)
+        except AllocationCollision:
+            allocation_collision = True
+            _refuse(FailureCode.ALLOCATION, Stage.ALLOCATION)
         ownership = _validate_ownership(effects.host.authority_inventory(run_id), run_id, allocated=True)
         effects.receipt_writer.ownership(root / "authority-observed.json", OwnershipJournal(
             run_id, root, plan.config.artifact_root, effects.clock.utc_now(), ownership))
@@ -956,11 +1299,596 @@ def prepare_authority(plan: Plan, *, effects: Effects, scope: RunScope) -> Prepa
             _manifest_hash(plan.migrations), migration, allocated - start, relayed - allocated, migrated - relayed)
         identity = IdentityProof(issuer.thumbprint, issuer.issuer, issuer.audience, binding.organization_id,
                                  binding.binding_id, binding.subject, binding.tier)
-        return PreparedAuthority(authority, dsn, lease, database, identity, binding)
+        return PreparedAuthority(authority, dsn, lease, database, identity, binding, plan)
     except ProofRefused:
         raise
     except Exception:
         _refuse(code, stage)
+
+
+STACK_TIMEOUT_S = 120.0
+BROWSER_TIMEOUT_S = 300.0
+HEARTBEAT_MAX_AGE_S = 30.0
+STACK_ROLES = ("broker", "worker", "harness", "app", "web")
+APP_DEPENDENCIES = ("broker", "harness", "database", "worker", "durable_stores", "build")
+CHECKPOINTS = ("ui_project_created", "ui_dxf_imported", "bearer_present",
+    "actor_header_absent", "bearerless_read_refused", "bearerless_mutation_refused",
+    "bearerless_no_mutation", "ui_checkout_acquired", "settings_submitted",
+    "worker_published", "settings_readback", "settings_reopened")
+
+
+@dataclass(frozen=True, repr=False)
+class ReadyRequest:
+    plan: Plan
+    launcher: OwnedProcess = field(repr=False)
+    environment: Mapping[str, str] = field(repr=False)
+    organization_id: str
+    binding_id: str
+    public_key_thumbprint: str
+    bearer: _SecretToken = field(repr=False)
+    deadline: float
+    expected_identities: tuple[ProcessIdentity, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
+
+    @property
+    def worker_id(self):
+        return "project:" + self.plan.config.run_id
+
+
+@dataclass(frozen=True)
+class HeartbeatProof:
+    worker_id: str
+    tool_name: str
+    runtime: str
+    source_revision: str
+    source_sha256: str
+    observed_at: datetime
+
+
+@dataclass(frozen=True)
+class AppReadiness:
+    source_revision: str
+    dependencies: tuple[tuple[str, str, bool], ...]
+
+
+@dataclass(frozen=True)
+class ReadyProof:
+    owned_process_identities: tuple[ProcessIdentity, ...]
+    source_revision: str
+    app_readiness: AppReadiness
+    heartbeat: HeartbeatProof
+    authenticated_org: bool
+    bearerless_refused: bool
+
+
+@dataclass(frozen=True)
+class CanonicalEvidence:
+    organization_id: str
+    project_id: str
+    drawing_id: str
+    input_version_id: str
+    output_version_id: str
+    job_id: str
+    binding_id: str
+    worker_id: str
+    checkout_fence: int
+    before_settings_sha256: str
+    settings_sha256: str
+    reopened_settings_sha256: str
+
+
+@dataclass(frozen=True)
+class CanonicalProof:
+    evidence: CanonicalEvidence
+    stored_settings_sha256: str
+    reopened_settings_sha256: str
+
+
+@dataclass(frozen=True, repr=False)
+class BrowserRequest:
+    run_id: str
+    source_binding: SourceProof
+    public_key_thumbprint: str
+    organization_id: str
+    binding_id: str
+    worker_id: str
+    web_origin: str
+    app_origin: str
+    required_test_ids: tuple[str, ...]
+    environment: Mapping[str, str] = field(repr=False)
+    output_root: Path
+    deadline: float
+
+    def __post_init__(self):
+        object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
+
+
+@dataclass(frozen=True)
+class TestOutcome:
+    test_id: str
+    status: str
+    retry: int
+
+
+@dataclass(frozen=True, repr=False)
+class BrowserResult:
+    run_id: str
+    source_binding: SourceProof
+    public_key_thumbprint: str
+    exit_code: int
+    selected_test_ids: tuple[str, ...]
+    started_test_ids: tuple[str, ...]
+    completed_test_ids: tuple[str, ...]
+    outcomes: tuple[TestOutcome, ...]
+    annotation_types: tuple[str, ...]
+    checkpoints: Mapping[str, bool]
+    canonical: CanonicalEvidence
+
+    def __post_init__(self):
+        object.__setattr__(self, "checkpoints", MappingProxyType(dict(self.checkpoints)))
+
+
+class OwnedBrowser(Protocol):
+    process: OwnedProcess
+    def poll(self) -> BrowserResult | None: ...
+    def stop(self, deadline: float) -> bool: ...
+
+
+@dataclass(frozen=True)
+class ExecutionProof:
+    stack: ReadyProof
+    worker_identity: str
+    initial_heartbeat: HeartbeatProof
+    final_heartbeat: HeartbeatProof
+    playwright: BrowserResult
+    canonical: CanonicalProof
+    stack_seconds: float
+    browser_seconds: float
+    observed_rows: tuple[str, ...] = ("P01", "P04", "P08", "P09", "P11")
+
+
+def _remaining(deadline, effects, code, stage):
+    remaining = deadline - effects.clock.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0:
+        _refuse(code, stage)
+    return remaining
+
+
+def _owned_stack(request, effects):
+    launcher = request.launcher
+    if launcher.poll() is not None:
+        _refuse(FailureCode.LAUNCH, Stage.STACK)
+    raw = effects.host.read_stack_ready(request.plan.config.run_root / "stack-ready.json")
+    if raw is None:
+        return None
+    if (type(raw) is not dict or set(raw) != {"launcher_pid", "pids", "ports"}
+            or type(raw["pids"]) is not dict or set(raw["pids"]) != set(STACK_ROLES)
+            or raw["ports"] != dict(zip(("web", "app", "broker", "harness"), request.plan.config.ports.values()))):
+        _refuse(FailureCode.LAUNCH, Stage.STACK)
+    if (type(raw["launcher_pid"]) is not int or raw["launcher_pid"] != launcher.identity.pid
+            or launcher.identity.role != "stack-launcher"):
+        _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+    if (any(type(pid) is not int or pid <= 0 for pid in raw["pids"].values())
+            or len(set(raw["pids"].values())) != len(STACK_ROLES)):
+        _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+    try:
+        children = launcher.children(raw["pids"])
+    except Exception:
+        _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+    identities = (launcher.identity, *sorted(children, key=lambda item: item.role))
+    if (len(children) != len(STACK_ROLES) or {c.role for c in children} != set(STACK_ROLES)
+            or any(c.pid != raw["pids"][c.role] or not c.start_id
+                   or c.parent_pid != launcher.identity.pid for c in children)
+            or (request.expected_identities and identities != request.expected_identities)):
+        _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+    return identities
+
+
+def _heartbeat(request, effects):
+    try:
+        raw = effects.host.worker_heartbeat(request)
+        if raw is None:
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        if type(raw) is not HeartbeatProof:
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        if raw.worker_id != request.worker_id:
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        descriptor = request.plan.descriptor
+        if (raw.tool_name, raw.runtime, raw.source_revision, raw.source_sha256) != (
+                descriptor.tool, descriptor.runtime, descriptor.source_revision, descriptor.source_sha256):
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        age = (effects.clock.utc_now() - raw.observed_at).total_seconds()
+        if not math.isfinite(age) or not 0 <= age <= HEARTBEAT_MAX_AGE_S:
+            _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+        return raw
+    except ProofRefused:
+        _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+    except Exception:
+        _refuse(FailureCode.HEARTBEAT, Stage.READINESS)
+
+
+def check_readiness(request: ReadyRequest, *, effects: Effects) -> ReadyProof:
+    """Validate OS custody, exact authority heartbeat and both auth controls."""
+    code, stage = FailureCode.LAUNCH, Stage.STACK
+    try:
+        while True:
+            _remaining(request.deadline, effects, code, stage)
+            identities = _owned_stack(request, effects)
+            if identities is not None:
+                break
+            effects.clock.wait(min(0.1, _remaining(request.deadline, effects, code, stage)))
+        code, stage = FailureCode.READINESS, Stage.READINESS
+        app = effects.host.app_readiness(request)
+        if (type(app) is not AppReadiness or len(app.dependencies) != len(APP_DEPENDENCIES)
+                or {item[0] for item in app.dependencies} != set(APP_DEPENDENCIES)
+                or any(state != "ready" or type(required) is not bool for _, state, required in app.dependencies)):
+            _refuse(FailureCode.READINESS, Stage.READINESS)
+        if app.source_revision != request.plan.source.commit:
+            _refuse(FailureCode.READINESS, Stage.READINESS)
+        heartbeat = _heartbeat(request, effects)
+        code = FailureCode.AUTH
+        auth = effects.host.organization_read(request, authenticated=True)
+        if auth != (200, request.organization_id, TIER, "active"):
+            _refuse(FailureCode.AUTH, Stage.READINESS)
+        denied = effects.host.organization_read(request, authenticated=False)
+        if type(denied) is not int or denied not in (401, 403):
+            _refuse(FailureCode.AUTH, Stage.READINESS)
+        _remaining(request.deadline, effects, FailureCode.READINESS, Stage.READINESS)
+        if _owned_stack(request, effects) != identities:
+            _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+        # The two organization reads take time; the returned heartbeat must still be fresh.
+        code = FailureCode.HEARTBEAT
+        heartbeat = _heartbeat(request, effects)
+        return ReadyProof(identities, app.source_revision, app, heartbeat, True, True)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(code, stage)
+
+
+def _validate_browser(result, request):
+    if type(result) is not BrowserResult:
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    if type(result.exit_code) is not int or result.exit_code != 0:
+        _refuse(FailureCode.BROWSER_EXIT, Stage.BROWSER)
+    ids = REQUIRED_TEST_IDS
+    if (request.required_test_ids != ids or result.run_id != request.run_id
+            or result.source_binding != request.source_binding
+            or result.public_key_thumbprint != request.public_key_thumbprint
+            or any(type(values) is not tuple or len(values) != len(ids) or set(values) != set(ids)
+                   for values in (result.selected_test_ids, result.started_test_ids, result.completed_test_ids))
+            or len(result.outcomes) != len(ids) or {o.test_id for o in result.outcomes} != set(ids)
+            or any(type(o) is not TestOutcome or o.status != "passed" or type(o.retry) is not int
+                   or o.retry != 0 for o in result.outcomes) or result.annotation_types):
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    if set(result.checkpoints) != set(CHECKPOINTS) or any(v is not True for v in result.checkpoints.values()):
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    evidence = result.canonical
+    if (type(evidence) is not CanonicalEvidence
+            or evidence.organization_id != request.organization_id or evidence.binding_id != request.binding_id
+            or evidence.worker_id != request.worker_id or type(evidence.checkout_fence) is not int
+            or not 1 <= evidence.checkout_fence <= 9223372036854775807
+            or evidence.input_version_id == evidence.output_version_id
+            or any(type(value) is not str or re.fullmatch(r"[A-Za-z0-9:|_-]{1,128}", value) is None
+                   for value in (evidence.organization_id, evidence.project_id, evidence.drawing_id,
+                       evidence.input_version_id, evidence.output_version_id, evidence.job_id,
+                       evidence.binding_id, evidence.worker_id))
+            or any(not _hash_ok(value) for value in (evidence.before_settings_sha256,
+                evidence.settings_sha256, evidence.reopened_settings_sha256))
+            or evidence.before_settings_sha256 == evidence.settings_sha256
+            or evidence.settings_sha256 != evidence.reopened_settings_sha256):
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    return result
+
+
+def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope: RunScope) -> ExecutionProof:
+    """Return execution evidence only; D/E still own teardown and success publication."""
+    code, stage = FailureCode.LAUNCH, Stage.STACK
+    try:
+        plan = prepared.plan
+        if plan is None or plan.reservation is None or plan.required_test_ids != REQUIRED_TEST_IDS:
+            _refuse(FailureCode.LAUNCH, Stage.STACK)
+        if effects.browser_runner is None or effects.browser_runner is _browser_unavailable:
+            _refuse(FailureCode.BROWSER_UNAVAILABLE, Stage.BROWSER)
+        env = project_environment(plan, os_env=plan.host.environment, dsn=prepared.dsn,
+            profile_env=prepared.identity_lease.profile, organization_id=prepared.binding.organization_id)
+        start = effects.clock.monotonic()
+        deadline = start + STACK_TIMEOUT_S
+        root, ports = plan.config.run_root, plan.config.ports
+        argv = (sys.executable, "-B", str(REPO / "scripts/start-leaf.py"), "--strict-ports",
+            "--with-harness", "--canonical-worker-tool", WORKER_TOOL,
+            "--canonical-worker-id", "project:" + plan.config.run_id,
+            "--ready-file", str(root / "stack-ready.json"),
+            "--web-port", str(ports.web), "--app-port", str(ports.app),
+            "--broker-port", str(ports.broker), "--harness-port", str(ports.harness))
+        plan.reservation.release_ports()
+        launcher = effects.process_launcher(ProcessSpec("stack-launcher", argv, REPO, env, deadline), scope=scope)
+        bearer = prepared.identity_lease.mint(now=int(effects.clock.utc_now().timestamp()), lifetime_s=180)
+        request = ReadyRequest(plan, launcher, env, prepared.binding.organization_id,
+            prepared.binding.binding_id, prepared.identity.public_key_thumbprint, bearer, deadline)
+        ready = effects.readiness_probe(request)
+        if type(ready) is not ReadyProof or not ready.authenticated_org or not ready.bearerless_refused:
+            _refuse(FailureCode.READINESS, Stage.READINESS)
+        _remaining(deadline, effects, FailureCode.READINESS, Stage.READINESS)
+        stack_ready = effects.clock.monotonic()
+        code, stage = FailureCode.BROWSER_EXIT, Stage.BROWSER
+        browser_deadline = stack_ready + BROWSER_TIMEOUT_S
+        # This distinct late mint is never added to the shared stack environment.
+        token = prepared.identity_lease.mint(now=int(effects.clock.utc_now().timestamp()), lifetime_s=360)
+        browser_env = _PrivateEnvironment(_essential_environment(plan.host.environment))
+        browser_env.update({"LEAF_E2E_TOKEN": token.reveal(), "LEAF_E2E_MANAGED": "1",
+            "LEAF_PROOF_PROJECT_RUN_ID": plan.config.run_id})
+        browser_request = BrowserRequest(plan.config.run_id, plan.source, prepared.identity.public_key_thumbprint,
+            prepared.binding.organization_id, prepared.binding.binding_id, request.worker_id,
+            f"http://127.0.0.1:{ports.web}", f"http://127.0.0.1:{ports.app}", REQUIRED_TEST_IDS,
+            browser_env, plan.config.artifact_root, browser_deadline)
+        request = replace(request, deadline=browser_deadline, expected_identities=ready.owned_process_identities)
+        browser = effects.browser_runner(browser_request, scope=scope)
+        while True:
+            _remaining(browser_deadline, effects, FailureCode.BROWSER_EXIT, Stage.BROWSER)
+            if _owned_stack(request, effects) != ready.owned_process_identities:
+                _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+            final_heartbeat = _heartbeat(request, effects)
+            result = browser.poll()
+            exit_code = browser.process.poll()
+            if exit_code is not None and (type(exit_code) is not int or exit_code != 0):
+                _refuse(FailureCode.BROWSER_EXIT, Stage.BROWSER)
+            if result is not None:
+                if exit_code != 0:
+                    _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+                code = FailureCode.BROWSER_EVIDENCE
+                result = _validate_browser(result, browser_request)
+                break
+            if exit_code is not None:
+                _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+            effects.clock.wait(min(0.1, _remaining(browser_deadline, effects, code, stage)))
+        _remaining(browser_deadline, effects, code, stage)
+        code, stage = FailureCode.CANONICAL, Stage.VERIFICATION
+        canonical = effects.canonical_reader(CanonicalRequest("execution", WORKER_TOOL, env,
+            result.canonical, browser_deadline))
+        if type(canonical) is not CanonicalProof or canonical.evidence != result.canonical:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        if (canonical.stored_settings_sha256 != result.canonical.settings_sha256
+                or canonical.reopened_settings_sha256 != result.canonical.reopened_settings_sha256):
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        _remaining(browser_deadline, effects, code, stage)
+        if _owned_stack(request, effects) != ready.owned_process_identities:
+            _refuse(FailureCode.OWNERSHIP, Stage.STACK)
+        final_heartbeat = _heartbeat(request, effects)
+        return ExecutionProof(ready, request.worker_id, ready.heartbeat, final_heartbeat,
+            result, canonical, stack_ready - start, effects.clock.monotonic() - stack_ready)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(code, stage)
+
+
+def _posix_child_identity(stat_text, owner_pid, role, pid):
+    """Parse one /proc/<pid>/stat line; fail closed unless the launcher owns a live child.
+
+    start-leaf.py starts each child with start_new_session=True, so a valid child's
+    session id is its own pid; the launcher's session is also accepted.
+    """
+    parts = stat_text.rsplit(")", 1)[1].split()
+    if (parts[0] in {"Z", "X"} or int(parts[1]) != owner_pid
+            or int(parts[3]) not in {owner_pid, pid} or not parts[19]):
+        raise RuntimeError("child custody unavailable")
+    return ProcessIdentity(role, pid, parts[19], int(parts[1]))
+
+
+def _process_child(owner, role, pid):
+    """Observe live OS identities; a JSON PID alone never establishes custody."""
+    if os.name != "nt":
+        return _posix_child_identity(Path(f"/proc/{pid}/stat").read_text(), owner.identity.pid, role, pid)
+    import ctypes
+    from ctypes import wintypes
+    kernel = owner.job.kernel
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    handle = kernel.OpenProcess(0x1000 | 0x0400, False, pid)
+    if not handle:
+        raise RuntimeError("child identity unavailable")
+    try:
+        class Basic(ctypes.Structure):
+            _fields_ = [("reserved1", ctypes.c_void_p), ("peb", ctypes.c_void_p),
+                ("reserved2", ctypes.c_void_p * 2), ("pid", ctypes.c_size_t), ("parent", ctypes.c_size_t)]
+        query = ctypes.WinDLL("ntdll").NtQueryInformationProcess
+        query.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p]
+        query.restype = ctypes.c_long
+        basic, member, status = Basic(), wintypes.BOOL(), wintypes.DWORD()
+        times = [ctypes.c_uint64() for _ in range(4)]
+        if (query(handle, 0, ctypes.byref(basic), ctypes.sizeof(basic), None) != 0
+                or basic.pid != pid or basic.parent != owner.identity.pid
+                or not kernel.IsProcessInJob(handle, owner.job.handle, ctypes.byref(member)) or not member.value
+                or not kernel.GetExitCodeProcess(handle, ctypes.byref(status)) or status.value != 259
+                or not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times))):
+            raise RuntimeError("child custody unavailable")
+        return ProcessIdentity(role, pid, str(times[0].value), basic.parent)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _project_http(request, path, *, bearer=None):
+    import http.client
+    remaining = request.deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("readiness deadline")
+    connection = http.client.HTTPConnection("127.0.0.1", request.plan.config.ports.app,
+                                           timeout=min(2.0, remaining))
+    transport, timer = None, None
+    def interrupt_read():
+        try:
+            if transport is not None:
+                transport.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    # A peer that trickles headers/body must not extend the absolute deadline.
+    try:
+        connection.connect()
+        transport = connection.sock
+        remaining = request.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("readiness deadline")
+        transport.settimeout(min(2.0, remaining))
+        timer = threading.Timer(min(2.0, remaining), interrupt_read)
+        timer.daemon = True
+        timer.start()
+        headers = {} if bearer is None else {"Authorization": "Bearer " + bearer.reveal()}
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        raw = response.read(65537)
+        if len(raw) > 65536 or time.monotonic() >= request.deadline:
+            raise ValueError("readiness response bound")
+        return response.status, json.loads(raw)
+    finally:
+        if timer is not None:
+            timer.cancel()
+        connection.close()
+
+
+def _project_connection(environment, deadline):
+    # Explicit connection authority; no pool and no mutation of parent environment.
+    dsn = _nonempty_dsn(environment)
+    if _clean_libpq(os.environ) != dict(os.environ):
+        raise RuntimeError("database child environment mismatch")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("database deadline")
+    import psycopg
+    from psycopg.rows import dict_row
+    return psycopg.connect(dsn, row_factory=dict_row, connect_timeout=max(1, math.ceil(min(2, remaining))),
+        options=f"-c statement_timeout={max(1, int(min(2, remaining) * 1000))} -c default_transaction_read_only=on")
+
+
+def _settings_hash(context, *, digest):
+    settings = context.graph["settings"] if context.graph is not None else None
+    return digest(settings)
+
+
+def _canonical_database_proof(request, *, graph, connection):
+    """Verify stored job and historical publication via the canonical verifier."""
+    from uuid import UUID
+    evidence = request.evidence
+    with connection(request.environment, request.deadline) as conn:
+        job = conn.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL",
+                           (evidence.job_id,)).fetchone()
+        if (job is None or job["status"] != "succeeded" or job["tool_name"] != WORKER_TOOL
+                or str(job["org_id"]) != evidence.organization_id
+                or str(job["project_id"]) != evidence.project_id
+                or job["request_tenant_id"] != evidence.organization_id
+                or str(job["input_version_id"]) != evidence.input_version_id
+                or str(job["output_version_id"]) != evidence.output_version_id
+                or (job.get("provenance") or {}).get("worker_id") != evidence.worker_id):
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        commit = job["result"]["graph_commit"]
+        expected = {key: commit[key] for key in ("schema", "attempt", "tool", "tool_manifest_sha256",
+            "parameters", "parent_intake_sha256", "before_graph_sha256", "graph_project_id", "initialized")}
+        expected.update(organization_id=evidence.organization_id, project_id=evidence.project_id,
+            drawing_id=evidence.drawing_id, parent_version_id=evidence.input_version_id,
+            actor_binding_id=evidence.binding_id, checkout_fence=str(evidence.checkout_fence), job_id=evidence.job_id)
+        proof = graph.project_graph_job_provenance(UUID(evidence.job_id), commit, expected=expected, conn=conn)
+        if proof["output_version_id"] != evidence.output_version_id:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        before, _ = graph._stored_context(expected, UUID(evidence.input_version_id), conn)
+        stored, _ = graph._stored_context(expected, UUID(evidence.output_version_id), conn)
+        if _settings_hash(before, digest=graph.local.digest) != evidence.before_settings_sha256:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        stored_hash = _settings_hash(stored, digest=graph.local.digest)
+    # Reopen on an independent connection after releasing the first read transaction.
+    with connection(request.environment, request.deadline) as conn:
+        reopened, _ = graph._stored_context(expected, UUID(evidence.output_version_id), conn)
+        reopened_hash = _settings_hash(reopened, digest=graph.local.digest)
+    return CanonicalProof(evidence, stored_hash, reopened_hash)
+
+
+def _canonical_child_entry():
+    # Fresh interpreter: server imports may read the scrubbed, run-local environment.
+    db = None
+    try:
+        environment = _PrivateEnvironment(_clean_libpq(os.environ))
+        _nonempty_dsn(environment)
+        raw = json.loads(environment.pop("LEAF_PROJECT_CANONICAL_REQUEST"))
+        evidence = None if raw["evidence"] is None else CanonicalEvidence(**raw["evidence"])
+        request = CanonicalRequest(raw["purpose"], WORKER_TOOL, environment, evidence, raw["deadline"], raw["worker_id"])
+        with open(os.devnull, "w") as sink, redirect_stdout(sink):
+            if request.purpose == "heartbeat":
+                with _project_connection(environment, request.deadline) as conn:
+                    row = conn.execute("SELECT worker_id, tool_name, runtime, source_revision, source_sha256, observed_at "
+                        "FROM canonical_worker_heartbeats WHERE worker_id = %s", (request.worker_id,)).fetchone()
+                    public = None if row is None else {"worker_id": row["worker_id"], "tool_name": row["tool_name"],
+                        "runtime": row["runtime"], "source_revision": row["source_revision"],
+                        "source_sha256": row["source_sha256"], "observed_at": row["observed_at"].isoformat()}
+            elif request.purpose == "execution":
+                db = _Host.database_module(environment)
+                sys.path.insert(0, str(REPO / "server"))
+                try:
+                    graph = importlib.import_module("solar_project_graph")
+                    proof = _canonical_database_proof(request, graph=graph, connection=_project_connection)
+                    public = {"stored_settings_sha256": proof.stored_settings_sha256,
+                              "reopened_settings_sha256": proof.reopened_settings_sha256}
+                finally:
+                    sys.path.remove(str(REPO / "server"))
+                    db.reset_pool()
+                    db = None
+            else:
+                return 1
+        print(json.dumps(public))
+        return 0
+    except Exception:
+        return 1
+    finally:
+        if db is not None:
+            with open(os.devnull, "w") as sink, redirect_stdout(sink):
+                db.reset_pool()
+
+
+def _canonical_execution(request):
+    _nonempty_dsn(request.environment)
+    if (request.purpose not in {"execution", "heartbeat"}
+            or (request.purpose == "execution" and type(request.evidence) is not CanonicalEvidence)):
+        _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+    environment = _PrivateEnvironment(request.environment)
+    evidence = request.evidence
+    # Explicit public fields only; never serialize runtime state or a capability.
+    public = None if evidence is None else {name: getattr(evidence, name) for name in ("organization_id", "project_id", "drawing_id",
+        "input_version_id", "output_version_id", "job_id", "binding_id", "worker_id", "checkout_fence",
+        "before_settings_sha256", "settings_sha256", "reopened_settings_sha256")}
+    environment["LEAF_PROJECT_CANONICAL_REQUEST"] = json.dumps({"evidence": public, "deadline": request.deadline,
+        "purpose": request.purpose, "worker_id": request.worker_id})
+    output = Path(environment["LEAF_STORE_DIR"]).parent / (request.purpose + "-readback.json")
+    code = ("import runpy,sys; m=runpy.run_path(sys.argv[1]); "
+            "sys.exit(m['_canonical_child_entry']())")
+    process = _RuntimeProcess(ProcessSpec("canonical-child", (sys.executable, "-B", "-c", code,
+        str(REPO / "scripts/proof_project.py")), REPO.parent, environment, request.deadline, output))
+    try:
+        process.start()
+        while process.poll() is None:
+            remaining = request.deadline - time.monotonic()
+            if remaining <= 0:
+                _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+            time.sleep(min(0.05, remaining))
+        if process.poll() != 0 or time.monotonic() >= request.deadline:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        raw = _Host.read_child_result(output)
+        if request.purpose == "heartbeat":
+            if raw is None:
+                return None
+            heartbeat = HeartbeatProof(**dict(raw, observed_at=datetime.fromisoformat(raw["observed_at"])))
+            return heartbeat
+        if (type(raw) is not dict or set(raw) != {"stored_settings_sha256", "reopened_settings_sha256"}
+                or any(not _hash_ok(value) for value in raw.values())):
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        return CanonicalProof(evidence, raw["stored_settings_sha256"], raw["reopened_settings_sha256"])
+    finally:
+        stopped = process.stop(request.deadline)
+        if stopped:
+            output.unlink(missing_ok=True)
+        if not stopped or time.monotonic() >= request.deadline:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
 
 
 def _later(record):
@@ -984,7 +1912,7 @@ class _Clock:
 
 def _canonical_reader(request):
     if request.purpose != "descriptor":
-        return _later("C")(request)
+        return _canonical_execution(request)
     # No sys.path change; exact dependency bindings are restored even on error.
     names = ("platform_link", "solar_project_tools", "solver_adapters",
              "solver_adapters.arlo_design", "solver_adapters.autofill", "_leaf_project_worker")
@@ -1063,7 +1991,61 @@ def _private_directory(path):
 
 
 class _Host:
-    scrub = staticmethod(_later("D"))
+    @staticmethod
+    def read_stack_ready(path):
+        try:
+            return _Host.read_child_result(path)
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def app_readiness(request):
+        status, payload = _project_http(request, "/api/ready")
+        if status != 200 or payload.get("ready") is not True or payload.get("status") != "ready":
+            _refuse(FailureCode.READINESS, Stage.READINESS)
+        dependencies = payload["dependencies"]
+        return AppReadiness(payload["source_revision"], tuple(sorted(
+            (name, value["state"], value["required"]) for name, value in dependencies.items())))
+
+    @staticmethod
+    def organization_read(request, *, authenticated):
+        status, payload = _project_http(request, "/api/orgs/" + request.organization_id,
+                                       bearer=request.bearer if authenticated else None)
+        if not authenticated:
+            return status
+        org = payload.get("org", {})
+        return status, org.get("org_id"), org.get("tier"), org.get("status")
+
+    @staticmethod
+    def worker_heartbeat(request):
+        # Exact owner selection: the same-tool newest-worker helper is insufficient.
+        return _canonical_execution(CanonicalRequest("heartbeat", WORKER_TOOL, request.environment,
+            deadline=min(request.deadline, time.monotonic() + 5.0), worker_id=request.worker_id))
+
+    @staticmethod
+    def begin_operation(callback):
+        return _PendingCall(callback)
+
+    @staticmethod
+    def private_absent(reservation):
+        # lexists catches dangling links too. An unlink/rmtree return is not proof.
+        return _path_absent(reservation.run_root)
+
+    @staticmethod
+    def scrub(reservation, *, keep_safe):
+        root = reservation.run_root
+        if (not root.is_absolute() or root == Path(root.anchor)
+                or root.is_relative_to(REPO) or REPO.is_relative_to(root)
+                or reservation.artifact_root != root / "artifacts" or not _path_safe(root)):
+            return False
+        # No retained-file allowlist exists before E. Remove the owned private
+        # root even for keep_safe; E may later retain approved public evidence.
+        if os.path.lexists(root):
+            info = root.stat()
+            if reservation.root_identity != (info.st_dev, info.st_ino):
+                return False
+            shutil.rmtree(root)
+        return _Host.private_absent(reservation)
 
     @staticmethod
     def migration_entry_present():
@@ -1120,9 +2102,25 @@ class _Host:
         return _pg_module().cleanup(run_id)
 
     @staticmethod
+    def cleanup_owned_authority(run_id, ownership):
+        pg = _pg_module()
+        _validate_ownership(replace(ownership, containers=(), networks=()), run_id, allocated=False)
+        allowed = set(ownership.containers + ownership.networks)
+        def docker(args):
+            # PP-2 re-inventories immediately before deletion. Guard the actual
+            # destructive call as well, so replacement IDs cannot slip through.
+            if args[:2] == ["rm", "-f"] or args[:2] == ["network", "rm"]:
+                if len(args) != 3 or args[2] not in allowed:
+                    raise RuntimeError("unowned authority resource")
+            return pg._docker(args)
+        return pg.cleanup(run_id, docker=docker)
+
+    @staticmethod
     def close_identity(lease):
         object.__setattr__(lease, "issuer", None)
         lease.jwks_path.unlink(missing_ok=True)
+        if not _path_absent(lease.jwks_path):
+            raise RuntimeError("identity removal unverified")
 
     @staticmethod
     def read_child_result(path):
@@ -1201,11 +2199,16 @@ class _Host:
         return SourceProof(commit, hashlib.sha256(dirty).hexdigest(), hashlib.sha256(manifest).hexdigest(),
                            files, untracked, migrations)
 
-    def reserve(self, plan):
+    def reserve(self, plan, *, scope=None):
         config = plan.config
         if not _path_safe(config.run_root) or not _path_safe(config.artifact_root):
             raise RuntimeError("unsafe reservation")
         _private_directory(config.run_root)
+        root_stat = config.run_root.stat()
+        reservation = Reservation(config.run_root, config.artifact_root, (),
+                                  (root_stat.st_dev, root_stat.st_ino))
+        if scope is not None:
+            scope.own_reservation(reservation, keep_safe=config.keep_run_root)
         handles = []
         try:
             _private_directory(config.artifact_root)
@@ -1233,10 +2236,11 @@ class _Host:
             for port in config.ports.values():
                 handle = socket.socket()
                 handles.append(handle)
+                object.__setattr__(reservation, "port_handles", tuple(handles))
                 if os.name == "nt":
                     handle.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 handle.bind(("127.0.0.1", port))
-            return Reservation(config.run_root, config.artifact_root, tuple(handles))
+            return reservation
         except Exception:
             for handle in handles:
                 handle.close()
@@ -1315,9 +2319,39 @@ class _WindowsJob:
             raise RuntimeError("runtime resume failed")
         return str(times[0].value)
 
+    def stop(self, deadline):
+        # Query the owned job until every descendant is gone; closing a handle
+        # or observing only the launcher exit is not an absence proof.
+        from ctypes import wintypes
+        ctypes = self.ctypes
+        class Accounting(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_int64) for name in
+                ("user", "kernel", "period_user", "period_kernel")] + [
+                (name, wintypes.DWORD) for name in
+                ("faults", "total", "active", "terminated")]
+        self.kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        self.kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+            ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+        if not self.handle:
+            return False  # A discarded handle cannot prove an empty job.
+        if not self.kernel.TerminateJobObject(self.handle, 1):
+            return False
+        while True:
+            counts = Accounting()
+            if not self.kernel.QueryInformationJobObject(self.handle, 1, ctypes.byref(counts),
+                                                         ctypes.sizeof(counts), None):
+                return False
+            if counts.active == 0:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.05, remaining))
+
     def close(self):
         if self.handle:
-            self.kernel.CloseHandle(self.handle)
+            if not self.kernel.CloseHandle(self.handle):
+                raise RuntimeError("owned job close failed")
             self.handle = None
 
 
@@ -1328,14 +2362,15 @@ class _RuntimeProcess:
         self.job = None
         self.output = None
         self.identity = None
+        self._stopped = False
 
     def __repr__(self):
         return "<owned runtime process>"
 
     def start(self):
         spec = self.spec
-        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child"}:
-            return _later("C")(spec)
+        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child", "stack-launcher", "canonical-child"}:
+            raise RuntimeError("unknown process role")
         try:
             if spec.output_path is not None:
                 self.output = spec.output_path.open("xb")
@@ -1362,24 +2397,61 @@ class _RuntimeProcess:
         return self.process.poll()
 
     def children(self, pids):
-        return _later("C")(pids)
+        return tuple(_process_child(self, role, pid) for role, pid in pids.items())
 
     def stop(self, deadline):
-        try:
-            if self.job is not None:
-                self.job.close()
-            if self.process is not None:
-                if os.name != "nt":
-                    import signal
-                    try:
-                        os.killpg(self.process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                elif self.process.poll() is None:
-                    self.process.kill()
-                self.process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        if self._stopped:
             return True
-        except Exception:
+        try:
+            if self.process is None:
+                if self.job is not None:
+                    self.job.close()
+                self._stopped = True
+                return True
+            def observe():
+                if self.process.poll() is not None:
+                    return None
+                if os.name == "nt":
+                    # Popen's retained kernel handle cannot target a reused PID.
+                    return self.identity
+                try:
+                    parts = Path(f"/proc/{self.process.pid}/stat").read_text().rsplit(")", 1)[1].split()
+                except FileNotFoundError:
+                    return None
+                return ProcessIdentity(self.spec.role, self.process.pid, parts[19], int(parts[1]))
+            def terminate():
+                self.process.terminate()  # Retained Popen owner, never a PID lookup.
+            def kill():
+                if self.job is not None:
+                    self.job.stop(deadline)
+                else:
+                    self.process.kill()
+            def wait(seconds):
+                try:
+                    self.process.wait(timeout=seconds)
+                    return True
+                except subprocess.TimeoutExpired:
+                    return False
+            if self.identity is None:
+                # A suspended child whose identity/assignment failed never ran.
+                self.process.kill()
+                self._stopped = wait(max(0.01, deadline - time.monotonic()))
+                if self.job is not None:
+                    self._stopped = self.job.stop(deadline) and self._stopped
+                    self.job.close()
+                return self._stopped
+            stopped = stop_owned(StopRequest(self.identity, observe, terminate, kill, wait),
+                                 effects=production_effects(), deadline=deadline)
+            # The launcher can exit while its descendants remain in our job.
+            if self.job is not None:
+                empty = self.job.stop(deadline)
+                self.job.close()
+                self._stopped = stopped and empty
+                return self._stopped
+            # There is no retained process-tree capability on POSIX in A/C.
+            # Stop the owned child but refuse a descendant-cleanup success claim.
+            return False
+        except BaseException:
             return False
         finally:
             if self.output is not None:
@@ -1391,7 +2463,8 @@ def _launch_runtime(spec, *, scope):
     process = _RuntimeProcess(spec)
     # Registration is synchronous and precedes the first possible child.
     kind = {"migration-child": ResourceKind.MIGRATION_PROCESS,
-            "seed-child": ResourceKind.SEED_PROCESS}.get(spec.role, ResourceKind.RUNTIME_PROCESS)
+            "seed-child": ResourceKind.SEED_PROCESS,
+            "stack-launcher": ResourceKind.STACK_PROCESS}.get(spec.role, ResourceKind.RUNTIME_PROCESS)
     scope.acquire(kind, lambda: process.stop(time.monotonic() + 5.0))
     process.start()
     return process
@@ -1403,8 +2476,19 @@ def _pg_module():
         return sys.modules.get(name) or _load_file(name, REPO / "scripts/proof_project_pg.py")
 
 
+class AllocationCollision(RuntimeError):
+    """PP-2 rejected existing resources before provisioning anything."""
+
+
 def _authority_factory(run_id):
-    return _pg_module().PgAuthority.start(run_id)
+    try:
+        return _pg_module().PgAuthority.start(run_id)
+    except RuntimeError as error:
+        # PP-2's closed refusal is emitted under its start lock, before provision.
+        # Do not classify arbitrary startup failures as collisions.
+        if str(error) == "run already exists":
+            raise AllocationCollision("allocation collision") from None
+        raise
 
 
 def _issuer_factory(run_id):
@@ -1544,8 +2628,86 @@ def _run_database_child(request, *, effects, scope):
 def production_effects() -> Effects:
     """Adapters are lazy: construction imports no worker and acquires nothing."""
     effects = Effects(_authority_factory, _issuer_factory, None, None,
-                   _launch_runtime, _later("C"), _browser_unavailable, _canonical_reader,
+                   _launch_runtime, None, _browser_unavailable, _canonical_reader,
                    _Clock(), _Host(), _ReceiptWriter())
     return replace(effects,
+        readiness_probe=lambda request: check_readiness(request, effects=effects),
         migration_runner=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope),
         seed_operation=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope))
+
+
+class _PendingCall:
+    """Bounded caller-facing completion for existing synchronous adapters.
+
+    A thread timeout is not termination. RunScope retains the handle, refuses
+    destructive cleanup while work is live, and keeps its guardian armed.
+    """
+    def __init__(self, callback):
+        self._done = threading.Event()
+        self._value = None
+        self._error = None
+        def run():
+            try:
+                self._value = callback()
+            except BaseException as error:
+                self._error = error
+            finally:
+                self._done.set()
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def __repr__(self):
+        return "<owned pending operation>"
+
+    def done(self):
+        return self._done.is_set()
+
+    def result(self):
+        if not self.done():
+            raise RuntimeError("operation pending")
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+
+@dataclass(frozen=True, repr=False)
+class StopRequest:
+    identity: ProcessIdentity
+    observe: Callable[[], ProcessIdentity | None] = field(repr=False)
+    terminate: Callable[[], None] = field(repr=False)
+    kill: Callable[[], None] = field(repr=False)
+    wait: Callable[[float], bool] = field(repr=False)
+
+
+def stop_owned(request: StopRequest, *, effects: Effects, deadline: float) -> bool:
+    """Escalate only the retained owner, rechecking identity before each signal."""
+    try:
+        remaining = deadline - effects.clock.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0:
+            return False
+        if request.observe() != request.identity:
+            return True  # Original owner is gone; the replacement is unrelated.
+        request.terminate()
+        if request.wait(min(1.0, remaining)):
+            return True
+        if request.observe() != request.identity:
+            return True
+        remaining = deadline - effects.clock.monotonic()
+        if remaining <= 0:
+            return False
+        request.kill()
+        remaining = max(0.0, deadline - effects.clock.monotonic())
+        return request.wait(remaining) is True
+    except BaseException:
+        return False
+
+
+def _path_absent(path):
+    """Only ENOENT proves absence; denied inspection and dangling links do not."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
