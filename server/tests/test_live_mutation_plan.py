@@ -13,7 +13,7 @@ import write_loop
 import store
 import mutation_apply  # after write_loop, which puts da/ on sys.path (the gate runs this file alone)
 from intake_parse import parse_text
-from mutation_plan import emit_plan, plan_sha256, validate_mutations, world_to_ocs
+from mutation_plan import emit_plan, mutation_scope, plan_sha256, validate_mutations, world_to_ocs
 
 
 def _entity(handle, layer="Panels", z=0.0):
@@ -1936,3 +1936,129 @@ def test_replaced_polyline_via_set_points_refuses_a_tilted_normal():
     with pytest.raises(
             ValueError, match="^replaced handle 'B' has unexpected output geometry$"):
         write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_mutation_scope_transform_and_layer_handles_are_uppercase():
+    base = _base()
+    base["polylines"][0]["handle"] = "a"
+    base["polylines"][1]["handle"] = "b"
+    canonical = validate_mutations(base, {
+        "transforms": [{"handle": "b", "dx": 1, "dy": 0, "rotation_deg": 0}],
+        "set_layer": [{"handle": "a", "layer": "X"}],
+    })
+    assert mutation_scope(canonical) == {
+        "touched": ["A", "B"], "removed": [], "added_layers": [], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_removal_is_not_touched():
+    base = _base()
+    base["circles"] = [_circle("f")]
+    canonical = validate_mutations(base, {"removed": ["f"]})
+    assert canonical["removed_kinds"] == {"f": "CIRCLE"}
+    assert mutation_scope(canonical) == {
+        "touched": [], "removed": ["F"], "added_layers": [], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_added_layer():
+    canonical = validate_mutations(_base(), {"added": [_entity("new", "X")]})
+    assert mutation_scope(canonical) == {
+        "touched": [], "removed": [], "added_layers": ["X"], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_block_members_are_removed_after_definition_is_copied():
+    base = _base()
+    base["memberEvidenceCovered"] = True
+    base["layers"].append("0")
+    canonical = validate_mutations(base, {
+        "block_defs": [{"name": "Rack", "base": [0, 0, 0], "members": ["A"], "insert": 0}],
+        "removed": ["A"],
+        "added": [{"handle": "new-insert", "kind": "INSERT", "name": "Rack", "layer": "0",
+                   "pt": [0, 0, 0], "rot": 0, "scale": [1, 1, 1]}],
+    })
+    lines = emit_plan(canonical, base_sha256="a" * 64).decode().splitlines()
+    definition_line = next(line for line in lines if line.startswith("ADDBLOCKDEF|"))
+    insert_line = next(line for line in lines if line.startswith("ADDINSERT|"))
+    assert definition_line.endswith("|H:A")
+    assert lines.index(definition_line) < lines.index(insert_line) < lines.index("REMOVE|A")
+    assert lines.count("REMOVE|A") == 1
+    assert mutation_scope(canonical) == {
+        "touched": [], "removed": ["A"], "added_layers": ["0"], "changed_blocks": ["Rack"],
+    }
+
+
+def test_mutation_scope_added_groups_touch_existing_members():
+    canonical = validate_mutations(_base(), {
+        "added_groups": [{"name": "Rack", "members": ["b", "a"]}],
+    })
+    assert mutation_scope(canonical)["touched"] == ["A", "B"]
+
+
+def test_mutation_scope_added_group_ordinals_are_covered_by_added_layers():
+    canonical = validate_mutations(_base(), {
+        "added": [_entity("new", "X")],
+        "added_groups": [{"name": "Rack", "members": ["A", {"add": 0}]}],
+    })
+    assert mutation_scope(canonical) == {
+        "touched": ["A"], "removed": [], "added_layers": ["X"], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_removed_groups_require_intake_and_resolve_members():
+    base = _base()
+    base["groups"] = [{"name": "Rack", "members": ["b", "a"]}]
+    canonical = validate_mutations(base, {"removed_groups": ["rack"]})
+    with pytest.raises(ValueError, match="intake.*removed_groups"):
+        mutation_scope(canonical)
+    assert mutation_scope(canonical, base) == {
+        "touched": ["A", "B"], "removed": [], "added_layers": [], "changed_blocks": [],
+    }
+    with pytest.raises(ValueError, match="RACK.*unavailable"):
+        mutation_scope(canonical, _base())
+
+
+def test_mutation_scope_unknown_key_fails_closed():
+    canonical = validate_mutations(_base(), _mutations())
+    canonical["future_operation"] = []
+    with pytest.raises(ValueError, match="unknown mutation fields: future_operation"):
+        mutation_scope(canonical)
+
+
+@pytest.mark.parametrize("op,entry", [
+    ("set_points", {"handle": "A", "pts": [[0, 0, 0], [4, 0, 0], [4, 4, 0]], "closed": True}),
+    ("set_circle", {"handle": "F", "c": [6, 5, 0], "r": 3}),
+    ("set_arc", {"handle": "E", "c": [6, 5, 0], "r": 3, "start_deg": 10, "end_deg": 90}),
+    ("set_color", {"handle": "A", "aci": 3}),
+    ("set_linetype", {"handle": "A", "name": "Continuous"}),
+    ("set_lineweight", {"handle": "A", "weight": 25}),
+])
+def test_mutation_scope_set_operations_touch_the_target(op, entry):
+    base = _base()
+    base["circles"] = [_circle("F")]
+    base["arcs"] = [_arc("E")]
+    canonical = validate_mutations(base, {op: [entry]})
+    assert mutation_scope(canonical) == {
+        "touched": [entry["handle"]], "removed": [], "added_layers": [], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_is_pure_deterministic_and_deduplicated():
+    base = _base()
+    base["groups"] = [{"name": "Old", "members": ["B", "A"]}]
+    canonical = validate_mutations(base, {
+        "removed_groups": ["old"],
+        "added_groups": [{"name": "New", "members": ["B", "A"]}],
+        "set_layer": [{"handle": "B", "layer": "X"}],
+        "added": [_entity("new-1", "Z"), _entity("new-2", "X"), _entity("new-3", "Z")],
+    })
+    original_canonical, original_intake = copy.deepcopy(canonical), copy.deepcopy(base)
+    first = mutation_scope(canonical, base)
+    assert first == mutation_scope(canonical, base) == {
+        "touched": ["A", "B"], "removed": [], "added_layers": ["X", "Z"], "changed_blocks": [],
+    }
+    first["touched"].append("FF")
+    assert mutation_scope(canonical, base)["touched"] == ["A", "B"]
+    assert canonical == original_canonical
+    assert base == original_intake

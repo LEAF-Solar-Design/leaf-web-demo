@@ -1129,6 +1129,44 @@ def uses_v3(canonical: Any) -> bool:
     )
 
 
+def mutation_scope(canonical: dict, intake: dict | None = None) -> dict:
+    """Derive scoped-oracle allowances from an already validated mutation set."""
+    unknown = set(canonical) - _MUTATION_FIELDS - set(V3_SET_OPS) - {"removed_kinds"}
+    if unknown:
+        raise ValueError(f"unknown mutation fields: {', '.join(sorted(map(str, unknown)))}")
+    if "removed_groups" in canonical and intake is None:
+        raise ValueError("intake is required to resolve removed_groups members")
+
+    touched = set()
+    for op in ("transforms", "set_layer", "set_points", "set_circle", "set_arc", *V3_SET_OPS):
+        touched.update(item["handle"].upper() for item in canonical.get(op, []))
+    for group in canonical.get("added_groups", []):
+        # Added ordinals have no existing drawing handle; their layers are scoped below.
+        touched.update(member.upper() for member in group["members"] if isinstance(member, str))
+    if "removed_groups" in canonical:
+        groups = {group["name"].casefold(): group for group in intake.get("groups", [])}
+        for name in canonical["removed_groups"]:
+            group = groups.get(name.casefold())
+            if group is None:
+                raise ValueError(f"removed group {name!r} is unavailable in intake")
+            touched.update(member.upper() for member in group["members"])
+
+    removed = {handle.upper() for handle in canonical.get("removed", [])}
+    added_layers = {entity["layer"] for entity in canonical.get("added", [])}
+    changed_blocks = set()
+    for definition in canonical.get("block_defs", []):
+        # ADDBLOCKDEF copies members; emit_plan's trailing REMOVE erases the originals.
+        removed.update(handle.upper() for handle in definition["members"])
+        added_layers.add(canonical["added"][definition["insert"]]["layer"])
+        changed_blocks.add(definition["name"])
+    return {
+        "touched": sorted(touched),
+        "removed": sorted(removed),
+        "added_layers": sorted(added_layers),
+        "changed_blocks": sorted(changed_blocks),
+    }
+
+
 def uses_v2(canonical: Dict[str, Any]) -> bool:
     """True when the canonical data needs the v2 interpreter: any replacement
     op, a non-polyline removal, or an added entity that is not a closed
