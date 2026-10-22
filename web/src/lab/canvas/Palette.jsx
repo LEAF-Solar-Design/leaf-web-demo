@@ -7,7 +7,6 @@ export default function Palette({ entries, onAdd, searchRef }) {
   const [groupBy, setGroupBy] = useState('family')
   const shown = Object.values(entries).filter(manifest => `${blockLabel(manifest)} ${laneLabel(manifest.lane)} ${strategySection(manifest) || ''}`.toLowerCase().includes(query.toLowerCase()))
   const entry = manifest => <button type="button" draggable key={manifest.id} onClick={() => onAdd(manifest)}
-    onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); onAdd(manifest) } }}
     onDragStart={event => { event.dataTransfer.setData(BLOCK_MIME, manifest.id); event.dataTransfer.effectAllowed = 'copy' }}>
     {blockLabel(manifest)}
   </button>

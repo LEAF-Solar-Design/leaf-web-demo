@@ -12,7 +12,13 @@ import { addBlock, connectPipe, emptyGraph } from './graphDoc.js'
 import { dependencyLayout, dependencyRanks } from './dependencyLayout.js'
 import * as layout from './dependencyLayout.js'
 
-// Exercise our UI and callbacks independently of browser geometry. ELK remains real.
+// Intercept the import before Vitest touches the GWT bundle. Engines are injected
+// below; the real package runs only in scripts/elk_rank.test.mjs under Node.
+vi.mock('elkjs/lib/elk.bundled.js', () => ({ default: class {
+  constructor() { throw new Error('Real ELK is forbidden under Vitest') }
+} }))
+
+// Exercise our UI and callbacks independently of browser geometry.
 vi.mock('@xyflow/react', () => ({
   ReactFlowProvider: ({ children }) => children,
   useReactFlow: () => ({ screenToFlowPosition: point => point, getNodes: () => [], fitView: () => {} }),
@@ -29,17 +35,57 @@ vi.mock('@xyflow/react', () => ({
   Position: { Top: 'top', Bottom: 'bottom' }, BaseEdge: () => null,
   EdgeLabelRenderer: ({ children }) => children, getBezierPath: () => ['', 0, 0],
 }))
-beforeEach(() => vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} }))
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  fakeEngine.load.mockClear()
+  layout.setLayoutEngineLoader(fakeEngine.load)
+})
+afterEach(async () => {
+  cleanup()
+  await act(async () => {})
+  expect(fakeEngine.pendingCount()).toBe(0)
+  layout.setLayoutEngineLoader()
+  vi.unstubAllGlobals()
+})
 const manifest = manifests.find(item => item.id === 'adjust-none')
 const documentOf = count => Array.from({ length: count }).reduce(document => addBlock(document, manifest), emptyGraph())
 const edge = (from, to) => ({ from: { node: `adjust-none-${from}`, port: 'result' }, to: { node: `adjust-none-${to}`, port: 'value' } })
 const entriesOf = (...items) => Object.fromEntries(items.map(item => [`${item.id}@${item.version.semver}`, item]))
+const pendingLayouts = new Set()
 const deferred = () => {
   let resolve
   let reject
   const promise = new Promise((done, fail) => { resolve = done; reject = fail })
-  return { promise, resolve, reject }
+  pendingLayouts.add(promise)
+  return { promise,
+    resolve: value => { pendingLayouts.delete(promise); resolve(value) },
+    reject: error => { pendingLayouts.delete(promise); reject(error) } }
+}
+const fakeEngine = {
+  pendingCount: () => pendingLayouts.size,
+  load: vi.fn(() => {
+    let pending
+    return {
+      layout: vi.fn(graph => {
+        pending = deferred()
+        const job = pending
+        // Deliberately reverse the response order. Positions must use block IDs.
+        queueMicrotask(() => job.resolve({ ...graph,
+          children: graph.children.map((node, index) => ({ ...node, x: index * 50, y: 0 })).reverse() }))
+        return job.promise
+      }),
+      terminateWorker: vi.fn(() => pending?.reject(new DOMException('Layout cancelled', 'AbortError'))),
+    }
+  }),
+}
+
+// jsdom does not synthesize a button's native keyboard click. Drive the key
+// sequence and the resulting activation so two add handlers cannot pass.
+const pressEnter = button => {
+  button.focus()
+  fireEvent.keyDown(button, { key: 'Enter', code: 'Enter' })
+  fireEvent.keyUp(button, { key: 'Enter', code: 'Enter' })
+  fireEvent.click(button, { detail: 0 })
 }
 
 describe('registry and deterministic dependencies', () => {
@@ -65,6 +111,25 @@ describe('registry and deterministic dependencies', () => {
     expect(dependencyRanks(fork)['adjust-none-3']).toBe(1)
     expect(() => dependencyRanks({ ...fork, pipes: [...fork.pipes, edge(2, 1)] })).toThrow(/Cycles/)
   })
+  it('passes only drawn pipes and measured dimensions to the injected engine', async () => {
+    const document = connectPipe(documentOf(3), edge(1, 2))
+    const positions = await dependencyLayout(document, { 'adjust-none-1': { width: 450, height: 200 } })
+    const engine = fakeEngine.load.mock.results.at(-1).value
+    const input = engine.layout.mock.calls[0][0]
+    expect(input.edges).toEqual([{ id: 'adjust-none-1/result>adjust-none-2/value',
+      sources: ['adjust-none-1'], targets: ['adjust-none-2'] }])
+    expect(input.children).toEqual([
+      { id: 'adjust-none-1', width: 450, height: 200 },
+      { id: 'adjust-none-2', width: 310, height: 360 },
+      { id: 'adjust-none-3', width: 310, height: 360 },
+    ])
+    expect(positions).toEqual({
+      'adjust-none-1': { x: 30, y: 30 },
+      'adjust-none-3': { x: 540, y: 30 },
+      'adjust-none-2': { x: 50, y: 490 },
+    })
+    expect(engine.terminateWorker).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('canvas authoring', () => {
@@ -77,9 +142,11 @@ describe('canvas authoring', () => {
     fireEvent.change(search, { target: { value: 'Strategy' } })
     vi.spyOn(screen.getByTestId('flow').parentElement, 'getBoundingClientRect').mockReturnValue({ left: 100, top: 60, width: 600, height: 400 })
     const button = screen.getByRole('button', { name: 'Strategy' })
-    button.focus()
-    fireEvent.keyDown(button, { key: 'Enter' })
+    pressEnter(button)
     await waitFor(() => expect(screen.getByTestId('adjust-none-1')).toBeInTheDocument())
+    expect(screen.getAllByRole('article')).toHaveLength(1)
+    expect(screen.queryByTestId('adjust-none-2')).not.toBeInTheDocument()
+    expect(changed).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId('adjust-none-1')).toHaveAttribute('data-position', JSON.stringify({ x: 400, y: 260 }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Relayout' })).not.toBeDisabled())
     fireEvent.click(screen.getByRole('button', { name: 'Move adjust-none-1' }))
@@ -210,8 +277,7 @@ describe('canvas authoring', () => {
     expect(within(palette).queryByRole('button', { name: 'Market' })).not.toBeInTheDocument()
     fireEvent.click(within(palette).getByRole('button', { name: 'Strategy' }))
     const allowed = within(palette).getByRole('button', { name: 'Target price' })
-    allowed.focus()
-    fireEvent.keyDown(allowed, { key: 'Enter' })
+    pressEnter(allowed)
     expect(screen.getByTestId('gates-price-v1-1')).toBeInTheDocument()
     fireEvent.keyDown(container.querySelector('[data-canvas-editor]'), { key: '/' })
     expect(screen.getByRole('searchbox')).toHaveFocus()

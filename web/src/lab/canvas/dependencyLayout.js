@@ -1,5 +1,17 @@
 import ELK from 'elkjs/lib/elk.bundled.js'
 
+const browserEngineLoader = () => {
+  if (import.meta.env?.MODE === 'test') throw new Error('Inject a layout engine under Vitest')
+  return new ELK()
+}
+let layoutEngineLoader = browserEngineLoader
+
+// Tests also mock the ELK module boundary, so its GWT bundle is never loaded.
+// Keep the browser import in the existing lazy canvas chunk and its stem cap.
+export function setLayoutEngineLoader(loader = browserEngineLoader) {
+  layoutEngineLoader = loader
+}
+
 function releaseWorker(elk) {
   const worker = elk.worker?.worker
   if (worker && typeof worker.terminate !== 'function') {
@@ -12,7 +24,7 @@ function releaseWorker(elk) {
 
 // Each canvas owns its runner. Cancellation rejects the dropped request and
 // releases ELK's worker instead of merely ignoring its eventual result.
-export function createDependencyLayoutRunner(createElk = () => new ELK()) {
+export function createDependencyLayoutRunner(createElk = layoutEngineLoader) {
   let active = null
   const cancel = () => {
     if (!active) return

@@ -1,23 +1,47 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LabWorkbench from './LabWorkbench.jsx'
 import { LAB_VIEWS, registerLabViews } from './views.js'
 import WidgetsView from './widgets/WidgetsView.jsx'
 import glossary from './contract/sources/leaf-glossary.v1.json'
+import { setLayoutEngineLoader } from './canvas/dependencyLayout.js'
 
-// Shell coverage stops at the lazy mount; canvas tests exercise real ELK layout.
-vi.mock('./canvas/dependencyLayout.js', () => ({
-  createDependencyLayoutRunner: () => ({ run: async () => ({}), cancel: vi.fn() }),
-}))
+// Do not resolve or evaluate the multi-megabyte ELK implementation in jsdom.
+// The shell proves the lazy mount; one Node gate proves real ELK.
+vi.mock('elkjs/lib/elk.bundled.js', () => ({ default: class {
+  constructor() { throw new Error('Real ELK is forbidden under Vitest') }
+} }))
+const fakeEngine = {
+  pending: new Set(),
+  pendingCount() { return this.pending.size },
+  load() {
+    let pending
+    return {
+      async layout(graph) {
+        pending = {}
+        fakeEngine.pending.add(pending)
+        try {
+          await Promise.resolve()
+          return { ...graph, children: graph.children.map((node, index) => ({ ...node, x: index * 370, y: 0 })) }
+        } finally { fakeEngine.pending.delete(pending) }
+      },
+      terminateWorker() { fakeEngine.pending.delete(pending) },
+    }
+  },
+}
 
 beforeEach(() => {
+  setLayoutEngineLoader(fakeEngine.load)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
 })
 
-afterEach(() => {
+afterEach(async () => {
   cleanup()
+  await act(async () => {})
+  expect(fakeEngine.pendingCount()).toBe(0)
+  setLayoutEngineLoader()
   vi.unstubAllGlobals()
 })
 
