@@ -20,6 +20,8 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
   // The provider is immutable; mounts forward its constructor onChange as a
   // revision so value-only updates also refresh the observed pins and results.
   const entries = useMemo(() => ({ ...base, ...provider.entries() }), [base, provider, signature, revision])
+  const residency = useMemo(() => draft ? validateResidency(draft.document, entries)
+    : { ok: true, problems: [], tainted: [] }, [draft, entries])
   useEffect(() => {
     const publish = update => setEvaluation(previous => ({ ...update(previous), draft, entries }))
     if (!draft) {
@@ -27,9 +29,8 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
       return
     }
     try {
-      const residency = validateResidency(draft.document, entries)
       if (!residency.ok) {
-        publish(previous => ({ ...previous, result: null, problems: residency.problems }))
+        publish(previous => ({ ...previous, result: null, problems: [] }))
         return
       }
       if (!draft.ready) {
@@ -42,7 +43,7 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
     } catch {
       publish(previous => ({ ...previous, result: null, problems: ['Graph evaluation failed'] }))
     }
-  }, [draft, entries, provider, revision, clock])
+  }, [draft, entries, residency, provider, revision, clock])
   const { count, times } = evaluation
   const current = evaluation.draft === draft && evaluation.entries === entries
   const result = current ? evaluation.result : null
@@ -77,8 +78,8 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
     }
     for (const [name, value] of Object.entries(result.outputs)) values.push(card(`output:${name}`, name, name, value))
   }
-  const problems = [...(draft?.problems || []), ...(current ? evaluation.problems : [])]
-  return { entries, draft, result, problems, ready: Boolean(draft?.ready && !problems.length),
+  const problems = [...(draft?.problems || []), ...residency.problems, ...(current ? evaluation.problems : [])]
+  return { entries, draft, result, problems, ready: Boolean(draft?.ready && residency.ok && !problems.length),
     measurements, upstream, badges: values, values, onChange }
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import GraphView, { LiveValues, useLiveGraph } from './GraphView.jsx'
 import LabWorkbench from '../LabWorkbench.jsx'
@@ -161,6 +161,35 @@ describe('first-click live graph', () => {
     expect(await screen.findByText(/host data cannot reach Strategy \(custom-strategy\)/)).toBeVisible()
     expect(screen.getByRole('button', { name: 'Run graph' })).toBeDisabled()
     expect(onRun).not.toHaveBeenCalled()
+  })
+
+  it('refuses a new host to custom Strategy pipe in every render of the same act flush', () => {
+    const provider = hostProvider()
+    const renders = []
+    const { result } = renderHook(() => {
+      const live = useLiveGraph({ provider, clock: fixedClock })
+      renders.push(live)
+      return live
+    })
+    act(() => result.current.onChange({
+      document: graphOf(provider, ['host-source', 'count']), ready: true, problems: [],
+    }))
+    expect(result.current.ready).toBe(true)
+
+    const draft = { document: graphOf(provider, ['host-source', 'custom-strategy']), ready: true, problems: [] }
+    const firstRender = renders.length
+    act(() => result.current.onChange(draft))
+
+    const changedRenders = renders.slice(firstRender)
+    expect(changedRenders.length).toBeGreaterThan(0)
+    for (const live of changedRenders) {
+      expect(live.draft).toBe(draft)
+      expect(live.ready).toBe(false)
+      expect(live.problems).toEqual([
+        'host data cannot reach Strategy (custom-strategy): it does not run in the browser',
+      ])
+      expect(live.result).toBeNull()
+    }
   })
 
   it('re-evaluates provider announcements, keeps measurements summarized, and skips invalid drafts', async () => {
