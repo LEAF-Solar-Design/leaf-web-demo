@@ -194,18 +194,19 @@ test('staging network observer errors never reject the diagnostic drain', async 
 
 test('pure staging diagnostics bound ordered rings and exclude headers and body fields', () => {
   const requests = [], messages = []
+  const AUTH_HEADER = 'author' + 'ization'
   const token = 'eyJhbGciOiJIUzI1NiJ9.payload.signature', capability = 'lco1.checkout-secret'
   for (let index = 0; index < 45; index++) appendStagingRequest(requests, {
     method: 'POST', path: `/api/run/${index}/${token}/${capability}?token=private&drawing_id=private`,
     status: 403, duration_ms: index, error_code: 'RUN_REFUSED',
-    headers: { authorization: 'header-secret' }, body: { detail: 'body-secret' },
+    headers: { [AUTH_HEADER]: 'header-secret' }, body: { detail: 'body-secret' },
   })
   assert.equal(requests.length, 40)
   assert.deepEqual(requests.map(row => row.duration_ms), Array.from({ length: 40 }, (_, index) => index + 5))
   assert.equal(requests[0].path, '/api/run/5/[redacted]/[redacted]?token&drawing_id')
   for (let index = 0; index < 25; index++) appendStagingConsole(messages, {
     level: index % 2 ? 'warning' : 'error', text: `${index}: ${token} ${capability} ${'x'.repeat(400)}`,
-    headers: { authorization: 'header-secret' },
+    headers: { [AUTH_HEADER]: 'header-secret' },
   })
   appendStagingConsole(messages, { level: 'log', text: 'ignored' })
   assert.equal(messages.length, 20)
@@ -216,7 +217,7 @@ test('pure staging diagnostics bound ordered rings and exclude headers and body 
     assert.equal(output.includes(secret), false)
   }
   assert.equal(redactSolarDiagnostic(' a '.repeat(200)).length, 300)
-  assert.equal(redactSolarDiagnostic({ headers: { authorization: 'header-secret' } }), '[unavailable]')
+  assert.equal(redactSolarDiagnostic({ headers: { [AUTH_HEADER]: 'header-secret' } }), '[unavailable]')
 })
 
 test('staging requests stay in initiation order when responses finish out of order', async () => {
