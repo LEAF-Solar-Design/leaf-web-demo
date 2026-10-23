@@ -22,7 +22,8 @@
   "allOf": [
     {"if": {"properties": {"kind": {"const": "source.value"}}}, "then": {"properties": {"payload": {"type": "object", "additionalProperties": false, "required": ["rows"], "properties": {"rows": {"type": "array", "maxItems": 200, "items": {"type": "object"}}}}}}},
     {"if": {"properties": {"kind": {"const": "signed-request"}}}, "then": {"properties": {"payload": {"type": "object", "additionalProperties": false, "required": ["request_hash", "handoff"], "properties": {"request_hash": {"$ref": "#/$defs/hash"}, "handoff": {"const": "server-sign"}}}}}},
-    {"if": {"properties": {"kind": {"enum": ["shell.ready", "proposal"]}}}, "then": {"properties": {"payload": {"type": "object", "additionalProperties": false}}}}
+    {"if": {"properties": {"kind": {"const": "shell.ready"}}}, "then": {"properties": {"payload": {"type": "object", "additionalProperties": false, "properties": {"accepted": {"type": "boolean"}, "restored": {"type": "boolean"}}}}}},
+    {"if": {"properties": {"kind": {"const": "proposal"}}}, "then": {"properties": {"payload": {"type": "object", "additionalProperties": false, "required": ["document", "ready", "problems"], "properties": {"document": {"$ref": "lab-graph.v1.schema.json"}, "ready": {"type": "boolean"}, "problems": {"type": "array", "maxItems": 64, "items": {"type": "string"}}, "restore": {"type": "boolean"}}}}}}
   ],
   "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
 }
