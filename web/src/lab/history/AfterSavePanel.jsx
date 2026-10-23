@@ -1,4 +1,3 @@
-import { canonicalJSON } from '../contract.js'
 import { registry } from '../canvas/registry.js'
 import { formatMoney } from '../widgets/widgetResolve.js'
 
@@ -46,11 +45,12 @@ export default function AfterSavePanel({ view, document }) {
       </div>
       <Side title="Deltas" value={data.deltas} />
       <p>p99 decision time {data.latency?.p99_us == null ? 'Not reported' : decimal(Number(data.latency.p99_us) / 1000)} ms</p>
+      {!view.changed && <p>Changed blocks unavailable</p>}
       <ul aria-label="Practice blocks">{(data.blocks || []).map(block => {
         const current = document?.blocks?.find(item => item.id === block.block_id)
-        const previous = view.previousDocument?.blocks?.find(item => item.id === block.block_id)
-        const changed = Boolean(current && previous && canonicalJSON(current.settings || {}) !== canonicalJSON(previous.settings || {}))
-        const title = current?.title || registry[`${current?.registry?.id || block.registry_id}@${current?.registry?.version || '1.0.0'}`]?.title || block.block_id
+        const saved = view.savedDocument?.blocks?.find(item => item.id === block.block_id)
+        const changed = Boolean(view.changed?.blockIds.includes(block.block_id))
+        const title = current?.title || registry[`${current?.registry?.id || saved?.registry?.id || block.registry_id}@${current?.registry?.version || saved?.registry?.version || '1.0.0'}`]?.title || saved?.registry?.id || block.registry_id || block.block_id
         return <li key={block.block_id} data-changed={changed ? 'true' : undefined}
           style={changed ? { outline: '2px solid var(--leaf-color-data-series-3)' } : undefined}>
           {title}: {block.triggered === 0 ? 'triggered 0 times in the window' : `triggered ${count(block.triggered)}`}, reached {count(block.reached)}

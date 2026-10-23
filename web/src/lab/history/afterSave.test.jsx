@@ -40,6 +40,8 @@ function artifacts(lastSaved = saved) {
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     update(patch) { Object.assign(this.state, patch); listeners.forEach(listener => listener()) },
     currentDocId: () => 'strategy', takeGraph: vi.fn(), save: vi.fn(),
+    diff: vi.fn().mockResolvedValue({ ok: true, changes: [{ op: 'replace', path: '/blocks/0/settings/calibration_intercept', before: 0, after: 0.77 }] }),
+    revision: vi.fn().mockResolvedValue({ ok: true, graph: draft }),
   }
 }
 function fixture(lastSaved = saved) {
@@ -104,9 +106,11 @@ describe('After save read model', () => {
 })
 
 describe('After save comparison', () => {
-  it('formats both sides, deltas, timing, changed and unreached blocks, attribution and coverage', () => {
+  it('formats both sides, deltas, timing, changed and unreached blocks, attribution and coverage', async () => {
     const { announce, afterSave } = fixture()
     announce(row())
+    afterSave.read()
+    await act(async () => {})
     render(<AfterSavePanel view={afterSave.read()} document={draft} />)
     const candidate = screen.getByRole('heading', { name: 'Candidate (simulated)' }).closest('article')
     const live = screen.getByRole('heading', { name: 'Live', exact: true }).closest('article')
@@ -127,7 +131,7 @@ describe('After save comparison', () => {
     expect(screen.getByText(/Simulated, not a verdict\. Window 2027-01-15T04:00:00Z\.\.2027-01-15T08:00:00Z, 8 Markets, 0 gaps\./)).toBeVisible()
   })
 
-  it('bounds attribution to 50 rows and notes truncation without assuming a change from missing history', () => {
+  it('bounds attribution to 50 rows and notes truncation while changed blocks are loading', () => {
     const { announce, afterSave, client } = fixture()
     client.state.revisions = []
     announce(row({ attribution: Array.from({ length: 51 }, (_, index) => ({ trade_id: `trade-${index}` })) }))
@@ -135,6 +139,73 @@ describe('After save comparison', () => {
     expect(within(screen.getByRole('list', { name: 'Per-Trade attribution' })).getAllByRole('listitem')).toHaveLength(50)
     expect(screen.getByText('truncated')).toBeVisible()
     expect(screen.getByText(/triggered 0 times/)).not.toHaveAttribute('data-changed')
+  })
+
+  it('outlines only the saved r2 diff block after metadata history loads and later draft edits', async () => {
+    const { announce, afterSave, client } = fixture()
+    const graph = addBlock(first, registry['adjust-none@1.0.0'])
+    client.state.revisions = [{ revision: 1 }, { revision: 2 }]
+    client.diff.mockResolvedValue({ ok: true, changes: [
+      { op: 'replace', path: '/blocks/1/settings/field', before: 'price', after: 'size' },
+    ] })
+    client.revision.mockResolvedValue({ ok: true, graph })
+    announce(row({ blocks: graph.blocks.map(block => ({ block_id: block.id, triggered: 1, reached: 2 })) }))
+    afterSave.read()
+    await act(async () => {})
+    expect(afterSave.read().changed).toEqual({ revision: 2, blockIds: [graph.blocks[1].id] })
+    const mount = render(<AfterSavePanel view={afterSave.read()} document={graph} />)
+    const blocks = () => within(screen.getByRole('list', { name: 'Practice blocks' })).getAllByRole('listitem')
+    expect(blocks()[0]).not.toHaveAttribute('data-changed')
+    expect(blocks()[1]).toHaveAttribute('data-changed', 'true')
+    const laterDraft = { ...graph, blocks: graph.blocks.map((block, index) => index === 0
+      ? { ...block, title: 'Later draft', settings: { field: 'edited again' } } : block) }
+    mount.rerender(<AfterSavePanel view={afterSave.read()} document={laterDraft} />)
+    expect(blocks()[0]).toHaveTextContent('Later draft')
+    expect(blocks()[0]).not.toHaveAttribute('data-changed')
+    expect(blocks()[1]).toHaveAttribute('data-changed', 'true')
+    mount.rerender(<AfterSavePanel view={afterSave.read()} document={emptyGraph()} />)
+    expect(blocks()[1]).toHaveTextContent('Strategy')
+    expect(blocks()[1]).toHaveAttribute('data-changed', 'true')
+    client.update({ revisions: [{ revision: 2 }] })
+    afterSave.read()
+    expect(client.diff).toHaveBeenCalledExactlyOnceWith('strategy', 1, 2)
+    expect(client.revision).toHaveBeenCalledExactlyOnceWith('strategy', 2)
+  })
+
+  it('outlines every saved block for r1 without requesting a parent diff', async () => {
+    const { announce, afterSave, client } = fixture({ ...saved, revision: 1 })
+    const graph = addBlock(first, registry['adjust-none@1.0.0'])
+    client.revision.mockResolvedValue({ ok: true, graph })
+    announce(row({ revision: 1, blocks: graph.blocks.map(block => ({ block_id: block.id, triggered: 0, reached: 0 })) }))
+    afterSave.read()
+    await act(async () => {})
+    expect(afterSave.read().changed).toEqual({ revision: 1, blockIds: graph.blocks.map(block => block.id) })
+    render(<AfterSavePanel view={afterSave.read()} document={graph} />)
+    for (const block of within(screen.getByRole('list', { name: 'Practice blocks' })).getAllByRole('listitem')) {
+      expect(block).toHaveAttribute('data-changed', 'true')
+    }
+    expect(client.diff).not.toHaveBeenCalled()
+    expect(client.revision).toHaveBeenCalledExactlyOnceWith('strategy', 1)
+  })
+
+  it('keeps Practice numbers when the diff fetch fails and reports changed blocks unavailable', async () => {
+    const { announce, afterSave, client } = fixture()
+    client.diff.mockRejectedValue(new Error('Offline'))
+    announce(row())
+    const listener = vi.fn()
+    const unsubscribe = afterSave.subscribe(listener)
+    afterSave.read()
+    await act(async () => {})
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(afterSave.read().changed).toBeNull()
+    render(<AfterSavePanel view={afterSave.read()} document={draft} />)
+    expect(screen.getByText('Changed blocks unavailable')).toBeVisible()
+    expect(within(screen.getByRole('heading', { name: 'Candidate (simulated)' }).closest('article')).getByText('$1,234.57')).toBeVisible()
+    expect(screen.getByText('p99 decision time 2.35 ms')).toBeVisible()
+    expect(screen.getByText(/triggered 0 times/)).not.toHaveAttribute('data-changed')
+    afterSave.read()
+    expect(client.diff).toHaveBeenCalledTimes(1)
+    unsubscribe()
   })
 
   it('shows exact unavailable coverage and reason with no Side statistics', () => {
