@@ -346,11 +346,10 @@ def test_versions_chain_after_two_writes(stack):
     assert versions[1]["tool"] == WRITE_TOOL and versions[2]["tool"] == WRITE_TOOL
 
 
-def test_versions_unknown_drawing_404(stack):
-    # Contract change (gap-fill QW-C, 2026-07-21): slug-valid first-seen ids
-    # auto-bootstrap now; only MALFORMED ids 404. Assert both halves.
+@pytest.mark.parametrize("drawing_id", ["UPPERCASE", "no-such-drawing"])
+def test_versions_unknown_drawing_404(stack, drawing_id):
     t = "uiw-unknown"
-    r = requests.get(f"{stack['app']}/api/drawings/UPPERCASE/versions",
+    r = requests.get(f"{stack['app']}/api/drawings/{drawing_id}/versions",
                      headers=_h(t), timeout=30)
     assert r.status_code == 404, r.text
     assert r.json()["error"]["error_code"] == "BAD_PARAMS"

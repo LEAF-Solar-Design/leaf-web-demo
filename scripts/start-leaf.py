@@ -81,6 +81,11 @@ def is_port_free(port: str | int, exclusive: bool = False) -> bool:
         try:
             if exclusive and IS_WIN:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            if not IS_WIN:
+                # Match uvicorn/Node on POSIX: a closed connection in TIME_WAIT
+                # is reusable, not a stale listener. Without this, a clean CI
+                # restart silently moves services away from fixed client URLs.
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("127.0.0.1", int(port)))
             return True
         except OSError:
