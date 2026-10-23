@@ -558,6 +558,9 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         for suite_id in measured_residual_floors
     } == measured_residual_floors
 
+    assert suites["web-vitest"].argv == [
+        g._npm(), "run", "test:unit", "--", "--maxWorkers=2",
+    ]
     assert suites["web-vitest"].allowed_vitest_skips == (
         ("src/cad/engineWasmHarness.realwasm.test.js", 1),
         ("src/cadedit/cadEditSurface.test.jsx", 16),

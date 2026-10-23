@@ -1,8 +1,10 @@
 import { expect, test } from './prodFixtures.mjs'
 import {
   assertProdResponse,
+  requireFixtureProject,
   resolveExpectedSha,
   resolveProdBaseUrl,
+  validateProdConfig,
 } from './prodConfig.mjs'
 
 const USER_AGENT = 'leaf-prod-readonly-smoke/1.0'
@@ -94,4 +96,77 @@ test('production app and web serve the expected candidate', async ({ request }) 
   test.info().annotations.push({ type: 'expected-sha', description: expected })
   expect(appHealth.source_sha).toBe(expected)
   expect(webHealth.source_sha).toBe(expected)
+})
+
+async function listProjects(request) {
+  const response = await get(request, '/api/projects', {
+    Authorization: `Bearer ${process.env.LEAF_E2E_PROD_ACCEPTANCE_TOKEN}`,
+  })
+  expect(response.status()).toBe(200)
+  const body = await response.json()
+  expect(body !== null && typeof body === 'object' && !Array.isArray(body)).toBe(true)
+  expect(Array.isArray(body.projects)).toBe(true)
+  return body.projects
+}
+
+test.describe('CAD engine NOTICE', () => {
+  test.use({ prodAuthenticated: true })
+
+// Keep the test declaration at column zero for the inventory source contract.
+test('P-062 production CAD edit surface shows the engine NOTICE', async ({ page, request }) => {
+  test.setTimeout(60000)
+  const projects = await listProjects(request)
+  const project = requireFixtureProject(projects, validateProdConfig().projectId)
+  const origin = new URL(resolveProdBaseUrl()).origin
+  await page.addInitScript(({ origin, token }) => {
+    if (window.location.origin === origin) localStorage.setItem('leaf.jwt', token)
+  }, { origin, token: process.env.LEAF_E2E_PROD_ACCEPTANCE_TOKEN })
+  try {
+    // Follow the P-146 project board path, then its canonical drawing selector.
+    const response = await page.goto(new URL('/app?surface=browser', origin).href)
+    assertProdResponse(response.url())
+    expect(response.ok()).toBe(true)
+    const projectButton = page.getByRole('region', { name: 'Workspace projects', exact: true })
+      .getByRole('list', { name: 'Projects', exact: true })
+      .getByRole('button', { name: project.name, exact: true })
+    await expect(projectButton).toHaveCount(1, { timeout: 30000 })
+    const [opened] = await Promise.all([
+      page.waitForResponse((result) =>
+        result.url() === new URL(`/api/projects/${encodeURIComponent(project.project_id)}`, origin).href
+        && result.request().method() === 'GET', { timeout: 30000 }),
+      projectButton.click({ timeout: 30000 }),
+    ])
+    assertProdResponse(opened.url())
+    expect(opened.status()).toBe(200)
+    const workspace = await opened.json()
+    expect(workspace.project.project_id).toBe(project.project_id)
+    expect(Array.isArray(workspace.drawing_versions)).toBe(true)
+    const [drawing] = [...workspace.drawing_versions].sort((a, b) =>
+      (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0)
+      || (b.seq || 0) - (a.seq || 0)
+      || String(a.version_id).localeCompare(String(b.version_id)))
+    expect(drawing, 'acceptance project must already contain a saved drawing version; no upload is allowed').toBeDefined()
+    expect(typeof drawing.version_id).toBe('string')
+    expect(drawing.version_id.length > 0).toBe(true)
+    const version = page.getByRole('combobox', { name: 'Canonical drawing version', exact: true })
+    await expect(version).toBeVisible({ timeout: 30000 })
+    await version.selectOption(drawing.version_id)
+    await expect(version).toHaveValue(drawing.version_id)
+    const cadTab = page.getByRole('tab', { name: 'CAD', exact: true })
+    await cadTab.click()
+    await expect(cadTab).toHaveAttribute('aria-selected', 'true')
+    // App.jsx opens the existing import pane locally; no file is selected.
+    await page.getByRole('button', { name: 'Open a DXF in the browser engine', exact: true }).click()
+    const surface = page.getByRole('region', { name: 'CAD editing surface', exact: true })
+    await expect(surface).toBeVisible({ timeout: 30000 })
+    const notice = surface.getByTestId('cad-edit-engine-notice')
+    await expect(notice).toBeVisible({ timeout: 30000 })
+    // Stable identifying substrings of server/routers/capabilities.py CAD_ENGINE_NOTICE.
+    await expect(notice).toContainText('licensed under the Mozilla Public License 2.0')
+    await expect(notice).toContainText('Source for the exact revision used is available at the upstream repository')
+    assertProdResponse(page.url())
+  } finally {
+    await page.close()
+  }
+})
 })

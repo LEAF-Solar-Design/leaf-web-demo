@@ -46,10 +46,13 @@ it:
 
 | plan (case-insensitive) | tier |
 |---|---|
-| `free`, `starter`, `basic`, `trial` | `hosted_starter` |
+| `free` | `hosted_free` |
+| `starter`, `basic`, `trial` | `hosted_starter` |
 | `pro`, `monthly`, `yearly`, `single_monthly`, `single_yearly`, `team`, `team_monthly`, `team_yearly`, `business` | `hosted_pro` |
 | `enterprise`, `self_hosted` | `self_hosted` |
 | *unknown / absent* | `hosted_starter` (`DEFAULT_TIER`) |
+
+`hosted_free` is the Free plan's tier, has `hosted_starter`'s capabilities, and is the key for the monthly managed-run allowance (slice A7b).
 
 Unknown plans deliberately resolve to the paid-entry default, never
 `restricted`: a paying-intent identity must not be bounced because a new plan
@@ -57,7 +60,7 @@ name shipped before this table learned it. The lapse override (§4) is the only
 path to `restricted`.
 
 `restricted` is **lapse-reachable only**: `platform/models.py TIERS` (the
-org-CREATION vocabulary) is `("self_hosted", "hosted_starter", "hosted_pro")`
+org-CREATION vocabulary) is `("self_hosted", "hosted_free", "hosted_starter", "hosted_pro")`
 — an org is never born restricted, it can only lapse into it, and only the
 billing feed (or an operator) does that.
 
@@ -158,3 +161,33 @@ Nothing below is chippable; each step is an operator action:
   resolve answers 404 and the webhook skips — acceptable: the login leg still
   corrects the claim, and the stored leg catches up on the next event after
   bootstrap.
+
+## 7. Managed add-on settings and statement feed
+
+`GET /api/orgs/{org_id}/addons` uses the verified caller's org, exactly like
+the org identities route. It returns `{"addons": {"<addon>": {"mode": "off",
+"byo_ref": null}}}` for every known add-on, defaulting unset settings to off.
+An unknown org or a different caller org returns **404**.
+
+`PUT /api/orgs/{org_id}/addons/{addon}` uses the same org scope and the existing
+org mutation role check (owner or editor under live auth). Its body is
+`{"mode": "managed" | "byo" | "off", "byo_ref"?: string}` and its response is
+`{"mode": "managed" | "byo" | "off", "byo_ref": string | null}`. Unknown
+add-ons return **404**; invalid settings return **422** naming the field.
+BYO requires a credential NAME of 1 to 128 characters, using letters, digits,
+`_`, `.`, `/`, `:`, or `-`. The name is stored and echoed, never resolved here;
+the audit actor is the verified subject (auth-off development uses `dev`).
+Managed integrations and bringing your own integrations are equally available
+through this API.
+
+`GET /api/orgs/{org_id}/billing/statement-feed?period=YYYY-MM` is the website's
+read-only server hop for **Platform statement (Recommended)**. It uses exactly
+the tier-sync shared gate: **dark by default**, `LEAF_BILLING_SYNC_LIVE=1` and
+a configured sync secret are required or it returns **503**. Secret resolution
+uses `LEAF_BILLING_SYNC_SECRET` with tier-sync's existing
+`LEAF_BILLING_SYNC_SECRET_ID` fallback. Missing or wrong
+`X-Billing-Sync-Secret` returns **403**, using a constant-time comparison.
+Unknown orgs return **404**; `production_acceptance` orgs return **409**.
+It returns the same `{"statement": {...}}` as the org-scoped
+`GET /api/orgs/{org_id}/billing/statement?period=YYYY-MM`, including its period
+validation and event-limit refusal. Money values are decimal strings.

@@ -68,10 +68,10 @@
 const CLAIM_NS = 'https://leafdesign.ai/';
 
 // plan (leaf_website app_metadata.leaf.plan) -> DeploymentTier
-// (orchestration platform tier union: "self_hosted" | "hosted_starter" | "hosted_pro").
+// (orchestration platform tier union: "self_hosted" | "hosted_free" | "hosted_starter" | "hosted_pro").
 // Surface-only mapping; refine as billing plans evolve.
 const PLAN_TIER = {
-  free: 'hosted_starter',
+  free: 'hosted_free',
   starter: 'hosted_starter',
   basic: 'hosted_starter',
   trial: 'hosted_starter',

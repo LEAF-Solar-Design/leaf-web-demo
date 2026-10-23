@@ -1398,12 +1398,25 @@ export async function publishProjectSolar(runtime, assertions = expect, {
     const settings = page.getByTestId('solar-settings-form')
     await assertions(settings).toHaveAttribute('data-mode', allowExistingGraph ? /^(initialize|edit)$/ : 'initialize')
     const initializing = await settings.getAttribute('data-mode') === 'initialize'
-    if (initializing) await settings.getByLabel('Drawing units', { exact: true }).selectOption('m')
+    if (initializing) await settings.getByRole('combobox', { name: 'Drawing units', exact: true }).selectOption('m')
     // A scratch fixture can already contain a graph from an earlier run.
     const sequence = allowExistingGraph && solar.context.graph?.settings?.panels_in_sequence === 1 ? 2 : 1
     await settings.getByLabel('Panels in sequence', { exact: true }).fill(String(sequence))
-    const start = settings.getByRole('button', { name: initializing ? 'Start Solar design' : 'Apply settings', exact: true })
-    await assertions(start).toBeEnabled({ timeout: 30_000 })
+    const buttonName = initializing ? 'Start Solar design' : 'Apply settings'
+    const start = settings.getByRole('button', { name: buttonName, exact: true })
+    try {
+      await assertions(start).toBeEnabled({ timeout: 30_000 })
+    } catch (error) {
+      const diagnosticText = async testId => {
+        try {
+          const locator = settings.getByTestId(testId)
+          return await locator.count() ? (await locator.textContent({ timeout: 2_000 }) ?? '').trim().slice(0, 300) : ''
+        } catch { return '[unavailable]' }
+      }
+      const reason = await diagnosticText('solar-settings-reason')
+      const runStatus = await diagnosticText('solar-settings-run')
+      throw new Error(`${buttonName} did not become enabled within 30 s; solar-settings-reason: ${reason}; solar-settings-run: ${runStatus}`, { cause: error })
+    }
     const result = await run({ page, expect: assertions, apiBase: solar.apiBase, traffic: solar.traffic,
       binding: solar.binding, before: solar.context, tool: 'solar-settings', action: () => start.click(), checkParams: (params) => {
         if (initializing) assertions(params.initialize?.units?.drawing_units).toBe('m')
@@ -1430,7 +1443,7 @@ export async function switchProjectSolarForms(runtime, assertions = expect) {
     await solve.getByLabel('Request', { exact: true }).fill('{"grid":{}}')
     await solve.getByLabel('Frame', { exact: true }).fill('walk-unsent-frame')
     // SchemaForm encodes enum option values as indices; use the schema labels.
-    await solve.getByLabel('Phase', { exact: true }).selectOption({ label: 'background' })
+    await solve.getByRole('combobox', { name: 'Phase', exact: true }).selectOption({ label: 'background' })
     await openProjectSolarTool(runtime, 'solar-correct-string', assertions, { closeEditor: false })
     const correction = page.getByRole('form', { name: 'Correct strings', exact: true })
     for (const name of ['Grant ref', 'Request', 'Frame', 'Phase']) await assertions(page.getByLabel(name, { exact: true })).toHaveCount(0)
