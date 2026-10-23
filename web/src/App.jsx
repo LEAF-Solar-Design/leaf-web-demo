@@ -949,7 +949,7 @@ export default function App() {
     closeStartForChange()
     return retryUnreadableHeadRaw(...args)
   }, [retryUnreadableHeadRaw, closeStartForChange])
-  const platform = usePlatformTrustController({ mock })
+  const platform = usePlatformTrustController({ mock, guestReadsPaused: knownGuest })
   const {
     usage,
     usageAt,
