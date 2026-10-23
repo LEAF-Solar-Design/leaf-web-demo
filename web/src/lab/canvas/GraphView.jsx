@@ -140,6 +140,18 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const [local] = useState(() => createHostProvider({ framed: false, operator, onChange: () => setRevision(value => value + 1) }))
   const provider = supplied || local
   const live = useLiveGraph({ provider, registry: entries || registry, revision: supplied ? revision : localRevision })
+  useEffect(() => {
+    if (hidden || !live.ready) return undefined
+    let generation = -1
+    const hydrate = () => {
+      if (generation === client.currentGeneration()) return
+      generation = client.currentGeneration()
+      void client.head(client.currentDocId())
+    }
+    const unsubscribe = client.subscribe(hydrate)
+    hydrate()
+    return unsubscribe
+  }, [client, hidden, live.ready])
   useEffect(() => client.subscribe(() => {
     if (client.state.restoredKey !== restored.key) {
       live.onChange(null)

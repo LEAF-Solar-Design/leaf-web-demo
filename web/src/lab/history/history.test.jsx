@@ -16,6 +16,12 @@ const changes = [
   { op: 'replace', path: '/pipes', before: [], after: second.pipes },
 ]
 const copy = value => JSON.parse(JSON.stringify(value))
+const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => copy(data) })
+function deferred() {
+  let resolve
+  const promise = new Promise(done => { resolve = done })
+  return { promise, resolve }
+}
 function ledger() {
   const rows = []
   const response = (status, data) => ({ ok: status < 400, status, json: async () => copy(data) })
@@ -49,6 +55,247 @@ function ledger() {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('Strategy revision ledger', () => {
+  it('P1-a captures the live edit after Save started before taking theirs', async () => {
+    const { client, append, fetchImpl } = ledger()
+    await client.save('strategy', first, null)
+    await client.head('strategy')
+    append(graph('server'))
+    const pending = deferred()
+    fetchImpl.mockImplementationOnce(() => pending.promise)
+    const take = vi.fn()
+    const view = render(<LabSaveBar document={second} ready client={client} onTakeTheirs={take} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }))
+    const edited = graph('edited during save')
+    view.rerender(<LabSaveBar document={edited} ready client={client} onTakeTheirs={take} />)
+    await act(async () => pending.resolve(response({ detail: 'stale' }, 409)))
+    await screen.findByText('Someone saved r2 while you edited.')
+    expect(screen.getByRole('button', { name: 'Restore my edits' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Take theirs' }))
+    await screen.findByText('Loaded r2. Your edits are kept.')
+    fireEvent.click(screen.getByRole('button', { name: 'Restore my edits' }))
+    expect(take.mock.calls.at(-1)[0]).toEqual(edited)
+  })
+
+  it('P1-b orders late writes and drops first-generation A responses after A to B to A', async () => {
+    const { client, fetchImpl } = ledger()
+    const late = deferred()
+    fetchImpl.mockImplementationOnce(() => late.promise)
+    const save = client.save('strategy', first, null)
+    fetchImpl.mockResolvedValueOnce(response({ revision: 4, graph: second }))
+    await client.restore('strategy', 1, 3)
+    late.resolve(response({ revision: 2, graph: first }))
+    await save
+    expect(client.state.head).toBe(4)
+    expect(client.state.restoredGraph).toEqual(second)
+    const old = deferred(), oldRestore = deferred(), oldPublish = deferred(), oldSave = deferred()
+    fetchImpl.mockImplementationOnce(() => old.promise)
+    const head = client.head('strategy')
+    fetchImpl.mockImplementationOnce(() => oldRestore.promise)
+    const restore = client.restore('strategy', 1, 4)
+    fetchImpl.mockImplementationOnce(() => oldPublish.promise)
+    const publish = client.publish('strategy', 4)
+    fetchImpl.mockImplementationOnce(() => oldSave.promise)
+    const firstGenerationSave = client.save('strategy', first, 4)
+    const dispatch = vi.spyOn(globalThis, 'dispatchEvent')
+    client.setDocId('B'); client.setDocId('strategy')
+    const latest = deferred()
+    fetchImpl.mockImplementationOnce(() => latest.promise)
+    const read = client.head('strategy')
+    old.resolve(response({ revision: 9 }))
+    oldRestore.resolve(response({ revision: 10, graph: first }))
+    oldPublish.resolve(response({ new_head: 10 }))
+    oldSave.resolve(response({ revision: 11 }))
+    await Promise.all([head, restore, publish, firstGenerationSave])
+    expect(client.state.head).toBeNull()
+    expect(client.state.restoredGraph).toBeNull()
+    expect(client.state.published).toBeNull()
+    expect(dispatch.mock.calls.some(([event]) => event.type === SAVED_REVISION_EVENT && event.detail.doc_id === 'strategy' && event.detail.revision === 11)).toBe(true)
+    latest.resolve(response({ revision: 5 }))
+    await read
+    expect(client.state.head).toBe(5)
+  })
+
+  it('P1-c drops Take theirs when the document or graph operation changes', async () => {
+    const { client, append, fetchImpl } = ledger()
+    await client.save('strategy', first, null)
+    append(second)
+    await client.save('strategy', first, 1)
+    const pending = deferred()
+    fetchImpl.mockImplementationOnce(() => pending.promise)
+    const take = vi.fn()
+    render(<LabSaveBar document={first} ready client={client} onTakeTheirs={take} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Take theirs' }))
+    act(() => client.setDocId('B'))
+    await act(async () => pending.resolve(response({ revision: 2, graph: second })))
+    expect(take).not.toHaveBeenCalled()
+    expect(screen.queryByText(/Loaded r2/)).toBeNull()
+    act(() => client.setDocId('strategy'))
+    await act(async () => { await client.save('strategy', first, 1) })
+    const replaced = deferred()
+    fetchImpl.mockImplementationOnce(() => replaced.promise)
+    fireEvent.click(screen.getByRole('button', { name: 'Take theirs' }))
+    await act(async () => { await client.restore('strategy', 1, 2) })
+    await act(async () => replaced.resolve(response({ revision: 2, graph: second })))
+    expect(take).not.toHaveBeenCalled()
+    expect(client.state.restoredGraph).toEqual(first)
+  })
+
+  it('P2-a drops older head and revisions reads and pre-conflict head responses', async () => {
+    const { client, fetchImpl, append } = ledger()
+    const older = deferred(), newer = deferred()
+    fetchImpl.mockImplementationOnce(() => older.promise).mockImplementationOnce(() => newer.promise)
+    const firstRead = client.head('strategy'), secondRead = client.head('strategy')
+    newer.resolve(response({ revision: 3 })); await secondRead
+    older.resolve(response({ revision: 2 })); await firstRead
+    expect(client.state.head).toBe(3)
+    const oldList = deferred(), newList = deferred()
+    fetchImpl.mockImplementationOnce(() => oldList.promise).mockImplementationOnce(() => newList.promise)
+    const list1 = client.revisions('strategy'), list2 = client.revisions('strategy')
+    newList.resolve(response({ revisions: [{ revision: 3, author: 'new' }] })); await list2
+    oldList.resolve(response({ revisions: [{ revision: 3, author: 'old' }] })); await list1
+    expect(client.state.revisions[0].author).toBe('new')
+    const preConflict = deferred()
+    fetchImpl.mockImplementationOnce(() => preConflict.promise)
+    const read = client.head('strategy')
+    for (let n = 0; n < 4; n += 1) append(first)
+    await client.save('strategy', second, 3)
+    preConflict.resolve(response({ revision: 2 })); await read
+    expect(client.state.head).toBe(4)
+    expect(client.state.conflict.serverHead).toBe(4)
+  })
+
+  it('P2-b puts mine back on the canvas before Keep mine sends its save', async () => {
+    const { client, append, fetchImpl } = ledger()
+    await client.save('strategy', first, null)
+    append(graph('server'))
+    await client.save('strategy', second, 1)
+    let canvas = second
+    const take = value => { canvas = value }
+    render(<LabSaveBar document={second} ready client={client} onTakeTheirs={take} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Take theirs' }))
+    await screen.findByText('Loaded r2. Your edits are kept.')
+    expect(canvas).toEqual(graph('server'))
+    fetchImpl.mockImplementationOnce(async (url, init) => {
+      expect(canvas).toEqual(second)
+      expect(JSON.parse(init.body)).toMatchObject({ graph: second, expected_head: 2 })
+      return response({ revision: 3, graph: second })
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Keep mine' }))
+    await screen.findByText('Saved r3')
+    expect(canvas).toEqual(second)
+  })
+
+  it('P2-c reconciles restore and publish conflicts and reloads revisions before retry', async () => {
+    const { client, append, fetchImpl } = ledger()
+    await client.save('strategy', first, null)
+    append(second)
+    expect(await client.restore('strategy', 1, 1)).toMatchObject({ conflict: true, head: 2 })
+    expect(client.state.head).toBe(2)
+    expect(client.state.revisions.map(row => row.revision)).toEqual([1, 2])
+    await client.restore('strategy', 1, client.state.head)
+    expect(JSON.parse(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/restore')).at(-1)[1].body).expected_head).toBe(2)
+    append(second)
+    expect(await client.publish('strategy', client.state.head)).toMatchObject({ conflict: true, head: 4 })
+    expect(client.state.head).toBe(4)
+    expect(client.state.revisions.map(row => row.revision)).toEqual([1, 2, 3, 4])
+    expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/revisions'))).toHaveLength(2)
+  })
+
+  it('P2-d retains the known head after a failed conflict lookup and offers retry', async () => {
+    const { client, append, fetchImpl } = ledger()
+    await client.save('strategy', first, null)
+    await client.head('strategy')
+    append(second)
+    fetchImpl.mockResolvedValueOnce(response({ detail: 'stale', head: 2 }, 409)).mockResolvedValueOnce(response({ detail: 'unavailable' }, 503))
+    render(<LabSaveBar document={second} ready client={client} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }))
+    const retry = await screen.findByRole('button', { name: 'Head unknown, retry' })
+    expect(client.state.head).toBe(1)
+    expect(client.state.conflict.serverHead).toBe(2)
+    expect(screen.getByRole('button', { name: 'Keep mine' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Take theirs' })).toBeEnabled()
+    const count = fetchImpl.mock.calls.length
+    fireEvent.click(retry)
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Head unknown, retry' })).toBeNull())
+    expect(fetchImpl.mock.calls.length).toBe(count + 1)
+    expect(fetchImpl.mock.calls.at(-1)[0]).toMatch(/\/head$/)
+    expect(client.state.head).toBe(2)
+  })
+
+  it('P2-f resets selection, comparison and status and ignores A list completion in B', async () => {
+    const { client, append, fetchImpl } = ledger()
+    append(first); append(second)
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Publish r2' })).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Before revision'), { target: { value: '1' } })
+    fireEvent.change(screen.getByLabelText('After revision'), { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Compare', exact: true }))
+    await screen.findByText('Compared revisions.')
+    const pending = deferred()
+    fetchImpl.mockImplementationOnce(() => pending.promise)
+    act(() => globalThis.dispatchEvent(new CustomEvent(SAVED_REVISION_EVENT, { detail: { doc_id: 'strategy' } })))
+    act(() => client.setDocId('B'))
+    await waitFor(() => expect(screen.queryByText('Loading history…')).toBeNull())
+    expect(screen.getByLabelText('Before revision')).toHaveValue('')
+    expect(screen.getByLabelText('After revision')).toHaveValue('')
+    expect(screen.queryByText('Compared revisions.')).toBeNull()
+    expect(screen.queryByRole('list', { name: 'Revision changes' })).toBeNull()
+    await act(async () => pending.resolve(response({ revisions: [{ revision: 99, created_at: 1800000000 }] })))
+    expect(screen.queryByTestId('vh-row-v99')).toBeNull()
+  })
+
+  it('P2-g Load older requests before the oldest revision and merges without duplicates', async () => {
+    const row = revision => ({ revision, created_at: 1800000000 + revision })
+    const fetchImpl = vi.fn(async url => response(url.endsWith('/head') ? { revision: 4 }
+      : { revisions: url.includes('before=3') ? [row(2), row(3)] : [row(3), row(4)] }))
+    const client = createLabArtifactsClient({ fetchImpl })
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Load older' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Load older' }))
+    await screen.findByTestId('vh-row-v2')
+    expect(fetchImpl.mock.calls.at(-1)[0]).toMatch(/revisions\?before=3$/)
+    expect(client.state.revisions.map(item => item.revision)).toEqual([2, 3, 4])
+    expect(screen.getAllByTestId('vh-row-v3')).toHaveLength(1)
+  })
+
+  it('P2-h renders registry-only block list changes and nested registry and title changes', () => {
+    const next = copy(first)
+    next.blocks[0].registry = { id: 'count', version: '2.0.0' }
+    const view = render(<LabDiffView changes={[{ op: 'replace', path: '/blocks', before: first.blocks, after: next.blocks }]} />)
+    expect(screen.getByText('Changed registry on field-1: field@1.0.0 -> count@2.0.0')).toBeVisible()
+    view.rerender(<LabDiffView beforeGraph={first} afterGraph={next} changes={[
+      { op: 'replace', path: '/blocks/0/registry/id', before: 'field', after: 'count' },
+      { op: 'replace', path: '/blocks/0/title', before: 'Old', after: 'New' },
+    ]} />)
+    expect(screen.getByText('Changed registry on field-1: field@1.0.0 -> count@2.0.0')).toBeVisible()
+    expect(screen.getByText('Changed title on field-1')).toBeVisible()
+  })
+
+  it('P3-a shows initial and refresh loading and disables cached actions until completion', async () => {
+    const { client, append, fetchImpl } = ledger()
+    append(first); append(second)
+    const initial = deferred()
+    fetchImpl.mockImplementationOnce(() => initial.promise)
+    render(<HistoryView client={client} />)
+    expect(screen.getByText('Loading history…')).toBeVisible()
+    await act(async () => initial.resolve(response({ revisions: copy(ledgerRows()) })))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Publish r2' })).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Before revision'), { target: { value: '1' } })
+    fireEvent.change(screen.getByLabelText('After revision'), { target: { value: '2' } })
+    const pending = deferred()
+    fetchImpl.mockImplementationOnce(() => pending.promise)
+    act(() => globalThis.dispatchEvent(new CustomEvent(SAVED_REVISION_EVENT, { detail: { doc_id: 'strategy' } })))
+    expect(screen.getByText('Loading history…')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Compare', exact: true })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Restore', exact: true })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Publish r2' })).toBeDisabled()
+    await act(async () => pending.resolve(response({ revisions: ledgerRows() })))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Compare', exact: true })).toBeEnabled())
+    expect(screen.getByRole('button', { name: 'Restore', exact: true })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Publish r2' })).toBeEnabled()
+    function ledgerRows() { return [1, 2].map(revision => ({ revision, created_at: 1800000000 + revision })) }
+  })
+
   it('loads only the diff route when graphs are disabled', async () => {
     const { client, append, fetchImpl } = ledger()
     append(first)
@@ -85,6 +332,7 @@ describe('Strategy revision ledger', () => {
     config.apiBase = 'https://studio.example.test'
     localStorage.setItem('leaf.jwt', 'test-token')
     try {
+      await client.head('strategy')
       const save = render(<LabSaveBar document={first} ready client={client} />)
       fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }))
       await waitFor(() => expect(client.state.head).toBe(1))
@@ -241,6 +489,7 @@ describe('Strategy revision ledger', () => {
   it('keeps mine byte-identical and retries against the conflict head', async () => {
     const { client, append, fetchImpl } = ledger()
     await client.save('strategy', first, null)
+    await client.head('strategy')
     append(graph('server'))
     const bytes = JSON.stringify(second)
     render(<LabSaveBar document={second} ready client={client} />)
@@ -258,6 +507,7 @@ describe('Strategy revision ledger', () => {
   it('takes theirs while retaining mine for recovery', async () => {
     const { client, append } = ledger()
     await client.save('strategy', first, null)
+    await client.head('strategy')
     const server = graph('server')
     append(server)
     const bytes = JSON.stringify(second)
@@ -314,6 +564,7 @@ describe('Strategy revision ledger', () => {
       time += count * 10
       return { ok: true, json: async () => ({ revision: count, sha256: 'a'.repeat(64), graph: first }) }
     } })
+    client.state.headLoaded = true
     const view = render(<LabSaveBar document={first} ready={false} client={client} />)
     expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
     view.rerender(<LabSaveBar document={null} ready client={client} />)

@@ -81,6 +81,34 @@ afterEach(async () => {
 })
 
 describe('first-click live graph', () => {
+  it('P2-e hydrates the selected document head before enabling its first Save', async () => {
+    let resolveHead
+    const head = new Promise(resolve => { resolveHead = resolve })
+    const fetchImpl = vi.fn((url, init) => init.method === 'GET' ? head : Promise.resolve({ ok: true,
+      json: async () => ({ revision: 8, graph: JSON.parse(init.body).graph }) }))
+    const client = createLabArtifactsClient({ fetchImpl })
+    client.setDocId('selected')
+    const provider = createHostProvider({ framed: true })
+    const document = graphOf(hostProvider(), ['host-source', 'count'])
+    const view = render(<GraphView client={client} provider={provider} revision={1} initialDocument={document} />)
+    await screen.findByRole('region', { name: 'Strategy palette' })
+    const save = screen.getByRole('button', { name: 'Save', exact: true })
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(save).toBeDisabled()
+    expect(save).not.toHaveAttribute('title', 'Loading head')
+    act(() => provider.announce(rows))
+    view.rerender(<GraphView client={client} provider={provider} revision={2} initialDocument={document} />)
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${config.apiBase}/api/lab/docs/selected/head`)
+    expect(save).toBeDisabled()
+    expect(save).toHaveAttribute('title', 'Loading head')
+    await act(async () => resolveHead({ ok: true, json: async () => ({ revision: 7 }) }))
+    await waitFor(() => expect(save).toBeEnabled())
+    fireEvent.click(save)
+    await waitFor(() => expect(client.state.head).toBe(8))
+    expect(JSON.parse(fetchImpl.mock.calls.find(([url]) => url.endsWith('/save'))[1].body).expected_head).toBe(7)
+  })
+
   it('uses the Studio base, tenant and current bearer token for each source request', async () => {
     const scheme = 'Bearer'
     const auth = token => [scheme, token].join(' ')
@@ -97,7 +125,7 @@ describe('first-click live graph', () => {
     document.blocks.push(...graphOf(provider, ['studio-capabilities']).blocks)
     const view = render(<GraphView initialDocument={document} />)
     try {
-      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3))
       for (const path of ['/api/jobs', '/api/capabilities']) {
         expect(fetchImpl).toHaveBeenCalledWith(`${config.apiBase}${path}`, expect.objectContaining({
           headers: expect.objectContaining({ accept: 'application/json', 'X-Tenant-Id': config.tenant, [authHeaderName]: auth('first-token') }),
@@ -106,8 +134,8 @@ describe('first-click live graph', () => {
       await waitFor(() => expect(cardNamed('Jobs')).toBeVisible())
       localStorage.setItem('leaf.jwt', 'renewed-token')
       await act(async () => { globalThis.document.dispatchEvent(new Event('visibilitychange')) })
-      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(4))
-      expect(fetchImpl.mock.calls.slice(2).every(([, init]) => init.headers[authHeaderName] === auth('renewed-token'))).toBe(true)
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(5))
+      expect(fetchImpl.mock.calls.slice(3).every(([, init]) => init.headers[authHeaderName] === auth('renewed-token'))).toBe(true)
     } finally {
       view.unmount()
       config.apiBase = originalBase
@@ -157,9 +185,10 @@ describe('first-click live graph', () => {
   })
 
   it('replaces a successful Studio value with a source refusal for primitive rows', async () => {
-    const fetchImpl = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ jobs: [{ a: 7 }], as_of: now }) })
-      .mockResolvedValue({ ok: true, json: async () => ({ jobs: [123], as_of: now }) })
+    let sourceCalls = 0
+    const fetchImpl = vi.fn(async url => url.endsWith('/head')
+      ? { ok: false, status: 404, json: async () => ({}) }
+      : { ok: true, json: async () => ({ jobs: ++sourceCalls === 1 ? [{ a: 7 }] : [123], as_of: now }) })
     vi.stubGlobal('fetch', fetchImpl)
     render(<GraphView initialDocument={graphOf(createHostProvider({ framed: false }), ['studio-jobs'])} />)
     await waitFor(() => expect(within(cardNamed('Jobs')).getByText('7')).toBeVisible())
@@ -232,13 +261,13 @@ describe('first-click live graph', () => {
     const removeListener = vi.spyOn(document, 'removeEventListener')
     const view = render(<GraphView />)
     const palette = within(await screen.findByRole('region', { name: 'Strategy palette' }))
-    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([`${config.apiBase}/api/lab/docs/strategy/head`])
     fireEvent.click(palette.getByRole('button', { name: 'Jobs' }))
-    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
     fireEvent.click(screen.getByRole('button', { name: 'Select studio-jobs-1' }))
     fireEvent.click(screen.getByRole('button', { name: 'Move studio-jobs-1' }))
-    expect(fetchImpl).toHaveBeenCalledTimes(1)
-    expect(fetchImpl.mock.calls[0][0]).toBe(`${config.apiBase}/api/jobs`)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl.mock.calls[1][0]).toBe(`${config.apiBase}/api/jobs`)
     fireEvent.click(screen.getByRole('button', { name: 'Remove block' }))
     expect(removeListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
     view.unmount()
