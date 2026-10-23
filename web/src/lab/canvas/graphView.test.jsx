@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import GraphView, { LiveValues, useLiveGraph } from './GraphView.jsx'
 import LabWorkbench from '../LabWorkbench.jsx'
 import { createHostProvider } from '../host/hostProvider.js'
+import * as hostProviderModule from '../host/hostProvider.js'
 import { addBlock, emptyGraph } from './graphDoc.js'
 import { registry } from './registry.js'
 import { setLayoutEngineLoader } from './dependencyLayout.js'
@@ -117,9 +118,13 @@ describe('first-click live graph', () => {
 
   it('shows a failed source as an empty card without exposing response text', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('private response')))
-    render(<GraphView initialDocument={graphOf(createHostProvider({ framed: false }), ['studio-jobs'])} />)
+    const document = graphOf(createHostProvider({ framed: false }), ['studio-jobs'])
+    const createProvider = vi.spyOn(hostProviderModule, 'createHostProvider')
+    render(<GraphView initialDocument={document} />)
     await waitFor(() => expect(within(cardNamed('Jobs')).getByText('error: source-failed')).toBeVisible())
     expect(cardNamed('Jobs')).toHaveAttribute('data-value-kind', 'empty')
+    const provider = createProvider.mock.results[0].value
+    expect(provider.sources(document)[document.blocks[0].id].error.code).toBe('source-failed')
     expect(screen.queryByText(/private response/)).toBeNull()
   })
 

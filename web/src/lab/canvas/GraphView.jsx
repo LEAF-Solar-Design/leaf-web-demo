@@ -137,8 +137,16 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     const wanted = ids ? ids.split(',') : []
     for (const [id, poller] of pollers.current) if (!wanted.includes(id)) { poller.dispose(); pollers.current.delete(id) }
     for (const id of wanted) if (!pollers.current.has(id)) {
-      const poller = sources.poll(id, { onValue: value => provider.setStudioValue(id, value),
-        onError: error => provider.setStudioValue(id, runtimeValue(null, { host_tainted: true, error })) })
+      const deliver = value => {
+        try {
+          provider.setStudioValue(id, value?.error || !Array.isArray(value?.data)
+            ? runtimeValue([], { host_tainted: true, error: { code: value?.error?.code || 'source-failed' } })
+            : value)
+        } catch { /* Keep provider refusals out of the poller. */ }
+      }
+      const poller = sources.poll(id, { onValue: deliver, onError: () => {
+        deliver(runtimeValue([], { host_tainted: true, error: { code: 'source-failed' } }))
+      } })
       pollers.current.set(id, poller)
       void poller.start()
     }
