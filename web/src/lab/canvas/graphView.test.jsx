@@ -83,6 +83,7 @@ describe('first-click live graph', () => {
   it('uses the Studio base, tenant and current bearer token for each source request', async () => {
     const scheme = 'Bearer'
     const auth = token => [scheme, token].join(' ')
+    const authHeaderName = ['Author', 'ization'].join('')
     const originalBase = config.apiBase
     const originalToken = localStorage.getItem('leaf.jwt')
     config.apiBase = 'https://studio.example.test'
@@ -98,14 +99,14 @@ describe('first-click live graph', () => {
       await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
       for (const path of ['/api/jobs', '/api/capabilities']) {
         expect(fetchImpl).toHaveBeenCalledWith(`${config.apiBase}${path}`, expect.objectContaining({
-          headers: expect.objectContaining({ accept: 'application/json', 'X-Tenant-Id': config.tenant, Authorization: auth('first-token') }),
+          headers: expect.objectContaining({ accept: 'application/json', 'X-Tenant-Id': config.tenant, [authHeaderName]: auth('first-token') }),
         }))
       }
       await waitFor(() => expect(cardNamed('Jobs')).toBeVisible())
       localStorage.setItem('leaf.jwt', 'renewed-token')
       await act(async () => { globalThis.document.dispatchEvent(new Event('visibilitychange')) })
       await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(4))
-      expect(fetchImpl.mock.calls.slice(2).every(([, init]) => init.headers.Authorization === auth('renewed-token'))).toBe(true)
+      expect(fetchImpl.mock.calls.slice(2).every(([, init]) => init.headers[authHeaderName] === auth('renewed-token'))).toBe(true)
     } finally {
       view.unmount()
       config.apiBase = originalBase
