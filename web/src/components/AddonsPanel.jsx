@@ -62,15 +62,25 @@ function AddonRow({ orgId, addon, setting }) {
 function AddonsContent({ orgId }) {
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState({ loading: true })
+  const [statementAttempt, setStatementAttempt] = useState(0)
+  const [statementState, setStatementState] = useState({ loading: true })
   useEffect(() => {
     let active = true
     setState({ loading: true })
-    const period = new Date().toISOString().slice(0, 7)
-    Promise.all([getAddons(orgId), getStatement(orgId, period)])
-      .then(([addons, statement]) => { if (active) setState({ addons, statement }) })
+    getAddons(orgId)
+      .then((addons) => { if (active) setState({ addons }) })
       .catch((error) => { if (active) setState({ error: error.message }) })
     return () => { active = false }
   }, [orgId, attempt])
+  useEffect(() => {
+    let active = true
+    setStatementState({ loading: true })
+    const period = new Date().toISOString().slice(0, 7)
+    getStatement(orgId, period)
+      .then((statement) => { if (active) setStatementState({ statement }) })
+      .catch((error) => { if (active) setStatementState({ error: error.message }) })
+    return () => { active = false }
+  }, [orgId, attempt, statementAttempt])
   if (state.loading) return <p className="ca-copy" role="status">Loading add-ons...</p>
   if (state.error) return (
     <div className="pane-fail">
@@ -78,8 +88,8 @@ function AddonsContent({ orgId }) {
       <button type="button" className="chip-act" onClick={() => setAttempt((value) => value + 1)}>Retry</button>
     </div>
   )
-  const lines = (state.statement?.lines || []).filter((line) => line.mode === 'managed')
-  const totals = state.statement?.totals
+  const lines = (statementState.statement?.lines || []).filter((line) => line.mode === 'managed')
+  const totals = statementState.statement?.totals
   return (
     <>
       <div className="ca-account-list">
@@ -87,7 +97,13 @@ function AddonsContent({ orgId }) {
       </div>
       <section aria-label="This month" className="ca-linked">
         <h3 className="ca-kindline">This month</h3>
-        {state.statement?.placeholder && <p className="ca-note">Prices are placeholders while pricing is set</p>}
+        {statementState.loading ? <p className="ca-copy">Loading this month...</p> : statementState.error ? (
+          <div className="pane-fail">
+            <p className="field-err" role="alert">{statementState.error}</p>
+            <button type="button" className="chip-act" onClick={() => setStatementAttempt((value) => value + 1)}>Retry</button>
+          </div>
+        ) : <>
+        {statementState.statement?.placeholder && <p className="ca-note">Prices are placeholders while pricing is set</p>}
         {!lines.length && <p className="ca-copy">No managed usage this month.</p>}
         <table className="ca-copy">
           <thead><tr><th>Add-on</th><th>Cost</th><th>Management fee</th><th>Total</th></tr></thead>
@@ -99,6 +115,7 @@ function AddonsContent({ orgId }) {
           ))}</tbody>
           {totals && <tfoot><tr><th scope="row">Totals</th><td>${totals.cost_usd}</td><td>${totals.fee_usd}</td><td>${totals.total_usd}</td></tr></tfoot>}
         </table>
+        </>}
       </section>
     </>
   )

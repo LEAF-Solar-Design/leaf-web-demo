@@ -160,6 +160,45 @@ describe('Studio Add-ons', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  it('keeps the settings usable when the statement is refused at the event limit', async () => {
+    const fetch = vi.fn(async (url, options) => {
+      if (options?.method === 'PUT') return response({ addon: { mode: 'byo', byo_ref: 'my-e2b-key' } })
+      if (url.includes('/billing/statement?')) return response({ detail: 'statement window exceeds the event limit' }, 409)
+      return response({ addons: {} })
+    })
+    vi.stubGlobal('fetch', fetch)
+    panel()
+    await loadedRow()
+    for (const label of LABELS) expect(screen.getByRole('region', { name: label })).toBeInTheDocument()
+    const month = within(screen.getByRole('region', { name: 'This month' }))
+    expect(await month.findByRole('alert')).toHaveTextContent('statement window exceeds the event limit')
+    const row = within(screen.getByRole('region', { name: 'Hosted execution' }))
+    fireEvent.click(row.getByRole('radio', { name: 'Your own' }))
+    fireEvent.change(row.getByRole('textbox'), { target: { value: 'my-e2b-key' } })
+    fireEvent.click(row.getByRole('button', { name: 'Save' }))
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/addons/e2b_exec'), expect.objectContaining({ method: 'PUT' }))
+    expect(await row.findByRole('status')).toHaveTextContent('Saved')
+  })
+
+  it('retries only the statement from This month', async () => {
+    const fetch = vi.fn(async (url) => {
+      if (url.includes('/billing/statement?')) return response({ detail: 'statement window exceeds the event limit' }, 409)
+      return response({ addons: {} })
+    })
+    vi.stubGlobal('fetch', fetch)
+    panel()
+    const month = within(await screen.findByRole('region', { name: 'This month' }))
+    expect(await month.findByRole('alert')).toHaveTextContent('statement window exceeds the event limit')
+    const retryFetch = mockFetch()
+    fireEvent.click(month.getByRole('button', { name: 'Retry' }))
+    expect(await month.findByRole('rowheader', { name: 'Hosted execution' })).toBeInTheDocument()
+    expect(month.getByText('$15.77')).toBeInTheDocument()
+    const addonsGets = [...fetch.mock.calls, ...retryFetch.mock.calls]
+      .filter(([url, options]) => url.endsWith('/addons') && (!options?.method || options.method === 'GET'))
+    expect(addonsGets).toHaveLength(1)
+    expect(retryFetch).toHaveBeenCalledWith(expect.stringContaining('/billing/statement?'), expect.any(Object))
+  })
+
   it('offers only text inputs named for credentials across all BYO rows', async () => {
     mockFetch()
     const { container } = panel()
