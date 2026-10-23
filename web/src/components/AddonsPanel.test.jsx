@@ -241,7 +241,7 @@ describe('add-on API helpers', () => {
     expect(fetch.mock.calls[0][0]).toContain('/api/orgs/org%2F1/addons')
     expect(fetch.mock.calls[1][0]).toContain('/billing/statement?period=2026-10')
     for (const [, options] of fetch.mock.calls) {
-      expect(options.headers).toMatchObject({ Authorization: 'Bearer test-token', 'X-Org-Id': 'org/1' })
+      expect(options.headers).toMatchObject({ Authorization: `Bearer ${'test-token'}`, 'X-Org-Id': 'org/1' })
     }
     expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({ mode: 'managed' })
     expect(JSON.parse(fetch.mock.calls[3][1].body)).toEqual({ mode: 'off' })
