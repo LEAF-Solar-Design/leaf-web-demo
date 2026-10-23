@@ -80,6 +80,7 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
           const after = kind === 'Next' ? catalog.next_cursor : undefined
           const page = IntegrationActionCatalogV1.parse(await client.getActionCatalog(projectId, { signal: controller.signal, limit: 25, after }))
           assertCurrent(); await guarded()
+          if (kind === 'Open') ctx.cursors.clear()
           if (after) ctx.cursors.add(after)
           setCatalog(page)
           return
