@@ -49,6 +49,32 @@ function ledger() {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('Strategy revision ledger', () => {
+  it('loads only the diff route when graphs are disabled', async () => {
+    const { client, append, fetchImpl } = ledger()
+    append(first)
+    append(second)
+    const result = await client.diff('strategy', 1, 2, { graphs: false })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${config.apiBase}/api/lab/docs/strategy/diff?before=1&after=2`)
+    expect(result).toEqual({ ok: true, before: 1, after: 2, changes })
+    expect(result).not.toHaveProperty('beforeGraph')
+    expect(result).not.toHaveProperty('afterGraph')
+  })
+
+  it('loads both compared graphs by default with three requests', async () => {
+    const { client, append, fetchImpl } = ledger()
+    append(first)
+    append(second)
+    const result = await client.diff('strategy', 1, 2)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      `${config.apiBase}/api/lab/docs/strategy/diff?before=1&after=2`,
+      `${config.apiBase}/api/lab/docs/strategy/revisions/1`,
+      `${config.apiBase}/api/lab/docs/strategy/revisions/2`,
+    ])
+    expect(result).toEqual({ ok: true, before: 1, after: 2, changes, beforeGraph: first, afterGraph: second })
+  })
+
   it('saves r1/r2, compares settings and pipes, restores r1 as r3 and publishes through the drawer primitive', async () => {
     const { client, fetchImpl } = ledger()
     const events = []
