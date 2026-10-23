@@ -17,7 +17,7 @@ from solar_inspection import (  # noqa: E402
     raw_record_bytes, store_evidence, validate_inspection,
 )
 from solar_apply_plan import (  # noqa: E402
-    build_apply_plan, patch_document, serialize_plan, validate_plan,
+    build_apply_plan, patch_document, serialize_plan, validate_adapter, validate_plan,
 )
 
 
@@ -447,3 +447,267 @@ def test_schema_freezes_point_table_delete_and_update_types(inputs):
     plan["operations"][2]["changes"] = {}
     with pytest.raises(GraphValidationError, match="SCHEMA"):
         validate_plan(plan)
+
+
+def _captured_two_strings(inputs):
+    inputs = copy.deepcopy(inputs)
+    inputs[0]["inverters"][0]["total_dc_inputs"] = 3
+    after = _string(inputs[0])
+    first = after["strings"][0]
+    second = copy.deepcopy(first)
+    second["id"] = _id("string", 2)
+    after["strings"].append(second)
+    for i, (string, panel) in enumerate(zip(after["strings"], after["panels"])):
+        string.update(ordered_panel_refs=[panel["id"]], module_count=1,
+                      from_ref=panel["id"], to_ref=panel["id"])
+        string["extra"]["circuit_assignment"].update(
+            strings_per_mppt=3, strings_on_inverter=2,
+            string_number=i + 1, terminal_number=i + 1)
+        string["circuit_tag"] = f"1.A.{i + 1}"
+        panel["assignment"] = {"string_ref": string["id"], "seq": 0}
+    after["inverters"][0]["input_assignments"] = [
+        {"string_ref": string["id"], "mppt_letter": "A", "input_number": i}
+        for i, string in enumerate(after["strings"])]
+    return _captured(inputs, after, _plan(inputs, after))
+
+
+def test_assignment_only_move_rewrites_only_moved_string(inputs):
+    captured = _captured_two_strings(inputs)
+    after = copy.deepcopy(captured[0])
+    after["inverters"][0]["input_assignments"][0]["input_number"] = 2
+    moved = after["strings"][0]
+    moved["extra"]["circuit_assignment"].update(string_number=3, terminal_number=3)
+    moved["circuit_tag"] = "1.A.3"
+    saved = copy.deepcopy((captured, after))
+    plan = _plan(captured, after)
+    handles = {entry["role"]: entry["handle"] for entry in captured[3]["entities"]
+               if entry["app_id"] == moved["id"]}
+    assert len(plan["operations"]) == 3
+    assert all(op["entity_handle"] in handles.values() for op in plan["operations"])
+    update = next(op for op in plan["operations"] if op["op"] == "update_entity")
+    assert update["entity_handle"] == handles["tag"]
+    assert update["changes"]["geometry"]["contents"] == "1.A.3"
+    stores = {op["entity_handle"]: op for op in plan["operations"] if op["op"] == "set_store"}
+    assert stores[handles["primary"]]["payload"]["records"][2]["value"] == "1.A.3"
+    assert [r["value"] for r in stores[handles["tag"]]["payload"]["records"]] == [
+        "TEST_APP", 1, 3, 3, 1, "A", 2, 3, 0]
+    assert all(op["expected_payload_sha256"] is not None for op in stores.values())
+    assert serialize_plan(plan) == serialize_plan(_plan(captured, after))
+    assert (captured, after) == saved
+
+
+@pytest.mark.parametrize("circuit_update", ["unchanged", "wrong-terminal", "wrong-tag"])
+def test_inconsistent_assignment_only_move_refuses(inputs, circuit_update):
+    captured = _captured_two_strings(inputs)
+    after = copy.deepcopy(captured[0])
+    after["inverters"][0]["input_assignments"][0]["input_number"] = 2
+    moved = after["strings"][0]
+    if circuit_update != "unchanged":
+        moved["extra"]["circuit_assignment"].update(
+            string_number=3, terminal_number=2 if circuit_update == "wrong-terminal" else 3)
+        moved["circuit_tag"] = "1.A.3" if circuit_update == "wrong-terminal" else "1.A.1"
+    else:
+        assert after["strings"] == captured[0]["strings"]
+    with pytest.raises(GraphValidationError, match="CIRCUIT_ASSIGNMENT_MISMATCH"):
+        _plan(captured, after)
+
+
+def test_assignment_only_swap_rewrites_both_strings_only(inputs):
+    captured = _captured_two_strings(inputs)
+    after = copy.deepcopy(captured[0])
+    for i, string in enumerate(after["strings"]):
+        number = 2 - i
+        after["inverters"][0]["input_assignments"][i]["input_number"] = number - 1
+        string["extra"]["circuit_assignment"].update(string_number=number, terminal_number=number)
+        string["circuit_tag"] = f"1.A.{number}"
+    plan = _plan(captured, after)
+    assert len(plan["operations"]) == 6
+    expected_ids = set()
+    for string in after["strings"]:
+        expected_ids.update({"entity:" + string["id"] + ":tag",
+                             "store:" + string["id"] + ":cable",
+                             "store:" + string["id"] + ":tag"})
+        handles = {entry["role"]: entry["handle"] for entry in captured[3]["entities"]
+                   if entry["app_id"] == string["id"]}
+        stores = {op["entity_handle"]: op for op in plan["operations"] if op["op"] == "set_store"}
+        assert stores[handles["primary"]]["payload"]["records"][2]["value"] == string["circuit_tag"]
+        assert stores[handles["tag"]]["payload"]["records"][7]["value"] == (
+            string["extra"]["circuit_assignment"]["terminal_number"])
+    assert {op["op_id"] for op in plan["operations"]} == expected_ids
+
+
+@pytest.mark.parametrize("graph_side", ["before", "after"])
+def test_dangling_input_reference_refuses_circuit_mismatch(inputs, graph_side):
+    captured = _captured_two_strings(inputs)
+    after = copy.deepcopy(captured[0])
+    graph = captured[0] if graph_side == "before" else after
+    graph["inverters"][0]["input_assignments"].append(
+        {"string_ref": _id("string", 99), "mppt_letter": "A", "input_number": 2})
+    with pytest.raises(GraphValidationError, match="CIRCUIT_ASSIGNMENT_MISMATCH"):
+        _plan(captured, after)
+
+
+def _global_store_inputs(inputs, key="settings"):
+    before, adapter, inspection, mapping = copy.deepcopy(inputs)
+    field = "string_layer" if key == "settings" else "name"
+    codec = copy.deepcopy(adapter["store_codecs"]["group"])
+    codec.update(scope="named-dictionary", dictionary_path=["TEST_GLOBAL"],
+                 key="TEST_" + key.upper(), encoding="json", document_count=1,
+                 defaults={"documents": [{"Value": ""}]})
+    adapter["store_codecs"]["global"] = codec
+    adapter["write_fields"]["global"] = [
+        {"source": "/node/" + field, "destination": "/documents/0/Value",
+         "conversion": "identity", "null": "reject", "default": None}]
+    adapter["preservation"]["allowed_changed_paths"]["global"] = ["/documents/0/Value"]
+    adapter["global_stores"] = {key: [{"codec": "global", "fields": "global"}]}
+    raw_document = ('{ "Value": ' + json.dumps(before[key][field])
+                    + ', "Unknown" : "keep\\u0020raw", "Number": 1.50 }')
+    payload = {"encoding": "json", "documents": [raw_document]}
+    raw = _raw_payload(payload)
+    store = {k: copy.deepcopy(codec[k]) for k in ("scope", "dictionary_path", "key", "app")}
+    store.update(entity_handle=None, payload=payload, raw_records=raw, **store_evidence(raw))
+    inspection["stores"].append(store)
+    return (before, adapter, inspection, mapping), field, raw_document
+
+
+@pytest.mark.parametrize("key", ["project", "settings"])
+def test_global_changed_leaf_preserves_tokens_and_captured_hash(inputs, key):
+    captured, field, raw = _global_store_inputs(inputs, key)
+    saved = copy.deepcopy(captured)
+    after = copy.deepcopy(captured[0])
+    after[key][field] = "Changed global value"
+    plan = _plan(captured, after)
+    assert len(plan["operations"]) == 1
+    store = plan["operations"][0]
+    assert store == {
+        "op": "set_store", "op_id": "store:global:" + key + ":global",
+        "scope": "named-dictionary", "dictionary_path": ["TEST_GLOBAL"],
+        "key": "TEST_" + key.upper(), "app": None,
+        "entity_handle": None, "entity_create_ref": None,
+        "expected_payload_sha256": captured[2]["stores"][-1]["sha256"],
+        "payload": {"encoding": "json", "documents": [
+            raw.replace(json.dumps(captured[0][key][field]), '"Changed global value"', 1)]},
+        "bindings": []}
+    assert '"Unknown" : "keep\\u0020raw"' in store["payload"]["documents"][0]
+    assert '"Number": 1.50' in store["payload"]["documents"][0]
+    assert captured == saved
+
+
+@pytest.mark.parametrize("key", ["project", "settings"])
+def test_global_semantically_equal_node_emits_no_store(inputs, key):
+    captured, _, _ = _global_store_inputs(inputs, key)
+    after = copy.deepcopy(captured[0])
+    after[key]["provenance"]["last_writer"] = "metadata-only"
+    assert _plan(captured, after)["operations"] == []
+
+
+def test_global_projection_already_matches_capture_emits_no_store(inputs):
+    captured, field, raw = _global_store_inputs(inputs)
+    after = copy.deepcopy(captured[0])
+    after["settings"][field] = "Already captured"
+    store = captured[2]["stores"][-1]
+    payload = {"encoding": "json", "documents": [
+        raw.replace(json.dumps(captured[0]["settings"][field]), '"Already captured"', 1)]}
+    records = _raw_payload(payload)
+    store.update(payload=payload, raw_records=records, **store_evidence(records))
+    assert _plan(captured, after)["operations"] == []
+
+
+@pytest.mark.parametrize("change", ["undeclared", "mixed", "added", "removed"])
+def test_global_uncovered_leaf_refuses(inputs, change):
+    captured, field, _ = _global_store_inputs(inputs)
+    if change == "removed":
+        captured[0]["settings"]["custom_setting"] = "Before"
+    after = copy.deepcopy(captured[0])
+    if change in {"undeclared", "mixed"}:
+        after["settings"]["panel_group_layer"] = "Changed group layer"
+    if change == "mixed":
+        after["settings"][field] = "Changed string layer"
+    if change == "added":
+        after["settings"]["custom_setting"] = "New setting"
+    if change == "removed":
+        del after["settings"]["custom_setting"]
+    with pytest.raises(GraphValidationError, match="GLOBAL_STORE_FIELD_UNDECLARED"):
+        _plan(captured, after)
+
+
+@pytest.mark.parametrize("source", ["/node", "/graph/settings", "/graph/settings/string_layer"])
+def test_global_source_ancestor_or_graph_path_covers_changed_leaf(inputs, source):
+    captured, field, _ = _global_store_inputs(inputs)
+    captured[1]["write_fields"]["global"][0]["source"] = source
+    after = copy.deepcopy(captured[0])
+    after["settings"][field] = "Changed string layer"
+    plan = _plan(captured, after)
+    assert len(plan["operations"]) == 1
+    store = plan["operations"][0]
+    assert store["op_id"] == "store:global:settings:global"
+    value = json.loads(store["payload"]["documents"][0])["Value"]
+    assert value == (after["settings"][field] if source.endswith("/" + field) else after["settings"])
+
+
+@pytest.mark.parametrize("declaration", [None, {}, {"settings": []}])
+def test_global_undeclared_change_refuses(inputs, declaration):
+    if declaration is not None:
+        inputs[1]["global_stores"] = declaration
+    after = copy.deepcopy(inputs[0])
+    after["settings"]["string_layer"] = "Changed layer"
+    with pytest.raises(GraphValidationError, match="GLOBAL_STORE_UNDECLARED"):
+        _plan(inputs, after)
+
+
+def test_global_missing_capture_refuses(inputs):
+    captured, field, _ = _global_store_inputs(inputs)
+    captured[2]["stores"].pop()
+    after = copy.deepcopy(captured[0])
+    after["settings"][field] = "Changed layer"
+    with pytest.raises(GraphValidationError, match="GLOBAL_STORE_NOT_CAPTURED"):
+        _plan(captured, after)
+
+
+@pytest.mark.parametrize("defect", ["entity-scope", "read-only", "unknown-codec", "unknown-fields",
+                                  "forbidden-path", "unknown-key", "not-object", "not-list", "extra-field"])
+def test_global_invalid_declaration_refuses(inputs, defect):
+    captured, _, _ = _global_store_inputs(inputs)
+    adapter = captured[1]
+    spec = adapter["global_stores"]["settings"][0]
+    if defect == "entity-scope":
+        spec["codec"] = "group"
+    elif defect == "read-only":
+        adapter["preservation"]["read_only_codecs"].append("global")
+    elif defect == "unknown-codec":
+        spec["codec"] = "missing"
+    elif defect == "unknown-fields":
+        spec["fields"] = "missing"
+    elif defect == "forbidden-path":
+        adapter["preservation"]["allowed_changed_paths"]["global"] = []
+    elif defect == "unknown-key":
+        adapter["global_stores"]["panels"] = []
+    elif defect == "not-object":
+        adapter["global_stores"] = []
+    elif defect == "not-list":
+        adapter["global_stores"]["settings"] = {}
+    else:
+        spec["role"] = "primary"
+    with pytest.raises(GraphValidationError, match="INVALID_TEMPLATE_STORE"):
+        validate_adapter(adapter)
+
+
+@pytest.mark.parametrize("document_index", [0, 1])
+def test_global_changed_field_must_land_in_captured_payload(inputs, document_index):
+    captured, field, raw = _global_store_inputs(inputs)
+    adapter = captured[1]
+    destination = "/documents/" + str(document_index) + "/Value"
+    adapter["write_fields"]["global"][0]["destination"] = destination
+    adapter["preservation"]["allowed_changed_paths"]["global"] = [destination]
+    assert adapter["store_codecs"]["global"]["document_count"] == 1
+    after = copy.deepcopy(captured[0])
+    after["settings"][field] = "Changed layer"
+    if document_index == 1:
+        with pytest.raises(GraphValidationError, match="GLOBAL_STORE_FIELD_UNAPPLIED"):
+            _plan(captured, after)
+    else:
+        operations = _plan(captured, after)["operations"]
+        assert len(operations) == 1
+        assert operations[0]["op"] == "set_store"
+        assert operations[0]["payload"]["documents"] == [
+            raw.replace(json.dumps(captured[0]["settings"][field]), '"Changed layer"', 1)]

@@ -24,7 +24,7 @@ function exercise({ tests = collected(), mutate = () => {}, status = 'passed' } 
 }
 
 test('required inventory rejects incomplete or nonpassing runs', () => {
-  assert.equal(PROD_INVENTORY.length, 12)
+  assert.equal(PROD_INVENTORY.length, 13)
   assert.ok(Object.isFrozen(PROD_INVENTORY))
   assert.ok(PROD_INVENTORY.every(Object.isFrozen))
   const pass = exercise()

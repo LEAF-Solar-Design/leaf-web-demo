@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -13,7 +15,7 @@ import write_loop
 import store
 import mutation_apply  # after write_loop, which puts da/ on sys.path (the gate runs this file alone)
 from intake_parse import parse_text
-from mutation_plan import emit_plan, plan_sha256, validate_mutations, world_to_ocs
+from mutation_plan import emit_plan, mutation_scope, plan_sha256, validate_mutations, world_to_ocs
 
 
 def _entity(handle, layer="Panels", z=0.0):
@@ -1936,3 +1938,419 @@ def test_replaced_polyline_via_set_points_refuses_a_tilted_normal():
     with pytest.raises(
             ValueError, match="^replaced handle 'B' has unexpected output geometry$"):
         write_loop.verify_live_mutation_effects(base, actual, canonical)
+
+
+def test_mutation_scope_transform_and_layer_handles_are_uppercase():
+    base = _base()
+    base["polylines"][0]["handle"] = "a"
+    base["polylines"][1]["handle"] = "b"
+    canonical = validate_mutations(base, {
+        "transforms": [{"handle": "b", "dx": 1, "dy": 0, "rotation_deg": 0}],
+        "set_layer": [{"handle": "a", "layer": "X"}],
+    })
+    assert mutation_scope(canonical) == {
+        "touched": ["A", "B"], "removed": [], "added_layers": [], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_removal_is_not_touched():
+    base = _base()
+    base["circles"] = [_circle("f")]
+    canonical = validate_mutations(base, {"removed": ["f"]})
+    assert canonical["removed_kinds"] == {"f": "CIRCLE"}
+    assert mutation_scope(canonical) == {
+        "touched": [], "removed": ["F"], "added_layers": [], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_added_layer():
+    canonical = validate_mutations(_base(), {"added": [_entity("new", "X")]})
+    assert mutation_scope(canonical) == {
+        "touched": [], "removed": [], "added_layers": ["X"], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_block_members_are_removed_after_definition_is_copied():
+    base = _base()
+    base["memberEvidenceCovered"] = True
+    base["layers"].append("0")
+    canonical = validate_mutations(base, {
+        "block_defs": [{"name": "Rack", "base": [0, 0, 0], "members": ["A"], "insert": 0}],
+        "removed": ["A"],
+        "added": [{"handle": "new-insert", "kind": "INSERT", "name": "Rack", "layer": "0",
+                   "pt": [0, 0, 0], "rot": 0, "scale": [1, 1, 1]}],
+    })
+    lines = emit_plan(canonical, base_sha256="a" * 64).decode().splitlines()
+    definition_line = next(line for line in lines if line.startswith("ADDBLOCKDEF|"))
+    insert_line = next(line for line in lines if line.startswith("ADDINSERT|"))
+    assert definition_line.endswith("|H:A")
+    assert lines.index(definition_line) < lines.index(insert_line) < lines.index("REMOVE|A")
+    assert lines.count("REMOVE|A") == 1
+    assert mutation_scope(canonical) == {
+        "touched": [], "removed": ["A"], "added_layers": ["0"], "changed_blocks": ["Rack"],
+    }
+
+
+def test_mutation_scope_added_groups_touch_existing_members():
+    canonical = validate_mutations(_base(), {
+        "added_groups": [{"name": "Rack", "members": ["b", "a"]}],
+    })
+    assert mutation_scope(canonical)["touched"] == ["A", "B"]
+
+
+def test_mutation_scope_added_group_ordinals_are_covered_by_added_layers():
+    canonical = validate_mutations(_base(), {
+        "added": [_entity("new", "X")],
+        "added_groups": [{"name": "Rack", "members": ["A", {"add": 0}]}],
+    })
+    assert mutation_scope(canonical) == {
+        "touched": ["A"], "removed": [], "added_layers": ["X"], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_removed_groups_require_intake_and_resolve_members():
+    base = _base()
+    base["groups"] = [{"name": "Rack", "members": ["b", "a"]}]
+    canonical = validate_mutations(base, {"removed_groups": ["rack"]})
+    with pytest.raises(ValueError, match="intake.*removed_groups"):
+        mutation_scope(canonical)
+    assert mutation_scope(canonical, base) == {
+        "touched": ["A", "B"], "removed": [], "added_layers": [], "changed_blocks": [],
+    }
+    with pytest.raises(ValueError, match="RACK.*unavailable"):
+        mutation_scope(canonical, _base())
+
+
+def test_mutation_scope_unknown_key_fails_closed():
+    canonical = validate_mutations(_base(), _mutations())
+    canonical["future_operation"] = []
+    with pytest.raises(ValueError, match="unknown mutation fields: future_operation"):
+        mutation_scope(canonical)
+
+
+@pytest.mark.parametrize("op,entry", [
+    ("set_points", {"handle": "A", "pts": [[0, 0, 0], [4, 0, 0], [4, 4, 0]], "closed": True}),
+    ("set_circle", {"handle": "F", "c": [6, 5, 0], "r": 3}),
+    ("set_arc", {"handle": "E", "c": [6, 5, 0], "r": 3, "start_deg": 10, "end_deg": 90}),
+    ("set_color", {"handle": "A", "aci": 3}),
+    ("set_linetype", {"handle": "A", "name": "Continuous"}),
+    ("set_lineweight", {"handle": "A", "weight": 25}),
+])
+def test_mutation_scope_set_operations_touch_the_target(op, entry):
+    base = _base()
+    base["circles"] = [_circle("F")]
+    base["arcs"] = [_arc("E")]
+    canonical = validate_mutations(base, {op: [entry]})
+    assert mutation_scope(canonical) == {
+        "touched": [entry["handle"]], "removed": [], "added_layers": [], "changed_blocks": [],
+    }
+
+
+def test_mutation_scope_is_pure_deterministic_and_deduplicated():
+    base = _base()
+    base["groups"] = [{"name": "Old", "members": ["B", "A"]}]
+    canonical = validate_mutations(base, {
+        "removed_groups": ["old"],
+        "added_groups": [{"name": "New", "members": ["B", "A"]}],
+        "set_layer": [{"handle": "B", "layer": "X"}],
+        "added": [_entity("new-1", "Z"), _entity("new-2", "X"), _entity("new-3", "Z")],
+    })
+    original_canonical, original_intake = copy.deepcopy(canonical), copy.deepcopy(base)
+    first = mutation_scope(canonical, base)
+    assert first == mutation_scope(canonical, base) == {
+        "touched": ["A", "B"], "removed": [], "added_layers": ["X", "Z"], "changed_blocks": [],
+    }
+    first["touched"].append("FF")
+    assert mutation_scope(canonical, base)["touched"] == ["A", "B"]
+    assert canonical == original_canonical
+    assert base == original_intake
+
+
+# Exercise the shared live seam directly so refusals retain their exception
+# type and both publication calls can be observed before the route maps errors.
+class OracleDa(FakeDa):
+    def __init__(self, output_intake, before, after, inspection=None):
+        super().__init__(output_intake)
+        self.before = before
+        self.after = after
+        self.inspection = inspection
+        self.downloads = []
+
+    def download_scratch_object(self, key):
+        self.downloads.append(key)
+        if key.endswith("_before.dxf"):
+            value = self.before
+        elif key.endswith("_after.dxf"):
+            value = self.after
+        elif key.endswith(".txt") and self.inspection is not None:
+            return self.inspection
+        else:
+            return super().download_scratch_object(key)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+def _oracle_dxf(intake, blocks=b""):
+    records = [b"0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n0\nENDSEC\n"]
+    if blocks:
+        records.extend([b"0\nSECTION\n2\nBLOCKS\n", blocks, b"0\nENDSEC\n"])
+    records.append(b"0\nSECTION\n2\nENTITIES\n")
+    for entity in intake["polylines"]:
+        points = entity["pts"]
+        text = (
+            f"0\nLWPOLYLINE\n5\n{entity['handle']}\n8\n{entity['layer']}\n"
+            f"90\n{len(points)}\n70\n{int(entity['closed'])}\n38\n{points[0][2]}\n"
+        )
+        text += "".join(f"10\n{p[0]}\n20\n{p[1]}\n" for p in points)
+        records.append(text.encode("ascii"))
+    for entity in intake.get("inserts", []):
+        records.append((
+            f"0\nINSERT\n5\n{entity['handle']}\n8\n{entity['layer']}\n2\n{entity['name']}\n"
+            f"10\n{entity['x']}\n20\n{entity['y']}\n30\n{entity['z']}\n"
+        ).encode("ascii"))
+    records.append(b"0\nENDSEC\n0\nEOF\n")
+    return b"".join(records)
+
+
+def _oracle_call(backend, da, *, base=None, canonical=None, contract=None):
+    base = _base() if base is None else base
+    canonical = (validate_mutations(base, _mutations())
+                 if canonical is None else canonical)
+    _, vkey = store.resolve_version(backend, "tenant", "drawing", 1)
+    source = backend.get(vkey)
+    plan = emit_plan(canonical, base_sha256=hashlib.sha256(source).hexdigest(),
+                     base_intake=base, contract=contract)
+    scratch_keys = []
+    response = write_loop._apply_plan_live(
+        tenant_id="tenant", drawing_id="drawing", head_v=1, vkey=vkey,
+        execution_source=source, bridged_legacy_bootstrap=False,
+        base_intake=base, canonical=canonical, plan_bytes=plan,
+        plan_digest=plan_sha256(plan), backend=backend, da=da,
+        name="cad-edit-plan", tool_version="1.0.0", t0=time.perf_counter(),
+        ledger_entry=None, holder=None, fence=None, on_submitted=None,
+        source_ref=None, meta_note="oracle test", envelope={}, result={},
+        provenance={}, planner_ms=None, drawing_fetch_ms=None,
+        scratch_keys=scratch_keys,
+    )
+    return response, scratch_keys
+
+
+@pytest.fixture
+def oracle_ready(monkeypatch):
+    monkeypatch.setenv("LEAF_MUTATION_DXF_ORACLE", "1")
+    calls = []
+
+    def readiness(*, contract):
+        calls.append(contract)
+        return {"ready": True}
+
+    monkeypatch.setattr(mutation_apply, "readiness", readiness)
+    return calls
+
+
+def _forbid_oracle_publication(monkeypatch):
+    def refused(*args, **kwargs):
+        pytest.fail("oracle refusal must precede version and intake publication")
+
+    monkeypatch.setattr(write_loop, "_put_bytes_version", refused)
+    monkeypatch.setattr(write_loop, "publish_intake_cache", refused)
+
+
+@pytest.mark.parametrize("flag", [None, "0", "true", " 1"])
+@pytest.mark.parametrize("contract", [2, 3])
+def test_dxf_oracle_flag_off_preserves_submission_and_output(monkeypatch, tmp_path, flag, contract):
+    backend = _store(tmp_path)
+    if flag is None:
+        monkeypatch.delenv("LEAF_MUTATION_DXF_ORACLE", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_MUTATION_DXF_ORACLE", flag)
+    ready_calls = []
+    monkeypatch.setattr(mutation_apply, "readiness",
+                        lambda *, contract: ready_calls.append(contract) or {"ready": True})
+    monkeypatch.setattr(write_loop.secrets, "token_hex", lambda _: "fixed")
+    monkeypatch.setattr(write_loop.time, "time", lambda: 1000)
+    da = OracleDa(_actual_success(), AssertionError("unexpected DXF"), AssertionError("unexpected DXF"))
+    (env, status), scratch = _oracle_call(backend, da, contract=contract)
+    assert status == 200
+    prefix = "https://scratch.test/"
+    assert da.submissions == [(
+        f"owner.{mutation_apply.CONTRACTS[contract].activity_id}+prod",
+        {
+            "HostDwg": {"url": prefix + "get/t/tenant/in/1000_drawing_v1_fixed.dwg", "verb": "get"},
+            "Plan": {"url": prefix + "get/t/tenant/in/1000_drawing_fixed_mutation-plan.txt", "verb": "get"},
+            "Result": {"url": prefix + "put/t/tenant/out/1000_drawing_write_fixed.dwg", "verb": "put"},
+            "Intake": {"url": prefix + "put/t/tenant/out/1000_drawing_write_fixed_intake.txt", "verb": "put"},
+        },
+        {"dry_run": False, "poll": True, "tenant_id": "tenant"},
+    )]
+    assert ready_calls == ([3] if contract == 3 else [])
+    assert not any(key.endswith(".dxf") for key in scratch + da.downloads)
+    assert "oracle" not in env["result"]
+    _, key = store.resolve_version(backend, "tenant", "drawing", 2)
+    assert backend.get(key) == b"AC1032" + b"\x01" * 64
+
+
+@pytest.mark.parametrize("not_ready", [False, RuntimeError("unavailable")])
+def test_dxf_oracle_requires_v4_without_fallback(monkeypatch, tmp_path, oracle_ready, not_ready):
+    backend = _store(tmp_path)
+
+    def readiness(*, contract):
+        assert contract == 4
+        if isinstance(not_ready, Exception):
+            raise not_ready
+        return {"ready": not_ready}
+
+    monkeypatch.setattr(mutation_apply, "readiness", readiness)
+    _forbid_oracle_publication(monkeypatch)
+    da = FakeDa(_actual_success())
+    (env, status), scratch = _oracle_call(backend, da)
+    assert status == 503
+    assert env["error"]["error_code"] == "APS_UNAVAILABLE"
+    assert env["error"]["message"] == "mutation Activity not ready: contract v4 Activity is not provisioned"
+    assert env["error"]["retryable"] is True
+    assert da.submissions == [] and scratch == []
+
+
+@pytest.mark.parametrize("contract", [2, 3])
+def test_dxf_oracle_accepts_real_scoped_comparison(monkeypatch, tmp_path, oracle_ready, contract):
+    backend = _store(tmp_path)
+    canonical = validate_mutations(_base(), {"transforms": [{"handle": "A", "dx": 1, "dy": 0}]})
+    actual = write_loop.apply_mutations(_base(), canonical)
+    da = OracleDa(actual, _oracle_dxf(_base()), _oracle_dxf(actual))
+    (env, status), scratch = _oracle_call(backend, da, canonical=canonical, contract=contract)
+    assert status == 200
+    assert oracle_ready == [4]
+    activity, arguments, _ = da.submissions[0]
+    assert activity == "owner.LeafApplyMutationsV4+prod"
+    assert set(arguments) == {"HostDwg", "Plan", "Result", "Intake", "BeforeDxf", "AfterDxf"}
+    assert all(arguments[name]["verb"] == "put" for name in ("BeforeDxf", "AfterDxf"))
+    assert len([key for key in scratch if key.endswith(".dxf")]) == 2
+    assert env["result"]["oracle"] == {"ok": True, "untouched_total": 1, "touched_changed": 1}
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 2
+    assert write_loop.read_intake(backend, "tenant", "drawing", 2)[0] == 2
+
+
+def test_dxf_oracle_refuses_untouched_precision_change(monkeypatch, tmp_path, oracle_ready):
+    backend = _store(tmp_path)
+    actual = _actual_success()
+    actual["polylines"][1]["handle"] = "F1"
+    after = copy.deepcopy(actual)
+    # Below the intake extractor's precision, above the oracle's tolerance.
+    after["polylines"][0]["pts"][0][0] += 0.00002
+    da = OracleDa(actual, _oracle_dxf(_base()), _oracle_dxf(after))
+    _forbid_oracle_publication(monkeypatch)
+    with pytest.raises(write_loop.LiveMutationEffectMismatch, match="untouched_changed"):
+        _oracle_call(backend, da)
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+def test_dxf_oracle_accepts_removal_and_new_layer(tmp_path, oracle_ready):
+    backend = _store(tmp_path)
+    actual = _actual_success()
+    actual["polylines"][1]["handle"] = "F1"
+    da = OracleDa(actual, _oracle_dxf(_base()), _oracle_dxf(actual))
+    (env, status), _ = _oracle_call(backend, da)
+    assert status == 200
+    assert env["result"]["oracle"] == {"ok": True, "untouched_total": 1, "touched_changed": 0}
+
+
+@pytest.mark.parametrize("artifact", ["BeforeDxf", "AfterDxf"])
+@pytest.mark.parametrize("failure", ["missing", "empty", "oversized", "malformed"])
+def test_dxf_oracle_refuses_invalid_artifact(monkeypatch, tmp_path, oracle_ready, artifact, failure):
+    backend = _store(tmp_path)
+    before, after = _oracle_dxf(_base()), _oracle_dxf(_actual_success())
+    monkeypatch.setattr(write_loop, "MAX_ORACLE_DXF_BYTES", max(len(before), len(after)))
+    invalid = {
+        "missing": FileNotFoundError("secret download URL"),
+        "empty": b"", "oversized": b"x" * (write_loop.MAX_ORACLE_DXF_BYTES + 1),
+        "malformed": b"not a DXF\n",
+    }[failure]
+    da = OracleDa(_actual_success(), invalid if artifact == "BeforeDxf" else before,
+                  invalid if artifact == "AfterDxf" else after)
+    _forbid_oracle_publication(monkeypatch)
+    reason = "malformed" if failure == "malformed" else artifact
+    with pytest.raises(write_loop.LiveMutationEffectMismatch, match=reason):
+        _oracle_call(backend, da)
+    assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+
+
+@pytest.mark.parametrize("property_note", [False, True])
+def test_dxf_oracle_runs_after_existing_effect_checks(monkeypatch, tmp_path, oracle_ready, property_note):
+    backend = _store(tmp_path)
+    da = OracleDa(_actual_success(), AssertionError("must not download"), AssertionError("must not download"))
+
+    def effects(*args):
+        if property_note:
+            return "property effects unverified"
+        raise ValueError("existing effect mismatch")
+
+    monkeypatch.setattr(write_loop, "verify_live_mutation_effects", effects)
+    _forbid_oracle_publication(monkeypatch)
+    with pytest.raises(write_loop.LiveMutationEffectMismatch, match="property effects|existing effect"):
+        _oracle_call(backend, da)
+    assert not any(key.endswith(".dxf") for key in da.downloads)
+
+
+@pytest.mark.parametrize("undeclared", [False, True])
+def test_dxf_oracle_block_plan_limits_definition_changes(monkeypatch, tmp_path, oracle_ready, undeclared):
+    backend = _store(tmp_path)
+    base = _base()
+    base["memberEvidenceCovered"] = True
+    canonical = validate_mutations(base, {
+        "block_defs": [{
+            "name": "Rack", "base": [0, 0, 0], "members": [], "insert": 0,
+            "children": [{"kind": "LINE", "layer": "0", "pts": [[0, 0, 0], [3, 0, 0]]}],
+            "order": ["C:0"],
+        }],
+        "added": [{"handle": "F0", "kind": "INSERT", "name": "Rack", "layer": "0",
+                   "pt": [0, 0, 0], "rot": 0, "scale": [1, 1, 1]}],
+    })
+    actual = write_loop.apply_mutations(base, canonical)
+    inspection = _families_text(actual) + (
+        b"IN|Rack|0|0,0,0|0|0,0,1|1,1,1|F0\n"
+        b"BK|Rack|0,0,0|1|1\nBKE|Rack|LINE|0,0,0|3,0,0|0\n"
+        b"BKEPC|1\nBKEP|Rack|0|256|ByLayer|-1|~\nGRC|1\nCA|0|F0\n"
+    )
+    blocks = (
+        b"0\nBLOCK\n5\n40\n8\n0\n2\nRack\n70\n0\n10\n0\n20\n0\n30\n0\n"
+        b"0\nLINE\n5\n41\n8\n0\n10\n0\n20\n0\n30\n0\n11\n3\n21\n0\n31\n0\n"
+        b"0\nENDBLK\n5\n42\n8\n0\n"
+    )
+    if undeclared:
+        blocks += (b"0\nBLOCK\n5\n50\n8\n0\n2\nRogue\n70\n0\n10\n0\n20\n0\n30\n0\n"
+                   b"0\nENDBLK\n5\n51\n8\n0\n")
+    da = OracleDa(actual, _oracle_dxf(base), _oracle_dxf(actual, blocks), inspection)
+    if undeclared:
+        _forbid_oracle_publication(monkeypatch)
+        with pytest.raises(write_loop.LiveMutationEffectMismatch, match="unexpected_blocks_changed"):
+            _oracle_call(backend, da, base=base, canonical=canonical)
+        assert store.load_manifest(backend, "tenant", "drawing")["head"] == 1
+    else:
+        (env, status), _ = _oracle_call(backend, da, base=base, canonical=canonical)
+        assert status == 200
+        assert env["result"]["oracle"] == {"ok": True, "untouched_total": 2, "touched_changed": 0}
+        assert store.load_manifest(backend, "tenant", "drawing")["head"] == 2
+
+
+def test_dxf_oracle_byte_bound_matches_export_fidelity(monkeypatch):
+    engine_dir = str(Path(__file__).resolve().parents[2] / "engine")
+    if engine_dir not in sys.path:
+        monkeypatch.setattr(sys, "path", [*sys.path, engine_dir])
+    import export_fidelity
+
+    assert write_loop.MAX_ORACLE_DXF_BYTES == export_fidelity.MAX_OUTPUT_BYTES
+
+
+def test_write_loop_import_without_oracle_does_not_load_engine(monkeypatch):
+    monkeypatch.delenv("LEAF_MUTATION_DXF_ORACLE", raising=False)
+    probe = subprocess.run(
+        [sys.executable, "-B", "-c",
+         "import sys\n"
+         "import write_loop\n"
+         "assert 'mutation_scope_diff' not in sys.modules\n"
+         "assert 'export_fidelity' not in sys.modules\n"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr

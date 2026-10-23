@@ -1,6 +1,6 @@
 """Fails closed on malformed input, compares every entity by handle, and treats an entity outside the declared scope that differs as a defect.
 
-Block definitions are never in scope in v1.
+A block definition is in scope only when the plan declares it by name.
 Unsupported kinds are compared as ordered raw records; a change is always a defect
 regardless of scope, since they have no handle the scope could name.
 """
@@ -22,13 +22,15 @@ class MutationScope:
     touched_handles: frozenset[str]
     removed_handles: frozenset[str]
     added_layers: frozenset[str]
+    changed_blocks: frozenset[str] = frozenset()
 
     @classmethod
-    def from_iterables(cls, touched=(), removed=(), added_layers=()):
+    def from_iterables(cls, touched=(), removed=(), added_layers=(), *, changed_blocks=()):
         return cls(
             frozenset(handle.upper() for handle in touched),
             frozenset(handle.upper() for handle in removed),
             frozenset(added_layers),
+            frozenset(name.casefold() for name in changed_blocks),
         )
 
 
@@ -143,6 +145,10 @@ def compare_scoped(before: bytes, after: bytes, scope: MutationScope, *, source_
             _same_block_record_strict(x, y) for x, y in zip(a, b)
         ):
             blocks_changed.add(name)
+    unexpected_blocks_changed = sorted(
+        name for name in blocks_changed if name.casefold() not in scope.changed_blocks
+    )
+    expected_blocks_missing = sorted(scope.changed_blocks - {name.casefold() for name in block_right})
     unsupported_left = _unsupported_records(raw_left["ENTITIES"])
     unsupported_right = _unsupported_records(raw_right["ENTITIES"])
     unsupported_changed = unsupported_left != unsupported_right
@@ -173,8 +179,8 @@ def compare_scoped(before: bytes, after: bytes, scope: MutationScope, *, source_
     return {
         "ok": not (
             untouched_changed or unexpected_removed or unexpected_added
-            or expected_removed_missing or handleless_changed or blocks_changed
-            or unsupported_changed
+            or expected_removed_missing or handleless_changed or unexpected_blocks_changed
+            or expected_blocks_missing or unsupported_changed
         ),
         "source_name": source_name,
         "untouched_total": len(untouched),
@@ -185,6 +191,8 @@ def compare_scoped(before: bytes, after: bytes, scope: MutationScope, *, source_
         "touched_changed": sorted(scope.touched_handles & changed),
         "handleless_changed": handleless_changed,
         "blocks_changed": sorted(blocks_changed),
+        "unexpected_blocks_changed": unexpected_blocks_changed,
+        "expected_blocks_missing": expected_blocks_missing,
         "unsupported_kinds": unsupported_kinds,
         "unsupported_changed": unsupported_changed,
         "kind_counts_before": left["counts"],
@@ -199,12 +207,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--touched", default="")
     parser.add_argument("--removed", default="")
     parser.add_argument("--added-layer", action="append", default=[])
+    parser.add_argument("--changed-block", action="append", default=[])
     parser.add_argument("--source-name")
     args = parser.parse_args(argv)
     scope = MutationScope.from_iterables(
         touched=(handle.strip() for handle in args.touched.split(",") if handle.strip()),
         removed=(handle.strip() for handle in args.removed.split(",") if handle.strip()),
         added_layers=args.added_layer,
+        changed_blocks=args.changed_block,
     )
     try:
         result = compare_scoped(

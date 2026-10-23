@@ -18,6 +18,66 @@ from typing import Any, Dict, Optional
 _store: Optional["PostgresBrokerStore"] = None
 JOB_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 MAX_USAGE_ROWS = 200_000
+TERMINAL_INTENT_KEYS = {
+    "version", "event_key", "tenant_id", "request_fingerprint", "job_id",
+    "workitem_id", "ledger_entry", "result", "http_status",
+}
+LEDGER_KEYS = {
+    "ts", "tenant_id", "tool", "engine_op", "aps_endpoint", "aps_live",
+    "engine_seconds", "usd_est", "status", "job_id",
+}
+JOB_EVENT_RE = re.compile(r"^(?P<job_id>[0-9a-f-]{36}):broker-(run|fallback)$")
+
+
+def _same_json(left, right):
+    # Python equates True and 1; JSON evidence must keep those distinct.
+    return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(
+        right, sort_keys=True, allow_nan=False)
+
+
+def validate_success_intent(intent, admission, event_key, tenant_id):
+    """Validate durable evidence without loading credentials or external state."""
+    if not isinstance(intent, dict) or set(intent) != TERMINAL_INTENT_KEYS:
+        raise ValueError("invalid terminal intent shape")
+    # Strict serialization also rejects nonfinite values nested in adapter output.
+    json.dumps(intent, allow_nan=False)
+    if (type(intent["version"]) is not int or intent["version"] != 1
+            or intent["event_key"] != event_key or intent["tenant_id"] != tenant_id
+            or intent["request_fingerprint"] != admission["request_fingerprint"]
+            or admission["tenant_id"] != tenant_id or admission["aps_live"] is not True):
+        raise ValueError("terminal intent identity mismatch")
+    match = JOB_EVENT_RE.fullmatch(event_key)
+    if (match is None or intent["job_id"] != match.group("job_id")
+            or not isinstance(intent["workitem_id"], str)
+            or not intent["workitem_id"].strip()):
+        raise ValueError("terminal intent requires job and WorkItem identity")
+    entry, result, status = intent["ledger_entry"], intent["result"], intent["http_status"]
+    if (not isinstance(entry, dict) or set(entry) != LEDGER_KEYS
+            or entry["tenant_id"] != tenant_id or entry["aps_live"] is not True
+            or entry["job_id"] != intent["job_id"] or entry["status"] != "ok"
+            or not isinstance(result, dict) or result.get("ok") is not True
+            or type(result.get("degraded_mode")) is not bool
+            or type(status) is not int or not 200 <= status < 300
+            or not isinstance(entry["aps_endpoint"], str) or not entry["aps_endpoint"]
+            or not isinstance(entry["engine_op"], str)
+            or (entry["tool"] is not None and not isinstance(entry["tool"], str))):
+        raise ValueError("terminal intent is not a conformed success")
+    def number(value):
+        try:
+            return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and math.isfinite(float(value)) and value >= 0)
+        except OverflowError:
+            return False
+    if not number(entry["ts"]):
+        raise ValueError("terminal intent timestamp is invalid")
+    cost = result.get("cost")
+    if not isinstance(cost, dict):
+        raise ValueError("terminal intent requires complete cost evidence")
+    for field in ("engine_seconds", "usd_est"):
+        if (not number(entry[field]) or not number(cost.get(field))
+                or not math.isclose(entry[field], cost[field], rel_tol=1e-9, abs_tol=1e-9)):
+            raise ValueError("terminal intent cost is invalid or inconsistent")
+    return intent
 
 
 def normalize_ledger_job_id(value: Any) -> Optional[str]:
@@ -85,7 +145,7 @@ class PostgresBrokerStore:
                 "event_key", "tenant_id", "request_fingerprint", "state",
                 "lease_token", "lease_expires_at", "aps_live", "accounted_work",
                 "reserved_usd", "execution_started_at", "result_json",
-                "http_status", "created_at", "updated_at", "terminal_at",
+                "http_status", "created_at", "updated_at", "terminal_at", "terminal_intent_json",
             },
             "broker_usage_ledger": {
                 "event_key", "ts", "tenant_id", "tool", "engine_op",
@@ -103,6 +163,8 @@ class PostgresBrokerStore:
             },
         }
         required_constraints = {
+            "broker_usage_ledger_pkey",
+            "broker_terminal_intent_object",
             "broker_run_admissions_event_tenant_uq",
             "broker_run_admissions_state_allowed",
             "broker_run_admissions_state_shape",
@@ -117,6 +179,7 @@ class PostgresBrokerStore:
             "broker_admission_resolution_admission_fk",
         }
         required_triggers = {
+            "broker_terminal_intent_write_once",
             "broker_usage_ledger_immutable",
             "broker_admission_resolution_audit_immutable",
         }
@@ -477,6 +540,130 @@ class PostgresBrokerStore:
 
         return self._db.run_transaction(operation, isolation="serializable")
 
+    def _lock_intent_admission(self, conn, event_key, tenant_id):
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended('event:' || %(event_key)s, 0))",
+            {"event_key": event_key})
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%(tenant_id)s, 0))",
+            {"tenant_id": tenant_id})
+        admission = conn.execute(
+            "SELECT * FROM broker_run_admissions WHERE event_key = %(event_key)s FOR UPDATE",
+            {"event_key": event_key}).fetchone()
+        if admission is None or admission["tenant_id"] != tenant_id:
+            raise ValueError("terminal intent admission identity mismatch")
+        return admission
+
+    @staticmethod
+    def _intent(admission, event_key, tenant_id):
+        raw = admission.get("terminal_intent_json")
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        return validate_success_intent(raw, admission, event_key, tenant_id)
+
+    @staticmethod
+    def _check_intent_ledger(conn, intent):
+        row = conn.execute(
+            "SELECT * FROM broker_usage_ledger WHERE event_key = %(event_key)s",
+            {"event_key": intent["event_key"]}).fetchone()
+        if row is not None and any(row.get(k) != v for k, v in intent["ledger_entry"].items()):
+            raise ValueError("existing ledger conflicts with terminal intent")
+        return row
+
+    def stage_success_intent(self, event_key, tenant_id, lease_token, intent):
+        # Detach caller-owned objects before a retryable transaction starts.
+        payload = json.loads(json.dumps(intent, allow_nan=False))
+        def operation(conn):
+            admission = self._lock_intent_admission(conn, event_key, tenant_id)
+            validate_success_intent(payload, admission, event_key, tenant_id)
+            if admission["state"] != "executing" or admission["lease_token"] != lease_token:
+                raise ValueError("terminal intent requires current executing owner")
+            self._check_intent_ledger(conn, payload)
+            if admission.get("terminal_intent_json") is not None:
+                if not _same_json(self._intent(admission, event_key, tenant_id), payload):
+                    raise ValueError("terminal intent is write once")
+                return
+            conn.execute(
+                "UPDATE broker_run_admissions SET terminal_intent_json = %(intent_json)s::jsonb "
+                "WHERE event_key = %(event_key)s",
+                {"event_key": event_key, "intent_json": json.dumps(payload, allow_nan=False)})
+        self._db.run_transaction(operation, isolation="serializable")
+
+    def inspect_success_intent(self, event_key, tenant_id):
+        """Read and crosscheck evidence, including in alarm-only mode."""
+        def operation(conn):
+            admission = self._lock_intent_admission(conn, event_key, tenant_id)
+            intent = self._intent(admission, event_key, tenant_id)
+            self._check_intent_ledger(conn, intent)
+            return intent
+        return self._db.run_transaction(operation, isolation="serializable")
+
+    def _settle_intent(self, conn, admission, event_key, tenant_id, actor, audit=None):
+        intent = self._intent(admission, event_key, tenant_id)
+        ledger = self._check_intent_ledger(conn, intent)
+        if admission["state"] == "terminal":
+            result = admission["result_json"]
+            if isinstance(result, str):
+                result = json.loads(result)
+            slot = conn.execute(
+                "SELECT state FROM broker_aps_slots WHERE event_key = %(event_key)s",
+                {"event_key": event_key}).fetchone()
+            if (ledger is None or not _same_json(result, intent["result"])
+                    or admission["http_status"] != intent["http_status"]
+                    or admission["reserved_usd"] != 0
+                    or (slot is not None and slot["state"] != "released")):
+                raise ValueError("terminal state conflicts with terminal intent")
+            return {"event_key": event_key, "state": "terminal", "already_settled": True}
+        if admission["state"] != "executing":
+            raise ValueError("terminal intent admission is not executing")
+        values = dict(intent["ledger_entry"], event_key=event_key,
+                      lease_token=admission["lease_token"],
+                      result_json=json.dumps(intent["result"], allow_nan=False),
+                      http_status=intent["http_status"])
+        if ledger is None:
+            conn.execute(
+                "INSERT INTO broker_usage_ledger "
+                "(event_key, ts, tenant_id, tool, engine_op, aps_endpoint, aps_live, "
+                "engine_seconds, usd_est, status, job_id) VALUES "
+                "(%(event_key)s, %(ts)s, %(tenant_id)s, %(tool)s, %(engine_op)s, "
+                "%(aps_endpoint)s, %(aps_live)s, %(engine_seconds)s, %(usd_est)s, %(status)s, %(job_id)s)", values)
+        updated = conn.execute(
+            "UPDATE broker_run_admissions SET state = 'terminal', reserved_usd = 0, "
+            "lease_expires_at = NULL, result_json = %(result_json)s::jsonb, "
+            "http_status = %(http_status)s, terminal_at = NOW(), updated_at = NOW() "
+            "WHERE event_key = %(event_key)s AND tenant_id = %(tenant_id)s "
+            "AND state = 'executing' RETURNING event_key", values).fetchone()
+        if updated is None:
+            raise ValueError("terminal intent settlement transition failed")
+        conn.execute(
+            "UPDATE broker_aps_slots SET state = 'released', released_at = NOW(), "
+            "release_reason = 'known_terminal' WHERE event_key = %(event_key)s AND state = 'held'", values)
+        if actor == "reconciler" or audit is not None:
+            values.update(audit_id=str(uuid.uuid4()), resolution="verified_terminal",
+                          operator_id="reconciler", reason="committed paid-success terminal intent",
+                          evidence_ref=f"terminal-intent:v1:{tenant_id}:{event_key}")
+            if audit is not None:
+                values.update(audit)
+            conn.execute(
+                "INSERT INTO broker_admission_resolution_audit "
+                "(audit_id, event_key, tenant_id, resolution, operator_id, reason, evidence_ref, prior_state, terminal_status) "
+                "VALUES (%(audit_id)s, %(event_key)s, %(tenant_id)s, %(resolution)s, %(operator_id)s, "
+                "%(reason)s, %(evidence_ref)s, 'executing', %(http_status)s)", values)
+        outcome = {"event_key": event_key, "tenant_id": tenant_id,
+                   "state": "terminal", "http_status": intent["http_status"],
+                   "already_settled": False}
+        if "audit_id" in values:
+            outcome.update(resolution=values["resolution"], audit_id=values["audit_id"])
+        return outcome
+
+    def settle_success_intent(self, event_key, tenant_id, *, actor):
+        if actor not in {"foreground", "reconciler"}:
+            raise ValueError("invalid terminal intent settlement actor")
+        def operation(conn):
+            admission = self._lock_intent_admission(conn, event_key, tenant_id)
+            return self._settle_intent(conn, admission, event_key, tenant_id, actor)
+        return self._db.run_transaction(operation, isolation="serializable")
+
     def complete_run(
         self, event_key: str, tenant_id: str, lease_token: str,
         entry: Dict[str, Any], result: Dict[str, Any], http_status: int,
@@ -505,12 +692,20 @@ class PostgresBrokerStore:
                 {"tenant_id": str(tenant_id)},
             )
             admission = conn.execute(
-                "SELECT tenant_id, state, lease_token FROM broker_run_admissions "
+                "SELECT * FROM broker_run_admissions "
                 "WHERE event_key = %(event_key)s FOR UPDATE",
                 {"event_key": key},
             ).fetchone()
             if admission is None or str(admission["tenant_id"]) != str(tenant_id):
                 raise RuntimeError("broker terminal write does not own this event")
+            if admission.get("terminal_intent_json") is not None:
+                intent = self._intent(admission, key, str(tenant_id))
+                if (values["tenant_id"] != tenant_id or not _same_json(entry, intent["ledger_entry"])
+                        or not _same_json(result, intent["result"])
+                        or type(http_status) is not int or http_status != intent["http_status"]
+                        or str(admission["lease_token"]) != str(lease_token)):
+                    raise ValueError("completion conflicts with terminal intent")
+                return self._settle_intent(conn, admission, key, str(tenant_id), "foreground")
             if admission["state"] == "terminal":
                 return
             if str(admission["lease_token"]) != str(lease_token):
@@ -616,7 +811,7 @@ class PostgresBrokerStore:
             rows = conn.execute(
                 "SELECT admission.tenant_id, admission.event_key, "
                 "admission.request_fingerprint, admission.aps_live, "
-                "admission.reserved_usd, admission.execution_started_at, "
+                "admission.reserved_usd, admission.execution_started_at, admission.terminal_intent_json, "
                 "EXTRACT(EPOCH FROM (NOW() - admission.execution_started_at)) "
                 "AS age_seconds, "
                 "slot.lease_expires_at AS slot_lease_expires_at, "
@@ -696,12 +891,20 @@ class PostgresBrokerStore:
                 {"tenant_id": tenant},
             )
             admission = conn.execute(
-                "SELECT tenant_id, state FROM broker_run_admissions "
+                "SELECT * FROM broker_run_admissions "
                 "WHERE event_key = %(event_key)s FOR UPDATE",
                 {"event_key": key},
             ).fetchone()
             if admission is None or str(admission["tenant_id"]) != tenant:
                 raise RuntimeError("executing broker admission was not found")
+            if admission.get("terminal_intent_json") is not None:
+                intent = self._intent(admission, key, tenant)
+                if (resolution != "verified_terminal" or not _same_json(entry, intent["ledger_entry"])
+                        or not _same_json(result, intent["result"])
+                        or type(http_status) is not int or http_status != intent["http_status"]):
+                    raise ValueError("resolution conflicts with terminal intent")
+                return self._settle_intent(conn, admission, key, tenant, "foreground", audit={
+                    "operator_id": operator_id, "reason": reason, "evidence_ref": evidence_ref})
             if admission["state"] != "executing":
                 raise RuntimeError(
                     f"broker admission is {admission['state']!r}, not 'executing'")

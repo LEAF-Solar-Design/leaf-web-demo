@@ -120,6 +120,16 @@ build or an expired deadline exits 2 with the Action name and last status, witho
 deploying that draft. A readback mismatch exits 1; a failed operation or an
 unobserved deployment exits 2.
 
+The drift project in `.codebuild/auth0-action-drift.yml` stays check-only.
+Deploys run `.codebuild/auth0-action-deploy.yml` on its own CodeBuild project.
+Without both authorization variables, it uses `--dry-run` to print the digest
+and planned changes and writes nothing. With `AUTH0_ACTIONS_DEPLOY=1` and
+`AUTH0_ACTIONS_CONFIRM_DIGEST` set to the matching digest, it deploys.
+Get the digest and review the planned changes with
+`python scripts/deploy_auth0_actions.py --dry-run --domain your-tenant.us.auth0.com`;
+dry-run exits 0 without Action writes. A separate terraform change creates the
+deploy CodeBuild project, using external credential inputs with deploy scopes.
+
 If a target reports `missing`, check its live Action name and trigger binding.
 The live dashboard name may differ from the file stem in `TARGETS`. Rename the
 intended live Action to match, or update `TARGETS` to its verified name, then

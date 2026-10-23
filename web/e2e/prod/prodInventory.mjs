@@ -13,6 +13,7 @@ export const PROD_INVENTORY = Object.freeze([
   [unified, 'production app displays its served build stamp'],
   [unified, 'production app renders the studio shell'],
   [unified, 'production app and web serve the expected candidate'],
+  [unified, 'P-062 production CAD edit surface shows the engine NOTICE'],
 ].map(([file, title], index) => Object.freeze({ file, title, id: `PROD_${String(index + 1).padStart(2, '0')}` })))
 
 export const CANARY_INVENTORY = Object.freeze([Object.freeze({
