@@ -55,12 +55,13 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
     takeGraph(graph) { update({ restoredGraph: graph, restoredKey: state.restoredKey + 1 }) },
     async save(id, graph, expectedHead) {
       identifier(id)
+      const epoch = headEpoch
       const mine = JSON.parse(JSON.stringify(graph))
       const started = now()
       const result = await request(id, 'save', { graph: mine, expected_head: expectedHead })
       if (id === docId) update({ saveTimes: [...state.saveTimes, Math.max(0, now() - started)].slice(-20) })
       if (result.ok) saved(id, result, 'save')
-      else if (result.conflict && id === docId) update({ head: result.head, conflict: { serverHead: result.head, mine } })
+      else if (result.conflict && id === docId && epoch === headEpoch) update({ head: result.head, conflict: { serverHead: result.head, mine } })
       return result
     },
     async head(id) {

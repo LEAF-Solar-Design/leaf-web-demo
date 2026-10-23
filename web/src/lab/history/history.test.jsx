@@ -161,6 +161,39 @@ describe('Strategy revision ledger', () => {
     expect(client.state.head).toBe(4)
   })
 
+  it('keeps the restored head when an earlier save conflict finishes, then saves against that head', async () => {
+    const { client, fetchImpl, append, rows } = ledger()
+    await client.save('strategy', first, null)
+    await client.save('strategy', second, 1)
+    append(graph('server'))
+    const staleHead = copy(rows[2])
+    let resolveHead
+    fetchImpl.mockImplementationOnce(async () => ({ ok: false, status: 409, json: async () => ({ detail: 'stale_expected_head' }) }))
+    fetchImpl.mockImplementationOnce(() => new Promise(resolve => { resolveHead = resolve }))
+    const save = client.save('strategy', second, client.state.head)
+    await waitFor(() => expect(resolveHead).toBeTypeOf('function'))
+    await client.restore('strategy', 1, 3)
+    expect(client.state.head).toBe(4)
+    expect(client.state.conflict).toBeNull()
+    resolveHead({ ok: true, json: async () => staleHead })
+    expect(await save).toMatchObject({ ok: false, conflict: true, head: 3, status: 409 })
+    expect(client.state.head).toBe(4)
+    expect(client.state.conflict).toBeNull()
+    await client.save('strategy', second, client.state.head)
+    const body = JSON.parse(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/save')).at(-1)[1].body)
+    expect(body.expected_head).toBe(4)
+    expect(client.state.head).toBe(5)
+  })
+
+  it('sets head and conflict from an ordinary save conflict', async () => {
+    const { client, append } = ledger()
+    await client.save('strategy', first, null)
+    append(graph('server'))
+    expect(await client.save('strategy', second, client.state.head)).toMatchObject({ ok: false, conflict: true, head: 2, status: 409 })
+    expect(client.state.head).toBe(2)
+    expect(client.state.conflict).toEqual({ serverHead: 2, mine: second })
+  })
+
   it('ignores pending head and revisions reads after switching documents', async () => {
     const { client, fetchImpl, append } = ledger()
     const row = append(first)
