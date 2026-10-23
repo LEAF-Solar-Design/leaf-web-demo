@@ -46,7 +46,7 @@ the **access token**:
 ```
 https://leafdesign.ai/tenant_id   (string, required)  e.g. "org_acme_solar"
 https://leafdesign.ai/org_id      (string | null)      e.g. "org_acme_solar"
-https://leafdesign.ai/tier        (string enum)        the §11.2 claim-mintable subset: "restricted" | "self_hosted" | "hosted_starter" | "hosted_pro" | "admin"
+https://leafdesign.ai/tier        (string enum)        the §11.2 claim-mintable subset: "restricted" | "self_hosted" | "hosted_free" | "hosted_starter" | "hosted_pro" | "admin"
 https://leafdesign.ai/roles       (string[], may be []) §11.5 role overlay, e.g. ["platform_admin"]
 ```
 
@@ -334,8 +334,8 @@ Agreeing copies: `server/auth.py DEFAULT_CLAIM_NS`, the Post-Login Action
 credentials-exchange Action. `LEAF_TENANT_CLAIM_NS` remains an env override
 for test rigs only; production uses the frozen default.
 
-**11.2 Tier vocabulary (frozen, 8 members; grown 2026-10-19 per the §11
-promotion ritual — durable live demo identity):**
+**11.2 Tier vocabulary (frozen, 10 members; grown 2026-10-19 per the §11
+promotion ritual for durable live demo identity; grown again on 2026-10-22 for the Free plan tier):**
 
 Operator authorization for this promotion, quoted verbatim on 2026-10-19:
 
@@ -345,6 +345,10 @@ Mandate 4 (fork F2/F3 answer):
 Mandate 5 (fork F4 answer):
 > why are you being so restrictive? This stuff NEEDs to be tested to its fullest production extent, asap
 
+Operator authorization for the 2026-10-22 promotion, quoted verbatim (program studio-managed-addons-20261022, mandate 5):
+
+> Add a hosted_free tier (Recommended)
+
 | Tier | Class | Meaning |
 |---|---|---|
 | `demo` | server-resolved | off-auth open-demo identity (full access, `LEAF_AUTH_LIVE=0`) |
@@ -352,11 +356,15 @@ Mandate 5 (fork F4 answer):
 | `guest` | server-resolved | ephemeral signed-out upload identity (§19) |
 | `restricted` | claim-mintable | authenticated but lapsed/unprovisioned — read-only floor |
 | `self_hosted` | claim-mintable | enterprise / BYO-infrastructure seat |
+| `hosted_free` | claim-mintable | Free plan hosted seat |
 | `hosted_starter` | claim-mintable | entry hosted seat (default for new/solo users) |
 | `hosted_pro` | claim-mintable | full hosted seat |
 | `admin` | claim-mintable (operator-granted) | staff self-edit identity (W14); the ONLY tier carrying `platform_customize` |
 
-The **claim-mintable subset** {`restricted`, `self_hosted`, `hosted_starter`,
+`hosted_free` is the Free plan's tier, has `hosted_starter`'s capabilities, and is the key for the monthly managed-run allowance (slice A7b).
+It was added by the A7a promotion on 2026-10-22 under operator mandate 5, "Add a hosted_free tier (Recommended)"; self-provisioned orgs start on it until tier-sync moves them.
+
+The **claim-mintable subset** {`restricted`, `self_hosted`, `hosted_free`, `hosted_starter`,
 `hosted_pro`, `admin`} is the only vocabulary a verified identity can carry
 (JWT tier claim, stored org tier). `demo`/`guest`/`demo_live` are server-resolved
 identities and must never be minted into a JWT claim or stored as an org's billing
@@ -392,7 +400,7 @@ platform lane's fail-closed literal (`platform/entitlements.py`).
 per-tier boolean values stay operator-tunable; the KEY SET is what is frozen).
 `link_service` gates the write routes of the tenant MCP server registry
 (`routers/tenant_mcp.py`: register, connect, unlink) — false on
-demo/restricted/guest, true on self_hosted/hosted_starter/hosted_pro/admin.
+demo/restricted/guest, true on self_hosted/hosted_free/hosted_starter/hosted_pro/admin.
 The registry's list route is owner-role gated only, not capability-gated.
 
 **11.4 Billing note:** the plan→tier mapping that FEEDS this vocabulary is
