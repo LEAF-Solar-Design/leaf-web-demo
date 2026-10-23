@@ -7,10 +7,10 @@
 // Usage:
 //   node scripts/check_bundle_budget.mjs                  # gate against baseline
 //   node scripts/check_bundle_budget.mjs --write-baseline # reseed after a deliberate change
-//   node scripts/check_bundle_budget.mjs --write-baseline --before <ref> # explicit pre-canvas source
-import { readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+//   node scripts/check_bundle_budget.mjs --write-baseline --before <ref> # explicit before source
+import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
-import { join, dirname, resolve } from 'node:path'
+import { join, dirname, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
@@ -37,6 +37,56 @@ export function beforeReference(args, mergeBase) {
   }
   if (!mergeBase) throw new Error('Cannot resolve merge-base with origin/main; supply --before <ref>')
   return mergeBase
+}
+
+export function beforeOverlay(sourceRef, root = ROOT, git = execFileSync) {
+  const run = args => git('git', args, { cwd: dirname(root), encoding: 'utf8' })
+  const paths = new Set(run(['diff', '--name-only', '--no-renames', '-z', sourceRef, '--', 'web/src']).split('\0').filter(Boolean))
+  const status = run(['status', '--porcelain', '-z', '--untracked-files=all', '--', 'web/src']).split('\0')
+  for (let index = 0; index < status.length; index++) {
+    const entry = status[index]
+    if (!entry) continue
+    paths.add(entry.slice(3))
+    if (/[RC]/.test(entry.slice(0, 2))) paths.add(status[++index])
+  }
+  const overlaidPaths = [...paths].filter(path => path?.startsWith('web/src/')).sort()
+  if (overlaidPaths.length > 400) throw new Error('too many changed files to isolate')
+  const beforePaths = new Set(run(['ls-tree', '-r', '--name-only', '-z', sourceRef, '--', 'web/src']).split('\0'))
+  const original = new Map(overlaidPaths.map(path => [
+    resolve(dirname(root), path).replaceAll('\\', '/'),
+    beforePaths.has(path) ? run(['show', `${sourceRef}:${path}`]) : 'export {}',
+  ]))
+  const deleted = new Set([...original.keys()].filter(path => !existsSync(path)))
+  const cleanId = id => id.split('?')[0].replaceAll('\\', '/')
+  return { paths: overlaidPaths, plugin: {
+    name: 'before-overlay', enforce: 'pre',
+    resolveId(source, importer) {
+      if (!source.startsWith('.') && !isAbsolute(source)) return null
+      if (source.startsWith('.') && !importer) return null
+      const path = cleanId(source.startsWith('/src/') ? resolve(root, `.${source}`) :
+        resolve(importer ? dirname(cleanId(importer)) : root, source))
+      const candidates = [path, ...['.js', '.jsx', '.ts', '.tsx', '.mjs', '.json', '.css'].map(ext => path + ext),
+        ...['/index.js', '/index.jsx', '/index.ts', '/index.tsx'].map(entry => path + entry)]
+      const match = candidates.find(candidate => deleted.has(candidate))
+      return match ? `${match}?before-overlay` : null
+    },
+    load(id) { return original.get(cleanId(id)) ?? null },
+  } }
+}
+
+export function measurementReceipt({ sourceRef, before, after, previous, canvas, deltas, paths }) {
+  const measurement = {
+    method: 'gzip-9, complete JS/CSS, Vite in-memory builds; merge-base or explicit --before changed web/src files before, working tree after',
+    source_ref: sourceRef, before_total: before.total, after_total: after.total,
+    delta: after.total - before.total, deltas,
+    baseline_before_total: previous.total,
+    unrelated_drift_bytes: before.total - previous.total,
+    canvas_dependency_gzip_bytes: canvas.reduce((sum, [, bytes]) => sum + bytes, 0),
+    cap_headroom_bytes: 4096,
+    overlaid_paths: paths.length,
+    overlaid_sample: paths.slice(0, 20),
+  }
+  return { isolated_measurement: measurement, isolated_canvas_measurement: measurement }
 }
 
 export function isolatedChunks(previous, before, after) {
@@ -82,9 +132,9 @@ export function stemFailures(chunks, baseline) {
 
 async function main() {
 if (process.argv.includes('--write-baseline')) {
-  // Isolate SEL-102 from unrelated drift since the older total baseline. Both
-  // builds use identical dependencies/configuration; only the original graph
-  // entry and shell styles are overlaid in memory for the before build.
+  // Isolate this slice from unrelated drift since the older total baseline.
+  // Both builds use identical dependencies/configuration; changed web/src
+  // files are overlaid in memory for the before build.
   // No checkout edits, dist writes or temporary files are needed.
   const { build } = await import('vite')
   const previous = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'))
@@ -95,16 +145,11 @@ if (process.argv.includes('--write-baseline')) {
   }
   const beforeRef = beforeReference(process.argv, mergeBase)
   const sourceRef = execFileSync('git', ['rev-parse', '--verify', beforeRef], { cwd: ROOT, encoding: 'utf8' }).trim()
-  const original = new Map(['src/lab/canvas/GraphView.jsx', 'src/lab/lab.css'].map(path => [
-    join(ROOT, path).replaceAll('\\', '/'),
-    execFileSync('git', ['show', `${sourceRef}:web/${path}`], { cwd: ROOT, encoding: 'utf8' }),
-  ]))
+  const overlay = beforeOverlay(sourceRef)
   const measure = async before => {
     const result = await build({ root: ROOT, logLevel: 'warn',
       build: { write: false, emptyOutDir: false },
-      plugins: before ? [{ name: 'sel102-before-overlay', enforce: 'pre',
-        load(id) { return original.get(id.replaceAll('\\', '/')) ?? null },
-      }] : [],
+      plugins: before ? [overlay.plugin] : [],
     })
     const chunks = {}
     for (const bundle of Array.isArray(result) ? result : [result]) for (const asset of bundle.output) {
@@ -126,17 +171,9 @@ if (process.argv.includes('--write-baseline')) {
   const total = Object.values(chunks).reduce((sum, bytes) => sum + bytes, 0)
   writeFileSync(BASELINE_PATH, JSON.stringify({ ...previous, _ref: ref, chunks, total, required_stems,
     stem_caps: { ...previous.stem_caps, ...Object.fromEntries(canvas.map(([name, bytes]) => [name, bytes + 4096])) },
-    isolated_canvas_measurement: {
-      method: 'gzip-9, complete JS/CSS, Vite in-memory builds; merge-base or explicit --before graph entry and shell CSS before, working tree after',
-      source_ref: sourceRef, before_total: before.total, after_total: after.total,
-      delta: after.total - before.total, deltas,
-      baseline_before_total: previous.total,
-      unrelated_drift_bytes: before.total - previous.total,
-      canvas_dependency_gzip_bytes: canvas.reduce((sum, [, bytes]) => sum + bytes, 0),
-      cap_headroom_bytes: 4096,
-    },
+    ...measurementReceipt({ sourceRef, before, after, previous, canvas, deltas, paths: overlay.paths }),
   }, null, 2) + '\n')
-  console.log(`SEL-102 isolated: before ${before.total}, after ${after.total}, delta ${after.total - before.total} gzip bytes`)
+  console.log(`Slice isolated: before ${before.total}, after ${after.total}, delta ${after.total - before.total} gzip bytes`)
   console.log(`bundle baseline ${previous.total} -> ${total}; unrelated drift ${before.total - previous.total} bytes was not reseeded`)
   console.log(`canvas hard caps: ${JSON.stringify(Object.fromEntries(canvas.map(([name, bytes]) => [name, bytes + 4096])))}`)
   return
