@@ -87,6 +87,66 @@ function rerenderProject(view, harness, changes) {
 const previewCalls = (harness) => harness.fetchImpl.mock.calls.filter(([url]) => url.includes('/api/capabilities?'));
 
 describe('Canonical Solar settings form through the merged project client', () => {
+  it.each([
+    [undefined, 'SIP_R7_WORKSPACE_NO_RESULT'],
+    [{ ok: false, status: null, reason: 'SIP_R7_WORKSPACE_NOT_ADMITTED', envelope: null }, 'SIP_R7_WORKSPACE_NOT_ADMITTED'],
+  ])('W1C15 reports the project submit result %j in run feedback', async (outcome, code) => {
+    const h = projectHarness({ intake: IG.intake });
+    h.props.onProjectSubmit = vi.fn().mockResolvedValue(outcome);
+    await editProject(h, 'Panels in sequence', '3');
+    changeInput('Drawing units', 'ft');
+    await readyProject('Start Solar design');
+    fireEvent.click(screen.getByRole('button', { name: 'Start Solar design' }));
+    await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toContain(code));
+    expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1);
+    expect(h.client.submitRun).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ busy: true }, 'SIP_R7_FORM_BUSY'],
+    [{ onProjectSubmit: undefined }, 'SIP_R7_FORM_NO_SUBMIT'],
+  ])('W1C15 reports a post-context guard %j', async (changes, code) => {
+    const h = projectHarness();
+    const view = await editProject(h);
+    await readyProject();
+    const pending = deferred();
+    h.contextResponses.push(pending.promise);
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(h.client.readContext).toHaveBeenCalledTimes(2));
+    view.rerender(<SolarSettingsForm {...h.props} {...changes} />);
+    await act(async () => { pending.resolve(projectResponse(canonicalView())); });
+    await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toContain(code));
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+
+  it('W1C15 reports a preview that expires between enabling Start and the click', async () => {
+    const h = projectHarness({ intake: IG.intake });
+    let current = true;
+    h.client.captureCatalogScope.mockImplementation(() => () => current);
+    await editProject(h, 'Panels in sequence', '3');
+    changeInput('Drawing units', 'ft');
+    await readyProject('Start Solar design');
+    current = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Start Solar design' }));
+    expect(screen.getByTestId('solar-settings-run').textContent).toContain('SIP_R7_FORM_NOT_ARMED');
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+
+  it('W1C15 reports a duplicate enabled submit as locked while preserving the accepted run', async () => {
+    const h = projectHarness();
+    const pending = deferred();
+    h.props.onProjectSubmit = vi.fn(() => pending.promise);
+    await editProject(h);
+    await readyProject();
+    const form = applyButton().closest('form');
+    act(() => { fireEvent.submit(form); fireEvent.submit(form); });
+    expect(screen.getByTestId('solar-settings-run').textContent).toContain('SIP_R7_FORM_LOCKED');
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1));
+    await act(async () => { pending.resolve({ ok: true, status: 202,
+      data: { job_id: projectJob, status: 'submitted' } }); });
+    expect(screen.getByTestId('solar-settings-run').textContent).toBe('Solar settings submitted.');
+  });
+
   it('R8-06 refuses invalid canonical bindings without client or legacy calls', async () => {
     const accessor = { ...projectBinding };
     const get = vi.fn(() => projectBinding.input_version_id);
