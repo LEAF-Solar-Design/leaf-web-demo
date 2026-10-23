@@ -335,7 +335,7 @@ export async function reviewStagingProposal(runtime, {
   await form.getByLabel('Grant ref', { exact: true }).fill('w1-staging')
   await form.getByLabel('Request', { exact: true }).fill(JSON.stringify(values.request))
   await frame.fill(values.frame)
-  await form.getByLabel('Phase', { exact: true }).selectOption('0')
+  await form.getByRole('combobox', { name: 'Phase', exact: true }).selectOption('0')
   const start = form.getByRole('button', { name: 'Run solve', exact: true })
   // Give a loading/locked form time to settle without turning refusal into failure.
   await assertions(start).toBeEnabled({ timeout: 10_000 }).catch(() => {})

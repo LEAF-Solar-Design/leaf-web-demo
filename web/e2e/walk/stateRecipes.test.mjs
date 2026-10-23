@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
@@ -20,6 +20,68 @@ import { canonicalProjectVersion, proposalCatalogState, proposalFormValues, refu
   stagingAction, stagingRead, stagingContext, stagingRun, reviewStagingProposal } from '../walk-staging/projectSolarSteps.mjs'
 import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErrorCode,
   observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep } from '../walk-staging/projectSolarSteps.mjs'
+
+function exactLabelSelectLines(source) {
+  // Keep strings atomic and omit comments so fixture text cannot flag itself.
+  const tokenPattern = new RegExp(String.raw`\/\/[^\n]*|\/\*[\s\S]*?\*\/|'(?:\\[\s\S]|[^'\\])*'|"(?:\\[\s\S]|[^"\\])*"|\x60(?:\\[\s\S]|[^\x60\\])*\x60|[A-Za-z_$][\w$]*|[^\s]`, 'g')
+  const tokens = [...source.matchAll(tokenPattern)]
+    .filter(([token]) => !token.startsWith('//') && !token.startsWith('/*'))
+  const value = index => tokens[index]?.[0]
+  const callEnd = start => {
+    let depth = 0
+    for (let index = start; index < tokens.length; index++) {
+      if (value(index) === '(') depth++
+      if (value(index) === ')' && --depth === 0) return index
+    }
+    return tokens.length
+  }
+  const lines = []
+  for (let index = 0; index < tokens.length; index++) {
+    if (value(index) !== 'getByLabel' || value(index + 1) !== '(') continue
+    const end = callEnd(index + 1)
+    const exact = tokens.slice(index + 2, end).some(([token], offset) =>
+      token === 'exact' && value(index + 3 + offset) === ':' && value(index + 4 + offset) === 'true')
+    if (!exact) continue
+    for (let next = end + 1; value(next) === '.' && value(next + 2) === '(';) {
+      if (value(next + 1) === 'selectOption') {
+        lines.push(source.slice(0, tokens[index].index).split('\n').length)
+        break
+      }
+      next = callEnd(next + 2) + 1
+    }
+  }
+  return lines
+}
+
+test('select locator guard flags exact labels, including multiline calls and chained locators', () => {
+  assert.deepEqual(exactLabelSelectLines(`await settings.getByLabel('Drawing units', { exact: true }).selectOption('m')`), [1])
+  assert.deepEqual(exactLabelSelectLines(`await form
+    .getByLabel('Phase', {
+      exact: true,
+    }).first().selectOption('0')`), [2])
+})
+
+test('select locator guard accepts combobox roles and separate statements', () => {
+  assert.deepEqual(exactLabelSelectLines(`await settings.getByRole('combobox', { name: 'Drawing units', exact: true }).selectOption('m')`), [])
+  assert.deepEqual(exactLabelSelectLines(`await form.getByLabel('Request', { exact: true }).fill('{}')
+    await form.getByRole('combobox', { name: 'Phase', exact: true }).selectOption('0')`), [])
+})
+
+test('all e2e select controls avoid exact label locators', () => {
+  const violations = []
+  const visit = (directory, relative = 'web/e2e') => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = `${relative}/${entry.name}`
+      const url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), directory)
+      if (entry.isDirectory()) visit(url, path)
+      else if (entry.isFile() && entry.name.endsWith('.mjs')) {
+        for (const line of exactLabelSelectLines(readFileSync(url, 'utf8'))) violations.push(`${path}:${line}`)
+      }
+    }
+  }
+  visit(new URL('../', import.meta.url))
+  assert.deepEqual(violations, [], `Use getByRole('combobox', { name, exact: true }) for select controls:\n${violations.join('\n')}`)
+})
 
 function fakeAuth(value) {
   const headers = {}
@@ -474,8 +536,10 @@ test('shared publication supports initialize and existing scratch graphs through
     const clickable = name => ({ isVisible: async () => true, isEnabled: async () => true,
       click: async () => events.push(name) })
     const settings = { getAttribute: async () => mode,
-      getByLabel: name => ({ fill: async value => { values[name] = value }, selectOption: async value => { values[name] = value } }),
-      getByRole: (_role, { name }) => clickable(name) }
+      getByLabel: name => ({ fill: async value => { values[name] = value } }),
+      getByRole: (role, { name, exact }) => role === 'combobox' ? { selectOption: async value => {
+        assert.equal(name, 'Drawing units'); assert.equal(exact, true); values[name] = value
+      } } : clickable(name) }
     const runtime = { cleanup: [], evidence: { projectSolar: { steps: [] } }, projectSolar: {
       binding: stagingBinding, apiBase: stagingBase, context: { graph: mode === 'edit' ? stagingGraph() : null },
     } }
@@ -506,6 +570,53 @@ test('shared publication supports initialize and existing scratch graphs through
   }
 })
 
+test('shared publication reports settings diagnostics when its button never enables', async () => {
+  for (const mode of ['initialize', 'edit']) {
+    const buttonName = mode === 'initialize' ? 'Start Solar design' : 'Apply settings'
+    const timeoutError = new Error('button enable wait timed out')
+    const reads = []
+    const clickable = { isVisible: async () => true, isEnabled: async () => true, click: async () => {} }
+    const start = { click: () => assert.fail('disabled publication must not submit') }
+    const settings = { getAttribute: async () => mode,
+      getByLabel: () => ({ fill: async () => {} }),
+      getByRole: (role, { name }) => {
+        if (role === 'combobox') return { selectOption: async () => {} }
+        assert.equal(name, buttonName)
+        return start
+      },
+      getByTestId: testId => ({ count: async () => 1, textContent: async options => {
+        assert.deepEqual(options, { timeout: 2_000 })
+        reads.push(testId)
+        return testId === 'solar-settings-reason' ? '  Drawing calibration is required.  ' : `  ${'r'.repeat(310)}  `
+      } }),
+    }
+    const runtime = { cleanup: [], evidence: { projectSolar: { steps: [] } }, projectSolar: {
+      binding: stagingBinding, apiBase: stagingBase, context: { graph: null },
+    }, page: {
+      getByRole: role => role === 'group' ? { getByRole: () => clickable } : clickable,
+      getByTestId: name => name === 'solar-settings-form' ? settings : { locator: () => clickable },
+      locator: () => ({ isVisible: async () => false }),
+    } }
+    const assertions = value => value === start ? { toBeEnabled: async options => {
+      assert.deepEqual(options, { timeout: 30_000 })
+      throw timeoutError
+    } } : stagingAssertions(value)
+    assertions.poll = stagingAssertions.poll
+    await assert.rejects(publishProjectSolar(runtime, assertions, { allowExistingGraph: true,
+      action: async (_page, _base, _method, path, click) => {
+        await click()
+        return stagingResponse(path, { acquired: true, ...stagingBinding, checkout: { fence: '7' } })
+      }, run: () => assert.fail('disabled publication must not run'),
+    }), error => {
+      assert.equal(error.cause.cause, timeoutError)
+      assert.equal(error.cause.message, `${buttonName} did not become enabled within 30 s; solar-settings-reason: Drawing calibration is required.; solar-settings-run: ${'r'.repeat(300)}`)
+      assert.ok(error.message.includes('Drawing calibration is required.'))
+      return true
+    })
+    assert.deepEqual(reads, ['solar-settings-reason', 'solar-settings-run'])
+  }
+})
+
 test('proposal review attempts an enabled UI solve even when the catalog says not runnable; never commits', async () => {
   for (const scenario of ['disabled-control', 'disabled-fields', 'disabled-submit', 'ui-refusal', 'http-refusal', 'job-refusal', 'review']) {
     const events = [], fields = {}
@@ -520,7 +631,10 @@ test('proposal review attempts an enabled UI solve even when the catalog says no
     page.getByRole = (role, { name } = {}) => role === 'form' ? {
       getByLabel: label => ({ isEnabled: async () => scenario !== 'disabled-fields',
         fill: async value => { fields[label] = value }, selectOption: async value => { fields[label] = value } }),
-      getByRole: role => role === 'status' ? { allTextContents: async () => [status] } : submit,
+      getByRole: (role, { name, exact } = {}) => role === 'status' ? { allTextContents: async () => [status] }
+        : role === 'combobox' ? { selectOption: async value => {
+          assert.equal(name, 'Phase'); assert.equal(exact, true); fields[name] = value
+        } } : submit,
     } : { visible: true, click: () => assert.fail(`must never click ${name}`) }
     const runtime = { page, projectSolar: { apiBase: stagingBase, binding: stagingBinding, context: { graph: null },
       catalog: [{ runnable: false, reason_code: 'SOLVE_CONTEXT_REQUIRED' }] } }
