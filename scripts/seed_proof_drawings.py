@@ -34,9 +34,10 @@ def seed_proof_drawings(tenant: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tenant", required=True)
+    parser.add_argument("--tenant", action="append", required=True)
     args = parser.parse_args()
-    seed_proof_drawings(args.tenant)
+    for tenant in dict.fromkeys(args.tenant):
+        seed_proof_drawings(tenant)
 
 
 if __name__ == "__main__":

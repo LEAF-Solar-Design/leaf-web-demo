@@ -176,8 +176,11 @@ try {
     $reqs += (Join-Path $repoRoot 'server\requirements-auth.txt')
   }
   $launcherFile = Get-ProofRuntime -RequirementFiles $reqs
-  $proofTenant = if ($env:VITE_TENANT_ID) { $env:VITE_TENANT_ID } else { 'demo-tenant' }
-  & $launcherFile -B (Join-Path $repoRoot 'scripts/seed_proof_drawings.py') --tenant $proofTenant
+  $proofTenantArgs = @('--tenant', 'demo-tenant')
+  if ($env:VITE_TENANT_ID -and $env:VITE_TENANT_ID -cne 'demo-tenant') {
+    $proofTenantArgs += @('--tenant', $env:VITE_TENANT_ID)
+  }
+  & $launcherFile -B (Join-Path $repoRoot 'scripts/seed_proof_drawings.py') @proofTenantArgs
   if ($LASTEXITCODE -ne 0) { throw 'Could not seed the proof drawings' }
   $launcherArgs = @(
     'scripts/start-leaf.py', '--with-harness',
