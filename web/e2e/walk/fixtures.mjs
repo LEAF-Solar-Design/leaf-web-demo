@@ -36,6 +36,8 @@ export async function projectSolarRunDiagnostic(page, settings, start) {
     'solar-settings-reason': await diagnosticText(() => text(settings.getByTestId('solar-settings-reason'))),
     'solar-settings-run': await diagnosticText(() => text(settings.getByTestId('solar-settings-run'))),
     'data-mode': await diagnosticText(() => settings.getAttribute('data-mode', { timeout: 2_000 })),
+    'data-submit-seq': await diagnosticText(() => settings.getAttribute('data-submit-seq', { timeout: 2_000 })),
+    'data-submit-exit': await diagnosticText(() => settings.getAttribute('data-submit-exit', { timeout: 2_000 })),
     startEnabled: await diagnosticText(() => start.isEnabled({ timeout: 2_000 })),
     checkoutStatus: await diagnosticText(() => text(checkout().getByRole('status'))),
     releaseEnabled: await diagnosticText(() => checkout().getByRole('button', { name: 'Release', exact: true }).isEnabled({ timeout: 2_000 })),

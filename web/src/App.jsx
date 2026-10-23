@@ -951,7 +951,7 @@ export default function App() {
     closeStartForChange()
     return retryUnreadableHeadRaw(...args)
   }, [retryUnreadableHeadRaw, closeStartForChange])
-  const platform = usePlatformTrustController({ mock })
+  const platform = usePlatformTrustController({ mock, guestReadsPaused: knownGuest })
   const {
     usage,
     usageAt,
@@ -3349,11 +3349,11 @@ export default function App() {
     setQuotaAt(quotaError || runQuotaError ? Date.now() : 0)
   }, [quotaError, runQuotaError])
   useEffect(() => {
-    if (mock || (!quotaError && !runQuotaError)) return undefined
+    if (mock || knownGuest || (!quotaError && !runQuotaError)) return undefined
     loadUsage()
     const id = setInterval(loadUsage, 60_000)
     return () => clearInterval(id)
-  }, [mock, quotaError, runQuotaError, loadUsage])
+  }, [mock, knownGuest, quotaError, runQuotaError, loadUsage])
   const freshUsage = quotaAt > 0 && usageAt > quotaAt ? usage : null
   const spendCapCleared = !!(quotaError && freshUsage?.cap?.enabled &&
     typeof freshUsage.cap.remaining === 'number' && freshUsage.cap.remaining > 0)

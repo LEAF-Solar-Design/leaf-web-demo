@@ -83,4 +83,21 @@ describe('known guest authenticated reads', () => {
     const drawingId = checkout.node.arguments[0].properties.find((property) => property.key?.name === 'drawingId')
     expect(text(drawingId.value)).toMatch(/^knownGuest \? null : checkoutScopeDrawingId\(/)
   })
+
+  it('pauses platform authenticated reads for a known guest', () => {
+    const platform = one((node) => node.type === 'CallExpression' && node.callee.name === 'usePlatformTrustController')
+    expect(platform.node.arguments).toHaveLength(1)
+    const options = platform.node.arguments[0]
+    expect(options.type).toBe('ObjectExpression')
+    expect(options.properties.map(text)).toEqual(['mock', 'guestReadsPaused: knownGuest'])
+  })
+
+  it('stops the quota re-poll for a known guest', () => {
+    const poll = one((node) => node.type === 'CallExpression' && node.callee.name === 'useEffect'
+      && text(node.arguments[0].body).includes('setInterval(loadUsage, 60_000)'))
+    const first = poll.node.arguments[0].body.body[0]
+    expect(first.type).toBe('IfStatement')
+    expect(text(first.test)).toBe('mock || knownGuest || (!quotaError && !runQuotaError)')
+    expect(poll.node.arguments[1].elements.map(text)).toEqual(['mock', 'knownGuest', 'quotaError', 'runQuotaError', 'loadUsage'])
+  })
 })
