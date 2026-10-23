@@ -109,6 +109,60 @@ describe('Strategy revision ledger', () => {
     }
   })
 
+  it('keeps the restored head and revisions when earlier reads finish, then saves against that head', async () => {
+    const { client, fetchImpl, rows } = ledger()
+    await client.save('strategy', first, null)
+    await client.save('strategy', second, 1)
+    const staleHead = copy(rows[1])
+    const staleRevisions = copy(rows)
+    let resolveHead
+    let resolveRevisions
+    fetchImpl.mockImplementationOnce(() => new Promise(resolve => { resolveHead = resolve }))
+    const head = client.head('strategy')
+    fetchImpl.mockImplementationOnce(() => new Promise(resolve => { resolveRevisions = resolve }))
+    const revisions = client.revisions('strategy')
+    await client.restore('strategy', 1, 2)
+    expect(client.state.head).toBe(3)
+    resolveHead({ ok: true, json: async () => staleHead })
+    resolveRevisions({ ok: true, json: async () => ({ revisions: staleRevisions }) })
+    expect(await head).toMatchObject({ ok: true, revision: 2 })
+    expect((await revisions).revisions).toHaveLength(2)
+    expect(client.state.head).toBe(3)
+    expect(client.state.revisions.map(row => row.revision)).toEqual([1, 2, 3])
+    await client.save('strategy', second, client.state.head)
+    const body = JSON.parse(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/save')).at(-1)[1].body)
+    expect(body.expected_head).toBe(3)
+    expect(client.state.head).toBe(4)
+  })
+
+  it('ignores pending head and revisions reads after switching documents', async () => {
+    const { client, fetchImpl, append } = ledger()
+    const row = append(first)
+    let resolveHead
+    let resolveRevisions
+    fetchImpl.mockImplementationOnce(() => new Promise(resolve => { resolveHead = resolve }))
+    const head = client.head('strategy')
+    fetchImpl.mockImplementationOnce(() => new Promise(resolve => { resolveRevisions = resolve }))
+    const revisions = client.revisions('strategy')
+    client.setDocId('other')
+    resolveHead({ ok: true, json: async () => ({ ...row, published_revision: 1 }) })
+    resolveRevisions({ ok: true, json: async () => ({ revisions: [row] }) })
+    expect(await head).toMatchObject({ ok: true, revision: 1 })
+    expect((await revisions).revisions).toEqual([row])
+    expect(client.currentDocId()).toBe('other')
+    expect(client.state.head).toBeNull()
+    expect(client.state.published).toBeNull()
+    expect(client.state.revisions).toEqual([])
+  })
+
+  it('sets head and published from an ordinary head read', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ revision: 3, published_revision: 2 }) }))
+    const client = createLabArtifactsClient({ fetchImpl })
+    expect(await client.head('strategy')).toEqual({ ok: true, revision: 3, published_revision: 2 })
+    expect(client.state.head).toBe(3)
+    expect(client.state.published).toBe(2)
+  })
+
   it('keeps mine byte-identical and retries against the conflict head', async () => {
     const { client, append, fetchImpl } = ledger()
     await client.save('strategy', first, null)
