@@ -40,7 +40,7 @@ function artifacts(lastSaved = saved) {
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     update(patch) { Object.assign(this.state, patch); listeners.forEach(listener => listener()) },
     currentDocId: () => 'strategy', takeGraph: vi.fn(), save: vi.fn(),
-    diff: vi.fn().mockResolvedValue({ ok: true, changes: [{ op: 'replace', path: '/blocks/0/settings/calibration_intercept', before: 0, after: 0.77 }] }),
+    diff: vi.fn().mockResolvedValue({ ok: true, afterGraph: draft, changes: [{ op: 'replace', path: '/blocks/0/settings/calibration_intercept', before: 0, after: 0.77 }] }),
     revision: vi.fn().mockResolvedValue({ ok: true, graph: draft }),
   }
 }
@@ -145,14 +145,14 @@ describe('After save comparison', () => {
     const { announce, afterSave, client } = fixture()
     const graph = addBlock(first, registry['adjust-none@1.0.0'])
     client.state.revisions = [{ revision: 1 }, { revision: 2 }]
-    client.diff.mockResolvedValue({ ok: true, changes: [
+    client.diff.mockResolvedValue({ ok: true, afterGraph: graph, changes: [
       { op: 'replace', path: '/blocks/1/settings/field', before: 'price', after: 'size' },
     ] })
-    client.revision.mockResolvedValue({ ok: true, graph })
     announce(row({ blocks: graph.blocks.map(block => ({ block_id: block.id, triggered: 1, reached: 2 })) }))
     afterSave.read()
     await act(async () => {})
     expect(afterSave.read().changed).toEqual({ revision: 2, blockIds: [graph.blocks[1].id] })
+    expect(afterSave.read().savedDocument).toBe(graph)
     const mount = render(<AfterSavePanel view={afterSave.read()} document={graph} />)
     const blocks = () => within(screen.getByRole('list', { name: 'Practice blocks' })).getAllByRole('listitem')
     expect(blocks()[0]).not.toHaveAttribute('data-changed')
@@ -169,7 +169,7 @@ describe('After save comparison', () => {
     client.update({ revisions: [{ revision: 2 }] })
     afterSave.read()
     expect(client.diff).toHaveBeenCalledExactlyOnceWith('strategy', 1, 2)
-    expect(client.revision).toHaveBeenCalledExactlyOnceWith('strategy', 2)
+    expect(client.revision).not.toHaveBeenCalled()
   })
 
   it('outlines every saved block for r1 without requesting a parent diff', async () => {
