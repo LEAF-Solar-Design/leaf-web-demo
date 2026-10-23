@@ -2212,7 +2212,7 @@ test.describe('route matrix, rail ON', () => {
     await page.getByLabel('ribbon group name').press('Enter')
     await expect(page.getByTestId('dock-groups')).toHaveText('RACK', { timeout: 60_000 })
     await expect(page.getByTestId('cad-edit-entity-count')).toHaveText(String(groupCountBefore + 2))
-    await page.getByLabel('Select group', { exact: true }).selectOption('RACK')
+    await page.getByRole('combobox', { name: 'Select group', exact: true }).selectOption('RACK')
     await expect(page.locator('.studio-ground .viewer-canvas')).toHaveAttribute('data-group-highlight', groupIds.map((id) => BigInt(id).toString(16).toUpperCase()).join(' '))
     await bar.fill('UNGROUP')
     await bar.press('Enter')
