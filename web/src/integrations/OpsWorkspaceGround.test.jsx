@@ -98,6 +98,30 @@ function submitAction() {
   fireEvent.click(screen.getByRole('button', { name: 'Send order now' }))
 }
 const actionPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) => url.endsWith('/integrations/actions') && options.method === 'POST')
+const uncertainAction = { ...actionRun, revision: 2, state: 'uncertain', effect_outcome: 'unknown' }
+const unknownReceipt = { schema_version: 1, receipt_id: projectId, run_id: actionRun.run_id, sequence: 1,
+  submission_digest: actionRun.submission_digest, operation_ref: actionRun.operation_ref,
+  observed_at: actionRun.updated_at, effect_outcome: 'unknown' }
+const unknownSnapshot = { run: uncertainAction, receipts: [unknownReceipt] }
+const reconciledSnapshot = { run: { ...actionRun, revision: 3, state: 'succeeded', effect_outcome: 'applied' },
+  receipts: [{ ...unknownReceipt, receipt_id: otherProject, sequence: 2, effect_outcome: 'applied' }] }
+const reconciliationPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) => url.endsWith('/reconcile') && options.method === 'POST')
+function setupReconciliation() {
+  const harness = setupAction()
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/reconcile')) return Promise.resolve(response(reconciledSnapshot))
+    if (url.includes('/integrations/actions/')) return Promise.resolve(response(unknownSnapshot))
+    return original(url, options)
+  })
+  return harness
+}
+async function observeUncertainAction() {
+  await openAction()
+  submitAction()
+  fireEvent.click(await screen.findByRole('button', { name: 'Check status' }))
+  await screen.findByText('Uncertain. Outcome unknown.')
+}
 beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
@@ -500,6 +524,116 @@ it('checks a known run using GET and renders canonical receipts with personal di
   const statusCalls = fetchImpl.mock.calls.filter(([url]) => url.includes('/integrations/actions/'))
   expect(statusCalls).toHaveLength(1)
   expect(statusCalls[0][1].method).toBe('GET')
+})
+it('reconciles an uncertain run once per explicit click without resubmission and retains its history', async () => {
+  const { props, fetchImpl } = setupReconciliation()
+  let finish
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/reconcile')
+    ? new Promise((resolve) => { finish = resolve }) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  expect(reconciliationPosts(fetchImpl)).toHaveLength(0)
+  const before = fetchImpl.mock.calls.length
+  const button = screen.getByRole('button', { name: 'Reconcile outcome' })
+  fireEvent.click(button)
+  fireEvent.click(button)
+  await waitFor(() => expect(reconciliationPosts(fetchImpl)).toHaveLength(1))
+  expect(screen.getByText('Reconciliation pending. The action outcome is still unknown.')).toBeInTheDocument()
+  expect(button).toBeDisabled()
+  expect(screen.getByRole('list', { name: 'Action history' }).querySelectorAll('li')).toHaveLength(1)
+  expect(fetchImpl.mock.calls.slice(before).map(([url]) => url.split('/').at(-1))).toEqual(['scope', 'orders-connection', 'reconcile'])
+  await act(async () => finish(response(reconciledSnapshot)))
+  await screen.findByText('The action succeeded and was applied.')
+  const history = screen.getByRole('list', { name: 'Action history' })
+  expect(history.querySelectorAll('li')).toHaveLength(2)
+  expect(history).toHaveTextContent('Action applied')
+  expect(screen.queryByRole('button', { name: 'Reconcile outcome' })).toBeNull()
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1)
+  const statusCalls = fetchImpl.mock.calls.filter(([url]) => url.endsWith(`/actions/${actionRun.run_id}`))
+  expect(statusCalls).toHaveLength(1)
+  expect(statusCalls[0][1].method).toBe('GET')
+})
+it.each(['unknown', 'failure', 'unsupported', 'forbidden', 'missing-client'])('retains uncertainty after %s reconciliation', async (outcome) => {
+  const { props, fetchImpl } = setupReconciliation()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/reconcile')
+    ? Promise.resolve(response(outcome === 'unknown' ? unknownSnapshot : { secret: 'private reconciliation failure' },
+      outcome === 'failure' ? 503 : outcome === 'unsupported' ? 404 : outcome === 'forbidden' ? 403 : 200)) : original(url, options))
+  if (outcome === 'missing-client') props.client.reconcileAction = undefined
+  render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Check status' })).toBeInTheDocument())
+  expect(screen.getByText('Uncertain. Outcome unknown.')).toBeInTheDocument()
+  expect(screen.getByRole('list', { name: 'Action history' }).querySelectorAll('li')).toHaveLength(1)
+  expect(screen.queryByRole('button', { name: 'Start another action' })).toBeNull()
+  expect(screen.queryByText(/The action was not submitted\./)).toBeNull()
+  expect(document.body.textContent).not.toContain('private reconciliation failure')
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  expect(reconciliationPosts(fetchImpl)).toHaveLength(outcome === 'missing-client' ? 0 : 1)
+  if (outcome === 'forbidden') expect(screen.getByRole('button', { name: 'Reconcile outcome' })).toBeDisabled()
+  if (outcome === 'unknown') {
+    fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Check status' })).toBeInTheDocument())
+    expect(reconciliationPosts(fetchImpl)).toHaveLength(2)
+    expect(actionPosts(fetchImpl)).toHaveLength(1)
+    expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1)
+  }
+})
+it.each(['scope', 'role', 'grant', 'revoked', 'ref', 'operation'])('refuses reconciliation before dispatch on fresh %s drift', async (change) => {
+  const { props, fetchImpl, authority } = setupReconciliation()
+  render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  if (change === 'scope') authority.scope = { ...scope, bindingId: otherProject }
+  if (change === 'role') authority.scope = { ...scope, projectRole: 'read_only' }
+  if (change === 'grant') authority.connection = { ...actionConnection, grant_revision: 8 }
+  if (change === 'revoked') authority.connection = { ...actionConnection, state: 'revoked' }
+  if (change === 'ref') authority.connection = { ...actionConnection, connector_ref: { ...reference, version: 4 } }
+  if (change === 'operation') authority.connection = { ...actionConnection, operation_ids: ['other'] }
+  fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+  await screen.findByRole('button', { name: 'Retry action authority' })
+  expect(screen.getByRole('button', { name: 'Reconcile outcome' })).toBeDisabled()
+  expect(screen.getByText('Uncertain. Outcome unknown.')).toBeInTheDocument()
+  expect(screen.queryByText(/The action was not submitted\./)).toBeNull()
+  expect(reconciliationPosts(fetchImpl)).toHaveLength(0)
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+})
+it('prevents reconciliation dispatch after an ignored late authority read in an invalidated context', async () => {
+  const { props, fetchImpl } = setupReconciliation()
+  const { rerender } = render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  let finish
+  const getScope = vi.spyOn(props.client, 'getScope').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = getScope.mock.calls[0][1].signal
+  rerender(<OpsWorkspaceGround {...props} active={false} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish(scope))
+  expect(reconciliationPosts(fetchImpl)).toHaveLength(0)
+  expect(screen.queryByRole('region', { name: 'Action run status' })).toBeNull()
+})
+it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('aborts reconciliation and rejects ignored late results on %s invalidation', async (change) => {
+  const { props, fetchImpl, sessionController } = setupReconciliation()
+  let finish
+  const reconcile = vi.spyOn(props.client, 'reconcileAction').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+  await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1))
+  const signal = reconcile.mock.calls[0][2].signal
+  if (change === 'unmount') unmount()
+  else if (change === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else if (change === 'status') act(() => sessionController.change({ status: 'expired' }))
+  else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } :
+    change === 'account' ? { accountScope: 'account-b' } : { active: false })} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish(reconciledSnapshot))
+  expect(screen.queryByRole('region', { name: 'Action run status' })).toBeNull()
+  expect(screen.queryByText('The action succeeded and was applied.')).toBeNull()
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
 })
 it.each(['reviewer', 'read_only'])('never loads execution authority for a %s', async (projectRole) => {
   const { props, fetchImpl, authority } = setupAction()
