@@ -106,6 +106,119 @@ describe('After save read model', () => {
 })
 
 describe('After save comparison', () => {
+  it('outlines a saved block when its registry version changes', async () => {
+    const { announce, afterSave, client } = fixture()
+    const graph = addBlock(first, registry['adjust-none@1.0.0'])
+    graph.blocks[1].registry = { ...graph.blocks[1].registry, version: '2.0.0' }
+    client.revision.mockResolvedValue({ ok: true, graph })
+    client.diff.mockResolvedValue({ ok: true, changes: [
+      { op: 'replace', path: '/blocks/1/registry/version', before: '1.0.0', after: '2.0.0' },
+    ] })
+    announce(row({ blocks: graph.blocks.map(block => ({ block_id: block.id, triggered: 1 })) }))
+    afterSave.read()
+    await act(async () => {})
+    expect(afterSave.read().changed.blockIds).toEqual([graph.blocks[1].id])
+    render(<AfterSavePanel view={afterSave.read()} document={graph} />)
+    const blocks = within(screen.getByRole('list', { name: 'Practice blocks' })).getAllByRole('listitem')
+    expect(blocks[0]).not.toHaveAttribute('data-changed')
+    expect(blocks[1]).toHaveAttribute('data-changed', 'true')
+  })
+
+  it('outlines a whole-block replacement with changed settings', async () => {
+    const { afterSave, client } = fixture()
+    client.diff.mockResolvedValue({ ok: true, changes: [
+      { op: 'replace', path: '/blocks/0', before: first.blocks[0], after: draft.blocks[0] },
+    ] })
+    afterSave.read()
+    await act(async () => {})
+    expect(afterSave.read().changed.blockIds).toEqual([draft.blocks[0].id])
+  })
+
+  it('marks both saved pipe endpoints and the previous node when a pipe target changes', async () => {
+    const { afterSave, client } = fixture()
+    const graph = addBlock(addBlock(first, registry['adjust-none@1.0.0']), registry['adjust-none@1.0.0'])
+    const [a, b, c] = graph.blocks.map(block => block.id)
+    graph.pipes = [{ from: { node: a, port: 'result' }, to: { node: c, port: 'value' } }]
+    client.revision.mockResolvedValue({ ok: true, graph })
+    client.diff.mockResolvedValue({ ok: true, changes: [
+      { op: 'replace', path: '/pipes/0/to/node', before: b, after: c },
+    ] })
+    afterSave.read()
+    await act(async () => {})
+    expect(afterSave.read().changed.blockIds).toEqual([a, b, c])
+  })
+
+  it('marks only the remaining endpoint when a block and its pipe are removed', async () => {
+    const { afterSave, client } = fixture()
+    const before = addBlock(first, registry['adjust-none@1.0.0'])
+    const [a, b] = before.blocks.map(block => block.id)
+    const graph = { ...before, blocks: [before.blocks[1]], pipes: [] }
+    client.revision.mockResolvedValue({ ok: true, graph })
+    client.diff.mockResolvedValue({ ok: true, changes: [
+      { op: 'replace', path: '/blocks', before: before.blocks, after: graph.blocks },
+      { op: 'replace', path: '/pipes', before: [{ from: { node: a, port: 'result' }, to: { node: b, port: 'value' } }], after: [] },
+    ] })
+    afterSave.read()
+    await act(async () => {})
+    expect(afterSave.read().changed.blockIds).toEqual([b])
+  })
+
+  it('shares revision requests and cached failures across clients over the same artifacts instance', async () => {
+    for (const failed of [false, true]) {
+      const { afterSave, client, provider } = fixture()
+      if (failed) client.diff.mockRejectedValue(new Error('Offline'))
+      afterSave.read()
+      const second = createAfterSaveClient({ provider, artifacts: client })
+      const listener = vi.fn()
+      const unsubscribe = second.subscribe(listener)
+      second.read()
+      await act(async () => {})
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(second.read().savedDocument).toBe(draft)
+      expect(second.read().changed).toEqual(afterSave.read().changed)
+      if (failed) expect(second.read().changed).toBeNull()
+      unsubscribe()
+      const remounted = createAfterSaveClient({ provider, artifacts: client })
+      remounted.read()
+      await act(async () => {})
+      expect(client.diff).toHaveBeenCalledExactlyOnceWith('strategy', 1, 2, { graphs: false })
+      expect(client.revision).toHaveBeenCalledExactlyOnceWith('strategy', 2)
+    }
+  })
+
+  it('retains the saved graph and block list when the diff rejects', async () => {
+    const { announce, afterSave, client } = fixture()
+    client.diff.mockRejectedValue(new Error('Offline'))
+    announce(row())
+    afterSave.read()
+    await act(async () => {})
+    expect(afterSave.read().savedDocument).toBe(draft)
+    expect(afterSave.read().changed).toBeNull()
+    render(<AfterSavePanel view={afterSave.read()} document={emptyGraph()} />)
+    expect(screen.getByText('Changed blocks unavailable')).toBeVisible()
+    const blocks = within(screen.getByRole('list', { name: 'Practice blocks' })).getAllByRole('listitem')
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]).toHaveTextContent('Strategy: triggered 0 times in the window, reached 0')
+    expect(blocks[0]).not.toHaveAttribute('data-changed')
+  })
+
+  it('uses the saved registry title when a titleless draft changes registry', async () => {
+    const { announce, afterSave } = fixture()
+    const document = { ...draft, blocks: draft.blocks.map(block => ({ ...block, title: '',
+      registry: { ...block.registry, id: 'exits-value-vs-hold-v1' } })) }
+    announce(row())
+    afterSave.read()
+    await act(async () => {})
+    const mount = render(<AfterSavePanel view={afterSave.read()} document={document} />)
+    const blocks = () => within(screen.getByRole('list', { name: 'Practice blocks' })).getAllByRole('listitem')
+    expect(blocks()[0]).toHaveTextContent('Strategy: triggered 0 times')
+    expect(blocks()[0]).not.toHaveTextContent('Cash out')
+    const savedDocument = { ...draft, blocks: draft.blocks.map(block => ({ ...block,
+      registry: { ...block.registry, version: '2.0.0' } })) }
+    mount.rerender(<AfterSavePanel view={{ ...afterSave.read(), savedDocument }} document={document} />)
+    expect(blocks()[0]).toHaveTextContent('adjust-none: triggered 0 times')
+  })
+
   it('formats both sides, deltas, timing, changed and unreached blocks, attribution and coverage', async () => {
     const { announce, afterSave } = fixture()
     announce(row())

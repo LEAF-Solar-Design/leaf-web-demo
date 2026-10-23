@@ -50,7 +50,7 @@ export default function AfterSavePanel({ view, document }) {
         const current = document?.blocks?.find(item => item.id === block.block_id)
         const saved = view.savedDocument?.blocks?.find(item => item.id === block.block_id)
         const changed = Boolean(view.changed?.blockIds.includes(block.block_id))
-        const title = current?.title || registry[`${current?.registry?.id || saved?.registry?.id || block.registry_id}@${current?.registry?.version || saved?.registry?.version || '1.0.0'}`]?.title || saved?.registry?.id || block.registry_id || block.block_id
+        const title = current?.title || registry[`${saved?.registry?.id || block.registry_id}@${saved?.registry?.version || '1.0.0'}`]?.title || saved?.registry?.id || block.registry_id || block.block_id
         return <li key={block.block_id} data-changed={changed ? 'true' : undefined}
           style={changed ? { outline: '2px solid var(--leaf-color-data-series-3)' } : undefined}>
           {title}: {block.triggered === 0 ? 'triggered 0 times in the window' : `triggered ${count(block.triggered)}`}, reached {count(block.reached)}
