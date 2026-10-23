@@ -6,9 +6,6 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from da import usage
-
-
 FREE_TIER = "hosted_free"
 _PRICEBOOK = Path(__file__).resolve().parent.parent / "platform" / "pricebook.json"
 
@@ -33,7 +30,7 @@ def load_monthly_limit(path=_PRICEBOOK):
     return limit
 
 
-def monthly_refusal(tenant_id, limit, used, tool_name):
+def monthly_refusal(usage, tenant_id, limit, used, tool_name):
     env = usage.daily_quota_envelope(tenant_id, FREE_TIER, limit, used, tool=tool_name)
     message = (f"Managed run allowance reached: the Free plan includes {limit} "
                "managed run(s) a month. Upgrade or bring your own account to continue.")

@@ -720,13 +720,13 @@ def _run_quota_preflight(tenant_id: str, tier: str, tool: Dict[str, Any]):
                     if not _free_allowance_config_logged:
                         LOGGER.error("Free allowance is unavailable; refusing hosted_free runs")
                         _free_allowance_config_logged = True
-                env = free_allowance.monthly_refusal(tenant_id, 0, used, tool.get("name"))
+                env = free_allowance.monthly_refusal(usage, tenant_id, 0, used, tool.get("name"))
                 message = "The free allowance is unavailable. Upgrade or bring your own account to continue."
                 env["message"] = env["error"]["message"] = message
                 env["degraded_mode"] = False
                 return env, 429
             if used >= limit:
-                env = free_allowance.monthly_refusal(tenant_id, limit, used, tool.get("name"))
+                env = free_allowance.monthly_refusal(usage, tenant_id, limit, used, tool.get("name"))
                 env["degraded_mode"] = False
                 return env, 429
         return None

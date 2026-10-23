@@ -20,6 +20,15 @@ import broker_pg_store  # noqa: E402
 import free_allowance as allowance  # noqa: E402
 
 
+def test_free_allowance_has_no_da_imports():
+    tree = ast.parse(Path(allowance.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all(alias.name.split(".")[0] != "da" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert (node.module or "").split(".")[0] != "da"
+
+
 @pytest.mark.parametrize("value", [None, "", "0", "true", " 1", "1 ", "01", "1"])
 def test_enforcement_requires_exact_one(monkeypatch, value):
     monkeypatch.delenv("LEAF_FREE_ALLOWANCE_ENFORCE", raising=False)
@@ -74,8 +83,9 @@ def test_missing_config_raises(tmp_path):
 
 
 def test_monthly_refusal_reuses_daily_shape():
-    daily = allowance.usage.daily_quota_envelope("tenant-a", "hosted_free", 1, 1, tool="solve")
-    monthly = allowance.monthly_refusal("tenant-a", 1, 1, "solve")
+    usage = broker._get_usage()
+    daily = usage.daily_quota_envelope("tenant-a", "hosted_free", 1, 1, tool="solve")
+    monthly = allowance.monthly_refusal(usage, "tenant-a", 1, 1, "solve")
     assert set(monthly) == set(daily) | {"window"}
     assert monthly["window"] == monthly["error"]["window"] == "month"
     assert monthly["message"] == monthly["error"]["message"]
@@ -97,7 +107,7 @@ def admission(monkeypatch):
 
     usage = SimpleNamespace(
         daily_run_limit_for=lambda tier: None if tier == "hosted_pro" else 20,
-        daily_quota_envelope=allowance.usage.daily_quota_envelope,
+        daily_quota_envelope=broker._get_usage().daily_quota_envelope,
         daily_run_quota_check=lambda *_args: {"ok": True},
     )
     store = SimpleNamespace(
@@ -108,7 +118,6 @@ def admission(monkeypatch):
     monkeypatch.setenv("LEAF_BROKER_STORE", "postgres")
     monkeypatch.setattr(broker, "_get_usage", lambda: usage)
     monkeypatch.setattr(broker, "_postgres_store", lambda: store)
-    monkeypatch.setattr(allowance, "usage", usage)
     monkeypatch.setattr(allowance, "load_monthly_limit", lambda: state.limit)
     monkeypatch.setattr(broker, "_free_allowance_config_logged", False)
     return state, calls
