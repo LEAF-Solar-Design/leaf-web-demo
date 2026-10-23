@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event, current_thread
 from types import SimpleNamespace
 
 import pytest
@@ -311,6 +311,354 @@ def test_worker_id_default_generator():
         assert value.startswith(prefix)
         assert uuid.UUID(value[len(prefix):]).version == 4
     assert first != second
+
+
+@pytest.mark.parametrize("selected", [
+    [], ["solar-settings"], ["string-autofill-opt"], ["solar-settings", "arlo-design"],
+], ids=["default", "single", "explicit-default", "repeat"])
+def test_main_tool_default_and_explicit_selections(monkeypatch, selected):
+    parsers, parsed, served = [], [], []
+    parse_args = canonical_worker.argparse.ArgumentParser.parse_args
+
+    def capture(parser, *args, **kwargs):
+        parsers.append(parser)
+        namespace = parse_args(parser, *args, **kwargs)
+        parsed.append(namespace.tool)
+        return namespace
+
+    monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    monkeypatch.setattr(canonical_worker.argparse.ArgumentParser, "parse_args", capture)
+    monkeypatch.setattr(canonical_worker, "serve", lambda **kwargs: served.append(kwargs["tool_name"]))
+    monkeypatch.setattr(canonical_worker, "_serve_tools", lambda worker_ids, **kwargs: served.extend(worker_ids))
+    _project_main(monkeypatch, [arg for tool in selected for arg in ("--tool", tool)], lambda: None)
+
+    canonical_worker.main()
+
+    action = next(action for action in parsers[0]._actions if action.dest == "tool")
+    assert action.default == canonical_worker.autofill.TOOL_NAME
+    assert parsed == [selected if selected else canonical_worker.autofill.TOOL_NAME]
+    assert served == (selected or [canonical_worker.autofill.TOOL_NAME])
+
+
+@pytest.mark.parametrize("opt_in", [False, True], ids=["off", "on"])
+def test_main_default_loop(monkeypatch, capsys, opt_in):
+    calls, schema, handlers = [], [], {}
+    if opt_in:
+        monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    else:
+        monkeypatch.delenv("LEAF_CANONICAL_MULTI_TOOL", raising=False)
+    monkeypatch.setenv("LEAF_CANONICAL_LEASE_SECONDS", "30")
+    _project_main(monkeypatch, [], lambda: schema.append("schema"))
+    monkeypatch.setattr(canonical_worker.signal, "signal", lambda sig, fn: handlers.update({sig: fn}))
+    monkeypatch.setattr(canonical_worker, "worker_id", lambda: "legacy-generated-id")
+
+    def cycle(owner, **kwargs):
+        calls.append((owner, kwargs, current_thread()))
+        handlers[canonical_worker.signal.SIGTERM](None, None)
+        return False
+
+    monkeypatch.setattr(canonical_worker, "run_once", cycle)
+    assert canonical_worker.main() is None
+    assert schema == ["schema"]
+    assert calls == [("legacy-generated-id", {
+        "lease_seconds": 30.0, "tool_name": "string-autofill-opt"}, current_thread())]
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("flag", [None, "0", "true", " 1", "1 "], ids=["none", "zero", "true", "lead", "tail"])
+@pytest.mark.parametrize("health", [False, True], ids=["serve", "health"])
+def test_multi_needs_opt_in(monkeypatch, capsys, flag, health):
+    if flag is None:
+        monkeypatch.delenv("LEAF_CANONICAL_MULTI_TOOL", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", flag)
+    argv = ["--tool", "string-autofill-opt", "--tool", "solar-settings"]
+    if health:
+        argv.append("--health")
+    _project_main(monkeypatch, argv,
+                  lambda: pytest.fail("refused arguments reached schema"))
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 2
+    assert "LEAF_CANONICAL_MULTI_TOOL" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("extra,second", [([], "solar-settings"), (["--once"], "solar-solve-proposal"),
+                                        (["--readiness"], "solar-solve-proposal")],
+                         ids=["dup", "once", "ready"])
+def test_multi_refuses_modes(monkeypatch, capsys, extra, second):
+    monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    _project_main(monkeypatch, ["--tool", "solar-settings", "--tool", second, *extra],
+                  lambda: pytest.fail("refused arguments reached schema"))
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 2
+    expected = "multiple --tool values cannot be used with" if extra else "duplicate --tool values"
+    assert expected in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("base", [None, "manual", "w" * (128 - len(":string-autofill-opt"))],
+                         ids=["host", "manual", "limit"])
+def test_multi_cycles(monkeypatch, capsys, base):
+    import solar_project_jobs
+
+    tools = ("string-autofill-opt", "arlo-design", "solar-settings")
+    handlers, counts, threads, schema = {}, {}, {}, []
+    barrier = Barrier(len(tools))
+    descriptors = {tool: {**_graph_descriptor(), "tool_name": tool} for tool in tools}
+    owner_base = base or "task-host"
+
+    class Cycles(FakeCanonicalJobs):
+        def claim_next(self, owner, *, lease_seconds=30, tool_name=None):
+            assert schema == ["schema"]
+            assert owner == f"{owner_base}:{tool_name}"
+            assert canonical_worker._worker_id_argument(owner) == owner
+            assert self.heartbeats.count((owner, *descriptors[tool_name].values())) == counts.get(tool_name, 0) + 1
+            super().claim_next(owner, lease_seconds=lease_seconds, tool_name=tool_name)
+            threads[tool_name] = current_thread()
+            counts[tool_name] = counts.get(tool_name, 0) + 1
+            if counts[tool_name] == 2:
+                barrier.wait(timeout=5)
+                handlers[canonical_worker.signal.SIGTERM](None, None)
+            return None
+
+    store = Cycles()
+    argv = [arg for tool in tools for arg in ("--tool", tool)] + ["--poll-seconds", "0.05"]
+    if base is not None:
+        argv += ["--worker-id", base]
+    monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    monkeypatch.setenv("LEAF_CANONICAL_LEASE_SECONDS", "1")
+    _project_posture(monkeypatch, runtime="staging", flag="0")
+    _project_main(monkeypatch, argv, lambda: schema.append("schema"))
+    monkeypatch.setattr(canonical_worker.signal, "signal", lambda sig, fn: handlers.update({sig: fn}))
+    monkeypatch.setattr(canonical_worker.socket, "gethostname", lambda: "task-host")
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
+    monkeypatch.setattr(canonical_worker.autofill, "descriptor", lambda: descriptors[tools[0]])
+    monkeypatch.setattr(canonical_worker.arlo_design, "descriptor", lambda: descriptors[tools[1]])
+    monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", lambda tool: descriptors[tool])
+    monkeypatch.setattr(solar_project_jobs, "run_once", store.claim_next)
+    assert canonical_worker.main() is None
+    assert counts == dict.fromkeys(tools, 2)
+    assert len(store.heartbeats) == len(store.claim_requests) == 6
+    assert len(set(threads.values())) == 3
+    assert all(thread.daemon and not thread.is_alive() for thread in threads.values())
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("failure", ["raise", "return", "exit"])
+def test_multi_stops_on_failure(monkeypatch, capsys, failure):
+    started, stopped = Event(), Event()
+    stops = []
+
+    def loop(*, tool_name, stop_event, **kwargs):
+        stops.append(stop_event)
+        if tool_name == "string-autofill-opt":
+            assert started.wait(5)
+            if failure == "raise":
+                raise ConnectionError("SECRET job params and error body")
+            if failure == "exit":
+                raise SystemExit("SECRET exit body")
+            return
+        started.set()
+        assert stop_event.wait(5)
+        stopped.set()
+
+    monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    _project_main(monkeypatch, ["--tool", "string-autofill-opt", "--tool", "solar-settings"], lambda: None)
+    monkeypatch.setattr(canonical_worker, "serve", loop)
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 1
+    assert stopped.is_set()
+    assert len(stops) == 2 and stops[0] is stops[1] and stops[0].is_set()
+    failure_class = {"raise": "ConnectionError", "return": "RuntimeError", "exit": "SystemExit"}[failure]
+    assert capsys.readouterr() == ("", f"canonical worker loop failed: string-autofill-opt {failure_class}\n")
+
+
+@pytest.mark.parametrize("signum", [canonical_worker.signal.SIGTERM, canonical_worker.signal.SIGINT],
+                         ids=["term", "int"])
+def test_multi_signal(monkeypatch, capsys, signum):
+    handlers, stops = {}, []
+    barrier = Barrier(2)
+
+    def loop(*, tool_name, stop_event, **kwargs):
+        stops.append(stop_event)
+        barrier.wait(timeout=5)
+        if tool_name == "solar-settings":
+            handlers[signum](signum, None)
+        assert stop_event.wait(5)
+
+    monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    _project_main(monkeypatch, ["--tool", "string-autofill-opt", "--tool", "solar-settings"], lambda: None)
+    monkeypatch.setattr(canonical_worker.signal, "signal", lambda sig, fn: handlers.update({sig: fn}))
+    monkeypatch.setattr(canonical_worker, "serve", loop)
+    assert canonical_worker.main() is None
+    assert len(stops) == 2 and stops[0] is stops[1] and stops[0].is_set()
+    assert capsys.readouterr() == ("", "")
+
+
+def test_multi_bounded_join(monkeypatch, capsys):
+    started, release, finished = Event(), Event(), Event()
+    threads = []
+
+    def loop(*, tool_name, **kwargs):
+        if tool_name == "solar-settings":
+            threads.append(current_thread())
+            started.set()
+            release.wait(5)
+            finished.set()
+        else:
+            assert started.wait(5)
+            raise TimeoutError("SECRET")
+
+    monkeypatch.setattr(canonical_worker, "serve", loop)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            canonical_worker._serve_tools({"solar-settings": "h:solar-settings", "string-autofill-opt": "h:string-autofill-opt"},
+                                          stop_event=Event(), poll_seconds=0.01, lease_seconds=0.02)
+        assert exc.value.code == 1
+        assert threads[0].daemon
+        assert not finished.is_set()
+    finally:
+        release.set()
+        assert finished.wait(5)
+        for thread in threads:
+            thread.join(timeout=5)
+    assert capsys.readouterr() == ("", "canonical worker loop failed: string-autofill-opt TimeoutError\n")
+
+
+@pytest.mark.parametrize("state,count,base,extra,age", [
+    ("ok", 2, None, [], 90), ("missing", 2, None, [], 90),
+    ("stale", 2, "manual", ["--max-age-seconds", "40"], 40),
+    ("wrong", 2, None, [], 90),
+], ids=["all", "missing", "stale", "wrong"])
+def test_task_health(monkeypatch, capsys, state, count, base, extra, age):
+    tools = ["string-autofill-opt", "solar-settings"][:count]
+    queries = []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("health probe claimed or mutated state")
+
+    def heartbeat(owner, *, max_age_seconds):
+        queries.append((owner, max_age_seconds))
+        tool = owner.split(":", 1)[1]
+        if tool == "solar-settings":
+            if state in {"stale", "missing"}:
+                return None
+            if state == "wrong":
+                return {"worker_id": owner, "tool_name": "solar-solve"}
+        return {"worker_id": owner, "tool_name": tool}
+
+    if count > 1:
+        monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    else:
+        monkeypatch.delenv("LEAF_CANONICAL_MULTI_TOOL", raising=False)
+    monkeypatch.setenv("LEAF_CANONICAL_LEASE_SECONDS", "30")
+    argv = ["--health", *extra, *(arg for tool in tools for arg in ("--tool", tool))]
+    if base is not None:
+        argv += ["--worker-id", base]
+    _project_main(monkeypatch, argv, forbidden)
+    monkeypatch.setattr(canonical_worker.socket, "gethostname", lambda: "task-host")
+    monkeypatch.setattr(canonical_worker, "serve", forbidden)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        worker_heartbeat=heartbeat, worker_health=forbidden, claim_next=forbidden,
+        record_worker_heartbeat=forbidden))
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == (0 if state == "ok" else 1)
+    assert queries == [(f"{base or 'task-host'}:{tool}", age) for tool in tools]
+    assert capsys.readouterr() == ("", "" if state == "ok" else
+                                  "canonical worker heartbeat stale or missing: solar-settings\n")
+
+
+@pytest.mark.parametrize("state", ["ok", "missing", "stale", "wrong"])
+@pytest.mark.parametrize("owner", ["task1", "w" * 128], ids=["explicit", "limit"])
+def test_single_tool_health(monkeypatch, capsys, state, owner):
+    queries = []
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("health probe claimed or mutated state")
+
+    def heartbeat(worker_id, *, max_age_seconds):
+        queries.append((worker_id, max_age_seconds))
+        if state in {"missing", "stale"}:
+            return None
+        return {"worker_id": owner,
+                "tool_name": "solar-solve" if state == "wrong" else "solar-settings"}
+
+    monkeypatch.delenv("LEAF_CANONICAL_MULTI_TOOL", raising=False)
+    _project_main(monkeypatch, ["--health", "--tool", "solar-settings", "--worker-id", owner,
+                               "--max-age-seconds", "1"], forbidden)
+    monkeypatch.setattr(canonical_worker, "serve", forbidden)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: SimpleNamespace(
+        worker_heartbeat=heartbeat, record_worker_heartbeat=forbidden, claim_next=forbidden))
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == (0 if state == "ok" else 1)
+    assert queries == [(owner, 15.0)]
+    assert capsys.readouterr() == ("", "" if state == "ok" else
+                                  "canonical worker heartbeat stale or missing: solar-settings\n")
+
+
+@pytest.mark.parametrize("tools", [[], ["--tool", "solar-settings"]], ids=["default", "explicit"])
+def test_single_tool_health_requires_worker_id(monkeypatch, capsys, tools):
+    def forbidden(*args, **kwargs):
+        pytest.fail("health without worker id reached the database or loop")
+
+    _project_main(monkeypatch, ["--health", *tools], forbidden)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", forbidden)
+    monkeypatch.setattr(canonical_worker, "serve", forbidden)
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 2
+    assert "single-tool --health requires --worker-id" in capsys.readouterr().err
+
+
+def test_single_tool_run_and_health_use_same_id(monkeypatch, capsys):
+    import solar_project_jobs
+
+    store = FakeCanonicalJobs()
+    queries = []
+
+    def heartbeat(owner, *, max_age_seconds):
+        queries.append(owner)
+        return next(({"worker_id": row[0], "tool_name": row[1]}
+                     for row in store.heartbeats if row[0] == owner), None)
+
+    monkeypatch.setattr(store, "worker_heartbeat", heartbeat, raising=False)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
+    monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", lambda tool: _graph_descriptor())
+    monkeypatch.setattr(solar_project_jobs, "run_once", store.claim_next)
+    monkeypatch.setenv("LEAF_CANONICAL_LEASE_SECONDS", "30")
+    _project_posture(monkeypatch)
+    argv = ["--tool", "solar-settings", "--worker-id", "task1"]
+    _project_main(monkeypatch, [*argv, "--readiness", "--once"], lambda: None)
+    canonical_worker.main()
+    assert store.heartbeats == [("task1", *_graph_descriptor().values())]
+    assert store.claim_requests == [("task1", 30.0, "solar-settings")]
+    capsys.readouterr()
+    _project_main(monkeypatch, [*argv, "--health"], lambda: pytest.fail("health checked schema"))
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 0
+    assert queries == ["task1"]
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("health", [False, True], ids=["multi", "health"])
+@pytest.mark.parametrize("base", ["w" * 128, "bad host"], ids=["long", "invalid"])
+def test_task_id_refusal(monkeypatch, capsys, health, base):
+    monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    argv = ["--tool", "string-autofill-opt", "--tool", "solar-settings"]
+    argv += ["--health"] if health else []
+    _project_main(monkeypatch, argv, lambda: pytest.fail("invalid id reached schema"))
+    monkeypatch.setattr(canonical_worker.socket, "gethostname", lambda: base)
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module",
+                        lambda: pytest.fail("invalid id reached heartbeat query"))
+    with pytest.raises(SystemExit) as exc:
+        canonical_worker.main()
+    assert exc.value.code == 2
+    assert "worker id must be" in capsys.readouterr().err
 
 
 def test_graph_worker_descriptor(monkeypatch, tmp_path):

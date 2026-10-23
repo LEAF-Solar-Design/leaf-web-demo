@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import json
+from copy import deepcopy
 import platform as _stdlib_platform
 import sys
 import threading
@@ -44,6 +46,13 @@ class _Connection:
         self.slots = {}
 
     def execute(self, sql, params=None):
+        answer = self._execute(sql, params)
+        fault = getattr(self, "fail_after", None)
+        if fault and sql.startswith(("INSERT", "UPDATE")) and fault in sql:
+            raise _TransactionCrash("injected after write")
+        return answer
+
+    def _execute(self, sql, params=None):
         params = params or {}
         if any(isinstance(value, str) and "\x00" in value for value in params.values()):
             raise ValueError("PostgreSQL text parameters cannot contain NUL bytes")
@@ -59,7 +68,7 @@ class _Connection:
                     "lease_token", "lease_expires_at", "aps_live",
                     "accounted_work", "reserved_usd", "execution_started_at",
                     "result_json", "http_status", "created_at", "updated_at",
-                    "terminal_at",
+                    "terminal_at", "terminal_intent_json",
                 },
                 "broker_usage_ledger": {
                     "event_key", "ts", "tenant_id", "tool", "engine_op",
@@ -203,6 +212,7 @@ class _Connection:
                 "execution_started_at": None,
                 "result_json": None,
                 "http_status": None,
+                "terminal_intent_json": None,
             }
             return _Result()
         if sql.startswith("UPDATE broker_run_admissions SET lease_token"):
@@ -253,10 +263,22 @@ class _Connection:
             if slot and slot["state"] == "held":
                 slot["state"] = "released"
             return _Result()
-        if sql.startswith("SELECT tenant_id, state, lease_token"):
+        if sql.startswith("UPDATE broker_run_admissions SET terminal_intent_json"):
+            self.admissions[params["event_key"]]["terminal_intent_json"] = json.loads(params["intent_json"])
+            return _Result()
+        if sql.startswith("SELECT * FROM broker_usage_ledger WHERE event_key"):
+            rec = self.ledger.get(params["event_key"])
+            return _Result(dict(rec) if rec else None)
+        if sql.startswith("SELECT state FROM broker_aps_slots WHERE event_key"):
+            rec = self.slots.get(params["event_key"])
+            return _Result(dict(rec) if rec else None)
+        if (sql.startswith("SELECT tenant_id, state, lease_token")
+                or sql.startswith("SELECT * FROM broker_run_admissions")):
             rec = self.admissions.get(params["event_key"])
             return _Result(dict(rec) if rec else None)
         if sql.startswith("INSERT INTO broker_usage_ledger"):
+            if params["event_key"] in self.ledger and "ON CONFLICT" not in sql:
+                raise RuntimeError("duplicate ledger event key")
             self.ledger.setdefault(params["event_key"], dict(params))
             return _Result()
         if sql.startswith("UPDATE broker_run_admissions SET state = 'terminal'"):
@@ -353,13 +375,24 @@ class _Db:
     def __init__(self):
         self.pool = _Pool()
         self.lock = threading.RLock()
+        self.lose_ack = False
 
     def get_pool(self):
         return self.pool
 
     def run_transaction(self, operation, **_kwargs):
         with self.lock:
-            return operation(self.pool.conn)
+            before = deepcopy(vars(self.pool.conn))
+            try:
+                result = operation(self.pool.conn)
+            except BaseException:
+                vars(self.pool.conn).clear()
+                vars(self.pool.conn).update(before)
+                raise
+            if self.lose_ack:
+                self.lose_ack = False
+                raise _TransactionCrash("commit acknowledgement lost")
+            return result
 
     def assert_schema_current(self):
         return {"ok": True}
@@ -389,6 +422,206 @@ def _admit(store, key, tenant="tenant-a", **overrides):
     }
     options.update(overrides)
     return store.admit_run(key, tenant, **options)
+
+
+class _TransactionCrash(BaseException):
+    pass
+
+
+INTENT_JOB = "12345678-1234-1234-1234-123456789abc"
+INTENT_EVENT = f"{INTENT_JOB}:broker-run"
+
+
+def _success_intent(key=INTENT_EVENT):
+    return {
+        "version": 1, "event_key": key, "tenant_id": "tenant-a",
+        "request_fingerprint": "a" * 64, "job_id": INTENT_JOB,
+        "workitem_id": "workitem-paid",
+        "ledger_entry": dict(_entry(), job_id=INTENT_JOB),
+        "result": {"ok": True, "degraded_mode": False, "result": {"output": "original"},
+                   "cost": {"engine_seconds": 1.0, "usd_est": 0.02}},
+        "http_status": 201,
+    }
+
+
+def _pending_intent(*, staged=True):
+    db = _Db()
+    store = broker_pg_store.PostgresBrokerStore(db)
+    owner = _admit(store, INTENT_EVENT)
+    store.mark_execution_started(INTENT_EVENT, "tenant-a", owner["lease_token"],
+                                 aps_live=True, max_concurrency=2, slot_lease_seconds=60)
+    intent = _success_intent()
+    if staged:
+        store.stage_success_intent(INTENT_EVENT, "tenant-a", owner["lease_token"], intent)
+    return db, store, owner, intent
+
+
+def test_stage_success_intent_is_write_once_and_owner_bound():
+    db, store, owner, intent = _pending_intent()
+    before = deepcopy(vars(db.pool.conn))
+    store.stage_success_intent(INTENT_EVENT, "tenant-a", owner["lease_token"], intent)
+    assert vars(db.pool.conn) == before
+    for field, value in [("workitem_id", "another"), ("request_fingerprint", "b" * 64)]:
+        altered = dict(intent, **{field: value})
+        with pytest.raises(ValueError):
+            store.stage_success_intent(INTENT_EVENT, "tenant-a", owner["lease_token"], altered)
+    for tenant, token in [("other", owner["lease_token"]), ("tenant-a", "stale")]:
+        with pytest.raises(ValueError):
+            store.stage_success_intent(INTENT_EVENT, tenant, token, intent)
+    assert vars(db.pool.conn) == before
+    for field, value in [("state", "leased"), ("aps_live", False)]:
+        db.pool.conn.admissions[INTENT_EVENT][field] = value
+        changed = deepcopy(vars(db.pool.conn))
+        with pytest.raises(ValueError):
+            store.stage_success_intent(INTENT_EVENT, "tenant-a", owner["lease_token"], intent)
+        assert vars(db.pool.conn) == changed
+        vars(db.pool.conn).update(deepcopy(before))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("engine_seconds", True), ("usd_est", -1), ("usd_est", float("nan")),
+    ("engine_seconds", float("inf")), ("usd_est", None), ("engine_seconds", "1"),
+    ("job_id", "wrong"), ("event_key", "wrong"), ("workitem_id", ""),
+    ("http_status", 500), ("http_status", True), ("version", True),
+    ("degraded_mode", None), ("ok", False), ("ledger_status", "failed"),
+    ("cost_disagreement", 0.03), ("missing_cost", None),
+])
+def test_terminal_intent_rejects_invalid_money_and_identity(field, value):
+    db, store, owner, intent = _pending_intent(staged=False)
+    if field in {"engine_seconds", "usd_est"}:
+        intent["ledger_entry"][field] = value
+    elif field in {"ok", "degraded_mode"}:
+        intent["result"][field] = value
+    elif field == "ledger_status":
+        intent["ledger_entry"]["status"] = value
+    elif field == "cost_disagreement":
+        intent["result"]["cost"]["usd_est"] = value
+    elif field == "missing_cost":
+        del intent["result"]["cost"]
+    else:
+        intent[field] = value
+    before = deepcopy(vars(db.pool.conn))
+    with pytest.raises((ValueError, TypeError)):
+        store.stage_success_intent(INTENT_EVENT, "tenant-a", owner["lease_token"], intent)
+    assert vars(db.pool.conn) == before
+
+
+def _assert_intent_settled(conn, intent, audits=1):
+    assert list(conn.ledger) == [intent["event_key"]]
+    assert {k: conn.ledger[intent["event_key"]][k] for k in broker_pg_store.LEDGER_KEYS} == intent["ledger_entry"]
+    row = conn.admissions[intent["event_key"]]
+    assert row["state"] == "terminal" and row["reserved_usd"] == 0
+    result = row["result_json"]
+    assert (json.loads(result) if isinstance(result, str) else result) == intent["result"]
+    assert row["http_status"] == intent["http_status"]
+    assert row["terminal_intent_json"] == intent
+    assert conn.slots[intent["event_key"]]["state"] == "released"
+    assert len(getattr(conn, "audits", [])) == audits
+
+
+def test_settle_success_intent_is_atomic_and_replayable():
+    db, store, _, intent = _pending_intent()
+    store.settle_success_intent(INTENT_EVENT, "tenant-a", actor="reconciler")
+    _assert_intent_settled(db.pool.conn, intent)
+    before = deepcopy(vars(db.pool.conn))
+    assert store.settle_success_intent(INTENT_EVENT, "tenant-a", actor="reconciler")["already_settled"]
+    assert vars(db.pool.conn) == before
+    assert store.admit_run(INTENT_EVENT, "tenant-a", aps_live=True, estimated_usd=0.02,
+                           spend_cap=1, daily_limit=10, request_fingerprint="a" * 64)["result"] == intent["result"]
+
+
+def test_settlement_commit_ack_loss_is_idempotent():
+    db, store, _, intent = _pending_intent()
+    db.lose_ack = True
+    with pytest.raises(_TransactionCrash):
+        store.settle_success_intent(INTENT_EVENT, "tenant-a", actor="reconciler")
+    store.settle_success_intent(INTENT_EVENT, "tenant-a", actor="reconciler")
+    _assert_intent_settled(db.pool.conn, intent)
+
+
+def test_complete_run_cannot_conflict_with_terminal_intent():
+    db, store, owner, intent = _pending_intent()
+    before = deepcopy(vars(db.pool.conn))
+    for entry, result in [(dict(intent["ledger_entry"], usd_est=0), intent["result"]),
+                          (intent["ledger_entry"], dict(intent["result"], result={}))]:
+        with pytest.raises(ValueError):
+            store.complete_run(INTENT_EVENT, "tenant-a", owner["lease_token"], entry, result, 201)
+        assert vars(db.pool.conn) == before
+    store.complete_run(INTENT_EVENT, "tenant-a", owner["lease_token"],
+                       intent["ledger_entry"], intent["result"], 201)
+    _assert_intent_settled(db.pool.conn, intent, audits=0)
+
+
+def test_operator_resolution_cannot_erase_paid_success_intent():
+    db, store, _, intent = _pending_intent()
+    before = deepcopy(vars(db.pool.conn))
+    for resolution in ["confirmed_failed_no_charge", "verified_terminal"]:
+        with pytest.raises(ValueError):
+            store.reconcile_executing(INTENT_EVENT, "tenant-a", resolution=resolution,
+                operator_id="operator", reason="operator investigation", evidence_ref="case:1",
+                entry=dict(intent["ledger_entry"], usd_est=None, engine_seconds=None, status="failed"),
+                result={"ok": False}, http_status=502)
+        assert vars(db.pool.conn) == before
+    store.settle_success_intent(INTENT_EVENT, "tenant-a", actor="reconciler")
+    _assert_intent_settled(db.pool.conn, intent)
+
+
+def test_existing_ledger_conflict_is_not_silently_accepted():
+    db, store, owner, intent = _pending_intent()
+    db.pool.conn.ledger[INTENT_EVENT] = dict(intent["ledger_entry"], usd_est=10)
+    before = deepcopy(vars(db.pool.conn))
+    with pytest.raises(ValueError):
+        store.settle_success_intent(INTENT_EVENT, "tenant-a", actor="reconciler")
+    with pytest.raises(ValueError):
+        store.stage_success_intent(INTENT_EVENT, "tenant-a", owner["lease_token"], intent)
+    assert vars(db.pool.conn) == before
+
+
+@pytest.mark.parametrize("first", ["foreground", "reconciler"])
+def test_foreground_reconciler_and_operator_race_preserves_one_charge(first):
+    db, store, owner, intent = _pending_intent()
+    winner_locked, contender_ready = threading.Event(), threading.Event()
+    def foreground():
+        store.complete_run(INTENT_EVENT, "tenant-a", owner["lease_token"],
+                           intent["ledger_entry"], intent["result"], 201)
+    def recover():
+        store.settle_success_intent(INTENT_EVENT, "tenant-a", actor="reconciler")
+    def operator():
+        assert winner_locked.wait(5)
+        with pytest.raises(ValueError):
+            store.reconcile_executing(INTENT_EVENT, "tenant-a", resolution="confirmed_failed_no_charge",
+                operator_id="operator", reason="conflicting evidence", evidence_ref="case:2",
+                entry=dict(intent["ledger_entry"], usd_est=None), result={"ok": False}, http_status=502)
+    def winner():
+        # Keep the first writer's transaction lock while the other writer
+        # arrives, so both schedules exercise real contention deterministically.
+        with db.lock:
+            winner_locked.set()
+            assert contender_ready.wait(5)
+            (foreground if first == "foreground" else recover)()
+    def contender():
+        assert winner_locked.wait(5)
+        contender_ready.set()
+        (recover if first == "foreground" else foreground)()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(fn) for fn in [winner, contender, operator]]
+        for future in futures:
+            future.result()
+    _assert_intent_settled(db.pool.conn, intent, audits=int(first == "reconciler"))
+
+
+@pytest.mark.parametrize("write", ["terminal_intent_json =", "INSERT INTO broker_usage_ledger",
+    "SET state = 'terminal'", "UPDATE broker_aps_slots", "INSERT INTO broker_admission_resolution_audit"])
+def test_transaction_fake_rolls_back_baseexception_at_every_write(write):
+    db, store, owner, intent = _pending_intent(staged=write != "terminal_intent_json =")
+    db.pool.conn.fail_after = write
+    before = deepcopy(vars(db.pool.conn))
+    with pytest.raises(_TransactionCrash):
+        if write == "terminal_intent_json =":
+            store.stage_success_intent(INTENT_EVENT, "tenant-a", owner["lease_token"], intent)
+        else:
+            store.settle_success_intent(INTENT_EVENT, "tenant-a", actor="reconciler")
+    assert vars(db.pool.conn) == before
 
 
 @pytest.mark.parametrize("period, start_parts, end_parts", [

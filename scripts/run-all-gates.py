@@ -1304,7 +1304,8 @@ def build_suites() -> List[Suite]:
         Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_surface.py"), 36),
         Suite("server-lab-artifacts", "server tests/test_lab_artifacts.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_artifacts.py"), 51, uses_database=True),
+              _py_pytest("tests/test_lab_artifacts.py"), 51, uses_database=True,
+              database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-diff", "server tests/test_lab_diff.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_diff.py"), 7),
         # AD4b: the Kit stream map is a superset of the harness stream events.
@@ -1315,7 +1316,7 @@ def build_suites() -> List[Suite]:
         Suite("server-billing-tiers", "server tests/test_billing_tiers.py", "pytest", SERVER,
               _py_pytest("tests/test_billing_tiers.py"), 30),
         Suite("server-broker-admission-reconciler", "server tests/test_broker_admission_reconciler.py", "pytest", SERVER,
-              _py_pytest("tests/test_broker_admission_reconciler.py"), 54),
+              _py_pytest("tests/test_broker_admission_reconciler.py"), 64),
         # The per-tenant DAILY AUTHORING cap. Shipped without a gate entry, the
         # same gap the site-demo lane above had: only the WEB half of this
         # feature (web-author-quota-gate) was registered, so every server-side
@@ -1709,7 +1710,7 @@ def build_suites() -> List[Suite]:
         Suite("server-agent-metering-hook", "server tests/test_agent_metering_hook.py",
               "pytest", SERVER, _py_pytest("tests/test_agent_metering_hook.py"), 2),
         Suite("server-broker-migration-static", "server tests/test_broker_migration_static.py",
-              "pytest", SERVER, _py_pytest("tests/test_broker_migration_static.py"), 1),
+              "pytest", SERVER, _py_pytest("tests/test_broker_migration_static.py"), 6),
         Suite("server-canonical-worker-deploy-contract",
               "server tests/test_canonical_worker_deploy_contract.py", "pytest", SERVER,
               _py_pytest("tests/test_canonical_worker_deploy_contract.py"), 3),
@@ -1754,6 +1755,25 @@ def build_suites() -> List[Suite]:
         Suite("server-unit-economics-ops",
               "server tests/test_unit_economics_ops.py", "pytest", SERVER,
               _py_pytest("tests/test_unit_economics_ops.py"), 5),  # +1 org attribution
+        # Explicit file target keeps 19 pure tests running without DATABASE_URL.
+        Suite("platform-tenant-cost-store", "platform tenant cost ledger and add-on settings", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_tenant_cost_store.py"), 19,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-aps-cost-sync", "platform APS broker cost ledger adapter", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_aps_cost_sync.py"), 14,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-billing-statement", "platform price book and monthly billing statement", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_billing_statement.py"), 53,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-addon-settings-api", "platform add-on settings and billing statement feed", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_addon_settings_api.py"), 30,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("server-e2b-cost-meter", "server tests/test_e2b_cost_meter.py", "pytest",
+              SERVER, _py_pytest("tests/test_e2b_cost_meter.py"), 34),
         # Ops usage scoreboard (M6). Registered WITH the file, per the #29
         # fix-then-register rule. Both files are hermetic -- every authority is
         # monkeypatched, no DB, no subprocess, no skipif -- so these floors are
@@ -1879,7 +1899,7 @@ def build_suites() -> List[Suite]:
         Suite("server-broker-demo-guard", "server tests/test_broker_demo_guard.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_demo_guard.py"), 413),
         Suite("server-broker-pg-store", "server tests/test_broker_pg_store.py",
-              "pytest", SERVER, _py_pytest("tests/test_broker_pg_store.py"), 28,
+              "pytest", SERVER, _py_pytest("tests/test_broker_pg_store.py"), 58,
               uses_database=True, database_skip_reasons=(r"DATABASE_URL is not configured",)),
         Suite("server-broker-usage-postgres", "server tests/test_broker_usage_postgres.py",
               "pytest", SERVER, _py_pytest("tests/test_broker_usage_postgres.py"), 4),
@@ -2806,6 +2826,10 @@ def build_suites() -> List[Suite]:
         # parametrize, so 14 = its 14 test functions on every runner.
         Suite("auth0-action-drift-check", "scripts test_check_auth0_action_drift.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_check_auth0_action_drift.py"), 14),
+        # 33 cases: 19 original functions (27 parametrized cases), plus three
+        # dry-run plans, two digest round trips and the CI deploy contract. No network.
+        Suite("auth0-action-deploy", "scripts test_deploy_auth0_actions.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_deploy_auth0_actions.py"), 33),
         # Actions cache bucket prune (2026-08-31). The bucket was at 92.7% of
         # its 10 GiB ceiling with 87% of the bytes in unreachable CodeQL
         # overlay-base databases, and the merge gate's 279 MB Playwright entry
@@ -3466,9 +3490,11 @@ def build_suites() -> List[Suite]:
         Suite("server-engine-corpus-harness", "server tests/test_engine_corpus_harness.py", "pytest", SERVER,
               _py_pytest("tests/test_engine_corpus_harness.py"), 24),
         Suite("server-broker-metering-crash-window", "server tests/test_broker_metering_crash_window.py", "pytest", SERVER,
-              _py_pytest("tests/test_broker_metering_crash_window.py"), 9),
+              _py_pytest("tests/test_broker_metering_crash_window.py"), 25),
         Suite("server-drawings-cross-tenant-canary", "server tests/test_drawings_cross_tenant_canary.py", "pytest", SERVER,
               _py_pytest("tests/test_drawings_cross_tenant_canary.py"), 10),
+        Suite("server-router-authz-negative", "server tests/test_router_authz_negative.py", "pytest", SERVER,
+              _py_pytest("tests/test_router_authz_negative.py"), 39),
         Suite("server-mutation-scope-diff", "server tests/test_mutation_scope_diff.py", "pytest", SERVER,
               _py_pytest("tests/test_mutation_scope_diff.py"), 20),
         # Registered WITH the file, per the #29 fix-then-register rule. The

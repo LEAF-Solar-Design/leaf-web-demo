@@ -30,6 +30,7 @@
   --ck-ribbon: 95px;
   --ck-doctabs: 32px;
   --ck-canvas-top: 155px;
+  --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));
   --ck-status: 31px; 
   --ck-pane: 250px;
   --ck-spine: 56px;
@@ -61,6 +62,7 @@
   --leaf-ribbon: var(--ck-ribbon);
   --leaf-doctabs: var(--ck-doctabs);
   --leaf-canvas-top: var(--ck-canvas-top);
+  --leaf-canvas-top-live: var(--ck-canvas-top-live);
   --leaf-status: var(--ck-status);
   --leaf-pane: var(--ck-pane);
   --leaf-spine: var(--ck-spine);
@@ -132,7 +134,7 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .rail-spine-count { font: 400 11px var(--ck-font); color: #cfcfcf; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail:not([data-spine]) {
-    position: fixed; right: 0; top: var(--ck-canvas-top); bottom: var(--ck-status); z-index: 5;
+    position: fixed; right: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: 5;
     width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: -8px 0 24px rgba(0, 0, 0, .4);
     background: var(--ck-chrome);
   }
@@ -156,6 +158,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] header.top .cockpit-band > * { flex-shrink: 0; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] {
     --ck-canvas-top: calc(var(--drawer-top, 28px) + 30px + var(--ck-ribbon) + var(--ck-doctabs));
+    --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .tc-product-nav {
     position: relative; inset: auto; z-index: 6;
@@ -194,7 +197,7 @@
     right: calc(var(--ck-rail-width) + 18px);
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .cad-overview {
-    top: calc(var(--ck-canvas-top) + 154px);
+    top: calc(var(--ck-canvas-top-live) + 154px);
   }
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon {
@@ -401,10 +404,10 @@
   }
 /* Objects uses the next row below Find, including when its disclosure is open. */
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(aside.nav:not([data-spine])) .drawing-objects-panel {
-    top: calc(var(--ck-canvas-top) + 82px);
+    top: calc(var(--ck-canvas-top-live) + 82px);
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.nav:not([data-spine]) {
-    position: fixed; left: 0; top: var(--ck-canvas-top); bottom: var(--ck-status); z-index: 5;
+    position: fixed; left: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: 5;
     width: var(--ck-nav-width); margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
     box-shadow: 8px 0 24px rgba(0, 0, 0, .4); backdrop-filter: none; background: var(--ck-chrome);
     overflow-y: auto;
@@ -419,7 +422,7 @@
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-tool[data-size="large"] { height: 76px; }
 @media (max-width: 980px) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-canvas-top: 183px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-canvas-top: 183px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav {
     position: relative; inset: auto; height: 28px; min-height: 28px; box-sizing: border-box;
     margin: 0; padding: 0 4px; display: flex; align-items: center;
@@ -440,7 +443,7 @@
   }
 }
 @media (min-width: 981px) and (max-width: 1499px) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 183px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 183px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-nav {
     position: relative; inset: auto; height: 28px; min-height: 28px; box-sizing: border-box;
     margin: 0; padding: 0 4px; display: flex; align-items: center;
@@ -449,7 +452,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; }
 }
 @media (min-width: 981px) and (max-width: 1499px) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 185px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 185px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-nav {
     height: 30px; min-height: 30px; padding-top: 2px; align-items: flex-start;
   }
@@ -465,13 +468,13 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] { height: 132px; justify-content: center; }
 }
 @media (min-width: 981px) and (max-width: 1499px) and (pointer: coarse) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 241px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 241px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-status: 46px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region { height: 44px; }
 }
 @media (max-width: 980px) and (min-height: 500px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] {
-    --ck-top: 44px; --ck-canvas-top: var(--cockpit-stack-top, 315px); --ck-status: 46px;
+    --ck-top: 44px; --ck-canvas-top: var(--cockpit-stack-top, 315px); --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); --ck-status: 46px;
     height: 100dvh; min-height: 0; grid-template-rows: 88px minmax(0, 1fr) 46px;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top { height: 88px; align-items: flex-start; position: fixed; inset: 0 0 auto; z-index: 45; }
@@ -493,7 +496,7 @@
     flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] > aside.nav {
-    position: fixed; top: var(--ck-canvas-top); right: 0; bottom: calc(100px + env(safe-area-inset-bottom, 0px)); left: auto;
+    position: fixed; top: var(--ck-canvas-top-live); right: 0; bottom: calc(100px + env(safe-area-inset-bottom, 0px)); left: auto;
     width: min(240px, 40vw); min-height: 0; overflow: auto;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar {
@@ -567,8 +570,8 @@
 .studio-shell .app[data-studio-shell="cockpit"] .cockpit-band { min-width: 0; }
 .studio-shell .app[data-studio-shell="cockpit"] .ribbon-tool:disabled { color: var(--ck-label); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info {
-  position: fixed; right: 12px; top: calc(var(--ck-canvas-top) + 8px); z-index: 5;
-  width: min(260px, calc(100vw - 24px)); max-height: calc(100dvh - var(--ck-canvas-top) - 112px);
+  position: fixed; right: 12px; top: calc(var(--ck-canvas-top-live) + 8px); z-index: 5;
+  width: min(260px, calc(100vw - 24px)); max-height: calc(100dvh - var(--ck-canvas-top-live) - 112px);
   overflow: auto; box-sizing: border-box; padding: 8px 12px;
   border: 1px solid var(--ck-edge); border-radius: 4px;
   background: var(--ck-glass-panel); color: var(--ck-ink); font: 400 12px/1.5 var(--ck-font);
@@ -611,7 +614,7 @@
 @media (max-width: 980px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] { min-height: 42px; padding: 0 10px; font: 400 12px var(--ck-font); }
   .studio-shell .app[data-studio-shell="cockpit"] .tc-product-tabs [role="tab"] small { display: none; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info { width: auto; max-width: calc(100vw - 24px); height: auto; min-height: 0; max-height: calc(100dvh - var(--ck-canvas-top) - 112px); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info { width: auto; max-width: calc(100vw - 24px); height: auto; min-height: 0; max-height: calc(100dvh - var(--ck-canvas-top-live) - 112px); }
   .studio-shell .app[data-studio-shell="cockpit"] .bar.bar-command-line { flex-direction: row; flex-wrap: nowrap; background: var(--ck-glass-dock); font-family: var(--ck-font); }
   .studio-shell .app[data-studio-shell="cockpit"] .bar-command-line .bar-input { min-width: 0; padding: 5px 8px; }
   .studio-shell .app[data-studio-shell="cockpit"] .bar-command-line .bar-caret { text-transform: none; letter-spacing: 0; font: 400 12px var(--ck-font); }

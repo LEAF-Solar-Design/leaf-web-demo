@@ -3169,8 +3169,8 @@ describe('Solar step rail wiring', () => {
     const fixedRules = rules.filter(({ body }) => body.includes('position: fixed'))
     assert.equal(fixedRules.length, 1)
     const { start, body: rule } = fixedRules[0]
-    for (const value of ['position: fixed', 'left: calc(var(--ck-pane) + 458px)', 'top: calc(var(--ck-canvas-top) + 86px)']) assert.ok(rule.includes(value))
-    const fixed = css.indexOf('top: calc(var(--ck-canvas-top) + 36px)')
+    for (const value of ['position: fixed', 'left: calc(var(--ck-pane) + 458px)', 'top: calc(var(--ck-canvas-top-live) + 86px)']) assert.ok(rule.includes(value))
+    const fixed = css.indexOf('top: calc(var(--ck-canvas-top-live) + 36px)')
     const workbench = css.lastIndexOf('.cad-edit-workbench {', fixed)
     assert.ok(workbench >= 0 && start > fixed && start < css.indexOf('/* ---- y 880-905: the command line'))
     assert.ok(css.includes('.studio-shell .app[data-start-open="true"] .solar-flow-seat { visibility: hidden; }'))
@@ -3474,7 +3474,7 @@ function dockClearanceFailures(cockpitCss, baseCss, structuralCss, otherSheets =
   const clearance = Number(wideBottom?.[1]) - dockPx(dock.get('bottom')) - dockPx(bar.get('height'))
   if (!(clearance > 0)) failures.push('the wide result block must sit above the dock, clearance ' + clearance)
   const tabletBlock = one(cockpit, DOCK_APP + ' .result-block', [DOCK_TABLET_FRAME], 'tablet result block rule')
-  if (tabletBlock.get('max-height') !== `max(0px, calc(100dvh - var(--ck-canvas-top) - ${DOCK_RESERVATION} - var(--ck-status-rise, 0px)))`) {
+  if (tabletBlock.get('max-height') !== `max(0px, calc(100dvh - var(--ck-canvas-top-live) - ${DOCK_RESERVATION} - var(--ck-status-rise, 0px)))`) {
     failures.push('the tablet result block must shrink by the rise')
   }
   // D3: the short fold's absolute border-box height drives the input (less its two

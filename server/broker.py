@@ -101,7 +101,7 @@ from tool_validate import validate_params  # noqa: E402
 import write_loop  # noqa: E402  (M2 write branch; never imports da.* at top)
 import platform_link  # noqa: E402  (collision-safe leaf_platform store loader)
 from jobs import PLAN_TOOL, PLAN_TOOL_NAME  # noqa: E402
-from broker_pg_store import normalize_ledger_job_id  # noqa: E402
+from broker_pg_store import normalize_ledger_job_id, validate_success_intent, LEDGER_KEYS  # noqa: E402
 from broker_demo_guard import demo_tenant_authorized, is_demo_session_tenant  # noqa: E402
 
 try:  # noqa: E402 - APS domain metrics via CloudWatch EMF; best-effort, optional
@@ -3007,6 +3007,7 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
     # therefore cannot evict the in-flight run's correlation.
     run_token = uuid.uuid4().hex
     admission: Optional[Dict[str, Any]] = None
+    request_fingerprint: Optional[str] = None
     terminal_env: Optional[Dict[str, Any]] = None
     terminal_status: Optional[int] = None
     try:
@@ -3019,6 +3020,7 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
             )
             return JSONResponse(status_code=status, content=env)
         if postgres_mode:
+            request_fingerprint = _broker_request_fingerprint(req)
             usage = _get_usage()
             tier = _tenant_tier(req.tenant_id)
             estimate = float(getattr(usage, "DEFAULT_EST_USD", 0.0)) if usage else 0.0
@@ -3034,7 +3036,7 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
                 estimated_usd=estimate,
                 spend_cap=spend_cap,
                 daily_limit=daily_limit,
-                request_fingerprint=_broker_request_fingerprint(req),
+                request_fingerprint=request_fingerprint,
             )
             decision = admission["status"]
             if decision == "replay":
@@ -3165,9 +3167,11 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
         # cancel does not happen. Either way the token is what stops a duplicate
         # delivery, which registered nothing, from touching the live run's
         # correlation.
-        if terminal_env is not None and terminal_env.get("ok"):
-            _drop_active_workitem(req.job_id, run_token)
-        else:
+        successful = terminal_env is not None and bool(terminal_env.get("ok"))
+        # PostgreSQL success keeps its correlation until durable accounting or
+        # a committed intent exists. Exceptions here escape without failure
+        # cleanup or replacement of the successful adapter evidence.
+        if not successful:
             _reap_or_disown_own_workitem(req.job_id, run_token)
         if (
             postgres_mode and admission is not None
@@ -3176,16 +3180,42 @@ def _broker_run_request(req: Union[BrokerRunRequest, BrokerPlanRunRequest]) -> J
             if terminal_env is None or terminal_status is None:
                 raise BrokerStateError("admitted broker run has no terminal result")
             _validate_terminal_ledger_numbers(entry)
-            _postgres_store().complete_run(
-                ledger_event_key,
-                req.tenant_id,
-                admission["lease_token"],
-                _conform_ledger_entry(entry),
-                terminal_env,
-                terminal_status,
-            )
+            conformed = _conform_ledger_entry(entry)
+            intent = None
+            if successful:
+                workitem_id = _owned_workitem_for(req.job_id, run_token)
+                candidate = {
+                    "version": 1, "event_key": ledger_event_key,
+                    "tenant_id": req.tenant_id,
+                    "request_fingerprint": request_fingerprint,
+                    "job_id": req.job_id, "workitem_id": workitem_id,
+                    "ledger_entry": {k: conformed[k] for k in LEDGER_KEYS},
+                    "result": terminal_env, "http_status": terminal_status,
+                }
+                try:
+                    validate_success_intent(candidate, {
+                        "tenant_id": req.tenant_id, "aps_live": entry["aps_live"],
+                        "request_fingerprint": request_fingerprint,
+                    }, ledger_event_key, req.tenant_id)
+                    intent = candidate
+                except (ValueError, TypeError, OverflowError):
+                    pass  # Incomplete evidence retains the existing operator boundary.
+            if intent is not None:
+                _postgres_store().stage_success_intent(
+                    ledger_event_key, req.tenant_id, admission["lease_token"], intent)
+                _drop_active_workitem(req.job_id, run_token)
+                _postgres_store().settle_success_intent(
+                    ledger_event_key, req.tenant_id, actor="foreground")
+            else:
+                _postgres_store().complete_run(
+                    ledger_event_key, req.tenant_id, admission["lease_token"],
+                    conformed, terminal_env, terminal_status)
+                if successful:
+                    _drop_active_workitem(req.job_id, run_token)
             _emit_aps_metric(entry, ledger_event_key)
         elif not postgres_mode:
+            if successful:
+                _drop_active_workitem(req.job_id, run_token)
             _ledger_append(entry, ledger_event_key)
             _emit_aps_metric(entry, ledger_event_key)
 

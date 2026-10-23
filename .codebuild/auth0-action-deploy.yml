@@ -1,0 +1,21 @@
+version: 0.2
+
+# Auth0 Action deploy (P-088), run only by its own CodeBuild project,
+# never by the drift project. A separate terraform change creates this project.
+# External inputs, set on that project or as start-build overrides, never here:
+#   LEAF_AUTH0_DOMAIN, LEAF_AUTH0_ACTIONS_CLIENT_ID,
+#   LEAF_AUTH0_ACTIONS_CLIENT_SECRET (a client that can update actions),
+#   AUTH0_ACTIONS_DEPLOY and AUTH0_ACTIONS_CONFIRM_DIGEST.
+env:
+  shell: bash
+phases:
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        if [ "${AUTH0_ACTIONS_DEPLOY:-}" = "1" ] && [ -n "${AUTH0_ACTIONS_CONFIRM_DIGEST:-}" ]; then
+          python3 scripts/deploy_auth0_actions.py --deploy --domain "$LEAF_AUTH0_DOMAIN" --confirm "$AUTH0_ACTIONS_CONFIRM_DIGEST"
+        else
+          echo "check only; deploy not authorized"
+          python3 scripts/deploy_auth0_actions.py --dry-run --domain "$LEAF_AUTH0_DOMAIN"
+        fi

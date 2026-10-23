@@ -249,3 +249,25 @@ def test_worker_health_is_short_lived():
     assert health["worker_id"] == "health-worker"
     assert canonical_jobs.worker_health(
         "string-autofill-opt", now=observed + timedelta(seconds=16)) is None
+
+
+def test_worker_heartbeat_is_exact_and_fresh():
+    observed = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    owner, other = f"task-{store.new_uuid()}:solar-settings", f"other-{store.new_uuid()}:solar-settings"
+    for worker, timestamp in ((owner, observed), (other, observed + timedelta(seconds=20))):
+        canonical_jobs.record_worker_heartbeat(
+            worker, "solar-settings", "python-test", "revision-test", "c" * 64,
+            now=timestamp)
+    assert canonical_jobs.worker_heartbeat(owner, max_age_seconds=15,
+                                           now=observed + timedelta(seconds=5)) == {
+        "worker_id": owner, "tool_name": "solar-settings", "runtime": "python-test",
+        "source_revision": "revision-test", "source_sha256": "c" * 64,
+        "observed_at": observed.isoformat()}
+    assert canonical_jobs.worker_heartbeat(owner, max_age_seconds=15,
+                                           now=observed + timedelta(seconds=15)) is not None
+    assert canonical_jobs.worker_heartbeat(owner, max_age_seconds=15,
+                                           now=observed + timedelta(seconds=16)) is None
+    assert canonical_jobs.worker_heartbeat(other, max_age_seconds=15,
+                                           now=observed + timedelta(seconds=21))["worker_id"] == other
+    assert canonical_jobs.worker_heartbeat(f"missing-{owner}", max_age_seconds=15,
+                                           now=observed + timedelta(seconds=21)) is None

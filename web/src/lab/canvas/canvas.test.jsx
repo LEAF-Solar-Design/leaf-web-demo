@@ -7,9 +7,9 @@ import LabCanvas from './LabCanvas.jsx'
 import GraphView from './GraphView.jsx'
 import { Measurement } from './LatencyPipe.jsx'
 import { BLOCK_MIME } from './Palette.jsx'
-import { contract, manifests } from './registry.js'
+import { contract, manifests, manifestFor, resolveManifest } from './registry.js'
 import { ELEMENT_FAMILIES, LANES } from './elementCatalog.js'
-import { addBlock, connectPipe, emptyGraph, validateGraph } from './graphDoc.js'
+import { addBlock, connectPipe, emptyGraph, inputValues, missingInputs, updateSettings, validateGraph } from './graphDoc.js'
 import { dependencyLayout, dependencyRanks } from './dependencyLayout.js'
 import * as layout from './dependencyLayout.js'
 
@@ -24,16 +24,19 @@ vi.mock('elkjs/lib/elk.bundled.js', () => {
 vi.mock('@xyflow/react', () => ({
   ReactFlowProvider: ({ children }) => children,
   useReactFlow: () => ({ screenToFlowPosition: point => point, getNodes: () => [], fitView: () => {} }),
-  ReactFlow: ({ nodes, edges, nodeTypes, onNodeClick, onNodesChange, onConnect, onEdgesChange, children }) => <div data-testid="flow">
+  ReactFlow: ({ nodes, edges, nodeTypes, edgeTypes, onNodeClick, onNodesChange, onConnect, onEdgesChange, children }) => <div data-testid="flow">
     {nodes.length > 1 && <button onClick={() => onConnect({ source: nodes[0].id, sourceHandle: 'result', target: nodes[1].id, targetHandle: 'value' })}>Connect first pair</button>}
     {edges.length > 0 && <button onClick={() => onEdgesChange([{ type: 'remove', id: edges[0].id }])}>Delete first pipe</button>}
     {nodes.map(node => { const Card = nodeTypes[node.type]; return <div key={node.id} data-testid={node.id} data-position={JSON.stringify(node.position)}>
       <button onClick={() => onNodeClick(null, node)}>Select {node.id}</button>
       <button onClick={() => onNodesChange([{ type: 'position', id: node.id, position: { x: 777, y: 888 } }])}>Move {node.id}</button>
       <Card {...node} />
-    </div> })}<span data-testid="pipe-count">{edges.length}</span>{children}
+    </div> })}<span data-testid="pipe-count">{edges.length}</span>
+    {edges.map(edge => { const Pipe = edgeTypes[edge.type]; return <div key={edge.id} data-testid={`budget-${edge.id}`}>
+      {JSON.stringify(edge.data.budget)}<Pipe {...edge} />
+    </div> })}{children}
   </div>,
-  Background: () => null, Controls: () => null, Handle: () => null,
+  Background: () => null, Controls: () => null, Handle: props => <span data-testid="handle" aria-label={props['aria-label']} />,
   Position: { Top: 'top', Bottom: 'bottom' }, BaseEdge: () => null,
   EdgeLabelRenderer: ({ children }) => children, getBezierPath: () => ['', 0, 0],
 }))
@@ -136,6 +139,76 @@ describe('registry and deterministic dependencies', () => {
 })
 
 describe('canvas authoring', () => {
+  it.each(['missing version', 'changed hash'])('renders and removes an unresolved block with a %s', async kind => {
+    const initial = documentOf(1)
+    const block = initial.blocks[0]
+    if (kind === 'missing version') block.registry.version = '9.0.0'
+    else block.registry.code_sha256 = '1'.repeat(64)
+    const entries = entriesOf(manifest)
+    const problem = kind === 'missing version' ? `unknown block ${manifest.id}@9.0.0` : `code changed for ${manifest.id}@1.0.0`
+    const resolution = resolveManifest(block, entries)
+    expect(resolution.problem).toBe(problem)
+    expect(resolution.manifest).toEqual({ id: manifest.id, title: `${manifest.id}@${block.registry.version}`,
+      lane: 'unresolved', effect: 'unresolved', inputs: {}, outputs: {}, settings_schema: null,
+      latency_budget_us: null, version: { semver: block.registry.version, code_sha256: block.registry.code_sha256 } })
+    expect(() => manifestFor(block, entries)).toThrow(problem)
+    expect(missingInputs(initial, block, entries)).toEqual([])
+    expect(inputValues(initial, block, {}, entries)).toEqual({})
+    expect(() => updateSettings(initial, block.id, {}, entries)).toThrow(problem)
+    const changed = vi.fn()
+    render(<LabCanvas initialDocument={initial} entries={entries} onChange={changed} />)
+    expect(changed).toHaveBeenCalledWith({ document: initial, ready: false, problems: [problem] })
+    const card = within(screen.getByRole('article', { name: resolution.manifest.title }))
+    expect(card.getByText('Unresolved')).toHaveClass('lane-unresolved')
+    expect(card.getByText(problem)).toBeVisible()
+    expect(card.queryAllByTestId('handle')).toHaveLength(0)
+    await waitFor(() => expect(screen.getByText('Layout updated')).toBeVisible())
+    fireEvent.click(screen.getByRole('button', { name: `Select ${block.id}` }))
+    const inspector = within(screen.getByRole('region', { name: 'Block inspector' }))
+    expect(inspector.getByRole('alert')).toHaveTextContent(problem)
+    expect(inspector.getAllByRole('button').map(button => button.textContent)).toEqual(['Remove block'])
+    expect(inspector.queryByRole('tablist')).not.toBeInTheDocument()
+    expect(inspector.queryByRole('combobox')).not.toBeInTheDocument()
+    fireEvent.click(inspector.getByRole('button', { name: 'Remove block' }))
+    expect(changed.mock.calls.at(-1)[0]).toEqual({ document: emptyGraph(), ready: true, problems: [] })
+    expect(screen.queryByRole('article')).not.toBeInTheDocument()
+  })
+
+  it('lists every unresolved problem and still lays out and connects resolved blocks', async () => {
+    const initial = documentOf(4)
+    initial.blocks[2].registry.version = '9.0.0'
+    initial.blocks[3].registry.code_sha256 = '1'.repeat(64)
+    initial.pipes = [edge(1, 3), { ...edge(4, 2), to: { node: 'adjust-none-2', port: 'auxiliary' } }]
+    const problems = [`unknown block ${manifest.id}@9.0.0`, `code changed for ${manifest.id}@1.0.0`]
+    const entries = entriesOf(manifest)
+    expect(validateGraph(initial, entries)).toMatchObject({ ready: false, problems })
+    expect(() => connectPipe(initial, edge(1, 3), entries)).toThrow(problems[0])
+    expect(() => connectPipe(initial, edge(4, 2), entries)).toThrow(problems[1])
+    const changed = vi.fn()
+    const measurements = { pipes: {
+      'adjust-none-1/result>adjust-none-3/value': { p50_us: 5, p99_us: 10 },
+      'adjust-none-4/result>adjust-none-2/auxiliary': { p50_us: 5, p99_us: 10 },
+    } }
+    render(<LabCanvas initialDocument={initial} entries={entries} measurements={measurements} onChange={changed} />)
+    await waitFor(() => expect(screen.getByText('Layout updated')).toBeVisible())
+    expect(screen.getByTestId('budget-adjust-none-1/result>adjust-none-3/value')).toHaveTextContent('null')
+    expect(screen.getByTestId('budget-adjust-none-4/result>adjust-none-2/auxiliary')).toHaveTextContent('null')
+    for (const id of Object.keys(measurements.pipes)) {
+      const pipe = screen.getByTestId(`budget-${id}`)
+      expect(pipe.querySelector('[data-budget-state="unassessed"]')).toBeInTheDocument()
+      expect(within(pipe).getByText(/no budget/)).toBeVisible()
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Select adjust-none-1' }))
+    const inspector = within(screen.getByRole('region', { name: 'Block inspector' }))
+    fireEvent.click(inspector.getByRole('tab', { name: 'Configure' }))
+    fireEvent.change(inspector.getByRole('combobox', { name: 'Input' }), { target: { value: 'value' } })
+    const sources = within(inspector.getByRole('combobox', { name: 'Source' })).getAllByRole('option')
+    expect(sources.some(option => option.textContent.includes('adjust-none-3'))).toBe(false)
+    expect(sources.some(option => option.textContent.includes('adjust-none-4'))).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
+    expect(changed.mock.calls.at(-1)[0]).toEqual({ document: { ...initial, pipes: [...initial.pipes, edge(1, 2)] }, ready: false, problems })
+  })
+
   it('reports the initial document exactly once through rerenders and Strict Mode effect replay, then reports edits', async () => {
     const initial = documentOf(1)
     const changed = vi.fn()
@@ -259,6 +332,18 @@ describe('canvas authoring', () => {
     expect(screen.getByText(/Value not measured/)).toBeVisible()
     const { container } = render(<Measurement measurement={{ value: 3, count: 1, p50_us: 5, p99_us: 11 }} budget={{ p50: 5, p99: 10 }} />)
     expect(container.querySelector('[data-budget-state="over-budget"]')).toBeInTheDocument()
+  })
+
+  it.each([null, { p50: null, p99: 10 }])('shows measured latency without a complete budget as unassessed (%j)', budget => {
+    const { container } = render(<Measurement measurement={{ p50_us: 5, p99_us: 10 }} budget={budget} />)
+    expect(container.querySelector('[data-budget-state="unassessed"]')).toBeInTheDocument()
+    expect(screen.getByText(/no budget/)).toBeVisible()
+  })
+
+  it('shows measured latency at the budget limits as within budget', () => {
+    const { container } = render(<Measurement measurement={{ p50_us: 5, p99_us: 10 }} budget={{ p50: 5, p99: 10 }} />)
+    expect(container.querySelector('[data-budget-state="within-budget"]')).toBeInTheDocument()
+    expect(screen.getByText(/within budget/)).toBeVisible()
   })
 
   it.each(['pure', 'write'])('renders the manifest effect %s on the card', effect => {

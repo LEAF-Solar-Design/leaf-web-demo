@@ -6,14 +6,18 @@
  * scripted fake so the real file/env path is never constructed here.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { createTenantGrantStore, FileTenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
+import { createTenantGrantStore, EnvelopeTenantGrantStore, FileTenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
 import type { AgentGrant } from "../src/ports/index.js";
 import type { TenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
+import { LocalKeyProvider } from "../src/security/grantEnvelope/keyProvider.js";
+import type { KeyProvider } from "../src/security/grantEnvelope/keyProvider.js";
+import { sealGrant } from "../src/security/grantEnvelope/envelope.js";
 
 const FAKE = "FAKE-OAUTH-not-a-real-token-000111222";
 const FAKE2 = "FAKE-OAUTH-second-333444555";
@@ -53,6 +57,7 @@ describe("FileTenantGrantStore", () => {
     expect(persisted.accounts).toHaveLength(1);
     expect(persisted.accounts[0]).toMatchObject({ kind: "oauth", token: FAKE });
     expect(persisted.active_account_id).toBe(persisted.accounts[0].id);
+    expect(await store.diagnostic("acme")).toMatchObject({ backend: "file", record_format: "v3" });
   });
 
   it("status NEVER returns the token (only linked + linked_at + kind)", async () => {
@@ -307,11 +312,198 @@ describe("FileTenantGrantStore", () => {
   });
 });
 
-/**
- * F18 grant-store seam (security-audit 2026-07-18): the live serve path selects the
- * backend via createTenantGrantStore(). `vault` requested-but-unwired must throw —
- * never silently fall back to on-disk token files.
- */
+describe("EnvelopeTenantGrantStore", () => {
+  let dir: string;
+  let keyProvider: KeyProvider;
+  let store: EnvelopeTenantGrantStore;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "leaf-grants-envelope-"));
+    keyProvider = new LocalKeyProvider(randomBytes(32), "grant-store-test");
+    store = new EnvelopeTenantGrantStore({ dir, keyProvider });
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.each([1, 2, 3])("reports vault and the opened v%s format without plaintext", async version => {
+    const account = {
+      id: "private-account-id", label: "private-account-label", kind: "oauth", token: FAKE,
+      linked_at: "2026-01-01T00:00:00.000Z", plan: "team", usage_tokens: 0,
+      selection_count: 0, last_used_at: null, cooldown_until: null, leases: [],
+    };
+    const record = version === 1
+      ? { version, kind: "oauth", token: FAKE }
+      : { version, active_account_id: account.id, accounts: [account] };
+    const plaintext = JSON.stringify(record);
+    const sealed = await sealGrant(plaintext, { tenantId: "acme", grantId: "acme.grant.json" }, keyProvider);
+    writeFileSync(join(dir, "acme.grant.json"), JSON.stringify(sealed), "utf8");
+
+    const diagnostic = await store.diagnostic("acme");
+    expect(diagnostic).toMatchObject({
+      schema: "leaf.grant-diagnostic.v1", backend: "vault", linked: true,
+      kind: "oauth", record_format: `v${version}`, degraded: false,
+    });
+    const json = JSON.stringify(diagnostic);
+    expect(json).not.toContain(FAKE);
+    expect(json).not.toContain(plaintext);
+    expect(json).not.toContain(account.id);
+    expect(json).not.toContain(account.label);
+    expect(json).not.toContain('"token"');
+    expect(json).not.toContain('"accounts"');
+  });
+
+  it("reports a missing vault record", async () => {
+    expect(await store.diagnostic("missing")).toMatchObject({
+      backend: "vault", linked: false, record_format: "missing", degraded: false,
+    });
+  });
+
+  it("rejects traversal / separator tenant ids (cannot escape the grants dir)", async () => {
+    await expect(store.put("../evil", FAKE)).rejects.toThrow(/invalid tenant id/);
+    await expect(store.get("a/b")).rejects.toThrow(/invalid tenant id/);
+    await expect(store.status("..")).rejects.toThrow(/invalid tenant id/);
+  });
+
+  it("round trips grants across store instances and persists only sealed bytes", async () => {
+    await store.put("acme", FAKE, "oauth", "team-primary", "team");
+    await store.put("acme", FAKE2, "api_key");
+    const reopened = new EnvelopeTenantGrantStore({ dir, keyProvider });
+    expect(await reopened.get("acme")).toEqual({ kind: "api_key", apiKey: FAKE2 });
+    const status = await reopened.status("acme");
+    await reopened.activate("acme", status.accounts![0].id);
+    expect(await reopened.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE });
+    expect(readdirSync(dir)).toEqual(["acme.grant.json"]);
+    const bytes = readFileSync(join(dir, "acme.grant.json"), "utf8");
+    expect(bytes).not.toContain(FAKE);
+    expect(bytes).not.toContain(FAKE2);
+    expect(bytes).not.toContain("team-primary");
+    expect(JSON.parse(bytes)).toMatchObject({
+      v: 1, alg: "A256GCM", kid: "grant-store-test", tenant: "acme", grant: "acme.grant.json",
+    });
+    expect(JSON.stringify(status)).not.toContain(FAKE);
+  });
+
+  it("rejects a sealed blob copied into another tenant, even with rewritten identifiers", async () => {
+    await store.put("acme", FAKE);
+    const bytes = readFileSync(join(dir, "acme.grant.json"), "utf8");
+    writeFileSync(join(dir, "other.grant.json"), bytes, "utf8");
+    await expect(store.get("other")).rejects.toThrow(/invalid persisted grant record/);
+    const rewritten = { ...JSON.parse(bytes), tenant: "other", grant: "other.grant.json" };
+    writeFileSync(join(dir, "other.grant.json"), JSON.stringify(rewritten), "utf8");
+    await expect(store.get("other")).rejects.toThrow(/invalid persisted grant record/);
+    expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE });
+  });
+
+  it.each(["ct", "tag", "iv", "wk", "grant"])("fails closed on tampered %s without a plaintext fallback", async field => {
+    await store.put("acme", FAKE);
+    const path = join(dir, "acme.grant.json");
+    const sealed = JSON.parse(readFileSync(path, "utf8"));
+    if (field === "grant") sealed.grant = "another-grant";
+    else {
+      const bytes = Buffer.from(sealed[field], "base64url");
+      bytes[0] ^= 1;
+      sealed[field] = bytes.toString("base64url");
+    }
+    writeFileSync(path, JSON.stringify(sealed), "utf8");
+    const diagnostic = await store.diagnostic("acme");
+    expect(diagnostic).toMatchObject({
+      backend: "vault", linked: false, record_format: "invalid", degraded: true,
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(FAKE);
+    expect(JSON.stringify(diagnostic)).not.toContain(FAKE2);
+    writeFileSync(join(dir, "acme.token"), FAKE2, "utf8");
+    await expect(store.get("acme")).rejects.toThrow(/invalid persisted grant record/);
+    await expect(store.status("acme")).rejects.toThrow(/invalid persisted grant record/);
+    await expect(store.acquire("acme")).rejects.toThrow(/invalid persisted grant record/);
+    await expect(store.put("acme", FAKE2)).rejects.toThrow(/invalid persisted grant record/);
+    expect(readFileSync(path, "utf8")).toBe(JSON.stringify(sealed));
+  });
+
+  it("refuses plaintext records, truncated envelopes, legacy files and the demo fallback", async () => {
+    const fallback = new EnvelopeTenantGrantStore({
+      dir, keyProvider, envFallback: new ScriptedEnvFallback({ kind: "oauth", oauthToken: FAKE }),
+    });
+    expect(await fallback.get("demo-tenant")).toBeNull();
+    expect(await store.status("missing")).toEqual({ linked: false, linked_at: null });
+    for (const raw of [JSON.stringify({ version: 1, kind: "oauth", token: FAKE }), '{"v":1', "null"]) {
+      writeFileSync(join(dir, "acme.grant.json"), raw, "utf8");
+      await expect(store.get("acme")).rejects.toThrow(/invalid persisted grant record/);
+    }
+    rmSync(join(dir, "acme.grant.json"));
+    writeFileSync(join(dir, "acme.token"), FAKE, "utf8");
+    await expect(store.get("acme")).rejects.toThrow(/invalid persisted grant record/);
+    await expect(store.status("acme")).rejects.toThrow(/invalid persisted grant record/);
+  });
+
+  it("fails closed when the configured provider cannot unwrap the record", async () => {
+    await store.put("acme", FAKE);
+    const wrongKey = new EnvelopeTenantGrantStore({
+      dir, keyProvider: new LocalKeyProvider(randomBytes(32), keyProvider.keyId()),
+    });
+    await expect(wrongKey.get("acme")).rejects.toThrow(/invalid persisted grant record/);
+    await expect(wrongKey.status("acme")).rejects.toThrow(/invalid persisted grant record/);
+    expect(await wrongKey.diagnostic("acme")).toMatchObject({ backend: "vault", record_format: "invalid" });
+    expect(await store.get("acme")).toEqual({ kind: "oauth", oauthToken: FAKE });
+  });
+
+  it("preserves leases, metering, cooldown and account removal through sealed writes", async () => {
+    const first = await store.put("acme", FAKE, "oauth", "first", "team");
+    await store.put("acme", FAKE2, "oauth", "second", "enterprise");
+    await store.activate("acme", first.active_account_id!);
+    const lease = await store.acquire("acme");
+    const outcome = { usage: { cost_tokens: 12000 }, stop_reason: "llm_quota_exhausted" as const, retry_after_s: 60 };
+    await store.settle("acme", lease.lease_id, outcome);
+    await store.settle("acme", lease.lease_id, outcome);
+    const next = await store.acquire("acme");
+    expect(next.account_id).not.toBe(lease.account_id);
+    const status = await store.status("acme");
+    expect(status.accounts!.find(account => account.id === lease.account_id)).toMatchObject({
+      usage_tokens: 12000, cooldown_until: expect.any(String),
+    });
+    await store.remove("acme", next.account_id);
+    await expect(store.acquire("acme")).rejects.toMatchObject({ name: "GrantPoolUnavailableError" });
+    await store.remove("acme");
+    expect(await store.get("acme")).toBeNull();
+    expect(existsSync(join(dir, "acme.grant.json"))).toBe(false);
+  });
+
+  it("serializes concurrent updates across instances without losing accounts or leases", async () => {
+    const other = new EnvelopeTenantGrantStore({ dir, keyProvider });
+    await Promise.all([
+      store.put("acme", FAKE, "api_key"),
+      other.put("acme", FAKE2, "api_key"),
+    ]);
+    expect((await store.status("acme")).accounts).toHaveLength(2);
+    const leases = await Promise.all([store.acquire("acme"), other.acquire("acme")]);
+    expect(leases[0].account_id).not.toBe(leases[1].account_id);
+    await Promise.all(leases.map((lease, index) => (index ? other : store).settle("acme", lease.lease_id, {
+      usage: { cost_tokens: 100 }, stop_reason: "end_turn",
+    })));
+    expect((await store.status("acme")).accounts!.map(account => account.usage_tokens)).toEqual([100, 100]);
+    const bytes = readFileSync(join(dir, "acme.grant.json"), "utf8");
+    expect(bytes).not.toContain(FAKE);
+    expect(bytes).not.toContain(FAKE2);
+  });
+
+  it("leaves the published envelope intact on a sealing failure and releases the mutation lock", async () => {
+    await store.put("acme", FAKE);
+    const path = join(dir, "acme.grant.json");
+    const before = readFileSync(path, "utf8");
+    const failing = new EnvelopeTenantGrantStore({ dir, keyProvider: {
+      keyId: () => keyProvider.keyId(),
+      unwrap: (wrapped, context) => keyProvider.unwrap(wrapped, context),
+      wrap: async () => { throw new Error("scripted wrapping failure"); },
+    } });
+    await expect(failing.put("acme", FAKE2)).rejects.toThrow(/Grant envelope operation failed/);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(readdirSync(dir)).toEqual(["acme.grant.json"]);
+    await store.put("acme", FAKE2);
+    expect((await store.status("acme")).accounts).toHaveLength(2);
+  });
+});
+
+/** The live serve path selects the backend via createTenantGrantStore(). */
 describe("createTenantGrantStore (F18 seam)", () => {
   const saved = process.env.LEAF_GRANT_STORE;
   afterEach(() => {
@@ -332,8 +524,43 @@ describe("createTenantGrantStore (F18 seam)", () => {
     }
   });
 
-  it("LEAF_GRANT_STORE=vault fails LOUDLY (unwired seam, no silent disk fallback)", () => {
+  it("LEAF_GRANT_STORE=vault requires a configured key provider", () => {
     process.env.LEAF_GRANT_STORE = "vault";
-    expect(() => createTenantGrantStore()).toThrowError(/vault/);
+    expect(() => createTenantGrantStore()).toThrowError("LEAF_GRANT_STORE=vault requires a configured key provider");
+  });
+
+  it("LEAF_GRANT_STORE=vault selects the sealed store with an injected key provider", async () => {
+    process.env.LEAF_GRANT_STORE = "vault";
+    const dir = mkdtempSync(join(tmpdir(), "leaf-grants-seam-"));
+    try {
+      const keyProvider = new LocalKeyProvider(randomBytes(32));
+      const store = createTenantGrantStore({ dir, keyProvider });
+      expect(store).toBeInstanceOf(EnvelopeTenantGrantStore);
+      await store.put("seam", FAKE);
+      expect(await store.get("seam")).toEqual({ kind: "oauth", oauthToken: FAKE });
+      expect(readFileSync(join(dir, "seam.grant.json"), "utf8")).not.toContain(FAKE);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("LEAF_GRANT_STORE=file preserves the plaintext file backend", async () => {
+    process.env.LEAF_GRANT_STORE = "file";
+    const dir = mkdtempSync(join(tmpdir(), "leaf-grants-seam-"));
+    try {
+      const store = createTenantGrantStore({ dir, envFallback: new ScriptedEnvFallback(null) });
+      expect(store).toBeInstanceOf(FileTenantGrantStore);
+      expect(store).not.toBeInstanceOf(EnvelopeTenantGrantStore);
+      await store.put("seam", FAKE);
+      expect(await store.get("seam")).toEqual({ kind: "oauth", oauthToken: FAKE });
+      expect(readFileSync(join(dir, "seam.grant.json"), "utf8")).toContain(FAKE);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unknown backend instead of silently selecting file storage", () => {
+    process.env.LEAF_GRANT_STORE = "unknown";
+    expect(() => createTenantGrantStore()).toThrowError(/unknown LEAF_GRANT_STORE backend/);
   });
 });
