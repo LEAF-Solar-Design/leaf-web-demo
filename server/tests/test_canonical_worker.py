@@ -77,6 +77,7 @@ def test_worker_project_idle_heartbeat(monkeypatch, capsys):
 
     def idle(owner, **kwargs):
         assert owner == "w1"
+        assert callable(kwargs.pop("on_renew"))
         assert kwargs == {"tool_name": "solar-settings", "lease_seconds": 30.0}
         assert events[-1] == "heartbeat"
         assert len(store.heartbeats) == events.count("delegate") + 1
@@ -147,6 +148,15 @@ def test_worker_default_path_unchanged(monkeypatch, capsys):
     assert store.heartbeats == [("generated", *descriptor.values())]
     assert store.claim_requests == [("generated", 30.0, "string-autofill-opt")]
     assert capsys.readouterr().out == ""
+
+
+def test_graph_default_callback_omitted(monkeypatch):
+    import solar_project_jobs
+
+    calls = []
+    monkeypatch.setattr(solar_project_jobs, "run_once", lambda *a, **k: calls.append((a, k)) or False)
+    assert canonical_worker.run_once("w", tool_name="solar-settings", on_renew=None) is False
+    assert calls == [(("w",), {"tool_name": "solar-settings", "lease_seconds": 30.0})]
 
 
 def test_worker_project_flag_requires_graph_tool(monkeypatch, capsys):
@@ -409,7 +419,8 @@ def test_multi_cycles(monkeypatch, capsys, base):
     owner_base = base or "task-host"
 
     class Cycles(FakeCanonicalJobs):
-        def claim_next(self, owner, *, lease_seconds=30, tool_name=None):
+        def claim_next(self, owner, *, lease_seconds=30, tool_name=None, on_renew=None):
+            assert callable(on_renew) if tool_name == "solar-settings" else on_renew is None
             assert schema == ["schema"]
             assert owner == f"{owner_base}:{tool_name}"
             assert canonical_worker._worker_id_argument(owner) == owner
@@ -443,6 +454,100 @@ def test_multi_cycles(monkeypatch, capsys, base):
     assert len(set(threads.values())) == 3
     assert all(thread.daemon and not thread.is_alive() for thread in threads.values())
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("ready", [False, True], ids=["multi", "ready"])
+def test_graph_long_job_health(monkeypatch, capsys, ready):
+    import solar_project_jobs
+
+    tool, other = "solar-settings", "solar-string-add"
+    owner = f"task:{tool}"
+    now, rows, heartbeats, guards, checks, renewals = [0.0], {}, [], [], [], []
+    job_id = uuid.UUID(int=1)
+
+    def record(worker, tool_name, *descriptor):
+        rows[worker] = (now[0], tool_name)
+        heartbeats.append((worker, tool_name, *descriptor))
+
+    def heartbeat(worker, *, max_age_seconds):
+        observed, tool_name = rows[worker]
+        return {"tool_name": tool_name} if now[0] - observed <= max_age_seconds else None
+
+    store = SimpleNamespace(
+        record_worker_heartbeat=record, worker_heartbeat=heartbeat,
+        claim_project_graph_job=lambda *a, **k: {"job_id": job_id, "attempt": 2, "params": {}},
+        heartbeat_project_graph_job=lambda *a, **k: renewals.append((a, k)) or True)
+
+    def probe(expected):
+        rows[f"task:{other}"] = (now[0], other)
+        with pytest.raises(SystemExit) as exc:
+            canonical_worker.main()
+        assert exc.value.code == expected
+        checks.append(expected)
+
+    class Intervals:
+        def wait(self, interval):
+            # Check after each completed renewal, then advance the lease clock.
+            if renewals:
+                probe(0)
+            if len(renewals) == 12:
+                return True
+            assert interval == 10.0
+            now[0] += interval
+            return False
+
+    def prepare(job, *, conn):
+        assert job["job_id"] == job_id
+        guard = guards[0]
+        guard._stop = Intervals()
+        guard._renew()
+        assert not guard.lost
+        assert now[0] == 120.0  # Longer than the default 90-second health window.
+        now[0] += 91.0
+        probe(1)  # No renewal means the worker must eventually become unhealthy.
+        return None
+
+    monkeypatch.setenv("LEAF_CANONICAL_MULTI_TOOL", "1")
+    _project_main(monkeypatch, ["--health", "--worker-id", "task", "--lease-seconds", "30",
+                               "--tool", tool, "--tool", other], lambda: pytest.fail("health checked schema"))
+    monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
+    monkeypatch.setattr(canonical_worker.platform_link, "platform_db", lambda: SimpleNamespace(
+        run_transaction=lambda fn: fn(None)))
+    monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", lambda tool: _graph_descriptor())
+    monkeypatch.setattr(solar_project_jobs.GraphLeaseGuard, "start", lambda guard: guards.append(guard))
+    monkeypatch.setattr(solar_project_jobs.GraphLeaseGuard, "close", lambda guard: None)
+    monkeypatch.setattr(solar_project_jobs, "prepare_project_graph_job", prepare)
+    canonical_worker.serve(tool_name=tool, worker_id=owner, once=True,
+                           graph_heartbeat=not ready, project_readiness=ready)
+    assert checks == [0] * 12 + [1]
+    assert heartbeats == [(owner, *_graph_descriptor().values())] * 13
+    assert renewals == [((job_id, owner, 2), {"lease_seconds": 30.0})] * 12
+    output = capsys.readouterr()
+    assert "heartbeat stale or missing: solar-settings" in output.err
+    assert output.out.count(READY_PREFIX) == int(ready)
+
+
+@pytest.mark.parametrize("renewed", [True, False], ids=["callback", "lease"])
+def test_graph_renew_fail_closed(renewed):
+    import solar_project_jobs
+
+    calls = []
+
+    def heartbeat(*args, **kwargs):
+        calls.append("lease")
+        return renewed
+
+    def failed():
+        calls.append("worker")
+        raise ConnectionError("worker heartbeat failed")
+
+    guard = solar_project_jobs.GraphLeaseGuard(
+        SimpleNamespace(heartbeat_project_graph_job=heartbeat), uuid.UUID(int=1), "w", 2, 30,
+        on_renew=failed)
+    guard._stop = SimpleNamespace(wait=lambda interval: False)
+    guard._renew()
+    assert guard.lost
+    assert calls == (["lease", "worker"] if renewed else ["lease"])
 
 
 @pytest.mark.parametrize("failure", ["raise", "return", "exit"])
@@ -628,7 +733,8 @@ def test_single_tool_run_and_health_use_same_id(monkeypatch, capsys):
     monkeypatch.setattr(store, "worker_heartbeat", heartbeat, raising=False)
     monkeypatch.setattr(canonical_worker.platform_link, "_canonical_jobs_module", lambda: store)
     monkeypatch.setattr(canonical_worker, "graph_worker_descriptor", lambda tool: _graph_descriptor())
-    monkeypatch.setattr(solar_project_jobs, "run_once", store.claim_next)
+    monkeypatch.setattr(solar_project_jobs, "run_once", lambda owner, on_renew, **kwargs:
+                        store.claim_next(owner, **kwargs))
     monkeypatch.setenv("LEAF_CANONICAL_LEASE_SECONDS", "30")
     _project_posture(monkeypatch)
     argv = ["--tool", "solar-settings", "--worker-id", "task1"]

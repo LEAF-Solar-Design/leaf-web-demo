@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./labRoute.js', async (original) => ({
@@ -18,7 +18,24 @@ vi.mock('../site/useSurfaceContract.js', async (original) => ({
   useSurfaceConfigOverlay: () => ({ lab: { authoring: true, chrome: { tab: true, rail: null } } }),
 }))
 
+// Ground tests exercise the lazy boundary without browser geometry or real ELK.
+const elkImport = vi.hoisted(() => vi.fn())
+vi.mock('elkjs/lib/elk.bundled.js', () => {
+  elkImport()
+  throw new Error('Real ELK is forbidden under Vitest')
+})
+vi.mock('@xyflow/react', () => ({
+  ReactFlowProvider: ({ children }) => children,
+  useReactFlow: () => ({ screenToFlowPosition: point => point, getNodes: () => [], fitView: () => {} }),
+  ReactFlow: ({ children }) => <div>{children}</div>,
+  Background: () => null, Controls: () => null, Handle: () => null,
+  Position: { Top: 'top', Bottom: 'bottom' }, BaseEdge: () => null,
+  EdgeLabelRenderer: ({ children }) => children, getBezierPath: () => ['', 0, 0],
+}))
+
 import { fetchLabStatus } from './labRoute.js'
+import { setGraphCanvasLoader } from './canvas/GraphView.jsx'
+import { setLayoutEngineLoader } from './canvas/dependencyLayout.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { subscribeUnauthorized } from '../api.js'
 import { _resetLabSurfaceStatusForTests } from './useLabSurfaceStatus.js'
@@ -29,6 +46,33 @@ import {
   productSurfaceStates, searchForProductSurface, surfaceContract, surfaceRailState,
 } from '../site/productSurfaces.js'
 
+const canvasImport = vi.fn(() => import('./canvas/LabCanvas.jsx'))
+// The unmeasured ground stays visibility:hidden in jsdom. Await its mounted
+// editor without pretending the ground has browser geometry.
+const findCanvas = () => waitFor(() => {
+  const editor = document.querySelector('[data-canvas-editor]')
+  expect(editor).toBeInTheDocument()
+  return editor
+}, { timeout: 15000 })
+const fakeEngine = {
+  pending: new Set(),
+  pendingCount() { return this.pending.size },
+  load() {
+    let pending
+    return {
+      async layout(graph) {
+        pending = {}
+        fakeEngine.pending.add(pending)
+        try {
+          await Promise.resolve()
+          return { ...graph, children: graph.children.map((node, index) => ({ ...node, x: index * 370, y: 0 })) }
+        } finally { fakeEngine.pending.delete(pending) }
+      },
+      terminateWorker() { fakeEngine.pending.delete(pending) },
+    }
+  },
+}
+
 let originalUrl
 beforeEach(() => {
   originalUrl = window.location.href
@@ -36,9 +80,16 @@ beforeEach(() => {
   localStorage.removeItem('leaf.jwt')
   _resetLabSurfaceStatusForTests()
   vi.clearAllMocks()
+  setGraphCanvasLoader(canvasImport)
+  setLayoutEngineLoader(fakeEngine.load)
 })
-afterEach(() => {
+afterEach(async () => {
   cleanup()
+  await act(async () => {})
+  expect(fakeEngine.pendingCount()).toBe(0)
+  expect(elkImport).not.toHaveBeenCalled()
+  setGraphCanvasLoader()
+  setLayoutEngineLoader()
   _resetLabSurfaceStatusForTests()
   window.history.replaceState({}, '', originalUrl)
   localStorage.removeItem('leaf.jwt')
@@ -50,6 +101,7 @@ describe('Lab rail selection and tab visibility', () => {
       fetchLabStatus.mockReturnValue(status === null ? new Promise(() => {}) : Promise.resolve(status))
       render(<><ProductSurfaceTabs activeSurface="cad" states={productSurfaceStates()} onSelect={() => {}} mock={false} /><LabGround active /></>)
       await act(async () => {})
+      expect(canvasImport).not.toHaveBeenCalled()
       expect(screen.queryByRole('tab', { name: 'Lab' })).toBeNull()
       const dormant = status?.state === 'off' ? 'Lab is turned off.'
         : status?.state === 'auth-off' ? 'Lab sign-in service is unavailable.'
@@ -72,6 +124,7 @@ describe('Lab rail selection and tab visibility', () => {
     expect(screen.queryByRole('tab', { name: 'Lab' })).toBeNull()
     expect(fetchLabStatus).toHaveBeenCalledTimes(1)
     await act(async () => { resolve({ state: 'on', posture: 'local' }) })
+    await findCanvas()
     expect(screen.getAllByRole('tab').map((tab) => tab.dataset.surface))
       .toEqual(['browser', 'cad', 'solar', 'ios', 'ops', 'lab'])
     expect(screen.getByRole('tab', { name: 'Lab' })).toHaveTextContent('Ready')
@@ -81,7 +134,7 @@ describe('Lab rail selection and tab visibility', () => {
     expect(surfaceContract('lab').toolbar.ribbon).toBe(false)
     expect(surfaceContract('lab').authoring).toBe(true)
     expect(surfaceContract('lab').entitlements).toEqual([])
-  })
+  }, 20000)
 
   it.each([subscribeBeforeLogout, subscribeUnauthorized])('hides immediately on sign-out and rejects an earlier authority probe: %s', async (subscribe) => {
     let resolveOld
@@ -90,6 +143,7 @@ describe('Lab rail selection and tab visibility', () => {
       .mockResolvedValueOnce({ state: 'on', posture: 'local' })
     render(<><ProductSurfaceTabs activeSurface="cad" states={productSurfaceStates()} onSelect={() => {}} mock={false} /><LabGround active /></>)
     await act(async () => {})
+    await findCanvas()
     expect(screen.getByRole('tab', { name: 'Lab' })).toBeInTheDocument()
     expect(subscribe).toHaveBeenCalledTimes(1)
     const tokenStored = subscribeTokenStored.mock.calls[0][0]
@@ -104,7 +158,7 @@ describe('Lab rail selection and tab visibility', () => {
     await act(async () => {})
     expect(screen.getByRole('tab', { name: 'Lab' })).toBeInTheDocument()
     expect(fetchLabStatus).toHaveBeenCalledTimes(3)
-  })
+  }, 20000)
 
   it('invalidates the rail when another tab clears the session', async () => {
     fetchLabStatus.mockResolvedValue({ state: 'on', posture: 'local' })
@@ -117,10 +171,30 @@ describe('Lab rail selection and tab visibility', () => {
   })
 })
 
+it('starts no canvas import while the ground is hidden and imports once on first reveal', async () => {
+  fetchLabStatus.mockResolvedValue({ state: 'on', posture: 'local' })
+  const { container, rerender } = render(<LabGround active={false} />)
+  await act(async () => {})
+  expect(container.querySelector('[data-graph-placeholder]')).toBeInTheDocument()
+  expect(container.querySelector('[data-canvas-editor]')).toBeNull()
+  expect(canvasImport).not.toHaveBeenCalled()
+
+  rerender(<LabGround active />)
+  expect(container.querySelector('[aria-label="Loading dependency canvas"]')).toBeInTheDocument()
+  const editor = await findCanvas()
+  expect(canvasImport).toHaveBeenCalledTimes(1)
+  rerender(<LabGround active={false} />)
+  expect(editor).not.toBeVisible()
+  rerender(<LabGround active />)
+  expect(container.querySelector('[data-canvas-editor]')).toBe(editor)
+  expect(canvasImport).toHaveBeenCalledTimes(1)
+}, 20000)
+
 it('retains the workbench and all views while propagating hidden', async () => {
   fetchLabStatus.mockResolvedValue({ state: 'on', posture: 'local' })
   const { container, rerender } = render(<LabGround active />)
   await act(async () => {})
+  await findCanvas()
   const workbench = container.querySelector('.lab-workbench')
   const views = [...container.querySelectorAll('[data-lab-view]')]
   expect(views).toHaveLength(5)
@@ -133,4 +207,4 @@ it('retains the workbench and all views while propagating hidden', async () => {
   expect(container.querySelector('.lab-workbench')).toBe(workbench)
   expect([...container.querySelectorAll('[data-lab-view]')]).toEqual(views)
   expect(fetchLabStatus).toHaveBeenCalledTimes(1)
-})
+}, 20000)

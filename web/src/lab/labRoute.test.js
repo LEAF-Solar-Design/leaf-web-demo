@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { config } from '../api.js'
-import { fetchLabStatus, formatLabRoute, parseLabRoute } from './labRoute.js'
+import { fetchLabStatus, formatLabRoute, isLabEmbedded, parseLabRoute } from './labRoute.js'
 import golden from './__fixtures__/lab-route.v1.golden.json'
 
 afterEach(() => {
@@ -9,6 +9,20 @@ afterEach(() => {
 })
 
 describe('Lab route golden', () => {
+  it('round-trips the inert embed string on direct and surface routes', () => {
+    for (const [path, search] of [['/app/lab', '?embed=1'], ['/app', '?surface=lab&embed=1']]) {
+      const route = parseLabRoute(path, search)
+      expect(route).toEqual({ view: 'graph', params: { embed: '1' } })
+      expect(formatLabRoute(route)).toBe('/app/lab?embed=1')
+    }
+    const top = {}
+    expect(isLabEmbedded(parseLabRoute('/app/lab', '?embed=1'), { self: top, top })).toBe(false)
+    expect(isLabEmbedded(parseLabRoute('/app/lab', '?embed=1'), { self: {}, top })).toBe(true)
+    for (const search of ['', '?embed=0', '?embed=true']) {
+      expect(isLabEmbedded(parseLabRoute('/app/lab', search), { self: {}, top })).toBe(false)
+    }
+    expect(parseLabRoute('/app/lab', '?embed=1&embed=1')).toBeNull()
+  })
   for (const entry of golden.accepted) {
     it(`parses and round-trips ${entry.path}${entry.search}`, () => {
       const route = parseLabRoute(entry.path, entry.search)
