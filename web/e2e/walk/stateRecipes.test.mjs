@@ -239,7 +239,11 @@ test('Solar failure snapshot reads form, checkout and every alert before cleanup
   const text = value => ({ textContent: async () => { assert.equal(released, false); return value } })
   const settings = {
     getByTestId: id => text(`${id} eyJabc.def.ghi lco1.secret`),
-    getAttribute: async () => 'edit',
+    getAttribute: async (name, options) => {
+      assert.deepEqual(options, { timeout: 2_000 })
+      return { 'data-mode': 'edit', 'data-submit-seq': ' 2 ',
+        'data-submit-exit': ' superseded_context eyJabc.def.ghi lco1.secret ' }[name]
+    },
     getByRole: role => {
       assert.equal(role, 'alert')
       return { count: async () => 2, nth: index => text(`${index}: ${'a'.repeat(400)}`) }
@@ -251,6 +255,8 @@ test('Solar failure snapshot reads form, checkout and every alert before cleanup
   released = true
   const fields = JSON.parse(output.slice(output.indexOf('{')))
   assert.equal(fields['data-mode'], 'edit')
+  assert.equal(fields['data-submit-seq'], '2')
+  assert.equal(fields['data-submit-exit'], 'superseded_context [redacted] [redacted]')
   assert.equal(fields.startEnabled, 'true')
   assert.equal(fields.checkoutStatus, 'Checkout held')
   assert.equal(fields.releaseEnabled, 'true')
@@ -259,6 +265,11 @@ test('Solar failure snapshot reads form, checkout and every alert before cleanup
   assert.deepEqual(fields.alerts.map(value => value.length), [300, 300])
   const unavailable = await projectSolarRunDiagnostic({}, {}, {})
   assert.equal(unavailable.includes('[unavailable]'), true)
+  const unreadable = await projectSolarRunDiagnostic({}, {
+    getAttribute: async () => { throw new Error('detached') } }, {})
+  const unreadableFields = JSON.parse(unreadable.slice(unreadable.indexOf('{')))
+  assert.equal(unreadableFields['data-submit-seq'], '[unavailable]')
+  assert.equal(unreadableFields['data-submit-exit'], '[unavailable]')
 })
 
 test('staging step persists evidence on pass and failure and preserves verdicts if evidence IO fails', async () => {
