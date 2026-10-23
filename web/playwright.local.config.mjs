@@ -58,8 +58,14 @@ if (linkFlowBoot) {
     }
     process.env.LEAF_LINK_FLOW_PORTS_CLEARED = '1'
   }
+  // /try?proof=1 loads /api/session?dwg=cat before reading cat-panels
+  // versions. Both use demo-tenant (the session's auth-off default and
+  // VITE_TENANT_ID above). Neither ID is a curated bootstrap alias, so
+  // provision both fixtures explicitly; ordinary unknown reads still fail.
+  execFileSync('python', ['-B', join(repo, 'scripts/seed_proof_drawings.py'), '--tenant', 'demo-tenant'],
+    { cwd: repo, env: { ...process.env, APS_LIVE: '0' }, stdio: 'inherit', timeout: 30_000 })
   webServer = {
-    command: 'npm --prefix harness run build && python scripts/start-leaf.py --with-harness --broker-port 8240 --app-port 8230 --harness-port 8250 --web-port 5275',
+    command: 'npm --prefix harness run build && python scripts/start-leaf.py --strict-ports --with-harness --broker-port 8240 --app-port 8230 --harness-port 8250 --web-port 5275',
     cwd: repo,
     url: 'http://127.0.0.1:5275',
     reuseExistingServer: false,

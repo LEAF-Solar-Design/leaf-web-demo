@@ -23,6 +23,11 @@ def client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "legacy")
+    monkeypatch.setenv("LEAF_BLOB_STORE", "filesystem")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
     monkeypatch.delenv("APS_LIVE", raising=False)  # APS_LIVE off -> FilesystemBackend, no da/creds
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)  # legacy X-Tenant-Id header stub
 
@@ -47,7 +52,7 @@ def _owner_hashes(tmp_path):
 
 def _seed(tmp_path):
     backend = store.FilesystemBackend(str(tmp_path / "drawings"))
-    write_loop.ensure_demo_drawing(backend, "tenant-a", "canary-a")
+    store.ingest_drawing(backend, "tenant-a", str(write_loop.CACHED_INTAKE_PATH), drawing_id="canary-a")
     # _put_bytes_version stages bytes for store.put_drawing, which appends an
     # immutable version and advances head via store.save_manifest.
     version = write_loop._put_bytes_version(
@@ -71,29 +76,30 @@ def test_owner_sees_both_versions(client, tmp_path):
 
 
 def test_other_tenant_read_bootstraps_its_own_copy_known_behaviour(client, tmp_path):
-    """Auto-bootstrap is a product question for the drawings owner, not a leak."""
+    """P-183: an unlisted ID in another tenant no longer creates a demo copy."""
     _seed(tmp_path)
+    before = _store_hashes(tmp_path)
     response = client.get("/api/drawings/canary-a/summary", headers=_h("tenant-b"))
-    assert response.status_code == 200
-    assert (tmp_path / "drawings" / "tenants" / "tenant-b" / "drawings" / "canary-a").is_dir()
+    assert response.status_code == 404
+    assert response.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert MARKER not in response.content and b"tenant-a" not in response.content
+    assert not (tmp_path / "drawings" / "tenants" / "tenant-b" / "drawings" / "canary-a").exists()
+    assert _store_hashes(tmp_path) == before
+
+
+def _store_hashes(tmp_path):
+    return {p.relative_to(tmp_path).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in tmp_path.rglob("*") if p.is_file()}
 
 
 def test_other_tenant_versions_never_lists_owner_version(client, tmp_path):
     _seed(tmp_path)
+    before = _store_hashes(tmp_path)
     response = client.get("/api/drawings/canary-a/versions", headers=_h("tenant-b"))
-    assert response.status_code == 200
+    assert response.status_code == 404
     assert MARKER not in response.content, response.status_code
     assert b"tenant-a" not in response.content, response.status_code
-    body = response.json()
-    assert body["head"] == body["latest"] == 1
-    assert len(body["versions"]) == 1
-    version = body["versions"][0]
-    demo_bytes = write_loop.DEMO_DWG_PATH.read_bytes()
-    assert version["v"] == 1
-    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
-    _, key = store.resolve_version(backend, "tenant-b", "canary-a", 1)
-    assert version["sha256"] == hashlib.sha256(backend.get(key)).hexdigest()
-    assert version["sha256"] != hashlib.sha256(demo_bytes + b"\n" + MARKER).hexdigest()
+    assert _store_hashes(tmp_path) == before
 
 
 def test_other_tenant_summary_graph_mapping_intake_never_carry_marker(client, tmp_path):
@@ -105,35 +111,42 @@ def test_other_tenant_summary_graph_mapping_intake_never_carry_marker(client, tm
     entity_total = sum(len(owner_intake.get(key) or [])
                        for key in ("polylines", "inserts", "faces3d"))
     assert entity_total > 0
-    before = _owner_hashes(tmp_path)
+    before = _store_hashes(tmp_path)
     responses = {route: client.get(f"/api/drawings/canary-a/{route}",
                             params={"project_id": "canary-project"}, headers=_h("tenant-b"))
                  for route in ("summary", "graph", "mapping", "intake")}
     for response in responses.values():
+        assert response.status_code == 404, response.text
         assert MARKER not in response.content, response.status_code
         assert b"tenant-a" not in response.content, response.status_code
-    for route in ("summary", "intake"):
-        assert responses[route].status_code == 200
-        body = responses[route].json()
-        assert body["version"] == body["head"] == body["latest"] == 1
-    assert responses["summary"].json()["entity_total"] == entity_total
-    intake = responses["intake"].json()["intake"]
-    assert sum(len(intake.get(key) or [])
-               for key in ("polylines", "inserts", "faces3d")) == entity_total
-    assert intake == owner_intake
-    # Demo bootstrap versions have no solar-bundle note. read_graph_bundle
-    # refuses them; neither graph nor mapping has an entity total to compare.
     for route in ("graph", "mapping"):
         assert responses[route].status_code == 404
         assert responses[route].json()["error"]["message"] == f"drawing {route} unavailable"
-    assert _owner_hashes(tmp_path) == before
+    assert _store_hashes(tmp_path) == before
 
 
 def test_other_tenant_dxf_never_carries_marker(client, tmp_path):
     _seed(tmp_path)
+    before = _store_hashes(tmp_path)
     response = client.get("/api/drawings/canary-a/dxf", headers=_h("tenant-b"))
+    assert response.status_code == 404
     assert MARKER not in response.content, response.status_code
     assert b"tenant-a" not in response.content, response.status_code
+    assert _store_hashes(tmp_path) == before
+
+
+def test_other_tenant_checkout_unknown_id_is_404_and_creates_nothing(client, tmp_path):
+    owner_before = _seed(tmp_path)
+    before = _store_hashes(tmp_path)
+    response = client.post("/api/drawings/canary-a/checkout", headers=_h("tenant-b"))
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert not response.json().get("checkout_capability")
+    assert not (tmp_path / "drawings" / "tenants" / "tenant-b").exists()
+    assert _store_hashes(tmp_path) == before
+    assert _owner_hashes(tmp_path) == owner_before
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    assert store.load_manifest(backend, "tenant-a", "canary-a")["head"] == 2
 
 
 def _other_tenant_writes(client):
@@ -145,6 +158,7 @@ def test_other_tenant_writes_never_touch_owner_files(client, tmp_path):
     before = _seed(tmp_path)
     responses = _other_tenant_writes(client)
     statuses = [response.status_code for response in responses]
+    assert statuses == [400, 400, 404, 400]
     assert _owner_hashes(tmp_path) == before, statuses
     response = client.get("/api/drawings/canary-a/versions", headers=_h("tenant-a"))
     assert response.json()["head"] == 2, statuses
@@ -158,8 +172,7 @@ def test_other_tenant_writes_create_files_only_under_own_prefix(client, tmp_path
     after = {path.relative_to(root) for path in root.rglob("*") if path.is_file()}
     statuses = [response.status_code for response in responses]
     assert _owner_hashes(tmp_path) == owner_before, statuses
-    assert all(path.parts[:2] == ("tenants", "tenant-b")
-               or path.parts[0] == "checkout-locks" for path in after - before), statuses
+    assert after == before, statuses
 
 
 def test_other_tenant_restore_of_owner_version_is_not_visible_to_owner(client, tmp_path):

@@ -195,7 +195,7 @@ import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
-import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
+import { consoleAuthRequired, consoleSignedOut, consoleKnownGuest } from './controllers/session/consoleGate.js'
 import useCheckoutController from './controllers/checkout/useCheckoutController.js'
 import { useProjectCheckoutController } from './controllers/useProjectCheckoutController.js'
 import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason } from './solar/solarProjectAppModel.js'
@@ -669,6 +669,8 @@ export default function App() {
   // the session. The controller publishes no token-presence signal, so folding
   // these into `status` would change three truth tables; they stay here.
   const [signedIn, setSignedIn] = useState(() => isSignedIn())
+  // Pause authenticated reads for guests before the session response arrives.
+  const knownGuest = consoleKnownGuest({ mock, authConfigured, isSignedIn, authCallback: isAuthRedirectCallback() })
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
   const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
   const [authorOpen, setAuthorOpenState] = useState(false)    // author flow (opens on build lane)
@@ -1210,6 +1212,7 @@ export default function App() {
     services: catalogServices,
     adapters: catalogAdapters,
     context: { mock, entitlements, running: false, agentDisabled,
+      guestReadsPaused: knownGuest,
       ...(projectMode ? {
         solarBinding: projectSolar.ready ? projectSolar.scope.binding : null,
         authorityKey: projectSolar.ready ? projectSolar.scope.authorityKey : null,
@@ -1305,7 +1308,7 @@ export default function App() {
     // the version chain wins, the booted identity is the fallback. A tenant
     // switch voids the identity and the scope goes with it — see
     // checkoutScopeDrawingId for why abandoning beats releasing.
-    drawingId: checkoutScopeDrawingId({
+    drawingId: knownGuest ? null : checkoutScopeDrawingId({
       identityDrawingId: projectMode ? null : REQUESTED_DRAWING_ID,
       drawingState,
       requestedDrawingId: REQUESTED_DRAWING_ID,

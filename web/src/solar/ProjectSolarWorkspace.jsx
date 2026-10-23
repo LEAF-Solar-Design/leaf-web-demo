@@ -12,6 +12,14 @@ const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-ca
 const SOLVE_TOOLS = ['solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const TOOL_NAME = new RegExp('^[a-z0-9][a-z0-9-]{0,127}$')
+export const PROJECT_SOLAR_WORKSPACE_SUBMIT_CODES = Object.freeze(Object.fromEntries([
+  'BUSY', 'NO_INTENT_KEY', 'NO_SUBMIT', 'RETIRED', 'PRESENTATION_STALE', 'TOOL_NOT_OPEN',
+  'NOT_ADMITTED', 'ROW_NOT_ADMITTED', 'ROW_MISMATCH', 'PROPOSAL_REQUIRED', 'INTENT_INVALID',
+  'OPTIONS_STALE', 'ABORTED', 'SIGNAL_INVALID', 'BINDING_MISMATCH', 'AUTHORITY_MISMATCH',
+  'TOOL_MISMATCH', 'CATALOG_STALE', 'SCOPE_STALE', 'NO_RESULT', 'ERROR',
+].map((name) => [name, `SIP_R7_WORKSPACE_${name}`])))
+const workspaceRefusal = (name) => Promise.resolve({ ok: false, status: null,
+  reason: PROJECT_SOLAR_WORKSPACE_SUBMIT_CODES[name], envelope: null })
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
 const current = (predicate) => {
   try { return typeof predicate === 'function' && predicate() === true } catch { return false }
@@ -244,30 +252,41 @@ export default function ProjectSolarWorkspace(props) {
   // observation belongs only to the captured scope, never to this editor or its busy state.
   function submit(prepared, options, runRow = selected) {
     const live = latest.current
-    if (!canWrite || live.busy || typeof live.newProjectIntentKey !== 'function' || typeof live.onProjectSubmit !== 'function' ||
-        presentation.current.retired || presentation.current.generation !== generation || live.openTool !== selected || !admitted(selected)) return undefined
     let handoff
     try {
-      if (!owner.rows.includes(runRow) || !admitted(runRow)) return undefined
-      if (runRow !== selected && !(runRow.name === 'solar-commit-solve' && selected?.name === 'solar-solve-proposal')) return undefined
+      if (busy || live.busy) return workspaceRefusal('BUSY')
+      if (typeof newProjectIntentKey !== 'function' || typeof live.newProjectIntentKey !== 'function') return workspaceRefusal('NO_INTENT_KEY')
+      if (typeof props.onProjectSubmit !== 'function' || typeof live.onProjectSubmit !== 'function') return workspaceRefusal('NO_SUBMIT')
+      if (presentation.current.retired) return workspaceRefusal('RETIRED')
+      if (live.openTool !== selected) return workspaceRefusal('TOOL_NOT_OPEN')
+      if (presentation.current.generation !== generation) return workspaceRefusal('PRESENTATION_STALE')
+      if (!admitted(selected)) return workspaceRefusal('NOT_ADMITTED')
+      if (!owner.rows.includes(runRow) || !admitted(runRow)) return workspaceRefusal('ROW_NOT_ADMITTED')
+      if (runRow !== selected && !(runRow.name === 'solar-commit-solve' && selected?.name === 'solar-solve-proposal')) return workspaceRefusal('ROW_MISMATCH')
       if (runRow.name === 'solar-commit-solve' && (!proposal || !validProposal(proposalReceipt) ||
-          prepared?.proposalJobId !== proposal.jobId)) return undefined
+          prepared?.proposalJobId !== proposal.jobId)) return workspaceRefusal('PROPOSAL_REQUIRED')
       const fields = ['binding', 'authorityKey', 'tool', 'catalogDigest']
       if (!plain(prepared) || fields.some((key) => {
         const descriptor = Object.getOwnPropertyDescriptor(prepared, key)
         return !descriptor || !Object.hasOwn(descriptor, 'value')
-      }) || !current(options?.isCurrent) || options?.signal?.aborted ||
-          (options?.signal !== undefined && !(options.signal instanceof AbortSignal)) ||
-          !sameSolarDrawingBinding(options?.binding, owner.binding) || options?.authorityKey !== owner.authorityKey ||
-          !sameSolarDrawingBinding(prepared?.binding, owner.binding) || prepared?.authorityKey !== owner.authorityKey ||
-          prepared?.tool !== runRow.name || prepared?.catalogDigest !== runRow.catalog_digest ||
-          live.submissionSignal?.aborted || (live.submissionSignal !== undefined && !(live.submissionSignal instanceof AbortSignal))) return undefined
+      })) return workspaceRefusal('INTENT_INVALID')
+      if (!current(options?.isCurrent)) return workspaceRefusal('OPTIONS_STALE')
+      if (options?.signal?.aborted) return workspaceRefusal('ABORTED')
+      if (options?.signal !== undefined && !(options.signal instanceof AbortSignal)) return workspaceRefusal('SIGNAL_INVALID')
+      if (!sameSolarDrawingBinding(options?.binding, owner.binding)) return workspaceRefusal('BINDING_MISMATCH')
+      if (options?.authorityKey !== owner.authorityKey) return workspaceRefusal('AUTHORITY_MISMATCH')
+      if (!sameSolarDrawingBinding(prepared?.binding, owner.binding)) return workspaceRefusal('BINDING_MISMATCH')
+      if (prepared?.authorityKey !== owner.authorityKey) return workspaceRefusal('AUTHORITY_MISMATCH')
+      if (prepared?.tool !== runRow.name) return workspaceRefusal('TOOL_MISMATCH')
+      if (prepared?.catalogDigest !== runRow.catalog_digest) return workspaceRefusal('CATALOG_STALE')
+      if (live.submissionSignal?.aborted) return workspaceRefusal('ABORTED')
+      if (live.submissionSignal !== undefined && !(live.submissionSignal instanceof AbortSignal)) return workspaceRefusal('SIGNAL_INVALID')
       const captured = owner.projectClient.captureCatalogScope()
       const guard = () => scope.isCurrent() && current(captured) && !submissionSignal?.aborted
-      if (!guard()) return undefined
+      if (!guard()) return workspaceRefusal('SCOPE_STALE')
       handoff = { binding: owner.binding, authorityKey: owner.authorityKey, signal: submissionSignal, isCurrent: guard }
-    } catch { return undefined }
-    return live.onProjectSubmit(prepared, handoff)
+      return live.onProjectSubmit(prepared, handoff) || workspaceRefusal('NO_RESULT')
+    } catch { return workspaceRefusal('ERROR') }
   }
   const shared = { solarBinding: owner.binding, authorityKey: owner.authorityKey, projectClient: owner.projectClient,
     catalogDigest: selected?.catalog_digest, newProjectIntentKey, onProjectSubmit: canWrite ? submit : undefined,

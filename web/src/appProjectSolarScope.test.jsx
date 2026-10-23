@@ -95,7 +95,7 @@ const intents = Function(`return ${text(declaration('PROJECT_SOLAR_INTENTS').nod
 // unrelated App inputs are supplied by this fixture; the owner, session, client
 // and catalog implementations below are production modules.
 const useAppScope = Function('React', 'createCatalogRunContext', 'composerDraftAccountScope',
-  'useProjectSolarScope', 'useCatalogController', 'solarSettingsScope', 'PROJECT_SOLAR_INTENTS', `
+  'useProjectSolarScope', 'useCatalogController', 'solarSettingsScope', 'PROJECT_SOLAR_INTENTS', 'knownGuest', `
   return function useAppScope(input, services) {
     const { useRef, useMemo, useCallback, useEffect } = React
     const { mock, tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState,
@@ -117,7 +117,7 @@ const useAppScope = Function('React', 'createCatalogRunContext', 'composerDraftA
       catalogServices, catalogController, catalogState, catalogActions, initialContext }
   }
 `)(React, createCatalogRunContext, composerDraftAccountScope, useProjectSolarScope,
-  useCatalogController, solarSettingsScope, intents)
+  useCatalogController, solarSettingsScope, intents, false)
 
 const O = '11111111-1111-1111-1111-111111111111'
 const P = '22222222-2222-2222-2222-222222222222'
