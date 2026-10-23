@@ -32,6 +32,11 @@ def client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "legacy")
+    monkeypatch.setenv("LEAF_BLOB_STORE", "filesystem")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
     monkeypatch.delenv("APS_LIVE", raising=False)
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
     monkeypatch.delenv("LEAF_TENANTS_DIR", raising=False)
@@ -51,14 +56,13 @@ def _h(tenant: str) -> dict:
 
 
 def _bootstrap_version_note(tmp_path, monkeypatch, tenant: str, drawing_id: str, note: str) -> None:
-    """Bootstrap `drawing_id` for `tenant` (the cached demo intake, same path
-    every fresh id takes) then overwrite v1's note to a tenant-unique string,
+    """Explicitly ingest `drawing_id`, then set a tenant-unique v1 note,
     so a search hit on that string PROVES which tenant's store answered."""
     import write_loop  # imported first: its own top-level code puts da/ (store.py's home) on sys.path
     import store
 
     backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
-    write_loop.ensure_demo_drawing(backend, tenant, drawing_id)
+    store.ingest_drawing(backend, tenant, str(write_loop.CACHED_INTAKE_PATH), drawing_id=drawing_id)
     manifest = store.load_manifest(backend, tenant, drawing_id)
     manifest["versions"][0]["note"] = note
     store.save_manifest(backend, tenant, drawing_id, manifest)
@@ -176,10 +180,12 @@ def test_tenant_a_version_note_is_invisible_to_tenant_b_for_the_same_drawing_id(
 
     a = client.get("/api/search", params={"q": "tenant-a-private-note-xyz", "drawing_id": "shared-id"},
                    headers=_h("tenant-a")).json()["results"]
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     b = client.get("/api/search", params={"q": "tenant-a-private-note-xyz", "drawing_id": "shared-id"},
                    headers=_h("tenant-b")).json()["results"]
     assert any(row["kind"] == "version" for row in a)
     assert all(row["kind"] != "version" for row in b)
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
 # --------------------------------------------------------------------------- #

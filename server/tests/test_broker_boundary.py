@@ -358,6 +358,8 @@ def test_broker_refuses_staged_source_on_live_aps_before_runner(monkeypatch):
 
 
 def test_broker_forces_staged_write_source_to_dry_run(monkeypatch, tmp_path):
+    import store
+
     monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
     monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
     monkeypatch.setenv("LEAF_SANDBOX", "e2b")
@@ -387,6 +389,12 @@ def test_broker_forces_staged_write_source_to_dry_run(monkeypatch, tmp_path):
         "    }]}}, None)\n"
     )
 
+    backend = broker.write_loop.default_backend(aps_live=False)
+    store.ingest_drawing(
+        backend, "tenant-a", str(write_loop.CACHED_INTAKE_PATH),
+        drawing_id="staged-safety",
+    )
+
     env, status = broker._execute(
         broker.BrokerRunRequest(
             tenant_id="tenant-a", tool=tool,
@@ -405,7 +413,6 @@ def test_broker_forces_staged_write_source_to_dry_run(monkeypatch, tmp_path):
     assert observed_runner_calls[0]["test_source"] == source
     assert env["result"]["dry_run"] is True
     assert "new_version" not in env["result"]
-    backend = broker.write_loop.default_backend(aps_live=False)
     version, _ = broker.write_loop.read_intake(
         backend, "tenant-a", "staged-safety", "head")
     assert version == 1

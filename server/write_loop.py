@@ -1430,15 +1430,13 @@ def apply_graph_version(backend, tenant_id: str, drawing_id: str, dwg: bytes,
 # demo bootstrap
 # --------------------------------------------------------------------------- #
 def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
-    """Bootstrap ANY first-seen `drawing_id` on first use.
+    """Bootstrap missing curated demo aliases, preserving their literal IDs.
 
-    At APS_LIVE=0, v1 remains the cached intake JSON via the identical
-    `store.ingest_drawing` path the well-known
-    `demo` drawing has always used — `demo` is now just one instance of this
-    general rule (its resulting v1 is byte-identical to before: same source file,
-    same ingest call). Generalizes the earlier demo-only special case per
-    leaf-backend-gaps.md §"Any plausible drawing_id ... should resolve to a
-    provisioned drawing" (fix (a): extend auto-bootstrap to any first-seen id).
+    Existing tenant drawings remain readable regardless of alias membership.
+    Missing guest drawings and pending uploads retain their fail-closed guards;
+    other missing IDs raise KeyError before mutation or source-byte work.
+    Allowed aliases use the existing ingest path: cached intake offline, or
+    bundled DWG with source-bound intake when APS_LIVE=1.
 
     `drawing_id` must satisfy the ONE shared slug-safe id rule
     (tenant_id_validator.validate_tenant_id — lowercase alnum/`_`/`-`, must start
@@ -1453,6 +1451,7 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
     passes here too.
     """
     import store
+    from drawing_identity import CURATED_DEMO
     validate_tenant_id(drawing_id, kind="drawing id")  # reject path-y / malformed ids, up front
     upload_marker_exists = False
     if store.authority_mode() == "postgres":
@@ -1493,6 +1492,8 @@ def ensure_demo_drawing(backend, tenant_id: str, drawing_id: str) -> None:
             f"drawing {drawing_id!r} was uploaded but extraction has not "
             f"produced geometry (see /api/drawings/{drawing_id}/upload-status); "
             f"refusing the demo-intake bootstrap")
+    if drawing_id not in CURATED_DEMO.aliases:
+        raise KeyError(f"unknown drawing {drawing_id!r}")
     with drawing_mutation_refusal_guard() as refusal:
         if refusal is not None:
             log_mutation_refused(LOGGER, refusal,
