@@ -164,6 +164,14 @@ Nothing below is chippable; each step is an operator action:
 
 ## 7. Managed add-on settings and statement feed
 
+The Free plan managed-run allowance is dark unless
+`LEAF_FREE_ALLOWANCE_ENFORCE=1`. For `hosted_free` tenants using the PostgreSQL
+broker store, admission checks the current UTC calendar month against
+`plans.free.runs_per_month` in `platform/pricebook.json`. An exhausted allowance
+returns HTTP **429** with `quota_exceeded` and `window: "month"`, offering an
+upgrade or bringing your own account. An unavailable allowance configuration
+also refuses admission for this tier.
+
 `GET /api/orgs/{org_id}/addons` uses the verified caller's org, exactly like
 the org identities route. It returns `{"addons": {"<addon>": {"mode": "off",
 "byo_ref": null}}}` for every known add-on, defaulting unset settings to off.
