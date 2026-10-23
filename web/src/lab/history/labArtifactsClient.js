@@ -10,6 +10,7 @@ const initial = () => ({ head: null, published: null, revisions: [], lastSaved: 
 
 export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.fetch(...args), now = Date.now } = {}) {
   let docId = 'strategy'
+  let headEpoch = 0
   const state = initial()
   const listeners = new Set()
   const update = patch => { Object.assign(state, patch); listeners.forEach(listener => listener()) }
@@ -35,6 +36,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
     }
   }
   function saved(id, row, kind) {
+    headEpoch += 1
     const revision = kind === 'publish' ? row.new_head : row.revision
     const detail = { doc_id: id, revision, sha256: row.sha256, kind, at: now() }
     update({ events: [...state.events, detail].slice(-20), ...(id === docId ? {
@@ -49,7 +51,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
   return {
     state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     currentDocId: () => docId,
-    setDocId(id) { identifier(id); if (id !== docId) { docId = id; update({ ...initial(), restoredKey: state.restoredKey + 1 }) } },
+    setDocId(id) { identifier(id); if (id !== docId) { headEpoch += 1; docId = id; update({ ...initial(), restoredKey: state.restoredKey + 1 }) } },
     takeGraph(graph) { update({ restoredGraph: graph, restoredKey: state.restoredKey + 1 }) },
     async save(id, graph, expectedHead) {
       identifier(id)
@@ -62,17 +64,19 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       return result
     },
     async head(id) {
+      const epoch = headEpoch
       const result = await request(id, 'head')
-      if (result.ok && id === docId) update({ head: result.revision,
+      if (result.ok && id === docId && epoch === headEpoch) update({ head: result.revision,
         ...(result.published_revision == null ? {} : { published: result.published_revision }) })
       return result
     },
     async revisions(id, { limit, before } = {}) {
+      const epoch = headEpoch
       const query = new URLSearchParams()
       if (limit != null) query.set('limit', limit)
       if (before != null) query.set('before', before)
       const result = await request(id, `revisions${query.size ? `?${query}` : ''}`)
-      if (result.ok && id === docId) update({ revisions: result.revisions })
+      if (result.ok && id === docId && epoch === headEpoch) update({ revisions: result.revisions })
       return result
     },
     revision: (id, n) => request(id, `revisions/${encodeURIComponent(n)}`),
