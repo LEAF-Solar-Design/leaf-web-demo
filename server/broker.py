@@ -83,6 +83,7 @@ for p in (str(PROJECT_ROOT), str(SERVER_DIR)):
 import tools_fallback as fb  # noqa: E402,F401  (compat: builtins delegate here)
 import entitlements  # noqa: E402  (F10: broker-side tier re-check; IMPORT/CALL only)
 import drawing_identity  # noqa: E402
+import free_allowance  # noqa: E402
 from envelopes import (  # noqa: E402
     DEFAULT_HTTP_STATUS,
     ErrorCode,
@@ -130,6 +131,7 @@ QA_SLEEP_CAP_S = 30.0
 _ledger_lock = threading.Lock()
 _tenants_lock = threading.Lock()
 _pg_store = None
+_free_allowance_config_logged = False
 
 
 def _broker_store_mode() -> str:
@@ -706,6 +708,27 @@ def _run_quota_preflight(tenant_id: str, tier: str, tool: Dict[str, Any]):
     else:
         decision = usage.daily_run_quota_check(tenant_id, tier, LEDGER_PATH)
     if decision.get("ok"):
+        if (free_allowance.enforcement_enabled()
+                and tier == free_allowance.FREE_TIER
+                and _broker_store_mode() == "postgres"):
+            used = _postgres_store().monthly_live_run_count(tenant_id)
+            try:
+                limit = free_allowance.load_monthly_limit()
+            except free_allowance.AllowanceConfigError:
+                global _free_allowance_config_logged
+                with _ledger_lock:
+                    if not _free_allowance_config_logged:
+                        LOGGER.error("Free allowance is unavailable; refusing hosted_free runs")
+                        _free_allowance_config_logged = True
+                env = free_allowance.monthly_refusal(tenant_id, 0, used, tool.get("name"))
+                message = "The free allowance is unavailable. Upgrade or bring your own account to continue."
+                env["message"] = env["error"]["message"] = message
+                env["degraded_mode"] = False
+                return env, 429
+            if used >= limit:
+                env = free_allowance.monthly_refusal(tenant_id, limit, used, tool.get("name"))
+                env["degraded_mode"] = False
+                return env, 429
         return None
     # reject: coerce degraded_mode to a boolean for the schema-valid wire body
     env = dict(decision)

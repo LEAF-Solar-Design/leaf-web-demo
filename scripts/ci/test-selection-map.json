@@ -112,6 +112,7 @@
     "platform-billing-statement",
     "platform-addon-settings-api",
     "server-e2b-cost-meter",
+    "server-free-allowance",
     "platform-ios-ship-source-catalog",
     "platform-ios-ship-source-catalog-static",
     "platform-org-acceptance",
