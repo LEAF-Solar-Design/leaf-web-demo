@@ -86,6 +86,36 @@ describe('Studio Add-ons', () => {
     expect(input).toHaveValue('my-e2b-key')
   })
 
+  it('shows a failed save detail string in the row alert', async () => {
+    mockFetch({ put: () => response({ detail: 'byo_ref must be a credential name', error: { message: 'Generic error' } }, 422) })
+    panel()
+    const row = within(await loadedRow())
+    fireEvent.click(row.getByRole('radio', { name: 'Your own' }))
+    fireEvent.change(row.getByRole('textbox'), { target: { value: 'my key' } })
+    fireEvent.click(row.getByRole('button', { name: 'Save' }))
+    expect(await row.findByRole('alert')).toHaveTextContent('byo_ref must be a credential name')
+  })
+
+  it('joins failed save validation details in the row alert', async () => {
+    mockFetch({ put: () => response({ detail: [{ msg: 'a' }, { msg: 'b' }], message: 'Generic error' }, 422) })
+    panel()
+    const row = within(await loadedRow())
+    fireEvent.click(row.getByRole('radio', { name: 'Your own' }))
+    fireEvent.change(row.getByRole('textbox'), { target: { value: 'my key' } })
+    fireEvent.click(row.getByRole('button', { name: 'Save' }))
+    expect(await row.findByRole('alert')).toHaveTextContent('a; b')
+  })
+
+  it('keeps the status text for a failed save with a non-JSON body', async () => {
+    mockFetch({ put: () => new Response('Internal Server Error', { status: 500 }) })
+    panel()
+    const row = within(await loadedRow())
+    fireEvent.click(row.getByRole('radio', { name: 'Your own' }))
+    fireEvent.change(row.getByRole('textbox'), { target: { value: 'my-e2b-key' } })
+    fireEvent.click(row.getByRole('button', { name: 'Save' }))
+    expect(await row.findByRole('alert')).toHaveTextContent('PUT /api/orgs/org-1/addons/e2b_exec -> 500')
+  })
+
   it('renders managed statement lines, decimal money, totals and placeholder pricing', async () => {
     mockFetch()
     panel()

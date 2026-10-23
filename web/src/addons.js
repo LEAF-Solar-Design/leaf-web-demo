@@ -23,7 +23,12 @@ async function request(orgId, suffix, options = {}) {
     const error = new Error(`${options.method || 'GET'} ${path} -> ${response.status}`)
     error.status = response.status
     try { error.body = await response.clone().json() } catch { /* Keep status for non-JSON failures. */ }
-    const message = error.body?.error?.message || error.body?.message
+    const detail = error.body?.detail
+    let message = error.body?.error?.message || error.body?.message
+    if (typeof detail === 'string') message = detail
+    else if (Array.isArray(detail)) {
+      message = detail.map((item) => item?.msg).filter((msg) => typeof msg === 'string').join('; ') || message
+    }
     if (typeof message === 'string') error.message = message
     throw error
   }
