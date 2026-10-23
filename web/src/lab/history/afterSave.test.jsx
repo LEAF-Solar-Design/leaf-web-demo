@@ -40,7 +40,7 @@ function artifacts(lastSaved = saved) {
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     update(patch) { Object.assign(this.state, patch); listeners.forEach(listener => listener()) },
     currentDocId: () => 'strategy', takeGraph: vi.fn(), save: vi.fn(),
-    diff: vi.fn().mockResolvedValue({ ok: true, afterGraph: draft, changes: [{ op: 'replace', path: '/blocks/0/settings/calibration_intercept', before: 0, after: 0.77 }] }),
+    diff: vi.fn().mockResolvedValue({ ok: true, changes: [{ op: 'replace', path: '/blocks/0/settings/calibration_intercept', before: 0, after: 0.77 }] }),
     revision: vi.fn().mockResolvedValue({ ok: true, graph: draft }),
   }
 }
@@ -145,9 +145,10 @@ describe('After save comparison', () => {
     const { announce, afterSave, client } = fixture()
     const graph = addBlock(first, registry['adjust-none@1.0.0'])
     client.state.revisions = [{ revision: 1 }, { revision: 2 }]
-    client.diff.mockResolvedValue({ ok: true, afterGraph: graph, changes: [
+    client.diff.mockResolvedValue({ ok: true, changes: [
       { op: 'replace', path: '/blocks/1/settings/field', before: 'price', after: 'size' },
     ] })
+    client.revision.mockResolvedValue({ ok: true, graph })
     announce(row({ blocks: graph.blocks.map(block => ({ block_id: block.id, triggered: 1, reached: 2 })) }))
     afterSave.read()
     await act(async () => {})
@@ -168,8 +169,8 @@ describe('After save comparison', () => {
     expect(blocks()[1]).toHaveAttribute('data-changed', 'true')
     client.update({ revisions: [{ revision: 2 }] })
     afterSave.read()
-    expect(client.diff).toHaveBeenCalledExactlyOnceWith('strategy', 1, 2)
-    expect(client.revision).not.toHaveBeenCalled()
+    expect(client.diff).toHaveBeenCalledExactlyOnceWith('strategy', 1, 2, { graphs: false })
+    expect(client.revision).toHaveBeenCalledExactlyOnceWith('strategy', 2)
   })
 
   it('outlines every saved block for r1 without requesting a parent diff', async () => {
@@ -188,9 +189,9 @@ describe('After save comparison', () => {
     expect(client.revision).toHaveBeenCalledExactlyOnceWith('strategy', 1)
   })
 
-  it('keeps Practice numbers when the diff fetch fails and reports changed blocks unavailable', async () => {
+  it.each(['diff', 'revision'])('keeps Practice numbers when the %s fetch fails and reports changed blocks unavailable', async request => {
     const { announce, afterSave, client } = fixture()
-    client.diff.mockRejectedValue(new Error('Offline'))
+    client[request].mockRejectedValue(new Error('Offline'))
     announce(row())
     const listener = vi.fn()
     const unsubscribe = afterSave.subscribe(listener)
@@ -205,6 +206,7 @@ describe('After save comparison', () => {
     expect(screen.getByText(/triggered 0 times/)).not.toHaveAttribute('data-changed')
     afterSave.read()
     expect(client.diff).toHaveBeenCalledTimes(1)
+    expect(client.revision).toHaveBeenCalledTimes(1)
     unsubscribe()
   })
 

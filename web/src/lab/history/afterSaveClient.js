@@ -46,10 +46,11 @@ export function createAfterSaveClient({ provider, artifacts, now = Date.now }) {
       // Defer requests until after read() so a request's state updates cannot
       // re-enter a render. Cache failures too: each revision is requested once.
       Promise.resolve().then(async () => {
-        const result = await (saved.revision === 1 ? artifacts.revision(docId, 1)
-          : artifacts.diff(docId, saved.revision - 1, saved.revision))
-        const graph = saved.revision === 1 ? result?.graph : result?.afterGraph
-        if (result?.ok === false || !graph || (saved.revision > 1 && !Array.isArray(result?.changes))) return
+        const [result, revision] = saved.revision === 1 ? [null, await artifacts.revision(docId, 1)]
+          : await Promise.all([artifacts.diff(docId, saved.revision - 1, saved.revision, { graphs: false }),
+            artifacts.revision(docId, saved.revision)])
+        const graph = revision?.graph
+        if (result?.ok === false || revision?.ok === false || !graph || (saved.revision > 1 && !Array.isArray(result?.changes))) return
         entry.document = graph
         entry.changed = { revision: saved.revision, blockIds: saved.revision === 1
           ? graph.blocks.map(block => block.id) : changedBlockIds(graph, result.changes) }
