@@ -33,6 +33,43 @@ export const ManualWorkflowHistoryPage = z.strictObject({
     .refine((items) => new Set(items.map((run) => run.run_id.toLowerCase())).size === items.length),
   next_cursor: workflowCursor.nullable(),
 })
+const scheduleDate = z.string().regex(/^20\d{2}-\d{2}-\d{2}(?![\s\S])/).refine((value) => {
+  const date = new Date(`${value}T00:00:00Z`)
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+})
+const scheduleInstant = z.string().regex(/^20\d{2}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?Z(?![\s\S])/)
+  .refine((value) => scheduleDate.safeParse(value.slice(0, 10)).success && Number.isFinite(Date.parse(value)))
+function canonicalScheduleTimezone(value) {
+  try { return new Intl.DateTimeFormat('en-US', { timeZone: value }).resolvedOptions().timeZone } catch { return null }
+}
+const scheduleTimezone = z.string().min(1).max(100).regex(/^[A-Za-z][A-Za-z0-9._+-]*(?:\/[A-Za-z0-9._+-]+)*(?![\s\S])/).refine((value) =>
+  value === value.trim() && canonicalScheduleTimezone(value) !== null)
+const scheduleHour = z.number().int().min(0).max(23)
+const scheduleMinute = z.number().int().min(0).max(59)
+const schedulePreviewInput = z.strictObject({ schema_version: z.literal(1),
+  schedule: z.strictObject({ kind: z.literal('daily'), timezone: scheduleTimezone, hour: scheduleHour, minute: scheduleMinute }),
+  after: scheduleInstant,
+})
+const schedulePreviewResponse = z.strictObject({ schema_version: z.literal(1), preview_only: z.literal(true),
+  occurrence: z.strictObject({ scheduledLocalDate: scheduleDate, instant: scheduleInstant, timezone: scheduleTimezone,
+    hour: scheduleHour, minute: scheduleMinute, occurrenceKey: z.string().max(256) }),
+})
+export function validateWorkflowSchedulePreviewInput(value) {
+  const body = parse(schedulePreviewInput, value)
+  boundedIntegrationBody(body, 2048)
+  return body
+}
+export function validateWorkflowSchedulePreview(value, input) {
+  const body = validateWorkflowSchedulePreviewInput(input)
+  const result = parse(schedulePreviewResponse, value)
+  const occurrence = result.occurrence
+  if (occurrence.timezone !== canonicalScheduleTimezone(body.schedule.timezone) ||
+      canonicalScheduleTimezone(occurrence.timezone) !== occurrence.timezone ||
+      occurrence.hour !== body.schedule.hour || occurrence.minute !== body.schedule.minute ||
+      Date.parse(occurrence.instant) <= Date.parse(body.after) ||
+      occurrence.occurrenceKey !== JSON.stringify(['daily', occurrence.timezone, occurrence.hour, occurrence.minute, occurrence.scheduledLocalDate])) throw invalid()
+  return result
+}
 const metadata = z.object({
   reference: IntegrationRefV1, revision, title: z.string().min(1).max(120),
   fields: z.array(DatasetFieldV1).min(1).max(100).refine((fields) => new Set(fields.map((field) => field.id)).size === fields.length),
@@ -199,6 +236,11 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
   }
   return {
     available: Boolean(destination),
+    async previewWorkflowSchedule(id, input, { signal } = {}) {
+      const body = validateWorkflowSchedulePreviewInput(input)
+      const value = await request(id, '/integrations/workflow-schedule-preview', { signal, method: 'POST', body, bodyLimit: 2048 })
+      return validateWorkflowSchedulePreview(value, body)
+    },
     async listManualWorkflowRuns(id, { signal, after, limit = 25 } = {}) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 50 ||
           (after !== undefined && !workflowCursor.safeParse(after).success)) throw invalid()

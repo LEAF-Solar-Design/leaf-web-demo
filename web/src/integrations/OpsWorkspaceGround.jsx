@@ -9,6 +9,7 @@ import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
+import { WorkflowSchedulePreviewPanel } from './WorkflowSchedulePreviewPanel.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 import './ops-workspace.css'
 
@@ -143,6 +144,17 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     const scope = await client.getScope(projectId, { signal })
     if (!current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
     if (!['owner', 'editor'].includes(scope.projectRole) || scopeCacheIdentity(scope, ctx.sessionGeneration) !== ctx.cacheIdentity) {
+      fail({ status: 403 }, ctx)
+      throw new DOMException('Aborted', 'AbortError')
+    }
+  }
+  async function guardSchedulePreview(signal) {
+    const ctx = context.current
+    if (!ctx || !current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    const scope = await client.getScope(projectId, { signal })
+    if (!current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    if (scope.projectId !== projectId || !['owner', 'editor', 'reviewer', 'read_only'].includes(scope.projectRole) ||
+        scopeCacheIdentity(scope, ctx.sessionGeneration) !== ctx.cacheIdentity) {
       fail({ status: 403 }, ctx)
       throw new DOMException('Aborted', 'AbortError')
     }
@@ -320,6 +332,10 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
         {state.error && <div role="alert"><p>{state.error}</p><button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button></div>}
         {state.scope && <>
+          {['owner', 'editor', 'reviewer', 'read_only'].includes(state.scope.projectRole) && context.current && <WorkflowSchedulePreviewPanel
+            key={JSON.stringify(['schedule-preview', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
+            signal={context.current.controller.signal} guard={guardSchedulePreview}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ManualWorkflowDefinitionPanel
             key={JSON.stringify(['manual-workflow-definition', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow}

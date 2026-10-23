@@ -101,6 +101,83 @@ const actionPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) 
 beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
+const schedulePreview = { schema_version: 1, preview_only: true, occurrence: { scheduledLocalDate: '2026-01-01',
+  instant: '2026-01-01T09:30:00Z', timezone: 'UTC', hour: 9, minute: 30,
+  occurrenceKey: JSON.stringify(['daily', 'UTC', 9, 30, '2026-01-01']) } }
+function fillSchedulePreview() {
+  for (const [label, value] of [['IANA timezone', 'UTC'], ['Daily hour', '9'], ['Daily minute', '30'], ['After (UTC)', '2026-01-01T00:00:00Z']]) {
+    fireEvent.change(screen.getByLabelText(label), { target: { value } })
+  }
+}
+const previewPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url]) => url.endsWith('/workflow-schedule-preview'))
+it.each(['owner', 'editor', 'reviewer', 'read_only'])('allows an explicit guarded daily preview for %s without workflow effects', async (projectRole) => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/scope')) return Promise.resolve(response({ ...scope, projectRole }))
+    if (url.endsWith('/workflow-schedule-preview')) return Promise.resolve(response(schedulePreview))
+    return original(url, options)
+  })
+  render(<OpsWorkspaceGround {...props} />); await loaded()
+  expect(screen.getByRole('heading', { name: 'Daily schedule preview' })).toBeInTheDocument()
+  fillSchedulePreview()
+  expect(previewPosts(fetchImpl)).toHaveLength(0)
+  const before = fetchImpl.mock.calls.length
+  fireEvent.click(screen.getByRole('button', { name: 'Preview next occurrence' }))
+  await screen.findByRole('region', { name: 'Next scheduled occurrence' })
+  expect(previewPosts(fetchImpl)).toHaveLength(1)
+  expect(fetchImpl.mock.calls.slice(before).map(([url]) => url.split('/').at(-1))).toEqual(['scope', 'workflow-schedule-preview', 'scope'])
+  expect(fetchImpl.mock.calls.filter(([, options]) => options.method === 'POST')).toHaveLength(1)
+})
+it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('rejects daily preview on complete read identity %s drift', async (key) => {
+  const { props, fetchImpl } = setup()
+  render(<OpsWorkspaceGround {...props} />); await loaded(); fillSchedulePreview()
+  const drift = key === 'projectRole' ? 'reviewer' : key === 'externalSubject' ? 'auth0|other' : key === 'externalAuthority' ? 'other' : otherProject
+  vi.spyOn(props.client, 'getScope').mockResolvedValue({ ...scope, [key]: drift })
+  fireEvent.click(screen.getByRole('button', { name: 'Preview next occurrence' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(previewPosts(fetchImpl)).toHaveLength(0)
+  expect(screen.queryByRole('region', { name: 'Next scheduled occurrence' })).toBeNull()
+})
+it('discards a preview when the completion scope differs', async () => {
+  const { props, fetchImpl } = setup()
+  render(<OpsWorkspaceGround {...props} />); await loaded(); fillSchedulePreview()
+  const original = fetchImpl.getMockImplementation()
+  let completed = false
+  fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/workflow-schedule-preview')) { completed = true; return Promise.resolve(response(schedulePreview)) }
+    if (url.endsWith('/scope')) return Promise.resolve(response({ ...scope, externalSubject: completed ? 'auth0|other' : scope.externalSubject }))
+    return original(url, options)
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Preview next occurrence' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(previewPosts(fetchImpl)).toHaveLength(1)
+  expect(screen.queryByRole('region', { name: 'Next scheduled occurrence' })).toBeNull()
+})
+it.each([401, 403])('uses the forbidden path on preview HTTP %s', async (status) => {
+  const { props, fetchImpl } = setup()
+  render(<OpsWorkspaceGround {...props} />); await loaded(); fillSchedulePreview()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/workflow-schedule-preview') ? Promise.resolve(response({}, status)) : original(url, options))
+  fireEvent.click(screen.getByRole('button', { name: 'Preview next occurrence' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(screen.queryByRole('heading', { name: 'Daily schedule preview' })).toBeNull()
+})
+it.each(['session', 'project', 'account'])('aborts a pending daily preview on %s context changes', async (kind) => {
+  const { props, fetchImpl, sessionController } = setup()
+  const original = fetchImpl.getMockImplementation()
+  let finish
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/workflow-schedule-preview') ? new Promise((resolve) => { finish = resolve }) : original(url, options))
+  const { rerender } = render(<OpsWorkspaceGround {...props} />); await loaded(); fillSchedulePreview()
+  fireEvent.click(screen.getByRole('button', { name: 'Preview next occurrence' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = previewPosts(fetchImpl)[0][1].signal
+  if (kind === 'session') act(() => sessionController.change({ generation: 2 }))
+  else rerender(<OpsWorkspaceGround {...props} {...(kind === 'project' ? { projectId: otherProject } : { accountScope: 'account-b' })} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish(response(schedulePreview)))
+  expect(screen.queryByRole('region', { name: 'Next scheduled occurrence' })).toBeNull()
+})
 it.each(['owner', 'editor', 'reviewer', 'read_only'])('offers first dataset setup only to the verified %s scope', async (projectRole) => {
   const { props, fetchImpl } = setup()
   const original = fetchImpl.getMockImplementation()
