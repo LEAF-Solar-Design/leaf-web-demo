@@ -240,8 +240,13 @@ function ProjectSettingsForContext(props) {
 
   async function submit(event) {
     event.preventDefault();
-    if (reason || !armed || scope.lock || !isScopeCurrent() || !scope.armed?.isCurrent()
-        || scope.armed.generation !== scope.generation || scope.armed.candidate.fingerprint !== fingerprint) return;
+    if (!isScopeCurrent()) return;
+    if (reason || !armed || scope.lock || !scope.armed?.isCurrent()
+        || scope.armed.generation !== scope.generation || scope.armed.candidate.fingerprint !== fingerprint) {
+      setFeedback({ scope, generation: scope.generation, ...projectFeedback({ ok: false,
+        reason: scope.lock ? 'SIP_R7_FORM_LOCKED' : 'SIP_R7_FORM_NOT_ARMED' }) });
+      return;
+    }
     const accepted = scope.armed;
     const pending = operation();
     const lock = {};
@@ -249,27 +254,42 @@ function ProjectSettingsForContext(props) {
     setSubmitting(true);
     try {
       const outcome = await projectClient.readContext({ signal: pending.signal });
-      if (!pending.isCurrent() || scope.armed !== accepted) return;
+      if (!pending.isCurrent()) return;
+      if (scope.armed !== accepted) {
+        setFeedback({ scope, generation: scope.generation, ...projectFeedback({ ok: false,
+          reason: latest.current.busy ? 'SIP_R7_FORM_BUSY'
+            : typeof latest.current.onProjectSubmit !== 'function' ? 'SIP_R7_FORM_NO_SUBMIT'
+              : 'SIP_R7_FORM_NOT_ARMED' }) });
+        return;
+      }
       const checked = outcome.ok ? deriveProjectSettingsState({ binding, contextView: outcome.data })
         : { mode: 'refused', reason: 'context_unreadable' };
       if (checked.mode === 'refused' || checked.mode !== state.mode || checked.intakeSha256 !== state.intakeSha256
           || checked.rev !== state.rev || !sameSolarDrawingBinding(checked.binding, state.binding)) {
         scope.armed = null;
-        if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectFeedback(outcome) });
+        setFeedback({ scope, generation: scope.generation,
+          ...projectFeedback({ ...outcome, reason: 'SIP_R7_FORM_CONTEXT_STALE' }) });
         setPublication({ scope, generation: scope.generation,
           reason: checked.reason === 'not_current_head' ? 'not_current_head' : 'scope_stale' });
         return;
       }
-      if (!pending.isCurrent() || latest.current.busy || typeof latest.current.onProjectSubmit !== 'function') return;
+      if (!pending.isCurrent()) return;
+      if (latest.current.busy || typeof latest.current.onProjectSubmit !== 'function') {
+        setFeedback({ scope, generation: scope.generation, ...projectFeedback({ ok: false,
+          reason: latest.current.busy ? 'SIP_R7_FORM_BUSY' : 'SIP_R7_FORM_NO_SUBMIT' }) });
+        return;
+      }
       const result = await latest.current.onProjectSubmit(accepted.candidate.intent,
-        { binding, authorityKey, signal: pending.signal, isCurrent: pending.isCurrent });
+        { binding, authorityKey, signal: pending.signal, isCurrent: pending.isCurrent })
+        || { ok: false, reason: 'SIP_R7_WORKSPACE_NO_RESULT' };
       if (!pending.isCurrent()) return;
       if (result?.ok && result.status === 202 && result.data?.status === 'submitted'
           && typeof result.data.job_id === 'string' && projectJobId.test(result.data.job_id)) {
         setFeedback({ scope, generation: scope.generation, outcome: result, text: 'Solar settings submitted.', code: null });
-      } else if (result) setFeedback({ scope, generation: scope.generation, ...projectFeedback(result) });
+      } else setFeedback({ scope, generation: scope.generation, ...projectFeedback(result) });
     } catch {
-      if (pending.isCurrent()) setFeedback({ scope, generation: scope.generation, ...projectFeedback(null) });
+      if (pending.isCurrent()) setFeedback({ scope, generation: scope.generation,
+        ...projectFeedback({ ok: false, reason: 'SIP_R7_FORM_ERROR' }) });
     } finally {
       if (scope.lock === lock) {
         scope.lock = null;
