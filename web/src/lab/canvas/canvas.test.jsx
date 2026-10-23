@@ -24,7 +24,7 @@ vi.mock('elkjs/lib/elk.bundled.js', () => {
 vi.mock('@xyflow/react', () => ({
   ReactFlowProvider: ({ children }) => children,
   useReactFlow: () => ({ screenToFlowPosition: point => point, getNodes: () => [], fitView: () => {} }),
-  ReactFlow: ({ nodes, edges, nodeTypes, onNodeClick, onNodesChange, onConnect, onEdgesChange, children }) => <div data-testid="flow">
+  ReactFlow: ({ nodes, edges, nodeTypes, edgeTypes, onNodeClick, onNodesChange, onConnect, onEdgesChange, children }) => <div data-testid="flow">
     {nodes.length > 1 && <button onClick={() => onConnect({ source: nodes[0].id, sourceHandle: 'result', target: nodes[1].id, targetHandle: 'value' })}>Connect first pair</button>}
     {edges.length > 0 && <button onClick={() => onEdgesChange([{ type: 'remove', id: edges[0].id }])}>Delete first pipe</button>}
     {nodes.map(node => { const Card = nodeTypes[node.type]; return <div key={node.id} data-testid={node.id} data-position={JSON.stringify(node.position)}>
@@ -32,7 +32,9 @@ vi.mock('@xyflow/react', () => ({
       <button onClick={() => onNodesChange([{ type: 'position', id: node.id, position: { x: 777, y: 888 } }])}>Move {node.id}</button>
       <Card {...node} />
     </div> })}<span data-testid="pipe-count">{edges.length}</span>
-    {edges.map(edge => <span key={edge.id} data-testid={`budget-${edge.id}`}>{JSON.stringify(edge.data.budget)}</span>)}{children}
+    {edges.map(edge => { const Pipe = edgeTypes[edge.type]; return <div key={edge.id} data-testid={`budget-${edge.id}`}>
+      {JSON.stringify(edge.data.budget)}<Pipe {...edge} />
+    </div> })}{children}
   </div>,
   Background: () => null, Controls: () => null, Handle: props => <span data-testid="handle" aria-label={props['aria-label']} />,
   Position: { Top: 'top', Bottom: 'bottom' }, BaseEdge: () => null,
@@ -183,10 +185,19 @@ describe('canvas authoring', () => {
     expect(() => connectPipe(initial, edge(1, 3), entries)).toThrow(problems[0])
     expect(() => connectPipe(initial, edge(4, 2), entries)).toThrow(problems[1])
     const changed = vi.fn()
-    render(<LabCanvas initialDocument={initial} entries={entries} onChange={changed} />)
+    const measurements = { pipes: {
+      'adjust-none-1/result>adjust-none-3/value': { p50_us: 5, p99_us: 10 },
+      'adjust-none-4/result>adjust-none-2/auxiliary': { p50_us: 5, p99_us: 10 },
+    } }
+    render(<LabCanvas initialDocument={initial} entries={entries} measurements={measurements} onChange={changed} />)
     await waitFor(() => expect(screen.getByText('Layout updated')).toBeVisible())
     expect(screen.getByTestId('budget-adjust-none-1/result>adjust-none-3/value')).toHaveTextContent('null')
     expect(screen.getByTestId('budget-adjust-none-4/result>adjust-none-2/auxiliary')).toHaveTextContent('null')
+    for (const id of Object.keys(measurements.pipes)) {
+      const pipe = screen.getByTestId(`budget-${id}`)
+      expect(pipe.querySelector('[data-budget-state="unassessed"]')).toBeInTheDocument()
+      expect(within(pipe).getByText(/no budget/)).toBeVisible()
+    }
     fireEvent.click(screen.getByRole('button', { name: 'Select adjust-none-1' }))
     const inspector = within(screen.getByRole('region', { name: 'Block inspector' }))
     fireEvent.click(inspector.getByRole('tab', { name: 'Configure' }))
@@ -321,6 +332,18 @@ describe('canvas authoring', () => {
     expect(screen.getByText(/Value not measured/)).toBeVisible()
     const { container } = render(<Measurement measurement={{ value: 3, count: 1, p50_us: 5, p99_us: 11 }} budget={{ p50: 5, p99: 10 }} />)
     expect(container.querySelector('[data-budget-state="over-budget"]')).toBeInTheDocument()
+  })
+
+  it.each([null, { p50: null, p99: 10 }])('shows measured latency without a complete budget as unassessed (%j)', budget => {
+    const { container } = render(<Measurement measurement={{ p50_us: 5, p99_us: 10 }} budget={budget} />)
+    expect(container.querySelector('[data-budget-state="unassessed"]')).toBeInTheDocument()
+    expect(screen.getByText(/no budget/)).toBeVisible()
+  })
+
+  it('shows measured latency at the budget limits as within budget', () => {
+    const { container } = render(<Measurement measurement={{ p50_us: 5, p99_us: 10 }} budget={{ p50: 5, p99: 10 }} />)
+    expect(container.querySelector('[data-budget-state="within-budget"]')).toBeInTheDocument()
+    expect(screen.getByText(/within budget/)).toBeVisible()
   })
 
   it.each(['pure', 'write'])('renders the manifest effect %s on the card', effect => {
