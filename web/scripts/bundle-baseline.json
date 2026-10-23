@@ -4,30 +4,30 @@
   "chunks": {
     "App.css": 10405,
     "App.js": 121039,
-    "ElementContextMenu.js": 34267,
+    "ElementContextMenu.js": 34269,
     "LeafPlatformScene.css": 494,
-    "LeafPlatformScene.js": 9062,
-    "OpsWorkspaceGround.js": 161074,
+    "LeafPlatformScene.js": 9061,
+    "OpsWorkspaceGround.js": 162201,
     "SheetsPage.css": 2583,
-    "SheetsPage.js": 5421,
+    "SheetsPage.js": 5424,
     "Viewer.js": 13582,
     "bridgeText.js": 21274,
     "index.css": 40176,
-    "index.js": 222830,
+    "index.js": 222834,
     "mockStageAuthority.js": 258,
-    "useAnnotations.js": 2030,
+    "useAnnotations.js": 2031,
     "vendor-react.js": 45884,
     "vendor-viewer.js": 123469,
     "worker-browser.js": 3824,
     "LabGround.js": 1795,
     "LabGround.css": 752,
-    "LabCanvas.js": 501028,
+    "LabCanvas.js": 501027,
     "string.js": 4533,
     "LabCanvas.css": 2547,
     "hostBridge.js": 2552,
     "contract.js": 3345
   },
-  "total": 1334224,
+  "total": 1335359,
   "total_allowance_bytes": 16384,
   "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers.",
   "stem_caps": {
@@ -41,30 +41,31 @@
   ],
   "isolated_canvas_measurement": {
     "method": "gzip-9, complete JS/CSS, paired in-memory Vite builds with complete changed runtime closure; dependencies, configuration and build identity fixed",
-    "source_ref": "5b3b55c35dda75574f413e25c75b5bb556f6e222",
-    "source_after_ref": "e4a187e739fc80a2eca604e01298e4587f2dd835",
-    "before_total": 1344731,
-    "after_total": 1346295,
-    "delta": 1564,
+    "source_ref": "8a7a0dc831b8c0737703e21c447a79cee9a8feb4",
+    "source_after_ref": "d217fe62d97b661d5de9bfa7229c846c8e0976ad",
+    "before_total": 1346303,
+    "after_total": 1347438,
+    "delta": 1135,
     "deltas": {
-      "App.js": -4,
-      "LabGround.js": -1,
-      "OpsWorkspaceGround.js": 1573,
-      "SheetsPage.js": -1,
-      "index.js": 2,
-      "LabCanvas.js": -4,
-      "ElementContextMenu.js": -1
+      "LabCanvas.js": -1,
+      "ElementContextMenu.js": 2,
+      "SheetsPage.js": 3,
+      "index.js": 4,
+      "useAnnotations.js": 1,
+      "LeafPlatformScene.js": -1,
+      "OpsWorkspaceGround.js": 1127
     },
-    "baseline_before_total": 1332660,
-    "unrelated_drift_bytes": 12071,
+    "baseline_before_total": 1334224,
+    "unrelated_drift_bytes": 12079,
     "canvas_dependency_gzip_bytes": 501526,
     "cap_headroom_bytes": 4096,
-    "overlaid_paths": 2,
+    "overlaid_paths": 3,
     "overlaid_sample": [
-      "web/src/integrations/ActionDefinitionPanel.jsx",
-      "web/src/integrations/OpsWorkspaceGround.jsx"
+      "web/src/integrations/OpsWorkspaceGround.jsx",
+      "web/src/integrations/WebhookReceiptPanel.jsx",
+      "web/src/integrations/client.js"
     ],
-    "producer_job": "2af6d3c6d02948b9aef34e318fb4ce28",
+    "producer_job": "00e0b1e047054a9e8a4d629d3d5b052e",
     "producer": {
       "node": "v22.23.2",
       "zlib": "1.2.12",
@@ -73,34 +74,35 @@
       "arch": "arm64"
     },
     "source_unchanged": true,
-    "measurement_sha256": "f08d69e9d9cb0ebfdeda250fa79b929bedcf090c114295b1004d379a62310085"
+    "measurement_sha256": "4ad1160b4f45cd1154cdba102863b07485b3193e851c6c1c47fdc54f8313c1a6"
   },
   "isolated_measurement": {
     "method": "gzip-9, complete JS/CSS, paired in-memory Vite builds with complete changed runtime closure; dependencies, configuration and build identity fixed",
-    "source_ref": "5b3b55c35dda75574f413e25c75b5bb556f6e222",
-    "source_after_ref": "e4a187e739fc80a2eca604e01298e4587f2dd835",
-    "before_total": 1344731,
-    "after_total": 1346295,
-    "delta": 1564,
+    "source_ref": "8a7a0dc831b8c0737703e21c447a79cee9a8feb4",
+    "source_after_ref": "d217fe62d97b661d5de9bfa7229c846c8e0976ad",
+    "before_total": 1346303,
+    "after_total": 1347438,
+    "delta": 1135,
     "deltas": {
-      "App.js": -4,
-      "LabGround.js": -1,
-      "OpsWorkspaceGround.js": 1573,
-      "SheetsPage.js": -1,
-      "index.js": 2,
-      "LabCanvas.js": -4,
-      "ElementContextMenu.js": -1
+      "LabCanvas.js": -1,
+      "ElementContextMenu.js": 2,
+      "SheetsPage.js": 3,
+      "index.js": 4,
+      "useAnnotations.js": 1,
+      "LeafPlatformScene.js": -1,
+      "OpsWorkspaceGround.js": 1127
     },
-    "baseline_before_total": 1332660,
-    "unrelated_drift_bytes": 12071,
+    "baseline_before_total": 1334224,
+    "unrelated_drift_bytes": 12079,
     "canvas_dependency_gzip_bytes": 501526,
     "cap_headroom_bytes": 4096,
-    "overlaid_paths": 2,
+    "overlaid_paths": 3,
     "overlaid_sample": [
-      "web/src/integrations/ActionDefinitionPanel.jsx",
-      "web/src/integrations/OpsWorkspaceGround.jsx"
+      "web/src/integrations/OpsWorkspaceGround.jsx",
+      "web/src/integrations/WebhookReceiptPanel.jsx",
+      "web/src/integrations/client.js"
     ],
-    "producer_job": "2af6d3c6d02948b9aef34e318fb4ce28",
+    "producer_job": "00e0b1e047054a9e8a4d629d3d5b052e",
     "producer": {
       "node": "v22.23.2",
       "zlib": "1.2.12",
@@ -109,6 +111,6 @@
       "arch": "arm64"
     },
     "source_unchanged": true,
-    "measurement_sha256": "f08d69e9d9cb0ebfdeda250fa79b929bedcf090c114295b1004d379a62310085"
+    "measurement_sha256": "4ad1160b4f45cd1154cdba102863b07485b3193e851c6c1c47fdc54f8313c1a6"
   }
 }
