@@ -91,4 +91,13 @@ describe('known guest authenticated reads', () => {
     expect(options.type).toBe('ObjectExpression')
     expect(options.properties.map(text)).toEqual(['mock', 'guestReadsPaused: knownGuest'])
   })
+
+  it('stops the quota re-poll for a known guest', () => {
+    const poll = one((node) => node.type === 'CallExpression' && node.callee.name === 'useEffect'
+      && text(node.arguments[0].body).includes('setInterval(loadUsage, 60_000)'))
+    const first = poll.node.arguments[0].body.body[0]
+    expect(first.type).toBe('IfStatement')
+    expect(text(first.test)).toBe('mock || knownGuest || (!quotaError && !runQuotaError)')
+    expect(poll.node.arguments[1].elements.map(text)).toEqual(['mock', 'knownGuest', 'quotaError', 'runQuotaError', 'loadUsage'])
+  })
 })
