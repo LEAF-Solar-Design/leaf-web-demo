@@ -4,8 +4,9 @@ Run from the repository root with Node 20 or later. The automated script uses no
 
 ```powershell
 node scripts/studio-lab-embed-proof.mjs --self-test
-node scripts/studio-lab-embed-proof.mjs --studio https://platform-staging.leafdesign.ai --ops https://ops-dashboard-seven.vercel.app --receipt-dir C:/Users/ehaug/.claude/program/studio-engine-lab-20260930/receipts --allow-missing-receipt
-node scripts/studio-lab-embed-proof.mjs --studio https://platform-staging.leafdesign.ai --ops https://ops-dashboard-seven.vercel.app --receipt-dir C:/Users/ehaug/.claude/program/studio-engine-lab-20260930/receipts --max-age-hours 24 --json
+# Origins: the Studio staging alias and the dashboard origin from web/src/lab/embed/hostOrigins.js (public deployment URLs, not Kashbot host rows). <program-receipts-dir> is the program receipt folder outside git.
+node scripts/studio-lab-embed-proof.mjs --studio https://platform-staging.leafdesign.ai --ops https://ops-dashboard-seven.vercel.app --receipt-dir <program-receipts-dir> --allow-missing-receipt
+node scripts/studio-lab-embed-proof.mjs --studio https://platform-staging.leafdesign.ai --ops https://ops-dashboard-seven.vercel.app --receipt-dir <program-receipts-dir> --max-age-hours 24 --json
 npm --prefix web run proof:local -- lab-milestone.spec.mjs
 ```
 
