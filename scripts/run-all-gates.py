@@ -106,8 +106,15 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Optional
 from urllib.parse import quote
+
+# Keep audit backoff instrumentation local to this runner. Patching the shared
+# time module also patches subprocess's POSIX timeout wait, whose internal
+# sleeps must not be mistaken for audit backoffs. Suites use subprocess.run.
+time = SimpleNamespace(sleep=time.sleep, perf_counter=time.perf_counter,
+                       strftime=time.strftime)
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO = SCRIPTS_DIR.parent               # .../leaf-web-demo
@@ -3256,8 +3263,10 @@ def build_suites() -> List[Suite]:
         # real-wasm harness case, sixteen editing-surface cases and the W4g-6
         # batch-atomicity case. An opted-in machine (local wasm build present)
         # executes them instead.
+        # PR 2131 probes 2144 to 2147 (2026-10-22) measured worker RPC stalls
+        # from oversubscription: four gate jobs share eight CPUs. Cap workers.
         Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit"], 752,
+              [_npm(), "run", "test:unit", "--", "--maxWorkers=2"], 752,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
@@ -3355,6 +3364,8 @@ def build_suites() -> List[Suite]:
               [_npm(), "run", "check:app-wiring"], None),
         Suite("web-walk-unit", "Studio walk unit tests", "script", WEB,
               [_npm(), "run", "check:walk-unit"], None),
+        Suite("web-elk-rank", "web node --test scripts/elk_rank.test.mjs", "script", WEB,
+              ["node", "--test", "scripts/elk_rank.test.mjs"], None),
         # Standardization slice 13d. ribbonClusters.js has carried an HONESTY
         # CONTRACT in its file header since W4d ("a greyed control with no
         # reason is the gap ToolsPanel's lock-note closed"), and nothing
@@ -5073,6 +5084,7 @@ _SERIAL_SUITE_REASONS = {
         "server-operator-stage-release",
     ), "shared PostgreSQL schema"),
     "server-sessions-e2e": "rebuilds shared harness/dist with npm",
+    "web-elk-rank": "node --test shares web/node_modules and build outputs in its cwd",
     "web-demo-gate": "nested runner rebuilds web/dist and may unpack node_modules",
     "studio-walk-regressions": "nested stack boots services and rebuilds shared production bundle",
     "harness-container-smoke": "fixed compose project and container ports 8130/8150",

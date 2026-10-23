@@ -1,14 +1,63 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import LabWorkbench from './LabWorkbench.jsx'
 import { LAB_VIEWS, registerLabViews } from './views.js'
 import WidgetsView from './widgets/WidgetsView.jsx'
 import glossary from './contract/sources/leaf-glossary.v1.json'
+import { setLayoutEngineLoader } from './canvas/dependencyLayout.js'
+import { setGraphCanvasLoader } from './canvas/GraphView.jsx'
 
-afterEach(() => {
+// The shell proves the lazy mount; one Node gate proves real ELK.
+const elkImport = vi.hoisted(() => vi.fn())
+vi.mock('elkjs/lib/elk.bundled.js', () => {
+  elkImport()
+  throw new Error('Real ELK is forbidden under Vitest')
+})
+// Shell tests have no geometry. Keep React Flow's resize/zoom animation work
+// out of jsdom rather than mounting it with an inert ResizeObserver.
+vi.mock('@xyflow/react', () => ({
+  ReactFlowProvider: ({ children }) => children,
+  useReactFlow: () => ({ screenToFlowPosition: point => point, getNodes: () => [], fitView: () => {} }),
+  ReactFlow: ({ children }) => <div>{children}</div>,
+  Background: () => null, Controls: () => null, Handle: () => null,
+  Position: { Top: 'top', Bottom: 'bottom' }, BaseEdge: () => null,
+  EdgeLabelRenderer: ({ children }) => children, getBezierPath: () => ['', 0, 0],
+}))
+const fakeEngine = {
+  pending: new Set(),
+  pendingCount() { return this.pending.size },
+  load() {
+    let pending
+    return {
+      async layout(graph) {
+        pending = {}
+        fakeEngine.pending.add(pending)
+        try {
+          await Promise.resolve()
+          return { ...graph, children: graph.children.map((node, index) => ({ ...node, x: index * 370, y: 0 })) }
+        } finally { fakeEngine.pending.delete(pending) }
+      },
+      terminateWorker() { fakeEngine.pending.delete(pending) },
+    }
+  },
+}
+const canvasImport = vi.fn(() => import('./canvas/LabCanvas.jsx'))
+
+beforeEach(() => {
+  canvasImport.mockClear()
+  setGraphCanvasLoader(canvasImport)
+  setLayoutEngineLoader(fakeEngine.load)
+})
+
+afterEach(async () => {
   cleanup()
+  await act(async () => {})
+  expect(fakeEngine.pendingCount()).toBe(0)
+  expect(elkImport).not.toHaveBeenCalled()
+  setGraphCanvasLoader()
+  setLayoutEngineLoader()
   vi.unstubAllGlobals()
 })
 
@@ -32,19 +81,40 @@ describe('Lab view registration', () => {
 })
 
 describe('LabWorkbench', () => {
-  it('shows the three unavailable home areas and their owners', () => {
-    render(<LabWorkbench route={route('graph')} status={on} />)
-    for (const title of ['Strategy palette', 'Dependency canvas', 'Tests and Keepers']) {
-      expect(screen.getByRole('region', { name: title })).toHaveAttribute('data-state', 'unavailable')
-    }
-    for (const text of ['Palette lands with SEL-102', 'Canvas lands with SEL-102', 'Tests and Keepers land with SEL-218']) {
-      expect(screen.getByText(text)).toBeVisible()
-    }
-    expect(screen.getAllByRole('link')).toHaveLength(5)
-  })
+  it.each([
+    ['hidden', { route: route('graph'), status: on, hidden: true }],
+    ['inactive', { route: route('widgets'), status: on }],
+    ['dormant', { route: route('graph'), status: { state: 'off' } }],
+  ])('starts no canvas import while %s and imports once on first reveal', async (_, props) => {
+    const { container, rerender } = render(<LabWorkbench {...props} />)
+    await act(async () => {})
+    expect(container.querySelector('[data-graph-placeholder]')).toBeInTheDocument()
+    expect(container.querySelector('[data-canvas-editor]')).toBeNull()
+    expect(canvasImport).not.toHaveBeenCalled()
 
-  it('retains every view DOM instance through navigation, dormancy and hiding', () => {
+    rerender(<LabWorkbench route={route('graph')} status={on} />)
+    expect(screen.getByRole('status', { name: 'Loading dependency canvas' })).toBeVisible()
+    const editor = await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    expect(canvasImport).toHaveBeenCalledTimes(1)
+    rerender(<LabWorkbench route={route('graph')} status={on} hidden />)
+    expect(editor).not.toBeVisible()
+    rerender(<LabWorkbench route={route('graph')} status={on} />)
+    expect(screen.getByRole('region', { name: 'Dependency canvas' })).toBe(editor)
+    expect(canvasImport).toHaveBeenCalledTimes(1)
+  }, 20000)
+
+  it('lazily mounts the dependency editor in the graph view', async () => {
+    render(<LabWorkbench route={route('graph')} status={on} />)
+    expect(screen.getByRole('status', { name: 'Loading dependency canvas' })).toBeVisible()
+    expect(await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })).toBeVisible()
+    expect(screen.getByRole('region', { name: 'Strategy palette' })).toBeVisible()
+    expect(screen.getByRole('region', { name: 'Block inspector' })).toBeVisible()
+    expect(within(screen.getByRole('navigation', { name: 'Lab views' })).getAllByRole('link')).toHaveLength(5)
+  }, 20000)
+
+  it('retains every view DOM instance through navigation, dormancy and hiding', async () => {
     const { container, rerender } = render(<LabWorkbench route={route('graph')} status={on} />)
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     const panels = [...container.querySelectorAll('[data-lab-view]')]
     expect(panels).toHaveLength(5)
     const editor = container.querySelector('.widgets-view')
@@ -67,6 +137,23 @@ describe('LabWorkbench', () => {
     expect(editor).toBeVisible()
   })
 
+  it('replaces the last valid graph with the latest not-ready draft and shows its problems', async () => {
+    render(<LabWorkbench route={route('graph')} status={on} />)
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
+    const palette = within(screen.getByRole('region', { name: 'Strategy palette' }))
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    fireEvent.click(palette.getAllByRole('button', { name: 'Strategy' })[0])
+    expect(readiness.getByRole('status')).toHaveTextContent('Ready')
+    fireEvent.click(palette.getAllByRole('button', { name: 'Market' })[0])
+    expect(readiness.getByRole('status')).toHaveTextContent('No valid graph')
+    expect(readiness.getByRole('listitem')).not.toBeEmptyDOMElement()
+    expect(readiness.getByRole('button', { name: 'Run graph' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('mean_fast_index (required)'), { target: { value: '1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    expect(readiness.getByRole('status')).toHaveTextContent('Ready')
+    expect(readiness.queryByRole('list')).not.toBeInTheDocument()
+  })
+
   it.each([
     ['off', 'Lab is turned off.'],
     ['auth-off', 'Lab sign-in service is unavailable.'],
@@ -81,6 +168,7 @@ describe('LabWorkbench', () => {
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Strategy palette' })).not.toBeInTheDocument()
     expect(fetchImpl).not.toHaveBeenCalled()
+    expect(canvasImport).not.toHaveBeenCalled()
   })
 
   it('fetches only the status probe when status is not provided', async () => {
@@ -91,6 +179,7 @@ describe('LabWorkbench', () => {
     vi.stubGlobal('fetch', fetchImpl)
     const { rerender } = render(<LabWorkbench route={route('graph')} />)
     await waitFor(() => expect(screen.getByRole('navigation', { name: 'Lab views' })).toBeVisible())
+    await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     rerender(<LabWorkbench route={route('history')} hidden />)
     expect(fetchImpl).toHaveBeenCalledTimes(1)
     expect(fetchImpl.mock.calls[0][0]).toMatch(/\/api\/lab\/status$/)
