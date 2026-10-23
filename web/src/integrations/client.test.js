@@ -159,6 +159,53 @@ function setup(value = scope) {
   return { client: createIntegrationsClient({ origin: 'https://ops.example', fetchImpl }), fetchImpl,
     options: { signal: new AbortController().signal } }
 }
+describe('manual workflow history HTTP contract', () => {
+  it('uses a bounded, authenticated, uncached collection GET with the caller signal', async () => {
+    const page = { items: [workflow.run], next_cursor: 'page_2' }
+    const { client, fetchImpl, options } = setup(page)
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(await client.listManualWorkflowRuns(projectId, options)).toEqual(page)
+    expect(fetchImpl.mock.calls[0][0]).toBe(`https://ops.example/api/v1/projects/${projectId}/integrations/manual-workflow-runs?limit=25`)
+    authHeaders.mockReturnValue({ Authorization: 'Bearer second' })
+    await client.listManualWorkflowRuns(projectId, { ...options, limit: 50, after: 'page_2' })
+    expect(fetchImpl.mock.calls[1][0]).toContain('?limit=50&after=page_2')
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: 'GET', signal: options.signal, cache: 'no-store',
+      redirect: 'error', credentials: 'omit', headers: { Authorization: 'Bearer second' } })
+    expect(fetchImpl.mock.calls[1][1]).not.toHaveProperty('body')
+  })
+  it.each([{ limit: 0 }, { limit: 51 }, { limit: 1.5 }, { after: '' }, { after: 'bad=' }, { after: 'a\n' },
+    { after: 'a'.repeat(1025) }, { after: null }])('rejects invalid history queries before I/O: %j', async (query) => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.listManualWorkflowRuns(projectId, { ...options, ...query })).rejects.toMatchObject({ dispatched: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([
+    { records: [], nextCursor: null }, { items: [], next_cursor: null, private: 'secret' },
+    { items: [{ ...workflow.run, arguments: { private: true } }], next_cursor: null },
+    { items: [workflow.run, workflow.run], next_cursor: null }, { items: Array(51).fill(workflow.run), next_cursor: null },
+    { items: [{}], next_cursor: null }, ...['', 'bad=', 'a\n', 'a'.repeat(1025)].map((next_cursor) => ({ items: [], next_cursor })),
+  ])('rejects unverified history pages: %j', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.listManualWorkflowRuns(projectId, options)).rejects.toMatchObject({ dispatched: false })
+  })
+  it.each([401, 403, 500])('uses safe HTTP %s errors', async (status) => {
+    const fetchImpl = vi.fn().mockResolvedValue(response({ secret: 'private provider detail' }, { status }))
+    const client = createIntegrationsClient({ origin: 'https://ops.example', fetchImpl })
+    await expect(client.listManualWorkflowRuns(projectId, { signal: new AbortController().signal })).rejects.toMatchObject({ status, dispatched: false })
+    expect(noteUnauthorized).toHaveBeenCalled()
+  })
+  it('rejects oversized responses and aborted or unauthenticated reads', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () => response({}, { raw: ' '.repeat(262145) }))
+    const client = createIntegrationsClient({ origin: 'https://ops.example', fetchImpl })
+    const controller = new AbortController()
+    await expect(client.listManualWorkflowRuns(projectId, { signal: controller.signal })).rejects.toThrow('invalid')
+    controller.abort()
+    await expect(client.listManualWorkflowRuns(projectId, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    authHeaders.mockReturnValue({})
+    await expect(client.listManualWorkflowRuns(projectId, { signal: new AbortController().signal })).rejects.toMatchObject({ status: 401 })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  })
+})
 describe('manual workflow definition HTTP contract', () => {
   const entry = { connection_id: action.connection_id, connection_title: 'Orders', connector_ref: ref,
     operation_ref: action.operation_ref, title: 'Send', form: action.form }

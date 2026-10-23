@@ -1,8 +1,9 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { IntegrationManualWorkflowRunStatus } from '../../../vendor/assistant-react/src/actions/IntegrationManualWorkflowRunStatus'
 import { updateManualWorkflowStatus } from '../../../vendor/assistant-react/src/actions/manual-workflow-status-state'
-import { IntegrationActionSnapshotV1, IntegrationManualWorkflowSnapshotV1 } from '../../../vendor/assistant-contract/src/integration'
+import { IntegrationActionSnapshotV1, IntegrationManualWorkflowSnapshotV1, IntegrationManualWorkflowRunV1 } from '../../../vendor/assistant-contract/src/integration'
 import { UUID } from './client.js'
+import { ManualWorkflowHistoryPanel } from './ManualWorkflowHistoryPanel.jsx'
 
 let nextContext = 0
 const childIdentity = (run) => JSON.stringify([run.run_id, run.connection_id, run.connector_ref, run.operation_ref,
@@ -18,19 +19,23 @@ export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onFor
   const [pending, setPending] = useState('')
   const [error, setError] = useState('')
   const [uncertain, setUncertain] = useState(false)
+  const [historySignal, setHistorySignal] = useState(signal)
   const binding = useRef(null)
+  const feedback = useRef(null)
   useLayoutEffect(() => {
-    const ctx = { key: `workflow-${++nextContext}`, busy: false, history: undefined, selected: '', controller: new AbortController() }
+    const ctx = { key: `workflow-${++nextContext}`, busy: false, history: undefined, selected: '', verified: new Map(), controller: new AbortController() }
     binding.current = ctx
+    setHistorySignal(ctx.controller.signal)
     setInput(''); setSelected(''); setStepId(''); setEvidence(null); setPending(''); setError(''); setUncertain(false)
     const abort = () => {
-      ctx.controller.abort(); ctx.history = undefined; ctx.anchor = null
+      ctx.controller.abort(); ctx.history = undefined; ctx.anchor = null; ctx.verified.clear()
       setInput(''); setSelected(''); setStepId(''); setEvidence(null); setPending(''); setError(''); setUncertain(false)
     }
     signal.addEventListener('abort', abort, { once: true })
     if (signal.aborted) abort()
     return () => { abort(); signal.removeEventListener('abort', abort); if (binding.current === ctx) binding.current = null }
   }, [client, projectId, signal])
+  useLayoutEffect(() => { if (!pending && (error || evidence)) feedback.current?.focus() }, [error, evidence, pending])
   useLayoutEffect(() => {
     const ctx = binding.current
     if (!ctx || !requestedRunId || ctx.consumed === requestedRunId || ctx.controller.signal.aborted) return
@@ -43,6 +48,23 @@ export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onFor
     setEvidence(null); setInput(requestedRunId)
     operate('Load', requestedRunId)
   }, [client, projectId, signal, requestedRunId, admittedBinding])
+
+  function selectSummary(value) {
+    const ctx = binding.current
+    if (!ctx || ctx.busy || ctx.controller.signal.aborted) return
+    const parsed = IntegrationManualWorkflowRunV1.safeParse(value)
+    if (!parsed.success) { setError('The selected run summary could not be verified.'); return }
+    const run = parsed.data
+    const verified = ctx.verified.get(run.run_id)
+    const prior = ctx.anchor?.run_id === run.run_id && (!verified || ctx.anchor.revision > verified.revision) ? ctx.anchor : verified
+    if (prior && workflowIdentity(prior) !== workflowIdentity(run)) {
+      setError('The selected run summary could not be verified.'); return
+    }
+    ctx.anchor = prior && prior.revision > run.revision ? prior : run
+    ctx.verified.set(run.run_id, ctx.anchor)
+    setInput(run.run_id)
+    operate('Load', run.run_id)
+  }
 
   async function operate(kind, requestedId) {
     const ctx = binding.current
@@ -100,6 +122,10 @@ export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onFor
         const history = updateManualWorkflowStatus(ctx.history, ctx.key, parsed)
         if (!history || history.unverified) throw new Error('invalid')
         ctx.history = history
+        const prior = ctx.verified.get(runId)
+        if (!prior || (workflowIdentity(prior) === workflowIdentity(history.snapshot.run) && history.snapshot.run.revision >= prior.revision)) {
+          ctx.verified.set(runId, history.snapshot.run)
+        }
         setEvidence(history.snapshot)
         setUncertain(false)
       }
@@ -113,7 +139,9 @@ export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onFor
       if (failure?.status === 401 || failure?.status === 403) {
         setEvidence(null)
         ctx.history = undefined
+        ctx.anchor = null; ctx.verified.clear()
         ctx.controller.abort()
+        setPending('')
         onForbidden()
         return
       }
@@ -131,13 +159,22 @@ export function ManualWorkflowRunPanel({ client, projectId, signal, guard, onFor
   return <section aria-label="Existing manual workflow" style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
     <h2>Existing manual workflow</h2>
     <p>Load an existing run. Refresh may record recovery state but does not dispatch provider work. Resume may execute later steps. Reconcile checks a persisted step and never resumes the workflow.</p>
+    <ManualWorkflowHistoryPanel client={client} projectId={projectId} signal={historySignal} guard={guard}
+      onForbidden={() => {
+        const ctx = binding.current
+        if (ctx) { ctx.controller.abort(); ctx.history = undefined; ctx.anchor = null; ctx.verified.clear() }
+        setEvidence(null); setPending(''); setError(''); setUncertain(false)
+        onForbidden()
+      }} onSelect={selectSummary} disabled={Boolean(pending)} displayPreferences={displayPreferences} />
     <form onSubmit={(event) => { event.preventDefault(); operate('Load') }}>
       <label>Run UUID<input value={input} maxLength={36} disabled={Boolean(pending)} onChange={(event) => setInput(event.target.value)} /></label>
       <button disabled={Boolean(pending)}>Load</button>
     </form>
-    <p role="status" aria-live="polite">{pending ? `${pending} in progress…` : ''}</p>
-    {uncertain && <p role="status">Outcome unknown. Work may have completed. Refresh to recover verified evidence.</p>}
-    {error && <p role="alert">{error}</p>}
+    <div ref={feedback} tabIndex={-1}>
+      <p role="status" aria-live="polite">{pending ? `${pending} in progress…` : evidence ? 'Run details verified.' : ''}</p>
+      {uncertain && <p role="status">Outcome unknown. Work may have completed. Refresh to recover verified evidence.</p>}
+      {error && <p role="alert">{error}</p>}
+    </div>
     {selected && <button disabled={Boolean(pending)} onClick={() => operate('Refresh')}>Refresh</button>}
     {evidence && <>
       <IntegrationManualWorkflowRunStatus snapshot={evidence} contextKey={binding.current.key} displayPreferences={displayPreferences} />
