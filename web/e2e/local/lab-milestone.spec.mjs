@@ -45,8 +45,8 @@ test('Lab first click: Jobs, Count and Latest wire live values without persisten
 
   async function connectJobs() {
     await inspector.getByRole('tab', { name: 'Configure', exact: true }).click()
-    await inspector.getByLabel('Input', { exact: true }).selectOption('value')
-    await inspector.getByLabel('Source', { exact: true }).selectOption({ label: 'studio-jobs-1 / rows' })
+    await inspector.getByRole('combobox', { name: 'Input', exact: true }).selectOption('value')
+    await inspector.getByRole('combobox', { name: 'Source', exact: true }).selectOption({ label: 'studio-jobs-1 / rows' })
     await inspector.getByRole('button', { name: 'Connect pipe', exact: true }).click()
     await expect(inspector.getByRole('button', { name: 'Disconnect value', exact: true })).toBeVisible()
   }

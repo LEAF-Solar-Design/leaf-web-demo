@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const root = new URL('../', import.meta.url);
+const GOLDEN_SHA256 = 'dca101515348b1bb0bd6899a48e6e825f946185f6bf72581280bcc99bdaa92e3';
 const sha = value => typeof value === 'string' && /^[a-f0-9]{7,40}$/i.test(value);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const requireThat = (condition, message) => {
@@ -63,16 +64,16 @@ function framePolicy(policy, directive, origin) {
   return 'includes-origin';
 }
 
-async function get(origin, path) {
+async function get(origin, path, accept = 'text/html, application/json') {
   // Manual redirects prevent leaving the selected origin. Never send authority.
   return fetch(new URL(path, origin), {
     method: 'GET', redirect: 'manual', credentials: 'omit',
-    headers: { accept: 'text/html, application/json', 'user-agent': 'Leaf-Lab-Proof/1.0' },
+    headers: { accept, 'user-agent': 'Leaf-Lab-Proof/1.0' },
     signal: AbortSignal.timeout(20_000),
   });
 }
 
-async function protocol() {
+async function protocol(goldenBytes) {
   const base = new URL('web/src/lab/contract/', root);
   const pin = JSON.parse(await readFile(new URL('PIN.json', base), 'utf8'));
   const bundle = {};
@@ -88,7 +89,9 @@ async function protocol() {
   for (const name of ['lab-embed.v1.schema.json', 'lab-graph.v1.schema.json']) requireThat(bundle[name], 'required schema missing');
   const { createContract } = await import(new URL('web/src/lab/contract.js', root));
   const contract = createContract(bundle);
-  const bytes = await readFile(new URL('contract/fixtures/lab/lab-embed.v1.golden.json', root));
+  const bytes = goldenBytes ?? await readFile(new URL('contract/fixtures/lab/lab-embed.v1.golden.json', root));
+  const goldenSha = hash(bytes);
+  requireThat(goldenSha === GOLDEN_SHA256, `golden drift: ${goldenSha.slice(0, 8)} vs pinned ${GOLDEN_SHA256.slice(0, 8)}`);
   const golden = JSON.parse(bytes);
   requireThat(Array.isArray(golden.messages) && golden.messages.length > 0, 'golden messages missing');
   for (const message of golden.messages) {
@@ -98,7 +101,7 @@ async function protocol() {
     if (message.kind === 'proposal') contract.schema(message.payload.document, 'lab-graph.v1.schema.json');
   }
   assert.throws(() => contract.schema({ ...golden.messages[0], kind: 'invalid' }, 'lab-embed.v1.schema.json'));
-  return `schema PINs match; ${golden.messages.length} golden messages; sha256=${hash(bytes)}`;
+  return `schema PINs match; ${golden.messages.length} golden messages; sha256=${goldenSha}`;
 }
 
 function exactKeys(value, keys) {
@@ -181,6 +184,15 @@ async function run(config, emit = () => {}) {
     const health = await response.json(); requireThat(sha(health.source_sha), 'health SHA');
     result.studio_sha = health.source_sha.toLowerCase(); return `200; source_sha=${result.studio_sha}`;
   });
+  await check('studio-rail', async () => {
+    const response = await get(config.studio, '/api/lab/status', 'application/json');
+    requireThat(response.status !== 404, 'rail off');
+    requireThat(response.status === 401, 'rail auth status required');
+    const body = await response.json();
+    requireThat(body?.error?.error_code === 'UNAUTHENTICATED', 'rail auth envelope required');
+    result.rail = 'auth-live';
+    return '401; rail=auth-live; UNAUTHENTICATED';
+  });
   await check('studio-embed', async () => {
     const response = await get(config.studio, '/app/lab?embed=1');
     requireThat(response.status === 200, 'embed status');
@@ -250,6 +262,9 @@ async function selfTest() {
   let cspMode = 'absent';
   let opsFrameOptions = 'DENY';
   let apiCacheControl = 'public, max-age=0, must-revalidate';
+  let railStatus = 401;
+  const authLiveBody = JSON.stringify({ ok: false, error: { error_code: 'UNAUTHENTICATED' } });
+  let railBody = authLiveBody;
   const spaBody = '<!doctype html><html><head><script type="module" crossorigin src="/assets/index-fixture.js"></script></head><body><div id="root"></div></body></html>';
   let embedBody = spaBody;
   const server = createServer((request, response) => {
@@ -262,6 +277,12 @@ async function selfTest() {
       ? `frame-ancestors ${cspMode === 'bad-studio' ? `${ops}.invalid` : ops}`
       : `frame-src ${cspMode === 'bad-ops' ? `${studio}.invalid` : studio}`);
     if (path === '/api/health') return response.end(JSON.stringify(isStudio ? { source_sha: 'a'.repeat(40) } : { data: { build: { sourceSha: 'b'.repeat(40) } } }));
+    if (isStudio && path === '/api/lab/status') {
+      assert.equal(request.headers.accept, 'application/json');
+      response.statusCode = railStatus;
+      response.setHeader('Content-Type', 'application/json');
+      return response.end(railBody);
+    }
     if (path === '/app/lab?embed=1') return response.end(embedBody);
     if (path === '/studio-lab') { response.statusCode = 307; response.setHeader('Location', '/auth/login'); return response.end(); }
     response.statusCode = 401; response.end('{}');
@@ -301,6 +322,27 @@ async function selfTest() {
       assert.deepEqual(first.csp, fresh.csp);
       assert.deepEqual(first.receipt.csp, fresh.csp);
       assert.deepEqual(first.embed, { shell: 'spa', module_script: '/assets/index-fixture.js' });
+      assert.equal(first.rail, 'auth-live');
+      assert.equal(first.checks.find(item => item.check === 'studio-rail').status, 'ok');
+      railStatus = 404;
+      const railOff = await run(config);
+      assert.equal(railOff.ok, false);
+      assert.deepEqual(railOff.checks.find(item => item.check === 'studio-rail'),
+        { check: 'studio-rail', status: 'FAIL', evidence: 'rail off' });
+      for (const status of [200, 403, 500]) {
+        railStatus = status;
+        assert.equal((await run(config)).checks.find(item => item.check === 'studio-rail').status, 'FAIL');
+      }
+      railStatus = 401;
+      for (const body of ['{}', 'null', '{"error":{"error_code":"FORBIDDEN"}}', 'not JSON']) {
+        railBody = body;
+        assert.equal((await run(config)).checks.find(item => item.check === 'studio-rail').status, 'FAIL');
+      }
+      railBody = authLiveBody;
+      const goldenBytes = await readFile(new URL('contract/fixtures/lab/lab-embed.v1.golden.json', root));
+      const driftedGolden = Buffer.concat([goldenBytes, Buffer.from('\n')]);
+      await assert.rejects(() => protocol(driftedGolden),
+        { message: `golden drift: ${hash(driftedGolden).slice(0, 8)} vs pinned ${GOLDEN_SHA256.slice(0, 8)}` });
       for (const body of ['<form><input type="password"></form>', `${spaBody}<form><input type="password"></form>`,
         spaBody.replace('<div id="root"></div>', ''), spaBody.replace('type="module"', 'type="text/javascript"'),
         spaBody.replace('/assets/', '/other/')]) {
