@@ -42,6 +42,36 @@ describe('host provider lifecycle', () => {
     provider.stop();
   });
 
+  it('keeps empty announcements disabled until usable rows arrive', () => {
+    vi.useFakeTimers();
+    const clearTimer = vi.fn(globalThis.clearTimeout);
+    const onChange = vi.fn();
+    const provider = createHostProvider({ framed: true, clearTimer, onChange });
+    provider.start();
+    for (const rows of [[], [{ source: 'x' }]]) {
+      provider.announce(rows);
+      expect(provider.entries()['host-source@1.0.0']).toBeUndefined();
+      expect(provider.state).toMatchObject({ announced: false, reason: null, sources: [] });
+      expect(onChange).toHaveBeenLastCalledWith(provider.state);
+    }
+    expect(provider.state.dropped).toBe(1);
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(clearTimer).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2000);
+    expect(provider.state.reason).toBe('Sample');
+    provider.announce([]);
+    expect(provider.state).toMatchObject({ announced: false, reason: 'Sample' });
+    expect(provider.entries()['host-source@1.0.0']).toBeUndefined();
+    provider.announce([{ source: 'markets', as_of: 1, data: { a: 1 } }]);
+    expect(provider.state).toMatchObject({ announced: true, reason: null, sources: ['markets'] });
+    const { document, entries } = graphFor(provider, 'host-source', { source: 'markets' });
+    const manifest = entries['host-source@1.0.0'];
+    expect(manifest.settings_schema.properties.source.enum).toEqual(['markets']);
+    expect(() => contract.schema(manifest, 'lab-block.v1.schema.json')).not.toThrow();
+    expect(contract.graph(document, entries)).toBe(true);
+    expect(canvasContract.graph(document, entries)).toBe(true);
+  });
+
   it('uses the window frame relation by default and never arms a standalone timer', () => {
     const win = {}; win.parent = win;
     const setTimer = vi.fn();

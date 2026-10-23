@@ -166,7 +166,10 @@ export function createHostProvider({ win = globalThis.window, framed = Boolean(w
         groups.get(row.source).push(copy);
       }
       for (const [name, values] of groups) stored.set(name, Object.freeze(values));
-      receivedAt = now(); announced = true; reason = null; clear();
+      receivedAt = now();
+      if ([...stored.values()].some(values => values.length > 0)) {
+        announced = true; reason = null; clear();
+      }
       onChange(state());
     },
     entries,
