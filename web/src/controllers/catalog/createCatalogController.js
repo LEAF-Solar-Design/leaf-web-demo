@@ -67,6 +67,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     entitlements: null,
     running: false,
     agentDisabled: true,
+    guestReadsPaused: false,
     ...context,
   }
   let started = false
@@ -347,6 +348,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   const openAuthorFlow = (text) => adapters.openAuthor?.(text)
 
   const loadTools = async () => {
+    if (current.guestReadsPaused) return undefined
     const request = ++toolsRequest
     publish({ toolsError: null })
     try {
@@ -360,6 +362,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const loadCatalog = async () => {
+    if (current.guestReadsPaused) return undefined
     const request = ++catalogRequest
     const project = projectScope()
     const fingerprint = projectFingerprint()
@@ -748,12 +751,18 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const previousProject = projectScope()
       const previousFingerprint = contextFingerprint
       const modeChanged = Object.prototype.hasOwnProperty.call(next, 'mock') && next.mock !== current.mock
+      const pausedChanged = Object.prototype.hasOwnProperty.call(next, 'guestReadsPaused') &&
+        !!next.guestReadsPaused !== !!current.guestReadsPaused
       const drawingChanged = ['drawingId', 'drawing_id', 'projectId', 'project_id',
         'drawingVersion', 'drawing_version'].some((key) =>
         Object.prototype.hasOwnProperty.call(next, key) && next[key] !== current[key])
       const derivedChanged = Object.prototype.hasOwnProperty.call(next, 'entitlements') &&
         next.entitlements !== current.entitlements
       current = { ...current, ...next }
+      if (started && pausedChanged && current.guestReadsPaused) {
+        toolsRequest += 1
+        catalogRequest += 1
+      }
       const projectChanged = (previousProject || projectScope()) &&
         (previousProject !== projectScope() || modeChanged || previousFingerprint !== projectFingerprint())
       contextFingerprint = projectFingerprint()
@@ -768,7 +777,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         snapshot = null
         for (const listener of listeners) listener()
       }
-      if (started && modeChanged) {
+      if (started && (modeChanged || (pausedChanged && !current.guestReadsPaused))) {
         void loadTools()
         void loadCatalog()
       } else if (started && (drawingChanged || derivedChanged || projectChanged)) {

@@ -60,3 +60,27 @@ describe('signed-out Studio banners', () => {
     expect(guards.map((node) => text(node.left))).toEqual(['!mock'])
   })
 })
+
+describe('known guest authenticated reads', () => {
+  it('declares the pre-answer guest signal before mounting the catalog controller', () => {
+    const guest = one((node) => node.type === 'VariableDeclarator' && node.id.name === 'knownGuest')
+    expect(text(guest.node.init)).toBe('consoleKnownGuest({ mock, authConfigured, isSignedIn, authCallback: isAuthRedirectCallback() })')
+    const catalog = one((node) => node.type === 'CallExpression' && node.callee.name === 'useCatalogController')
+    expect(guest.node.start).toBeLessThan(catalog.node.start)
+  })
+
+  it('pauses the catalog context for a known guest', () => {
+    const catalog = one((node) => node.type === 'CallExpression' && node.callee.name === 'useCatalogController')
+    const context = catalog.node.arguments[0].properties.find((property) => property.key?.name === 'context')
+    expect(context.value.type).toBe('ObjectExpression')
+    const paused = context.value.properties.filter((property) => property.key?.name === 'guestReadsPaused')
+    expect(paused).toHaveLength(1)
+    expect(text(paused[0])).toBe('guestReadsPaused: knownGuest')
+  })
+
+  it('gives checkout a null drawing scope for a known guest', () => {
+    const checkout = one((node) => node.type === 'CallExpression' && node.callee.name === 'useCheckoutController')
+    const drawingId = checkout.node.arguments[0].properties.find((property) => property.key?.name === 'drawingId')
+    expect(text(drawingId.value)).toMatch(/^knownGuest \? null : checkoutScopeDrawingId\(/)
+  })
+})
