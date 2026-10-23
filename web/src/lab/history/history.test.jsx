@@ -163,6 +163,22 @@ describe('Strategy revision ledger', () => {
     expect(client.state.published).toBe(2)
   })
 
+  it('restores Published r3 in the save bar and drawer on a fresh head read', async () => {
+    const row = { revision: 3, parent_revision: 2, author: 'tester', created_at: 1800000003,
+      sha256: '1'.repeat(64), graph: first }
+    const { graph: unused, ...metadata } = row
+    const fetchImpl = vi.fn(async url => ({ ok: true, json: async () => url.endsWith('/head')
+      ? { ...row, published_revision: 3 } : { revisions: [metadata] } }))
+    const client = createLabArtifactsClient({ fetchImpl })
+    expect(client.state.published).toBeNull()
+    render(<><LabSaveBar document={first} ready client={client} /><HistoryView client={client} /></>)
+    await waitFor(() => expect(within(screen.getByRole('region', { name: 'Save Strategy' })).getByText('Published r3')).toBeVisible())
+    expect(within(await screen.findByTestId('vh-row-v3')).getByText('Published r3')).toBeVisible()
+    expect(client.state.events).toEqual([])
+    expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/head'))).toHaveLength(1)
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true)
+  })
+
   it('keeps mine byte-identical and retries against the conflict head', async () => {
     const { client, append, fetchImpl } = ledger()
     await client.save('strategy', first, null)
