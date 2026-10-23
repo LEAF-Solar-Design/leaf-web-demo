@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { canonicalJSON } from '../contract.js';
-import { contract as canvasContract, registry } from '../canvas/registry.js';
+import { contract as canvasContract, registry, resolveManifest } from '../canvas/registry.js';
 import { connectPipe } from '../canvas/graphDoc.js';
 import { portCompatibility } from '../canvas/portCompat.js';
 import { contract, evaluateGraph, evaluateOperation, exportValue, runtimeValue } from '../runtime/evaluate.js';
@@ -23,6 +23,17 @@ function graphFor(provider, sourceId = 'host-source', settings = { source: 'tota
 }
 
 describe('host provider lifecycle', () => {
+  it('keeps a placed host source resolved when another source is announced', () => {
+    const provider = createHostProvider({ framed: true });
+    provider.announce([row('markets', { price: 1 })]);
+    const { document } = graphFor(provider, 'host-source', { source: 'markets' });
+    provider.announce([row('orders', { price: 2 })]);
+    const resolved = resolveManifest(document.blocks[0], provider.entries());
+    expect(resolved.problem).toBe('');
+    expect(resolved.manifest.settings_schema.properties.source.enum).toEqual(['markets', 'orders']);
+    expect(contract.graph(document, { ...registry, ...provider.entries() })).toBe(true);
+  });
+
   it('arms exactly one framed timer and reports Sample after two seconds', () => {
     vi.useFakeTimers();
     const setTimer = vi.fn(globalThis.setTimeout);
@@ -98,7 +109,7 @@ describe('host provider lifecycle', () => {
     provider.announce([row('progress', {})]);
     const second = provider.entries()['host-source@1.0.0'];
     expect(second.settings_schema.properties.source.enum).toEqual(['activity', 'progress', 'totals']);
-    expect(second.version.code_sha256).not.toBe(first.version.code_sha256);
+    expect(second.version.code_sha256).toBe(first.version.code_sha256);
     expect(provider.entries()['studio-jobs@1.0.0']).toBeUndefined();
   });
 
@@ -210,8 +221,7 @@ describe('registry manifests and runtime integration', () => {
     } });
     expect(schema.properties.studio).toEqual({ type: ['boolean'] });
     for (const [key, manifest] of Object.entries(before)) {
-      // A new source name changes only the host selector settings fingerprint.
-      if (manifest.id !== 'host-source') expect(entries[key].version.code_sha256).toBe(manifest.version.code_sha256);
+      expect(entries[key].version.code_sha256).toBe(manifest.version.code_sha256);
     }
     const hostBefore = entries['host-source@1.0.0'];
     provider.announce([row('totals', { changed: 'shape' })]);
