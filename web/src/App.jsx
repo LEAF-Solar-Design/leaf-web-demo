@@ -3376,6 +3376,8 @@ export default function App() {
   // derivation and one state machine behind it. `isSignedIn` is handed in as a
   // function so the storage read keeps its short circuit.
   const signedOut = consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn })
+  // A signed-out visitor's catalog read can only 401; SignedOutGate already tells them to sign in.
+  const visibleCatalogErr = signedOut ? null : catalogErr
 
   // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
   // module default, so the drawing workspace renders exactly as before unless
@@ -4460,7 +4462,7 @@ export default function App() {
       activeSurface={activeSurface}
       states={surfaceStates}
       catalog={catalog}
-      catalogError={catalogErr}
+      catalogError={visibleCatalogErr}
       workspaceProject={workspaceProjectState}
       boardPresentation={boardVisible}
       studioPresentation={Boolean(studioGround)}
@@ -4700,6 +4702,7 @@ export default function App() {
           {!mock && (
             <ClaudeAccountPanel
               mock={mock}
+              signedOut={signedOut}
               grant={grant}
               loading={grantLoading}
               busy={grantBusy}
@@ -5167,7 +5170,7 @@ export default function App() {
             <DraftingRibbon
               clusters={ribbonClusters}
               tab={activeRibbonTab}
-              catalogError={navSpine || (phoneViewport && studioDrawer !== 'nav') ? catalogErr : null}
+              catalogError={navSpine || (phoneViewport && studioDrawer !== 'nav') ? visibleCatalogErr : null}
               onRetryCatalog={loadCatalog}
             >
               {/* The engine's own panels (File, Draw, Modify) read the ONE
@@ -5345,7 +5348,7 @@ export default function App() {
               {!mock && previewing && (
                 <span className="version-note readonly">viewing v{previewing.version} · read-only</span>
               )}
-              {!mock && (
+              {!mock && !signedOut && (
                 projectMode ? (
                   projectSolar.ready ? (
                     <ProjectSolarCheckoutControls
