@@ -15,8 +15,30 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { noteUnauthorized, subscribeUnauthorized } from '../../api.js'
 import { shouldAutoDemo } from '../../demoState.js'
-import { consoleAuthRequired, consoleSignedOut } from './consoleGate.js'
+import { consoleAuthRequired, consoleSignedOut, consoleKnownGuest } from './consoleGate.js'
 import { MAX_TOKEN_RECOVERIES, createSessionController } from './createSessionController.js'
+
+describe('pre-answer console guest truth table', () => {
+  for (const mock of [false, true]) {
+    for (const authConfigured of [false, true]) {
+      for (const authCallback of [false, true]) {
+        for (const signedIn of [false, true]) {
+          it(`mock=${mock} configured=${authConfigured} callback=${authCallback} signedIn=${signedIn}`, () => {
+            expect(consoleKnownGuest({ mock, authConfigured, authCallback, isSignedIn: () => signedIn }))
+              .toBe(!mock && authConfigured && !authCallback && !signedIn)
+          })
+        }
+      }
+    }
+  }
+
+  it('does not read the token in mock mode', () => {
+    let reads = 0
+    const isSignedIn = () => { reads += 1; return false }
+    expect(consoleKnownGuest({ mock: true, authConfigured: true, authCallback: false, isSignedIn })).toBe(false)
+    expect(reads).toBe(0)
+  })
+})
 
 describe('console session truth table', () => {
   it('maps only `required` to authRequired', () => {

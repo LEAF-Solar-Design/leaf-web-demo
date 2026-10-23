@@ -1609,7 +1609,7 @@ describe('C4-1b publication shell bindings', () => {
     for (const history of HISTORIES) {
       const o = owner()
       const wiring = assertPublicationBindings(source, shell, o.value,
-        { ...o.extra, otherOwner: other, agentTurns: history, turns: history })
+        { ...o.extra, knownGuest: false, otherOwner: other, agentTurns: history, turns: history })
       const publication = { sessionId: 'session-1', changeSetId: 'change-1', catalogDigest: 'digest-1' }
       assert.equal(wiring.panel.sessionId, publication.sessionId)
       assert.equal(wiring.panel.userTurns, history)
