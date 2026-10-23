@@ -105,7 +105,7 @@ describe('LabWorkbench', () => {
 
   it('lazily mounts the dependency editor in the graph view', async () => {
     render(<LabWorkbench route={route('graph')} status={on} />)
-    expect(await screen.findByRole('status', { name: 'Loading dependency canvas' }, { timeout: 15000 })).toBeVisible()
+    expect(screen.getByRole('status', { name: 'Loading dependency canvas' })).toBeVisible()
     expect(await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })).toBeVisible()
     expect(screen.getByRole('region', { name: 'Strategy palette' })).toBeVisible()
     expect(screen.getByRole('region', { name: 'Block inspector' })).toBeVisible()

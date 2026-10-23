@@ -42,7 +42,16 @@ freeze(manifests)
 export const registry = Object.freeze(Object.fromEntries(manifests.map(manifest =>
   [`${manifest.id}@${manifest.version.semver}`, manifest])))
 export function manifestFor(block, entries = registry) {
-  const manifest = entries[`${block.registry.id}@${block.registry.version}`]
-  if (!manifest || manifest.version.code_sha256 !== block.registry.code_sha256) throw new Error('Registry mismatch')
+  const { manifest, problem } = resolveManifest(block, entries)
+  if (problem) throw new Error(problem)
   return manifest
+}
+export function resolveManifest(block, entries = registry) {
+  const { id, version, code_sha256 } = block.registry
+  const manifest = entries[`${id}@${version}`]
+  const problem = !manifest ? `unknown block ${id}@${version}`
+    : manifest.version.code_sha256 !== code_sha256 ? `code changed for ${id}@${version}` : ''
+  return { manifest: problem ? { id, title: `${id}@${version}`, lane: 'unresolved', effect: 'unresolved',
+    inputs: {}, outputs: {}, settings_schema: null, latency_budget_us: null,
+    version: { semver: version, code_sha256 } } : manifest, problem }
 }

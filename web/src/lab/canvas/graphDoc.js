@@ -1,5 +1,5 @@
 import { canonicalJSON } from '../contract.js'
-import { contract, manifestFor, registry } from './registry.js'
+import { contract, manifestFor, registry, resolveManifest } from './registry.js'
 import { connectionStatus } from './portCompat.js'
 
 export const emptyGraph = () => ({ schema: 'leaf.lab-graph.v1', blocks: [], pipes: [], outputs: {} })
@@ -50,12 +50,12 @@ export function updateSettings(document, id, settings, entries = registry) {
   return roundTrip(next)
 }
 export function missingInputs(document, block, entries = registry) {
-  return Object.entries(manifestFor(block, entries).inputs).filter(([name, pin]) =>
+  return Object.entries(resolveManifest(block, entries).manifest.inputs).filter(([name, pin]) =>
     pin.required && !pin.has_default && !document.pipes.some(pipe => pipe.to.node === block.id && pipe.to.port === name))
     .map(([name]) => name)
 }
 export function inputValues(document, block, upstream = {}, entries = registry) {
-  return Object.fromEntries(Object.entries(manifestFor(block, entries).inputs).flatMap(([name, pin]) => {
+  return Object.fromEntries(Object.entries(resolveManifest(block, entries).manifest.inputs).flatMap(([name, pin]) => {
     const pipe = document.pipes.find(edge => edge.to.node === block.id && edge.to.port === name)
     if (pipe) return Object.hasOwn(upstream, `${pipe.from.node}/${pipe.from.port}`)
       ? [[name, upstream[`${pipe.from.node}/${pipe.from.port}`]]] : []
@@ -64,6 +64,10 @@ export function inputValues(document, block, upstream = {}, entries = registry) 
 }
 export function validateGraph(document, entries = registry) {
   const started = performance.now()
-  try { contract.graph(document, entries); return { ready: true, problems: [], message: 'Ready', ms: performance.now() - started } }
+  try {
+    const problems = document.blocks.map(block => resolveManifest(block, entries).problem).filter(Boolean)
+    if (problems.length) return { ready: false, problems, message: problems.join('; '), ms: performance.now() - started }
+    contract.graph(document, entries); return { ready: true, problems: [], message: 'Ready', ms: performance.now() - started }
+  }
   catch (error) { return { ready: false, problems: [error.message], message: error.message, ms: performance.now() - started } }
 }

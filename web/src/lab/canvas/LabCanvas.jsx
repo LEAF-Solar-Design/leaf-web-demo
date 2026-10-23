@@ -5,7 +5,7 @@ import Palette, { BLOCK_MIME } from './Palette.jsx'
 import Inspector from './Inspector.jsx'
 import NodeCard from './NodeCard.jsx'
 import LatencyPipe from './LatencyPipe.jsx'
-import { contract, manifestFor, registry } from './registry.js'
+import { contract, resolveManifest, registry } from './registry.js'
 import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, roundTrip, updateSettings, validateGraph } from './graphDoc.js'
 import { connectionStatus } from './portCompat.js'
 import { createDependencyLayoutRunner } from './dependencyLayout.js'
@@ -83,11 +83,14 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
   }, [initialLayoutDocument, layoutRunner, runLayout])
 
   const nodes = document.blocks.map((block, index) => {
-    const manifest = manifestFor(block, entries)
-    let settingsError = ''
-    try { contract.validate(block.settings, manifest.settings_schema) } catch (error) { settingsError = error.message }
+    const { manifest, problem } = resolveManifest(block, entries)
+    let settingsError = problem
+    if (!problem) try { contract.validate(block.settings, manifest.settings_schema) } catch (error) { settingsError = error.message }
     const handleAllowed = (direction, name) => {
+      if (problem) return { ok: false, reason: problem }
       if (!pending) return { ok: true, reason: '' }
+      const pendingProblem = resolveManifest(document.blocks.find(item => item.id === pending.node), entries).problem
+      if (pendingProblem) return { ok: false, reason: pendingProblem }
       if (pending.type === 'source' && direction === 'inputs') return connectionStatus(document,
         { from: { node: pending.node, port: pending.port }, to: { node: block.id, port: name } }, entries)
       if (pending.type === 'target' && direction === 'outputs') return connectionStatus(document,
@@ -95,12 +98,16 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
       return { ok: false, reason: 'Connect an output to an input' }
     }
     return { id: block.id, type: 'block', position: positions[block.id] || { x: index * 370, y: 30 }, selected: selected === block.id,
-      data: { manifest, missing: missingInputs(document, block, entries), settingsError,
+      data: { manifest, unresolved: problem, missing: missingInputs(document, block, entries), settingsError,
         measurement: measurements.blocks?.[block.id], pending, handleAllowed } }
   })
-  const edges = document.pipes.map(pipe => ({ id: pipeId(pipe), type: 'latency',
+  const edges = document.pipes.map(pipe => {
+    const source = resolveManifest(document.blocks.find(block => block.id === pipe.from.node), entries)
+    const target = resolveManifest(document.blocks.find(block => block.id === pipe.to.node), entries)
+    return { id: pipeId(pipe), type: 'latency',
     source: pipe.from.node, sourceHandle: pipe.from.port, target: pipe.to.node, targetHandle: pipe.to.port,
-    data: { measurement: measurements.pipes?.[pipeId(pipe)], budget: manifestFor(document.blocks.find(block => block.id === pipe.from.node), entries).latency_budget_us, disconnect } }))
+    data: { measurement: measurements.pipes?.[pipeId(pipe)], budget: source.problem || target.problem ? null : source.manifest.latency_budget_us, disconnect } }
+  })
   return <div className="lab-home lab-canvas-editor" data-canvas-editor tabIndex={-1} onKeyDown={event => {
     if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey ||
       event.target.closest?.('input,textarea,select,[contenteditable="true"]') || event.currentTarget.closest('[hidden]')) return
@@ -139,7 +146,9 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
           onConnectStart={(_, params) => { lastRefusal.current = ''; setPending({ node: params.nodeId, port: params.handleId, type: params.handleType }) }}
           onConnectEnd={() => { setPending(null); if (lastRefusal.current) setMessage(lastRefusal.current) }}
           isValidConnection={connection => {
-            const status = connectionStatus(document, asPipe(connection), entries)
+            let status
+            try { status = connectionStatus(document, asPipe(connection), entries) }
+            catch (error) { status = { ok: false, reason: error.message } }
             lastRefusal.current = status.reason
             return status.ok
           }}

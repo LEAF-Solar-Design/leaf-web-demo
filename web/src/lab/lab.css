@@ -88,6 +88,7 @@
 .lab-node-card.is-selected { outline: 2px solid var(--leaf-color-primary); }
 .lab-node-card h3 { margin-block: var(--leaf-spacing-control-gap); }
 .lab-lane-chip { color: var(--leaf-color-data-series-1); font-family: var(--leaf-font-label); }
+.lab-lane-chip.lane-unresolved { color: var(--leaf-color-foreground); opacity: 0.6; border: 1px dashed var(--leaf-color-border); }
 .lab-effect-chip { margin-inline-start: var(--leaf-spacing-control-gap); padding-inline: var(--leaf-spacing-control-gap); border: 1px solid var(--leaf-color-border); border-radius: var(--leaf-radius-control); font-family: var(--leaf-font-label); }
 .lab-lane-chip.lane-cashout, .lab-lane-chip.lane-admission { color: var(--leaf-color-data-series-2); }
 .lab-lane-chip.lane-engines, .lab-lane-chip.lane-observation { color: var(--leaf-color-data-series-3); }
