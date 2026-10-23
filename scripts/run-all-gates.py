@@ -1774,6 +1774,8 @@ def build_suites() -> List[Suite]:
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("server-e2b-cost-meter", "server tests/test_e2b_cost_meter.py", "pytest",
               SERVER, _py_pytest("tests/test_e2b_cost_meter.py"), 34),
+        Suite("server-free-allowance", "server tests/test_free_allowance.py", "pytest",
+              SERVER, _py_pytest("tests/test_free_allowance.py"), 36),
         # Ops usage scoreboard (M6). Registered WITH the file, per the #29
         # fix-then-register rule. Both files are hermetic -- every authority is
         # monkeypatched, no DB, no subprocess, no skipif -- so these floors are
