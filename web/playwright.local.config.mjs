@@ -62,11 +62,8 @@ if (linkFlowBoot) {
   // versions. Both use demo-tenant (the session's auth-off default and
   // VITE_TENANT_ID above). Neither ID is a curated bootstrap alias, so
   // provision both fixtures explicitly; ordinary unknown reads still fail.
-  execFileSync('python', ['-B', '-c', [
-    'import write_loop, store',
-    'for drawing_id in ("cat", "cat-panels"):',
-    '    store.ingest_drawing(write_loop.default_backend(), "demo-tenant", str(write_loop.CACHED_INTAKE_PATH), drawing_id=drawing_id)',
-  ].join('\n')], { cwd: join(repo, 'server'), env: { ...process.env, APS_LIVE: '0' }, stdio: 'inherit', timeout: 30_000 })
+  execFileSync('python', ['-B', join(repo, 'scripts/seed_proof_drawings.py'), '--tenant', 'demo-tenant'],
+    { cwd: repo, env: { ...process.env, APS_LIVE: '0' }, stdio: 'inherit', timeout: 30_000 })
   webServer = {
     command: 'npm --prefix harness run build && python scripts/start-leaf.py --strict-ports --with-harness --broker-port 8240 --app-port 8230 --harness-port 8250 --web-port 5275',
     cwd: repo,

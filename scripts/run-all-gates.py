@@ -2479,6 +2479,8 @@ def build_suites() -> List[Suite]:
         # Proves labelled sizing replay isolation; opens loopback sockets and short-lived child Pythons only.
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
+        Suite("scripts-seed-proof-drawings", "scripts test_seed_proof_drawings.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_seed_proof_drawings.py"), 5),
         # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets.
         Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 49),
