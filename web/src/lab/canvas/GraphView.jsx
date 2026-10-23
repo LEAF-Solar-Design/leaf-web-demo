@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { registry } from './registry.js'
-import { pipeId } from './graphDoc.js'
+import { pipeId, validateGraph } from './graphDoc.js'
+import { authHeaders, config } from '../../api.js'
+import { fetchWithBudget } from '../../fetchBudget.js'
 import { createHostProvider } from '../host/hostProvider.js'
 import { validateResidency } from '../host/hostResidency.js'
 import { createStudioSources, evaluateGraph, runtimeValue, sourceAge } from '../runtime/index.js'
@@ -15,11 +17,13 @@ const seriesOf = data => Array.isArray(data) ? data.map(item => typeof item === 
 
 export function useLiveGraph({ provider, registry: base = registry, now = wallTime, clock = tick, revision }) {
   const [draft, onChange] = useState(null)
+  const [currentTime, setNow] = useState(() => now())
   const [evaluation, setEvaluation] = useState({ result: null, problems: [], count: 0, times: [] })
   const signature = JSON.stringify(provider.entries())
   // The provider is immutable; mounts forward its constructor onChange as a
   // revision so value-only updates also refresh the observed pins and results.
   const entries = useMemo(() => ({ ...base, ...provider.entries() }), [base, provider, signature, revision])
+  const validation = useMemo(() => draft ? validateGraph(draft.document, entries) : null, [draft, entries])
   const residency = useMemo(() => draft ? validateResidency(draft.document, entries)
     : { ok: true, problems: [], tainted: [] }, [draft, entries])
   useEffect(() => {
@@ -33,7 +37,7 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
         publish(previous => ({ ...previous, result: null, problems: [] }))
         return
       }
-      if (!draft.ready) {
+      if (!validation.ready) {
         publish(previous => ({ ...previous, result: null, problems: [] }))
         return
       }
@@ -43,7 +47,7 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
     } catch {
       publish(previous => ({ ...previous, result: null, problems: ['Graph evaluation failed'] }))
     }
-  }, [draft, entries, residency, provider, revision, clock])
+  }, [draft, entries, validation, residency, provider, revision, clock])
   const { count, times } = evaluation
   const current = evaluation.draft === draft && evaluation.entries === entries
   const result = current ? evaluation.result : null
@@ -56,10 +60,11 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
   const card = (id, port, title, value) => {
     const series = seriesOf(value.data)
     const kind = value.error || value.data === null ? 'empty'
-      : typeof value.data === 'string' || Number.isFinite(value.data) ? 'value'
+      : typeof value.data === 'string' || typeof value.data === 'boolean' || Number.isFinite(value.data) ? 'value'
         : Array.isArray(value.data) ? series.length > 0 && series.every(Number.isFinite) ? 'chart' : 'rows' : 'empty'
-    return { id, port, title, kind, display: kind === 'value' ? value.data : summary(value), series,
-      as_of: value.as_of, age_ms: sourceAge(value, now()), stale: value.stale, simulated: value.simulated,
+    const display = typeof value.data === 'boolean' ? String(value.data) : value.data
+    return { id, port, title, kind, display: kind === 'value' ? display : summary(value), series,
+      as_of: value.as_of, age_ms: sourceAge(value, Math.max(currentTime, now())), stale: value.stale, simulated: value.simulated,
       truncated: value.truncated, host_tainted: value.host_tainted, error: value.error, ...latency }
   }
   if (result) {
@@ -78,8 +83,14 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
     }
     for (const [name, value] of Object.entries(result.outputs)) values.push(card(`output:${name}`, name, name, value))
   }
-  const problems = [...(draft?.problems || []), ...residency.problems, ...(current ? evaluation.problems : [])]
-  return { entries, draft, result, problems, ready: Boolean(draft?.ready && residency.ok && !problems.length),
+  const hasValues = values.length > 0
+  useEffect(() => {
+    if (!hasValues) return undefined
+    const timer = setInterval(() => setNow(now()), 1000)
+    return () => clearInterval(timer)
+  }, [hasValues, now])
+  const problems = [...(validation?.problems || []), ...residency.problems, ...(current ? evaluation.problems : [])]
+  return { entries, draft, result, problems, ready: Boolean(validation?.ready && residency.ok && !problems.length),
     measurements, upstream, badges: values, values, onChange }
 }
 
@@ -121,20 +132,28 @@ export function setGraphCanvasLoader(loader = loadLabCanvas) {
   LabCanvas = lazy(loader)
 }
 
-export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, operator = false }) {
+export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false }) {
   const [opened, setOpened] = useState(!hidden)
-  const [revision, setRevision] = useState(0)
+  const [localRevision, setRevision] = useState(0)
   const [local] = useState(() => createHostProvider({ framed: false, operator, onChange: () => setRevision(value => value + 1) }))
   const provider = supplied || local
-  const live = useLiveGraph({ provider, registry: entries || registry, revision })
+  const live = useLiveGraph({ provider, registry: entries || registry, revision: supplied ? revision : localRevision })
   const validDocument = live.ready ? live.draft.document : null
   const pollers = useRef(new Map())
-  const [sources] = useState(() => createStudioSources())
+  const [sources] = useState(() => createStudioSources({
+    fetchImpl: (path, init) => fetchWithBudget(globalThis.fetch, `${config.apiBase}${path}`, {
+      ...init, headers: { ...init.headers, accept: 'application/json', 'X-Tenant-Id': config.tenant, ...authHeaders() },
+    }),
+  }))
   const ids = [...new Set((live.draft?.document.blocks || []).map(block => block.registry.id)
     .filter(id => ['studio-jobs', 'studio-capabilities'].includes(id)))].sort().join(',')
   useEffect(() => { if (!supplied) { provider.start(); return () => provider.stop() } }, [provider, supplied])
   useEffect(() => {
-    if (supplied) return
+    if (supplied) {
+      pollers.current.forEach(poller => poller.dispose())
+      pollers.current.clear()
+      return
+    }
     const wanted = ids ? ids.split(',') : []
     for (const [id, poller] of pollers.current) if (!wanted.includes(id)) { poller.dispose(); pollers.current.delete(id) }
     for (const id of wanted) if (!pollers.current.has(id)) {
@@ -143,7 +162,9 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
           provider.setStudioValue(id, value?.error || !Array.isArray(value?.data)
             ? runtimeValue([], { host_tainted: true, error: { code: value?.error?.code || 'source-failed' } })
             : value)
-        } catch { /* Keep provider refusals out of the poller. */ }
+        } catch {
+          provider.setStudioValue(id, runtimeValue([], { host_tainted: true, error: { code: 'source-refused' } }))
+        }
       }
       const poller = sources.poll(id, { onValue: deliver, onError: () => {
         deliver(runtimeValue([], { host_tainted: true, error: { code: 'source-failed' } }))

@@ -5,6 +5,8 @@ import GraphView, { LiveValues, useLiveGraph } from './GraphView.jsx'
 import LabWorkbench from '../LabWorkbench.jsx'
 import { createHostProvider } from '../host/hostProvider.js'
 import * as hostProviderModule from '../host/hostProvider.js'
+import * as runtime from '../runtime/index.js'
+import { config } from '../../api.js'
 import { addBlock, emptyGraph } from './graphDoc.js'
 import { registry } from './registry.js'
 import { setLayoutEngineLoader } from './dependencyLayout.js'
@@ -74,9 +76,122 @@ afterEach(async () => {
   setLayoutEngineLoader()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 describe('first-click live graph', () => {
+  it('uses the Studio base, tenant and current bearer token for each source request', async () => {
+    const originalBase = config.apiBase
+    const originalToken = localStorage.getItem('leaf.jwt')
+    config.apiBase = 'https://studio.example.test'
+    localStorage.setItem('leaf.jwt', 'first-token')
+    const fetchImpl = vi.fn(async url => ({ ok: true, json: async () =>
+      url.endsWith('/api/jobs') ? { jobs: [], as_of: now } : { families: [], as_of: now } }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const provider = createHostProvider({ framed: false })
+    const document = graphOf(provider, ['studio-jobs'])
+    document.blocks.push(...graphOf(provider, ['studio-capabilities']).blocks)
+    const view = render(<GraphView initialDocument={document} />)
+    try {
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+      for (const path of ['/api/jobs', '/api/capabilities']) {
+        expect(fetchImpl).toHaveBeenCalledWith(`${config.apiBase}${path}`, expect.objectContaining({
+          headers: expect.objectContaining({ accept: 'application/json', 'X-Tenant-Id': config.tenant, Authorization: 'Bearer first-token' }),
+        }))
+      }
+      await waitFor(() => expect(cardNamed('Jobs')).toBeVisible())
+      localStorage.setItem('leaf.jwt', 'renewed-token')
+      await act(async () => { globalThis.document.dispatchEvent(new Event('visibilitychange')) })
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(4))
+      expect(fetchImpl.mock.calls.slice(2).every(([, init]) => init.headers.Authorization === 'Bearer renewed-token')).toBe(true)
+    } finally {
+      view.unmount()
+      config.apiBase = originalBase
+      if (originalToken === null) localStorage.removeItem('leaf.jwt')
+      else localStorage.setItem('leaf.jwt', originalToken)
+    }
+  })
+
+  it('revalidates a restored draft after its source arrives without another canvas report', () => {
+    const provider = createHostProvider({ framed: true })
+    const document = graphOf(hostProvider(), ['host-source', 'count'])
+    const { result, rerender } = renderHook(({ revision }) => useLiveGraph({ provider, revision, clock: fixedClock }),
+      { initialProps: { revision: 1 } })
+    const draft = { document, ready: false, problems: ['unknown block host-source@1.0.0'] }
+    act(() => result.current.onChange(draft))
+    expect(result.current.ready).toBe(false)
+    expect(result.current.problems).toContain('unknown block host-source@1.0.0')
+    act(() => provider.announce(rows))
+    rerender({ revision: 2 })
+    expect(result.current.draft).toBe(draft)
+    expect(result.current.ready).toBe(true)
+    expect(result.current.problems).toEqual([])
+    render(<LiveValues values={result.current.values} provider={provider} />)
+    expect(within(cardNamed('Count')).getByText('1')).toBeVisible()
+  })
+
+  it('observes supplied provider revisions when row values change with the same schema', async () => {
+    const provider = hostProvider()
+    const document = graphOf(provider, ['host-source', 'latest', 'field'])
+    const view = render(<GraphView provider={provider} revision={1} initialDocument={document} />)
+    await waitFor(() => expect(within(cardNamed('Field')).getByText('42')).toBeVisible())
+    act(() => provider.announce([{ ...rows[0], data: { price: 73, marker: 'updated' } }]))
+    view.rerender(<GraphView provider={provider} revision={2} initialDocument={document} />)
+    await waitFor(() => expect(within(cardNamed('Field')).getByText('73')).toBeVisible())
+    expect(within(cardNamed('Field')).queryByText('42')).toBeNull()
+  })
+
+  it('disposes local pollers when switching to a supplied provider', async () => {
+    const dispose = vi.fn()
+    const start = vi.fn().mockResolvedValue(undefined)
+    vi.spyOn(runtime, 'createStudioSources').mockReturnValue({ poll: vi.fn(() => ({ start, dispose })) })
+    const document = graphOf(createHostProvider({ framed: false }), ['studio-jobs'])
+    const view = render(<GraphView initialDocument={document} />)
+    await waitFor(() => expect(start).toHaveBeenCalledOnce())
+    view.rerender(<GraphView provider={hostProvider()} initialDocument={document} />)
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it('replaces a successful Studio value with a source refusal for primitive rows', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ jobs: [{ a: 7 }], as_of: now }) })
+      .mockResolvedValue({ ok: true, json: async () => ({ jobs: [123], as_of: now }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView initialDocument={graphOf(createHostProvider({ framed: false }), ['studio-jobs'])} />)
+    await waitFor(() => expect(within(cardNamed('Jobs')).getByText('7')).toBeVisible())
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    await waitFor(() => expect(within(cardNamed('Jobs')).getByText('error: source-refused')).toBeVisible())
+    expect(within(cardNamed('Jobs')).queryByText('7')).toBeNull()
+  })
+
+  it('advances source age every second and clears the ticker on unmount', () => {
+    vi.spyOn(Date, 'now').mockRestore()
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    const provider = hostProvider()
+    const { result, unmount } = renderHook(() => useLiveGraph({ provider, clock: fixedClock }))
+    act(() => result.current.onChange({ document: graphOf(provider, ['host-source']), ready: true, problems: [] }))
+    const view = render(<LiveValues values={result.current.values} provider={provider} />)
+    expect(within(cardNamed('Dashboard source')).getByText('as of 0s ago')).toBeVisible()
+    const count = result.current.measurements.blocks['host-source-1'].count
+    act(() => vi.advanceTimersByTime(1000))
+    view.rerender(<LiveValues values={result.current.values} provider={provider} />)
+    expect(within(cardNamed('Dashboard source')).getByText('as of 1s ago')).toBeVisible()
+    expect(result.current.measurements.blocks['host-source-1'].count).toBe(count)
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('renders boolean fields as value cards', async () => {
+    const provider = createHostProvider({ framed: true })
+    provider.announce([{ source: 'markets', as_of: now, data: { active: true } }])
+    const document = graphOf(provider, ['host-source', 'latest', 'field'])
+    document.blocks.at(-1).settings.field = 'active'
+    render(<GraphView provider={provider} initialDocument={document} />)
+    await waitFor(() => expect(within(cardNamed('Field')).getByText('true')).toBeVisible())
+    expect(cardNamed('Field')).toHaveAttribute('data-value-kind', 'value')
+  })
+
   it('offers Studio reads and transforms, four inspector tabs, and unavailable save/history', async () => {
     render(<GraphView />)
     const palette = within(await screen.findByRole('region', { name: 'Strategy palette' }))
@@ -99,7 +214,7 @@ describe('first-click live graph', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Select studio-jobs-1' }))
     fireEvent.click(screen.getByRole('button', { name: 'Move studio-jobs-1' }))
     expect(fetchImpl).toHaveBeenCalledTimes(1)
-    expect(fetchImpl.mock.calls[0][0]).toBe('/api/jobs')
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${config.apiBase}/api/jobs`)
     fireEvent.click(screen.getByRole('button', { name: 'Remove block' }))
     expect(removeListener).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
     view.unmount()
@@ -176,7 +291,7 @@ describe('first-click live graph', () => {
     }))
     expect(result.current.ready).toBe(true)
 
-    const draft = { document: graphOf(provider, ['host-source', 'custom-strategy']), ready: true, problems: [] }
+    const draft = { document: graphOf(provider, ['host-source', 'count', 'custom-strategy']), ready: true, problems: [] }
     const firstRender = renders.length
     act(() => result.current.onChange(draft))
 
@@ -205,7 +320,11 @@ describe('first-click live graph', () => {
         provider.announce(rows)
         live.onChange({ document: graphOf(provider, ['host-source', 'count']), ready: true, problems: [] })
         announce = next => provider.announce(next)
-        invalidate = () => live.onChange({ document: graphOf(provider, ['host-source', 'count']), ready: false, problems: ['Input required'] })
+        invalidate = () => {
+          const document = graphOf(provider, ['host-source', 'count'])
+          document.pipes = []
+          live.onChange({ document, ready: false, problems: ['Input required'] })
+        }
       }, [provider, live.onChange])
       return <LiveValues values={live.values} provider={provider} />
     }

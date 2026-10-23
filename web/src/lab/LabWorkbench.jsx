@@ -47,6 +47,7 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
         restoration.current = resolve
         initialReport.current = true
         setOpened(true)
+        live.onChange(null)
         setRestored((previous) => ({ document: draft.document, revision: (previous?.revision || 0) + 1 }))
       }),
     })
@@ -72,7 +73,11 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
       return
     }
     const triggeredAt = actionAt.current ?? performance.now()
-    void guardSink('proposal', next => bridge.current?.proposal(next, triggeredAt))(draft)?.catch(() => {})
+    try {
+      void guardSink('proposal', next => bridge.current?.proposal(next, triggeredAt))(draft)?.catch(() => {})
+    } catch {
+      setHostProposal({ ready: false, problems: ['Proposal refused: host data cannot leave the runtime'] })
+    }
   }, [live.onChange])
 
   return <div ref={root} className="lab-graph-view" hidden={hidden}
@@ -88,7 +93,11 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
           onClick={() => {
             const triggeredAt = performance.now()
             // Publish the current draft before asking the host to sign it.
-            void guardSink('proposal', draft => bridge.current?.proposal(draft, triggeredAt))(graph)?.then(() => bridge.current?.run(triggeredAt)).catch(() => {})
+            try {
+              void guardSink('proposal', draft => bridge.current?.proposal(draft, triggeredAt))(graph)?.then(() => bridge.current?.run(triggeredAt)).catch(() => {})
+            } catch {
+              setHostProposal({ ready: false, problems: ['Proposal refused: host data cannot leave the runtime'] })
+            }
           }}>Run graph</button>
       </section>
       <LiveValues values={live.values} provider={provider} />
