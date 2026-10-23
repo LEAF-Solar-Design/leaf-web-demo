@@ -10,6 +10,7 @@ import { config } from '../../api.js'
 import { addBlock, emptyGraph } from './graphDoc.js'
 import { registry } from './registry.js'
 import { setLayoutEngineLoader } from './dependencyLayout.js'
+import { createLabArtifactsClient } from '../history/labArtifactsClient.js'
 
 const elkImport = vi.hoisted(() => vi.fn())
 vi.mock('elkjs/lib/elk.bundled.js', () => {
@@ -195,14 +196,34 @@ describe('first-click live graph', () => {
     expect(cardNamed('Field')).toHaveAttribute('data-value-kind', 'value')
   })
 
-  it('offers Studio reads and transforms, four inspector tabs, and unavailable save/history', async () => {
+  it('offers Studio reads and transforms, four inspector tabs, and Save', async () => {
     render(<GraphView />)
     const palette = within(await screen.findByRole('region', { name: 'Strategy palette' }))
     for (const title of ['Jobs', 'Capabilities', 'Count', 'Latest', 'Field']) expect(palette.getByRole('button', { name: title })).toBeVisible()
     fireEvent.click(palette.getByRole('button', { name: 'Count' }))
     for (const name of ['Setup', 'Configure', 'Test', 'Code']) expect(screen.getByRole('tab', { name })).toBeVisible()
-    expect(screen.getByRole('note')).toHaveTextContent('Save and history: not yet available')
+    expect(screen.getByRole('button', { name: 'Save', exact: true })).toBeVisible()
     expect(screen.getByText('Studio sources: jobs, capabilities')).toBeVisible()
+  })
+
+  it('remounts the canvas on a ledger restore and on taking or recovering edits', async () => {
+    const provider = hostProvider()
+    const mine = graphOf(provider, ['host-source', 'latest', 'field'])
+    const theirs = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({
+      revision: 3, graph: theirs, sha256: 'a'.repeat(64), created_at: now / 1000,
+    }) }) })
+    render(<GraphView client={client} provider={provider} initialDocument={mine} />)
+    await waitFor(() => expect(cardNamed('Field')).toBeVisible())
+    const originalFlow = screen.getByTestId('flow')
+    await act(async () => { await client.restore('strategy', 1, 2) })
+    await waitFor(() => expect(cardNamed('Count')).toBeVisible())
+    expect(screen.getByTestId('flow')).not.toBe(originalFlow)
+    expect(screen.queryByTestId('field-1')).not.toBeInTheDocument()
+    act(() => client.takeGraph(mine))
+    await waitFor(() => expect(cardNamed('Field')).toBeVisible())
+    act(() => client.takeGraph(theirs))
+    await waitFor(() => expect(cardNamed('Count')).toBeVisible())
   })
 
   it('starts exactly one jobs poller on adding Jobs and disposes it on removal', async () => {

@@ -6,6 +6,8 @@ import { fetchWithBudget } from '../../fetchBudget.js'
 import { createHostProvider } from '../host/hostProvider.js'
 import { validateResidency } from '../host/hostResidency.js'
 import { createStudioSources, evaluateGraph, runtimeValue, sourceAge } from '../runtime/index.js'
+import LabSaveBar from '../history/LabSaveBar.jsx'
+import { labArtifactsClient } from '../history/labArtifactsClient.js'
 
 const wallTime = () => Date.now()
 const tick = () => performance.now()
@@ -119,7 +121,6 @@ export function LiveValues({ values, provider }) {
         </article>
       })}
     </section>
-    <p role="note">Save and history: not yet available</p>
   </>
 }
 
@@ -132,12 +133,19 @@ export function setGraphCanvasLoader(loader = loadLabCanvas) {
   LabCanvas = lazy(loader)
 }
 
-export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false }) {
+export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false, client = labArtifactsClient }) {
+  const [restored, setRestored] = useState(() => ({ graph: client.state.restoredGraph, key: client.state.restoredKey }))
   const [opened, setOpened] = useState(!hidden)
   const [localRevision, setRevision] = useState(0)
   const [local] = useState(() => createHostProvider({ framed: false, operator, onChange: () => setRevision(value => value + 1) }))
   const provider = supplied || local
   const live = useLiveGraph({ provider, registry: entries || registry, revision: supplied ? revision : localRevision })
+  useEffect(() => client.subscribe(() => {
+    if (client.state.restoredKey !== restored.key) {
+      live.onChange(null)
+      setRestored({ graph: client.state.restoredGraph, key: client.state.restoredKey })
+    }
+  }), [client, restored.key, live.onChange])
   const validDocument = live.ready ? live.draft.document : null
   const pollers = useRef(new Map())
   const [sources] = useState(() => createStudioSources({
@@ -187,9 +195,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
             title={onRun ? undefined : 'Execution is unavailable here.'}
             onClick={() => { if (validDocument) onRun?.(validDocument) }}>Run graph</button>
         </section>
+        <LabSaveBar document={live.draft?.document} ready={live.ready} client={client} onTakeTheirs={graph => client.takeGraph(graph)} />
         <LiveValues values={live.values} provider={provider} />
         <Suspense fallback={<p role="status" aria-label="Loading dependency canvas">Loading dependency canvas…</p>}>
-          <LabCanvas initialDocument={initialDocument} entries={live.entries} measurements={live.measurements} upstream={live.upstream} onChange={live.onChange} />
+          <LabCanvas key={restored.key} initialDocument={restored.graph || initialDocument} entries={live.entries} measurements={live.measurements} upstream={live.upstream} onChange={live.onChange} />
         </Suspense>
       </> : <p data-graph-placeholder>Open Strategy to load the dependency canvas.</p>}
     </div>
