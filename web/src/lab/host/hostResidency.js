@@ -71,6 +71,9 @@ export function guardSink(name, sink) {
       // Fail closed when the bounded walk cannot establish a safe graph.
       if (depth > 32 || seen.size >= 10000) refuse();
       seen.add(value);
+      // Inherited properties and overridden Map/Set iterators are outside this data-flow guard's scope.
+      if ([Object.prototype, null].includes(Object.getPrototypeOf(value))
+        && Object.getOwnPropertyDescriptor(value, 'host_tainted')?.value === true) refuse();
       let branded = false;
       try { sourceAge(value); branded = true; } catch { /* Ordinary container. */ }
       if (branded && value.host_tainted) {
@@ -85,6 +88,7 @@ export function guardSink(name, sink) {
         visit(descriptor.value, depth + 1);
       }
     }
+    visit(this, 0);
     args.forEach(value => visit(value, 0));
     return sink.apply(this, args);
   };

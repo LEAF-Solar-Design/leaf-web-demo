@@ -17,6 +17,7 @@ const pin = (schema, nullable = false) => ({
   mode: 'scalar', schema, unit: 'none', nullable, required: true, has_default: false,
 });
 const primitiveSchema = () => ({ type: ['string', 'number', 'boolean', 'null'] });
+export const isSourceName = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(value);
 
 // Schemas contain observed kinds and field names, never observed values.
 function observedSchema(values) {
@@ -58,7 +59,10 @@ function manifest(fields) {
 }
 
 export function readManifest(id, title, { sourceNames = [], rowSchema = emptyRowSchema() } = {}) {
-  if (!HOST_READ_IDS.includes(id)) throw new Error('Test: source unavailable');
+  if (!HOST_READ_IDS.includes(id) || (id === 'host-source'
+    && (!Array.isArray(sourceNames) || !sourceNames.length || !sourceNames.every(isSourceName)))) {
+    throw new Error('Test: source unavailable');
+  }
   return manifest({ id, title, kind: 'settings', effect: 'read', lane: 'observation', inputs: {},
     outputs: { rows: pin({ type: 'array', items: rowSchema }) },
     settings_schema: { type: 'object', additionalProperties: false,
@@ -69,6 +73,7 @@ export function readManifest(id, title, { sourceNames = [], rowSchema = emptyRow
   });
 }
 
+// Field and select outputs and filter comparisons are limited to primitives.
 export function transformManifests(rowSchema = emptyRowSchema()) {
   const rowArraySchema = { type: 'array', items: rowSchema };
   const titles = { count: 'Count', latest: 'Latest', select: 'Pick field', filter: 'Filter',
@@ -82,14 +87,14 @@ export function transformManifests(rowSchema = emptyRowSchema()) {
     }
     if (id === 'filter') {
       properties.comparison = { type: 'string', enum: ['eq', 'ne', 'gt', 'gte', 'lt', 'lte'] };
-      properties.value = { ...emptyRowSchema(), type: ['null', 'string', 'number', 'boolean', 'object', 'array'],
-        items: primitiveSchema() };
+      properties.value = { type: ['null', 'string', 'number', 'boolean'] };
       required.push('comparison', 'value');
     }
     if (id === 'sort') properties.direction = { type: 'string', enum: ['asc', 'desc'] };
     if (id === 'take') properties.count = { type: 'integer', minimum: 0, maximum: 5000 };
-    const nullable = ['mean', 'min', 'max', 'latest', 'field', 'select'].includes(id);
-    const outputSchema = ['field', 'select'].includes(id) ? primitiveSchema()
+    const nullable = ['mean', 'min', 'max', 'latest', 'field'].includes(id);
+    const outputSchema = id === 'select' ? { type: 'array', items: primitiveSchema() }
+      : id === 'field' ? primitiveSchema()
       : id === 'latest' ? rowSchema : ['filter', 'sort', 'take'].includes(id) ? rowArraySchema : { type: 'number' };
     const value = manifest({ id, title, kind: 'builtin', effect: 'pure', lane: 'processing',
       inputs: { value: pin(id === 'field' ? rowSchema : rowArraySchema, id === 'field') },
@@ -111,7 +116,11 @@ export function createHostProvider({ win = globalThis.window, framed = Boolean(w
   const rowSchema = () => {
     const rows = [...stored.values()].flatMap(values => values.map(value => value.data));
     for (const value of studio.values()) rows.push(...(Array.isArray(value.data) ? value.data : [value.data]));
-    for (const id of sampled) rows.push(...samplePack.rows[id]);
+    if (operator === true && samplePack) {
+      for (const id of ['studio-jobs', 'studio-capabilities']) {
+        if (!studio.has(id) && own(samplePack.rows || {}, id)) rows.push(...samplePack.rows[id]);
+      }
+    }
     const objects = rows.filter(plain);
     return objects.length ? observedSchema(objects) : emptyRowSchema();
   };
@@ -152,7 +161,7 @@ export function createHostProvider({ win = globalThis.window, framed = Boolean(w
     announce(rows) {
       const groups = new Map();
       for (const row of Array.isArray(rows) ? rows : []) {
-        if (!row || typeof row.source !== 'string' || !row.source.trim() || !plain(row.data)) {
+        if (!row || !isSourceName(row.source) || !plain(row.data)) {
           dropped += 1; continue;
         }
         let copy;
@@ -202,8 +211,11 @@ export function createHostProvider({ win = globalThis.window, framed = Boolean(w
     },
     setStudioValue(id, value) {
       if (!['studio-jobs', 'studio-capabilities'].includes(id)) throw new Error('Test: source unavailable');
-      sourceAge(value); // Validate the runtime brand without exporting host data.
-      studio.set(id, value); sampled.delete(id); onChange(state());
+      try { sourceAge(value); } catch { throw new Error('Test: source shape refused'); }
+      if (value.mode !== 'scalar' || !Array.isArray(value.data) || !value.data.every(plain)) {
+        throw new Error('Test: source shape refused');
+      }
+      studio.set(id, value); onChange(state());
     },
     serialize() { return { ...state(), entries: Object.values(entries()).map(value => value.id).sort() }; },
   });
