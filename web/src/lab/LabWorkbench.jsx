@@ -26,6 +26,7 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
   const [sourcePick, setSourcePick] = useState('')
   const [inspector, setInspector] = useState(null)
   const [admitted, setAdmitted] = useState(false)
+  const [hostProposal, setHostProposal] = useState(null)
   const [reloaded, setReloaded] = useState(false)
   if (!hidden && !opened) setOpened(true)
 
@@ -33,6 +34,7 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
     if (!enabled || !createHostBridge) return undefined
     const connection = createHostBridge({
       onAdmitted: () => setAdmitted(true),
+      onChange: ({ ready, problems }) => setHostProposal({ ready, problems }),
       onSource: (next) => { setRows(next); setSourcePick('host') },
       onReload: () => { setReloaded(true); setAdmitted(false); onReload(true) },
       onRestore: (draft) => new Promise((resolve) => {
@@ -50,6 +52,7 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
       restoration.current?.()
       restoration.current = null
       setAdmitted(false)
+      setHostProposal(null)
       setRows(null)
       setSourcePick('')
     }
@@ -79,7 +82,8 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
       <section className="lab-graph-status" aria-label="Graph readiness">
         <p role="status">{graph?.ready ? 'Ready' : 'No valid graph'}</p>
         {graph?.problems.length > 0 && <ul>{graph.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
-        <button type="button" disabled={!enabled || !admitted || !graph?.ready || reloaded}
+        {hostProposal && <p role="status" aria-label="Host proposal">{hostProposal.ready ? 'Proposal accepted by the host' : hostProposal.problems[0]}</p>}
+        <button type="button" disabled={!enabled || !admitted || !graph?.ready || reloaded || hostProposal?.ready === false || bridge.current?.state?.status === 'too_large'}
           onClick={() => {
             const triggeredAt = performance.now()
             // Publish the current draft before asking the host to sign it.

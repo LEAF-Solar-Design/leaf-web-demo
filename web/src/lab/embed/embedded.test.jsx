@@ -7,6 +7,7 @@ vi.mock('./hostBridge.js', () => ({
     const connection = {
       callbacks, start: vi.fn(() => { callbacks.onAdmitted(); return Promise.resolve(true) }),
       stop: vi.fn(), proposal: vi.fn().mockResolvedValue(true), run: vi.fn().mockResolvedValue(true),
+      state: null,
     }
     connections.push(connection)
     return connection
@@ -147,6 +148,45 @@ describe('Lab embedded mode', () => {
     expect(connection.proposal).toHaveBeenLastCalledWith(expect.objectContaining({ ready: true, problems: [] }), expect.any(Number))
     fireEvent.click(screen.getByRole('button', { name: 'Run graph' }))
     await waitFor(() => expect(connection.run).toHaveBeenCalledOnce())
+  })
+
+  it('shows the host wire-limit problem and keeps Run disabled until a later proposal fits', async () => {
+    framed()
+    render(<LabGround active />)
+    await canvas()
+    const connection = connections[0]
+    const run = screen.getByRole('button', { name: 'Run graph' })
+    expect(run).toBeEnabled()
+    expect(screen.queryByRole('status', { name: 'Host proposal' })).toBeNull()
+
+    act(() => {
+      connection.state = { status: 'too_large', bytes: 4097 }
+      connection.callbacks.onChange({ ready: false, problems: ['proposal exceeds the 4096-byte wire limit (4097 bytes)'] })
+    })
+    expect(screen.getByRole('status', { name: 'Host proposal' }))
+      .toHaveTextContent('proposal exceeds the 4096-byte wire limit (4097 bytes)')
+    expect(run).toBeDisabled()
+    fireEvent.click(run)
+    expect(connection.run).not.toHaveBeenCalled()
+
+    act(() => { connection.callbacks.onChange({ ready: true, problems: [] }) })
+    expect(run).toBeDisabled()
+    act(() => {
+      connection.state = null
+      connection.callbacks.onChange({ ready: true, problems: [] })
+    })
+    expect(screen.getByRole('status', { name: 'Host proposal' })).toHaveTextContent('Proposal accepted by the host')
+    expect(screen.queryByText('proposal exceeds the 4096-byte wire limit (4097 bytes)')).toBeNull()
+    expect(run).toBeEnabled()
+    fireEvent.click(run)
+    await waitFor(() => expect(connection.run).toHaveBeenCalledOnce())
+  })
+
+  it('renders no host proposal status in standalone mode', async () => {
+    render(<LabWorkbench route={{ view: 'graph', params: {} }} status={{ state: 'on' }} />)
+    await act(async () => {})
+    expect(screen.queryByRole('status', { name: 'Host proposal' })).toBeNull()
+    expect(connections).toHaveLength(0)
   })
 
   it('applies a restored document before resolving and offers host rows in the Inspector source pick', async () => {

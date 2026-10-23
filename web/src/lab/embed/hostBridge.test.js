@@ -146,6 +146,44 @@ describe('Studio host bootstrap', () => {
 })
 
 describe('admitted Lab channel', () => {
+  it.each([4096, 4097])('checks the full canonical UTF-8 proposal envelope at %i bytes and recovers', async (bytes) => {
+    const onChange = vi.fn()
+    const h = harness({ onChange })
+    await h.bridge.start()
+    await h.admit()
+    const payload = { ...draft, problems: ['é'] }
+    const message = { ...h.hello(), kind: 'proposal', payload, sequence: 1,
+      proposal_revision: 1, proposal_hash: hash(document) }
+    const padding = bytes - new TextEncoder().encode(canonicalJSON(message)).length
+    payload.problems[0] += 'x'.repeat(padding)
+    expect(new TextEncoder().encode(canonicalJSON(message)).length).toBe(bytes)
+
+    const proposal = h.bridge.proposal(payload)
+    const run = h.bridge.run()
+    expect(await proposal).toBe(bytes === 4096)
+    expect(await run).toBe(bytes === 4096)
+    if (bytes === 4096) {
+      expect(h.sent().map(({ kind }) => kind)).toEqual(['proposal', 'signed-request'])
+      expect(new TextEncoder().encode(canonicalJSON(h.sent()[0])).length).toBe(4096)
+      expect(h.bridge.state).toBeNull()
+      expect(onChange).not.toHaveBeenCalled()
+    } else {
+      expect(h.sent()).toEqual([])
+      expect(h.bridge.state).toEqual({ status: 'too_large', bytes: 4097 })
+      expect(onChange).toHaveBeenLastCalledWith({ ...payload, ready: false,
+        problems: [...payload.problems, 'proposal exceeds the 4096-byte wire limit (4097 bytes)'] })
+      expect(payload.ready).toBe(true)
+      expect(payload.problems).toHaveLength(1)
+      expect(await h.bridge.run()).toBe(false)
+      expect(await h.bridge.proposal(draft)).toBe(true)
+      expect(h.bridge.state).toBeNull()
+      expect(onChange).toHaveBeenLastCalledWith(draft)
+      expect(await h.bridge.run()).toBe(true)
+      expect(h.sent().map(({ kind }) => kind)).toEqual(['proposal', 'signed-request'])
+    }
+    h.bridge.stop()
+  })
+
   it('rejects a restore with a bad hash before touching the canvas or replay state', async () => {
     const onRestore = vi.fn()
     const h = harness({ onRestore })

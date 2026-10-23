@@ -58,6 +58,7 @@ export function createLabHostBridge({
   win = globalThis.window, origins = hostOrigins(), cryptoImpl = globalThis.crypto,
   principalProof, sourceSha, now = Date.now, clock = () => performance.now(),
   onRestore = () => {}, onSource = () => {}, onReload = () => {}, onAdmitted = () => {},
+  onChange = () => {},
 } = {}) {
   const allowed = hostOrigins(origins.join(','))
   const channel = mintChannel(cryptoImpl)
@@ -70,6 +71,7 @@ export function createLabHostBridge({
   let emptyHash
   let revision = 0
   let proposalHash = null
+  let proposalState = null
   let sourceRows = null
   let outbound = -1
   let inbound = -1
@@ -98,6 +100,18 @@ export function createLabHostBridge({
   function post(kind, payload, triggeredAt, proposal = false) {
     if (stopped || !admitted) return false
     const message = envelope(kind, payload, triggeredAt, proposal)
+    if (kind === 'proposal') {
+      const bytes = new TextEncoder().encode(canonicalJSON(message)).length
+      if (bytes > 4096) {
+        proposalState = { status: 'too_large', bytes }
+        onChange({ ...copy(payload), ready: false,
+          problems: [...payload.problems, `proposal exceeds the 4096-byte wire limit (${bytes} bytes)`] })
+        return false
+      }
+      const wasTooLarge = proposalState !== null
+      proposalState = null
+      if (wasTooLarge) onChange(copy(payload))
+    }
     win.parent.postMessage(message, origin)
     return true
   }
@@ -161,6 +175,7 @@ export function createLabHostBridge({
     get rejectedCount() { return rejected },
     get lockedOrigin() { return origin },
     get sourceRows() { return sourceRows === null ? null : copy(sourceRows) },
+    get state() { return proposalState === null ? null : { ...proposalState } },
     start() {
       if (started || stopped || !win || win.self === win.top || !allowed.length) return Promise.resolve(false)
       started = true
@@ -198,7 +213,7 @@ export function createLabHostBridge({
     },
     run(triggeredAt = clock()) {
       if (!admitted || stopped) return Promise.resolve(false)
-      return enqueue(() => proposalHash ? post('signed-request', { request_hash: proposalHash, handoff: 'server-sign' }, triggeredAt) : false)
+      return enqueue(() => proposalHash && proposalState === null ? post('signed-request', { request_hash: proposalHash, handoff: 'server-sign' }, triggeredAt) : false)
     },
     receive(event) { return enqueue(() => receive(event)) },
   }
