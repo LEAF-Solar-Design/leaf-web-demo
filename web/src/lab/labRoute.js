@@ -3,6 +3,10 @@ import { fetchWithBudget } from '../fetchBudget.js'
 
 const VIEW_IDS = ['graph', 'widgets', 'history', 'runs', 'deploys']
 
+export function isLabEmbedded(route, win = globalThis.window) {
+  return route?.params?.embed === '1' && Boolean(win) && win.self !== win.top
+}
+
 // Route params are inert strings. They never supply credentials or host authority.
 export function parseLabRoute(path, search = '') {
   if (typeof path !== 'string' || typeof search !== 'string') return null

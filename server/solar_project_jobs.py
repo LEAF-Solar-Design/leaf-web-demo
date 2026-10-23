@@ -238,8 +238,9 @@ def complete_project_graph_job(job_id, worker_id, attempt, prepared):
 
 class GraphLeaseGuard:
     """Renew only worker custody, binding every heartbeat to the claimed attempt."""
-    def __init__(self, jobs, job_id, owner, attempt, lease_seconds):
+    def __init__(self, jobs, job_id, owner, attempt, lease_seconds, *, on_renew=None):
         self._jobs, self._job_id, self._owner, self._attempt = jobs, job_id, owner, attempt
+        self._on_renew = on_renew
         self._seconds = lease_seconds
         self._interval = max(min(lease_seconds / 3, 10), 0.05)
         self._stop, self._lost = threading.Event(), threading.Event()
@@ -265,6 +266,8 @@ class GraphLeaseGuard:
                     self._job_id, self._owner, self._attempt, lease_seconds=self._seconds):
                     self._lost.set()
                     return
+                if self._on_renew is not None:
+                    self._on_renew()
             except Exception:
                 self._lost.set()
                 return
@@ -395,7 +398,7 @@ def _cloud_prepare(job, guard):
     return db.run_transaction(lambda conn: prepare_project_graph_job(job, conn=conn))
 
 
-def run_once(owner, *, tool_name, lease_seconds=30.0):
+def run_once(owner, *, tool_name, lease_seconds=30.0, on_renew=None):
     if tool_name not in graph.SUPPORTED_TOOLS:
         raise ValueError(f"no canonical solver adapter for {tool_name}")
     jobs = _jobs()
@@ -403,7 +406,8 @@ def run_once(owner, *, tool_name, lease_seconds=30.0):
     if job is None:
         return False
     job_id, attempt = UUID(str(job["job_id"])), job["attempt"]
-    guard = GraphLeaseGuard(jobs, job_id, owner, attempt, lease_seconds)
+    guard = GraphLeaseGuard(jobs, job_id, owner, attempt, lease_seconds,
+                            **({"on_renew": on_renew} if on_renew is not None else {}))
     guard.start()
     try:
         if tool_name == solve.TOOL_NAME:

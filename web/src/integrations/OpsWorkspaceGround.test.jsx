@@ -645,13 +645,79 @@ it.each(['owner', 'editor', 'reviewer', 'read_only'])('exposes the separate exis
   render(<OpsWorkspaceGround {...props} />)
   await loaded()
   if (['owner', 'editor'].includes(role)) {
+    expect(screen.getByRole('region', { name: 'Create manual workflow' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Existing manual workflow' })).toBeInTheDocument()
     expect(screen.getByRole('region', { name: 'Start manual workflow' })).toBeInTheDocument()
     expect(screen.getByLabelText('Run UUID')).toBeInTheDocument()
   } else {
+    expect(screen.queryByRole('region', { name: 'Create manual workflow' })).toBeNull()
     expect(screen.queryByRole('region', { name: 'Existing manual workflow' })).toBeNull()
     expect(screen.queryByRole('region', { name: 'Start manual workflow' })).toBeNull()
   }
+})
+const catalogAction = { connection_id: actionElement.connection_id, connection_title: 'Orders connection', connector_ref: reference,
+  operation_ref: actionElement.operation_ref, title: 'Send order', form: { fields: [], submit_label: 'Send' } }
+async function composeWorkflow() {
+  fireEvent.click(screen.getByRole('button', { name: 'Open action catalog' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeEnabled())
+  fireEvent.change(screen.getByLabelText('Definition title'), { target: { value: 'Order workflow' } })
+  fireEvent.change(screen.getByLabelText('Definition stable ID'), { target: { value: reference.id } })
+  fireEvent.change(screen.getByLabelText('Definition version'), { target: { value: String(reference.version) } })
+  fireEvent.change(screen.getByLabelText('Step 1 action'), { target: { value: JSON.stringify([
+    catalogAction.connection_id, catalogAction.connector_ref, catalogAction.operation_ref]) } })
+}
+function setupComposer() {
+  const harness = setupAction()
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.includes('/action-catalog?')) return Promise.resolve(response({ actions: [catalogAction], next_cursor: null }))
+    if (url.endsWith('/manual-workflows')) return Promise.resolve(response(reference))
+    return original(url, options)
+  })
+  return harness
+}
+it('registers from the shared workspace without starting and leaves existing Start review explicit', async () => {
+  const { props, fetchImpl } = setupComposer()
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(fetchImpl.mock.calls.some(([url]) => url.includes('/action-catalog?'))).toBe(false)
+  await composeWorkflow()
+  fireEvent.click(screen.getByRole('button', { name: 'Save workflow definition' }))
+  await screen.findByRole('region', { name: 'Saved immutable definition' })
+  expect(screen.getByLabelText('Workflow definition ID')).toHaveValue('')
+  expect(screen.getByRole('button', { name: 'Load workflow review' })).toBeEnabled()
+  expect(fetchImpl.mock.calls.filter(([, options]) => options.method === 'POST').map(([url]) => url.split('/integrations/')[1])).toEqual(['manual-workflows'])
+})
+it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('refuses definition dispatch and clears input on fresh %s drift', async (field) => {
+  const { props, authority, fetchImpl } = setupComposer()
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeWorkflow()
+  authority.scope = { ...scope, [field]: field === 'projectRole' ? 'reviewer' : field === 'externalSubject' ? 'auth0|other' : field === 'externalAuthority' ? 'other' : otherProject }
+  if (field === 'projectId' || field === 'externalAuthority') vi.spyOn(props.client, 'getScope').mockResolvedValueOnce(authority.scope)
+  fireEvent.click(screen.getByRole('button', { name: 'Save workflow definition' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(fetchImpl.mock.calls.some(([url]) => url.endsWith('/manual-workflows'))).toBe(false)
+  expect(screen.queryByLabelText('Definition title')).toBeNull()
+})
+it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('aborts pending definition registration and clears recovery on %s change', async (change) => {
+  const { props, fetchImpl, sessionController } = setupComposer()
+  const original = fetchImpl.getMockImplementation()
+  let finish
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/manual-workflows')
+    ? new Promise((resolve) => { finish = resolve }) : original(url, options))
+  const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeWorkflow()
+  fireEvent.click(screen.getByRole('button', { name: 'Save workflow definition' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = fetchImpl.mock.calls.find(([url]) => url.endsWith('/manual-workflows'))[1].signal
+  if (change === 'unmount') unmount()
+  else if (change === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else if (change === 'status') act(() => sessionController.change({ status: 'expired' }))
+  else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } : change === 'account' ? { accountScope: 'account-b' } : { active: false })} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish(response(reference)))
+  expect(screen.queryByRole('region', { name: 'Saved immutable definition' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Retry identical workflow definition' })).toBeNull()
 })
 async function reviewWorkflow() {
   fireEvent.change(screen.getByLabelText('Workflow definition ID'), { target: { value: reference.id } })

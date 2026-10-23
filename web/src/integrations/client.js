@@ -3,7 +3,7 @@ import { authHeaders, noteUnauthorized } from '../api.js'
 import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetFieldV1, IntegrationRefV1,
   ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1,
   IntegrationActionElementV1, IntegrationActionSubmissionV1, IntegrationActionSubmissionResultV1, IntegrationActionSnapshotV1,
-  IntegrationManualWorkflowSnapshotV1, IntegrationManualWorkflowDefinitionV1,
+  IntegrationManualWorkflowSnapshotV1, IntegrationManualWorkflowDefinitionV1, IntegrationActionCatalogV1,
   IntegrationManualWorkflowSubmissionV1, IntegrationManualWorkflowSubmissionResultV1 } from '../../../vendor/assistant-contract/src/integration'
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/i
@@ -193,6 +193,18 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
   }
   return {
     available: Boolean(destination),
+    async getActionCatalog(id, { signal, after, limit = 25 } = {}) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 50 || (after !== undefined &&
+          (typeof after !== 'string' || !/^[A-Za-z0-9_-]{1,1024}(?![\s\S])/.test(after)))) throw invalid()
+      const query = new URLSearchParams({ limit: String(limit) })
+      if (after !== undefined) query.set('after', after)
+      return setupResponse(IntegrationActionCatalogV1, id, `action-catalog?${query}`, { signal, method: 'GET' })
+    },
+    async registerManualWorkflow(id, input, options) {
+      const body = parse(IntegrationManualWorkflowDefinitionV1, input)
+      return setupResponse(IntegrationRefV1, id, 'manual-workflows', { ...options, method: 'POST', body, bodyLimit: 65536 },
+        (value) => value.id === body.id && value.version === body.version)
+    },
     async getManualWorkflowDefinition(id, reference, options) {
       const ref = parse(IntegrationRefV1, reference)
       return setupResponse(IntegrationManualWorkflowDefinitionV1, id,
