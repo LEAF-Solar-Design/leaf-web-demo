@@ -94,6 +94,7 @@ import OpsDrawer from './components/OpsDrawer.jsx'
 import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
+import AddonsPanel from './components/AddonsPanel.jsx'
 import CostTransparencyPanel from './components/CostTransparencyPanel.jsx'
 import useTenantMcpRegistry from './useTenantMcpRegistry.js'
 import DemoBanner from './components/DemoBanner.jsx'
@@ -719,6 +720,7 @@ export default function App() {
   // Kept strictly apart from the platform identity above (AUTH.md §0). The token
   // is write-only: we hold linkage status only, never the token itself.
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
+  const [addonsOpen, setAddonsOpen] = useState(false)
 
   // --- Tenant MCP server registry (standardization slice 8c) ---
   const mcpRegistry = useTenantMcpRegistry({ mock })
@@ -4716,6 +4718,7 @@ export default function App() {
               onUnlink={onUnlinkClaude}
             />
           )}
+          {!mock && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
         </div>
       </header>
 
