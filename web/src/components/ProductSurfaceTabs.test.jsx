@@ -17,6 +17,22 @@ import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
 
+it('hides the tabs only for a framed Lab embed route', () => {
+  const originalUrl = window.location.href
+  try {
+    window.history.replaceState({}, '', '/app/lab?embed=1')
+    const { rerender } = render(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    expect(screen.getByRole('navigation', { name: 'Product workspace' })).toBeVisible()
+    const self = vi.spyOn(window, 'self', 'get').mockReturnValue({})
+    rerender(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    expect(screen.queryByRole('navigation', { name: 'Product workspace' })).toBeNull()
+    window.history.replaceState({}, '', '/app/lab?embed=0')
+    rerender(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    expect(screen.getByRole('navigation', { name: 'Product workspace' })).toBeVisible()
+    self.mockRestore()
+  } finally { window.history.replaceState({}, '', originalUrl) }
+})
+
 it.each([
   ['console', '/app', true],
   ['stage', '/try', false],

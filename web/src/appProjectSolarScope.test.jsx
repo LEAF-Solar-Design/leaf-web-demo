@@ -385,7 +385,7 @@ describe('App project Solar scope ownership', () => {
       `${text(components[0].node)}; return ProjectSolarCheckoutControls`)(
       React, React.useEffect, projectHook, projectSolarAppReason)
     const branches = nodes((node) => node.type === 'LogicalExpression' && node.operator === '&&'
-      && text(node.left) === '!mock' && text(node.right).includes('<CheckoutControls'))
+      && text(node.left) === '!mock && !signedOut' && text(node.right).includes('<CheckoutControls'))
     expect(branches).toHaveLength(1)
     const standalone = vi.fn(() => React.createElement('div', { 'data-testid': 'standalone-checkout' }))
     let controlProps
@@ -404,10 +404,19 @@ describe('App project Solar scope ownership', () => {
       canTake: true, unknown: { unknown: true } }
     const legacy = { actions: legacyActions, readFailed: { failed: true },
       failure: { code: 'legacy failure' }, busy: { busy: true } }
-    const legacyInputs = { lock, checkout: legacy, otherHeldCheckout: { holder: 'other' },
+    const legacyInputs = { mock: false, signedOut: false, lock, checkout: legacy, otherHeldCheckout: { holder: 'other' },
       heldByUs: { held: true }, projectSolarAppReason }
     const renderBranch = (inputs) => element(branches[0].node, { ...legacyInputs, ...inputs },
       { ProjectSolarCheckoutControls: ProjectProbe, CheckoutControls: standalone })
+    for (const projectMode of [false, true]) {
+      const project = vi.fn(() => null)
+      const guest = render(element(branches[0].node, { ...legacyInputs, signedOut: true, projectMode },
+        { ProjectSolarCheckoutControls: project, CheckoutControls: standalone }))
+      expect(project).not.toHaveBeenCalled()
+      expect(standalone).not.toHaveBeenCalled()
+      expect(projectHook).not.toHaveBeenCalled()
+      guest.unmount()
+    }
     const variants = [
       { name: 'available', fields: { checkout: null, ownsCheckout: false }, take: true, release: false, retry: true, reason: 'checkout_required' },
       { name: 'owned', fields: { ownsCheckout: true }, take: false, release: true, retry: true, reason: null },

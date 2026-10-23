@@ -14,7 +14,7 @@
     },
     "lab-embed.v1.schema.json": {
       "source": "contract/lab-embed.v1.schema.json",
-      "sha256": "63ff890988df06c06bac1f2f188833dfb433558d1b89fc60c842024e597d5726"
+      "sha256": "09d1c31f3ee0dd3855fa7512cc70e86d4d9f64c3c5c2ef3bcda082f8a465074a"
     },
     "leaf-block-manifest.v1.schema.json": {
       "source": "contract/fixtures/lab/leaf-block-manifest.v1.schema.json",

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, productSurfaceStates, surfaceContract, surfaceRailState } from '../site/productSurfaces.js'
 import { useLabSurfaceStatus } from '../lab/useLabSurfaceStatus.js'
+import { isLabEmbedded, parseLabRoute } from '../lab/labRoute.js'
 import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { useContinuityHost } from '../site/continuityStore.js'
 import { useSurfaceFrame } from '../site/SurfaceFrame.jsx'
@@ -84,6 +85,8 @@ export function AccountSignOut({ signedIn = false, onSignOut = null }) {
 // tablist, rail, sign-out. Outside a store (a tabs band rendered alone) the
 // host is null and the nav renders its tablist and nothing else: fails closed.
 export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mock = true }) {
+  const embedded = typeof window !== 'undefined'
+    && isLabEmbedded(parseLabRoute(window.location.pathname, window.location.search))
   const host = useContinuityHost()
   const frame = useSurfaceFrame()
   const scene = frame ? (frame.scene === 'console' ? 'app' : 'tool') : undefined
@@ -108,7 +111,8 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mo
     if (!nav || !host) return undefined
     nav.appendChild(host)
     return () => { if (host.parentNode === nav) nav.removeChild(host) }
-  }, [host])
+  }, [host, embedded])
+  if (embedded) return null
   return (
     <nav ref={navRef} className="tc-product-nav" data-cast="tool" aria-label="Product workspace">
       <div className="tc-product-tabs" role="tablist" aria-label="Workspace profile" onKeyDown={moveRovingTab}>

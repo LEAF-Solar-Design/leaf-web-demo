@@ -166,7 +166,7 @@ test(H_TITLE, async ({ page }, testInfo) => {
     await openTool('solar-settings')
     const settings = page.getByTestId('solar-settings-form')
     await expect(settings).toHaveAttribute('data-mode', 'initialize')
-    await settings.getByLabel('Drawing units', { exact: true }).selectOption('m')
+    await settings.getByRole('combobox', { name: 'Drawing units', exact: true }).selectOption('m')
     await settings.getByLabel('Panels in sequence', { exact: true }).fill('1')
     const initialized = await run('solar-settings', settings.getByRole('button', { name: 'Start Solar design', exact: true }), params => {
       demand(params.initialize?.units?.drawing_units === 'm' && params.changes?.panels_in_sequence === 1, 'settings initialization intent mismatch')
