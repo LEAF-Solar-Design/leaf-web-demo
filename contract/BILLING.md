@@ -46,10 +46,13 @@ it:
 
 | plan (case-insensitive) | tier |
 |---|---|
-| `free`, `starter`, `basic`, `trial` | `hosted_starter` |
+| `free` | `hosted_free` |
+| `starter`, `basic`, `trial` | `hosted_starter` |
 | `pro`, `monthly`, `yearly`, `single_monthly`, `single_yearly`, `team`, `team_monthly`, `team_yearly`, `business` | `hosted_pro` |
 | `enterprise`, `self_hosted` | `self_hosted` |
 | *unknown / absent* | `hosted_starter` (`DEFAULT_TIER`) |
+
+`hosted_free` is the Free plan's tier, has `hosted_starter`'s capabilities, and is the key for the monthly managed-run allowance (slice A7b).
 
 Unknown plans deliberately resolve to the paid-entry default, never
 `restricted`: a paying-intent identity must not be bounced because a new plan
@@ -57,7 +60,7 @@ name shipped before this table learned it. The lapse override (§4) is the only
 path to `restricted`.
 
 `restricted` is **lapse-reachable only**: `platform/models.py TIERS` (the
-org-CREATION vocabulary) is `("self_hosted", "hosted_starter", "hosted_pro")`
+org-CREATION vocabulary) is `("self_hosted", "hosted_free", "hosted_starter", "hosted_pro")`
 — an org is never born restricted, it can only lapse into it, and only the
 billing feed (or an operator) does that.
 

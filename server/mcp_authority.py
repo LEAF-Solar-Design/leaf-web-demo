@@ -39,6 +39,7 @@ PUBLIC_SERVICES = (
 
 _TIER_AUTHORITY = {
     "restricted": ("starter", ("read",)),
+    "hosted_free": ("starter", ("read", "external_read")),
     "hosted_starter": ("starter", ("read", "external_read")),
     "hosted_pro": (
         "pro", ("read", "external_read", "write", "external_write"),

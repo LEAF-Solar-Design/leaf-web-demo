@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # DeploymentTier enum mirrored from the orchestration platform. Surface-only here;
 # ENTITLEMENT ENFORCEMENT is explicitly out of scope for this lane.
-TIERS = ("self_hosted", "hosted_starter", "hosted_pro")
+TIERS = ("self_hosted", "hosted_free", "hosted_starter", "hosted_pro")
 DEFAULT_TIER = "hosted_starter"
 
 

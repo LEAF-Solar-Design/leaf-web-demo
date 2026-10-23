@@ -11,7 +11,7 @@
 'use strict';
 
 const CLAIM_NS = 'https://leafdesign.ai/';
-const VALID_TIERS = new Set(['restricted', 'self_hosted', 'hosted_starter', 'hosted_pro']);
+const VALID_TIERS = new Set(['restricted', 'self_hosted', 'hosted_free', 'hosted_starter', 'hosted_pro']);
 const DEFAULT_TIER = 'restricted';
 const ACCEPTANCE_TENANT_CLASS = 'non_customer_acceptance';
 const TENANT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
