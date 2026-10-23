@@ -317,8 +317,18 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       const isDataset = resource === 'datasets'
       const page = await client[isDataset ? 'listDatasets' : 'listElements'](projectId, { signal: ctx.controller.signal,
         after: isDataset ? state.datasetCursor : state.elementCursor })
-      if (current(ctx)) setState((old) => ({ ...old, [resource]: [...old[resource], ...page.records],
-        [isDataset ? 'datasetCursor' : 'elementCursor']: page.nextCursor }))
+      if (current(ctx)) setState((old) => {
+        let records = [...old[resource], ...page.records]
+        if (!isDataset) {
+          const byId = new Map()
+          for (const record of records) {
+            const previous = byId.get(record.element.id)
+            if (!previous || record.revision > previous.revision) byId.set(record.element.id, record)
+          }
+          records = [...byId.values()]
+        }
+        return { ...old, [resource]: records, [isDataset ? 'datasetCursor' : 'elementCursor']: page.nextCursor }
+      })
     })
   }
   const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
