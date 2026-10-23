@@ -280,6 +280,26 @@ def reconcile_once(*, aps_client, correlation=None, alarm=None, now=None,
     for row in candidates:
         summary["checked"] += 1
         event_key, tenant_id = row["event_key"], row["tenant_id"]
+        if row.get("terminal_intent_json") is not None:
+            try:
+                # Validate before alarm-only handling; settlement re-reads this
+                # evidence under transaction locks and checks existing ledger.
+                store = broker._postgres_store()
+                store._intent(row, event_key, tenant_id)
+                store.inspect_success_intent(event_key, tenant_id)
+                if alarm_only:
+                    raise_alarm(row, "alarm_only_mode")
+                    continue
+                store.settle_success_intent(event_key, tenant_id, actor="reconciler")
+            except Exception:
+                raise_alarm(row, "terminal_intent_invalid")
+                continue
+            summary["resolved"].append({
+                "event_key": event_key, "tenant_id": tenant_id,
+                "resolution": "verified_terminal",
+                "evidence_ref": f"terminal-intent:v1:{tenant_id}:{event_key}",
+            })
+            continue
         match = _JOB_EVENT.fullmatch(event_key)
         job_id = match.group("job_id") if match else None
         if job_id is not None and jobs[job_id] > 1:

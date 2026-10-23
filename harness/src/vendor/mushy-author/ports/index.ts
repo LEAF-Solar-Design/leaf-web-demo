@@ -268,7 +268,7 @@ export interface GrantDiagnostic {
   linked: boolean;
   kind: GrantKind | "missing";
   linked_at: string | null;
-  backend: "file";
+  backend: "file" | "vault";
   path_class: "efs_access_point" | "local_file" | "environment";
   record_format: "v1" | "v2" | "v3" | "legacy" | "environment" | "missing" | "invalid";
   legacy_fallback_present: boolean;

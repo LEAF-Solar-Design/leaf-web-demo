@@ -71,7 +71,18 @@ CONTRACTS = {
                 build_apply=build_apply_scr, inspect_blocks=MUTATION_INSPECT_BLOCKS),
     3: Contract(activity_id="LeafApplyMutationsV3",
                 build_apply=build_apply_scr_v3, inspect_blocks=MUTATION_INSPECT_BLOCKS_V3),
+    4: Contract(activity_id="LeafApplyMutationsV4",
+                build_apply=build_apply_scr_v3, inspect_blocks=MUTATION_INSPECT_BLOCKS_V3),
 }
+
+
+def build_dxfout_scr(localname: str) -> str:
+    """Export ASCII DXF with the console proof's default version and precision 16."""
+    return (
+        '(setvar "CMDECHO" 0)\r\n'
+        '(setvar "FILEDIA" 0)\r\n'
+        f'(command "_.DXFOUT" "{localname}" "16")\r\n'
+    )
 
 
 def inspection_activity_spec() -> dict[str, Any]:
@@ -99,7 +110,7 @@ def activity_spec(contract: int = 2, source_revision: str | None = None) -> dict
         raise ValueError("source revision must be 40 lowercase hexadecimal characters")
     target = CONTRACTS[contract]
     inspect_script = build_scr(INTAKE_LOCALNAME, extra_blocks=target.inspect_blocks)
-    return {
+    spec = {
         "id": target.activity_id,
         "engine": ENGINE,
         # The second command reopens the exact saved Result bytes before it
@@ -140,6 +151,27 @@ def activity_spec(contract: int = 2, source_revision: str | None = None) -> dict
             + (" leaf-source=" + source_revision if source_revision is not None else "")
         ),
     }
+    if contract == 4:
+        spec["commandLine"] = [
+            COMMAND_LINE.replace("settings[script]", "settings[exportBeforeScript]"),
+            COMMAND_LINE,
+            INSPECTION_COMMAND_LINE,
+            INSPECTION_COMMAND_LINE.replace("settings[inspectScript]", "settings[exportAfterScript]"),
+        ]
+        spec["parameters"].update({
+            "BeforeDxf": {"verb": "put", "required": False, "localName": "before.dxf"},
+            "AfterDxf": {"verb": "put", "required": False, "localName": "after.dxf"},
+        })
+        spec["settings"].update({
+            "exportBeforeScript": {"value": build_dxfout_scr("before.dxf")},
+            "exportAfterScript": {"value": build_dxfout_scr("after.dxf")},
+        })
+        spec["description"] = (
+            "Leaf v4 closed-format drawing mutation interpreter with "
+            "same-WorkItem output inspection and BeforeDxf/AfterDxf exports."
+            + (" leaf-source=" + source_revision if source_revision is not None else "")
+        )
+    return spec
 
 
 def _headers() -> dict[str, str]:

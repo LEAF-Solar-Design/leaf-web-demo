@@ -210,7 +210,7 @@ describe('rollback contract', () => {
     const instruments = `${shell} :is(.cad-overview, .cockpit-cube-wrap, .cockpit-cube-wcs)`
     const rightInset = /right:\s*calc\(var\(--ck-rail-width\) \+ 18px\);/
     expect(bodies(instruments)).toMatch(rightInset)
-    expect(bodies(`${shell} .cad-overview`)).toMatch(/top:\s*calc\(var\(--ck-canvas-top\) \+ 154px\);/)
+    expect(bodies(`${shell} .cad-overview`)).toMatch(/top:\s*calc\(var\(--ck-canvas-top-live\) \+ 154px\);/)
     expect(outsideDesktop.join('\n')).not.toMatch(rightInset)
     expect(outsideDesktop.join('\n')).not.toMatch(/--ck-rail-width:\s*300px;/)
     expect(outsideDesktop.join('\n')).not.toMatch(/--ck-overview-reserve|margin-right:\s*var\(--ck-overview-reserve\);/)

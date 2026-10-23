@@ -29,6 +29,8 @@ from .models import JOB_KINDS, TIERS
 from .mutation_fence import drawing_mutation_refusal_guard, fence_refusal_message
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 from . import org_export
+from . import billing_statement, db, tenant_cost_store
+from .pricebook import load_pricebook
 
 router = APIRouter(prefix="/api", tags=["platform"])
 from .binding_grant_issuance import router as binding_grant_router
@@ -93,6 +95,13 @@ class SetIdentityDisplayNameBody(BaseModel):
     @classmethod
     def validate_display_name(cls, value):
         return project_lifecycle.normalize_display_name(value)
+
+
+class SetAddonModeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str
+    byo_ref: Optional[str] = None
 
 
 class PutProjectFileBody(BaseModel):
@@ -268,6 +277,39 @@ def get_org_identities(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_or
     if org_id != caller_org or store.get_org(org_id) is None:
         raise HTTPException(status_code=404, detail="org not found")
     return {"identities": project_lifecycle.list_org_identities(org_id)}
+
+
+@router.get("/orgs/{org_id}/addons")
+def get_org_addons(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_org_id)):
+    if org_id != caller_org or store.get_org(org_id) is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    with db.connection() as conn:
+        return {"addons": tenant_cost_store.get_addon_settings(conn, org_id)}
+
+
+@router.put("/orgs/{org_id}/addons/{addon}")
+def put_org_addon(org_id: uuid.UUID, addon: str, body: SetAddonModeBody,
+                  caller_org: uuid.UUID = Depends(get_write_org_id),
+                  _auth: Any = Depends(require_auth_when_live)):
+    if org_id != caller_org or store.get_org(org_id) is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    if addon not in tenant_cost_store.ADDONS:
+        raise HTTPException(status_code=404, detail="addon not found")
+    # Auth-off is the existing development seam; live audit uses only the
+    # verified token subject, never a body field or credential lookup.
+    actor = "dev"
+    if platform_deps.auth_live():
+        if not _auth or not _auth.get("sub"):
+            raise HTTPException(status_code=403, detail="verified token has no external subject")
+        actor = str(_auth["sub"])
+    try:
+        setting = tenant_cost_store.validate_addon_mode(
+            org_id, addon, body.mode, byo_ref=body.byo_ref, actor=actor)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    with db.connection() as conn:
+        tenant_cost_store.set_addon_mode(conn, **setting)
+    return {"mode": setting["mode"], "byo_ref": setting["byo_ref"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -1053,6 +1095,39 @@ def billing_org_resolve(body: BillingOrgResolveBody,
     if org is None or org.status != "active" or org.account_class == "production_acceptance":
         raise HTTPException(status_code=404, detail="no platform org for this identity")
     return {"org_id": str(org.org_id)}
+
+
+@router.get("/orgs/{org_id}/billing/statement")
+def get_billing_statement(org_id: uuid.UUID, period: str,
+                          caller_org: uuid.UUID = Depends(get_org_id)):
+    if org_id != caller_org or store.get_org(org_id) is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    try:
+        billing_statement.month_window(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=billing_statement.PERIOD_MESSAGE) from exc
+    pricebook = load_pricebook()
+    try:
+        with db.connection() as conn:
+            statement = billing_statement.build_statement(conn, org_id, period, pricebook)
+    except ValueError as exc:
+        if str(exc) == billing_statement.EVENT_LIMIT_MESSAGE:
+            raise HTTPException(status_code=409, detail=billing_statement.EVENT_LIMIT_MESSAGE) from exc
+        raise
+    return {"statement": statement}
+
+
+@router.get("/orgs/{org_id}/billing/statement-feed")
+def get_billing_statement_feed(org_id: uuid.UUID, period: str,
+                               x_billing_sync_secret: str | None = Header(default=None)):
+    _require_billing_sync_caller(x_billing_sync_secret)
+    org = store.get_org(org_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    if org.account_class == "production_acceptance":
+        raise HTTPException(status_code=409,
+                            detail="production acceptance organization is excluded from billing")
+    return get_billing_statement(org_id, period, caller_org=org_id)
 
 
 @router.post("/orgs/{org_id}/billing/tier-sync")

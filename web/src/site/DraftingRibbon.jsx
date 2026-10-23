@@ -53,25 +53,74 @@ function useBandHeight(ref) {
     const shell = el.closest('.studio-shell')
     const app = el.closest('.app')
     const toolbar = host.querySelector('.viewer-toolbar')
+    let bandToolbar = host.querySelector('.viewer-toolbar') || app?.querySelector('.viewer-toolbar') || shell?.querySelector('.viewer-toolbar') || null
+    let bandObserved = false
     const publish = () => {
+      if (!bandToolbar) bandToolbar = host.querySelector('.viewer-toolbar') || app?.querySelector('.viewer-toolbar') || shell?.querySelector('.viewer-toolbar') || null
+      observeBand()
       host.style.setProperty(RIBBON_HEIGHT_VAR, `${Math.round(el.offsetHeight)}px`)
       // The narrow ground is a sibling of the app. Publish its real band
       // edge on their shared shell, including the document tabs and nav.
       if (shell && toolbar && window.innerWidth <= 980 && window.innerHeight >= 500) {
         shell.style.setProperty('--cockpit-stack-top', `${toolbar.getBoundingClientRect().bottom}px`)
       } else shell?.style.removeProperty('--cockpit-stack-top')
+      // Desktop canvas top follows a pushed-down band bottom; overlays never move up.
+      if (shell && bandToolbar && window.innerWidth >= 981) {
+        shell.style.setProperty('--cockpit-band-bottom', `${Math.floor(bandToolbar.getBoundingClientRect().bottom)}px`)
+      } else shell?.style.removeProperty('--cockpit-band-bottom')
+    }
+    let frame = null
+    let scheduled = false
+    const schedulePublish = () => {
+      if (scheduled) return
+      if (typeof window.requestAnimationFrame !== 'function') {
+        publish()
+        return
+      }
+      scheduled = true
+      const id = window.requestAnimationFrame(() => {
+        scheduled = false
+        frame = null
+        publish()
+      })
+      if (scheduled) frame = id
+    }
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedulePublish)
+    observer?.observe(el)
+    for (const band of app?.querySelectorAll('header.top, .tc-product-nav') || []) observer?.observe(band)
+    const mutations = typeof MutationObserver === 'undefined' ? null : new MutationObserver(records => {
+      for (const record of records) {
+        for (const child of record.addedNodes) {
+          if (child.nodeType === 1) observer?.observe(child)
+        }
+        for (const child of record.removedNodes) {
+          if (child.nodeType === 1) observer?.unobserve(child)
+        }
+      }
+      schedulePublish()
+    })
+    const observeBand = () => {
+      if (!bandToolbar || bandObserved) return
+      bandObserved = true
+      observer?.observe(bandToolbar)
+      if (shell) {
+        for (let ancestor = bandToolbar.parentElement; ancestor; ancestor = ancestor.parentElement) {
+          mutations?.observe(ancestor, { childList: true })
+          for (const child of ancestor.children) observer?.observe(child)
+          if (ancestor === shell) break
+        }
+      }
     }
     publish()
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(publish)
-    observer?.observe(el)
-    if (toolbar) observer?.observe(toolbar)
-    for (const band of app?.querySelectorAll('header.top, .tc-product-nav') || []) observer?.observe(band)
     window.addEventListener('resize', publish)
     return () => {
+      mutations?.disconnect()
       observer?.disconnect()
+      if (frame !== null) window.cancelAnimationFrame?.(frame)
       window.removeEventListener('resize', publish)
       host.style.removeProperty(RIBBON_HEIGHT_VAR)
       shell?.style.removeProperty('--cockpit-stack-top')
+      shell?.style.removeProperty('--cockpit-band-bottom')
     }
   }, [ref])
 }

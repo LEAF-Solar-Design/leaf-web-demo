@@ -309,7 +309,7 @@ function SignedOutGate({ onDemo, onSignIn }) {
         <p className="panel-sub" style={{ margin: 0 }}>
           {onSignIn
             ? 'Sign in to load your tools and drawings from the cloud workspace, or explore the interactive demo on sample data.'
-            : 'This is a live preview of Leaf against the cloud workspace. Sign-in for the live surface is coming soon. Explore the interactive demo to try the prompt lanes, tool catalog, and viewer on a sample rooftop drawing.'}
+            : 'This is a live preview of Leaf against the cloud workspace. Explore the interactive demo to try the prompt lanes, tool catalog, and viewer on a sample rooftop drawing.'}
         </p>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           {onSignIn && <button type="button" className="btn primary" onClick={onSignIn}>Sign in</button>}
@@ -4815,11 +4815,11 @@ export default function App() {
         </>)}
 
         <SurfaceFrame.Tabs />
-        {!boardHostsProject && !mock && openProjectId && (
+        {surfaceSlots.ground !== 'integrations' && !boardHostsProject && !mock && openProjectId && (
           <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
         )}
 
-        {!boardHostsProject && !mock && openProjectId && (
+        {surfaceSlots.ground !== 'integrations' && !boardHostsProject && !mock && openProjectId && (
           <WorkspaceSummary
             workspace={workspace}
             loading={wsLoading}

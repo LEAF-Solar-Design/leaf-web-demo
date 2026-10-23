@@ -58,6 +58,21 @@ const receipt = { id: projectId, actor_id: projectId, binding_id: projectId,
   connector_ref: ref, operation_ref: operationRef, dataset_ref: ref, transform_ref: { ...ref, id: 'orders-transform' },
   source_outcome: 'success', outcome: 'success', row_count: 2, failure_code: null }
 describe('first organization setup HTTP contract', () => {
+  it('revokes only the exact connection with DELETE, fresh If-Match and no body', async () => {
+    const revoked = { ...ownerSummary, state: 'revoked', revision: 8, health: { checked_at: null, code: 'revoked' } }
+    const { client, fetchImpl, options } = setup(revoked)
+    expect(await client.revokeConnection(projectId, connection.id, 7, { ...options, body: { ignored: true }, method: 'POST' })).toEqual(revoked)
+    const [url, request] = fetchImpl.mock.calls[0]
+    expect(url).toMatch(new RegExp(`/api/v1/projects/${projectId}/integrations/connections/${connection.id}$`))
+    expect(request).toMatchObject({ method: 'DELETE', signal: options.signal, credentials: 'omit', redirect: 'error',
+      headers: { Authorization: 'Bearer first', 'If-Match': '7' } })
+    expect(request).not.toHaveProperty('body')
+    expect(request.headers).not.toHaveProperty('Content-Type')
+    await expect(client.revokeConnection(projectId, connection.id, 0, options)).rejects.toMatchObject({ dispatched: false })
+    fetchImpl.mockResolvedValueOnce(response({ ...revoked, id: 'different-connection' }))
+    await expect(client.revokeConnection(projectId, connection.id, 7, options)).rejects.toMatchObject({ dispatched: true })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
   it('uses normalized IDs, exact refs, revision bodies and safe owner projections through the complete flow', async () => {
     const { client, fetchImpl, options } = setup({ reference: ref, revision: 1, issues: [] })
     const imported = { document: { openapi: '3.1.0', paths: {} }, options: { id: 'orders', title: 'Orders' } }
