@@ -49,6 +49,32 @@ function ledger() {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('Strategy revision ledger', () => {
+  it('loads only the diff route when graphs are disabled', async () => {
+    const { client, append, fetchImpl } = ledger()
+    append(first)
+    append(second)
+    const result = await client.diff('strategy', 1, 2, { graphs: false })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${config.apiBase}/api/lab/docs/strategy/diff?before=1&after=2`)
+    expect(result).toEqual({ ok: true, before: 1, after: 2, changes })
+    expect(result).not.toHaveProperty('beforeGraph')
+    expect(result).not.toHaveProperty('afterGraph')
+  })
+
+  it('loads both compared graphs by default with three requests', async () => {
+    const { client, append, fetchImpl } = ledger()
+    append(first)
+    append(second)
+    const result = await client.diff('strategy', 1, 2)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      `${config.apiBase}/api/lab/docs/strategy/diff?before=1&after=2`,
+      `${config.apiBase}/api/lab/docs/strategy/revisions/1`,
+      `${config.apiBase}/api/lab/docs/strategy/revisions/2`,
+    ])
+    expect(result).toEqual({ ok: true, before: 1, after: 2, changes, beforeGraph: first, afterGraph: second })
+  })
+
   it('saves r1/r2, compares settings and pipes, restores r1 as r3 and publishes through the drawer primitive', async () => {
     const { client, fetchImpl } = ledger()
     const events = []
@@ -161,6 +187,22 @@ describe('Strategy revision ledger', () => {
     expect(await client.head('strategy')).toEqual({ ok: true, revision: 3, published_revision: 2 })
     expect(client.state.head).toBe(3)
     expect(client.state.published).toBe(2)
+  })
+
+  it('restores Published r3 in the save bar and drawer on a fresh head read', async () => {
+    const row = { revision: 3, parent_revision: 2, author: 'tester', created_at: 1800000003,
+      sha256: '1'.repeat(64), graph: first }
+    const { graph: unused, ...metadata } = row
+    const fetchImpl = vi.fn(async url => ({ ok: true, json: async () => url.endsWith('/head')
+      ? { ...row, published_revision: 3 } : { revisions: [metadata] } }))
+    const client = createLabArtifactsClient({ fetchImpl })
+    expect(client.state.published).toBeNull()
+    render(<><LabSaveBar document={first} ready client={client} /><HistoryView client={client} /></>)
+    await waitFor(() => expect(within(screen.getByRole('region', { name: 'Save Strategy' })).getByText('Published r3')).toBeVisible())
+    expect(within(await screen.findByTestId('vh-row-v3')).getByText('Published r3')).toBeVisible()
+    expect(client.state.events).toEqual([])
+    expect(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/head'))).toHaveLength(1)
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true)
   })
 
   it('keeps mine byte-identical and retries against the conflict head', async () => {

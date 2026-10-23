@@ -78,7 +78,7 @@ def test_save_read_exact_bytes_and_content_address(local_store):
     assert result["created_at"] > 0
     assert result["canonical_text"].encode() == canonical_bytes(GRAPH)
     assert result["sha256"] == graph_digest(GRAPH)
-    assert ledger.get("tenant-a", "strategy") == result
+    assert ledger.get("tenant-a", "strategy") == {**result, "published_revision": None}
     assert ledger.get("tenant-a", "strategy", 1) == result
     with sqlite3.connect(local_store) as conn:
         text, data, digest = conn.execute("SELECT canonical_text,canonical_bytes,sha256 FROM lab_blobs").fetchone()
@@ -99,7 +99,7 @@ def test_stale_head_never_appends_or_changes_head():
     first = save()
     with pytest.raises(ledger.Conflict):
         save()
-    assert ledger.get("tenant-a", "strategy") == first
+    assert ledger.get("tenant-a", "strategy") == {**first, "published_revision": None}
     assert len(ledger.list_revisions("tenant-a", "strategy")) == 1
 
 
@@ -174,7 +174,7 @@ def test_tenant_caps_rollback_every_write(monkeypatch, local_store, cap):
         operation = lambda: save(1, graph)
     with pytest.raises(TooLarge):
         operation()
-    assert ledger.get("tenant-a", "strategy") == first
+    assert ledger.get("tenant-a", "strategy") == {**first, "published_revision": None}
     with sqlite3.connect(local_store) as conn:
         assert conn.execute("SELECT COUNT(*) FROM lab_blobs").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM lab_documents").fetchone()[0] == 1
@@ -308,6 +308,25 @@ def test_http_save_restore_publish_diff_and_tenant_boundary():
         assert other.get("/api/lab/docs/strategy/" + path).status_code == 404
     assert other.post("/api/lab/docs/strategy/restore", json={"revision": 1, "expected_head": 1}).status_code == 404
     assert other.post("/api/lab/docs/strategy/publish", json={"expected_head": 1}).status_code == 404
+
+
+def test_http_head_carries_published_revision_but_numbered_revision_does_not():
+    http = client()
+    save()
+    head = http.get("/api/lab/docs/strategy/head")
+    assert head.status_code == 200
+    assert head.json()["published_revision"] is None
+    save(1)
+    published = http.post("/api/lab/docs/strategy/publish", json={"expected_head": 2})
+    assert published.status_code == 200
+    assert published.json()["new_head"] == 2
+    head = http.get("/api/lab/docs/strategy/head")
+    assert head.status_code == 200
+    assert head.json()["revision"] == head.json()["published_revision"] == 2
+    revision = http.get("/api/lab/docs/strategy/revisions/2")
+    assert revision.status_code == 200
+    assert revision.json()["revision"] == 2
+    assert "published_revision" not in revision.json()
 
 
 def test_http_status_completes_while_save_is_pending(monkeypatch):

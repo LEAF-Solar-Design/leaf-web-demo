@@ -80,9 +80,9 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       return result
     },
     revision: (id, n) => request(id, `revisions/${encodeURIComponent(n)}`),
-    async diff(id, before, after) {
+    async diff(id, before, after, { graphs = true } = {}) {
       const result = await request(id, `diff?before=${encodeURIComponent(before)}&after=${encodeURIComponent(after)}`)
-      if (!result.ok) return result
+      if (!result.ok || !graphs) return result
       // List rows contain metadata only. Load the compared documents to name
       // blocks in settings changes without rendering any document payload.
       const [left, right] = await Promise.all([request(id, `revisions/${encodeURIComponent(before)}`), request(id, `revisions/${encodeURIComponent(after)}`)])
