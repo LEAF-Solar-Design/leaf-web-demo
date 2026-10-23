@@ -38,7 +38,7 @@ from typing import Dict, FrozenSet, Optional
 
 # Every tier the entitlement policy knows (entitlements.json keys).
 TIER_VOCABULARY: FrozenSet[str] = frozenset({
-    "demo", "guest", "restricted", "self_hosted", "hosted_starter", "hosted_pro",
+    "demo", "guest", "restricted", "self_hosted", "hosted_free", "hosted_starter", "hosted_pro",
     "admin", "demo_live",
 })
 
@@ -51,7 +51,7 @@ TIER_VOCABULARY: FrozenSet[str] = frozenset({
 # it, so no billing state can produce an admin identity (W14, contract/AUTH.md
 # §11.2).
 CLAIM_TIERS: FrozenSet[str] = frozenset({
-    "restricted", "self_hosted", "hosted_starter", "hosted_pro", "admin",
+    "restricted", "self_hosted", "hosted_free", "hosted_starter", "hosted_pro", "admin",
 })
 
 # The tier the admin override mints. Kept as a named constant so the freeze
@@ -65,7 +65,7 @@ ADMIN_TIER = "admin"
 # forward vocabulary for named products — see contract/BILLING.md §2).
 # --------------------------------------------------------------------------- #
 PLAN_TIER: Dict[str, str] = {
-    "free": "hosted_starter",
+    "free": "hosted_free",
     "starter": "hosted_starter",
     "basic": "hosted_starter",
     "trial": "hosted_starter",

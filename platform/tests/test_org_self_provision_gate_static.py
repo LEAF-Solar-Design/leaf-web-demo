@@ -73,13 +73,14 @@ def _assert_invite_only(state):
 
 
 def _assert_created(state, method="ensure"):
+    tier = "hosted_starter" if method == "create" else "hosted_free"
     response = state.client.post("/api/orgs", json={"name": "Bootstrap Org"})
     assert response.status_code == 200, response.text
     assert response.json() == {"org": state.org.to_dict(), "created": True}
-    assert response.json()["org"]["tier"] == "hosted_starter"
-    assert state.writes == [(method, "Bootstrap Org", "hosted_starter")]
+    assert response.json()["org"]["tier"] == tier
+    assert state.writes == [(method, "Bootstrap Org", tier)]
     assert state.events == [(
-        "org.created", str(state.org.org_id), {"tier": "hosted_starter"},
+        "org.created", str(state.org.org_id), {"tier": tier},
     )]
 
 
@@ -120,7 +121,7 @@ def test_active_binding_can_reuse_org_without_opt_in(bootstrap):
     assert bootstrap.writes == []
     assert bootstrap.events == []
     bootstrap.ensure.assert_called_once_with(
-        "Bootstrap Org", "auth0", "auth0|bootstrap", tier="hosted_starter",
+        "Bootstrap Org", "auth0", "auth0|bootstrap", tier="hosted_free",
     )
 
 
@@ -165,6 +166,6 @@ def test_auth_off_identity_seam_uses_server_tier(bootstrap, monkeypatch):
     })
     assert response.status_code == 200, response.text
     assert response.json() == {"org": bootstrap.org.to_dict(), "created": True}
-    assert response.json()["org"]["tier"] == "hosted_starter"
-    assert bootstrap.writes == [("identity", "Bootstrap Org", "hosted_starter")]
+    assert response.json()["org"]["tier"] == "hosted_free"
+    assert bootstrap.writes == [("identity", "Bootstrap Org", "hosted_free")]
     bootstrap.resolve.assert_not_called()

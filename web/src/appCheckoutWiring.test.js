@@ -114,7 +114,7 @@ describe('App.jsx checkout controller adoption', () => {
     // on a tenant switch; the identity does. Reading the chain alone kept
     // addressing the previous tenant's drawing with its bearer capability.
     expect(stripped).toMatch(
-      new RegExp('drawingId: checkoutScopeDrawingId\\(\\{\\s*identityDrawingId: projectMode \\? null : REQUESTED_DRAWING_ID,\\s*drawingState,\\s*requestedDrawingId: REQUESTED_DRAWING_ID\\s*\\}\\)'),
+      new RegExp('drawingId: knownGuest \\? null : checkoutScopeDrawingId\\(\\{\\s*identityDrawingId: projectMode \\? null : REQUESTED_DRAWING_ID,\\s*drawingState,\\s*requestedDrawingId: REQUESTED_DRAWING_ID\\s*\\}\\)'),
     )
   })
 
@@ -174,13 +174,13 @@ describe('App.jsx checkout controller adoption', () => {
     expect(appText(statements[1])).toBe('await login()')
   })
 
-  it('R13F-07 project mode deactivates both legacy checkout inputs and preserves standalone inputs', () => {
+  it.each([false, true])('R13F-07 project mode deactivates both legacy checkout inputs and preserves standalone inputs (knownGuest=%s)', (knownGuest) => {
     const calls = appNodes((node) => node.type === 'CallExpression' && node.callee.name === 'useCheckoutController')
     expect(calls).toHaveLength(1)
     expect(calls[0].arguments).toHaveLength(1)
     expect(calls[0].arguments[0].type).toBe('ObjectExpression')
     const options = Function('projectMode', 'REQUESTED_DRAWING_ID', 'drawingState', 'mock',
-      'ownHolder', 'isAuthRedirectCallback', 'setOwnHolder', 'checkoutScopeDrawingId',
+      'ownHolder', 'isAuthRedirectCallback', 'setOwnHolder', 'checkoutScopeDrawingId', 'knownGuest',
       `return (${appText(calls[0].arguments[0])})`)
     const holder = { sentinel: 'holder' }
     const remint = vi.fn()
@@ -191,9 +191,9 @@ describe('App.jsx checkout controller adoption', () => {
             for (const deferred of [true, false]) {
               const authCallback = vi.fn(() => deferred)
               const actual = options(projectMode, identity, drawingState, mock, holder,
-                authCallback, remint, checkoutScopeDrawingId)
+                authCallback, remint, checkoutScopeDrawingId, knownGuest)
               expect(actual).toEqual({ mock,
-                drawingId: projectMode ? null : checkoutScopeDrawingId({
+                drawingId: knownGuest || projectMode ? null : checkoutScopeDrawingId({
                   identityDrawingId: identity, drawingState, requestedDrawingId: identity }),
                 holder, bootDrawingId: projectMode ? null : identity,
                 deferForAuthCallback: deferred, onHolderRemint: remint })

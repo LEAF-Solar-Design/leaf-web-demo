@@ -94,6 +94,7 @@ import OpsDrawer from './components/OpsDrawer.jsx'
 import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
+import AddonsPanel from './components/AddonsPanel.jsx'
 import CostTransparencyPanel from './components/CostTransparencyPanel.jsx'
 import useTenantMcpRegistry from './useTenantMcpRegistry.js'
 import DemoBanner from './components/DemoBanner.jsx'
@@ -194,7 +195,7 @@ import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
-import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
+import { consoleAuthRequired, consoleSignedOut, consoleKnownGuest } from './controllers/session/consoleGate.js'
 import useCheckoutController from './controllers/checkout/useCheckoutController.js'
 import { useProjectCheckoutController } from './controllers/useProjectCheckoutController.js'
 import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason } from './solar/solarProjectAppModel.js'
@@ -668,6 +669,8 @@ export default function App() {
   // the session. The controller publishes no token-presence signal, so folding
   // these into `status` would change three truth tables; they stay here.
   const [signedIn, setSignedIn] = useState(() => isSignedIn())
+  // Pause authenticated reads for guests before the session response arrives.
+  const knownGuest = consoleKnownGuest({ mock, authConfigured, isSignedIn, authCallback: isAuthRedirectCallback() })
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
   const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
   const [authorOpen, setAuthorOpenState] = useState(false)    // author flow (opens on build lane)
@@ -717,6 +720,7 @@ export default function App() {
   // Kept strictly apart from the platform identity above (AUTH.md §0). The token
   // is write-only: we hold linkage status only, never the token itself.
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
+  const [addonsOpen, setAddonsOpen] = useState(false)
 
   // --- Tenant MCP server registry (standardization slice 8c) ---
   const mcpRegistry = useTenantMcpRegistry({ mock })
@@ -947,7 +951,7 @@ export default function App() {
     closeStartForChange()
     return retryUnreadableHeadRaw(...args)
   }, [retryUnreadableHeadRaw, closeStartForChange])
-  const platform = usePlatformTrustController({ mock })
+  const platform = usePlatformTrustController({ mock, guestReadsPaused: knownGuest })
   const {
     usage,
     usageAt,
@@ -1208,6 +1212,7 @@ export default function App() {
     services: catalogServices,
     adapters: catalogAdapters,
     context: { mock, entitlements, running: false, agentDisabled,
+      guestReadsPaused: knownGuest,
       ...(projectMode ? {
         solarBinding: projectSolar.ready ? projectSolar.scope.binding : null,
         authorityKey: projectSolar.ready ? projectSolar.scope.authorityKey : null,
@@ -1303,7 +1308,7 @@ export default function App() {
     // the version chain wins, the booted identity is the fallback. A tenant
     // switch voids the identity and the scope goes with it — see
     // checkoutScopeDrawingId for why abandoning beats releasing.
-    drawingId: checkoutScopeDrawingId({
+    drawingId: knownGuest ? null : checkoutScopeDrawingId({
       identityDrawingId: projectMode ? null : REQUESTED_DRAWING_ID,
       drawingState,
       requestedDrawingId: REQUESTED_DRAWING_ID,
@@ -3344,11 +3349,11 @@ export default function App() {
     setQuotaAt(quotaError || runQuotaError ? Date.now() : 0)
   }, [quotaError, runQuotaError])
   useEffect(() => {
-    if (mock || (!quotaError && !runQuotaError)) return undefined
+    if (mock || knownGuest || (!quotaError && !runQuotaError)) return undefined
     loadUsage()
     const id = setInterval(loadUsage, 60_000)
     return () => clearInterval(id)
-  }, [mock, quotaError, runQuotaError, loadUsage])
+  }, [mock, knownGuest, quotaError, runQuotaError, loadUsage])
   const freshUsage = quotaAt > 0 && usageAt > quotaAt ? usage : null
   const spendCapCleared = !!(quotaError && freshUsage?.cap?.enabled &&
     typeof freshUsage.cap.remaining === 'number' && freshUsage.cap.remaining > 0)
@@ -3376,6 +3381,8 @@ export default function App() {
   // derivation and one state machine behind it. `isSignedIn` is handed in as a
   // function so the storage read keeps its short circuit.
   const signedOut = consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn })
+  // A signed-out visitor's catalog read can only 401; SignedOutGate already tells them to sign in.
+  const visibleCatalogErr = signedOut ? null : catalogErr
 
   // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
   // module default, so the drawing workspace renders exactly as before unless
@@ -4460,7 +4467,7 @@ export default function App() {
       activeSurface={activeSurface}
       states={surfaceStates}
       catalog={catalog}
-      catalogError={catalogErr}
+      catalogError={visibleCatalogErr}
       workspaceProject={workspaceProjectState}
       boardPresentation={boardVisible}
       studioPresentation={Boolean(studioGround)}
@@ -4700,6 +4707,7 @@ export default function App() {
           {!mock && (
             <ClaudeAccountPanel
               mock={mock}
+              signedOut={signedOut}
               grant={grant}
               loading={grantLoading}
               busy={grantBusy}
@@ -4710,6 +4718,7 @@ export default function App() {
               onUnlink={onUnlinkClaude}
             />
           )}
+          {!mock && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
         </div>
       </header>
 
@@ -5167,7 +5176,7 @@ export default function App() {
             <DraftingRibbon
               clusters={ribbonClusters}
               tab={activeRibbonTab}
-              catalogError={navSpine || (phoneViewport && studioDrawer !== 'nav') ? catalogErr : null}
+              catalogError={navSpine || (phoneViewport && studioDrawer !== 'nav') ? visibleCatalogErr : null}
               onRetryCatalog={loadCatalog}
             >
               {/* The engine's own panels (File, Draw, Modify) read the ONE
@@ -5345,7 +5354,7 @@ export default function App() {
               {!mock && previewing && (
                 <span className="version-note readonly">viewing v{previewing.version} · read-only</span>
               )}
-              {!mock && (
+              {!mock && !signedOut && (
                 projectMode ? (
                   projectSolar.ready ? (
                     <ProjectSolarCheckoutControls

@@ -765,6 +765,19 @@ class PostgresBrokerStore:
             ).fetchone()
         return int(row["used"])
 
+    def monthly_live_run_count(self, tenant_id: str) -> int:
+        with self._db.get_pool().connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS used FROM broker_usage_ledger "
+                "WHERE tenant_id = %(tenant_id)s AND aps_live = TRUE "
+                "AND status NOT IN ('quota_exceeded', 'TENANT_DISABLED', "
+                "'RECONCILED_FAILED_NO_CHARGE') "
+                "AND date_trunc('month', to_timestamp(ts) AT TIME ZONE 'UTC') = "
+                "date_trunc('month', NOW() AT TIME ZONE 'UTC')",
+                {"tenant_id": str(tenant_id)},
+            ).fetchone()
+        return int(row["used"])
+
     def aggregate_usage(self, tenant_id: str) -> Dict[str, Any]:
         """Frozen tenant usage shape, matching da.usage.aggregate_usage."""
         with self._db.get_pool().connection() as conn:
