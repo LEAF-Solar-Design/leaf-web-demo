@@ -1,5 +1,7 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { LiveValues, useLiveGraph } from './canvas/GraphView.jsx'
+import { createHostProvider } from './host/hostProvider.js'
+import { guardSink } from './host/hostResidency.js'
 import { fetchLabStatus, formatLabRoute } from './labRoute.js'
 import { registerLabViews } from './views.js'
 import './lab.css'
@@ -20,11 +22,12 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
   const initialReport = useRef(true)
   const actionAt = useRef(null)
   const [opened, setOpened] = useState(!hidden)
-  const [graph, setGraph] = useState(null)
+  const [revision, setRevision] = useState(0)
+  const [provider, setProvider] = useState(() => createHostProvider({ framed: true,
+    onChange: () => setRevision(value => value + 1) }))
+  const live = useLiveGraph({ provider, revision })
+  const graph = live.draft
   const [restored, setRestored] = useState(null)
-  const [rows, setRows] = useState(null)
-  const [sourcePick, setSourcePick] = useState('')
-  const [inspector, setInspector] = useState(null)
   const [admitted, setAdmitted] = useState(false)
   const [hostProposal, setHostProposal] = useState(null)
   const [reloaded, setReloaded] = useState(false)
@@ -32,10 +35,13 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
 
   useEffect(() => {
     if (!enabled || !createHostBridge) return undefined
+    const sourceProvider = createHostProvider({ framed: true, onChange: () => setRevision(value => value + 1) })
+    setProvider(sourceProvider)
+    sourceProvider.start()
     const connection = createHostBridge({
       onAdmitted: () => setAdmitted(true),
       onChange: ({ ready, problems }) => setHostProposal({ ready, problems }),
-      onSource: (next) => { setRows(next); setSourcePick('host') },
+      onSource: (next) => sourceProvider.announce(next),
       onReload: () => { setReloaded(true); setAdmitted(false); onReload(true) },
       onRestore: (draft) => new Promise((resolve) => {
         restoration.current = resolve
@@ -48,18 +54,17 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
     void connection.start()
     return () => {
       connection.stop()
+      sourceProvider.stop()
       if (bridge.current === connection) bridge.current = null
       restoration.current?.()
       restoration.current = null
       setAdmitted(false)
       setHostProposal(null)
-      setRows(null)
-      setSourcePick('')
     }
   }, [enabled, onReload, createHostBridge])
 
   const changed = useCallback((draft) => {
-    setGraph(draft)
+    live.onChange(draft)
     if (initialReport.current) {
       initialReport.current = false
       restoration.current?.()
@@ -67,12 +72,8 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
       return
     }
     const triggeredAt = actionAt.current ?? performance.now()
-    void bridge.current?.proposal(draft, triggeredAt).catch(() => {})
-  }, [])
-
-  useLayoutEffect(() => {
-    setInspector(root.current?.querySelector('.lab-inspector') || null)
-  }, [graph])
+    void guardSink('proposal', next => bridge.current?.proposal(next, triggeredAt))(draft)?.catch(() => {})
+  }, [live.onChange])
 
   return <div ref={root} className="lab-graph-view" hidden={hidden}
     onPointerDownCapture={() => { actionAt.current = performance.now() }}
@@ -80,26 +81,21 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
     onChangeCapture={() => { actionAt.current = performance.now() }}>
     {opened ? <>
       <section className="lab-graph-status" aria-label="Graph readiness">
-        <p role="status">{graph?.ready ? 'Ready' : 'No valid graph'}</p>
-        {graph?.problems.length > 0 && <ul>{graph.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
+        <p role="status">{live.ready ? 'Ready' : 'No valid graph'}</p>
+        {live.problems.length > 0 && <ul>{live.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
         {hostProposal && <p role="status" aria-label="Host proposal">{hostProposal.ready ? 'Proposal accepted by the host' : hostProposal.problems[0]}</p>}
-        <button type="button" disabled={!enabled || !admitted || !graph?.ready || reloaded || hostProposal?.ready === false || bridge.current?.state?.status === 'too_large'}
+        <button type="button" disabled={!enabled || !admitted || !live.ready || reloaded || hostProposal?.ready === false || bridge.current?.state?.status === 'too_large'}
           onClick={() => {
             const triggeredAt = performance.now()
             // Publish the current draft before asking the host to sign it.
-            void bridge.current?.proposal(graph, triggeredAt).then(() => bridge.current?.run(triggeredAt)).catch(() => {})
+            void guardSink('proposal', draft => bridge.current?.proposal(draft, triggeredAt))(graph)?.then(() => bridge.current?.run(triggeredAt)).catch(() => {})
           }}>Run graph</button>
       </section>
+      <LiveValues values={live.values} provider={provider} />
       <Suspense fallback={<p role="status" aria-label="Loading dependency canvas">Loading dependency canvas…</p>}>
-        <EmbeddedCanvas key={restored?.revision || 0} initialDocument={restored?.document} onChange={changed} />
+        <EmbeddedCanvas key={restored?.revision || 0} initialDocument={restored?.document} entries={live.entries}
+          measurements={live.measurements} upstream={live.upstream} onChange={changed} />
       </Suspense>
-      {inspector && createPortal(<section aria-label="Host source">
-        <label>Host source<select value={sourcePick} onChange={(event) => setSourcePick(event.target.value)}>
-          <option value="">Choose source</option>
-          {rows !== null && <option value="host">Dashboard</option>}
-        </select></label>
-        {sourcePick === 'host' && rows !== null && <pre aria-label="Host source rows">{JSON.stringify(rows, null, 2)}</pre>}
-      </section>, inspector)}
     </> : <p data-graph-placeholder>Open Strategy to load the dependency canvas.</p>}
   </div>
 }

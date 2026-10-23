@@ -23,9 +23,10 @@ vi.mock('../views.js', () => ({
 vi.mock('../canvas/LabCanvas.jsx', async () => {
   const { useEffect } = await import('react')
   const empty = { schema: 'leaf.lab-graph.v1', blocks: [], pipes: [], outputs: {} }
-  return { default: function Canvas({ initialDocument = empty, onChange }) {
+  return { default: function Canvas({ initialDocument = empty, onChange, entries = {} }) {
     useEffect(() => { onChange({ document: initialDocument, ready: true, problems: [] }) }, [initialDocument, onChange])
     return <div data-canvas-editor>
+      <section aria-label="Block palette">{Object.values(entries).map(entry => <button key={entry.id}>{entry.title}</button>)}</section>
       <p aria-label="Canvas document">{JSON.stringify(initialDocument)}</p>
       <button onClick={() => onChange({ document: initialDocument, ready: true, problems: [] })}>Commit ready draft</button>
       <button onClick={() => onChange({ document: initialDocument, ready: false, problems: ['Input required'] })}>Commit incomplete draft</button>
@@ -189,7 +190,7 @@ describe('Lab embedded mode', () => {
     expect(connections).toHaveLength(0)
   })
 
-  it('applies a restored document before resolving and offers host rows in the Inspector source pick', async () => {
+  it('applies a restored document before resolving and offers the Dashboard source without raw rows', async () => {
     framed()
     render(<LabGround active />)
     await canvas()
@@ -200,13 +201,10 @@ describe('Lab embedded mode', () => {
     await act(async () => { await restored })
     expect(screen.getByLabelText('Canvas document')).toHaveTextContent(JSON.stringify(document))
     expect(connection.proposal).not.toHaveBeenCalled()
-    act(() => { connection.callbacks.onSource([{ price: 42 }]) })
-    const inspector = within(screen.getByRole('region', { name: 'Block inspector' }))
-    const sourcePick = inspector.getByRole('combobox', { name: 'Host source' })
-    expect(sourcePick).toHaveValue('host')
-    expect(inspector.getByLabelText('Host source rows')).toHaveTextContent('42')
-    fireEvent.change(sourcePick, { target: { value: '' } })
-    expect(inspector.queryByLabelText('Host source rows')).toBeNull()
+    act(() => { connection.callbacks.onSource([{ source: 'markets', as_of: Date.now(), data: { price: 42 } }]) })
+    expect(screen.getByText('Dashboard sources: markets')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Dashboard source' })).toBeVisible()
+    expect(screen.queryByLabelText('Host source rows')).toBeNull()
   })
 
   it('shows source reload and tears the bridge down when the rail closes', async () => {
