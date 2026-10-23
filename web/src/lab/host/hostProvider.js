@@ -40,8 +40,12 @@ const emptyRowSchema = () => ({ type: 'object', additionalProperties: false, pro
 
 // A synchronous registry fingerprint, not a cryptographic integrity claim.
 export function fingerprint(manifest) {
+  const settings = manifest.settings_schema;
+  const settingsSchema = manifest.id === 'host-source' && settings.properties?.source ? { ...settings, properties: {
+    ...settings.properties, source: { ...settings.properties.source, enum: ['*'] },
+  } } : settings;
   const text = canonicalJSON({ id: manifest.id, semver: manifest.version.semver,
-    settings_schema: manifest.settings_schema });
+    settings_schema: settingsSchema });
   let hash = 0x811c9dc5;
   for (const byte of new TextEncoder().encode(text)) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
   return hash.toString(16).padStart(8, '0').repeat(8);

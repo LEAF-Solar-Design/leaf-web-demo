@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const connections = vi.hoisted(() => [])
+const canvasControl = vi.hoisted(() => ({ report: true, onLayout: null }))
 vi.mock('./hostBridge.js', () => ({
   createLabHostBridge: vi.fn((callbacks) => {
     const connection = {
@@ -21,14 +22,24 @@ vi.mock('../views.js', () => ({
   })),
 }))
 vi.mock('../canvas/LabCanvas.jsx', async () => {
-  const { useEffect } = await import('react')
+  const { useEffect, useLayoutEffect } = await import('react')
   const empty = { schema: 'leaf.lab-graph.v1', blocks: [], pipes: [], outputs: {} }
-  return { default: function Canvas({ initialDocument = empty, onChange }) {
-    useEffect(() => { onChange({ document: initialDocument, ready: true, problems: [] }) }, [initialDocument, onChange])
+  return { default: function Canvas({ initialDocument = empty, onChange, entries = {} }) {
+    useEffect(() => {
+      if (canvasControl.report) onChange({ document: initialDocument, ready: true, problems: [] })
+    }, [initialDocument, onChange])
+    useLayoutEffect(() => { canvasControl.onLayout?.(initialDocument) })
     return <div data-canvas-editor>
+      <section aria-label="Block palette">{Object.values(entries).map(entry => <button key={entry.id}>{entry.title}</button>)}</section>
       <p aria-label="Canvas document">{JSON.stringify(initialDocument)}</p>
       <button onClick={() => onChange({ document: initialDocument, ready: true, problems: [] })}>Commit ready draft</button>
-      <button onClick={() => onChange({ document: initialDocument, ready: false, problems: ['Input required'] })}>Commit incomplete draft</button>
+      <button onClick={() => onChange({ document: { ...initialDocument, blocks: [{ id: 'count-1',
+        registry: { id: 'count', version: '1.0.0', code_sha256: entries['count@1.0.0'].version.code_sha256 }, settings: {},
+      }] }, ready: false, problems: ['Input required'] })}>Commit incomplete draft</button>
+      <button onClick={() => onChange({ document: { ...initialDocument, blocks: [{ id: 'count-1',
+        registry: { id: 'count', version: '1.0.0', code_sha256: entries['count@1.0.0'].version.code_sha256 },
+        settings: { host_tainted: true },
+      }] }, ready: true, problems: [] })}>Commit tainted draft</button>
       <section className="lab-inspector" aria-label="Block inspector"><h2>Block inspector</h2></section>
     </div>
   } }
@@ -40,6 +51,8 @@ import LabWorkbench from '../LabWorkbench.jsx'
 import { createLabHostBridge } from './hostBridge.js'
 import ProductSurfaceTabs from '../../components/ProductSurfaceTabs.jsx'
 import { productSurfaceStates } from '../../site/productSurfaces.js'
+import { createHostProvider } from '../host/hostProvider.js'
+import { addBlock, emptyGraph } from '../canvas/graphDoc.js'
 
 let originalUrl
 const bridgeImport = vi.fn(() => import('./hostBridge.js'))
@@ -47,6 +60,8 @@ beforeEach(() => {
   originalUrl = window.location.href
   window.history.replaceState({}, '', '/app/lab?embed=1')
   connections.length = 0
+  canvasControl.report = true
+  canvasControl.onLayout = null
   vi.clearAllMocks()
   setLabHostBridgeLoader(bridgeImport)
   useLabSurfaceStatus.mockReturnValue({ state: 'on', posture: 'local' })
@@ -65,6 +80,50 @@ const canvas = async () => {
 }
 
 describe('Lab embedded mode', () => {
+  it('clears values before displaying a second restore and waits for its canvas report', async () => {
+    framed()
+    render(<LabGround active />)
+    await canvas()
+    const connection = connections[0]
+    const provider = createHostProvider({ framed: true })
+    const rows = [{ source: 'markets', as_of: Date.now(), data: { price: 42 } }]
+    provider.announce(rows)
+    act(() => connection.callbacks.onSource(rows))
+    const first = addBlock(emptyGraph(), provider.entries()['host-source@1.0.0'])
+    first.blocks[0].settings = { source: 'markets' }
+    let restored
+    act(() => { restored = connection.callbacks.onRestore({ document: first }) })
+    await act(async () => { await restored })
+    const values = screen.getByRole('region', { name: 'Values' })
+    await waitFor(() => expect(within(values).getByRole('heading', { name: 'Dashboard source' })).toBeVisible())
+    canvasControl.report = false
+    const second = emptyGraph()
+    const snapshots = []
+    canvasControl.onLayout = document => {
+      if (document === second) snapshots.push(values.querySelectorAll('article').length)
+    }
+    act(() => { restored = connection.callbacks.onRestore({ document: second }) })
+    expect(screen.getByLabelText('Canvas document')).toHaveTextContent(JSON.stringify(second))
+    expect(values).toBeEmptyDOMElement()
+    expect(snapshots.length).toBeGreaterThan(0)
+    expect(snapshots.every(count => count === 0)).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Commit ready draft' }))
+    await act(async () => { await restored })
+    expect(connection.proposal).not.toHaveBeenCalled()
+  })
+
+  it('reports a synchronous sink refusal without proposing host-tainted settings', async () => {
+    framed()
+    render(<LabGround active />)
+    await canvas()
+    fireEvent.click(screen.getByRole('button', { name: 'Commit tainted draft' }))
+    expect(screen.getByRole('status', { name: 'Host proposal' }))
+      .toHaveTextContent('Proposal refused: host data cannot leave the runtime')
+    expect(connections[0].proposal).not.toHaveBeenCalled()
+    expect(connections[0].run).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Run graph' })).toBeDisabled()
+  })
+
   it.each([[false, '1'], [true, '0'], [true, 'true']])('keeps the standalone shell for framed=%s and embed=%s', async (frame, embed) => {
     if (frame) framed()
     window.history.replaceState({}, '', `/app/lab?embed=${embed}`)
@@ -189,7 +248,7 @@ describe('Lab embedded mode', () => {
     expect(connections).toHaveLength(0)
   })
 
-  it('applies a restored document before resolving and offers host rows in the Inspector source pick', async () => {
+  it('applies a restored document before resolving and offers the Dashboard source without raw rows', async () => {
     framed()
     render(<LabGround active />)
     await canvas()
@@ -200,13 +259,10 @@ describe('Lab embedded mode', () => {
     await act(async () => { await restored })
     expect(screen.getByLabelText('Canvas document')).toHaveTextContent(JSON.stringify(document))
     expect(connection.proposal).not.toHaveBeenCalled()
-    act(() => { connection.callbacks.onSource([{ price: 42 }]) })
-    const inspector = within(screen.getByRole('region', { name: 'Block inspector' }))
-    const sourcePick = inspector.getByRole('combobox', { name: 'Host source' })
-    expect(sourcePick).toHaveValue('host')
-    expect(inspector.getByLabelText('Host source rows')).toHaveTextContent('42')
-    fireEvent.change(sourcePick, { target: { value: '' } })
-    expect(inspector.queryByLabelText('Host source rows')).toBeNull()
+    act(() => { connection.callbacks.onSource([{ source: 'markets', as_of: Date.now(), data: { price: 42 } }]) })
+    expect(screen.getByText('Dashboard sources: markets')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Dashboard source' })).toBeVisible()
+    expect(screen.queryByLabelText('Host source rows')).toBeNull()
   })
 
   it('shows source reload and tears the bridge down when the rail closes', async () => {
