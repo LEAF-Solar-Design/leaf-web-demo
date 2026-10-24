@@ -2,6 +2,954 @@
   "schema": "leaf.lab-graph-cases.v1",
   "cases": [
     {
+      "name": "admission-settings",
+      "registry": [
+        {
+          "schema_version": 1,
+          "id": "constant",
+          "title": "constant",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.0",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {},
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "number"
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": "number"
+              }
+            }
+          },
+          "ui_schema": {},
+          "sample_input": {},
+          "sample_output": {
+            "result": 7
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        }
+      ],
+      "graph": {
+        "schema": "leaf.lab-graph.v1",
+        "blocks": [
+          {
+            "id": "block-0",
+            "registry": {
+              "id": "constant",
+              "version": "1.0.0",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {
+              "value": "x"
+            }
+          }
+        ],
+        "pipes": [],
+        "outputs": {
+          "result": {
+            "node": "block-0",
+            "port": "result"
+          }
+        }
+      },
+      "admission": "refused",
+      "code": "lab_graph_invalid_settings",
+      "block_id": "block-0"
+    },
+    {
+      "name": "admission-incompatible-unit",
+      "registry": [
+        {
+          "schema_version": 1,
+          "id": "constant",
+          "title": "constant",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.0",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {},
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "ui_schema": {},
+          "sample_input": {},
+          "sample_output": {
+            "result": [
+              1,
+              2
+            ]
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        },
+        {
+          "schema_version": 1,
+          "id": "identity",
+          "title": "identity",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.1",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {
+            "value": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "ms",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+          },
+          "ui_schema": {},
+          "sample_input": {
+            "value": [
+              1,
+              2
+            ]
+          },
+          "sample_output": {
+            "result": [
+              1,
+              2
+            ]
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        }
+      ],
+      "graph": {
+        "schema": "leaf.lab-graph.v1",
+        "blocks": [
+          {
+            "id": "block-0",
+            "registry": {
+              "id": "constant",
+              "version": "1.0.0",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {
+              "value": [
+                1,
+                2
+              ]
+            }
+          },
+          {
+            "id": "block-1",
+            "registry": {
+              "id": "identity",
+              "version": "1.0.1",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {}
+          }
+        ],
+        "pipes": [
+          {
+            "from": {
+              "node": "block-0",
+              "port": "result"
+            },
+            "to": {
+              "node": "block-1",
+              "port": "value"
+            }
+          }
+        ],
+        "outputs": {
+          "result": {
+            "node": "block-1",
+            "port": "result"
+          }
+        }
+      },
+      "admission": "refused",
+      "code": "lab_graph_incompatible_pins",
+      "block_id": "block-1"
+    },
+    {
+      "name": "admission-duplicate-input",
+      "registry": [
+        {
+          "schema_version": 1,
+          "id": "constant",
+          "title": "constant",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.0",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {},
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "ui_schema": {},
+          "sample_input": {},
+          "sample_output": {
+            "result": [
+              1,
+              2
+            ]
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        },
+        {
+          "schema_version": 1,
+          "id": "identity",
+          "title": "identity",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.1",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {
+            "value": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+          },
+          "ui_schema": {},
+          "sample_input": {
+            "value": [
+              1,
+              2
+            ]
+          },
+          "sample_output": {
+            "result": [
+              1,
+              2
+            ]
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        }
+      ],
+      "graph": {
+        "schema": "leaf.lab-graph.v1",
+        "blocks": [
+          {
+            "id": "block-0",
+            "registry": {
+              "id": "constant",
+              "version": "1.0.0",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {
+              "value": [
+                1,
+                2
+              ]
+            }
+          },
+          {
+            "id": "block-1",
+            "registry": {
+              "id": "identity",
+              "version": "1.0.1",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {}
+          },
+          {
+            "id": "block-extra",
+            "registry": {
+              "id": "constant",
+              "version": "1.0.0",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {
+              "value": [
+                1,
+                2
+              ]
+            }
+          }
+        ],
+        "pipes": [
+          {
+            "from": {
+              "node": "block-0",
+              "port": "result"
+            },
+            "to": {
+              "node": "block-1",
+              "port": "value"
+            }
+          },
+          {
+            "from": {
+              "node": "block-extra",
+              "port": "result"
+            },
+            "to": {
+              "node": "block-1",
+              "port": "value"
+            }
+          }
+        ],
+        "outputs": {
+          "result": {
+            "node": "block-1",
+            "port": "result"
+          }
+        }
+      },
+      "admission": "refused",
+      "code": "lab_graph_duplicate_input",
+      "block_id": "block-1"
+    },
+    {
+      "name": "admission-required-input",
+      "registry": [
+        {
+          "schema_version": 1,
+          "id": "constant",
+          "title": "constant",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.0",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {},
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "ui_schema": {},
+          "sample_input": {},
+          "sample_output": {
+            "result": [
+              1,
+              2
+            ]
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        },
+        {
+          "schema_version": 1,
+          "id": "identity",
+          "title": "identity",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.1",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {
+            "value": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": true,
+              "has_default": false
+            }
+          },
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+          },
+          "ui_schema": {},
+          "sample_input": {
+            "value": [
+              1,
+              2
+            ]
+          },
+          "sample_output": {
+            "result": [
+              1,
+              2
+            ]
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        }
+      ],
+      "graph": {
+        "schema": "leaf.lab-graph.v1",
+        "blocks": [
+          {
+            "id": "block-0",
+            "registry": {
+              "id": "constant",
+              "version": "1.0.0",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {
+              "value": [
+                1,
+                2
+              ]
+            }
+          },
+          {
+            "id": "block-1",
+            "registry": {
+              "id": "identity",
+              "version": "1.0.1",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {}
+          }
+        ],
+        "pipes": [],
+        "outputs": {
+          "result": {
+            "node": "block-1",
+            "port": "result"
+          }
+        }
+      },
+      "admission": "refused",
+      "code": "lab_graph_input_required",
+      "block_id": "block-1"
+    },
+    {
+      "name": "admission-missing-output",
+      "registry": [
+        {
+          "schema_version": 1,
+          "id": "constant",
+          "title": "constant",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.0",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {},
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "ui_schema": {},
+          "sample_input": {},
+          "sample_output": {
+            "result": [
+              1,
+              2
+            ]
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        },
+        {
+          "schema_version": 1,
+          "id": "identity",
+          "title": "identity",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.1",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {
+            "value": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+          },
+          "ui_schema": {},
+          "sample_input": {
+            "value": [
+              1,
+              2
+            ]
+          },
+          "sample_output": {
+            "result": [
+              1,
+              2
+            ]
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        }
+      ],
+      "graph": {
+        "schema": "leaf.lab-graph.v1",
+        "blocks": [
+          {
+            "id": "block-0",
+            "registry": {
+              "id": "constant",
+              "version": "1.0.0",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {
+              "value": [
+                1,
+                2
+              ]
+            }
+          },
+          {
+            "id": "block-1",
+            "registry": {
+              "id": "identity",
+              "version": "1.0.1",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {}
+          }
+        ],
+        "pipes": [
+          {
+            "from": {
+              "node": "block-0",
+              "port": "result"
+            },
+            "to": {
+              "node": "block-1",
+              "port": "value"
+            }
+          }
+        ],
+        "outputs": {
+          "result": {
+            "node": "block-1",
+            "port": "missing"
+          }
+        }
+      },
+      "admission": "refused",
+      "code": "lab_graph_bad_port",
+      "block_id": "block-1"
+    },
+    {
+      "name": "admission-integer-output-name",
+      "registry": [
+        {
+          "schema_version": 1,
+          "id": "constant",
+          "title": "constant",
+          "profile": "lab-registry",
+          "version": {
+            "semver": "1.0.0",
+            "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "kind": "builtin",
+          "inputs": {},
+          "outputs": {
+            "result": {
+              "mode": "scalar",
+              "schema": {
+                "type": "number"
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            },
+            "0": {
+              "mode": "stream",
+              "schema": {
+                "type": "number"
+              },
+              "unit": "none",
+              "nullable": true,
+              "required": false,
+              "has_default": false
+            }
+          },
+          "settings_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "ui_schema": {},
+          "sample_input": {},
+          "sample_output": {
+            "result": 7,
+            "0": 1
+          },
+          "latency_budget_us": {
+            "profile": "legacy-us-to-std4-ns-ms-v1",
+            "p50": 1,
+            "p99": 10
+          },
+          "lane": "processing",
+          "effect": "pure",
+          "execution_target": "runner",
+          "residency": "tenant",
+          "permissions": [],
+          "state": "stateless",
+          "tests": [
+            "sample"
+          ]
+        }
+      ],
+      "graph": {
+        "schema": "leaf.lab-graph.v1",
+        "blocks": [
+          {
+            "id": "block-0",
+            "registry": {
+              "id": "constant",
+              "version": "1.0.0",
+              "code_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "settings": {
+              "value": [
+                1,
+                2
+              ]
+            }
+          }
+        ],
+        "pipes": [],
+        "outputs": {
+          "result": {
+            "node": "block-0",
+            "port": "result"
+          }
+        }
+      },
+      "admission": "refused",
+      "code": "lab_graph_manifest_invalid",
+      "block_id": "block-0"
+    },
+    {
       "name": "constant-number",
       "registry": [
         {

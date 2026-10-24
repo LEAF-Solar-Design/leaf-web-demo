@@ -33,6 +33,14 @@ def ticks(*values):
 def test_shared_case(item):
     before = deepcopy(item)
     registry = {f'{m["id"]}@{m["version"]["semver"]}': m for m in item["registry"]}
+    if item.get("admission") == "refused":
+        seen = []
+        with pytest.raises(GraphRefused) as exc:
+            evaluate_graph(item["graph"], registry, on_block=lambda *args: seen.append(args))
+        assert (exc.value.code, exc.value.block_id) == (item["code"], item["block_id"])
+        assert seen == []
+        assert item == before
+        return
     result = evaluate_graph(item["graph"], registry)
     assert {name: {key: getattr(value, key) for key in FIELDS}
             for name, value in result["outputs"].items()} == item["expect"]
@@ -45,6 +53,99 @@ def test_fixture_contract():
     assert FIXTURE["schema"] == "leaf.lab-graph-cases.v1"
     assert len(CASES) >= 25
     assert len({item["name"] for item in CASES}) == len(CASES)
+
+
+def test_integer_output_name_is_refused_before_execution():
+    graph, registry = case("constant-number")
+    manifest = registry["constant@1.0.0"]
+    manifest["outputs"]["0"] = deepcopy(manifest["outputs"]["result"])
+    manifest["sample_output"]["0"] = 7
+    seen = []
+    with pytest.raises(GraphRefused) as exc:
+        evaluate_graph(graph, registry, on_block=lambda *args: seen.append(args))
+    assert (exc.value.code, exc.value.block_id) == ("lab_graph_manifest_invalid", "block-0")
+    assert not seen
+
+
+@pytest.mark.parametrize("mutation", [
+    "structure", "settings-keyword", "settings-type", "nested-schema", "sample-input",
+    "sample-output", "sample-required", "latency", "pin-keyword", "nullable",
+    "default", "missing-default", "unexpected-default", "ui",
+])
+def test_manifest_admission_refuses_before_execution(mutation):
+    graph, registry = case()
+    manifest = registry["identity@1.0.1"]
+    pin = manifest["inputs"]["value"]
+    if mutation == "structure":
+        del manifest["title"]
+    elif mutation == "settings-keyword":
+        manifest["settings_schema"]["patternProperties"] = {}
+    elif mutation == "settings-type":
+        manifest["settings_schema"]["type"] = ["object", "object"]
+    elif mutation == "nested-schema":
+        manifest["settings_schema"]["properties"]["value"] = {"type": "array"}
+    elif mutation == "sample-input":
+        manifest["sample_input"]["value"] = "wrong"
+    elif mutation == "sample-output":
+        manifest["sample_output"]["result"] = "wrong"
+    elif mutation == "sample-required":
+        pin["required"] = True
+        manifest["sample_input"] = {}
+    elif mutation == "latency":
+        manifest["latency_budget_us"]["p50"] = manifest["latency_budget_us"]["p99"] + 1
+    elif mutation == "pin-keyword":
+        pin["schema"]["maxProperties"] = 1
+    elif mutation == "nullable":
+        pin.update(nullable=False, schema={"type": ["array", "null"], "items": {"type": "number"}})
+    elif mutation == "default":
+        pin.update(has_default=True, default="wrong")
+    elif mutation == "missing-default":
+        pin["has_default"] = True
+    elif mutation == "unexpected-default":
+        pin["default"] = None
+    else:
+        manifest["ui_schema"]["permissions"] = []
+    seen = []
+    with pytest.raises(GraphRefused) as exc:
+        evaluate_graph(graph, registry, on_block=lambda *args: seen.append(args))
+    assert (exc.value.code, exc.value.block_id) == ("lab_graph_manifest_invalid", "block-1")
+    assert not seen
+
+
+def test_nullable_samples_and_defaults_and_required_default_are_admitted():
+    graph, registry = case()
+    manifest = registry["identity@1.0.1"]
+    manifest["inputs"]["value"].update(required=True, has_default=True, default=None)
+    manifest["sample_input"] = {}
+    manifest["sample_output"]["result"] = None
+    graph["pipes"] = []
+    assert evaluate_graph(graph, registry)["outputs"]["result"].data is None
+
+
+@pytest.mark.parametrize("output_schema,input_schema,accepted", [
+    ({"type": "integer"}, {"type": "number"}, True),
+    ({"type": "number"}, {"type": "integer"}, False),
+    ({"type": "number", "minimum": 2}, {"type": "number", "minimum": 1}, True),
+    ({"type": "number"}, {"type": "number", "minimum": 1}, False),
+    ({"type": "number", "maximum": 2}, {"type": "number", "maximum": 1}, False),
+    ({"type": "number", "enum": [1]}, {"type": "number", "enum": [1, 2]}, True),
+    ({"type": "number", "enum": [1, 2]}, {"type": "number", "enum": [1]}, False),
+    ({"type": "string", "minLength": 2}, {"type": "string"}, False),
+    ({"type": ["number", "null"]}, {"type": ["number", "null"]}, True),
+    ({"type": ["number", "null"], "minimum": 2}, {"type": ["number", "null"]}, False),
+])
+def test_pin_compatibility_subset(output_schema, input_schema, accepted):
+    pin = {"mode": "scalar", "unit": "none", "nullable": False}
+    assert evaluator.compatible(dict(pin, schema=output_schema), dict(pin, schema=input_schema)) is accepted
+
+
+@pytest.mark.parametrize("field,value", [("mode", "stream"), ("unit", "ms"), ("nullable", False)])
+def test_pin_compatibility_metadata(field, value):
+    graph, registry = case()
+    registry["identity@1.0.1"]["inputs"]["value"][field] = value
+    with pytest.raises(GraphRefused) as exc:
+        evaluate_graph(graph, registry)
+    assert (exc.value.code, exc.value.block_id) == ("lab_graph_incompatible_pins", "block-1")
 
 
 @pytest.mark.parametrize("source", ["studio-jobs", "studio-capabilities", "host-source"])
@@ -64,7 +165,7 @@ def test_read_sources_refused_before_any_block(source):
 def test_manifest_host_refused():
     graph, registry = case()
     registry["identity@1.0.1"]["residency"] = "host"
-    with pytest.raises(GraphRefused, match="lab_graph_host_refused"):
+    with pytest.raises(GraphRefused, match="lab_graph_manifest_invalid"):
         evaluate_graph(graph, registry)
 
 
@@ -84,11 +185,14 @@ def test_server_derived_metadata_is_authoritative(monkeypatch, effect, residency
     assert not seen
 
 
-@pytest.mark.parametrize("effect", ["write", "simulate", "read", "compute"])
-def test_manifest_effect_refused(effect):
+@pytest.mark.parametrize("effect,code", [("write", "lab_graph_effect_refused"),
+                                      ("simulate", "lab_graph_manifest_invalid"),
+                                      ("read", "lab_graph_effect_refused"),
+                                      ("compute", "lab_graph_manifest_invalid")])
+def test_manifest_effect_refused(effect, code):
     graph, registry = case()
     registry["identity@1.0.1"]["effect"] = effect
-    with pytest.raises(GraphRefused, match="lab_graph_effect_refused"):
+    with pytest.raises(GraphRefused, match=code):
         evaluate_graph(graph, registry)
 
 
@@ -117,8 +221,8 @@ def test_bad_port(target):
 
 def test_cycle_is_refused_before_any_block():
     graph, registry = case()
-    graph["pipes"].append({"from": {"node": "block-1", "port": "result"},
-                           "to": {"node": "block-1", "port": "value"}})
+    graph["pipes"] = [{"from": {"node": "block-1", "port": "result"},
+                       "to": {"node": "block-1", "port": "value"}}]
     seen = []
     with pytest.raises(GraphRefused, match="lab_graph_cycle"):
         evaluate_graph(graph, registry, on_block=lambda *args: seen.append(args))
@@ -146,6 +250,7 @@ def test_budget_replaces_every_output_and_inherits_metadata():
     graph, registry = case("row-truncation")
     manifest = registry["constant@1.0.0"]
     manifest["outputs"]["other"] = deepcopy(manifest["outputs"]["result"])
+    manifest["sample_output"]["other"] = deepcopy(manifest["sample_output"]["result"])
     result = evaluate_graph(graph, registry, budget=Budget(block_output_bytes=1))
     for output in result["values"]["block-0"].values():
         assert output.error == "budget-exceeded"
@@ -160,6 +265,12 @@ def test_output_byte_budget_counts_ports_after_validation(limit):
     manifest["outputs"]["result"]["schema"] = {"type": "number"}
     manifest["outputs"]["other"] = deepcopy(manifest["outputs"]["result"])
     manifest["outputs"]["other"]["schema"] = {"type": "string"}
+    manifest["sample_output"] = {"result": 1, "other": "sample"}
+    manifest["settings_schema"]["properties"]["value"] = {"type": "string"}
+    # Both output pins remain admissible, while the operation's string result
+    # violates only the first output. The downstream pin must accept its schema.
+    registry["identity@1.0.1"]["inputs"]["value"]["schema"] = {"type": "number"}
+    registry["identity@1.0.1"]["sample_input"]["value"] = 1
     result = evaluate_graph(graph, registry, budget=Budget(block_output_bytes=limit))
     outputs = result["values"]["block-0"]
     # Refused data is null (4 bytes); the retained string is 22 UTF-8 bytes.
@@ -180,6 +291,7 @@ def test_output_byte_budget_sums_small_ports(limit):
     graph, registry = case()
     manifest = registry["constant@1.0.0"]
     manifest["outputs"]["other"] = deepcopy(manifest["outputs"]["result"])
+    manifest["sample_output"]["other"] = deepcopy(manifest["sample_output"]["result"])
     result = evaluate_graph(graph, registry, budget=Budget(block_output_bytes=limit))
     outputs = result["values"]["block-0"]
     # Each [1,2] fits individually (5 bytes); together they require 10 bytes.
@@ -344,6 +456,9 @@ def test_settings_large_integers_use_browser_numbers(nested):
     graph["blocks"][0]["settings"]["value"] = [9007199254740993] if nested else 9007199254740993
     pin = registry["constant@1.0.0"]["outputs"]["result"]
     pin["schema"] = {"type": "array", "items": {"type": "number"}} if nested else {"type": "number"}
+    registry["constant@1.0.0"]["settings_schema"]["properties"]["value"] = deepcopy(pin["schema"])
+    if nested:
+        registry["constant@1.0.0"]["sample_output"]["result"] = [7]
     value = evaluate_graph(graph, registry)["outputs"]["result"].data
     number = value[0] if nested else value
     assert type(number) is float and number == 9007199254740992.0
@@ -393,6 +508,7 @@ def test_output_pins_validate_independently():
     wrong_schema = deepcopy(manifest["outputs"]["result"])
     wrong_schema["schema"] = {"type": "string"}
     manifest["outputs"]["wrong-schema"] = wrong_schema
+    manifest["sample_output"].update({"wrong-mode": 7, "wrong-schema": "sample"})
     result = evaluate_graph(graph, registry)["values"]["block-0"]
     assert result["result"].data == 7
     assert result["wrong-mode"].error == result["wrong-schema"].error == "output-refused"
@@ -401,6 +517,8 @@ def test_output_pins_validate_independently():
 def test_stream_events_are_validated_individually():
     graph, registry = case("stream-latest")
     graph["blocks"][0]["settings"]["value"] = [1, "wrong"]
+    registry["constant@1.0.0"]["settings_schema"]["properties"]["value"]["items"] = {
+        "type": ["number", "string"]}
     result = evaluate_graph(graph, registry)
     assert result["values"]["block-0"]["result"].error == "output-refused"
     assert result["outputs"]["result"].error == "upstream-failed"

@@ -20,6 +20,12 @@ describe('shared Lab graph evaluation conformance', () => {
     expect(fixture.schema).toBe('leaf.lab-graph-cases.v1');
     expect(fixture.cases.length).toBeGreaterThanOrEqual(25);
     expect(new Set(fixture.cases.map(test => test.name)).size).toBe(fixture.cases.length);
+    expect(fixture.cases.filter(test => test.admission === 'refused').map(test => test.name)).toEqual(
+      expect.arrayContaining([
+        'admission-settings', 'admission-incompatible-unit', 'admission-duplicate-input',
+        'admission-required-input', 'admission-missing-output', 'admission-integer-output-name',
+      ]),
+    );
   });
 
   it.each(fixture.cases)('$name', test => {
@@ -27,6 +33,11 @@ describe('shared Lab graph evaluation conformance', () => {
       `${manifest.id}@${manifest.version.semver}`, manifest,
     ]));
     const before = structuredClone(test);
+    if (test.admission === 'refused') {
+      expect(() => evaluateGraph(test.graph, registry)).toThrow();
+      expect(test).toEqual(before);
+      return;
+    }
     const result = evaluateGraph(test.graph, registry);
     expect(Object.keys(result.outputs).sort()).toEqual(Object.keys(test.expect).sort());
     for (const [name, expected] of Object.entries(test.expect)) {

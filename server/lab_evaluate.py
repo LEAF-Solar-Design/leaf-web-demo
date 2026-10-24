@@ -11,7 +11,7 @@ import time
 from types import MappingProxyType
 
 from jsonschema import Draft202012Validator
-from referencing import Registry
+from referencing import Registry, Resource
 
 from lab_canonical import canonical_json
 from lab_doc_validators import validate_graph
@@ -59,8 +59,8 @@ def _copy(data, *, bounded=False, frozen=False, flags=None):
                     for child in (data[:MAX_ROWS] if bounded else data)]
         return _List(children) if frozen else children
     if isinstance(data, dict):
-        children = {key: _copy(child, bounded=bounded, frozen=frozen, flags=flags)
-                    for key, child in data.items()}
+        children = {key: _copy(value, bounded=bounded, frozen=frozen, flags=flags)
+                    for key, value in data.items()}
         return _Dict(children) if frozen else children
     if type(data) is int and abs(data) > 2 ** 53:
         return float(data)
@@ -175,6 +175,188 @@ def trusted_registry():
     return MappingProxyType(registry)
 
 
+@lru_cache(maxsize=1)
+def _contract_validators():
+    root = Path(__file__).resolve().parents[1] / "contract"
+    names = ("lab-block.v1.schema.json", "lab-pin.v1.schema.json",
+             "lab-graph.v1.schema.json", "fixtures/lab/leaf-block-manifest.v1.schema.json")
+    documents = {name: json.loads((root / name).read_text(encoding="utf-8")) for name in names}
+    resources = Registry()
+    for name, document in documents.items():
+        resource = Resource.from_contents(document)
+        resources = resources.with_resource("https://leaf.internal/contract/" + name, resource)
+        resources = resources.with_resource(document["$id"], resource)
+    return {name: Draft202012Validator(document, registry=resources)
+            for name, document in documents.items()}
+
+
+def check_embedded(schema):
+    vocabulary = {"type", "const", "enum", "required", "properties", "additionalProperties",
+                  "items", "minItems", "maxItems", "minimum", "maximum", "minLength",
+                  "maxLength", "title", "description"}
+    if not isinstance(schema, dict) or "type" not in schema or set(schema) - vocabulary:
+        raise ValueError("unsupported schema")
+    types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+    if (not types or any(not isinstance(kind, str) or kind not in
+                        {"null", "boolean", "number", "integer", "string", "object", "array"}
+                        for kind in types) or len(set(types)) != len(types)):
+        raise ValueError("schema type required")
+    for key in ("minimum", "maximum"):
+        if key in schema and (type(schema[key]) not in (int, float) or not math.isfinite(schema[key])):
+            raise ValueError("schema bounds refused")
+    for key in ("minItems", "maxItems", "minLength", "maxLength"):
+        if key in schema and (type(schema[key]) not in (int, float)
+                              or not math.isfinite(schema[key]) or int(schema[key]) != schema[key]
+                              or schema[key] < 0):
+            raise ValueError("schema bounds refused")
+    if "enum" in schema:
+        choices = schema["enum"]
+        if (not isinstance(choices, list) or not choices
+                or len({canonical_json(item) for item in choices}) != len(choices)):
+            raise ValueError("schema choices refused")
+    if "required" in schema:
+        required = schema["required"]
+        if (not isinstance(required, list) or any(not isinstance(key, str) for key in required)
+                or len(set(required)) != len(required)):
+            raise ValueError("required setting refused")
+    for key in ("title", "description"):
+        if key in schema and not isinstance(schema[key], str):
+            raise ValueError("schema text refused")
+    if "additionalProperties" in schema and type(schema["additionalProperties"]) is not bool:
+        raise ValueError("closed settings required")
+    if "properties" in schema:
+        if not isinstance(schema["properties"], dict):
+            raise ValueError("schema settings refused")
+        for child in schema["properties"].values():
+            check_embedded(child)
+    if "items" in schema:
+        check_embedded(schema["items"])
+    if "object" in types:
+        if not isinstance(schema.get("properties"), dict) or schema.get("additionalProperties") is not False:
+            raise ValueError("closed settings required")
+        if any(key not in schema["properties"] for key in schema.get("required", [])):
+            raise ValueError("required setting missing")
+    if "array" in types:
+        check_embedded(schema.get("items"))
+
+
+def compatible(output, input):
+    if (output["mode"] != input["mode"] or output["unit"] != input["unit"]
+            or (output["nullable"] and not input["nullable"])):
+        return False
+    a, b = output["schema"], input["schema"]
+    if canonical_json(a) == canonical_json(b):
+        return True
+    if (set(a) | set(b)) - {"type", "minimum", "maximum", "enum"}:
+        return False
+    # JavaScript compares type arrays by identity, rather than by contents.
+    if not (isinstance(a["type"], str) and isinstance(b["type"], str)
+            and (a["type"] == b["type"] or (a["type"] == "integer" and b["type"] == "number"))):
+        return False
+    if "minimum" in b and ("minimum" not in a or a["minimum"] < b["minimum"]):
+        return False
+    if "maximum" in b and ("maximum" not in a or a["maximum"] > b["maximum"]):
+        return False
+    if "enum" in b and ("enum" not in a or any(
+            canonical_json(value) not in {canonical_json(item) for item in b["enum"]}
+            for value in a["enum"])):
+        return False
+    return True
+
+
+def _admit_manifest(manifest):
+    canonical_json(manifest)
+    _contract_validators()["lab-block.v1.schema.json"].validate(manifest)
+    check_embedded(manifest["settings_schema"])
+    for direction, sample in (("inputs", "sample_input"), ("outputs", "sample_output")):
+        pins = manifest[direction]
+        properties = {key: {"anyOf": [pins[key]["schema"], {"type": "null"}]}
+                      if pins[key]["nullable"] else pins[key]["schema"] for key in pins}
+        required = [key for key in pins if direction == "outputs"
+                    or (pins[key]["required"] and not pins[key]["has_default"])]
+        Draft202012Validator({"type": "object", "additionalProperties": False,
+                              "properties": properties, "required": required},
+                             registry=Registry()).validate(manifest[sample])
+    if manifest["latency_budget_us"]["p50"] > manifest["latency_budget_us"]["p99"]:
+        raise ValueError("latency bounds refused")
+    for direction in ("inputs", "outputs"):
+        for pin in manifest[direction].values():
+            check_embedded(pin["schema"])
+            types = pin["schema"]["type"]
+            if not pin["nullable"] and (types == "null" or isinstance(types, list) and "null" in types):
+                raise ValueError("nullability mismatch")
+            if pin["has_default"] and not (pin["default"] is None and pin["nullable"]):
+                Draft202012Validator(pin["schema"], registry=Registry()).validate(pin["default"])
+    if not isinstance(manifest["ui_schema"], dict) or set(manifest["ui_schema"]) - {"order", "labels"}:
+        raise ValueError("presentation refused")
+
+
+def admit_graph(graph, registry):
+    """Browser contract.graph admission, before server execution policy."""
+    try:
+        _contract_validators()["lab-graph.v1.schema.json"].validate(graph)
+        size = len(canonical_json(graph).encode("utf-8"))
+    except Exception as error:
+        raise GraphRefused("lab_graph_invalid") from error
+    if size > 262144:
+        raise GraphRefused("lab_graph_too_large")
+    manifests = {}
+    for block in graph["blocks"]:
+        block_id, ref = block["id"], block["registry"]
+        if block_id in manifests:
+            raise GraphRefused("lab_graph_duplicate_block", block_id)
+        manifest = registry.get(f'{ref["id"]}@{ref["version"]}')
+        if manifest is None:
+            raise GraphRefused("lab_graph_unknown_block", block_id)
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("version"), dict):
+            raise GraphRefused("lab_graph_manifest_invalid", block_id)
+        if manifest["version"].get("code_sha256") != ref["code_sha256"]:
+            raise GraphRefused("lab_graph_unknown_block", block_id)
+        try:
+            _admit_manifest(manifest)
+        except Exception as error:
+            raise GraphRefused("lab_graph_manifest_invalid", block_id) from error
+        try:
+            Draft202012Validator(manifest["settings_schema"], registry=Registry()).validate(block["settings"])
+        except Exception as error:
+            raise GraphRefused("lab_graph_invalid_settings", block_id) from error
+        manifests[block_id] = manifest
+    def pin(endpoint, direction):
+        pins = manifests.get(endpoint["node"], {}).get(direction, {})
+        if endpoint["port"] not in pins:
+            raise GraphRefused("lab_graph_bad_port", endpoint["node"])
+        return pins[endpoint["port"]]
+    attached = set()
+    adjacency = {key: [] for key in manifests}
+    degrees = dict.fromkeys(manifests, 0)
+    for pipe in graph["pipes"]:
+        if not compatible(pin(pipe["from"], "outputs"), pin(pipe["to"], "inputs")):
+            raise GraphRefused("lab_graph_incompatible_pins", pipe["to"]["node"])
+        target = (pipe["to"]["node"], pipe["to"]["port"])
+        if target in attached:
+            raise GraphRefused("lab_graph_duplicate_input", target[0])
+        attached.add(target)
+        adjacency[pipe["from"]["node"]].append(target[0])
+        degrees[target[0]] += 1
+    for block_id, manifest in manifests.items():
+        for name, input in manifest["inputs"].items():
+            if input["required"] and not input["has_default"] and (block_id, name) not in attached:
+                raise GraphRefused("lab_graph_input_required", block_id)
+    ready = deque(key for key in manifests if not degrees[key])
+    visited = 0
+    while ready:
+        visited += 1
+        for target in adjacency[ready.popleft()]:
+            degrees[target] -= 1
+            if not degrees[target]:
+                ready.append(target)
+    if visited != len(manifests):
+        raise GraphRefused("lab_graph_cycle")
+    for endpoint in graph["outputs"].values():
+        pin(endpoint, "outputs")
+    return manifests
+
+
 @dataclass(frozen=True)
 class Budget:
     block_cpu_ms: float = 500
@@ -196,18 +378,15 @@ class Budget:
 def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
                    cpu_clock=time.thread_time, cancelled=None, on_block=None):
     validate_graph(graph)
+    manifests = admit_graph(graph, registry)
     budget = Budget() if budget is None else budget
     started = clock()
-    manifests = {}
     blocks = {block["id"]: block for block in graph["blocks"]}
     incoming = {key: [] for key in blocks}
     outgoing = {key: [] for key in blocks}
     for block_id, block in blocks.items():
         ref = block["registry"]
-        manifest = registry.get(f'{ref["id"]}@{ref["version"]}')
-        if manifest is None or manifest["version"]["code_sha256"] != ref["code_sha256"]:
-            raise GraphRefused("lab_graph_unknown_block", block_id)
-        manifests[block_id] = manifest
+        manifest = manifests[block_id]
         trusted = lab_registry.lookup(ref["id"], ref["version"])
         if (manifest["residency"] == "host"
                 or manifest["id"] in ("studio-jobs", "studio-capabilities", "host-source")
@@ -216,15 +395,8 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
         if manifest["effect"] != "pure" or (trusted is not None and trusted.effect != "pure"):
             raise GraphRefused("lab_graph_effect_refused", block_id)
     for pipe in graph["pipes"]:
-        for side, direction in (("from", "outputs"), ("to", "inputs")):
-            endpoint = pipe[side]
-            if endpoint["port"] not in manifests[endpoint["node"]][direction]:
-                raise GraphRefused("lab_graph_bad_port", endpoint["node"])
         incoming[pipe["to"]["node"]].append(pipe)
         outgoing[pipe["from"]["node"]].append(pipe["to"]["node"])
-    for endpoint in graph["outputs"].values():
-        if endpoint["port"] not in manifests[endpoint["node"]]["outputs"]:
-            raise GraphRefused("lab_graph_bad_port", endpoint["node"])
 
     # Complete the topological check before running even disconnected blocks.
     degrees = {key: len(pipes) for key, pipes in incoming.items()}
