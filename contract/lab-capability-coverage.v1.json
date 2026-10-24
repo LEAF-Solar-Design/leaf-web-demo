@@ -1,0 +1,538 @@
+{
+  "schema": "leaf.lab-capability-coverage.v1",
+  "families": [
+    {
+      "family": "measurement",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "selection",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "custom",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "internal_qa",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "stringing",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "placement",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "settings",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "solve",
+      "status": "unavailable-with-reason",
+      "adapter_owner": "SEL-306",
+      "host": "production",
+      "reason": "no Lab adapter in wave 2"
+    },
+    {
+      "family": "equipment",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "routing",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "schedules",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "imports",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "terrain",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "shade",
+      "status": "unavailable-with-reason",
+      "adapter_owner": "SEL-306",
+      "host": "production",
+      "reason": "no Lab adapter in wave 2"
+    },
+    {
+      "family": "evidence",
+      "status": "unavailable-with-reason",
+      "adapter_owner": "SEL-306",
+      "host": "production",
+      "reason": "no Lab adapter in wave 2"
+    }
+  ],
+  "entries": [
+    {
+      "source": "studio-tool:arlo-design",
+      "status": "explicit-handoff",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:autofill-string-targets",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:count-by-layer",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:delete-marked-panel",
+      "status": "explicit-handoff",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:highlight-panels-near-edge",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:instant-list-layers",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:measure-panel-area",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:qa-sleep-count",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-assign-equipment",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-assign-strings",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-autofill",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-autofill-plan",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-cable-export",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-central-inverter-add",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-color-strings",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-combiners",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-commit-solve",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-correct-string",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-design-presets",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-design-presets-list",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-electrical-schedules",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-electrical-zones",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-elevation-zones",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-equipment-move",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-feeders",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-guardrails-read",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-homeruns",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-nec-ac-voltage-drop",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-nec-ampacity-correction",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-nec-conduit-fill",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-nec-feeder-ocpd",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-panel-add",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-panel-group-delete",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-panel-groups",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-panel-remove",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-panels-from-drawing",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-physical-export",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-physical-shade",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-pvcase-convert",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-pvcase-export",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-pvcase-solve",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-schedule",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-select-by-zone",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-settings",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-size-strings",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-solaredge-accept",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-solaredge-tracking-read",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-solve-proposal",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-add",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-conductors",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-data",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-delete",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-flip",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-midpoint",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-multi-add",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-rebuild",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-swap",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-terrain-read",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-trackers-to-panel-groups",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-trench-manual",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-unit-sync",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:string-autofill-opt",
+      "status": "explicit-handoff",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:string-panels",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:engine",
+      "status": "explicit-handoff",
+      "adapter_owner": "SEL-306",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:book",
+      "status": "explicit-handoff",
+      "adapter_owner": "SEL-306",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:market",
+      "status": "readable",
+      "adapter_owner": "ops-dashboard studio-lab relay",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:feed",
+      "status": "explicit-handoff",
+      "adapter_owner": "SEL-306",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:run",
+      "status": "explicit-handoff",
+      "adapter_owner": "SEL-306",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:position",
+      "status": "explicit-handoff",
+      "adapter_owner": "SEL-306",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:settlement",
+      "status": "explicit-handoff",
+      "adapter_owner": "SEL-306",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:tuning",
+      "status": "explicit-handoff",
+      "adapter_owner": "SEL-306",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:engine-lab",
+      "status": "explicit-handoff",
+      "adapter_owner": "SEL-306",
+      "host": "production"
+    },
+    {
+      "source": "kashbot:tape",
+      "status": "explicit-handoff",
+      "adapter_owner": "SEL-306",
+      "host": "production"
+    }
+  ]
+}

@@ -57,6 +57,108 @@ const receipt = { id: projectId, actor_id: projectId, binding_id: projectId,
   started_at: '2026-10-20T00:00:00Z', finished_at: '2026-10-20T00:00:01Z',
   connector_ref: ref, operation_ref: operationRef, dataset_ref: ref, transform_ref: { ...ref, id: 'orders-transform' },
   source_outcome: 'success', outcome: 'success', row_count: 2, failure_code: null }
+describe('inert schedule draft HTTP contract', () => {
+  const draft = { schema_version: 1, id: 'schedule-draft-orders', version: 1, title: 'Order workflow', workflow_ref: ref,
+    schedule: { kind: 'daily', timezone: 'US/Eastern', hour: 9, minute: 0,
+      gap_policy: 'next_valid_minute', fold_policy: 'first_occurrence' }, state: 'draft' }
+  const saved = { ...ref, id: draft.id }
+  it('uses a direct bounded POST and exact digest GET with safe authenticated transport', async () => {
+    const { client, fetchImpl, options } = setup(saved)
+    expect(await client.registerWorkflowScheduleDraft(projectId, draft, { ...options, match: 9 })).toEqual(saved)
+    fetchImpl.mockResolvedValueOnce(response(draft))
+    expect(await client.getWorkflowScheduleDraft(projectId, saved, { ...options, body: {}, match: 9 })).toEqual(draft)
+    const base = `https://ops.example/api/v1/projects/${projectId}/integrations/manual-workflow-schedule-drafts`
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([base, `${base}/${saved.id}/versions/1?digest=${saved.digest}`])
+    const [post, get] = fetchImpl.mock.calls.map(([, value]) => value)
+    expect(post.method).toBe('POST')
+    expect(post.body).toBe(JSON.stringify(draft))
+    expect(get.method).toBe('GET')
+    expect(get).not.toHaveProperty('body')
+    for (const request of [post, get]) {
+      expect(request).toMatchObject({ signal: options.signal, credentials: 'omit', redirect: 'error', cache: 'no-store',
+        headers: { Authorization: 'Bearer first', Accept: 'application/json' } })
+      expect(request.headers).not.toHaveProperty('If-Match')
+    }
+  })
+  it('enforces the 65536 byte request bound before dispatch', async () => {
+    const { client, fetchImpl, options } = setup(saved)
+    const encode = vi.spyOn(TextEncoder.prototype, 'encode').mockReturnValueOnce(new Uint8Array(65537))
+    try {
+      await expect(client.registerWorkflowScheduleDraft(projectId, draft, options)).rejects.toMatchObject({ dispatched: false })
+      expect(fetchImpl).not.toHaveBeenCalled()
+    } finally { encode.mockRestore() }
+  })
+  it.each([{ id: 'wrong' }, { version: 2 }, { digest: 'private' }, { extra: true }])('rejects malformed or unbound POST acknowledgements %j', async (patch) => {
+    const { client, options } = setup({ ...saved, ...patch })
+    await expect(client.registerWorkflowScheduleDraft(projectId, draft, options)).rejects.toMatchObject({ dispatched: true })
+  })
+  it.each([{ id: 'wrong' }, { version: 2 }, { state: 'active' }, { schedule: { ...draft.schedule, fold_policy: 'both' } }])('validates GET schema and requested identity %j', async (patch) => {
+    const { client, options } = setup({ ...draft, ...patch })
+    await expect(client.getWorkflowScheduleDraft(projectId, saved, options)).rejects.toThrow('invalid')
+  })
+  it.each([400, 401, 403, 409, 503])('keeps status %s safe and phase-specific', async (status) => {
+    const { client, fetchImpl, options } = setup()
+    fetchImpl.mockResolvedValueOnce(response({ message: 'private sentinel' }, { status }))
+    await expect(client.registerWorkflowScheduleDraft(projectId, draft, options)).rejects.toMatchObject({ status, dispatched: true })
+    fetchImpl.mockResolvedValueOnce(response({ message: 'private sentinel' }, { status }))
+    await expect(client.getWorkflowScheduleDraft(projectId, saved, options)).rejects.toMatchObject({ status, dispatched: false })
+  })
+  it('rejects malformed drafts, references, missing auth and aborted requests without dispatch', async () => {
+    const { client, fetchImpl, options } = setup(saved)
+    await expect(client.registerWorkflowScheduleDraft(projectId, { ...draft, state: 'active' }, options)).rejects.toThrow('invalid')
+    await expect(client.getWorkflowScheduleDraft(projectId, { ...saved, digest: 'bad' }, options)).rejects.toThrow('invalid')
+    authHeaders.mockReturnValue({})
+    await expect(client.registerWorkflowScheduleDraft(projectId, draft, options)).rejects.toMatchObject({ status: 401 })
+    const controller = new AbortController(); controller.abort()
+    await expect(client.getWorkflowScheduleDraft(projectId, saved, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
+describe('saved schedule draft discovery HTTP contract', () => {
+  it('preserves opaque cursors and uses only the bounded GET query and safe request options', async () => {
+    const after = ' opaque +/&?=雪\n' + 'x'.repeat(1100)
+    const value = { references: [ref], nextCursor: 'next' }
+    const { client, fetchImpl, options } = setup(value)
+    expect(await client.listWorkflowScheduleDrafts(projectId, { ...options, after, limit: 1, body: {}, match: 9 })).toEqual(value)
+    const [url, request] = fetchImpl.mock.calls[0]
+    const query = new URL(url).searchParams
+    expect([...query.keys()]).toEqual(['limit', 'after'])
+    expect(query.get('after')).toBe(after)
+    expect(query.get('limit')).toBe('1')
+    expect(new URL(url).pathname).toBe(`/api/v1/projects/${projectId}/integrations/manual-workflow-schedule-drafts`)
+    expect(request).toEqual({ method: 'GET', signal: options.signal, credentials: 'omit', redirect: 'error', cache: 'no-store',
+      headers: { Authorization: 'Bearer first', Accept: 'application/json' } })
+    fetchImpl.mockResolvedValueOnce(response({ references: [], nextCursor: null }))
+    await client.listWorkflowScheduleDrafts(projectId, options)
+    expect(fetchImpl.mock.calls[1][0]).toMatch(/\?limit=25$/)
+  })
+  it.each([{ limit: 0 }, { limit: 26 }, { limit: 1.5 }, { limit: '25' }, { after: '' }, { after: null },
+    { after: 'x'.repeat(2049) }])('rejects invalid discovery query %j before dispatch', async (query) => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.listWorkflowScheduleDrafts(projectId, { ...options, ...query })).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([
+    { records: [ref], nextCursor: null }, { page: { references: [ref], nextCursor: null } },
+    { references: [ref], nextCursor: null, extra: true }, { references: [{ ...ref, extra: true }], nextCursor: null },
+    { references: [{ ...ref, digest: 'bad' }], nextCursor: null }, { references: [ref], nextCursor: '' },
+    { references: [ref], nextCursor: 'x'.repeat(2049) }, { references: [ref], nextCursor: 'same' },
+    { references: Array(26).fill(ref), nextCursor: null },
+  ])('rejects complete invalid discovery pages', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.listWorkflowScheduleDrafts(projectId, { ...options, after: 'same' })).rejects.toThrow('invalid')
+  })
+  it('enforces requested row count and accepts the maximum cursor unchanged', async () => {
+    const { client, fetchImpl, options } = setup({ references: [ref, ref], nextCursor: null })
+    await expect(client.listWorkflowScheduleDrafts(projectId, { ...options, limit: 1 })).rejects.toThrow('invalid')
+    const after = 'x'.repeat(2048)
+    fetchImpl.mockResolvedValueOnce(response({ references: [], nextCursor: null }))
+    await client.listWorkflowScheduleDrafts(projectId, { ...options, after })
+    expect(new URL(fetchImpl.mock.calls[1][0]).searchParams.get('after')).toBe(after)
+  })
+})
+
 describe('daily schedule preview HTTP contract', () => {
   const input = { schema_version: 1, schedule: { kind: 'daily', timezone: 'UTC', hour: 9, minute: 30 }, after: '2026-01-01T00:00:00Z' }
   const occurrence = { scheduledLocalDate: '2026-01-01', instant: '2026-01-01T09:30:00Z', timezone: 'UTC', hour: 9, minute: 30,

@@ -125,6 +125,87 @@ async function observeUncertainAction() {
 beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
+const browsedDraftRef = { id: 'schedule-draft-existing', version: 2, digest: 'd'.repeat(64) }
+const browsedDraft = { schema_version: 1, id: browsedDraftRef.id, version: browsedDraftRef.version, title: 'Previously saved draft',
+  workflow_ref: reference, state: 'draft', schedule: { kind: 'daily', timezone: 'US/Eastern', hour: 9, minute: 5,
+    gap_policy: 'next_valid_minute', fold_policy: 'first_occurrence' } }
+function draftRoutes(harness, projectRole = 'owner') {
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/scope')) return Promise.resolve(response({ ...scope, projectRole }))
+    if (url.includes('/manual-workflow-schedule-drafts?')) return Promise.resolve(response({ references: [browsedDraftRef], nextCursor: null }))
+    if (url.includes('/manual-workflow-schedule-drafts/')) return Promise.resolve(response(browsedDraft))
+    return original(url, options)
+  })
+}
+const draftReads = fetchImpl => fetchImpl.mock.calls.filter(([url]) => url.includes('/manual-workflow-schedule-drafts'))
+async function chooseExistingDraft() {
+  fireEvent.click(screen.getByRole('button', { name: 'Load drafts' }))
+  fireEvent.click(await screen.findByRole('button', { name: `Select draft ${browsedDraftRef.id}, version 2` }))
+}
+it.each(['owner', 'editor'])('places the inert saved draft browser first for returning %s with explicit reads only', async projectRole => {
+  const harness = setup(); draftRoutes(harness, projectRole)
+  const { props, fetchImpl } = harness
+  const { rerender } = render(<OpsWorkspaceGround {...props} mode="dark" />); await loaded()
+  rerender(<OpsWorkspaceGround {...props} mode="dark" />)
+  expect(draftReads(fetchImpl)).toHaveLength(0)
+  const browser = screen.getByRole('region', { name: 'Saved schedule drafts' })
+  const preview = screen.getByRole('heading', { name: 'Daily schedule preview' })
+  expect(browser.compareDocumentPosition(preview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  await chooseExistingDraft()
+  await screen.findByText(browsedDraft.title)
+  expect(draftReads(fetchImpl).map(([url]) => url.split('/integrations/')[1])).toEqual([
+    'manual-workflow-schedule-drafts?limit=25',
+    `manual-workflow-schedule-drafts/${browsedDraftRef.id}/versions/2?digest=${browsedDraftRef.digest}`,
+  ])
+  expect(fetchImpl.mock.calls.every(([, request]) => request.method === 'GET')).toBe(true)
+  expect(screen.getByText('09:05')).toBeInTheDocument()
+  expect(screen.getByText('This is a saved draft. Nothing is scheduled or authorized to run.')).toBeInTheDocument()
+})
+it.each(['reviewer', 'read_only'])('does not offer draft discovery to %s', async projectRole => {
+  const harness = setup(); draftRoutes(harness, projectRole)
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  expect(screen.queryByRole('button', { name: 'Load drafts' })).toBeNull()
+  expect(draftReads(harness.fetchImpl)).toHaveLength(0)
+})
+it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('blocks saved discovery before dispatch on complete scope %s drift', async key => {
+  const harness = setup(); draftRoutes(harness)
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  const drift = key === 'projectRole' ? 'reviewer' : key === 'externalSubject' ? 'auth0|other' : key === 'externalAuthority' ? 'other' : otherProject
+  vi.spyOn(harness.props.client, 'getScope').mockResolvedValueOnce({ ...scope, [key]: drift })
+  fireEvent.click(screen.getByRole('button', { name: 'Load drafts' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(draftReads(harness.fetchImpl)).toHaveLength(0)
+  expect(screen.queryByRole('region', { name: 'Saved schedule drafts' })).toBeNull()
+})
+it.each(['session', 'account', 'project', 'client', 'inactive'])('clears an actual Ground draft read on %s change and discards late completion', async kind => {
+  const harness = setup(); draftRoutes(harness)
+  const { props, fetchImpl, sessionController } = harness
+  const original = fetchImpl.getMockImplementation()
+  let finish
+  fetchImpl.mockImplementation((url, options) => url.includes('/manual-workflow-schedule-drafts/') ?
+    new Promise(resolve => { finish = resolve }) : original(url, options))
+  const { rerender } = render(<OpsWorkspaceGround {...props} />); await loaded(); await chooseExistingDraft()
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  expect(screen.getByText('Loading saved draft.')).toBeInTheDocument()
+  const readSignal = draftReads(fetchImpl)[1][1].signal
+  if (kind === 'session') act(() => sessionController.change({ status: 'expired', generation: 2 }))
+  else rerender(<OpsWorkspaceGround {...props} {...({ account: { accountScope: 'account-b' }, project: { projectId: otherProject },
+    client: { client: { ...props.client } }, inactive: { active: false } })[kind]} />)
+  expect(readSignal.aborted).toBe(true)
+  await act(async () => finish(response(browsedDraft)))
+  expect(screen.queryByText(browsedDraft.title)).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Retry draft read' })).toBeNull()
+})
+it.each([401, 403])('routes saved draft HTTP %s through Ground forbidden handling', async status => {
+  const harness = setup(); draftRoutes(harness)
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => url.includes('/manual-workflow-schedule-drafts/') ?
+    Promise.resolve(response({}, status)) : original(url, options))
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await chooseExistingDraft()
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(screen.queryByRole('region', { name: 'Saved schedule drafts' })).toBeNull()
+})
 const schedulePreview = { schema_version: 1, preview_only: true, occurrence: { scheduledLocalDate: '2026-01-01',
   instant: '2026-01-01T09:30:00Z', timezone: 'UTC', hour: 9, minute: 30,
   occurrenceKey: JSON.stringify(['daily', 'UTC', 9, 30, '2026-01-01']) } }
