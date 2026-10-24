@@ -476,7 +476,7 @@ export default function useJobController({
       return undefined
     }
     // A known guest's reads are paused: no jobs poll until the session can read.
-    if (readsPaused) return undefined
+    if (readsPaused) { setJobs([]); return undefined }
     let alive = true
     let timer = null
     const tick = async () => {
@@ -509,7 +509,7 @@ export default function useJobController({
       return undefined
     }
     // Keep the stored pointer; reattach once the session can read.
-    if (readsPaused) return undefined
+    if (readsPaused) { setInflight(null); setReattaching(false); return undefined }
     const pointer = readInflightJob(storageRef.current)
     if (!pointer?.job_id) return undefined
     setInflight(pointer)

@@ -25,7 +25,7 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
   const generation = useRef(0)
 
   const refresh = useCallback(async () => {
-    if (mock) { setServers([]); setLoading(false); return [] }
+    if (mock) { generation.current += 1; setServers([]); setLoading(false); return [] }
     const gen = ++generation.current
     setLoading(true)
     setError(null)
@@ -37,7 +37,7 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
   }, [mock])
 
   useEffect(() => {
-    if (!mock) refresh()
+    refresh()
   }, [mock, refresh])
 
   const register = useCallback(async (url, label) => {
