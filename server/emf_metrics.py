@@ -249,6 +249,46 @@ def emit_job_terminal(status: str, execution_path: Optional[str] = None) -> None
             pass
 
 
+def emit_lab_run_terminal(status: str) -> None:
+    """One terminal count under {environment,status}; no entity dimensions."""
+    if _DISABLED:
+        return
+    try:
+        if status not in {"finished", "failed", "cancelled"}:
+            return
+        _emit([{"Namespace": NAMESPACE, "Dimensions": [["environment", "status"]],
+                "Metrics": [{"Name": "LabRunTerminal", "Unit": "Count"}]}],
+              {"environment": _metrics_environment(), "status": status, "LabRunTerminal": 1})
+    except Exception:
+        pass
+
+
+def emit_lab_lease_takeover() -> None:
+    """One takeover count under {environment}."""
+    if _DISABLED:
+        return
+    try:
+        _emit([{"Namespace": NAMESPACE, "Dimensions": [["environment"]],
+                "Metrics": [{"Name": "LabLeaseTakeover", "Unit": "Count"}]}],
+              {"environment": _metrics_environment(), "LabLeaseTakeover": 1})
+    except Exception:
+        pass
+
+
+def emit_lab_queue_age_max(seconds: float) -> None:
+    """Oldest queued age gauge under {environment}, in seconds."""
+    if _DISABLED:
+        return
+    try:
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds < 0:
+            return
+        _emit([{"Namespace": NAMESPACE, "Dimensions": [["environment"]],
+                "Metrics": [{"Name": "LabQueueAgeMax", "Unit": "Seconds"}]}],
+              {"environment": _metrics_environment(), "LabQueueAgeMax": seconds})
+    except Exception:
+        pass
+
+
 GIVE_BACK_REASON_ALLOW = frozenset({"raised", "not_released"})
 
 
