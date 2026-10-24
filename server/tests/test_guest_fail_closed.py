@@ -2,7 +2,7 @@
 The fabrication-trap guards (§19): an uploaded/guest drawing id must NEVER
 fall through to write_loop.ensure_demo_drawing's cached rooftop_demo
 bootstrap. Real extraction or an honest 404 — nothing else. Also regression-
-proves the pre-§19 bootstrap behavior for ordinary tenants is untouched.
+proves ordinary tenants retain curated demo bytes while unlisted IDs fail.
 
 Run:  cd server && python -m pytest tests/test_guest_fail_closed.py -q
 """
@@ -661,6 +661,12 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("LEAF_GUEST_STORE_DIR", str(tmp_path / "guest"))
     monkeypatch.setenv("LEAF_UPLOADS_DIR", str(tmp_path / "uploads"))
     monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "store"))
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "legacy")
+    monkeypatch.setenv("LEAF_BLOB_STORE", "filesystem")
+    monkeypatch.setenv("APS_LIVE", "0")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
     guest_uploads._reset_rate_state()
     return TestClient(app_module.app)
@@ -785,17 +791,18 @@ def test_pending_upload_versions_and_checkout_fail_closed(client, monkeypatch):
                        headers={"X-Tenant-Id": tenant}).status_code == 404
 
 
-def test_account_demo_bootstrap_regression_byte_identical(client):
-    """Ordinary tenants keep the pre-§19 behavior: any first-seen slug-safe
-    drawing id bootstraps v1 from the cached intake, byte-identical."""
+def test_account_demo_bootstrap_regression_byte_identical(client, tmp_path):
+    """Ordinary tenants retain exact demo bytes; unlisted IDs stay missing."""
     r = client.get("/api/drawings/demo/intake",
                    headers={"X-Tenant-Id": "acme-regression"})
     assert r.status_code == 200
     assert r.json()["intake"] == ROOFTOP
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     r2 = client.get("/api/drawings/any-fresh-id/intake",
                     headers={"X-Tenant-Id": "acme-regression"})
-    assert r2.status_code == 200
-    assert r2.json()["intake"] == ROOFTOP
+    assert r2.status_code == 404
+    assert r2.json()["error"]["error_code"] == "BAD_PARAMS"
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
 def test_guest_cannot_reach_demo_bootstrap_even_for_wellknown_id(client):

@@ -87,6 +87,7 @@ const history = [{ turnId: 'turn-0', text: 'Publish a tool' }]
 function Seat({ shell, o, destination, shown = true, turns = [] }) {
   const state = useSyncExternalStore(o.controller.subscribe, o.controller.getState, o.controller.getState)
   const wiring = shellWiring(sources[shell], shell, { ...o.value, state }, {
+    knownGuest: false,
     onPublishAuthor: o.author, publishAuthoredTool: o.author,
     onAttachAgentJob: o.job, refreshJobs: o.job, attachJob: o.job,
     agentTurns: turns, turns,

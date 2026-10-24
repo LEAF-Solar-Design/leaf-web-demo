@@ -65,7 +65,7 @@ def test_mapping_values_stay_inside_claim_tiers():
 # derive_tier semantics
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("plan,expected", [
-    ("free", "hosted_starter"),
+    ("free", "hosted_free"),
     ("starter", "hosted_starter"),
     ("basic", "hosted_starter"),
     ("trial", "hosted_starter"),
@@ -89,6 +89,28 @@ def test_unknown_or_absent_plan_defaults_not_restricted():
     assert bt.derive_tier("brand-new-plan") == bt.DEFAULT_TIER
     assert bt.derive_tier("") == bt.DEFAULT_TIER
     assert bt.derive_tier(None) == bt.DEFAULT_TIER
+
+
+def test_free_tier_and_unknown_plan_default():
+    assert bt.derive_tier("free") == "hosted_free"
+    assert bt.derive_tier("brand-new-plan") == "hosted_starter"
+
+
+def test_hosted_free_entitlements_match_hosted_starter():
+    import entitlements
+
+    assert entitlements.entitlements_for("hosted_free") == entitlements.entitlements_for("hosted_starter")
+
+
+def test_hosted_free_daily_run_limit_matches_hosted_starter():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "leaf_usage_billing_tiers", SERVER_DIR.parent / "da" / "usage.py",
+    )
+    usage = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(usage)
+    assert usage.daily_run_limit_for("hosted_free") == usage.daily_run_limit_for("hosted_starter")
 
 
 def test_plan_lookup_is_case_insensitive():

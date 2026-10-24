@@ -15,6 +15,7 @@ export function useCatalogController(options) {
   }, [
     controller,
     options.context?.mock,
+    options.context?.guestReadsPaused,
     options.context?.entitlements,
     options.context?.running,
     options.context?.agentDisabled,

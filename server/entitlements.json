@@ -36,6 +36,18 @@
     "upload": true,
     "link_service": true
   },
+  "hosted_free": {
+    "run_read": true,
+    "run_write": true,
+    "solve": false,
+    "build": true,
+    "converse": true,
+    "agent_write_autopilot": false,
+    "deploy": false,
+    "platform_customize": false,
+    "upload": true,
+    "link_service": true
+  },
   "hosted_starter": {
     "run_read": true,
     "run_write": true,

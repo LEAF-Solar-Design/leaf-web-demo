@@ -234,9 +234,10 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
         if binding is None and not _org_self_provision_allowed():
             raise HTTPException(status_code=403, detail="invite_only")
         try:
+            # Self-provisioned orgs start on the Free plan's tier until tier-sync moves them.
             org, created = store.ensure_org_with_identity(
                 body.name, "auth0", str(subject),
-                tier="hosted_starter",
+                tier="hosted_free",
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
@@ -244,9 +245,10 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
         # DEV SEAM: bootstrap org + binding in one call, mirroring the live-auth
         # shape, so the billing org-resolve path is exercisable without Auth0.
         try:
+            # Self-provisioned orgs start on the Free plan's tier until tier-sync moves them.
             org = store.create_org_with_identity(
                 body.name, body.external_authority, body.external_subject,
-                tier="hosted_starter",
+                tier="hosted_free",
             )
             created = True
         except ValueError as exc:

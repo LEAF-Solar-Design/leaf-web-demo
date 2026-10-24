@@ -19,6 +19,39 @@ import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProo
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
 
 export { expect }
+
+export function redactSolarDiagnostic(value) {
+  if (!['string', 'number', 'boolean'].includes(typeof value)) return '[unavailable]'
+  return String(value).replace(/eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/g, '[redacted]')
+    .replace(/lco1\.[A-Za-z0-9_.-]+/g, '[redacted]').trim().slice(0, 300)
+}
+
+export async function projectSolarRunDiagnostic(page, settings, start) {
+  const diagnosticText = async read => {
+    try { return redactSolarDiagnostic(await read()) } catch { return '[unavailable]' }
+  }
+  const text = locator => locator.textContent({ timeout: 2_000 })
+  const checkout = () => page.getByRole('group', { name: 'Project checkout', exact: true })
+  const fields = {
+    'solar-settings-reason': await diagnosticText(() => text(settings.getByTestId('solar-settings-reason'))),
+    'solar-settings-run': await diagnosticText(() => text(settings.getByTestId('solar-settings-run'))),
+    'data-mode': await diagnosticText(() => settings.getAttribute('data-mode', { timeout: 2_000 })),
+    'data-submit-seq': await diagnosticText(() => settings.getAttribute('data-submit-seq', { timeout: 2_000 })),
+    'data-submit-exit': await diagnosticText(() => settings.getAttribute('data-submit-exit', { timeout: 2_000 })),
+    startEnabled: await diagnosticText(() => start.isEnabled({ timeout: 2_000 })),
+    checkoutStatus: await diagnosticText(() => text(checkout().getByRole('status'))),
+    releaseEnabled: await diagnosticText(() => checkout().getByRole('button', { name: 'Release', exact: true }).isEnabled({ timeout: 2_000 })),
+  }
+  let alerts
+  try {
+    const locators = settings.getByRole('alert')
+    alerts = []
+    for (let index = 0, count = await locators.count(); index < count; index++) {
+      alerts.push(await diagnosticText(() => text(locators.nth(index))))
+    }
+  } catch { alerts = ['[unavailable]'] }
+  return `Solar settings before cleanup: ${JSON.stringify({ ...fields, alerts })}`
+}
 export const ENGINE_WASM_ROUTE = /\/engine\/engine_bg\.wasm(?:\?[^#]*)?$/
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
 export const COACH_STORAGE_KEY = 'leaf.coach.dismissed.v1'
@@ -1398,17 +1431,40 @@ export async function publishProjectSolar(runtime, assertions = expect, {
     const settings = page.getByTestId('solar-settings-form')
     await assertions(settings).toHaveAttribute('data-mode', allowExistingGraph ? /^(initialize|edit)$/ : 'initialize')
     const initializing = await settings.getAttribute('data-mode') === 'initialize'
-    if (initializing) await settings.getByLabel('Drawing units', { exact: true }).selectOption('m')
+    if (initializing) await settings.getByRole('combobox', { name: 'Drawing units', exact: true }).selectOption('m')
     // A scratch fixture can already contain a graph from an earlier run.
     const sequence = allowExistingGraph && solar.context.graph?.settings?.panels_in_sequence === 1 ? 2 : 1
     await settings.getByLabel('Panels in sequence', { exact: true }).fill(String(sequence))
-    const start = settings.getByRole('button', { name: initializing ? 'Start Solar design' : 'Apply settings', exact: true })
-    await assertions(start).toBeEnabled({ timeout: 30_000 })
-    const result = await run({ page, expect: assertions, apiBase: solar.apiBase, traffic: solar.traffic,
-      binding: solar.binding, before: solar.context, tool: 'solar-settings', action: () => start.click(), checkParams: (params) => {
-        if (initializing) assertions(params.initialize?.units?.drawing_units).toBe('m')
-        assertions(params.changes?.panels_in_sequence).toBe(sequence)
-      } })
+    const buttonName = initializing ? 'Start Solar design' : 'Apply settings'
+    const start = settings.getByRole('button', { name: buttonName, exact: true })
+    try {
+      await assertions(start).toBeEnabled({ timeout: 30_000 })
+    } catch (error) {
+      const diagnosticText = async testId => {
+        try {
+          const locator = settings.getByTestId(testId)
+          return await locator.count() ? redactSolarDiagnostic(await locator.textContent({ timeout: 2_000 }) ?? '') : ''
+        } catch { return '[unavailable]' }
+      }
+      const reason = await diagnosticText('solar-settings-reason')
+      const runStatus = await diagnosticText('solar-settings-run')
+      throw new Error(`${buttonName} did not become enabled within 30 s; solar-settings-reason: ${reason}; solar-settings-run: ${runStatus}`, { cause: error })
+    }
+    let result
+    try {
+      result = await run({ page, expect: assertions, apiBase: solar.apiBase, traffic: solar.traffic,
+        binding: solar.binding, before: solar.context, tool: 'solar-settings', action: () => start.click(), checkParams: (params) => {
+          if (initializing) assertions(params.initialize?.units?.drawing_units).toBe('m')
+          assertions(params.changes?.panels_in_sequence).toBe(sequence)
+        } })
+    } catch (error) {
+      const diagnostic = await projectSolarRunDiagnostic(page, settings, start)
+      if (error instanceof Error) {
+        error.message += `\n${diagnostic}`
+        throw error
+      }
+      throw new Error(`${redactSolarDiagnostic(error)}\n${diagnostic}`, { cause: error })
+    }
     solar.binding = result.binding
     solar.context = result.context
     proof.publication = result.step
@@ -1430,7 +1486,7 @@ export async function switchProjectSolarForms(runtime, assertions = expect) {
     await solve.getByLabel('Request', { exact: true }).fill('{"grid":{}}')
     await solve.getByLabel('Frame', { exact: true }).fill('walk-unsent-frame')
     // SchemaForm encodes enum option values as indices; use the schema labels.
-    await solve.getByLabel('Phase', { exact: true }).selectOption({ label: 'background' })
+    await solve.getByRole('combobox', { name: 'Phase', exact: true }).selectOption({ label: 'background' })
     await openProjectSolarTool(runtime, 'solar-correct-string', assertions, { closeEditor: false })
     const correction = page.getByRole('form', { name: 'Correct strings', exact: true })
     for (const name of ['Grant ref', 'Request', 'Frame', 'Phase']) await assertions(page.getByLabel(name, { exact: true })).toHaveCount(0)
