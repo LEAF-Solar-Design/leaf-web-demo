@@ -17,6 +17,8 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { getSurfaceConfig } from '../api.js'
+import { authConfigured, isAuthRedirectCallback, isSignedIn } from '../auth.js'
+import { consoleKnownGuest } from '../controllers/session/consoleGate.js'
 import { deepFreeze, surfaceContract } from './productSurfaces.js'
 
 // Mirrors _vendor/mushy_fold/surface_config.py's `_SLOT_NAMES` (server) and
@@ -51,11 +53,13 @@ function _notify() {
 }
 
 function _startFetchOnce(mock) {
-  if (_fetchStarted && !(_fetchedMock && !mock)) return _fetchPromise
+  // A known guest reads nothing: the overlay is the same {} a 401 would leave.
+  const skip = mock || consoleKnownGuest({ mock: false, authConfigured, isSignedIn, authCallback: isAuthRedirectCallback() })
+  if (_fetchStarted && !(_fetchedMock && !skip)) return _fetchPromise
   _fetchStarted = true
-  _fetchedMock = mock
+  _fetchedMock = skip
   const generation = ++_fetchGeneration
-  _fetchPromise = getSurfaceConfig(mock)
+  _fetchPromise = getSurfaceConfig(skip)
     .then((body) => {
       if (generation !== _fetchGeneration) return
       _overlay = isPlainObject(body?.surfaces) ? body.surfaces : {}
