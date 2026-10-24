@@ -71,6 +71,31 @@ describe('live widget values', () => {
     expect(client.resolveValues).toHaveBeenCalledTimes(3)
   })
 
+  it.each([3000, 5100])('starts the next poll at the later of its deadline and completion at %s ms', async (duration) => {
+    const requests = [], starts = [], start = Date.now()
+    const client = { resolveValues: vi.fn(() => {
+      const request = pending()
+      requests.push(request)
+      starts.push(Date.now() - start)
+      return request.promise
+    }) }
+    render(<WidgetPreview docId="widget" doc={doc} client={client} />)
+    await advance(duration)
+    expect(client.resolveValues).toHaveBeenCalledTimes(1)
+    await act(async () => { requests[0].resolve(resolved(1)) })
+    if (duration < 5000) {
+      expect(client.resolveValues).toHaveBeenCalledTimes(1)
+      await advance(5000 - duration - 1)
+      expect(client.resolveValues).toHaveBeenCalledTimes(1)
+      await advance(1)
+    }
+    expect(starts).toEqual([0, Math.max(5000, duration)])
+    await advance(10000)
+    expect(client.resolveValues).toHaveBeenCalledTimes(2)
+    await act(async () => { requests[1].resolve(resolved(2)) })
+    expect(starts).toEqual([0, Math.max(5000, duration), Math.max(5000, duration) + 10000])
+  })
+
   it('does not start while hidden and waits for visibility', async () => {
     visibility = 'hidden'
     const client = { resolveValues: vi.fn().mockResolvedValue(resolved(1)) }
@@ -170,6 +195,20 @@ describe('live widget values', () => {
     expect(node('mixed')).toHaveAttribute('data-host-tainted', 'true')
     expect(node('mixed')).toHaveAttribute('data-freshness', 'live')
     expect(node('mixed')).toHaveTextContent('1')
+  })
+
+  it.each([false, true])('uses the later host source for both value and freshness (simulated: %s)', (simulatedLast) => {
+    const host = createHostProvider({ framed: true })
+    const live = { data: { openCount: '7' }, as_of: Date.now() }
+    const simulated = { data: { openCount: '9' }, as_of: Date.now() - 60001, simulated: true, stale: true }
+    host.announce([
+      { source: 'a-first', ...(simulatedLast ? live : simulated) },
+      { source: 'z-last', ...(simulatedLast ? simulated : live) },
+    ])
+    render(<WidgetPreview host={host} doc={documentWith(element('host', board))} />)
+    expect(node('host')).toHaveTextContent(simulatedLast ? '9' : '7')
+    expect(node('host')).toHaveAttribute('data-freshness', simulatedLast ? 'simulated' : 'live')
+    expect(node('host')).toHaveAttribute('data-host-tainted', 'true')
   })
 
   it('labels each host field independently and treats missing fields as samples', () => {

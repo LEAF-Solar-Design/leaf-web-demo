@@ -15,12 +15,11 @@ function hostBoard(host, field) {
     if (!manifest) return { board: {}, sample: true }
     const blocks = host.state.sources.map((source, index) => ({ id: `preview-${index}`,
       registry: { id: manifest.id, version: manifest.version.semver, code_sha256: manifest.version.code_sha256 }, settings: { source } }))
-    const values = Object.values(host.sources({ blocks }, entries)).filter((value) =>
-      value.data.some((row) => Object.hasOwn(row, field) || Array.isArray(row.rows) && row.rows.some((item) => Object.hasOwn(item, field))))
-    return { board: Object.assign({}, ...values.flatMap((value) => value.data)), sample: !values.length,
-      host_tainted: values.some((value) => value.host_tainted), simulated: values.some((value) => value.simulated),
-      stale: values.some((value) => value.stale),
-      as_of: values.length && values.every((value) => value.as_of !== null) ? Math.min(...values.map((value) => value.as_of)) : null }
+    const value = Object.values(host.sources({ blocks }, entries)).filter((value) =>
+      value.data.some((row) => Object.hasOwn(row, field) || Array.isArray(row.rows) && row.rows.some((item) => Object.hasOwn(item, field)))).at(-1)
+    return { board: Object.assign({}, ...(value?.data ?? [])), sample: !value,
+      host_tainted: value?.host_tainted, simulated: value?.simulated,
+      stale: value?.stale, as_of: value?.as_of ?? null }
   } catch { return { board: {}, sample: true } }
 }
 
@@ -36,12 +35,13 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
     setPoll({ values: [], failed: false })
     function schedule() {
       clearTimeout(timer)
-      if (!disposed && document.visibilityState === 'visible') timer = setTimeout(tick, period)
+      const delay = docId && graphBindings.length ? Math.max(0, lastStarted + period - now()) : period
+      if (!disposed && document.visibilityState === 'visible') timer = setTimeout(tick, delay)
     }
     async function tick(immediate = false) {
       if (disposed || document.visibilityState !== 'visible') return
       setClock(now())
-      if (inFlight) { schedule(); return }
+      if (inFlight) return
       if (!docId || !graphBindings.length || (!immediate && now() - lastStarted < period)) { schedule(); return }
       inFlight = true; lastStarted = now(); controller = new AbortController()
       const active = controller
@@ -66,6 +66,10 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
       finally {
         inFlight = false
         if (!disposed && resumePending && document.visibilityState === 'visible') { resumePending = false; tick(true) }
+        else if (!disposed && document.visibilityState === 'visible') {
+          if (now() - lastStarted >= period) tick()
+          else schedule()
+        }
       }
     }
     function visibility() {
