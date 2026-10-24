@@ -1470,6 +1470,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_approval_consume.py"), 20),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
               SERVER, _py_pytest("tests/test_drawings_bootstrap.py"), 23),
+        Suite("server-drawings-bootstrap-scope-callers", "server tests/test_drawings_bootstrap_scope_callers.py", "pytest",
+              SERVER, _py_pytest("tests/test_drawings_bootstrap_scope_callers.py"), 33),
         # NOT db_gated on purpose: this file's authority-selector and legacy-contract
         # tests need no database, and its DB-only tests skip themselves via
         # @requires_database. Gating the whole suite would hide the un-gated half on
@@ -1774,6 +1776,8 @@ def build_suites() -> List[Suite]:
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("server-e2b-cost-meter", "server tests/test_e2b_cost_meter.py", "pytest",
               SERVER, _py_pytest("tests/test_e2b_cost_meter.py"), 34),
+        Suite("server-free-allowance", "server tests/test_free_allowance.py", "pytest",
+              SERVER, _py_pytest("tests/test_free_allowance.py"), 36),
         # Ops usage scoreboard (M6). Registered WITH the file, per the #29
         # fix-then-register rule. Both files are hermetic -- every authority is
         # monkeypatched, no DB, no subprocess, no skipif -- so these floors are
@@ -2503,6 +2507,8 @@ def build_suites() -> List[Suite]:
         # Proves labelled sizing replay isolation; opens loopback sockets and short-lived child Pythons only.
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
+        Suite("scripts-seed-proof-drawings", "scripts test_seed_proof_drawings.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("test_seed_proof_drawings.py"), 5),
         # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets.
         Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 49),

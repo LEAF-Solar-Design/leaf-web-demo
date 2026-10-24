@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ClaudeAccountPanel from './ClaudeAccountPanel.jsx'
 import { getClaudeGrant } from '../api.js'
 import { createPlatformTrustController } from '../controllers/platform/createPlatformTrustController.js'
@@ -17,6 +17,39 @@ function noManagement() {
 }
 
 describe('Claude account administrative status', () => {
+  it('invites signed-out visitors to sign in without showing errors or management controls', () => {
+    const props = { mock: false, signedOut: true, grant: null, error: 'Unauthenticated',
+      loading: false, onToggle: vi.fn(), onLink: vi.fn(), onUnlink: vi.fn() }
+    const view = panel({ ...props, open: false })
+    expect(screen.getByText('sign in')).toBeInTheDocument()
+    expect(screen.queryByText('unavailable')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Claude accounts/ }))
+    expect(props.onToggle).toHaveBeenCalledWith(true)
+    view.rerender(<ClaudeAccountPanel {...props} open />)
+    const dialog = screen.getByRole('dialog', { name: 'Claude accounts' })
+    expect(within(dialog).getAllByRole('status')).toHaveLength(1)
+    expect(within(dialog).getByRole('status')).toHaveTextContent('Sign in to view or link Claude accounts.')
+    expect(dialog.querySelectorAll('p')).toHaveLength(1)
+    expect(dialog.querySelectorAll('input, a')).toHaveLength(0)
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+    expect(within(dialog).getAllByRole('button')).toHaveLength(1)
+    expect(within(dialog).getByRole('button', { name: 'Close Claude account panel' })).toBeInTheDocument()
+  })
+  for (const state of [
+    { loading: true, grant: null },
+    { grant: { read_status: 'restricted' } },
+    { grant: { linked: true, kind: 'oauth' } },
+    { grant: { linked: false } },
+  ]) {
+    it(`prioritizes sign in over retained account state ${JSON.stringify(state)}`, () => {
+      panel({ ...state, signedOut: true })
+      expect(screen.getByText('sign in')).toBeInTheDocument()
+      const dialog = screen.getByRole('dialog', { name: 'Claude accounts' })
+      expect(dialog.querySelectorAll('p')).toHaveLength(1)
+      expect(dialog.querySelectorAll('input, a')).toHaveLength(0)
+      expect(within(dialog).getAllByRole('button')).toHaveLength(1)
+    })
+  }
   for (const [status, label] of [[403, 'access restricted'], [503, 'unavailable']]) {
     it(`propagates HTTP ${status} through transport/controller to honest UI`, async () => {
       vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { code: status === 403 ? 'FORBIDDEN' : 'UNAVAILABLE', message: 'Status could not be read' } }), { status, headers: { 'Content-Type': 'application/json' } })))
@@ -63,7 +96,7 @@ describe('Claude account administrative status', () => {
     noManagement()
   })
   it('retains mock suppression', () => {
-    panel({ mock: true, grant: { linked: false } })
+    panel({ mock: true, signedOut: true, grant: { linked: false } })
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 })
