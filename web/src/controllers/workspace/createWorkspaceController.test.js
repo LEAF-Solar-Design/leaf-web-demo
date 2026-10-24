@@ -13,6 +13,97 @@ function setup(options = {}) {
   return { controller, services, storage }
 }
 
+describe('workspace open hydration', () => {
+  it('joins an in-flight open without publishing or issuing another read', async () => {
+    const callbacks = { onWorkspaceOpened: vi.fn(), onWorkspaceRehydrated: vi.fn() }
+    const { controller, services } = setup({ callbacks })
+    let resolveOpen
+    services.openProject.mockImplementationOnce(() => new Promise((resolve) => { resolveOpen = resolve }))
+    const opening = controller.openProject('p1')
+    const snapshot = controller.getSnapshot()
+    const rehydrating = controller.rehydrate()
+    expect(controller.getSnapshot()).toBe(snapshot)
+    expect(services.openProject).toHaveBeenCalledExactlyOnceWith('p1', 'stored-org')
+
+    const workspace = { project: { project_id: 'p1' } }
+    resolveOpen(workspace)
+    expect(await opening).toBe(workspace)
+    expect(await rehydrating).toBe(workspace)
+    expect(controller.getSnapshot()).toMatchObject({ workspace, workspaceLoading: false })
+    expect(callbacks.onWorkspaceOpened).toHaveBeenCalledExactlyOnceWith({ projectId: 'p1', orgId: 'stored-org', workspace })
+    expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
+  })
+
+  it('joins an open from a synchronous publication subscriber', async () => {
+    const { controller, services } = setup()
+    let rehydrating
+    const unsubscribe = controller.subscribe(() => {
+      if (controller.getSnapshot().workspaceLoading) rehydrating = controller.rehydrate()
+    })
+    const workspace = await controller.openProject('p1')
+    expect(await rehydrating).toBe(workspace)
+    expect(services.openProject).toHaveBeenCalledTimes(1)
+    unsubscribe()
+  })
+
+  it('shares a failed open while preserving its error handling', async () => {
+    const callbacks = { onWorkspaceOpened: vi.fn(), onWorkspaceRehydrated: vi.fn() }
+    const { controller, services } = setup({ callbacks })
+    let rejectOpen
+    services.openProject.mockImplementationOnce(() => new Promise((resolve, reject) => { rejectOpen = reject }))
+    const opening = controller.openProject('p1')
+    const rehydrating = controller.rehydrate()
+    rejectOpen(new Error('Open failed.'))
+    expect(await opening).toBeNull()
+    expect(await rehydrating).toBeNull()
+    expect(services.openProject).toHaveBeenCalledTimes(1)
+    expect(controller.getSnapshot()).toMatchObject({ openProjectId: 'p1', workspace: null,
+      workspaceLoading: false, projectsError: 'Open failed.' })
+    expect(callbacks.onWorkspaceOpened).not.toHaveBeenCalled()
+    expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
+    const workspace = { project: { project_id: 'p1' } }
+    services.openProject.mockResolvedValueOnce(workspace)
+    expect(await controller.rehydrate()).toBe(workspace)
+    expect(services.openProject).toHaveBeenCalledTimes(2)
+  })
+
+  it('refreshes after an open settles and retains hydration on refresh failure', async () => {
+    const { controller, services } = setup()
+    await controller.openProject('p1')
+    const workspace = { project: { project_id: 'p1', name: 'Refreshed' } }
+    services.openProject.mockResolvedValueOnce(workspace)
+    expect(await controller.rehydrate()).toBe(workspace)
+    expect(services.openProject).toHaveBeenCalledTimes(2)
+    services.openProject.mockRejectedValueOnce(new Error('Refresh failed.'))
+    expect(await controller.rehydrate()).toBeNull()
+    expect(services.openProject).toHaveBeenCalledTimes(3)
+    expect(controller.getSnapshot()).toMatchObject({ workspace, workspaceLoading: false, projectsError: null })
+  })
+
+  it('joins the superseding open and ignores the older late response', async () => {
+    const { controller, services } = setup()
+    let resolveFirst
+    let resolveSecond
+    services.openProject
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve }))
+    const first = controller.openProject('p1')
+    const second = controller.openProject('p2')
+    const rehydrating = controller.rehydrate()
+    expect(services.openProject.mock.calls).toEqual([['p1', 'stored-org'], ['p2', 'stored-org']])
+    resolveFirst({ project: { project_id: 'p1' } })
+    const snapshot = controller.getSnapshot()
+    expect(await first).toBeNull()
+    expect(controller.getSnapshot()).toBe(snapshot)
+    const workspace = { project: { project_id: 'p2' } }
+    resolveSecond(workspace)
+    expect(await second).toBe(workspace)
+    expect(await rehydrating).toBe(workspace)
+    expect(controller.getSnapshot()).toMatchObject({ openProjectId: 'p2', workspace, workspaceLoading: false })
+    expect(services.openProject).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('server workspace bootstrap', () => {
   it('readsPaused publishes the empty snapshot and makes no projects read', async () => {
     const services = { listProjects: vi.fn(async () => []) }
