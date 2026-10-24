@@ -723,7 +723,7 @@ export default function App() {
   const [addonsOpen, setAddonsOpen] = useState(false)
 
   // --- Tenant MCP server registry (standardization slice 8c) ---
-  const mcpRegistry = useTenantMcpRegistry({ mock })
+  const mcpRegistry = useTenantMcpRegistry({ mock: mock || knownGuest })
   const [linkServiceOpen, setLinkServiceOpen] = useState(false)
   // The command bar's @ mounts list gains connected registry servers by
   // LABEL, never by host or any upstream tool name — mergePickerEntries'
@@ -783,7 +783,7 @@ export default function App() {
   // tokens as CSS custom properties, so an approved change is on screen
   // without a build or a deploy. LIVE only, like the agent tier: mock mode has
   // no tenant to read for, and applying a theme there would be theatre.
-  const themeOverlay = useOverlay(agentSessionId, { enabled: !mock })
+  const themeOverlay = useOverlay(agentSessionId, { enabled: !mock && !knownGuest })
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0)
   const [pendingApprovalsUnavailable, setPendingApprovalsUnavailable] = useState(false)
   useEffect(() => {
@@ -854,12 +854,12 @@ export default function App() {
   const [registryEntries, setRegistryEntries] = useState([])
   const [catalogSkills, setCatalogSkills] = useState([])
   useEffect(() => {
-    if (mock) { setRegistryEntries([]); setCatalogSkills([]); return undefined }
+    if (mock || knownGuest) { setRegistryEntries([]); setCatalogSkills([]); return undefined }
     let live = true
     fetchRegistry().then((r) => { if (live) setRegistryEntries(r.entries || []) })
     fetchSkills().then((r) => { if (live) setCatalogSkills(r.skills || []) })
     return () => { live = false }
-  }, [mock])
+  }, [mock, knownGuest])
 
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
@@ -3498,7 +3498,7 @@ export default function App() {
   // Slice 11a: the builds poll (GET /api/builds, validated records from
   // every lane). Mock mode makes no request; the rail hosts one
   // BuildQueueCard per record and the toolbar badge counts the open ones.
-  const buildQueue = useBuildQueue({ mock })
+  const buildQueue = useBuildQueue({ mock: mock || knownGuest })
   // W4e: the ribbon shows ONE tab's panels at a time (the reference's
   // Draw / Insert / Annotate / View / Manage); the top band switches it.
   // Slice 2: the opening tab is the contract's declared home tab, not a
@@ -4544,7 +4544,7 @@ export default function App() {
           projectName={currentProjectName || projectName}
           inputRef={barInputRef}
           routeActive={!!route}
-          mcpDiscoveryEnabled={!mock}
+          mcpDiscoveryEnabled={!mock && !knownGuest}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
           // refusal the TRANSPORT raised (api.nlPrompt / converse.postMessage)
@@ -4703,7 +4703,7 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
-          <CostTransparencyPanel mock={mock} />
+          <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />
           {!mock && (
             <ClaudeAccountPanel
               mock={mock}
@@ -5936,7 +5936,7 @@ export default function App() {
       )}
       <div className="rail-stack">
         {studioShell && <SurfaceFrame.Frame />}
-        {!mock && <SurfaceFrame.Conversations />}
+        {!mock && !knownGuest && <SurfaceFrame.Conversations />}
         <SurfaceFrame.JobRail />
         <SurfaceFrame.Inbox />
         {/* Standardization slice 8c: the Link-a-service drawer sits in the

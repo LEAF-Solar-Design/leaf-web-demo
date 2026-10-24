@@ -378,6 +378,18 @@ describe('cost transparency', () => {
     expect(screen.getByRole('table')).toBeInTheDocument()
   })
 
+  it('keeps the guest button and unavailable panel without monthly or history reads', async () => {
+    const fetchMock = respond()
+    await act(async () => { render(<CostTransparencyPanel readsPaused />) })
+    expect(screen.getByRole('button', { name: title })).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: title }))
+    expect(screen.getByText('Costs are unavailable for this month.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'History' }))
+    expect(screen.getByText('Cost history is unavailable.')).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('hides mock mode without making a request', async () => {
     const fetchMock = respond()
     await act(async () => { render(<CostTransparencyPanel mock />) })
