@@ -58,6 +58,7 @@ import { ForgePublicationError } from "./vendor/mushy-author/ports/impl/forgeRem
 import type { LabDocumentPort } from "./vendor/mushy-author/ports/labDocumentPort.js";
 import { handleLabCommit, LAB_COMMIT_MAX_BODY_BYTES } from "./lab/labCommit.js";
 import { handleLabInspect, LAB_INSPECT_MAX_BODY_BYTES } from "./lab/labInspect.js";
+import { handleLabPublish, LAB_PUBLISH_MAX_BODY_BYTES } from "./lab/labPublish.js";
 import { classifyRoute } from "./routing.js";
 import {
   DEFAULT_TENANT,
@@ -952,6 +953,18 @@ export function createHarness(ports: HarnessPorts, opts?: {
         }
         const body = await readJsonBody(req, LAB_INSPECT_MAX_BODY_BYTES, true, false, true);
         const result = await handleLabInspect(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
+        return send(res, result.status, result.body);
+      }
+
+      if (method === "POST" && path === "/lab/publish") {
+        res.setHeader("cache-control", "no-store");
+        if (!opts?.labDocuments) {
+          return send(res, 501, {
+            error: { code: "lab_publish_unavailable", message: "Lab publish is unavailable" },
+          });
+        }
+        const body = await readJsonBody(req, LAB_PUBLISH_MAX_BODY_BYTES, true, false, true);
+        const result = await handleLabPublish(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
         return send(res, result.status, result.body);
       }
 
