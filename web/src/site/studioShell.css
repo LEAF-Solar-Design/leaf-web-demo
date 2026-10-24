@@ -139,35 +139,35 @@
     background: var(--ck-chrome);
   }
 }
-/* U3 header measurements cover the desktop CAD and Solar cockpits; the rail and canvas-instrument rules stay CAD-only. */
+/* U3 measurements cover the desktop CAD cockpit only. */
 @media (min-width: 981px) {
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) header.top {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] header.top {
     height: auto; min-height: 28px; flex-wrap: wrap; overflow: visible;
   }
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) header.top .who {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] header.top .who {
     flex-wrap: wrap; max-width: 100%; min-width: 0;
   }
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) header.top .who > *,
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) header.top :is(button, .switch) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] header.top .who > *,
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] header.top :is(button, .switch) {
     flex-shrink: 0; white-space: nowrap;
   }
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) header.top .cockpit-band {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] header.top .cockpit-band {
     display: flex; flex-wrap: nowrap; align-items: center;
     max-width: calc(100% - 24px); min-width: 0; overflow-x: auto; overflow-y: hidden;
   }
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) header.top .cockpit-band > * { flex-shrink: 0; }
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] header.top .cockpit-band > * { flex-shrink: 0; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] {
     --ck-canvas-top: calc(var(--drawer-top, 28px) + 30px + var(--ck-ribbon) + var(--ck-doctabs));
     --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));
   }
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .tc-product-nav {
     position: relative; inset: auto; z-index: 6;
     height: 30px; min-height: 30px; box-sizing: border-box; margin: 0; padding: 2px 4px 0; display: flex; align-items: flex-start;
     overflow-x: auto; flex-wrap: nowrap; isolation: isolate; pointer-events: auto;
     background: transparent; border: 0; border-radius: 0; box-shadow: none;
   }
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; box-sizing: border-box; align-self: flex-start; }
-.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"] { flex-shrink: 0; white-space: nowrap; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; box-sizing: border-box; align-self: flex-start; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] .tc-product-tabs [role="tab"] { flex-shrink: 0; white-space: nowrap; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] { --ck-rail-width: 300px; --ck-overview-reserve: 212px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]:has(.cad-overview) .converse-card {
     margin-right: var(--ck-overview-reserve);
