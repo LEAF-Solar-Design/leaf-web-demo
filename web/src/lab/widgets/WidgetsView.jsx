@@ -1,114 +1,110 @@
-import { useEffect, useId, useRef, useState } from 'react'
-import WidgetPreview from './WidgetPreview.jsx'
-import { createTextElement, MAX_ELEMENTS, textInputs, validateTextInputs } from './widgetDoc.js'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import WidgetDesigner from './WidgetDesigner.jsx'
+import { createEditorState, createWidgetDoc, sameDocument, widgetEditorReducer } from './useWidgetEditor.js'
+import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
+import { validateWidgetDoc } from './widgetDoc.js'
+import { loadWidget, saveWidget } from './widgetsClient.js'
 import './widgets.css'
 
-const emptyDraft = { entries: [], selectedId: null }
-
-export function WidgetsView({ scopeKey, hidden = false }) {
-  const [drafts, setDrafts] = useState(() => new Map())
-  const sequence = useRef(0)
-  const prefix = useId()
-  const addRef = useRef(null)
-  const selectedRef = useRef(null)
-  const focusAfterRemove = useRef(false)
-  const hasScope = typeof scopeKey === 'string' && scopeKey.trim().length > 0
-  const draft = hasScope ? drafts.get(scopeKey) || emptyDraft : emptyDraft
-  const selected = draft.entries.find(({ element }) => element.id === draft.selectedId)
-
-  useEffect(() => {
-    if (focusAfterRemove.current) {
-      focusAfterRemove.current = false
-      const target = selectedRef.current || addRef.current
-      target?.focus()
+const validId = (id) => /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\s\S])/.test(id)
+function validationError(doc) {
+  try { validateWidgetDoc(doc); return null }
+  catch (error) {
+    for (const [id, surface] of Object.entries(doc.formats)) {
+      for (let index = 0; index < surface.els.length; index += 1) {
+        try { validateWidgetDoc({ ...doc, active: id, formats: { [id]: { ...surface, els: [surface.els[index]] } } }) }
+        catch (problem) { return { detail: problem.message, pointer: `/formats/${id}/els/${index}` } }
+      }
     }
-  }, [draft])
-
-  function updateDraft(change) {
-    if (!hasScope) return
-    setDrafts((previous) => {
+    return { detail: error.message, pointer: '/formats' }
+  }
+}
+export function WidgetsView({ scopeKey, hidden = false }) {
+  const local = typeof scopeKey === 'string' && scopeKey.trim().length > 0
+  const [drafts, setDrafts] = useState(() => new Map())
+  const [storeState, setStoreState] = useState(null)
+  const [docId, setDocId] = useState('')
+  const [loadedId, setLoadedId] = useState(null)
+  const [head, setHead] = useState(null)
+  const [status, setStatus] = useState('empty')
+  const [failure, setFailure] = useState(null)
+  const [graphOutputs, setGraphOutputs] = useState(() => new Map())
+  const onOutputs = useCallback((id, outputs) => setGraphOutputs((previous) => new Map(previous).set(id, outputs)), [])
+  const requestGeneration = useRef(0)
+  const storeRef = useRef(storeState)
+  storeRef.current = storeState
+  const empty = useRef(createEditorState())
+  const state = local ? drafts.get(scopeKey) ?? empty.current : storeState
+  useEffect(() => { requestGeneration.current += 1; return () => { requestGeneration.current += 1 } }, [scopeKey])
+  const dispatch = useCallback((action) => {
+    if (local) setDrafts((previous) => {
       const next = new Map(previous)
-      next.set(scopeKey, change(previous.get(scopeKey) || emptyDraft))
+      next.set(scopeKey, widgetEditorReducer(previous.get(scopeKey) ?? createEditorState(), action))
       return next
     })
+    else {
+      const previous = storeRef.current
+      const next = previous || action.type === 'load' ? widgetEditorReducer(previous, action) : previous
+      storeRef.current = next
+      setStoreState(next)
+      if (previous && next.doc !== previous.doc) {
+        setStatus((previous) => previous === 'conflict' || previous === 'saving' ? previous : 'editing')
+        setFailure((previous) => previous?.status === 409 ? previous : null)
+      }
+    }
+  }, [local, scopeKey])
+  const invalid = useMemo(() => {
+    if (!state) return null
+    const problem = validationError(state.doc)
+    if (problem) return problem
+    for (const [id, surface] of Object.entries(state.doc.formats)) {
+      const index = surface.els.findIndex(({ binding }) => binding?.source === 'graph.output' && graphOutputs.has(binding.doc_id) && !graphOutputs.get(binding.doc_id).some((output) => output.name === binding.output))
+      if (index >= 0) return { detail: 'Output not found', pointer: `/formats/${id}/els/${index}/binding/output` }
+    }
+    return null
+  }, [state?.doc, graphOutputs])
+  async function load(id = docId) {
+    const ticket = ++requestGeneration.current
+    setStatus('loading'); setFailure(null)
+    const result = await loadWidget(id)
+    if (ticket !== requestGeneration.current) return
+    if (!result.ok) { setStatus('error'); setFailure(result); return }
+    try {
+      const doc = result.doc ? validateWidgetDoc(result.doc) : createWidgetDoc(DESIGNER_DEFAULT_DOC)
+      dispatch({ type: 'load', doc }); setLoadedId(id); setDocId(id); setHead(result.revision ?? null)
+      setStatus(result.doc ? 'saved' : 'editing')
+    } catch (error) { setStatus('invalid'); setFailure({ detail: error.message, pointer: '/graph' }) }
   }
-
-  function addText() {
-    const element = createTextElement(`${prefix}-text-${++sequence.current}`)
-    updateDraft((current) => current.entries.length >= MAX_ELEMENTS ? current : {
-      entries: [...current.entries, { element, input: textInputs(element), errors: {} }], selectedId: element.id,
-    })
+  function newDocument() {
+    requestGeneration.current += 1
+    dispatch({ type: 'load', doc: createWidgetDoc(DESIGNER_DEFAULT_DOC) }); setLoadedId(docId); setHead(null); setFailure(null); setStatus('editing')
   }
-
-  function edit(field, value) {
-    updateDraft((current) => ({ ...current, entries: current.entries.map((entry) => {
-      if (entry.element.id !== current.selectedId) return entry
-      const input = { ...entry.input, [field]: value }
-      const result = validateTextInputs(entry.element, input)
-      return { input, errors: result.errors, element: result.element || entry.element }
-    }) }))
+  async function save() {
+    if (local || invalid || !state || state.transaction || !validId(loadedId ?? '')) return
+    const ticket = ++requestGeneration.current, sentDoc = state.doc
+    setStatus('saving'); setFailure(null)
+    const result = await saveWidget(loadedId, sentDoc, head)
+    if (ticket !== requestGeneration.current) return
+    if (result.ok) { setHead(result.revision); setStatus(sameDocument(storeRef.current?.doc, sentDoc) ? 'saved' : 'editing') }
+    else if (result.status === 422 && !sameDocument(storeRef.current?.doc, sentDoc)) { setStatus('editing') }
+    else { setFailure(result); setStatus(result.status === 409 ? 'conflict' : result.status === 422 ? 'invalid' : 'error') }
   }
-
-  function removeText() {
-    focusAfterRemove.current = true
-    updateDraft((current) => {
-      const index = current.entries.findIndex(({ element }) => element.id === current.selectedId)
-      const entries = current.entries.filter(({ element }) => element.id !== current.selectedId)
-      return { entries, selectedId: entries[Math.min(index, entries.length - 1)]?.element.id || null }
-    })
-  }
-
-  const controlId = (field) => `${prefix}-${field}`
-  return (
-    <section className="widgets-view" hidden={hidden} aria-label="Text widget editor">
-      <h2>Text widget</h2>
-      {!hasScope ? <p role="status">Choose a project to create a text widget.</p> : (
-        <div className="widgets-layout">
-          <div className="widgets-editor">
-            <button ref={addRef} type="button" onClick={addText} disabled={draft.entries.length >= MAX_ELEMENTS}>Add text</button>
-            <p role="status">{draft.entries.length} of 32 text elements. Limit: 32 elements per draft.</p>
-            {draft.entries.length === 0 && <p>No text yet. Use Add text to start your preview.</p>}
-            <ul className="widgets-element-list" aria-label="Text elements">
-              {draft.entries.map(({ element }, index) => (
-                <li key={element.id}>
-                  <button type="button" ref={element.id === draft.selectedId ? selectedRef : null}
-                    aria-pressed={element.id === draft.selectedId}
-                    onClick={() => updateDraft((current) => ({ ...current, selectedId: element.id }))}>
-                    Text {index + 1}: {element.text || '(empty)'}
-                  </button>
-                </li>
-              ))}
-            </ul>
-            {selected && (
-              <div className="widgets-fields">
-                <label htmlFor={controlId('text')}>Text</label>
-                <textarea id={controlId('text')} value={selected.input.text} onChange={(event) => edit('text', event.target.value)}
-                  aria-invalid={Boolean(selected.errors.text)} aria-describedby={controlId('errors')} rows={3} />
-                <p>Up to 512 characters. Text stays on one line in the preview.</p>
-                {['x', 'y'].map((axis) => (
-                  <label key={axis} htmlFor={controlId(axis)}>{axis.toUpperCase()} position (points)
-                    <input id={controlId(axis)} type="text" inputMode="decimal" value={selected.input[axis]}
-                      onChange={(event) => edit(axis, event.target.value)} aria-invalid={Boolean(selected.errors[axis])}
-                      aria-describedby={controlId('errors')} />
-                  </label>
-                ))}
-                <label htmlFor={controlId('align')}>Alignment</label>
-                <select id={controlId('align')} value={selected.input.align} onChange={(event) => edit('align', event.target.value)}>
-                  <option value="left">Left</option><option value="center">Center</option><option value="right">Right</option>
-                </select>
-                <div id={controlId('errors')} role="alert" aria-atomic="true">
-                  {Object.values(selected.errors).map((error) => <p key={error}>{error}</p>)}
-                  {Object.keys(selected.errors).length > 0 && <p>Preview keeps the last valid values until these errors are fixed.</p>}
-                </div>
-                <button type="button" onClick={removeText}>Remove</button>
-              </div>
-            )}
-          </div>
-          <WidgetPreview elements={draft.entries.map(({ element }) => element)} />
-        </div>
-      )}
-    </section>
-  )
+  const displayedStatus = invalid ? 'invalid' : status
+  const problem = invalid ?? failure
+  return <section className="widgets-view" hidden={hidden} aria-label={local ? 'Text widget editor' : 'Widget designer'}>
+    <h2>Widget designer</h2>
+    {!local && <>
+      <div className="widget-toolbar">
+        <label>Document ID<input value={docId} maxLength={128} disabled={status === 'loading' || status === 'saving'} onChange={(e) => setDocId(e.target.value)} /></label>
+        <button type="button" disabled={!validId(docId) || status === 'loading' || status === 'saving'} onClick={() => load()}>Load</button>
+        <button type="button" disabled={!validId(docId) || status === 'loading' || status === 'saving'} onClick={newDocument}>New</button>
+        {state && <button type="button" onClick={save} disabled={Boolean(invalid) || status === 'invalid' || status === 'loading' || status === 'saving' || status === 'conflict' || docId !== loadedId}>Save</button>}
+      </div>
+      <p role="status">{({ empty: 'Choose a project to create a text widget.', loading: 'Loading widget…', saving: 'Saving widget…', saved: `Saved revision ${head ?? ''}.`, editing: 'Local edits. Save when ready.', invalid: 'Invalid widget. Correct the indicated field before saving.', conflict: 'Conflict: the document changed. Your local edits are kept. Reload to use the stored revision.', error: 'The document request failed. Your local edits are kept.' })[displayedStatus]}</p>
+      {problem && <p role="alert">{typeof problem.detail === 'string' ? problem.detail : JSON.stringify(problem.detail)}{problem.pointer ? ` (${problem.pointer})` : ''}</p>}
+      {status === 'conflict' && <button type="button" onClick={() => load(loadedId)}>Reload</button>}
+    </>}
+    {state && <WidgetDesigner key={local ? scopeKey : loadedId ?? 'store'} state={state} dispatch={dispatch} local={local} hidden={hidden || (!local && status === 'loading')} invalid={Boolean(invalid)} onOutputs={onOutputs} graphOutputs={graphOutputs} />}
+  </section>
 }
-
 export default WidgetsView
