@@ -3235,10 +3235,10 @@ export default function App() {
       // a deliberate sign-out indistinguishable from an expiry.
       action: isSignedIn()
         ? { label: 'Sign out', onClick: sessionActions.signOut }
-        : { label: 'Refresh', onClick: () => { loadUsage(); loadHealth() } },
+        : { label: 'Refresh', onClick: () => { if (!knownGuest) loadUsage(); loadHealth() } },
       foot: 'Your account and usage.',
     })
-  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions, health, checkout.readFailed, checkout.failure, lock.unknown, heldByUs, otherHeldCheckout])
+  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions, health, checkout.readFailed, checkout.failure, lock.unknown, heldByUs, otherHeldCheckout, knownGuest])
 
   // Esc while a live run is in flight: detach this session from the job (the
   // rail keeps tracking it; the close beacon flags it reap-able server-side).

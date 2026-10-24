@@ -3,7 +3,7 @@ import { authHeaders, noteUnauthorized } from '../api.js'
 import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetFieldV1, IntegrationRefV1,
   ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1,
   IntegrationActionElementV1, IntegrationActionSubmissionV1, IntegrationActionSubmissionResultV1, IntegrationActionSnapshotV1,
-  IntegrationManualWorkflowSnapshotV1, IntegrationManualWorkflowDefinitionV1, IntegrationActionCatalogV1,
+  IntegrationManualWorkflowSnapshotV1, IntegrationManualWorkflowRunV1, IntegrationManualWorkflowDefinitionV1, IntegrationActionCatalogV1,
   IntegrationManualWorkflowSubmissionV1, IntegrationManualWorkflowSubmissionResultV1 } from '../../../vendor/assistant-contract/src/integration'
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/i
@@ -27,6 +27,12 @@ export const actionRunMatches = (run, binding) => run.connection_id === binding.
   sameRef(run.connector_ref, binding.connector_ref) && sameRef(run.operation_ref, binding.operation_ref) &&
   run.grant_revision === binding.expected_grant_revision
 const page = (record) => z.object({ records: z.array(record).max(100), nextCursor: z.string().max(2048).nullable() })
+const workflowCursor = z.string().regex(/^[A-Za-z0-9_-]{1,1024}(?![\s\S])/)
+export const ManualWorkflowHistoryPage = z.strictObject({
+  items: z.array(IntegrationManualWorkflowRunV1).max(50)
+    .refine((items) => new Set(items.map((run) => run.run_id.toLowerCase())).size === items.length),
+  next_cursor: workflowCursor.nullable(),
+})
 const metadata = z.object({
   reference: IntegrationRefV1, revision, title: z.string().min(1).max(120),
   fields: z.array(DatasetFieldV1).min(1).max(100).refine((fields) => new Set(fields.map((field) => field.id)).size === fields.length),
@@ -193,6 +199,13 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
   }
   return {
     available: Boolean(destination),
+    async listManualWorkflowRuns(id, { signal, after, limit = 25 } = {}) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 50 ||
+          (after !== undefined && !workflowCursor.safeParse(after).success)) throw invalid()
+      const query = new URLSearchParams({ limit: String(limit) })
+      if (after !== undefined) query.set('after', after)
+      return setupResponse(ManualWorkflowHistoryPage, id, `manual-workflow-runs?${query}`, { signal, method: 'GET' })
+    },
     async getActionCatalog(id, { signal, after, limit = 25 } = {}) {
       if (!Number.isInteger(limit) || limit < 1 || limit > 50 || (after !== undefined &&
           (typeof after !== 'string' || !/^[A-Za-z0-9_-]{1,1024}(?![\s\S])/.test(after)))) throw invalid()
