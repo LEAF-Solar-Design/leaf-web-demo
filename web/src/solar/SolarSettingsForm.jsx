@@ -413,7 +413,7 @@ function ProjectSettingsForContext(props) {
               </label>
             </fieldset>
           )}
-          <button type="submit" disabled={Boolean(reason)}>{state.mode === 'edit' ? 'Apply settings' : 'Start Solar design'}</button>
+          <button type="submit" data-seat-start="" disabled={Boolean(reason)}>{state.mode === 'edit' ? 'Apply settings' : 'Start Solar design'}</button>
         </form>
       )}
       {editable && <button type="button" disabled={submitting} onClick={() => {
@@ -591,7 +591,7 @@ function SettingsForContext({ context, readIntake, readVersions, checkoutHeld, b
               </label>
             </fieldset>
           )}
-          <button type="submit" disabled={Boolean(reason)}>{state.mode === 'edit' ? 'Apply settings' : 'Start Solar design'}</button>
+          <button type="submit" data-seat-start="" disabled={Boolean(reason)}>{state.mode === 'edit' ? 'Apply settings' : 'Start Solar design'}</button>
         </form>
       )}
       <button type="button" onClick={() => onClose()}>Close</button>
