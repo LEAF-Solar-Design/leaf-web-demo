@@ -433,6 +433,13 @@ _REQUIRED_COLUMNS = {
 # Legacy values intentionally add nothing. Session shadow and dual-write modes
 # still write PostgreSQL, so they require the same proof as canonical reads.
 _AUTHORITY_REQUIRED_COLUMNS = {
+    "lab_runs": {
+        "lab_runs": {"tenant_id", "doc_id", "run_id", "graph_revision", "graph_sha256",
+                     "registry_digest", "ops_revision", "input_digest", "adapter_revision",
+                     "build_revision", "state", "lease_owner", "lease_fence", "lease_expires_at",
+                     "next_seq", "event_count", "created_at", "updated_at", "finished_at"},
+        "lab_run_events": {"tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at"},
+    },
     "lab": {
         "lab_blobs": {"tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count"},
         "lab_revisions": {"tenant_id", "doc_id", "revision", "parent_revision", "author", "created_at", "sha256"},
@@ -1186,6 +1193,15 @@ _REQUIRED_TRIGGERS = {
 # Names below are stable database API. They enforce idempotency, fencing, state
 # shape, referential integrity, and immutable audit records used by callers.
 _AUTHORITY_REQUIRED_CONSTRAINTS = {
+    "lab_runs": {
+        "lab_runs_pkey": _catalog_contract("lab_runs", "PRIMARY KEY (tenant_id, run_id)"),
+        "lab_run_events_pkey": _catalog_contract("lab_run_events", "PRIMARY KEY (tenant_id, run_id, seq)"),
+        "lab_runs_state_check": _catalog_contract(
+            "lab_runs", "CHECK", "state", "queued", "running", "finished", "failed", "cancelled"),
+        "lab_run_events_tenant_id_run_id_fkey": _catalog_contract(
+            "lab_run_events", "FOREIGN KEY (tenant_id, run_id)",
+            "REFERENCES lab_runs(tenant_id, run_id)", "ON DELETE CASCADE"),
+    },
     "lab": {
         "lab_blobs_pkey": _catalog_contract("lab_blobs", "PRIMARY KEY (tenant_id, sha256)"),
         "lab_revisions_pkey": _catalog_contract("lab_revisions", "PRIMARY KEY (tenant_id, doc_id, revision)"),
@@ -1644,6 +1660,11 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
 }
 
 _AUTHORITY_REQUIRED_INDEXES = {
+    "lab_runs": {
+        "lab_runs_doc_created_idx": _catalog_contract(
+            "lab_runs", "(tenant_id, doc_id, created_at DESC)"),
+        "lab_run_events_created_idx": _catalog_contract("lab_run_events", "(created_at)"),
+    },
     "annotations": {
         "annotation_batches_request_key_uq": _catalog_contract(
             "annotation_batches", "CREATE UNIQUE INDEX",
@@ -1814,6 +1835,7 @@ _AUTHORITY_REQUIRED_TRIGGERS = {
 _TRIGGER_ENABLED_MODES = frozenset({"O", "A"})
 
 _AUTHORITY_SELECTORS = {
+    "LEAF_LAB_RUN_STORE": {"postgres": "lab_runs", "postgres_required": "lab_runs"},
     "LEAF_LAB_STORE": {"postgres": "lab"},
     "LEAF_JOBS_STORE": {"postgres": "jobs"},
     "LEAF_CALLBACK_REPLAY_STORE": {"postgres": "callback_replay"},

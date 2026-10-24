@@ -84,7 +84,8 @@
       "0080",
       "0081",
       "0082",
-      "0083"
+      "0083",
+      "0084"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -1119,6 +1120,25 @@
       "current_selection": {
         "staging": {"value": null, "status": "unknown", "evidence": "No live deployment selection recorded by SEL-101."},
         "production": {"value": null, "status": "unknown", "evidence": "No live deployment selection recorded by SEL-101."}
+      }
+    },
+    {
+      "id": "lab_runs",
+      "coverage": ["lab_runs"],
+      "selectors": [{
+        "name": "LEAF_LAB_RUN_STORE",
+        "allowed_modes": ["sqlite", "postgres", "postgres_required"],
+        "repository_default": "sqlite"
+      }],
+      "postgres_tables": ["lab_runs", "lab_run_events"],
+      "legacy_source": ["LEAF_LAB_DB local SQLite; forbidden in deployed runtimes and under /data/state."],
+      "backfill": {"command": null, "status": "not_applicable", "note": "New Lab run authority; local SQLite is not a deployed migration source."},
+      "parity": {"command": null, "status": "not_run", "note": "Shared SQLite/PostgreSQL lease, event and retention proofs are in server/tests/test_lab_run_store.py; execution is required before enablement."},
+      "cutover_modes": ["postgres", "postgres_required"],
+      "rollback_mode": "Disable LEAF_LAB_SURFACE_ENABLED and retain PostgreSQL runs and events. Never fall back to SQLite in deployment.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "SEL-202 adds migration 0084 only; no schema or runtime selection applied."},
+        "production": {"value": null, "status": "unknown", "evidence": "SEL-202 adds migration 0084 only; no schema or runtime selection applied."}
       }
     },
     {

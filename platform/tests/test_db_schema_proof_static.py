@@ -168,6 +168,37 @@ def _assert_lab_immutable_ledger_contract():
     assert "CREATE TABLE IF NOT EXISTS lab_publish_receipts" in migration
 
 
+@pytest.mark.parametrize("mode", ["postgres", "postgres_required"])
+def test_lab_run_schema_proof(mode):
+    selected = {"LEAF_LAB_RUN_STORE": mode}
+    columns = db.required_columns_for_selected_authorities(selected)
+    assert columns["lab_runs"] == {
+        "tenant_id", "doc_id", "run_id", "graph_revision", "graph_sha256", "registry_digest",
+        "ops_revision", "input_digest", "adapter_revision", "build_revision", "state",
+        "lease_owner", "lease_fence", "lease_expires_at", "next_seq", "event_count",
+        "created_at", "updated_at", "finished_at",
+    }
+    assert columns["lab_run_events"] == {
+        "tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at",
+    }
+    assert "lab_runs" not in db.required_columns_for_selected_authorities({})
+    catalog = db.required_catalog_for_selected_authorities(selected)
+    assert catalog["constraints"]["lab_runs_pkey"] == db._catalog_contract(
+        "lab_runs", "PRIMARY KEY (tenant_id, run_id)")
+    assert catalog["constraints"]["lab_run_events_pkey"] == db._catalog_contract(
+        "lab_run_events", "PRIMARY KEY (tenant_id, run_id, seq)")
+    assert catalog["constraints"]["lab_run_events_tenant_id_run_id_fkey"] == db._catalog_contract(
+        "lab_run_events", "FOREIGN KEY (tenant_id, run_id)",
+        "REFERENCES lab_runs(tenant_id, run_id)", "ON DELETE CASCADE")
+    assert "lab_runs_state_check" in catalog["constraints"]
+    assert set(db._AUTHORITY_REQUIRED_INDEXES["lab_runs"]) <= set(catalog["indexes"])
+    migration = (db._PKG_DIR / "migrations/0084_lab_runs.sql").read_text(encoding="utf-8")
+    for fragment in ("payload JSONB NOT NULL", "lease_fence INTEGER NOT NULL DEFAULT 0",
+                     "next_seq INTEGER NOT NULL DEFAULT 0", "ON DELETE CASCADE",
+                     "(tenant_id, doc_id, created_at DESC)"):
+        assert fragment in migration
+
+
 def test_every_shipped_table_has_a_readiness_contract():
     created = set()
     for path in (db._PKG_DIR / "migrations").glob(db.MIGRATION_GLOB):
