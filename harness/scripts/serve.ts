@@ -39,6 +39,7 @@
  */
 
 import type { Server } from "node:http";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
 
@@ -72,7 +73,9 @@ import {
 import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
 import { upstreamSinkFromEnv } from "../src/ports/impl/httpUpstreamSink.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
-import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
+import { PgTenantRepoLeaseCoordinator, TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
+import { TenantDocumentRepo, type LabDocumentPort } from "../src/vendor/mushy-author/ports/labDocumentPort.js";
+import { HARNESS_IDENTITY } from "../src/vendor/mushy-author/registry/registerTool.js";
 import { createTenantForgeConfigurationFromEnv } from "../src/ports/impl/tenantForgeAuthority.js";
 import { createProjectForgeAuthorityFromEnv, createProjectRepositoryEditsForService } from "../src/ports/impl/projectForgeAuthority.js";
 import {
@@ -200,7 +203,7 @@ function spineTurnRunner(
 }
 
 /** Compose the real multi-tenant ports. */
-function buildPorts(standardServicesResolver: StandardServicesResolver | undefined): HarnessPorts & { tenantRepo: TenantRepoProviderImpl } {
+function buildPorts(standardServicesResolver: StandardServicesResolver | undefined): HarnessPorts & { tenantRepo: TenantRepoProviderImpl; labDocuments?: LabDocumentPort } {
   // F18 seam: the backend is selected by $LEAF_GRANT_STORE (default `file` →
   // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
   // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
@@ -222,6 +225,20 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     new OAuthGrantProviderImpl({ store: grantStore }),
   );
   const tenantForge = createTenantForgeConfigurationFromEnv(process.env, tenantRepoDir);
+  let lease: PgTenantRepoLeaseCoordinator | undefined;
+  if ((process.env.LEAF_HARNESS_SESSION_STORE ?? "file").trim().toLowerCase() === "postgres") {
+    const connectionString = (process.env.LEAF_HARNESS_DATABASE_URL ?? process.env.DATABASE_URL ?? "").trim();
+    if (!connectionString) {
+      throw new Error("PostgreSQL harness mode requires LEAF_HARNESS_DATABASE_URL or DATABASE_URL for tenant repo leases");
+    }
+    lease = new PgTenantRepoLeaseCoordinator({
+      poolConfig: {
+        connectionString,
+        max: 5,
+        application_name: "leaf-platform-harness-repo-lease",
+      },
+    });
+  }
   const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
   const customizationCoordination = appUrl && dispatchSecret
@@ -231,6 +248,7 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     throw new Error("Forge tenant authority requires effective catalog coordination");
   }
   const tenantRepo = new TenantRepoProviderImpl({
+    lease: lease ?? false,
     projectRemoteAuthority: createProjectForgeAuthorityFromEnv(),
     locator: tenantForge?.locator ?? { async repoRef(tenantId: string) { return tenantRepoDir(tenantId); } },
     ...(tenantForge ? {
@@ -242,6 +260,21 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     bareBase: TENANT_GIT_DIR,
     autoProvisionFrom: TENANT_FIXTURE,
   });
+  const labDocuments = tenantForge && lease ? new TenantDocumentRepo({
+    locate: async (tenantId) => ({
+      dir: join(realpathSync(TENANT_GIT_DIR), safeComponent(tenantId) + ".git"),
+      sourceRef: await tenantForge.locator.repoRef(tenantId),
+    }),
+    lease,
+    authority: tenantForge.remoteAuthority,
+    identity: HARNESS_IDENTITY,
+  }) : undefined;
+  if (!labDocuments) {
+    log(`[harness] POST /lab/commit disabled: missing ${[
+      ...(!tenantForge ? ["tenant Forge configuration"] : []),
+      ...(!lease ? ["PostgreSQL tenant lease coordinator"] : []),
+    ].join(" and ")}`);
+  }
   const broker = new BrokerApsClientHttp({ brokerUrl: BROKER_URL });
   // OPTIONAL platform-improvement capture. Constructed only when
   // UPSTREAM_SINK_URL and UPSTREAM_SINK_TOKEN are BOTH set (see
@@ -262,6 +295,7 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     oauth,
     grantAdmin: grantStore,
     tenantRepo,
+    ...(labDocuments ? { labDocuments } : {}),
     broker,
     agentRunner: authorRunnerMode() === "fake"
       ? new FakeAgentRunner()
@@ -418,6 +452,7 @@ async function main(): Promise<void> {
     ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
     ...(standardServicesApproval ? { standardServicesApproval } : {}),
     ...(glugMushyAuthor ? { glugMushyAuthor } : {}),
+    ...(ports.labDocuments ? { labDocuments: ports.labDocuments } : {}),
   };
   const server: Server = createHarness(
     ports,

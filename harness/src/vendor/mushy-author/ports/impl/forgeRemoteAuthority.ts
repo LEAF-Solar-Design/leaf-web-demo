@@ -191,6 +191,45 @@ export class ForgeRemoteAuthority {
     });
   }
 
+  /** Publish only the separate Lab document branch with exact remote CAS. */
+  async publishRef(
+    tenantId: string, dir: string, sourceRef: string, ref: string, expectedSha: string | null,
+  ): Promise<{ commit: string }> {
+    if (ref !== "refs/heads/lab/main"
+      || (expectedSha !== null && (!SHA.test(expectedSha) || expectedSha.length !== 40 || expectedSha === ZERO))) this.refuse();
+    return this.session(tenantId, dir, sourceRef, async (git, remote) => {
+      await git(["rev-parse", "--verify", `${MAIN}^{commit}`], dir);
+      const commit = await git(["rev-parse", "--verify", ref], dir);
+      if (!SHA.test(commit) || await git(["cat-file", "-t", commit]) !== "commit") this.refuse();
+      const exactRef = await git(["for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)", ref], dir);
+      if (exactRef !== `${ref}\t${commit}`) this.refuse();
+      const entries = await git(["ls-tree", "-rz", "--full-tree", commit], dir);
+      if (!entries) this.refuse();
+      for (const entry of entries.split("\0").filter(Boolean)) {
+        if (!/^100644 blob [0-9a-f]{40}\tlab\/(graphs|widgets)\/[A-Za-z0-9][A-Za-z0-9_-]*\.json$(?![\s\S])/.test(entry)) this.refuse();
+      }
+      // Ref publication cannot attach Lab history to the executable main branch.
+      const all = await git(["rev-list", "--count", commit], dir);
+      const separate = await git(["rev-list", "--count", commit, "--not", MAIN], dir);
+      if (all !== separate) this.refuse();
+      const before = await this.head(git, remote, ref);
+      if (before !== expectedSha) throw new GitRefConflictError(ref, expectedSha, before);
+      if (expectedSha !== null) {
+        try { await git(["merge-base", "--is-ancestor", expectedSha, commit], dir); }
+        catch { throw new GitRefConflictError(ref, expectedSha, commit); }
+      }
+      try {
+        await git(["push", `--force-with-lease=${ref}:${expectedSha ?? ""}`, remote, `${commit}:${ref}`]);
+      } catch {
+        // Only authoritative readback can resolve a lost push response.
+      }
+      const after = await this.head(git, remote, ref);
+      if (after === commit) return { commit };
+      if (after === expectedSha) throw new ForgePublicationError("not-published", "Forge Lab ref was not accepted");
+      throw new GitRefConflictError(ref, expectedSha, after);
+    });
+  }
+
   async publish(
     tenantId: string, dir: string, sourceRef: string, request: AuthoritativePublishRequest,
   ): Promise<{ commit: string }> {
