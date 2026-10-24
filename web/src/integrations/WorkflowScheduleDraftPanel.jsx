@@ -13,11 +13,10 @@ function contextFor(props, key, binding) {
         typeof props.client?.getWorkflowScheduleDraft !== 'function' || typeof props.guard !== 'function' ||
         typeof props.onForbidden !== 'function' || typeof props.signal?.aborted !== 'boolean' ||
         typeof props.signal?.addEventListener !== 'function' || typeof props.signal?.removeEventListener !== 'function') throw failed()
-    const workflow_ref = IntegrationRefV1.parse(props.workflowRef)
     const identity = globalThis.crypto?.randomUUID?.()
     if (typeof identity !== 'string' || !UUID.test(identity)) throw failed()
     initialDraft = IntegrationWorkflowScheduleDraftV1.parse({ schema_version: 1, id: `schedule-draft-${identity}`, version: 1,
-      title: props.title, workflow_ref, schedule: { kind: 'daily', timezone: 'UTC', hour: 9, minute: 0,
+      title: props.title, workflow_ref: props.workflowRef, schedule: { kind: 'daily', timezone: 'UTC', hour: 9, minute: 0,
         gap_policy: 'next_valid_minute', fold_policy: 'first_occurrence' }, state: 'draft' })
   } catch { /* Fixed unavailable copy; no identity fallback. */ }
   return { client: props.client, projectId: props.projectId, signal: props.signal, binding, key, initialDraft }
@@ -51,7 +50,8 @@ function ScopedScheduleDraft({ client, projectId, signal, guard, onForbidden, co
 
   async function save(input, saveSignal) {
     // Keep the comparison snapshot independent of objects passed to injected clients.
-    const serialized = JSON.stringify(IntegrationWorkflowScheduleDraftV1.parse(input))
+    const snapshot = IntegrationWorkflowScheduleDraftV1.parse(input)
+    const serialized = JSON.stringify(snapshot)
     const ctx = scope.current
     const controller = new AbortController()
     const abort = () => controller.abort()
@@ -73,13 +73,11 @@ function ScopedScheduleDraft({ client, projectId, signal, guard, onForbidden, co
     saveSignal.addEventListener('abort', abort, { once: true })
     let postConflict = false
     try {
-      const snapshot = JSON.parse(serialized)
       const initial = context.initialDraft
       if (snapshot.id !== initial.id || snapshot.version !== initial.version ||
           JSON.stringify(snapshot.workflow_ref) !== JSON.stringify(initial.workflow_ref)) throw failed()
       const payload = JSON.parse(serialized)
       await checkGuard()
-      assertCurrent()
       let response
       try { response = await client.registerWorkflowScheduleDraft(projectId, payload, { signal: controller.signal }) }
       catch (error) {
@@ -92,12 +90,10 @@ function ScopedScheduleDraft({ client, projectId, signal, guard, onForbidden, co
       const reference = IntegrationRefV1.parse(response)
       if (reference.id !== snapshot.id || reference.version !== snapshot.version) throw failed()
       await checkGuard()
-      assertCurrent()
       const readback = await client.getWorkflowScheduleDraft(projectId, { ...reference }, { signal: controller.signal })
       assertCurrent()
       if (JSON.stringify(IntegrationWorkflowScheduleDraftV1.parse(readback)) !== serialized) throw failed()
       await checkGuard()
-      assertCurrent()
       return reference
     } catch (error) {
       if (current() && !controller.signal.aborted && (error?.status === 401 || error?.status === 403)) invalidate(true)
@@ -110,8 +106,7 @@ function ScopedScheduleDraft({ client, projectId, signal, guard, onForbidden, co
   }
 
   return <div className="workflow-schedule-draft-host">
-    <style>{`.ops-workspace .workflow-schedule-draft-host .leaf-schedule-draft label,
-      .ops-workspace .workflow-schedule-draft-host .leaf-schedule-draft button { margin: 0; }`}</style>
+    <style>{`.ops-workspace .workflow-schedule-draft-host .leaf-schedule-draft :is(label,button) { margin: 0; }`}</style>
     <IntegrationWorkflowScheduleDraftForm initialDraft={context.initialDraft} contextKey={String(context.key)}
       availability={availability} onSave={save} mode={mode} />
   </div>
