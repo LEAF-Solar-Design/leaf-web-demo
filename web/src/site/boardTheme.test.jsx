@@ -16,10 +16,12 @@ const board = () => screen.getByRole('region', { name: 'Project workspace' })
 const toggle = () => screen.getByRole('button', { name: 'Light board' })
 function expectDark() {
   expect(board().hasAttribute('data-board-theme')).toBe(false)
+  expect(board().hasAttribute('data-leaf-theme')).toBe(false)
   expect(board().classList.contains('leaf-light')).toBe(false)
 }
 function expectLight() {
   expect(board().getAttribute('data-board-theme')).toBe('light')
+  expect(board().getAttribute('data-leaf-theme')).toBe('paper')
   expect(board().classList.contains('leaf-light')).toBe(true)
   expect(toggle().getAttribute('aria-pressed')).toBe('true')
 }
