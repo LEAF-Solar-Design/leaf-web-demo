@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type { HarnessIdentity } from "../index.js";
 import { LAB_DOCUMENT_REF } from "../labDocumentPort.js";
-import type { LabDocumentPort, LabDocumentWrite } from "../labDocumentPort.js";
+import type { LabDocumentInspection, LabDocumentPort, LabDocumentWrite } from "../labDocumentPort.js";
 import type { PgTenantRepoLeaseCoordinator } from "./tenantRepoProvider.js";
 import { ForgePublicationError } from "./forgeRemoteAuthority.js";
 import type { ForgeRemoteAuthority } from "./forgeRemoteAuthority.js";
@@ -24,7 +25,9 @@ export interface TenantDocumentRepoOptions {
 export class TenantDocumentRepo implements LabDocumentPort {
   constructor(private readonly opts: TenantDocumentRepoOptions) {}
 
-  private git(dir: string, args: string[], input?: string): string {
+  private git(dir: string, args: string[], input?: string): string;
+  private git(dir: string, args: string[], input: undefined, raw: true): Buffer;
+  private git(dir: string, args: string[], input?: string, raw = false): string | Buffer {
     const env: NodeJS.ProcessEnv = {};
     for (const [key, value] of Object.entries(process.env)) {
       if (/^(PATH|SYSTEMROOT|WINDIR|TEMP|TMP)$/i.test(key)) env[key] = value;
@@ -40,7 +43,7 @@ export class TenantDocumentRepo implements LabDocumentPort {
         "-c", "core.fsmonitor=false",
         "-c", "commit.gpgSign=false", "-c", `user.name=${this.opts.identity.name}`,
         "-c", `user.email=${this.opts.identity.email}`, ...args,
-      ], { cwd: dir, env, input, encoding: "utf8", windowsHide: true });
+      ], { cwd: dir, env, input, encoding: raw ? "buffer" : "utf8", maxBuffer: 2 * 1024 * 1024, windowsHide: true });
     } catch {
       throw new Error("Lab Git operation failed");
     }
@@ -62,6 +65,43 @@ export class TenantDocumentRepo implements LabDocumentPort {
     }
     this.git(repo.dir, ["rev-parse", "--verify", "refs/heads/main^{commit}"]);
     return repo;
+  }
+
+  async inspect(tenantId: string, options: { readonly limit: number }): Promise<LabDocumentInspection> {
+    if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 200) throw new Error("invalid inspect limit");
+    return this.opts.lease.withLease(tenantId, async (lease) => {
+      const { dir } = await this.mapped(tenantId);
+      return this.opts.lease.runFenced(lease, async () => {
+        const head = this.readRef(dir);
+        if (!head) return { ref: LAB_DOCUMENT_REF, head: null, commits: [], documents: [] };
+        const commits: LabDocumentInspection["commits"][number][] = [];
+        for (const commit of this.git(dir, ["rev-list", "--first-parent", `--max-count=${options.limit}`, head]).trim().split("\n")) {
+          if (!SHA.test(commit)) throw new Error("invalid Lab commit");
+          const raw = this.git(dir, ["cat-file", "commit", commit], undefined, true);
+          const separator = raw.indexOf("\n\n");
+          if (separator < 0) throw new Error("invalid Lab commit headers");
+          const message = raw.subarray(separator + 2);
+          if (message.length > 16 * 1024) throw new Error("Lab commit message too large");
+          const parents = raw.subarray(0, separator).toString("utf8").split("\n").filter(line => line.startsWith("parent ")).map(line => line.slice(7));
+          if (parents.length > 1 || parents.some(parent => !SHA.test(parent))) throw new Error("invalid Lab commit parents");
+          commits.push({ commit, parent: parents[0] ?? null, message: message.toString("utf8") });
+        }
+        const entries = this.git(dir, ["ls-tree", "-rz", "--full-tree", head]).split("\0").filter(Boolean);
+        if (entries.length > 2000) throw new Error("too many Lab documents");
+        const documents: LabDocumentInspection["documents"][number][] = [];
+        for (const entry of entries) {
+          const match = /^100644 blob ([0-9a-f]{40})\t(.+)$/.exec(entry);
+          if (!match || !PATH.test(match[2]!)) throw new Error("Lab tree contains a forbidden path or mode");
+          const blob = match[1]!;
+          const size = Number(this.git(dir, ["cat-file", "-s", blob]).trim());
+          if (!Number.isSafeInteger(size) || size < 0 || size > 1024 * 1024) throw new Error("Lab blob too large");
+          const bytes = this.git(dir, ["cat-file", "blob", blob], undefined, true);
+          if (bytes.length !== size) throw new Error("invalid Lab blob size");
+          documents.push({ path: match[2]!, blob, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length });
+        }
+        return { ref: LAB_DOCUMENT_REF, head, commits, documents };
+      });
+    });
   }
 
   async commit(request: LabDocumentWrite): Promise<{ ref: typeof LAB_DOCUMENT_REF; commit: string }> {

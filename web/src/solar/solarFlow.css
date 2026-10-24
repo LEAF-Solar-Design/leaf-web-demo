@@ -55,4 +55,11 @@
   background: rgba(240, 242, 240, .08); color: rgba(240, 242, 240, .92);
 }
 .studio-shell .workspace-card .solar-flow-seat option { background: var(--cv-panel-glass); color: rgba(240, 242, 240, .92); }
+/* SEATSTART: Start stays visible at the bottom of the seat's scroll area; the fields scroll under it. */
+.studio-shell .workspace-card .solar-flow-seat [data-testid="solar-settings-form"] > form.params > button[type="submit"] {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: linear-gradient(rgba(240, 242, 240, .08), rgba(240, 242, 240, .08)), var(--cv-panel, #1b1f1c);
+}
 }
