@@ -44,3 +44,44 @@ it('pauses guest job reads while preserving the in-flight pointer and resumes po
   await act(async () => { hook.rerender({ readsPaused: false }) })
   expect(services.listJobs).toHaveBeenCalled()
 })
+
+it('clears the current job and stale results when reads pause', async () => {
+  const services = { listJobs: vi.fn(async () => []) }
+  const storage = { getItem: () => null }
+  const { result, rerender } = renderHook(({ readsPaused }) => useJobController({
+    readsPaused, services, storage, pollIntervalMs: 60000,
+  }), { initialProps: { readsPaused: false } })
+  await act(async () => {})
+
+  act(() => {
+    result.current.adoptEnvelope({ ok: true, tool: 'count' }, { jobId: 'job-9', toolName: 'count' })
+  })
+  expect(result.current.currentJob?.job_id).toBe('job-9')
+
+  act(() => { rerender({ readsPaused: true }) })
+
+  expect(result.current.currentJob).toBeNull()
+  expect(result.current.result).toBeNull()
+  expect(result.current.staleResults).toEqual([])
+})
+
+it('drops a jobs response that settles after reads pause', async () => {
+  let resolveJobs
+  const deferred = new Promise((resolve) => { resolveJobs = resolve })
+  const services = {
+    listJobs: vi.fn().mockResolvedValueOnce([]).mockReturnValueOnce(deferred),
+  }
+  const storage = { getItem: () => null }
+  const { result, rerender } = renderHook(({ readsPaused }) => useJobController({
+    readsPaused, services, storage, pollIntervalMs: 60000,
+  }), { initialProps: { readsPaused: false } })
+  await act(async () => {})
+
+  let pending
+  act(() => { pending = result.current.refreshJobs() })
+  act(() => { rerender({ readsPaused: true }) })
+  resolveJobs([{ id: 'job-1', status: 'running' }])
+  await act(async () => { await pending })
+
+  expect(result.current.jobs).toEqual([])
+})
