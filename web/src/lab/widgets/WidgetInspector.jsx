@@ -14,11 +14,12 @@ function NumberField({ label, value, min, max, step = 1, onChange, type = 'numbe
 }
 function BindingPicker({ element, edit, local }) {
   const binding = element.binding
-  const [graphId, setGraphId] = useState(binding?.doc_id ?? '')
-  const [result, setResult] = useState(null)
+  const graphId = binding?.doc_id ?? ''
+  const [discovery, setDiscovery] = useState(null)
+  const result = discovery?.docId === graphId ? discovery.result : null
   const [loading, setLoading] = useState(false)
   const generation = useRef(0)
-  useEffect(() => { generation.current += 1; setGraphId(binding?.doc_id ?? ''); setResult(null); setLoading(false); return () => { generation.current += 1 } }, [element.id])
+  useEffect(() => { generation.current += 1; setDiscovery(null); setLoading(false); return () => { generation.current += 1 } }, [element.id, binding?.source, graphId])
   function patch(change) {
     const next = { ...binding, ...change }
     if (next.source === 'kashbot.board' && next.field === 'winRate') next.window = 'today-utc'
@@ -30,17 +31,17 @@ function BindingPicker({ element, edit, local }) {
     setLoading(true)
     const next = await loadGraphOutputs(graphId)
     if (generation.current !== ticket) return
-    setResult(next); setLoading(false)
+    setDiscovery({ docId: graphId, result: next }); setLoading(false)
   }
   return <fieldset className="widgets-fields"><legend>Binding</legend>
     <Select label="Binding source" value={binding?.source ?? 'none'} options={['none', 'kashbot.board', 'graph.output']} onChange={(source) => {
-      generation.current += 1; setResult(null); setLoading(false)
+      generation.current += 1; setDiscovery(null); setLoading(false)
       if (source === 'none') edit({ binding: undefined })
       else edit({ binding: { source, min_renderer: RENDERER_VERSION, scale: 'identity', tone: 'auto', ...(source === 'kashbot.board' ? { field: 'total' } : { doc_id: graphId, output: '' }) } })
     }} />
     {binding?.source === 'kashbot.board' && <Select label="Board field" value={binding.field} options={BINDING_FIELDS} onChange={(field) => patch({ field })} />}
     {binding?.source === 'graph.output' && <>
-      <label>Graph document ID<input value={graphId} onChange={(e) => { generation.current += 1; setGraphId(e.target.value); setResult(null); setLoading(false); patch({ doc_id: e.target.value, output: '' }) }} /></label>
+      <label>Graph document ID<input value={graphId} onChange={(e) => { generation.current += 1; setDiscovery(null); setLoading(false); patch({ doc_id: e.target.value, output: '' }) }} /></label>
       <button type="button" disabled={local || loading || !graphId} onClick={outputs}>{loading ? 'Loading outputs…' : 'Load outputs'}</button>
       {local && <p>Graph output discovery is available in the authenticated Lab.</p>}
       <label>Graph output<select value={binding.output} onChange={(e) => patch({ output: e.target.value })}>

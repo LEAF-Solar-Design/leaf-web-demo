@@ -1,10 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import WidgetsView from './WidgetsView.jsx'
+import WidgetInspector from './WidgetInspector.jsx'
+import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 import { FORMAT_NAMES } from './WidgetDesigner.jsx'
 import { FORMATS, PRESETS } from './widgetCatalog.js'
-import { validateWidgetDoc } from './widgetDoc.js'
-import { createEditorState, createWidgetDoc, HANDLES, snap1, snapTargets, supportsPreset, transformElement, widgetEditorReducer as reduce } from './useWidgetEditor.js'
+import { migrate, validateWidgetDoc } from './widgetDoc.js'
+import { createEditorState, createWidgetDoc, HANDLES, snap1, snapTargets, supportsPreset, transformElement, useWidgetEditor, widgetEditorReducer as reduce } from './useWidgetEditor.js'
 import { loadGraphOutputs, loadWidget, resolveValues, saveWidget } from './widgetsClient.js'
 import { manifests } from '../canvas/registry.js'
 
@@ -64,6 +67,16 @@ describe.each(Object.keys(FORMATS))('%s geometry', (format) => {
 })
 
 describe('document editing and history', () => {
+  it('pins the frozen default snapshot to the migrated designer fixture and returns independent copies', () => {
+    const fixture = JSON.parse(readFileSync(`${process.cwd()}/../contract/fixtures/widget/designer-v2-default.json`, 'utf8'))
+    expect(DESIGNER_DEFAULT_DOC).toEqual(migrate(fixture))
+    expect(Object.values(createEditorState().doc.formats).every((f) => f.els.length === 0 && f.ship)).toBe(true)
+    const doc = createWidgetDoc(DESIGNER_DEFAULT_DOC), other = createWidgetDoc(DESIGNER_DEFAULT_DOC)
+    expect(doc).toEqual(DESIGNER_DEFAULT_DOC)
+    expect(Object.isFrozen(DESIGNER_DEFAULT_DOC.formats.la.els[0])).toBe(true)
+    doc.formats.la.els[0].x += 1
+    expect(other).toEqual(DESIGNER_DEFAULT_DOC)
+  })
   it('opens absent catalog formats from a valid partial document and preserves undo', () => {
     const doc = createWidgetDoc()
     doc.formats = { la: doc.formats.la }
@@ -324,6 +337,61 @@ describe('designer interactions', () => {
 })
 
 describe('widget store client and states', () => {
+  it('New saves the migrated default document with all reference layouts and inclusion flags', async () => {
+    const fetchImpl = vi.fn(async () => response({ revision: 1, sha256: 'default' }))
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<WidgetsView />); edit('Document ID', 'default-widget'); click('New')
+    expect(screen.getByRole('button', { name: 'Lock screen', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    click('Save')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 1'))
+    const doc = JSON.parse(fetchImpl.mock.calls[0][1].body).graph
+    expect(doc).toEqual(DESIGNER_DEFAULT_DOC)
+    expect(Object.fromEntries(Object.entries(doc.formats).map(([id, f]) => [id, f.els.length]))).toEqual({
+      la: 6, diExp: 6, diCompact: 2, diMin: 1, standby: 6, lockRect: 3, lockCirc: 1, lockInline: 2,
+      homeS: 5, homeM: 7, homeL: 11, watchStack: 4, watchCorner: 1,
+    })
+    expect(Object.keys(doc.formats).filter((id) => !doc.formats[id].ship)).toEqual(['homeL', 'watchStack', 'watchCorner'])
+  })
+  it('follows binding history and loads outputs only for the current graph document', async () => {
+    const initial = seed().doc
+    initial.formats.la.els[0].binding = { source: 'graph.output', doc_id: 'A', output: 'answer', min_renderer: '1.0.0', scale: 'identity', tone: 'auto' }
+    function PickerHistory() {
+      const [state, dispatch] = useWidgetEditor(initial)
+      function history(type) { dispatch({ type }); dispatch({ type: 'select', id: 'text1' }) }
+      return <>
+        <button onClick={() => history('undo')}>Undo binding</button>
+        <button onClick={() => history('redo')}>Redo binding</button>
+        <button onClick={() => { dispatch({ type: 'load', doc: initial }); dispatch({ type: 'select', id: 'text1' }) }}>Load binding</button>
+        <WidgetInspector doc={state.doc} selectedId="text1" dispatch={(action) => dispatch({ ...action, id: 'text1' })} local={false} />
+        <pre data-testid="binding-document">{JSON.stringify(state.doc)}</pre>
+      </>
+    }
+    const manifest = manifests[0]
+    const fetchImpl = vi.fn(async (url) => response({ kind: 'graph', graph: {
+      blocks: [{ id: 'node1', registry: { id: manifest.id, version: manifest.version.semver, code_sha256: manifest.version.code_sha256 } }],
+      outputs: { [url.includes('/B/') ? 'from-b' : 'from-a']: { node: 'node1', port: 'result' } },
+    } }))
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<PickerHistory />)
+    expect(screen.getByLabelText('Graph document ID')).toHaveValue('A')
+    edit('Graph document ID', 'B'); click('Load outputs')
+    await screen.findByRole('option', { name: 'from-b — scalar<number>' })
+    click('Undo binding')
+    expect(screen.getByLabelText('Graph document ID')).toHaveValue('A')
+    expect(screen.queryByRole('option', { name: 'from-b — scalar<number>' })).not.toBeInTheDocument()
+    click('Redo binding')
+    expect(screen.getByLabelText('Graph document ID')).toHaveValue('B')
+    click('Undo binding')
+    expect(screen.getByLabelText('Graph document ID')).toHaveValue('A')
+    click('Load outputs')
+    await screen.findByRole('option', { name: 'from-a — scalar<number>' })
+    expect(fetchImpl.mock.calls.at(-1)[0]).toBe('/api/lab/docs/A/head')
+    edit('Graph output', 'from-a')
+    expect(JSON.parse(screen.getByTestId('binding-document').textContent).formats.la.els[0].binding).toMatchObject({ doc_id: 'A', output: 'from-a' })
+    edit('Graph document ID', 'B'); click('Load binding')
+    expect(screen.getByLabelText('Graph document ID')).toHaveValue('A')
+    expect(screen.queryByRole('option', { name: 'from-a — scalar<number>' })).not.toBeInTheDocument()
+  })
   it.each([409, 413, 503])('preserves HTTP %s when an error response is not JSON', async (status) => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status, json: async () => { throw new Error('HTML response') } }))
     expect(await saveWidget('widget', createWidgetDoc(), null, { fetch: fetchImpl })).toMatchObject({ ok: false, status })
@@ -351,7 +419,7 @@ describe('widget store client and states', () => {
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 2'))
     const payload = JSON.parse(fetchImpl.mock.calls[1][1].body)
     expect(payload.expected_head).toBe(1)
-    expect(payload.graph.formats.la.els[0].text).toBe('Second version')
+    expect(payload.graph.formats.la.els.find((e) => e.id === 'text1').text).toBe('Second version')
   })
   it('loads missing widgets as new documents and saves with kind and expected_head', async () => {
     const fetchImpl = vi.fn().mockResolvedValueOnce(response({}, 404)).mockResolvedValueOnce(response({ revision: 3, sha256: 'abc' }))
@@ -420,14 +488,14 @@ describe('widget store client and states', () => {
     const fetchImpl = vi.fn().mockResolvedValueOnce(response({ revision: 1, sha256: 'sha' })).mockRejectedValueOnce(new Error('offline'))
     vi.stubGlobal('fetch', fetchImpl)
     render(<WidgetsView />); edit('Document ID', 'widget'); click('New')
-    expect(screen.getByText('Empty. Add an element to start your preview.')).toBeInTheDocument()
+    expect(screen.getByTestId('widget-surface').querySelectorAll('[data-element-id]')).toHaveLength(DESIGNER_DEFAULT_DOC.formats.la.els.length)
     click('Add text'); click('Save')
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 1'))
     click('Save'); await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('request failed'))
     expect(screen.getByLabelText('Text')).toHaveValue('Your text')
     edit('Binding source', 'graph.output')
     expect(screen.getByRole('status')).toHaveTextContent('Invalid')
-    expect(screen.getByRole('alert')).toHaveTextContent('/formats/la/els/0')
+    expect(screen.getByRole('alert')).toHaveTextContent(`/formats/la/els/${DESIGNER_DEFAULT_DOC.formats.la.els.length}`)
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
   })
   it('shows the selected graph output type in the authenticated binding picker', async () => {

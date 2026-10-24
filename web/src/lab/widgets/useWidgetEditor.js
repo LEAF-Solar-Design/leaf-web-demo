@@ -7,8 +7,8 @@ export const CUTOUTS = { diExp: { x: 122.5, y: 0, w: 126, h: 37 }, diCompact: { 
 export const supportsPreset = (format, preset) => format !== 'lockInline' || (shapeFor(preset) === 'text' && preset !== 'streak')
 const clamp = (n, min, max) => Math.max(min, Math.min(max, n))
 export const defaultSurface = (id) => ({ h: FORMATS[id].h, radius: FORMATS[id].radius, bg: FORMATS[id].bg, vibrant: FORMATS[id].accessory, ship: true, els: [] })
-export function createWidgetDoc() {
-  return { schema: 'widget-doc.v1', min_renderer: RENDERER_VERSION, active: 'la', formats: Object.fromEntries(Object.keys(FORMATS).map((id) => [id, defaultSurface(id)])) }
+export function createWidgetDoc(seed) {
+  return seed ? JSON.parse(JSON.stringify(seed)) : { schema: 'widget-doc.v1', min_renderer: RENDERER_VERSION, active: 'la', formats: Object.fromEntries(Object.keys(FORMATS).map((id) => [id, defaultSurface(id)])) }
 }
 export function createEditorState(doc = createWidgetDoc()) {
   return { doc, selectedId: null, past: [], future: [], guides: {}, transaction: null, nudgeAt: null }

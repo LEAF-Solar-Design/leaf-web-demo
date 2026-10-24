@@ -12,6 +12,7 @@ const preview = () => screen.getByRole('region', { name: 'Preview' })
 describe('scoped widget designer', () => {
   it('edits and previews literal text and removes it', () => {
     render(<WidgetsView scopeKey="a/p" />)
+    expect(preview().querySelectorAll('[data-element-id]')).toHaveLength(0)
     add()
     const literal = '<img onerror="bad()"> & text'
     text(literal)

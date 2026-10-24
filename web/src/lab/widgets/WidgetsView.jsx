@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import WidgetDesigner from './WidgetDesigner.jsx'
 import { createEditorState, createWidgetDoc, widgetEditorReducer } from './useWidgetEditor.js'
+import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 import { validateWidgetDoc } from './widgetDoc.js'
 import { loadWidget, saveWidget } from './widgetsClient.js'
 import './widgets.css'
@@ -62,7 +63,7 @@ export function WidgetsView({ scopeKey, hidden = false }) {
   }
   function newDocument() {
     requestGeneration.current += 1
-    setStoreState(createEditorState()); setLoadedId(docId); setHead(null); setFailure(null); setStatus('editing')
+    setStoreState(createEditorState(createWidgetDoc(DESIGNER_DEFAULT_DOC))); setLoadedId(docId); setHead(null); setFailure(null); setStatus('editing')
   }
   async function save() {
     if (local || invalid || !state || !validId(loadedId ?? '')) return
