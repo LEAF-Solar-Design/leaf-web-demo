@@ -14,7 +14,7 @@ const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
 const asPipe = connection => ({ from: { node: connection.source, port: connection.sourceHandle }, to: { node: connection.target, port: connection.targetHandle } })
 
-function Editor({ initialDocument, onChange, entries, measurements, upstream }) {
+function Editor({ initialDocument, onChange, entries, measurements, upstream, codeEvidence }) {
   const [document, setDocument] = useState(() => roundTrip(initialDocument || emptyGraph()))
   const [initialLayoutDocument] = useState(document)
   const [layoutRunner] = useState(createDependencyLayoutRunner)
@@ -161,12 +161,12 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream }) 
         <span className="leaf-timing">Layout {layoutMs === null ? 'not measured' : `${layoutMs.toFixed(2)} ms`}</span>{' · '}
         <span className="leaf-timing">Validation {validation.ms.toFixed(2)} ms</span></footer>
     </section>
-    <Inspector block={document.blocks.find(block => block.id === selected)} document={document} entries={entries} upstream={upstream}
+    <Inspector block={document.blocks.find(block => block.id === selected)} document={document} entries={entries} upstream={upstream} codeEvidence={codeEvidence}
       onSettings={settings => commit(updateSettings(current.current, selected, settings, entries))}
       onConnect={connect} onDisconnect={disconnect} onRemove={remove} onClose={() => setSelected(null)} />
   </div>
 }
 
-export default function LabCanvas({ initialDocument, onChange, entries = registry, measurements = {}, upstream = {} }) {
-  return <ReactFlowProvider><Editor initialDocument={initialDocument} onChange={onChange} entries={entries} measurements={measurements} upstream={upstream} /></ReactFlowProvider>
+export default function LabCanvas({ initialDocument, onChange, entries = registry, measurements = {}, upstream = {}, codeEvidence }) {
+  return <ReactFlowProvider><Editor initialDocument={initialDocument} onChange={onChange} entries={entries} measurements={measurements} upstream={upstream} codeEvidence={codeEvidence} /></ReactFlowProvider>
 }

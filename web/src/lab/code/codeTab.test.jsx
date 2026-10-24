@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CodeTab from './CodeTab.jsx'
 import BlockChecks from './BlockChecks.jsx'
+import { evidenceFor } from './hostEvidence.js'
 import { manifests } from '../canvas/registry.js'
 
 const manifest = {
@@ -34,6 +35,43 @@ afterEach(() => {
 const mount = (evidence = null, onSettings = vi.fn()) => render(<CodeTab block={block} manifest={manifest} evidence={evidence} onSettings={onSettings} />)
 const checkRows = () => within(screen.getByRole('region', { name: 'Checks before it can be used' })).getAllByRole('listitem')
 
+describe('host evidence boundary', () => {
+  const selected = { registry: { id: 'adjust-none', version: '1.0.0' } }
+  const row = overrides => ({ data: { kind: 'adjust-none', version: '1.0.0', checks: passed(), digest, draftDigest: digest, ...overrides } })
+  const providerOf = (checks, versions = []) => ({ rowsOf: name => name === 'block-checks' ? checks : versions })
+
+  it('normalizes only matching, valid evidence and bounded version history', () => {
+    const checks = passed()
+    checks.tests = { state: 'pass', passed: 12, total: 12 }
+    const result = evidenceFor(providerOf([row({ kind: 'another' }), row({ checks })], [
+      { data: { kind: 'adjust-none', version: '1.0.0', versions: [
+        { state: 'pending', version: 'v3', restart_required: true, digest },
+        { state: 'prior', version: 'v1', restart_required: 'false' },
+      ] } },
+    ]), selected)
+    expect(result).toEqual({ checks: { ...passed(), tests: { status: 'pass', passed: 12, total: 12 } }, digest, draftDigest: digest,
+      versions: [{ state: 'pending', version: 'v3', restart_required: true, digest }] })
+  })
+
+  it.each([
+    { kind: 'another' }, { version: '2.0.0' }, { digest: 'A'.repeat(64) }, { draftDigest: 'short' },
+    { checks: { ...passed(), builds: { status: 'unknown' } } },
+    { checks: { ...passed(), builds: { status: 'pass', detail: 'é'.repeat(1025) } } },
+    { checks: { ...passed(), corpus: { status: 'pass', difference_count: -1 } } },
+    { checks: { ...passed(), corpus: { status: 'pass', differences: ['x'.repeat(2049)] } } },
+  ])('ignores a malformed or unrelated check row (%j)', invalid => {
+    expect(evidenceFor(providerOf([row(invalid)]), selected)).toBeNull()
+  })
+
+  it('reads no more than 64 announced rows and handles absent or refused sources', () => {
+    expect(evidenceFor(providerOf([...Array.from({ length: 64 }, () => row({ kind: 'another' })), row()]), selected)).toBeNull()
+    expect(evidenceFor(providerOf([row({ checks: { ...passed(), builds: { status: 'pass', detail: 'é'.repeat(1024) } } })]), selected).checks.builds.detail).toHaveLength(1024)
+    expect(evidenceFor(providerOf([]), selected)).toBeNull()
+    expect(evidenceFor({ rowsOf: () => { throw new Error('unavailable') } }, selected)).toBeNull()
+    expect(evidenceFor(null, selected)).toBeNull()
+  })
+})
+
 describe('Block Code tab', () => {
   it.each(['Built-in', 'Settings only', 'Custom Rust'])('shows the exact manifest contract and commands in %s', mode => {
     mount()
@@ -44,10 +82,11 @@ describe('Block Code tab', () => {
     expect(typed).toHaveTextContent('trades: integer [count], nullable (stream)')
     expect(typed).toHaveTextContent('out: size: number [count], non-nullable')
     expect(typed).toHaveTextContent('budget: p50 at most 10 µs · p99 at most 100 µs')
-    for (const command of ['export-contract', 'validate-settings', 'new-rust', 'check', 'request-use']) {
+    for (const command of ['export-contract', 'validate-settings', 'new-rust', 'check']) {
       expect(screen.getByRole('button', { name: `Copy ${command}`, exact: true }).previousElementSibling)
         .toHaveTextContent(`python -m leafhft.studio_blocks.cli ${command} --kind 'adjust-none' --version '1.0.0'`)
     }
+    expect(document.body).not.toHaveTextContent('request-use')
     expect(screen.getByLabelText('Ask Claude')).toHaveValue('Size by Kelly as now, but halve it in the last 2 minutes before close.')
   })
 
@@ -57,17 +96,27 @@ describe('Block Code tab', () => {
     expect(checkRows().map(row => row.dataset.check)).toEqual(['builds', 'safety', 'contract', 'tests', 'speed', 'corpus'])
     for (const row of checkRows()) expect(row).toHaveAttribute('data-status', 'pending')
     expect(screen.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
+    expect(document.body).not.toHaveTextContent('request-use')
   })
 
   it.each([null, previousDigest])('requires the check evidence digest to match the draft (%s)', evidenceDigest => {
     mount(evidenceOf({ digest: evidenceDigest }))
     expect(screen.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
+    expect(document.body).not.toHaveTextContent('request-use')
+  })
+
+  it('does not expose request-use when passed checks arrive without a draft', () => {
+    mount({ digest, checks: passed(), versions: [{ state: 'prior', version: 'v1', digest: previousDigest }] })
+    expect(screen.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Undo at restart' }))
+    expect(document.body).not.toHaveTextContent('request-use')
   })
 
   it('enables Use only with matching evidence and reveals its digest-bound command', () => {
     mount(evidenceOf())
     const use = screen.getByRole('button', { name: 'Use as a Change' })
     expect(use).toBeEnabled()
+    expect(document.body).not.toHaveTextContent('request-use')
     expect(screen.queryByRole('button', { name: 'Copy Use as a Change command' })).not.toBeInTheDocument()
     fireEvent.click(use)
     expect(screen.getByRole('button', { name: 'Copy Use as a Change command' }).previousElementSibling)
@@ -79,10 +128,12 @@ describe('Block Code tab', () => {
     const view = mount(evidenceOf({ checks }))
     expect(screen.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
     expect(checkRows().find(row => row.dataset.check === key)).toHaveAttribute('data-status', 'fail')
+    expect(document.body).not.toHaveTextContent('request-use')
     delete checks[key]
     view.rerender(<CodeTab block={block} manifest={manifest} evidence={evidenceOf({ checks })} />)
     expect(screen.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
     expect(checkRows().find(row => row.dataset.check === key)).toHaveAttribute('data-status', 'pending')
+    expect(document.body).not.toHaveTextContent('request-use')
   })
 
   it('shows sample counts, measured speed against budget, corpus count and first differences', () => {
@@ -110,8 +161,9 @@ describe('Block Code tab', () => {
     expect(screen.getByText('v1 builtin · previous')).toBeVisible()
     expect(screen.getByText('Takes effect at the next restart')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Undo at restart' }))
-    expect(screen.getByRole('button', { name: 'Copy Undo at restart command' }).previousElementSibling)
-      .toHaveTextContent(`--digest '${previousDigest}'`)
+    expect(screen.getByRole('button', { name: 'Copy prior version digest' }).previousElementSibling)
+      .toHaveTextContent(previousDigest)
+    expect(document.body).not.toHaveTextContent('request-use')
   })
 
   it('discards the local draft and its Use command without discarding history', () => {
@@ -126,6 +178,7 @@ describe('Block Code tab', () => {
     expect(screen.queryByRole('button', { name: 'Copy Use as a Change command' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
     expect(screen.getByText('v1 builtin · live')).toBeVisible()
+    expect(document.body).not.toHaveTextContent('request-use')
     view.rerender(<CodeTab block={block} manifest={manifest} evidence={{ ...evidence }} />)
     expect(screen.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
   })
@@ -163,6 +216,7 @@ describe('Block Code tab', () => {
     view.rerender(<CodeTab block={block} manifest={manifest} evidence={evidenceOf({ digest: previousDigest })} />)
     expect(screen.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Copy Use as a Change command' })).not.toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent('request-use')
   })
 
   it('copies prompts and commands locally without contacting a model or network', async () => {

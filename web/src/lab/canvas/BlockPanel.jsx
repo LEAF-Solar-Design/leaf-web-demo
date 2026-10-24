@@ -5,7 +5,7 @@ import { connectionStatus } from './portCompat.js'
 import { inputValues, pipeId, validateGraph } from './graphDoc.js'
 import CodeTab, { SettingField, SettingsJSON } from '../code/CodeTab.jsx'
 
-export default function BlockPanel({ block, document, onSettings, onConnect, onDisconnect, entries = registry, upstream = {}, evidence = null }) {
+export default function BlockPanel({ block, document, onSettings, onConnect, onDisconnect, entries = registry, upstream = {}, evidence = null, codeEvidence }) {
   const manifest = manifestFor(block, entries)
   const [tab, setTab] = useState('Setup')
   const [draft, setDraft] = useState(block.settings)
@@ -64,7 +64,7 @@ export default function BlockPanel({ block, document, onSettings, onConnect, onD
         <h3>Resolved inputs</h3><pre>{canonicalJSON(inputValues(document, block, upstream, entries))}</pre>
         <h3>Declared sample output</h3><pre>{canonicalJSON(manifest.sample_output)}</pre>
       </>}
-      <div hidden={tab !== 'Code'}><CodeTab key={block.id} block={block} manifest={manifest} evidence={evidence} onSettings={applySettings} /></div>
+      <div hidden={tab !== 'Code'}><CodeTab key={block.id} block={block} manifest={manifest} evidence={codeEvidence ? codeEvidence(block) : evidence} onSettings={applySettings} /></div>
     </div>
     {message && <p role="status">{message}</p>}
   </>

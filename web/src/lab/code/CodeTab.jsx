@@ -53,7 +53,7 @@ export default function CodeTab({ block, manifest, evidence = null, onSettings }
   const [action, setAction] = useState(null)
   const [prompt, setPrompt] = useState('Size by Kelly as now, but halve it in the last 2 minutes before close.')
   const draft = evidence?.draft
-  const draftDigest = identity(draft) || evidence?.draft_digest || null
+  const draftDigest = identity(draft) || evidence?.draftDigest || evidence?.draft_digest || null
   const hasDraft = Boolean(draftDigest && discarded !== draftDigest)
   const evidenceDigest = evidence?.digest || evidence?.evidence_digest || null
   const checks = hasDraft ? evidence?.checks : null
@@ -84,8 +84,8 @@ export default function CodeTab({ block, manifest, evidence = null, onSettings }
     <CopyText label="Ask Claude prompt" text={`${prompt}\n\nBlock ${manifest.id}@${manifest.version.semver}\n${canonicalJSON(manifest)}`} />
     <p>Copy this prompt to your own Claude session. No model calls or host data uploads happen here.</p>
     <h4>Terminal commands</h4>
-    {['export-contract', 'validate-settings', 'new-rust', 'check', 'request-use'].map(name =>
-      <CopyText key={name} label={name} text={command(name, name === 'request-use' ? ` --digest ${hasDraft ? quote(draftDigest) : '<draft-digest>'}` : '')} />)}
+    {['export-contract', 'validate-settings', 'new-rust', 'check'].map(name =>
+      <CopyText key={name} label={name} text={command(name)} />)}
     {mode === 'Built-in' && <p>Uses the registered built-in implementation.</p>}
     {mode === 'Settings only' && <>
       <details><summary>Settings schema and UI schema</summary><pre>{canonicalJSON(manifest.settings_schema)}</pre><pre>{canonicalJSON(manifest.ui_schema)}</pre></details>
@@ -119,7 +119,7 @@ export default function CodeTab({ block, manifest, evidence = null, onSettings }
       {version.state === 'pending' && <p>Takes effect at the next restart</p>}
     </li>)}</ul>
     {identity(prior) && <><button type="button" onClick={() => setAction({ type: 'undo', digest: identity(prior) })}>Undo at restart</button>
-      {action?.type === 'undo' && action.digest === identity(prior) && <CopyText label="Undo at restart command" text={requestUse(action.digest)} />}</>}
+      {action?.type === 'undo' && action.digest === identity(prior) && <CopyText label="prior version digest" text={`Prior version for owner-approved undo at restart: ${action.digest}`} />}</>}
     {message && <p role="status">{message}</p>}
   </section>
 }
