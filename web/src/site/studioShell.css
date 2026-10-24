@@ -683,3 +683,16 @@
     overscroll-behavior: contain;
   }
 }
+
+/* TOPBAR3: on Solar the pinned top-row surface tabs overlap the ribbon and header controls until about 1780px.
+   From 1500 to 1799px Solar keeps the own-row nav it already uses at 1499px (measured on staging: 3 overlaps at
+   1600px and 2 at 1700px before, none after). */
+@media (min-width: 1500px) and (max-width: 1799px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"] { --ck-canvas-top: 185px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"] .tc-product-nav {
+    position: relative; inset: auto; height: 30px; min-height: 30px; box-sizing: border-box;
+    margin: 0; padding: 2px 4px 0; display: flex; align-items: flex-start;
+    overflow-x: auto; flex-wrap: nowrap; background: transparent; isolation: isolate; pointer-events: auto;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"] .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; align-self: flex-start; }
+}

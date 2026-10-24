@@ -57,6 +57,7 @@ import { GitRefConflictError } from "./ports/impl/tenantChangeRepo.js";
 import { ForgePublicationError } from "./vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 import type { LabDocumentPort } from "./vendor/mushy-author/ports/labDocumentPort.js";
 import { handleLabCommit, LAB_COMMIT_MAX_BODY_BYTES } from "./lab/labCommit.js";
+import { handleLabInspect, LAB_INSPECT_MAX_BODY_BYTES } from "./lab/labInspect.js";
 import { classifyRoute } from "./routing.js";
 import {
   DEFAULT_TENANT,
@@ -941,6 +942,18 @@ export function createHarness(ports: HarnessPorts, opts?: {
       const auth = explicitAuth ?? resolveHarnessAuth();
       const denial = harnessAuthDenial(req, auth);
       if (denial) return send(res, 401, denial);
+
+      if (method === "POST" && path === "/lab/inspect") {
+        res.setHeader("cache-control", "no-store");
+        if (!opts?.labDocuments) {
+          return send(res, 501, {
+            error: { code: "lab_inspect_unavailable", message: "Lab inspect is unavailable" },
+          });
+        }
+        const body = await readJsonBody(req, LAB_INSPECT_MAX_BODY_BYTES, true, false, true);
+        const result = await handleLabInspect(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
+        return send(res, result.status, result.body);
+      }
 
       if (method === "POST" && path === "/lab/commit") {
         res.setHeader("cache-control", "no-store");

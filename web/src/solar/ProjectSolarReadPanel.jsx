@@ -8,6 +8,9 @@ export const PROJECT_SOLAR_WORKSPACE_REASONS = Object.freeze({
   scope_stale: 'The drawing or session changed. Read the output again.',
   client_unavailable: 'Project Solar reads are not available in this view.',
   catalog_unavailable: 'Refresh the Solar tools before reading this output.',
+  catalog_refreshing: 'Refreshing the Solar tools. Your inputs are kept.',
+  tool_not_admitted: 'This Solar tool is no longer available for this project. Close it to continue.',
+  params_schema_changed: 'This Solar tool changed. Close and reopen it to use the new inputs.',
   unsupported: 'This tool is not available in the project Solar workspace.',
   host_unavailable: 'This editor is not available in the project Solar workspace.',
   busy: 'Wait for the current project action to finish.',
@@ -53,6 +56,9 @@ export function projectSolarWorkspaceReason(code) {
     case 'scope_stale': return PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale
     case 'client_unavailable': return PROJECT_SOLAR_WORKSPACE_REASONS.client_unavailable
     case 'catalog_unavailable': return PROJECT_SOLAR_WORKSPACE_REASONS.catalog_unavailable
+    case 'catalog_refreshing': return PROJECT_SOLAR_WORKSPACE_REASONS.catalog_refreshing
+    case 'tool_not_admitted': return PROJECT_SOLAR_WORKSPACE_REASONS.tool_not_admitted
+    case 'params_schema_changed': return PROJECT_SOLAR_WORKSPACE_REASONS.params_schema_changed
     case 'unsupported': return PROJECT_SOLAR_WORKSPACE_REASONS.unsupported
     case 'host_unavailable': return PROJECT_SOLAR_WORKSPACE_REASONS.host_unavailable
     case 'busy': return PROJECT_SOLAR_WORKSPACE_REASONS.busy

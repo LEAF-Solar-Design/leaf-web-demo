@@ -268,6 +268,42 @@ describe('rollback contract', () => {
     expect(css).toContain('--ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));')
   })
 
+  it('puts the Solar surface tabs on their own row from 1500 to 1799px', () => {
+    const css = read('./studioShell.css')
+    const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"]'
+    const mediaBlocks = []
+    const media = /@media\s*([^{}]+)\{/g
+    let match
+    while ((match = media.exec(css))) {
+      const start = media.lastIndex
+      let depth = 1
+      let end = start
+      for (; end < css.length && depth; end++) {
+        if (css[end] === '{') depth++
+        if (css[end] === '}') depth--
+      }
+      expect(depth).toBe(0)
+      mediaBlocks.push({ header: match[0].slice(0, -1).trim(), body: css.slice(start, end - 1) })
+      media.lastIndex = end
+    }
+    const block = mediaBlocks.find(block => block.header === '@media (min-width: 1500px) and (max-width: 1799px)')
+    expect(block).toBeDefined()
+    const rules = [...block.body.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    const nav = rules.find(rule => rule[1].trim() === `${shell} .tc-product-nav`)
+    expect(nav).toBeDefined()
+    expect(nav[2]).toMatch(/position:\s*relative;/)
+    expect(nav[2]).toMatch(/height:\s*30px;/)
+    expect(nav[2]).toMatch(/overflow-x:\s*auto;/)
+    expect(nav[2]).not.toMatch(/position:\s*fixed/)
+    const canvas = rules.find(rule => rule[1].trim() === shell)
+    expect(canvas).toBeDefined()
+    expect(canvas[2]).toMatch(/--ck-canvas-top:\s*185px;/)
+    expect(canvas[2]).toContain('--ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));')
+    for (const rule of rules) {
+      expect(rule[1]).not.toMatch(/data-surface="(?:cad|browser|ops)"/)
+    }
+  })
+
   it('insets the fixed Find field past the open tool rail only on desktop', () => {
     const css = read('./studioShell.css')
     const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'

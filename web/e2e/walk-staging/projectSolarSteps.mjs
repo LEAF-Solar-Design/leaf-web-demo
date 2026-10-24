@@ -7,6 +7,7 @@ import {
 import { inspectContext, inspectJob, isUuid, projectBinding } from '../local/solarProjectWalk.mjs'
 import {
   openProjectSolarTool, selectProjectSolarVersion, takeProjectSolarCheckout, redactSolarDiagnostic, walkClick,
+  walkFill, walkSelect, walkEnabled,
 } from '../walk/fixtures.mjs'
 
 const TOOL = 'solar-solve-proposal'
@@ -348,25 +349,26 @@ export async function reviewStagingProposal(runtime, {
 } = {}) {
   const { page, projectSolar: solar } = runtime
   const refused = reason => ({ reason, catalog: solar.catalog })
+  // Take refreshes the catalog and closes an editor that is already open.
+  await checkout(runtime, assertions, stagingAction)
   const opened = await open(runtime, TOOL, assertions, { allowDisabled: true })
   if (!opened) return refused('run_solve_disabled')
   const form = page.getByRole('form', { name: 'Solve', exact: true })
   await assertions(form).toBeVisible()
-  await checkout(runtime, assertions, stagingAction)
   const frame = form.getByLabel('Frame', { exact: true })
   await assertions(frame).toBeEnabled({ timeout: 10_000 }).catch(() => {})
-  if (!await frame.isEnabled()) return refused('run_solve_disabled')
+  if (!await walkEnabled(frame, 'Frame')) return refused('run_solve_disabled')
   // These are references, never cloud credentials. The server resolves the grant.
   // w1-staging is also used by server/tests/test_w1_cloud_solve_probe.py.
   const values = proposalFormValues(solar.context.graph)
-  await form.getByLabel('Grant ref', { exact: true }).fill('w1-staging')
-  await form.getByLabel('Request', { exact: true }).fill(JSON.stringify(values.request))
-  await frame.fill(values.frame)
-  await form.getByRole('combobox', { name: 'Phase', exact: true }).selectOption('0')
+  await walkFill(form.getByLabel('Grant ref', { exact: true }), 'w1-staging', 'Grant ref')
+  await walkFill(form.getByLabel('Request', { exact: true }), JSON.stringify(values.request), 'Request')
+  await walkFill(frame, values.frame, 'Frame')
+  await walkSelect(form.getByRole('combobox', { name: 'Phase', exact: true }), '0', 'Phase')
   const start = form.getByRole('button', { name: 'Run solve', exact: true })
   // Give a loading/locked form time to settle without turning refusal into failure.
   await assertions(start).toBeEnabled({ timeout: 10_000 }).catch(() => {})
-  if (!await start.isEnabled()) return refused('run_solve_disabled')
+  if (!await walkEnabled(start, 'Run solve')) return refused('run_solve_disabled')
   // Submission can be refused by the UI's preflight before POST /api/run.
   let runResponse = null
   const observe = response => {

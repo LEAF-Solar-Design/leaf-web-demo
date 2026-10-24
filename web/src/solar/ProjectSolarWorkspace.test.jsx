@@ -125,6 +125,165 @@ function fixture(name = STEP[0], { code = null, realGraph = false, rows = null }
 }
 const last = (values) => values[values.length - 1]
 
+it('keeps an open Solve draft across an empty then same-schema catalog refresh', () => {
+  const solve = Row('solar-solve-proposal')
+  solve.params = { type: 'object', properties: { site: { type: 'string', title: 'Site' },
+    request: { type: 'object', title: 'Request' } } }
+  const h = fixture(solve.name, { rows: [solve] })
+  h.mount({ openTool: solve })
+  const frame = screen.getByLabelText('Frame')
+  const editor = h.view.container.querySelector('.project-solar-workspace-editor')
+  fireEvent.change(frame, { target: { value: 'kept-frame' } })
+  fireEvent.change(screen.getByLabelText('Site'), { target: { value: 'kept-site' } })
+  const request = screen.getByLabelText('Request')
+  fireEvent.change(request, { target: { value: '{"partial":' } })
+  h.epoch += 1
+  h.update({ projectCatalog: { ...h.catalog, families: [], isCurrent: () => false } })
+  expect(screen.getByLabelText('Frame')).toBe(frame)
+  expect(frame).toBeDisabled()
+  expect(frame.value).toBe('kept-frame')
+  expect(screen.getByLabelText('Request')).toBe(request)
+  expect(request.value).toBe('{"partial":')
+  expect(screen.getByRole('status')).toHaveTextContent('Refreshing the Solar tools. Your inputs are kept.')
+  h.update({ projectCatalog: { ...h.catalog, families: [] } })
+  expect(frame).toBeDisabled()
+  expect(screen.getByRole('status')).toHaveTextContent(PROJECT_SOLAR_WORKSPACE_REASONS.catalog_refreshing)
+  // New objects and JSON key order do not change the input contract.
+  const fresh = { ...solve, params: { properties: { request: { title: 'Request', type: 'object' },
+    site: { title: 'Site', type: 'string' } }, type: 'object' } }
+  h.update({ openTool: fresh, projectCatalog: { ...h.catalog, families: [{ capabilities: [fresh] }] } })
+  expect(h.view.container.querySelector('.project-solar-workspace-editor')).toBe(editor)
+  expect(screen.getByLabelText('Frame')).toBe(frame)
+  expect(frame).toBeEnabled()
+  expect(frame.value).toBe('kept-frame')
+  expect(screen.getByLabelText('Site').value).toBe('kept-site')
+  expect(screen.getByLabelText('Request')).toBe(request)
+  expect(request.value).toBe('{"partial":')
+  expect(screen.queryByRole('status')).toBeNull()
+})
+
+it('a same-schema refresh with a new digest submits against the current row', async () => {
+  const solve = Row('solar-solve-proposal')
+  const h = fixture(solve.name, { rows: [solve] })
+  h.mount({ openTool: solve })
+  fireEvent.change(screen.getByLabelText('Frame'), { target: { value: 'kept-frame' } })
+  const oldPrepared = h.client.prepareRun({ tool: solve.name, params: { drawing_id: B.drawing_id },
+    catalogDigest: D, idempotencyKey: 'prepared-before-refresh' })
+  const digest = 'sha256:' + 'd'.repeat(64)
+  const fresh = { ...solve, catalog_digest: digest, params: { ...solve.params } }
+  h.epoch += 1
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: [fresh] }] } })
+  expect(screen.getByLabelText('Frame').value).toBe('kept-frame')
+  expect(screen.getByLabelText('Frame')).toBeEnabled()
+  h.client.prepareRun.mockReturnValueOnce(oldPrepared)
+  fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(PROJECT_SOLAR_WORKSPACE_SUBMIT_CODES.CATALOG_STALE))
+  expect(h.submit).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))
+  await waitFor(() => expect(h.submit).toHaveBeenCalledOnce())
+  expect(h.client.prepareRun.mock.calls.at(-1)[0]).toMatchObject({ tool: solve.name, catalogDigest: digest,
+    solveContext: { frame_ref: 'kept-frame', phase: 'initial', expected_rev: 6 } })
+  expect(h.submit.mock.calls[0][0]).toMatchObject({ tool: solve.name, catalogDigest: digest })
+  expect(h.submit.mock.calls[0][1].isCurrent()).toBe(true)
+})
+
+it('names params_schema_changed and keeps the draft disabled', () => {
+  const solve = Row('solar-solve-proposal')
+  solve.params = { type: 'object', properties: { site: { type: 'string', title: 'Site' } } }
+  const h = fixture(solve.name, { rows: [solve] })
+  h.mount({ openTool: solve })
+  const frame = screen.getByLabelText('Frame')
+  fireEvent.change(frame, { target: { value: 'kept-frame' } })
+  fireEvent.change(screen.getByLabelText('Site'), { target: { value: 'kept-site' } })
+  const fresh = { ...solve, params: { type: 'object', properties: { replacement: { type: 'number' } } } }
+  const catalog = { ...h.catalog, families: [{ capabilities: [fresh] }] }
+  h.update({ openTool: fresh, projectCatalog: catalog })
+  expect(screen.getByLabelText('Frame')).toBe(frame)
+  expect(frame.value).toBe('kept-frame')
+  expect(frame).toBeDisabled()
+  expect(screen.getByLabelText('Site').value).toBe('kept-site')
+  expect(screen.queryByLabelText('Replacement')).toBeNull()
+  expect(screen.getByRole('status')).toHaveTextContent('This Solar tool changed. Close and reopen it to use the new inputs.')
+  closeWorkspace()
+  expect(screen.queryByLabelText('Frame')).toBeNull()
+  expect(h.close).toHaveBeenCalledOnce()
+  h.rows = [fresh]
+  h.update()
+  h.open(fresh)
+  expect(screen.getByLabelText('Replacement')).toBeEnabled()
+  expect(screen.getByLabelText('Frame').value).toBe('')
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('names tool_not_admitted when the refreshed catalog drops the tool', () => {
+  const solve = Row('solar-solve-proposal')
+  const h = fixture(solve.name, { rows: [solve] })
+  h.mount({ openTool: solve })
+  const frame = screen.getByLabelText('Frame')
+  fireEvent.change(frame, { target: { value: 'kept-frame' } })
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: [Row('count-by-layer')] }] } })
+  expect(screen.getByLabelText('Frame')).toBe(frame)
+  expect(frame.value).toBe('kept-frame')
+  expect(frame).toBeDisabled()
+  expect(screen.getByRole('status')).toHaveTextContent('This Solar tool is no longer available for this project. Close it to continue.')
+  closeWorkspace()
+  expect(screen.queryByLabelText('Frame')).toBeNull()
+  expect(h.close).toHaveBeenCalledOnce()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('an owner change still closes the editor', () => {
+  for (const change of ['binding', 'authority']) {
+    const solve = Row('solar-solve-proposal')
+    const h = fixture(solve.name, { rows: [solve] })
+    h.mount({ openTool: solve })
+    fireEvent.change(screen.getByLabelText('Frame'), { target: { value: 'old-frame' } })
+    const binding = change === 'binding' ? { ...B, drawing_id: JOB } : B
+    const authorityKey = change === 'authority' ? 'epoch-2' : 'epoch-1'
+    h.snapshot = { binding, authorityKey }
+    h.update({ solarBinding: binding, authorityKey,
+      projectCatalog: { ...h.catalog, binding, authorityKey } })
+    expect(screen.queryByLabelText('Frame')).toBeNull()
+    expect(h.view.container.querySelector('.project-solar-workspace-editor')).toBeNull()
+    // Returning to the old owner cannot revive its retired draft.
+    h.snapshot = { binding: B, authorityKey: 'epoch-1' }
+    h.update({ solarBinding: B, authorityKey: 'epoch-1', projectCatalog: h.catalog })
+    expect(screen.queryByLabelText('Frame')).toBeNull()
+    expect(h.submit).not.toHaveBeenCalled()
+    h.view.unmount()
+  }
+})
+
+it.each(['selected', 'commit'])('refuses a removed %s row without authorizing a retained draft', async (removed) => {
+  const row = Row('solar-homeruns'), commit = Row('solar-commit-solve')
+  const h = fixture(row.name, { rows: [row, commit] })
+  h.mount({ openTool: row })
+  const prepared = h.intent(), options = optionsFor(h)
+  // A missing commit row must be refused even when the caller kept its old row object.
+  const runRow = removed === 'commit' ? commit : row
+  const remaining = removed === 'commit' ? [row] : [commit]
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: remaining }] } })
+  const submit = last(h.graphs).onProjectSubmit
+  await expect(submit({ ...prepared, tool: runRow.name }, options, runRow)).resolves.toMatchObject({
+    ok: false, reason: PROJECT_SOLAR_WORKSPACE_SUBMIT_CODES.ROW_NOT_ADMITTED,
+  })
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('resolves a cloned selection by name while taking schema and digest only from the admitted row', async () => {
+  const h = fixture('solar-homeruns')
+  const supplied = { ...h.row, catalog_digest: 'sha256:' + 'd'.repeat(64),
+    params: { type: 'object', properties: { injected: { type: 'string' } } } }
+  h.mount({ openTool: supplied })
+  const editor = last(h.graphs)
+  expect(editor.tool).toBe(h.row)
+  expect(editor.catalogDigest).toBe(D)
+  await expect(editor.onProjectSubmit({ ...h.intent(), catalogDigest: supplied.catalog_digest }, optionsFor(h)))
+    .resolves.toMatchObject({ ok: false, reason: PROJECT_SOLAR_WORKSPACE_SUBMIT_CODES.CATALOG_STALE })
+  expect(h.submit).not.toHaveBeenCalled()
+  expect(await editor.onProjectSubmit(h.intent(), optionsFor(h))).toBe(h.outcome)
+})
+
 it('W1C5 mounts proposal review, keeps it through commit submission, and discards without writing', async () => {
   const solve = Row('solar-solve-proposal'), commit = Row('solar-commit-solve')
   const h = fixture(solve.name, { rows: [solve, commit] })
@@ -609,7 +768,6 @@ describe('Project Solar workspace composition', () => {
       ['catalog_unavailable', (h) => { h.catalog.isCurrent = () => 'true' }],
       ['catalog_unavailable', (h) => { h.catalog.isCurrent = () => { throw new Error('expired') } }],
       ['catalog_unavailable', (h) => { Object.defineProperty(h.catalog, 'isCurrent', { get() { throw new Error('expired') } }) }],
-      ['catalog_unavailable', (h) => { h.props.openTool = { ...h.row } }],
       ['catalog_unavailable', (h) => { delete h.row.catalog_digest }],
       ['catalog_unavailable', (h) => { h.rows.push({ ...h.row, catalog_digest: 'sha256:' + 'd'.repeat(64) }) }],
       ['catalog_unavailable', (h) => { h.rows.push({ ...h.row, params: { type: 'object', properties: { extra: { type: 'string' } } } }) }],
@@ -661,7 +819,18 @@ describe('Project Solar workspace composition', () => {
       act(() => open(h.row))
       expect(h.props.onOpenTool).not.toHaveBeenCalled()
       expect(h.submit).not.toHaveBeenCalled()
-      if (variant !== 'busy') { h.update(); noHost() }
+      if (variant !== 'busy') {
+        h.update()
+        // Same-owner refreshes keep the draft; their old callbacks still fail authorization above.
+        if (['catalog', 'duplicate', 'receipt', 'signal'].includes(variant)) {
+          expect(screen.getByTestId('recorded-graph')).toBeInTheDocument()
+          const boundary = h.view.container.querySelector('.project-solar-workspace-editor fieldset')
+          expect(boundary.disabled).toBe(['catalog', 'duplicate'].includes(variant))
+          const draft = screen.getByRole('textbox', { name: 'Fixture draft' })
+          if (['catalog', 'duplicate'].includes(variant)) expect(draft).toBeDisabled()
+          else expect(draft).toBeEnabled()
+        } else noHost()
+      }
       h.view.unmount()
     }
     // The incoming form must still be current at the exact handoff boundary.
@@ -1109,7 +1278,7 @@ describe('Project Solar workspace composition', () => {
       noHost()
       h.view.unmount()
     }
-    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(20)
+    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(23)
     expect(projectSolarWorkspaceReason('not_a_reason')).toBeNull()
   })
 

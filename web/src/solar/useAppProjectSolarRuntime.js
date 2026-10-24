@@ -13,7 +13,7 @@ const deferred = () => {
   const promise = new Promise(done => { resolve = done })
   return { promise, resolve }
 }
-const empty = () => ({ context: null, openTool: null, projectRunMemory: null,
+const empty = () => ({ context: null, openTool: null, toolOwner: null, projectRunMemory: null,
   projectPending: null, projectOutcome: null, busy: false, notice: null,
   publishedVersionId: null, visibleLayers: {} })
 function identity(inputs) {
@@ -198,9 +198,14 @@ export function useAppProjectSolarRuntime(props) {
     try { bindingRef.current = createSolarDrawingBinding(a?.scope?.binding) } catch { bindingRef.current = null }
   }
   const binding = bindingRef.current
+  const selectionCurrent = (previous) => inputs.projectMode === true &&
+    previous.toolOwner?.authorityKey === a?.scope?.authorityKey &&
+    sameSolarDrawingBinding(previous.toolOwner?.binding, a?.scope?.binding)
+  const resetOwnerState = (previous) => ({ ...empty(), ...(selectionCurrent(previous)
+    ? { openTool: previous.openTool, toolOwner: previous.toolOwner } : {}) })
   useEffect(() => {
     if (!inputs.projectMode || !a?.ready) {
-      if (!m.transition) publish(() => m.alive && latest.current === inputs, empty())
+      if (!m.transition) publish(() => m.alive && latest.current === inputs, resetOwnerState)
       return undefined
     }
     observe()
@@ -209,7 +214,7 @@ export function useAppProjectSolarRuntime(props) {
       onOutcome: (outcome, meta) => onOutcome(owner, outcome, meta) })
     m.owner = owner
     if (m.transition && !transitionCurrent(m.transition)) retire()
-    if (!m.transition) publish(() => m.alive && m.owner === owner, empty())
+    if (!m.transition) publish(() => m.alive && m.owner === owner, resetOwnerState)
     refresh(value => m.alive && m.owner === owner ? value + 1 : value)
     return () => {
       owner.abort.abort()
@@ -236,9 +241,10 @@ export function useAppProjectSolarRuntime(props) {
     // Re-expose an already-read context after committing a valid replacement capture.
     const restoredContext = contextView === null && current(state.context?.current)
     if (staleRun || m.run?.uncertain || restoredContext) publish(() => ownerCurrent(owner), {
-      ...(staleRun || m.run?.uncertain ? { openTool: null } : {}), ...(staleRun
+      ...(staleRun
       ? { projectPending: null, projectOutcome: null, busy: false, notice: null } : {}),
-      ...(m.run?.uncertain ? { projectPending: null, busy: false, notice: PROJECT_SOLAR_RUN_REASONS.outcome_unknown } : {}) })
+      ...(m.run?.uncertain ? { openTool: null, toolOwner: null, projectPending: null, busy: false,
+        notice: PROJECT_SOLAR_RUN_REASONS.outcome_unknown } : {}) })
     return undefined
   }, [inputs.projectMode, a?.ready, a?.projectClient, a?.isCurrent, binding, a?.scope?.authorityKey, revision])
 
@@ -251,7 +257,7 @@ export function useAppProjectSolarRuntime(props) {
     // Check the live capture without making its function identity own the request.
     const valid = () => !controller.signal.aborted && epoch === m.epoch &&
       ownerCurrent(owner) && current(latest.current.projectSolar?.isCurrent)
-    publish(valid, { context: null, openTool: null })
+    publish(valid, { context: null })
     async function read() {
       let response
       try { response = await a.projectClient.readContext({ signal: controller.signal }) } catch { response = null }
@@ -366,16 +372,18 @@ export function useAppProjectSolarRuntime(props) {
     const owner = m.owner, live = latest.current
     if (!entryCurrent() || !live.hostEnabled || live.externalBusy || m.run ||
         !ownerCurrent(owner) || !catalogRows(live).includes(row)) return false
-    publish(() => entryCurrent() && ownerCurrent(owner), { openTool: row })
+    publish(() => entryCurrent() && ownerCurrent(owner), { openTool: row, toolOwner: a.scope })
     return true
   }
-  function onClose() { publish(entryCurrent, { openTool: null }) }
+  function onClose() { publish(entryCurrent, { openTool: null, toolOwner: null }) }
   function setVisibleLayers(value) {
     publish(contextCurrent, previous => ({ visibleLayers: typeof value === 'function' ? value(previous.visibleLayers) : value }))
   }
   const contextView = contextCurrent() ? state.context.data : null
   return { onProjectSubmit, complete, retryReadback, contextView,
-    contextCurrent, openTool: state.openTool, onOpenTool, onClose, projectRunMemory: state.projectRunMemory,
+    contextCurrent, openTool: selectionCurrent(state)
+      ? catalogRows(inputs).find(row => row.name === state.openTool?.name) ?? state.openTool : null,
+    onOpenTool, onClose, projectRunMemory: state.projectRunMemory,
     projectPending: state.projectPending, projectOutcome: state.projectOutcome,
     submissionSignal: m.owner?.abort.signal, busy: state.busy || !!inputs.externalBusy,
     notice: state.notice, publishedVersionId: state.publishedVersionId,

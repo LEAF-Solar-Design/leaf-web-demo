@@ -77,7 +77,7 @@ function rowDeclaration(row) {
 
 function describeScope(props) {
   const { solarBinding, authorityKey, projectClient, projectCatalog, isCurrent, submissionSignal } = props
-  let binding = null, bindingKey = null, receiptCurrent = null, rows = [], catalogKey = null
+  let binding = null, bindingKey = null, receiptCurrent = null, rows = [], catalogKey = null, catalogEmpty = false
   // Validate the caller's binding, then keep its identity so every host receives the object it was given.
   try { createSolarDrawingBinding(solarBinding); binding = solarBinding; bindingKey = solarDrawingBindingKey(solarBinding) } catch { /* refusal */ }
   let reason = binding ? null : 'binding_invalid'
@@ -111,6 +111,7 @@ function describeScope(props) {
         if (!denseArray(capabilities)) throw new TypeError('Invalid catalog family')
         for (let position = 0; position < capabilities.length; position += 1) collected.push(capabilities[position])
       }
+      catalogEmpty = collected.length === 0
       rows = collected.filter((row) => {
         if (!plain(row) || typeof row.name !== 'string' || !TOOL_NAME.test(row.name)) throw new TypeError('Invalid catalog row')
         return hostFor(row, props) !== 'unsupported'
@@ -126,14 +127,18 @@ function describeScope(props) {
     } catch { reason = 'catalog_unavailable'; rows = [] }
   }
   return { binding, bindingKey, authorityKey, projectClient, projectCatalog, isCurrent, submissionSignal,
-    receiptCurrent, rows, catalogKey, reason }
+    receiptCurrent, rows, catalogKey, catalogEmpty, reason }
 }
 
 function sameScope(left, right) {
   return !!left && ['bindingKey', 'authorityKey', 'projectClient', 'projectCatalog', 'isCurrent',
-    'submissionSignal', 'receiptCurrent', 'catalogKey', 'reason'].every((key) => left[key] === right[key]) &&
+    'submissionSignal', 'receiptCurrent', 'catalogKey', 'catalogEmpty', 'reason'].every((key) => left[key] === right[key]) &&
     left.rows.length === right.rows.length && left.rows.every((row, index) => row === right.rows[index])
 }
+
+const sameOwner = (left, right) => !!left?.bindingKey && left.bindingKey === right.bindingKey &&
+  left.authorityKey === right.authorityKey
+const schemaDeclaration = (row) => JSON.stringify(declaration(row.params_schema ?? row.params))
 
 function hostFor(row, props) {
   if (row?.name === 'solar-settings') return 'settings'
@@ -189,8 +194,16 @@ export default function ProjectSolarWorkspace(props) {
   const proposal = proposalReceipt?.outcome?.jobId === discardedProposal ? null : proposalReceipt?.outcome
   const base = presentation.current
   let view = base
-  if (replacing && committed) view = { ...view, retired: true, generation: view.generation + 1 }
-  if (view.row !== openTool) view = { row: openTool, retired: false, generation: view.generation + 1 }
+  if (replacing && committed && !sameOwner(committed.owner, owner)) {
+    view = { ...view, retired: true, generation: view.generation + 1 }
+  }
+  if (view.row?.name !== openTool?.name) view = { row: openTool, retired: false, generation: view.generation + 1 }
+  const currentRow = owner.rows.find((row) => row.name === openTool?.name)
+  if (!view.retired && !view.draftRow && !owner.reason && currentRow) {
+    // The validated JSON copy keeps field order as well as values: SchemaForm keys its fields
+    // by their declarations, so sorting a retained schema would lose unfinished JSON input.
+    view = { ...view, draftRow: JSON.parse(JSON.stringify(currentRow)), schemaKey: schemaDeclaration(currentRow) }
+  }
   const generation = view.generation
   useLayoutEffect(() => {
     latest.current = props
@@ -233,19 +246,27 @@ export default function ProjectSolarWorkspace(props) {
   }
   function open(row) {
     if (latest.current.busy || typeof latest.current.onOpenTool !== 'function' || !admitted(row)) return
-    presentation.current = { ...presentation.current, retired: false, generation: presentation.current.generation + 1 }
+    presentation.current = { row, retired: false, generation: presentation.current.generation + 1 }
     latest.current.onOpenTool(row)
     repaint((value) => value + 1)
   }
-  const selected = view.retired ? null : openTool
+  const selected = view.retired ? null : view.row
   let reason = owner.reason || (!FlowRail ? 'host_unavailable' : null)
   let host = null
-  if (!reason && selected) {
-    if (!owner.rows.includes(selected)) reason = hostFor(selected, props) === 'unsupported' ? 'unsupported' : 'catalog_unavailable'
-    else {
-      host = hostFor(selected, props)
-      if (host === 'unsupported' || host === 'host_unavailable') { reason = host; host = null }
+  let editorRow = currentRow
+  if (selected && view.draftRow && (!reason || reason === 'catalog_unavailable')) {
+    if (reason || owner.catalogEmpty) reason = 'catalog_refreshing'
+    else if (!currentRow) reason = 'tool_not_admitted'
+    else if (schemaDeclaration(currentRow) !== view.schemaKey) reason = 'params_schema_changed'
+    if (reason) editorRow = view.draftRow
+    else if (JSON.stringify(currentRow.params_schema ?? currentRow.params) !==
+        JSON.stringify(view.draftRow.params_schema ?? view.draftRow.params)) {
+      editorRow = { ...currentRow, params: view.draftRow.params, params_schema: view.draftRow.params_schema }
     }
+    host = hostFor(editorRow, props)
+    if (host === 'unsupported' || host === 'host_unavailable') { reason = host; host = null }
+  } else if (!reason && selected) {
+    reason = hostFor(selected, props) === 'unsupported' ? 'unsupported' : 'catalog_unavailable'
   }
   const canWrite = !busy && typeof newProjectIntentKey === 'function' && typeof props.onProjectSubmit === 'function'
   // A retained callback must still belong to this presentation at handoff. After handoff,
@@ -258,11 +279,16 @@ export default function ProjectSolarWorkspace(props) {
       if (typeof newProjectIntentKey !== 'function' || typeof live.newProjectIntentKey !== 'function') return workspaceRefusal('NO_INTENT_KEY')
       if (typeof props.onProjectSubmit !== 'function' || typeof live.onProjectSubmit !== 'function') return workspaceRefusal('NO_SUBMIT')
       if (presentation.current.retired) return workspaceRefusal('RETIRED')
-      if (live.openTool !== selected) return workspaceRefusal('TOOL_NOT_OPEN')
+      if (live.openTool?.name !== selected?.name) return workspaceRefusal('TOOL_NOT_OPEN')
       if (presentation.current.generation !== generation) return workspaceRefusal('PRESENTATION_STALE')
-      if (!admitted(selected)) return workspaceRefusal('NOT_ADMITTED')
-      if (!owner.rows.includes(runRow) || !admitted(runRow)) return workspaceRefusal('ROW_NOT_ADMITTED')
-      if (runRow !== selected && !(runRow.name === 'solar-commit-solve' && selected?.name === 'solar-solve-proposal')) return workspaceRefusal('ROW_MISMATCH')
+      // Draft rows only describe the visible inputs. Authorization always resolves live rows by name.
+      const next = describeScope(live)
+      const liveSelected = next.rows.find((row) => row.name === selected?.name)
+      const liveRow = next.rows.find((row) => row.name === runRow?.name)
+      if (!next.reason && (!liveSelected || !liveRow)) return workspaceRefusal('ROW_NOT_ADMITTED')
+      if (!admitted(liveSelected) || schemaDeclaration(liveSelected) !== view.schemaKey) return workspaceRefusal('NOT_ADMITTED')
+      if (!admitted(liveRow)) return workspaceRefusal('ROW_NOT_ADMITTED')
+      if (liveRow.name !== selected.name && !(liveRow.name === 'solar-commit-solve' && selected?.name === 'solar-solve-proposal')) return workspaceRefusal('ROW_MISMATCH')
       if (runRow.name === 'solar-commit-solve' && (!proposal || !validProposal(proposalReceipt) ||
           prepared?.proposalJobId !== proposal.jobId)) return workspaceRefusal('PROPOSAL_REQUIRED')
       const fields = ['binding', 'authorityKey', 'tool', 'catalogDigest']
@@ -278,7 +304,7 @@ export default function ProjectSolarWorkspace(props) {
       if (!sameSolarDrawingBinding(prepared?.binding, owner.binding)) return workspaceRefusal('BINDING_MISMATCH')
       if (prepared?.authorityKey !== owner.authorityKey) return workspaceRefusal('AUTHORITY_MISMATCH')
       if (prepared?.tool !== runRow.name) return workspaceRefusal('TOOL_MISMATCH')
-      if (prepared?.catalogDigest !== runRow.catalog_digest) return workspaceRefusal('CATALOG_STALE')
+      if (prepared?.catalogDigest !== liveRow.catalog_digest) return workspaceRefusal('CATALOG_STALE')
       if (live.submissionSignal?.aborted) return workspaceRefusal('ABORTED')
       if (live.submissionSignal !== undefined && !(live.submissionSignal instanceof AbortSignal)) return workspaceRefusal('SIGNAL_INVALID')
       const captured = owner.projectClient.captureCatalogScope()
@@ -289,21 +315,21 @@ export default function ProjectSolarWorkspace(props) {
     } catch { return workspaceRefusal('ERROR') }
   }
   const shared = { solarBinding: owner.binding, authorityKey: owner.authorityKey, projectClient: owner.projectClient,
-    catalogDigest: selected?.catalog_digest, newProjectIntentKey, onProjectSubmit: canWrite ? submit : undefined,
+    catalogDigest: editorRow?.catalog_digest, newProjectIntentKey, onProjectSubmit: canWrite ? submit : undefined,
     busy, onClose: () => retire() }
   let editor = null
-  if (!reason && host === 'settings') editor = <SolarSettingsForm {...shared} />
-  if (!reason && host === 'step') editor = <StepEditor {...shared} row={selected} />
-  if (!reason && host === 'graph') editor = <GraphForm {...shared} tool={selected} isCurrent={scope.isCurrent}
+  if (host === 'settings') editor = <SolarSettingsForm {...shared} />
+  if (host === 'step') editor = <StepEditor {...shared} row={editorRow} />
+  if (host === 'graph') editor = <GraphForm {...shared} tool={editorRow} isCurrent={scope.isCurrent}
     projectOutcome={projectOutcome} submissionSignal={submissionSignal} />
-  if (!reason && host === 'read') editor = <ProjectSolarReadPanel tool={selected} solarBinding={owner.binding}
+  if (host === 'read') editor = <ProjectSolarReadPanel tool={editorRow} solarBinding={owner.binding}
     authorityKey={owner.authorityKey} projectClient={owner.projectClient} projectCatalog={owner.projectCatalog}
     isCurrent={scope.isCurrent} busy={busy} />
   const solveRow = owner.rows.find((row) => row.name === 'solar-solve-proposal')
   const commitRow = owner.rows.find((row) => row.name === 'solar-commit-solve')
-  if (!reason && host === 'solve') {
+  if (host === 'solve') {
     if (selected.name === 'solar-correct-string' || (selected.name === 'solar-solve-proposal' && !proposal)) {
-      editor = <ProjectSolarSchemaForm key={selected.name} {...shared} tool={selected} isCurrent={scope.isCurrent}
+      editor = <ProjectSolarSchemaForm key={selected.name} {...shared} tool={editorRow} isCurrent={scope.isCurrent}
         projectOutcome={projectOutcome} submissionSignal={submissionSignal} />
     } else if (proposal) {
       editor = <ProjectSolveReview {...shared} proposal={proposal} catalogDigest={commitRow?.catalog_digest}
@@ -331,8 +357,8 @@ export default function ProjectSolarWorkspace(props) {
     </button>)}
     {(reason || busy) && <p role="status">{projectSolarWorkspaceReason(reason || 'busy')}</p>}
     {editor && <div key={generation} className="project-solar-workspace-editor">
-      {host === 'read' ? editor : <fieldset disabled={busy || !canWrite}>{editor}</fieldset>}
-      {(host === 'read' || busy || !canWrite) && <button type="button" onClick={() => retire()}>Close</button>}
+      <fieldset disabled={!!reason || (host !== 'read' && (busy || !canWrite))}>{editor}</fieldset>
+      {(host === 'read' || reason || busy || !canWrite) && <button type="button" onClick={() => retire()}>Close</button>}
     </div>}
   </section>
 }

@@ -44,16 +44,16 @@ def refuse_split(params, solve_context):
 
 def plan_request(context, params, solve_context, *, job_id=UUID(int=0)):
     refuse_split(params, solve_context)
+    # A graph that cannot be solved names its missing input before the request shape is judged.
+    from product_capability_availability import w1_graph_readiness
+    readiness = w1_graph_readiness(context.graph)[TOOL_NAME]
+    if not readiness["input_ready"]:
+        raise GraphValidationError(readiness["input_reason"].upper())
     parsed = cloud.validate_params(params)
     if (type(solve_context) is not dict
             or set(solve_context) != {"frame_ref", "expected_rev", "phase"}
             or type(solve_context["expected_rev"]) is not int):
         raise GraphValidationError("INVALID_SOLVE_BINDING")
-    # Reuse the producer readiness contract, including compact Ground's refusal.
-    from product_capability_availability import w1_graph_readiness
-    readiness = w1_graph_readiness(context.graph)[TOOL_NAME]
-    if not readiness["input_ready"]:
-        raise GraphValidationError(readiness["input_reason"].upper())
     binding = kernel.bind_request(context.graph, parsed.request.model_dump(),
         expected_rev=solve_context["expected_rev"], frame_ref=solve_context["frame_ref"],
         phase=solve_context["phase"], tenant_id=str(context.organization_id), job_id=str(job_id))
