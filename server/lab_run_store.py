@@ -16,6 +16,8 @@ from lab_artifacts import NotFound, StoreUnavailable, _SQL
 from lab_doc_validators import InvalidGraph, TooLarge
 
 MAX_EVENTS = 10000
+MAX_QUEUED_PER_TENANT = 16
+MAX_ACTIVE_PER_TENANT = 4
 _PIN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS lab_runs (
@@ -25,6 +27,8 @@ CREATE TABLE IF NOT EXISTS lab_runs (
  adapter_revision TEXT NOT NULL, build_revision TEXT NOT NULL,
  state TEXT NOT NULL CHECK (state IN ('queued','running','finished','failed','cancelled')),
  lease_owner TEXT, lease_fence INTEGER NOT NULL DEFAULT 0, lease_expires_at TEXT,
+ claimed_build_revision TEXT, claimed_color TEXT CHECK (claimed_color IN ('active','idle')),
+ cancel_requested_at TEXT, cancel_requested_by TEXT,
  next_seq INTEGER NOT NULL DEFAULT 0, event_count INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT,
  PRIMARY KEY (tenant_id, run_id)
@@ -37,6 +41,15 @@ CREATE TABLE IF NOT EXISTS lab_run_events (
  FOREIGN KEY (tenant_id,run_id) REFERENCES lab_runs (tenant_id,run_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS lab_run_events_created_idx ON lab_run_events (created_at);
+CREATE TABLE IF NOT EXISTS lab_worker_status (
+ worker_id TEXT PRIMARY KEY, build_revision TEXT NOT NULL,
+ color TEXT NOT NULL CHECK (color IN ('active','idle')), heartbeat_at TEXT NOT NULL,
+ active_runs INTEGER NOT NULL, queued_runs INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lab_worker_control (
+ id TEXT PRIMARY KEY CHECK (id = 'global'), paused BOOLEAN NOT NULL,
+ reason TEXT NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 """
 
 
@@ -104,6 +117,15 @@ def _run(tenant, operation, *, write=False):
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SQLITE_SCHEMA)
         conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        # Upgrade explicit local databases created before the worker extension.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(lab_runs)")}
+        for name, definition in (
+            ("claimed_build_revision", "TEXT"),
+            ("claimed_color", "TEXT CHECK (claimed_color IN ('active','idle'))"),
+            ("cancel_requested_at", "TEXT"), ("cancel_requested_by", "TEXT"),
+        ):
+            if name not in columns:
+                conn.execute("ALTER TABLE lab_runs ADD COLUMN " + name + " " + definition)
         result = operation(_SQL(conn, False))
         conn.commit()
         return result
@@ -129,6 +151,10 @@ def create(tenant, doc_id, run_id, graph_revision, graph_sha256, ops_revision,
         raise InvalidGraph("lab_registry_digest_mismatch")
 
     def operation(sql):
+        queued = sql.execute("SELECT COUNT(*) AS count FROM lab_runs WHERE tenant_id=? AND state='queued'",
+                             (tenant,)).fetchone()["count"]
+        if queued >= MAX_QUEUED_PER_TENANT:
+            raise TooLarge("lab_run_queue_full")
         now = _now().isoformat()
         sql.execute("INSERT INTO lab_runs (tenant_id,doc_id,run_id,graph_revision,graph_sha256,"
                     "registry_digest,ops_revision,input_digest,adapter_revision,build_revision,state,created_at,updated_at)"
@@ -158,9 +184,51 @@ def _ttl(ttl_s):
     return timedelta(seconds=ttl_s)
 
 
-def claim(tenant, run_id, owner, ttl_s):
+def _color(color):
+    _pin(color)
+    if color not in {"active", "idle"}:
+        raise InvalidGraph("invalid_lab_worker_color")
+    return color
+
+
+def claimable(limit, *, ops_revisions):
+    if type(limit) is not int or limit < 0:
+        raise ValueError("invalid_lab_queue_limit")
+    revisions = {_pin(revision) for revision in ops_revisions}
+    if not revisions or limit == 0:
+        return []
+
+    def operation(sql):
+        rows = sql.execute("SELECT * FROM lab_runs WHERE state='queued' ORDER BY created_at,run_id,tenant_id").fetchall()
+        active = {row["tenant_id"]: row["count"] for row in sql.execute(
+            "SELECT tenant_id,COUNT(*) AS count FROM lab_runs WHERE state='running' AND lease_expires_at>?"
+            " GROUP BY tenant_id", (_now().isoformat(),)).fetchall()}
+        queues = {}
+        for row in rows:
+            slots = MAX_ACTIVE_PER_TENANT - active.get(row["tenant_id"], 0)
+            if slots > 0:
+                queue = queues.setdefault(row["tenant_id"], [])
+                if row["ops_revision"] in revisions and len(queue) < slots:
+                    queue.append(dict(row))
+        result = []
+        depth = 0
+        while len(result) < limit:
+            batch = [queue[depth] for queue in queues.values() if len(queue) > depth]
+            if not batch:
+                break
+            batch.sort(key=lambda row: (row["created_at"], row["run_id"], row["tenant_id"]))
+            result.extend(batch[:limit - len(result)])
+            depth += 1
+        return result
+
+    return _run("lab-queue", operation)
+
+
+def claim(tenant, run_id, owner, ttl_s, *, build_revision, color):
     _pin(run_id)
     _pin(owner)
+    _pin(build_revision)
+    _color(color)
     duration = _ttl(ttl_s)
 
     def operation(sql):
@@ -169,12 +237,29 @@ def claim(tenant, run_id, owner, ttl_s):
         if (row is None or row["state"] not in {"queued", "running"}
                 or (row["lease_expires_at"] and _date(row["lease_expires_at"]) > now)):
             return False
+        active = sql.execute("SELECT COUNT(*) AS count FROM lab_runs WHERE tenant_id=?"
+                             " AND state='running' AND lease_expires_at>?",
+                             (tenant, now.isoformat())).fetchone()["count"]
+        if active >= MAX_ACTIVE_PER_TENANT:
+            return False
         fence = row["lease_fence"] + 1
+        seq, count = row["next_seq"], row["event_count"]
+        takeover = row["lease_fence"] > 0
+        if takeover:
+            _insert_event(sql, tenant, run_id, seq, None, "lease_takeover", json.dumps({
+                "previous_fence": row["lease_fence"], "previous_owner": row["lease_owner"]}), now.isoformat())
+            seq, count = seq + 1, count + 1
+            if count >= MAX_EVENTS:
+                seq, count = _coalesce(sql, tenant, run_id, seq, count, now.isoformat())
+                if count > MAX_EVENTS:
+                    raise TooLarge("lab_run_event_cap")
         expires = (now + duration).isoformat()
         sql.execute("UPDATE lab_runs SET state='running',lease_owner=?,lease_fence=?,"
-                    "lease_expires_at=?,updated_at=? WHERE tenant_id=? AND run_id=?",
-                    (owner, fence, expires, now.isoformat(), tenant, run_id))
-        return {"owner": owner, "fence": fence, "expires_at": expires}
+                    "lease_expires_at=?,updated_at=?,claimed_build_revision=?,claimed_color=?,"
+                    "next_seq=?,event_count=? WHERE tenant_id=? AND run_id=?",
+                    (owner, fence, expires, now.isoformat(), build_revision, color, seq, count, tenant, run_id))
+        return {"owner": owner, "fence": fence, "expires_at": expires,
+                "takeover": takeover, "committed_seq": seq - 1}
 
     return _run(tenant, operation, write=True)
 
@@ -274,13 +359,19 @@ def append_events(tenant, run_id, owner, fence, events):
     return _run(tenant, operation, write=True)
 
 
-def list_events(tenant, run_id):
+def list_events(tenant, run_id, *, after_seq=0, limit=500):
+    """Read past a committed cursor; use -1 to include the initial seq 0."""
+    if type(after_seq) is not int or after_seq < -1:
+        raise ValueError("invalid_lab_event_cursor")
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError("invalid_lab_event_limit")
+
     def operation(sql):
         if _row(sql, tenant, run_id) is None:
             raise NotFound("lab_run_not_found")
         result = []
-        for row in sql.execute("SELECT * FROM lab_run_events WHERE tenant_id=? AND run_id=? ORDER BY seq",
-                               (tenant, run_id)).fetchall():
+        for row in sql.execute("SELECT * FROM lab_run_events WHERE tenant_id=? AND run_id=? AND seq>? ORDER BY seq LIMIT ?",
+                               (tenant, run_id, after_seq, limit)).fetchall():
             event = dict(row)
             if not sql.postgres:
                 event["payload"] = json.loads(event["payload"])
@@ -288,6 +379,88 @@ def list_events(tenant, run_id):
         return result
 
     return _run(tenant, operation)
+
+
+def request_cancel(tenant, run_id, actor):
+    _pin(run_id)
+    if not isinstance(actor, str) or not actor or len(actor) > 200:
+        raise InvalidGraph("invalid_lab_actor")
+
+    def operation(sql):
+        row = _row(sql, tenant, run_id)
+        if row is None:
+            raise NotFound("lab_run_not_found")
+        if row["state"] not in {"queued", "running"} or row["cancel_requested_at"] is not None:
+            return False
+        now = _now().isoformat()
+        sql.execute("UPDATE lab_runs SET cancel_requested_at=?,cancel_requested_by=?,updated_at=?"
+                    " WHERE tenant_id=? AND run_id=?", (now, actor, now, tenant, run_id))
+        if row["state"] == "queued":
+            _insert_event(sql, tenant, run_id, row["next_seq"], None, "cancelled", "{}", now)
+            sql.execute("UPDATE lab_runs SET state='cancelled',finished_at=?,next_seq=next_seq+1,"
+                        "event_count=event_count+1 WHERE tenant_id=? AND run_id=?", (now, tenant, run_id))
+        return True
+
+    return _run(tenant, operation, write=True)
+
+
+def cancel_requested(tenant, run_id):
+    _pin(run_id)
+
+    def operation(sql):
+        row = sql.execute("SELECT cancel_requested_at FROM lab_runs WHERE tenant_id=? AND run_id=?",
+                          (tenant, run_id)).fetchone()
+        if row is None:
+            raise NotFound("lab_run_not_found")
+        return row["cancel_requested_at"] is not None
+
+    return _run(tenant, operation, write=True)
+
+
+def record_worker_status(worker_id, build_revision, color, active_runs, queued_runs):
+    _pin(worker_id)
+    _pin(build_revision)
+    _color(color)
+    if any(type(count) is not int or count < 0 for count in (active_runs, queued_runs)):
+        raise ValueError("invalid_lab_worker_count")
+
+    def operation(sql):
+        sql.execute("INSERT INTO lab_worker_status (worker_id,build_revision,color,heartbeat_at,active_runs,queued_runs)"
+                    " VALUES (?,?,?,?,?,?) ON CONFLICT (worker_id) DO UPDATE SET"
+                    " build_revision=excluded.build_revision,color=excluded.color,heartbeat_at=excluded.heartbeat_at,"
+                    " active_runs=excluded.active_runs,queued_runs=excluded.queued_runs",
+                    (worker_id, build_revision, color, _now().isoformat(), active_runs, queued_runs))
+
+    return _run("lab-worker-control", operation, write=True)
+
+
+def worker_status(max_age_s=60):
+    cutoff = (_now() - _ttl(max_age_s)).isoformat()
+    return _run("lab-worker-control", lambda sql: [dict(row) for row in sql.execute(
+        "SELECT * FROM lab_worker_status WHERE heartbeat_at>=? ORDER BY worker_id", (cutoff,)).fetchall()])
+
+
+def set_paused(paused, reason, actor):
+    if type(paused) is not bool or not isinstance(reason, str):
+        raise ValueError("invalid_lab_worker_pause")
+    if not isinstance(actor, str) or not actor or len(actor) > 200:
+        raise InvalidGraph("invalid_lab_actor")
+
+    def operation(sql):
+        sql.execute("INSERT INTO lab_worker_control (id,paused,reason,updated_by,updated_at)"
+                    " VALUES ('global',?,?,?,?) ON CONFLICT (id) DO UPDATE SET paused=excluded.paused,"
+                    " reason=excluded.reason,updated_by=excluded.updated_by,updated_at=excluded.updated_at",
+                    (paused, reason, actor, _now().isoformat()))
+
+    return _run("lab-worker-control", operation, write=True)
+
+
+def paused():
+    def operation(sql):
+        row = sql.execute("SELECT paused FROM lab_worker_control WHERE id='global'").fetchone()
+        return bool(row["paused"]) if row else False
+
+    return _run("lab-worker-control", operation)
 
 
 def sweep(now):

@@ -437,8 +437,11 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "lab_runs": {"tenant_id", "doc_id", "run_id", "graph_revision", "graph_sha256",
                      "registry_digest", "ops_revision", "input_digest", "adapter_revision",
                      "build_revision", "state", "lease_owner", "lease_fence", "lease_expires_at",
-                     "next_seq", "event_count", "created_at", "updated_at", "finished_at"},
+                     "next_seq", "event_count", "created_at", "updated_at", "finished_at",
+                     "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by"},
         "lab_run_events": {"tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at"},
+        "lab_worker_status": {"worker_id", "build_revision", "color", "heartbeat_at", "active_runs", "queued_runs"},
+        "lab_worker_control": {"id", "paused", "reason", "updated_by", "updated_at"},
     },
     "lab": {
         "lab_blobs": {"tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count"},
@@ -1195,6 +1198,11 @@ _REQUIRED_TRIGGERS = {
 _AUTHORITY_REQUIRED_CONSTRAINTS = {
     "lab_runs": {
         "lab_runs_pkey": _catalog_contract("lab_runs", "PRIMARY KEY (tenant_id, run_id)"),
+        "lab_runs_claimed_color_check": _catalog_contract("lab_runs", "CHECK", "claimed_color", "active", "idle"),
+        "lab_worker_status_pkey": _catalog_contract("lab_worker_status", "PRIMARY KEY (worker_id)"),
+        "lab_worker_status_color_check": _catalog_contract("lab_worker_status", "CHECK", "color", "active", "idle"),
+        "lab_worker_control_pkey": _catalog_contract("lab_worker_control", "PRIMARY KEY (id)"),
+        "lab_worker_control_id_check": _catalog_contract("lab_worker_control", "CHECK", "id", "global"),
         "lab_run_events_pkey": _catalog_contract("lab_run_events", "PRIMARY KEY (tenant_id, run_id, seq)"),
         "lab_runs_state_check": _catalog_contract(
             "lab_runs", "CHECK", "state", "queued", "running", "finished", "failed", "cancelled"),
