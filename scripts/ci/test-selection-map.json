@@ -366,6 +366,7 @@
     "server-kit-stream-superset",
     "server-lab-contract",
     "server-lab-ops",
+    "server-lab-evaluate",
     "server-lab-artifacts",
     "server-lab-run-store",
     "server-lab-diff",
