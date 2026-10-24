@@ -1,19 +1,39 @@
 """The browser and server execute the same operator vectors."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 import re
 
 import pytest
 
 from lab_ops import (
-    MAX_ROWS, OPERATOR_IDS, STREAM_ADAPTERS, OperatorRefused,
+    MAX_ROWS, OPERATOR_IDS, STREAM_ADAPTERS, UNDEFINED, OperatorRefused,
     OperatorUnavailable, has_operator, run_operator,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/lab-operator-cases.v1.json").read_text(encoding="utf-8"))
 CASES = FIXTURE["cases"]
+
+
+def case_arguments(case):
+    input, settings = deepcopy((case["input"], case["settings"]))
+    if "non_json" in case:
+        # JSON cannot carry these values. Map denotes non-string keys in JS.
+        cycle = []
+        cycle.append(cycle)
+        values = {
+            "undefined": UNDEFINED, "nan": float("nan"),
+            "infinity": float("inf"), "negative-infinity": -float("inf"),
+            "non-string-key": {1: None}, "unsupported": object(), "cycle": cycle,
+        }
+        value = values[case["non_json"]["kind"]]
+        if case["non_json"]["at"] == "selected":
+            input["value"][0]["x"] = value
+        else:
+            settings["value"] = value
+    return input, settings
 
 
 def assert_json_equal(actual, expected):
@@ -37,12 +57,33 @@ def assert_json_equal(actual, expected):
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
 def test_shared_operator_case(case):
+    input, settings = case_arguments(case)
     if "error" in case:
         error_class = {"refused": OperatorRefused, "unavailable": OperatorUnavailable}[case["error"]]
         with pytest.raises(error_class):
-            run_operator(case["op"], case["input"], case["settings"])
+            run_operator(case["op"], input, settings)
+    elif case.get("expect_undefined"):
+        assert run_operator(case["op"], input, settings) is UNDEFINED
     else:
-        assert_json_equal(run_operator(case["op"], case["input"], case["settings"]), case["expect"])
+        assert_json_equal(run_operator(case["op"], input, settings), case["expect"])
+
+
+@pytest.mark.parametrize("comparison", ["eq", "ne"])
+@pytest.mark.parametrize("value", [b"bytes", (1,), {1}, {None: 1}, {"nested": [UNDEFINED]}])
+@pytest.mark.parametrize("at", ["selected", "target"])
+def test_python_non_json_values_are_refused(comparison, value, at):
+    selected, target = (value, None) if at == "selected" else (None, value)
+    with pytest.raises(OperatorRefused):
+        run_operator("filter", {"value": [{"x": selected}]},
+                     {"field": "x", "comparison": comparison, "value": target})
+
+
+def test_undefined_results_and_null_are_distinct():
+    assert repr(UNDEFINED) == "UNDEFINED"
+    assert run_operator("field", {"value": {"x": UNDEFINED}}, {"field": "x"}) is UNDEFINED
+    assert run_operator("select", {"value": [{"x": UNDEFINED}]}, {"field": "x"})[0] is UNDEFINED
+    assert run_operator("field", {}, {"field": "x"}) is None
+    assert run_operator("latest", {"value": [UNDEFINED]}) is None
 
 
 def test_browser_operator_exports_and_fixture_contract():
@@ -60,5 +101,7 @@ def test_browser_operator_exports_and_fixture_contract():
     assert len({case["name"] for case in CASES}) == len(CASES)
     assert set(OPERATOR_IDS) <= {case["op"] for case in CASES}
     for case in CASES:
-        assert ("expect" in case) != ("error" in case)
+        assert sum(key in case for key in ("expect", "expect_undefined", "error")) == 1
+        if "expect_undefined" in case:
+            assert case["expect_undefined"] is True
         assert case.get("error", "refused") in ("refused", "unavailable")

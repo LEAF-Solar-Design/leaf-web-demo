@@ -15,6 +15,15 @@ STREAM_ADAPTERS = ("latest", "window", "collect")
 _MISSING = object()
 
 
+class _Undefined:
+    def __repr__(self):
+        return "UNDEFINED"
+
+
+# UNDEFINED is JavaScript undefined; callers treat it as the web runtime does (it fails port validation).
+UNDEFINED = _Undefined()
+
+
 class OperatorRefused(ValueError):
     pass
 
@@ -56,7 +65,7 @@ def _count(value=_MISSING):
 
 def _truthy(value):
     # Empty arrays and objects are truthy in JavaScript.
-    if value is None or value is False:
+    if value is UNDEFINED or value is None or value is False:
         return False
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value != 0 and not math.isnan(value)
@@ -111,9 +120,12 @@ def _predicate(value, settings):
     selected = _field(value, settings.get("field"))
     comparison = settings.get("comparison")
     comparison = comparison if _truthy(comparison) else "eq"
-    target = settings.get("value")
+    target = settings.get("value", UNDEFINED)
     if comparison in ("eq", "ne"):
-        equal = canonical_json(selected) == canonical_json(target)
+        try:
+            equal = canonical_json(selected) == canonical_json(target)
+        except (ValueError, TypeError, OverflowError):
+            _refuse()
         return equal if comparison == "eq" else not equal
     if comparison not in ("gt", "gte", "lt", "lte"):
         _refuse()
@@ -130,9 +142,9 @@ def run_operator(op_id, input=None, settings=None):
         raise OperatorUnavailable("Test: operator unavailable in browser")
     input = {} if input is None else input
     settings = {} if settings is None else settings
-    value = input.get("value")
+    value = input.get("value", UNDEFINED)
     if op_id == "constant":
-        return settings.get("value")
+        return settings.get("value", UNDEFINED)
     if op_id == "identity":
         return value
     if op_id == "field":
@@ -158,7 +170,7 @@ def run_operator(op_id, input=None, settings=None):
         return len(_rows(value))
     if op_id == "latest":
         values = _rows(value)
-        return values[-1] if values else None
+        return values[-1] if values and values[-1] is not UNDEFINED else None
     if op_id in ("sum", "mean", "min", "max"):
         values = _rows(value)
         if op_id != "sum" and not values:
