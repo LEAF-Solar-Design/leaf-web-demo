@@ -978,6 +978,7 @@ export default function App() {
   }), [])
   const workspaceController = useWorkspaceController({
     mock,
+    readsPaused: knownGuest,
     services: workspaceServices,
     formatError: humanizeError,
   })
@@ -1435,7 +1436,7 @@ export default function App() {
       && loadDrawingId === requestedDrawingIdRef.current
       && isScopeCurrent()
       && sessionProof.current(true)
-    if (!current()) return undefined
+    if (knownGuest || !current()) return undefined
     const loadGeneration = (requestedDrawingIdRef.loadGeneration ?? 0) + 1
     requestedDrawingIdRef.loadGeneration = loadGeneration
     requestedDrawingIdRef.onDrawingLoad?.(loadGeneration)
@@ -1497,7 +1498,7 @@ export default function App() {
     return () => { alive = false }
     // Both proofs share token, recovery and workspace fencing.
   }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
-      session.recoveries, sessionProof, sessionActions])
+      session.recoveries, sessionProof, sessionActions, knownGuest])
 
   // App owns the transport; controls only express the user's choice.
   const localCadUpdateRef = useRef(null)
@@ -1752,6 +1753,7 @@ export default function App() {
     discardPendingRun,
   } = useJobController({
     mock,
+    readsPaused: knownGuest,
     drawingKey: resultDrawingKey,
     resetKey: `${isEditFixture}:${intakeRetryKey}`,
     formatError: humanizeError,

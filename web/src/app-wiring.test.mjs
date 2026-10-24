@@ -607,7 +607,7 @@ describe('R13F project Solar execution and form ingresses', () => {
       assert.equal(r13Hash(r13Text(declaration.init)), hash, name + ' remains unchanged')
     }
     const job = r13One((node) => node.type === 'CallExpression' && node.callee.name === 'useJobController')
-    assert.equal(r13Hash(r13Text(job)), '24c5eac98f2d89b5cecd2f475afd5db80b327e47cb5510d97a71eb54660efbcb')
+    assert.equal(r13Hash(r13Text(job)), '3ceaf226d1b00ac4275f446a376165f7a9d690c2f9a6478c2727f96dcc97d89e')
     for (const name of ['useProjectSolarScope', 'useCatalogController', 'useProjectCheckoutController']) {
       assert.equal(r13Find((node) => node.type === 'CallExpression' && node.callee.name === name).length, 1, name)
     }
@@ -4061,7 +4061,7 @@ describe('Solar rooftop starter', () => {
       const context = {
         REQUESTED_DRAWING_ID: 'A', DRAWING_SOURCE: 'A', requestedDrawingIdRef,
         isScopeCurrent: () => true, hasDrawingSelection,
-        mock: false, isEditFixture: false, resetDrawing: noop,
+        mock: false, knownGuest: false, isEditFixture: false, resetDrawing: noop,
         setDrawingLoad: (value) => loads.push(value), setLoadErr: noop,
         resetCatalogTransient: noop, clearToast: noop, setDrawer: noop,
         setTenant: noop, setTier: noop, setOrg: noop, clearAgentSession: noop,
@@ -5482,7 +5482,7 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
     assert.equal(r13Hash(r13Text(node.init)), hash, name)
   }
   const job = r13One(node => node.type === 'CallExpression' && node.callee.name === 'useJobController')
-  assert.equal(r13Hash(r13Text(job)), '24c5eac98f2d89b5cecd2f475afd5db80b327e47cb5510d97a71eb54660efbcb')
+  assert.equal(r13Hash(r13Text(job)), '3ceaf226d1b00ac4275f446a376165f7a9d690c2f9a6478c2727f96dcc97d89e')
   const head = r13One(node => node.type === 'JSXElement' && node.openingElement.name.name === 'EngineHeadOpener')
   for (const [name, expression] of Object.entries({
     drawingId: 'REQUESTED_DRAWING_ID',

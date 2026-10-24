@@ -55,7 +55,7 @@ function loader(overrides = {}) {
     REQUESTED_DRAWING_ID: identity.drawingId, DRAWING_SOURCE: identity.source,
     requestedDrawingIdRef: { current: identity.drawingId },
     isScopeCurrent: identity.isScopeCurrent, hasDrawingSelection,
-    mock: false, isEditFixture: false, resetDrawing: vi.fn(),
+    mock: false, knownGuest: false, isEditFixture: false, resetDrawing: vi.fn(),
     setDrawingLoad: vi.fn(), setLoadErr: vi.fn(), resetCatalogTransient: noop,
     clearToast: noop, setDrawer: noop, setTenant: noop, setTier: noop,
     setOrg: noop, clearAgentSession: noop, mockVersions: { reset: noop },
@@ -126,6 +126,15 @@ it('URL307B-21 empty identity issues no drawing requests', () => {
   expect(h.context.seatIntake).not.toHaveBeenCalled()
   expect(active.state).toBe('active')
   dispose()
+})
+
+it('GUEST4b2 a known guest issues no drawing requests', () => {
+  mount()
+  const h = loader({ knownGuest: true })
+  h.run()
+  expect(h.context.getSession).not.toHaveBeenCalled()
+  expect(h.context.getDrawingVersions).not.toHaveBeenCalled()
+  expect(h.context.setDrawingLoad).not.toHaveBeenCalled()
 })
 
 it('URL307B-30 App mounts the reset hook after workspace selection', () => {
