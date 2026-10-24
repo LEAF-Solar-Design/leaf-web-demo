@@ -205,6 +205,7 @@ class LabWorker:
                 run.lost = True
 
     def _execute(self, run):
+        started = self.clock()
         renewer = threading.Thread(target=self._renew, args=(run,), daemon=True, name="lab-lease")
         try:
             renewer.start()
@@ -227,7 +228,9 @@ class LabWorker:
                                      if event["seq"] <= end and event["kind"] == "value")
                     cursor = batch[-1]["seq"]
 
-            started = self.clock()
+            elapsed = max(0, self.clock() - started)
+            if elapsed >= 600:
+                raise RunBudgetExceeded()
 
             def on_block(block_id, values):
                 with run.lock:
@@ -241,7 +244,7 @@ class LabWorker:
                                                               for port, value in values.items()}}]):
                             raise RunCancelled()
 
-            evaluate_graph(artifact["graph"], trusted_registry(), budget=Budget(),
+            evaluate_graph(artifact["graph"], trusted_registry(), budget=Budget(run_wall_s=600 - elapsed),
                            clock=self.clock, cancelled=lambda: self._cancelled(run), on_block=on_block)
             # Refresh cancellation at the terminal boundary, even for a one-block graph.
             with run.lock:

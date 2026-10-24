@@ -228,6 +228,49 @@ def test_run_cap_uses_injected_clock(rig, monkeypatch):
     assert events(rig)[-1]["payload"] == {"reason": "run_wall_cap"}
 
 
+@pytest.mark.parametrize("read_s", [600, 601])
+def test_artifact_read_exhausting_run_cap_skips_evaluation(rig, monkeypatch, read_s):
+    rig.create()
+    current = [100]
+    evaluated = []
+    instance = rig.make(clock=lambda: current[0])
+
+    def get(*args):
+        current[0] += read_s
+        return rig.artifact
+
+    monkeypatch.setattr(instance.artifacts, "get", get)
+    monkeypatch.setattr(worker, "evaluate_graph", lambda *args, **kwargs: evaluated.append(True))
+    instance.tick()
+    terminal(rig, "failed")
+    assert events(rig)[-1]["payload"] == {"reason": "run_wall_cap"}
+    assert evaluated == []
+
+
+@pytest.mark.parametrize("evaluation_s,state", [(11, "failed"), (9, "finished")])
+def test_artifact_read_reduces_evaluation_budget(rig, monkeypatch, evaluation_s, state):
+    rig.create()
+    current = [100]
+    budgets = []
+    instance = rig.make(clock=lambda: current[0])
+
+    def get(*args):
+        current[0] += 590
+        return rig.artifact
+
+    def evaluate(*args, budget, **kwargs):
+        budgets.append(budget.run_wall_s)
+        current[0] += evaluation_s
+
+    monkeypatch.setattr(instance.artifacts, "get", get)
+    monkeypatch.setattr(worker, "evaluate_graph", evaluate)
+    instance.tick()
+    terminal(rig, state)
+    assert budgets == [10]
+    if state == "failed":
+        assert events(rig)[-1]["payload"] == {"reason": "run_wall_cap"}
+
+
 def test_at_most_two_concurrent_runs(rig, monkeypatch):
     entered = []
     release = threading.Event()
