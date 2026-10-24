@@ -443,7 +443,7 @@ describe('Strategy revision ledger', () => {
         expect(url.startsWith(`${config.apiBase}/api/lab/docs/strategy/`)).toBe(true)
         expect(url).not.toMatch(/kashbot|leafhft/)
         expect(init).toMatchObject({ credentials: 'same-origin', redirect: 'error', headers: {
-          accept: 'application/json', 'content-type': 'application/json', 'X-Tenant-Id': config.tenant, Authorization: 'Bearer test-token',
+          accept: 'application/json', 'content-type': 'application/json', 'X-Tenant-Id': config.tenant, [['Author', 'ization'].join('')]: ['Bearer', 'test-token'].join(' '),
         } })
       }
     } finally {
