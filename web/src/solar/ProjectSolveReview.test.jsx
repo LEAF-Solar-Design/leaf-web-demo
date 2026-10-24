@@ -143,6 +143,56 @@ it('W1C5 retires a pending context read on scope change or editor close', async 
   }
 })
 
+it('ProjectSolarSchemaForm starts from a valid draft and reports changes', () => {
+  const h = fixture()
+  const tool = { name: 'solar-solve-proposal', params: { type: 'object', properties: {
+    grant_ref: { type: 'string', default: 'default-grant' }, request: { type: 'object' },
+  } } }
+  const draft = { params: { grant_ref: 'kept-grant', request: { grid: { name: 'original' } } },
+    context: { frame_ref: 'kept-frame', phase: 'background' } }
+  const onDraftChange = vi.fn()
+  const view = render(<ProjectSolarSchemaForm {...h.props} tool={tool} draft={draft} onDraftChange={onDraftChange} />)
+  expect(screen.getByLabelText('Grant ref').value).toBe('kept-grant')
+  expect(screen.getByLabelText('Request').value).toBe('{"grid":{"name":"original"}}')
+  expect(screen.getByLabelText('Frame').value).toBe('kept-frame')
+  expect(screen.getByLabelText('Phase').value).toBe('1')
+  expect(onDraftChange).not.toHaveBeenCalled()
+  draft.params.grant_ref = 'changed source'
+  draft.params.request.grid.name = 'changed source'
+  draft.context.frame_ref = 'changed source'
+  fireEvent.change(screen.getByLabelText('Frame'), { target: { value: 'new-frame' } })
+  expect(onDraftChange).toHaveBeenLastCalledWith({
+    params: { grant_ref: 'kept-grant', request: { grid: { name: 'original' } } },
+    context: { frame_ref: 'new-frame', phase: 'background' },
+  })
+  const reported = onDraftChange.mock.calls.at(-1)[0]
+  expect(reported.params).not.toBe(draft.params)
+  expect(reported.params.request).not.toBe(draft.params.request)
+  expect(reported.context).not.toBe(draft.context)
+  reported.params.request.grid.name = 'changed report'
+  reported.context.frame_ref = 'changed report'
+  fireEvent.change(screen.getByLabelText('Grant ref'), { target: { value: 'new-grant' } })
+  expect(onDraftChange).toHaveBeenLastCalledWith({
+    params: { grant_ref: 'new-grant', request: { grid: { name: 'original' } } },
+    context: { frame_ref: 'new-frame', phase: 'background' },
+  })
+  expect(screen.getByLabelText('Frame').value).toBe('new-frame')
+  expect(onDraftChange).toHaveBeenCalledTimes(2)
+  view.unmount()
+
+  for (const invalid of [null, [], { params: null, context: {} }, { params: [], context: {} },
+    { params: 'invalid', context: {} }, { params: {}, context: null }, { params: {}, context: [] }]) {
+    const changes = vi.fn()
+    const fallback = render(<ProjectSolarSchemaForm {...h.props} tool={tool} draft={invalid} onDraftChange={changes} />)
+    expect(screen.getByLabelText('Grant ref').value).toBe('default-grant')
+    expect(screen.getByLabelText('Request').value).toBe('')
+    expect(screen.getByLabelText('Frame').value).toBe('')
+    expect(screen.getByLabelText('Phase').value).toBe('0')
+    expect(changes).not.toHaveBeenCalled()
+    fallback.unmount()
+  }
+})
+
 it('W1C5 invalid membership JSON keeps the generic correction form from submitting', async () => {
   const h = fixture()
   const tool = { name: 'solar-correct-string', params: { type: 'object', properties: {
