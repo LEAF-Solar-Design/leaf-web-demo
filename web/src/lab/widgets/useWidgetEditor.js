@@ -28,7 +28,7 @@ export function snapTargets(doc, skip) {
 }
 export function snap1(values, targets) {
   let best = null
-  for (const target of targets) for (const value of values) {
+  for (const value of values) for (const target of targets) {
     const delta = target - value
     if (Math.abs(delta) <= 4 && (!best || Math.abs(delta) < Math.abs(best.delta))) best = { delta, target }
   }
@@ -112,7 +112,9 @@ export function widgetEditorReducer(state, action) {
   const withElements = (els) => withSurface({ ...surface, els })
   switch (action.type) {
     case 'load': return createEditorState(action.doc)
-    case 'select': return { ...state, selectedId: action.id, nudgeAt: null }
+    case 'select': return action.reveal && selected && !selected.visible
+      ? commit(state, withElements(surface.els.map((e) => e.id === selectedId ? { ...e, visible: true } : e)), { selectedId, nudgeAt: null })
+      : { ...state, selectedId: action.id, nudgeAt: null }
     case 'format': {
       if (!Object.hasOwn(FORMATS, action.format) || action.format === id) return state
       // The document contract permits a subset of the catalog's formats.
