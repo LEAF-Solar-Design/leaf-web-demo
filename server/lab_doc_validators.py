@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from referencing import Registry, Resource
 
 from lab_canonical import canonical_bytes
+from lab_validate import ManifestInvalid, validate_manifest, _pointer
 
 MAX_RAW_BYTES = 262144
 MAX_GRAPH_BYTES = 262144
@@ -26,7 +27,14 @@ _VALIDATOR = Draft202012Validator(_GRAPH, registry=_REGISTRY)
 
 
 class InvalidGraph(ValueError):
-    pass
+    def __init__(self, message, pointer="", block=None):
+        super().__init__(message)
+        self.code = message if message in {
+            "lab_manifest_spoof", "lab_manifest_unknown_block",
+            "lab_returns_schema_bounds", "lab_extension_incomplete",
+        } else "invalid_lab_document"
+        self.pointer = pointer
+        self.block = block
 
 
 class TooLarge(ValueError):
@@ -62,7 +70,22 @@ def validate_graph(graph):
         data = canonical_bytes(graph)
         if len(data) > MAX_GRAPH_BYTES:
             raise TooLarge("graph_too_large")
-        _VALIDATOR.validate(graph)
+        # The pinned graph envelope predates optional embedded manifests.
+        # Validate the original manifest, and the unchanged envelope separately.
+        envelope = graph
+        if isinstance(graph, dict) and isinstance(graph.get("blocks"), list):
+            blocks = []
+            for index, block in enumerate(graph["blocks"]):
+                if isinstance(block, dict) and "manifest" in block:
+                    try:
+                        validate_manifest(block["manifest"])
+                    except ManifestInvalid as error:
+                        raise InvalidGraph(error.code, f"/blocks/{index}/manifest" + error.pointer,
+                                           error.block_id) from error
+                    block = {key: value for key, value in block.items() if key != "manifest"}
+                blocks.append(block)
+            envelope = dict(graph, blocks=blocks)
+        _VALIDATOR.validate(envelope)
         ids = [block["id"] for block in graph["blocks"]]
         if len(set(ids)) != len(ids):
             raise InvalidGraph("duplicate_block")
@@ -72,7 +95,8 @@ def validate_graph(graph):
             raise InvalidGraph("missing_block")
         return data
     except (ValidationError, UnicodeError, RecursionError, OverflowError) as error:
-        raise InvalidGraph("invalid_graph") from error
+        pointer = _pointer(error.absolute_path) if isinstance(error, ValidationError) else ""
+        raise InvalidGraph("invalid_graph", pointer) from error
     except ValueError as error:
         if isinstance(error, (InvalidGraph, TooLarge)):
             raise
