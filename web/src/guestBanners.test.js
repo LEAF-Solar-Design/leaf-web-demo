@@ -62,6 +62,12 @@ describe('signed-out Studio banners', () => {
 })
 
 describe('known guest authenticated reads', () => {
+  it('pauses the drawing, jobs and projects reads in App', () => {
+    expect(source.split('readsPaused: knownGuest,').length - 1).toBe(2)
+    expect(source).toContain('if (knownGuest || !current()) return undefined')
+    expect(source).toContain('session.recoveries, sessionProof, sessionActions, knownGuest])')
+  })
+
   it('pauses the remaining guest reads in App', () => {
     const changes = [
       ['const mcpRegistry = useTenantMcpRegistry({ mock })', 'const mcpRegistry = useTenantMcpRegistry({ mock: mock || knownGuest })'],

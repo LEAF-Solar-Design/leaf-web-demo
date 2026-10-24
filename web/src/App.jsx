@@ -334,11 +334,12 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
   }, [actions])
 
   return React.createElement('div',
-    { role: 'group', 'aria-label': 'Project checkout' },
-    React.createElement('p', { role: 'status' },
+    { role: 'group', 'aria-label': 'Project checkout', className: 'checkout-controls project-checkout' },
+    React.createElement('p', { role: 'status', title: projectSolarAppReason(checkout.reason) },
       projectSolarAppReason(checkout.reason)),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: !checkout.canTake,
       onClick: () => {
         if (!isCurrent() || !checkout.canTake) return
@@ -347,6 +348,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
     }, 'Take'),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: !checkout.canRelease,
       onClick: () => {
         if (!isCurrent() || !checkout.canRelease) return
@@ -355,6 +357,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
     }, 'Release'),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: checkout.pending,
       onClick: () => {
         if (!isCurrent() || checkout.pending) return
@@ -978,6 +981,7 @@ export default function App() {
   }), [])
   const workspaceController = useWorkspaceController({
     mock,
+    readsPaused: knownGuest,
     services: workspaceServices,
     formatError: humanizeError,
   })
@@ -1435,7 +1439,7 @@ export default function App() {
       && loadDrawingId === requestedDrawingIdRef.current
       && isScopeCurrent()
       && sessionProof.current(true)
-    if (!current()) return undefined
+    if (knownGuest || !current()) return undefined
     const loadGeneration = (requestedDrawingIdRef.loadGeneration ?? 0) + 1
     requestedDrawingIdRef.loadGeneration = loadGeneration
     requestedDrawingIdRef.onDrawingLoad?.(loadGeneration)
@@ -1497,7 +1501,7 @@ export default function App() {
     return () => { alive = false }
     // Both proofs share token, recovery and workspace fencing.
   }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
-      session.recoveries, sessionProof, sessionActions])
+      session.recoveries, sessionProof, sessionActions, knownGuest])
 
   // App owns the transport; controls only express the user's choice.
   const localCadUpdateRef = useRef(null)
@@ -1752,6 +1756,7 @@ export default function App() {
     discardPendingRun,
   } = useJobController({
     mock,
+    readsPaused: knownGuest,
     drawingKey: resultDrawingKey,
     resetKey: `${isEditFixture}:${intakeRetryKey}`,
     formatError: humanizeError,
