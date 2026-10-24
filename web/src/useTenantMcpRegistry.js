@@ -23,6 +23,9 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const generation = useRef(0)
+  // Read after an await: a mutation that settles after the switch to mock acts on the current mode.
+  const mockRef = useRef(mock)
+  mockRef.current = mock
 
   const refresh = useCallback(async () => {
     if (mock) { generation.current += 1; setServers([]); setLoading(false); return [] }
@@ -35,6 +38,8 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
     setLoading(false)
     return list
   }, [mock])
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
 
   useEffect(() => {
     refresh()
@@ -46,15 +51,15 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
     setError(null)
     try {
       const record = await registerTenantMcpServer(url, label)
-      await refresh()
+      await refreshRef.current()
       return record
     } catch (e) {
-      setError(String(e?.body?.error?.message || e?.message || e))
+      if (!mockRef.current) setError(String(e?.body?.error?.message || e?.message || e))
       throw e
     } finally {
       setBusy(false)
     }
-  }, [mock, refresh])
+  }, [mock])
 
   // Connect and health each mint their OWN error, keyed by server id, rather
   // than the shared `error` field: a failed health ping on one row must never
@@ -64,12 +69,12 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
     setBusy(true)
     try {
       const result = await connectTenantMcpServer(id)
-      await refresh()
+      await refreshRef.current()
       return result
     } finally {
       setBusy(false)
     }
-  }, [mock, refresh])
+  }, [mock])
 
   const health = useCallback(async (id) => {
     if (mock) return null
@@ -81,12 +86,12 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
     setBusy(true)
     try {
       const result = await unlinkTenantMcpServer(id)
-      await refresh()
+      await refreshRef.current()
       return result
     } finally {
       setBusy(false)
     }
-  }, [mock, refresh])
+  }, [mock])
 
   return { servers, loading, busy, error, refresh, register, connect, health, unlink }
 }
