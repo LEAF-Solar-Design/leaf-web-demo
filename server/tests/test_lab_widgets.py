@@ -285,11 +285,63 @@ def test_single_value_byte_cut(monkeypatch):
     import lab_widget_values
 
     save_source()
-    monkeypatch.setattr(lab_widget_values, "run_operator", lambda *args: ["é" * 10000] * 200)
+    original = ["é" * 10000] * 200
+    monkeypatch.setattr(lab_widget_values, "run_operator", lambda *args: original)
     value = resolve_values("tenant-a", [binding()])["values"][0]
     assert size(value) <= MAX_VALUE_BYTES
+    assert value["status"] == "resolved"
     assert value["truncated"] is True
     assert 0 < len(value["value"]) < 200
+    assert value["value"] == original[:len(value["value"])]
+
+
+def test_object_exceeding_value_limit_is_unavailable():
+    from lab_doc_validators import MAX_GRAPH_BYTES
+
+    original = {"payload": ""}
+    original["payload"] = "x" * (MAX_GRAPH_BYTES - size(graph(original)))
+    doc_id = "s" * 128
+    head = save_source(original, doc_id=doc_id)
+    pins = {
+        "doc_id": doc_id, "graph_revision": 1, "graph_sha256": head["sha256"],
+        "output": {"name": "total", "node": "constant", "port": "result"}, "schema": None,
+    }
+    assert size({"status": "resolved", "value": original, "truncated": False,
+                 "pins": pins}) > MAX_VALUE_BYTES
+    result = resolve_values("tenant-a", [binding(doc_id)] * 32)
+    assert result == {"values": [{"status": "unavailable", "reason": "value-limit",
+                                  "truncated": True, "pins": pins}] * 32,
+                      "truncated": True}
+    assert size(result) <= MAX_RESPONSE_BYTES
+    assert all(size(value) <= MAX_VALUE_BYTES for value in result["values"])
+
+
+@pytest.mark.parametrize("original", [{"amount": 42}, [1, 2], "hello", None],
+                         ids=["object", "list", "string", "null"])
+def test_fitting_value_is_unchanged(original):
+    head = save_source(original)
+    assert resolve_values("tenant-a", [binding()]) == {
+        "values": [{"status": "resolved", "value": original, "truncated": False,
+                    "pins": {"doc_id": "source", "graph_revision": 1,
+                             "graph_sha256": head["sha256"],
+                             "output": {"name": "total", "node": "constant", "port": "result"},
+                             "schema": None}}],
+        "truncated": False,
+    }
+
+
+@pytest.mark.parametrize("original", [[1, 2], "hello"], ids=["list", "string"])
+def test_empty_prefix_exceeding_value_limit_is_unavailable(monkeypatch, original):
+    import lab_widget_values
+
+    result = {"status": "resolved", "value": original, "truncated": False,
+              "pins": {"doc_id": "source"}}
+    monkeypatch.setattr(lab_widget_values, "MAX_VALUE_BYTES",
+                        size({**result, "value": original[:0], "truncated": True}) - 1)
+    assert lab_widget_values._fit(result) == {
+        "status": "unavailable", "reason": "value-limit", "truncated": True,
+        "pins": {"doc_id": "source"},
+    }
 
 
 @pytest.mark.parametrize("body", [{"bindings": [binding()] * 33}, {"bindings": [{}]}, {"bindings": "bad"}])

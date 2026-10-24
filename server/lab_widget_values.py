@@ -165,10 +165,11 @@ def _fit(result):
             else:
                 high = middle - 1
         result["value"] = value[:low]
-    else:
-        result["value"] = None
-    if _bytes(result) > MAX_VALUE_BYTES:
-        return {"status": "unavailable", "reason": "value-limit", "truncated": True}
+        if _bytes(result) <= MAX_VALUE_BYTES:
+            return result
+    del result["value"]
+    result["status"] = "unavailable"
+    result["reason"] = "value-limit"
     return result
 
 
