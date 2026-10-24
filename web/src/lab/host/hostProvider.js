@@ -186,6 +186,10 @@ export function createHostProvider({ win = globalThis.window, framed = Boolean(w
       onChange(state());
     },
     entries,
+    rowsOf(name) {
+      return Object.freeze((stored.get(name) || []).map(({ data, as_of, stale, truncated }) =>
+        Object.freeze({ data, as_of, stale, truncated })));
+    },
     sources(document, suppliedEntries) {
       const merged = suppliedEntries ?? { ...registry, ...entries() };
       const values = [];
