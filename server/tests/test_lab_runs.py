@@ -1,0 +1,183 @@
+"""Runs HTTP contract on SQLite and PostgreSQL authorities."""
+from datetime import timedelta
+from types import SimpleNamespace
+
+from fastapi import FastAPI
+from fastapi.encoders import jsonable_encoder
+from fastapi.testclient import TestClient
+import pytest
+
+import deps
+import lab_artifacts as ledger
+import lab_run_store as store
+from lab_canonical import graph_digest
+from routers import lab_router, lab_runs
+from test_lab_evaluate import case
+from test_lab_run_store import authority  # noqa: F401 -- PostgreSQL twin
+
+
+@pytest.fixture
+def rig(authority, monkeypatch):
+    monkeypatch.setenv("LEAF_LAB_STORE", store.store_mode())
+    monkeypatch.setenv("LEAF_LAB_SURFACE_ENABLED", "1")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_BUILD_REVISION", "abc1234")
+    monkeypatch.delenv("LEAF_ENTITLEMENTS_FILE", raising=False)
+    graph, registry = case()
+    monkeypatch.setattr(lab_runs, "trusted_registry", lambda: registry)
+    artifact = ledger.save(authority, "doc", graph, None, "member")
+    context = deps.TenantContext(authority, tier="hosted_pro", subject="run-actor")
+    app = FastAPI()
+    app.include_router(lab_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: context
+    prior = store.paused()
+    with TestClient(app, raise_server_exceptions=False) as http:
+        yield SimpleNamespace(http=http, tenant=authority, context=context, app=app,
+                              graph=graph, registry=registry, artifact=artifact)
+    store.set_paused(prior, "", "test")
+
+
+def create(rig):
+    return rig.http.post("/api/lab/runs", json={"doc_id": "doc", "graph_revision": 1})
+
+
+def test_create_pins_and_public_row(rig):
+    response = create(rig)
+    assert response.status_code == 202, response.text
+    run_id = response.json()["run_id"]
+    assert response.json() == {"run_id": run_id, "state": "queued"}
+    row = store.get(rig.tenant, run_id)
+    assert row["graph_sha256"] == rig.artifact["sha256"]
+    assert row["graph_revision"] == 1
+    assert row["input_digest"] == graph_digest({})
+    assert row["registry_digest"] == store.registry_digest()
+    assert (row["ops_revision"], row["adapter_revision"], row["build_revision"]) == (
+        "lab-ops.v1", "lab-worker.v1", "abc1234")
+    public = rig.http.get("/api/lab/runs/" + run_id)
+    assert public.status_code == 200
+    assert public.json() == jsonable_encoder({k: v for k, v in row.items()
+                                            if k not in {"lease_owner", "lease_fence"}})
+    assert create(rig).json()["run_id"] != run_id
+
+
+@pytest.mark.parametrize("kind,code", [
+    ("host", "lab_graph_host_refused"), ("effect", "lab_graph_effect_refused"),
+    ("invalid", "lab_graph_unknown_block"),
+    ("malformed", "lab_graph_invalid"),
+])
+def test_refuses_before_enqueue(rig, monkeypatch, kind, code):
+    if kind in {"host", "effect"}:
+        monkeypatch.setattr(lab_runs.lab_registry, "lookup", lambda name, version:
+                            SimpleNamespace(residency="host" if kind == "host" else "tenant",
+                                            effect="pure" if kind == "host" else "write")
+                            if name == "identity" else None)
+    elif kind == "malformed":
+        monkeypatch.setattr(ledger, "get", lambda *args: {**rig.artifact, "graph": {}})
+    else:
+        rig.registry.clear()
+    def forbidden(*args, **kwargs):
+        pytest.fail("refused graph reached enqueue")
+    monkeypatch.setattr(store, "create", forbidden)
+    response = create(rig)
+    assert response.status_code == 422, response.text
+    assert response.json() == {"detail": code}
+
+
+def test_queue_full(rig):
+    for _ in range(16):
+        assert create(rig).status_code == 202
+    response = create(rig)
+    assert response.status_code == 409
+    assert response.json() == {"detail": "lab_run_queue_full"}
+
+
+@pytest.mark.parametrize("method,suffix", [("GET", ""), ("GET", "/events"), ("POST", "/cancel")])
+def test_foreign_and_missing_run(rig, method, suffix):
+    run_id = create(rig).json()["run_id"]
+    rig.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        rig.tenant + "-foreign", tier="hosted_pro", subject="other")
+    for key in (run_id, "missing"):
+        response = rig.http.request(method, "/api/lab/runs/" + key + suffix)
+        assert response.status_code == 404
+        assert response.json() == {"detail": "lab_run_not_found"}
+    assert store.get(rig.tenant, run_id)["state"] == "queued"
+
+
+def test_events_cursor(rig):
+    run_id = create(rig).json()["run_id"]
+    lease = store.claim(rig.tenant, run_id, "worker", 60, build_revision="abc1234", color="active")
+    assert store.append_events(rig.tenant, run_id, "worker", lease["fence"], [
+        {"kind": "progress", "payload": {"n": n}} for n in range(3)])
+    path = "/api/lab/runs/" + run_id + "/events"
+    first = rig.http.get(path, params={"after_seq": -1, "limit": 1})
+    assert first.status_code == 200
+    assert [e["seq"] for e in first.json()["events"]] == [0]
+    rest = rig.http.get(path, params={"after_seq": 0, "limit": 500})
+    assert [e["seq"] for e in rest.json()["events"]] == [1, 2]
+
+
+def test_cancel_actor_and_idempotency(rig):
+    run_id = create(rig).json()["run_id"]
+    path = "/api/lab/runs/" + run_id + "/cancel"
+    assert rig.http.post(path).json() == {"cancel_requested": True}
+    assert rig.http.post(path).json() == {"cancel_requested": False}
+    row = store.get(rig.tenant, run_id)
+    assert row["state"] == "cancelled" and row["cancel_requested_by"] == "run-actor"
+
+
+@pytest.mark.parametrize("action", ["pause", "resume"])
+def test_worker_controls_need_deploy(rig, action):
+    path = "/api/lab/runs/worker/" + action
+    rig.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        rig.tenant, tier="hosted_starter", subject="member")
+    response = rig.http.post(path, json={"reason": "maintenance"} if action == "pause" else None)
+    assert response.status_code == 403
+    rig.app.dependency_overrides[deps.require_tenant] = lambda: rig.context
+    response = rig.http.post(path, json={"reason": "maintenance"} if action == "pause" else None)
+    assert response.status_code == 200
+    assert response.json() == {"paused": action == "pause"}
+    assert store.paused() is (action == "pause")
+
+
+def test_status_worker_fields_and_liveness(rig, monkeypatch):
+    now = store._now()
+    monkeypatch.setattr(store, "_now", lambda: now - timedelta(seconds=61))
+    store.record_worker_status(rig.tenant + "-stale", "old", "idle", 0, 0)
+    monkeypatch.setattr(store, "_now", lambda: now)
+    store.record_worker_status(rig.tenant, "abc1234", "active", 1, 2)
+    create(rig)
+    response = rig.http.get("/api/lab/status")
+    assert response.status_code == 200, response.text
+    status = response.json()["worker"]
+    assert set(status) == {"paused", "workers", "queue_age_max_s"}
+    worker = next(w for w in status["workers"] if w["build_revision"] == "abc1234")
+    assert set(worker) == {"build_revision", "color", "heartbeat_age_s", "active_runs", "queued_runs"}
+    assert worker["color"] == "active" and worker["active_runs"] == 1 and worker["queued_runs"] == 2
+    assert worker["heartbeat_age_s"] >= 0 and status["queue_age_max_s"] >= 0
+    assert not any(w["build_revision"] == "old" for w in status["workers"])
+    assert "worker_id" not in response.text and "lease_owner" not in response.text and "fence" not in response.text
+    store._run("lab-worker-control", lambda sql: sql.execute(
+        "DELETE FROM lab_worker_status WHERE worker_id=?", (rig.tenant + "-stale",)), write=True)
+
+
+@pytest.mark.parametrize("body", [{}, {"doc_id": "doc", "graph_revision": True},
+    {"doc_id": "doc", "graph_revision": 0}, {"doc_id": "doc", "graph_revision": "1"},
+    {"doc_id": "doc", "graph_revision": 1, "run_id": "caller"}])
+def test_exact_create_fields(rig, body):
+    assert rig.http.post("/api/lab/runs", json=body).status_code == 422
+
+
+@pytest.mark.parametrize("query", ["limit=0", "limit=501", "after_seq=-2"])
+def test_event_bounds(rig, query):
+    run_id = create(rig).json()["run_id"]
+    assert rig.http.get("/api/lab/runs/" + run_id + "/events?" + query).status_code == 422
+
+
+@pytest.mark.parametrize("operation", ["create", "status"])
+def test_store_failures_are_sanitized(rig, monkeypatch, operation):
+    def fail(*args, **kwargs):
+        raise RuntimeError("postgres://private-host/secret")
+    monkeypatch.setattr(store, "create" if operation == "create" else "worker_status", fail)
+    response = create(rig) if operation == "create" else rig.http.get("/api/lab/status")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "lab_store_unavailable"}

@@ -23,11 +23,20 @@ LAB_PATHS = [
     "/api/lab/docs/{doc_id}/restore",
     "/api/lab/docs/{doc_id}/publish",
     "/api/lab/widgets/{doc_id}/values",
+    "/api/lab/runs",
+    "/api/lab/runs/{run_id}",
+    "/api/lab/runs/{run_id}/events",
+    "/api/lab/runs/{run_id}/cancel",
+    "/api/lab/runs/worker/pause",
+    "/api/lab/runs/worker/resume",
 ]
 
 
 @pytest.fixture(autouse=True)
 def _environment(monkeypatch):
+    monkeypatch.setattr(lab_surface.lab_run_store, "worker_status", lambda age: [])
+    monkeypatch.setattr(lab_surface.lab_run_store, "paused", lambda: False)
+    monkeypatch.setattr(lab_surface.lab_run_store, "oldest_queued_age_s", lambda: None)
     monkeypatch.delenv(lab_surface.FLAG_LAB_SURFACE, raising=False)
     monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
     monkeypatch.setenv("LEAF_DEPLOYMENT_ENVIRONMENT", "")
@@ -168,6 +177,7 @@ def test_status_contract_contains_only_public_fields(monkeypatch, runtime, postu
     assert body == {
         "ok": True, "schema": "leaf.lab-status.v1", "rail": "on",
         "posture": posture, "tenant": "tenant-a",
+        "worker": {"paused": False, "workers": [], "queue_age_max_s": None},
     }
     secret_key = re.compile(
         r"password|credential|secret|token|jwt|auth|cookie|session|host|^sub$", re.I)
@@ -191,11 +201,11 @@ def test_pinned_routers_match_the_included_set():
     app.include_router(lab_router.router)
     routes = [route for path, route in iter_leaf_routes(app.router.routes)
               if isinstance(route, APIRoute) and path.startswith("/api/lab")]
-    assert lab_router.PINNED_ROUTERS == ("lab_surface", "lab_artifacts", "lab_widgets")
+    assert lab_router.PINNED_ROUTERS == ("lab_surface", "lab_artifacts", "lab_widgets", "lab_runs")
     assert {route.endpoint.__module__.rsplit(".", 1)[-1]
             for route in routes} == set(lab_router.PINNED_ROUTERS)
     assert {tag for route in routes for tag in route.tags} == {
-        "lab_surface", "lab_artifacts", "lab_widgets"}
+        "lab_surface", "lab_artifacts", "lab_widgets", "lab_runs"}
     assert [route.path for route in routes] == LAB_PATHS
 
 

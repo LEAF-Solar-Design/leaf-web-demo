@@ -371,6 +371,7 @@
     "server-lab-artifacts",
     "server-lab-widgets",
     "server-lab-run-store",
+    "server-lab-runs",
     "server-lab-diff",
     "server-lab-registry",
     "server-lab-validate",

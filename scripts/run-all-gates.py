@@ -1319,6 +1319,10 @@ def build_suites() -> List[Suite]:
         Suite("server-lab-run-store", "server tests/test_lab_run_store.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_run_store.py"), 25, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
+        # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
+        Suite("server-lab-runs", "server tests/test_lab_runs.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
+              database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-diff", "server tests/test_lab_diff.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_diff.py"), 7),
         Suite("server-lab-registry", "server tests/test_lab_registry.py", "pytest", SERVER,
@@ -3521,7 +3525,7 @@ def build_suites() -> List[Suite]:
         Suite("server-drawings-cross-tenant-canary", "server tests/test_drawings_cross_tenant_canary.py", "pytest", SERVER,
               _py_pytest("tests/test_drawings_cross_tenant_canary.py"), 10),
         Suite("server-router-authz-negative", "server tests/test_router_authz_negative.py", "pytest", SERVER,
-              _py_pytest("tests/test_router_authz_negative.py"), 44),
+              _py_pytest("tests/test_router_authz_negative.py"), 73),
         Suite("server-mutation-scope-diff", "server tests/test_mutation_scope_diff.py", "pytest", SERVER,
               _py_pytest("tests/test_mutation_scope_diff.py"), 20),
         # Registered WITH the file, per the #29 fix-then-register rule. The

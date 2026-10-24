@@ -16,8 +16,9 @@ if str(SERVER_DIR) not in sys.path:
 
 import deps  # noqa: E402
 import lab_artifacts as ledger  # noqa: E402
+import lab_run_store as run_store  # noqa: E402
 import tenancy  # noqa: E402
-from routers import deployment_identity, lab_artifacts, lab_router, lab_widgets  # noqa: E402
+from routers import deployment_identity, lab_artifacts, lab_router, lab_runs, lab_widgets  # noqa: E402
 from route_flatten import iter_leaf_routes  # noqa: E402
 from test_auth import _ENV, bearer, mint  # noqa: E402
 
@@ -37,6 +38,14 @@ LAB_CASES = [
     pytest.param("POST", "restore", {"revision": 1, "expected_head": 2}, 404,
                  id="restore"),
     pytest.param("POST", "publish", {"expected_head": 2}, 404, id="publish"),
+]
+RUN_CASES = [
+    ("POST", "", {"doc_id": DOC, "graph_revision": 2}),
+    ("GET", "/private-run", None),
+    ("GET", "/private-run/events", None),
+    ("POST", "/private-run/cancel", None),
+    ("POST", "/worker/pause", {"reason": "maintenance"}),
+    ("POST", "/worker/resume", None),
 ]
 
 
@@ -70,6 +79,7 @@ def client(tmp_path, monkeypatch):
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("LEAF_LAB_SURFACE_ENABLED", "1")
     monkeypatch.setenv("LEAF_LAB_STORE", "sqlite")
+    monkeypatch.setenv("LEAF_LAB_RUN_STORE", "sqlite")
     monkeypatch.setenv("LEAF_LAB_DB", str(tmp_path / "lab.db"))
     monkeypatch.setenv("LEAF_RUNTIME_ENV", "test")
     monkeypatch.setenv("LEAF_PLATFORM_POSTGRES_REQUIRED", "0")
@@ -105,6 +115,16 @@ def test_route_inventory_is_complete():
     assert {(method, path)
             for path, route in iter_leaf_routes(deployment_identity.router.routes)
             for method in route.methods} == {("GET", "/api/deployment-identity")}
+    assert {(method, path)
+            for path, route in iter_leaf_routes(lab_runs.router.routes)
+            for method in route.methods} == {
+        ("POST", "/api/lab/runs"),
+        ("GET", "/api/lab/runs/{run_id}"),
+        ("GET", "/api/lab/runs/{run_id}/events"),
+        ("POST", "/api/lab/runs/{run_id}/cancel"),
+        ("POST", "/api/lab/runs/worker/pause"),
+        ("POST", "/api/lab/runs/worker/resume"),
+    }
     assert {(method, path)
             for path, route in iter_leaf_routes(lab_widgets.router.routes)
             for method in route.methods} == {
@@ -166,6 +186,41 @@ def test_widget_values_admission(client, owner, monkeypatch, mode, status):
     if mode == "graph-target":
         assert response.json() == {"detail": "lab_document_not_widget"}
     assert MARKER not in response.text
+    assert _owner_snapshot(db) == before
+
+
+@pytest.mark.parametrize("method,suffix,body", RUN_CASES)
+@pytest.mark.parametrize("mode,status", [
+    ("rail-off", 404), ("auth-off", 503), ("anonymous", 401), ("no-build", 403),
+])
+def test_runs_admission_precedes_storage(client, monkeypatch, method, suffix, body, mode, status):
+    if mode == "rail-off":
+        monkeypatch.setenv("LEAF_LAB_SURFACE_ENABLED", "0")
+    elif mode == "auth-off":
+        monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    elif mode == "no-build":
+        monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                            lambda subject: ("tenant-b", "restricted"))
+    def forbidden(*args, **kwargs):
+        pytest.fail("closed runs admission reached storage")
+    monkeypatch.setattr(ledger, "_run", forbidden)
+    monkeypatch.setattr(run_store, "_run", forbidden)
+    response = client.request(method, "/api/lab/runs" + suffix, json=body,
+                              headers={} if mode == "anonymous" else _h("tenant-b"))
+    assert response.status_code == status, response.text
+    assert MARKER not in response.text
+
+
+@pytest.mark.parametrize("method,suffix,body", RUN_CASES[:4])
+def test_runs_foreign_tenant_is_not_found(client, owner, method, suffix, body):
+    row = run_store.create("tenant-a", DOC, "private-run", 2, "a" * 64, "lab-ops.v1",
+                           "b" * 64, "lab-worker.v1", "abc1234")
+    response = client.request(method, "/api/lab/runs" + suffix, json=body,
+                              headers=_h("tenant-b"))
+    assert response.status_code == 404, response.text
+    assert MARKER not in response.text and "tenant-a" not in response.text
+    assert run_store.get("tenant-a", "private-run") == row
+    db, before = owner
     assert _owner_snapshot(db) == before
 
 
