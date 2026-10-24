@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import {
   attachToJob as defaultAttachToJob,
@@ -50,6 +50,7 @@ export const MAX_STALE_RESULTS = 5
 const NAME_CHARS = /^[A-Za-z0-9_.:-]+$/
 const MAX_TOOL_NAME_CHARS = 128
 const MAX_JOB_ID_CHARS = 200
+const NO_ROWS = Object.freeze([])
 
 const isToolName = (value) => typeof value === 'string'
   && value.length <= MAX_TOOL_NAME_CHARS && NAME_CHARS.test(value)
@@ -156,6 +157,22 @@ export default function useJobController({
   const storageRef = useRef(storage)
   const drawingKeyRef = useRef(drawingKey)
   drawingKeyRef.current = drawingKey
+  // Read at entry points and after every await: while a known guest's reads are paused, nothing reads,
+  // publishes, or clears the stored pointer on the signed-in session's behalf.
+  const readsPausedRef = useRef(readsPaused)
+  readsPausedRef.current = readsPaused
+  // Bumped each time reads pause. An operation compares the value it started with, so a response that
+  // settles after a pause, even after a later resume, is still known to be superseded by that pause.
+  const pauseGenerationRef = useRef(0)
+  // Transport this hook started (subscriptions and run executions), aborted when reads pause.
+  const activeControllersRef = useRef(new Set())
+  const pointerOwnerRef = useRef(null)
+  // Every runJob call, paused or not, takes the next intent, and only the newest intent may save pending inputs.
+  const pendingIntentRef = useRef(0)
+  // The sequence value when reads last resumed: a late submit receipt only triggers a reattach if
+  // nothing else started since.
+  const resumeSequenceRef = useRef(null)
+  const [reattachGeneration, setReattachGeneration] = useState(0)
   callbacksRef.current = { formatError, onCompleteVersion, onNotice, onAuthRequired }
   servicesRef.current = { ...defaultServices, ...services }
   storageRef.current = storage
@@ -191,6 +208,7 @@ export default function useJobController({
   }, [resetActivity, setJobId])
 
   const reportError = useCallback((cause) => {
+    if (readsPausedRef.current) return
     setError(typeof cause === 'string'
       ? cause
       : formatLifecycleError(cause, callbacksRef.current.formatError))
@@ -199,6 +217,7 @@ export default function useJobController({
   const clearError = useCallback(() => setError(null), [])
 
   const adoptEnvelope = useCallback((envelope, { jobId = null, toolName = null } = {}) => {
+    if (readsPausedRef.current) return null
     sequenceRef.current += 1
     setJobId(jobId)
     setJobTool(toolName || envelope?.tool || 'job')
@@ -234,13 +253,16 @@ export default function useJobController({
   }, [markRunning])
 
   const refreshJobs = useCallback(async () => {
-    if (mock) return []
+    if (mock || readsPausedRef.current) return []
+    const pauseGeneration = pauseGenerationRef.current
     try {
       const next = await servicesRef.current.listJobs()
+      if (readsPausedRef.current || pauseGenerationRef.current !== pauseGeneration) return null
       setJobs(next)
       setAuth(false)
       return next
     } catch (cause) {
+      if (readsPausedRef.current || pauseGenerationRef.current !== pauseGeneration) return null
       if (isUnauthorized(cause)) setAuth(true)
       return null
     }
@@ -297,8 +319,12 @@ export default function useJobController({
     record = null,
     reattach = false,
   } = {}) => {
-    if (!jobId || mock) return null
+    if (!jobId || mock || readsPausedRef.current) return null
     const sequence = ++sequenceRef.current
+    const pauseGeneration = pauseGenerationRef.current
+    const controller = new AbortController()
+    activeControllersRef.current.add(controller)
+    let terminal = false
     const stale = { jobId, epoch: epochRef.current }
     let keepPointer = false
     setJobId(jobId)
@@ -312,6 +338,7 @@ export default function useJobController({
     runningSinceRef.current = null
     if (persist) {
       const pointer = saveInflightJob(jobId, toolName, storageRef.current)
+      pointerOwnerRef.current = { sequence, jobId }
       setInflight(pointer)
     }
     if (reattach) setReattaching(true)
@@ -319,6 +346,7 @@ export default function useJobController({
     try {
       if (record && isTerminal(record.status)) {
         const envelope = servicesRef.current.recordToEnvelope(record)
+        terminal = true
         await finishEnvelope(envelope, sequence, toolName || record.tool, stale)
         return sequenceRef.current === sequence ? envelope : null
       }
@@ -326,7 +354,9 @@ export default function useJobController({
       else if (record?.status) setStatus(record.status)
       const envelope = await servicesRef.current.attachToJob(jobId, {
         onStatus: (update) => acceptStatus(update, sequence),
+        signal: controller.signal,
       })
+      terminal = true
       await finishEnvelope(envelope, sequence, toolName, stale)
       return sequenceRef.current === sequence ? envelope : null
     } catch (cause) {
@@ -337,10 +367,14 @@ export default function useJobController({
         // The job is already on the server: keep its pointer so it
         // reattaches after sign-in instead of being lost.
         keepPointer = true
-        setAuth(true)
+        // Once reads resume, a sign-in failure from an attach a pause superseded is stale: it publishes nothing.
+        if (pauseGenerationRef.current === pauseGeneration || readsPausedRef.current) setAuth(true)
       }
       return null
     } finally {
+      activeControllersRef.current.delete(controller)
+      // A pause superseded the attach before the job finished: keep its pointer so it reattaches after sign-in.
+      if (!terminal && pauseGenerationRef.current !== pauseGeneration) keepPointer = true
       if (sequenceRef.current === sequence) {
         resetActivity()
         setReattaching(false)
@@ -356,10 +390,24 @@ export default function useJobController({
   // lifecycle is unchanged.
   const runJob = useCallback(async ({ toolName, execute, submission = null }) => {
     if (!execute) throw new TypeError('runJob requires an execute callback')
+    const intent = ++pendingIntentRef.current
+    if (readsPausedRef.current) {
+      if (submission) {
+        const saved = savePendingRun(toolName, submission.params, storageRef.current)
+        if (saved) setPendingRun(saved)
+      }
+      setAuth(true)
+      return null
+    }
     const capturedDrawingKey = drawingKeyRef.current
     const origin = typeof capturedDrawingKey === 'string' && capturedDrawingKey.length > 0
       ? { drawingKey: capturedDrawingKey } : undefined
     const sequence = ++sequenceRef.current
+    const pauseGeneration = pauseGenerationRef.current
+    const startedAt = Date.now()
+    const controller = new AbortController()
+    activeControllersRef.current.add(controller)
+    let terminal = false
     const epoch = epochRef.current
     let submittedJobId = null
     let keepPointer = false
@@ -373,11 +421,14 @@ export default function useJobController({
     setElapsedMs(null)
     runningSinceRef.current = null
     const signInExpired = () => {
+      const supersededByPause = pauseGenerationRef.current !== pauseGeneration
+      // Once reads resume, a sign-in failure from a run a pause superseded is stale: it publishes nothing.
+      if (supersededByPause && !readsPausedRef.current) return
       if (submittedJobId) {
         // Submitted: re-running would duplicate an apply, so keep the
         // pointer and let the job reattach after sign-in.
         keepPointer = true
-      } else if (sequenceRef.current === sequence && submission) {
+      } else if ((sequenceRef.current === sequence || supersededByPause) && pendingIntentRef.current === intent && submission) {
         const saved = savePendingRun(toolName, submission.params, storageRef.current)
         if (saved) setPendingRun(saved)
       }
@@ -386,14 +437,33 @@ export default function useJobController({
     try {
       const output = await execute({
         onSubmit: (jobId) => {
-          if (sequenceRef.current !== sequence) return
-          submittedJobId = jobId
-          setJobId(jobId)
-          const pointer = saveInflightJob(jobId, toolName, storageRef.current)
-          setInflight(pointer)
+          if (sequenceRef.current === sequence) {
+            submittedJobId = jobId
+            setJobId(jobId)
+            const pointer = saveInflightJob(jobId, toolName, storageRef.current)
+            pointerOwnerRef.current = { sequence, jobId }
+            setInflight(pointer)
+          } else if (pauseGenerationRef.current !== pauseGeneration) {
+            // Superseded by a pause after the submit went out: the job exists, so keep a pointer to it unless a
+            // newer run owns the pointer by run sequence and job id, never by a millisecond timestamp alone.
+            // Also keep a strictly newer pointer from another tab; otherwise reattach once reads resume.
+            submittedJobId = jobId
+            const stored = readInflightJob(storageRef.current)
+            const owner = pointerOwnerRef.current
+            const newerRunOwnsPointer = Boolean(stored?.job_id) && owner !== null && owner.sequence > sequence && owner.jobId === stored.job_id
+            if (!newerRunOwnsPointer && !(Number.isFinite(stored?.ts) && stored.ts > startedAt)) {
+              saveInflightJob(jobId, toolName, storageRef.current)
+              pointerOwnerRef.current = { sequence, jobId }
+            }
+            if (!readsPausedRef.current && sequenceRef.current === resumeSequenceRef.current) {
+              setReattachGeneration((value) => value + 1)
+            }
+          }
         },
         onStatus: (update) => acceptStatus(update, sequence),
+        signal: controller.signal,
       })
+      terminal = true
       const envelope = origin && output ? { ...output, origin } : output
       if (!submittedJobId && isUnauthenticatedEnvelope(envelope)) signInExpired()
       await finishEnvelope(envelope, sequence, toolName, { jobId: submittedJobId, epoch })
@@ -405,6 +475,9 @@ export default function useJobController({
       if (isUnauthorized(cause)) signInExpired()
       return null
     } finally {
+      activeControllersRef.current.delete(controller)
+      // A pause superseded the run before the job finished: keep its pointer so it reattaches after sign-in.
+      if (!terminal && pauseGenerationRef.current !== pauseGeneration) keepPointer = true
       if (sequenceRef.current === sequence) {
         resetActivity()
         setInflight(null)
@@ -415,6 +488,7 @@ export default function useJobController({
   }, [acceptStatus, finishEnvelope, mock, refreshJobs, resetActivity, setAuth, setJobId])
 
   const takePendingRun = useCallback(() => {
+    if (readsPausedRef.current) return null
     const record = readPendingRun(storageRef.current)
     clearPendingRun(storageRef.current)
     setPendingRun(null)
@@ -425,17 +499,23 @@ export default function useJobController({
   // with the saved inputs still stored. Resolves null when nothing is pending,
   // else { pending, tool } with tool null when the catalog no longer has it.
   const preparePendingRun = useCallback(async (loadTools) => {
+    if (readsPausedRef.current) {
+      setAuth(true)
+      return null
+    }
     if (!readPendingRun(storageRef.current)) {
       setPendingRun(null)
       return null
     }
+    const pauseGeneration = pauseGenerationRef.current
     const tools = await loadTools()
+    if (readsPausedRef.current || pauseGenerationRef.current !== pauseGeneration) return null
     const pending = takePendingRun()
     if (!pending) return null
     const tool = (Array.isArray(tools) ? tools : [])
       .find((candidate) => candidate?.name === pending.tool) || null
     return { pending, tool }
-  }, [takePendingRun])
+  }, [setAuth, takePendingRun])
 
   const discardPendingRun = useCallback(() => {
     clearPendingRun(storageRef.current)
@@ -457,6 +537,21 @@ export default function useJobController({
   useEffect(() => {
     reset()
   }, [mock, reset, resetKey])
+
+  // A layout effect runs in the same task as the commit, before any timer or response callback can run
+  // against the paused tree.
+  useLayoutEffect(() => {
+    if (!readsPaused) {
+      resumeSequenceRef.current = sequenceRef.current
+      return
+    }
+    pauseGenerationRef.current += 1
+    for (const controller of activeControllersRef.current) controller.abort()
+    activeControllersRef.current.clear()
+    setJobs([])
+    setStaleResults([])
+    reset()
+  }, [readsPaused, reset])
 
   useEffect(() => {
     if (status !== 'running') return undefined
@@ -480,13 +575,15 @@ export default function useJobController({
     let alive = true
     let timer = null
     const tick = async () => {
+      if (!alive || readsPausedRef.current) return
       try {
         const next = await servicesRef.current.listJobs()
-        if (alive) {
+        if (alive && !readsPausedRef.current) {
           setJobs(next)
           setAuth(false)
         }
       } catch (cause) {
+        if (readsPausedRef.current) return
         if (alive && isUnauthorized(cause)) {
           setAuth(true)
           if (timer) clearInterval(timer)
@@ -515,6 +612,7 @@ export default function useJobController({
     setInflight(pointer)
     let alive = true
     const sequenceAtLoad = sequenceRef.current
+    const pauseGeneration = pauseGenerationRef.current
     ;(async () => {
       let record
       try {
@@ -526,13 +624,14 @@ export default function useJobController({
           if (alive) setAuth(true)
           return
         }
+        if (readsPausedRef.current || pauseGenerationRef.current !== pauseGeneration) return
         if (alive && sequenceRef.current === sequenceAtLoad) {
           clearInflightJob(pointer.job_id, storageRef.current)
           setInflight(null)
         }
         return
       }
-      if (!alive || sequenceRef.current !== sequenceAtLoad) return
+      if (!alive || readsPausedRef.current || pauseGenerationRef.current !== pauseGeneration || sequenceRef.current !== sequenceAtLoad) return
       // P2 wave C-2: does session-survival UX earn its keep? Counted only for
       // a job still in flight (a terminal record is just a result render, not
       // a re-attach). This boot path is the ONLY reattach:true call site.
@@ -552,7 +651,7 @@ export default function useJobController({
       })
     })()
     return () => { alive = false }
-  }, [attachJob, mock, readsPaused, setAuth])
+  }, [attachJob, mock, readsPaused, reattachGeneration, setAuth])
 
   useEffect(() => {
     if (mock || typeof window === 'undefined' || typeof document === 'undefined') return undefined
@@ -596,18 +695,18 @@ export default function useJobController({
   }, [currentJobId, elapsedMs, jobTool, progress, result, running, status])
 
   return {
-    jobs,
+    jobs: readsPaused ? NO_ROWS : jobs,
     authRequired,
-    currentJobId,
-    currentJob,
-    inflight,
-    reattaching,
-    running,
-    status,
-    progress,
-    elapsedMs,
-    result,
-    error,
+    currentJobId: readsPaused ? null : currentJobId,
+    currentJob: readsPaused ? null : currentJob,
+    inflight: readsPaused ? null : inflight,
+    reattaching: readsPaused ? false : reattaching,
+    running: readsPaused ? false : running,
+    status: readsPaused ? null : status,
+    progress: readsPaused ? null : progress,
+    elapsedMs: readsPaused ? null : elapsedMs,
+    result: readsPaused ? null : result,
+    error: readsPaused ? null : error,
     runJob,
     attachJob,
     detachJob,
@@ -618,7 +717,7 @@ export default function useJobController({
     adoptRecord,
     refreshJobs,
     resumeJobPolling,
-    staleResults,
+    staleResults: readsPaused ? NO_ROWS : staleResults,
     dismissStaleResult,
     pendingRun,
     takePendingRun,

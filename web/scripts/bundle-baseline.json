@@ -1,36 +1,36 @@
 {
   "_comment": "gzip -9 bytes per chunk-stem (hash-stripped) from `npm run build` at the commit named in _ref. Regenerate with: node scripts/check_bundle_budget.mjs --write-baseline",
-  "_ref": "29abe30f",
+  "_ref": "8cd7f9d7",
   "chunks": {
     "App.css": 10465,
-    "App.js": 123275,
-    "ElementContextMenu.js": 34273,
+    "App.js": 123276,
+    "ElementContextMenu.js": 34277,
     "LeafPlatformScene.css": 494,
-    "LeafPlatformScene.js": 9060,
-    "OpsWorkspaceGround.js": 171409,
+    "LeafPlatformScene.js": 9059,
+    "OpsWorkspaceGround.js": 172491,
     "SheetsPage.css": 2583,
-    "SheetsPage.js": 5418,
+    "SheetsPage.js": 5419,
     "Viewer.js": 13582,
     "bridgeText.js": 21274,
     "index.css": 40176,
-    "index.js": 223051,
+    "index.js": 223395,
     "mockStageAuthority.js": 258,
-    "useAnnotations.js": 2021,
+    "useAnnotations.js": 2022,
     "vendor-react.js": 45884,
     "vendor-viewer.js": 123469,
     "worker-browser.js": 3824,
-    "LabGround.js": 26485,
+    "LabGround.js": 26484,
     "LabGround.css": 752,
-    "LabCanvas.js": 495972,
+    "LabCanvas.js": 495975,
     "string.js": 4533,
     "LabCanvas.css": 2547,
-    "hostBridge.js": 2618
+    "hostBridge.js": 2621
   },
-  "total": 1363423,
+  "total": 1364860,
   "total_allowance_bytes": 16384,
   "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers.",
   "stem_caps": {
-    "LabCanvas.js": 62181,
+    "LabCanvas.js": 62182,
     "LabCanvas.css": 6641,
     "elk.bundled.js": 441238
   },
@@ -40,56 +40,54 @@
   ],
   "isolated_canvas_measurement": {
     "method": "gzip-9, complete JS/CSS, Vite in-memory builds; merge-base or explicit --before changed web/src files before, working tree after",
-    "source_ref": "13fde4dd7579a5328163b2301f32c5ce5ebdba85",
-    "before_total": 1379557,
-    "after_total": 1379686,
-    "delta": 129,
+    "source_ref": "10039d2d39de6003cf066607665158979b051736",
+    "before_total": 1380635,
+    "after_total": 1381133,
+    "delta": 498,
     "deltas": {
-      "index.js": 151,
-      "App.js": -4,
-      "Viewer.js": -1,
-      "ElementContextMenu.js": -2,
-      "useAnnotations.js": -1,
-      "OpsWorkspaceGround.js": -3,
-      "LabGround.js": -2,
-      "hostBridge.js": -4,
-      "LabCanvas.js": -5
+      "index.js": 503,
+      "App.js": -2,
+      "SheetsPage.js": 1,
+      "ElementContextMenu.js": 2,
+      "OpsWorkspaceGround.js": -2,
+      "LabGround.js": -1,
+      "hostBridge.js": -1,
+      "LabCanvas.js": -2
     },
-    "baseline_before_total": 1363294,
-    "unrelated_drift_bytes": 16263,
-    "canvas_dependency_gzip_bytes": 497772,
+    "baseline_before_total": 1364362,
+    "unrelated_drift_bytes": 16273,
+    "canvas_dependency_gzip_bytes": 497773,
     "cap_headroom_bytes": 4096,
     "overlaid_paths": 2,
     "overlaid_sample": [
-      "web/src/controllers/workspace/createWorkspaceController.js",
-      "web/src/controllers/workspace/createWorkspaceController.test.js"
+      "web/src/controllers/useJobController.js",
+      "web/src/controllers/useJobController.pause.test.jsx"
     ]
   },
   "isolated_measurement": {
     "method": "gzip-9, complete JS/CSS, Vite in-memory builds; merge-base or explicit --before changed web/src files before, working tree after",
-    "source_ref": "13fde4dd7579a5328163b2301f32c5ce5ebdba85",
-    "before_total": 1379557,
-    "after_total": 1379686,
-    "delta": 129,
+    "source_ref": "10039d2d39de6003cf066607665158979b051736",
+    "before_total": 1380635,
+    "after_total": 1381133,
+    "delta": 498,
     "deltas": {
-      "index.js": 151,
-      "App.js": -4,
-      "Viewer.js": -1,
-      "ElementContextMenu.js": -2,
-      "useAnnotations.js": -1,
-      "OpsWorkspaceGround.js": -3,
-      "LabGround.js": -2,
-      "hostBridge.js": -4,
-      "LabCanvas.js": -5
+      "index.js": 503,
+      "App.js": -2,
+      "SheetsPage.js": 1,
+      "ElementContextMenu.js": 2,
+      "OpsWorkspaceGround.js": -2,
+      "LabGround.js": -1,
+      "hostBridge.js": -1,
+      "LabCanvas.js": -2
     },
-    "baseline_before_total": 1363294,
-    "unrelated_drift_bytes": 16263,
-    "canvas_dependency_gzip_bytes": 497772,
+    "baseline_before_total": 1364362,
+    "unrelated_drift_bytes": 16273,
+    "canvas_dependency_gzip_bytes": 497773,
     "cap_headroom_bytes": 4096,
     "overlaid_paths": 2,
     "overlaid_sample": [
-      "web/src/controllers/workspace/createWorkspaceController.js",
-      "web/src/controllers/workspace/createWorkspaceController.test.js"
+      "web/src/controllers/useJobController.js",
+      "web/src/controllers/useJobController.pause.test.jsx"
     ]
   },
   "isolated_workflow_history_measurement": {
@@ -312,5 +310,16 @@
     "baseline_before": 1362182,
     "unrelated_drift_excluded": 12502,
     "measurement_sha256": "5331a06114c38b2f268c4b4049e05590c080177914177959f019dd7b9ff6045d"
+  },
+  "isolated_s97_final_measurement": {
+    "before_ref": "e7fddb6ebf4105bd32a28beb37e04fe171f6c00f",
+    "after_ref": "51dc7485631a19ceba1881dd0af2478ba45e4fb9",
+    "method": "Complete-runtime paired Vite builds with fixed identity, dependencies and configuration",
+    "before_total": 1375806,
+    "after_total": 1376874,
+    "delta": 1068,
+    "baseline_before": 1363294,
+    "unrelated_drift_excluded": 12512,
+    "measurement_sha256": "4b113d689b2343730b17ff6761db7bb93d7542520c8b2a80f50d172d6a28b905"
   }
 }
