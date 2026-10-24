@@ -6,12 +6,10 @@ import { UUID } from './client.js'
 const unavailable = 'Schedule draft saving is unavailable.'
 const failed = () => new Error(unavailable)
 
-function contextFor(props, key, binding) {
+function contextFor(props, key, binding, callable) {
   let initialDraft = null
   try {
-    if (typeof props.projectId !== 'string' || !UUID.test(props.projectId) || typeof props.client?.registerWorkflowScheduleDraft !== 'function' ||
-        typeof props.client?.getWorkflowScheduleDraft !== 'function' || typeof props.guard !== 'function' ||
-        typeof props.onForbidden !== 'function' || typeof props.signal?.aborted !== 'boolean' ||
+    if (typeof props.projectId !== 'string' || !UUID.test(props.projectId) || callable.includes(false) || typeof props.signal?.aborted !== 'boolean' ||
         typeof props.signal?.addEventListener !== 'function' || typeof props.signal?.removeEventListener !== 'function') throw failed()
     const identity = globalThis.crypto?.randomUUID?.()
     if (typeof identity !== 'string' || !UUID.test(identity)) throw failed()
@@ -24,19 +22,20 @@ function contextFor(props, key, binding) {
 
 export function WorkflowScheduleDraftPanel(props) {
   const parsed = IntegrationRefV1.safeParse(props.workflowRef)
+  const callable = [props.guard, props.onForbidden, props.client?.registerWorkflowScheduleDraft,
+    props.client?.getWorkflowScheduleDraft].map(value => typeof value === 'function')
   const binding = JSON.stringify([parsed.success ? parsed.data : null, typeof props.title === 'string' ? props.title : null,
-    typeof props.guard === 'function', typeof props.onForbidden === 'function',
-    typeof props.client?.registerWorkflowScheduleDraft === 'function', typeof props.client?.getWorkflowScheduleDraft === 'function'])
-  const [context, setContext] = useState(() => contextFor(props, 1, binding))
+    ...callable])
+  const [context, setContext] = useState(() => contextFor(props, 1, binding, callable))
   if (context.client !== props.client || context.projectId !== props.projectId || context.signal !== props.signal || context.binding !== binding) {
-    setContext(contextFor(props, context.key + 1, binding))
+    setContext(contextFor(props, context.key + 1, binding, callable))
     return null
   }
   if (!context.initialDraft) return <p role="status">{unavailable}</p>
   return <ScopedScheduleDraft key={context.key} {...props} context={context} />
 }
 
-function ScopedScheduleDraft({ client, projectId, signal, guard, onForbidden, context, mode = 'light' }) {
+function ScopedScheduleDraft({ client, projectId, signal, guard, onForbidden, context, mode }) {
   const [availability, setAvailability] = useState(signal.aborted ? 'forbidden' : 'ready')
   const scope = useRef(null)
   useLayoutEffect(() => {
@@ -81,10 +80,8 @@ function ScopedScheduleDraft({ client, projectId, signal, guard, onForbidden, co
       let response
       try { response = await client.registerWorkflowScheduleDraft(projectId, payload, { signal: controller.signal }) }
       catch (error) {
-        assertCurrent()
-        if (error?.status === 401 || error?.status === 403) invalidate(true)
-        else if (error?.status === 409) postConflict = true
-        throw failed()
+        postConflict = error?.status === 409
+        throw error
       }
       assertCurrent()
       const reference = IntegrationRefV1.parse(response)
@@ -96,8 +93,10 @@ function ScopedScheduleDraft({ client, projectId, signal, guard, onForbidden, co
       await checkGuard()
       return reference
     } catch (error) {
-      if (current() && !controller.signal.aborted && (error?.status === 401 || error?.status === 403)) invalidate(true)
-      if (postConflict) throw new IntegrationWorkflowScheduleDraftSaveError('conflict')
+      if (current() && !controller.signal.aborted) {
+        if (error?.status === 401 || error?.status === 403) invalidate(true)
+        else if (postConflict) throw new IntegrationWorkflowScheduleDraftSaveError('conflict')
+      }
       throw failed()
     } finally {
       ctx.controller.signal.removeEventListener('abort', abort)
@@ -106,7 +105,7 @@ function ScopedScheduleDraft({ client, projectId, signal, guard, onForbidden, co
   }
 
   return <div className="workflow-schedule-draft-host">
-    <style>{`.ops-workspace .workflow-schedule-draft-host .leaf-schedule-draft :is(label,button) { margin: 0; }`}</style>
+    <style>{`.ops-workspace .workflow-schedule-draft-host :is(label,button){margin:0}`}</style>
     <IntegrationWorkflowScheduleDraftForm initialDraft={context.initialDraft} contextKey={String(context.key)}
       availability={availability} onSave={save} mode={mode} />
   </div>
