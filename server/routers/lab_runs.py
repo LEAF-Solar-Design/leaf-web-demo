@@ -71,11 +71,30 @@ def get(run_id: str, tenant=Depends(deps.require_tenant)):
     return {key: value for key, value in row.items() if key not in {"lease_owner", "lease_fence"}}
 
 
+def _public_event(event):
+    payload_fields = {
+        "failed": ("reason",),
+        "suspended": ("reason",),
+        "cancelled": (),
+        "finished": (),
+        "coalesced": ("removed",),
+        "lease_takeover": (),
+    }
+    payload = event["payload"]
+    # Value payload keys are output port names, rather than control metadata.
+    public_payload = (dict(payload) if event["kind"] == "value" else
+                      {key: payload[key] for key in payload_fields.get(event["kind"], ())
+                       if key in payload})
+    return {"seq": event["seq"], "kind": event["kind"], "block_id": event["block_id"],
+            "at": event["created_at"], "payload": public_payload}
+
+
 @router.get("/{run_id}/events")
 def events(run_id: str, after_seq: int = Query(-1, ge=-1),
            limit: int = Query(100, ge=1, le=500), tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
-    return {"events": _call(store.list_events, str(tenant), run_id, after_seq=after_seq, limit=limit)}
+    rows = _call(store.list_events, str(tenant), run_id, after_seq=after_seq, limit=limit)
+    return {"events": [_public_event(event) for event in rows]}
 
 
 @router.post("/{run_id}/cancel")

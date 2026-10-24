@@ -116,6 +116,59 @@ def test_events_cursor(rig):
     assert [e["seq"] for e in rest.json()["events"]] == [1, 2]
 
 
+def test_lease_takeover_event_hides_previous_holder(rig, monkeypatch):
+    run_id = create(rig).json()["run_id"]
+    now = store._now()
+    monkeypatch.setattr(store, "_now", lambda: now)
+    first = store.claim(rig.tenant, run_id, "private-worker", 60,
+                        build_revision="abc1234", color="active")
+    assert first
+    monkeypatch.setattr(store, "_now", lambda: now + timedelta(seconds=61))
+    assert store.claim(rig.tenant, run_id, "replacement-worker", 60,
+                       build_revision="abc1234", color="active")
+    stored = store.list_events(rig.tenant, run_id, after_seq=-1)
+    assert stored[0]["payload"] == {"previous_owner": "private-worker",
+                                     "previous_fence": first["fence"]}
+    response = rig.http.get("/api/lab/runs/" + run_id + "/events?after_seq=-1")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"events": [jsonable_encoder({
+        "seq": stored[0]["seq"], "kind": "lease_takeover", "block_id": None,
+        "at": stored[0]["created_at"], "payload": {},
+    })]}
+    for private in ("previous_owner", "previous_fence", "private-worker", "replacement-worker"):
+        assert private not in response.text
+
+
+@pytest.mark.parametrize("kind,payload,expected", [
+    ("value", {"out": {"type": "number", "data": 42},
+               "other": {"type": "string", "data": "ok"}},
+              {"out": {"type": "number", "data": 42},
+               "other": {"type": "string", "data": "ok"}}),
+    ("failed", {"reason": "worker_error"}, {"reason": "worker_error"}),
+    ("suspended", {"reason": "maintenance"}, {"reason": "maintenance"}),
+    ("cancelled", {"reason": "cancelled"}, {}),
+    ("finished", {}, {}),
+    ("coalesced", {"removed": 3, "count": 3}, {"removed": 3}),
+    ("unknown-kind", {"reason": "private"}, {}),
+])
+def test_event_payload_projection(rig, kind, payload, expected):
+    run_id = create(rig).json()["run_id"]
+    lease = store.claim(rig.tenant, run_id, "worker", 60, build_revision="abc1234", color="active")
+    if kind != "value":
+        payload = {**payload, "previous_owner": "private-worker", "previous_fence": 99,
+                   "owner": "private-worker", "fence": 99, "actor": "private-actor",
+                   "extra": "private-extra"}
+    assert store.append_events(rig.tenant, run_id, "worker", lease["fence"], [
+        {"kind": kind, "block_id": "block", "payload": payload}])
+    stored = store.list_events(rig.tenant, run_id, after_seq=-1)[0]
+    response = rig.http.get("/api/lab/runs/" + run_id + "/events?after_seq=-1")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"events": [jsonable_encoder({
+        "seq": 0, "kind": kind, "block_id": "block", "at": stored["created_at"],
+        "payload": expected,
+    })]}
+
+
 def test_cancel_actor_and_idempotency(rig):
     run_id = create(rig).json()["run_id"]
     path = "/api/lab/runs/" + run_id + "/cancel"
