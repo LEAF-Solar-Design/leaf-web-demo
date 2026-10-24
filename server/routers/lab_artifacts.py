@@ -34,6 +34,8 @@ def _call(function, *args, _document_errors=False, **kwargs):
         return function(*args, **kwargs)
     except ledger.NotFound:
         raise HTTPException(404, detail="lab_document_not_found") from None
+    except ledger.KindFixed:
+        raise HTTPException(409, detail="lab_document_kind_fixed") from None
     except ledger.Conflict:
         raise HTTPException(409, detail="stale_expected_head") from None
     except TooLarge:
@@ -49,7 +51,7 @@ def _call(function, *args, _document_errors=False, **kwargs):
         raise HTTPException(503, detail="lab_store_unavailable") from None
 
 
-async def _body(request, required, *, _document_errors=False):
+async def _body(request, required, *, _document_errors=False, optional=()):
     length = request.headers.get("content-length")
     if length is not None:
         try:
@@ -68,7 +70,7 @@ async def _body(request, required, *, _document_errors=False):
     body = _call(parse_body, bytes(data), _document_errors=_document_errors)
     if isinstance(body, JSONResponse):
         return body
-    if set(body) != set(required):
+    if not set(required) <= set(body) or set(body) - set(required) - set(optional):
         raise HTTPException(422, detail="invalid_lab_fields")
     return body
 
@@ -76,10 +78,10 @@ async def _body(request, required, *, _document_errors=False):
 @router.post("/{doc_id}/save")
 async def save(doc_id: str, request: Request, tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
-    body = await _body(request, ("graph", "expected_head"), _document_errors=True)
+    body = await _body(request, ("graph", "expected_head"), _document_errors=True, optional=("kind",))
     if isinstance(body, JSONResponse):
         return body
-    return await run_in_threadpool(_call, ledger.save, str(tenant), doc_id, body["graph"], body["expected_head"], _actor(tenant), _document_errors=True)
+    return await run_in_threadpool(_call, ledger.save, str(tenant), doc_id, body["graph"], body["expected_head"], _actor(tenant), kind=body.get("kind", "graph"), _document_errors=True)
 
 
 @router.get("/{doc_id}/head")

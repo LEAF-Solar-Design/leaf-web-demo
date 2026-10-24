@@ -368,6 +368,7 @@
     "server-lab-ops",
     "server-lab-evaluate",
     "server-lab-artifacts",
+    "server-lab-widgets",
     "server-lab-run-store",
     "server-lab-diff",
     "server-lab-registry",

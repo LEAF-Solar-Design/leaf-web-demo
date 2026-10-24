@@ -17,7 +17,7 @@ if str(SERVER_DIR) not in sys.path:
 import deps  # noqa: E402
 import lab_artifacts as ledger  # noqa: E402
 import tenancy  # noqa: E402
-from routers import deployment_identity, lab_artifacts, lab_router  # noqa: E402
+from routers import deployment_identity, lab_artifacts, lab_router, lab_widgets  # noqa: E402
 from route_flatten import iter_leaf_routes  # noqa: E402
 from test_auth import _ENV, bearer, mint  # noqa: E402
 
@@ -106,6 +106,11 @@ def test_route_inventory_is_complete():
             for path, route in iter_leaf_routes(deployment_identity.router.routes)
             for method in route.methods} == {("GET", "/api/deployment-identity")}
     assert {(method, path)
+            for path, route in iter_leaf_routes(lab_widgets.router.routes)
+            for method in route.methods} == {
+        ("POST", "/api/lab/widgets/{doc_id}/values"),
+    }
+    assert {(method, path)
             for path, route in iter_leaf_routes(lab_artifacts.router.routes)
             for method in route.methods} == {
         ("POST", "/api/lab/docs/{doc_id}/save"),
@@ -126,6 +131,42 @@ def test_deployment_identity_refuses_unauthenticated(client, monkeypatch):
     response = client.get("/api/deployment-identity", headers={})
     assert response.status_code == 401, response.text
     assert response.json() == {"detail": "missing bearer token (Authorization header)"}
+
+
+@pytest.mark.parametrize("mode,status", [
+    ("anonymous", 401), ("foreign", 404), ("owner", 200),
+    ("rail-off", 404), ("auth-off", 503), ("graph-target", 409),
+])
+def test_widget_values_admission(client, owner, monkeypatch, mode, status):
+    db, before = owner
+    doc_id = DOC
+    if mode in ("owner", "graph-target"):
+        monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                            lambda subject: ("tenant-a", "hosted_pro"))
+    if mode == "owner":
+        doc_id = "boundary-widget"
+        ledger.save("tenant-a", doc_id, {
+            "schema": "widget-doc.v1", "min_renderer": "1.0.0", "active": "la",
+            "formats": {"la": {"h": 160, "radius": 22, "bg": "black",
+                               "vibrant": False, "ship": True, "els": []}},
+        }, None, "owner-a", kind="widget")
+        before = _owner_snapshot(db)
+    if mode == "rail-off":
+        monkeypatch.setenv("LEAF_LAB_SURFACE_ENABLED", "0")
+    if mode == "auth-off":
+        monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    if mode in ("anonymous", "rail-off", "auth-off"):
+        def forbidden(*args, **kwargs):
+            pytest.fail("closed widget admission reached persistence")
+        monkeypatch.setattr(ledger, "_run", forbidden)
+    response = client.post(f"/api/lab/widgets/{doc_id}/values", json={"bindings": []},
+                           headers={} if mode == "anonymous" else
+                           _h("tenant-a" if mode in ("owner", "graph-target") else "tenant-b"))
+    assert response.status_code == status, response.text
+    if mode == "graph-target":
+        assert response.json() == {"detail": "lab_document_not_widget"}
+    assert MARKER not in response.text
+    assert _owner_snapshot(db) == before
 
 
 def test_deployment_identity_auth_off_is_public_and_tenant_independent(client, monkeypatch):
