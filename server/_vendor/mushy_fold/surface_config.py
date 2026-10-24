@@ -26,7 +26,7 @@ SURFACE_CONFIG_FILE = "surface-config.json"
 # call-time fold (build doctrine: bound every allocation).
 MAX_SURFACE_CONFIG_BYTES = 64 * 1024
 
-SURFACE_IDS = frozenset({"browser", "cad", "solar", "ios", "sheets", "ops"})
+SURFACE_IDS = frozenset({"browser", "cad", "solar", "ios", "sheets", "ops", "lab"})
 
 # The slot names contract/surface-config.v1.schema.json declares at the
 # surface-overlay level. Three carry their own closed field set (checked
