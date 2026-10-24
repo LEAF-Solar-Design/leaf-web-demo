@@ -156,9 +156,6 @@ export default function useJobController({
   const storageRef = useRef(storage)
   const drawingKeyRef = useRef(drawingKey)
   drawingKeyRef.current = drawingKey
-  // Read inside async callbacks: a jobs response that settles after reads pause is not applied.
-  const readsPausedRef = useRef(readsPaused)
-  readsPausedRef.current = readsPaused
   callbacksRef.current = { formatError, onCompleteVersion, onNotice, onAuthRequired }
   servicesRef.current = { ...defaultServices, ...services }
   storageRef.current = storage
@@ -237,15 +234,13 @@ export default function useJobController({
   }, [markRunning])
 
   const refreshJobs = useCallback(async () => {
-    if (mock || readsPausedRef.current) return []
+    if (mock) return []
     try {
       const next = await servicesRef.current.listJobs()
-      if (readsPausedRef.current) return null
       setJobs(next)
       setAuth(false)
       return next
     } catch (cause) {
-      if (readsPausedRef.current) return null
       if (isUnauthorized(cause)) setAuth(true)
       return null
     }
@@ -481,7 +476,7 @@ export default function useJobController({
       return undefined
     }
     // A known guest's reads are paused: no jobs poll until the session can read.
-    if (readsPaused) { setJobs([]); return undefined }
+    if (readsPaused) return undefined
     let alive = true
     let timer = null
     const tick = async () => {
@@ -514,7 +509,7 @@ export default function useJobController({
       return undefined
     }
     // Keep the stored pointer; reattach once the session can read.
-    if (readsPaused) { setInflight(null); setReattaching(false); return undefined }
+    if (readsPaused) return undefined
     const pointer = readInflightJob(storageRef.current)
     if (!pointer?.job_id) return undefined
     setInflight(pointer)
@@ -558,14 +553,6 @@ export default function useJobController({
     })()
     return () => { alive = false }
   }, [attachJob, mock, readsPaused, setAuth])
-
-  // A known guest sees none of the signed-in session's job state; the stored pointer is kept.
-  useEffect(() => {
-    if (!readsPaused) return
-    setJobs([])
-    setStaleResults([])
-    reset()
-  }, [readsPaused, reset])
 
   useEffect(() => {
     if (mock || typeof window === 'undefined' || typeof document === 'undefined') return undefined
