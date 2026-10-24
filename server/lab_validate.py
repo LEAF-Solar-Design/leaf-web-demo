@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
@@ -44,11 +45,20 @@ def validate_manifest(manifest):
         for field in ("effect", "residency"):
             if field in manifest and manifest[field] != getattr(block, field):
                 raise ManifestInvalid("lab_manifest_spoof", "/" + field, block_id)
-    error = next(_VALIDATOR.iter_errors(manifest), None)
+    schema_manifest = manifest
+    if isinstance(manifest, dict):
+        schema_manifest = {key: value for key, value in manifest.items() if key != "returns_schema"}
+    error = next(_VALIDATOR.iter_errors(schema_manifest), None)
     if error is not None:
         raise ManifestInvalid("lab_manifest_invalid", _pointer(error.absolute_path), block_id)
     if block is None:
         raise ManifestInvalid("lab_manifest_unknown_block", "/kind", block_id)
+    if "returns_schema" in manifest:
+        try:
+            digest = validate_returns_schema(manifest["returns_schema"])
+        except ManifestInvalid as error:
+            raise ManifestInvalid(error.code, "/returns_schema" + error.pointer, block_id) from error
+        block = replace(block, returns_schema_digest=digest)
     return block
 
 

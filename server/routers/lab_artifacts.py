@@ -49,7 +49,7 @@ def _call(function, *args, _document_errors=False, **kwargs):
         raise HTTPException(503, detail="lab_store_unavailable") from None
 
 
-async def _body(request, required):
+async def _body(request, required, *, _document_errors=False):
     length = request.headers.get("content-length")
     if length is not None:
         try:
@@ -65,7 +65,9 @@ async def _body(request, required):
         if len(data) + len(chunk) > MAX_RAW_BYTES:
             raise HTTPException(413, detail="lab_body_too_large")
         data.extend(chunk)
-    body = _call(parse_body, bytes(data))
+    body = _call(parse_body, bytes(data), _document_errors=_document_errors)
+    if isinstance(body, JSONResponse):
+        return body
     if set(body) != set(required):
         raise HTTPException(422, detail="invalid_lab_fields")
     return body
@@ -74,7 +76,9 @@ async def _body(request, required):
 @router.post("/{doc_id}/save")
 async def save(doc_id: str, request: Request, tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
-    body = await _body(request, ("graph", "expected_head"))
+    body = await _body(request, ("graph", "expected_head"), _document_errors=True)
+    if isinstance(body, JSONResponse):
+        return body
     return await run_in_threadpool(_call, ledger.save, str(tenant), doc_id, body["graph"], body["expected_head"], _actor(tenant), _document_errors=True)
 
 
@@ -109,8 +113,10 @@ def diff(doc_id: str, before: int, after: int, tenant=Depends(deps.require_tenan
 @router.post("/{doc_id}/restore")
 async def restore(doc_id: str, request: Request, tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
-    body = await _body(request, ("revision", "expected_head"))
-    return await run_in_threadpool(_call, ledger.restore, str(tenant), doc_id, body["revision"], body["expected_head"], _actor(tenant))
+    body = await _body(request, ("revision", "expected_head"), _document_errors=True)
+    if isinstance(body, JSONResponse):
+        return body
+    return await run_in_threadpool(_call, ledger.restore, str(tenant), doc_id, body["revision"], body["expected_head"], _actor(tenant), _document_errors=True)
 
 
 @router.post("/{doc_id}/publish")

@@ -1,5 +1,7 @@
 """Effect oracle, extension requirements and bounded latency telemetry."""
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
 from time import perf_counter
 
 import pytest
@@ -141,10 +143,108 @@ def test_histogram():
     assert len(histogram.counts) == 32
     assert histogram.counts == [1] * 31 + [2]
     assert histogram.p95() == histogram.buckets[-1]
-    assert set(vars(histogram)) == {"counts"}
+    assert set(vars(histogram)) == {"counts", "dropped"}
     for invalid in (-1, True, float("inf")):
-        with pytest.raises(ValueError):
-            histogram.observe(invalid)
+        histogram.observe(invalid)
+    assert histogram.dropped == 3
+
+
+def test_A1_concurrent_registration_refuses_duplicate(extension, monkeypatch):
+    entered = Event()
+    second_check = Event()
+    start = Barrier(2)
+
+    class ContendedRegistry(dict):
+        def __contains__(self, key):
+            exists = super().__contains__(key)
+            if not entered.is_set():
+                entered.set()
+                # Without the registration lock both writers see the absent key.
+                second_check.wait(timeout=1)
+            else:
+                second_check.set()
+            return exists
+
+    monkeypatch.setattr(registry, "REGISTRY", ContendedRegistry(registry.REGISTRY))
+
+    def register(_):
+        start.wait(timeout=5)
+        try:
+            return registry.register_extension(extension)
+        except ManifestInvalid as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(register, range(2)))
+    blocks = [value for value in results if isinstance(value, registry.TrustedBlock)]
+    errors = [value for value in results if isinstance(value, ManifestInvalid)]
+    assert len(blocks) == len(errors) == 1
+    assert errors[0].to_http() == (422, {
+        "detail": "lab_manifest_duplicate", "pointer": "/kind", "block": extension["id"],
+    })
+    assert registry.lookup(extension["kind"], extension["version"]) is blocks[0]
+
+
+@pytest.mark.parametrize("field,value", [("effect", "compute"), ("residency", "unknown")])
+def test_A2_extension_declarations_cannot_spoof(extension, field, value):
+    extension[field] = value
+    before = dict(registry.REGISTRY)
+    with pytest.raises(ManifestInvalid) as caught:
+        registry.register_extension(extension)
+    assert caught.value.to_http() == (422, {
+        "detail": "lab_manifest_spoof", "pointer": "/" + field, "block": extension["id"],
+    })
+    assert registry.REGISTRY == before
+    extension.update(effect="read", residency="none")
+    block = registry.register_extension(extension)
+    data = manifest()
+    data.update(kind=block.kind, effect=block.effect, residency=block.residency)
+    assert validate_manifest(data) is block
+    data[field] = value if field == "effect" else "tenant"
+    with pytest.raises(ManifestInvalid) as caught:
+        validate_manifest(data)
+    assert caught.value.code == "lab_manifest_spoof"
+    assert caught.value.pointer == "/" + field
+    assert caught.value.block_id == data["id"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("id", None), ("id", "Bad"), ("id", "has_underscore"),
+    ("id", "a" * 65), ("id", "a--b"), ("id", "a\n"),
+    ("version", None), ("version", "1.0"), ("version", "01.0.0"),
+    ("version", "1.0.0-01"), ("version", {"semver": "bad"}),
+])
+def test_A3_extension_identity_uses_pinned_grammar(extension, field, value):
+    if value is None:
+        del extension[field]
+    else:
+        extension[field] = value
+    before = dict(registry.REGISTRY)
+    with pytest.raises(ManifestInvalid) as caught:
+        registry.register_extension(extension)
+    assert caught.value.to_http() == (422, {
+        "detail": "lab_manifest_invalid", "pointer": "/" + field, "block": extension.get("id"),
+    })
+    assert registry.REGISTRY == before
+
+
+def test_A4_duplicate_seed_keys_are_refused(monkeypatch):
+    seed = {"id": "duplicate", "version": "1.0.0", "capability": "read.value"}
+    monkeypatch.setattr(registry.catalog, "seed_tools", lambda: [seed, dict(seed)])
+    with pytest.raises(RuntimeError, match=r"duplicate.*1\.0\.0"):
+        registry._seed_registry()
+
+
+def test_A5_histogram_clamps_huge_integers_and_counts_drops():
+    histogram = registry.LatencyHistogram()
+    for value in (1 << 2000, 10 ** 10000, float("1e300")):
+        histogram.observe(value)
+    assert histogram.counts == [0] * 31 + [3]
+    assert histogram.p95() == histogram.buckets[-1]
+    for value in (None, "1", [], {}, object(), True, -1, float("nan"), float("inf"), -float("inf")):
+        histogram.observe(value)
+    assert histogram.dropped == 10
+    assert sum(histogram.counts) == 3
 
 
 def test_validation_benchmark():

@@ -368,6 +368,55 @@ def test_http_invalid_and_oversize_never_create_database(local_store):
     assert not local_store.exists()
 
 
+@pytest.mark.parametrize("schema,pointer", [
+    ({}, None), ({"$ref": "https://example.invalid/schema"}, "/$ref"),
+    ({"description": "x" * 16384}, ""),
+])
+def test_C1_graph_save_validates_returns_schema(local_store, schema, pointer):
+    from test_lab_validate import manifest
+
+    data = manifest()
+    data["returns_schema"] = schema
+    graph = dict(GRAPH, blocks=[{
+        "id": "example", "registry": {"id": "example", "version": "1.0.0", "code_sha256": "0" * 64},
+        "settings": {}, "manifest": data,
+    }])
+    response = client().post("/api/lab/docs/strategy/save", json={"graph": graph, "expected_head": None})
+    if pointer is None:
+        assert response.status_code == 200
+        assert response.json()["graph"] == graph
+    else:
+        assert response.status_code == 422
+        assert response.json() == {
+            "detail": "lab_returns_schema_bounds",
+            "pointer": "/blocks/0/manifest/returns_schema" + pointer, "block": data["id"],
+        }
+        assert not local_store.exists()
+
+
+@pytest.mark.parametrize("action", ["save", "restore"])
+@pytest.mark.parametrize("raw", [
+    b'{"expected_head":null,"expected_head":null}', b'{', b'[]',
+    b'{"expected_head":NaN}',
+])
+def test_C2_parse_errors_have_document_shape(local_store, action, raw):
+    response = client().post("/api/lab/docs/strategy/" + action, content=raw)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid_lab_document", "pointer": "", "block": None}
+    assert not local_store.exists()
+
+
+@pytest.mark.parametrize("action,body", [
+    ("save", {"graph": GRAPH, "expected_head": -1}),
+    ("restore", {"revision": 1, "expected_head": -1}),
+])
+def test_C2_validation_errors_have_document_shape(local_store, action, body):
+    response = client().post("/api/lab/docs/strategy/" + action, json=body)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid_lab_document", "pointer": "", "block": None}
+    assert not local_store.exists()
+
+
 def test_http_chunked_body_bound(local_store):
     response = client().post("/api/lab/docs/strategy/save", content=iter([b"x" * 65536] * 5))
     assert response.status_code == 413

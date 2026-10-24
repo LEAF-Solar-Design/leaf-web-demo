@@ -12,6 +12,7 @@ from bisect import bisect_left
 from dataclasses import dataclass
 import math
 import re
+from threading import Lock
 
 import catalog
 
@@ -70,15 +71,22 @@ def _seed_registry():
         block = TrustedBlock(tool.get("id", tool.get("name")), tool.get("version", "1.0.0"),
                              effect, tool.get("residency", "tenant"), capability, adapter,
                              execution, live, tool.get("host", "production"))
-        result[(block.kind, block.version)] = block
+        key = (block.kind, block.version)
+        if key in result:
+            raise RuntimeError(f"duplicate registry seed: {key!r}")
+        result[key] = block
     for source in KASHBOT_CLASSES:
         block = TrustedBlock("kashbot." + source, "1.0.0", "read", "host",
                              "read." + source, None, "handoff", False, "production")
-        result[(block.kind, block.version)] = block
+        key = (block.kind, block.version)
+        if key in result:
+            raise RuntimeError(f"duplicate registry seed: {key!r}")
+        result[key] = block
     return result
 
 
 REGISTRY = _seed_registry()
+_REGISTRY_LOCK = Lock()
 
 
 def lookup(kind, version):
@@ -88,13 +96,17 @@ def lookup(kind, version):
 
 
 def register_extension(manifest):
-    from lab_validate import ManifestInvalid, validate_returns_schema
+    from lab_validate import ManifestInvalid, validate_returns_schema, _SCHEMA
 
     def fail(field, code="lab_extension_incomplete"):
         raise ManifestInvalid(code, "/" + field, manifest.get("id"))
 
     if not isinstance(manifest, dict):
         raise ManifestInvalid("lab_extension_incomplete", "")
+    block_id = manifest.get("id")
+    if (not isinstance(block_id, str) or len(block_id) > 64
+            or not re.fullmatch(r"[a-z][a-z0-9]*(-[a-z0-9]+)*", block_id)):
+        fail("id", "lab_manifest_invalid")
     capability = manifest.get("capability")
     if isinstance(capability, str) and (capability == "money" or capability.startswith("money.")):
         fail("capability", "lab_manifest_unregistrable")
@@ -120,16 +132,19 @@ def register_extension(manifest):
         version = version.get("semver")
     if not isinstance(kind, str) or not kind:
         fail("kind")
-    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", version):
-        fail("version")
+    if not isinstance(version, str) or not re.fullmatch(
+            _SCHEMA["properties"]["version"]["properties"]["semver"]["pattern"], version):
+        fail("version", "lab_manifest_invalid")
     execution = manifest.get("execution_class", "inline")
     adapter, live = manifest.get("solar_adapter"), manifest.get("aps_live", False)
     effect = total_effect(capability, adapter, execution, live)
     if effect == "refused":
         fail("capability", "lab_manifest_unregistrable")
+    if "effect" in manifest and manifest["effect"] != effect:
+        fail("effect", "lab_manifest_spoof")
     residency, host = manifest.get("residency", "tenant"), manifest.get("host", "production")
     if residency not in ("tenant", "host", "none"):
-        fail("residency")
+        fail("residency", "lab_manifest_spoof")
     if host not in ("production", "pc"):
         fail("host")
     returns_schema_digest = None
@@ -141,9 +156,10 @@ def register_extension(manifest):
                                   manifest.get("id")) from error
     block = TrustedBlock(kind, version, effect, residency, capability, adapter, execution, live, host,
                          returns_schema_digest)
-    if (kind, version) in REGISTRY:
-        fail("kind", "lab_manifest_unregistrable")
-    REGISTRY[(kind, version)] = block
+    with _REGISTRY_LOCK:
+        if (kind, version) in REGISTRY:
+            fail("kind", "lab_manifest_duplicate")
+        REGISTRY[(kind, version)] = block
     return block
 
 
@@ -153,10 +169,13 @@ class LatencyHistogram:
 
     def __init__(self):
         self.counts = [0] * 32
+        self.dropped = 0
 
     def observe(self, us):
-        if isinstance(us, bool) or not isinstance(us, (int, float)) or not math.isfinite(us) or us < 0:
-            raise ValueError("invalid_latency")
+        if (isinstance(us, bool) or not isinstance(us, (int, float))
+                or (isinstance(us, float) and not math.isfinite(us)) or us < 0):
+            self.dropped += 1
+            return
         self.counts[min(bisect_left(self.buckets, us), 31)] += 1
 
     def p95(self):

@@ -22,6 +22,32 @@ def test_valid_manifest():
     assert validate_manifest(manifest()) is lookup("qa-sleep-count", "1.0.0")
 
 
+@pytest.mark.parametrize("schema,pointer", [
+    ({}, None), ({"type": "object"}, None),
+    ({"$ref": "https://example.invalid/schema"}, "/$ref"),
+    ({"description": "x" * 16384}, ""), ([], ""),
+])
+def test_C1_manifest_admits_and_bounds_returns_schema(schema, pointer):
+    data = manifest()
+    data["returns_schema"] = schema
+    original = copy.deepcopy(data)
+    trusted = lookup(data["kind"], data["version"]["semver"])
+    if pointer is None:
+        block = validate_manifest(data)
+        assert block.returns_schema_digest == validate_returns_schema(schema)
+        assert block.effect == trusted.effect
+        assert block.residency == trusted.residency
+        assert trusted.returns_schema_digest is None
+    else:
+        with pytest.raises(ManifestInvalid) as caught:
+            validate_manifest(data)
+        assert caught.value.to_http() == (422, {
+            "detail": "lab_returns_schema_bounds", "pointer": "/returns_schema" + pointer,
+            "block": data["id"],
+        })
+    assert data == original
+
+
 @pytest.mark.parametrize("field,value", [
     ("effect", "read"), ("residency", "host"), ("effect", "unknown"), ("residency", "unknown"),
 ])
