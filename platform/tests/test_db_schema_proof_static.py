@@ -177,11 +177,16 @@ def test_lab_run_schema_proof(mode):
         "ops_revision", "input_digest", "adapter_revision", "build_revision", "state",
         "lease_owner", "lease_fence", "lease_expires_at", "next_seq", "event_count",
         "created_at", "updated_at", "finished_at",
+        "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by",
     }
     assert columns["lab_run_events"] == {
         "tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at",
     }
     assert "lab_runs" not in db.required_columns_for_selected_authorities({})
+    assert columns["lab_worker_status"] == {
+        "worker_id", "build_revision", "color", "heartbeat_at", "active_runs", "queued_runs",
+    }
+    assert columns["lab_worker_control"] == {"id", "paused", "reason", "updated_by", "updated_at"}
     catalog = db.required_catalog_for_selected_authorities(selected)
     assert catalog["constraints"]["lab_runs_pkey"] == db._catalog_contract(
         "lab_runs", "PRIMARY KEY (tenant_id, run_id)")
@@ -191,12 +196,21 @@ def test_lab_run_schema_proof(mode):
         "lab_run_events", "FOREIGN KEY (tenant_id, run_id)",
         "REFERENCES lab_runs(tenant_id, run_id)", "ON DELETE CASCADE")
     assert "lab_runs_state_check" in catalog["constraints"]
+    for constraint in ("lab_runs_claimed_color_check", "lab_worker_status_pkey",
+                       "lab_worker_status_color_check", "lab_worker_control_pkey", "lab_worker_control_id_check"):
+        assert constraint in catalog["constraints"]
     assert set(db._AUTHORITY_REQUIRED_INDEXES["lab_runs"]) <= set(catalog["indexes"])
     migration = (db._PKG_DIR / "migrations/0084_lab_runs.sql").read_text(encoding="utf-8")
     for fragment in ("payload JSONB NOT NULL", "lease_fence INTEGER NOT NULL DEFAULT 0",
                      "next_seq INTEGER NOT NULL DEFAULT 0", "ON DELETE CASCADE",
                      "(tenant_id, doc_id, created_at DESC)"):
         assert fragment in migration
+
+    worker_migration = (db._PKG_DIR / "migrations/0085_lab_worker.sql").read_text(encoding="utf-8")
+    for fragment in ("claimed_build_revision TEXT", "claimed_color TEXT CHECK",
+                     "cancel_requested_at TIMESTAMPTZ", "cancel_requested_by TEXT",
+                     "CREATE TABLE IF NOT EXISTS lab_worker_status", "CREATE TABLE IF NOT EXISTS lab_worker_control"):
+        assert fragment in worker_migration
 
 
 def test_every_shipped_table_has_a_readiness_contract():

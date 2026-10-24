@@ -236,6 +236,8 @@ jobs:
           LEAF_LAB_RUN_STORE: postgres_required
         run: |
           test -n "${DATABASE_URL:-}"
+          # The suite applies 0085 and proves lab_worker_status and lab_worker_control
+          # alongside lab_runs and lab_run_events under the required selector.
           if ! out=$(python -m pytest -q -rs tests/test_lab_run_store.py 2>&1); then
             printf '%s\n' "$out"
             exit 1
@@ -246,6 +248,15 @@ jobs:
             echo 'FAIL: Lab run store tests skipped - DATABASE_URL is not reaching pytest.'
             exit 1
           fi
+          python - <<'PY'
+          import platform_link
+          db = platform_link.platform_db()
+          db.assert_schema_current()
+          def proof(conn):
+              for table in ("lab_runs", "lab_run_events", "lab_worker_status", "lab_worker_control"):
+                  conn.execute("SELECT * FROM " + table + " LIMIT 0")
+          db.run_transaction(proof)
+          PY
 
       - name: Run T1 overlay store PostgreSQL suite
         working-directory: platform

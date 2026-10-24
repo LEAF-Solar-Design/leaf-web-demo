@@ -35,8 +35,8 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'", "'demo'")
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert manifest[-1]["name"] == "0084_lab_runs.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0084"
+    assert manifest[-1]["name"] == "0085_lab_worker.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0085"
 
     class Schema:
         absent = None
@@ -189,9 +189,9 @@ def test_sip_r1_schema_contract_complete():
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 85)]
+    ids = [f"{n:04d}" for n in range(1, 86)]
     assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0084_lab_runs.sql"
+    assert db.migration_manifest()[-1]["name"] == "0085_lab_worker.sql"
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
     assert "project_sizing_exchanges" in ledger["postgres_tables"]
@@ -199,7 +199,7 @@ def test_sip_r1_migration_registration_complete():
     for name in ("test_conversation_model.py", "test_template_store.py",
                  "test_postgres_authority_inventory_contract.py"):
         source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 85)" in source
+        assert "range(1, 86)" in source
         assert "range(1, 74)" not in source
 
 
@@ -384,12 +384,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0084_lab_runs.sql",
+        manifest_names[-1], "0085_lab_worker.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0084",
+        inventory["scope"]["migration_ids"][-1], "0085",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )
