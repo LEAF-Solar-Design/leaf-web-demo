@@ -59,6 +59,7 @@ export function ProjectBoardGround({
     <div
       className={`studio-ground-board${lightBoard ? ' leaf-light' : ''}`}
       data-board-theme={lightBoard ? 'light' : undefined}
+      data-leaf-theme={lightBoard ? 'paper' : undefined}
       ref={boardRef}
       data-ground="browser"
       data-studio-shell={studioShell ? 'cockpit' : undefined}
