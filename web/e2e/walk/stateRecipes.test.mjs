@@ -21,7 +21,75 @@ import { canonicalProjectVersion, proposalCatalogState, proposalFormValues, refu
 import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErrorCode,
   observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep,
   appendStagingRequest, appendStagingConsole } from '../walk-staging/projectSolarSteps.mjs'
-import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick } from './fixtures.mjs'
+import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled } from './fixtures.mjs'
+
+test('walk form helpers pass default and explicit timeouts and preserve enabled booleans', async () => {
+  for (const [options, timeout] of [[undefined, 15_000], [{ timeout: 7_000 }, 7_000]]) {
+    for (const [helper, method] of [[walkFill, 'fill'], [walkSelect, 'selectOption']]) {
+      let called = false
+      await helper({ [method]: async (value, actual) => {
+        assert.equal(value, '0')
+        assert.deepEqual(actual, { timeout })
+        called = true
+      }, evaluate: () => assert.fail('successful actions need no probe') }, '0', 'Control', options)
+      assert.equal(called, true)
+    }
+    for (const enabled of [true, false]) {
+      assert.equal(await walkEnabled({ isEnabled: async actual => {
+        assert.deepEqual(actual, { timeout })
+        return enabled
+      } }, 'Run solve', options), enabled)
+    }
+  }
+})
+
+test('walk form helpers name rejected controls, redact secrets and retain the original cause', async () => {
+  const token = 'eyJabc.def.ghi', capability = 'lco1.secret'
+  for (const [helper, method] of [[walkFill, 'fill'], [walkSelect, 'selectOption'], [walkEnabled, 'isEnabled']]) {
+    const original = new Error(`missing control ${token} ${capability}\r\nprivate call log`)
+    const locator = { [method]: async () => { throw original }, evaluate: async () => ['0'] }
+    const label = `Control ${token} ${capability}`
+    const action = helper === walkEnabled ? helper(locator, label) : helper(locator, '0', label)
+    await assert.rejects(action, error => {
+      assert.equal(error.cause, original)
+      assert.equal(error.message.split('\n')[0], 'Control [redacted] [redacted]: missing control [redacted] [redacted]')
+      for (const secret of [token, capability, 'private call log']) assert.equal(error.message.includes(secret), false)
+      return true
+    })
+  }
+})
+
+test('walkSelect reports current option values with a bounded, redacted probe or unavailable', async () => {
+  const original = new Error('option missing\ncall log')
+  const token = 'eyJabc.def.ghi', capability = 'lco1.secret'
+  for (const unavailable of [false, true]) {
+    await assert.rejects(walkSelect({ selectOption: async () => { throw original },
+      evaluate: async (fn, argument, options) => {
+        assert.equal(argument, undefined)
+        assert.deepEqual(options, { timeout: 2_000 })
+        if (unavailable) throw new Error('probe detached')
+        return fn({ options: [{ value: '0' }, { value: '1' }, { value: token }, { value: capability }] })
+      },
+    }, '2', 'Phase'), error => {
+      assert.equal(error.cause, original)
+      assert.equal(error.message, `Phase: option missing\nSelect options: ${unavailable
+        ? '[unavailable]' : '["0","1","[redacted]","[redacted]"]'}`)
+      return true
+    })
+  }
+})
+
+test('proposal review uses named bounded helpers for every fill, select and enabled check', () => {
+  const body = reviewStagingProposal.toString()
+  assert.doesNotMatch(body, /\.(?:fill|selectOption|isEnabled)\s*\(/)
+  for (const call of ["walkEnabled(frame, 'Frame')", "walkEnabled(start, 'Run solve')",
+    "walkFill(form.getByLabel('Grant ref', { exact: true }), 'w1-staging', 'Grant ref')",
+    "walkFill(form.getByLabel('Request', { exact: true }), JSON.stringify(values.request), 'Request')",
+    "walkFill(frame, values.frame, 'Frame')",
+    "walkSelect(form.getByRole('combobox', { name: 'Phase', exact: true }), '0', 'Phase')"]) {
+    assert.ok(body.includes(call), `missing helper call: ${call}`)
+  }
+})
 
 test('walkClick resolves with default and explicit click timeouts', async () => {
   for (const [options, timeout] of [[undefined, 15_000], [{ timeout: 7_000 }, 7_000]]) {
