@@ -52,6 +52,38 @@ export async function walkClick(locator, label, { timeout = 15_000 } = {}) {
   }
 }
 
+export async function walkFill(locator, value, label, { timeout = 15_000 } = {}) {
+  try {
+    await locator.fill(value, { timeout })
+  } catch (error) {
+    const reason = String(error?.message ?? error).split(/\r?\n/)[0]
+    throw new Error(redactSolarDiagnostic(`${label}: ${reason}`, { maxLength: Infinity }), { cause: error })
+  }
+}
+
+export async function walkSelect(locator, value, label, { timeout = 15_000 } = {}) {
+  try {
+    await locator.selectOption(value, { timeout })
+  } catch (error) {
+    let options = '[unavailable]'
+    try {
+      options = JSON.stringify(await locator.evaluate(node => Array.from(node.options, option => option.value),
+        undefined, { timeout: 2_000 }))
+    } catch { /* Preserve the select failure when its options cannot be inspected. */ }
+    const reason = String(error?.message ?? error).split(/\r?\n/)[0]
+    throw new Error(redactSolarDiagnostic(`${label}: ${reason}\nSelect options: ${options}`, { maxLength: Infinity }), { cause: error })
+  }
+}
+
+export async function walkEnabled(locator, label, { timeout = 15_000 } = {}) {
+  try {
+    return await locator.isEnabled({ timeout })
+  } catch (error) {
+    const reason = String(error?.message ?? error).split(/\r?\n/)[0]
+    throw new Error(redactSolarDiagnostic(`${label}: ${reason}`, { maxLength: Infinity }), { cause: error })
+  }
+}
+
 export async function projectSolarRunDiagnostic(page, settings, start) {
   const diagnosticText = async read => {
     try { return redactSolarDiagnostic(await read()) } catch { return '[unavailable]' }
