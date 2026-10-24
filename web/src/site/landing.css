@@ -1464,6 +1464,11 @@
 }
 /* a header popover (Add-ons, Claude accounts) paints above .tc-product-nav (z-index 6) while open */
 .studio-shell header.top:has(.claude-pop) { z-index: 7; }
+/* on phones the header popover is position: fixed; a backdrop-filter here would make header.top its
+   containing block and its overflow: hidden would clip the sheet, so cancel it while one is open */
+@media (max-width: 600px) {
+  .studio-shell header.top:has(.claude-pop) { backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
 .studio-shell header.top :is(.mark, .who, .who b, .proj .name, .switch) { color: rgba(240, 242, 240, .92); }
 .studio-shell header.top .meta { color: rgba(240, 242, 240, .6); }
 /* Browser results use paper; the sticky shell header keeps its dark material. */
