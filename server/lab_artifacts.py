@@ -227,7 +227,12 @@ def get(tenant, doc_id, revision=None):
         selected = _head(sql, tenant, doc_id) if revision is None else revision
         if selected is None:
             raise NotFound("lab_document_not_found")
-        return _revision(sql, tenant, doc_id, selected)
+        result = _revision(sql, tenant, doc_id, selected)
+        if revision is None:
+            row = sql.execute("SELECT published_revision FROM lab_documents WHERE tenant_id=? AND doc_id=?",
+                              (tenant, doc_id)).fetchone()
+            result["published_revision"] = row["published_revision"]
+        return result
 
     return _run(tenant, operation)
 
