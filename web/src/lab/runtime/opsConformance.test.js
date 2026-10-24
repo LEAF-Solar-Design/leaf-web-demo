@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { runOperator } from './ops.js';
+import { MAX_ROWS, runOperator } from './ops.js';
 
 const fixture = JSON.parse(readFileSync(
   `${process.cwd()}/../server/tests/fixtures/lab-operator-cases.v1.json`, 'utf8',
@@ -17,11 +17,22 @@ function caseArguments(test) {
       'non-string-key': new Map([[1, null]]), unsupported: () => {}, cycle,
     };
     expect(Object.prototype.hasOwnProperty.call(values, test.non_json.kind)).toBe(true);
-    expect(['selected', 'target']).toContain(test.non_json.at);
+    expect(['selected', 'target', 'count', 'direction', 'field', 'comparison', 'input-value', 'auxiliary']).toContain(test.non_json.at);
     if (test.non_json.at === 'selected') input.value[0].x = values[test.non_json.kind];
-    else settings.value = values[test.non_json.kind];
+    else if (test.non_json.at === 'target') settings.value = values[test.non_json.kind];
+    else if (test.non_json.at === 'input-value') input.value = values[test.non_json.kind];
+    else if (test.non_json.at === 'auxiliary') input.auxiliary = values[test.non_json.kind];
+    else settings[test.non_json.at] = values[test.non_json.kind];
   }
   return [input, settings];
+}
+
+function assertSignedZeros(actual, expected) {
+  if (typeof expected === 'number' && expected === 0) {
+    expect(Object.is(actual, expected)).toBe(true);
+  } else if (expected !== null && typeof expected === 'object') {
+    for (const key of Object.keys(expected)) assertSignedZeros(actual[key], expected[key]);
+  }
 }
 
 describe('shared Lab operator conformance', () => {
@@ -43,7 +54,9 @@ describe('shared Lab operator conformance', () => {
     } else if (test.expect_undefined) {
       expect(run()).toBe(undefined);
     } else {
-      expect(run()).toEqual(test.expect);
+      const actual = run();
+      expect(actual).toEqual(test.expect);
+      assertSignedZeros(actual, test.expect);
     }
   });
 
@@ -55,6 +68,14 @@ describe('shared Lab operator conformance', () => {
       }
     },
   );
+
+  it.each(['take', 'collect', 'window'])('%s defaults absent and undefined counts to MAX_ROWS', op => {
+    const value = Array.from({ length: MAX_ROWS + 1 }, (_, index) => index);
+    const expected = op === 'window' ? value.slice(-MAX_ROWS) : value.slice(0, MAX_ROWS);
+    for (const settings of [{}, { count: undefined }]) {
+      expect(runOperator(op, { value }, settings)).toEqual(expected);
+    }
+  });
 
   it('preserves explicit undefined fields and coalesces latest to null', () => {
     expect(runOperator('field', { value: { x: undefined } }, { field: 'x' })).toBe(undefined);

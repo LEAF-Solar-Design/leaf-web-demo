@@ -1,6 +1,7 @@
 """The browser and server execute the same operator vectors."""
 
 import json
+import math
 from copy import deepcopy
 from pathlib import Path
 import re
@@ -29,10 +30,16 @@ def case_arguments(case):
             "non-string-key": {1: None}, "unsupported": object(), "cycle": cycle,
         }
         value = values[case["non_json"]["kind"]]
-        if case["non_json"]["at"] == "selected":
+        at = case["non_json"]["at"]
+        if at == "selected":
             input["value"][0]["x"] = value
-        else:
+        elif at == "target":
             settings["value"] = value
+        elif at in ("input-value", "auxiliary"):
+            input["value" if at == "input-value" else at] = value
+        else:
+            assert at in ("count", "direction", "field", "comparison")
+            settings[at] = value
     return input, settings
 
 
@@ -43,6 +50,8 @@ def assert_json_equal(actual, expected):
     elif isinstance(expected, (int, float)):
         assert isinstance(actual, (int, float)) and not isinstance(actual, bool)
         assert actual == expected
+        if expected == 0:
+            assert math.copysign(1.0, actual) == math.copysign(1.0, expected)
     elif isinstance(expected, list):
         assert isinstance(actual, list) and len(actual) == len(expected)
         for left, right in zip(actual, expected):
@@ -76,6 +85,14 @@ def test_python_non_json_values_are_refused(comparison, value, at):
     with pytest.raises(OperatorRefused):
         run_operator("filter", {"value": [{"x": selected}]},
                      {"field": "x", "comparison": comparison, "value": target})
+
+
+@pytest.mark.parametrize("op", ["take", "collect", "window"])
+@pytest.mark.parametrize("settings", [{}, {"count": UNDEFINED}])
+def test_undefined_count_uses_max_rows(op, settings):
+    values = list(range(MAX_ROWS + 1))
+    expected = values[-MAX_ROWS:] if op == "window" else values[:MAX_ROWS]
+    assert run_operator(op, {"value": values}, settings) == expected
 
 
 def test_undefined_results_and_null_are_distinct():

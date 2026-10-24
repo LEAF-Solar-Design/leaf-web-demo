@@ -55,7 +55,7 @@ def _number(value):
 
 
 def _count(value=_MISSING):
-    if value is _MISSING:
+    if value is _MISSING or value is UNDEFINED:
         return MAX_ROWS
     result = _number(value)
     if not 0 <= result <= MAX_ROWS or not result.is_integer():
@@ -155,7 +155,7 @@ def run_operator(op_id, input=None, settings=None):
         return [row for row in _rows(value) if _predicate(row, settings)]
     if op_id == "sort":
         direction = settings.get("direction", _MISSING)
-        if direction is not _MISSING and direction not in ("asc", "desc"):
+        if direction is not _MISSING and direction is not UNDEFINED and direction not in ("asc", "desc"):
             _refuse()
         sign = -1 if direction == "desc" else 1
         return sorted(_rows(value), key=cmp_to_key(lambda a, b: sign * _compare(
@@ -178,7 +178,9 @@ def run_operator(op_id, input=None, settings=None):
         path = settings.get("field")
         numbers = (_number(_field(row, path) if _truthy(path) else row) for row in values)
         if op_id in ("min", "max"):
-            return (min if op_id == "min" else max)(numbers)
+            # Math.min/max break zero ties by sign, independently of input order.
+            return (min if op_id == "min" else max)(
+                numbers, key=lambda number: (number, math.copysign(1.0, number)))
         total = 0.0
         for number in numbers:
             total = _number(total + number)
