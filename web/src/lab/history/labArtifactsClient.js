@@ -71,7 +71,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
     currentGeneration: () => generation,
     beginGraphOperation: () => ({ ...capture(docId), operation: ++operation }),
     isCurrentOperation: token => current(token) && token.operation === operation,
-    captureMine(graph) { if (state.conflict) update({ conflict: { ...state.conflict, mine: JSON.parse(JSON.stringify(graph)), captured: true } }) },
+    captureMine(graph) { if (state.conflict && !state.conflict.captured) update({ conflict: { ...state.conflict, mine: JSON.parse(JSON.stringify(graph)), captured: true } }) },
     setDocId(id) { identifier(id); if (id !== docId) { generation += 1; operation += 1; writeSeq = 0; readSeq = 0; applied = { head: 0, revisions: 0 }; docId = id; update({ ...initial(), restoredKey: state.restoredKey + 1 }) } },
     takeGraph(graph) { operation += 1; update({ restoredGraph: graph, restoredKey: state.restoredKey + 1 }) },
     async save(id, graph, expectedHead) {

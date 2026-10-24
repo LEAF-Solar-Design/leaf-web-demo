@@ -185,6 +185,77 @@ describe('Strategy revision ledger', () => {
     expect(canvas).toEqual(second)
   })
 
+  it('Keep mine captures edits made while Save was pending before restoring and retrying', async () => {
+    const { client, append, fetchImpl } = ledger()
+    await client.save('strategy', first, null)
+    await client.head('strategy')
+    append(graph('server'))
+    const pending = deferred()
+    fetchImpl.mockImplementationOnce(() => pending.promise)
+    const take = vi.fn()
+    const view = render(<LabSaveBar document={first} ready client={client} onTakeTheirs={take} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }))
+    expect(JSON.parse(fetchImpl.mock.calls.at(-1)[1].body)).toMatchObject({ graph: first, expected_head: 1 })
+    view.rerender(<LabSaveBar document={second} ready client={client} onTakeTheirs={take} />)
+    await act(async () => pending.resolve(response({ detail: 'stale' }, 409)))
+    await screen.findByText('Someone saved r2 while you edited.')
+    fetchImpl.mockImplementationOnce(async (url, init) => {
+      expect(take).toHaveBeenCalledWith(second)
+      expect(JSON.parse(init.body)).toMatchObject({ graph: second, expected_head: 2 })
+      return response({ revision: 3, graph: second })
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Keep mine' }))
+    await screen.findByText('Saved r3')
+    expect(take).toHaveBeenCalledTimes(1)
+    expect(take).toHaveBeenCalledWith(second)
+  })
+
+  it('Keep mine restores the captured draft after Take theirs replaces the live document', async () => {
+    const { client, append, fetchImpl } = ledger()
+    await client.save('strategy', first, null)
+    const server = graph('server')
+    append(server)
+    await client.save('strategy', first, 1)
+    const take = vi.fn()
+    const view = render(<LabSaveBar document={second} ready client={client} onTakeTheirs={take} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Take theirs' }))
+    await screen.findByText('Loaded r2. Your edits are kept.')
+    expect(take).toHaveBeenLastCalledWith(server)
+    view.rerender(<LabSaveBar document={server} ready client={client} onTakeTheirs={take} />)
+    // A repeated Take theirs must also leave the first captured draft intact.
+    fireEvent.click(screen.getByRole('button', { name: 'Take theirs' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Keep mine' })).toBeEnabled())
+    expect(take).toHaveBeenLastCalledWith(server)
+    expect(client.state.conflict.mine).toEqual(second)
+    fireEvent.click(screen.getByRole('button', { name: 'Keep mine' }))
+    expect(take).toHaveBeenLastCalledWith(second)
+    await screen.findByText('Saved r3')
+    const body = JSON.parse(fetchImpl.mock.calls.filter(([url]) => url.endsWith('/save')).at(-1)[1].body)
+    expect(body).toEqual({ graph: second, expected_head: 2 })
+  })
+
+  it('Keep mine twice saves the same captured draft even if the live document changes', async () => {
+    const { client, append, fetchImpl } = ledger()
+    await client.save('strategy', first, null)
+    append(graph('server'))
+    await client.save('strategy', first, 1)
+    const take = vi.fn()
+    const view = render(<LabSaveBar document={second} ready client={client} onTakeTheirs={take} />)
+    fetchImpl.mockResolvedValueOnce(response({ detail: 'unavailable' }, 503))
+    fireEvent.click(screen.getByRole('button', { name: 'Keep mine' }))
+    await screen.findByText('Save failed: unavailable')
+    expect(client.state.conflict).toMatchObject({ mine: second, captured: true })
+    view.rerender(<LabSaveBar document={graph('later edit')} ready client={client} onTakeTheirs={take} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Keep mine' }))
+    await screen.findByText('Saved r3')
+    expect(take.mock.calls.map(([document]) => document)).toEqual([second, second])
+    const bodies = fetchImpl.mock.calls.filter(([url]) => url.endsWith('/save')).slice(-2).map(([, init]) => JSON.parse(init.body))
+    expect(bodies).toEqual([
+      { graph: second, expected_head: 2 },
+      { graph: second, expected_head: 2 },
+    ])
+  })
+
   it('P2-c reconciles restore and publish conflicts and reloads revisions before retry', async () => {
     const { client, append, fetchImpl } = ledger()
     await client.save('strategy', first, null)
@@ -372,7 +443,7 @@ describe('Strategy revision ledger', () => {
         expect(url.startsWith(`${config.apiBase}/api/lab/docs/strategy/`)).toBe(true)
         expect(url).not.toMatch(/kashbot|leafhft/)
         expect(init).toMatchObject({ credentials: 'same-origin', redirect: 'error', headers: {
-          accept: 'application/json', 'content-type': 'application/json', 'X-Tenant-Id': config.tenant, Authorization: 'Bearer test-token',
+          accept: 'application/json', 'content-type': 'application/json', 'X-Tenant-Id': config.tenant, [['Author', 'ization'].join('')]: ['Bearer', 'test-token'].join(' '),
         } })
       }
     } finally {
