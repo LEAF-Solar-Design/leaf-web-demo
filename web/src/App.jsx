@@ -2485,7 +2485,7 @@ export default function App() {
     const envelope = await runJob({
       toolName: tool.name,
       submission: { params: merged },
-      execute: ({ onSubmit, onStatus }) => (mock
+      execute: ({ onSubmit, onStatus, signal }) => (mock
         ? runTool(mock, tool, merged, shown)
         : runToolAsync(tool, merged, executionContext.drawingId, {
           orgId: executionContext.orgId || undefined,
@@ -2497,6 +2497,7 @@ export default function App() {
           checkoutCapability: checkout.actions.getCapability() || undefined,
           onSubmit,
           onStatus,
+          signal,
         })),
     })
 
