@@ -167,6 +167,8 @@ export default function useJobController({
   // Transport this hook started (subscriptions and run executions), aborted when reads pause.
   const activeControllersRef = useRef(new Set())
   const pointerOwnerRef = useRef(null)
+  // Every runJob call, paused or not, takes the next intent, and only the newest intent may save pending inputs.
+  const pendingIntentRef = useRef(0)
   // The sequence value when reads last resumed: a late submit receipt only triggers a reattach if
   // nothing else started since.
   const resumeSequenceRef = useRef(null)
@@ -365,7 +367,8 @@ export default function useJobController({
         // The job is already on the server: keep its pointer so it
         // reattaches after sign-in instead of being lost.
         keepPointer = true
-        setAuth(true)
+        // Once reads resume, a sign-in failure from an attach a pause superseded is stale: it publishes nothing.
+        if (pauseGenerationRef.current === pauseGeneration || readsPausedRef.current) setAuth(true)
       }
       return null
     } finally {
@@ -387,6 +390,7 @@ export default function useJobController({
   // lifecycle is unchanged.
   const runJob = useCallback(async ({ toolName, execute, submission = null }) => {
     if (!execute) throw new TypeError('runJob requires an execute callback')
+    const intent = ++pendingIntentRef.current
     if (readsPausedRef.current) {
       if (submission) {
         const saved = savePendingRun(toolName, submission.params, storageRef.current)
@@ -417,11 +421,14 @@ export default function useJobController({
     setElapsedMs(null)
     runningSinceRef.current = null
     const signInExpired = () => {
+      const supersededByPause = pauseGenerationRef.current !== pauseGeneration
+      // Once reads resume, a sign-in failure from a run a pause superseded is stale: it publishes nothing.
+      if (supersededByPause && !readsPausedRef.current) return
       if (submittedJobId) {
         // Submitted: re-running would duplicate an apply, so keep the
         // pointer and let the job reattach after sign-in.
         keepPointer = true
-      } else if ((sequenceRef.current === sequence || pauseGenerationRef.current !== pauseGeneration) && submission) {
+      } else if ((sequenceRef.current === sequence || supersededByPause) && pendingIntentRef.current === intent && submission) {
         const saved = savePendingRun(toolName, submission.params, storageRef.current)
         if (saved) setPendingRun(saved)
       }

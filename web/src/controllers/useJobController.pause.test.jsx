@@ -221,3 +221,77 @@ it('asks for sign-in instead of running or preparing while paused', async () => 
   expect(loadTools).not.toHaveBeenCalled()
   expect(readPendingRun(storage)).toEqual({ tool: 'count', params: { a: 1 }, ts: expect.any(Number) })
 })
+
+it('ignores a stale sign-in failure from a run once reads resume', async () => {
+  const storage = memoryStorage()
+  const pending = deferred()
+  const onAuthRequired = vi.fn()
+  const services = {
+    listJobs: vi.fn(async () => []),
+    getJob: vi.fn(async () => ({ job_id: 'job-1', status: 'running', tool: 'count' })),
+    attachToJob: vi.fn(async () => ({ ok: true, tool: 'count' })),
+  }
+  const hook = renderController({ services, storage, onAuthRequired })
+  let run
+  act(() => {
+    run = hook.result.current.runJob({
+      toolName: 'count', execute: () => pending.promise, submission: { params: { a: 1 } },
+    })
+  })
+  act(() => { hook.rerender({ readsPaused: true }) })
+  await act(async () => { hook.rerender({ readsPaused: false }) })
+  await act(async () => {
+    pending.reject(Object.assign(new Error('expired'), { status: 401 }))
+    await run
+  })
+  expect(onAuthRequired).not.toHaveBeenCalledWith(true)
+  expect(hook.result.current.authRequired).toBe(false)
+  expect(readPendingRun(storage)).toBeNull()
+})
+
+it("keeps a newer paused run's inputs when an older run fails sign-in", async () => {
+  const storage = memoryStorage()
+  const pending = deferred()
+  const services = { listJobs: vi.fn(async () => []) }
+  const hook = renderController({ services, storage })
+  let run
+  act(() => {
+    run = hook.result.current.runJob({
+      toolName: 'count', execute: () => pending.promise, submission: { params: { a: 1 } },
+    })
+  })
+  act(() => { hook.rerender({ readsPaused: true }) })
+  await act(async () => {
+    expect(await hook.result.current.runJob({
+      toolName: 'count', execute: vi.fn(), submission: { params: { b: 2 } },
+    })).toBeNull()
+  })
+  expect(readPendingRun(storage).params).toEqual({ b: 2 })
+  await act(async () => {
+    pending.reject(Object.assign(new Error('expired'), { status: 401 }))
+    await run
+  })
+  expect(readPendingRun(storage).params).toEqual({ b: 2 })
+})
+
+it('ignores a stale attach sign-in failure once reads resume', async () => {
+  const storage = memoryStorage()
+  const pending = deferred()
+  const onAuthRequired = vi.fn()
+  const services = {
+    listJobs: vi.fn(async () => []),
+    getJob: vi.fn(async () => ({ job_id: 'job-1', status: 'running', tool: 'count' })),
+    attachToJob: vi.fn(() => pending.promise),
+  }
+  const hook = renderController({ services, storage, onAuthRequired })
+  let attach
+  act(() => { attach = hook.result.current.attachJob('job-1', { toolName: 'count' }) })
+  act(() => { hook.rerender({ readsPaused: true }) })
+  await act(async () => { hook.rerender({ readsPaused: false }) })
+  await act(async () => {
+    pending.reject(Object.assign(new Error('expired'), { status: 401 }))
+    await attach
+  })
+  expect(onAuthRequired).not.toHaveBeenCalledWith(true)
+  expect(hook.result.current.authRequired).toBe(false)
+})
