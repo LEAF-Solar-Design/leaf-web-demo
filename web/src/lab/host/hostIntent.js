@@ -6,7 +6,6 @@ import { HOST_INTENT_ID, HOST_INTENT_KINDS, intentManifest } from './hostProvide
 const refused = reason => ({ ok: false, reason });
 const enginePattern = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const noncePattern = /^[A-Za-z0-9_-]{16,64}$/;
-const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 
 // The only caller is an explicit click handler; evaluation, polling and reruns never reach this.
 export function createHostIntentDispatcher({ bridge, framed, intentsEnabled, cryptoImpl = globalThis.crypto }) {
@@ -35,13 +34,8 @@ export function createHostIntentDispatcher({ bridge, framed, intentsEnabled, cry
         contract.schema(nextDraft.document, 'lab-graph.v1.schema.json');
         if (typeof nextDraft.ready !== 'boolean' || !Array.isArray(nextDraft.problems)
           || !nextDraft.problems.every(problem => typeof problem === 'string')) throw new Error();
-        const bytes = cryptoImpl.getRandomValues(new Uint8Array(18));
-        nonce = '';
-        for (let i = 0; i < bytes.length; i += 3) {
-          const value = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
-          nonce += alphabet[(value >>> 18) & 63] + alphabet[(value >>> 12) & 63]
-            + alphabet[(value >>> 6) & 63] + alphabet[value & 63];
-        }
+        const bytes = cryptoImpl.getRandomValues(new Uint8Array(12));
+        nonce = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
         if (!noncePattern.test(nonce)) return refused('Host intent is not a supported kind or engine');
         if (!blocks.some(block => block.registry.id === HOST_INTENT_ID)) {
           nextDraft.document = addBlock(nextDraft.document, intentManifest());

@@ -85,7 +85,7 @@ describe('explicit host intent clicks', () => {
     const h = harness();
     const original = draft();
     const result = await h.dispatcher.propose(original, { ...intent, kind });
-    expect(result).toEqual({ ok: true, nonce: expect.stringMatching(/^[A-Za-z0-9_-]{24}$/) });
+    expect(result).toEqual({ ok: true, nonce: expect.stringMatching(/^[0-9a-f]{24}$/) });
     expect(h.calls.map(([name]) => name)).toEqual(['proposal', 'run']);
     expect(h.bridge.proposal).toHaveBeenCalledTimes(1);
     expect(h.bridge.run).toHaveBeenCalledTimes(1);
@@ -103,8 +103,8 @@ describe('explicit host intent clicks', () => {
     original.document.blocks = [placed('existing', { kind: 'engine.probe', engine_id: 'old', nonce: 'old' })];
     const first = await h.dispatcher.propose(original, intent);
     const second = await h.dispatcher.propose(original, intent);
-    expect(first.ok).toBe(true);
-    expect(second).toEqual({ ok: true, nonce: expect.stringMatching(/^[A-Za-z0-9_-]{24}$/) });
+    expect(first).toEqual({ ok: true, nonce: expect.stringMatching(/^[0-9a-f]{24}$/) });
+    expect(second).toEqual({ ok: true, nonce: expect.stringMatching(/^[0-9a-f]{24}$/) });
     expect(first.nonce).not.toBe(second.nonce);
     for (const [, value] of h.calls.filter(([name]) => name === 'proposal')) {
       expect(value.document.blocks).toHaveLength(1);
