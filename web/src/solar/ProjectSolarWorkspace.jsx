@@ -171,7 +171,7 @@ export default function ProjectSolarWorkspace(props) {
   const latest = useRef(props)
   const owner = describeScope(props)
   const scopeRef = useRef(null)
-  const presentation = useRef({ row: openTool, retired: false, generation: 0 })
+  const presentation = useRef({ row: openTool, retired: false, generation: 0, drafts: new Map() })
   const [, repaint] = useState(0)
   const notifications = useRef([])
   const retainedProposal = useRef(null)
@@ -195,10 +195,15 @@ export default function ProjectSolarWorkspace(props) {
   const base = presentation.current
   let view = base
   if (replacing && committed && !sameOwner(committed.owner, owner)) {
-    view = { ...view, retired: true, generation: view.generation + 1 }
+    view = { ...view, retired: true, generation: view.generation + 1, drafts: new Map() }
   }
-  if (view.row?.name !== openTool?.name) view = { row: openTool, retired: false, generation: view.generation + 1 }
+  if (view.row?.name !== openTool?.name) view = { row: openTool, retired: false, generation: view.generation + 1, drafts: new Map() }
   const currentRow = owner.rows.find((row) => row.name === openTool?.name)
+  // Value snapshots survive a stale scope without keeping its editor mounted or authorizing a run.
+  const keptDraft = view.drafts.get(currentRow?.name)
+  if (keptDraft && (!sameOwner(keptDraft, owner) || keptDraft.schemaKey !== schemaDeclaration(currentRow))) {
+    view = { ...view, drafts: new Map() }
+  }
   if (!view.retired && !view.draftRow && !owner.reason && currentRow) {
     // The validated JSON copy keeps field order as well as values: SchemaForm keys its fields
     // by their declarations, so sorting a retained schema would lose unfinished JSON input.
@@ -231,7 +236,7 @@ export default function ProjectSolarWorkspace(props) {
   }, [props.projectClient])
 
   function retire(flow, changingFlow = false) {
-    presentation.current = { ...presentation.current, retired: true, generation: presentation.current.generation + 1 }
+    presentation.current = { ...presentation.current, retired: true, generation: presentation.current.generation + 1, drafts: new Map() }
     const close = latest.current.onClose, change = latest.current.onFlowChange
     notifications.current.push(() => {
       close?.()
@@ -246,7 +251,8 @@ export default function ProjectSolarWorkspace(props) {
   }
   function open(row) {
     if (latest.current.busy || typeof latest.current.onOpenTool !== 'function' || !admitted(row)) return
-    presentation.current = { row, retired: false, generation: presentation.current.generation + 1 }
+    presentation.current = { row, retired: false, generation: presentation.current.generation + 1,
+      drafts: presentation.current.row?.name === row.name ? presentation.current.drafts : new Map() }
     latest.current.onOpenTool(row)
     repaint((value) => value + 1)
   }
@@ -311,7 +317,12 @@ export default function ProjectSolarWorkspace(props) {
       const guard = () => scope.isCurrent() && current(captured) && !submissionSignal?.aborted
       if (!guard()) return workspaceRefusal('SCOPE_STALE')
       handoff = { binding: owner.binding, authorityKey: owner.authorityKey, signal: submissionSignal, isCurrent: guard }
-      return live.onProjectSubmit(prepared, handoff) || workspaceRefusal('NO_RESULT')
+      const result = live.onProjectSubmit(prepared, handoff)
+      if (presentation.current.generation === generation &&
+          ['solar-solve-proposal', 'solar-correct-string'].includes(runRow.name)) {
+        presentation.current = { ...presentation.current, drafts: new Map() }
+      }
+      return result || workspaceRefusal('NO_RESULT')
     } catch { return workspaceRefusal('ERROR') }
   }
   const shared = { solarBinding: owner.binding, authorityKey: owner.authorityKey, projectClient: owner.projectClient,
@@ -329,8 +340,20 @@ export default function ProjectSolarWorkspace(props) {
   const commitRow = owner.rows.find((row) => row.name === 'solar-commit-solve')
   if (host === 'solve') {
     if (selected.name === 'solar-correct-string' || (selected.name === 'solar-solve-proposal' && !proposal)) {
+      const kept = view.drafts.get(selected.name)
       editor = <ProjectSolarSchemaForm key={selected.name} {...shared} tool={editorRow} isCurrent={scope.isCurrent}
-        projectOutcome={projectOutcome} submissionSignal={submissionSignal} />
+        projectOutcome={projectOutcome} submissionSignal={submissionSignal}
+        draft={kept && sameOwner(kept, owner) && kept.schemaKey === schemaDeclaration(editorRow) ? kept.draft : undefined}
+        onDraftChange={(draft) => {
+          const state = presentation.current
+          const liveOwner = describeScope(latest.current)
+          const liveRow = liveOwner.rows.find((row) => row.name === selected.name)
+          if (state.retired || state.generation !== generation || !sameOwner(owner, liveOwner) ||
+              !liveRow || schemaDeclaration(liveRow) !== view.schemaKey) return
+          presentation.current = { ...state, drafts: new Map([[selected.name, {
+            bindingKey: owner.bindingKey, authorityKey: owner.authorityKey, schemaKey: view.schemaKey, draft,
+          }]]) }
+        }} />
     } else if (proposal) {
       editor = <ProjectSolveReview {...shared} proposal={proposal} catalogDigest={commitRow?.catalog_digest}
         isCurrent={scope.isCurrent} projectOutcome={projectOutcome} submissionSignal={submissionSignal}
