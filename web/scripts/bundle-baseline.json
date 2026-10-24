@@ -27,8 +27,8 @@
     "hostBridge.js": 2624
   },
   "total": 1378935,
-  "total_allowance_bytes": 16384,
-  "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers.",
+  "total_allowance_bytes": 32768,
+  "_allowance_basis": "32 KiB: raised from 16 KiB on 2026-10-24 by operator directive (raise the bundle allowance); measured on main af3f47f4: 12,467 B over baseline with 3,917 B headroom, and each UI slice needed its own reseed. Original 16 KiB basis: 12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0).",
   "stem_caps": {
     "LabCanvas.js": 62184,
     "LabCanvas.css": 6641,
