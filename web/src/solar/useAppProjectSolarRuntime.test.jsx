@@ -415,6 +415,53 @@ it('R13G-12 the owned output transition survives its intentional binding change'
   expect(fast.result.current.projectOutcome.outcome).toBe(dispatch.mock.calls[0][1])
 })
 
+it('a same-owner context reread keeps the selected tool; an owner change clears it', async () => {
+  const h = await setup({ toolName: 'solar-solve-proposal' })
+  act(() => expect(h.result.current.onOpenTool(h.tool)).toBe(true))
+  expect(h.result.current.openTool).toBe(h.tool)
+  const reread = deferred()
+  h.client.readContext.mockReturnValueOnce(reread.promise)
+  // Replacing observation restarts context reading without changing the drawing or authority.
+  const workspace = store(h.ws.getSnapshot())
+  await h.update({ workspaceController: workspace })
+  expect(h.result.current.contextView).toBeNull()
+  expect(h.result.current.openTool).toBe(h.tool)
+  await h.update({ projectCatalog: { ...h.props.projectCatalog, families: [] } })
+  expect(h.result.current.openTool.name).toBe(h.tool.name)
+  const fresh = { ...h.tool, catalog_digest: 'sha256:' + 'd'.repeat(64) }
+  await h.update({ projectCatalog: { ...h.props.projectCatalog, families: [{ capabilities: [fresh] }] } })
+  expect(h.result.current.openTool).toBe(fresh)
+  await act(async () => { reread.resolve(response(context())); await drain() })
+  expect(h.result.current.contextCurrent()).toBe(true)
+  expect(h.result.current.openTool).toBe(fresh)
+  act(() => h.result.current.onClose())
+  expect(h.result.current.openTool).toBeNull()
+  act(() => expect(h.result.current.onOpenTool(fresh)).toBe(true))
+  await h.install(V, 'foreign')
+  expect(h.result.current.openTool).toBeNull()
+  act(() => expect(h.result.current.onOpenTool(h.tool)).toBe(true))
+  await act(async () => { workspace.change({ canonicalVersionId: X }); await drain() })
+  await h.install(X, 'foreign')
+  expect(h.result.current.openTool).toBeNull()
+  act(() => expect(h.result.current.onOpenTool(h.tool)).toBe(true))
+  await h.update({ projectMode: false })
+  expect(h.result.current.openTool).toBeNull()
+})
+
+it('an uncertain run on a capture rotation still closes the selected tool', async () => {
+  const h = await setup()
+  act(() => expect(h.result.current.onOpenTool(h.tool)).toBe(true))
+  expect(h.result.current.openTool).toBe(h.tool)
+  expect(await h.submit()).toEqual(accepted)
+  expect(h.result.current.projectPending).not.toBeNull()
+  expect(h.result.current.projectOutcome).toBeNull()
+  expect(h.result.current.busy).toBe(true)
+  await h.install(V)
+  expect(h.result.current.openTool).toBeNull()
+  expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+  h.unmount()
+})
+
 it('W1C8 retains an in-flight read across equal bindings and capture rotations', async () => {
   const read = deferred(), h = await setup({ initialContext: read })
   const reads = h.client.readContext.mock.calls.length
@@ -471,6 +518,7 @@ it('R13G-13 exact context reads discard obsolete replies and restart for a new r
   expect(h.result.current.projectPending).toBeNull()
   expect(h.result.current.projectOutcome).toBeNull()
   expect(h.result.current.busy).toBe(false)
+  // An accepted run loses its capture and becomes uncertain, closing the selected tool.
   expect(h.result.current.openTool).toBeNull()
   const stale = deferred()
   h.client.readContext.mockReturnValue(stale.promise)
