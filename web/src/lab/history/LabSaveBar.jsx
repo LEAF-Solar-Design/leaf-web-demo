@@ -21,6 +21,12 @@ export default function LabSaveBar({ document, ready, client = labArtifactsClien
       if (valid()) setStatus(result.ok ? `Saved r${result.revision}` : result.conflict ? 'Save needs a choice.' : `Save failed: ${result.detail}`)
     } finally { if (valid()) setPending(false) }
   }
+  function keepMine() {
+    if (document != null) client.captureMine(document)
+    const { mine, serverHead } = client.state.conflict
+    onTakeTheirs?.(mine)
+    void save(mine, serverHead)
+  }
   async function takeTheirs() {
     client.captureMine(document)
     const graphToken = client.beginGraphOperation()
@@ -42,7 +48,7 @@ export default function LabSaveBar({ document, ready, client = labArtifactsClien
     {state.lastSaved && <p>Saved r{state.lastSaved.revision} · {state.lastSaved.sha256?.slice(0, 8)}</p>}
     {state.conflict && <div>
       <p role="status">Someone saved r{state.conflict.serverHead} while you edited.</p>
-      <button type="button" disabled={pending || state.conflict.serverHead == null} onClick={() => { onTakeTheirs?.(state.conflict.mine); void save(state.conflict.mine, state.conflict.serverHead) }}>Keep mine</button>
+      <button type="button" disabled={pending || state.conflict.serverHead == null} onClick={keepMine}>Keep mine</button>
       <button type="button" disabled={pending || state.conflict.serverHead == null} onClick={takeTheirs}>Take theirs</button>
       <button type="button" disabled={pending || !state.conflict.captured} onClick={() => { client.beginGraphOperation(); onTakeTheirs?.(state.conflict.mine); setStatus('Your edits restored.') }}>Restore my edits</button>
     </div>}

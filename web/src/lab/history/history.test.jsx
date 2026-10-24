@@ -185,6 +185,31 @@ describe('Strategy revision ledger', () => {
     expect(canvas).toEqual(second)
   })
 
+  it('Keep mine captures edits made while Save was pending before restoring and retrying', async () => {
+    const { client, append, fetchImpl } = ledger()
+    await client.save('strategy', first, null)
+    await client.head('strategy')
+    append(graph('server'))
+    const pending = deferred()
+    fetchImpl.mockImplementationOnce(() => pending.promise)
+    const take = vi.fn()
+    const view = render(<LabSaveBar document={first} ready client={client} onTakeTheirs={take} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }))
+    expect(JSON.parse(fetchImpl.mock.calls.at(-1)[1].body)).toMatchObject({ graph: first, expected_head: 1 })
+    view.rerender(<LabSaveBar document={second} ready client={client} onTakeTheirs={take} />)
+    await act(async () => pending.resolve(response({ detail: 'stale' }, 409)))
+    await screen.findByText('Someone saved r2 while you edited.')
+    fetchImpl.mockImplementationOnce(async (url, init) => {
+      expect(take).toHaveBeenCalledWith(second)
+      expect(JSON.parse(init.body)).toMatchObject({ graph: second, expected_head: 2 })
+      return response({ revision: 3, graph: second })
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Keep mine' }))
+    await screen.findByText('Saved r3')
+    expect(take).toHaveBeenCalledTimes(1)
+    expect(take).toHaveBeenCalledWith(second)
+  })
+
   it('P2-c reconciles restore and publish conflicts and reloads revisions before retry', async () => {
     const { client, append, fetchImpl } = ledger()
     await client.save('strategy', first, null)
