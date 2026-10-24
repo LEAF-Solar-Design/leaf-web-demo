@@ -621,7 +621,8 @@ export default function useJobController({
         if (isUnauthorized(cause)) {
           // Sign-in expired: the job is still on the server, so keep its
           // pointer and in-flight state and reattach after sign-in.
-          if (alive) setAuth(true)
+          // A run or attach started since this read reports its own sign-in failures.
+          if (alive && sequenceRef.current === sequenceAtLoad) setAuth(true)
           return
         }
         if (readsPausedRef.current || pauseGenerationRef.current !== pauseGeneration) return
