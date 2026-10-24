@@ -1424,8 +1424,16 @@ footer .warn-txt { color: var(--status-warning); }
 .claude-pop {
   position: absolute; top: calc(100% + 8px); right: 0; z-index: 55;
   width: 320px; max-width: calc(100vw - 32px);
+  white-space: normal; overflow-wrap: anywhere;
   background: var(--card); border: 1px solid var(--border); border-radius: 6px;
   box-shadow: var(--shadow-pop); padding: 12px; text-align: left;
+}
+@media (max-width: 600px) {
+  header.top .claude-pop {
+    position: fixed; top: auto; bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+    left: 8px; right: 8px; width: auto; max-width: none;
+    max-height: 70vh; overflow-y: auto; z-index: 70;
+  }
 }
 .ca-head {
   display: flex; align-items: center; justify-content: space-between;
