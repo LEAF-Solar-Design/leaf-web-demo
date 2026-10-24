@@ -233,6 +233,41 @@ describe('rollback contract', () => {
     expect(outsideDesktop.join('\n')).not.toMatch(/grid-template-columns:\s*0 minmax\(0,\s*1fr\) var\(--ck-rail-width\);/)
   })
 
+  it('bounds the project panels above the desktop CAD and Solar workspace', () => {
+    const css = read('./studioShell.css')
+    const selector = '.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > :is(.campaign-panel, .workspace-summary)'
+    const desktopBodies = []
+    const outsideDesktop = []
+    const media = /@media\s*\([^{}]*min-width\s*:\s*981px[^{}]*\)\s*(?:and\s*\([^{}]*\)\s*)*\{/g
+    let previousEnd = 0
+    let match
+    while ((match = media.exec(css))) {
+      const start = media.lastIndex
+      let depth = 1
+      let end = start
+      for (; end < css.length && depth; end++) {
+        if (css[end] === '{') depth++
+        if (css[end] === '}') depth--
+      }
+      expect(depth).toBe(0)
+      desktopBodies.push(css.slice(start, end - 1))
+      outsideDesktop.push(css.slice(previousEnd, match.index))
+      previousEnd = media.lastIndex = end
+    }
+    outsideDesktop.push(css.slice(previousEnd))
+    const rules = desktopBodies.flatMap(body => [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)])
+    const rule = rules.find(rule => rule[1].trim() === selector)
+    expect(rule).toBeDefined()
+    expect(rule[2]).toMatch(/height:\s*96px;/)
+    expect(rule[2]).toMatch(/max-height:\s*96px;/)
+    expect(rule[2]).toMatch(/min-height:\s*0;/)
+    expect(rule[2]).toMatch(/overflow:\s*auto;/)
+    const outsideRules = [...outsideDesktop.join('\n').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    expect(outsideRules.some(rule => /\.(?:campaign-panel|workspace-summary)\b/.test(rule[1])
+      && /max-height:\s*96px/.test(rule[2]))).toBe(false)
+    expect(css).toContain('--ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));')
+  })
+
   it('insets the fixed Find field past the open tool rail only on desktop', () => {
     const css = read('./studioShell.css')
     const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'

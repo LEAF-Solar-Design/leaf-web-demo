@@ -665,3 +665,21 @@
     --ck-label: var(--ck-ink);
   }
 }
+
+/* TOPBAR2: with a project open, Project results and the Workspace summary sit in flow above the drawing
+   workspace. Bound each to a 96px scrollable strip on the desktop CAD and Solar cockpit so the ribbon,
+   viewer toolbar and every canvas-anchored overlay (the Solar flow seat and its Start button) stay inside
+   the viewport. The band measurement and --ck-canvas-top-live are unchanged. */
+@media (min-width: 981px) {
+  .studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > :is(.campaign-panel, .workspace-summary) {
+    box-sizing: border-box;
+    height: 96px;
+    min-height: 0;
+    max-height: 96px;
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 8px;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+}
