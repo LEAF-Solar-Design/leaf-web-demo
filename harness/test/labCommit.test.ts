@@ -55,6 +55,7 @@ describe("Lab commit", () => {
 
   function fakePort(): LabDocumentPort {
     return {
+      inspect: vi.fn<LabDocumentPort["inspect"]>(async () => ({ ref: LAB_DOCUMENT_REF, head: null, commits: [], documents: [] })),
       commit: vi.fn<LabDocumentPort["commit"]>(async () => ({ ref: LAB_DOCUMENT_REF, commit: SHA })),
       publishRef: vi.fn(async () => ({ commit: SHA })),
     };

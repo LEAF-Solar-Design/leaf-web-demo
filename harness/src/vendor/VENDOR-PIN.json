@@ -53,6 +53,10 @@
       "reason": "leaf-web-demo downstream patch not present upstream (upstream unchanged since 52e8a36; carried unchanged by AD4)",
       "sha256": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f"
     },
+    "ports/impl/tenantDocumentRepo.ts": {
+      "reason": "SEL-303a: read-only inspect of the tenant Lab ref for ledger replay, divergence and rollback checks; upstream candidate; retire when mushy-code ships an equivalent read",
+      "sha256": "e65f5d607934b1274455c7ff82b64fbbc47127f5da32b9fc5ed13c824c978970"
+    },
     "ports/impl/tenantRepoProvider.ts": {
       "reason": "Selective PR93 Forge publication with consumer leases and the durable effective catalog checkout (rebased onto mushy-code ad209705 by AD4; upstream candidate); P05: exact local transport trust in a temporary protected config plus no-local cloning for foreign-owned source repositories; retire when upstream includes equivalent behavior.",
       "sha256": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691"
@@ -60,6 +64,10 @@
     "ports/index.ts": {
       "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault.",
       "sha256": "6f4c53818e22245bfb7ed5b15188bce33daa009a23874ef2f23b4e95fda56e48"
+    },
+    "ports/labDocumentPort.ts": {
+      "reason": "SEL-303a: read-only inspect of the tenant Lab ref for ledger replay, divergence and rollback checks; upstream candidate; retire when mushy-code ships an equivalent read",
+      "sha256": "dadf477cea65cb62646d4e3d89731f0a6af5e0779fc7a9353e4fa66252eea392"
     },
     "ports/modelAllowlist.ts": {
       "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8; claude-haiku-5-5 allowlist entry from mushy-code 74e50286 carried too ahead of a re-pin; retire at the next re-pin past 74e50286; absorbed upstream at cd637b434f7f1c103160f93c3c0119122c746a67; provenance retained",
@@ -121,11 +129,11 @@
     "ports/impl/standardServicesRuntime.ts": "74925259f354b874d5ad5318701f4bc727d4a043939dfe8c995711daa7300e95",
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "32740d32b3dce694ec1c7f35a4191517da9d91cea6b23906438ba1a8624b5888",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
-    "ports/impl/tenantDocumentRepo.ts": "beab4857429a077bab68a59352cef8d88a5d2bb001dcf0d73e49ad749f00bbfc",
+    "ports/impl/tenantDocumentRepo.ts": "e65f5d607934b1274455c7ff82b64fbbc47127f5da32b9fc5ed13c824c978970",
     "ports/impl/tenantRepoProvider.ts": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691",
     "ports/index.ts": "6f4c53818e22245bfb7ed5b15188bce33daa009a23874ef2f23b4e95fda56e48",
     "ports/integrationTools.ts": "5dd38008c3abeae5b84235c84fa5f2465f85a78110f8ef79814251e0b6dc7735",
-    "ports/labDocumentPort.ts": "327c3bab54cee6d06126ed4f172933d2169c869b3c8760e340941dc7b644c472",
+    "ports/labDocumentPort.ts": "dadf477cea65cb62646d4e3d89731f0a6af5e0779fc7a9353e4fa66252eea392",
     "ports/modelAllowlist.ts": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17",
     "ports/surfaceAnnotations.ts": "8fba9c1d4373c2e9600e29a68ee78c801dd75bc56411baf9a33570b65cd52e5b",
     "ports/wireGrant.ts": "ac9619a708b426ff3920c796497727497bc7e707d70a5a5503c759324e379904",
