@@ -8,6 +8,8 @@ import WidgetsView from './widgets/WidgetsView.jsx'
 import glossary from './contract/sources/leaf-glossary.v1.json'
 import { setLayoutEngineLoader } from './canvas/dependencyLayout.js'
 import { setGraphCanvasLoader } from './canvas/GraphView.jsx'
+import { createWidgetDoc } from './widgets/useWidgetEditor.js'
+import { createTextElement } from './widgets/widgetDoc.js'
 
 // The shell proves the lazy mount; one Node gate proves real ELK.
 const elkImport = vi.hoisted(() => vi.fn())
@@ -196,6 +198,40 @@ describe('LabWorkbench', () => {
       status={on} scopeKey="untrusted" token="untrusted" />)
     expect(screen.getByText('Choose a project to create a text widget.')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Add text' })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    [false, true, 'sample'],
+    [true, false, 'sample'],
+    [true, true, 'live'],
+  ])('supplies widget host values only with embedding and a bridge (embedded: %s, bridge: %s)', async (embedded, connected, freshness) => {
+    const doc = createWidgetDoc()
+    doc.formats.la.els = [{ ...createTextElement('host'), min_renderer: '1.0.0', text: 'Example host',
+      binding: { source: 'kashbot.board', field: 'openCount', min_renderer: '1.0.0', scale: 'identity', tone: 'ink' } }]
+    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ kind: 'widget', graph: doc, revision: 1 }) }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const stop = vi.fn()
+    let callbacks
+    const createHostBridge = vi.fn((next) => {
+      callbacks = next
+      return { start: () => next.onSource([{ source: 'board', data: { openCount: '7' }, as_of: Date.now() }]), stop }
+    })
+    const { unmount } = render(<LabWorkbench route={route('widgets')} status={on} embedded={embedded} createHostBridge={connected ? createHostBridge : undefined} />)
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'widget' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Load' })) })
+    const preview = screen.getByRole('region', { name: 'Live widget preview' })
+    const element = preview.querySelector('[data-element-id="host"]')
+    expect(element).toHaveAttribute('data-freshness', freshness)
+    expect(element).toHaveTextContent(freshness === 'live' ? '7' : 'Example host')
+    expect(createHostBridge).toHaveBeenCalledTimes(embedded && connected ? 1 : 0)
+    if (embedded && connected) {
+      act(() => callbacks.onSource([{ source: 'board', data: { openCount: '8' }, as_of: Date.now() }]))
+      expect(element).toHaveTextContent('8')
+      expect(element).toHaveAttribute('data-freshness', 'live')
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    unmount()
+    expect(stop).toHaveBeenCalledTimes(embedded && connected ? 1 : 0)
   })
 
   it('has no browser dialogs or authority prop spreading in the owned implementation', () => {

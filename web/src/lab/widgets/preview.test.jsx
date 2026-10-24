@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import WidgetPreview from './WidgetPreview.jsx'
 import WidgetsView from './WidgetsView.jsx'
+import LabWorkbench from '../LabWorkbench.jsx'
 import { createWidgetDoc } from './useWidgetEditor.js'
 import { createTextElement } from './widgetDoc.js'
 import { createHostProvider } from '../host/hostProvider.js'
@@ -223,5 +224,36 @@ describe('live widget values', () => {
     expect(screen.getByRole('region', { name: 'Live widget preview' })).toBeInTheDocument()
     rerender(<WidgetsView scopeKey="guest" />)
     expect(screen.queryByRole('region', { name: 'Live widget preview' })).not.toBeInTheDocument()
+  })
+
+  it.each([false, true])('uses the embedded source in a saved widget (simulated: %s) and keeps it out of requests', async (simulated) => {
+    let callbacks
+    const connection = { start: vi.fn(() => {
+      callbacks.onAdmitted()
+      callbacks.onSource([{ source: 'board', data: { openCount: 'PRIVATE_HOST_VALUE' }, as_of: Date.now(), simulated }])
+    }), stop: vi.fn() }
+    const createHostBridge = vi.fn((next) => { callbacks = next; return connection })
+    const fetchImpl = vi.fn(async (url) => ({ ok: true, json: async () =>
+      url.endsWith('/values') ? resolved('Graph value') : { kind: 'widget', graph: doc, revision: 1 } }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const { unmount } = render(<LabWorkbench route={{ view: 'widgets', params: {} }} status={{ state: 'on' }} embedded createHostBridge={createHostBridge} />)
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'widget' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Load' })) })
+    expect(createHostBridge).toHaveBeenCalledTimes(1)
+    expect(connection.start).toHaveBeenCalledTimes(1)
+    expect(node('host')).toHaveTextContent('PRIVATE_HOST_VALUE')
+    expect(node('host')).toHaveAttribute('data-freshness', simulated ? 'simulated' : 'live')
+    expect(node('host')).toHaveAttribute('data-host-tainted', 'true')
+    expect(node('graph')).toHaveTextContent('Graph value')
+
+    act(() => callbacks.onSource([{ source: 'board', data: { openCount: 'UPDATED_PRIVATE_VALUE' }, as_of: Date.now(), simulated: !simulated }]))
+    expect(node('host')).toHaveTextContent('UPDATED_PRIVATE_VALUE')
+    expect(node('host')).toHaveAttribute('data-freshness', simulated ? 'live' : 'simulated')
+    const requests = fetchImpl.mock.calls.filter(([, options]) => options.body)
+    expect(requests).toHaveLength(1)
+    expect(JSON.parse(requests[0][1].body)).toEqual({ bindings: [graph] })
+    expect(JSON.stringify(fetchImpl.mock.calls)).not.toMatch(/PRIVATE_HOST_VALUE|UPDATED_PRIVATE_VALUE|kashbot\.board|openCount|host_tainted|simulated/)
+    unmount()
+    expect(connection.stop).toHaveBeenCalledTimes(1)
   })
 })
