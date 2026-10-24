@@ -67,7 +67,7 @@ describe("Lab inspect", () => {
   function fakePort(): LabDocumentPort {
     return {
       inspect: vi.fn(async () => empty),
-      commit: vi.fn(async () => ({ ref: LAB_DOCUMENT_REF, commit: "a".repeat(40) })),
+      commit: vi.fn<LabDocumentPort["commit"]>(async () => ({ ref: LAB_DOCUMENT_REF, commit: "a".repeat(40) })),
       publishRef: vi.fn(async () => ({ commit: "a".repeat(40) })),
     };
   }
@@ -126,7 +126,7 @@ describe("Lab inspect", () => {
       { path, blob: git(cache, ["rev-parse", `${second.commit}:${path}`]), sha256: createHash("sha256").update(content).digest("hex"), bytes: Buffer.byteLength(content) },
       { path: "lab/widgets/two.json", blob: git(cache, ["rev-parse", `${second.commit}:lab/widgets/two.json`]), sha256: createHash("sha256").update("{}").digest("hex"), bytes: 2 },
     ] });
-    expect((await port.inspect(TENANT, { limit: 1 })).commits).toEqual(result.body.commits.slice(0, 1));
+    expect((await port.inspect(TENANT, { limit: 1 })).commits).toEqual((result.body as LabDocumentInspection).commits.slice(0, 1));
     expect(git(cache, ["show-ref"])).toBe(refs);
     expect(git(remote, ["show-ref"])).toBe(remoteRefs);
     expect(git(cache, ["cat-file", "--batch-all-objects", "--batch-check"])).toBe(objects);
@@ -149,7 +149,7 @@ describe("Lab inspect", () => {
     for (const tenant of [null, "../other", "x".repeat(201)]) {
       const result = await post(url, { limit: 1 }, tenant);
       expect(result.status).toBe(400);
-      expect(result.body.error.code).toBe("lab_tenant_required");
+      expect((result.body as { error: { code: string } }).error.code).toBe("lab_tenant_required");
     }
     expect(port.inspect).not.toHaveBeenCalled();
   });
