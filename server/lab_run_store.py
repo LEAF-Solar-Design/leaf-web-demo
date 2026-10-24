@@ -200,15 +200,15 @@ def claimable(limit, *, ops_revisions):
 
     def operation(sql):
         rows = sql.execute("SELECT * FROM lab_runs WHERE state='queued' ORDER BY created_at,run_id,tenant_id").fetchall()
-        active = {row["tenant_id"] for row in sql.execute(
-            "SELECT tenant_id FROM lab_runs WHERE state='running' AND lease_expires_at>?"
-            " GROUP BY tenant_id HAVING COUNT(*)>=?",
-            (_now().isoformat(), MAX_ACTIVE_PER_TENANT)).fetchall()}
+        active = {row["tenant_id"]: row["count"] for row in sql.execute(
+            "SELECT tenant_id,COUNT(*) AS count FROM lab_runs WHERE state='running' AND lease_expires_at>?"
+            " GROUP BY tenant_id", (_now().isoformat(),)).fetchall()}
         queues = {}
         for row in rows:
-            if row["tenant_id"] not in active:
+            slots = MAX_ACTIVE_PER_TENANT - active.get(row["tenant_id"], 0)
+            if slots > 0:
                 queue = queues.setdefault(row["tenant_id"], [])
-                if row["ops_revision"] in revisions:
+                if row["ops_revision"] in revisions and len(queue) < slots:
                     queue.append(dict(row))
         result = []
         depth = 0
@@ -216,6 +216,7 @@ def claimable(limit, *, ops_revisions):
             batch = [queue[depth] for queue in queues.values() if len(queue) > depth]
             if not batch:
                 break
+            batch.sort(key=lambda row: (row["created_at"], row["run_id"], row["tenant_id"]))
             result.extend(batch[:limit - len(result)])
             depth += 1
         return result

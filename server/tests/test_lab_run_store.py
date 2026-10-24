@@ -348,6 +348,52 @@ def test_claimable_round_robin_revisions_and_active_cap(authority, monkeypatch):
     assert claim(authority, "run-0", "worker", 60)
 
 
+@pytest.mark.parametrize("schedule,expected", [
+    ([("a", 1), ("a", 100), ("b", 2), ("b", 3)],
+     [("a", 1), ("b", 2), ("b", 3), ("a", 100)]),
+    ([("a", 1), ("a", 100), ("a", 101),
+      ("b", 2), ("b", 3), ("b", 200),
+      ("c", 4), ("c", 5), ("c", 6)],
+     [("a", 1), ("b", 2), ("c", 4),
+      ("b", 3), ("c", 5), ("a", 100),
+      ("c", 6), ("a", 101), ("b", 200)]),
+], ids=["critic-example", "three-rounds"])
+def test_claimable_orders_each_round_by_current_head(authority, monkeypatch, schedule, expected):
+    base = store._date("2026-01-01T00:00:00+00:00")
+    tenants = {authority + "-" + suffix for suffix, _ in schedule}
+    for suffix, seconds in schedule:
+        created = base + timedelta(seconds=seconds)
+        monkeypatch.setattr(store, "_now", lambda: created)
+        create(authority + "-" + suffix, "run-" + str(seconds))
+    expected_ids = [(authority + "-" + suffix, "run-" + str(seconds))
+                    for suffix, seconds in expected]
+    rows = store.claimable(10000, ops_revisions={"ops:1"})
+    assert [(row["tenant_id"], row["run_id"]) for row in rows
+            if row["tenant_id"] in tenants] == expected_ids
+    # A limit cutting through a later round must use that round's head order.
+    rows = store.claimable(len(expected) - 1, ops_revisions={"ops:1"})
+    assert [(row["tenant_id"], row["run_id"]) for row in rows] == expected_ids[:-1]
+
+
+def test_claimable_bounds_each_tenant_by_remaining_active_slots(authority, monkeypatch):
+    now = store._now()
+    monkeypatch.setattr(store, "_now", lambda: now)
+    for index in range(2):
+        run_id = "active-" + str(index)
+        create(authority, run_id)
+        assert claim(authority, run_id, "worker", 60)
+    for index in range(store.MAX_ACTIVE_PER_TENANT + 1):
+        create(authority, "queued-" + str(index))
+    create(authority + "-other")
+    rows = store.claimable(10000, ops_revisions={"ops:1"})
+    assert [row["run_id"] for row in rows if row["tenant_id"] == authority] == [
+        "queued-" + str(index) for index in range(store.MAX_ACTIVE_PER_TENANT - 2)]
+    assert any(row["tenant_id"] == authority + "-other" for row in rows)
+    now += timedelta(seconds=61)
+    rows = store.claimable(10000, ops_revisions={"ops:1"})
+    assert len([row for row in rows if row["tenant_id"] == authority]) == store.MAX_ACTIVE_PER_TENANT
+
+
 def test_revision_claim_takeover_and_committed_cursor(authority, monkeypatch):
     create(authority)
     old = store.claim(authority, "run", "old", 10, build_revision="build:old", color="idle")
