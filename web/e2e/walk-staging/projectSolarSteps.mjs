@@ -349,11 +349,12 @@ export async function reviewStagingProposal(runtime, {
 } = {}) {
   const { page, projectSolar: solar } = runtime
   const refused = reason => ({ reason, catalog: solar.catalog })
+  // Take refreshes the catalog and closes an editor that is already open.
+  await checkout(runtime, assertions, stagingAction)
   const opened = await open(runtime, TOOL, assertions, { allowDisabled: true })
   if (!opened) return refused('run_solve_disabled')
   const form = page.getByRole('form', { name: 'Solve', exact: true })
   await assertions(form).toBeVisible()
-  await checkout(runtime, assertions, stagingAction)
   const frame = form.getByLabel('Frame', { exact: true })
   await assertions(frame).toBeEnabled({ timeout: 10_000 }).catch(() => {})
   if (!await walkEnabled(frame, 'Frame')) return refused('run_solve_disabled')

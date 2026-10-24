@@ -891,6 +891,7 @@ test('proposal review attempts an enabled UI solve even when the catalog says no
       catalog: [{ runnable: false, reason_code: 'SOLVE_CONTEXT_REQUIRED' }] } }
     const result = await reviewStagingProposal(runtime, { assertions: stagingAssertions,
       open: async (_runtime, tool, _assertions, options) => {
+        events.push('open')
         assert.equal(tool, 'solar-solve-proposal'); assert.equal(options.allowDisabled, true)
         return scenario !== 'disabled-control'
       }, checkout: async () => events.push('checkout'), read: async () => ({
@@ -900,6 +901,8 @@ test('proposal review attempts an enabled UI solve even when the catalog says no
       }) })
     const expected = scenario.startsWith('disabled') ? 'run_solve_disabled' : scenario === 'ui-refusal' ? 'SOLVE_CONTEXT_REQUIRED'
       : scenario === 'review' ? undefined : 'CLOUD_OFFLINE'
+    assert.equal(events[0], 'checkout')
+    assert.equal(events[1], 'open')
     assert.equal(result.reason, expected)
     assert.equal(events.includes('Run solve'), !scenario.startsWith('disabled'))
     assert.equal(page.listenerCount('response'), 0)
