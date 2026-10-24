@@ -41,6 +41,14 @@ def test_invalid_harness_configuration_adds_nothing(monkeypatch, value):
     assert not broker._egress_allowed("evil.example.com")
 
 
+@pytest.mark.parametrize("port, allowed", [
+    ("invalid", False), ("99999", False), ("8150", True),
+])
+def test_harness_port_validation(monkeypatch, port, allowed):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", f"http://harness.example:{port}")
+    assert broker._egress_allowed("harness.example") is allowed
+
+
 def test_harness_configuration_is_read_at_call_time(monkeypatch):
     monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", f"http://{HARNESS_HOST}:8150")
     assert broker._egress_allowed(HARNESS_HOST)

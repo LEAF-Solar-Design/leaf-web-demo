@@ -182,6 +182,7 @@ def _egress_allowed(host: str) -> bool:
     # Allow the configured harness host because tenant grant routes call it.
     try:
         harness = urllib.parse.urlsplit(os.environ.get("LEAF_AUTHOR_HARNESS_URL", ""))
+        _ = harness.port  # Validate the port before allowing the hostname.
         if harness.scheme in {"http", "https"} and harness.hostname:
             if host.lower() == harness.hostname.lower():
                 return True
