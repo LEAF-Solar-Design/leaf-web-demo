@@ -343,7 +343,7 @@ describe('canvas authoring', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Validate graph' }))
     expect(screen.getByText('Validation checks wiring and settings. Execution is unavailable here.')).toBeVisible()
     fireEvent.click(screen.getByRole('tab', { name: 'Code' }))
-    expect(screen.getByRole('heading', { name: 'Code unavailable' })).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Code' })).toBeVisible()
   })
   it('shows missing required pipes, declared defaults and explicit measurement states', () => {
     const required = { ...manifest, inputs: { value: { ...manifest.inputs.value, required: true }, optional: { ...manifest.inputs.value, has_default: true, default: 7 } } }
