@@ -529,6 +529,41 @@ def test_pause_defaults_to_false_on_empty_local_store(local):
     assert store.paused() is False
 
 
+def test_latest_build_and_oldest_queue_are_read_only(local, monkeypatch):
+    assert store.latest_build_revision() is None
+    assert store.oldest_queued_age_s() is None
+    assert store.queued_run_count() == 0
+    first_time = store._now()
+    monkeypatch.setattr(store, "_now", lambda: first_time)
+    first = create("tenant-a")
+    second_time = first_time + timedelta(seconds=20)
+    monkeypatch.setattr(store, "_now", lambda: second_time)
+    store.create("tenant-b", "doc", "run", 1, "a" * 64, "ops:1", "b" * 64,
+                 "adapter-1", "new-build")
+    assert store.latest_build_revision() == "new-build"
+    assert store.oldest_queued_age_s() == 20
+    assert store.oldest_queued_age_s(now=second_time.timestamp() + 5) == 25
+    assert store.queued_run_count() == 2
+    assert store.get("tenant-a", "run") == first
+    lease = claim("tenant-a", "run", "worker", 60)
+    assert lease
+    assert store.oldest_queued_age_s() == 0
+    assert store.request_cancel("tenant-b", "run", "actor")
+    assert store.oldest_queued_age_s() is None
+
+
+def test_expired_running_lease_is_discoverable(authority, monkeypatch):
+    create(authority)
+    now = store._now()
+    monkeypatch.setattr(store, "_now", lambda: now)
+    lease = claim(authority, "run", "worker", 1)
+    assert lease
+    assert not any(row["tenant_id"] == authority for row in store.claimable(10000, ops_revisions={"ops:1"}))
+    now += timedelta(seconds=2)
+    rows = store.claimable(10000, ops_revisions={"ops:1"})
+    assert any(row["tenant_id"] == authority and row["run_id"] == "run" for row in rows)
+
+
 @pytest.mark.parametrize("runtime", ["staging", "production"])
 def test_deployed_runtime_refuses_sqlite(local, monkeypatch, runtime):
     monkeypatch.setenv("LEAF_RUNTIME_ENV", runtime)
