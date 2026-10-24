@@ -958,6 +958,121 @@ async function composeWorkflow() {
   fireEvent.change(screen.getByLabelText('Step 1 action'), { target: { value: JSON.stringify([
     catalogAction.connection_id, catalogAction.connector_ref, catalogAction.operation_ref]) } })
 }
+async function composeActionForm() {
+  fireEvent.click(screen.getByRole('button', { name: 'Load permitted actions' }))
+  await screen.findByRole('option', { name: /Send order · Orders connection/ })
+  fireEvent.change(screen.getByLabelText('Form title'), { target: { value: 'New order form' } })
+  fireEvent.change(screen.getByLabelText('Form stable ID'), { target: { value: 'new-order-form' } })
+  fireEvent.change(screen.getByLabelText('Permitted action'), { target: {
+    value: screen.getByRole('option', { name: /Send order · Orders connection/ }).value } })
+}
+function setupActionComposer() {
+  const harness = setupAction()
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => url.includes('/action-catalog?')
+    ? Promise.resolve(response({ actions: [{ ...catalogAction, form: actionElement.form }], next_cursor: null })) : original(url, options))
+  return harness
+}
+it.each(['owner', 'editor', 'reviewer', 'read_only'])('admits the action form composer only for current owner/editor (%s)', async (projectRole) => {
+  const { props, authority, fetchImpl } = setupActionComposer()
+  authority.scope = { ...scope, projectRole }
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(Boolean(screen.queryByRole('region', { name: 'Create an action form' }))).toBe(['owner', 'editor'].includes(projectRole))
+  expect(fetchImpl.mock.calls.some(([url]) => url.includes('/action-catalog?'))).toBe(false)
+})
+it.each(['owner', 'editor'])('adds the exact created record to Saved views and opens the native form inertly as %s', async (projectRole) => {
+  const { props, authority, fetchImpl } = setupActionComposer()
+  authority.scope = { ...scope, projectRole }
+  const submit = vi.spyOn(props.client, 'submitAction')
+  const reconcile = vi.spyOn(props.client, 'reconcileAction')
+  const start = vi.spyOn(props.client, 'submitManualWorkflow')
+  const saveElement = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeActionForm()
+  fireEvent.click(screen.getByRole('button', { name: 'Save action form' }))
+  const open = await screen.findByRole('button', { name: 'New order form · revision 3' })
+  expect(screen.getAllByRole('button', { name: 'New order form · revision 3' })).toHaveLength(1)
+  expect(saveElement).toHaveBeenCalledExactlyOnceWith(projectId, { ...actionElement, id: 'new-order-form', title: 'New order form' },
+    { signal: expect.any(AbortSignal) })
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  expect(screen.getByRole('region', { name: 'Create manual workflow' })).toBeInTheDocument()
+  expect(screen.getByRole('form', { name: 'Compose native view' })).toBeInTheDocument()
+  fireEvent.click(open)
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send order now' })).toBeEnabled())
+  expect(screen.getByLabelText('Order note (required)')).toBeInTheDocument()
+  expect(submit).not.toHaveBeenCalled()
+  expect(reconcile).not.toHaveBeenCalled()
+  expect(start).not.toHaveBeenCalled()
+  expect(fetchImpl.mock.calls.filter(([, options]) => options.method === 'POST').map(([url]) => url.split('/integrations/')[1])).toEqual(['elements'])
+})
+it('keeps one current action form when later saved-view pages repeat its ID', async () => {
+  const { props } = setupActionComposer()
+  const created = { element: { ...actionElement, id: 'new-order-form', title: 'New order form' }, revision: 3 }
+  const unseen = { element: { ...element, id: 'other-view', title: 'Other view' }, revision: 1 }
+  const stale = { element: { ...created.element, title: 'Stale form' }, revision: 2 }
+  const list = vi.spyOn(props.client, 'listElements').mockResolvedValueOnce({ records: [saved], nextCursor: 'next' })
+    .mockResolvedValueOnce({ records: [stale, created, unseen, unseen], nextCursor: null })
+  const submit = vi.spyOn(props.client, 'submitAction')
+  const reconcile = vi.spyOn(props.client, 'reconcileAction')
+  const start = vi.spyOn(props.client, 'submitManualWorkflow')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeActionForm()
+  fireEvent.click(screen.getByRole('button', { name: 'Save action form' }))
+  await screen.findByRole('button', { name: 'New order form · revision 3' })
+  fireEvent.click(screen.getByRole('button', { name: 'Load more saved views' }))
+  await screen.findByRole('button', { name: 'Other view · revision 1' })
+  expect(screen.getAllByRole('button', { name: 'New order form · revision 3' })).toHaveLength(1)
+  expect(screen.getAllByRole('button', { name: 'Other view · revision 1' })).toHaveLength(1)
+  expect(screen.queryByRole('button', { name: /Stale form/ })).toBeNull()
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Load more saved views' })).toBeNull()
+  expect(list.mock.calls[1][1]).toMatchObject({ after: 'next' })
+  fireEvent.click(screen.getByRole('button', { name: 'New order form · revision 3' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send order now' })).toBeEnabled())
+  expect(submit).not.toHaveBeenCalled()
+  expect(reconcile).not.toHaveBeenCalled()
+  expect(start).not.toHaveBeenCalled()
+})
+it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('blocks action form creation and clears input on fresh %s drift', async (field) => {
+  const { props, authority } = setupActionComposer()
+  const saveElement = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeActionForm()
+  authority.scope = { ...scope, [field]: field === 'projectRole' ? 'reviewer' : field === 'externalSubject' ? 'auth0|other' : field === 'externalAuthority' ? 'other' : otherProject }
+  if (field === 'projectId' || field === 'externalAuthority') vi.spyOn(props.client, 'getScope').mockResolvedValueOnce(authority.scope)
+  fireEvent.click(screen.getByRole('button', { name: 'Save action form' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(saveElement).not.toHaveBeenCalled()
+  expect(screen.queryByLabelText('Form title')).toBeNull()
+})
+it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('aborts action form creation and ignores its late record on %s change', async (change) => {
+  const { props, sessionController } = setupActionComposer()
+  let finish
+  const saveElement = vi.spyOn(props.client, 'saveElement').mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+  const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeActionForm()
+  fireEvent.click(screen.getByRole('button', { name: 'Save action form' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = saveElement.mock.calls[0][2].signal
+  if (change === 'unmount') unmount()
+  else if (change === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else if (change === 'status') act(() => sessionController.change({ status: 'expired' }))
+  else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } : change === 'account' ? { accountScope: 'account-b' } : { active: false })} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish({ element: { ...actionElement, id: 'new-order-form', title: 'New order form' }, revision: 1 }))
+  expect(screen.queryByRole('button', { name: /New order form · revision/ })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Check saved form' })).toBeNull()
+})
+it('routes a forbidden action catalog result through host permission handling', async () => {
+  const { props } = setupActionComposer()
+  vi.spyOn(props.client, 'getActionCatalog').mockRejectedValue({ status: 403 })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Load permitted actions' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(screen.queryByRole('region', { name: 'Create an action form' })).toBeNull()
+})
 function setupComposer() {
   const harness = setupAction()
   const original = harness.fetchImpl.getMockImplementation()

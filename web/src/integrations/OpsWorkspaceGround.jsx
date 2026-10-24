@@ -9,6 +9,7 @@ import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
+import { ActionDefinitionPanel } from './ActionDefinitionPanel.jsx'
 import { WorkflowSchedulePreviewPanel } from './WorkflowSchedulePreviewPanel.jsx'
 import { WorkflowScheduleDraftBrowser } from './WorkflowScheduleDraftBrowser.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
@@ -144,7 +145,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     if (!ctx || !current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
     const scope = await client.getScope(projectId, { signal })
     if (!current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
-    if (!['owner', 'editor'].includes(scope.projectRole) || scopeCacheIdentity(scope, ctx.sessionGeneration) !== ctx.cacheIdentity) {
+    if (scope.projectId !== projectId || !['owner', 'editor'].includes(scope.projectRole) || scopeCacheIdentity(scope, ctx.sessionGeneration) !== ctx.cacheIdentity) {
       fail({ status: 403 }, ctx)
       throw new DOMException('Aborted', 'AbortError')
     }
@@ -317,8 +318,18 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       const isDataset = resource === 'datasets'
       const page = await client[isDataset ? 'listDatasets' : 'listElements'](projectId, { signal: ctx.controller.signal,
         after: isDataset ? state.datasetCursor : state.elementCursor })
-      if (current(ctx)) setState((old) => ({ ...old, [resource]: [...old[resource], ...page.records],
-        [isDataset ? 'datasetCursor' : 'elementCursor']: page.nextCursor }))
+      if (current(ctx)) setState((old) => {
+        let records = [...old[resource], ...page.records]
+        if (!isDataset) {
+          const byId = new Map()
+          for (const record of records) {
+            const previous = byId.get(record.element.id)
+            if (!previous || record.revision > previous.revision) byId.set(record.element.id, record)
+          }
+          records = [...byId.values()]
+        }
+        return { ...old, [resource]: records, [isDataset ? 'datasetCursor' : 'elementCursor']: page.nextCursor }
+      })
     })
   }
   const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
@@ -339,6 +350,13 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             contextKey={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow} mode={mode === 'light' || mode === 'dark' ? mode : undefined}
             onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ActionDefinitionPanel
+            key={JSON.stringify(['action-definition', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
+            signal={context.current.controller.signal} guard={guardWorkflow}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
+            onSaved={(record) => { const ctx = context.current; if (ctx && current(ctx)) setState((old) => ({ ...old,
+              elements: [...old.elements.filter((item) => item.element.id !== record.element.id), record],
+              notice: `Saved ${record.element.title}, revision ${record.revision}. No action was submitted.` })) }} />}
           {['owner', 'editor', 'reviewer', 'read_only'].includes(state.scope.projectRole) && context.current && <WorkflowSchedulePreviewPanel
             key={JSON.stringify(['schedule-preview', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardSchedulePreview}

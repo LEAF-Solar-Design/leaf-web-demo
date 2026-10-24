@@ -3,30 +3,30 @@
   "_ref": "5c930f5a",
   "chunks": {
     "App.css": 10405,
-    "App.js": 123279,
-    "ElementContextMenu.js": 34272,
+    "App.js": 123282,
+    "ElementContextMenu.js": 34274,
     "LeafPlatformScene.css": 494,
     "LeafPlatformScene.js": 9061,
-    "OpsWorkspaceGround.js": 168719,
+    "OpsWorkspaceGround.js": 170295,
     "SheetsPage.css": 2583,
     "SheetsPage.js": 5420,
     "Viewer.js": 13583,
     "bridgeText.js": 21274,
     "index.css": 40176,
-    "index.js": 222810,
+    "index.js": 222808,
     "mockStageAuthority.js": 258,
     "useAnnotations.js": 2024,
     "vendor-react.js": 45884,
     "vendor-viewer.js": 123469,
     "worker-browser.js": 3824,
-    "LabGround.js": 26491,
+    "LabGround.js": 26490,
     "LabGround.css": 752,
-    "LabCanvas.js": 495976,
+    "LabCanvas.js": 495977,
     "string.js": 4533,
     "LabCanvas.css": 2547,
-    "hostBridge.js": 2622
+    "hostBridge.js": 2623
   },
-  "total": 1360456,
+  "total": 1362036,
   "total_allowance_bytes": 16384,
   "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers.",
   "stem_caps": {
@@ -218,5 +218,34 @@
     },
     "measurement_receipt_sha256": "573413ed139d82a88b3634ba8c38ee8f51a9cd6318245d2febb64005aef36e7d",
     "mini_job": "e41209152df140e8b87d54d955298bfb"
+  },
+  "isolated_action_form_measurement": {
+    "method": "Complete paired in-memory Vite JS/CSS builds with canonical before overlay and gzip9; fixed after build identity and identical configuration/dependencies. Only the isolated feature delta is added.",
+    "before_ref": "f41054e6584d2e4859f5937ea5634eb4d01dd27e",
+    "after_ref": "46bffee560c744a390933f32e81a8dfcc3dec843",
+    "before_total": 1364285,
+    "after_total": 1365865,
+    "delta": 1580,
+    "deltas": {
+      "index.js": -2,
+      "App.js": 3,
+      "ElementContextMenu.js": 2,
+      "OpsWorkspaceGround.js": 1576,
+      "LabGround.js": -1,
+      "hostBridge.js": 1,
+      "LabCanvas.js": 1
+    },
+    "baseline_before_total": 1351812,
+    "unrelated_drift_excluded": 12473,
+    "measurement_sha256": "6f2ecc7263fd28b280f26c38eb2e20068e74e8fe9ff09f87da42f29732892160",
+    "producer_job": "ff50ce011c6042e58d9bbed1885fb9d4",
+    "producer": {
+      "node": "v22.23.2",
+      "zlib": "1.2.12",
+      "vite": "6.4.3",
+      "platform": "darwin",
+      "arch": "arm64"
+    },
+    "build_identity_fixed_to": "46bffee560c744a390933f32e81a8dfcc3dec843"
   }
 }
