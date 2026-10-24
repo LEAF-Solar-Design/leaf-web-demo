@@ -11,6 +11,7 @@ import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
 import { ActionDefinitionPanel } from './ActionDefinitionPanel.jsx'
 import { WorkflowSchedulePreviewPanel } from './WorkflowSchedulePreviewPanel.jsx'
+import { WorkflowScheduleDraftBrowser } from './WorkflowScheduleDraftBrowser.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 import './ops-workspace.css'
 
@@ -24,7 +25,7 @@ export function scopeCacheIdentity(scope, generation) {
 }
 
 export function OpsWorkspaceGround({ active = false, projectId = null, projectLabel, session, signedIn = false, accountScope, mock = false,
-  leavingGround = null, studioShell = false, occluders = NO_OCCLUDERS, client: suppliedClient }) {
+  leavingGround = null, studioShell = false, occluders = NO_OCCLUDERS, client: suppliedClient, mode }) {
   const client = useMemo(() => suppliedClient || createIntegrationsClient(), [suppliedClient])
   const [state, setState] = useState(empty)
   const [form, setForm] = useState(blankForm)
@@ -344,6 +345,11 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
         {state.error && <div role="alert"><p>{state.error}</p><button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button></div>}
         {state.scope && <>
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WorkflowScheduleDraftBrowser
+            key={JSON.stringify(['schedule-drafts', identity.key, context.current.cacheIdentity])}
+            contextKey={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
+            signal={context.current.controller.signal} guard={guardWorkflow} mode={mode === 'light' || mode === 'dark' ? mode : undefined}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ActionDefinitionPanel
             key={JSON.stringify(['action-definition', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow}
