@@ -6,7 +6,7 @@
     "last_change": "34401e73 (2026-07-08)",
     "read_from": "local checkout D:/GitHub/ops-dashboard, branch fix/demo-blurb-bound, 2026-09-23",
     "blocks": [":root", ".dark", "@layer components .section-label, .metric-hero, .num", "@media (prefers-reduced-motion: reduce)"],
-    "note": "Values are copied verbatim from the blocks above; LeafTheme.swift matches them hex for hex (K-D10). To regenerate, copy the same blocks again and review the diff. Never edit a value here by hand."
+    "note": "Historical Mushy snapshot retained for compatibility. Product profiles label current choices. Regenerate CSS and Swift with scripts/generate-leaf-tokens.py after reviewing source pins."
   },
   "color": {
     "light": {
@@ -116,6 +116,56 @@
   "size": {
     "target_min_px": 44
   },
+  "roles": {
+    "color": { "bg": "background", "background": "background", "foreground": "foreground", "surface": "card", "border": "border", "primary": "primary", "command": "primary", "success": "state-healthy", "data-series-1": "chart-1", "data-series-2": "chart-2", "data-series-3": "chart-3", "data-series-4": "chart-4", "data-series-5": "chart-5" },
+    "font": ["sans", "mono", "label"],
+    "typography": { "body": "font.sans", "code": "font.mono", "label": "type.section_label", "metric": "type.metric_hero", "figure": "type.figure" },
+    "spacing": { "chrome-gap": "2px", "control-gap": "8px", "panel-padding": "16px", "target-min": "44px" },
+    "radius": { "control": "0.5rem", "panel": "0.5rem", "chrome": "3px" }
+  },
+  "cascade": {
+    "default_profile": "mushy",
+    "namespace": "--leaf-",
+    "profile_scope": "Only data-leaf-profile elements and :root for mushy declare inherited light/dark role pairs and resolved roles.",
+    "theme": "Inherited --leaf-when-dark and --leaf-when-light toggles select the nearest theme. Explicit light wins over dark on the same element; profiles without a theme inherit toggles and default to light at the root.",
+    "theme_only": "Theme-bearing elements set toggles and recompute every role from inherited light/dark pairs. Consumers read --leaf-<role> only; --leaf-light-*, --leaf-dark-* pairs and --leaf-when-* toggles are internal. Descendants inherit computed values, never expressions.",
+    "order": ["root light toggles and resolved roles", "profile pairs and resolved roles", "dark toggles and resolved roles", "explicit light toggles and resolved roles"]
+  },
+  "profiles": {
+    "mushy": {
+      "label": "Mushy historical Geist palette, with presenter choices labelled separately",
+      "font": { "sans": "\"Geist\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif", "mono": "\"Geist Mono\", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", "label": "\"Geist\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif" },
+      "spacing": { "chrome-gap": "2px", "control-gap": "8px", "panel-padding": "16px", "target-min": "44px" },
+      "radius": { "control": "0.5rem", "panel": "0.5rem", "chrome": "3px" },
+      "color": {
+        "light": { "bg": "#f7f8fa", "background": "#f7f8fa", "foreground": "#0b0d12", "surface": "#ffffff", "border": "#e2e5ea", "primary": "#0b0d12", "command": "#0b0d12", "success": "#146c43", "data-series-1": "#2f6f9f", "data-series-2": "#146c43", "data-series-3": "#95590a", "data-series-4": "#6d5bd0", "data-series-5": "#64748b" },
+        "dark": { "bg": "#0c0e12", "background": "#0c0e12", "foreground": "#e6e8ec", "surface": "#15181e", "border": "#262b33", "primary": "#e6e8ec", "command": "#e6e8ec", "success": "#4cc38a", "data-series-1": "#5b9bd5", "data-series-2": "#4cc38a", "data-series-3": "#e0a94b", "data-series-4": "#9b87e8", "data-series-5": "#9aa1ac" }
+      },
+      "existing_presenter": { "font": "\"Segoe UI\",system-ui,sans-serif", "background": "#edf0f4", "primary": "#284f78" }
+    },
+    "ops": {
+      "label": "Ops Inter Tight body, Inter labels, green primary actions",
+      "font": { "sans": "var(--font-inter-tight)", "mono": "ui-monospace, 'SF Mono', Menlo, monospace", "label": "var(--font-inter), system-ui, sans-serif" },
+      "spacing": { "chrome-gap": "2px", "control-gap": "8px", "panel-padding": "16px", "target-min": "44px" },
+      "radius": { "control": "0.5rem", "panel": "0.5rem", "chrome": "3px" },
+      "color": {
+        "light": { "bg": "#fafafa", "background": "#fafafa", "foreground": "#0b0d12", "surface": "#ffffff", "border": "#e2e5ea", "primary": "#16a34a", "command": "#16a34a", "success": "#16a34a", "data-series-1": "oklch(0.5 0.12 230)", "data-series-2": "#16a34a", "data-series-3": "#d97706", "data-series-4": "#6d5bd0", "data-series-5": "#71717a" },
+        "dark": { "bg": "#0a0a0a", "background": "#0a0a0a", "foreground": "#e6e8ec", "surface": "#15181e", "border": "#262b33", "primary": "#22c55e", "command": "#22c55e", "success": "#22c55e", "data-series-1": "oklch(0.72 0.12 230)", "data-series-2": "#22c55e", "data-series-3": "oklch(0.8 0.14 85)", "data-series-4": "#9b87e8", "data-series-5": "#a1a1aa" }
+      }
+    },
+    "studio": {
+      "label": "Studio chrome, blue active accent; existing command green remains a separate role",
+      "font": { "sans": "system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif", "mono": "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", "label": "system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" },
+      "spacing": { "chrome-gap": "2px", "control-gap": "8px", "panel-padding": "16px", "target-min": "44px" },
+      "radius": { "control": "0.5rem", "panel": "0.5rem", "chrome": "3px" },
+      "color": {
+        "light": { "bg": "#2a2a2a", "background": "#2a2a2a", "foreground": "#e2e2e2", "surface": "#232323", "border": "#424242", "primary": "#1390cc", "success": "#04b255", "command": "#04b255", "data-series-1": "#2f6f9f", "data-series-2": "#146c43", "data-series-3": "#95590a", "data-series-4": "#6d5bd0", "data-series-5": "#64748b" },
+        "dark": { "bg": "#2a2a2a", "background": "#2a2a2a", "foreground": "#e2e2e2", "surface": "#232323", "border": "#424242", "primary": "#1390cc", "success": "#04b255", "command": "#04b255", "data-series-1": "#5b9bd5", "data-series-2": "#4cc38a", "data-series-3": "#e0a94b", "data-series-4": "#9b87e8", "data-series-5": "#9aa1ac" }
+      },
+      "theme_note": "Studio chrome retains its dark shell in both application themes. Each theme explicitly pins data roles independently of primary and success."
+    }
+  },
+  "adoption": { "lab_profile": "studio", "follow_ups": ["FUP-TOK-OPS", "FUP-TOK-STUDIO", "FUP-STD-MUSHY"] },
   "motion": {
     "reduced_query": "(prefers-reduced-motion: reduce)",
     "reduced_duration_ms": 0.01

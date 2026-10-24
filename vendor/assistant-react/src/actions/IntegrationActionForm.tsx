@@ -24,6 +24,8 @@ export interface IntegrationActionFormProps {
   /** May throw IntegrationActionPreflightError only before invoking the action submission client. */
   onSubmit: (submission: IntegrationActionSubmissionV1, signal: AbortSignal) => Promise<unknown>;
   onCheckStatus: (runId: string, signal: AbortSignal) => Promise<unknown>;
+  /** Explicitly check provider evidence without repeating the original action. The host owns authority. */
+  onReconcile?: (runId: string, signal: AbortSignal) => Promise<unknown>;
 }
 
 const controlStyle: CSSProperties = {
@@ -56,7 +58,8 @@ export function IntegrationActionForm(props: IntegrationActionFormProps) {
   if (!parsed.success || typeof props.contextKey !== "string" || props.contextKey.length === 0 ||
       !Number.isSafeInteger(props.grantRevision) || props.grantRevision <= 0 ||
       !Object.hasOwn(availabilityCopy, props.availability) || typeof props.onSubmit !== "function" ||
-      typeof props.onCheckStatus !== "function" || (props.mode !== undefined && props.mode !== "light" && props.mode !== "dark")) {
+      typeof props.onCheckStatus !== "function" || (props.onReconcile !== undefined && typeof props.onReconcile !== "function") ||
+      (props.mode !== undefined && props.mode !== "light" && props.mode !== "dark")) {
     return <p role="status">{availabilityCopy.unavailable}</p>;
   }
   // React's key is never a DOM attribute. Exact presentation/binding changes discard scoped state synchronously.
@@ -64,7 +67,7 @@ export function IntegrationActionForm(props: IntegrationActionFormProps) {
   return <ActionFormInner key={scope} {...props} element={parsed.data} displayPreferences={preferences} />;
 }
 
-function ActionFormInner({ element, grantRevision, availability, displayPreferences, mode = "light", onSubmit, onCheckStatus }: IntegrationActionFormProps) {
+function ActionFormInner({ element, grantRevision, availability, displayPreferences, mode = "light", onSubmit, onCheckStatus, onReconcile }: IntegrationActionFormProps) {
   const id = useId();
   const [inputs, setInputs] = useState<ActionInputs>(() => initialInputs(element));
   const [errors, setErrors] = useState<Record<string, string>>(() => Object.create(null));
@@ -76,7 +79,7 @@ function ActionFormInner({ element, grantRevision, availability, displayPreferen
   const frozen = useRef<IntegrationActionSubmissionV1 | undefined>(undefined);
   const mayHaveSubmitted = useRef(false);
   const latch = useRef(false);
-  const active = useRef<{ controller: AbortController; timer: ReturnType<typeof setTimeout> } | undefined>(undefined);
+  const active = useRef<{ kind: "submit" | "status" | "reconcile"; controller: AbortController; timer: ReturnType<typeof setTimeout> } | undefined>(undefined);
   const alive = useRef(true);
   const summary = useRef<HTMLDivElement>(null);
   const controls = useRef<Record<string, HTMLInputElement | HTMLSelectElement | null>>({});
@@ -94,19 +97,34 @@ function ActionFormInner({ element, grantRevision, availability, displayPreferen
   const ready = availability === "ready";
   const locked = busy || frozen.current !== undefined;
   const terminal = run !== undefined && isTerminal(run) && message !== unknownCopy;
+  const canReconcile = !!onReconcile && run?.state === "uncertain" && run.effect_outcome === "unknown" && !conflict && !terminal;
+
+  useEffect(() => {
+    const attempt = active.current;
+    if (attempt?.kind !== "reconcile" || (ready && onReconcile)) return;
+    active.current = undefined;
+    clearTimeout(attempt.timer);
+    attempt.controller.abort();
+    latch.current = false;
+    setBusy(false);
+    setMessage(unknownCopy);
+  }, [ready, onReconcile]);
 
   function update(fieldId: string, change: Partial<ActionInputs[string]>) {
     setInputs((previous) => ({ ...previous, [fieldId]: { ...previous[fieldId], ...change } }));
   }
 
-  async function dispatch(kind: "submit" | "status", submission: IntegrationActionSubmissionV1) {
+  async function dispatch(kind: "submit" | "status" | "reconcile", submission: IntegrationActionSubmissionV1) {
     // A synchronous latch covers click/Enter bursts before React commits disabled controls.
     if (latch.current || !ready) return;
+    if (kind === "reconcile" && !canReconcile) return;
     latch.current = true;
     setBusy(true);
-    setMessage(kind === "status" ? "Checking action status." : "Submitting action. Outcome pending.");
+    setMessage(kind === "reconcile" ? "Reconciliation pending. The action outcome is still unknown." :
+      kind === "status" ? "Checking action status." : "Submitting action. Outcome pending.");
     const controller = new AbortController();
     const attempt = {
+      kind,
       controller,
       timer: setTimeout(() => {
         if (!alive.current || active.current !== attempt) return;
@@ -124,6 +142,7 @@ function ActionFormInner({ element, grantRevision, availability, displayPreferen
       if (kind === "submit") mayHaveSubmitted.current = true;
       const response = kind === "status"
         ? await onCheckStatus(run!.run_id, controller.signal)
+        : kind === "reconcile" ? await onReconcile!(run!.run_id, controller.signal)
         : await onSubmit(submission, controller.signal);
       if (!alive.current || active.current !== attempt) return;
       if (kind === "submit") {
@@ -245,6 +264,11 @@ function ActionFormInner({ element, grantRevision, availability, displayPreferen
     </form>
     <div ref={summary} role="status" aria-live="polite" aria-atomic="true" tabIndex={-1} aria-busy={busy}>{message}</div>
     {run && <IntegrationActionRunStatus run={run} receipts={receipts} displayPreferences={displayPreferences} mode={mode} />}
+    {canReconcile && <div>
+      <p>Reconciliation checks provider evidence without repeating the action. The outcome may remain unknown.</p>
+      <button type="button" style={secondaryButton} disabled={busy || !ready}
+        onClick={() => { if (frozen.current) void dispatch("reconcile", frozen.current); }}>Reconcile outcome</button>
+    </div>}
     {frozen.current && !busy && !terminal && !conflict && (run ?
       <button type="button" style={secondaryButton} disabled={!ready} onClick={() => { if (frozen.current) void dispatch("status", frozen.current); }}>Check status</button> :
       <div>{message !== preflightCopy && <p>Recovery sends the same request and key. It can execute the original action if the server never received it.</p>}

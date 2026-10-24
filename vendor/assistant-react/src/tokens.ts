@@ -4,7 +4,8 @@ import tokenFile from "./leaf-tokens.v1.json";
 
 // The Leaf look (K-D10) comes from a package-local copy of contract/leaf-tokens.v1.json,
 // kept equal by test/self-contained.test.ts so this package vendors on its own.
-// The contract copies the ops-dashboard globals.css values. Components reference `var(--leaf-*)`
+// The Mushy profile resolves shared roles; legacy-only keys retain their pinned values.
+// Components reference `var(--leaf-*)`
 // only; the colour values live in the token file and reach the DOM through
 // tokenStyle() on the thread root, so no component carries a literal colour.
 
@@ -13,7 +14,24 @@ export type ColorToken = keyof typeof tokenFile.color.light;
 /** Tone of a state glyph or StateInk. Colour follows tone, never the other way round. */
 export type StateTone = "neutral" | "progress" | "attention" | "critical" | "healthy" | "stale";
 
-export const LEAF_TOKENS = tokenFile;
+const MUSHY_PROFILE = tokenFile.profiles.mushy;
+
+/** Map shared roles onto the existing assistant colour names. */
+function resolvedColors(mode: ColorMode): Record<ColorToken, string> {
+  const values: Record<ColorToken, string> = { ...tokenFile.color[mode] };
+  const roles = MUSHY_PROFILE.color[mode];
+  for (const [role, token] of Object.entries(tokenFile.roles.color)) {
+    values[token as ColorToken] = roles[role as keyof typeof roles];
+  }
+  return values;
+}
+
+export const LEAF_TOKENS = {
+  ...tokenFile,
+  color: { light: resolvedColors("light"), dark: resolvedColors("dark") },
+  font: MUSHY_PROFILE.font,
+  radius: { ...tokenFile.radius, base: MUSHY_PROFILE.radius.control },
+};
 export const COLOR_TOKENS = Object.keys(tokenFile.color.light) as ColorToken[];
 
 const COLOR_VALUE = /^#[0-9a-f]{6}$/;
@@ -21,8 +39,8 @@ const COLOR_VALUE = /^#[0-9a-f]{6}$/;
 /** Fails closed at import: a malformed or lopsided token file never renders. */
 function assertTokenFile(): void {
   if (tokenFile.schema !== "leaf.tokens.v1") throw new Error(`unknown token schema ${String(tokenFile.schema)}`);
-  const light = tokenFile.color.light as Record<string, string>;
-  const dark = tokenFile.color.dark as Record<string, string>;
+  const light = LEAF_TOKENS.color.light;
+  const dark = LEAF_TOKENS.color.dark;
   if (Object.keys(dark).length !== COLOR_TOKENS.length) throw new Error("light and dark token sets differ");
   for (const token of COLOR_TOKENS) {
     if (!COLOR_VALUE.test(light[token] ?? "") || !COLOR_VALUE.test(dark[token] ?? "")) {
@@ -51,12 +69,14 @@ export const REDUCED_MOTION_QUERY: string = tokenFile.motion.reduced_query;
 
 /** The custom properties a thread root sets for one colour mode. */
 export function tokenStyle(mode: ColorMode): CSSProperties {
-  const values = tokenFile.color[mode] as Record<string, string>;
+  const values = LEAF_TOKENS.color[mode];
   const style: Record<string, string> = {};
   for (const token of COLOR_TOKENS) style[`--leaf-${token}`] = values[token];
-  style["--leaf-font-sans"] = tokenFile.font.sans;
-  style["--leaf-font-mono"] = tokenFile.font.mono;
-  style["--leaf-radius"] = tokenFile.radius.base;
+  for (const [role, value] of Object.entries(MUSHY_PROFILE.color[mode])) style[`--leaf-color-${role}`] = value;
+  for (const [role, value] of Object.entries(MUSHY_PROFILE.font)) style[`--leaf-font-${role}`] = value;
+  for (const [role, value] of Object.entries(MUSHY_PROFILE.spacing)) style[`--leaf-spacing-${role}`] = value;
+  for (const [role, value] of Object.entries(MUSHY_PROFILE.radius)) style[`--leaf-radius-${role}`] = value;
+  style["--leaf-radius"] = LEAF_TOKENS.radius.base;
   return style as CSSProperties;
 }
 
