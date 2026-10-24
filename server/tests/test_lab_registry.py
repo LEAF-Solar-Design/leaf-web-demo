@@ -39,26 +39,35 @@ def test_total_effect(capability, adapter, execution, live, effect):
     assert registry.total_effect(capability, adapter, execution, live) == effect
 
 
-@pytest.mark.parametrize("capability,execution,host_source,residency", [
-    ("host.value", "inline", None, "host"),
-    ("host.value", "worker", None, "host"),
-    ("pure.value", "inline", "kashbot.engine", "host"),
-    ("read.value", "inline", "mcp.example", "host"),
-    ("value", "handoff", None, "host"),
-    ("pure.value", "inline", None, "none"),
-    ("hosted.value", "inline", None, "none"),
-    ("read.value", "inline", None, "tenant"),
-    ("simulate.value", "inline", None, "tenant"),
-    ("pure.value", "worker", None, "tenant"),
+@pytest.mark.parametrize("effect,capability,execution,host_source,residency", [
+    ("pure", "host.value", "inline", None, "host"),
+    ("compute", "host.value", "worker", None, "host"),
+    ("pure", "pure.value", "inline", "kashbot.engine", "host"),
+    ("read", "read.value", "inline", "mcp.example", "host"),
+    ("read", "value", "handoff", None, "host"),
+    ("pure", "pure.value", "inline", None, "none"),
+    ("pure", "hosted.value", "inline", None, "none"),
+    ("read", "read.value", "inline", None, "tenant"),
+    ("simulate", "simulate.value", "inline", None, "tenant"),
+    ("simulate", "value", "inline", None, "tenant"),
+    ("compute", "pure.value", "worker", None, "tenant"),
 ])
-def test_total_residency(capability, execution, host_source, residency):
-    assert registry.total_residency(capability, execution, host_source) == residency
+def test_total_residency(effect, capability, execution, host_source, residency):
+    assert registry.total_residency(effect, capability, execution, host_source) == residency
 
 
 def test_seed_residency_agrees_with_table():
     for block in registry._seed_registry().values():
         assert block.residency == registry.total_residency(
-            block.capability, block.execution_class, block.host_source)
+            block.effect, block.capability, block.execution_class, block.host_source)
+
+
+def test_seed_solar_adapter_residency(monkeypatch):
+    seed = {"id": "solar-adapter", "capability": "value", "solar_adapter": "simulate",
+            "execution_class": "inline"}
+    monkeypatch.setattr(registry.catalog, "seed_tools", lambda: [seed])
+    block = registry._seed_registry()[("solar-adapter", "1.0.0")]
+    assert (block.effect, block.residency) == ("simulate", "tenant")
 
 
 def test_lookup():
@@ -112,6 +121,27 @@ def test_register_derived_residency(extension, capability, execution, host_sourc
     data = manifest()
     data.update(kind=block.kind, effect=block.effect, residency=residency)
     assert validate_manifest(data) is block
+
+
+def test_register_solar_adapter_residency(extension):
+    extension.update(capability="value", solar_adapter="simulate", execution_class="inline")
+    block = registry.register_extension(extension)
+    assert (block.effect, block.residency) == ("simulate", "tenant")
+    data = manifest()
+    data.update(kind=block.kind, effect=block.effect, residency="tenant")
+    assert validate_manifest(data) is block
+    data["residency"] = "none"
+    with pytest.raises(ManifestInvalid) as caught:
+        validate_manifest(data)
+    assert caught.value.code == "lab_manifest_spoof"
+    assert caught.value.pointer == "/residency"
+    extension["residency"] = "none"
+    before = dict(registry.REGISTRY)
+    with pytest.raises(ManifestInvalid) as caught:
+        registry.register_extension(extension)
+    assert caught.value.code == "lab_manifest_spoof"
+    assert caught.value.pointer == "/residency"
+    assert registry.REGISTRY == before
 
 
 def test_register_returns_schema(extension):

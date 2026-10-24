@@ -40,7 +40,7 @@ def total_effect(capability, solar_adapter, execution_class, aps_live):
     return "pure"
 
 
-def total_residency(capability, execution_class, host_source):
+def total_residency(effect, capability, execution_class, host_source):
     """Residency table, in precedence order:
 
     host.* capability, a host source name, or handoff -> host;
@@ -49,7 +49,7 @@ def total_residency(capability, execution_class, host_source):
     if ((isinstance(capability, str) and capability.startswith("host."))
             or host_source or execution_class == "handoff"):
         return "host"
-    if total_effect(capability, None, execution_class, False) == "pure":
+    if effect == "pure":
         return "none"
     return "tenant"
 
@@ -84,7 +84,7 @@ def _seed_registry():
         if effect == "refused" or capability == "money" or capability.startswith("money."):
             continue
         block = TrustedBlock(tool.get("id", tool.get("name")), tool.get("version", "1.0.0"),
-                             effect, total_residency(capability, execution, tool.get("host_source")),
+                             effect, total_residency(effect, capability, execution, tool.get("host_source")),
                              capability, adapter, execution, live, tool.get("host", "production"),
                              host_source=tool.get("host_source"))
         key = (block.kind, block.version)
@@ -93,8 +93,9 @@ def _seed_registry():
         result[key] = block
     for source in KASHBOT_CLASSES:
         capability = "read." + source
-        block = TrustedBlock("kashbot." + source, "1.0.0", "read",
-                             total_residency(capability, "handoff", source),
+        effect = total_effect(capability, None, "handoff", False)
+        block = TrustedBlock("kashbot." + source, "1.0.0", effect,
+                             total_residency(effect, capability, "handoff", source),
                              capability, None, "handoff", False, "production", host_source=source)
         key = (block.kind, block.version)
         if key in result:
@@ -161,7 +162,7 @@ def register_extension(manifest):
     if "effect" in manifest and manifest["effect"] != effect:
         fail("effect", "lab_manifest_spoof")
     host_source = manifest.get("host_source")
-    residency = total_residency(capability, execution, host_source)
+    residency = total_residency(effect, capability, execution, host_source)
     if "residency" in manifest and manifest["residency"] != residency:
         fail("residency", "lab_manifest_spoof")
     host = manifest.get("host", "production")
