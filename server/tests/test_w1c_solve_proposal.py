@@ -17,6 +17,7 @@ import solar_project_solve as solve
 import solar_sizing_client as sizing
 from leaf_cloud_grants import CloudError, CloudGrant
 from leaf_platform import canonical_jobs as jobs, project_solve_store as real_store
+from product_capability_availability import w1_graph_readiness
 from solar_design_graph import GraphValidationError
 from test_w1_design_graph import graph as graph_fixture  # noqa: F401
 from test_w1_solve_commit import case, graph as graph  # noqa: F401
@@ -197,6 +198,25 @@ def test_not_ready_refused(admitted):
     admitted.s.set_parent(b3.embedded(value))
     result = request(admitted)
     assert result["content"]["error"]["reason_code"] == "SIZED_PANEL_GROUPS_REQUIRED"
+
+
+def test_not_ready_precedes_invalid_request(admitted):
+    value = admitted.context.graph
+    value["settings"]["global_string_sizing_confirmed"] = False
+    admitted.s.set_parent(b3.embedded(value))
+    admitted.params = {**admitted.params, "request": {"grid": {}}}
+    result = request(admitted)
+    reason_code = result["content"]["error"]["reason_code"]
+    assert reason_code == "SIZED_PANEL_GROUPS_REQUIRED"
+    assert reason_code != "CLOUD_REQUEST_INVALID"
+
+
+def test_ready_invalid_request_still_refused(admitted):
+    assert w1_graph_readiness(admitted.context.graph)[solve.TOOL_NAME]["input_ready"]
+    params = {**admitted.params, "request": {"grid": {}}}
+    with pytest.raises(CloudError) as exc:
+        solve.plan_request(admitted.context, params, admitted.solve_context)
+    assert exc.value.classification.upper() == "CLOUD_REQUEST_INVALID"
 
 
 def test_route_forwards_context_and_derives_drawing(case, monkeypatch):
