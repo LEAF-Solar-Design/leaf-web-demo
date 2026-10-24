@@ -147,6 +147,24 @@ describe("Lab publish", () => {
     expect(port.publishRef).not.toHaveBeenCalled();
   });
 
+  it("returns a fixed error for malformed JSON and reader validation failures", async () => {
+    const port = fakePort();
+    const url = listen(port);
+    for (const body of ['{"expected_remote_sha":', "not JSON", '{"expected_remote_sha":null,"expected_remote_sha":null}', new Uint8Array([0xff])]) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-tenant-id": TENANT, "x-harness-secret": SECRET },
+        body,
+      });
+      expect(response.status).toBe(422);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({
+        error: { code: "lab_publish_invalid", pointer: "", message: "Invalid JSON body" },
+      });
+    }
+    expect(port.publishRef).not.toHaveBeenCalled();
+  });
+
   it("validates closed bodies and nonzero lowercase shas with JSON pointers", async () => {
     const port = fakePort();
     const url = listen(port);
@@ -163,6 +181,7 @@ describe("Lab publish", () => {
     }
     const oversized = await post(url, { ...validBody(), padding: "é".repeat(512) });
     expect(oversized.status).toBe(413);
+    expect(oversized.body).toEqual({ error: { code: "lab_body_too_large" } });
     expect(oversized.cacheControl).toBe("no-store");
     expect(port.publishRef).not.toHaveBeenCalled();
   });

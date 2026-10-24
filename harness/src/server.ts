@@ -951,7 +951,15 @@ export function createHarness(ports: HarnessPorts, opts?: {
             error: { code: "lab_inspect_unavailable", message: "Lab inspect is unavailable" },
           });
         }
-        const body = await readJsonBody(req, LAB_INSPECT_MAX_BODY_BYTES, true, false, true);
+        let body: unknown;
+        try {
+          body = await readJsonBody(req, LAB_INSPECT_MAX_BODY_BYTES, true, false, true);
+        } catch (error) {
+          if (error instanceof AuthorLoopError && error.status === 413) {
+            return send(res, 413, { error: { code: "lab_body_too_large" } });
+          }
+          return send(res, 422, { error: { code: "lab_inspect_invalid", pointer: "", message: "Invalid JSON body" } });
+        }
         const result = await handleLabInspect(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
         return send(res, result.status, result.body);
       }
@@ -963,7 +971,15 @@ export function createHarness(ports: HarnessPorts, opts?: {
             error: { code: "lab_publish_unavailable", message: "Lab publish is unavailable" },
           });
         }
-        const body = await readJsonBody(req, LAB_PUBLISH_MAX_BODY_BYTES, true, false, true);
+        let body: unknown;
+        try {
+          body = await readJsonBody(req, LAB_PUBLISH_MAX_BODY_BYTES, true, false, true);
+        } catch (error) {
+          if (error instanceof AuthorLoopError && error.status === 413) {
+            return send(res, 413, { error: { code: "lab_body_too_large" } });
+          }
+          return send(res, 422, { error: { code: "lab_publish_invalid", pointer: "", message: "Invalid JSON body" } });
+        }
         const result = await handleLabPublish(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
         return send(res, result.status, result.body);
       }
@@ -975,7 +991,15 @@ export function createHarness(ports: HarnessPorts, opts?: {
             error: { code: "lab_commit_unavailable", message: "Lab commit is unavailable" },
           });
         }
-        const body = await readJsonBody(req, LAB_COMMIT_MAX_BODY_BYTES, true, false, true);
+        let body: unknown;
+        try {
+          body = await readJsonBody(req, LAB_COMMIT_MAX_BODY_BYTES, true, false, true);
+        } catch (error) {
+          if (error instanceof AuthorLoopError && error.status === 413) {
+            return send(res, 413, { error: { code: "lab_body_too_large" } });
+          }
+          return send(res, 422, { error: { code: "lab_commit_invalid", pointer: "", message: "Invalid JSON body" } });
+        }
         const result = await handleLabCommit(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
         return send(res, result.status, result.body);
       }
