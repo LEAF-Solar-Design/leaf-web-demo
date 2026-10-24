@@ -60,6 +60,7 @@ export function createWorkspaceController({
 
   const listeners = new Set()
   let disposed = false
+  let readsPaused = false // a known guest: loadProjects publishes the empty, error-free snapshot and reads nothing
   const generations = { projects: 0, workspace: 0, org: 0, project: 0 }
   let state = {
     mock: !!mock,
@@ -101,7 +102,7 @@ export function createWorkspaceController({
   async function loadProjects() {
     const request = nextGeneration('projects')
     const orgId = state.orgId
-    if (state.mock || (!authLive && !orgId)) {
+    if (state.mock || readsPaused || (!authLive && !orgId)) {
       publish({ projects: [], projectsError: null, projectsLoading: false, projectsLoaded: false, bootstrapState: orgId ? 'bound' : 'unbound', bootstrapMessage: null })
       return []
     }
@@ -332,6 +333,8 @@ export function createWorkspaceController({
     })
   }
 
+  function setReadsPaused(next) { readsPaused = !!next }
+
   function dispose() {
     disposed = true
     invalidateAll()
@@ -354,6 +357,7 @@ export function createWorkspaceController({
     createProject,
     selectCanonicalVersion,
     setMock,
+    setReadsPaused,
     start,
     dispose,
   }

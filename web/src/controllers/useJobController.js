@@ -119,6 +119,7 @@ function formatLifecycleError(error, formatter) {
  */
 export default function useJobController({
   mock = false,
+  readsPaused = false,
   resetKey = null,
   services = defaultServices,
   storage,
@@ -474,6 +475,8 @@ export default function useJobController({
       setAuth(false)
       return undefined
     }
+    // A known guest's reads are paused: no jobs poll until the session can read.
+    if (readsPaused) return undefined
     let alive = true
     let timer = null
     const tick = async () => {
@@ -497,7 +500,7 @@ export default function useJobController({
       alive = false
       if (timer) clearInterval(timer)
     }
-  }, [mock, pollGeneration, pollIntervalMs, setAuth])
+  }, [mock, readsPaused, pollGeneration, pollIntervalMs, setAuth])
 
   useEffect(() => {
     if (mock) {
@@ -505,6 +508,8 @@ export default function useJobController({
       setReattaching(false)
       return undefined
     }
+    // Keep the stored pointer; reattach once the session can read.
+    if (readsPaused) return undefined
     const pointer = readInflightJob(storageRef.current)
     if (!pointer?.job_id) return undefined
     setInflight(pointer)
@@ -547,7 +552,7 @@ export default function useJobController({
       })
     })()
     return () => { alive = false }
-  }, [attachJob, mock, setAuth])
+  }, [attachJob, mock, readsPaused, setAuth])
 
   useEffect(() => {
     if (mock || typeof window === 'undefined' || typeof document === 'undefined') return undefined
