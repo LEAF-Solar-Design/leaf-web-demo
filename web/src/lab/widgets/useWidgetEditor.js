@@ -105,13 +105,13 @@ function commit(state, doc, extra = {}, group = false) {
   return { ...state, doc, past: group ? state.past : [...state.past, state.doc].slice(-150), future: [], guides: {}, nudgeAt: null, ...extra }
 }
 export function widgetEditorReducer(state, action) {
+  if (action.type === 'load') return createEditorState(action.doc)
   if (state.transaction && !['move', 'resize', 'end', 'cancel'].includes(action.type)) return state
   const { doc } = state, id = doc.active, surface = doc.formats[id], W = FORMATS[id].w
   const selectedId = action.id ?? state.selectedId, selected = surface.els.find((e) => e.id === selectedId)
   const withSurface = (f) => ({ ...doc, formats: { ...doc.formats, [id]: f } })
   const withElements = (els) => withSurface({ ...surface, els })
   switch (action.type) {
-    case 'load': return createEditorState(action.doc)
     case 'select': return action.reveal && selected && !selected.visible
       ? commit(state, withElements(surface.els.map((e) => e.id === selectedId ? { ...e, visible: true } : e)), { selectedId, nudgeAt: null })
       : { ...state, selectedId: action.id, nudgeAt: null }

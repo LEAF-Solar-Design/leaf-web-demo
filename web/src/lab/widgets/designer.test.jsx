@@ -102,6 +102,19 @@ describe('document editing and history', () => {
     state = reduce(state, { type: 'cancel' })
     expect(state).toEqual(original)
   })
+  it('loads a document during a gesture without retaining its transaction or snapshot', () => {
+    let state = seed()
+    state = reduce(state, { type: 'begin' })
+    state = reduce(state, { type: 'move', dx: 8, dy: 8, alt: true })
+    const doc = seed('homeS').doc
+    state = reduce(state, { type: 'load', doc })
+    expect(state).toEqual(createEditorState(doc))
+    expect(reduce(state, { type: 'cancel' })).toBe(state)
+    state = reduce(state, { type: 'add' })
+    state = reduce(state, { type: 'edit', patch: { text: 'After load' } })
+    state = reduce(reduce(state, { type: 'undo' }), { type: 'undo' })
+    expect(state.doc).toEqual(doc)
+  })
   it('supports every catalog preset as a valid primitive on every surface', () => {
     for (const format of Object.keys(FORMATS)) for (const preset of Object.keys(PRESETS)) {
       const state = reduce(seed(format), { type: 'add', preset })
@@ -332,6 +345,39 @@ describe('designer interactions', () => {
     expect(screen.getByLabelText('X').valueAsNumber).toBe(x)
     expect(screen.getByLabelText('Text')).toHaveValue('Your text')
   })
+  it.each(['move', 'se'])('cancels an unmounted %s gesture and restores the scoped draft and history', (handle) => {
+    vi.stubGlobal('PointerEvent', class extends MouseEvent {
+      constructor(type, options) { super(type, options); this.pointerId = options.pointerId ?? 1 }
+    })
+    const { rerender } = render(<WidgetsView scopeKey="first" />)
+    click('Add text'); edit('Text', 'Original'); click('Add text'); click('Undo')
+    fireEvent.click(screen.getByRole('button', { name: 'Text 1: Original', exact: true }))
+    const surface = screen.getByTestId('widget-surface'), original = surface.innerHTML
+    surface.setPointerCapture = vi.fn()
+    surface.hasPointerCapture = () => true
+    surface.releasePointerCapture = vi.fn()
+    const target = surface.querySelector(handle === 'move' ? '[data-element-id]' : `[data-handle="${handle}"]`)
+    fireEvent.pointerDown(target, { clientX: 20, clientY: 20, pointerId: 1, button: 0 })
+    fireEvent.pointerMove(surface, { clientX: 40, clientY: 40, pointerId: 1, altKey: true })
+    expect(surface.innerHTML).not.toBe(original)
+    rerender(<WidgetsView scopeKey="second" />)
+    expect(surface.releasePointerCapture).toHaveBeenCalledWith(1)
+    click('Add text'); edit('Text', 'Other scope')
+    rerender(<WidgetsView scopeKey="first" />)
+    expect(screen.getByTestId('widget-surface').innerHTML).toBe(original)
+    expect(screen.getByLabelText('Text')).toHaveValue('Original')
+    expect(screen.getByRole('button', { name: 'Redo', exact: true })).toBeEnabled()
+    click('Add text')
+    expect(screen.getByTestId('widget-surface').querySelectorAll('[data-element-id]')).toHaveLength(2)
+    edit('Text', 'After cancellation')
+    expect(screen.getByLabelText('Text')).toHaveValue('After cancellation')
+    click('Undo')
+    fireEvent.click(screen.getByRole('button', { name: 'Text 2: Your text', exact: true }))
+    expect(screen.getByLabelText('Text')).toHaveValue('Your text')
+    click('Undo')
+    fireEvent.click(screen.getByRole('button', { name: 'Text 1: Original', exact: true }))
+    expect(screen.getByTestId('widget-surface').innerHTML).toBe(original)
+  })
   it('supports arrows, shift arrows, escape, delete, duplicate, undo/redo outside inputs', () => {
     render(<WidgetsView scopeKey="local" />); click('Add text')
     const x = screen.getByLabelText('X').valueAsNumber
@@ -557,6 +603,40 @@ describe('SEL-207 critic regressions', () => {
 })
 
 describe('widget store client and states', () => {
+  it.each(['widget', 'other-widget'])('reloads %s mid-drag and permits Add, inspector edits and undo', async (id) => {
+    vi.stubGlobal('PointerEvent', class extends MouseEvent {
+      constructor(type, options) { super(type, options); this.pointerId = options.pointerId ?? 1 }
+    })
+    const doc = seed().doc
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(response({ graph: doc, revision: 1, kind: 'widget' }))
+      .mockResolvedValueOnce(response({ graph: doc, revision: 2, kind: 'widget' }))
+      .mockResolvedValueOnce(response({ revision: 3 }))
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<WidgetsView />); edit('Document ID', 'widget'); click('Load')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 1'))
+    const surface = screen.getByTestId('widget-surface')
+    surface.setPointerCapture = vi.fn()
+    surface.hasPointerCapture = () => true
+    surface.releasePointerCapture = vi.fn()
+    fireEvent.pointerDown(surface.querySelector('[data-element-id]'), { clientX: 20, clientY: 20, pointerId: 1, button: 0 })
+    fireEvent.pointerMove(surface, { clientX: 40, clientY: 40, pointerId: 1, altKey: true })
+    expect(screen.getByLabelText('X')).not.toHaveValue(doc.formats.la.els[0].x)
+    edit('Document ID', id); click('Load')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 2'))
+    expect(surface.releasePointerCapture).toHaveBeenCalledWith(1)
+    click('Add text')
+    expect(screen.getByTestId('widget-surface').querySelectorAll('[data-element-id]')).toHaveLength(2)
+    edit('Text', 'After reload')
+    expect(screen.getByLabelText('Text')).toHaveValue('After reload')
+    click('Undo')
+    fireEvent.click(screen.getByRole('button', { name: 'Text 2: Your text', exact: true }))
+    expect(screen.getByLabelText('Text')).toHaveValue('Your text')
+    click('Undo'); click('Save')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 3'))
+    expect(fetchImpl.mock.calls[1][0]).toBe(`/api/lab/docs/${id}/head`)
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body).graph).toEqual(doc)
+  })
   it('New saves the migrated default document with all reference layouts and inclusion flags', async () => {
     const fetchImpl = vi.fn(async () => response({ revision: 1, sha256: 'default' }))
     vi.stubGlobal('fetch', fetchImpl)

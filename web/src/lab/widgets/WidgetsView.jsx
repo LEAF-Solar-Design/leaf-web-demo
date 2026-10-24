@@ -44,7 +44,7 @@ export function WidgetsView({ scopeKey, hidden = false }) {
     })
     else {
       const previous = storeRef.current
-      const next = previous ? widgetEditorReducer(previous, action) : previous
+      const next = previous || action.type === 'load' ? widgetEditorReducer(previous, action) : previous
       storeRef.current = next
       setStoreState(next)
       if (previous && next.doc !== previous.doc) {
@@ -64,7 +64,6 @@ export function WidgetsView({ scopeKey, hidden = false }) {
     return null
   }, [state?.doc, graphOutputs])
   async function load(id = docId) {
-    if (storeRef.current?.transaction) return
     const ticket = ++requestGeneration.current
     setStatus('loading'); setFailure(null)
     const result = await loadWidget(id)
@@ -72,14 +71,13 @@ export function WidgetsView({ scopeKey, hidden = false }) {
     if (!result.ok) { setStatus('error'); setFailure(result); return }
     try {
       const doc = result.doc ? validateWidgetDoc(result.doc) : createWidgetDoc(DESIGNER_DEFAULT_DOC)
-      setStoreState(createEditorState(doc)); setLoadedId(id); setDocId(id); setHead(result.revision ?? null)
+      dispatch({ type: 'load', doc }); setLoadedId(id); setDocId(id); setHead(result.revision ?? null)
       setStatus(result.doc ? 'saved' : 'editing')
     } catch (error) { setStatus('invalid'); setFailure({ detail: error.message, pointer: '/graph' }) }
   }
   function newDocument() {
-    if (storeRef.current?.transaction) return
     requestGeneration.current += 1
-    setStoreState(createEditorState(createWidgetDoc(DESIGNER_DEFAULT_DOC))); setLoadedId(docId); setHead(null); setFailure(null); setStatus('editing')
+    dispatch({ type: 'load', doc: createWidgetDoc(DESIGNER_DEFAULT_DOC) }); setLoadedId(docId); setHead(null); setFailure(null); setStatus('editing')
   }
   async function save() {
     if (local || invalid || !state || state.transaction || !validId(loadedId ?? '')) return

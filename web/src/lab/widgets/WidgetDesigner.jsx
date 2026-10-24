@@ -31,15 +31,17 @@ export default function WidgetDesigner({ state, dispatch, local, hidden = false,
   const allowedPreset = supportsPreset(doc.active, preset) ? preset : 'text'
   if (!invalid) lastTree.current = doc
   const paintDoc = Object.hasOwn(lastTree.current.formats, doc.active) ? lastTree.current : createWidgetDoc()
-  useEffect(() => { drag.current = null }, [doc.active])
-  useEffect(() => () => { drag.current = null }, [dispatch])
+  useEffect(() => () => { finishGesture(true) }, [dispatch, doc.active])
   useEffect(() => {
-    if (hidden) { if (drag.current) { drag.current = null; dispatch({ type: 'cancel' }) } return }
+    if (!state.transaction) finishGesture(true)
+  }, [state.transaction])
+  useEffect(() => {
+    if (hidden) { finishGesture(true); return }
     function keydown(event) {
       if (!surfaceRef.current?.isConnected || surfaceRef.current.closest('[hidden]')) return
       if (event.target.closest?.('input, textarea, select, [contenteditable="true"]')) return
       if (drag.current) {
-        if (event.key === 'Escape') { drag.current = null; dispatch({ type: 'cancel' }); event.preventDefault() }
+        if (event.key === 'Escape') { finishGesture(true); event.preventDefault() }
         else if (event.ctrlKey || event.metaKey || event.key.startsWith('Arrow') || ['Delete', 'Backspace'].includes(event.key)) event.preventDefault()
         return
       }
@@ -59,7 +61,7 @@ export default function WidgetDesigner({ state, dispatch, local, hidden = false,
     if (hidden || drag.current) return
     if (event.button != null && event.button !== 0) return
     const bounds = surfaceRef.current.getBoundingClientRect()
-    drag.current = { id: element.id, original: element, handle, x: event.clientX, y: event.clientY, zoom: bounds.width / W || 1, pointerId: event.pointerId }
+    drag.current = { id: element.id, original: element, handle, x: event.clientX, y: event.clientY, zoom: bounds.width / W || 1, pointerId: event.pointerId, surface: surfaceRef.current }
     dispatch({ type: 'begin', id: element.id })
     surfaceRef.current.focus({ preventScroll: true })
     surfaceRef.current.setPointerCapture?.(event.pointerId)
@@ -71,11 +73,16 @@ export default function WidgetDesigner({ state, dispatch, local, hidden = false,
     dispatch({ type: gesture.handle === 'move' ? 'move' : 'resize', id: gesture.id, original: gesture.original, handle: gesture.handle,
       dx: (event.clientX - gesture.x) / gesture.zoom, dy: (event.clientY - gesture.y) / gesture.zoom, alt: event.altKey })
   }
+  function finishGesture(cancel) {
+    const gesture = drag.current
+    if (!gesture) return
+    drag.current = null
+    if (gesture.surface.hasPointerCapture?.(gesture.pointerId)) gesture.surface.releasePointerCapture(gesture.pointerId)
+    dispatch({ type: cancel ? 'cancel' : 'end' })
+  }
   function end(event, cancel = false) {
     if (!drag.current || drag.current.pointerId !== event.pointerId) return
-    drag.current = null
-    if (surfaceRef.current.hasPointerCapture?.(event.pointerId)) surfaceRef.current.releasePointerCapture(event.pointerId)
-    dispatch({ type: cancel ? 'cancel' : 'end' })
+    finishGesture(cancel)
   }
   return <div ref={rootRef} className="widget-designer" hidden={hidden}>
     <div className="widget-formats" aria-label="Widget formats">{Object.keys(FORMATS).map((id) => <button type="button" key={id} aria-pressed={doc.active === id} onClick={() => dispatch({ type: 'format', format: id })}>{FORMAT_NAMES[id]}</button>)}</div>
