@@ -21,7 +21,85 @@ import { canonicalProjectVersion, proposalCatalogState, proposalFormValues, refu
 import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErrorCode,
   observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep,
   appendStagingRequest, appendStagingConsole } from '../walk-staging/projectSolarSteps.mjs'
-import { redactSolarDiagnostic, projectSolarRunDiagnostic } from './fixtures.mjs'
+import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick } from './fixtures.mjs'
+
+test('walkClick resolves with default and explicit click timeouts', async () => {
+  for (const [options, timeout] of [[undefined, 15_000], [{ timeout: 7_000 }, 7_000]]) {
+    let clicked = false
+    await walkClick({ click: async actual => {
+      assert.deepEqual(actual, { timeout })
+      clicked = true
+    }, evaluate: async () => assert.fail('successful clicks need no probe') }, 'Open Solar', options)
+    assert.equal(clicked, true)
+  }
+})
+
+test('walkClick reports redacted geometry and the original first-line reason with its cause', async () => {
+  const token = 'eyJabc.def.ghi', capability = 'lco1.secret'
+  const original = new Error(`outside viewport ${token} ${capability}\nprivate second line`)
+  const overlay = { tagName: 'DIV', id: token, classList: ['overlay', 'blocking', capability, 'omitted'] }
+  const node = {
+    getBoundingClientRect: () => ({ x: -100.4, y: 20.7, width: 40.2, height: 10.8 }),
+    contains: hit => hit === overlay,
+    ownerDocument: {
+      defaultView: { innerWidth: 800, innerHeight: 600,
+        getComputedStyle: target => {
+          assert.equal(target, node)
+          return { position: 'fixed', top: '20px', left: '-100px', zIndex: '9' }
+        } },
+    },
+  }
+  for (const [hit, contains, hitIsTarget] of [[overlay, true, true], [overlay, false, false],
+    [node, false, true], [null, false, false]]) {
+    node.tagName = 'BUTTON'
+    node.id = ''
+    node.classList = []
+    node.contains = () => contains
+    node.ownerDocument.elementFromPoint = (x, y) => {
+      assert.equal(x, -100.4 + 40.2 / 2)
+      assert.equal(y, 20.7 + 10.8 / 2)
+      return hit
+    }
+    await assert.rejects(walkClick({
+      click: async () => { throw original },
+      evaluate: async (fn, argument, options) => {
+        assert.equal(argument, undefined)
+        assert.deepEqual(options, { timeout: 2_000 })
+        return fn(node)
+      },
+    }, `Open Solar ${token} ${capability}`), error => {
+      assert.equal(error.cause, original)
+      assert.ok(error.message.startsWith('Open Solar [redacted] [redacted]: outside viewport [redacted] [redacted]\n'))
+      for (const secret of [token, capability, 'private second line', 'omitted']) assert.equal(error.message.includes(secret), false)
+      const probe = JSON.parse(error.message.split('\nClick target: ')[1])
+      assert.deepEqual(probe.box, { x: -100, y: 21, width: 40, height: 11 })
+      assert.deepEqual(probe.viewport, { width: 800, height: 600 })
+      assert.equal(probe.hit, hit === overlay ? 'div#[redacted].overlay.blocking.[redacted]' : hit ? 'button' : null)
+      assert.equal(probe.hitIsTarget, hitIsTarget)
+      assert.deepEqual(probe.position, { position: 'fixed', top: '20px', left: '-100px', zIndex: '9' })
+      return true
+    })
+  }
+})
+
+test('walkClick keeps the full probe JSON while limiting the original reason to 300 characters', async () => {
+  const probe = { box: {}, viewport: {}, hit: 'x'.repeat(500), hitIsTarget: false, position: {} }
+  await assert.rejects(walkClick({ click: async () => { throw new Error('r'.repeat(400)) },
+    evaluate: async () => probe }, 'Run solve'), error => {
+    assert.equal(error.message, `Run solve: ${'r'.repeat(300)}\nClick target: ${JSON.stringify(probe)}`)
+    return true
+  })
+})
+
+test('walkClick preserves the click failure when its geometry probe is unavailable', async () => {
+  const original = new Error('target detached\ncall log')
+  await assert.rejects(walkClick({ click: async () => { throw original },
+    evaluate: async () => { throw new Error('probe detached') } }, 'Open versions'), error => {
+    assert.equal(error.message, 'Open versions: target detached\nClick target: [unavailable]')
+    assert.equal(error.cause, original)
+    return true
+  })
+})
 
 function exactLabelSelectLines(source) {
   // Keep strings atomic and omit comments so fixture text cannot flag itself.
@@ -1254,12 +1332,24 @@ const censusAssertions = (value) => ({
 
 const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
 
+test('project Solar walk functions and staging steps contain no untimed empty-argument clicks', () => {
+  for (const name of ['assertProjectSolarDrawing', 'openProjectSolar', 'selectProjectSolarVersion',
+    'openProjectSolarTool', 'takeProjectSolarCheckout', 'publishProjectSolar', 'switchProjectSolarForms']) {
+    const start = fixtureSource.indexOf(`export async function ${name}(`)
+    assert.ok(start >= 0, `missing function ${name}`)
+    const end = fixtureSource.indexOf('\nexport ', start + 1)
+    const body = fixtureSource.slice(start, end < 0 ? undefined : end)
+    assert.doesNotMatch(body, /\.click\(\s*\)/, name)
+  }
+  assert.doesNotMatch(readFileSync(new URL('../walk-staging/projectSolarSteps.mjs', import.meta.url), 'utf8'), /\.click\(\s*\)/)
+})
+
 test('WL16b canonical import opens material intake through the Upload drawing ribbon action', () => {
   const source = fixtureSource.slice(fixtureSource.indexOf('export async function openProjectSolar('),
     fixtureSource.indexOf('export async function openProjectSolarTool('))
   const steps = [
-    "await page.getByRole('tab', { name: 'Browser', exact: true }).click()",
-    "await page.getByRole('button', { name: 'Upload drawing', exact: true }).click()",
+    "await walkClick(page.getByRole('tab', { name: 'Browser', exact: true }), 'Open Browser tab')",
+    "await walkClick(page.getByRole('button', { name: 'Upload drawing', exact: true }), 'Upload drawing')",
     'const material = page.locator(\'[data-pane="material-intake"]\')',
     "await assertions(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()",
   ]

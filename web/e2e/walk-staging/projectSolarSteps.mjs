@@ -6,7 +6,7 @@ import {
 } from '../staging/stagingConfig.mjs'
 import { inspectContext, inspectJob, isUuid, projectBinding } from '../local/solarProjectWalk.mjs'
 import {
-  openProjectSolarTool, selectProjectSolarVersion, takeProjectSolarCheckout, redactSolarDiagnostic,
+  openProjectSolarTool, selectProjectSolarVersion, takeProjectSolarCheckout, redactSolarDiagnostic, walkClick,
 } from '../walk/fixtures.mjs'
 
 const TOOL = 'solar-solve-proposal'
@@ -320,8 +320,8 @@ export async function withStagingProject(page, baseURL, projectId, token, testIn
     expect(Boolean(project)).toBe(true)
     expect(projects.filter(row => row.name === project.name)).toHaveLength(1)
     const response = await stagingAction(page, baseURL, 'GET', `/api/projects/${projectId}`,
-      () => page.getByRole('region', { name: 'Workspace projects', exact: true })
-        .getByRole('button', { name: project.name, exact: true }).click())
+      () => walkClick(page.getByRole('region', { name: 'Workspace projects', exact: true })
+        .getByRole('button', { name: project.name, exact: true }), 'Open Workspace project'))
     expect(response.status()).toBe(200)
     runtime.projectSolar.binding = canonicalProjectVersion(await response.json(), projectId)
     await selectProjectSolarVersion(runtime)
@@ -374,7 +374,7 @@ export async function reviewStagingProposal(runtime, {
   }
   page.on('response', observe)
   try {
-    await start.click()
+    await walkClick(start, 'Run solve')
     await assertions.poll(async () => runResponse !== null ||
       /The server refused this Solar request\./.test(await form.getByRole('status').allTextContents().then(rows => rows.join(' '))),
     { timeout: 30_000, message: 'Solve must receive a run response or a refusal reason' }).toBe(true)
