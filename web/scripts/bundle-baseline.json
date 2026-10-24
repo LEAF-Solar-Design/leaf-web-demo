@@ -4,29 +4,29 @@
   "chunks": {
     "App.css": 10405,
     "App.js": 123288,
-    "ElementContextMenu.js": 34267,
+    "ElementContextMenu.js": 34268,
     "LeafPlatformScene.css": 494,
-    "LeafPlatformScene.js": 9063,
-    "OpsWorkspaceGround.js": 157159,
+    "LeafPlatformScene.js": 9064,
+    "OpsWorkspaceGround.js": 158461,
     "SheetsPage.css": 2583,
-    "SheetsPage.js": 5422,
+    "SheetsPage.js": 5421,
     "Viewer.js": 13582,
     "bridgeText.js": 21274,
     "index.css": 40176,
-    "index.js": 222819,
+    "index.js": 222813,
     "mockStageAuthority.js": 258,
-    "useAnnotations.js": 2030,
+    "useAnnotations.js": 2029,
     "vendor-react.js": 45884,
     "vendor-viewer.js": 123469,
     "worker-browser.js": 3824,
-    "LabGround.js": 17859,
+    "LabGround.js": 17860,
     "LabGround.css": 752,
-    "LabCanvas.js": 495975,
+    "LabCanvas.js": 495973,
     "string.js": 4533,
     "LabCanvas.css": 2547,
-    "hostBridge.js": 2623
+    "hostBridge.js": 2621
   },
-  "total": 1340286,
+  "total": 1341579,
   "total_allowance_bytes": 16384,
   "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers.",
   "stem_caps": {
@@ -97,5 +97,36 @@
       "web/src/components/AddonsPanel.jsx",
       "web/src/components/AddonsPanel.test.jsx"
     ]
+  },
+  "isolated_workflow_history_measurement": {
+    "method": "Complete paired in-memory Vite JS/CSS builds with canonical beforeOverlay and gzip9; same fixed build identity, dependencies and toolchain. Only the feature delta is added.",
+    "before_ref": "97eab6ed42b130341fcac27a55998a75baeee530",
+    "after_ref": "5afc37012681650a4b363b9ea727c4422e5b25cc",
+    "producer": {
+      "node": "v22.23.2",
+      "zlib": "1.2.12",
+      "vite": "6.4.3",
+      "platform": "darwin",
+      "arch": "arm64"
+    },
+    "before_total": 1351779,
+    "after_total": 1353072,
+    "delta": 1293,
+    "deltas": {
+      "index.js": -6,
+      "SheetsPage.js": -1,
+      "LeafPlatformScene.js": 1,
+      "ElementContextMenu.js": 1,
+      "useAnnotations.js": -1,
+      "OpsWorkspaceGround.js": 1302,
+      "LabGround.js": 1,
+      "hostBridge.js": -2,
+      "LabCanvas.js": -2
+    },
+    "baseline_before_total": 1340286,
+    "unrelated_drift_bytes": 11493,
+    "measurement_sha256": "8ef1478d323024534b7b7b8c3a678868148b1ac535295ef3375a8e262d735a0b",
+    "allowance_unchanged": true,
+    "hard_caps_unchanged": true
   }
 }
