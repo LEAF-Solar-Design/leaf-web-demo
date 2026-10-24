@@ -5,9 +5,29 @@ import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetF
   ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1, IntegrationWorkflowScheduleDraftV1,
   IntegrationActionElementV1, IntegrationActionSubmissionV1, IntegrationActionSubmissionResultV1, IntegrationActionSnapshotV1,
   IntegrationManualWorkflowSnapshotV1, IntegrationManualWorkflowRunV1, IntegrationManualWorkflowDefinitionV1, IntegrationActionCatalogV1,
-  IntegrationManualWorkflowSubmissionV1, IntegrationManualWorkflowSubmissionResultV1 } from '../../../vendor/assistant-contract/src/integration'
+  IntegrationManualWorkflowSubmissionV1, IntegrationManualWorkflowSubmissionResultV1,
+  IntegrationManualWorkflowRunV2, IntegrationManualWorkflowSnapshotV2,
+  IntegrationManualWorkflowCancellationRequestV1, IntegrationManualWorkflowCancellationResultV1 } from '../../../vendor/assistant-contract/src/integration'
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/i
+const webhookId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\s\S])/)
+const webhookDeliveryId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/)
+const webhookReceiptInput = z.strictObject({ registrationId: webhookId, deliveryId: webhookDeliveryId })
+const webhookRevision = z.number().int().min(1).max(2147483647)
+const webhookReceipt = z.strictObject({
+  registrationId: webhookId, registrationRevision: webhookRevision, connectionId: webhookId,
+  provider: z.enum(['forgejo', 'github']), deliveryId: webhookDeliveryId,
+  payloadSha256: z.string().regex(/^[0-9a-f]{64}(?![\s\S])/),
+  byteLength: z.number().int().min(0).max(1048576), connectionRevision: webhookRevision,
+  createdBy: z.string().regex(UUID), createdAt: z.string().min(1).max(128),
+})
+export function validateWebhookReceiptInput(value) { return parse(webhookReceiptInput, value) }
+export function validateWebhookReceipt(value, input) {
+  const requested = validateWebhookReceiptInput(input)
+  const result = parse(webhookReceipt, value)
+  if (result.registrationId !== requested.registrationId || result.deliveryId !== requested.deliveryId) throw invalid()
+  return result
+}
 const slug = z.string().regex(/^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\s\S])/).min(1).max(128)
 const revision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const scopeSchema = z.object({
@@ -31,6 +51,11 @@ const page = (record) => z.object({ records: z.array(record).max(100), nextCurso
 const workflowCursor = z.string().regex(/^[A-Za-z0-9_-]{1,1024}(?![\s\S])/)
 export const ManualWorkflowHistoryPage = z.strictObject({
   items: z.array(IntegrationManualWorkflowRunV1).max(50)
+    .refine((items) => new Set(items.map((run) => run.run_id.toLowerCase())).size === items.length),
+  next_cursor: workflowCursor.nullable(),
+})
+export const ManualWorkflowHistoryPageV2 = z.strictObject({
+  items: z.array(IntegrationManualWorkflowRunV2).max(50)
     .refine((items) => new Set(items.map((run) => run.run_id.toLowerCase())).size === items.length),
   next_cursor: workflowCursor.nullable(),
 })
@@ -237,6 +262,37 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
   }
   return {
     available: Boolean(destination),
+    async listManualWorkflowRunsV2(id, { signal, after, limit = 25 } = {}) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 50 ||
+          (after !== undefined && !workflowCursor.safeParse(after).success)) throw invalid()
+      const query = new URLSearchParams({ limit: String(limit) })
+      if (after !== undefined) query.set('after', after)
+      return setupResponse(ManualWorkflowHistoryPageV2, id, `manual-workflow-runs-v2?${query}`, { signal, method: 'GET' })
+    },
+    async getManualWorkflowRunV2(id, runId, { signal } = {}) {
+      if (!UUID.test(runId)) throw invalid()
+      return setupResponse(IntegrationManualWorkflowSnapshotV2, id, `manual-workflow-runs-v2/${runId}`, { signal, method: 'GET' },
+        (value) => value.run.run_id === runId)
+    },
+    async cancelManualWorkflowRun(id, runId, input, { signal } = {}) {
+      const body = parse(IntegrationManualWorkflowCancellationRequestV1, input)
+      if (!UUID.test(runId) || body.run_id !== runId) throw invalid()
+      return setupResponse(IntegrationManualWorkflowCancellationResultV1, id, `manual-workflow-runs-v2/${runId}/cancel`,
+        { signal, method: 'POST', body },
+        (value) => value.snapshot.run.run_id === runId && value.snapshot.run.revision >= body.expected_revision)
+    },
+    async reconcileManualWorkflowStepV2(id, runId, stepId, input, { signal } = {}) {
+      if (!UUID.test(runId)) throw invalid()
+      parse(slug, stepId)
+      const body = parse(z.strictObject({}), input)
+      return setupResponse(IntegrationActionSnapshotV1, id, `manual-workflow-runs-v2/${runId}/steps/${stepId}/reconcile`,
+        { signal, method: 'POST', body })
+    },
+    async getWebhookReceipt(id, registrationId, deliveryId, { signal } = {}) {
+      const input = validateWebhookReceiptInput({ registrationId, deliveryId })
+      const value = await request(id, `/integrations/webhook-registrations/${input.registrationId}/deliveries/${input.deliveryId}`, { signal })
+      return validateWebhookReceipt(value, input)
+    },
     async previewWorkflowSchedule(id, input, { signal } = {}) {
       const body = validateWorkflowSchedulePreviewInput(input)
       const value = await request(id, '/integrations/workflow-schedule-preview', { signal, method: 'POST', body, bodyLimit: 2048 })

@@ -4,16 +4,16 @@ import { ManualWorkflowHistoryPanel } from './ManualWorkflowHistoryPanel.jsx'
 
 const runId = '11111111-1111-4111-8111-111111111111'
 const otherId = '22222222-2222-4222-8222-222222222222'
-const run = { schema_version: 1, run_id: runId, revision: 1,
+const run = { schema_version: 2, run_id: runId, revision: 1,
   workflow_ref: { id: 'orders', version: 1, digest: 'a'.repeat(64) }, submission_digest: 'b'.repeat(64),
   authority_binding_digest: 'c'.repeat(64), authority_mode: 'caller_bound',
   created_at: '2026-10-20T00:00:00Z', updated_at: '2026-10-20T00:00:00Z', state: 'accepted' }
 const other = { ...run, run_id: otherId, workflow_ref: { ...run.workflow_ref, id: 'second' } }
 function setup(page = { items: [run], next_cursor: null }) {
   const controller = new AbortController()
-  const props = { client: { listManualWorkflowRuns: vi.fn().mockResolvedValue(page) }, projectId: runId,
+  const props = { client: { listManualWorkflowRunsV2: vi.fn().mockResolvedValue(page) }, projectId: runId,
     signal: controller.signal, guard: vi.fn().mockResolvedValue(), onForbidden: vi.fn(), onSelect: vi.fn() }
-  return { props, controller, list: props.client.listManualWorkflowRuns }
+  return { props, controller, list: props.client.listManualWorkflowRunsV2 }
 }
 const click = (name) => fireEvent.click(screen.getByRole('button', { name, exact: true }))
 async function loaded() { await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh history' })).toBeEnabled()) }
@@ -73,6 +73,8 @@ it('rejects self and longer cursor cycles, keeps the page, and resets traversal 
 })
 it.each([
   {}, { records: [], nextCursor: null }, { items: [], next_cursor: null, private: 'secret' },
+  { items: [{ ...run, schema_version: 1 }], next_cursor: null },
+  { items: [{ ...run, state: 'cancelled' }], next_cursor: null },
   { items: [{ ...run, private: 'secret' }], next_cursor: null },
   { items: [{ ...run, workflow_ref: { ...run.workflow_ref, private: true } }], next_cursor: null },
   { items: [run, run], next_cursor: null }, { items: Array(51).fill(run), next_cursor: null },

@@ -41,6 +41,7 @@ const workflowSnapshot = {
     authority_binding_digest: 'c'.repeat(64), created_at: actionRun.created_at, updated_at: actionRun.updated_at, state: 'accepted' },
   steps: [{ run_id: otherProject, step_id: 'send', state: 'pending' }],
 }
+const workflowSnapshotV2 = { ...workflowSnapshot, run: { ...workflowSnapshot.run, schema_version: 2 } }
 const read = { schema_version: 1, dataset_ref: reference, fields,
   rows: [{ key: 'one', values: { day: '2026-10-20', total: 1234 } }], next_cursor: null, status: 'ready',
   freshness: { source_updated_at: null, synced_at: null, fetched_at: '2026-10-20T12:00:00Z' } }
@@ -205,6 +206,98 @@ it.each([401, 403])('routes saved draft HTTP %s through Ground forbidden handlin
   render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await chooseExistingDraft()
   await screen.findByText('You do not have permission to view these integrations.')
   expect(screen.queryByRole('region', { name: 'Saved schedule drafts' })).toBeNull()
+})
+const webhookReceipt = { registrationId: 'Forge.Reg_1', registrationRevision: 1, connectionId: 'Forge.Conn_1', provider: 'forgejo',
+  deliveryId: 'Delivery:AbC-1', payloadSha256: 'a'.repeat(64), byteLength: 123, connectionRevision: 2,
+  createdBy: otherProject, createdAt: '2026-10-23 09:30:00+00' }
+function fillWebhookReceipt() {
+  fireEvent.change(screen.getByLabelText('Registration ID'), { target: { value: webhookReceipt.registrationId } })
+  fireEvent.change(screen.getByLabelText('Delivery ID'), { target: { value: webhookReceipt.deliveryId } })
+}
+const receiptGets = (fetchImpl) => fetchImpl.mock.calls.filter(([url]) => url.includes('/webhook-registrations/'))
+const receiptEvidence = () => screen.queryByRole('region', { name: 'Stored admission evidence' })
+it.each(['owner', 'editor', 'reviewer', 'read_only'])('mounts the read-only receipt inspector only for owner/editor: %s', async (projectRole) => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/scope')) return Promise.resolve(response({ ...scope, projectRole }))
+    if (url.includes('/webhook-registrations/')) return Promise.resolve(response(webhookReceipt))
+    return original(url, options)
+  })
+  render(<OpsWorkspaceGround {...props} />); await loaded()
+  expect(receiptGets(fetchImpl)).toHaveLength(0)
+  if (!['owner', 'editor'].includes(projectRole)) {
+    expect(screen.queryByRole('heading', { name: 'Webhook admission receipt' })).toBeNull()
+    return
+  }
+  fillWebhookReceipt()
+  expect(receiptGets(fetchImpl)).toHaveLength(0)
+  const before = fetchImpl.mock.calls.length
+  fireEvent.click(screen.getByRole('button', { name: 'Look up receipt' }))
+  await screen.findByRole('region', { name: 'Stored admission evidence' })
+  expect(fetchImpl.mock.calls.slice(before).map(([url]) => url.split('/').at(-1))).toEqual(['scope', webhookReceipt.deliveryId, 'scope'])
+  expect(receiptGets(fetchImpl)).toHaveLength(1)
+  expect(fetchImpl.mock.calls.every(([, options]) => options.method === 'GET')).toBe(true)
+})
+it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('checks full receipt scope %s before and after lookup', async (key) => {
+  for (const phase of ['preflight', 'completion']) {
+    const { props } = setup()
+    const get = vi.spyOn(props.client, 'getWebhookReceipt').mockResolvedValue(webhookReceipt)
+    const view = render(<OpsWorkspaceGround {...props} />); await loaded(); fillWebhookReceipt()
+    const drift = { ...scope, [key]: key === 'projectRole' ? 'read_only' : key === 'externalSubject' ? 'auth0|other' : key === 'externalAuthority' ? 'other' : otherProject }
+    const fresh = vi.spyOn(props.client, 'getScope')
+    if (phase === 'completion') fresh.mockResolvedValueOnce(scope).mockResolvedValueOnce(drift)
+    else fresh.mockResolvedValueOnce(drift)
+    fireEvent.click(screen.getByRole('button', { name: 'Look up receipt' }))
+    await screen.findByText('You do not have permission to view these integrations.')
+    expect(get).toHaveBeenCalledTimes(phase === 'preflight' ? 0 : 1)
+    expect(receiptEvidence()).toBeNull()
+    expect(screen.queryByLabelText('Registration ID')).toBeNull()
+    view.unmount()
+  }
+})
+it.each([401, 403])('removes protected receipt evidence on HTTP %s', async (status) => {
+  const { props } = setup()
+  vi.spyOn(props.client, 'getWebhookReceipt').mockResolvedValueOnce(webhookReceipt).mockRejectedValueOnce({ status })
+  render(<OpsWorkspaceGround {...props} />); await loaded(); fillWebhookReceipt()
+  fireEvent.click(screen.getByRole('button', { name: 'Look up receipt' }))
+  await screen.findByRole('region', { name: 'Stored admission evidence' })
+  fireEvent.click(screen.getByRole('button', { name: 'Look up receipt' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(receiptEvidence()).toBeNull()
+  expect(screen.queryByLabelText('Registration ID')).toBeNull()
+})
+it.each(['project', 'account', 'generation', 'status', 'inactive', 'unmount'])('aborts pending receipt lookup and suppresses late promises on %s change', async (kind) => {
+  const { props, sessionController } = setup()
+  let finish
+  const get = vi.spyOn(props.client, 'getWebhookReceipt').mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+  const view = render(<OpsWorkspaceGround {...props} />); await loaded(); fillWebhookReceipt()
+  fireEvent.click(screen.getByRole('button', { name: 'Look up receipt' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = get.mock.calls[0][3].signal
+  if (kind === 'unmount') view.unmount()
+  else if (kind === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else if (kind === 'status') act(() => sessionController.change({ status: 'expired' }))
+  else view.rerender(<OpsWorkspaceGround {...props} {...(kind === 'project' ? { projectId: otherProject } : kind === 'account' ? { accountScope: 'account-b' } : { active: false })} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish(webhookReceipt))
+  expect(receiptEvidence()).toBeNull()
+})
+it.each(['project', 'account', 'generation', 'role'])('clears loaded receipt evidence and IDs on %s change', async (kind) => {
+  const { props, sessionController } = setup()
+  vi.spyOn(props.client, 'getWebhookReceipt').mockResolvedValue(webhookReceipt)
+  const view = render(<OpsWorkspaceGround {...props} />); await loaded(); fillWebhookReceipt()
+  fireEvent.click(screen.getByRole('button', { name: 'Look up receipt' }))
+  await screen.findByRole('region', { name: 'Stored admission evidence' })
+  if (kind === 'role') {
+    vi.spyOn(props.client, 'getScope').mockResolvedValueOnce({ ...scope, projectRole: 'reviewer' })
+    fireEvent.click(screen.getByRole('button', { name: 'Look up receipt' }))
+    await screen.findByText('You do not have permission to view these integrations.')
+  } else if (kind === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else view.rerender(<OpsWorkspaceGround {...props} {...(kind === 'project' ? { projectId: otherProject } : { accountScope: 'account-b' })} />)
+  expect(receiptEvidence()).toBeNull()
+  const registration = screen.queryByLabelText('Registration ID')
+  if (registration) expect(registration).toHaveValue('')
 })
 const schedulePreview = { schema_version: 1, preview_only: true, occurrence: { scheduledLocalDate: '2026-01-01',
   instant: '2026-01-01T09:30:00Z', timezone: 'UTC', hour: 9, minute: 30,
@@ -1137,7 +1230,7 @@ it('hands the canonical admitted run to the viewer once and recovers a failed fi
   const { props } = setupAction()
   vi.spyOn(props.client, 'getManualWorkflowDefinition').mockResolvedValue(workflowSnapshot.definition)
   const submit = vi.spyOn(props.client, 'submitManualWorkflow').mockResolvedValue({ status: 'admitted', run: workflowSnapshot.run, replayed: false })
-  const get = vi.spyOn(props.client, 'getManualWorkflowRun').mockRejectedValueOnce(new Error('lost')).mockResolvedValue(workflowSnapshot)
+  const get = vi.spyOn(props.client, 'getManualWorkflowRunV2').mockRejectedValueOnce(new Error('lost')).mockResolvedValue(workflowSnapshotV2)
   const view = render(<OpsWorkspaceGround {...props} />)
   await loaded(); await reviewWorkflow()
   expect(submit).not.toHaveBeenCalled()
@@ -1169,7 +1262,7 @@ it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('a
   vi.spyOn(props.client, 'getManualWorkflowDefinition').mockResolvedValue(workflowSnapshot.definition)
   let finish
   const submit = vi.spyOn(props.client, 'submitManualWorkflow').mockImplementation(() => new Promise((resolve) => { finish = resolve }))
-  const get = vi.spyOn(props.client, 'getManualWorkflowRun')
+  const get = vi.spyOn(props.client, 'getManualWorkflowRunV2')
   const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
   await loaded(); await reviewWorkflow()
   fireEvent.click(screen.getByRole('button', { name: 'Start workflow', exact: true }))
@@ -1186,7 +1279,7 @@ it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('a
 })
 it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('refuses fresh workflow scope %s drift and clears protected evidence', async (field) => {
   const { props, authority, fetchImpl } = setupAction()
-  vi.spyOn(props.client, 'getManualWorkflowRun').mockResolvedValue(workflowSnapshot)
+  vi.spyOn(props.client, 'getManualWorkflowRunV2').mockResolvedValue(workflowSnapshotV2)
   render(<OpsWorkspaceGround {...props} />)
   await loaded()
   fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })
@@ -1199,7 +1292,7 @@ it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 
   if (field === 'projectId' || field === 'externalAuthority') vi.spyOn(props.client, 'getScope').mockResolvedValueOnce(authority.scope)
   fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
   await screen.findByText('You do not have permission to view these integrations.')
-  expect(props.client.getManualWorkflowRun).toHaveBeenCalledTimes(1)
+  expect(props.client.getManualWorkflowRunV2).toHaveBeenCalledTimes(1)
   expect(screen.queryByRole('region', { name: 'Manual workflow run status' })).toBeNull()
   expect(screen.queryByLabelText('Run UUID')).toBeNull()
   expect(fetchImpl.mock.calls.some(([url]) => url.includes('manual-workflow-runs'))).toBe(false)
@@ -1207,7 +1300,7 @@ it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 
 it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('aborts the workflow and discards late results on %s invalidation', async (change) => {
   const { props, sessionController } = setupAction()
   let finish
-  const get = vi.spyOn(props.client, 'getManualWorkflowRun').mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+  const get = vi.spyOn(props.client, 'getManualWorkflowRunV2').mockImplementation(() => new Promise((resolve) => { finish = resolve }))
   const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
   await loaded()
   fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })
@@ -1220,12 +1313,12 @@ it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('a
   else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } : change === 'account' ? { accountScope: 'account-b' } : { active: false })} />)
   expect(signal.aborted).toBe(true)
   expect(screen.queryByRole('region', { name: 'Manual workflow run status' })).toBeNull()
-  await act(async () => finish(workflowSnapshot))
+  await act(async () => finish(workflowSnapshotV2))
   expect(screen.queryByRole('region', { name: 'Manual workflow run status' })).toBeNull()
 })
 it('clears loaded workflow evidence immediately when the active account changes', async () => {
   const { props } = setupAction()
-  vi.spyOn(props.client, 'getManualWorkflowRun').mockResolvedValue(workflowSnapshot)
+  vi.spyOn(props.client, 'getManualWorkflowRunV2').mockResolvedValue(workflowSnapshotV2)
   const { rerender } = render(<OpsWorkspaceGround {...props} />)
   await loaded()
   fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })
@@ -1237,7 +1330,7 @@ it('clears loaded workflow evidence immediately when the active account changes'
 it('keeps the shared display key bounded for a long verified external identity', async () => {
   const { props, authority } = setupAction()
   authority.scope = { ...scope, externalSubject: 's'.repeat(500) }
-  vi.spyOn(props.client, 'getManualWorkflowRun').mockResolvedValue(workflowSnapshot)
+  vi.spyOn(props.client, 'getManualWorkflowRunV2').mockResolvedValue(workflowSnapshotV2)
   render(<OpsWorkspaceGround {...props} />)
   await loaded()
   fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })
@@ -1249,7 +1342,7 @@ it('rejects late workflow preflight continuations when a supplied client ignores
   const { props } = setupAction()
   let finish
   vi.spyOn(props.client, 'getScope').mockResolvedValueOnce(scope).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
-  const get = vi.spyOn(props.client, 'getManualWorkflowRun')
+  const get = vi.spyOn(props.client, 'getManualWorkflowRunV2')
   const { rerender } = render(<OpsWorkspaceGround {...props} />)
   await loaded()
   fireEvent.change(screen.getByLabelText('Run UUID'), { target: { value: otherProject } })

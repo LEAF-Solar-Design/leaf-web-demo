@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ReadableStream } from 'node:stream/web'
 import { TextEncoder, TextDecoder } from 'node:util'
-import { createIntegrationsClient, integrationOrigin, validateDatasetRegistration, validateWorkflowSchedulePreview } from './client.js'
+import { createIntegrationsClient, integrationOrigin, validateDatasetRegistration, validateWorkflowSchedulePreview, validateWebhookReceipt, validateWebhookReceiptInput } from './client.js'
 
 vi.mock('../api.js', () => ({ authHeaders: vi.fn(), noteUnauthorized: vi.fn() }))
 import { authHeaders, noteUnauthorized } from '../api.js'
@@ -159,6 +159,74 @@ describe('saved schedule draft discovery HTTP contract', () => {
   })
 })
 
+describe('stored webhook admission receipt HTTP contract', () => {
+  const input = { registrationId: 'Forge.Reg_1', deliveryId: 'Delivery:AbC-1' }
+  const result = { ...input, registrationRevision: 1, connectionId: 'Forge.Conn_1', provider: 'forgejo',
+    payloadSha256: 'a'.repeat(64), byteLength: 1048576, connectionRevision: 2147483647,
+    createdBy: '22222222-2222-4222-8222-222222222222', createdAt: '2026-10-23 09:30:00+00' }
+  it('sends one authenticated no-store GET with exact case and literal delivery colon, no query or body', async () => {
+    const { client, fetchImpl, options } = setup(result)
+    expect(await client.getWebhookReceipt(projectId, input.registrationId, input.deliveryId, options)).toEqual(result)
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    const [url, request] = fetchImpl.mock.calls[0]
+    expect(url).toBe(`https://ops.example/api/v1/projects/${projectId}/integrations/webhook-registrations/Forge.Reg_1/deliveries/Delivery:AbC-1`)
+    expect(request).toMatchObject({ method: 'GET', signal: options.signal, cache: 'no-store', redirect: 'error', credentials: 'omit',
+      headers: { Authorization: 'Bearer first', Accept: 'application/json' } })
+    expect(request).not.toHaveProperty('body')
+  })
+  it.each(['', 'a'.repeat(129), 'a\n', ':a', 'a/b', 'a%3Ab', ' a', 'é', 'a?b', 'a#b'])('rejects unsafe IDs before transport: %j', async (id) => {
+    const { client, fetchImpl, options } = setup(result)
+    await expect(client.getWebhookReceipt(projectId, id, input.deliveryId, options)).rejects.toThrow('invalid')
+    await expect(client.getWebhookReceipt(projectId, input.registrationId, id, options)).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it('enforces registration colon exclusion and accepts exact endpoint bounds', async () => {
+    const { client, fetchImpl, options } = setup(result)
+    await expect(client.getWebhookReceipt(projectId, 'a:b', 'a:b', options)).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(validateWebhookReceiptInput({ registrationId: 'A', deliveryId: 'B' })).toEqual({ registrationId: 'A', deliveryId: 'B' })
+    const maximum = { registrationId: 'A'.repeat(128), deliveryId: 'B'.repeat(128) }
+    expect(validateWebhookReceipt({ ...result, ...maximum, connectionId: 'C'.repeat(128), byteLength: 0,
+      connectionRevision: 1, registrationRevision: 2147483647, createdAt: 'x'.repeat(128) }, maximum).byteLength).toBe(0)
+  })
+  it.each([
+    null, {}, { extra: true }, { schema_version: 1 }, { provider: 'gitlab' }, { provider: null },
+    { registrationId: 'forge.Reg_1' }, { deliveryId: 'Delivery:abc-1' }, { connectionId: 'a:b' },
+    { connectionId: 'a\n' }, { connectionId: 'x'.repeat(129) },
+    { registrationRevision: 0 }, { registrationRevision: 2147483648 }, { registrationRevision: 1.5 },
+    { connectionRevision: 0 }, { connectionRevision: 2147483648 }, { connectionRevision: '1' },
+    { byteLength: -1 }, { byteLength: 1048577 }, { byteLength: 0.5 },
+    { payloadSha256: 'A'.repeat(64) }, { payloadSha256: 'a'.repeat(63) }, { payloadSha256: 'a'.repeat(64) + '\n' },
+    { createdBy: 'not-a-uuid' }, { createdBy: projectId + '\n' }, { createdAt: '' }, { createdAt: 'x'.repeat(129) }, { createdAt: null },
+  ])('rejects malformed, extra or mismatched receipt fields: %j', async (patch) => {
+    const value = patch === null ? null : Object.keys(patch).length ? { ...result, ...patch } : {}
+    const { client, options } = setup(value)
+    await expect(client.getWebhookReceipt(projectId, input.registrationId, input.deliveryId, options)).rejects.toThrow('invalid')
+    expect(() => validateWebhookReceipt(value, input)).toThrow('invalid')
+  })
+  it('rejects each missing public field', () => {
+    for (const key of Object.keys(result)) {
+      const value = { ...result }; delete value[key]
+      expect(() => validateWebhookReceipt(value, input)).toThrow('invalid')
+    }
+  })
+  it.each([401, 403, 404, 409])('retains safe HTTP %s without exposing response content', async (status) => {
+    const { client, fetchImpl, options } = setup()
+    fetchImpl.mockResolvedValueOnce(response({ secret: 'private payload' }, { status }))
+    await expect(client.getWebhookReceipt(projectId, input.registrationId, input.deliveryId, options)).rejects.toMatchObject({ status, dispatched: false })
+  })
+  it('uses bounded parsing and honors cancellation', async () => {
+    const { client, fetchImpl, options } = setup()
+    for (const extra of [{ raw: 'null' }, { raw: '{' }, { length: '262145' }, { raw: ' '.repeat(262145) }, { type: 'text/plain' }]) {
+      fetchImpl.mockResolvedValueOnce(response(result, extra))
+      await expect(client.getWebhookReceipt(projectId, input.registrationId, input.deliveryId, options)).rejects.toThrow('invalid')
+    }
+    const controller = new AbortController(); controller.abort()
+    const calls = fetchImpl.mock.calls.length
+    await expect(client.getWebhookReceipt(projectId, input.registrationId, input.deliveryId, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchImpl).toHaveBeenCalledTimes(calls)
+  })
+})
 describe('daily schedule preview HTTP contract', () => {
   const input = { schema_version: 1, schedule: { kind: 'daily', timezone: 'UTC', hour: 9, minute: 30 }, after: '2026-01-01T00:00:00Z' }
   const occurrence = { scheduledLocalDate: '2026-01-01', instant: '2026-01-01T09:30:00Z', timezone: 'UTC', hour: 9, minute: 30,
@@ -464,6 +532,60 @@ describe('manual workflow start HTTP contract', () => {
     controller.abort()
     await expect(client.submitManualWorkflow(projectId, input, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
     expect(fetchImpl).toHaveBeenCalledOnce()
+  })
+})
+
+describe('V2 workflow cancellation HTTP contract', () => {
+  const v2 = { ...workflow, run: { ...workflow.run, schema_version: 2 } }
+  const request = { schema_version: 1, run_id: projectId, expected_revision: workflow.run.revision }
+  const cancelled = { status: 'recorded', snapshot: { ...v2, run: { ...v2.run,
+    revision: workflow.run.revision + 1, state: 'cancelled', requested_at: workflow.run.updated_at } } }
+  it('uses only the explicit V2 routes, canonical bodies, current bearer and caller signal', async () => {
+    const { client, fetchImpl, options } = setup({ items: [v2.run], next_cursor: null })
+    await client.listManualWorkflowRunsV2(projectId, { ...options, limit: 50, after: 'page_2' })
+    fetchImpl.mockResolvedValueOnce(response(v2))
+    expect(await client.getManualWorkflowRunV2(projectId, projectId, options)).toEqual(v2)
+    fetchImpl.mockResolvedValueOnce(response(cancelled))
+    expect(await client.cancelManualWorkflowRun(projectId, projectId, request, options)).toEqual(cancelled)
+    fetchImpl.mockResolvedValueOnce(response({ run, receipts: [] }))
+    await client.reconcileManualWorkflowStepV2(projectId, projectId, 'send', {}, options)
+    const base = `https://ops.example/api/v1/projects/${projectId}/integrations/manual-workflow-runs-v2`
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      `${base}?limit=50&after=page_2`, `${base}/${projectId}`, `${base}/${projectId}/cancel`, `${base}/${projectId}/steps/send/reconcile`,
+    ])
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual(request)
+    expect(fetchImpl.mock.calls[3][1].body).toBe('{}')
+    for (const [, optionsSent] of fetchImpl.mock.calls) {
+      expect(optionsSent).toMatchObject({ signal: options.signal, credentials: 'omit', redirect: 'error', cache: 'no-store',
+        headers: { Authorization: 'Bearer first' } })
+      expect(optionsSent.headers).not.toHaveProperty('If-Match')
+    }
+  })
+  it.each([{ limit: 0 }, { limit: 51 }, { limit: 1.5 }, { after: '' }, { after: 'bad=' }, { after: null }])('rejects invalid V2 queries: %j', async (query) => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.listManualWorkflowRunsV2(projectId, { ...options, ...query })).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([
+    { items: [workflow.run], next_cursor: null }, { items: [v2.run, v2.run], next_cursor: null },
+    { items: [], next_cursor: null, extra: true }, { items: [{ ...v2.run, state: 'cancelled' }], next_cursor: null },
+  ])('rejects noncanonical V2 history: %j', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.listManualWorkflowRunsV2(projectId, options)).rejects.toThrow('invalid')
+  })
+  it.each([{ expected_revision: 0 }, { schema_version: 2 }, { run_id: '22222222-2222-4222-8222-222222222222' }, { extra: true }])('rejects unbound cancellation intent before transport: %j', async (patch) => {
+    const { client, fetchImpl, options } = setup(cancelled)
+    await expect(client.cancelManualWorkflowRun(projectId, projectId, { ...request, ...patch }, options)).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it('retains safe dispatch ambiguity without retrying lost or regressive cancellation responses', async () => {
+    const { client, fetchImpl, options } = setup(cancelled)
+    fetchImpl.mockRejectedValueOnce(new Error('private provider text'))
+    await expect(client.cancelManualWorkflowRun(projectId, projectId, request, options)).rejects.toMatchObject({ dispatched: true })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    await expect(client.cancelManualWorkflowRun(projectId, projectId, { ...request, expected_revision: 10 }, options)).rejects.toMatchObject({ dispatched: true })
+    fetchImpl.mockResolvedValueOnce(response({ ...cancelled, snapshot: workflow }))
+    await expect(client.cancelManualWorkflowRun(projectId, projectId, request, options)).rejects.toMatchObject({ dispatched: true })
   })
 })
 
