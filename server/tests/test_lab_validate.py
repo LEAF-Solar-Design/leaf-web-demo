@@ -116,3 +116,37 @@ def test_graph_manifest_and_pointer():
     with pytest.raises(InvalidGraph) as caught:
         validate_graph(graph)
     assert caught.value.pointer == "/blocks/0/manifest/effect"
+    assert caught.value.code == "lab_manifest_spoof"
+    assert caught.value.block == data["id"]
+
+
+def test_save_manifest_spoof_names_block(monkeypatch, tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import deps
+    from routers import lab_router
+
+    monkeypatch.setenv("LEAF_LAB_STORE", "sqlite")
+    monkeypatch.setenv("LEAF_LAB_DB", str(tmp_path / "lab.db"))
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "test")
+    monkeypatch.setenv("LEAF_PLATFORM_POSTGRES_REQUIRED", "0")
+    monkeypatch.setenv("LEAF_LAB_SURFACE_ENABLED", "1")
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    app = FastAPI()
+    app.include_router(lab_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier="hosted_pro", subject="member")
+    data = manifest()
+    data.update(id="example", effect="read")
+    graph = {"schema": "leaf.lab-graph.v1", "blocks": [{
+        "id": "example", "registry": {"id": "example", "version": "1.0.0", "code_sha256": "0" * 64},
+        "settings": {}, "manifest": data,
+    }], "pipes": [], "outputs": {}}
+    with TestClient(app, raise_server_exceptions=False) as http:
+        response = http.post("/api/lab/docs/strategy/save", json={"graph": graph, "expected_head": None})
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "lab_manifest_spoof", "pointer": "/blocks/0/manifest/effect", "block": "example",
+    }
+    assert not (tmp_path / "lab.db").exists()

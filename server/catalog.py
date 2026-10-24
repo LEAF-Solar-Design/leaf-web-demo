@@ -191,10 +191,9 @@ def _capability_entry(tool: Dict[str, Any], solar_snapshot=None) -> Dict[str, An
         try:
             digest = validate_returns_schema(tool["returns_schema"])
         except ManifestInvalid as error:
-            entry["returns_schema_error"] = error.code
-        else:
-            entry["returns_schema"] = tool["returns_schema"]
-            entry["returns_schema_digest"] = digest
+            raise ManifestInvalid(error.code, error.pointer, tool.get("name")) from error
+        entry["returns_schema"] = tool["returns_schema"]
+        entry["returns_schema_digest"] = digest
     if solar is not None:
         entry["solar"] = solar
     return entry

@@ -2,8 +2,10 @@
 import copy
 import json
 
+import pytest
+
 import catalog
-from lab_validate import validate_returns_schema
+from lab_validate import ManifestInvalid, validate_returns_schema
 
 
 def projected(tool, monkeypatch):
@@ -22,10 +24,11 @@ def test_valid_returns_schema(monkeypatch):
 
 def test_bad_returns_schema(monkeypatch):
     tool = {"name": "example", "family_id": "custom", "returns_schema": {"$ref": "https://example.invalid"}}
-    result = projected(tool, monkeypatch)
-    assert "returns_schema" not in result
-    assert "returns_schema_digest" not in result
-    assert result["returns_schema_error"] == "lab_returns_schema_bounds"
+    with pytest.raises(ManifestInvalid) as caught:
+        projected(tool, monkeypatch)
+    assert caught.value.to_http() == (422, {
+        "detail": "lab_returns_schema_bounds", "pointer": "/$ref", "block": "example",
+    })
 
 
 def test_legacy_projection_bytes(monkeypatch):

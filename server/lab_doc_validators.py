@@ -27,9 +27,14 @@ _VALIDATOR = Draft202012Validator(_GRAPH, registry=_REGISTRY)
 
 
 class InvalidGraph(ValueError):
-    def __init__(self, message, pointer=""):
+    def __init__(self, message, pointer="", block=None):
         super().__init__(message)
+        self.code = message if message in {
+            "lab_manifest_spoof", "lab_manifest_unknown_block",
+            "lab_returns_schema_bounds", "lab_extension_incomplete",
+        } else "invalid_lab_document"
         self.pointer = pointer
+        self.block = block
 
 
 class TooLarge(ValueError):
@@ -75,7 +80,8 @@ def validate_graph(graph):
                     try:
                         validate_manifest(block["manifest"])
                     except ManifestInvalid as error:
-                        raise InvalidGraph(error.code, f"/blocks/{index}/manifest" + error.pointer) from error
+                        raise InvalidGraph(error.code, f"/blocks/{index}/manifest" + error.pointer,
+                                           error.block_id) from error
                     block = {key: value for key, value in block.items() if key != "manifest"}
                 blocks.append(block)
             envelope = dict(graph, blocks=blocks)
