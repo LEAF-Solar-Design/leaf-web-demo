@@ -1,5 +1,6 @@
 import { useReducer } from 'react'
 import { FORMATS, PRESETS, RENDERER_VERSION, shapeFor } from './widgetCatalog.js'
+import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 
 export const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 export const HEIGHT_BOUNDS = { la: [60, 220], diExp: [84, 200] }
@@ -14,7 +15,7 @@ export function createEditorState(doc = createWidgetDoc()) {
   return { doc, selectedId: null, past: [], future: [], guides: {}, transaction: null, nudgeAt: null }
 }
 export function clampElement(element, width, height) {
-  const w = clamp(element.w, 6, width), h = clamp(element.h, element.preset === 'divider' ? 1 : 6, height)
+  const w = clamp(element.w, 0.01, width), h = clamp(element.h, 0.01, height)
   return { ...element, w, h, x: clamp(element.x, 0, width - w), y: clamp(element.y, 0, height - h) }
 }
 export function snapTargets(doc, skip) {
@@ -63,10 +64,10 @@ export function transformElement(doc, original, handle, dx, dy, alt = false) {
         if (s) { if (north) top += s.delta; else bottom += s.delta; guides.y = s.target }
       }
     }
-    if (handle.includes('w')) left = clamp(Math.round(left), 0, right - 6)
-    if (handle.includes('e')) right = clamp(Math.round(right), left + 6, W)
-    if (handle.includes('n')) top = clamp(Math.round(top), 0, bottom - minH)
-    if (handle.includes('s')) bottom = clamp(Math.round(bottom), top + minH, H)
+    if (handle.includes('w')) left = clamp(Math.round(left), 0, right - Math.min(6, right))
+    if (handle.includes('e')) right = clamp(Math.round(right), left + Math.min(6, W - left), W)
+    if (handle.includes('n')) top = clamp(Math.round(top), 0, bottom - Math.min(minH, bottom))
+    if (handle.includes('s')) bottom = clamp(Math.round(bottom), top + Math.min(minH, H - top), H)
     x = left; y = top; w = right - left; h = bottom - top
   }
   // Do not draw a guide for an edge displaced by the surface clamp.
@@ -83,7 +84,14 @@ export function newElement(doc, preset = 'text') {
     color: d.color ?? 'slate', align: d.align ?? 'left', visible: true }
   for (const key of ['arrows', 'showPct', 'count', 'tracking', 'opacity']) if (d[key] !== undefined) e[key] = d[key]
   if (preset === 'text') e.text = 'Your text'
-  if (d.col) e.maxRows = 3
+  if (d.col) {
+    e.maxRows = 3
+    const columns = surface.els.filter((column) => column.visible && PRESETS[column.preset]?.col)
+    if (columns.length) {
+      e.y = columns[0].y; e.h = columns[0].h; e.maxRows = columns[0].maxRows
+      e.x = clamp(Math.max(...columns.map((column) => column.x + column.w)) + 6, 0, W - w)
+    }
+  }
   if (!['brand', 'leafIcon', 'text', 'divider'].includes(preset)) {
     const field = preset === 'ring' ? 'winRate' : preset
     e.binding = { source: 'kashbot.board', field, min_renderer: RENDERER_VERSION, scale: preset === 'ring' ? 'fraction' : 'identity', tone: e.color }
@@ -91,11 +99,13 @@ export function newElement(doc, preset = 'text') {
   }
   return clampElement(e, W, surface.h)
 }
+export const sameDocument = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b)
 function commit(state, doc, extra = {}, group = false) {
-  if (doc === state.doc) return { ...state, ...extra }
+  if (sameDocument(doc, state.doc)) return state
   return { ...state, doc, past: group ? state.past : [...state.past, state.doc].slice(-150), future: [], guides: {}, nudgeAt: null, ...extra }
 }
 export function widgetEditorReducer(state, action) {
+  if (state.transaction && !['move', 'resize', 'end', 'cancel'].includes(action.type)) return state
   const { doc } = state, id = doc.active, surface = doc.formats[id], W = FORMATS[id].w
   const selectedId = action.id ?? state.selectedId, selected = surface.els.find((e) => e.id === selectedId)
   const withSurface = (f) => ({ ...doc, formats: { ...doc.formats, [id]: f } })
@@ -107,8 +117,7 @@ export function widgetEditorReducer(state, action) {
       if (!Object.hasOwn(FORMATS, action.format) || action.format === id) return state
       // The document contract permits a subset of the catalog's formats.
       const formats = Object.hasOwn(doc.formats, action.format) ? doc.formats : { ...doc.formats, [action.format]: defaultSurface(action.format) }
-      const ended = state.transaction ? widgetEditorReducer(state, { type: 'end' }) : state
-      return commit(ended, { ...doc, active: action.format, formats }, { selectedId: null, transaction: null })
+      return commit(state, { ...doc, active: action.format, formats }, { selectedId: null, transaction: null })
     }
     case 'undo': {
       if (!state.past.length) return state
@@ -118,11 +127,11 @@ export function widgetEditorReducer(state, action) {
       if (!state.future.length) return state
       return { ...state, doc: state.future[0], past: [...state.past, doc].slice(-150), future: state.future.slice(1), selectedId: null, transaction: null, guides: {}, nudgeAt: null }
     }
-    case 'begin': return { ...state, transaction: doc, nudgeAt: null }
-    case 'cancel': return { ...state, doc: state.transaction ?? doc, transaction: null, guides: {} }
-    case 'end': return state.transaction && state.transaction !== doc
-      ? { ...state, past: [...state.past, state.transaction].slice(-150), future: [], transaction: null, guides: {} }
-      : { ...state, transaction: null, guides: {} }
+    case 'begin': return { ...state, selectedId, transaction: doc, gestureSnapshot: state, nudgeAt: null }
+    case 'cancel': return state.gestureSnapshot ?? state
+    case 'end': return state.transaction && !sameDocument(state.transaction, doc)
+      ? { ...state, past: [...state.past, state.transaction].slice(-150), future: [], transaction: null, gestureSnapshot: null, guides: {} }
+      : { ...state, doc: state.transaction ?? doc, transaction: null, gestureSnapshot: null, guides: {} }
     case 'add': {
       if (surface.els.length >= 32 || !Object.hasOwn(PRESETS, action.preset ?? 'text') || !supportsPreset(id, action.preset ?? 'text')) return state
       const e = newElement(doc, action.preset)
@@ -134,7 +143,7 @@ export function widgetEditorReducer(state, action) {
       return commit(state, withElements([...surface.els, e]), { selectedId: e.id })
     }
     case 'delete': return selected ? commit(state, withElements(surface.els.filter((e) => e.id !== selectedId)), { selectedId: null }) : state
-    case 'visibility': return selected ? commit(state, withElements(surface.els.map((e) => e.id === selectedId ? { ...e, visible: !e.visible } : e))) : state
+    case 'visibility': return selected ? commit(state, withElements(surface.els.map((e) => e.id === selectedId ? { ...e, visible: !e.visible } : e)), { selectedId: selected.visible && state.selectedId === selectedId ? null : state.selectedId }) : state
     case 'reorder': {
       const from = surface.els.findIndex((e) => e.id === selectedId)
       if (from < 0) return state
@@ -144,8 +153,12 @@ export function widgetEditorReducer(state, action) {
     }
     case 'edit': {
       if (!selected) return state
-      const element = clampElement({ ...selected, ...action.patch }, W, surface.h)
-      return commit(state, withElements(surface.els.map((e) => e.id === selectedId ? element : e)))
+      const element = { ...selected, ...action.patch }
+      if (Object.hasOwn(action.patch, 'w')) element.w = clamp(element.w, Math.min(6, W - element.x), W - element.x)
+      if (Object.hasOwn(action.patch, 'h')) element.h = clamp(element.h, Math.min(element.preset === 'divider' ? 1 : 6, surface.h - element.y), surface.h - element.y)
+      if (Object.hasOwn(action.patch, 'x')) element.x = clamp(element.x, 0, W - element.w)
+      if (Object.hasOwn(action.patch, 'y')) element.y = clamp(element.y, 0, surface.h - element.h)
+      return commit(state, withElements(surface.els.map((e) => e.id === selectedId ? element : e)), { selectedId: !element.visible && state.selectedId === selectedId ? null : state.selectedId })
     }
     case 'move': case 'resize': {
       if (!selected) return state
@@ -163,10 +176,10 @@ export function widgetEditorReducer(state, action) {
       const f = { ...surface, ...action.patch }
       if (HEIGHT_BOUNDS[id]) f.h = clamp(f.h, ...HEIGHT_BOUNDS[id])
       f.radius = clamp(f.radius, 0, Math.floor(Math.min(W, f.h) / 2))
-      f.els = f.els.map((e) => clampElement(e, W, f.h))
+      if (f.h !== surface.h) f.els = f.els.map((e) => clampElement(e, W, f.h))
       return commit(state, withSurface(f))
     }
-    case 'reset': return commit(state, withSurface(defaultSurface(id)), { selectedId: null })
+    case 'reset': return commit(state, withSurface(createWidgetDoc(DESIGNER_DEFAULT_DOC).formats[id]), { selectedId: null })
     default: return state
   }
 }

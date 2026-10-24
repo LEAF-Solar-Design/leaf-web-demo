@@ -92,16 +92,15 @@ describe('document editing and history', () => {
     state = reduce(reduce(state, { type: 'undo' }), { type: 'undo' })
     expect(state.doc).toEqual(doc)
   })
-  it('ends a drag before switching formats so later cancellation cannot restore the old format', () => {
+  it('ignores format switches during a drag and restores the original on cancellation', () => {
     let state = seed()
+    const original = state
     state = reduce(state, { type: 'begin' })
     state = reduce(state, { type: 'move', dx: 8, dy: 8, alt: true })
-    const moved = state.doc
     state = reduce(state, { type: 'format', format: 'homeS' })
-    expect(state.transaction).toBeNull()
+    expect(state.doc.active).toBe('la')
     state = reduce(state, { type: 'cancel' })
-    expect(state.doc.active).toBe('homeS')
-    expect(reduce(state, { type: 'undo' }).doc).toEqual(moved)
+    expect(state).toEqual(original)
   })
   it('supports every catalog preset as a valid primitive on every surface', () => {
     for (const format of Object.keys(FORMATS)) for (const preset of Object.keys(PRESETS)) {
@@ -126,7 +125,9 @@ describe('document editing and history', () => {
     const original = selected(state)
     state = reduce(state, { type: 'duplicate' })
     expect(selected(state)).toMatchObject({ id: 'text2', x: original.x + 8, y: original.y + 8 })
-    state = reduce(state, { type: 'visibility' }); expect(selected(state).visible).toBe(false)
+    state = reduce(state, { type: 'visibility' }); expect(state.selectedId).toBeNull()
+    expect(state.doc.formats.la.els[1].visible).toBe(false)
+    state = reduce(state, { type: 'select', id: 'text2' })
     state = reduce(state, { type: 'reorder', index: 0 }); expect(state.doc.formats.la.els[0].id).toBe('text2')
     state = reduce(state, { type: 'delete' }); state = reduce(state, { type: 'select', id: 'text1' }); state = reduce(state, { type: 'duplicate' })
     expect(selected(state).id).toBe('text2')
@@ -318,7 +319,7 @@ describe('designer interactions', () => {
     click('Add text'); click('Edit surface'); click('Reset this format')
     expect(screen.getByRole('button', { name: 'Click again to reset' })).toBeInTheDocument()
     click('Click again to reset'); expect(screen.getByLabelText('Height')).toHaveValue('160')
-    expect(screen.getByRole('region', { name: 'Preview' }).querySelectorAll('[data-element-id]')).toHaveLength(0)
+    expect(screen.getByRole('region', { name: 'Preview' }).querySelectorAll('[data-element-id]')).toHaveLength(DESIGNER_DEFAULT_DOC.formats.la.els.length)
     vi.useFakeTimers(); click('Reset this format')
     // Date-based guard also prevents a delayed second click from resetting.
     vi.setSystemTime(Date.now() + 3001); click('Click again to reset')
@@ -333,6 +334,185 @@ describe('designer interactions', () => {
     edit('Binding source', 'graph.output'); edit('Graph document ID', 'strategy')
     expect(screen.getByRole('button', { name: 'Load outputs' })).toBeDisabled()
     expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
+describe('SEL-207 critic regressions', () => {
+  function tinyState() {
+    const state = seed()
+    Object.assign(selected(state), { x: 360, y: 159, w: 1, h: 1 })
+    return state
+  }
+  it('G1 keeps all resize handles inside the surface when the available room is below the minimum', () => {
+    const state = tinyState()
+    for (const preset of ['text', 'divider']) for (const handle of HANDLES) for (const delta of [-1000, 0, 1000]) for (const alt of [false, true]) {
+      const original = { ...selected(state), preset }
+      const { element } = transformElement(state.doc, original, handle, delta, delta, alt)
+      expect(element.x).toBeGreaterThanOrEqual(0); expect(element.y).toBeGreaterThanOrEqual(0)
+      expect(element.w).toBeGreaterThan(0); expect(element.h).toBeGreaterThan(0)
+      expect(element.x + element.w).toBeLessThanOrEqual(361)
+      expect(element.y + element.h).toBeLessThanOrEqual(160)
+    }
+  })
+  it('G2 preserves tiny loaded dimensions and unchanged coordinates across unrelated operations', () => {
+    const state = tinyState(), original = selected(state)
+    for (const action of [
+      { type: 'nudge', dx: 1, dy: 1, time: 0 },
+      { type: 'edit', patch: { color: 'leaf' } },
+      { type: 'surface', patch: { bg: 'blur' } },
+      { type: 'duplicate' },
+    ]) {
+      const next = reduce(state, action)
+      expect(selected(next)).toMatchObject({ x: 360, y: 159, w: 1, h: 1 })
+      expect(next.doc.formats.la.els[0]).toMatchObject({ x: original.x, y: original.y, w: original.w, h: original.h })
+    }
+    const moved = reduce(state, { type: 'edit', patch: { x: 10 } })
+    expect(selected(moved)).toMatchObject({ x: 10, y: 159, w: 1, h: 1 })
+  })
+  it('G3 isolates pointer transactions and cancellation restores document selection and both history stacks', () => {
+    vi.stubGlobal('PointerEvent', class extends MouseEvent {
+      constructor(type, options) { super(type, options); this.pointerId = options.pointerId ?? 1 }
+    })
+    let initial = reduce(seed(), { type: 'duplicate' })
+    initial = reduce(initial, { type: 'undo' })
+    initial = reduce(initial, { type: 'select', id: null })
+    let state = reduce(initial, { type: 'begin', id: 'text1' })
+    state = reduce(state, { type: 'move', dx: 10, dy: 10, alt: true })
+    for (const action of [
+      { type: 'add' }, { type: 'duplicate' }, { type: 'delete' }, { type: 'reset' },
+      { type: 'visibility' }, { type: 'format', format: 'homeS' }, { type: 'select', id: null },
+      { type: 'undo' }, { type: 'redo' }, { type: 'nudge', dx: 1, dy: 0, time: 0 },
+      { type: 'edit', patch: { color: 'leaf' } }, { type: 'surface', patch: { bg: 'blur' } },
+    ]) expect(reduce(state, action)).toBe(state)
+    expect(reduce(state, { type: 'cancel' })).toEqual(initial)
+    render(<WidgetsView scopeKey="gesture" />); click('Add text')
+    const surface = screen.getByTestId('widget-surface'), x = screen.getByLabelText('X').value
+    fireEvent.pointerDown(surface.querySelector('[data-element-id]'), { clientX: 20, clientY: 20, pointerId: 1, button: 0 })
+    fireEvent.pointerMove(surface, { clientX: 40, clientY: 40, pointerId: 1, altKey: true })
+    click('Add text'); edit('Color', 'leaf'); click('Undo'); click('Small')
+    fireEvent.keyDown(document.body, { key: 'Delete' })
+    fireEvent.pointerCancel(surface, { pointerId: 1 })
+    expect(surface.querySelectorAll('[data-element-id]')).toHaveLength(1)
+    expect(screen.getByLabelText('X')).toHaveValue(Number(x))
+    expect(screen.getByLabelText('Color')).toHaveValue('slate')
+  })
+  it('G4 ignores stale 422 validation and its pointer after the submitted document changes', async () => {
+    let finish
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => { finish = resolve })))
+    render(<WidgetsView />); edit('Document ID', 'widget'); click('New'); click('Add text')
+    click('Save'); edit('Text', 'Changed during save')
+    finish(response({ detail: 'stale validation', pointer: '/formats/la/els/0' }, 422))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Local edits'))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+  })
+  it('G5 keeps server invalid status and Save disabled after no-op dispatches', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({ detail: 'bad binding', pointer: '/formats/la/els/0' }, 422)))
+    render(<WidgetsView />); edit('Document ID', 'widget'); click('New'); click('Save')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Invalid'))
+    click('Lock screen'); edit('Background', 'black'); click('Edit surface')
+    expect(screen.getByRole('status')).toHaveTextContent('Invalid')
+    expect(screen.getByRole('alert')).toHaveTextContent('/formats/la/els/0')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+  it('G6 marks a missing saved graph output invalid without offering a manufactured output', async () => {
+    const doc = seed().doc, manifest = manifests[0]
+    doc.formats.la.els[0].binding = { source: 'graph.output', doc_id: 'strategy', output: 'removed', min_renderer: '1.0.0', scale: 'identity', tone: 'auto' }
+    const fetchImpl = vi.fn().mockResolvedValueOnce(response({ graph: doc, kind: 'widget', revision: 1 }))
+      .mockResolvedValue(response({ kind: 'graph', graph: { blocks: [{ id: 'node1', registry: { id: manifest.id, version: manifest.version.semver, code_sha256: manifest.version.code_sha256 } }], outputs: { answer: { node: 'node1', port: 'result' } } } }))
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<WidgetsView />); edit('Document ID', 'widget'); click('Load')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved'))
+    click('Text 1: Your text'); click('Load outputs')
+    await screen.findByRole('option', { name: 'Output not found' })
+    expect(screen.queryByRole('option', { name: 'removed' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Output type:/)).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Invalid')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    edit('Graph output', 'answer')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+    edit('Graph output', ''); expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    edit('Binding source', 'none'); expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+  })
+  it('G7 preserves graph binding window and other properties when changing tone scale output or field', async () => {
+    const doc = seed().doc, manifest = manifests[0]
+    doc.formats.la.els[0].binding = { source: 'graph.output', doc_id: 'strategy', output: 'answer', field: 'old', window: 'today-utc', min_renderer: '1.0.0', scale: 'identity', tone: 'auto' }
+    function BindingEditor() {
+      const [state, dispatch] = useWidgetEditor(doc)
+      return <><WidgetInspector doc={state.doc} selectedId="text1" dispatch={(action) => dispatch({ ...action, id: 'text1' })} local={false} /><pre data-testid="binding-state">{JSON.stringify(state.doc.formats.la.els[0].binding)}</pre></>
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => response({ kind: 'graph', graph: { blocks: [{ id: 'node1', registry: { id: manifest.id, version: manifest.version.semver, code_sha256: manifest.version.code_sha256 } }], outputs: { answer: { node: 'node1', port: 'result' }, other: { node: 'node1', port: 'result' } } } })))
+    render(<BindingEditor />); click('Load outputs')
+    await screen.findByRole('option', { name: 'other — scalar<number>' })
+    for (const [label, value, key] of [['Binding tone', 'leaf', 'tone'], ['Binding scale', 'fraction', 'scale'], ['Graph output', 'other', 'output'], ['Output field (optional)', 'new', 'field']]) {
+      const before = JSON.parse(screen.getByTestId('binding-state').textContent)
+      edit(label, value)
+      expect(JSON.parse(screen.getByTestId('binding-state').textContent)).toEqual({ ...before, [key]: value })
+    }
+  })
+  it('G8 resets each format to its starting layout and ship flag while preserving other formats', () => {
+    for (const format of Object.keys(FORMATS)) {
+      let state = seed(format)
+      state = reduce(state, { type: 'surface', patch: { bg: 'blur', ship: !DESIGNER_DEFAULT_DOC.formats[format].ship } })
+      const before = state.doc
+      state = reduce(state, { type: 'reset' })
+      expect(state.doc.formats[format]).toEqual(DESIGNER_DEFAULT_DOC.formats[format])
+      for (const other of Object.keys(FORMATS).filter((id) => id !== format)) expect(state.doc.formats[other]).toBe(before.formats[other])
+      expect(reduce(state, { type: 'undo' }).doc).toEqual(before)
+    }
+  })
+  it('G9 starts a 404 load from the same defaults as New', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(response({}, 404)).mockResolvedValueOnce(response({ revision: 1 }))
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<WidgetsView />); edit('Document ID', 'missing'); click('Load')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Local edits'))
+    click('Save')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saved revision 1'))
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual({ graph: DESIGNER_DEFAULT_DOC, kind: 'widget', expected_head: null })
+  })
+  it('G10 leaves history and redo intact after blocked nudges and no-op inspector commits', () => {
+    let state = tinyState()
+    state = reduce(state, { type: 'edit', patch: { color: 'leaf' } })
+    state = reduce(state, { type: 'undo' })
+    state = reduce(state, { type: 'select', id: 'text1' })
+    for (const action of [{ type: 'nudge', dx: 1, dy: 0, time: 0 }, { type: 'edit', patch: { color: 'slate' } }, { type: 'surface', patch: { bg: 'black' } }]) {
+      expect(reduce(state, action)).toBe(state)
+    }
+    expect(selected(reduce(state, { type: 'redo' }))).toBeUndefined()
+    expect(reduce(state, { type: 'redo' }).doc.formats.la.els[0].color).toBe('leaf')
+  })
+  it('G11 clears selection when the selected element is hidden from layers or inspector', () => {
+    render(<WidgetsView scopeKey="visibility" />); click('Add text'); click('Hide text1')
+    expect(screen.queryByLabelText('Text')).not.toBeInTheDocument()
+    click('Show text1'); click('Text 1: Your text')
+    fireEvent.click(screen.getByLabelText('Visible'))
+    expect(screen.queryByLabelText('Text')).not.toBeInTheDocument()
+    expect(screen.getByTestId('widget-surface').querySelector('[data-handle]')).toBeNull()
+  })
+  it('G12 focuses the next layer then previous layer then Add after layers and inspector removal', () => {
+    render(<WidgetsView scopeKey="focus" />); click('Add text'); edit('Text', 'First')
+    click('Add text'); edit('Text', 'Second'); click('Add text'); edit('Text', 'Third')
+    click('Remove text2')
+    expect(screen.getByRole('button', { name: 'Text 2: Third' })).toHaveFocus()
+    click('Text 2: Third')
+    click('Remove')
+    expect(screen.getByRole('button', { name: 'Text 1: First' })).toHaveFocus()
+    click('Text 1: First'); click('Remove')
+    expect(screen.getByRole('button', { name: 'Add text' })).toHaveFocus()
+  })
+  it('G13 aligns new columns to the first visible column and clamps placement after the rightmost edge', () => {
+    let state = reduce(createEditorState(), { type: 'add', preset: 'symbols' })
+    state = reduce(state, { type: 'edit', patch: { x: 10, y: 20, w: 40, h: 70, maxRows: 2 } })
+    state = reduce(state, { type: 'add', preset: 'pnl' })
+    expect(selected(state)).toMatchObject({ x: 56, y: 20, h: 70, maxRows: 2 })
+    state = reduce(state, { type: 'edit', patch: { x: 300, w: 50 } })
+    state = reduce(state, { type: 'add', preset: 'oddsBar' })
+    expect(selected(state)).toMatchObject({ x: 361 - selected(state).w, y: 20, h: 70, maxRows: 2 })
+    state = reduce(state, { type: 'visibility', id: 'symbols1' })
+    state = reduce(state, { type: 'select', id: 'pnl1' })
+    state = reduce(state, { type: 'edit', patch: { y: 30, h: 60, maxRows: 1 } })
+    state = reduce(state, { type: 'add', preset: 'symbols' })
+    expect(selected(state)).toMatchObject({ y: 30, h: 60, maxRows: 1 })
   })
 })
 

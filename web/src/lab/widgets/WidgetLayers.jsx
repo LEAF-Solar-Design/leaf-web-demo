@@ -7,7 +7,7 @@ export default function WidgetLayers({ elements, selectedId, dispatch }) {
       {elements.map((element, index) => {
         const name = element.preset === 'text' ? `Text ${index + 1}: ${element.text || '(empty)'}` : `${PRESETS[element.preset]?.n ?? element.kind} ${element.id}`
         return <li key={element.id} className="widget-layer">
-          <button type="button" aria-pressed={selectedId === element.id} onClick={() => dispatch({ type: 'select', id: element.id })}
+          <button type="button" data-layer-id={element.id} aria-pressed={selectedId === element.id} onClick={() => dispatch({ type: 'select', id: element.id })}
             onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); dispatch({ type: 'select', id: element.id }) } }}>{name}</button>
           <div className="widget-layer-actions">
             <button type="button" aria-label={`${element.visible ? 'Hide' : 'Show'} ${element.id}`} onClick={() => dispatch({ type: 'visibility', id: element.id })}>{element.visible ? 'Hide' : 'Show'}</button>

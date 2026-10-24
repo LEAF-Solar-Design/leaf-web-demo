@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import WidgetDesigner from './WidgetDesigner.jsx'
-import { createEditorState, createWidgetDoc, widgetEditorReducer } from './useWidgetEditor.js'
+import { createEditorState, createWidgetDoc, sameDocument, widgetEditorReducer } from './useWidgetEditor.js'
 import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 import { validateWidgetDoc } from './widgetDoc.js'
 import { loadWidget, saveWidget } from './widgetsClient.js'
@@ -28,6 +28,8 @@ export function WidgetsView({ scopeKey, hidden = false }) {
   const [head, setHead] = useState(null)
   const [status, setStatus] = useState('empty')
   const [failure, setFailure] = useState(null)
+  const [graphOutputs, setGraphOutputs] = useState(() => new Map())
+  const onOutputs = useCallback((id, outputs) => setGraphOutputs((previous) => new Map(previous).set(id, outputs)), [])
   const requestGeneration = useRef(0)
   const storeRef = useRef(storeState)
   storeRef.current = storeState
@@ -41,37 +43,52 @@ export function WidgetsView({ scopeKey, hidden = false }) {
       return next
     })
     else {
-      setStoreState((previous) => previous ? widgetEditorReducer(previous, action) : previous)
-      if (!['select', 'begin', 'end', 'cancel'].includes(action.type)) {
+      const previous = storeRef.current
+      const next = previous ? widgetEditorReducer(previous, action) : previous
+      storeRef.current = next
+      setStoreState(next)
+      if (previous && next.doc !== previous.doc) {
         setStatus((previous) => previous === 'conflict' || previous === 'saving' ? previous : 'editing')
         setFailure((previous) => previous?.status === 409 ? previous : null)
       }
     }
   }, [local, scopeKey])
-  const invalid = useMemo(() => state && validationError(state.doc), [state?.doc])
+  const invalid = useMemo(() => {
+    if (!state) return null
+    const problem = validationError(state.doc)
+    if (problem) return problem
+    for (const [id, surface] of Object.entries(state.doc.formats)) {
+      const index = surface.els.findIndex(({ binding }) => binding?.source === 'graph.output' && graphOutputs.has(binding.doc_id) && !graphOutputs.get(binding.doc_id).some((output) => output.name === binding.output))
+      if (index >= 0) return { detail: 'Output not found', pointer: `/formats/${id}/els/${index}/binding/output` }
+    }
+    return null
+  }, [state?.doc, graphOutputs])
   async function load(id = docId) {
+    if (storeRef.current?.transaction) return
     const ticket = ++requestGeneration.current
     setStatus('loading'); setFailure(null)
     const result = await loadWidget(id)
     if (ticket !== requestGeneration.current) return
     if (!result.ok) { setStatus('error'); setFailure(result); return }
     try {
-      const doc = result.doc ? validateWidgetDoc(result.doc) : createWidgetDoc()
+      const doc = result.doc ? validateWidgetDoc(result.doc) : createWidgetDoc(DESIGNER_DEFAULT_DOC)
       setStoreState(createEditorState(doc)); setLoadedId(id); setDocId(id); setHead(result.revision ?? null)
       setStatus(result.doc ? 'saved' : 'editing')
     } catch (error) { setStatus('invalid'); setFailure({ detail: error.message, pointer: '/graph' }) }
   }
   function newDocument() {
+    if (storeRef.current?.transaction) return
     requestGeneration.current += 1
     setStoreState(createEditorState(createWidgetDoc(DESIGNER_DEFAULT_DOC))); setLoadedId(docId); setHead(null); setFailure(null); setStatus('editing')
   }
   async function save() {
-    if (local || invalid || !state || !validId(loadedId ?? '')) return
+    if (local || invalid || !state || state.transaction || !validId(loadedId ?? '')) return
     const ticket = ++requestGeneration.current, sentDoc = state.doc
     setStatus('saving'); setFailure(null)
     const result = await saveWidget(loadedId, sentDoc, head)
     if (ticket !== requestGeneration.current) return
-    if (result.ok) { setHead(result.revision); setStatus(storeRef.current?.doc === sentDoc ? 'saved' : 'editing') }
+    if (result.ok) { setHead(result.revision); setStatus(sameDocument(storeRef.current?.doc, sentDoc) ? 'saved' : 'editing') }
+    else if (result.status === 422 && !sameDocument(storeRef.current?.doc, sentDoc)) { setStatus('editing') }
     else { setFailure(result); setStatus(result.status === 409 ? 'conflict' : result.status === 422 ? 'invalid' : 'error') }
   }
   const displayedStatus = invalid ? 'invalid' : status
@@ -89,7 +106,7 @@ export function WidgetsView({ scopeKey, hidden = false }) {
       {problem && <p role="alert">{typeof problem.detail === 'string' ? problem.detail : JSON.stringify(problem.detail)}{problem.pointer ? ` (${problem.pointer})` : ''}</p>}
       {status === 'conflict' && <button type="button" onClick={() => load(loadedId)}>Reload</button>}
     </>}
-    {state && <WidgetDesigner key={local ? scopeKey : loadedId ?? 'store'} state={state} dispatch={dispatch} local={local} hidden={hidden || (!local && status === 'loading')} invalid={Boolean(invalid)} />}
+    {state && <WidgetDesigner key={local ? scopeKey : loadedId ?? 'store'} state={state} dispatch={dispatch} local={local} hidden={hidden || (!local && status === 'loading')} invalid={Boolean(invalid)} onOutputs={onOutputs} graphOutputs={graphOutputs} />}
   </section>
 }
 export default WidgetsView

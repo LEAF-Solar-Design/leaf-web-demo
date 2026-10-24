@@ -7,10 +7,25 @@ import { createWidgetDoc, CUTOUTS, HANDLES, supportsPreset } from './useWidgetEd
 
 const Card = memo(WidgetCard)
 export const FORMAT_NAMES = { la: 'Lock screen', diExp: 'Island expanded', diCompact: 'Island compact', diMin: 'Island minimal', standby: 'StandBy', lockRect: 'Rectangular', lockCirc: 'Circular', lockInline: 'Inline', homeS: 'Small', homeM: 'Medium', homeL: 'Large', watchStack: 'Smart Stack', watchCorner: 'Complication' }
-export default function WidgetDesigner({ state, dispatch, local, hidden = false, invalid = false }) {
+export default function WidgetDesigner({ state, dispatch, local, hidden = false, invalid = false, onOutputs, graphOutputs }) {
   const { doc, selectedId, guides } = state, f = doc.formats[doc.active], W = FORMATS[doc.active].w
   const selected = f.els.find((e) => e.id === selectedId), cutout = CUTOUTS[doc.active]
   const surfaceRef = useRef(null), drag = useRef(null), lastTree = useRef(null)
+  const rootRef = useRef(null), removalFocus = useRef(null)
+  function designerDispatch(action) {
+    if (action.type === 'delete' && !state.transaction) {
+      const index = f.els.findIndex((element) => element.id === (action.id ?? selectedId))
+      if (index >= 0) removalFocus.current = f.els[index + 1]?.id ?? f.els[index - 1]?.id ?? 'add'
+    }
+    dispatch(action)
+  }
+  useEffect(() => {
+    if (removalFocus.current === null) return
+    const target = [...rootRef.current.querySelectorAll('[data-layer-id]')].find((row) => row.dataset.layerId === removalFocus.current)
+    const control = target ?? rootRef.current.querySelector('[data-add-control]')
+    control?.focus()
+    removalFocus.current = null
+  }, [f.els])
   if (!lastTree.current) lastTree.current = createWidgetDoc()
   const [preset, setPreset] = useState('text')
   const allowedPreset = supportsPreset(doc.active, preset) ? preset : 'text'
@@ -45,7 +60,7 @@ export default function WidgetDesigner({ state, dispatch, local, hidden = false,
     if (event.button != null && event.button !== 0) return
     const bounds = surfaceRef.current.getBoundingClientRect()
     drag.current = { id: element.id, original: element, handle, x: event.clientX, y: event.clientY, zoom: bounds.width / W || 1, pointerId: event.pointerId }
-    dispatch({ type: 'select', id: element.id }); dispatch({ type: 'begin' })
+    dispatch({ type: 'begin', id: element.id })
     surfaceRef.current.focus({ preventScroll: true })
     surfaceRef.current.setPointerCapture?.(event.pointerId)
     event.preventDefault(); event.stopPropagation()
@@ -62,10 +77,10 @@ export default function WidgetDesigner({ state, dispatch, local, hidden = false,
     if (surfaceRef.current.hasPointerCapture?.(event.pointerId)) surfaceRef.current.releasePointerCapture(event.pointerId)
     dispatch({ type: cancel ? 'cancel' : 'end' })
   }
-  return <div className="widget-designer" hidden={hidden}>
+  return <div ref={rootRef} className="widget-designer" hidden={hidden}>
     <div className="widget-formats" aria-label="Widget formats">{Object.keys(FORMATS).map((id) => <button type="button" key={id} aria-pressed={doc.active === id} onClick={() => dispatch({ type: 'format', format: id })}>{FORMAT_NAMES[id]}</button>)}</div>
     <div className="widget-toolbar">
-      <button type="button" disabled={f.els.length >= 32} onClick={() => dispatch({ type: 'add', preset: 'text' })}>Add text</button>
+      <button type="button" data-add-control disabled={f.els.length >= 32} onClick={() => dispatch({ type: 'add', preset: 'text' })}>Add text</button>
       <label>Element preset<select value={allowedPreset} onChange={(e) => setPreset(e.target.value)}>{Object.entries(PRESETS).filter(([id]) => supportsPreset(doc.active, id)).map(([id, p]) => <option key={id} value={id}>{p.n}</option>)}</select></label>
       <button type="button" disabled={f.els.length >= 32} onClick={() => dispatch({ type: 'add', preset: allowedPreset })}>Add element</button>
       <button type="button" disabled={!state.past.length} onClick={() => dispatch({ type: 'undo' })}>Undo</button>
@@ -74,7 +89,7 @@ export default function WidgetDesigner({ state, dispatch, local, hidden = false,
     </div>
     <p>{f.els.length} of 32 elements.</p>
     <div className="widget-designer-layout">
-      <WidgetLayers elements={f.els} selectedId={selectedId} dispatch={dispatch} />
+      <WidgetLayers elements={f.els} selectedId={selectedId} dispatch={designerDispatch} />
       <section aria-label="Preview" className="widget-designer-preview">
         {!f.els.length && <p>Empty. Add an element to start your preview.</p>}
         <div ref={surfaceRef} tabIndex={0} aria-label="Widget canvas" className="widget-designer-surface" data-testid="widget-surface" style={{ maxWidth: W, aspectRatio: `${W} / ${f.h}`, borderRadius: f.radius }}
@@ -97,7 +112,7 @@ export default function WidgetDesigner({ state, dispatch, local, hidden = false,
         </div>
         {selected && <p>{selected.w} × {selected.h} points at {selected.x}, {selected.y}</p>}
       </section>
-      <WidgetInspector doc={doc} selectedId={selectedId} dispatch={dispatch} local={local} />
+      <WidgetInspector doc={doc} selectedId={selectedId} dispatch={designerDispatch} local={local} onOutputs={onOutputs} graphOutputs={graphOutputs} />
     </div>
   </div>
 }

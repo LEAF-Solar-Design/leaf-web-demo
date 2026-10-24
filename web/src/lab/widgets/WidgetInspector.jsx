@@ -12,18 +12,20 @@ function NumberField({ label, value, min, max, step = 1, onChange, type = 'numbe
     if (e.target.value !== '' && Number.isFinite(Number(e.target.value))) onChange(Math.max(min, Math.min(max, Number(e.target.value))))
   }} /></label>
 }
-function BindingPicker({ element, edit, local }) {
+function BindingPicker({ element, edit, local, onOutputs, graphOutputs }) {
   const binding = element.binding
   const graphId = binding?.doc_id ?? ''
   const [discovery, setDiscovery] = useState(null)
-  const result = discovery?.docId === graphId ? discovery.result : null
+  const result = discovery?.docId === graphId ? discovery.result : graphOutputs?.has(graphId) ? { ok: true, outputs: graphOutputs.get(graphId) } : null
   const [loading, setLoading] = useState(false)
   const generation = useRef(0)
   useEffect(() => { generation.current += 1; setDiscovery(null); setLoading(false); return () => { generation.current += 1 } }, [element.id, binding?.source, graphId])
   function patch(change) {
     const next = { ...binding, ...change }
-    if (next.source === 'kashbot.board' && next.field === 'winRate') next.window = 'today-utc'
-    else delete next.window
+    if (next.source === 'kashbot.board') {
+      if (next.field === 'winRate') next.window = 'today-utc'
+      else delete next.window
+    }
     edit({ binding: next })
   }
   async function outputs() {
@@ -32,6 +34,7 @@ function BindingPicker({ element, edit, local }) {
     const next = await loadGraphOutputs(graphId)
     if (generation.current !== ticket) return
     setDiscovery({ docId: graphId, result: next }); setLoading(false)
+    if (next.ok) onOutputs?.(graphId, next.outputs)
   }
   return <fieldset className="widgets-fields"><legend>Binding</legend>
     <Select label="Binding source" value={binding?.source ?? 'none'} options={['none', 'kashbot.board', 'graph.output']} onChange={(source) => {
@@ -44,9 +47,8 @@ function BindingPicker({ element, edit, local }) {
       <label>Graph document ID<input value={graphId} onChange={(e) => { generation.current += 1; setDiscovery(null); setLoading(false); patch({ doc_id: e.target.value, output: '' }) }} /></label>
       <button type="button" disabled={local || loading || !graphId} onClick={outputs}>{loading ? 'Loading outputs…' : 'Load outputs'}</button>
       {local && <p>Graph output discovery is available in the authenticated Lab.</p>}
-      <label>Graph output<select value={binding.output} onChange={(e) => patch({ output: e.target.value })}>
-        <option value="">Choose an output</option>
-        {binding.output && !result?.outputs?.some((o) => o.name === binding.output) && <option value={binding.output}>{binding.output}</option>}
+      <label>Graph output<select value={result?.ok && !result.outputs.some((o) => o.name === binding.output) ? '' : binding.output} onChange={(e) => patch({ output: e.target.value })}>
+        <option value="">{binding.output && result?.ok && !result.outputs.some((o) => o.name === binding.output) ? 'Output not found' : 'Choose an output'}</option>
         {result?.outputs?.map((output) => <option key={output.name} value={output.name}>{output.name} — {output.type}</option>)}
       </select></label>
       {result?.outputs?.find((o) => o.name === binding.output) && <p>Output type: {result.outputs.find((o) => o.name === binding.output).type}</p>}
@@ -59,7 +61,7 @@ function BindingPicker({ element, edit, local }) {
     </>}
   </fieldset>
 }
-export default function WidgetInspector({ doc, selectedId, dispatch, local }) {
+export default function WidgetInspector({ doc, selectedId, dispatch, local, onOutputs, graphOutputs }) {
   const format = doc.active, surface = doc.formats[format], W = FORMATS[format].w
   const element = surface.els.find((e) => e.id === selectedId)
   const [resetAt, setResetAt] = useState(null)
@@ -82,7 +84,7 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local }) {
     </> : <>
       <h3>{PRESETS[element.preset]?.n ?? element.kind}</h3>
       <div className="widget-geometry">{['x', 'y', 'w', 'h'].map((key) => <NumberField key={key} label={key.toUpperCase()} value={element[key]}
-        min={key === 'w' ? 6 : key === 'h' ? element.preset === 'divider' ? 1 : 6 : 0}
+        min={key === 'w' ? Math.min(6, W - element.x) : key === 'h' ? Math.min(element.preset === 'divider' ? 1 : 6, surface.h - element.y) : 0}
         max={key === 'x' ? W - element.w : key === 'y' ? surface.h - element.h : key === 'w' ? W - element.x : surface.h - element.y} onChange={(value) => edit({ [key]: value })} />)}</div>
       <NumberField label="Scale" type="range" value={element.scale} min={0.4} max={2} step={0.02} onChange={(scale) => edit({ scale })} />
       <NumberField label="Weight" value={element.weight} min={400} max={900} step={100} onChange={(weight) => edit({ weight: Math.round(weight / 100) * 100 })} />
@@ -96,7 +98,7 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local }) {
       {element.tracking !== undefined && <NumberField label="Spacing" value={element.tracking} min={0} max={20} onChange={(tracking) => edit({ tracking })} />}
       {element.kind === 'text' && (!element.preset || element.preset === 'text') && <label>Text<input value={element.text ?? ''} maxLength={40} onChange={(e) => edit({ text: e.target.value.slice(0, 40) })} /></label>}
       {check('Visible', element.visible, (visible) => edit({ visible }))}
-      <BindingPicker key={element.id} element={element} edit={edit} local={local} />
+      <BindingPicker key={element.id} element={element} edit={edit} local={local} onOutputs={onOutputs} graphOutputs={graphOutputs} />
       <div className="widget-toolbar"><button type="button" disabled={surface.els.length >= 32} onClick={() => dispatch({ type: 'duplicate' })}>Duplicate</button><button type="button" onClick={() => dispatch({ type: 'delete' })}>Remove</button></div>
     </>}
   </aside>
