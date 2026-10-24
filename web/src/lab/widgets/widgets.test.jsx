@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import WidgetsView from './WidgetsView.jsx'
 import WidgetPreview from './WidgetPreview.jsx'
 import { createTextElement, validateElement, validateElements } from './widgetDoc.js'
+import { createWidgetDoc } from './useWidgetEditor.js'
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 const add = () => fireEvent.click(screen.getByRole('button', { name: 'Add text' }))
@@ -83,8 +84,12 @@ describe('existing text primitive boundary', () => {
     expect(() => validateElement({ ...createTextElement('a'), ...patch })).toThrow()
   })
   it('retains the standalone preview boundary and visibility behavior', () => {
-    render(<WidgetPreview elements={validateElements([{ ...createTextElement('a'), x: 241, y: 144, text: 'Boundary' }, { ...createTextElement('b'), visible: false }])} />)
-    expect(preview().querySelectorAll('[data-element-id]')).toHaveLength(1)
-    expect(within(preview()).getByText('Boundary')).toBeInTheDocument()
+    const doc = createWidgetDoc()
+    doc.formats.la.els = [{ ...createTextElement('a'), min_renderer: '1.0.0', x: 241, y: 144, text: 'Boundary' }, { ...createTextElement('b'), min_renderer: '1.0.0', visible: false }]
+    render(<WidgetPreview doc={doc} />)
+    const livePreview = screen.getByRole('region', { name: 'Live widget preview' })
+    expect(livePreview.querySelectorAll('[data-element-id]')).toHaveLength(1)
+    expect(within(livePreview).getByText('Boundary')).toBeInTheDocument()
+    expect(livePreview.querySelector('[data-element-id="a"]')).toHaveAttribute('data-freshness', 'sample')
   })
 })

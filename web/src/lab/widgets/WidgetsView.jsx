@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import WidgetDesigner from './WidgetDesigner.jsx'
+import WidgetPreview from './WidgetPreview.jsx'
 import { createEditorState, createWidgetDoc, sameDocument, widgetEditorReducer } from './useWidgetEditor.js'
 import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 import { validateWidgetDoc } from './widgetDoc.js'
@@ -105,6 +106,7 @@ export function WidgetsView({ scopeKey, hidden = false }) {
       {status === 'conflict' && <button type="button" onClick={() => load(loadedId)}>Reload</button>}
     </>}
     {state && <WidgetDesigner key={local ? scopeKey : loadedId ?? 'store'} state={state} dispatch={dispatch} local={local} hidden={hidden || (!local && status === 'loading')} invalid={Boolean(invalid)} onOutputs={onOutputs} graphOutputs={graphOutputs} />}
+    {!local && !hidden && status !== 'loading' && state && loadedId && head != null && !invalid && <WidgetPreview docId={loadedId} doc={state.doc} format={state.doc.active} />}
   </section>
 }
 export default WidgetsView
