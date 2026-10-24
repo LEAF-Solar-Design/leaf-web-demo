@@ -146,7 +146,7 @@ def evaluate_operation(op_id, inputs=None, settings=None, *, output_mode=None):
         if any(value.mode == "stream" for value in values) and not adapter and output_mode != "stream":
             return runtime_value(None, **metadata, error="stream-adapter-required")
         data = run_operator(op_id, {key: value.data for key, value in inputs.items()},
-                            {} if settings is None else _copy(settings))
+                            {} if settings is None else settings)
         return runtime_value(data, **metadata, mode="scalar" if adapter else output_mode or "scalar")
     except Exception:
         # Operator messages and input values never become diagnostics.
@@ -291,8 +291,18 @@ def _admit_manifest(manifest):
         raise ValueError("presentation refused")
 
 
+def _graph_inputs(graph, registry):
+    # Match JSON.parse numbers before any graph or manifest validation.
+    return _copy(graph), {key: _copy(manifest) for key, manifest in registry.items()}
+
+
 def admit_graph(graph, registry):
     """Browser contract.graph admission, before server execution policy."""
+    graph, registry = _graph_inputs(graph, registry)
+    return _admit_graph(graph, registry)
+
+
+def _admit_graph(graph, registry):
     try:
         _contract_validators()["lab-graph.v1.schema.json"].validate(graph)
         size = len(canonical_json(graph).encode("utf-8"))
@@ -377,8 +387,9 @@ class Budget:
 
 def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
                    cpu_clock=time.thread_time, cancelled=None, on_block=None):
+    graph, registry = _graph_inputs(graph, registry)
     validate_graph(graph)
-    manifests = admit_graph(graph, registry)
+    manifests = _admit_graph(graph, registry)
     budget = Budget() if budget is None else budget
     started = clock()
     blocks = {block["id"]: block for block in graph["blocks"]}

@@ -459,10 +459,73 @@ def test_settings_large_integers_use_browser_numbers(nested):
     registry["constant@1.0.0"]["settings_schema"]["properties"]["value"] = deepcopy(pin["schema"])
     if nested:
         registry["constant@1.0.0"]["sample_output"]["result"] = [7]
+    before = deepcopy((graph, registry))
     value = evaluate_graph(graph, registry)["outputs"]["result"].data
     number = value[0] if nested else value
     assert type(number) is float and number == 9007199254740992.0
-    assert graph["blocks"][0]["settings"]["value"] == ([9007199254740993] if nested else 9007199254740993)
+    assert (graph, registry) == before
+
+
+@pytest.mark.parametrize("entry", [evaluator.admit_graph, evaluate_graph])
+@pytest.mark.parametrize("number", [9007199254740993, 9007199254740992.0])
+@pytest.mark.parametrize("maximum", [9007199254740991, 9007199254740992, 9007199254740993])
+def test_large_integer_settings_admission(entry, number, maximum):
+    graph, registry = case("constant-number")
+    graph["blocks"][0]["settings"]["value"] = number
+    registry["constant@1.0.0"]["settings_schema"]["properties"]["value"] = {
+        "type": "integer", "maximum": maximum}
+    before = deepcopy((graph, registry))
+    if maximum == 9007199254740991:
+        with pytest.raises(GraphRefused) as exc:
+            entry(graph, registry)
+        assert (exc.value.code, exc.value.block_id) == ("lab_graph_invalid_settings", "block-0")
+    else:
+        result = entry(graph, registry)
+        if entry is evaluate_graph:
+            value = result["outputs"]["result"]
+            assert value.error is None
+            assert type(value.data) is float and value.data == 9007199254740992.0
+        elif maximum == 9007199254740993:
+            bound = result["block-0"]["settings_schema"]["properties"]["value"]["maximum"]
+            assert type(bound) is float and bound == 9007199254740992.0
+    assert (graph, registry) == before
+
+
+@pytest.mark.parametrize("entry", [evaluator.admit_graph, evaluate_graph])
+@pytest.mark.parametrize("field", ["default", "sample_input", "sample_output"])
+@pytest.mark.parametrize("maximum", [9007199254740991, 9007199254740992])
+def test_large_integer_manifest_values_admission(entry, field, maximum):
+    graph, registry = case()
+    graph["blocks"] = [graph["blocks"][1]]
+    graph["pipes"] = []
+    manifest = registry["identity@1.0.1"]
+    schema = {"type": "integer", "maximum": maximum}
+    manifest["inputs"]["value"].update(schema=deepcopy(schema), required=True,
+                                        has_default=True, default=7)
+    manifest["outputs"]["result"]["schema"] = deepcopy(schema)
+    manifest["sample_input"] = {"value": 7}
+    manifest["sample_output"] = {"result": 7}
+    if field == "default":
+        manifest["inputs"]["value"]["default"] = 9007199254740993
+    else:
+        manifest[field]["value" if field == "sample_input" else "result"] = 9007199254740993
+    before = deepcopy((graph, registry))
+    if maximum == 9007199254740991:
+        with pytest.raises(GraphRefused) as exc:
+            entry(graph, registry)
+        assert (exc.value.code, exc.value.block_id) == ("lab_graph_manifest_invalid", "block-1")
+    else:
+        result = entry(graph, registry)
+        if entry is evaluate_graph:
+            value = result["outputs"]["result"]
+            assert value.error is None
+            assert value.data == (9007199254740992.0 if field == "default" else 7)
+        else:
+            admitted = result["block-1"]
+            number = (admitted["inputs"]["value"]["default"] if field == "default"
+                      else admitted[field]["value" if field == "sample_input" else "result"])
+            assert type(number) is float and number == 9007199254740992.0
+    assert (graph, registry) == before
 
 
 def test_runtime_numbers_and_negative_zero():
