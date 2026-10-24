@@ -9,3 +9,6 @@ export { IntegrationManualWorkflowRunStatus } from "./IntegrationManualWorkflowR
 export type { IntegrationManualWorkflowRunStatusProps } from "./IntegrationManualWorkflowRunStatus";
 export type { ActionAvailability } from "./action-form-state";
 export { IntegrationActionPreflightError } from "./action-form-state";
+export { IntegrationWorkflowScheduleDraftForm } from "./IntegrationWorkflowScheduleDraftForm";
+export type { IntegrationWorkflowScheduleDraftFormProps } from "./IntegrationWorkflowScheduleDraftForm";
+export { IntegrationWorkflowScheduleDraftSaveError } from "./workflow-schedule-draft-form-state";

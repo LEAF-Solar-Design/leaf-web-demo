@@ -1,10 +1,12 @@
-import { IntegrationManualWorkflowSnapshotV1 } from "../../../assistant-contract/src/integration";
+import { IntegrationManualWorkflowSnapshotV1, IntegrationManualWorkflowSnapshotV2 } from "../../../assistant-contract/src/integration";
 import { sameRef, sameRun } from "./action-form-state";
+
+export type ManualWorkflowSnapshot = IntegrationManualWorkflowSnapshotV1 | IntegrationManualWorkflowSnapshotV2;
 
 export interface ManualWorkflowStatusState {
   contextKey: string;
   runId: string;
-  snapshot?: IntegrationManualWorkflowSnapshotV1;
+  snapshot?: ManualWorkflowSnapshot;
   unverified: boolean;
 }
 
@@ -18,16 +20,25 @@ export function updateManualWorkflowStatus(
     ? rawRun.run_id : "";
   const prior = previous?.contextKey === contextKey && previous.runId === runId ? previous.snapshot : undefined;
   const rejected = (): ManualWorkflowStatusState => ({ contextKey, runId, snapshot: prior, unverified: true });
-  const parsed = IntegrationManualWorkflowSnapshotV1.safeParse(input);
+  const schema = rawRun && typeof rawRun === "object" && "schema_version" in rawRun && rawRun.schema_version === 2
+    ? IntegrationManualWorkflowSnapshotV2 : IntegrationManualWorkflowSnapshotV1;
+  const parsed = schema.safeParse(input);
   if (!parsed.success) return rejected();
   const next = parsed.data;
   if (prior) {
     const a = next.run, b = prior.run;
+    const { schema_version: nextVersion, ...nextRun } = a;
+    const { schema_version: priorVersion, ...priorRun } = b;
+    const priorRequestedAt = b.schema_version === 2 ? b.requested_at : undefined;
     if (!sameRef(a.workflow_ref, b.workflow_ref) || a.submission_digest !== b.submission_digest ||
         a.authority_binding_digest !== b.authority_binding_digest || a.authority_mode !== b.authority_mode ||
         a.created_at !== b.created_at || a.revision < b.revision ||
         (b.state === "succeeded" && a.state !== "succeeded") ||
-        (a.revision === b.revision && JSON.stringify(a) !== JSON.stringify(b)) ||
+        (priorVersion === 2 && nextVersion !== 2) ||
+        (b.state === "cancel_requested" && a.state !== "cancel_requested" && a.state !== "cancelled") ||
+        (b.state === "cancelled" && a.state !== "cancelled") ||
+        (priorRequestedAt !== undefined && (a.schema_version !== 2 || a.requested_at !== priorRequestedAt)) ||
+        (a.revision === b.revision && JSON.stringify(nextRun) !== JSON.stringify(priorRun)) ||
         JSON.stringify(next.definition) !== JSON.stringify(prior.definition)) return rejected();
     for (const [index, step] of next.steps.entries()) {
       const old = prior.steps[index];
@@ -50,12 +61,14 @@ export function updateManualWorkflowStatus(
       step.action.receipts = receipts;
     }
   }
-  const merged = IntegrationManualWorkflowSnapshotV1.safeParse(next);
+  const merged = schema.safeParse(next);
   return merged.success ? { contextKey, runId, snapshot: merged.data, unverified: false } : rejected();
 }
 
-export function manualWorkflowSummary(snapshot: IntegrationManualWorkflowSnapshotV1): string {
+export function manualWorkflowSummary(snapshot: ManualWorkflowSnapshot): string {
   const { run, steps } = snapshot;
+  if (run.state === "cancel_requested") return "Cancellation requested. Workflow settlement is pending. Already claimed actions can still finish; unknown action outcomes remain unknown.";
+  if (run.state === "cancelled") return "Workflow cancelled. Cancellation does not undo applied actions.";
   if (run.state === "accepted") return "Accepted. Awaiting execution results.";
   if (run.state === "succeeded") return "Workflow succeeded.";
   if (run.state === "failed") return "Workflow failed. Inspect the recorded step evidence for individual action outcomes.";

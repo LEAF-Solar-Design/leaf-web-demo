@@ -26,7 +26,7 @@
     "LabCanvas.css": 2547,
     "hostBridge.js": 2622
   },
-  "total": 1351812,
+  "total": 1357433,
   "total_allowance_bytes": 16384,
   "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers.",
   "stem_caps": {
@@ -154,5 +154,21 @@
     "measurement_sha256": "1b648a3c6ab4334cff17659c7a070fbcf40e503addc917284bdebc3138f0ee28",
     "allowance_unchanged": true,
     "hard_caps_unchanged": true
+  },
+  "isolated_schedule_draft_host_measurement": {
+    "method": "Two canonical complete Vite production builds and gzip-9 budget tables; only the isolated feature delta is added.",
+    "before_ref": "653af88cb1ffb76c4d850fa4b61286e354faf92e",
+    "before_total": 1364471,
+    "after_total": 1370092,
+    "delta": 5621,
+    "baseline_before_total": 1351812,
+    "unrelated_drift_bytes": 12659,
+    "before_job": "148c6013c7494689a539830881971ff8",
+    "after_job": "05fc12dbaf4c4d6cacb6fa956833b485",
+    "before_receipt_sha256": "e285b792e383bcc9fb746f7950bedccb3b26b789add07329863c94120ac05683",
+    "after_receipt_sha256": "aea75c8502beb49014d5b1ea596efcdd448dd2557ab107866fb269279fcc9859",
+    "dependency_cache_key": "1fa35c21697cead731c0",
+    "vite_version": "6.4.3",
+    "changed_source_paths": 23
   }
 }

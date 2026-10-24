@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { authHeaders, noteUnauthorized } from '../api.js'
 import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetFieldV1, IntegrationRefV1,
-  ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1,
+  ConnectorDefinitionV1, DatasetDefinitionV1, TransformMappingV1, IntegrationWorkflowScheduleDraftV1,
   IntegrationActionElementV1, IntegrationActionSubmissionV1, IntegrationActionSubmissionResultV1, IntegrationActionSnapshotV1,
   IntegrationManualWorkflowSnapshotV1, IntegrationManualWorkflowRunV1, IntegrationManualWorkflowDefinitionV1, IntegrationActionCatalogV1,
   IntegrationManualWorkflowSubmissionV1, IntegrationManualWorkflowSubmissionResultV1 } from '../../../vendor/assistant-contract/src/integration'
@@ -259,6 +259,17 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       const body = parse(IntegrationManualWorkflowDefinitionV1, input)
       return setupResponse(IntegrationRefV1, id, 'manual-workflows', { ...options, method: 'POST', body, bodyLimit: 65536 },
         (value) => value.id === body.id && value.version === body.version)
+    },
+    async registerWorkflowScheduleDraft(id, input, { signal } = {}) {
+      const body = parse(IntegrationWorkflowScheduleDraftV1, input)
+      return setupResponse(IntegrationRefV1, id, 'manual-workflow-schedule-drafts', { signal, method: 'POST', body, bodyLimit: 65536 },
+        (value) => value.id === body.id && value.version === body.version)
+    },
+    async getWorkflowScheduleDraft(id, reference, { signal } = {}) {
+      const ref = parse(IntegrationRefV1, reference)
+      return setupResponse(IntegrationWorkflowScheduleDraftV1, id,
+        `manual-workflow-schedule-drafts/${ref.id}/versions/${ref.version}?digest=${encodeURIComponent(ref.digest)}`,
+        { signal, method: 'GET' }, (value) => value.id === ref.id && value.version === ref.version)
     },
     async getManualWorkflowDefinition(id, reference, options) {
       const ref = parse(IntegrationRefV1, reference)

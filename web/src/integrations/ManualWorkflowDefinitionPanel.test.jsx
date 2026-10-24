@@ -75,6 +75,53 @@ it('opens only explicitly, renders catalog text safely and saves typed fixed dat
   expect(screen.getByLabelText('Definition stable ID')).toHaveValue('')
   expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeDisabled()
 })
+it('mounts an inert schedule form only below the saved immutable definition and removes it on composer reset', async () => {
+  vi.stubGlobal('crypto', { randomUUID: vi.fn(() => projectId) })
+  const { props, fetchImpl } = setup()
+  render(<ManualWorkflowDefinitionPanel {...props} />)
+  expect(screen.queryByRole('region', { name: 'Schedule draft' })).toBeNull()
+  await compose(); save()
+  const definition = await screen.findByRole('region', { name: 'Saved immutable definition' })
+  const form = screen.getByRole('region', { name: 'Schedule draft' })
+  expect(definition).toContainElement(form)
+  expect(form.closest('form')).toBeNull()
+  expect(screen.getByLabelText('Draft title')).toHaveValue('Order workflow')
+  expect(form).toHaveTextContent('Workflow ID: workflow. Workflow version: 1.')
+  expect(posts(fetchImpl)).toHaveLength(1)
+  let draft
+  const savedRef = { id: `schedule-draft-${projectId}`, version: 1, digest: 'b'.repeat(64) }
+  fetchImpl.mockImplementationOnce(async (_, options) => { draft = JSON.parse(options.body); return response(savedRef) })
+  fetchImpl.mockImplementationOnce(async () => response(draft))
+  fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
+  await screen.findByText(/^Draft saved\./)
+  expect(draft).toEqual({ schema_version: 1, id: savedRef.id, version: 1, title: 'Order workflow', workflow_ref: reference,
+    schedule: { kind: 'daily', timezone: 'UTC', hour: 9, minute: 0,
+      gap_policy: 'next_valid_minute', fold_policy: 'first_occurrence' }, state: 'draft' })
+  const base = `https://ops.example/api/v1/projects/${projectId}/integrations/manual-workflow-schedule-drafts`
+  expect(fetchImpl.mock.calls.slice(-2).map(([url, options]) => [url, options.method])).toEqual([
+    [base, 'POST'], [`${base}/${savedRef.id}/versions/1?digest=${savedRef.digest}`, 'GET'],
+  ])
+  fireEvent.click(screen.getByRole('button', { name: 'Compose a new definition' }))
+  expect(screen.queryByRole('region', { name: 'Schedule draft' })).toBeNull()
+})
+it('composer reset aborts a pending draft save and ignores its late acknowledgement', async () => {
+  vi.stubGlobal('crypto', { randomUUID: vi.fn(() => projectId) })
+  const { props, fetchImpl } = setup()
+  render(<ManualWorkflowDefinitionPanel {...props} />)
+  await compose(); save(); await screen.findByRole('region', { name: 'Saved immutable definition' })
+  let finish, draftSignal
+  fetchImpl.mockImplementationOnce((_, options) => {
+    draftSignal = options.signal
+    return new Promise((resolve) => { finish = resolve })
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  fireEvent.click(screen.getByRole('button', { name: 'Compose a new definition' }))
+  expect(draftSignal.aborted).toBe(true)
+  await act(async () => finish(response({ id: `schedule-draft-${projectId}`, version: 1, digest: 'b'.repeat(64) })))
+  expect(screen.queryByRole('region', { name: 'Schedule draft' })).toBeNull()
+  expect(fetchImpl.mock.calls.filter(([url, options]) => url.includes('manual-workflow-schedule-drafts') && options.method === 'GET')).toHaveLength(0)
+})
 it('honestly handles an empty catalog and bounds explicit pagination with retained selections', async () => {
   const { props, fetchImpl } = setup({ actions: [], next_cursor: 'page_2' })
   render(<ManualWorkflowDefinitionPanel {...props} />)
