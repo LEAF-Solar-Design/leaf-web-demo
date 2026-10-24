@@ -216,24 +216,32 @@ def save(tenant, doc_id, graph, expected_head, author, kind="graph"):
     validate_head(expected_head)
     if not isinstance(author, str) or not author or len(author) > 200:
         raise InvalidGraph("invalid_author")
-    try:
-        if kind not in ("graph", "widget"):
+
+    def validated_data(document_kind):
+        if document_kind not in ("graph", "widget"):
             raise InvalidGraph("invalid_document_kind")
-        if kind == "widget":
+        if document_kind == "widget":
             from lab_widget_doc import validate_widget
 
-            data = validate_widget(graph)
-        else:
-            data = validate_graph(graph)
+            return validate_widget(graph)
+        return validate_graph(graph)
+
+    try:
+        # Reject invalid first saves without creating a local database. An
+        # existing store must be consulted first, even with a null expected head.
+        db_path = os.environ.get("LEAF_LAB_DB")
+        empty_local_store = (store_mode() == "sqlite" and db_path and not Path(db_path).exists())
+        data = validated_data(kind) if empty_local_store else None
 
         def operation(sql):
+            row = sql.execute("SELECT kind FROM lab_documents WHERE tenant_id=? AND doc_id=?",
+                              (tenant, doc_id)).fetchone()
+            if row is not None and row["kind"] != kind:
+                raise KindFixed("lab_document_kind_fixed")
             current = _check_head(sql, tenant, doc_id, expected_head)
-            if current is not None:
-                row = sql.execute("SELECT kind FROM lab_documents WHERE tenant_id=? AND doc_id=?",
-                                  (tenant, doc_id)).fetchone()
-                if row["kind"] != kind:
-                    raise KindFixed("lab_document_kind_fixed")
-            return _append(sql, tenant, doc_id, data, author, current, current, kind)
+            document_kind = row["kind"] if row is not None else kind
+            payload = data if data is not None else validated_data(document_kind)
+            return _append(sql, tenant, doc_id, payload, author, current, current, document_kind)
 
         return _run(tenant, operation, write=True)
     except Conflict:

@@ -15,8 +15,10 @@ router = APIRouter(prefix="/api/lab/widgets", tags=["lab_widgets"])
 def _resolve(tenant, doc_id, bindings):
     identifier(doc_id)
     validate_bindings(bindings)
-    ledger.get(tenant, doc_id)
-    return resolve_values(tenant, bindings)
+    revision = ledger.get(tenant, doc_id)
+    if revision["kind"] != "widget":
+        return JSONResponse(status_code=409, content={"detail": "lab_document_not_widget"})
+    return resolve_values(tenant, bindings, documents={doc_id: revision})
 
 
 @router.post("/{doc_id}/values")

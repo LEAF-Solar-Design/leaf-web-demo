@@ -135,12 +135,22 @@ def test_deployment_identity_refuses_unauthenticated(client, monkeypatch):
 
 @pytest.mark.parametrize("mode,status", [
     ("anonymous", 401), ("foreign", 404), ("owner", 200),
-    ("rail-off", 404), ("auth-off", 503),
+    ("rail-off", 404), ("auth-off", 503), ("graph-target", 409),
 ])
 def test_widget_values_admission(client, owner, monkeypatch, mode, status):
-    if mode == "owner":
+    db, before = owner
+    doc_id = DOC
+    if mode in ("owner", "graph-target"):
         monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
                             lambda subject: ("tenant-a", "hosted_pro"))
+    if mode == "owner":
+        doc_id = "boundary-widget"
+        ledger.save("tenant-a", doc_id, {
+            "schema": "widget-doc.v1", "min_renderer": "1.0.0", "active": "la",
+            "formats": {"la": {"h": 160, "radius": 22, "bg": "black",
+                               "vibrant": False, "ship": True, "els": []}},
+        }, None, "owner-a", kind="widget")
+        before = _owner_snapshot(db)
     if mode == "rail-off":
         monkeypatch.setenv("LEAF_LAB_SURFACE_ENABLED", "0")
     if mode == "auth-off":
@@ -149,12 +159,13 @@ def test_widget_values_admission(client, owner, monkeypatch, mode, status):
         def forbidden(*args, **kwargs):
             pytest.fail("closed widget admission reached persistence")
         monkeypatch.setattr(ledger, "_run", forbidden)
-    response = client.post(f"/api/lab/widgets/{DOC}/values", json={"bindings": []},
+    response = client.post(f"/api/lab/widgets/{doc_id}/values", json={"bindings": []},
                            headers={} if mode == "anonymous" else
-                           _h("tenant-a" if mode == "owner" else "tenant-b"))
+                           _h("tenant-a" if mode in ("owner", "graph-target") else "tenant-b"))
     assert response.status_code == status, response.text
+    if mode == "graph-target":
+        assert response.json() == {"detail": "lab_document_not_widget"}
     assert MARKER not in response.text
-    db, before = owner
     assert _owner_snapshot(db) == before
 
 

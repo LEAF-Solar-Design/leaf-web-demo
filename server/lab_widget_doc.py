@@ -33,7 +33,7 @@ def require_renderer(version, pointer=""):
         raise InvalidWidget("Unsupported min_renderer.", pointer)
 
 
-def _schema_failure(error, pointer=""):
+def _schema_failure(error, pointer="", *, binding_error=False):
     """Keep renderer rejection reasons while retaining schema-owned pointers."""
     path = list(error.absolute_path)
     field = path[-1] if path else None
@@ -44,7 +44,7 @@ def _schema_failure(error, pointer=""):
             Draft202012Validator({"$ref": f"#/$defs/{branch}", "$defs": SCHEMA["$defs"]},
                                  registry=Registry()).validate(binding)
         except ValidationError as nested:
-            failure = _schema_failure(nested, pointer + _pointer(path))
+            failure = _schema_failure(nested, pointer + _pointer(path), binding_error=True)
             if (binding.get("source") == "kashbot.board" and binding.get("field") == "winRate"
                     and binding.get("window") != "today-utc"):
                 return InvalidWidget("Win rate requires the today-utc window field.", failure.pointer)
@@ -52,6 +52,8 @@ def _schema_failure(error, pointer=""):
     reason = "Unsupported document field."
     if field == "kind":
         reason = "Unknown primitive kind."
+    elif field in ("scale", "tone") and (binding_error or "binding" in path):
+        reason = "Invalid binding scale or tone."
     elif field in ("x", "y", "w", "h", "scale"):
         reason = "Numeric value outside bounds."
     elif field in ("weight", "color", "align", "visible"):
@@ -72,7 +74,7 @@ def validate_binding(binding, pointer=""):
         Draft202012Validator({"$ref": "#/$defs/binding", "$defs": SCHEMA["$defs"]},
                              registry=Registry()).validate(binding)
     except ValidationError as error:
-        raise _schema_failure(error, pointer) from error
+        raise _schema_failure(error, pointer, binding_error=True) from error
     require_renderer(binding["min_renderer"], pointer + "/min_renderer")
     return binding
 

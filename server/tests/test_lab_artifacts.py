@@ -310,6 +310,31 @@ def test_http_save_restore_publish_diff_and_tenant_boundary():
     assert other.post("/api/lab/docs/strategy/publish", json={"expected_head": 1}).status_code == 404
 
 
+@pytest.mark.parametrize("stored_kind", ["widget", "graph"])
+@pytest.mark.parametrize("requested_kind", ["widget", "graph", None])
+@pytest.mark.parametrize("expected_head", [None, 1])
+def test_F4_kind_change_conflicts_before_payload_validation(stored_kind, requested_kind, expected_head):
+    widget = json.loads((ROOT / "contract/fixtures/widget/parity/basic.json").read_text(
+        encoding="utf-8"))["doc"]
+    document = widget if stored_kind == "widget" else GRAPH
+    first = ledger.save("tenant-a", "fixed", document, None, "member", kind=stored_kind)
+    body = {"graph": document, "expected_head": expected_head}
+    if requested_kind is not None:
+        body["kind"] = requested_kind
+    response = client().post("/api/lab/docs/fixed/save", json=body)
+    if (requested_kind or "graph") != stored_kind:
+        assert response.status_code == 409
+        assert response.json() == {"detail": "lab_document_kind_fixed"}
+        assert ledger.get("tenant-a", "fixed")["sha256"] == first["sha256"]
+        assert len(ledger.list_revisions("tenant-a", "fixed")) == 1
+    elif expected_head is None:
+        assert response.status_code == 409
+        assert response.json() == {"detail": "stale_expected_head"}
+    else:
+        assert response.status_code == 200
+        assert response.json()["kind"] == stored_kind
+
+
 def test_http_head_carries_published_revision_but_numbered_revision_does_not():
     http = client()
     save()

@@ -9,7 +9,7 @@ from referencing import Registry
 
 import lab_artifacts as ledger
 from lab_ops import (UNDEFINED, STREAM_ADAPTERS, OperatorRefused, OperatorUnavailable,
-                     _field, has_operator, run_operator)
+                     has_operator, run_operator)
 from lab_registry import lookup
 from lab_widget_doc import InvalidWidget, validate_binding
 
@@ -26,6 +26,29 @@ def _bytes(value):
 
 class Unavailable(LookupError):
     pass
+
+
+def _binding_field(value, path):
+    if not isinstance(path, str) or not path:
+        raise Unavailable("field-missing")
+    for key in path.split("."):
+        if key in ("__proto__", "prototype", "constructor"):
+            raise Unavailable("field-missing")
+        if isinstance(value, dict):
+            if key not in value:
+                raise Unavailable("field-missing")
+            value = value[key]
+        elif isinstance(value, list):
+            if key == "length":
+                value = len(value)
+            elif (key.isascii() and key.isdecimal() and (key == "0" or not key.startswith("0"))
+                  and len(key) <= 10 and int(key) < len(value)):
+                value = value[int(key)]
+            else:
+                raise Unavailable("field-missing")
+        else:
+            raise Unavailable("field-missing")
+    return value
 
 
 def validate_bindings(bindings):
@@ -173,15 +196,16 @@ def _fit(result):
     return result
 
 
-def resolve_values(tenant, bindings):
+def resolve_values(tenant, bindings, *, documents=None):
     validate_bindings(bindings)
+    revisions = dict(documents or {})
     documents = {}
     # Resolve each head once, even if the document is missing.
     for binding in bindings:
         doc_id = binding["doc_id"]
         if doc_id not in documents:
             try:
-                revision = ledger.get(tenant, doc_id)
+                revision = revisions[doc_id] if doc_id in revisions else ledger.get(tenant, doc_id)
                 documents[doc_id] = (revision, _Graph(revision["graph"])) if revision["kind"] == "graph" else None
             except ledger.NotFound:
                 documents[doc_id] = None
@@ -199,7 +223,7 @@ def resolve_values(tenant, bindings):
             _, _, _, port = graph.port(output["node"], output["port"])
             value = graph.visit(output["node"], output["port"])
             if "field" in binding:
-                value = _field(value, binding["field"])
+                value = _binding_field(value, binding["field"])
             value, cut = _bounded(value)
             result = _fit({"status": "resolved", "value": value, "truncated": cut, "pins": {
                 "doc_id": binding["doc_id"], "graph_revision": revision["revision"],

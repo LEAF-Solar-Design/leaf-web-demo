@@ -200,6 +200,81 @@ def test_32_bindings_read_three_heads_once(monkeypatch):
     assert all(value["value"] == 42 for value in result["values"])
 
 
+@pytest.mark.parametrize("field,expected", [
+    ("absent", "missing"), ("nested.absent", "missing"), ("nested.null", None),
+    ("null", None), ("null.absent", "missing"), ("amount", 42),
+    ("items.0", None), ("items.1.amount", 7), ("items.length", 2),
+    ("items.2", "missing"), ("items.01", "missing"), ("items.-1", "missing"),
+    ("items.١", "missing"), ("items.10000000000", "missing"),
+    ("__proto__", "missing"), ("prototype", "missing"), ("constructor", "missing"),
+    ("nested.constructor", "missing"),
+])
+def test_F1_absent_field_is_unavailable_and_present_null_resolves(field, expected):
+    head = save_source({"amount": 42, "null": None, "nested": {"null": None},
+                        "items": [None, {"amount": 7}]})
+    value = resolve_values("tenant-a", [binding(field=field)])["values"][0]
+    if expected == "missing":
+        assert value == {"status": "unavailable", "reason": "field-missing", "truncated": False}
+    else:
+        assert value == {"status": "resolved", "value": expected, "truncated": False, "pins": {
+            "doc_id": "source", "graph_revision": 1, "graph_sha256": head["sha256"],
+            "output": {"name": "total", "node": "constant", "port": "result"}, "schema": None,
+        }}
+
+
+def test_F2_values_route_reads_widget_and_each_binding_document_once(monkeypatch):
+    save_widget()
+    save_source()
+    reads = []
+    original = ledger.get
+
+    def spy(tenant, doc_id):
+        reads.append((tenant, doc_id))
+        return original(tenant, doc_id)
+
+    monkeypatch.setattr(ledger, "get", spy)
+    response = client().post("/api/lab/widgets/widget/values", json={
+        "bindings": [binding("widget"), binding(), binding("widget"), binding()]})
+    assert response.status_code == 200, response.text
+    assert reads == [("tenant-a", "widget"), ("tenant-a", "source")]
+    values = response.json()["values"]
+    assert values[0] == values[2] == {
+        "status": "unavailable", "reason": "missing-document", "truncated": False}
+    assert values[1]["value"] == values[3]["value"] == 42
+
+
+def test_F3_values_route_requires_widget_target():
+    save_source(doc_id="g")
+    response = client().post("/api/lab/widgets/g/values", json={"bindings": []})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "lab_document_not_widget"}
+
+
+@pytest.mark.parametrize("source", ["graph.output", "kashbot.board"])
+@pytest.mark.parametrize("field", ["scale", "tone"])
+def test_F5_binding_scale_and_tone_errors_match_client(source, field):
+    from lab_widget_doc import validate_binding
+
+    value = binding() if source == "graph.output" else {
+        "source": source, "field": "total", "min_renderer": "1.0.0",
+        "scale": "identity", "tone": "auto"}
+    value[field] = "bogus"
+    with pytest.raises(InvalidWidget) as caught:
+        validate_binding(value)
+    assert caught.value.reason == "Invalid binding scale or tone."
+    assert caught.value.pointer == "/" + field
+    doc = copy.deepcopy(PARITY["doc"])
+    doc["formats"]["la"]["els"][1]["binding"] = value
+    response = client().post("/api/lab/docs/widget/save", json={
+        "kind": "widget", "graph": doc, "expected_head": None})
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid_widget_document",
+                               "pointer": "/formats/la/els/1/binding/" + field, "block": None}
+    with pytest.raises(InvalidWidget) as caught:
+        validate_widget(doc)
+    assert caught.value.reason == "Invalid binding scale or tone."
+
+
 @pytest.mark.parametrize("missing,reason", [
     ("document", "missing-document"), ("output", "missing-output"), ("port", "missing-port"),
 ])
