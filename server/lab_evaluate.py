@@ -273,7 +273,8 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
             except Exception:
                 value = runtime_value(None, **inherited([result]), error="output-refused")
             outputs[port] = value
-        size = len(canonical_json(next(iter(outputs.values())).data).encode("utf-8"))
+        size = sum(len(canonical_json(value.data).encode("utf-8"))
+                   for value in outputs.values())
         cpu_ms = (cpu_clock() - cpu_started) * 1000
         wall_ms = (clock() - wall_started) * 1000
         if (cpu_ms > budget.block_cpu_ms or wall_ms > budget.block_wall_ms

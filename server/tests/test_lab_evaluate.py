@@ -152,6 +152,46 @@ def test_budget_replaces_every_output_and_inherits_metadata():
         assert output.truncated
 
 
+@pytest.mark.parametrize("limit", [10, 25, 26])
+def test_output_byte_budget_counts_ports_after_validation(limit):
+    graph, registry = case()
+    graph["blocks"][0]["settings"]["value"] = "x" * 20
+    manifest = registry["constant@1.0.0"]
+    manifest["outputs"]["result"]["schema"] = {"type": "number"}
+    manifest["outputs"]["other"] = deepcopy(manifest["outputs"]["result"])
+    manifest["outputs"]["other"]["schema"] = {"type": "string"}
+    result = evaluate_graph(graph, registry, budget=Budget(block_output_bytes=limit))
+    outputs = result["values"]["block-0"]
+    # Refused data is null (4 bytes); the retained string is 22 UTF-8 bytes.
+    if limit < 26:
+        assert set(outputs) == {"result", "other"}
+        assert all(value.error == "budget-exceeded" and value.data is None
+                   for value in outputs.values())
+    else:
+        assert outputs["result"].error == "output-refused"
+        assert outputs["result"].data is None
+        assert outputs["other"].error is None
+        assert outputs["other"].data == "x" * 20
+    assert result["outputs"]["result"].error == "upstream-failed"
+
+
+@pytest.mark.parametrize("limit", [9, 10, 11])
+def test_output_byte_budget_sums_small_ports(limit):
+    graph, registry = case()
+    manifest = registry["constant@1.0.0"]
+    manifest["outputs"]["other"] = deepcopy(manifest["outputs"]["result"])
+    result = evaluate_graph(graph, registry, budget=Budget(block_output_bytes=limit))
+    outputs = result["values"]["block-0"]
+    # Each [1,2] fits individually (5 bytes); together they require 10 bytes.
+    assert set(outputs) == {"result", "other"}
+    for value in outputs.values():
+        assert value.error == ("budget-exceeded" if limit < 10 else None)
+        assert value.data == (None if limit < 10 else [1, 2])
+    downstream = result["outputs"]["result"]
+    assert downstream.error == ("upstream-failed" if limit < 10 else None)
+    assert downstream.data == (None if limit < 10 else [1, 2])
+
+
 def test_run_wall_budget():
     graph, registry = case()
     seen = []
