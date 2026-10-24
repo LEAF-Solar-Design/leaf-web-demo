@@ -18,6 +18,10 @@ import {
   IntegrationManualWorkflowRunV1,
   IntegrationManualWorkflowSnapshotV1,
   IntegrationManualWorkflowSubmissionResultV1,
+  IntegrationManualWorkflowRunV2,
+  IntegrationManualWorkflowSnapshotV2,
+  IntegrationManualWorkflowCancellationRequestV1,
+  IntegrationManualWorkflowCancellationResultV1,
   CredentialReferenceV1,
   ConnectionV1,
   TransformMappingV1,
@@ -100,6 +104,10 @@ export const SCHEMA_DEFS = {
   DatasetReadV1,
   DatasetElementV1,
   IntegrationElementV1,
+  IntegrationManualWorkflowRunV2,
+  IntegrationManualWorkflowSnapshotV2,
+  IntegrationManualWorkflowCancellationRequestV1,
+  IntegrationManualWorkflowCancellationResultV1,
 } as const;
 
 export type SchemaName = keyof typeof SCHEMA_DEFS;

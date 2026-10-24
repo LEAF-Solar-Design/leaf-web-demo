@@ -1,10 +1,10 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { formatDatasetValue, resolveDisplayPreferences } from '../../../vendor/assistant-react/src/datasets/formatting'
-import { ManualWorkflowHistoryPage } from './client.js'
+import { ManualWorkflowHistoryPageV2 } from './client.js'
 
 const timestamp = { id: 'created', label: 'Created', type: { kind: 'instant' }, nullable: false, sensitivity: 'public' }
 
-export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, onForbidden, onSelect, disabled = false, displayPreferences }) {
+export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, onForbidden, onSelect, disabled = false, displayPreferences, acquire, release }) {
   const [page, setPage] = useState(null)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -31,21 +31,22 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
     if (!ctx || ctx.busy || disabled || ctx.controller.signal.aborted) return
     const after = kind === 'Next' ? page?.next_cursor : undefined
     if (kind === 'Next' && (!after || ctx.cursors.has(after))) return
-    ctx.busy = true; setPending(true); setError(''); setRetry(kind)
     const controller = new AbortController()
+    if (acquire && !acquire(controller)) return
+    ctx.busy = true; setPending(true); setError(''); setRetry(kind)
     const abort = () => controller.abort()
     ctx.controller.signal.addEventListener('abort', abort, { once: true })
     const current = () => binding.current === ctx && !ctx.controller.signal.aborted
     const assertCurrent = () => { if (!current() || controller.signal.aborted) throw new DOMException('Aborted', 'AbortError') }
     const guarded = async () => { await guard(controller.signal); assertCurrent() }
-    let timer, cancel
+    let timer, cancel, expired = false
     try {
       const work = async () => {
         await guarded()
-        const result = await client.listManualWorkflowRuns(projectId, { signal: controller.signal, limit: 25, after })
+        const result = await client.listManualWorkflowRunsV2(projectId, { signal: controller.signal, limit: 25, after })
         assertCurrent()
         await guarded()
-        const verified = ManualWorkflowHistoryPage.parse(result)
+        const verified = ManualWorkflowHistoryPageV2.parse(result)
         if (verified.next_cursor && (verified.next_cursor === after || (kind === 'Next' && ctx.cursors.has(verified.next_cursor)))) throw new Error('invalid')
         if (kind !== 'Next') ctx.cursors.clear()
         if (after) ctx.cursors.add(after)
@@ -54,10 +55,10 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
       await Promise.race([work(), new Promise((_, reject) => {
         cancel = () => reject(new DOMException('Aborted', 'AbortError'))
         controller.signal.addEventListener('abort', cancel, { once: true })
-        timer = setTimeout(() => { controller.abort(); reject(new Error('timeout')) }, 45000)
+        timer = setTimeout(() => { expired = true; controller.abort(); reject(new Error('timeout')) }, 45000)
       })])
     } catch (failure) {
-      if (!current()) return
+      if (!current() || (controller.signal.aborted && !expired)) return
       if (failure?.status === 401 || failure?.status === 403) {
         ctx.controller.abort(); ctx.cursors.clear()
         setPage(null); setPending(false); setError(''); setForbidden(true); onForbidden(); return
@@ -66,6 +67,7 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
     } finally {
       clearTimeout(timer); controller.signal.removeEventListener('abort', cancel)
       ctx.controller.signal.removeEventListener('abort', abort)
+      release?.(controller)
       if (current()) { ctx.busy = false; setPending(false) }
     }
   }
@@ -76,9 +78,9 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
   return <section aria-label="Workflow history" style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
     <h3>Workflow history</h3>
     <p>These are stored run summaries. Opening details refreshes the selected run.</p>
-    <button type="button" disabled={locked} onClick={() => read('Load')}>{page ? 'Refresh history' : 'Load history'}</button>
-    {page?.next_cursor && <button type="button" disabled={locked || binding.current?.cursors.has(page.next_cursor)} onClick={() => read('Next')}>Next page</button>}
-    {error && <button type="button" disabled={locked} onClick={() => read(retry)}>Retry history</button>}
+    <button type="button" style={{ minHeight: 44 }} disabled={locked} onClick={() => read('Load')}>{page ? 'Refresh history' : 'Load history'}</button>
+    {page?.next_cursor && <button type="button" style={{ minHeight: 44 }} disabled={locked || binding.current?.cursors.has(page.next_cursor)} onClick={() => read('Next')}>Next page</button>}
+    {error && <button type="button" style={{ minHeight: 44 }} disabled={locked} onClick={() => read(retry)}>Retry history</button>}
     <div ref={feedback} tabIndex={-1} style={{ minWidth: 0 }}>
       <p role="status" aria-live="polite">{pending ? 'Loading workflow history…' : page ?
         page.items.length ? `${page.items.length} stored run summaries on this page.` : 'No stored runs on this page.' :
@@ -90,7 +92,7 @@ export function ManualWorkflowHistoryPanel({ client, projectId, signal, guard, o
         <p>{run.workflow_ref.id} · Version {run.workflow_ref.version} · {run.state}</p>
         <p>Created <time dateTime={run.created_at}>{preferences ? formatDatasetValue(timestamp, run.created_at, preferences) : run.created_at}</time></p>
         <p>{run.run_id}</p>
-        <button type="button" style={{ maxWidth: '100%', whiteSpace: 'normal' }} disabled={locked}
+        <button type="button" style={{ minHeight: 44, maxWidth: '100%', whiteSpace: 'normal' }} disabled={locked}
           aria-label={`Open run details ${run.run_id}`} onClick={() => {
             const ctx = binding.current
             if (ctx && !ctx.busy && !disabled && !ctx.controller.signal.aborted) onSelect(run)

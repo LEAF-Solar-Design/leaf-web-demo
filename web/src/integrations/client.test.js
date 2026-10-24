@@ -433,6 +433,60 @@ describe('manual workflow start HTTP contract', () => {
   })
 })
 
+describe('V2 workflow cancellation HTTP contract', () => {
+  const v2 = { ...workflow, run: { ...workflow.run, schema_version: 2 } }
+  const request = { schema_version: 1, run_id: projectId, expected_revision: workflow.run.revision }
+  const cancelled = { status: 'recorded', snapshot: { ...v2, run: { ...v2.run,
+    revision: workflow.run.revision + 1, state: 'cancelled', requested_at: workflow.run.updated_at } } }
+  it('uses only the explicit V2 routes, canonical bodies, current bearer and caller signal', async () => {
+    const { client, fetchImpl, options } = setup({ items: [v2.run], next_cursor: null })
+    await client.listManualWorkflowRunsV2(projectId, { ...options, limit: 50, after: 'page_2' })
+    fetchImpl.mockResolvedValueOnce(response(v2))
+    expect(await client.getManualWorkflowRunV2(projectId, projectId, options)).toEqual(v2)
+    fetchImpl.mockResolvedValueOnce(response(cancelled))
+    expect(await client.cancelManualWorkflowRun(projectId, projectId, request, options)).toEqual(cancelled)
+    fetchImpl.mockResolvedValueOnce(response({ run, receipts: [] }))
+    await client.reconcileManualWorkflowStepV2(projectId, projectId, 'send', {}, options)
+    const base = `https://ops.example/api/v1/projects/${projectId}/integrations/manual-workflow-runs-v2`
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      `${base}?limit=50&after=page_2`, `${base}/${projectId}`, `${base}/${projectId}/cancel`, `${base}/${projectId}/steps/send/reconcile`,
+    ])
+    expect(JSON.parse(fetchImpl.mock.calls[2][1].body)).toEqual(request)
+    expect(fetchImpl.mock.calls[3][1].body).toBe('{}')
+    for (const [, optionsSent] of fetchImpl.mock.calls) {
+      expect(optionsSent).toMatchObject({ signal: options.signal, credentials: 'omit', redirect: 'error', cache: 'no-store',
+        headers: { Authorization: 'Bearer first' } })
+      expect(optionsSent.headers).not.toHaveProperty('If-Match')
+    }
+  })
+  it.each([{ limit: 0 }, { limit: 51 }, { limit: 1.5 }, { after: '' }, { after: 'bad=' }, { after: null }])('rejects invalid V2 queries: %j', async (query) => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.listManualWorkflowRunsV2(projectId, { ...options, ...query })).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([
+    { items: [workflow.run], next_cursor: null }, { items: [v2.run, v2.run], next_cursor: null },
+    { items: [], next_cursor: null, extra: true }, { items: [{ ...v2.run, state: 'cancelled' }], next_cursor: null },
+  ])('rejects noncanonical V2 history: %j', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.listManualWorkflowRunsV2(projectId, options)).rejects.toThrow('invalid')
+  })
+  it.each([{ expected_revision: 0 }, { schema_version: 2 }, { run_id: '22222222-2222-4222-8222-222222222222' }, { extra: true }])('rejects unbound cancellation intent before transport: %j', async (patch) => {
+    const { client, fetchImpl, options } = setup(cancelled)
+    await expect(client.cancelManualWorkflowRun(projectId, projectId, { ...request, ...patch }, options)).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it('retains safe dispatch ambiguity without retrying lost or regressive cancellation responses', async () => {
+    const { client, fetchImpl, options } = setup(cancelled)
+    fetchImpl.mockRejectedValueOnce(new Error('private provider text'))
+    await expect(client.cancelManualWorkflowRun(projectId, projectId, request, options)).rejects.toMatchObject({ dispatched: true })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    await expect(client.cancelManualWorkflowRun(projectId, projectId, { ...request, expected_revision: 10 }, options)).rejects.toMatchObject({ dispatched: true })
+    fetchImpl.mockResolvedValueOnce(response({ ...cancelled, snapshot: workflow }))
+    await expect(client.cancelManualWorkflowRun(projectId, projectId, request, options)).rejects.toMatchObject({ dispatched: true })
+  })
+})
+
 describe('existing manual workflow HTTP contract', () => {
   it('uses exact canonical GET, explicit resume and persisted-step reconcile with current bearer and empty bodies', async () => {
     const { client, fetchImpl, options } = setup(workflow)
