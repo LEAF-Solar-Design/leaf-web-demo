@@ -240,7 +240,10 @@ describe("opt-in manual workflow cancellation contracts", () => {
     const names = ["IntegrationManualWorkflowRunV2", "IntegrationManualWorkflowSnapshotV2",
       "IntegrationManualWorkflowCancellationRequestV1", "IntegrationManualWorkflowCancellationResultV1"];
     for (const [defs, prefix] of [[json.$defs, "#/$defs/"], [openapi.components.schemas, "#/components/schemas/"]] as const) {
-      expect(Object.keys(defs).slice(-4)).toEqual(names);
+      const registered = Object.keys(defs);
+      const start = registered.indexOf(names[0]);
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(registered.slice(start, start + names.length)).toEqual(names);
       for (const name of names) expect(defs[name].additionalProperties).toBe(false);
       expect(defs.IntegrationManualWorkflowRunV2.properties.schema_version.const).toBe(2);
       expect(defs.IntegrationManualWorkflowRunV2.properties.state.enum).toContain("cancelled");

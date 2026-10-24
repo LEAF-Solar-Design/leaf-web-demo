@@ -6,6 +6,14 @@ import { fetchWithBudget } from '../../fetchBudget.js'
 import { createHostProvider } from '../host/hostProvider.js'
 import { validateResidency } from '../host/hostResidency.js'
 import { createStudioSources, evaluateGraph, runtimeValue, sourceAge } from '../runtime/index.js'
+import LabSaveBar from '../history/LabSaveBar.jsx'
+import { labArtifactsClient } from '../history/labArtifactsClient.js'
+import AfterSavePanel from '../history/AfterSavePanel.jsx'
+import { createAfterSaveClient } from '../history/afterSaveClient.js'
+
+// Both mounts pass the values returned by useLiveGraph to LiveValues. Keep
+// their display context out of the values and the proposal document itself.
+const displayContexts = new WeakMap()
 
 const wallTime = () => Date.now()
 const tick = () => performance.now()
@@ -15,7 +23,7 @@ const summary = value => value.error ? `error: ${value.error.code}`
 const seriesOf = data => Array.isArray(data) ? data.map(item => typeof item === 'number' ? item
   : item && typeof item === 'object' ? Object.values(item).find(Number.isFinite) : undefined) : []
 
-export function useLiveGraph({ provider, registry: base = registry, now = wallTime, clock = tick, revision }) {
+export function useLiveGraph({ provider, registry: base = registry, now = wallTime, clock = tick, revision, artifacts = labArtifactsClient }) {
   const [draft, onChange] = useState(null)
   const [currentTime, setNow] = useState(() => now())
   const [evaluation, setEvaluation] = useState({ result: null, problems: [], count: 0, times: [] })
@@ -90,13 +98,16 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
     return () => clearInterval(timer)
   }, [hasValues, now])
   const problems = [...(validation?.problems || []), ...residency.problems, ...(current ? evaluation.problems : [])]
+  displayContexts.set(values, { document: draft?.document, ready: Boolean(validation?.ready && residency.ok && !problems.length), artifacts })
   return { entries, draft, result, problems, ready: Boolean(validation?.ready && residency.ok && !problems.length),
     measurements, upstream, badges: values, values, onChange }
 }
 
-export function LiveValues({ values, provider }) {
+export function LiveValues({ values, provider, saveBar = true }) {
   const state = provider.state
+  const context = displayContexts.get(values)
   return <>
+    {context && <AfterSaveDisplay provider={provider} context={context} saveBar={saveBar} />}
     <p data-sources-state>{!state.framed ? 'Studio sources: jobs, capabilities'
       : state.reason === 'Sample' ? 'Dashboard sources: Sample (none announced within 2 seconds)'
         : `Dashboard sources: ${state.sources.join(', ')}`}</p>
@@ -119,7 +130,24 @@ export function LiveValues({ values, provider }) {
         </article>
       })}
     </section>
-    <p role="note">Save and history: not yet available</p>
+  </>
+}
+
+function AfterSaveDisplay({ provider, context, saveBar }) {
+  const { artifacts, document, ready } = context
+  const client = useMemo(() => createAfterSaveClient({ provider, artifacts }), [provider, artifacts])
+  const [, refresh] = useState(0)
+  useEffect(() => client.subscribe(() => refresh(value => value + 1)), [client])
+  const view = client.read()
+  const pending = ['pending', 'running'].includes(view.status)
+  useEffect(() => {
+    if (!pending) return undefined
+    const timer = setInterval(() => refresh(value => value + 1), 1000)
+    return () => clearInterval(timer)
+  }, [pending])
+  return <>
+    {saveBar && <LabSaveBar document={document} ready={ready} client={artifacts} onTakeTheirs={graph => artifacts.takeGraph(graph)} />}
+    <AfterSavePanel view={view} document={document} />
   </>
 }
 
@@ -132,12 +160,31 @@ export function setGraphCanvasLoader(loader = loadLabCanvas) {
   LabCanvas = lazy(loader)
 }
 
-export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false }) {
+export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false, client = labArtifactsClient }) {
+  const [restored, setRestored] = useState(() => ({ graph: client.state.restoredGraph, key: client.state.restoredKey }))
   const [opened, setOpened] = useState(!hidden)
   const [localRevision, setRevision] = useState(0)
   const [local] = useState(() => createHostProvider({ framed: false, operator, onChange: () => setRevision(value => value + 1) }))
   const provider = supplied || local
-  const live = useLiveGraph({ provider, registry: entries || registry, revision: supplied ? revision : localRevision })
+  const live = useLiveGraph({ provider, registry: entries || registry, revision: supplied ? revision : localRevision, artifacts: client })
+  useEffect(() => {
+    if (hidden || !live.ready) return undefined
+    let generation = -1
+    const hydrate = () => {
+      if (generation === client.currentGeneration()) return
+      generation = client.currentGeneration()
+      void client.head(client.currentDocId())
+    }
+    const unsubscribe = client.subscribe(hydrate)
+    hydrate()
+    return unsubscribe
+  }, [client, hidden, live.ready])
+  useEffect(() => client.subscribe(() => {
+    if (client.state.restoredKey !== restored.key) {
+      live.onChange(null)
+      setRestored({ graph: client.state.restoredGraph, key: client.state.restoredKey })
+    }
+  }), [client, restored.key, live.onChange])
   const validDocument = live.ready ? live.draft.document : null
   const pollers = useRef(new Map())
   const [sources] = useState(() => createStudioSources({
@@ -187,9 +234,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
             title={onRun ? undefined : 'Execution is unavailable here.'}
             onClick={() => { if (validDocument) onRun?.(validDocument) }}>Run graph</button>
         </section>
-        <LiveValues values={live.values} provider={provider} />
+        <LabSaveBar document={live.draft?.document} ready={live.ready} client={client} onTakeTheirs={graph => client.takeGraph(graph)} />
+        <LiveValues values={live.values} provider={provider} saveBar={false} />
         <Suspense fallback={<p role="status" aria-label="Loading dependency canvas">Loading dependency canvas…</p>}>
-          <LabCanvas initialDocument={initialDocument} entries={live.entries} measurements={live.measurements} upstream={live.upstream} onChange={live.onChange} />
+          <LabCanvas key={restored.key} initialDocument={restored.graph || initialDocument} entries={live.entries} measurements={live.measurements} upstream={live.upstream} onChange={live.onChange} />
         </Suspense>
       </> : <p data-graph-placeholder>Open Strategy to load the dependency canvas.</p>}
     </div>

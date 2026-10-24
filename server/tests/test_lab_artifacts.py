@@ -78,7 +78,7 @@ def test_save_read_exact_bytes_and_content_address(local_store):
     assert result["created_at"] > 0
     assert result["canonical_text"].encode() == canonical_bytes(GRAPH)
     assert result["sha256"] == graph_digest(GRAPH)
-    assert ledger.get("tenant-a", "strategy") == result
+    assert ledger.get("tenant-a", "strategy") == {**result, "published_revision": None}
     assert ledger.get("tenant-a", "strategy", 1) == result
     with sqlite3.connect(local_store) as conn:
         text, data, digest = conn.execute("SELECT canonical_text,canonical_bytes,sha256 FROM lab_blobs").fetchone()
@@ -99,7 +99,7 @@ def test_stale_head_never_appends_or_changes_head():
     first = save()
     with pytest.raises(ledger.Conflict):
         save()
-    assert ledger.get("tenant-a", "strategy") == first
+    assert ledger.get("tenant-a", "strategy") == {**first, "published_revision": None}
     assert len(ledger.list_revisions("tenant-a", "strategy")) == 1
 
 
@@ -174,7 +174,7 @@ def test_tenant_caps_rollback_every_write(monkeypatch, local_store, cap):
         operation = lambda: save(1, graph)
     with pytest.raises(TooLarge):
         operation()
-    assert ledger.get("tenant-a", "strategy") == first
+    assert ledger.get("tenant-a", "strategy") == {**first, "published_revision": None}
     with sqlite3.connect(local_store) as conn:
         assert conn.execute("SELECT COUNT(*) FROM lab_blobs").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM lab_documents").fetchone()[0] == 1
@@ -310,6 +310,25 @@ def test_http_save_restore_publish_diff_and_tenant_boundary():
     assert other.post("/api/lab/docs/strategy/publish", json={"expected_head": 1}).status_code == 404
 
 
+def test_http_head_carries_published_revision_but_numbered_revision_does_not():
+    http = client()
+    save()
+    head = http.get("/api/lab/docs/strategy/head")
+    assert head.status_code == 200
+    assert head.json()["published_revision"] is None
+    save(1)
+    published = http.post("/api/lab/docs/strategy/publish", json={"expected_head": 2})
+    assert published.status_code == 200
+    assert published.json()["new_head"] == 2
+    head = http.get("/api/lab/docs/strategy/head")
+    assert head.status_code == 200
+    assert head.json()["revision"] == head.json()["published_revision"] == 2
+    revision = http.get("/api/lab/docs/strategy/revisions/2")
+    assert revision.status_code == 200
+    assert revision.json()["revision"] == 2
+    assert "published_revision" not in revision.json()
+
+
 def test_http_status_completes_while_save_is_pending(monkeypatch):
     entered = threading.Event()
     release = threading.Event()
@@ -346,6 +365,90 @@ def test_http_invalid_and_oversize_never_create_database(local_store):
     assert http.post(endpoint, json={"graph": {}, "expected_head": None}).status_code == 422
     assert http.post(endpoint, json={"graph": GRAPH}).status_code == 422
     assert http.post(endpoint, content=b"x" * (MAX_RAW_BYTES + 1)).status_code == 413
+    assert not local_store.exists()
+
+
+@pytest.mark.parametrize("schema,pointer", [
+    ({}, None), ({"$ref": "https://example.invalid/schema"}, "/$ref"),
+    ({"description": "x" * 16384}, ""),
+])
+def test_C1_graph_save_validates_returns_schema(local_store, schema, pointer):
+    from test_lab_validate import manifest
+
+    data = manifest()
+    data["returns_schema"] = schema
+    graph = dict(GRAPH, blocks=[{
+        "id": "example", "registry": {"id": "example", "version": "1.0.0", "code_sha256": "0" * 64},
+        "settings": {}, "manifest": data,
+    }])
+    response = client().post("/api/lab/docs/strategy/save", json={"graph": graph, "expected_head": None})
+    if pointer is None:
+        assert response.status_code == 200
+        assert response.json()["graph"] == graph
+    else:
+        assert response.status_code == 422
+        assert response.json() == {
+            "detail": "lab_returns_schema_bounds",
+            "pointer": "/blocks/0/manifest/returns_schema" + pointer, "block": data["id"],
+        }
+        assert not local_store.exists()
+
+
+def test_save_manifest_spoof_names_block(local_store):
+    from test_lab_validate import manifest
+
+    data = manifest()
+    data.update(id="example", effect="read")
+    graph = dict(GRAPH, blocks=[{
+        "id": "example", "registry": {"id": "example", "version": "1.0.0", "code_sha256": "0" * 64},
+        "settings": {}, "manifest": data,
+    }])
+    with client() as http:
+        response = http.post("/api/lab/docs/strategy/save", json={"graph": graph, "expected_head": None})
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "lab_manifest_spoof", "pointer": "/blocks/0/manifest/effect", "block": "example",
+    }
+    assert not local_store.exists()
+
+
+def test_J4_graph_save_refuses_trailing_newline_manifest_id(local_store):
+    from test_lab_validate import manifest
+
+    data = manifest()
+    data["id"] = "example\n"
+    graph = dict(GRAPH, blocks=[{
+        "id": "example", "registry": {"id": "example", "version": "1.0.0", "code_sha256": "0" * 64},
+        "settings": {}, "manifest": data,
+    }])
+    response = client().post("/api/lab/docs/strategy/save", json={"graph": graph, "expected_head": None})
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "invalid_lab_document", "pointer": "/blocks/0/manifest/id", "block": data["id"],
+    }
+    assert not local_store.exists()
+
+
+@pytest.mark.parametrize("action", ["save", "restore"])
+@pytest.mark.parametrize("raw", [
+    b'{"expected_head":null,"expected_head":null}', b'{', b'[]',
+    b'{"expected_head":NaN}',
+])
+def test_C2_parse_errors_have_document_shape(local_store, action, raw):
+    response = client().post("/api/lab/docs/strategy/" + action, content=raw)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid_lab_document", "pointer": "", "block": None}
+    assert not local_store.exists()
+
+
+@pytest.mark.parametrize("action,body", [
+    ("save", {"graph": GRAPH, "expected_head": -1}),
+    ("restore", {"revision": 1, "expected_head": -1}),
+])
+def test_C2_validation_errors_have_document_shape(local_store, action, body):
+    response = client().post("/api/lab/docs/strategy/" + action, json=body)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid_lab_document", "pointer": "", "block": None}
     assert not local_store.exists()
 
 

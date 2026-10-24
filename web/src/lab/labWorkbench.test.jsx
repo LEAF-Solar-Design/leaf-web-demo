@@ -171,7 +171,7 @@ describe('LabWorkbench', () => {
     expect(canvasImport).not.toHaveBeenCalled()
   })
 
-  it('fetches only the status probe when status is not provided', async () => {
+  it('fetches the status probe and the head read, nothing else, when status is not provided', async () => {
     const fetchImpl = vi.fn(async () => ({
       ok: true, status: 200,
       json: async () => ({ ok: true, schema: 'leaf.lab-status.v1', rail: 'on', posture: 'local', tenant: 't1' }),
@@ -180,9 +180,15 @@ describe('LabWorkbench', () => {
     const { rerender } = render(<LabWorkbench route={route('graph')} />)
     await waitFor(() => expect(screen.getByRole('navigation', { name: 'Lab views' })).toBeVisible())
     await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
-    rerender(<LabWorkbench route={route('history')} hidden />)
-    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    await act(async () => {})
+    const requestCount = fetchImpl.mock.calls.length
+    expect(requestCount).toBeGreaterThanOrEqual(1)
+    expect(requestCount).toBeLessThanOrEqual(2)
     expect(fetchImpl.mock.calls[0][0]).toMatch(/\/api\/lab\/status$/)
+    if (requestCount === 2) expect(fetchImpl.mock.calls[1][0]).toMatch(/\/api\/lab\/docs\/strategy\/head$/)
+    rerender(<LabWorkbench route={route('history')} hidden />)
+    await act(async () => {})
+    expect(fetchImpl).toHaveBeenCalledTimes(requestCount)
   })
 
   it('does not grant widget scope or forward authority from route params or extra props', () => {

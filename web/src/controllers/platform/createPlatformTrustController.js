@@ -190,6 +190,14 @@ export function createPlatformTrustController({
     }
   }
 
+  // A known guest: drop what the signed-in session read and fence its in-flight reads. Health stays.
+  const clearSessionReads = () => {
+    for (const name of ['usage', 'entitlements', 'grant']) begin(name)
+    publish({ usage: null, usageAt: 0, usageLoading: false, usageError: null,
+      entitlements: null, entLoading: false, entError: null,
+      grant: null, grantLoading: false, grantBusy: false, grantErr: null })
+  }
+
   const linkClaude = async (token, kind, label, plan) => {
     if (state.mock) return null
     const generation = begin('grant')
@@ -268,6 +276,7 @@ export function createPlatformTrustController({
     loadEntitlements,
     loadHealth,
     loadGrant,
+    clearSessionReads,
     linkClaude,
     activateClaude,
     unlinkClaude,

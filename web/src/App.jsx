@@ -334,11 +334,12 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
   }, [actions])
 
   return React.createElement('div',
-    { role: 'group', 'aria-label': 'Project checkout' },
-    React.createElement('p', { role: 'status' },
+    { role: 'group', 'aria-label': 'Project checkout', className: 'checkout-controls project-checkout' },
+    React.createElement('p', { role: 'status', title: projectSolarAppReason(checkout.reason) },
       projectSolarAppReason(checkout.reason)),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: !checkout.canTake,
       onClick: () => {
         if (!isCurrent() || !checkout.canTake) return
@@ -347,6 +348,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
     }, 'Take'),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: !checkout.canRelease,
       onClick: () => {
         if (!isCurrent() || !checkout.canRelease) return
@@ -355,6 +357,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
     }, 'Release'),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: checkout.pending,
       onClick: () => {
         if (!isCurrent() || checkout.pending) return
@@ -723,7 +726,7 @@ export default function App() {
   const [addonsOpen, setAddonsOpen] = useState(false)
 
   // --- Tenant MCP server registry (standardization slice 8c) ---
-  const mcpRegistry = useTenantMcpRegistry({ mock })
+  const mcpRegistry = useTenantMcpRegistry({ mock: mock || knownGuest })
   const [linkServiceOpen, setLinkServiceOpen] = useState(false)
   // The command bar's @ mounts list gains connected registry servers by
   // LABEL, never by host or any upstream tool name — mergePickerEntries'
@@ -783,7 +786,7 @@ export default function App() {
   // tokens as CSS custom properties, so an approved change is on screen
   // without a build or a deploy. LIVE only, like the agent tier: mock mode has
   // no tenant to read for, and applying a theme there would be theatre.
-  const themeOverlay = useOverlay(agentSessionId, { enabled: !mock })
+  const themeOverlay = useOverlay(agentSessionId, { enabled: !mock && !knownGuest })
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0)
   const [pendingApprovalsUnavailable, setPendingApprovalsUnavailable] = useState(false)
   useEffect(() => {
@@ -854,12 +857,12 @@ export default function App() {
   const [registryEntries, setRegistryEntries] = useState([])
   const [catalogSkills, setCatalogSkills] = useState([])
   useEffect(() => {
-    if (mock) { setRegistryEntries([]); setCatalogSkills([]); return undefined }
+    if (mock || knownGuest) { setRegistryEntries([]); setCatalogSkills([]); return undefined }
     let live = true
     fetchRegistry().then((r) => { if (live) setRegistryEntries(r.entries || []) })
     fetchSkills().then((r) => { if (live) setCatalogSkills(r.skills || []) })
     return () => { live = false }
-  }, [mock])
+  }, [mock, knownGuest])
 
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
@@ -978,6 +981,7 @@ export default function App() {
   }), [])
   const workspaceController = useWorkspaceController({
     mock,
+    readsPaused: knownGuest,
     services: workspaceServices,
     formatError: humanizeError,
   })
@@ -1435,7 +1439,7 @@ export default function App() {
       && loadDrawingId === requestedDrawingIdRef.current
       && isScopeCurrent()
       && sessionProof.current(true)
-    if (!current()) return undefined
+    if (knownGuest || !current()) return undefined
     const loadGeneration = (requestedDrawingIdRef.loadGeneration ?? 0) + 1
     requestedDrawingIdRef.loadGeneration = loadGeneration
     requestedDrawingIdRef.onDrawingLoad?.(loadGeneration)
@@ -1497,7 +1501,7 @@ export default function App() {
     return () => { alive = false }
     // Both proofs share token, recovery and workspace fencing.
   }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
-      session.recoveries, sessionProof, sessionActions])
+      session.recoveries, sessionProof, sessionActions, knownGuest])
 
   // App owns the transport; controls only express the user's choice.
   const localCadUpdateRef = useRef(null)
@@ -1752,6 +1756,7 @@ export default function App() {
     discardPendingRun,
   } = useJobController({
     mock,
+    readsPaused: knownGuest,
     drawingKey: resultDrawingKey,
     resetKey: `${isEditFixture}:${intakeRetryKey}`,
     formatError: humanizeError,
@@ -3498,7 +3503,7 @@ export default function App() {
   // Slice 11a: the builds poll (GET /api/builds, validated records from
   // every lane). Mock mode makes no request; the rail hosts one
   // BuildQueueCard per record and the toolbar badge counts the open ones.
-  const buildQueue = useBuildQueue({ mock })
+  const buildQueue = useBuildQueue({ mock: mock || knownGuest })
   // W4e: the ribbon shows ONE tab's panels at a time (the reference's
   // Draw / Insert / Annotate / View / Manage); the top band switches it.
   // Slice 2: the opening tab is the contract's declared home tab, not a
@@ -4544,7 +4549,7 @@ export default function App() {
           projectName={currentProjectName || projectName}
           inputRef={barInputRef}
           routeActive={!!route}
-          mcpDiscoveryEnabled={!mock}
+          mcpDiscoveryEnabled={!mock && !knownGuest}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
           // refusal the TRANSPORT raised (api.nlPrompt / converse.postMessage)
@@ -4703,7 +4708,7 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
-          <CostTransparencyPanel mock={mock} />
+          <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />
           {!mock && (
             <ClaudeAccountPanel
               mock={mock}
@@ -5936,7 +5941,7 @@ export default function App() {
       )}
       <div className="rail-stack">
         {studioShell && <SurfaceFrame.Frame />}
-        {!mock && <SurfaceFrame.Conversations />}
+        {!mock && !knownGuest && <SurfaceFrame.Conversations />}
         <SurfaceFrame.JobRail />
         <SurfaceFrame.Inbox />
         {/* Standardization slice 8c: the Link-a-service drawer sits in the

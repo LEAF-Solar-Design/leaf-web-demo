@@ -33,6 +33,8 @@ import {
   DatasetReadV1,
   DatasetElementV1,
   IntegrationElementV1,
+  IntegrationDailyWorkflowScheduleV1,
+  IntegrationWorkflowScheduleDraftV1,
 } from "./integration";
 import { ApproveRequestV1, ConfirmCardV1 } from "./card";
 import { ProposalV1 } from "./proposal";
@@ -108,6 +110,8 @@ export const SCHEMA_DEFS = {
   IntegrationManualWorkflowSnapshotV2,
   IntegrationManualWorkflowCancellationRequestV1,
   IntegrationManualWorkflowCancellationResultV1,
+  IntegrationDailyWorkflowScheduleV1,
+  IntegrationWorkflowScheduleDraftV1,
 } as const;
 
 export type SchemaName = keyof typeof SCHEMA_DEFS;

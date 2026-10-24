@@ -147,11 +147,10 @@ describe('App portal wiring', () => {
 })
 
 describe('rollback contract', () => {
-  it('seats desktop CAD navigation and the whole rail, shares the header layout with Solar, and leaves other surfaces and phone rules unchanged', () => {
+  it('seats desktop CAD navigation and the whole rail without changing other surfaces or phone rules', () => {
     const css = read('./studioShell.css')
     const sharedShell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'
     const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]'
-    const headerShell = '.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"])'
     const desktopBodies = []
     const outsideDesktop = []
     const media = /@media\s*\([^{}]*min-width\s*:\s*981px[^{}]*\)\s*(?:and\s*\([^{}]*\)\s*)*\{/g
@@ -173,21 +172,21 @@ describe('rollback contract', () => {
     outsideDesktop.push(css.slice(previousEnd))
     const rules = desktopBodies.flatMap(body => [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)])
     const bodies = selector => rules.filter(rule => rule[1].trim() === selector).map(rule => rule[2]).join('\n')
-    expect(bodies(`${headerShell} header.top`)).toMatch(/height:\s*auto;/)
-    expect(bodies(`${headerShell} header.top`)).toMatch(/min-height:\s*28px;/)
-    expect(bodies(`${headerShell} header.top`)).toMatch(/flex-wrap:\s*wrap;/)
-    expect(bodies(`${headerShell} header.top`)).toMatch(/overflow:\s*visible;/)
-    expect(bodies(`${headerShell} header.top .who`)).toMatch(/max-width:\s*100%;/)
-    expect(bodies(`${headerShell} header.top .who`)).toMatch(/flex-wrap:\s*wrap;/)
-    expect(bodies(`${headerShell} header.top .cockpit-band`)).toMatch(/max-width:\s*calc\(100% - 24px\);/)
-    expect(bodies(`${headerShell} header.top .cockpit-band`)).toMatch(/overflow-x:\s*auto;/)
-    expect(rules.some(rule => rule[1].includes(`${headerShell} header.top :is(button, .switch)`)
+    expect(bodies(`${shell} header.top`)).toMatch(/height:\s*auto;/)
+    expect(bodies(`${shell} header.top`)).toMatch(/min-height:\s*28px;/)
+    expect(bodies(`${shell} header.top`)).toMatch(/flex-wrap:\s*wrap;/)
+    expect(bodies(`${shell} header.top`)).toMatch(/overflow:\s*visible;/)
+    expect(bodies(`${shell} header.top .who`)).toMatch(/max-width:\s*100%;/)
+    expect(bodies(`${shell} header.top .who`)).toMatch(/flex-wrap:\s*wrap;/)
+    expect(bodies(`${shell} header.top .cockpit-band`)).toMatch(/max-width:\s*calc\(100% - 24px\);/)
+    expect(bodies(`${shell} header.top .cockpit-band`)).toMatch(/overflow-x:\s*auto;/)
+    expect(rules.some(rule => rule[1].includes(`${shell} header.top :is(button, .switch)`)
       && /flex-shrink:\s*0;/.test(rule[2]) && /white-space:\s*nowrap;/.test(rule[2]))).toBe(true)
-    expect(bodies(`${headerShell} .tc-product-nav`)).toMatch(/position:\s*relative;/)
-    expect(bodies(`${headerShell} .tc-product-nav`)).toMatch(/height:\s*30px;/)
-    expect(bodies(`${headerShell} .tc-product-nav`)).toMatch(/overflow-x:\s*auto;/)
-    expect(bodies(`${headerShell} .tc-product-nav`)).not.toMatch(/position:\s*fixed|left:\s*max\(/)
-    expect(bodies(`${headerShell} .tc-product-tabs`)).toMatch(/flex-wrap:\s*nowrap;/)
+    expect(bodies(`${shell} .tc-product-nav`)).toMatch(/position:\s*relative;/)
+    expect(bodies(`${shell} .tc-product-nav`)).toMatch(/height:\s*30px;/)
+    expect(bodies(`${shell} .tc-product-nav`)).toMatch(/overflow-x:\s*auto;/)
+    expect(bodies(`${shell} .tc-product-nav`)).not.toMatch(/position:\s*fixed|left:\s*max\(/)
+    expect(bodies(`${shell} .tc-product-tabs`)).toMatch(/flex-wrap:\s*nowrap;/)
     const gridRules = rules.filter(rule => /grid-template-columns/.test(rule[2])
       && rule[1].split(',\n').some(selector => selector.trim() === shell
         || selector.trim() === `${shell}:has(aside.rail[data-spine])`
@@ -217,19 +216,14 @@ describe('rollback contract', () => {
     expect(outsideDesktop.join('\n')).not.toMatch(/--ck-overview-reserve|margin-right:\s*var\(--ck-overview-reserve\);/)
     const offset = /--ck-canvas-top:\s*calc\(var\(--drawer-top, 28px\) \+ 30px \+ var\(--ck-ribbon\) \+ var\(--ck-doctabs\)\);/
     expect(desktopBodies.join('\n')).toMatch(offset)
-    expect(bodies(headerShell)).toMatch(offset)
     expect(outsideDesktop.join('\n')).not.toMatch(offset)
     expect(bodies(shell)).not.toMatch(/--ck-canvas-top:\s*(?:183|185|241)px;/)
-    const u3Rules = rules.filter(rule => /--ck-rail-width|--ck-overview-reserve|right:\s*calc\(var\(--ck-rail-width\)/.test(rule[2])
+    const u3Rules = rules.filter(rule => /--ck-rail-width|--ck-overview-reserve|--drawer-top|right:\s*calc\(var\(--ck-rail-width\)/.test(rule[2])
       || /header\.top/.test(rule[1]) && /flex-wrap:\s*wrap;|flex-shrink:\s*0;/.test(rule[2]))
     expect(u3Rules.length).toBeGreaterThan(0)
     for (const rule of u3Rules) {
-      const prefix = /header\.top/.test(rule[1]) ? headerShell : shell
-      expect(rule[1].split(',\n').every(selector => selector.trim().startsWith(prefix))).toBe(true)
+      expect(rule[1].split(',\n').every(selector => selector.trim().startsWith(shell))).toBe(true)
     }
-    expect(rules.filter(rule => /--ck-rail-width|--ck-overview-reserve/.test(rule[2])
-      || /\.cad-overview|\.cockpit-cube/.test(rule[1]))
-      .every(rule => !rule[1].includes('[data-surface="solar"]'))).toBe(true)
     expect(bodies(`${sharedShell} .tc-product-nav`)).toMatch(/position:\s*fixed;/)
     expect(bodies(`${sharedShell}:has(aside.rail[data-spine])`)).toMatch(/grid-template-columns:\s*0 1fr 0;/)
     expect(bodies(`${sharedShell} aside.rail:not([data-spine])`)).toMatch(/position:\s*fixed;/)
@@ -237,6 +231,41 @@ describe('rollback contract', () => {
     expect(bodies(otherShell)).toMatch(/--ck-canvas-top:\s*185px;/)
     expect(bodies(otherShell)).toMatch(/--ck-canvas-top:\s*241px;/)
     expect(outsideDesktop.join('\n')).not.toMatch(/grid-template-columns:\s*0 minmax\(0,\s*1fr\) var\(--ck-rail-width\);/)
+  })
+
+  it('bounds the project panels above the desktop CAD and Solar workspace', () => {
+    const css = read('./studioShell.css')
+    const selector = '.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > :is(.campaign-panel, .workspace-summary)'
+    const desktopBodies = []
+    const outsideDesktop = []
+    const media = /@media\s*\([^{}]*min-width\s*:\s*981px[^{}]*\)\s*(?:and\s*\([^{}]*\)\s*)*\{/g
+    let previousEnd = 0
+    let match
+    while ((match = media.exec(css))) {
+      const start = media.lastIndex
+      let depth = 1
+      let end = start
+      for (; end < css.length && depth; end++) {
+        if (css[end] === '{') depth++
+        if (css[end] === '}') depth--
+      }
+      expect(depth).toBe(0)
+      desktopBodies.push(css.slice(start, end - 1))
+      outsideDesktop.push(css.slice(previousEnd, match.index))
+      previousEnd = media.lastIndex = end
+    }
+    outsideDesktop.push(css.slice(previousEnd))
+    const rules = desktopBodies.flatMap(body => [...body.matchAll(/([^{}]+)\{([^{}]*)\}/g)])
+    const rule = rules.find(rule => rule[1].trim() === selector)
+    expect(rule).toBeDefined()
+    expect(rule[2]).toMatch(/height:\s*96px;/)
+    expect(rule[2]).toMatch(/max-height:\s*96px;/)
+    expect(rule[2]).toMatch(/min-height:\s*0;/)
+    expect(rule[2]).toMatch(/overflow:\s*auto;/)
+    const outsideRules = [...outsideDesktop.join('\n').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    expect(outsideRules.some(rule => /\.(?:campaign-panel|workspace-summary)\b/.test(rule[1])
+      && /max-height:\s*96px/.test(rule[2]))).toBe(false)
+    expect(css).toContain('--ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));')
   })
 
   it('insets the fixed Find field past the open tool rail only on desktop', () => {

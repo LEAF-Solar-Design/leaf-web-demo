@@ -3,6 +3,8 @@ import { registry, resolveManifest } from '../canvas/registry.js';
 import { runtimeValue, sourceAge } from '../runtime/evaluate.js';
 
 export const HOST_READ_IDS = Object.freeze(['host-source', 'studio-jobs', 'studio-capabilities']);
+export const HOST_INTENT_ID = 'host-intent';
+export const HOST_INTENT_KINDS = Object.freeze(['engine.halt', 'engine.probe', 'engine.assign']);
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const plain = value => value !== null && typeof value === 'object'
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
@@ -60,6 +62,20 @@ function manifest(fields) {
   };
   value.version.code_sha256 = fingerprint(value);
   return freeze(value);
+}
+
+export function intentManifest() {
+  return manifest({ id: HOST_INTENT_ID, title: 'Host intent', kind: 'settings', effect: 'pure',
+    lane: 'lifecycle', permissions: ['host.intent'],
+    inputs: {}, outputs: { ready: pin({ type: 'boolean' }) },
+    settings_schema: { type: 'object', additionalProperties: false,
+      required: ['kind', 'engine_id', 'nonce'], properties: {
+        kind: { type: 'string', enum: HOST_INTENT_KINDS },
+        engine_id: { type: 'string', minLength: 1, maxLength: 32 },
+        nonce: { type: 'string', minLength: 16, maxLength: 64 },
+      } },
+    sample_input: {}, sample_output: { ready: true },
+  });
 }
 
 export function readManifest(id, title, { sourceNames = [], rowSchema = emptyRowSchema() } = {}) {
@@ -186,6 +202,10 @@ export function createHostProvider({ win = globalThis.window, framed = Boolean(w
       onChange(state());
     },
     entries,
+    rowsOf(name) {
+      return Object.freeze((stored.get(name) || []).map(({ data, as_of, stale, truncated }) =>
+        Object.freeze({ data, as_of, stale, truncated })));
+    },
     sources(document, suppliedEntries) {
       const merged = suppliedEntries ?? { ...registry, ...entries() };
       const values = [];

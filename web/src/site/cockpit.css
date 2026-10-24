@@ -415,6 +415,13 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-actions {
   order: 4; margin-left: auto; gap: 4px; flex-wrap: nowrap; padding-right: 6px; align-items: center;
 }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .project-checkout {
+  display: inline-flex; align-items: center; gap: 4px; flex-wrap: nowrap; min-width: 0; flex: 0 1 auto;
+}
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .project-checkout p[role="status"] {
+  margin: 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 320px; font: 400 11px/20px var(--ck-font);
+}
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act {

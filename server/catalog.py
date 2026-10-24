@@ -186,6 +186,14 @@ def _capability_entry(tool: Dict[str, Any], solar_snapshot=None) -> Dict[str, An
         **tool_record_fields.sanitize_optional_fields(tool),
     }
     solar = solar_tools.catalog_view(tool, snapshot=solar_snapshot)
+    if "returns_schema" in tool:
+        from lab_validate import ManifestInvalid, validate_returns_schema
+        try:
+            digest = validate_returns_schema(tool["returns_schema"])
+        except ManifestInvalid as error:
+            raise ManifestInvalid(error.code, error.pointer, tool.get("name")) from error
+        entry["returns_schema"] = tool["returns_schema"]
+        entry["returns_schema_digest"] = digest
     if solar is not None:
         entry["solar"] = solar
     return entry

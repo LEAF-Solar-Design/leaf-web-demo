@@ -4244,6 +4244,96 @@
         "snapshot"
       ],
       "additionalProperties": false
+    },
+    "IntegrationDailyWorkflowScheduleV1": {
+      "description": "Daily calendar policy only, with no calendar calculation: a nonexistent local minute moves to the next valid local minute; an ambiguous local minute uses the first occurrence only. Parsing or saving this policy grants no execution authority.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "daily"
+        },
+        "timezone": {
+          "description": "Lexical ASCII timezone key, preserved exactly. The host must verify recognized IANA calendar support before accepting a persisted draft.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.+-]+(?:\\/[A-Za-z0-9_.+-]+)*(?![\\s\\S])"
+        },
+        "hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 23
+        },
+        "minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 59
+        },
+        "gap_policy": {
+          "type": "string",
+          "const": "next_valid_minute"
+        },
+        "fold_policy": {
+          "type": "string",
+          "const": "first_occurrence"
+        }
+      },
+      "required": [
+        "kind",
+        "timezone",
+        "hour",
+        "minute",
+        "gap_policy",
+        "fold_policy"
+      ],
+      "additionalProperties": false
+    },
+    "IntegrationWorkflowScheduleDraftV1": {
+      "description": "Inert authoring draft recording intended immutable workflow identity and calendar policy. Parsing or saving it grants no execution authority. Reference existence, digest equality, immutable persistence, timezone support and eventual scheduling eligibility are host guarantees. A reference to a caller-bound manual definition does not make that definition eligible for unattended execution. This contract implements no persistence, timer, occurrence admission, activation, grant or execution path.",
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "workflow_ref": {
+          "$ref": "#/$defs/IntegrationRefV1"
+        },
+        "schedule": {
+          "$ref": "#/$defs/IntegrationDailyWorkflowScheduleV1"
+        },
+        "state": {
+          "type": "string",
+          "const": "draft"
+        }
+      },
+      "required": [
+        "schema_version",
+        "id",
+        "version",
+        "title",
+        "workflow_ref",
+        "schedule",
+        "state"
+      ],
+      "additionalProperties": false
     }
   }
 }

@@ -81,7 +81,7 @@ function useBootstrap({ drawingId = 'legacy', mock = false, orgId = U(1), projec
     hasDrawingSelection, setDrawingLoad, resetCatalogTransient: noop,
     clearToast: noop, setDrawer: noop, clearAgentSession: noop, mockVersions,
     seatIntake: noop, isEditFixture: false, getDrawingVersions,
-    classifyDrawingLoadFailure,
+    classifyDrawingLoadFailure, knownGuest: false,
   }
   Function(...Object.keys(env), bootstrapSource)(...Object.values(env))
   // The production App projection feeds the real Solar scope owner.

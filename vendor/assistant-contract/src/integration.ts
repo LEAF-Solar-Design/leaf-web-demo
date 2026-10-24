@@ -736,3 +736,26 @@ export const IntegrationManualWorkflowCancellationResultV1 = z.strictObject({
   }
 }).describe("Runtime status/state checks only. Recorded may already be safely cancelled. Existing succeeded/failed parents return unchanged without a cancellation request time or invented cancellation receipt. Host and caller must bind this snapshot to the requested run and expected revision; this result alone cannot prove that binding. Error transport remains separate.");
 export type IntegrationManualWorkflowCancellationResultV1 = z.infer<typeof IntegrationManualWorkflowCancellationResultV1>;
+
+export const IntegrationDailyWorkflowScheduleV1 = z.strictObject({
+  kind: z.literal("daily"),
+  timezone: z.string().min(1).max(128)
+    .regex(/^[A-Za-z0-9_.+-]+(?:\/[A-Za-z0-9_.+-]+)*(?![\s\S])/)
+    .describe("Lexical ASCII timezone key, preserved exactly. The host must verify recognized IANA calendar support before accepting a persisted draft."),
+  hour: z.number().int().min(0).max(23),
+  minute: z.number().int().min(0).max(59),
+  gap_policy: z.literal("next_valid_minute"),
+  fold_policy: z.literal("first_occurrence"),
+}).describe("Daily calendar policy only, with no calendar calculation: a nonexistent local minute moves to the next valid local minute; an ambiguous local minute uses the first occurrence only. Parsing or saving this policy grants no execution authority.");
+export type IntegrationDailyWorkflowScheduleV1 = z.infer<typeof IntegrationDailyWorkflowScheduleV1>;
+
+export const IntegrationWorkflowScheduleDraftV1 = z.strictObject({
+  schema_version: z.literal(1),
+  id: Slug,
+  version: ActionRevision,
+  title: Title,
+  workflow_ref: IntegrationRefV1,
+  schedule: IntegrationDailyWorkflowScheduleV1,
+  state: z.literal("draft"),
+}).describe("Inert authoring draft recording intended immutable workflow identity and calendar policy. Parsing or saving it grants no execution authority. Reference existence, digest equality, immutable persistence, timezone support and eventual scheduling eligibility are host guarantees. A reference to a caller-bound manual definition does not make that definition eligible for unattended execution. This contract implements no persistence, timer, occurrence admission, activation, grant or execution path.");
+export type IntegrationWorkflowScheduleDraftV1 = z.infer<typeof IntegrationWorkflowScheduleDraftV1>;
