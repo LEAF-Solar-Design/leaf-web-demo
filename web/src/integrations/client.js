@@ -392,6 +392,12 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       if (snapshot.run.run_id !== runId) throw invalid()
       return snapshot
     },
+    async reconcileAction(id, runId, { signal } = {}) {
+      if (!UUID.test(runId)) throw invalid()
+      const snapshot = parse(IntegrationActionSnapshotV1, await request(id, `/integrations/actions/${runId}/reconcile`, { signal, method: 'POST', body: {} }))
+      if (snapshot.run.run_id !== runId) throw invalid()
+      return snapshot
+    },
     async queryDataset(id, reference, query, options) {
       const ref = parse(IntegrationRefV1, reference)
       const read = parse(DatasetReadV1, await request(id, `/integrations/datasets/${ref.id}/versions/${ref.version}/query`, { ...options, method: 'POST', body: parse(DatasetQueryV1, query) }))

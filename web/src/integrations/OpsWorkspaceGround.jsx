@@ -225,7 +225,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       actionAvailability(binding, error?.status === 403 ? 'forbidden' : 'unavailable')
     }
   }
-  async function actionCallback(binding, callerSignal, submission, runId) {
+  async function actionCallback(binding, callerSignal, mode, submission, runId) {
     let submissionStarted = false
     const controller = new AbortController()
     const abort = () => controller.abort()
@@ -259,7 +259,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         throw new Error('This action has changed. Refresh it before continuing.')
       }
       let result
-      if (runId) result = await client.getAction(projectId, runId, { signal: controller.signal })
+      if (mode === 'reconcile') result = await client.reconcileAction(projectId, runId, { signal: controller.signal })
+      else if (mode === 'status') result = await client.getAction(projectId, runId, { signal: controller.signal })
       else {
         submissionStarted = true
         result = await client.submitAction(projectId, submission, { signal: controller.signal })
@@ -269,7 +270,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       return result
     } catch (error) {
       if (error?.status === 403) actionAvailability(binding, 'forbidden')
-      if (submission && !submissionStarted && error?.name !== 'AbortError') throw new IntegrationActionPreflightError()
+      if (mode === 'submit' && submission && !submissionStarted && error?.name !== 'AbortError') throw new IntegrationActionPreflightError()
       throw error
     } finally { signals.forEach((signal) => signal.removeEventListener('abort', abort)) }
   }
@@ -406,8 +407,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
                 {state.action.binding.grantRevision !== null ? <IntegrationActionForm
                   element={state.selected.element} contextKey={JSON.stringify([context.current?.cacheIdentity, sessionGeneration, state.selected.revision, state.action.binding.request])}
                   grantRevision={state.action.binding.grantRevision} availability={state.action.availability} displayPreferences={preferences}
-                  onSubmit={(submission, signal) => actionCallback(state.action.binding, signal, submission)}
-                  onCheckStatus={(runId, signal) => actionCallback(state.action.binding, signal, null, runId)} />
+                  onSubmit={(submission, signal) => actionCallback(state.action.binding, signal, 'submit', submission)}
+                  onCheckStatus={(runId, signal) => actionCallback(state.action.binding, signal, 'status', null, runId)}
+                  onReconcile={(runId, signal) => actionCallback(state.action.binding, signal, 'reconcile', null, runId)} />
                   : <p role="status">{state.action.availability === 'forbidden' ? 'You do not have permission to perform this action.' :
                     state.action.availability === 'stale' ? 'This action has changed. Refresh it before continuing.' : 'This action is unavailable.'}</p>}
                 {state.action.availability !== 'ready' && <button disabled={pending} onClick={() => refreshAction(state.action.binding)}>Retry action authority</button>}

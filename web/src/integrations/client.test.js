@@ -520,6 +520,49 @@ describe('fixed integration destination and bounded authenticated transport', ()
     expect(fetchImpl.mock.calls[2][1].body).toBeUndefined()
     await expect(client.getAction(projectId, '22222222-2222-4222-8222-222222222222', options)).rejects.toThrow('invalid')
   })
+  it('reconciles only the existing run with an empty authenticated POST and caller signal', async () => {
+    const snapshot = { run, receipts: [] }
+    const { client, fetchImpl, options } = setup(snapshot)
+    expect(await client.reconcileAction(projectId, run.run_id, options)).toEqual(snapshot)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl).toHaveBeenCalledWith(`https://ops.example/api/v1/projects/${projectId}/integrations/actions/${run.run_id}/reconcile`, {
+      method: 'POST', signal: options.signal, credentials: 'omit', redirect: 'error', cache: 'no-store',
+      headers: { Authorization: 'Bearer first', Accept: 'application/json', 'Content-Type': 'application/json' }, body: '{}',
+    })
+  })
+  it.each(['../escape', '', `${projectId}\n`, 'not-a-uuid'])('refuses invalid reconciliation run IDs before dispatch: %j', async (runId) => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.reconcileAction(projectId, runId, options)).rejects.toThrow('The integration response or request was invalid.')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([
+    { run: { ...run, run_id: '22222222-2222-4222-8222-222222222222' }, receipts: [] },
+    { run: { ...run, secret: 'private' }, receipts: [] },
+    { run, receipts: [], secret: 'private' },
+    { run: { ...run, state: 'succeeded', effect_outcome: 'applied' }, receipts: [] },
+  ])('rejects malformed or cross-run reconciliation snapshots: %j', async (snapshot) => {
+    const { client, fetchImpl, options } = setup(snapshot)
+    await expect(client.reconcileAction(projectId, run.run_id, options)).rejects.toThrow('The integration response or request was invalid.')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+  it.each([403, 404, 503])('sanitizes reconciliation HTTP %s failures without retrying', async (status) => {
+    const { client, fetchImpl, options } = setup()
+    fetchImpl.mockResolvedValue(response({ secret: 'private provider payload' }, { status }))
+    await expect(client.reconcileAction(projectId, run.run_id, options)).rejects.toMatchObject({ status,
+      message: status === 403 ? 'You do not have permission to view these integrations.' : 'The integration request failed. Please retry.' })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+  it('sanitizes reconciliation transport failures and refuses canceled or unauthenticated dispatch', async () => {
+    const { client, fetchImpl, options } = setup()
+    fetchImpl.mockRejectedValue(new Error('private provider payload'))
+    await expect(client.reconcileAction(projectId, run.run_id, options)).rejects.toThrow('Integrations are unavailable. Please retry.')
+    const controller = new AbortController()
+    controller.abort()
+    await expect(client.reconcileAction(projectId, run.run_id, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    authHeaders.mockReturnValue({})
+    await expect(client.reconcileAction(projectId, run.run_id, options)).rejects.toMatchObject({ status: 401 })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
   it.each([
     { ...run, connection_id: 'another' }, { ...run, connector_ref: { ...ref, version: 2 } },
     { ...run, operation_ref: ref }, { ...run, grant_revision: 8 }, { ...run, secret: 'do not display' },

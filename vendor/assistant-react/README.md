@@ -106,9 +106,12 @@ global CSS. Provider strings render as text, never raw HTML.
 ## Tokens
 
 Colours, fonts and the 44 px target come from `src/leaf-tokens.v1.json`,
-the package-local copy of `contract/leaf-tokens.v1.json`, which holds the
-ops-dashboard globals.css values (K-D10).
-`AssistantRoot` sets them as `--leaf-*` custom properties; components reference
+the byte-equal package-local copy of `contract/leaf-tokens.v1.json`.
+`tokenStyle("light" | "dark")` resolves shared colour roles, fonts, spacing and
+radii from `profiles.mushy`; legacy-only colour keys retain their pinned values.
+The existing `LEAF_TOKENS`, `color`, `font`, `radius` and `SERIES` exports stay
+available. `AssistantRoot` sets resolved `--leaf-*` custom properties, including
+the existing assistant variable names; components reference
 `var(--leaf-*)` only, and a test fails any component that carries a literal
 colour. Reduced motion is honoured in CSS and in the stream's scrolling.
 
