@@ -47,7 +47,7 @@ def total_residency(effect, capability, execution_class, host_source):
     pure total effect -> none; otherwise -> tenant.
     """
     if ((isinstance(capability, str) and capability.startswith("host."))
-            or host_source or execution_class == "handoff"):
+            or host_source is not None or execution_class == "handoff"):
         return "host"
     if effect == "pure":
         return "none"
@@ -73,9 +73,22 @@ class TrustedBlock:
         return self.host == "production" and self.execution_class != "handoff"
 
 
+def _validated_host_source(manifest):
+    if "host_source" not in manifest:
+        return None
+    value = manifest["host_source"]
+    if not isinstance(value, str) or not value or len(value) > 128 or not value.isprintable():
+        from lab_validate import ManifestInvalid
+
+        raise ManifestInvalid("lab_manifest_invalid", "/host_source",
+                              manifest.get("id", manifest.get("name")))
+    return value
+
+
 def _seed_registry():
     result = {}
     for tool in catalog.seed_tools():
+        host_source = _validated_host_source(tool)
         capability = tool.get("capability", next(iter(tool.get("capabilities", [])), "pure"))
         execution = tool.get("execution_class", "inline")
         adapter = tool.get("solar_adapter")
@@ -84,9 +97,9 @@ def _seed_registry():
         if effect == "refused" or capability == "money" or capability.startswith("money."):
             continue
         block = TrustedBlock(tool.get("id", tool.get("name")), tool.get("version", "1.0.0"),
-                             effect, total_residency(effect, capability, execution, tool.get("host_source")),
+                             effect, total_residency(effect, capability, execution, host_source),
                              capability, adapter, execution, live, tool.get("host", "production"),
-                             host_source=tool.get("host_source"))
+                             host_source=host_source)
         key = (block.kind, block.version)
         if key in result:
             raise RuntimeError(f"duplicate registry seed: {key!r}")
@@ -161,7 +174,7 @@ def register_extension(manifest):
         fail("capability", "lab_manifest_unregistrable")
     if "effect" in manifest and manifest["effect"] != effect:
         fail("effect", "lab_manifest_spoof")
-    host_source = manifest.get("host_source")
+    host_source = _validated_host_source(manifest)
     residency = total_residency(effect, capability, execution, host_source)
     if "residency" in manifest and manifest["residency"] != residency:
         fail("residency", "lab_manifest_spoof")

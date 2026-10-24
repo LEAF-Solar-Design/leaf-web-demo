@@ -1,5 +1,6 @@
 """Completeness is measured against the real catalog composition seam."""
 from collections import Counter
+import ast
 import copy
 import hashlib
 import json
@@ -14,26 +15,40 @@ from lab_registry import KASHBOT_CLASSES
 
 ROOT = Path(__file__).resolve().parents[2]
 PATH = ROOT / "contract/lab-capability-coverage.v1.json"
-COVERAGE_SHA256 = "cdb77a4b5fb4647a16392ad347219c880bbbd22a8c15df13a99ccc108625999f"
+COVERAGE_SHA256 = "ad83557b234f41193821f5d7e20f529da3cc254e8c06ced540fc2391d1a47e97"
 STATUSES = {"runnable", "readable", "explicit-handoff", "unavailable-with-reason"}
 
 
-def check_coverage(coverage, families, sources):
+def check_coverage(coverage, families, sources, source_families):
     assert coverage["schema"] == "leaf.lab-capability-coverage.v1"
-    family_counts = Counter(coverage["families"])
+    family_counts = Counter(record["family"] for record in coverage["families"])
     for family in sorted(set(families) | set(family_counts)):
         assert family_counts[family] == (1 if family in families else 0), f"family:{family} missing, duplicate or unexpected"
+    for index, record in enumerate(coverage["families"]):
+        family = record["family"]
+        assert family == families[index], f"family:{family} out of order"
     counts = Counter(entry["source"] for entry in coverage["entries"])
     for source in sorted(sources | set(counts)):
         assert counts[source] == (1 if source in sources else 0), f"{source} missing, duplicate or unexpected"
-    for entry in coverage["entries"]:
-        source = entry["source"]
-        assert entry["status"] in STATUSES, source
+    for entry in coverage["entries"] + coverage["families"]:
+        source = entry.get("source", "family:" + entry.get("family", ""))
+        assert entry.get("status") in STATUSES, source
         assert isinstance(entry.get("adapter_owner"), str) and entry["adapter_owner"].strip(), source
-        assert entry["host"] in ("production", "pc"), source
+        assert entry.get("host") in ("production", "pc"), source
         assert not (entry["host"] == "pc" and entry["status"] == "runnable"), source
         if entry["status"] == "unavailable-with-reason":
             assert isinstance(entry.get("reason"), str) and entry["reason"].strip(), source
+    strength = {status: rank for rank, status in enumerate(
+        ("unavailable-with-reason", "explicit-handoff", "readable", "runnable"))}
+    for record in coverage["families"]:
+        family = record["family"]
+        entries = [entry for entry in coverage["entries"]
+                   if source_families.get(entry["source"]) == family]
+        expected = max((entry["status"] for entry in entries), key=strength.get,
+                       default="unavailable-with-reason")
+        assert record["status"] == expected, f"family:{family} strongest status"
+        if not entries:
+            assert record.get("reason") == "no Lab adapter in wave 2", f"family:{family} reason"
 
 
 @pytest.fixture
@@ -46,9 +61,14 @@ def inventory(monkeypatch, tmp_path):
     tools = deps.all_tools("coverage-tenant") + catalog.seed_tools()
     sources = {"studio-tool:" + tool["name"] for tool in tools}
     sources.update("kashbot:" + name for name in KASHBOT_CLASSES)
-    sources.update("mcp:" + tool["name"] for tool in mcp_tool_projection.projected_tools("coverage-tenant"))
+    mcp_tools = mcp_tool_projection.projected_tools("coverage-tenant")
+    sources.update("mcp:" + tool["name"] for tool in mcp_tools)
     config = json.loads(catalog.FAMILIES_FILE.read_text(encoding="utf-8"))
-    return {family["family_id"] for family in config["families"]}, sources
+    source_families = {"studio-tool:" + tool["name"]: catalog.family_for_persist(tool)
+                       for tool in tools}
+    source_families.update({"mcp:" + tool["name"]: catalog.family_for_persist(tool)
+                            for tool in mcp_tools})
+    return [family["family_id"] for family in config["families"]], sources, source_families
 
 
 def load():
@@ -76,7 +96,7 @@ def test_duplicate_entry_named(inventory):
 
 def test_missing_family_named(inventory):
     coverage = load()
-    family = coverage["families"].pop()
+    family = coverage["families"].pop()["family"]
     with pytest.raises(AssertionError, match=family):
         check_coverage(coverage, *inventory)
 
@@ -85,8 +105,67 @@ def test_duplicate_family_named(inventory):
     coverage = load()
     family = coverage["families"][0]
     coverage["families"].append(family)
-    with pytest.raises(AssertionError, match=family):
+    with pytest.raises(AssertionError, match=family["family"]):
         check_coverage(coverage, *inventory)
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing-status", "unknown-status", "empty-owner", "pc-runnable", "unknown-host",
+    "missing-reason", "weaker-status", "wrong-order",
+])
+def test_J1_family_record_mutations_name_family(inventory, mutation):
+    coverage = load()
+    record = coverage["families"][0]
+    if mutation == "missing-status":
+        del record["status"]
+    elif mutation == "unknown-status":
+        record["status"] = "unknown"
+    elif mutation == "empty-owner":
+        record["adapter_owner"] = ""
+    elif mutation == "pc-runnable":
+        record.update(host="pc", status="runnable")
+    elif mutation == "unknown-host":
+        record["host"] = "unknown"
+    elif mutation == "missing-reason":
+        record = next(row for row in coverage["families"] if row["family"] == "solve")
+        del record["reason"]
+    elif mutation == "weaker-status":
+        record["status"] = "explicit-handoff"
+    else:
+        coverage["families"][0], coverage["families"][1] = coverage["families"][1], record
+        record = coverage["families"][0]
+    with pytest.raises(AssertionError, match="family:" + record["family"]):
+        check_coverage(coverage, *inventory)
+
+
+@pytest.mark.parametrize("statuses,expected", [
+    (("runnable", "readable"), "runnable"),
+    (("readable", "explicit-handoff"), "readable"),
+    (("explicit-handoff", "unavailable-with-reason"), "explicit-handoff"),
+    (("unavailable-with-reason", "unavailable-with-reason"), "unavailable-with-reason"),
+])
+def test_J1_family_status_is_strongest_member(inventory, statuses, expected):
+    coverage = load()
+    source_families = inventory[2]
+    entries = [entry for entry in coverage["entries"]
+               if source_families.get(entry["source"]) == "measurement"]
+    assert len(entries) == len(statuses)
+    for entry, status in zip(entries, statuses):
+        entry.update(status=status, reason="adapter unavailable")
+    record = next(row for row in coverage["families"] if row["family"] == "measurement")
+    record.update(status=expected, reason="adapter unavailable")
+    check_coverage(coverage, *inventory)
+
+
+def test_J2_gate_counts_cover_parametrized_baseline():
+    tree = ast.parse((ROOT / "scripts/run-all-gates.py").read_text(encoding="utf-8"))
+    expected = {"server-lab-registry": 96, "server-lab-validate": 31}
+    counts = {node.args[0].value: ast.literal_eval(node.args[5])
+              for node in ast.walk(tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "Suite" and len(node.args) > 5
+              and isinstance(node.args[0], ast.Constant) and node.args[0].value in expected}
+    assert counts == expected
 
 
 def test_pc_cannot_run(inventory):

@@ -1,21 +1,99 @@
 {
   "schema": "leaf.lab-capability-coverage.v1",
   "families": [
-    "measurement",
-    "selection",
-    "custom",
-    "internal_qa",
-    "stringing",
-    "placement",
-    "settings",
-    "solve",
-    "equipment",
-    "routing",
-    "schedules",
-    "imports",
-    "terrain",
-    "shade",
-    "evidence"
+    {
+      "family": "measurement",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "selection",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "custom",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "internal_qa",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "stringing",
+      "status": "readable",
+      "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "family": "placement",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "settings",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "solve",
+      "status": "unavailable-with-reason",
+      "adapter_owner": "SEL-306",
+      "host": "production",
+      "reason": "no Lab adapter in wave 2"
+    },
+    {
+      "family": "equipment",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "routing",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "schedules",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "imports",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "terrain",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "family": "shade",
+      "status": "unavailable-with-reason",
+      "adapter_owner": "SEL-306",
+      "host": "production",
+      "reason": "no Lab adapter in wave 2"
+    },
+    {
+      "family": "evidence",
+      "status": "unavailable-with-reason",
+      "adapter_owner": "SEL-306",
+      "host": "production",
+      "reason": "no Lab adapter in wave 2"
+    }
   ],
   "entries": [
     {

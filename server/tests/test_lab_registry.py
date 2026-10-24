@@ -1,5 +1,6 @@
 """Effect oracle, extension requirements and bounded latency telemetry."""
 import json
+import runpy
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 from time import perf_counter
@@ -98,6 +99,39 @@ def test_register(extension):
     assert block.returns_schema_digest is None
     with pytest.raises(ManifestInvalid):
         registry.register_extension(extension)
+
+
+@pytest.mark.parametrize("host_source", ["", [], None, 7, "x" * 129, "host\n"])
+def test_J3_extension_host_source_must_be_bounded_printable_text(extension, host_source):
+    extension.update(capability="pure.value", residency="none", host_source=host_source)
+    before = dict(registry.REGISTRY)
+    with pytest.raises(ManifestInvalid) as caught:
+        registry.register_extension(extension)
+    assert caught.value.to_http() == (422, {
+        "detail": "lab_manifest_invalid", "pointer": "/host_source", "block": extension["id"],
+    })
+    assert registry.REGISTRY == before
+
+
+def test_J3_seed_host_source_is_validated_at_import(monkeypatch):
+    seed = {"id": "bad-host", "capability": "pure.value", "host_source": ""}
+    monkeypatch.setattr(registry.catalog, "seed_tools", lambda: [seed])
+    with pytest.raises(ManifestInvalid) as caught:
+        runpy.run_path(registry.__file__)
+    assert caught.value.to_http() == (422, {
+        "detail": "lab_manifest_invalid", "pointer": "/host_source", "block": "bad-host",
+    })
+
+
+def test_J3_valid_host_source_requires_host_residency(extension):
+    extension.update(capability="pure.value", host_source="h" * 128, residency="none")
+    with pytest.raises(ManifestInvalid) as caught:
+        registry.register_extension(extension)
+    assert caught.value.pointer == "/residency"
+    extension["residency"] = "host"
+    block = registry.register_extension(extension)
+    assert block.residency == "host"
+    assert block.host_source == extension["host_source"]
 
 
 @pytest.mark.parametrize("capability,execution,host_source,residency", [

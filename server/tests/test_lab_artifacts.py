@@ -394,6 +394,41 @@ def test_C1_graph_save_validates_returns_schema(local_store, schema, pointer):
         assert not local_store.exists()
 
 
+def test_save_manifest_spoof_names_block(local_store):
+    from test_lab_validate import manifest
+
+    data = manifest()
+    data.update(id="example", effect="read")
+    graph = dict(GRAPH, blocks=[{
+        "id": "example", "registry": {"id": "example", "version": "1.0.0", "code_sha256": "0" * 64},
+        "settings": {}, "manifest": data,
+    }])
+    with client() as http:
+        response = http.post("/api/lab/docs/strategy/save", json={"graph": graph, "expected_head": None})
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "lab_manifest_spoof", "pointer": "/blocks/0/manifest/effect", "block": "example",
+    }
+    assert not local_store.exists()
+
+
+def test_J4_graph_save_refuses_trailing_newline_manifest_id(local_store):
+    from test_lab_validate import manifest
+
+    data = manifest()
+    data["id"] = "example\n"
+    graph = dict(GRAPH, blocks=[{
+        "id": "example", "registry": {"id": "example", "version": "1.0.0", "code_sha256": "0" * 64},
+        "settings": {}, "manifest": data,
+    }])
+    response = client().post("/api/lab/docs/strategy/save", json={"graph": graph, "expected_head": None})
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "invalid_lab_document", "pointer": "/blocks/0/manifest/id", "block": data["id"],
+    }
+    assert not local_store.exists()
+
+
 @pytest.mark.parametrize("action", ["save", "restore"])
 @pytest.mark.parametrize("raw", [
     b'{"expected_head":null,"expected_head":null}', b'{', b'[]',

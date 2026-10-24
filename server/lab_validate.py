@@ -5,6 +5,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+import re
 
 from jsonschema import Draft202012Validator
 from referencing import Registry
@@ -40,6 +41,14 @@ def validate_manifest(manifest):
 
     block_id = manifest.get("id") if isinstance(manifest, dict) else None
     version = manifest.get("version") if isinstance(manifest, dict) else None
+    if isinstance(manifest, dict):
+        if (not isinstance(block_id, str) or len(block_id) > 64
+                or not re.fullmatch(_SCHEMA["$defs"]["id"]["pattern"], block_id)):
+            raise ManifestInvalid("lab_manifest_invalid", "/id", block_id)
+        semver = version.get("semver") if isinstance(version, dict) else None
+        if not isinstance(semver, str) or not re.fullmatch(
+                _SCHEMA["properties"]["version"]["properties"]["semver"]["pattern"], semver):
+            raise ManifestInvalid("lab_manifest_invalid", "/version", block_id)
     block = lookup(manifest.get("kind"), version.get("semver")) if isinstance(version, dict) else None
     if block is not None:
         for field in ("effect", "residency"):
