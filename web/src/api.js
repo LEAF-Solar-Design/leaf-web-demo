@@ -933,14 +933,26 @@ export async function saveArloReview(context, body, idempotencyKey) {
 // authoritative resolution always comes from a GET record (the SSE payload
 // carries no `result`), so a terminal SSE event just triggers one more poll.
 // `onStatus({status, progress, elapsed_ms, error, job_id})` fires on updates.
-function subscribeJob(jobId, onStatus) {
+function subscribeJob(jobId, onStatus, signal = null) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason || new DOMException('Aborted', 'AbortError'))
+      return
+    }
     let settled = false
     let es = null
     let poll = null
     let errStreak = 0
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(signal.reason || new DOMException('Aborted', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
 
     const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort)
       if (es) { try { es.close() } catch { /* noop */ } es = null }
       if (poll) { clearInterval(poll); poll = null }
     }
@@ -1007,7 +1019,7 @@ function subscribeJob(jobId, onStatus) {
 
 // Re-attach to an EXISTING job (tab-close survivability) without re-submitting.
 export function attachToJob(jobId, opts = {}) {
-  return subscribeJob(jobId, opts.onStatus)
+  return subscribeJob(jobId, opts.onStatus, opts.signal || null)
 }
 
 // --- Tab-close reap beacon (CONTRACT-ADDENDUM §7 / routers/jobs.py:121) --
@@ -1112,7 +1124,7 @@ export async function runToolAsync(tool, params, dwg = 'rooftop_demo', opts = {}
   const jobId = body.job_id
   if (opts.onSubmit) opts.onSubmit(jobId)
   if (opts.onStatus) opts.onStatus({ status: 'submitted', progress: 'queued', elapsed_ms: null, job_id: jobId })
-  return subscribeJob(jobId, opts.onStatus)
+  return subscribeJob(jobId, opts.onStatus, opts.signal || null)
 }
 
 // --- Run (dispatch) -----------------------------------------------------
