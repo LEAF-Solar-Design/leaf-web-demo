@@ -97,8 +97,10 @@ def test_downstream_overlay_inventory_matches_current_vendor():
         "ports/impl/sessionStore.ts",
         "ports/impl/tenantBrokerStandardServiceProvider.ts",
         "ports/impl/tenantChangeRepo.ts",
+        "ports/impl/tenantDocumentRepo.ts",
         "ports/impl/tenantRepoProvider.ts",
         "ports/index.ts",
+        "ports/labDocumentPort.ts",
         "ports/modelAllowlist.ts",
     }
     for rel, declared_hash in overlays.items():
