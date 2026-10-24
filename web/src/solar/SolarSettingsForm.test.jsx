@@ -87,6 +87,186 @@ function rerenderProject(view, harness, changes) {
 const previewCalls = (harness) => harness.fetchImpl.mock.calls.filter(([url]) => url.includes('/api/capabilities?'));
 
 describe('Canonical Solar settings form through the merged project client', () => {
+  it('W1C16 traces each Start click from entry through a successful submission', async () => {
+    const h = projectHarness({ intake: IG.intake });
+    await editProject(h, 'Panels in sequence', '3');
+    changeInput('Drawing units', 'ft');
+    await readyProject('Start Solar design');
+    const section = screen.getByTestId('solar-settings-form');
+    expect(section.getAttribute('data-submit-seq')).toBe('0');
+    expect(section.hasAttribute('data-submit-exit')).toBe(false);
+    for (const seq of [1, 2]) {
+      const pending = deferred();
+      h.contextResponses.push(pending.promise);
+      fireEvent.click(screen.getByRole('button', { name: 'Start Solar design' }));
+      expect(section.getAttribute('data-submit-seq')).toBe(String(seq));
+      expect(section.getAttribute('data-submit-exit')).toBe('entered');
+      await act(async () => { pending.resolve(projectResponse(canonicalView(projectBinding, IG.intake))); });
+      await waitFor(() => expect(section.getAttribute('data-submit-exit')).toBe('submitted'));
+      await readyProject('Start Solar design');
+    }
+  });
+
+  it.each(['not_armed', 'locked'])('W1C16 traces the existing %s top guard', async (exit) => {
+    const h = projectHarness();
+    let current = true;
+    h.client.captureCatalogScope.mockImplementation(() => () => current);
+    const pending = deferred();
+    h.props.onProjectSubmit = vi.fn(() => pending.promise);
+    await editProject(h);
+    await readyProject();
+    const form = applyButton().closest('form');
+    if (exit === 'not_armed') current = false;
+    act(() => {
+      fireEvent.submit(form);
+      if (exit === 'locked') fireEvent.submit(form);
+    });
+    const section = screen.getByTestId('solar-settings-form');
+    expect(section.getAttribute('data-submit-seq')).toBe(exit === 'locked' ? '2' : '1');
+    expect(section.getAttribute('data-submit-exit')).toBe(exit);
+    expect(screen.getByTestId('solar-settings-run').textContent).toContain(`SIP_R7_FORM_${exit.toUpperCase()}`);
+    if (exit === 'locked') {
+      await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1));
+      await act(async () => { pending.resolve({ ok: true, status: 202,
+        data: { job_id: projectJob, status: 'submitted' } }); });
+      // The older accepted run may publish feedback, but cannot overwrite the newer click's trace.
+      expect(section.getAttribute('data-submit-exit')).toBe('locked');
+      expect(screen.getByTestId('solar-settings-run').textContent).toBe('Solar settings submitted.');
+    } else expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(['context', 'result', 'error'])('W1C16 explains a superseded %s while its scope survives', async (stage) => {
+    const h = projectHarness();
+    const pending = deferred();
+    if (stage !== 'context') h.props.onProjectSubmit = vi.fn(() => pending.promise);
+    let current = true;
+    h.client.captureCatalogScope.mockImplementation(() => () => current);
+    await editProject(h);
+    await readyProject();
+    if (stage === 'context') h.client.readContext.mockImplementationOnce(() => pending.promise);
+    fireEvent.click(applyButton());
+    if (stage !== 'context') await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1));
+    current = false;
+    await act(async () => {
+      if (stage === 'error') pending.reject(new Error('superseded transport'));
+      else pending.resolve(stage === 'context' ? { ok: true, data: canonicalView() }
+        : { ok: true, status: 202, data: { job_id: projectJob, status: 'submitted' } });
+    });
+    const code = `SIP_R7_FORM_SUPERSEDED_${stage.toUpperCase()}`;
+    expect(screen.getByTestId('solar-settings-run').textContent).toContain(code);
+    expect(screen.getByTestId('solar-settings-form').getAttribute('data-submit-exit')).toBe(`superseded_${stage}`);
+    if (stage === 'context') expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+
+    // A successful preview calls setFeedback(null); the trace still explains the previous click.
+    current = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }));
+    await readyProject();
+    expect(screen.getByTestId('solar-settings-run').textContent).toContain(code);
+    const next = deferred();
+    h.client.readContext.mockImplementationOnce(() => next.promise);
+    fireEvent.click(applyButton());
+    expect(screen.queryByTestId('solar-settings-run')).toBeNull();
+    expect(screen.getByTestId('solar-settings-form').getAttribute('data-submit-seq')).toBe('2');
+    expect(screen.getByTestId('solar-settings-form').getAttribute('data-submit-exit')).toBe('entered');
+    current = false;
+    await act(async () => { next.resolve({ ok: true, data: canonicalView() }); });
+  });
+
+  it('W1C16 explains a predicate that expires immediately before the handoff', async () => {
+    const h = projectHarness();
+    await editProject(h);
+    await readyProject();
+    const predicate = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
+    h.client.captureCatalogScope.mockImplementationOnce(() => predicate);
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(screen.getByTestId('solar-settings-form').getAttribute('data-submit-exit'))
+      .toBe('superseded_handoff'));
+    expect(screen.getByTestId('solar-settings-run').textContent).toContain('SIP_R7_FORM_SUPERSEDED_HANDOFF');
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+
+  it('W1C16 explains a replaced scope at handler entry and commits the current scope', async () => {
+    const h = projectHarness();
+    const binding = { ...projectBinding };
+    h.props.solarBinding = binding;
+    await editProject(h);
+    await readyProject();
+    const subscriptions = h.client.subscribe.mock.calls.length;
+    const reads = h.client.readContext.mock.calls.length;
+    // Change the latest binding without a render: the on-screen handler still owns the old scope.
+    binding.input_version_id = '66666666-6666-6666-6666-666666666666';
+    fireEvent.click(applyButton());
+    expect(screen.getByTestId('solar-settings-form').getAttribute('data-submit-exit')).toBe('scope_replaced');
+    expect(screen.getByTestId('solar-settings-form').getAttribute('data-submit-seq')).toBe('1');
+    expect(screen.getByTestId('solar-settings-run').textContent).toContain('SIP_R7_FORM_SCOPE_REPLACED');
+    // The forced render installs a new scope, whose snapshot refuses the mismatched client binding.
+    await waitForMode('refused');
+    expect(h.client.getSnapshot().binding).toEqual(projectBinding);
+    expect(h.client.subscribe).toHaveBeenCalledTimes(subscriptions);
+    expect(h.client.readContext).toHaveBeenCalledTimes(reads);
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [undefined, 'SIP_R7_WORKSPACE_NO_RESULT'],
+    [{ ok: false, status: null, reason: 'SIP_R7_WORKSPACE_NOT_ADMITTED', envelope: null }, 'SIP_R7_WORKSPACE_NOT_ADMITTED'],
+  ])('W1C15 reports the project submit result %j in run feedback', async (outcome, code) => {
+    const h = projectHarness({ intake: IG.intake });
+    h.props.onProjectSubmit = vi.fn().mockResolvedValue(outcome);
+    await editProject(h, 'Panels in sequence', '3');
+    changeInput('Drawing units', 'ft');
+    await readyProject('Start Solar design');
+    fireEvent.click(screen.getByRole('button', { name: 'Start Solar design' }));
+    await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toContain(code));
+    expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1);
+    expect(h.client.submitRun).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ busy: true }, 'SIP_R7_FORM_BUSY'],
+    [{ onProjectSubmit: undefined }, 'SIP_R7_FORM_NO_SUBMIT'],
+  ])('W1C15 reports a post-context guard %j', async (changes, code) => {
+    const h = projectHarness();
+    const view = await editProject(h);
+    await readyProject();
+    const pending = deferred();
+    h.contextResponses.push(pending.promise);
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(h.client.readContext).toHaveBeenCalledTimes(2));
+    view.rerender(<SolarSettingsForm {...h.props} {...changes} />);
+    await act(async () => { pending.resolve(projectResponse(canonicalView())); });
+    await waitFor(() => expect(screen.getByTestId('solar-settings-run').textContent).toContain(code));
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+
+  it('W1C15 reports a preview that expires between enabling Start and the click', async () => {
+    const h = projectHarness({ intake: IG.intake });
+    let current = true;
+    h.client.captureCatalogScope.mockImplementation(() => () => current);
+    await editProject(h, 'Panels in sequence', '3');
+    changeInput('Drawing units', 'ft');
+    await readyProject('Start Solar design');
+    current = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Start Solar design' }));
+    expect(screen.getByTestId('solar-settings-run').textContent).toContain('SIP_R7_FORM_NOT_ARMED');
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled();
+  });
+
+  it('W1C15 reports a duplicate enabled submit as locked while preserving the accepted run', async () => {
+    const h = projectHarness();
+    const pending = deferred();
+    h.props.onProjectSubmit = vi.fn(() => pending.promise);
+    await editProject(h);
+    await readyProject();
+    const form = applyButton().closest('form');
+    act(() => { fireEvent.submit(form); fireEvent.submit(form); });
+    expect(screen.getByTestId('solar-settings-run').textContent).toContain('SIP_R7_FORM_LOCKED');
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1));
+    await act(async () => { pending.resolve({ ok: true, status: 202,
+      data: { job_id: projectJob, status: 'submitted' } }); });
+    expect(screen.getByTestId('solar-settings-run').textContent).toBe('Solar settings submitted.');
+  });
+
   it('R8-06 refuses invalid canonical bindings without client or legacy calls', async () => {
     const accessor = { ...projectBinding };
     const get = vi.fn(() => projectBinding.input_version_id);
@@ -664,8 +844,12 @@ function props(overrides = {}) {
 
 function deferred() {
   let resolvePromise;
-  const promise = new Promise((resolveValue) => { resolvePromise = resolveValue; });
-  return { promise, resolve: resolvePromise };
+  let rejectPromise;
+  const promise = new Promise((resolveValue, rejectValue) => {
+    resolvePromise = resolveValue;
+    rejectPromise = rejectValue;
+  });
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
 }
 
 async function waitForMode(mode) {

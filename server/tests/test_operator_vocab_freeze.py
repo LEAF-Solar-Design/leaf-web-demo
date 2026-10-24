@@ -31,6 +31,7 @@ MATRIX_PATH = REPO_ROOT / "contract" / "operator_action_matrix.v1.json"
 
 FROZEN_TIERS = {
     "demo", "guest", "restricted", "self_hosted",
+    "hosted_free",  # Free plan tier, section 11 ritual, 2026-10-22
     "hosted_starter", "hosted_pro", "admin",
     "demo_live",  # Server-only durable demo — §11 ritual, 2026-10-19
 }
