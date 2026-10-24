@@ -40,7 +40,28 @@ vi.mock('@xyflow/react', () => ({
   Position: { Top: 'top', Bottom: 'bottom' }, BaseEdge: () => null,
   EdgeLabelRenderer: ({ children }) => children, getBezierPath: () => ['', 0, 0],
 }))
+function fakeArtifactsClient({ state: overrides = {}, ...methods } = {}) {
+  const listeners = new Set()
+  let operation = 0
+  const state = { head: null, published: null, revisions: [], lastSaved: null, conflict: null,
+    restoredGraph: null, restoredKey: 0, events: [], saveTimes: [], requestTimes: [],
+    headLoaded: true, headLookupFailed: false, ...overrides }
+  return {
+    state,
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
+    currentDocId: () => 'strategy', currentGeneration: () => 0,
+    beginGraphOperation: vi.fn(() => ++operation),
+    isCurrentOperation: token => token === operation,
+    captureMine: vi.fn(), setDocId: vi.fn(), takeGraph: vi.fn(), save: vi.fn(),
+    head: vi.fn(async () => { state.headLoaded = true; return { ok: true, revision: state.head } }),
+    revisions: vi.fn().mockResolvedValue({ ok: true, revisions: [] }),
+    revision: vi.fn(), diff: vi.fn(), restore: vi.fn(), publish: vi.fn(),
+    ...methods,
+  }
+}
+let artifactsClient
 beforeEach(() => {
+  artifactsClient = fakeArtifactsClient()
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   fakeEngine.load.mockClear()
   layout.setLayoutEngineLoader(fakeEngine.load)
@@ -229,7 +250,7 @@ describe('canvas authoring', () => {
   it('enables the host Run for a valid loaded graph without editing', async () => {
     const initial = documentOf(1)
     const onRun = vi.fn()
-    render(<GraphView initialDocument={initial} onRun={onRun} />)
+    render(<GraphView client={artifactsClient} initialDocument={initial} onRun={onRun} />)
     await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
     expect(readiness.getByRole('status')).toHaveTextContent('Ready')
@@ -248,7 +269,7 @@ describe('canvas authoring', () => {
     const { problems } = validateGraph(initial, entries)
     expect(problems).not.toHaveLength(0)
     const onRun = vi.fn()
-    render(<GraphView initialDocument={initial} entries={entries} onRun={onRun} />)
+    render(<GraphView client={artifactsClient} initialDocument={initial} entries={entries} onRun={onRun} />)
     await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
     expect(readiness.getByRole('status')).toHaveTextContent('No valid graph')
@@ -460,7 +481,7 @@ describe('canvas authoring', () => {
     const required = { ...manifest, id: 'required-strategy',
       inputs: { value: { ...manifest.inputs.value, required: true } } }
     const onRun = vi.fn()
-    render(<GraphView initialDocument={addBlock(documentOf(1), required)} entries={entriesOf(manifest, required)} onRun={onRun} />)
+    render(<GraphView client={artifactsClient} initialDocument={addBlock(documentOf(1), required)} entries={entriesOf(manifest, required)} onRun={onRun} />)
     await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
     const run = readiness.getByRole('button', { name: 'Run graph' })
@@ -534,20 +555,20 @@ describe('canvas authoring', () => {
   it('mounts only on the first reveal and preserves the editor through hide and show', async () => {
     const runner = { run: vi.fn(async () => ({})), cancel: vi.fn() }
     vi.spyOn(layout, 'createDependencyLayoutRunner').mockReturnValue(runner)
-    const view = render(<GraphView hidden />)
+    const view = render(<GraphView client={artifactsClient} hidden />)
     expect(view.container.querySelector('[data-canvas-editor]')).toBeNull()
     expect(runner.run).not.toHaveBeenCalled()
 
-    view.rerender(<GraphView />)
+    view.rerender(<GraphView client={artifactsClient} />)
     await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     const editor = view.container.querySelector('[data-canvas-editor]')
     const search = within(editor).getByRole('searchbox')
     fireEvent.change(search, { target: { value: 'Market' } })
     await waitFor(() => expect(runner.run).toHaveBeenCalledTimes(1))
 
-    view.rerender(<GraphView hidden />)
+    view.rerender(<GraphView client={artifactsClient} hidden />)
     expect(editor).not.toBeVisible()
-    view.rerender(<GraphView />)
+    view.rerender(<GraphView client={artifactsClient} />)
     expect(view.container.querySelector('[data-canvas-editor]')).toBe(editor)
     expect(search).toHaveValue('Market')
     expect(editor).toBeVisible()
