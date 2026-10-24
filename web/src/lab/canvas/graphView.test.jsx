@@ -87,6 +87,8 @@ describe('first-click live graph', () => {
     const checks = Object.fromEntries(['builds', 'safety', 'contract', 'tests', 'speed', 'corpus']
       .map(name => [name, { status: 'pass' }]))
     checks.corpus.difference_count = 0
+    checks.tests = { status: 'pass', passed: 12, total: 12 }
+    checks.speed = { status: 'pass', p99_us: 0 }
     const identity = { kind: scenario === 'other kind' ? 'adjust-none' : 'count',
       version: scenario === 'other version' ? '2.0.0' : '1.0.0' }
     provider.announce([
@@ -106,7 +108,7 @@ describe('first-click live graph', () => {
     const code = within(screen.getByRole('region', { name: 'Block code' }))
     const checkRows = within(code.getByRole('region', { name: 'Checks before it can be used' })).getAllByRole('listitem')
     expect(checkRows).toHaveLength(6)
-    for (const row of checkRows) expect(row).toHaveAttribute('data-status', scenario === 'matching' ? 'pass' : 'pending')
+    for (const row of checkRows) expect(row).toHaveAttribute('data-status', ['matching', 'malformed'].includes(scenario) ? 'pass' : 'pending')
     expect(globalThis.document.body).not.toHaveTextContent('request-use')
     if (scenario === 'matching') {
       expect(code.getByText('0 differ')).toBeVisible()
@@ -114,14 +116,16 @@ describe('first-click live graph', () => {
       expect(code.getByText(/v3.*pending restart/)).toBeVisible()
       expect(code.getByText('Takes effect at the next restart')).toBeVisible()
       fireEvent.click(code.getByRole('button', { name: 'Use as a Change' }))
-      expect(code.getByText(/python .*request-use/)).toHaveTextContent(digest)
+      expect(code.getByText(/python .*request-use/)).toHaveTextContent('request-use --manifest ./studio-block-check.json')
+      expect(code.getByText(/Evidence digest:/)).toHaveTextContent(digest)
       act(() => provider.announce([{ source: 'block-checks', data: { ...identity, checks, digest: 'b'.repeat(64), draftDigest: digest } }]))
       view.rerender(<GraphView client={client} provider={provider} revision={2} initialDocument={document} />)
       expect(code.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
       expect(globalThis.document.body).not.toHaveTextContent('request-use')
     } else {
       expect(code.getByRole('button', { name: 'Use as a Change' })).toBeDisabled()
-      expect(code.queryByText('0 differ')).not.toBeInTheDocument()
+      if (scenario === 'malformed') expect(code.getByText('0 differ')).toBeVisible()
+      else expect(code.queryByText('0 differ')).not.toBeInTheDocument()
       expect(code.queryByText(/v3.*pending restart/)).not.toBeInTheDocument()
       if (scenario !== 'malformed') expect(code.getByText('No version history supplied by the host.')).toBeVisible()
     }

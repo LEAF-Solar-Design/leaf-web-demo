@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { canonicalJSON } from '../contract.js'
 import { manifestFor, registry } from './registry.js'
 import { connectionStatus } from './portCompat.js'
@@ -14,9 +14,20 @@ export default function BlockPanel({ block, document, onSettings, onConnect, onD
   const [test, setTest] = useState(null)
   const [source, setSource] = useState('')
   const [target, setTarget] = useState('')
+  const settingsKey = `${block.id}:${canonicalJSON(block.settings)}`
+  const previousSettings = useRef(settingsKey)
+  const dirty = useRef(false)
+  useEffect(() => {
+    if (previousSettings.current === settingsKey) return
+    previousSettings.current = settingsKey
+    setDraft(block.settings)
+    setJson(canonicalJSON(block.settings))
+    setMessage(dirty.current ? 'Newer block settings replaced unsaved local edits.' : '')
+    dirty.current = false
+  }, [settingsKey, block.settings])
   const properties = manifest.settings_schema.properties || {}
   const order = [...new Set([...(manifest.ui_schema.order || []).filter(name => Object.hasOwn(properties, name)), ...Object.keys(properties)])]
-  const applySettings = value => { onSettings(value); setDraft(value); setJson(canonicalJSON(value)) }
+  const applySettings = value => { onSettings(value); setDraft(value); setJson(canonicalJSON(value)); dirty.current = false }
   const save = value => {
     try { applySettings(value); setMessage('Settings saved') }
     catch (error) { setMessage(error.message) }
@@ -30,9 +41,10 @@ export default function BlockPanel({ block, document, onSettings, onConnect, onD
     <div role="tabpanel" id="block-tab-panel" aria-labelledby={`block-tab-${tab}`}>
       {tab === 'Setup' && <form onSubmit={event => { event.preventDefault(); save(draft) }}>
         {order.map(name => <SettingField key={name} name={name} schema={properties[name]} label={manifest.ui_schema.labels?.[name]}
-          required={manifest.settings_schema.required?.includes(name)} value={draft[name]} onChange={value => {
+          required={manifest.settings_schema.required?.includes(name)} value={draft[name]} onEdit={() => { dirty.current = true }} onChange={value => {
             const next = { ...draft }; if (value === undefined) delete next[name]; else next[name] = value
             setDraft(next)
+            dirty.current = true
           }} />)}
         {!order.length && <p>No settings required.</p>}<button type="submit">Save settings</button>
       </form>}
@@ -54,7 +66,7 @@ export default function BlockPanel({ block, document, onSettings, onConnect, onD
         </p>)}
         {Object.entries(manifest.inputs).map(([name, pin]) => <p key={name}>{name}: {pin.has_default ? `omitted uses default ${JSON.stringify(pin.default)}` : pin.required ? 'pipe required' : 'optional, no declared default'}</p>)}
         <details><summary>Submit settings JSON</summary>
-          <SettingsJSON value={json} onChange={setJson} onApply={() => { try { save(JSON.parse(json)) } catch (error) { setMessage(error.message) } }} />
+          <SettingsJSON value={json} onChange={value => { setJson(value); dirty.current = true }} onApply={() => { try { save(JSON.parse(json)) } catch (error) { setMessage(error.message) } }} />
         </details>
       </>}
       {tab === 'Test' && <>
