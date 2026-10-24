@@ -1627,7 +1627,7 @@ def build_suites() -> List[Suite]:
         # patching `Path.is_symlink` when the host refuses to create a link, so
         # it EXECUTES there rather than skipping.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_boundary.py"), 86),
+              SERVER, _py_pytest("tests/test_broker_boundary.py") + ["tests/test_broker_egress_harness.py"], 86),
         # The /broker/run-plan route, boundary's companion: it owns the live-write
         # entry point's schema, identity, fail-closed and readiness-cache contracts.
         # Registered per the #29 fix-then-register rule after it sat UNREGISTERED
