@@ -229,8 +229,13 @@ def test_run_cap_uses_injected_clock(rig, monkeypatch):
 
 
 @pytest.mark.parametrize("read_s", [600, 601])
-def test_artifact_read_exhausting_run_cap_skips_evaluation(rig, monkeypatch, read_s):
+@pytest.mark.parametrize("mismatch", [None, "graph_pin_mismatch", "registry_changed"])
+def test_artifact_read_exhausting_run_cap_skips_evaluation(rig, monkeypatch, read_s, mismatch):
     rig.create()
+    if mismatch == "graph_pin_mismatch":
+        rig.artifact["sha256"] = "c" * 64
+    elif mismatch == "registry_changed":
+        monkeypatch.setattr(store, "registry_digest", lambda: "changed")
     current = [100]
     evaluated = []
     instance = rig.make(clock=lambda: current[0])

@@ -211,6 +211,8 @@ class LabWorker:
             renewer.start()
             row = run.row
             artifact = self.artifacts.get(row["tenant_id"], row["doc_id"], row["graph_revision"])
+            if self.clock() - started >= 600:
+                raise RunBudgetExceeded()
             if artifact["sha256"] != row["graph_sha256"]:
                 self._terminal(run, "failed", "graph_pin_mismatch")
                 return
