@@ -37,6 +37,39 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('live widget values', () => {
+  it('truncates long resolved text within the renderer limit and preserves its freshness', async () => {
+    const client = { resolveValues: vi.fn().mockResolvedValueOnce(resolved('x'.repeat(600)))
+      .mockResolvedValue({ values: [{ status: 'unavailable' }] }) }
+    render(<WidgetPreview docId="widget" doc={doc} client={client} />)
+    await flush()
+    const painted = node('graph').querySelector('text').textContent
+    expect(painted).toBe('x'.repeat(511) + '…')
+    expect(painted).toHaveLength(512)
+    expect(node('graph')).toHaveAttribute('data-freshness', 'live')
+    expect(node('graph')).toHaveAttribute('data-truncated', 'true')
+    expect(screen.getByRole('list', { name: 'Element freshness' })).toHaveTextContent('graph: live (truncated)')
+    await advance(5000)
+    expect(node('graph').querySelector('text').textContent).toBe(painted)
+    expect(node('graph')).toHaveAttribute('data-freshness', 'stale')
+    expect(screen.getByRole('list', { name: 'Element freshness' })).toHaveTextContent('graph: stale (truncated)')
+  })
+
+  it('labels sample text as sample when rendering fails for another reason', async () => {
+    const rejectedDoc = documentWith({ ...element('graph', graph), min_renderer: '9999.0.0' },
+      element('host', binding('kashbot.board', { field: 'cash' })))
+    const host = createHostProvider({ framed: true })
+    host.announce([{ source: 'board', data: { cash: 'invalid figure' }, as_of: Date.now() }])
+    const client = { resolveValues: vi.fn().mockResolvedValue(resolved('x'.repeat(600))) }
+    render(<WidgetPreview docId="widget" doc={rejectedDoc} client={client} host={host} />)
+    await flush()
+    for (const id of ['graph', 'host']) {
+      expect(node(id).querySelector('text').textContent).toBe(`Example ${id}`)
+      expect(node(id)).toHaveAttribute('data-freshness', 'sample')
+      expect(node(id)).toHaveAttribute('data-truncated', 'false')
+      expect(screen.getByRole('list', { name: 'Element freshness' })).toHaveTextContent(`${id}: sample`)
+    }
+  })
+
   it('clamps polling to five seconds and sends only graph bindings', async () => {
     const host = createHostProvider({ framed: true })
     host.announce([{ source: 'board', data: { openCount: 'PRIVATE_HOST_VALUE' }, as_of: Date.now() }])

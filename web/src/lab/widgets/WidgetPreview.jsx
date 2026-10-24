@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { resolveValues } from './widgetsClient.js'
 import { renderWidget } from './widgetRender.js'
+import { MAX_TEXT_LENGTH } from './widgetDoc.js'
 import { FORMATS } from './widgetCatalog.js'
 import { kashbotSamplePack } from '../host/kashbotSamplePack.js'
 import './widgets.css'
@@ -91,28 +92,35 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
     const graph = element.binding?.source === 'graph.output', entry = graph ? poll.values[graphIndex++] : null
     const fromHost = element.binding?.source === 'kashbot.board'
     const local = fromHost ? hostBoard(host, element.binding.field) : { board: {}, sample: true }
-    const freshness = graph ? !entry?.resolved ? 'sample' : entry.stale || clock - entry.time > 3 * period ? 'stale' : 'live'
+    let freshness = graph ? !entry?.resolved ? 'sample' : entry.stale || clock - entry.time > 3 * period ? 'stale' : 'live'
       : fromHost && !local.sample ? local.simulated ? 'simulated' : local.stale || local.as_of === null || clock - local.as_of > 60000 ? 'stale' : 'live' : 'sample'
-    let painted = element
+    let painted = element, truncated = false
     if (graph) {
       const value = entry?.resolved ? entry.value : element.text ?? 'Sample'
       // Server field selection is complete; never reinterpret it as a board field.
       painted = { ...element, kind: 'text', text: typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value ?? 'Not reported') }
+      if (entry?.resolved && painted.text.length > MAX_TEXT_LENGTH) {
+        painted.text = painted.text.slice(0, MAX_TEXT_LENGTH - 1) + '…'
+        truncated = true
+      }
       delete painted.binding; delete painted.preset
     }
     let nodes
     try {
       nodes = renderWidget({ ...doc, active: format, formats: { [format]: { ...surface, els: [painted] } } }, { format, board: fromHost ? local.board : {} }).nodes
       if (fromHost && local.sample && element.text) nodes = nodes.map((node) => node.kind === 'text' ? { ...node, text: element.text } : node)
-    } catch { nodes = [{ ...element, kind: 'text', text: element.text ?? 'Sample', fontSize: element.h * 0.8, color: '--leaf-color-ink' }] }
-    return { element, nodes, freshness, tainted: fromHost && local.host_tainted === true }
+    } catch {
+      nodes = [{ ...element, kind: 'text', text: element.text ?? 'Sample', fontSize: element.h * 0.8, color: '--leaf-color-ink' }]
+      freshness = 'sample'; truncated = false
+    }
+    return { element, nodes, freshness, truncated, tainted: fromHost && local.host_tainted === true }
   }).filter(({ element }) => element.visible)
   return <section className="widget-preview" aria-label="Live widget preview">
     <h3>Live widget preview</h3>
     {poll.failed && <p role="alert">Values unavailable; showing the last known values</p>}
     <svg role="img" aria-label="Widget values" viewBox={`0 0 ${FORMATS[format].w} ${surface.h}`} style={{ width: '100%', maxWidth: FORMATS[format].w, background: '#09090b', borderRadius: surface.radius }}>
-      {elements.map(({ element, nodes, freshness, tainted }) => <g key={element.id} data-element-id={element.id} data-freshness={freshness} data-host-tainted={String(tainted)}>
-        <title>{`${element.id}: ${freshness}`}</title>
+      {elements.map(({ element, nodes, freshness, truncated, tainted }) => <g key={element.id} data-element-id={element.id} data-freshness={freshness} data-truncated={String(truncated)} data-host-tainted={String(tainted)}>
+        <title>{`${element.id}: ${freshness}${truncated ? ' (truncated)' : ''}`}</title>
         {nodes.map((node) => <svg key={node.id} x={node.x} y={node.y} width={node.w} height={node.h} viewBox={node.viewBox ?? `0 0 ${node.w} ${node.h}`} overflow="hidden" opacity={node.opacity}>
           {node.kind === 'text' ? <text x={node.align === 'right' ? node.w : node.align === 'center' ? node.w / 2 : 0} y={node.h / 2} dominantBaseline="central" textAnchor={node.align === 'right' ? 'end' : node.align === 'center' ? 'middle' : 'start'} fill={`var(${node.color}, #ffffff)`} fontSize={node.fontSize} fontWeight={node.weight}>{node.text}</text>
             : node.kind === 'box' ? <rect width={node.w} height={node.h} fill={`var(${node.color}, #86efac)`} />
@@ -120,7 +128,7 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
         </svg>)}
       </g>)}
     </svg>
-    <ul aria-label="Element freshness">{elements.map(({ element, freshness }) => <li key={element.id}>{element.id}: {freshness}</li>)}</ul>
+    <ul aria-label="Element freshness">{elements.map(({ element, freshness, truncated }) => <li key={element.id}>{element.id}: {freshness}{truncated ? ' (truncated)' : ''}</li>)}</ul>
   </section>
 }
 
