@@ -62,6 +62,28 @@ describe('signed-out Studio banners', () => {
 })
 
 describe('known guest authenticated reads', () => {
+  it('pauses the remaining guest reads in App', () => {
+    const changes = [
+      ['const mcpRegistry = useTenantMcpRegistry({ mock })', 'const mcpRegistry = useTenantMcpRegistry({ mock: mock || knownGuest })'],
+      ['const themeOverlay = useOverlay(agentSessionId, { enabled: !mock })', 'const themeOverlay = useOverlay(agentSessionId, { enabled: !mock && !knownGuest })'],
+      [
+        'if (mock) { setRegistryEntries([]); setCatalogSkills([]); return undefined }',
+        'if (mock || knownGuest) { setRegistryEntries([]); setCatalogSkills([]); return undefined }',
+      ],
+      ['const buildQueue = useBuildQueue({ mock })', 'const buildQueue = useBuildQueue({ mock: mock || knownGuest })'],
+      ['mcpDiscoveryEnabled={!mock}', 'mcpDiscoveryEnabled={!mock && !knownGuest}'],
+      ['<CostTransparencyPanel mock={mock} />', '<CostTransparencyPanel mock={mock} readsPaused={knownGuest} />'],
+      ['{!mock && <SurfaceFrame.Conversations />}', '{!mock && !knownGuest && <SurfaceFrame.Conversations />}'],
+    ]
+    for (const [before, after] of changes) {
+      expect(source).toContain(after)
+      expect(source).not.toContain(before)
+    }
+    const discovery = one((node) => node.type === 'CallExpression' && node.callee.name === 'useEffect'
+      && text(node.arguments[0].body).includes('fetchRegistry()'))
+    expect(text(discovery.node.arguments[1])).toBe('[mock, knownGuest]')
+  })
+
   it('declares the pre-answer guest signal before mounting the catalog controller', () => {
     const guest = one((node) => node.type === 'VariableDeclarator' && node.id.name === 'knownGuest')
     expect(text(guest.node.init)).toBe('consoleKnownGuest({ mock, authConfigured, isSignedIn, authCallback: isAuthRedirectCallback() })')
