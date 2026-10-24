@@ -12,3 +12,6 @@ export { IntegrationActionPreflightError } from "./action-form-state";
 export { IntegrationWorkflowScheduleDraftForm } from "./IntegrationWorkflowScheduleDraftForm";
 export type { IntegrationWorkflowScheduleDraftFormProps } from "./IntegrationWorkflowScheduleDraftForm";
 export { IntegrationWorkflowScheduleDraftSaveError } from "./workflow-schedule-draft-form-state";
+export { IntegrationWorkflowScheduleDraftPicker } from "./IntegrationWorkflowScheduleDraftPicker";
+export type { IntegrationWorkflowScheduleDraftPickerProps } from "./IntegrationWorkflowScheduleDraftPicker";
+export type { ScheduleDraftPageQuery, ScheduleDraftPickerAvailability, ScheduleDraftReferencePage } from "./workflow-schedule-draft-picker-state";

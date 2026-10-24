@@ -115,6 +115,50 @@ describe('inert schedule draft HTTP contract', () => {
   })
 })
 
+describe('saved schedule draft discovery HTTP contract', () => {
+  it('preserves opaque cursors and uses only the bounded GET query and safe request options', async () => {
+    const after = ' opaque +/&?=雪\n' + 'x'.repeat(1100)
+    const value = { references: [ref], nextCursor: 'next' }
+    const { client, fetchImpl, options } = setup(value)
+    expect(await client.listWorkflowScheduleDrafts(projectId, { ...options, after, limit: 1, body: {}, match: 9 })).toEqual(value)
+    const [url, request] = fetchImpl.mock.calls[0]
+    const query = new URL(url).searchParams
+    expect([...query.keys()]).toEqual(['limit', 'after'])
+    expect(query.get('after')).toBe(after)
+    expect(query.get('limit')).toBe('1')
+    expect(new URL(url).pathname).toBe(`/api/v1/projects/${projectId}/integrations/manual-workflow-schedule-drafts`)
+    expect(request).toEqual({ method: 'GET', signal: options.signal, credentials: 'omit', redirect: 'error', cache: 'no-store',
+      headers: { Authorization: 'Bearer first', Accept: 'application/json' } })
+    fetchImpl.mockResolvedValueOnce(response({ references: [], nextCursor: null }))
+    await client.listWorkflowScheduleDrafts(projectId, options)
+    expect(fetchImpl.mock.calls[1][0]).toMatch(/\?limit=25$/)
+  })
+  it.each([{ limit: 0 }, { limit: 26 }, { limit: 1.5 }, { limit: '25' }, { after: '' }, { after: null },
+    { after: 'x'.repeat(2049) }])('rejects invalid discovery query %j before dispatch', async (query) => {
+    const { client, fetchImpl, options } = setup()
+    await expect(client.listWorkflowScheduleDrafts(projectId, { ...options, ...query })).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([
+    { records: [ref], nextCursor: null }, { page: { references: [ref], nextCursor: null } },
+    { references: [ref], nextCursor: null, extra: true }, { references: [{ ...ref, extra: true }], nextCursor: null },
+    { references: [{ ...ref, digest: 'bad' }], nextCursor: null }, { references: [ref], nextCursor: '' },
+    { references: [ref], nextCursor: 'x'.repeat(2049) }, { references: [ref], nextCursor: 'same' },
+    { references: Array(26).fill(ref), nextCursor: null },
+  ])('rejects complete invalid discovery pages', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.listWorkflowScheduleDrafts(projectId, { ...options, after: 'same' })).rejects.toThrow('invalid')
+  })
+  it('enforces requested row count and accepts the maximum cursor unchanged', async () => {
+    const { client, fetchImpl, options } = setup({ references: [ref, ref], nextCursor: null })
+    await expect(client.listWorkflowScheduleDrafts(projectId, { ...options, limit: 1 })).rejects.toThrow('invalid')
+    const after = 'x'.repeat(2048)
+    fetchImpl.mockResolvedValueOnce(response({ references: [], nextCursor: null }))
+    await client.listWorkflowScheduleDrafts(projectId, { ...options, after })
+    expect(new URL(fetchImpl.mock.calls[1][0]).searchParams.get('after')).toBe(after)
+  })
+})
+
 describe('daily schedule preview HTTP contract', () => {
   const input = { schema_version: 1, schedule: { kind: 'daily', timezone: 'UTC', hour: 9, minute: 30 }, after: '2026-01-01T00:00:00Z' }
   const occurrence = { scheduledLocalDate: '2026-01-01', instant: '2026-01-01T09:30:00Z', timezone: 'UTC', hour: 9, minute: 30,

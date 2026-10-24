@@ -125,6 +125,32 @@ canonical draft changes discard scoped inputs and abort pending work; equivalent
 retain edits. Invalid props unmount the active form. Hosts must supply a new identity
 or context to begin another save after success.
 
+## Inert schedule draft picker (separate actions entry)
+
+Import `IntegrationWorkflowScheduleDraftPicker` from `./vendor/assistant-react/src/actions`.
+Supply opaque nonempty `contextKey` (organization, project, principal and authorization
+revision), `availability` (`ready`, `unavailable`, `forbidden`), optional `mode`
+(defaults to `light`), `onLoadPage(query, signal): Promise<unknown>`, and synchronous
+`onSelect(reference): void`. The host read returns exactly `{ references, nextCursor }`:
+at most 25 canonical `IntegrationRefV1` values and a null or nonempty cursor of at most
+2048 characters. This page shape is a local UI adapter, not a persisted contract.
+
+Loading is explicit. Load drafts / Refresh requests `{ limit: 25 }`; Next forwards the
+exact opaque cursor as `after`. Retry repeats the failed query. Only one page is kept;
+an empty page with a continuation still offers Next. Failed, malformed, nonadvancing
+or timed-out reads retain the last verified page with selection disabled until a
+successful read. The 45-second deadline aborts the signal; no read retries automatically.
+Scope or readiness changes and unmount abort pending reads and discard scoped state.
+Re-created callback identities do not reset the page; hosts must change `contextKey`
+when the authorization binding changes and honor the supplied abort signal.
+
+Rows show only draft ID/version, in host order. Selection sends an independent exact
+id/version/digest copy; another row may be chosen deliberately. Selection does not
+load details, save, schedule, activate or authorize a run. Hosts own discovery access,
+reference existence, digest equality, persistence and scheduling eligibility. This
+component has no transport or runtime authority; host adoption requires separate
+runtime and current owner/editor authorization verification.
+
 ## States
 
 `src/states.ts` holds every VI.3 state as data: its copy and exactly one exit.
