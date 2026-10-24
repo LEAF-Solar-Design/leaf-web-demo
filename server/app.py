@@ -304,6 +304,43 @@ def stop_campaign_release_worker() -> None:
             _campaign_release_worker_stop = None
             _campaign_release_worker_thread = None
 
+_lab_worker = None
+_lab_worker_lock = threading.Lock()
+
+
+@app.on_event("startup")
+def initialize_lab_worker() -> None:
+    global _lab_worker
+    try:
+        if not deps.auth_live() or os.environ.get("LEAF_LAB_WORKER_DISABLED") == "1":
+            return
+        import lab_run_store
+        from lab_worker import LabWorker
+
+        if (lab_run_store.store_mode() != "postgres"
+                and os.environ.get("LEAF_LAB_WORKER_SQLITE_SINGLE_PROCESS") != "1"):
+            return
+        with _lab_worker_lock:
+            if _lab_worker is None:
+                worker = LabWorker()
+                worker.start()
+                _lab_worker = worker
+    except Exception as exc:
+        print(f"[lab-worker] startup unavailable: {type(exc).__name__}", file=sys.stderr)
+
+
+@app.on_event("shutdown")
+def stop_lab_worker() -> None:
+    global _lab_worker
+    with _lab_worker_lock:
+        if _lab_worker is not None:
+            _lab_worker.stop(timeout_s=2.0)
+            # A stopped executor cannot be restarted; retain it while any old
+            # task still occupies a process slot.
+            if all(run.future is None or run.future.done() for run in _lab_worker._runs.values()):
+                _lab_worker = None
+
+
 # §19: byte-counting wall on the upload route — bounds multipart pre-parse
 # disk use in-process (chunked bodies included); see UploadBodyLimitMiddleware.
 # Registered BEFORE CORSMiddleware so CORS wraps it (last-added = outermost):

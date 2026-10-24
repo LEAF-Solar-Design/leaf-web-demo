@@ -178,6 +178,29 @@ def get(tenant, run_id):
     return _run(tenant, operation)
 
 
+def latest_build_revision():
+    # Scan bounded by retention: sweep keeps at most 50 runs per tenant and document.
+    def operation(sql):
+        row = sql.execute("SELECT build_revision FROM lab_runs ORDER BY created_at DESC,run_id DESC LIMIT 1").fetchone()
+        return row["build_revision"] if row else None
+
+    return _run("lab-queue", operation)
+
+
+def oldest_queued_age_s(now=None):
+    # Scan bounded by retention (50 runs per tenant/document) and 16 queued per tenant.
+    def operation(sql):
+        row = sql.execute("SELECT MIN(created_at) AS created_at FROM lab_runs WHERE state='queued'").fetchone()
+        return max(0.0, ((_now() if now is None else _date(now)) - _date(row["created_at"])).total_seconds()) if row["created_at"] is not None else None
+
+    return _run("lab-queue", operation)
+
+
+def queued_run_count():
+    return _run("lab-queue", lambda sql: sql.execute(
+        "SELECT COUNT(*) AS count FROM lab_runs WHERE state='queued'").fetchone()["count"])
+
+
 def _ttl(ttl_s):
     if type(ttl_s) not in (int, float) or not math.isfinite(ttl_s) or ttl_s <= 0:
         raise ValueError("invalid_lab_lease_ttl")
@@ -199,7 +222,9 @@ def claimable(limit, *, ops_revisions):
         return []
 
     def operation(sql):
-        rows = sql.execute("SELECT * FROM lab_runs WHERE state='queued' ORDER BY created_at,run_id,tenant_id").fetchall()
+        rows = sql.execute("SELECT * FROM lab_runs WHERE state='queued' OR"
+                           " (state='running' AND lease_expires_at<=?) ORDER BY created_at,run_id,tenant_id",
+                           (_now().isoformat(),)).fetchall()
         active = {row["tenant_id"]: row["count"] for row in sql.execute(
             "SELECT tenant_id,COUNT(*) AS count FROM lab_runs WHERE state='running' AND lease_expires_at>?"
             " GROUP BY tenant_id", (_now().isoformat(),)).fetchall()}
