@@ -62,6 +62,7 @@ export function createWorkspaceController({
   let disposed = false
   let readsPaused = false // a known guest: loadProjects publishes the empty, error-free snapshot and reads nothing
   const generations = { projects: 0, workspace: 0, org: 0, project: 0 }
+  let inFlightOpen = null
   let state = {
     mock: !!mock,
     orgId: readStoredOrgId(storage),
@@ -92,9 +93,12 @@ export function createWorkspaceController({
     state = { ...state, ...patch }
     listeners.forEach((listener) => listener())
   }
-  const nextGeneration = (lane) => ++generations[lane]
+  const nextGeneration = (lane) => {
+    if (lane === 'workspace') inFlightOpen = null
+    return ++generations[lane]
+  }
   const isCurrent = (lane, request) => !disposed && generations[lane] === request
-  const invalidateAll = () => Object.keys(generations).forEach((lane) => { generations[lane] += 1 })
+  const invalidateAll = () => Object.keys(generations).forEach((lane) => { nextGeneration(lane) })
   const explain = (error) => {
     try { return formatError(error) } catch { return defaultFormatError(error) }
   }
@@ -133,33 +137,57 @@ export function createWorkspaceController({
     }
   }
 
-  async function openProject(projectId) {
-    if (!projectId) return null
+  function openProject(projectId) {
+    if (!projectId) return Promise.resolve(null)
     const request = nextGeneration('workspace')
     const orgId = state.orgId
-    publish({
-      openProjectId: projectId,
-      workspace: null,
-      canonicalVersionId: null,
-      workspaceLoading: true,
-      projectsError: null,
-    })
-    try {
-      const workspace = await services.openProject(projectId, orgId)
-      if (!isCurrent('workspace', request) || state.openProjectId !== projectId || state.orgId !== orgId) return null
-      publish({ workspace, workspaceLoading: false })
-      invoke(callbacks.onWorkspaceOpened, { projectId, orgId, workspace })
-      return workspace
-    } catch (error) {
-      if (!isCurrent('workspace', request) || state.openProjectId !== projectId || state.orgId !== orgId) return null
-      publish({ workspace: null, projectsError: explain(error), workspaceLoading: false })
-      return null
+    let resolveOpen
+    let rejectOpen
+    const promise = new Promise((resolve, reject) => { resolveOpen = resolve; rejectOpen = reject })
+    const opening = { request, projectId, orgId, promise }
+    inFlightOpen = opening
+    // Register before publishing: a subscriber may synchronously request hydration.
+    performOpen().then(
+      (workspace) => {
+        if (inFlightOpen === opening) inFlightOpen = null
+        resolveOpen(workspace)
+      },
+      (error) => {
+        if (inFlightOpen === opening) inFlightOpen = null
+        rejectOpen(error)
+      },
+    )
+    return promise
+
+    async function performOpen() {
+      publish({
+        openProjectId: projectId,
+        workspace: null,
+        canonicalVersionId: null,
+        workspaceLoading: true,
+        projectsError: null,
+      })
+      try {
+        const workspace = await services.openProject(projectId, orgId)
+        if (!isCurrent('workspace', request) || state.openProjectId !== projectId || state.orgId !== orgId) return null
+        publish({ workspace, workspaceLoading: false })
+        invoke(callbacks.onWorkspaceOpened, { projectId, orgId, workspace })
+        return workspace
+      } catch (error) {
+        if (!isCurrent('workspace', request) || state.openProjectId !== projectId || state.orgId !== orgId) return null
+        publish({ workspace: null, projectsError: explain(error), workspaceLoading: false })
+        return null
+      }
     }
   }
 
   async function rehydrate() {
     const projectId = state.openProjectId
     if (!projectId) return null
+    if (inFlightOpen && isCurrent('workspace', inFlightOpen.request)
+      && inFlightOpen.projectId === projectId && inFlightOpen.orgId === state.orgId) {
+      return inFlightOpen.promise
+    }
     const request = nextGeneration('workspace')
     const orgId = state.orgId
     publish({ workspaceLoading: true })
@@ -225,7 +253,7 @@ export function createWorkspaceController({
       if (!orgId) throw new Error('The workspace service returned an org without an id.')
       if (!isCurrent('org', request)) return null
       generations.projects += 1
-      generations.workspace += 1
+      nextGeneration('workspace')
       generations.project += 1
       // Preserve App ordering: persistence first, then the in-memory org and list.
       writeStoredOrgId(orgId, storage)
