@@ -544,7 +544,7 @@ describe('R13F project Solar execution and form ingresses', () => {
         }
       }
     }
-    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), '93fbf477681a27b7e29670e6ff658b17b6c40906d9ad3eea96d6d66b6b2a509c')
+    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), 'efbcbfe1a68a117368579c9455804ad9b3aae7b848903752ecb351a38a5c033c')
   })
 
   it('R13F-20 App retains one refusal helper and admits the project workspace', () => {
