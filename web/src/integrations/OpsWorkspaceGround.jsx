@@ -51,7 +51,11 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const identity = useMemo(() => ({ key: identityKey }), [identityKey, session?.controller])
   const visible = state.identity === identity && eligible
   const leaving = leavingGround === 'integrations'
-  const win = useGroundWindow(active || leaving, studioShell, boardRef, occluders)
+  // These shell cards can float over the Ground at tablet widths.
+  const shellOccluders = useMemo(() => [
+    ...occluders, ['aside.nav', 'nearest'], ['.studio-profile-info', 'nearest'],
+  ], [occluders])
+  const win = useGroundWindow(active || leaving, studioShell, boardRef, shellOccluders)
 
   function invalidate() {
     setHandoff(null)
