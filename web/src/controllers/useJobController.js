@@ -166,6 +166,7 @@ export default function useJobController({
   const pauseGenerationRef = useRef(0)
   // Transport this hook started (subscriptions and run executions), aborted when reads pause.
   const activeControllersRef = useRef(new Set())
+  const pointerOwnerRef = useRef(null)
   // The sequence value when reads last resumed: a late submit receipt only triggers a reattach if
   // nothing else started since.
   const resumeSequenceRef = useRef(null)
@@ -335,6 +336,7 @@ export default function useJobController({
     runningSinceRef.current = null
     if (persist) {
       const pointer = saveInflightJob(jobId, toolName, storageRef.current)
+      pointerOwnerRef.current = { sequence, jobId }
       setInflight(pointer)
     }
     if (reattach) setReattaching(true)
@@ -432,13 +434,20 @@ export default function useJobController({
             submittedJobId = jobId
             setJobId(jobId)
             const pointer = saveInflightJob(jobId, toolName, storageRef.current)
+            pointerOwnerRef.current = { sequence, jobId }
             setInflight(pointer)
           } else if (pauseGenerationRef.current !== pauseGeneration) {
             // Superseded by a pause after the submit went out: the job exists, so keep a pointer to it unless a
-            // newer run stored its own, and let the reattach effect pick it up once reads resume.
+            // newer run owns the pointer by run sequence and job id, never by a millisecond timestamp alone.
+            // Also keep a strictly newer pointer from another tab; otherwise reattach once reads resume.
             submittedJobId = jobId
             const stored = readInflightJob(storageRef.current)
-            if (!(Number.isFinite(stored?.ts) && stored.ts > startedAt)) saveInflightJob(jobId, toolName, storageRef.current)
+            const owner = pointerOwnerRef.current
+            const newerRunOwnsPointer = Boolean(stored?.job_id) && owner !== null && owner.sequence > sequence && owner.jobId === stored.job_id
+            if (!newerRunOwnsPointer && !(Number.isFinite(stored?.ts) && stored.ts > startedAt)) {
+              saveInflightJob(jobId, toolName, storageRef.current)
+              pointerOwnerRef.current = { sequence, jobId }
+            }
             if (!readsPausedRef.current && sequenceRef.current === resumeSequenceRef.current) {
               setReattachGeneration((value) => value + 1)
             }

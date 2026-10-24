@@ -129,6 +129,36 @@ it('stores a submit receipt that arrives during a pause', async () => {
   await act(async () => { pending.resolve({ ok: true, tool: 'count' }); await run })
 })
 
+it("keeps a newer run's pointer when a late receipt lands in the same millisecond", async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000)
+  const storage = memoryStorage()
+  const pendingA = deferred()
+  const pendingB = deferred()
+  const services = {
+    listJobs: vi.fn(async () => []),
+    getJob: vi.fn(async () => ({ job_id: 'job-B', status: 'running', tool: 'count' })),
+    attachToJob: vi.fn(() => pendingB.promise),
+  }
+  let onSubmitA
+  const executeA = vi.fn((options) => { onSubmitA = options.onSubmit; return pendingA.promise })
+  const executeB = vi.fn((options) => { options.onSubmit('job-B'); return pendingB.promise })
+  const hook = renderController({ services, storage })
+  let runA
+  let runB
+  act(() => { runA = hook.result.current.runJob({ toolName: 'count', execute: executeA }) })
+  act(() => { hook.rerender({ readsPaused: true }) })
+  await act(async () => { hook.rerender({ readsPaused: false }) })
+  act(() => { runB = hook.result.current.runJob({ toolName: 'count', execute: executeB }) })
+  expect(readInflightJob(storage).job_id).toBe('job-B')
+  act(() => { onSubmitA('job-A') })
+  expect(readInflightJob(storage).job_id).toBe('job-B')
+  await act(async () => {
+    pendingA.resolve({ ok: true, tool: 'count' })
+    pendingB.resolve({ ok: true, tool: 'count' })
+    await Promise.all([runA, runB])
+  })
+})
+
 it('reattaches a stored receipt when reads resume', async () => {
   const storage = memoryStorage()
   const pending = deferred()
