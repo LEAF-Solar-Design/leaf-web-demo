@@ -8,6 +8,24 @@ import { ConnectionV1, DatasetElementV1, DatasetQueryV1, DatasetReadV1, DatasetF
   IntegrationManualWorkflowSubmissionV1, IntegrationManualWorkflowSubmissionResultV1 } from '../../../vendor/assistant-contract/src/integration'
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/i
+const webhookId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\s\S])/)
+const webhookDeliveryId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?![\s\S])/)
+const webhookReceiptInput = z.strictObject({ registrationId: webhookId, deliveryId: webhookDeliveryId })
+const webhookRevision = z.number().int().min(1).max(2147483647)
+const webhookReceipt = z.strictObject({
+  registrationId: webhookId, registrationRevision: webhookRevision, connectionId: webhookId,
+  provider: z.enum(['forgejo', 'github']), deliveryId: webhookDeliveryId,
+  payloadSha256: z.string().regex(/^[0-9a-f]{64}(?![\s\S])/),
+  byteLength: z.number().int().min(0).max(1048576), connectionRevision: webhookRevision,
+  createdBy: z.string().regex(UUID), createdAt: z.string().min(1).max(128),
+})
+export function validateWebhookReceiptInput(value) { return parse(webhookReceiptInput, value) }
+export function validateWebhookReceipt(value, input) {
+  const requested = validateWebhookReceiptInput(input)
+  const result = parse(webhookReceipt, value)
+  if (result.registrationId !== requested.registrationId || result.deliveryId !== requested.deliveryId) throw invalid()
+  return result
+}
 const slug = z.string().regex(/^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\s\S])/).min(1).max(128)
 const revision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const scopeSchema = z.object({
@@ -237,6 +255,11 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
   }
   return {
     available: Boolean(destination),
+    async getWebhookReceipt(id, registrationId, deliveryId, { signal } = {}) {
+      const input = validateWebhookReceiptInput({ registrationId, deliveryId })
+      const value = await request(id, `/integrations/webhook-registrations/${input.registrationId}/deliveries/${input.deliveryId}`, { signal })
+      return validateWebhookReceipt(value, input)
+    },
     async previewWorkflowSchedule(id, input, { signal } = {}) {
       const body = validateWorkflowSchedulePreviewInput(input)
       const value = await request(id, '/integrations/workflow-schedule-preview', { signal, method: 'POST', body, bodyLimit: 2048 })

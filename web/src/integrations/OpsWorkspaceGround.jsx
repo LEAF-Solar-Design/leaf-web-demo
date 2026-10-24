@@ -11,6 +11,7 @@ import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
 import { ActionDefinitionPanel } from './ActionDefinitionPanel.jsx'
 import { WorkflowSchedulePreviewPanel } from './WorkflowSchedulePreviewPanel.jsx'
+import { WebhookReceiptPanel } from './WebhookReceiptPanel.jsx'
 import { WorkflowScheduleDraftBrowser } from './WorkflowScheduleDraftBrowser.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 import './ops-workspace.css'
@@ -349,6 +350,10 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             key={JSON.stringify(['schedule-drafts', identity.key, context.current.cacheIdentity])}
             contextKey={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow} mode={mode === 'light' || mode === 'dark' ? mode : undefined}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WebhookReceiptPanel
+            key={JSON.stringify(['webhook-receipt', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
+            signal={context.current.controller.signal} guard={guardWorkflow}
             onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ActionDefinitionPanel
             key={JSON.stringify(['action-definition', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
