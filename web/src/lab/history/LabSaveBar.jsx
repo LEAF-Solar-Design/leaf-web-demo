@@ -22,7 +22,7 @@ export default function LabSaveBar({ document, ready, client = labArtifactsClien
     } finally { if (valid()) setPending(false) }
   }
   function keepMine() {
-    if (document != null) client.captureMine(document)
+    if (document != null && !client.state.conflict.captured) client.captureMine(document)
     const { mine, serverHead } = client.state.conflict
     onTakeTheirs?.(mine)
     void save(mine, serverHead)
