@@ -607,7 +607,7 @@ describe('R13F project Solar execution and form ingresses', () => {
       assert.equal(r13Hash(r13Text(declaration.init)), hash, name + ' remains unchanged')
     }
     const job = r13One((node) => node.type === 'CallExpression' && node.callee.name === 'useJobController')
-    assert.equal(r13Hash(r13Text(job)), '24c5eac98f2d89b5cecd2f475afd5db80b327e47cb5510d97a71eb54660efbcb')
+    assert.equal(r13Hash(r13Text(job)), '3ceaf226d1b00ac4275f446a376165f7a9d690c2f9a6478c2727f96dcc97d89e')
     for (const name of ['useProjectSolarScope', 'useCatalogController', 'useProjectCheckoutController']) {
       assert.equal(r13Find((node) => node.type === 'CallExpression' && node.callee.name === name).length, 1, name)
     }
@@ -996,6 +996,49 @@ describe('R13F project Solar execution and form ingresses', () => {
       assert.deepEqual(kept.errors, [])
       assert.equal(kept.calls('toast').length, 1)
     }
+  })
+})
+
+describe('project checkout toolbar row', () => {
+  it('keeps the project group styled, with a full-text status title and toolbar buttons', () => {
+    const controls = r13One((node) => node.type === 'FunctionDeclaration' && node.id.name === 'ProjectSolarCheckoutControls')
+    const root = controls.body.body.find((node) => node.type === 'ReturnStatement').argument
+    assert.equal(r13Text(root.callee), 'React.createElement')
+    assert.equal(root.arguments[0].value, 'div')
+    const prop = (element, name) => element.arguments[1].properties.find((node) => (node.key.name ?? node.key.value) === name)?.value
+    assert.equal(prop(root, 'role').value, 'group')
+    assert.equal(prop(root, 'aria-label').value, 'Project checkout')
+    assert.equal(prop(root, 'className').value, 'checkout-controls project-checkout')
+    const [status, ...buttons] = root.arguments.slice(2)
+    assert.equal(status.arguments[0].value, 'p')
+    assert.equal(prop(status, 'role').value, 'status')
+    assert.equal(r13Text(prop(status, 'title')), r13Text(status.arguments[2]))
+    assert.equal(r13Text(prop(status, 'title')), 'projectSolarAppReason(checkout.reason)')
+    assert.deepEqual(buttons.map((button) => button.arguments[2].value), ['Take', 'Release', 'Retry'])
+    for (const button of buttons) {
+      assert.equal(button.arguments[0].value, 'button')
+      assert.equal(prop(button, 'className').value, 'btn ghost')
+    }
+  })
+
+  it('keeps the project-open CAD and Solar checkout row compact and ellipsizes its status', () => {
+    const readCss = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+    const css = readCss('./site/cockpit.css')
+    const scope = '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .project-checkout'
+    const rule = (selector) => {
+      const blocks = css.split(selector + ' {')
+      assert.equal(blocks.length, 2, selector + ' has one scoped rule')
+      return blocks[1].split('}')[0]
+    }
+    const group = rule(scope)
+    for (const declaration of ['display: inline-flex', 'align-items: center', 'gap: 4px', 'flex-wrap: nowrap', 'min-width: 0', 'flex: 0 1 auto']) {
+      assert.ok(group.includes(declaration + ';'), declaration)
+    }
+    const status = rule(scope + ' p[role="status"]')
+    for (const declaration of ['margin: 0', 'min-width: 0', 'white-space: nowrap', 'overflow: hidden', 'text-overflow: ellipsis', 'max-width: 320px', 'font: 400 11px/20px var(--ck-font)']) {
+      assert.ok(status.includes(declaration + ';'), declaration)
+    }
+    assert.match(readCss('./styles.css'), /\.checkout-controls\s*>\s*p\s*\{\s*margin:\s*0;\s*\}/)
   })
 })
 
@@ -1609,7 +1652,7 @@ describe('C4-1b publication shell bindings', () => {
     for (const history of HISTORIES) {
       const o = owner()
       const wiring = assertPublicationBindings(source, shell, o.value,
-        { ...o.extra, otherOwner: other, agentTurns: history, turns: history })
+        { ...o.extra, knownGuest: false, otherOwner: other, agentTurns: history, turns: history })
       const publication = { sessionId: 'session-1', changeSetId: 'change-1', catalogDigest: 'digest-1' }
       assert.equal(wiring.panel.sessionId, publication.sessionId)
       assert.equal(wiring.panel.userTurns, history)
@@ -4061,7 +4104,7 @@ describe('Solar rooftop starter', () => {
       const context = {
         REQUESTED_DRAWING_ID: 'A', DRAWING_SOURCE: 'A', requestedDrawingIdRef,
         isScopeCurrent: () => true, hasDrawingSelection,
-        mock: false, isEditFixture: false, resetDrawing: noop,
+        mock: false, knownGuest: false, isEditFixture: false, resetDrawing: noop,
         setDrawingLoad: (value) => loads.push(value), setLoadErr: noop,
         resetCatalogTransient: noop, clearToast: noop, setDrawer: noop,
         setTenant: noop, setTier: noop, setOrg: noop, clearAgentSession: noop,
@@ -4141,18 +4184,18 @@ describe('W4g S08-c: the Details drawer carries sanitized diagnostics', () => {
 describe('W4g S08-a: an explicit demo starts in mock', () => {
   it('gates registry and skills discovery on mock', () => {
     const start = appSource.indexOf('const [catalogSkills, setCatalogSkills]')
-    const end = appSource.indexOf('}, [mock])', start)
+    const end = appSource.indexOf('}, [mock, knownGuest])', start)
     assert.ok(start >= 0 && end > start)
-    const effect = appSource.slice(start, end + '}, [mock])'.length)
-    const guard = effect.indexOf('if (mock)')
+    const effect = appSource.slice(start, end + '}, [mock, knownGuest])'.length)
+    const guard = effect.indexOf('if (mock || knownGuest)')
     assert.ok(guard >= 0 && guard < effect.indexOf('fetchRegistry('))
     assert.ok(guard < effect.indexOf('fetchSkills('))
-    assert.ok(effect.endsWith('}, [mock])'))
+    assert.ok(effect.endsWith('}, [mock, knownGuest])'))
   })
   it('gates PromptBox MCP discovery on mock', () => {
     const promptBox = appSource.match(/<PromptBox\s[\s\S]*?\/>/)?.[0]
     assert.ok(promptBox)
-    assert.ok(promptBox.includes('mcpDiscoveryEnabled={!mock}'))
+    assert.ok(promptBox.includes('mcpDiscoveryEnabled={!mock && !knownGuest}'))
   })
   it('decides explicit demo mode in the lazy initial state', () => {
     assert.match(appSource, new RegExp('useState\\(\\(\\) => config\\.mockDefault[\\s\\S]{0,200}explicitDemo\\(\\{'))
@@ -5482,7 +5525,7 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
     assert.equal(r13Hash(r13Text(node.init)), hash, name)
   }
   const job = r13One(node => node.type === 'CallExpression' && node.callee.name === 'useJobController')
-  assert.equal(r13Hash(r13Text(job)), '24c5eac98f2d89b5cecd2f475afd5db80b327e47cb5510d97a71eb54660efbcb')
+  assert.equal(r13Hash(r13Text(job)), '3ceaf226d1b00ac4275f446a376165f7a9d690c2f9a6478c2727f96dcc97d89e')
   const head = r13One(node => node.type === 'JSXElement' && node.openingElement.name.name === 'EngineHeadOpener')
   for (const [name, expression] of Object.entries({
     drawingId: 'REQUESTED_DRAWING_ID',

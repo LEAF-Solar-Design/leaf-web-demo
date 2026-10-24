@@ -1,7 +1,8 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import { fetchLabStatus } from './labRoute.js'
 import { setLabSurfaceStatus } from '../site/productSurfaces.js'
-import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
+import { authConfigured, isAuthRedirectCallback, isSignedIn, subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
+import { consoleKnownGuest } from '../controllers/session/consoleGate.js'
 import { subscribeUnauthorized } from '../api.js'
 
 let status = null
@@ -30,6 +31,11 @@ function publish(next) {
 function probeStatus() {
   if (started) return
   started = true
+  // A known guest reads nothing: the status is the same signed-out a 401 would publish.
+  if (consoleKnownGuest({ mock: false, authConfigured, isSignedIn, authCallback: isAuthRedirectCallback() })) {
+    publish({ state: 'signed-out', posture: null })
+    return
+  }
   const probe = generation
   fetchLabStatus().then((next) => {
     if (probe === generation) publish(next)

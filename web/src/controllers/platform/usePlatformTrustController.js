@@ -34,6 +34,7 @@ export default function usePlatformTrustController({
   now,
   onAuthRequired,
   autoLoad = true,
+  guestReadsPaused = false,
   quotaResult = null,
   quotaAt = 0,
   quotaPollIntervalMs = 60_000,
@@ -57,10 +58,13 @@ export default function usePlatformTrustController({
     return () => controller.destroy()
   }, [controller])
 
+  // A known guest reads only public health; clearing the pause runs the normal refresh once.
   useEffect(() => {
     controller.setMock(mock)
-    if (autoLoad && !mock) controller.refreshAll()
-  }, [autoLoad, controller, mock])
+    if (mock) return
+    if (guestReadsPaused) { controller.clearSessionReads(); controller.loadHealth() }
+    else if (autoLoad) controller.refreshAll()
+  }, [autoLoad, controller, guestReadsPaused, mock])
 
   const quota = resolveQuotaStatus({
     result: quotaResult,
@@ -70,11 +74,11 @@ export default function usePlatformTrustController({
   })
 
   useEffect(() => {
-    if (mock || state.authRequired || !quota.condition || quota.cleared) return undefined
+    if (mock || guestReadsPaused || state.authRequired || !quota.condition || quota.cleared) return undefined
     controller.loadUsage()
     const timer = setInterval(controller.loadUsage, quotaPollIntervalMs)
     return () => clearInterval(timer)
-  }, [controller, mock, quota.cleared, quota.condition?.kind, quotaAt, quotaPollIntervalMs, state.authRequired])
+  }, [controller, guestReadsPaused, mock, quota.cleared, quota.condition?.kind, quotaAt, quotaPollIntervalMs, state.authRequired])
 
   return {
     ...state,

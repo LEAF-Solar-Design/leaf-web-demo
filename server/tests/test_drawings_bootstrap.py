@@ -1,23 +1,16 @@
 """
-Binary acceptance for QW-C: generalized drawing bootstrap.
+Binary acceptance for P-183: curated drawing bootstrap.
 
-`write_loop.ensure_demo_drawing` used to auto-provision ONLY the well-known
-`demo` drawing_id (v1 = the cached rooftop intake); any other id raised
-KeyError -> a 404 the client could never recover from (leaf-backend-gaps.md
-§"Any plausible drawing_id ... should resolve to a provisioned drawing or
-fail with a clear provisioning message" — most notably the client's OWN
-`'rooftop_demo'` default `?drawing=` value bricked the whole write-loop
-surface). This wave generalizes the bootstrap to ANY first-seen, slug-safe
-drawing_id, via the identical `store.ingest_drawing` call `demo` always took,
-while still rejecting path-y / malformed ids up front and leaving `demo`
-byte-identical.
+Only demo, rooftop_demo, and rooftop-demo may bootstrap on first touch.
+Unlisted missing IDs stay absent; explicitly ingested custom drawings retain
+their real bytes. Aliases remain separate literal store keys.
 
 Covers:
-  1. a brand-new valid drawing_id bootstraps on first touch -> GET .../versions
+  1. a brand-new curated drawing_id bootstraps on first touch -> GET .../versions
      200, v1 present, filesystem layout tenants/<t>/drawings/<id>/manifest.json
   2. `demo`'s bootstrap is untouched: same golden 2345-polyline cached intake,
      v1/head/latest all 1, "initial ingest" note
-  3. a fresh id and `demo` (same tenant) ingest the IDENTICAL source bytes
+  3. all curated aliases (same tenant) ingest the IDENTICAL source bytes
      (sha256-equal v1) -> proves the SAME ingest path, not a parallel one
   4. path-traversal / malformed ids are rejected -- both at the pure-function
      level (write_loop.ensure_demo_drawing directly) and end-to-end over HTTP
@@ -33,6 +26,7 @@ Run:  cd server && python -m pytest tests/test_drawings_bootstrap.py -q
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 from pathlib import Path
 
@@ -57,6 +51,11 @@ def client(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("LEAF_STORE_DIR", str(tmp_path / "drawings"))
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "legacy")
+    monkeypatch.setenv("LEAF_BLOB_STORE", "filesystem")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
     monkeypatch.delenv("APS_LIVE", raising=False)  # APS_LIVE off -> FilesystemBackend, no da/creds
     monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)  # legacy X-Tenant-Id header stub
 
@@ -80,8 +79,9 @@ def _store_root(tmp_path) -> Path:
 # --------------------------------------------------------------------------- #
 # 1. a fresh, never-seen, valid drawing_id auto-bootstraps
 # --------------------------------------------------------------------------- #
-def test_fresh_id_bootstraps_versions_200(client, tmp_path):
-    t, did = "bootstrap-fresh", "rooftop_demo"  # the client's OWN default ?drawing= value (the bug case)
+@pytest.mark.parametrize("did", ["demo", "rooftop_demo", "rooftop-demo"])
+def test_fresh_id_bootstraps_versions_200(client, tmp_path, did):
+    t = "bootstrap-fresh"
 
     r = client.get(f"/api/drawings/{did}/versions", headers=_h(t))
     assert r.status_code == 200, r.text
@@ -106,9 +106,10 @@ def test_fresh_id_bootstraps_versions_200(client, tmp_path):
     assert len(intake["intake"]["polylines"]) == CACHED_POLYLINE_COUNT
 
 
-def test_fresh_id_bootstraps_only_once(client):
+@pytest.mark.parametrize("did", ["demo", "rooftop_demo", "rooftop-demo"])
+def test_fresh_id_bootstraps_only_once(client, did):
     """A second touch of the same fresh id must NOT re-ingest (still v1/head/latest=1)."""
-    t, did = "bootstrap-idempotent", "my-fresh-drawing"
+    t = "bootstrap-idempotent"
 
     first = client.get(f"/api/drawings/{did}/versions", headers=_h(t)).json()
     second = client.get(f"/api/drawings/{did}/versions", headers=_h(t)).json()
@@ -187,25 +188,60 @@ def test_demo_bootstrap_unchanged(client):
     assert len(intake["intake"]["polylines"]) == CACHED_POLYLINE_COUNT
 
 
-def test_fresh_id_and_demo_ingest_identical_bytes(client):
-    """Same tenant, two different drawing_ids ('demo' + a fresh custom id) -> v1
-    sha256/bytes match exactly: proof the generalized path reuses the identical
-    CACHED_INTAKE_PATH + store.ingest_drawing call 'demo' always took, not a
-    parallel/divergent one."""
+def test_allowed_demo_ids_ingest_identical_bytes(client, tmp_path):
+    """Curated aliases ingest identical bytes under distinct literal keys."""
+    import store
+
     t = "bootstrap-parity"
-
-    demo_v = client.get(f"/api/drawings/{write_loop.DEMO_DRAWING_ID}/versions", headers=_h(t)).json()
-    fresh_v = client.get("/api/drawings/some-other-drawing/versions", headers=_h(t)).json()
-
-    demo_v1, fresh_v1 = demo_v["versions"][0], fresh_v["versions"][0]
-    assert demo_v1["sha256"] == fresh_v1["sha256"]
-    assert demo_v1["bytes"] == fresh_v1["bytes"]
-    assert demo_v1["note"] == fresh_v1["note"] == "initial ingest"
-
-    # and matches the cached intake file on disk, byte for byte
     raw = write_loop.CACHED_INTAKE_PATH.read_bytes()
-    assert demo_v1["bytes"] == len(raw)
-    assert json.loads(raw.decode("utf-8"))  # sanity: still valid JSON
+    backend = store.FilesystemBackend(str(_store_root(tmp_path)))
+    keys = set()
+    for did in ("demo", "rooftop_demo", "rooftop-demo"):
+        response = client.get(f"/api/drawings/{did}/versions", headers=_h(t))
+        assert response.status_code == 200, response.text
+        v1 = response.json()["versions"][0]
+        assert v1["sha256"] == hashlib.sha256(raw).hexdigest()
+        assert v1["bytes"] == len(raw)
+        assert v1["note"] == "initial ingest"
+        assert store.load_manifest(backend, t, did)["drawing_id"] == did
+        _, key = store.resolve_version(backend, t, did, 1)
+        keys.add(key)
+        assert backend.get(key) == raw
+    assert len(keys) == 3
+
+
+def _snapshot(tmp_path):
+    return {p.relative_to(tmp_path).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in tmp_path.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("did", ["my-fresh-drawing", "some-other-drawing", "project-drawing"])
+def test_unknown_slug_reads_return_404_without_materializing(client, tmp_path, did):
+    before = _snapshot(tmp_path)
+    for _ in range(2):
+        for route in ("versions", "intake", "summary", "dxf"):
+            response = client.get(f"/api/drawings/{did}/{route}", headers=_h("missing"))
+            assert response.status_code == 404, response.text
+            assert response.json()["error"]["error_code"] == "BAD_PARAMS"
+            assert _snapshot(tmp_path) == before
+
+
+def test_existing_unlisted_drawing_is_read_without_bootstrap(client, tmp_path):
+    import store
+
+    backend = store.FilesystemBackend(str(_store_root(tmp_path)))
+    intake = json.loads(write_loop.CACHED_INTAKE_PATH.read_text(encoding="utf-8"))
+    intake["polylines"] = intake["polylines"][:1]
+    source = tmp_path / "custom.intake.json"
+    source.write_text(json.dumps(intake), encoding="utf-8")
+    store.ingest_drawing(backend, "existing", str(source), drawing_id="custom-roof")
+    before = _snapshot(tmp_path)
+    response = client.get("/api/drawings/custom-roof/intake", headers=_h("existing"))
+    assert response.status_code == 200, response.text
+    assert response.json()["intake"] == intake
+    versions = client.get("/api/drawings/custom-roof/versions", headers=_h("existing"))
+    assert versions.json()["head"] == versions.json()["latest"] == 1
+    assert _snapshot(tmp_path) == before
 
 
 def test_live_bootstrap_stores_real_dwg_with_bound_intake(tmp_path, monkeypatch):
@@ -215,19 +251,21 @@ def test_live_bootstrap_stores_real_dwg_with_bound_intake(tmp_path, monkeypatch)
     import store  # noqa: PLC0415
 
     monkeypatch.setenv("APS_LIVE", "1")
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "legacy")
     monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
     monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
     backend = store.FilesystemBackend(str(tmp_path / "drawings"))
 
     write_loop.ensure_demo_drawing(
-        backend, "live-bootstrap", "project-drawing")
+        backend, "live-bootstrap", "rooftop-demo")
 
     version, key = store.resolve_version(
-        backend, "live-bootstrap", "project-drawing", "head")
+        backend, "live-bootstrap", "rooftop-demo", "head")
     assert version == 1
     assert backend.get(key) == write_loop.DEMO_DWG_PATH.read_bytes()
     read_version, intake = write_loop.read_intake(
-        backend, "live-bootstrap", "project-drawing", "head")
+        backend, "live-bootstrap", "rooftop-demo", "head")
     assert read_version == 1
     assert len(intake["polylines"]) == CACHED_POLYLINE_COUNT
 
@@ -317,11 +355,10 @@ def test_path_y_id_never_created_a_manifest_on_disk(client, tmp_path):
 
 
 def _corrupt_manifest(client, tmp_path, tenant: str, drawing_id: str) -> None:
-    created = client.get(
-        f"/api/drawings/{drawing_id}/versions",
-        headers=_h(tenant),
-    )
-    assert created.status_code == 200, created.text
+    import store
+
+    backend = store.FilesystemBackend(str(_store_root(tmp_path)))
+    store.ingest_drawing(backend, tenant, str(write_loop.CACHED_INTAKE_PATH), drawing_id=drawing_id)
     manifest_path = (
         _store_root(tmp_path)
         / "tenants"

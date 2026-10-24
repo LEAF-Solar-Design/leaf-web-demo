@@ -14,6 +14,19 @@ function setup(options = {}) {
 }
 
 describe('server workspace bootstrap', () => {
+  it('readsPaused publishes the empty snapshot and makes no projects read', async () => {
+    const services = { listProjects: vi.fn(async () => []) }
+    const { controller } = setup({ authLive: true, services })
+    controller.setReadsPaused(true)
+    await controller.loadProjects()
+    expect(services.listProjects).not.toHaveBeenCalled()
+    expect(controller.getSnapshot()).toMatchObject({ projectsError: null, projectsLoading: false, projectsLoaded: false })
+
+    controller.setReadsPaused(false)
+    await controller.loadProjects()
+    expect(services.listProjects).toHaveBeenCalledTimes(1)
+  })
+
   const bindingError = { status: 403, message: 'Create a workspace to continue.', body: { detail: 'verified subject has no active platform identity binding' } }
   const oldOrgStorage = () => {
     let id = 'old-org'

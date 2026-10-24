@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, it, expect, vi } from 'vitest'
-import ProjectSolarWorkspace from './ProjectSolarWorkspace.jsx'
+import ProjectSolarWorkspace, { PROJECT_SOLAR_WORKSPACE_SUBMIT_CODES } from './ProjectSolarWorkspace.jsx'
 import SolarFlowRail from './SolarFlowRail.jsx'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
@@ -253,6 +253,42 @@ async function expectGraphRefusal(h, code, sentence) {
 }
 
 describe('Project Solar workspace composition', () => {
+  it.each([
+    ['BUSY', (h) => h.update({ busy: true })],
+    ['TOOL_NOT_OPEN', (h) => h.update({ openTool: null })],
+    ['NOT_ADMITTED', (h) => { h.catalogCurrent = false }],
+    ['BINDING_MISMATCH', (_h, intent) => { intent.binding = { ...B, drawing_id: B.project_id } }],
+    ['CATALOG_STALE', (_h, intent) => { intent.catalogDigest = 'sha256:' + 'd'.repeat(64) }],
+    ['ABORTED', (_h, _intent, options) => {
+      const controller = new AbortController()
+      controller.abort()
+      options.signal = controller.signal
+    }],
+    ['SCOPE_STALE', (h) => h.client.captureCatalogScope.mockReturnValue(() => false)],
+    ['ERROR', (h) => h.client.captureCatalogScope.mockImplementation(() => { throw new Error('private') })],
+  ])('W1C15 resolves %s refusals with the local controller shape', async (code, refuse) => {
+    const h = fixture('solar-string-add')
+    h.mount({ openTool: h.row })
+    const submit = last(h.steps).onProjectSubmit
+    const intent = { ...h.intent() }, options = optionsFor(h)
+    refuse(h, intent, options)
+    await expect(submit(intent, options)).resolves.toEqual({ ok: false, status: null,
+      reason: PROJECT_SOLAR_WORKSPACE_SUBMIT_CODES[code], envelope: null })
+    expect(PROJECT_SOLAR_WORKSPACE_SUBMIT_CODES[code]).toBe('SIP_R7_WORKSPACE_' + code)
+    expect(Object.isFrozen(PROJECT_SOLAR_WORKSPACE_SUBMIT_CODES)).toBe(true)
+    expect(h.submit).not.toHaveBeenCalled()
+  })
+
+  it('W1C15 preserves the admitted submit and captured handoff', async () => {
+    const h = fixture('solar-string-add')
+    h.mount({ openTool: h.row })
+    const intent = h.intent()
+    await expect(last(h.steps).onProjectSubmit(intent, optionsFor(h))).resolves.toBe(h.outcome)
+    expect(h.submit).toHaveBeenCalledExactlyOnceWith(intent, { binding: B, authorityKey: 'epoch-1',
+      signal: h.scopeController.signal, isCurrent: expect.any(Function) })
+    expect(h.submit.mock.calls[0][1].isCurrent()).toBe(true)
+  })
+
   it('W1C12 keeps the full catalog available and opens Solve with a generic row without availability', () => {
     const solve = Row('solar-solve-proposal'), commit = Row('solar-commit-solve')
     const generic = { name: 'count-by-layer', label: 'Count by layer', catalog_digest: D,
@@ -520,7 +556,7 @@ describe('Project Solar workspace composition', () => {
         expect(live.onProjectSubmit).toBeUndefined()
         expect(screen.getByRole('button', { name: 'Submit fixture' }).disabled).toBe(true)
         fireEvent.click(screen.getByRole('button', { name: 'Submit fixture' }))
-        expect(retained(prepared, options)).toBeUndefined()
+        await expect(retained(prepared, options)).resolves.toMatchObject({ ok: false, reason: 'SIP_R7_WORKSPACE_BUSY' })
       } else {
         expect(screen.getByRole('button', { name: 'Apply settings' }).disabled).toBe(true)
         fireEvent.click(screen.getByRole('button', { name: 'Apply settings' }))
@@ -620,7 +656,8 @@ describe('Project Solar workspace composition', () => {
       if (variant === 'duplicate') h.rows.push({ ...h.row, catalog_digest: 'sha256:' + 'd'.repeat(64) })
       if (variant === 'receipt') h.update({ projectCatalog: { ...h.catalog } })
       if (variant === 'signal') h.update({ submissionSignal: new AbortController().signal })
-      expect(retained(prepared, options)).toBeUndefined()
+      await expect(retained(prepared, options)).resolves.toMatchObject({ ok: false,
+        reason: expect.stringMatching(/^SIP_R7_WORKSPACE_/) })
       act(() => open(h.row))
       expect(h.props.onOpenTool).not.toHaveBeenCalled()
       expect(h.submit).not.toHaveBeenCalled()
@@ -635,19 +672,21 @@ describe('Project Solar workspace composition', () => {
       { ...options, isCurrent: () => false }, { ...options, isCurrent: () => 1 },
       { ...options, isCurrent: () => { throw new Error('expired') } }, { ...options, authorityKey: 'wrong' },
       { ...options, binding: { ...B, drawing_id: B.project_id } }, { ...options, signal: {} },
-    ]) expect(handoff(prepared, invalid)).toBeUndefined()
+    ]) await expect(handoff(prepared, invalid)).resolves.toMatchObject({ ok: false,
+      reason: expect.stringMatching(/^SIP_R7_WORKSPACE_/) })
     for (const invalid of [{ ...prepared, binding: null }, { ...prepared, authorityKey: 'wrong' },
       { ...prepared, tool: 'solar-string-multi-add' }, { ...prepared, catalogDigest: 'sha256:' + 'd'.repeat(64) }]) {
-      expect(handoff(invalid, options)).toBeUndefined()
+      await expect(handoff(invalid, options)).resolves.toMatchObject({ ok: false,
+        reason: expect.stringMatching(/^SIP_R7_WORKSPACE_/) })
     }
     const accessor = { ...prepared }
     const readTool = vi.fn(() => prepared.tool)
     Object.defineProperty(accessor, 'tool', { get: readTool, enumerable: true })
-    expect(handoff(accessor, options)).toBeUndefined()
+    await expect(handoff(accessor, options)).resolves.toMatchObject({ ok: false, reason: 'SIP_R7_WORKSPACE_INTENT_INVALID' })
     expect(readTool).not.toHaveBeenCalled()
     const aborted = new AbortController()
     aborted.abort()
-    expect(handoff(prepared, { ...options, signal: aborted.signal })).toBeUndefined()
+    await expect(handoff(prepared, { ...options, signal: aborted.signal })).resolves.toMatchObject({ ok: false, reason: 'SIP_R7_WORKSPACE_ABORTED' })
     expect(h.submit).not.toHaveBeenCalled()
     expect(await handoff(prepared, options)).toBe(h.outcome)
   })
@@ -746,7 +785,8 @@ describe('Project Solar workspace composition', () => {
       noHost()
       h.update({ busy: false })
       noHost()
-      expect(callback(prepared, { binding: B, authorityKey: 'epoch-1', isCurrent: () => true })).toBeUndefined()
+      await expect(callback(prepared, { binding: B, authorityKey: 'epoch-1', isCurrent: () => true })).resolves.toMatchObject({
+        ok: false, reason: 'SIP_R7_WORKSPACE_RETIRED' })
       h.open()
       expect(screen.getByRole('textbox', { name: 'Fixture draft' }).value).toBe('')
       expect(options.isCurrent()).toBe(true)
@@ -979,7 +1019,7 @@ describe('Project Solar workspace composition', () => {
     h.open()
     expect(mounts).toBe(2)
     expect(screen.getAllByTestId('recorded-step')).toHaveLength(1)
-    expect(retained(h.intent(), options())).toBeUndefined()
+    await expect(retained(h.intent(), options())).resolves.toMatchObject({ ok: false, reason: 'SIP_R7_WORKSPACE_PRESENTATION_STALE' })
     expect(h.submit).not.toHaveBeenCalled()
     expect(await last(h.steps).onProjectSubmit(h.intent(), options())).toBe(h.outcome)
     expect(h.submit).toHaveBeenCalledTimes(1)
@@ -1020,7 +1060,7 @@ describe('Project Solar workspace composition', () => {
     expect(opened).toHaveBeenCalledWith(h.row)
     expect(mounts).toBe(2)
     expect(screen.getAllByTestId('recorded-step')).toHaveLength(1)
-    expect(retained(h.intent(), options())).toBeUndefined()
+    await expect(retained(h.intent(), options())).resolves.toMatchObject({ ok: false, reason: 'SIP_R7_WORKSPACE_PRESENTATION_STALE' })
     expect(h.submit).not.toHaveBeenCalled()
     expect(await last(h.steps).onProjectSubmit(h.intent(), options())).toBe(h.outcome)
     expect(h.submit).toHaveBeenCalledTimes(1)

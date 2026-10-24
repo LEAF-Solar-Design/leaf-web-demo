@@ -82,7 +82,7 @@ function HistoryView({ data, loading, from, to, currentMonth, onFrom, onTo, onRe
   </>
 }
 
-export default function CostTransparencyPanel({ mock = false }) {
+export default function CostTransparencyPanel({ mock = false, readsPaused = false }) {
   const currentMonth = new Date().toISOString().slice(0, 7)
   const [period, setPeriod] = useState(currentMonth)
   const [view, setView] = useState('monthly')
@@ -99,27 +99,29 @@ export default function CostTransparencyPanel({ mock = false }) {
   const closeButton = useRef(null)
   const panelRef = useRef(null)
 
+  // A known guest keeps the panel and its button but makes no cost reads, so it shows the unavailable state.
   useEffect(() => {
     let active = true
-    if (mock) { setData(null); return undefined }
+    if (mock || readsPaused) { setData(null); return undefined }
     setLoading(true)
     setData(null)
     getCost(period).then((result) => { if (active) setData(result) }).catch(() => {
       if (active) setData(null)
     }).finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [mock, period, retry])
+  }, [mock, readsPaused, period, retry])
 
   useEffect(() => {
     let active = true
-    if (mock || view !== 'history') return undefined
+    if (mock || readsPaused) { setHistory(null); setHistoryLoading(false); return undefined }
+    if (view !== 'history') return undefined
     setHistoryLoading(true)
     setHistory(null)
     getCostHistory(historyFrom, historyTo).then((result) => { if (active) setHistory(result) }).finally(() => {
       if (active) setHistoryLoading(false)
     })
     return () => { active = false }
-  }, [mock, view, historyFrom, historyTo, historyRetry])
+  }, [mock, readsPaused, view, historyFrom, historyTo, historyRetry])
 
   useEffect(() => {
     if (open) closeButton.current?.focus()

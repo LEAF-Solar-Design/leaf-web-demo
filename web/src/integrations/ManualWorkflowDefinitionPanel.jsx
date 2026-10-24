@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { IntegrationActionCatalogV1, IntegrationManualWorkflowDefinitionV1, IntegrationRefV1 } from '../../../vendor/assistant-contract/src/integration'
 import { boundedIntegrationBody } from './client.js'
+import { WorkflowScheduleDraftPanel } from './WorkflowScheduleDraftPanel.jsx'
 
 const blank = () => ({ id: '', title: '', version: '1', steps: [{ key: 1, id: 'step-1', action: null, fields: {} }] })
 const actionKey = (action) => JSON.stringify([action.connection_id, action.connector_ref, action.operation_ref])
@@ -38,7 +39,7 @@ function definitionFrom(draft) {
     }) })
 }
 
-export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard, onForbidden }) {
+export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard, onForbidden, mode = 'light' }) {
   const [draft, setDraft] = useState(blank)
   const [catalog, setCatalog] = useState(null)
   const [pending, setPending] = useState('')
@@ -211,6 +212,8 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
         <p>Copy this immutable reference into the existing Start review.</p>
         {['id', 'version', 'digest'].map((field) => <label key={field}>Saved workflow {field}<input readOnly value={result.reference[field]} /></label>)}
         <ol>{result.definition.steps.map((step) => <li key={step.id}>{step.id} · {step.connection_id} · {step.operation_ref.id}<pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(step, null, 2)}</pre></li>)}</ol>
+        <WorkflowScheduleDraftPanel client={client} projectId={projectId} signal={signal} guard={guard} onForbidden={onForbidden}
+          workflowRef={result.reference} title={result.definition.title} mode={mode} />
       </section>}
     </div>
     {unknown && <button disabled={Boolean(pending)} onClick={() => operate('Retry')}>Retry identical workflow definition</button>}

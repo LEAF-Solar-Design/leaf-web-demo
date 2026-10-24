@@ -74,7 +74,7 @@ function proofHarness(mock = false, effect = proof) {
     shouldAutoDemo: () => false, authConfigured: true, setMock: vi.fn(),
     useMemo: fn => fn(), REQUESTED_DRAWING_ID: 'legacy', DRAWING_SOURCE: 'legacy',
     requestedDrawingIdRef: { current: 'legacy' }, isScopeCurrent: () => true,
-    hasDrawingSelection: () => true, isEditFixture: false,
+    hasDrawingSelection: () => true, isEditFixture: false, knownGuest: false,
     resetDrawing: vi.fn(), setDrawingLoad: vi.fn(), resetCatalogTransient: vi.fn(),
     clearToast: vi.fn(), setDrawer: vi.fn(), clearAgentSession: vi.fn(),
     mockVersions: { reset: vi.fn(), seedBase: vi.fn() }, seatIntake: vi.fn(),

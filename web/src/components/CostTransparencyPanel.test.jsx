@@ -378,6 +378,35 @@ describe('cost transparency', () => {
     expect(screen.getByRole('table')).toBeInTheDocument()
   })
 
+  it('clears signed-in history when reads pause', async () => {
+    const history = { ...historyFixture, months: [historyFixture.months[0]] }
+    const fetchMock = vi.fn(async (url) => new Response(JSON.stringify(
+      String(url).includes('/api/cost/history?') ? history : fixture,
+    ), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<CostTransparencyPanel />)
+    fireEvent.click(screen.getByRole('button', { name: title }))
+    fireEvent.click(screen.getByRole('button', { name: 'History' }))
+    const monthLabel = '2026-07: published. Your implied amount: $1.00'
+    expect(await screen.findByText(monthLabel)).toBeInTheDocument()
+
+    rerender(<CostTransparencyPanel readsPaused />)
+
+    expect(screen.queryByText(monthLabel)).not.toBeInTheDocument()
+  })
+
+  it('keeps the guest button and unavailable panel without monthly or history reads', async () => {
+    const fetchMock = respond()
+    await act(async () => { render(<CostTransparencyPanel readsPaused />) })
+    expect(screen.getByRole('button', { name: title })).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: title }))
+    expect(screen.getByText('Costs are unavailable for this month.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'History' }))
+    expect(screen.getByText('Cost history is unavailable.')).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('hides mock mode without making a request', async () => {
     const fetchMock = respond()
     await act(async () => { render(<CostTransparencyPanel mock />) })

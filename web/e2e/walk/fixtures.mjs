@@ -19,6 +19,65 @@ import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProo
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
 
 export { expect }
+
+export function redactSolarDiagnostic(value, { maxLength = 300 } = {}) {
+  if (!['string', 'number', 'boolean'].includes(typeof value)) return '[unavailable]'
+  return String(value).replace(/eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/g, '[redacted]')
+    .replace(/lco1\.[A-Za-z0-9_.-]+/g, '[redacted]').trim().slice(0, maxLength)
+}
+
+export async function walkClick(locator, label, { timeout = 15_000 } = {}) {
+  try {
+    await locator.click({ timeout })
+  } catch (error) {
+    let probe = '[unavailable]'
+    try {
+      probe = JSON.stringify(await locator.evaluate(node => {
+        const box = node.getBoundingClientRect()
+        const doc = node.ownerDocument
+        const view = doc.defaultView
+        const hit = doc.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+        const style = view.getComputedStyle(node)
+        return {
+          box: Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, Math.round(box[key])])),
+          viewport: { width: view.innerWidth, height: view.innerHeight },
+          hit: hit ? `${hit.tagName.toLowerCase()}${hit.id ? `#${hit.id}` : ''}${[...hit.classList].slice(0, 3).map(name => `.${name}`).join('')}` : null,
+          hitIsTarget: hit !== null && (hit === node || node.contains(hit)),
+          position: { position: style.position, top: style.top, left: style.left, zIndex: style.zIndex },
+        }
+      }, undefined, { timeout: 2_000 }))
+    } catch { /* Preserve the click failure when the target cannot be inspected. */ }
+    const reason = String(error?.message ?? error).split(/\r?\n/)[0].slice(0, 300)
+    throw new Error(redactSolarDiagnostic(`${label}: ${reason}\nClick target: ${probe}`, { maxLength: Infinity }), { cause: error })
+  }
+}
+
+export async function projectSolarRunDiagnostic(page, settings, start) {
+  const diagnosticText = async read => {
+    try { return redactSolarDiagnostic(await read()) } catch { return '[unavailable]' }
+  }
+  const text = locator => locator.textContent({ timeout: 2_000 })
+  const checkout = () => page.getByRole('group', { name: 'Project checkout', exact: true })
+  const fields = {
+    'solar-settings-reason': await diagnosticText(() => text(settings.getByTestId('solar-settings-reason'))),
+    'solar-settings-run': await diagnosticText(() => text(settings.getByTestId('solar-settings-run'))),
+    'data-mode': await diagnosticText(() => settings.getAttribute('data-mode', { timeout: 2_000 })),
+    'data-submit-seq': await diagnosticText(() => settings.getAttribute('data-submit-seq', { timeout: 2_000 })),
+    'data-submit-exit': await diagnosticText(() => settings.getAttribute('data-submit-exit', { timeout: 2_000 })),
+    startEnabled: await diagnosticText(() => start.isEnabled({ timeout: 2_000 })),
+    checkoutStatus: await diagnosticText(() => text(checkout().getByRole('status'))),
+    releaseEnabled: await diagnosticText(() => checkout().getByRole('button', { name: 'Release', exact: true }).isEnabled({ timeout: 2_000 })),
+  }
+  let alerts
+  try {
+    const locators = settings.getByRole('alert')
+    alerts = []
+    for (let index = 0, count = await locators.count(); index < count; index++) {
+      alerts.push(await diagnosticText(() => text(locators.nth(index))))
+    }
+  } catch { alerts = ['[unavailable]'] }
+  return `Solar settings before cleanup: ${JSON.stringify({ ...fields, alerts })}`
+}
 export const ENGINE_WASM_ROUTE = /\/engine\/engine_bg\.wasm(?:\?[^#]*)?$/
 export const LOCAL_IDENTITY = Object.freeze({ tenant: 'demo-tenant', token: 'j1-presentation-fixture' })
 export const COACH_STORAGE_KEY = 'leaf.coach.dismissed.v1'
@@ -1216,7 +1275,7 @@ export async function assertProjectSolarDrawing(runtime, assertions = expect) {
   const { page, projectSolar: { binding } } = runtime
   const toggle = page.locator('[data-testid="solar-flow-seat"] button.solar-flow-seat-toggle')
   if (await toggle.count() && await toggle.getAttribute('aria-expanded') === 'false') {
-    await toggle.click()
+    await walkClick(toggle, 'Expand Solar flow seat')
     await assertions(toggle).toHaveAttribute('aria-expanded', 'true')
   }
   await assertions(page.locator('.project-solar-workspace')).toBeVisible()
@@ -1273,8 +1332,8 @@ export async function openProjectSolar(runtime, assertions = expect) {
   solar.traffic = observeProjectTraffic(page, solar.apiBase)
   runtime.cleanup.push(async () => { try { await solar.traffic.drain() } finally { solar.traffic.dispose() } })
   await projectSolarStep(runtime, 'canonical material import', async () => {
-    await page.getByRole('tab', { name: 'Browser', exact: true }).click()
-    await page.getByRole('button', { name: 'Upload drawing', exact: true }).click()
+    await walkClick(page.getByRole('tab', { name: 'Browser', exact: true }), 'Open Browser tab')
+    await walkClick(page.getByRole('button', { name: 'Upload drawing', exact: true }), 'Upload drawing')
     const material = page.locator('[data-pane="material-intake"]')
     await assertions(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()
     const path = `/api/projects/${evidence.escapeProject.projectId}/drawing-versions/import`
@@ -1331,14 +1390,14 @@ export async function selectProjectSolarVersion(runtime, assertions = expect) {
     .locator('[data-tile="versions"] > strong'),
   `project ${solar.binding.project_id ?? solar.binding.input_version_id} did not open in the UI within 30 s`)
     .toHaveCount(1, { timeout: 30_000 })
-  await page.getByRole('button', { name: 'Open versions', exact: true }).click()
+  await walkClick(page.getByRole('button', { name: 'Open versions', exact: true }), 'Open versions')
   const version = page.locator('[data-pane="versions"]').getByRole('button', {
     name: new RegExp(`^v\\d+ .*${solar.binding.input_version_id}$`),
   })
   await assertions(version, `version ${solar.binding.input_version_id} is not listed in the Versions pane within 30 s`)
     .toBeVisible({ timeout: 30_000 })
   await version.click({ timeout: 30_000 })
-  await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+  await walkClick(page.getByRole('tab', { name: 'Solar CAD', exact: true }), 'Open Solar CAD tab')
   await assertProjectSolarDrawing(runtime, assertions)
 }
 
@@ -1346,20 +1405,20 @@ export async function openProjectSolarTool(runtime, tool, assertions = expect, {
   const { page } = runtime
   const editor = page.locator('.project-solar-workspace-editor')
   if (closeEditor && await editor.isVisible()) {
-    await editor.getByRole('button', { name: /^(Close|Cancel)$/ }).click()
+    await walkClick(editor.getByRole('button', { name: /^(Close|Cancel)$/ }), 'Close Solar editor')
     await assertions(editor).toHaveCount(0)
   }
-  await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+  await walkClick(page.getByRole('tab', { name: 'Solar', exact: true }), 'Open Solar tab')
   const ribbon = page.getByTestId('drafting-ribbon').locator(`button[data-tool="${tool}"]`)
   const rail = page.locator(`#solar-step-${tool}`)
   const more = page.getByRole('button', { name: 'More panels', exact: true })
   await assertions.poll(async () => await ribbon.isVisible() || await more.isVisible() || await rail.isVisible(),
     { timeout: 30_000, message: `project Solar control ${tool} must render` }).toBe(true)
-  if (!await ribbon.isVisible() && await more.isVisible()) await more.click()
+  if (!await ribbon.isVisible() && await more.isVisible()) await walkClick(more, 'Open More panels')
   const control = await ribbon.isVisible() ? ribbon : rail
   if (allowDisabled && !await control.isEnabled()) return false
   await assertions(control).toBeEnabled()
-  await control.click()
+  await walkClick(control, `Open Solar tool ${tool}`)
   return true
 }
 
@@ -1369,13 +1428,13 @@ export async function takeProjectSolarCheckout(runtime, assertions = expect, act
   const path = `/api/projects/${solar.binding.project_id}/drawings/${solar.binding.drawing_id}/checkout`
   await projectSolarStep(runtime, 'take Project checkout', async () => {
     const response = await action(page, solar.apiBase, 'POST', path,
-      () => checkout().getByRole('button', { name: 'Take', exact: true }).click())
+      () => walkClick(checkout().getByRole('button', { name: 'Take', exact: true }), 'Take Project checkout'))
     const lease = await projectSolarResponse(response, 'Project checkout', [200])
     // Register release before validating the lease body so a later assertion
     // failure still relinquishes an acquired checkout through the UI.
     if (lease.acquired === true) runtime.cleanup.push(async () => {
       const released = await action(page, solar.apiBase, 'DELETE', path,
-        () => checkout().getByRole('button', { name: 'Release', exact: true }).click())
+        () => walkClick(checkout().getByRole('button', { name: 'Release', exact: true }), 'Release Project checkout'))
       const body = await projectSolarResponse(released, 'release Project checkout', [200])
       assertions(body.released).toBe(true)
       assertions(body.checkout).toBe(null)
@@ -1398,17 +1457,40 @@ export async function publishProjectSolar(runtime, assertions = expect, {
     const settings = page.getByTestId('solar-settings-form')
     await assertions(settings).toHaveAttribute('data-mode', allowExistingGraph ? /^(initialize|edit)$/ : 'initialize')
     const initializing = await settings.getAttribute('data-mode') === 'initialize'
-    if (initializing) await settings.getByLabel('Drawing units', { exact: true }).selectOption('m')
+    if (initializing) await settings.getByRole('combobox', { name: 'Drawing units', exact: true }).selectOption('m')
     // A scratch fixture can already contain a graph from an earlier run.
     const sequence = allowExistingGraph && solar.context.graph?.settings?.panels_in_sequence === 1 ? 2 : 1
     await settings.getByLabel('Panels in sequence', { exact: true }).fill(String(sequence))
-    const start = settings.getByRole('button', { name: initializing ? 'Start Solar design' : 'Apply settings', exact: true })
-    await assertions(start).toBeEnabled({ timeout: 30_000 })
-    const result = await run({ page, expect: assertions, apiBase: solar.apiBase, traffic: solar.traffic,
-      binding: solar.binding, before: solar.context, tool: 'solar-settings', action: () => start.click(), checkParams: (params) => {
-        if (initializing) assertions(params.initialize?.units?.drawing_units).toBe('m')
-        assertions(params.changes?.panels_in_sequence).toBe(sequence)
-      } })
+    const buttonName = initializing ? 'Start Solar design' : 'Apply settings'
+    const start = settings.getByRole('button', { name: buttonName, exact: true })
+    try {
+      await assertions(start).toBeEnabled({ timeout: 30_000 })
+    } catch (error) {
+      const diagnosticText = async testId => {
+        try {
+          const locator = settings.getByTestId(testId)
+          return await locator.count() ? redactSolarDiagnostic(await locator.textContent({ timeout: 2_000 }) ?? '') : ''
+        } catch { return '[unavailable]' }
+      }
+      const reason = await diagnosticText('solar-settings-reason')
+      const runStatus = await diagnosticText('solar-settings-run')
+      throw new Error(`${buttonName} did not become enabled within 30 s; solar-settings-reason: ${reason}; solar-settings-run: ${runStatus}`, { cause: error })
+    }
+    let result
+    try {
+      result = await run({ page, expect: assertions, apiBase: solar.apiBase, traffic: solar.traffic,
+        binding: solar.binding, before: solar.context, tool: 'solar-settings', action: () => walkClick(start, buttonName), checkParams: (params) => {
+          if (initializing) assertions(params.initialize?.units?.drawing_units).toBe('m')
+          assertions(params.changes?.panels_in_sequence).toBe(sequence)
+        } })
+    } catch (error) {
+      const diagnostic = await projectSolarRunDiagnostic(page, settings, start)
+      if (error instanceof Error) {
+        error.message += `\n${diagnostic}`
+        throw error
+      }
+      throw new Error(`${redactSolarDiagnostic(error)}\n${diagnostic}`, { cause: error })
+    }
     solar.binding = result.binding
     solar.context = result.context
     proof.publication = result.step
@@ -1430,7 +1512,7 @@ export async function switchProjectSolarForms(runtime, assertions = expect) {
     await solve.getByLabel('Request', { exact: true }).fill('{"grid":{}}')
     await solve.getByLabel('Frame', { exact: true }).fill('walk-unsent-frame')
     // SchemaForm encodes enum option values as indices; use the schema labels.
-    await solve.getByLabel('Phase', { exact: true }).selectOption({ label: 'background' })
+    await solve.getByRole('combobox', { name: 'Phase', exact: true }).selectOption({ label: 'background' })
     await openProjectSolarTool(runtime, 'solar-correct-string', assertions, { closeEditor: false })
     const correction = page.getByRole('form', { name: 'Correct strings', exact: true })
     for (const name of ['Grant ref', 'Request', 'Frame', 'Phase']) await assertions(page.getByLabel(name, { exact: true })).toHaveCount(0)

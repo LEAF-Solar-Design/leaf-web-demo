@@ -6,7 +6,7 @@ import {
 } from '../staging/stagingConfig.mjs'
 import { inspectContext, inspectJob, isUuid, projectBinding } from '../local/solarProjectWalk.mjs'
 import {
-  openProjectSolarTool, selectProjectSolarVersion, takeProjectSolarCheckout,
+  openProjectSolarTool, selectProjectSolarVersion, takeProjectSolarCheckout, redactSolarDiagnostic, walkClick,
 } from '../walk/fixtures.mjs'
 
 const TOOL = 'solar-solve-proposal'
@@ -14,13 +14,30 @@ const code = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,127}
 
 export function stagingNetworkPath(url) {
   const parsed = new URL(url)
-  if (!/^\/api\/(?:projects|capabilities|tools|session|drawings|campaigns|jobs)(?:\/|$)/.test(parsed.pathname)) return null
-  const keys = [...parsed.searchParams.keys()].map(key => encodeURIComponent(key))
-  return parsed.pathname + (keys.length ? `?${keys.join('&')}` : '')
+  if (!parsed.pathname.startsWith('/api/')) return null
+  const keys = [...parsed.searchParams.keys()].map(key => encodeURIComponent(redactSolarDiagnostic(key)))
+  return redactSolarDiagnostic(parsed.pathname + (keys.length ? `?${keys.join('&')}` : ''))
+}
+
+export function appendStagingRequest(records, input) {
+  const path = stagingNetworkPath(new URL(input.path, 'https://diagnostic.invalid').href)
+  if (!path) return null
+  const record = { method: redactSolarDiagnostic(input.method), path,
+    status: Number.isInteger(input.status) ? input.status : 'failed',
+    duration_ms: Number.isFinite(input.duration_ms) ? input.duration_ms : null,
+    error_code: input.error_code == null ? null : redactSolarDiagnostic(input.error_code) }
+  records.push(record)
+  if (records.length > 40) records.splice(0, records.length - 40)
+  return record
+}
+
+export function appendStagingConsole(records, { level, text }) {
+  if (!['error', 'warning'].includes(level)) return
+  records.push({ level, text: redactSolarDiagnostic(text) })
+  if (records.length > 20) records.splice(0, records.length - 20)
 }
 
 export async function stagingErrorCode(response) {
-  if (response.status() < 400) return null
   try {
     const body = await response.json()
     return code(body?.error_code) ?? code(body?.error?.error_code)
@@ -28,8 +45,15 @@ export async function stagingErrorCode(response) {
 }
 
 // Diagnostic observations must never affect the walk's security or UI verdict.
-export function observeStagingNetwork(page, records, latest = {}) {
+export function observeStagingNetwork(page, records) {
   const pending = new Set()
+  const requests = new WeakMap()
+  const onRequest = request => {
+    try {
+      const record = appendStagingRequest(records, { method: request.method(), path: request.url() })
+      if (record) requests.set(request, record)
+    } catch { /* Diagnostic only. */ }
+  }
   const duration = request => {
     const timing = request.timing()
     if (!Number.isFinite(timing.startTime) || timing.startTime <= 0) return null
@@ -40,18 +64,15 @@ export function observeStagingNetwork(page, records, latest = {}) {
     try {
       const path = stagingNetworkPath(request.url())
       if (!path) return
-      const record = { method: request.method(), path, duration_ms: 0, error_code: null }
-      if (response) record.status = response.status()
-      else record.failure = String(request.failure()?.errorText ?? 'request failed').slice(0, 512)
-      records.push(record)
-      if (records.length > 200) records.splice(0, records.length - 200)
-      const pathname = path.split('?')[0]
-      if (/\/drawing-versions\/[^/]+\/context$/.test(pathname)) latest.context = record
-      if (/^\/api\/capabilities\/?$/.test(pathname)) latest.capabilities = record
+      if (!requests.has(request)) onRequest(request)
+      const record = requests.get(request)
+      if (!record) return
+      record.status = response ? response.status() : 'failed'
       let timer
       const observation = (async () => {
         if (response) {
-          record.error_code = await stagingErrorCode(response)
+          const errorCode = await stagingErrorCode(response)
+          record.error_code = errorCode == null ? null : redactSolarDiagnostic(errorCode)
           await response.finished()
         }
         record.duration_ms = duration(request)
@@ -68,21 +89,22 @@ export function observeStagingNetwork(page, records, latest = {}) {
     try { observe(response.request(), response) } catch { /* Diagnostic only. */ }
   }
   const onFailed = request => observe(request, null)
+  page.on('request', onRequest)
   page.on('response', onResponse)
   page.on('requestfailed', onFailed)
   return async () => {
+    page.off('request', onRequest)
     page.off('response', onResponse)
     page.off('requestfailed', onFailed)
     while (pending.size) await Promise.all([...pending])
   }
 }
 
-export function stagingNetworkFailure(records, latest = {}) {
-  const last = pattern => [...records].reverse().find(row => pattern.test(row.path.split('?')[0])) ?? null
-  return `Staging network: ${JSON.stringify({
-    context: latest.context ?? last(/\/drawing-versions\/[^/]+\/context$/),
-    capabilities: latest.capabilities ?? last(/^\/api\/capabilities\/?$/),
-  })}`
+export function stagingNetworkFailure(records, consoleMessages = []) {
+  const safeRecords = [], safeConsole = []
+  for (const record of records) appendStagingRequest(safeRecords, record)
+  for (const message of consoleMessages) appendStagingConsole(safeConsole, message)
+  return `Staging network: ${JSON.stringify(safeRecords)}\nStaging console: ${JSON.stringify(safeConsole)}`
 }
 
 async function persistStagingEvidence(evidence, title) {
@@ -94,8 +116,12 @@ async function persistStagingEvidence(evidence, title) {
 
 export async function stagingEvidenceStep(runtime, testInfo, action, persist = persistStagingEvidence) {
   const records = runtime.evidence.projectSolar.network = []
-  const latest = runtime.evidence.projectSolar.networkLast = { context: null, capabilities: null }
-  const finish = observeStagingNetwork(runtime.page, records, latest)
+  const consoleMessages = runtime.evidence.projectSolar.console = []
+  const onConsole = message => {
+    try { appendStagingConsole(consoleMessages, { level: message.type(), text: message.text() }) } catch { /* Diagnostic only. */ }
+  }
+  runtime.page.on('console', onConsole)
+  const finish = observeStagingNetwork(runtime.page, records)
   let failure
   try {
     return await action()
@@ -103,8 +129,9 @@ export async function stagingEvidenceStep(runtime, testInfo, action, persist = p
     failure = error
     throw error
   } finally {
+    runtime.page.off('console', onConsole)
     await finish()
-    if (failure instanceof Error) failure.message += `\n${stagingNetworkFailure(records, latest)}`
+    if (failure instanceof Error) failure.message += `\n${stagingNetworkFailure(records, consoleMessages)}`
     try {
       await persist(runtime.evidence, testInfo.title)
     } catch { /* Evidence IO must not replace the step's verdict. */ }
@@ -293,8 +320,8 @@ export async function withStagingProject(page, baseURL, projectId, token, testIn
     expect(Boolean(project)).toBe(true)
     expect(projects.filter(row => row.name === project.name)).toHaveLength(1)
     const response = await stagingAction(page, baseURL, 'GET', `/api/projects/${projectId}`,
-      () => page.getByRole('region', { name: 'Workspace projects', exact: true })
-        .getByRole('button', { name: project.name, exact: true }).click())
+      () => walkClick(page.getByRole('region', { name: 'Workspace projects', exact: true })
+        .getByRole('button', { name: project.name, exact: true }), 'Open Workspace project'))
     expect(response.status()).toBe(200)
     runtime.projectSolar.binding = canonicalProjectVersion(await response.json(), projectId)
     await selectProjectSolarVersion(runtime)
@@ -335,7 +362,7 @@ export async function reviewStagingProposal(runtime, {
   await form.getByLabel('Grant ref', { exact: true }).fill('w1-staging')
   await form.getByLabel('Request', { exact: true }).fill(JSON.stringify(values.request))
   await frame.fill(values.frame)
-  await form.getByLabel('Phase', { exact: true }).selectOption('0')
+  await form.getByRole('combobox', { name: 'Phase', exact: true }).selectOption('0')
   const start = form.getByRole('button', { name: 'Run solve', exact: true })
   // Give a loading/locked form time to settle without turning refusal into failure.
   await assertions(start).toBeEnabled({ timeout: 10_000 }).catch(() => {})
@@ -347,7 +374,7 @@ export async function reviewStagingProposal(runtime, {
   }
   page.on('response', observe)
   try {
-    await start.click()
+    await walkClick(start, 'Run solve')
     await assertions.poll(async () => runResponse !== null ||
       /The server refused this Solar request\./.test(await form.getByRole('status').allTextContents().then(rows => rows.join(' '))),
     { timeout: 30_000, message: 'Solve must receive a run response or a refusal reason' }).toBe(true)

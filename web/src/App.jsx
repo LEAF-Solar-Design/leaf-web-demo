@@ -94,6 +94,7 @@ import OpsDrawer from './components/OpsDrawer.jsx'
 import CustomizePanel from './components/CustomizePanel.jsx'
 import CheckoutControls from './components/CheckoutControls.jsx'
 import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
+import AddonsPanel from './components/AddonsPanel.jsx'
 import CostTransparencyPanel from './components/CostTransparencyPanel.jsx'
 import useTenantMcpRegistry from './useTenantMcpRegistry.js'
 import DemoBanner from './components/DemoBanner.jsx'
@@ -194,7 +195,7 @@ import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
-import { consoleAuthRequired, consoleSignedOut } from './controllers/session/consoleGate.js'
+import { consoleAuthRequired, consoleSignedOut, consoleKnownGuest } from './controllers/session/consoleGate.js'
 import useCheckoutController from './controllers/checkout/useCheckoutController.js'
 import { useProjectCheckoutController } from './controllers/useProjectCheckoutController.js'
 import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason } from './solar/solarProjectAppModel.js'
@@ -333,11 +334,12 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
   }, [actions])
 
   return React.createElement('div',
-    { role: 'group', 'aria-label': 'Project checkout' },
-    React.createElement('p', { role: 'status' },
+    { role: 'group', 'aria-label': 'Project checkout', className: 'checkout-controls project-checkout' },
+    React.createElement('p', { role: 'status', title: projectSolarAppReason(checkout.reason) },
       projectSolarAppReason(checkout.reason)),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: !checkout.canTake,
       onClick: () => {
         if (!isCurrent() || !checkout.canTake) return
@@ -346,6 +348,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
     }, 'Take'),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: !checkout.canRelease,
       onClick: () => {
         if (!isCurrent() || !checkout.canRelease) return
@@ -354,6 +357,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
     }, 'Release'),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: checkout.pending,
       onClick: () => {
         if (!isCurrent() || checkout.pending) return
@@ -668,6 +672,8 @@ export default function App() {
   // the session. The controller publishes no token-presence signal, so folding
   // these into `status` would change three truth tables; they stay here.
   const [signedIn, setSignedIn] = useState(() => isSignedIn())
+  // Pause authenticated reads for guests before the session response arrives.
+  const knownGuest = consoleKnownGuest({ mock, authConfigured, isSignedIn, authCallback: isAuthRedirectCallback() })
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
   const [toolsOpen, setToolsOpen] = useState(false)      // left catalog collapsed by default
   const [authorOpen, setAuthorOpenState] = useState(false)    // author flow (opens on build lane)
@@ -717,9 +723,10 @@ export default function App() {
   // Kept strictly apart from the platform identity above (AUTH.md §0). The token
   // is write-only: we hold linkage status only, never the token itself.
   const [claudeOpen, setClaudeOpen] = useState(false) // header Claude-account popover open
+  const [addonsOpen, setAddonsOpen] = useState(false)
 
   // --- Tenant MCP server registry (standardization slice 8c) ---
-  const mcpRegistry = useTenantMcpRegistry({ mock })
+  const mcpRegistry = useTenantMcpRegistry({ mock: mock || knownGuest })
   const [linkServiceOpen, setLinkServiceOpen] = useState(false)
   // The command bar's @ mounts list gains connected registry servers by
   // LABEL, never by host or any upstream tool name — mergePickerEntries'
@@ -779,7 +786,7 @@ export default function App() {
   // tokens as CSS custom properties, so an approved change is on screen
   // without a build or a deploy. LIVE only, like the agent tier: mock mode has
   // no tenant to read for, and applying a theme there would be theatre.
-  const themeOverlay = useOverlay(agentSessionId, { enabled: !mock })
+  const themeOverlay = useOverlay(agentSessionId, { enabled: !mock && !knownGuest })
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0)
   const [pendingApprovalsUnavailable, setPendingApprovalsUnavailable] = useState(false)
   useEffect(() => {
@@ -850,12 +857,12 @@ export default function App() {
   const [registryEntries, setRegistryEntries] = useState([])
   const [catalogSkills, setCatalogSkills] = useState([])
   useEffect(() => {
-    if (mock) { setRegistryEntries([]); setCatalogSkills([]); return undefined }
+    if (mock || knownGuest) { setRegistryEntries([]); setCatalogSkills([]); return undefined }
     let live = true
     fetchRegistry().then((r) => { if (live) setRegistryEntries(r.entries || []) })
     fetchSkills().then((r) => { if (live) setCatalogSkills(r.skills || []) })
     return () => { live = false }
-  }, [mock])
+  }, [mock, knownGuest])
 
   const resultBlockRef = useRef(null)   // toast "View" scroll target (result)
   const workspaceCardRef = useRef(null) // toast "View" scroll target (viewer)
@@ -947,7 +954,7 @@ export default function App() {
     closeStartForChange()
     return retryUnreadableHeadRaw(...args)
   }, [retryUnreadableHeadRaw, closeStartForChange])
-  const platform = usePlatformTrustController({ mock })
+  const platform = usePlatformTrustController({ mock, guestReadsPaused: knownGuest })
   const {
     usage,
     usageAt,
@@ -974,6 +981,7 @@ export default function App() {
   }), [])
   const workspaceController = useWorkspaceController({
     mock,
+    readsPaused: knownGuest,
     services: workspaceServices,
     formatError: humanizeError,
   })
@@ -1208,6 +1216,7 @@ export default function App() {
     services: catalogServices,
     adapters: catalogAdapters,
     context: { mock, entitlements, running: false, agentDisabled,
+      guestReadsPaused: knownGuest,
       ...(projectMode ? {
         solarBinding: projectSolar.ready ? projectSolar.scope.binding : null,
         authorityKey: projectSolar.ready ? projectSolar.scope.authorityKey : null,
@@ -1303,7 +1312,7 @@ export default function App() {
     // the version chain wins, the booted identity is the fallback. A tenant
     // switch voids the identity and the scope goes with it — see
     // checkoutScopeDrawingId for why abandoning beats releasing.
-    drawingId: checkoutScopeDrawingId({
+    drawingId: knownGuest ? null : checkoutScopeDrawingId({
       identityDrawingId: projectMode ? null : REQUESTED_DRAWING_ID,
       drawingState,
       requestedDrawingId: REQUESTED_DRAWING_ID,
@@ -1430,7 +1439,7 @@ export default function App() {
       && loadDrawingId === requestedDrawingIdRef.current
       && isScopeCurrent()
       && sessionProof.current(true)
-    if (!current()) return undefined
+    if (knownGuest || !current()) return undefined
     const loadGeneration = (requestedDrawingIdRef.loadGeneration ?? 0) + 1
     requestedDrawingIdRef.loadGeneration = loadGeneration
     requestedDrawingIdRef.onDrawingLoad?.(loadGeneration)
@@ -1492,7 +1501,7 @@ export default function App() {
     return () => { alive = false }
     // Both proofs share token, recovery and workspace fencing.
   }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
-      session.recoveries, sessionProof, sessionActions])
+      session.recoveries, sessionProof, sessionActions, knownGuest])
 
   // App owns the transport; controls only express the user's choice.
   const localCadUpdateRef = useRef(null)
@@ -1747,6 +1756,7 @@ export default function App() {
     discardPendingRun,
   } = useJobController({
     mock,
+    readsPaused: knownGuest,
     drawingKey: resultDrawingKey,
     resetKey: `${isEditFixture}:${intakeRetryKey}`,
     formatError: humanizeError,
@@ -3230,10 +3240,10 @@ export default function App() {
       // a deliberate sign-out indistinguishable from an expiry.
       action: isSignedIn()
         ? { label: 'Sign out', onClick: sessionActions.signOut }
-        : { label: 'Refresh', onClick: () => { loadUsage(); loadHealth() } },
+        : { label: 'Refresh', onClick: () => { if (!knownGuest) loadUsage(); loadHealth() } },
       foot: 'Your account and usage.',
     })
-  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions, health, checkout.readFailed, checkout.failure, lock.unknown, heldByUs, otherHeldCheckout])
+  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions, health, checkout.readFailed, checkout.failure, lock.unknown, heldByUs, otherHeldCheckout, knownGuest])
 
   // Esc while a live run is in flight: detach this session from the job (the
   // rail keeps tracking it; the close beacon flags it reap-able server-side).
@@ -3344,11 +3354,11 @@ export default function App() {
     setQuotaAt(quotaError || runQuotaError ? Date.now() : 0)
   }, [quotaError, runQuotaError])
   useEffect(() => {
-    if (mock || (!quotaError && !runQuotaError)) return undefined
+    if (mock || knownGuest || (!quotaError && !runQuotaError)) return undefined
     loadUsage()
     const id = setInterval(loadUsage, 60_000)
     return () => clearInterval(id)
-  }, [mock, quotaError, runQuotaError, loadUsage])
+  }, [mock, knownGuest, quotaError, runQuotaError, loadUsage])
   const freshUsage = quotaAt > 0 && usageAt > quotaAt ? usage : null
   const spendCapCleared = !!(quotaError && freshUsage?.cap?.enabled &&
     typeof freshUsage.cap.remaining === 'number' && freshUsage.cap.remaining > 0)
@@ -3376,6 +3386,8 @@ export default function App() {
   // derivation and one state machine behind it. `isSignedIn` is handed in as a
   // function so the storage read keeps its short circuit.
   const signedOut = consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn })
+  // A signed-out visitor's catalog read can only 401; SignedOutGate already tells them to sign in.
+  const visibleCatalogErr = signedOut ? null : catalogErr
 
   // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
   // module default, so the drawing workspace renders exactly as before unless
@@ -3491,7 +3503,7 @@ export default function App() {
   // Slice 11a: the builds poll (GET /api/builds, validated records from
   // every lane). Mock mode makes no request; the rail hosts one
   // BuildQueueCard per record and the toolbar badge counts the open ones.
-  const buildQueue = useBuildQueue({ mock })
+  const buildQueue = useBuildQueue({ mock: mock || knownGuest })
   // W4e: the ribbon shows ONE tab's panels at a time (the reference's
   // Draw / Insert / Annotate / View / Manage); the top band switches it.
   // Slice 2: the opening tab is the contract's declared home tab, not a
@@ -4460,7 +4472,7 @@ export default function App() {
       activeSurface={activeSurface}
       states={surfaceStates}
       catalog={catalog}
-      catalogError={catalogErr}
+      catalogError={visibleCatalogErr}
       workspaceProject={workspaceProjectState}
       boardPresentation={boardVisible}
       studioPresentation={Boolean(studioGround)}
@@ -4537,7 +4549,7 @@ export default function App() {
           projectName={currentProjectName || projectName}
           inputRef={barInputRef}
           routeActive={!!route}
-          mcpDiscoveryEnabled={!mock}
+          mcpDiscoveryEnabled={!mock && !knownGuest}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
           // refusal the TRANSPORT raised (api.nlPrompt / converse.postMessage)
@@ -4696,10 +4708,11 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
-          <CostTransparencyPanel mock={mock} />
+          <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />
           {!mock && (
             <ClaudeAccountPanel
               mock={mock}
+              signedOut={signedOut}
               grant={grant}
               loading={grantLoading}
               busy={grantBusy}
@@ -4710,6 +4723,7 @@ export default function App() {
               onUnlink={onUnlinkClaude}
             />
           )}
+          {!mock && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
         </div>
       </header>
 
@@ -5167,7 +5181,7 @@ export default function App() {
             <DraftingRibbon
               clusters={ribbonClusters}
               tab={activeRibbonTab}
-              catalogError={navSpine || (phoneViewport && studioDrawer !== 'nav') ? catalogErr : null}
+              catalogError={navSpine || (phoneViewport && studioDrawer !== 'nav') ? visibleCatalogErr : null}
               onRetryCatalog={loadCatalog}
             >
               {/* The engine's own panels (File, Draw, Modify) read the ONE
@@ -5345,7 +5359,7 @@ export default function App() {
               {!mock && previewing && (
                 <span className="version-note readonly">viewing v{previewing.version} · read-only</span>
               )}
-              {!mock && (
+              {!mock && !signedOut && (
                 projectMode ? (
                   projectSolar.ready ? (
                     <ProjectSolarCheckoutControls
@@ -5927,7 +5941,7 @@ export default function App() {
       )}
       <div className="rail-stack">
         {studioShell && <SurfaceFrame.Frame />}
-        {!mock && <SurfaceFrame.Conversations />}
+        {!mock && !knownGuest && <SurfaceFrame.Conversations />}
         <SurfaceFrame.JobRail />
         <SurfaceFrame.Inbox />
         {/* Standardization slice 8c: the Link-a-service drawer sits in the

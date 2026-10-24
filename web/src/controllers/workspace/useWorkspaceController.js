@@ -19,8 +19,9 @@ export default function useWorkspaceController(options) {
 
   useEffect(() => {
     controller.setMock(options?.mock)
+    controller.setReadsPaused(options?.readsPaused)
     controller.loadProjects()
-  }, [controller, options?.mock, snapshot.orgId])
+  }, [controller, options?.mock, options?.readsPaused, snapshot.orgId])
 
   return { ...snapshot, ...controller }
 }

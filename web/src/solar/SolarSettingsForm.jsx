@@ -60,6 +60,9 @@ function ProjectSettingsForContext(props) {
   const [units, setUnits] = useState({ drawing_units: '', elevation_datum: 'unknown', crs: '' });
   const [publication, setPublication] = useState(null);
   const [feedback, setFeedback] = useState(null);
+  const [submitTrace, setSubmitTrace] = useState({ seq: 0, exit: null });
+  const submitSequence = useRef(0);
+  const submitScope = useRef(null);
   const [refresh, setRefresh] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const dependencies = binding && typeof authorityKey === 'string' && authorityKey.trim().length > 0
@@ -222,7 +225,16 @@ function ProjectSettingsForContext(props) {
     : busy || submitting ? 'run_in_progress' : result && !result.ok ? result.reason
       : !armed ? (publication?.scope === scope && publication.generation === scope.generation
         ? publication.reason || 'preview_required' : 'preview_required') : null;
-  const runMessage = feedback?.scope === scope && feedback.generation === scope.generation ? feedback : null;
+  const traceCode = {
+    scope_replaced: 'SIP_R7_FORM_SCOPE_REPLACED',
+    superseded_context: 'SIP_R7_FORM_SUPERSEDED_CONTEXT',
+    superseded_handoff: 'SIP_R7_FORM_SUPERSEDED_HANDOFF',
+    superseded_result: 'SIP_R7_FORM_SUPERSEDED_RESULT',
+    superseded_error: 'SIP_R7_FORM_SUPERSEDED_ERROR',
+  }[submitTrace.exit];
+  const runMessage = feedback?.scope === scope && feedback.generation === scope.generation ? feedback
+    : traceCode && (submitTrace.exit === 'scope_replaced' || submitScope.current === scope) ? { code: traceCode,
+      text: 'The drawing changed while Start was being handled; review the settings and press Start again.' } : null;
   const effectiveZip = editable ? pyStrip(projectDrafts.zip_code ?? state.project.zip_code) : '';
   const zipChanged = editable && effectiveZip !== pyStrip(state.project.zip_code);
   const coordinateChange = editable ? buildSettingsParams(state, {}, units,
@@ -239,9 +251,23 @@ function ProjectSettingsForContext(props) {
   }));
 
   async function submit(event) {
+    const seq = ++submitSequence.current;
+    submitScope.current = scope;
+    setSubmitTrace({ seq, exit: 'entered' });
+    const traceExit = (exit) => setSubmitTrace((previous) => previous.seq === seq ? { seq, exit } : previous);
     event.preventDefault();
-    if (reason || !armed || scope.lock || !isScopeCurrent() || !scope.armed?.isCurrent()
-        || scope.armed.generation !== scope.generation || scope.armed.candidate.fingerprint !== fingerprint) return;
+    if (!isScopeCurrent()) {
+      traceExit('scope_replaced');
+      setRefresh((value) => value + 1);
+      return;
+    }
+    if (reason || !armed || scope.lock || !scope.armed?.isCurrent()
+        || scope.armed.generation !== scope.generation || scope.armed.candidate.fingerprint !== fingerprint) {
+      setFeedback({ scope, generation: scope.generation, ...projectFeedback({ ok: false,
+        reason: scope.lock ? 'SIP_R7_FORM_LOCKED' : 'SIP_R7_FORM_NOT_ARMED' }) });
+      traceExit(scope.lock ? 'locked' : 'not_armed');
+      return;
+    }
     const accepted = scope.armed;
     const pending = operation();
     const lock = {};
@@ -249,27 +275,53 @@ function ProjectSettingsForContext(props) {
     setSubmitting(true);
     try {
       const outcome = await projectClient.readContext({ signal: pending.signal });
-      if (!pending.isCurrent() || scope.armed !== accepted) return;
+      if (!pending.isCurrent()) { traceExit('superseded_context'); return; }
+      if (scope.armed !== accepted) {
+        setFeedback({ scope, generation: scope.generation, ...projectFeedback({ ok: false,
+          reason: latest.current.busy ? 'SIP_R7_FORM_BUSY'
+            : typeof latest.current.onProjectSubmit !== 'function' ? 'SIP_R7_FORM_NO_SUBMIT'
+              : 'SIP_R7_FORM_NOT_ARMED' }) });
+        traceExit(latest.current.busy ? 'busy'
+          : typeof latest.current.onProjectSubmit !== 'function' ? 'no_submit' : 'not_armed');
+        return;
+      }
       const checked = outcome.ok ? deriveProjectSettingsState({ binding, contextView: outcome.data })
         : { mode: 'refused', reason: 'context_unreadable' };
       if (checked.mode === 'refused' || checked.mode !== state.mode || checked.intakeSha256 !== state.intakeSha256
           || checked.rev !== state.rev || !sameSolarDrawingBinding(checked.binding, state.binding)) {
         scope.armed = null;
-        if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectFeedback(outcome) });
+        setFeedback({ scope, generation: scope.generation,
+          ...projectFeedback({ ...outcome, reason: 'SIP_R7_FORM_CONTEXT_STALE' }) });
         setPublication({ scope, generation: scope.generation,
           reason: checked.reason === 'not_current_head' ? 'not_current_head' : 'scope_stale' });
+        traceExit('context_stale');
         return;
       }
-      if (!pending.isCurrent() || latest.current.busy || typeof latest.current.onProjectSubmit !== 'function') return;
+      if (!pending.isCurrent()) { traceExit('superseded_handoff'); return; }
+      if (latest.current.busy || typeof latest.current.onProjectSubmit !== 'function') {
+        setFeedback({ scope, generation: scope.generation, ...projectFeedback({ ok: false,
+          reason: latest.current.busy ? 'SIP_R7_FORM_BUSY' : 'SIP_R7_FORM_NO_SUBMIT' }) });
+        traceExit(latest.current.busy ? 'busy' : 'no_submit');
+        return;
+      }
       const result = await latest.current.onProjectSubmit(accepted.candidate.intent,
-        { binding, authorityKey, signal: pending.signal, isCurrent: pending.isCurrent });
-      if (!pending.isCurrent()) return;
+        { binding, authorityKey, signal: pending.signal, isCurrent: pending.isCurrent })
+        || { ok: false, reason: 'SIP_R7_WORKSPACE_NO_RESULT' };
+      if (!pending.isCurrent()) { traceExit('superseded_result'); return; }
       if (result?.ok && result.status === 202 && result.data?.status === 'submitted'
           && typeof result.data.job_id === 'string' && projectJobId.test(result.data.job_id)) {
         setFeedback({ scope, generation: scope.generation, outcome: result, text: 'Solar settings submitted.', code: null });
-      } else if (result) setFeedback({ scope, generation: scope.generation, ...projectFeedback(result) });
+        traceExit('submitted');
+      } else {
+        setFeedback({ scope, generation: scope.generation, ...projectFeedback(result) });
+        traceExit('refused');
+      }
     } catch {
-      if (pending.isCurrent()) setFeedback({ scope, generation: scope.generation, ...projectFeedback(null) });
+      if (pending.isCurrent()) {
+        setFeedback({ scope, generation: scope.generation,
+          ...projectFeedback({ ok: false, reason: 'SIP_R7_FORM_ERROR' }) });
+        traceExit('error');
+      } else traceExit('superseded_error');
     } finally {
       if (scope.lock === lock) {
         scope.lock = null;
@@ -279,7 +331,8 @@ function ProjectSettingsForContext(props) {
     }
   }
   return (
-    <section aria-label="Solar settings" data-testid="solar-settings-form" data-mode={state?.mode ?? 'loading'}>
+    <section aria-label="Solar settings" data-testid="solar-settings-form" data-mode={state?.mode ?? 'loading'}
+      data-submit-seq={String(submitTrace.seq)} data-submit-exit={submitTrace.exit ?? undefined}>
       {state === null && <p role="status" data-testid="solar-settings-status">Reading the drawing.</p>}
       {state?.mode === 'edit' && <p>Graph revision {state.rev}</p>}
       {state?.mode === 'initialize' && <p>{PROJECT_SETTINGS_REASONS.graphless}</p>}

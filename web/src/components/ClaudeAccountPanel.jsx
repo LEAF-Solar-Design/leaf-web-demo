@@ -15,6 +15,7 @@ function detectKind(token) {
 
 export default function ClaudeAccountPanel({
   mock,
+  signedOut = false,
   grant,
   loading,
   busy,
@@ -89,7 +90,7 @@ export default function ClaudeAccountPanel({
     setToken('')
   }
 
-  const stateLabel = loading ? 'checking' : restricted ? 'access restricted'
+  const stateLabel = signedOut ? 'sign in' : loading ? 'checking' : restricted ? 'access restricted'
     : !known ? 'unavailable' : linked ? `${shownAccounts.length} mounted` : 'not linked'
   const isApiKey = kind === 'api_key'
 
@@ -113,14 +114,15 @@ export default function ClaudeAccountPanel({
             <EscCap onClick={() => onToggle(false)} label="Close Claude account panel" />
           </div>
 
-          {!loading && !known && (
+          {signedOut && <p className="ca-copy" role="status">Sign in to view or link Claude accounts.</p>}
+          {!signedOut && !loading && !known && (
             <p className="ca-copy" role="status">
               {restricted
                 ? 'Only the tenant owner can view or manage Claude accounts. This does not indicate whether authoring is available.'
                 : 'Claude account status is unavailable. This does not indicate whether an account is linked.'}
             </p>
           )}
-          {canManage && linked && (
+          {!signedOut && canManage && linked && (
             <div className="ca-linked">
               <div className="ca-kindline">automatic tenant routing</div>
               <p className="ca-copy">Each turn uses the least-used eligible mount in this tenant. Mounts are never pooled across tenants.</p>
@@ -159,7 +161,7 @@ export default function ClaudeAccountPanel({
             </div>
           )}
 
-          {canManage && (!linked || showAdd) && (
+          {!signedOut && canManage && (!linked || showAdd) && (
             <div className="ca-setup">
               <div className="ca-choice" role="radiogroup" aria-label="Credential type">
                 <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => setKind('oauth')} disabled={busy}>Claude subscription</button>
@@ -211,7 +213,7 @@ export default function ClaudeAccountPanel({
               <p className="ca-note">Credentials stay server-side, tenant-isolated, and never appear again after mounting.</p>
             </div>
           )}
-          {error && <div className="field-err" role="alert"><span className="dot red" />{error}</div>}
+          {!signedOut && error && <div className="field-err" role="alert"><span className="dot red" />{error}</div>}
         </div>
       )}
     </span>

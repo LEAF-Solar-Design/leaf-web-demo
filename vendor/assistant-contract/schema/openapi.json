@@ -4375,6 +4375,246 @@
             "$ref": "#/components/schemas/IntegrationActionElementV1"
           }
         ]
+      },
+      "IntegrationManualWorkflowRunV2": {
+        "description": "Opt-in V2 host evidence, never authority or an aggregate effect outcome. Time and state checks are runtime refinements. The host must persist cancellation before inspecting the frontier, keep requested_at immutable across cancellation history and never regress a cancellation to an ordinary state. These history guarantees cannot be proved by a standalone schema.",
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "number",
+            "const": 2
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36,
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "revision": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "workflow_ref": {
+            "$ref": "#/components/schemas/IntegrationRefV1"
+          },
+          "submission_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+          },
+          "authority_mode": {
+            "type": "string",
+            "const": "caller_bound"
+          },
+          "authority_binding_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}(?![\\s\\S])"
+          },
+          "created_at": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?Z(?![\\s\\S])"
+          },
+          "updated_at": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?Z(?![\\s\\S])"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "running",
+              "succeeded",
+              "failed",
+              "uncertain",
+              "cancel_requested",
+              "cancelled"
+            ]
+          },
+          "requested_at": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?Z(?![\\s\\S])"
+          }
+        },
+        "required": [
+          "schema_version",
+          "run_id",
+          "revision",
+          "workflow_ref",
+          "submission_digest",
+          "authority_mode",
+          "authority_binding_digest",
+          "created_at",
+          "updated_at",
+          "state"
+        ],
+        "additionalProperties": false
+      },
+      "IntegrationManualWorkflowSnapshotV2": {
+        "description": "V1 identity, order, exact references, successful prefix and frontier checks remain runtime refinements. Cancellation stops future admissions and claims; it does not abort or compensate claimed provider actions. A winning request remains cancel_requested while a child is running or unknown; explicit reconciliation may permit cancelled, while unsupported reconciliation may leave it pending. An all-applied prefix may settle cancelled with completed effects visible. Accepted/not_dispatched is safe only when the host atomically bars future claims. Pending never proves no effect. Schema checks prove neither private child identity lookup nor an atomic dispatch fence, hashes, input equality or append-only history. Original child receipts remain unchanged; this contract implements no fence or provider work.",
+        "type": "object",
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/IntegrationManualWorkflowDefinitionV1"
+          },
+          "run": {
+            "$ref": "#/components/schemas/IntegrationManualWorkflowRunV2"
+          },
+          "steps": {
+            "minItems": 1,
+            "maxItems": 8,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IntegrationManualWorkflowStepSnapshotV1"
+            }
+          }
+        },
+        "required": [
+          "definition",
+          "run",
+          "steps"
+        ],
+        "additionalProperties": false
+      },
+      "IntegrationManualWorkflowCancellationRequestV1": {
+        "description": "Cancellation request shape only, granting no authority and settling no effect. The host reconciles repeated requests against the same parent and retains finish, expiry and reconciliation capability for already claimed children under unchanged authority.",
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "number",
+            "const": 1
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36,
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "schema_version",
+          "run_id",
+          "expected_revision"
+        ],
+        "additionalProperties": false
+      },
+      "IntegrationManualWorkflowCancellationResultV1": {
+        "description": "Runtime status/state checks only. Recorded may already be safely cancelled. Existing succeeded/failed parents return unchanged without a cancellation request time or invented cancellation receipt. Host and caller must bind this snapshot to the requested run and expected revision; this result alone cannot prove that binding. Error transport remains separate.",
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "recorded",
+              "already_recorded",
+              "already_terminal"
+            ]
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/IntegrationManualWorkflowSnapshotV2"
+          }
+        },
+        "required": [
+          "status",
+          "snapshot"
+        ],
+        "additionalProperties": false
+      },
+      "IntegrationDailyWorkflowScheduleV1": {
+        "description": "Daily calendar policy only, with no calendar calculation: a nonexistent local minute moves to the next valid local minute; an ambiguous local minute uses the first occurrence only. Parsing or saving this policy grants no execution authority.",
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "daily"
+          },
+          "timezone": {
+            "description": "Lexical ASCII timezone key, preserved exactly. The host must verify recognized IANA calendar support before accepting a persisted draft.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_.+-]+(?:\\/[A-Za-z0-9_.+-]+)*(?![\\s\\S])"
+          },
+          "hour": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          },
+          "minute": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 59
+          },
+          "gap_policy": {
+            "type": "string",
+            "const": "next_valid_minute"
+          },
+          "fold_policy": {
+            "type": "string",
+            "const": "first_occurrence"
+          }
+        },
+        "required": [
+          "kind",
+          "timezone",
+          "hour",
+          "minute",
+          "gap_policy",
+          "fold_policy"
+        ],
+        "additionalProperties": false
+      },
+      "IntegrationWorkflowScheduleDraftV1": {
+        "description": "Inert authoring draft recording intended immutable workflow identity and calendar policy. Parsing or saving it grants no execution authority. Reference existence, digest equality, immutable persistence, timezone support and eventual scheduling eligibility are host guarantees. A reference to a caller-bound manual definition does not make that definition eligible for unattended execution. This contract implements no persistence, timer, occurrence admission, activation, grant or execution path.",
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "type": "number",
+            "const": 1
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+          },
+          "version": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "workflow_ref": {
+            "$ref": "#/components/schemas/IntegrationRefV1"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/IntegrationDailyWorkflowScheduleV1"
+          },
+          "state": {
+            "type": "string",
+            "const": "draft"
+          }
+        },
+        "required": [
+          "schema_version",
+          "id",
+          "version",
+          "title",
+          "workflow_ref",
+          "schedule",
+          "state"
+        ],
+        "additionalProperties": false
       }
     }
   }

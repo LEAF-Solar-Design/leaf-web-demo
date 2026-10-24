@@ -38,3 +38,8 @@ export function consoleAuthRequired(status) {
 export function consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn }) {
   return !mock && authRequired && (authConfigured || !isSignedIn())
 }
+
+// Pre-answer guest signal: true only when every authenticated read must answer 401.
+export function consoleKnownGuest({ mock, authConfigured, isSignedIn, authCallback }) {
+  return !mock && !!authConfigured && !authCallback && !isSignedIn()
+}

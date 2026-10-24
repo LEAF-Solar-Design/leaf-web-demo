@@ -272,7 +272,7 @@ def daily_run_limit_for(tier: Optional[str]) -> Optional[int]:
     Tier map (spec §c), tier-aware and read live:
         demo / self_hosted        -> N   (env LEAF_DAILY_RUN_QUOTA, default 20 — free cap)
         restricted                -> N   (fail closed to the free cap)
-        hosted_starter            -> 200 (placeholder 10x free)
+        hosted_free / hosted_starter -> 200 (placeholder 10x free)
         hosted_pro                -> None (unmetered; still counted for future billing)
         unknown / unauthenticated -> N   (FAIL CLOSED to the free cap — never fail open)
     """
@@ -281,6 +281,7 @@ def daily_run_limit_for(tier: Optional[str]) -> Optional[int]:
         "demo": n,
         "self_hosted": n,
         "restricted": n,
+        "hosted_free": _HOSTED_STARTER_DAILY_RUN_QUOTA,
         "hosted_starter": _HOSTED_STARTER_DAILY_RUN_QUOTA,
         "hosted_pro": None,  # unmetered
     }

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
@@ -19,7 +19,149 @@ import { expect as walkExpect, selectProjectSolarVersion, openProjectSolarTool,
 import { canonicalProjectVersion, proposalCatalogState, proposalFormValues, refusalCode,
   stagingAction, stagingRead, stagingContext, stagingRun, reviewStagingProposal } from '../walk-staging/projectSolarSteps.mjs'
 import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErrorCode,
-  observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep } from '../walk-staging/projectSolarSteps.mjs'
+  observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep,
+  appendStagingRequest, appendStagingConsole } from '../walk-staging/projectSolarSteps.mjs'
+import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick } from './fixtures.mjs'
+
+test('walkClick resolves with default and explicit click timeouts', async () => {
+  for (const [options, timeout] of [[undefined, 15_000], [{ timeout: 7_000 }, 7_000]]) {
+    let clicked = false
+    await walkClick({ click: async actual => {
+      assert.deepEqual(actual, { timeout })
+      clicked = true
+    }, evaluate: async () => assert.fail('successful clicks need no probe') }, 'Open Solar', options)
+    assert.equal(clicked, true)
+  }
+})
+
+test('walkClick reports redacted geometry and the original first-line reason with its cause', async () => {
+  const token = 'eyJabc.def.ghi', capability = 'lco1.secret'
+  const original = new Error(`outside viewport ${token} ${capability}\nprivate second line`)
+  const overlay = { tagName: 'DIV', id: token, classList: ['overlay', 'blocking', capability, 'omitted'] }
+  const node = {
+    getBoundingClientRect: () => ({ x: -100.4, y: 20.7, width: 40.2, height: 10.8 }),
+    contains: hit => hit === overlay,
+    ownerDocument: {
+      defaultView: { innerWidth: 800, innerHeight: 600,
+        getComputedStyle: target => {
+          assert.equal(target, node)
+          return { position: 'fixed', top: '20px', left: '-100px', zIndex: '9' }
+        } },
+    },
+  }
+  for (const [hit, contains, hitIsTarget] of [[overlay, true, true], [overlay, false, false],
+    [node, false, true], [null, false, false]]) {
+    node.tagName = 'BUTTON'
+    node.id = ''
+    node.classList = []
+    node.contains = () => contains
+    node.ownerDocument.elementFromPoint = (x, y) => {
+      assert.equal(x, -100.4 + 40.2 / 2)
+      assert.equal(y, 20.7 + 10.8 / 2)
+      return hit
+    }
+    await assert.rejects(walkClick({
+      click: async () => { throw original },
+      evaluate: async (fn, argument, options) => {
+        assert.equal(argument, undefined)
+        assert.deepEqual(options, { timeout: 2_000 })
+        return fn(node)
+      },
+    }, `Open Solar ${token} ${capability}`), error => {
+      assert.equal(error.cause, original)
+      assert.ok(error.message.startsWith('Open Solar [redacted] [redacted]: outside viewport [redacted] [redacted]\n'))
+      for (const secret of [token, capability, 'private second line', 'omitted']) assert.equal(error.message.includes(secret), false)
+      const probe = JSON.parse(error.message.split('\nClick target: ')[1])
+      assert.deepEqual(probe.box, { x: -100, y: 21, width: 40, height: 11 })
+      assert.deepEqual(probe.viewport, { width: 800, height: 600 })
+      assert.equal(probe.hit, hit === overlay ? 'div#[redacted].overlay.blocking.[redacted]' : hit ? 'button' : null)
+      assert.equal(probe.hitIsTarget, hitIsTarget)
+      assert.deepEqual(probe.position, { position: 'fixed', top: '20px', left: '-100px', zIndex: '9' })
+      return true
+    })
+  }
+})
+
+test('walkClick keeps the full probe JSON while limiting the original reason to 300 characters', async () => {
+  const probe = { box: {}, viewport: {}, hit: 'x'.repeat(500), hitIsTarget: false, position: {} }
+  await assert.rejects(walkClick({ click: async () => { throw new Error('r'.repeat(400)) },
+    evaluate: async () => probe }, 'Run solve'), error => {
+    assert.equal(error.message, `Run solve: ${'r'.repeat(300)}\nClick target: ${JSON.stringify(probe)}`)
+    return true
+  })
+})
+
+test('walkClick preserves the click failure when its geometry probe is unavailable', async () => {
+  const original = new Error('target detached\ncall log')
+  await assert.rejects(walkClick({ click: async () => { throw original },
+    evaluate: async () => { throw new Error('probe detached') } }, 'Open versions'), error => {
+    assert.equal(error.message, 'Open versions: target detached\nClick target: [unavailable]')
+    assert.equal(error.cause, original)
+    return true
+  })
+})
+
+function exactLabelSelectLines(source) {
+  // Keep strings atomic and omit comments so fixture text cannot flag itself.
+  const tokenPattern = new RegExp(String.raw`\/\/[^\n]*|\/\*[\s\S]*?\*\/|'(?:\\[\s\S]|[^'\\])*'|"(?:\\[\s\S]|[^"\\])*"|\x60(?:\\[\s\S]|[^\x60\\])*\x60|[A-Za-z_$][\w$]*|[^\s]`, 'g')
+  const tokens = [...source.matchAll(tokenPattern)]
+    .filter(([token]) => !token.startsWith('//') && !token.startsWith('/*'))
+  const value = index => tokens[index]?.[0]
+  const callEnd = start => {
+    let depth = 0
+    for (let index = start; index < tokens.length; index++) {
+      if (value(index) === '(') depth++
+      if (value(index) === ')' && --depth === 0) return index
+    }
+    return tokens.length
+  }
+  const lines = []
+  for (let index = 0; index < tokens.length; index++) {
+    if (value(index) !== 'getByLabel' || value(index + 1) !== '(') continue
+    const end = callEnd(index + 1)
+    const exact = tokens.slice(index + 2, end).some(([token], offset) =>
+      token === 'exact' && value(index + 3 + offset) === ':' && value(index + 4 + offset) === 'true')
+    if (!exact) continue
+    for (let next = end + 1; value(next) === '.' && value(next + 2) === '(';) {
+      if (value(next + 1) === 'selectOption') {
+        lines.push(source.slice(0, tokens[index].index).split('\n').length)
+        break
+      }
+      next = callEnd(next + 2) + 1
+    }
+  }
+  return lines
+}
+
+test('select locator guard flags exact labels, including multiline calls and chained locators', () => {
+  assert.deepEqual(exactLabelSelectLines(`await settings.getByLabel('Drawing units', { exact: true }).selectOption('m')`), [1])
+  assert.deepEqual(exactLabelSelectLines(`await form
+    .getByLabel('Phase', {
+      exact: true,
+    }).first().selectOption('0')`), [2])
+})
+
+test('select locator guard accepts combobox roles and separate statements', () => {
+  assert.deepEqual(exactLabelSelectLines(`await settings.getByRole('combobox', { name: 'Drawing units', exact: true }).selectOption('m')`), [])
+  assert.deepEqual(exactLabelSelectLines(`await form.getByLabel('Request', { exact: true }).fill('{}')
+    await form.getByRole('combobox', { name: 'Phase', exact: true }).selectOption('0')`), [])
+})
+
+test('all e2e select controls avoid exact label locators', () => {
+  const violations = []
+  const visit = (directory, relative = 'web/e2e') => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = `${relative}/${entry.name}`
+      const url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), directory)
+      if (entry.isDirectory()) visit(url, path)
+      else if (entry.isFile() && entry.name.endsWith('.mjs')) {
+        for (const line of exactLabelSelectLines(readFileSync(url, 'utf8'))) violations.push(`${path}:${line}`)
+      }
+    }
+  }
+  visit(new URL('../', import.meta.url))
+  assert.deepEqual(violations, [], `Use getByRole('combobox', { name, exact: true }) for select controls:\n${violations.join('\n')}`)
+})
 
 function fakeAuth(value) {
   const headers = {}
@@ -44,29 +186,29 @@ const stagingContextBody = (binding = stagingBinding, graph = stagingGraph()) =>
 
 test('staging network paths cover runtime APIs and retain only query keys', () => {
   for (const path of ['/api/projects', '/api/projects/p/drawing-versions/v/context', '/api/capabilities',
-    '/api/tools/catalog', '/api/session', '/api/drawings/d', '/api/campaigns', '/api/jobs/j']) {
+    '/api/tools/catalog', '/api/session', '/api/drawings/d', '/api/campaigns', '/api/jobs/j', '/api/run']) {
     assert.equal(stagingNetworkPath(`${stagingBase}${path}?drawing_id=private&token=secret&token=other&empty=`),
       `${path}?drawing_id&token&token&empty`)
   }
-  for (const path of ['/api/run', '/api/projectstuff', '/api/toolshed', '/app', '/assets/api/jobs']) {
+  for (const path of ['/app', '/assets/api/jobs']) {
     assert.equal(stagingNetworkPath(`${stagingBase}${path}?secret=value`), null)
   }
 })
 
-test('staging network reads only public error codes on HTTP errors', async () => {
+test('staging network reads only public error codes from response bodies', async () => {
   for (const [body, expected] of [
     [{ error_code: 'SCOPE_PENDING', private: 'secret' }, 'SCOPE_PENDING'],
     [{ error: { error_code: 'context_missing', detail: 'secret' } }, 'context_missing'],
     [{ error_code: 'not a public code', error: { error_code: 'fallback_code' } }, 'fallback_code'],
     [{ detail: 'secret' }, null],
   ]) assert.equal(await stagingErrorCode(stagingResponse('/api/session', body, 403)), expected)
-  assert.equal(await stagingErrorCode({ status: () => 200, json: () => assert.fail('success body read') }), null)
+  assert.equal(await stagingErrorCode(stagingResponse('/api/run', { error_code: 'RUN_PENDING' }, 202)), 'RUN_PENDING')
   assert.equal(await stagingErrorCode({ status: () => 500, json: async () => { throw new Error('not JSON') } }), null)
 })
 
-test('staging network retains the last 200 events, failures and timings without private content', async () => {
-  const page = new EventEmitter(), records = [], latest = {}
-  const finish = observeStagingNetwork(page, records, latest)
+test('staging network retains the last 40 events, failures and timings without private content', async () => {
+  const page = new EventEmitter(), records = []
+  const finish = observeStagingNetwork(page, records)
   const request = path => ({ url: () => `${stagingBase}${path}`, method: () => 'GET',
     timing: () => ({ startTime: 1, responseEnd: 12.6 }), failure: () => ({ errorText: 'net::ERR_FAILED' }) })
   page.emit('requestfailed', request('/api/projects/p/drawing-versions/early/context'))
@@ -77,18 +219,18 @@ test('staging network retains the last 200 events, failures and timings without 
     response.finished = async () => null
     page.emit('response', response)
   }
-  assert.equal(records.length, 200)
-  assert.match(stagingNetworkFailure(records, latest), /drawing-versions\/early\/context/)
-  assert.match(stagingNetworkFailure(records, latest), /capabilities/)
+  assert.equal(records.length, 40)
+  assert.equal(stagingNetworkFailure(records).includes('/early/context'), false)
   page.emit('requestfailed', request('/api/projects/p/drawing-versions/v/context?drawing_id=secret'))
   page.emit('requestfailed', request('/api/capabilities?tenant=secret'))
-  page.emit('requestfailed', request('/api/run?secret=value'))
+  page.emit('requestfailed', request('/api/run?token=value'))
   await finish()
-  assert.equal(records.length, 200)
-  assert.equal(records[0].path, '/api/jobs/7?token')
-  assert.deepEqual(records[0], { method: 'GET', path: '/api/jobs/7?token', duration_ms: 13,
+  assert.equal(records.length, 40)
+  assert.equal(records[0].path, '/api/jobs/168?token')
+  assert.deepEqual(records[0], { method: 'GET', path: '/api/jobs/168?token', duration_ms: 13,
     status: 500, error_code: 'JOB_FAILED' })
-  assert.equal(records.at(-1).failure, 'net::ERR_FAILED')
+  assert.equal(records.at(-1).status, 'failed')
+  assert.equal(records.at(-1).path, '/api/run?token')
   assert.equal(records.at(-1).duration_ms, 13)
   assert.equal(JSON.stringify(records).includes('secret'), false)
   const diagnostic = stagingNetworkFailure(records)
@@ -125,7 +267,87 @@ test('staging network observer errors never reject the diagnostic drain', async 
   page.emit('response', { request: () => { throw new Error('unavailable request') } })
   await finish()
   assert.deepEqual(records, [])
-  assert.equal(stagingNetworkFailure(records), 'Staging network: {"context":null,"capabilities":null}')
+  assert.equal(stagingNetworkFailure(records), 'Staging network: []\nStaging console: []')
+})
+
+test('pure staging diagnostics bound ordered rings and exclude headers and body fields', () => {
+  const requests = [], messages = []
+  const AUTH_HEADER = 'author' + 'ization'
+  const token = 'eyJhbGciOiJIUzI1NiJ9.payload.signature', capability = 'lco1.checkout-secret'
+  for (let index = 0; index < 45; index++) appendStagingRequest(requests, {
+    method: 'POST', path: `/api/run/${index}/${token}/${capability}?token=private&drawing_id=private`,
+    status: 403, duration_ms: index, error_code: 'RUN_REFUSED',
+    headers: { [AUTH_HEADER]: 'header-secret' }, body: { detail: 'body-secret' },
+  })
+  assert.equal(requests.length, 40)
+  assert.deepEqual(requests.map(row => row.duration_ms), Array.from({ length: 40 }, (_, index) => index + 5))
+  assert.equal(requests[0].path, '/api/run/5/[redacted]/[redacted]?token&drawing_id')
+  for (let index = 0; index < 25; index++) appendStagingConsole(messages, {
+    level: index % 2 ? 'warning' : 'error', text: `${index}: ${token} ${capability} ${'x'.repeat(400)}`,
+    headers: { [AUTH_HEADER]: 'header-secret' },
+  })
+  appendStagingConsole(messages, { level: 'log', text: 'ignored' })
+  assert.equal(messages.length, 20)
+  assert.ok(messages[0].text.startsWith('5: [redacted] [redacted]'))
+  assert.ok(messages.every(row => row.text.length === 300))
+  const output = stagingNetworkFailure(requests, messages)
+  for (const secret of [token, capability, 'private', 'header-secret', 'body-secret', 'ignored']) {
+    assert.equal(output.includes(secret), false)
+  }
+  assert.equal(redactSolarDiagnostic(' a '.repeat(200)).length, 300)
+  assert.equal(redactSolarDiagnostic({ headers: { [AUTH_HEADER]: 'header-secret' } }), '[unavailable]')
+})
+
+test('staging requests stay in initiation order when responses finish out of order', async () => {
+  const page = new EventEmitter(), records = []
+  const finish = observeStagingNetwork(page, records)
+  const requests = [1, 2].map(index => ({ url: () => `${stagingBase}/api/run/${index}`,
+    method: () => 'POST', timing: () => ({ startTime: 1, responseEnd: index }) }))
+  for (const request of requests) page.emit('request', request)
+  for (const request of [...requests].reverse()) page.emit('response', {
+    request: () => request, status: () => 202, json: async () => ({}), finished: async () => null,
+  })
+  await finish()
+  assert.deepEqual(records.map(row => row.path), ['/api/run/1', '/api/run/2'])
+  assert.equal(page.listenerCount('request'), 0)
+})
+
+test('Solar failure snapshot reads form, checkout and every alert before cleanup and tolerates unreadable locators', async () => {
+  let released = false
+  const text = value => ({ textContent: async () => { assert.equal(released, false); return value } })
+  const settings = {
+    getByTestId: id => text(`${id} eyJabc.def.ghi lco1.secret`),
+    getAttribute: async (name, options) => {
+      assert.deepEqual(options, { timeout: 2_000 })
+      return { 'data-mode': 'edit', 'data-submit-seq': ' 2 ',
+        'data-submit-exit': ' superseded_context eyJabc.def.ghi lco1.secret ' }[name]
+    },
+    getByRole: role => {
+      assert.equal(role, 'alert')
+      return { count: async () => 2, nth: index => text(`${index}: ${'a'.repeat(400)}`) }
+    },
+  }
+  const page = { getByRole: () => ({ getByRole: role => role === 'status' ? text('Checkout held')
+    : { isEnabled: async () => { assert.equal(released, false); return true } } }) }
+  const output = await projectSolarRunDiagnostic(page, settings, { isEnabled: async () => true })
+  released = true
+  const fields = JSON.parse(output.slice(output.indexOf('{')))
+  assert.equal(fields['data-mode'], 'edit')
+  assert.equal(fields['data-submit-seq'], '2')
+  assert.equal(fields['data-submit-exit'], 'superseded_context [redacted] [redacted]')
+  assert.equal(fields.startEnabled, 'true')
+  assert.equal(fields.checkoutStatus, 'Checkout held')
+  assert.equal(fields.releaseEnabled, 'true')
+  assert.equal(fields['solar-settings-reason'], 'solar-settings-reason [redacted] [redacted]')
+  assert.equal(fields['solar-settings-run'], 'solar-settings-run [redacted] [redacted]')
+  assert.deepEqual(fields.alerts.map(value => value.length), [300, 300])
+  const unavailable = await projectSolarRunDiagnostic({}, {}, {})
+  assert.equal(unavailable.includes('[unavailable]'), true)
+  const unreadable = await projectSolarRunDiagnostic({}, {
+    getAttribute: async () => { throw new Error('detached') } }, {})
+  const unreadableFields = JSON.parse(unreadable.slice(unreadable.indexOf('{')))
+  assert.equal(unreadableFields['data-submit-seq'], '[unavailable]')
+  assert.equal(unreadableFields['data-submit-exit'], '[unavailable]')
 })
 
 test('staging step persists evidence on pass and failure and preserves verdicts if evidence IO fails', async () => {
@@ -140,6 +362,7 @@ test('staging step persists evidence on pass and failure and preserves verdicts 
         timing: () => ({ startTime: 1, responseEnd: 10 }) })
       response.finished = async () => null
       page.emit('response', response)
+      page.emit('console', { type: () => 'warning', text: () => 'run blocked lco1.secret' })
       page.emit('requestfailed', { url: () => `${stagingBase}/api/capabilities`, method: () => 'GET',
         failure: () => ({ errorText: 'net::ERR_FAILED' }), timing: () => ({ startTime: 1, responseEnd: 20 }) })
       if (fail) throw failure
@@ -153,12 +376,14 @@ test('staging step persists evidence on pass and failure and preserves verdicts 
       assert.match(error.message, /workspace hidden\nStaging network:/)
       assert.match(error.message, /SCOPE_PENDING/)
       assert.match(error.message, /capabilities/)
+      assert.match(error.message, /Staging console:.*run blocked \[redacted\]/)
       return true
     })
     else assert.equal(await run(), 'passed')
     assert.equal(persisted.title, 'project-solar-open')
     assert.equal(persisted.evidence.projectSolar.network.length, 2)
     assert.equal(persisted.evidence.projectSolar.network[0].error_code, 'SCOPE_PENDING')
+    assert.equal(page.listenerCount('console'), 0)
   }
 })
 
@@ -468,14 +693,21 @@ test('shared tool opener reports a disabled Solve control only when refusal is p
 })
 
 test('shared publication supports initialize and existing scratch graphs through the staging adapters', async () => {
-  for (const mode of ['initialize', 'edit']) {
+  for (const scenario of ['initialize', 'edit', 'run-failure']) {
+    const mode = scenario === 'run-failure' ? 'edit' : scenario
     const events = [], values = {}
     const next = { ...stagingBinding, input_version_id: stagingIds[5] }
     const clickable = name => ({ isVisible: async () => true, isEnabled: async () => true,
       click: async () => events.push(name) })
     const settings = { getAttribute: async () => mode,
-      getByLabel: name => ({ fill: async value => { values[name] = value }, selectOption: async value => { values[name] = value } }),
-      getByRole: (_role, { name }) => clickable(name) }
+      getByTestId: id => ({ textContent: async () => {
+        assert.equal(events.includes('Release'), false)
+        return `${id}: checkout still held lco1.secret`
+      } }),
+      getByLabel: name => ({ fill: async value => { values[name] = value } }),
+      getByRole: (role, { name, exact }) => role === 'combobox' ? { selectOption: async value => {
+        assert.equal(name, 'Drawing units'); assert.equal(exact, true); values[name] = value
+      } } : clickable(name) }
     const runtime = { cleanup: [], evidence: { projectSolar: { steps: [] } }, projectSolar: {
       binding: stagingBinding, apiBase: stagingBase, context: { graph: mode === 'edit' ? stagingGraph() : null },
     } }
@@ -486,23 +718,85 @@ test('shared publication supports initialize and existing scratch graphs through
       locator: selector => selector.includes('editor') ? { isVisible: async () => false } : selector.includes('canvas')
         ? { count: 1, visible: true, evaluate: async () => true } : { count: async () => 0, visible: true, text: stagingIds[5] },
     }
-    await publishProjectSolar(runtime, stagingAssertions, { allowExistingGraph: true,
+    const publication = publishProjectSolar(runtime, stagingAssertions, { allowExistingGraph: true,
       action: async (_page, _base, method, path, click) => {
         await click()
         return stagingResponse(path, method === 'POST' ? { acquired: true, ...stagingBinding, checkout: { fence: '7' } }
           : { released: true, checkout: null })
       }, run: async options => {
         await options.action()
+        if (scenario === 'run-failure') throw new Error('no POST /api/run within 30 s')
         options.checkParams({ changes: { panels_in_sequence: mode === 'edit' ? 2 : 1 },
           ...(mode === 'initialize' ? { initialize: { units: { drawing_units: 'm' } } } : {}) })
         return { binding: next, context: { head: stagingIds[5] }, step: { output_version_id: stagingIds[5] } }
       } })
+    if (scenario === 'run-failure') {
+      await assert.rejects(publication, error => {
+        assert.match(error.message, /no POST \/api\/run within 30 s/)
+        assert.match(error.message, /Solar settings before cleanup:/)
+        assert.match(error.message, /checkout still held \[redacted\]/)
+        assert.match(error.message, /"startEnabled":"true"/)
+        assert.match(error.message, /"releaseEnabled":"true"/)
+        return true
+      })
+      await runtime.cleanup[0]()
+      assert.equal(events.at(-1), 'Release')
+      continue
+    }
+    await publication
     assert.equal(values['Panels in sequence'], mode === 'edit' ? '2' : '1')
     assert.equal(values['Drawing units'], mode === 'initialize' ? 'm' : undefined)
     assert.ok(events.includes(mode === 'edit' ? 'Apply settings' : 'Start Solar design'))
     assert.equal(runtime.evidence.projectSolar.publishedHead, stagingIds[5])
     await runtime.cleanup[0]()
     assert.equal(events.at(-1), 'Release')
+  }
+})
+
+test('shared publication reports settings diagnostics when its button never enables', async () => {
+  for (const mode of ['initialize', 'edit']) {
+    const buttonName = mode === 'initialize' ? 'Start Solar design' : 'Apply settings'
+    const timeoutError = new Error('button enable wait timed out')
+    const reads = []
+    const clickable = { isVisible: async () => true, isEnabled: async () => true, click: async () => {} }
+    const start = { click: () => assert.fail('disabled publication must not submit') }
+    const settings = { getAttribute: async () => mode,
+      getByLabel: () => ({ fill: async () => {} }),
+      getByRole: (role, { name }) => {
+        if (role === 'combobox') return { selectOption: async () => {} }
+        assert.equal(name, buttonName)
+        return start
+      },
+      getByTestId: testId => ({ count: async () => 1, textContent: async options => {
+        assert.deepEqual(options, { timeout: 2_000 })
+        reads.push(testId)
+        return testId === 'solar-settings-reason' ? '  Drawing calibration is required.  ' : `  ${'r'.repeat(310)}  `
+      } }),
+    }
+    const runtime = { cleanup: [], evidence: { projectSolar: { steps: [] } }, projectSolar: {
+      binding: stagingBinding, apiBase: stagingBase, context: { graph: null },
+    }, page: {
+      getByRole: role => role === 'group' ? { getByRole: () => clickable } : clickable,
+      getByTestId: name => name === 'solar-settings-form' ? settings : { locator: () => clickable },
+      locator: () => ({ isVisible: async () => false }),
+    } }
+    const assertions = value => value === start ? { toBeEnabled: async options => {
+      assert.deepEqual(options, { timeout: 30_000 })
+      throw timeoutError
+    } } : stagingAssertions(value)
+    assertions.poll = stagingAssertions.poll
+    await assert.rejects(publishProjectSolar(runtime, assertions, { allowExistingGraph: true,
+      action: async (_page, _base, _method, path, click) => {
+        await click()
+        return stagingResponse(path, { acquired: true, ...stagingBinding, checkout: { fence: '7' } })
+      }, run: () => assert.fail('disabled publication must not run'),
+    }), error => {
+      assert.equal(error.cause.cause, timeoutError)
+      assert.equal(error.cause.message, `${buttonName} did not become enabled within 30 s; solar-settings-reason: Drawing calibration is required.; solar-settings-run: ${'r'.repeat(300)}`)
+      assert.ok(error.message.includes('Drawing calibration is required.'))
+      return true
+    })
+    assert.deepEqual(reads, ['solar-settings-reason', 'solar-settings-run'])
   }
 })
 
@@ -520,7 +814,10 @@ test('proposal review attempts an enabled UI solve even when the catalog says no
     page.getByRole = (role, { name } = {}) => role === 'form' ? {
       getByLabel: label => ({ isEnabled: async () => scenario !== 'disabled-fields',
         fill: async value => { fields[label] = value }, selectOption: async value => { fields[label] = value } }),
-      getByRole: role => role === 'status' ? { allTextContents: async () => [status] } : submit,
+      getByRole: (role, { name, exact } = {}) => role === 'status' ? { allTextContents: async () => [status] }
+        : role === 'combobox' ? { selectOption: async value => {
+          assert.equal(name, 'Phase'); assert.equal(exact, true); fields[name] = value
+        } } : submit,
     } : { visible: true, click: () => assert.fail(`must never click ${name}`) }
     const runtime = { page, projectSolar: { apiBase: stagingBase, binding: stagingBinding, context: { graph: null },
       catalog: [{ runnable: false, reason_code: 'SOLVE_CONTEXT_REQUIRED' }] } }
@@ -1035,12 +1332,24 @@ const censusAssertions = (value) => ({
 
 const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
 
+test('project Solar walk functions and staging steps contain no untimed empty-argument clicks', () => {
+  for (const name of ['assertProjectSolarDrawing', 'openProjectSolar', 'selectProjectSolarVersion',
+    'openProjectSolarTool', 'takeProjectSolarCheckout', 'publishProjectSolar', 'switchProjectSolarForms']) {
+    const start = fixtureSource.indexOf(`export async function ${name}(`)
+    assert.ok(start >= 0, `missing function ${name}`)
+    const end = fixtureSource.indexOf('\nexport ', start + 1)
+    const body = fixtureSource.slice(start, end < 0 ? undefined : end)
+    assert.doesNotMatch(body, /\.click\(\s*\)/, name)
+  }
+  assert.doesNotMatch(readFileSync(new URL('../walk-staging/projectSolarSteps.mjs', import.meta.url), 'utf8'), /\.click\(\s*\)/)
+})
+
 test('WL16b canonical import opens material intake through the Upload drawing ribbon action', () => {
   const source = fixtureSource.slice(fixtureSource.indexOf('export async function openProjectSolar('),
     fixtureSource.indexOf('export async function openProjectSolarTool('))
   const steps = [
-    "await page.getByRole('tab', { name: 'Browser', exact: true }).click()",
-    "await page.getByRole('button', { name: 'Upload drawing', exact: true }).click()",
+    "await walkClick(page.getByRole('tab', { name: 'Browser', exact: true }), 'Open Browser tab')",
+    "await walkClick(page.getByRole('button', { name: 'Upload drawing', exact: true }), 'Upload drawing')",
     'const material = page.locator(\'[data-pane="material-intake"]\')',
     "await assertions(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()",
   ]
