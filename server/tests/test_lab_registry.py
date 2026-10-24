@@ -39,6 +39,28 @@ def test_total_effect(capability, adapter, execution, live, effect):
     assert registry.total_effect(capability, adapter, execution, live) == effect
 
 
+@pytest.mark.parametrize("capability,execution,host_source,residency", [
+    ("host.value", "inline", None, "host"),
+    ("host.value", "worker", None, "host"),
+    ("pure.value", "inline", "kashbot.engine", "host"),
+    ("read.value", "inline", "mcp.example", "host"),
+    ("value", "handoff", None, "host"),
+    ("pure.value", "inline", None, "none"),
+    ("hosted.value", "inline", None, "none"),
+    ("read.value", "inline", None, "tenant"),
+    ("simulate.value", "inline", None, "tenant"),
+    ("pure.value", "worker", None, "tenant"),
+])
+def test_total_residency(capability, execution, host_source, residency):
+    assert registry.total_residency(capability, execution, host_source) == residency
+
+
+def test_seed_residency_agrees_with_table():
+    for block in registry._seed_registry().values():
+        assert block.residency == registry.total_residency(
+            block.capability, block.execution_class, block.host_source)
+
+
 def test_lookup():
     assert registry.lookup("qa-sleep-count", "1.0.0").effect == "pure"
     for source in registry.KASHBOT_CLASSES:
@@ -62,10 +84,34 @@ def test_register(extension):
     block = registry.register_extension(extension)
     assert registry.lookup(block.kind, block.version) is block
     assert block.effect == "read"
+    assert block.residency == "tenant"
     assert block.runnable_in_production
     assert block.returns_schema_digest is None
     with pytest.raises(ManifestInvalid):
         registry.register_extension(extension)
+
+
+@pytest.mark.parametrize("capability,execution,host_source,residency", [
+    ("read.value", "inline", None, "tenant"),
+    ("pure.value", "inline", None, "none"),
+    ("host.value", "inline", None, "host"),
+    ("read.value", "inline", "mcp.example", "host"),
+    ("read.value", "handoff", None, "host"),
+])
+@pytest.mark.parametrize("declare_residency", [False, True])
+def test_register_derived_residency(extension, capability, execution, host_source,
+                                   residency, declare_residency):
+    extension.update(capability=capability, execution_class=execution)
+    if host_source is not None:
+        extension["host_source"] = host_source
+    if declare_residency:
+        extension["residency"] = residency
+    block = registry.register_extension(extension)
+    assert block.residency == residency
+    assert block.host_source == host_source
+    data = manifest()
+    data.update(kind=block.kind, effect=block.effect, residency=residency)
+    assert validate_manifest(data) is block
 
 
 def test_register_returns_schema(extension):
@@ -92,10 +138,10 @@ def test_register_rejects_remote_returns_schema_ref(extension):
     ("worker", "read.value", "compute"), ("inline", "simulate.value", "simulate"),
 ])
 def test_extension_manifest_roundtrip(extension, execution, capability, effect):
-    extension.update(execution_class=execution, capability=capability, residency="none")
+    extension.update(execution_class=execution, capability=capability, residency="tenant")
     block = registry.register_extension(extension)
     data = manifest()
-    data.update(kind=block.kind, effect=effect, residency="none")
+    data.update(kind=block.kind, effect=effect, residency="tenant")
     assert validate_manifest(data) is block
 
 
@@ -185,7 +231,10 @@ def test_A1_concurrent_registration_refuses_duplicate(extension, monkeypatch):
     assert registry.lookup(extension["kind"], extension["version"]) is blocks[0]
 
 
-@pytest.mark.parametrize("field,value", [("effect", "compute"), ("residency", "unknown")])
+@pytest.mark.parametrize("field,value", [
+    ("effect", "compute"), ("residency", "unknown"), ("residency", "host"),
+    ("residency", "none"),
+])
 def test_A2_extension_declarations_cannot_spoof(extension, field, value):
     extension[field] = value
     before = dict(registry.REGISTRY)
@@ -195,12 +244,12 @@ def test_A2_extension_declarations_cannot_spoof(extension, field, value):
         "detail": "lab_manifest_spoof", "pointer": "/" + field, "block": extension["id"],
     })
     assert registry.REGISTRY == before
-    extension.update(effect="read", residency="none")
+    extension.update(effect="read", residency="tenant")
     block = registry.register_extension(extension)
     data = manifest()
     data.update(kind=block.kind, effect=block.effect, residency=block.residency)
     assert validate_manifest(data) is block
-    data[field] = value if field == "effect" else "tenant"
+    data[field] = value
     with pytest.raises(ManifestInvalid) as caught:
         validate_manifest(data)
     assert caught.value.code == "lab_manifest_spoof"

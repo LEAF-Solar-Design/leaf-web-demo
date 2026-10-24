@@ -14,7 +14,7 @@ PORT_DIGEST = "1093ae826c50fd89996c5e611dd184c7b6c3a3a0d662f4a477b73bec2829e264"
 
 def manifest():
     value = json.loads((ROOT / "contract/fixtures/lab/blocks.json").read_text(encoding="utf-8"))["manifests"][0]
-    value.update(kind="qa-sleep-count", effect="pure", residency="tenant")
+    value.update(kind="qa-sleep-count", effect="pure", residency="none")
     return value
 
 
@@ -49,7 +49,8 @@ def test_C1_manifest_admits_and_bounds_returns_schema(schema, pointer):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("effect", "read"), ("residency", "host"), ("effect", "unknown"), ("residency", "unknown"),
+    ("effect", "read"), ("residency", "host"), ("residency", "tenant"),
+    ("effect", "unknown"), ("residency", "unknown"),
 ])
 def test_spoof(field, value):
     data = manifest()
