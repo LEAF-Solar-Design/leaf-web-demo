@@ -1335,6 +1335,7 @@ def test_all_skipped_pytest_suite_fails_even_when_reason_is_allowlisted(tmp_path
 # "no database" skip stops being tolerated the moment a DSN reached the child.
 _GATE_DSN = "postgresql://postgres@127.0.0.1:5432/leaf_gate_fixture"
 _DATABASE_SUITE_IDS = (
+    "server-lab-run-store",
     "server-w1-commit-solve-adapter", "server-jobs-tenant-inflight-cap",
     "server-drawing-authority-postgres", "server-agent-gate-postgres",
     "server-agent-ops-postgres", "server-broker-pg-store",
@@ -1364,6 +1365,18 @@ def _database_suite(g, tmp_path, sid, *, uses_database=True, db_gated=False):
                     uses_database=uses_database, db_gated=db_gated,
                     database_skip_reasons=(r"DATABASE_URL is not set",))
     return suite, seen
+
+
+def test_lab_run_store_gate_registration():
+    g = _load_runner()
+    suite = next(s for s in g.build_suites() if s.id == "server-lab-run-store")
+    assert suite.argv == g._py_pytest("tests/test_lab_run_store.py")
+    assert suite.kind == "pytest" and suite.expected == 22
+    assert suite.uses_database and not suite.db_gated
+    assert suite.allowed_skip_reasons == ()
+    assert suite.database_skip_reasons == (r"platform DB unreachable: .+",)
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1
 
 
 def test_database_suites_take_the_gate_dsn_and_no_longer_allowlist_its_absence():

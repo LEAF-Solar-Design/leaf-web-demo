@@ -87,6 +87,11 @@ on:
       - 'server/jobs.py'
       - 'server/ops_metrics_read.py'
       - 'server/platform_link.py'
+      - 'server/lab_artifacts.py'
+      - 'server/lab_registry.py'
+      - 'server/lab_run_store.py'
+      - 'server/tests/test_lab_artifacts.py'
+      - 'server/tests/test_lab_run_store.py'
       - 'server/routers/drawings.py'
       - 'server/routers/ops.py'
       - 'server/routers/uploads.py'
@@ -207,6 +212,38 @@ jobs:
           if [[ "${out,,}" == *skipped* ]]; then
             printf '%s\n' "$out"
             echo 'FAIL: schema_status authority tests skipped - DATABASE_URL is not reaching pytest.'
+            exit 1
+          fi
+
+      - name: Run Lab ledger PostgreSQL suite
+        working-directory: server
+        run: |
+          test -n "${DATABASE_URL:-}"
+          if ! out=$(python -m pytest -q -rs tests/test_lab_artifacts.py 2>&1); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: Lab ledger tests skipped - DATABASE_URL is not reaching pytest.'
+            exit 1
+          fi
+
+      - name: Run Lab run store PostgreSQL suite
+        working-directory: server
+        env:
+          LEAF_LAB_RUN_STORE: postgres_required
+        run: |
+          test -n "${DATABASE_URL:-}"
+          if ! out=$(python -m pytest -q -rs tests/test_lab_run_store.py 2>&1); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out" | tail -5
+          if [[ "${out,,}" == *skipped* ]]; then
+            printf '%s\n' "$out"
+            echo 'FAIL: Lab run store tests skipped - DATABASE_URL is not reaching pytest.'
             exit 1
           fi
 
