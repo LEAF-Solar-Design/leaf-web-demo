@@ -50,6 +50,7 @@ class TrustedBlock:
     execution_class: str
     aps_live: bool
     host: str
+    returns_schema_digest: str | None = None
 
     @property
     def runnable_in_production(self):
@@ -87,7 +88,7 @@ def lookup(kind, version):
 
 
 def register_extension(manifest):
-    from lab_validate import ManifestInvalid
+    from lab_validate import ManifestInvalid, validate_returns_schema
 
     def fail(field, code="lab_extension_incomplete"):
         raise ManifestInvalid(code, "/" + field, manifest.get("id"))
@@ -131,7 +132,15 @@ def register_extension(manifest):
         fail("residency")
     if host not in ("production", "pc"):
         fail("host")
-    block = TrustedBlock(kind, version, effect, residency, capability, adapter, execution, live, host)
+    returns_schema_digest = None
+    if "returns_schema" in manifest:
+        try:
+            returns_schema_digest = validate_returns_schema(manifest["returns_schema"])
+        except ManifestInvalid as error:
+            raise ManifestInvalid(error.code, "/returns_schema" + error.pointer,
+                                  manifest.get("id")) from error
+    block = TrustedBlock(kind, version, effect, residency, capability, adapter, execution, live, host,
+                         returns_schema_digest)
     if (kind, version) in REGISTRY:
         fail("kind", "lab_manifest_unregistrable")
     REGISTRY[(kind, version)] = block

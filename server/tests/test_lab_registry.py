@@ -5,7 +5,7 @@ from time import perf_counter
 import pytest
 
 import lab_registry as registry
-from lab_validate import ManifestInvalid, validate_manifest
+from lab_validate import ManifestInvalid, validate_manifest, validate_returns_schema
 from test_lab_validate import ROOT, manifest
 
 
@@ -61,8 +61,29 @@ def test_register(extension):
     assert registry.lookup(block.kind, block.version) is block
     assert block.effect == "read"
     assert block.runnable_in_production
+    assert block.returns_schema_digest is None
     with pytest.raises(ManifestInvalid):
         registry.register_extension(extension)
+
+
+def test_register_returns_schema(extension):
+    extension["returns_schema"] = {"type": "object", "properties": {"value": {"type": "string"}}}
+    block = registry.register_extension(extension)
+    assert registry.lookup(block.kind, block.version) is block
+    assert block.returns_schema_digest == validate_returns_schema(extension["returns_schema"])
+
+
+def test_register_rejects_remote_returns_schema_ref(extension):
+    extension["returns_schema"] = {"$ref": "https://example.invalid"}
+    before = dict(registry.REGISTRY)
+    with pytest.raises(ManifestInvalid) as caught:
+        registry.register_extension(extension)
+    assert caught.value.code == "lab_returns_schema_bounds"
+    assert caught.value.pointer == "/returns_schema/$ref"
+    assert caught.value.block_id == extension["id"]
+    assert caught.value.to_http()[0] == 422
+    assert registry.lookup(extension["kind"], extension["version"]) is None
+    assert registry.REGISTRY == before
 
 
 @pytest.mark.parametrize("execution,capability,effect", [
