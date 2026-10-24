@@ -20,9 +20,14 @@ KASHBOT_CLASSES = ("engine", "book", "market", "feed", "run", "position",
                    "settlement", "tuning", "engine-lab", "tape")
 
 
+def _valid_capability(value):
+    return (isinstance(value, str) and len(value) <= 128
+            and re.fullmatch(r"[a-z][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)*", value) is not None)
+
+
 def total_effect(capability, solar_adapter, execution_class, aps_live):
-    if (not isinstance(capability, str) or not capability.strip()
-            or (solar_adapter is not None and not isinstance(solar_adapter, str))
+    if (not _valid_capability(capability)
+            or (solar_adapter is not None and not _valid_capability(solar_adapter))
             or not isinstance(execution_class, str)
             or execution_class not in ("inline", "worker", "handoff")
             or type(aps_live) is not bool):
@@ -140,6 +145,10 @@ def register_extension(manifest):
             or not re.fullmatch(r"[a-z][a-z0-9]*(-[a-z0-9]+)*", block_id)):
         fail("id", "lab_manifest_invalid")
     capability = manifest.get("capability")
+    if not _valid_capability(capability):
+        fail("capability", "lab_manifest_invalid")
+    if manifest.get("solar_adapter") is not None and not _valid_capability(manifest["solar_adapter"]):
+        fail("solar_adapter", "lab_manifest_invalid")
     if isinstance(capability, str) and (capability == "money" or capability.startswith("money.")):
         fail("capability", "lab_manifest_unregistrable")
     schema = manifest.get("schema")

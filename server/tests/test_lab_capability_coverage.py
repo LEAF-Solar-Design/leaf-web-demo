@@ -5,6 +5,8 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -159,13 +161,26 @@ def test_J1_family_status_is_strongest_member(inventory, statuses, expected):
 
 def test_J2_gate_counts_cover_parametrized_baseline():
     tree = ast.parse((ROOT / "scripts/run-all-gates.py").read_text(encoding="utf-8"))
-    expected = {"server-lab-registry": 96, "server-lab-validate": 31}
+    suites = {
+        "server-lab-registry": "tests/test_lab_registry.py",
+        "server-lab-validate": "tests/test_lab_validate.py",
+        "server-catalog-returns-schema": "tests/test_catalog_returns_schema.py",
+        "server-lab-capability-coverage": "tests/test_lab_capability_coverage.py",
+    }
     counts = {node.args[0].value: ast.literal_eval(node.args[5])
               for node in ast.walk(tree)
               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
               and node.func.id == "Suite" and len(node.args) > 5
-              and isinstance(node.args[0], ast.Constant) and node.args[0].value in expected}
-    assert counts == expected
+              and isinstance(node.args[0], ast.Constant) and node.args[0].value in suites}
+    assert counts.keys() == suites.keys()
+    for suite, path in suites.items():
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", path, "--collect-only", "-q"],
+            cwd=ROOT / "server", capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        node_ids = [line for line in result.stdout.splitlines() if line.startswith(path + "::")]
+        assert len(node_ids) == counts[suite], (suite, len(node_ids), counts[suite])
 
 
 def test_pc_cannot_run(inventory):

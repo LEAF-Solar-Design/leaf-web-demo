@@ -35,6 +35,10 @@ from test_lab_validate import ROOT, manifest
     ("value", None, [], False, "refused"),
     ("value", None, "batch", False, "refused"),
     ("value", None, "inline", 1, "refused"),
+    ("read.value\n", None, "inline", False, "refused"),
+    ("read.value", "simulate\n", "inline", False, "refused"),
+    ("Read.value", None, "inline", False, "refused"),
+    ("a" * 129, None, "inline", False, "refused"),
 ])
 def test_total_effect(capability, adapter, execution, live, effect):
     assert registry.total_effect(capability, adapter, execution, live) == effect
@@ -61,6 +65,14 @@ def test_seed_residency_agrees_with_table():
     for block in registry._seed_registry().values():
         assert block.residency == registry.total_residency(
             block.effect, block.capability, block.execution_class, block.host_source)
+
+
+def test_K1_seed_effects_are_preserved():
+    for block in registry._seed_registry().values():
+        expected = "read" if block.kind.startswith("kashbot.") else "pure"
+        assert block.effect == expected
+        assert registry.total_effect(block.capability, block.solar_adapter,
+                                     block.execution_class, block.aps_live) == expected
 
 
 def test_seed_solar_adapter_residency(monkeypatch):
@@ -99,6 +111,24 @@ def test_register(extension):
     assert block.returns_schema_digest is None
     with pytest.raises(ManifestInvalid):
         registry.register_extension(extension)
+
+
+@pytest.mark.parametrize("field", ["capability", "solar_adapter"])
+@pytest.mark.parametrize("value", [
+    "read.value\n", "simulate\n", "Read.value", "a" * 129, "", " read.value",
+    "read..value", "read.Value", "read.-value", "read/value",
+])
+def test_K1_extension_capability_grammar(extension, field, value):
+    extension[field] = value
+    before = dict(registry.REGISTRY)
+    assert registry.total_effect(extension["capability"], extension.get("solar_adapter"),
+                                 "inline", False) == "refused"
+    with pytest.raises(ManifestInvalid) as caught:
+        registry.register_extension(extension)
+    assert caught.value.to_http() == (422, {
+        "detail": "lab_manifest_invalid", "pointer": "/" + field, "block": extension["id"],
+    })
+    assert registry.REGISTRY == before
 
 
 @pytest.mark.parametrize("host_source", ["", [], None, 7, "x" * 129, "host\n"])

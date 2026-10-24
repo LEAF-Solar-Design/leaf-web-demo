@@ -22,6 +22,30 @@ def test_valid_manifest():
     assert validate_manifest(manifest()) is lookup("qa-sleep-count", "1.0.0")
 
 
+@pytest.mark.parametrize("field", ["capability", "solar_adapter"])
+@pytest.mark.parametrize("value", [
+    "read.value\n", "simulate\n", "Read.value", "a" * 129, "", " read.value",
+    "read..value", "read.Value", "read.-value", "read/value",
+])
+def test_K1_manifest_capability_grammar(field, value):
+    data = manifest()
+    data[field] = value
+    with pytest.raises(ManifestInvalid) as caught:
+        validate_manifest(data)
+    assert caught.value.to_http() == (422, {
+        "detail": "lab_manifest_invalid", "pointer": "/" + field, "block": data["id"],
+    })
+
+
+@pytest.mark.parametrize("capability,adapter", [
+    ("read.engine-lab", None), ("a" * 128, "simulate"), ("read.0_value", "adapter.v2"),
+])
+def test_K1_manifest_valid_capability_text(capability, adapter):
+    data = manifest()
+    data.update(capability=capability, solar_adapter=adapter)
+    assert validate_manifest(data) is lookup("qa-sleep-count", "1.0.0")
+
+
 @pytest.mark.parametrize("field", ["id", "version"])
 def test_J4_identity_requires_full_string_match(field):
     data = manifest()
