@@ -1301,6 +1301,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_contract_freeze.py"), 14),
         Suite("server-lab-contract", "server tests/test_lab_contract.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_contract.py"), 117),
+        Suite("server-lab-ops", "server tests/test_lab_ops_conformance.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_ops_conformance.py"), 188),
         Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_surface.py"), 36),
         Suite("server-lab-artifacts", "server tests/test_lab_artifacts.py", "pytest", SERVER,
