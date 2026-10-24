@@ -55,6 +55,8 @@ import type { StoreReadiness } from "./storeReadiness.js";
 import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { GitRefConflictError } from "./ports/impl/tenantChangeRepo.js";
 import { ForgePublicationError } from "./vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
+import type { LabDocumentPort } from "./vendor/mushy-author/ports/labDocumentPort.js";
+import { handleLabCommit, LAB_COMMIT_MAX_BODY_BYTES } from "./lab/labCommit.js";
 import { classifyRoute } from "./routing.js";
 import {
   DEFAULT_TENANT,
@@ -822,6 +824,8 @@ export function createHarness(ports: HarnessPorts, opts?: {
   /** Glug maintenance runs in this grant-owning sidecar. Git publication and
    * provider credentials remain in the calling control plane. */
   glugMushyAuthor?: GlugMushyAuthor;
+  /** absent -> POST /lab/commit ships dark (501) */
+  labDocuments?: LabDocumentPort;
   /** GET /ready: the harness's own session and grant store readiness, built from
    * the stores the composition root already constructed (createReadinessCheck
    * coalesces and caches). Absent -> /ready answers 404, which the app's harness
@@ -937,6 +941,18 @@ export function createHarness(ports: HarnessPorts, opts?: {
       const auth = explicitAuth ?? resolveHarnessAuth();
       const denial = harnessAuthDenial(req, auth);
       if (denial) return send(res, 401, denial);
+
+      if (method === "POST" && path === "/lab/commit") {
+        res.setHeader("cache-control", "no-store");
+        if (!opts?.labDocuments) {
+          return send(res, 501, {
+            error: { code: "lab_commit_unavailable", message: "Lab commit is unavailable" },
+          });
+        }
+        const body = await readJsonBody(req, LAB_COMMIT_MAX_BODY_BYTES, true, false, true);
+        const result = await handleLabCommit(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
+        return send(res, result.status, result.body);
+      }
 
       if (method === "POST" && path === "/internal/glug/mushy/author") {
         if (!opts?.glugMushyAuthor) {

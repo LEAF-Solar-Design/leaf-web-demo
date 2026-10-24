@@ -98,9 +98,114 @@ function submitAction() {
   fireEvent.click(screen.getByRole('button', { name: 'Send order now' }))
 }
 const actionPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) => url.endsWith('/integrations/actions') && options.method === 'POST')
+const uncertainAction = { ...actionRun, revision: 2, state: 'uncertain', effect_outcome: 'unknown' }
+const unknownReceipt = { schema_version: 1, receipt_id: projectId, run_id: actionRun.run_id, sequence: 1,
+  submission_digest: actionRun.submission_digest, operation_ref: actionRun.operation_ref,
+  observed_at: actionRun.updated_at, effect_outcome: 'unknown' }
+const unknownSnapshot = { run: uncertainAction, receipts: [unknownReceipt] }
+const reconciledSnapshot = { run: { ...actionRun, revision: 3, state: 'succeeded', effect_outcome: 'applied' },
+  receipts: [{ ...unknownReceipt, receipt_id: otherProject, sequence: 2, effect_outcome: 'applied' }] }
+const reconciliationPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) => url.endsWith('/reconcile') && options.method === 'POST')
+function setupReconciliation() {
+  const harness = setupAction()
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/reconcile')) return Promise.resolve(response(reconciledSnapshot))
+    if (url.includes('/integrations/actions/')) return Promise.resolve(response(unknownSnapshot))
+    return original(url, options)
+  })
+  return harness
+}
+async function observeUncertainAction() {
+  await openAction()
+  submitAction()
+  fireEvent.click(await screen.findByRole('button', { name: 'Check status' }))
+  await screen.findByText('Uncertain. Outcome unknown.')
+}
 beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
+const browsedDraftRef = { id: 'schedule-draft-existing', version: 2, digest: 'd'.repeat(64) }
+const browsedDraft = { schema_version: 1, id: browsedDraftRef.id, version: browsedDraftRef.version, title: 'Previously saved draft',
+  workflow_ref: reference, state: 'draft', schedule: { kind: 'daily', timezone: 'US/Eastern', hour: 9, minute: 5,
+    gap_policy: 'next_valid_minute', fold_policy: 'first_occurrence' } }
+function draftRoutes(harness, projectRole = 'owner') {
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/scope')) return Promise.resolve(response({ ...scope, projectRole }))
+    if (url.includes('/manual-workflow-schedule-drafts?')) return Promise.resolve(response({ references: [browsedDraftRef], nextCursor: null }))
+    if (url.includes('/manual-workflow-schedule-drafts/')) return Promise.resolve(response(browsedDraft))
+    return original(url, options)
+  })
+}
+const draftReads = fetchImpl => fetchImpl.mock.calls.filter(([url]) => url.includes('/manual-workflow-schedule-drafts'))
+async function chooseExistingDraft() {
+  fireEvent.click(screen.getByRole('button', { name: 'Load drafts' }))
+  fireEvent.click(await screen.findByRole('button', { name: `Select draft ${browsedDraftRef.id}, version 2` }))
+}
+it.each(['owner', 'editor'])('places the inert saved draft browser first for returning %s with explicit reads only', async projectRole => {
+  const harness = setup(); draftRoutes(harness, projectRole)
+  const { props, fetchImpl } = harness
+  const { rerender } = render(<OpsWorkspaceGround {...props} mode="dark" />); await loaded()
+  rerender(<OpsWorkspaceGround {...props} mode="dark" />)
+  expect(draftReads(fetchImpl)).toHaveLength(0)
+  const browser = screen.getByRole('region', { name: 'Saved schedule drafts' })
+  const preview = screen.getByRole('heading', { name: 'Daily schedule preview' })
+  expect(browser.compareDocumentPosition(preview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  await chooseExistingDraft()
+  await screen.findByText(browsedDraft.title)
+  expect(draftReads(fetchImpl).map(([url]) => url.split('/integrations/')[1])).toEqual([
+    'manual-workflow-schedule-drafts?limit=25',
+    `manual-workflow-schedule-drafts/${browsedDraftRef.id}/versions/2?digest=${browsedDraftRef.digest}`,
+  ])
+  expect(fetchImpl.mock.calls.every(([, request]) => request.method === 'GET')).toBe(true)
+  expect(screen.getByText('09:05')).toBeInTheDocument()
+  expect(screen.getByText('This is a saved draft. Nothing is scheduled or authorized to run.')).toBeInTheDocument()
+})
+it.each(['reviewer', 'read_only'])('does not offer draft discovery to %s', async projectRole => {
+  const harness = setup(); draftRoutes(harness, projectRole)
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  expect(screen.queryByRole('button', { name: 'Load drafts' })).toBeNull()
+  expect(draftReads(harness.fetchImpl)).toHaveLength(0)
+})
+it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('blocks saved discovery before dispatch on complete scope %s drift', async key => {
+  const harness = setup(); draftRoutes(harness)
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  const drift = key === 'projectRole' ? 'reviewer' : key === 'externalSubject' ? 'auth0|other' : key === 'externalAuthority' ? 'other' : otherProject
+  vi.spyOn(harness.props.client, 'getScope').mockResolvedValueOnce({ ...scope, [key]: drift })
+  fireEvent.click(screen.getByRole('button', { name: 'Load drafts' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(draftReads(harness.fetchImpl)).toHaveLength(0)
+  expect(screen.queryByRole('region', { name: 'Saved schedule drafts' })).toBeNull()
+})
+it.each(['session', 'account', 'project', 'client', 'inactive'])('clears an actual Ground draft read on %s change and discards late completion', async kind => {
+  const harness = setup(); draftRoutes(harness)
+  const { props, fetchImpl, sessionController } = harness
+  const original = fetchImpl.getMockImplementation()
+  let finish
+  fetchImpl.mockImplementation((url, options) => url.includes('/manual-workflow-schedule-drafts/') ?
+    new Promise(resolve => { finish = resolve }) : original(url, options))
+  const { rerender } = render(<OpsWorkspaceGround {...props} />); await loaded(); await chooseExistingDraft()
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  expect(screen.getByText('Loading saved draft.')).toBeInTheDocument()
+  const readSignal = draftReads(fetchImpl)[1][1].signal
+  if (kind === 'session') act(() => sessionController.change({ status: 'expired', generation: 2 }))
+  else rerender(<OpsWorkspaceGround {...props} {...({ account: { accountScope: 'account-b' }, project: { projectId: otherProject },
+    client: { client: { ...props.client } }, inactive: { active: false } })[kind]} />)
+  expect(readSignal.aborted).toBe(true)
+  await act(async () => finish(response(browsedDraft)))
+  expect(screen.queryByText(browsedDraft.title)).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Retry draft read' })).toBeNull()
+})
+it.each([401, 403])('routes saved draft HTTP %s through Ground forbidden handling', async status => {
+  const harness = setup(); draftRoutes(harness)
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => url.includes('/manual-workflow-schedule-drafts/') ?
+    Promise.resolve(response({}, status)) : original(url, options))
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await chooseExistingDraft()
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(screen.queryByRole('region', { name: 'Saved schedule drafts' })).toBeNull()
+})
 const schedulePreview = { schema_version: 1, preview_only: true, occurrence: { scheduledLocalDate: '2026-01-01',
   instant: '2026-01-01T09:30:00Z', timezone: 'UTC', hour: 9, minute: 30,
   occurrenceKey: JSON.stringify(['daily', 'UTC', 9, 30, '2026-01-01']) } }
@@ -501,6 +606,116 @@ it('checks a known run using GET and renders canonical receipts with personal di
   expect(statusCalls).toHaveLength(1)
   expect(statusCalls[0][1].method).toBe('GET')
 })
+it('reconciles an uncertain run once per explicit click without resubmission and retains its history', async () => {
+  const { props, fetchImpl } = setupReconciliation()
+  let finish
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/reconcile')
+    ? new Promise((resolve) => { finish = resolve }) : original(url, options))
+  render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  expect(reconciliationPosts(fetchImpl)).toHaveLength(0)
+  const before = fetchImpl.mock.calls.length
+  const button = screen.getByRole('button', { name: 'Reconcile outcome' })
+  fireEvent.click(button)
+  fireEvent.click(button)
+  await waitFor(() => expect(reconciliationPosts(fetchImpl)).toHaveLength(1))
+  expect(screen.getByText('Reconciliation pending. The action outcome is still unknown.')).toBeInTheDocument()
+  expect(button).toBeDisabled()
+  expect(screen.getByRole('list', { name: 'Action history' }).querySelectorAll('li')).toHaveLength(1)
+  expect(fetchImpl.mock.calls.slice(before).map(([url]) => url.split('/').at(-1))).toEqual(['scope', 'orders-connection', 'reconcile'])
+  await act(async () => finish(response(reconciledSnapshot)))
+  await screen.findByText('The action succeeded and was applied.')
+  const history = screen.getByRole('list', { name: 'Action history' })
+  expect(history.querySelectorAll('li')).toHaveLength(2)
+  expect(history).toHaveTextContent('Action applied')
+  expect(screen.queryByRole('button', { name: 'Reconcile outcome' })).toBeNull()
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1)
+  const statusCalls = fetchImpl.mock.calls.filter(([url]) => url.endsWith(`/actions/${actionRun.run_id}`))
+  expect(statusCalls).toHaveLength(1)
+  expect(statusCalls[0][1].method).toBe('GET')
+})
+it.each(['unknown', 'failure', 'unsupported', 'forbidden', 'missing-client'])('retains uncertainty after %s reconciliation', async (outcome) => {
+  const { props, fetchImpl } = setupReconciliation()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/reconcile')
+    ? Promise.resolve(response(outcome === 'unknown' ? unknownSnapshot : { secret: 'private reconciliation failure' },
+      outcome === 'failure' ? 503 : outcome === 'unsupported' ? 404 : outcome === 'forbidden' ? 403 : 200)) : original(url, options))
+  if (outcome === 'missing-client') props.client.reconcileAction = undefined
+  render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Check status' })).toBeInTheDocument())
+  expect(screen.getByText('Uncertain. Outcome unknown.')).toBeInTheDocument()
+  expect(screen.getByRole('list', { name: 'Action history' }).querySelectorAll('li')).toHaveLength(1)
+  expect(screen.queryByRole('button', { name: 'Start another action' })).toBeNull()
+  expect(screen.queryByText(/The action was not submitted\./)).toBeNull()
+  expect(document.body.textContent).not.toContain('private reconciliation failure')
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+  expect(reconciliationPosts(fetchImpl)).toHaveLength(outcome === 'missing-client' ? 0 : 1)
+  if (outcome === 'forbidden') expect(screen.getByRole('button', { name: 'Reconcile outcome' })).toBeDisabled()
+  if (outcome === 'unknown') {
+    fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Check status' })).toBeInTheDocument())
+    expect(reconciliationPosts(fetchImpl)).toHaveLength(2)
+    expect(actionPosts(fetchImpl)).toHaveLength(1)
+    expect(globalThis.crypto.randomUUID).toHaveBeenCalledTimes(1)
+  }
+})
+it.each(['scope', 'role', 'grant', 'revoked', 'ref', 'operation'])('refuses reconciliation before dispatch on fresh %s drift', async (change) => {
+  const { props, fetchImpl, authority } = setupReconciliation()
+  render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  if (change === 'scope') authority.scope = { ...scope, bindingId: otherProject }
+  if (change === 'role') authority.scope = { ...scope, projectRole: 'read_only' }
+  if (change === 'grant') authority.connection = { ...actionConnection, grant_revision: 8 }
+  if (change === 'revoked') authority.connection = { ...actionConnection, state: 'revoked' }
+  if (change === 'ref') authority.connection = { ...actionConnection, connector_ref: { ...reference, version: 4 } }
+  if (change === 'operation') authority.connection = { ...actionConnection, operation_ids: ['other'] }
+  fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+  await screen.findByRole('button', { name: 'Retry action authority' })
+  expect(screen.getByRole('button', { name: 'Reconcile outcome' })).toBeDisabled()
+  expect(screen.getByText('Uncertain. Outcome unknown.')).toBeInTheDocument()
+  expect(screen.queryByText(/The action was not submitted\./)).toBeNull()
+  expect(reconciliationPosts(fetchImpl)).toHaveLength(0)
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+})
+it('prevents reconciliation dispatch after an ignored late authority read in an invalidated context', async () => {
+  const { props, fetchImpl } = setupReconciliation()
+  const { rerender } = render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  let finish
+  const getScope = vi.spyOn(props.client, 'getScope').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = getScope.mock.calls[0][1].signal
+  rerender(<OpsWorkspaceGround {...props} active={false} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish(scope))
+  expect(reconciliationPosts(fetchImpl)).toHaveLength(0)
+  expect(screen.queryByRole('region', { name: 'Action run status' })).toBeNull()
+})
+it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('aborts reconciliation and rejects ignored late results on %s invalidation', async (change) => {
+  const { props, fetchImpl, sessionController } = setupReconciliation()
+  let finish
+  const reconcile = vi.spyOn(props.client, 'reconcileAction').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+  const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
+  await observeUncertainAction()
+  fireEvent.click(screen.getByRole('button', { name: 'Reconcile outcome' }))
+  await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1))
+  const signal = reconcile.mock.calls[0][2].signal
+  if (change === 'unmount') unmount()
+  else if (change === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else if (change === 'status') act(() => sessionController.change({ status: 'expired' }))
+  else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } :
+    change === 'account' ? { accountScope: 'account-b' } : { active: false })} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish(reconciledSnapshot))
+  expect(screen.queryByRole('region', { name: 'Action run status' })).toBeNull()
+  expect(screen.queryByText('The action succeeded and was applied.')).toBeNull()
+  expect(actionPosts(fetchImpl)).toHaveLength(1)
+})
 it.each(['reviewer', 'read_only'])('never loads execution authority for a %s', async (projectRole) => {
   const { props, fetchImpl, authority } = setupAction()
   authority.scope = { ...scope, projectRole }
@@ -743,6 +958,121 @@ async function composeWorkflow() {
   fireEvent.change(screen.getByLabelText('Step 1 action'), { target: { value: JSON.stringify([
     catalogAction.connection_id, catalogAction.connector_ref, catalogAction.operation_ref]) } })
 }
+async function composeActionForm() {
+  fireEvent.click(screen.getByRole('button', { name: 'Load permitted actions' }))
+  await screen.findByRole('option', { name: /Send order · Orders connection/ })
+  fireEvent.change(screen.getByLabelText('Form title'), { target: { value: 'New order form' } })
+  fireEvent.change(screen.getByLabelText('Form stable ID'), { target: { value: 'new-order-form' } })
+  fireEvent.change(screen.getByLabelText('Permitted action'), { target: {
+    value: screen.getByRole('option', { name: /Send order · Orders connection/ }).value } })
+}
+function setupActionComposer() {
+  const harness = setupAction()
+  const original = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => url.includes('/action-catalog?')
+    ? Promise.resolve(response({ actions: [{ ...catalogAction, form: actionElement.form }], next_cursor: null })) : original(url, options))
+  return harness
+}
+it.each(['owner', 'editor', 'reviewer', 'read_only'])('admits the action form composer only for current owner/editor (%s)', async (projectRole) => {
+  const { props, authority, fetchImpl } = setupActionComposer()
+  authority.scope = { ...scope, projectRole }
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(Boolean(screen.queryByRole('region', { name: 'Create an action form' }))).toBe(['owner', 'editor'].includes(projectRole))
+  expect(fetchImpl.mock.calls.some(([url]) => url.includes('/action-catalog?'))).toBe(false)
+})
+it.each(['owner', 'editor'])('adds the exact created record to Saved views and opens the native form inertly as %s', async (projectRole) => {
+  const { props, authority, fetchImpl } = setupActionComposer()
+  authority.scope = { ...scope, projectRole }
+  const submit = vi.spyOn(props.client, 'submitAction')
+  const reconcile = vi.spyOn(props.client, 'reconcileAction')
+  const start = vi.spyOn(props.client, 'submitManualWorkflow')
+  const saveElement = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeActionForm()
+  fireEvent.click(screen.getByRole('button', { name: 'Save action form' }))
+  const open = await screen.findByRole('button', { name: 'New order form · revision 3' })
+  expect(screen.getAllByRole('button', { name: 'New order form · revision 3' })).toHaveLength(1)
+  expect(saveElement).toHaveBeenCalledExactlyOnceWith(projectId, { ...actionElement, id: 'new-order-form', title: 'New order form' },
+    { signal: expect.any(AbortSignal) })
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  expect(screen.getByRole('region', { name: 'Create manual workflow' })).toBeInTheDocument()
+  expect(screen.getByRole('form', { name: 'Compose native view' })).toBeInTheDocument()
+  fireEvent.click(open)
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send order now' })).toBeEnabled())
+  expect(screen.getByLabelText('Order note (required)')).toBeInTheDocument()
+  expect(submit).not.toHaveBeenCalled()
+  expect(reconcile).not.toHaveBeenCalled()
+  expect(start).not.toHaveBeenCalled()
+  expect(fetchImpl.mock.calls.filter(([, options]) => options.method === 'POST').map(([url]) => url.split('/integrations/')[1])).toEqual(['elements'])
+})
+it('keeps one current action form when later saved-view pages repeat its ID', async () => {
+  const { props } = setupActionComposer()
+  const created = { element: { ...actionElement, id: 'new-order-form', title: 'New order form' }, revision: 3 }
+  const unseen = { element: { ...element, id: 'other-view', title: 'Other view' }, revision: 1 }
+  const stale = { element: { ...created.element, title: 'Stale form' }, revision: 2 }
+  const list = vi.spyOn(props.client, 'listElements').mockResolvedValueOnce({ records: [saved], nextCursor: 'next' })
+    .mockResolvedValueOnce({ records: [stale, created, unseen, unseen], nextCursor: null })
+  const submit = vi.spyOn(props.client, 'submitAction')
+  const reconcile = vi.spyOn(props.client, 'reconcileAction')
+  const start = vi.spyOn(props.client, 'submitManualWorkflow')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeActionForm()
+  fireEvent.click(screen.getByRole('button', { name: 'Save action form' }))
+  await screen.findByRole('button', { name: 'New order form · revision 3' })
+  fireEvent.click(screen.getByRole('button', { name: 'Load more saved views' }))
+  await screen.findByRole('button', { name: 'Other view · revision 1' })
+  expect(screen.getAllByRole('button', { name: 'New order form · revision 3' })).toHaveLength(1)
+  expect(screen.getAllByRole('button', { name: 'Other view · revision 1' })).toHaveLength(1)
+  expect(screen.queryByRole('button', { name: /Stale form/ })).toBeNull()
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Load more saved views' })).toBeNull()
+  expect(list.mock.calls[1][1]).toMatchObject({ after: 'next' })
+  fireEvent.click(screen.getByRole('button', { name: 'New order form · revision 3' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Send order now' })).toBeEnabled())
+  expect(submit).not.toHaveBeenCalled()
+  expect(reconcile).not.toHaveBeenCalled()
+  expect(start).not.toHaveBeenCalled()
+})
+it.each(['tenantId', 'projectId', 'platformUserId', 'bindingId', 'projectRole', 'externalAuthority', 'externalSubject'])('blocks action form creation and clears input on fresh %s drift', async (field) => {
+  const { props, authority } = setupActionComposer()
+  const saveElement = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeActionForm()
+  authority.scope = { ...scope, [field]: field === 'projectRole' ? 'reviewer' : field === 'externalSubject' ? 'auth0|other' : field === 'externalAuthority' ? 'other' : otherProject }
+  if (field === 'projectId' || field === 'externalAuthority') vi.spyOn(props.client, 'getScope').mockResolvedValueOnce(authority.scope)
+  fireEvent.click(screen.getByRole('button', { name: 'Save action form' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(saveElement).not.toHaveBeenCalled()
+  expect(screen.queryByLabelText('Form title')).toBeNull()
+})
+it.each(['project', 'account', 'generation', 'status', 'profile', 'unmount'])('aborts action form creation and ignores its late record on %s change', async (change) => {
+  const { props, sessionController } = setupActionComposer()
+  let finish
+  const saveElement = vi.spyOn(props.client, 'saveElement').mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+  const { rerender, unmount } = render(<OpsWorkspaceGround {...props} />)
+  await loaded(); await composeActionForm()
+  fireEvent.click(screen.getByRole('button', { name: 'Save action form' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = saveElement.mock.calls[0][2].signal
+  if (change === 'unmount') unmount()
+  else if (change === 'generation') act(() => sessionController.change({ generation: 2 }))
+  else if (change === 'status') act(() => sessionController.change({ status: 'expired' }))
+  else rerender(<OpsWorkspaceGround {...props} {...(change === 'project' ? { projectId: otherProject } : change === 'account' ? { accountScope: 'account-b' } : { active: false })} />)
+  expect(signal.aborted).toBe(true)
+  await act(async () => finish({ element: { ...actionElement, id: 'new-order-form', title: 'New order form' }, revision: 1 }))
+  expect(screen.queryByRole('button', { name: /New order form · revision/ })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Check saved form' })).toBeNull()
+})
+it('routes a forbidden action catalog result through host permission handling', async () => {
+  const { props } = setupActionComposer()
+  vi.spyOn(props.client, 'getActionCatalog').mockRejectedValue({ status: 403 })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'Load permitted actions' }))
+  await screen.findByText('You do not have permission to view these integrations.')
+  expect(screen.queryByRole('region', { name: 'Create an action form' })).toBeNull()
+})
 function setupComposer() {
   const harness = setupAction()
   const original = harness.fetchImpl.getMockImplementation()

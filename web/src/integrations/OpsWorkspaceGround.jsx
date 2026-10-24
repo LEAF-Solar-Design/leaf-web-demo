@@ -9,7 +9,9 @@ import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
+import { ActionDefinitionPanel } from './ActionDefinitionPanel.jsx'
 import { WorkflowSchedulePreviewPanel } from './WorkflowSchedulePreviewPanel.jsx'
+import { WorkflowScheduleDraftBrowser } from './WorkflowScheduleDraftBrowser.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 import './ops-workspace.css'
 
@@ -23,7 +25,7 @@ export function scopeCacheIdentity(scope, generation) {
 }
 
 export function OpsWorkspaceGround({ active = false, projectId = null, projectLabel, session, signedIn = false, accountScope, mock = false,
-  leavingGround = null, studioShell = false, occluders = NO_OCCLUDERS, client: suppliedClient }) {
+  leavingGround = null, studioShell = false, occluders = NO_OCCLUDERS, client: suppliedClient, mode }) {
   const client = useMemo(() => suppliedClient || createIntegrationsClient(), [suppliedClient])
   const [state, setState] = useState(empty)
   const [form, setForm] = useState(blankForm)
@@ -143,7 +145,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     if (!ctx || !current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
     const scope = await client.getScope(projectId, { signal })
     if (!current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
-    if (!['owner', 'editor'].includes(scope.projectRole) || scopeCacheIdentity(scope, ctx.sessionGeneration) !== ctx.cacheIdentity) {
+    if (scope.projectId !== projectId || !['owner', 'editor'].includes(scope.projectRole) || scopeCacheIdentity(scope, ctx.sessionGeneration) !== ctx.cacheIdentity) {
       fail({ status: 403 }, ctx)
       throw new DOMException('Aborted', 'AbortError')
     }
@@ -225,7 +227,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       actionAvailability(binding, error?.status === 403 ? 'forbidden' : 'unavailable')
     }
   }
-  async function actionCallback(binding, callerSignal, submission, runId) {
+  async function actionCallback(binding, callerSignal, mode, submission, runId) {
     let submissionStarted = false
     const controller = new AbortController()
     const abort = () => controller.abort()
@@ -259,7 +261,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         throw new Error('This action has changed. Refresh it before continuing.')
       }
       let result
-      if (runId) result = await client.getAction(projectId, runId, { signal: controller.signal })
+      if (mode === 'reconcile') result = await client.reconcileAction(projectId, runId, { signal: controller.signal })
+      else if (mode === 'status') result = await client.getAction(projectId, runId, { signal: controller.signal })
       else {
         submissionStarted = true
         result = await client.submitAction(projectId, submission, { signal: controller.signal })
@@ -269,7 +272,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       return result
     } catch (error) {
       if (error?.status === 403) actionAvailability(binding, 'forbidden')
-      if (submission && !submissionStarted && error?.name !== 'AbortError') throw new IntegrationActionPreflightError()
+      if (mode === 'submit' && submission && !submissionStarted && error?.name !== 'AbortError') throw new IntegrationActionPreflightError()
       throw error
     } finally { signals.forEach((signal) => signal.removeEventListener('abort', abort)) }
   }
@@ -315,8 +318,18 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       const isDataset = resource === 'datasets'
       const page = await client[isDataset ? 'listDatasets' : 'listElements'](projectId, { signal: ctx.controller.signal,
         after: isDataset ? state.datasetCursor : state.elementCursor })
-      if (current(ctx)) setState((old) => ({ ...old, [resource]: [...old[resource], ...page.records],
-        [isDataset ? 'datasetCursor' : 'elementCursor']: page.nextCursor }))
+      if (current(ctx)) setState((old) => {
+        let records = [...old[resource], ...page.records]
+        if (!isDataset) {
+          const byId = new Map()
+          for (const record of records) {
+            const previous = byId.get(record.element.id)
+            if (!previous || record.revision > previous.revision) byId.set(record.element.id, record)
+          }
+          records = [...byId.values()]
+        }
+        return { ...old, [resource]: records, [isDataset ? 'datasetCursor' : 'elementCursor']: page.nextCursor }
+      })
     })
   }
   const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
@@ -332,6 +345,18 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
         {state.error && <div role="alert"><p>{state.error}</p><button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button></div>}
         {state.scope && <>
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WorkflowScheduleDraftBrowser
+            key={JSON.stringify(['schedule-drafts', identity.key, context.current.cacheIdentity])}
+            contextKey={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
+            signal={context.current.controller.signal} guard={guardWorkflow} mode={mode === 'light' || mode === 'dark' ? mode : undefined}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
+          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ActionDefinitionPanel
+            key={JSON.stringify(['action-definition', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
+            signal={context.current.controller.signal} guard={guardWorkflow}
+            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
+            onSaved={(record) => { const ctx = context.current; if (ctx && current(ctx)) setState((old) => ({ ...old,
+              elements: [...old.elements.filter((item) => item.element.id !== record.element.id), record],
+              notice: `Saved ${record.element.title}, revision ${record.revision}. No action was submitted.` })) }} />}
           {['owner', 'editor', 'reviewer', 'read_only'].includes(state.scope.projectRole) && context.current && <WorkflowSchedulePreviewPanel
             key={JSON.stringify(['schedule-preview', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardSchedulePreview}
@@ -406,8 +431,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
                 {state.action.binding.grantRevision !== null ? <IntegrationActionForm
                   element={state.selected.element} contextKey={JSON.stringify([context.current?.cacheIdentity, sessionGeneration, state.selected.revision, state.action.binding.request])}
                   grantRevision={state.action.binding.grantRevision} availability={state.action.availability} displayPreferences={preferences}
-                  onSubmit={(submission, signal) => actionCallback(state.action.binding, signal, submission)}
-                  onCheckStatus={(runId, signal) => actionCallback(state.action.binding, signal, null, runId)} />
+                  onSubmit={(submission, signal) => actionCallback(state.action.binding, signal, 'submit', submission)}
+                  onCheckStatus={(runId, signal) => actionCallback(state.action.binding, signal, 'status', null, runId)}
+                  onReconcile={(runId, signal) => actionCallback(state.action.binding, signal, 'reconcile', null, runId)} />
                   : <p role="status">{state.action.availability === 'forbidden' ? 'You do not have permission to perform this action.' :
                     state.action.availability === 'stale' ? 'This action has changed. Refresh it before continuing.' : 'This action is unavailable.'}</p>}
                 {state.action.availability !== 'ready' && <button disabled={pending} onClick={() => refreshAction(state.action.binding)}>Retry action authority</button>}

@@ -97,6 +97,60 @@ The cores accept `className`/`style` for layout, use `--leaf-*` tokens with
 host CSS-variable and package-token fallbacks, and fit their parent without
 global CSS. Provider strings render as text, never raw HTML.
 
+## Inert schedule draft form (separate actions entry)
+
+Import `IntegrationWorkflowScheduleDraftForm` and
+`IntegrationWorkflowScheduleDraftSaveError` from `./vendor/assistant-react/src/actions`.
+Props are canonical `initialDraft`, opaque nonempty `contextKey` (include organization,
+project, principal and authorization revision), `availability` (`ready`, `unavailable`,
+`forbidden`), optional `mode` (`light`, `dark`), and `onSave(draft, signal): Promise<unknown>`.
+The host supplies immutable id/version/workflow reference and owns authorization,
+reference existence, timezone support, immutable persistence and digest computation.
+The callback receives a direct canonical draft and must acknowledge it with a canonical
+`IntegrationRefV1` matching the draft id/version. Saving remains inert: this component
+never schedules, activates or authorizes a run, and a manual workflow reference does
+not grant unattended eligibility.
+
+Only explicit Save draft invokes the host. Acknowledgement locks this version;
+conflict requires a new host version. Rejection, malformed/mismatched acknowledgement,
+availability loss and the 45-second abort deadline mean unknown outcome: inputs stay
+locked and explicit Retry save receives a fresh copy of the identical frozen payload.
+There are no automatic retries. The host must safely reconcile identical retries.
+Only the trusted error class's `invalid_timezone` code certifies that persistence did
+not occur and permits correction, with fixed support copy and timezone focus; after
+an earlier unknown outcome it cannot unlock the possibly persisted version. Its
+`conflict` code locks the version without retry. Other errors use fixed unknown copy;
+exception text is never displayed. The error class grants no authority. Context or
+canonical draft changes discard scoped inputs and abort pending work; equivalent props
+retain edits. Invalid props unmount the active form. Hosts must supply a new identity
+or context to begin another save after success.
+
+## Inert schedule draft picker (separate actions entry)
+
+Import `IntegrationWorkflowScheduleDraftPicker` from `./vendor/assistant-react/src/actions`.
+Supply opaque nonempty `contextKey` (organization, project, principal and authorization
+revision), `availability` (`ready`, `unavailable`, `forbidden`), optional `mode`
+(defaults to `light`), `onLoadPage(query, signal): Promise<unknown>`, and synchronous
+`onSelect(reference): void`. The host read returns exactly `{ references, nextCursor }`:
+at most 25 canonical `IntegrationRefV1` values and a null or nonempty cursor of at most
+2048 characters. This page shape is a local UI adapter, not a persisted contract.
+
+Loading is explicit. Load drafts / Refresh requests `{ limit: 25 }`; Next forwards the
+exact opaque cursor as `after`. Retry repeats the failed query. Only one page is kept;
+an empty page with a continuation still offers Next. Failed, malformed, nonadvancing
+or timed-out reads retain the last verified page with selection disabled until a
+successful read. The 45-second deadline aborts the signal; no read retries automatically.
+Scope or readiness changes and unmount abort pending reads and discard scoped state.
+Re-created callback identities do not reset the page; hosts must change `contextKey`
+when the authorization binding changes and honor the supplied abort signal.
+
+Rows show only draft ID/version, in host order. Selection sends an independent exact
+id/version/digest copy; another row may be chosen deliberately. Selection does not
+load details, save, schedule, activate or authorize a run. Hosts own discovery access,
+reference existence, digest equality, persistence and scheduling eligibility. This
+component has no transport or runtime authority; host adoption requires separate
+runtime and current owner/editor authorization verification.
+
 ## States
 
 `src/states.ts` holds every VI.3 state as data: its copy and exactly one exit.
@@ -106,9 +160,12 @@ global CSS. Provider strings render as text, never raw HTML.
 ## Tokens
 
 Colours, fonts and the 44 px target come from `src/leaf-tokens.v1.json`,
-the package-local copy of `contract/leaf-tokens.v1.json`, which holds the
-ops-dashboard globals.css values (K-D10).
-`AssistantRoot` sets them as `--leaf-*` custom properties; components reference
+the byte-equal package-local copy of `contract/leaf-tokens.v1.json`.
+`tokenStyle("light" | "dark")` resolves shared colour roles, fonts, spacing and
+radii from `profiles.mushy`; legacy-only colour keys retain their pinned values.
+The existing `LEAF_TOKENS`, `color`, `font`, `radius` and `SERIES` exports stay
+available. `AssistantRoot` sets resolved `--leaf-*` custom properties, including
+the existing assistant variable names; components reference
 `var(--leaf-*)` only, and a test fails any component that carries a literal
 colour. Reduced motion is honoured in CSS and in the stream's scrolling.
 
