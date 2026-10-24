@@ -1371,6 +1371,7 @@ footer .warn-txt { color: var(--status-warning); }
 
 /* --- 3B: checkout take/release affordances (calm, not amber-alarm) --- */
 .checkout-controls { display: inline-flex; align-items: center; gap: 8px; }
+.checkout-controls > p { margin: 0; }
 .checkout-mine {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 11px; color: var(--primary);

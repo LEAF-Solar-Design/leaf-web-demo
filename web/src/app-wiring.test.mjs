@@ -999,6 +999,49 @@ describe('R13F project Solar execution and form ingresses', () => {
   })
 })
 
+describe('project checkout toolbar row', () => {
+  it('keeps the project group styled, with a full-text status title and toolbar buttons', () => {
+    const controls = r13One((node) => node.type === 'FunctionDeclaration' && node.id.name === 'ProjectSolarCheckoutControls')
+    const root = controls.body.body.find((node) => node.type === 'ReturnStatement').argument
+    assert.equal(r13Text(root.callee), 'React.createElement')
+    assert.equal(root.arguments[0].value, 'div')
+    const prop = (element, name) => element.arguments[1].properties.find((node) => (node.key.name ?? node.key.value) === name)?.value
+    assert.equal(prop(root, 'role').value, 'group')
+    assert.equal(prop(root, 'aria-label').value, 'Project checkout')
+    assert.equal(prop(root, 'className').value, 'checkout-controls project-checkout')
+    const [status, ...buttons] = root.arguments.slice(2)
+    assert.equal(status.arguments[0].value, 'p')
+    assert.equal(prop(status, 'role').value, 'status')
+    assert.equal(r13Text(prop(status, 'title')), r13Text(status.arguments[2]))
+    assert.equal(r13Text(prop(status, 'title')), 'projectSolarAppReason(checkout.reason)')
+    assert.deepEqual(buttons.map((button) => button.arguments[2].value), ['Take', 'Release', 'Retry'])
+    for (const button of buttons) {
+      assert.equal(button.arguments[0].value, 'button')
+      assert.equal(prop(button, 'className').value, 'btn ghost')
+    }
+  })
+
+  it('keeps the project-open CAD and Solar checkout row compact and ellipsizes its status', () => {
+    const readCss = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+    const css = readCss('./site/cockpit.css')
+    const scope = '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .project-checkout'
+    const rule = (selector) => {
+      const blocks = css.split(selector + ' {')
+      assert.equal(blocks.length, 2, selector + ' has one scoped rule')
+      return blocks[1].split('}')[0]
+    }
+    const group = rule(scope)
+    for (const declaration of ['display: inline-flex', 'align-items: center', 'gap: 4px', 'flex-wrap: nowrap', 'min-width: 0', 'flex: 0 1 auto']) {
+      assert.ok(group.includes(declaration + ';'), declaration)
+    }
+    const status = rule(scope + ' p[role="status"]')
+    for (const declaration of ['margin: 0', 'min-width: 0', 'white-space: nowrap', 'overflow: hidden', 'text-overflow: ellipsis', 'max-width: 320px', 'font: 400 11px/20px var(--ck-font)']) {
+      assert.ok(status.includes(declaration + ';'), declaration)
+    }
+    assert.match(readCss('./styles.css'), /\.checkout-controls\s*>\s*p\s*\{\s*margin:\s*0;\s*\}/)
+  })
+})
+
 describe('R13F project Solar catalog attachment', () => {
   const tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
   const find = (predicate) => {
