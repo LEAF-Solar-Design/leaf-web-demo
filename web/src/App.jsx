@@ -334,11 +334,12 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
   }, [actions])
 
   return React.createElement('div',
-    { role: 'group', 'aria-label': 'Project checkout' },
-    React.createElement('p', { role: 'status' },
+    { role: 'group', 'aria-label': 'Project checkout', className: 'checkout-controls project-checkout' },
+    React.createElement('p', { role: 'status', title: projectSolarAppReason(checkout.reason) },
       projectSolarAppReason(checkout.reason)),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: !checkout.canTake,
       onClick: () => {
         if (!isCurrent() || !checkout.canTake) return
@@ -347,6 +348,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
     }, 'Take'),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: !checkout.canRelease,
       onClick: () => {
         if (!isCurrent() || !checkout.canRelease) return
@@ -355,6 +357,7 @@ function ProjectSolarCheckoutControls({ projectClient, checkout, isCurrent }) {
     }, 'Release'),
     React.createElement('button', {
       type: 'button',
+      className: 'btn ghost',
       disabled: checkout.pending,
       onClick: () => {
         if (!isCurrent() || checkout.pending) return
