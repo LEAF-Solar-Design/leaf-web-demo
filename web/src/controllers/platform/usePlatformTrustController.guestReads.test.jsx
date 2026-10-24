@@ -17,6 +17,25 @@ function fakeServices() {
 }
 
 describe('platform trust guest reads', () => {
+  it('clears signed-in usage, entitlements and grant when reads pause', async () => {
+    const services = fakeServices()
+    const { result, rerender } = renderHook(
+      ({ guestReadsPaused }) => usePlatformTrustController({ mock: false, guestReadsPaused, services }),
+      { initialProps: { guestReadsPaused: false } },
+    )
+    await waitFor(() => {
+      expect(result.current.usage).toEqual({ used: 0 })
+      expect(result.current.entitlements).toEqual({ features: {} })
+      expect(result.current.grant).toEqual({ linked: false })
+    })
+
+    rerender({ guestReadsPaused: true })
+
+    expect(result.current.usage).toBeNull()
+    expect(result.current.entitlements).toBeNull()
+    expect(result.current.grant).toBeNull()
+  })
+
   it('loads only public health for a known guest', async () => {
     const services = fakeServices()
     const { result } = renderHook(() => usePlatformTrustController({

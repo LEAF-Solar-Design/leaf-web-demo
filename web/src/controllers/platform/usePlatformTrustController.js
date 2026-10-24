@@ -62,7 +62,7 @@ export default function usePlatformTrustController({
   useEffect(() => {
     controller.setMock(mock)
     if (mock) return
-    if (guestReadsPaused) controller.loadHealth()
+    if (guestReadsPaused) { controller.clearSessionReads(); controller.loadHealth() }
     else if (autoLoad) controller.refreshAll()
   }, [autoLoad, controller, guestReadsPaused, mock])
 

@@ -113,7 +113,8 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
 
   useEffect(() => {
     let active = true
-    if (mock || readsPaused || view !== 'history') return undefined
+    if (mock || readsPaused) { setHistory(null); setHistoryLoading(false); return undefined }
+    if (view !== 'history') return undefined
     setHistoryLoading(true)
     setHistory(null)
     getCostHistory(historyFrom, historyTo).then((result) => { if (active) setHistory(result) }).finally(() => {
