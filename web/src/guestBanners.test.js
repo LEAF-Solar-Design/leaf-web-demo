@@ -92,6 +92,17 @@ describe('known guest authenticated reads', () => {
     expect(options.properties.map(text)).toEqual(['mock', 'guestReadsPaused: knownGuest'])
   })
 
+  it('keeps the drawer Refresh from reading usage for a known guest', () => {
+    const refresh = one((node) => node.type === 'ObjectExpression'
+      && node.properties.some((property) => property.key?.name === 'label' && property.value?.value === 'Refresh')
+      && node.properties.some((property) => property.key?.name === 'onClick'))
+    const onClick = refresh.node.properties.find((property) => property.key?.name === 'onClick')
+    expect(text(onClick.value)).toBe('() => { if (!knownGuest) loadUsage(); loadHealth() }')
+    const session = one((node) => node.type === 'CallExpression' && node.callee.name === 'useCallback'
+      && text(node.arguments[0].body).includes("'Session · provenance'"))
+    expect(text(session.node.arguments[1].elements.at(-1))).toBe('knownGuest')
+  })
+
   it('stops the quota re-poll for a known guest', () => {
     const poll = one((node) => node.type === 'CallExpression' && node.callee.name === 'useEffect'
       && text(node.arguments[0].body).includes('setInterval(loadUsage, 60_000)'))
