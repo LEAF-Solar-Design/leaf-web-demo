@@ -4,29 +4,29 @@
   "chunks": {
     "App.css": 10465,
     "App.js": 123279,
-    "ElementContextMenu.js": 34274,
+    "ElementContextMenu.js": 34275,
     "LeafPlatformScene.css": 494,
-    "LeafPlatformScene.js": 9061,
-    "OpsWorkspaceGround.js": 170295,
+    "LeafPlatformScene.js": 9060,
+    "OpsWorkspaceGround.js": 171412,
     "SheetsPage.css": 2583,
-    "SheetsPage.js": 5421,
+    "SheetsPage.js": 5418,
     "Viewer.js": 13583,
     "bridgeText.js": 21274,
     "index.css": 40176,
-    "index.js": 222898,
+    "index.js": 222900,
     "mockStageAuthority.js": 258,
-    "useAnnotations.js": 2024,
+    "useAnnotations.js": 2022,
     "vendor-react.js": 45884,
     "vendor-viewer.js": 123469,
     "worker-browser.js": 3824,
-    "LabGround.js": 26489,
+    "LabGround.js": 26487,
     "LabGround.css": 752,
-    "LabCanvas.js": 495976,
+    "LabCanvas.js": 495977,
     "string.js": 4533,
     "LabCanvas.css": 2547,
-    "hostBridge.js": 2623
+    "hostBridge.js": 2622
   },
-  "total": 1362182,
+  "total": 1363294,
   "total_allowance_bytes": 16384,
   "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers.",
   "stem_caps": {
@@ -299,5 +299,16 @@
       "web/src/lab/deploys/DeploysView.jsx",
       "web/src/lab/deploys/deploys.test.jsx"
     ]
+  },
+  "isolated_s92_final_measurement": {
+    "before_ref": "ffca34188e8a4ae32832796937429a06ae0c1aa5",
+    "after_ref": "bd4f806c8517a019201ff71ac2881315c34c159d",
+    "method": "Complete-runtime paired Vite builds with fixed identity, dependencies and configuration",
+    "before_total": 1374684,
+    "after_total": 1375796,
+    "delta": 1112,
+    "baseline_before": 1362182,
+    "unrelated_drift_excluded": 12502,
+    "measurement_sha256": "5331a06114c38b2f268c4b4049e05590c080177914177959f019dd7b9ff6045d"
   }
 }
