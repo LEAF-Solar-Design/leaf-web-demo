@@ -1305,6 +1305,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_lab_ops_conformance.py"), 188),
         Suite("server-lab-evaluate", "server tests/test_lab_evaluate.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_evaluate.py"), 119),
+        # 42 collected: 25 execute without DATABASE_URL, 17 PostgreSQL twins skip.
+        Suite("server-lab-worker", "server tests/test_lab_worker.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_worker.py"), 25, uses_database=True,
+              database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_surface.py"), 36),
         Suite("server-lab-artifacts", "server tests/test_lab_artifacts.py", "pytest", SERVER,
@@ -1313,7 +1317,7 @@ def build_suites() -> List[Suite]:
         Suite("server-lab-widgets", "server tests/test_lab_widgets.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_widgets.py"), 47),
         Suite("server-lab-run-store", "server tests/test_lab_run_store.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_run_store.py"), 22, uses_database=True,
+              _py_pytest("tests/test_lab_run_store.py"), 25, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-diff", "server tests/test_lab_diff.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_diff.py"), 7),
@@ -1623,7 +1627,7 @@ def build_suites() -> List[Suite]:
         # patching `Path.is_symlink` when the host refuses to create a link, so
         # it EXECUTES there rather than skipping.
         Suite("server-broker-boundary", "server tests/test_broker_boundary.py", "pytest",
-              SERVER, _py_pytest("tests/test_broker_boundary.py"), 86),
+              SERVER, _py_pytest("tests/test_broker_boundary.py") + ["tests/test_broker_egress_harness.py"], 86),
         # The /broker/run-plan route, boundary's companion: it owns the live-write
         # entry point's schema, identity, fail-closed and readiness-cache contracts.
         # Registered per the #29 fix-then-register rule after it sat UNREGISTERED

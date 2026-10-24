@@ -125,6 +125,126 @@ function fixture(name = STEP[0], { code = null, realGraph = false, rows = null }
 }
 const last = (values) => values[values.length - 1]
 
+function solveDraftFixture() {
+  const h = fixture('solar-solve-proposal')
+  h.row.params = { type: 'object', properties: { grant_ref: { type: 'string' } } }
+  return h
+}
+
+it('restores typed Solve values after a same-owner scope_stale remount', () => {
+  const h = solveDraftFixture()
+  h.mount({ openTool: h.row })
+  const frame = screen.getByLabelText('Frame')
+  const grant = screen.getByLabelText('Grant ref')
+  fireEvent.change(frame, { target: { value: 'kept-frame' } })
+  fireEvent.change(grant, { target: { value: 'kept-grant' } })
+  fireEvent.change(screen.getByLabelText('Phase'), { target: { value: '1' } })
+  h.current = false
+  h.update()
+  expect(screen.queryByLabelText('Frame')).toBeNull()
+  expect(h.view.container.querySelector('.project-solar-workspace-editor')).toBeNull()
+  expect(screen.getByRole('status')).toHaveTextContent(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale)
+  const fresh = { ...h.row, catalog_digest: 'sha256:' + 'd'.repeat(64),
+    params: { properties: { grant_ref: { type: 'string' } }, type: 'object' } }
+  h.rows = [fresh]
+  h.current = true
+  h.epoch += 1
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: [fresh] }] } })
+  expect(screen.getByLabelText('Frame')).not.toBe(frame)
+  expect(screen.getByLabelText('Grant ref')).not.toBe(grant)
+  expect(screen.getByLabelText('Frame')).toBeEnabled()
+  expect(screen.getByLabelText('Frame').value).toBe('kept-frame')
+  expect(screen.getByLabelText('Grant ref').value).toBe('kept-grant')
+  expect(screen.getByLabelText('Phase').value).toBe('1')
+  h.open(fresh)
+  expect(screen.getByLabelText('Frame').value).toBe('kept-frame')
+  expect(screen.getByLabelText('Grant ref').value).toBe('kept-grant')
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('a user Close discards the kept Solve draft', () => {
+  const h = solveDraftFixture()
+  h.mount({ openTool: h.row })
+  fireEvent.change(screen.getByLabelText('Frame'), { target: { value: 'old-frame' } })
+  fireEvent.change(screen.getByLabelText('Grant ref'), { target: { value: 'old-grant' } })
+  closeWorkspace()
+  expect(screen.queryByLabelText('Frame')).toBeNull()
+  expect(h.close).toHaveBeenCalledOnce()
+  h.open()
+  expect(screen.getByLabelText('Frame').value).toBe('')
+  expect(screen.getByLabelText('Grant ref').value).toBe('')
+})
+
+it('an owner change discards the kept Solve draft', () => {
+  for (const change of ['binding', 'authority']) {
+    const h = solveDraftFixture()
+    h.mount({ openTool: h.row })
+    fireEvent.change(screen.getByLabelText('Frame'), { target: { value: 'old-frame' } })
+    fireEvent.change(screen.getByLabelText('Grant ref'), { target: { value: 'old-grant' } })
+    const binding = change === 'binding' ? { ...B, drawing_id: JOB } : B
+    const authorityKey = change === 'authority' ? 'epoch-2' : 'epoch-1'
+    h.snapshot = { binding, authorityKey }
+    h.update({ solarBinding: binding, authorityKey,
+      projectCatalog: { ...h.catalog, binding, authorityKey } })
+    expect(screen.queryByLabelText('Frame')).toBeNull()
+    h.open()
+    expect(screen.getByLabelText('Frame').value).toBe('')
+    expect(screen.getByLabelText('Grant ref').value).toBe('')
+    // Returning to the old owner cannot restore its earlier values either.
+    h.snapshot = { binding: B, authorityKey: 'epoch-1' }
+    h.update({ solarBinding: B, authorityKey: 'epoch-1', projectCatalog: h.catalog })
+    h.open()
+    expect(screen.getByLabelText('Frame').value).toBe('')
+    expect(screen.getByLabelText('Grant ref').value).toBe('')
+    h.view.unmount()
+  }
+})
+
+it('a changed schema does not restore the kept draft', () => {
+  for (const restoreSchema of [false, true]) {
+    const h = solveDraftFixture()
+    h.mount({ openTool: h.row })
+    const frame = screen.getByLabelText('Frame')
+    fireEvent.change(frame, { target: { value: 'old-frame' } })
+    fireEvent.change(screen.getByLabelText('Grant ref'), { target: { value: 'old-grant' } })
+    const fresh = { ...h.row, params: { type: 'object', properties: {
+      grant_ref: { type: 'string', default: 'new-default' },
+    } } }
+    h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: [fresh] }] } })
+    expect(screen.getByLabelText('Frame')).toBe(frame)
+    expect(frame).toBeDisabled()
+    const row = restoreSchema ? h.row : fresh
+    h.rows = [row]
+    h.current = false
+    h.update()
+    expect(screen.queryByLabelText('Frame')).toBeNull()
+    h.current = true
+    h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: [row] }] } })
+    h.open(row)
+    expect(screen.getByLabelText('Frame').value).toBe('')
+    expect(screen.getByLabelText('Grant ref').value).toBe(restoreSchema ? '' : 'new-default')
+    expect(h.submit).not.toHaveBeenCalled()
+    h.view.unmount()
+  }
+})
+
+it('a handed-off run discards the kept draft', async () => {
+  const h = solveDraftFixture()
+  h.mount({ openTool: h.row })
+  fireEvent.change(screen.getByLabelText('Frame'), { target: { value: 'submitted-frame' } })
+  fireEvent.change(screen.getByLabelText('Grant ref'), { target: { value: 'submitted-grant' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))
+  await waitFor(() => expect(h.submit).toHaveBeenCalledOnce())
+  expect(h.client.prepareRun.mock.calls[0][0]).toMatchObject({
+    params: { grant_ref: 'submitted-grant', drawing_id: B.drawing_id },
+    solveContext: { frame_ref: 'submitted-frame', phase: 'initial', expected_rev: 6 },
+  })
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(PROJECT_SOLAR_WORKSPACE_REASONS.run_submitted))
+  h.open()
+  expect(screen.getByLabelText('Frame').value).toBe('')
+  expect(screen.getByLabelText('Grant ref').value).toBe('')
+})
+
 it('keeps an open Solve draft across an empty then same-schema catalog refresh', () => {
   const solve = Row('solar-solve-proposal')
   solve.params = { type: 'object', properties: { site: { type: 'string', title: 'Site' },

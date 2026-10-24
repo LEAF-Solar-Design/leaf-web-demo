@@ -1,5 +1,6 @@
 import { expect } from '@playwright/test'
 import { mkdir, writeFile } from 'node:fs/promises'
+import { createActionRecorder, classifyStagingOutcome, stagingActionRecorder } from '../walk/stagingEvidence.mjs'
 import {
   allowedStagingOrigins, assertAllowedStagingHost, assertPageOnAllowedOrigin,
   assertResponseOnAllowedOrigin, assertStagingTokenIdentity, collectBearerLeaks,
@@ -46,13 +47,16 @@ export async function stagingErrorCode(response) {
 }
 
 // Diagnostic observations must never affect the walk's security or UI verdict.
-export function observeStagingNetwork(page, records) {
+export function observeStagingNetwork(page, records, recorder) {
   const pending = new Set()
   const requests = new WeakMap()
   const onRequest = request => {
     try {
       const record = appendStagingRequest(records, { method: request.method(), path: request.url() })
-      if (record) requests.set(request, record)
+      if (record) {
+        requests.set(request, record)
+        recorder?.record(record)
+      }
     } catch { /* Diagnostic only. */ }
   }
   const duration = request => {
@@ -118,20 +122,26 @@ async function persistStagingEvidence(evidence, title) {
 export async function stagingEvidenceStep(runtime, testInfo, action, persist = persistStagingEvidence) {
   const records = runtime.evidence.projectSolar.network = []
   const consoleMessages = runtime.evidence.projectSolar.console = []
+  const recorder = createActionRecorder()
+  runtime.page[stagingActionRecorder] = recorder
   const onConsole = message => {
     try { appendStagingConsole(consoleMessages, { level: message.type(), text: message.text() }) } catch { /* Diagnostic only. */ }
   }
   runtime.page.on('console', onConsole)
-  const finish = observeStagingNetwork(runtime.page, records)
-  let failure
+  const finish = observeStagingNetwork(runtime.page, records, recorder)
+  let failure = null
   try {
     return await action()
   } catch (error) {
     failure = error
     throw error
   } finally {
+    delete runtime.page[stagingActionRecorder]
     runtime.page.off('console', onConsole)
     await finish()
+    recorder.end()
+    runtime.evidence.projectSolar.actions = recorder.snapshot()
+    runtime.evidence.projectSolar.classification = classifyStagingOutcome({ error: failure, network: records })
     if (failure instanceof Error) failure.message += `\n${stagingNetworkFailure(records, consoleMessages)}`
     try {
       await persist(runtime.evidence, testInfo.title)
@@ -193,13 +203,19 @@ export function canonicalProjectVersion(workspace, projectId) {
 export async function stagingAction(page, apiBase, method, path, action) {
   const origin = assertAllowedStagingHost(apiBase).origin
   assertPageOnAllowedOrigin(page)
-  const wait = page.waitForResponse(response => {
-    const url = new URL(response.url())
-    return url.origin === origin && url.pathname === path && response.request().method() === method
-  }, { timeout: 30_000 })
-  const [response] = await Promise.all([wait, Promise.resolve().then(action)])
-  assertResponseOnAllowedOrigin(response)
-  return response
+  const recorder = page[stagingActionRecorder]
+  recorder?.begin(`${method} ${path}`)
+  try {
+    const wait = page.waitForResponse(response => {
+      const url = new URL(response.url())
+      return url.origin === origin && url.pathname === path && response.request().method() === method
+    }, { timeout: 30_000 })
+    const [response] = await Promise.all([wait, Promise.resolve().then(action)])
+    assertResponseOnAllowedOrigin(response)
+    return response
+  } finally {
+    recorder?.end()
+  }
 }
 
 export async function stagingRead(page, apiBase, path, binding) {

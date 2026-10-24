@@ -113,10 +113,14 @@ function Feedback({ value }) {
 }
 
 export function ProjectSolarSchemaForm(props) {
-  const { tool, onClose } = props
+  const { tool, onClose, draft, onDraftChange } = props
   const schema = tool.params_schema ?? tool.params
-  const [params, setParams] = useState(() => defaultsOf(schema))
-  const [context, setContext] = useState({ frame_ref: '', phase: 'initial' })
+  const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
+  const copy = (value) => Array.isArray(value) ? value.map(copy)
+    : plain(value) ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, copy(item)])) : value
+  const validDraft = plain(draft) && plain(draft.params) && plain(draft.context)
+  const [params, setParams] = useState(() => validDraft ? copy(draft.params) : defaultsOf(schema))
+  const [context, setContext] = useState(() => validDraft ? copy(draft.context) : { frame_ref: '', phase: 'initial' })
   const [valid, setValid] = useState(true)
   const run = useSubmission(props, tool.name)
   const solve = tool.name === 'solar-solve-proposal'
@@ -131,8 +135,14 @@ export function ProjectSolarSchemaForm(props) {
   }}>
     <h3>{solve ? PROJECT_SOLAR_WORKSPACE_LABELS.solve_action : PROJECT_SOLAR_WORKSPACE_LABELS.correct_strings_action}</h3>
     <fieldset disabled={run.locked}>
-      <SchemaForm schema={editable} values={params} onChange={setParams} onValidityChange={setValid} />
-      {solve && <SchemaForm schema={solveSchema} values={context} onChange={setContext} />}
+      <SchemaForm schema={editable} values={params} onChange={(next) => {
+        setParams(next)
+        onDraftChange?.({ params: copy(next), context: copy(context) })
+      }} onValidityChange={setValid} />
+      {solve && <SchemaForm schema={solveSchema} values={context} onChange={(next) => {
+        setContext(next)
+        onDraftChange?.({ params: copy(params), context: copy(next) })
+      }} />}
       <button type="submit" disabled={!complete || !valid}>{solve ? PROJECT_SOLAR_WORKSPACE_LABELS.run_solve_action : PROJECT_SOLAR_WORKSPACE_LABELS.correct_strings_action}</button>
     </fieldset>
     <Feedback value={run.feedback} />

@@ -3201,3 +3201,190 @@ test('Explode checks exact segment geometry and preserves every other entity', a
     else await check()
   }
 })
+
+import { createActionRecorder, classifyStagingOutcome } from './stagingEvidence.mjs'
+
+const stagingEvidenceEntry = (path, status = 200) => ({ method: 'GET', path, status,
+  duration_ms: 120, error_code: null })
+
+test('staging action requests survive 200 job and build polls', () => {
+  const recorder = createActionRecorder()
+  recorder.begin('POST /api/run')
+  recorder.record(stagingEvidenceEntry('/api/projects/p1/context'))
+  for (let index = 0; index < 200; index++) {
+    recorder.record(stagingEvidenceEntry(index % 2 ? '/api/jobs?limit=20' : '/api/builds'))
+  }
+  recorder.end()
+  assert.deepEqual(recorder.snapshot(), { actions: [{ action: 'POST /api/run',
+    requests: [stagingEvidenceEntry('/api/projects/p1/context')], truncated: false }], truncated: false })
+})
+
+test('staging action recorder bounds requests and actions independently', () => {
+  const recorder = createActionRecorder()
+  recorder.begin('first')
+  for (let index = 0; index < 45; index++) recorder.record(stagingEvidenceEntry(`/api/context/${index}`))
+  const first = recorder.snapshot()
+  assert.equal(first.actions[0].truncated, true)
+  assert.equal(first.truncated, false)
+  assert.deepEqual(first.actions[0].requests.map(entry => entry.path),
+    Array.from({ length: 40 }, (_, index) => `/api/context/${index + 5}`))
+  for (let index = 1; index < 21; index++) recorder.begin(`action ${index}`)
+  recorder.end()
+  assert.equal(recorder.snapshot().truncated, true)
+  assert.deepEqual(recorder.snapshot().actions.map(window => window.action),
+    Array.from({ length: 20 }, (_, index) => `action ${index + 1}`))
+})
+
+test('staging action recorder shares live entries but copies only allowed fields at snapshot time', () => {
+  const recorder = createActionRecorder(), entry = stagingEvidenceEntry('/api/run', null)
+  entry.headers = { private: 'secret' }
+  recorder.begin('POST /api/run')
+  recorder.record(entry)
+  const before = recorder.snapshot()
+  entry.status = 500
+  entry.duration_ms = 42
+  entry.error_code = 'RUN_FAILED'
+  assert.equal(before.actions[0].requests[0].status, null)
+  const after = recorder.snapshot()
+  assert.deepEqual(after.actions[0].requests[0], { method: 'GET', path: '/api/run', status: 500,
+    duration_ms: 42, error_code: 'RUN_FAILED' })
+  after.actions[0].requests[0].status = 201
+  assert.equal(recorder.snapshot().actions[0].requests[0].status, 500)
+})
+
+test('staging action recorder ignores entries outside windows and keeps recorders independent', () => {
+  const recorder = createActionRecorder(), other = createActionRecorder()
+  recorder.record(stagingEvidenceEntry('/api/before'))
+  assert.deepEqual(recorder.snapshot(), { actions: [], truncated: false })
+  recorder.begin('a'.repeat(100))
+  recorder.record(stagingEvidenceEntry('/api/inside'))
+  recorder.end()
+  recorder.record(stagingEvidenceEntry('/api/after'))
+  assert.equal(recorder.snapshot().actions[0].action, 'a'.repeat(80))
+  assert.deepEqual(recorder.snapshot().actions[0].requests, [stagingEvidenceEntry('/api/inside')])
+  assert.deepEqual(other.snapshot(), { actions: [], truncated: false })
+})
+
+test('staging action recorder honors custom bounds and exclusions without stateful regexp drift', () => {
+  const recorder = createActionRecorder({ maxRequests: 1, maxActions: 1, exclude: [/^\/api\/poll/g] })
+  recorder.begin('previous')
+  recorder.begin('current')
+  for (const path of ['/api/poll', '/api/poll', '/api/one', '/api/two']) recorder.record(stagingEvidenceEntry(path))
+  assert.deepEqual(recorder.snapshot(), { actions: [{ action: 'current',
+    requests: [stagingEvidenceEntry('/api/two')], truncated: true }], truncated: true })
+})
+
+function emitStagingEvidenceResponse(page, path, status = 200, error_code = null) {
+  const request = { url: () => `${stagingBase}${path}`, method: () => 'GET',
+    timing: () => ({ startTime: 1, responseEnd: 120 }) }
+  const response = { url: request.url, request: () => request, status: () => status,
+    json: async () => ({ error_code }), finished: async () => null }
+  page.emit('request', request)
+  page.emit('response', response)
+  return response
+}
+
+test('staging network feeds the general ring and live action entries without changing the general ring', async () => {
+  const results = []
+  for (const useRecorder of [false, true]) {
+    const page = new EventEmitter(), records = [], recorder = createActionRecorder()
+    recorder.begin('POST /api/run')
+    const finish = observeStagingNetwork(page, records, useRecorder ? recorder : undefined)
+    emitStagingEvidenceResponse(page, '/api/projects/p1/context?token=secret', 500, 'CONTEXT_FAILED')
+    for (let index = 0; index < 205; index++) emitStagingEvidenceResponse(page, `/api/jobs/${index}`)
+    recorder.end()
+    await finish()
+    assert.equal(records.length, 40)
+    assert.equal(records[0].path, '/api/jobs/165')
+    if (useRecorder) assert.deepEqual(recorder.snapshot().actions[0].requests, [
+      { method: 'GET', path: '/api/projects/p1/context?token', status: 500,
+        duration_ms: 120, error_code: 'CONTEXT_FAILED' },
+    ])
+    else assert.deepEqual(recorder.snapshot().actions[0].requests, [])
+    results.push(records)
+  }
+  assert.deepEqual(results[0], results[1])
+})
+
+test('staging classification treats the standing grant 502 as an observation on a pass', () => {
+  assert.deepEqual(classifyStagingOutcome({ network: [stagingEvidenceEntry('/api/tenant/claude-grant', 502)] }),
+    { status: 'passed', barrierFailure: null,
+      observations: [{ method: 'GET', path: '/api/tenant/claude-grant', status: 502, error_code: null }] })
+})
+
+test('staging classification names the UI barrier independently of endpoint observations', () => {
+  assert.deepEqual(classifyStagingOutcome({
+    error: new Error('owner project did not open in the UI within 30 s\nstack...'),
+    network: [stagingEvidenceEntry('/api/projects/p1'), stagingEvidenceEntry('/api/tenant/claude-grant', 502)],
+  }), { status: 'failed', barrierFailure: 'owner project did not open in the UI within 30 s',
+    observations: [{ method: 'GET', path: '/api/tenant/claude-grant', status: 502, error_code: null }] })
+})
+
+test('staging classification gives a named skip precedence and bounds barrier messages', () => {
+  assert.deepEqual(classifyStagingOutcome({ skipped: 'proposal-review named skip', error: new Error('ignored') }),
+    { status: 'skipped', barrierFailure: null, observations: [] })
+  assert.equal(classifyStagingOutcome({ skipped: '', error: 'x'.repeat(220) }).barrierFailure, 'x'.repeat(200))
+  assert.deepEqual(classifyStagingOutcome(), { status: 'passed', barrierFailure: null, observations: [] })
+})
+
+test('staging classification bounds observations in record order and excludes successful responses', () => {
+  const network = [stagingEvidenceEntry('/api/ok', 200), stagingEvidenceEntry('/api/redirect', 302)]
+  network[0].error_code = 'PUBLIC_CODE'
+  network[1].error_code = 'PUBLIC_CODE'
+  network.push(stagingEvidenceEntry('/api/failed', null), stagingEvidenceEntry('/api/legacy-failure', 'failed'))
+  network.push({ ...stagingEvidenceEntry('/api/error-code'), status: undefined, error_code: 'REQUEST_FAILED' })
+  for (let index = 0; index < 25; index++) network.push(stagingEvidenceEntry(`/api/errors/${index}`, 400))
+  const result = classifyStagingOutcome({ network })
+  assert.equal(result.status, 'passed')
+  assert.equal(result.observations.length, 20)
+  assert.deepEqual(result.observations, network.slice(2, 22).map(({ method, path, status, error_code }) =>
+    ({ method, path, status, error_code })))
+})
+
+test('staging evidence persists classification and action windows while preserving the original verdict', async () => {
+  for (const fail of [false, true]) {
+    const page = new EventEmitter(), runtime = { page, evidence: { projectSolar: {} } }
+    const initialSymbols = Object.getOwnPropertySymbols(page)
+    page.url = () => stagingBase
+    let armed = false, persisted
+    const response = stagingResponse('/api/run', {}, 202, 'POST')
+    page.waitForResponse = async predicate => {
+      armed = true
+      assert.equal(predicate(response), true)
+      return response
+    }
+    const failure = new Error('owner project did not open in the UI within 30 s\nstack...')
+    const run = () => stagingEvidenceStep(runtime, { title: 'action-evidence' }, async () => {
+      await stagingAction(page, stagingBase, 'POST', '/api/run', () => {
+        assert.equal(armed, true)
+        emitStagingEvidenceResponse(page, '/api/projects/p1/context')
+        if (fail) throw failure
+      })
+      emitStagingEvidenceResponse(page, '/api/outside-action')
+      return 'passed'
+    }, async evidence => { persisted = evidence.projectSolar })
+    // Observe the endpoint error while the response wait is being armed.
+    const wait = page.waitForResponse
+    page.waitForResponse = predicate => {
+      emitStagingEvidenceResponse(page, '/api/tenant/claude-grant', 502)
+      return wait(predicate)
+    }
+    if (fail) await assert.rejects(run(), error => error === failure)
+    else assert.equal(await run(), 'passed')
+    assert.equal(persisted.classification.status, fail ? 'failed' : 'passed')
+    assert.equal(persisted.classification.barrierFailure,
+      fail ? 'owner project did not open in the UI within 30 s' : null)
+    assert.deepEqual(persisted.classification.observations,
+      [{ method: 'GET', path: '/api/tenant/claude-grant', status: 502, error_code: null }])
+    assert.deepEqual(persisted.actions, { actions: [{ action: 'POST /api/run', requests: [
+      stagingEvidenceEntry('/api/tenant/claude-grant', 502), stagingEvidenceEntry('/api/projects/p1/context'),
+    ], truncated: false }], truncated: false })
+    // A later caller on the same page must not reopen the finished step's recorder.
+    await stagingAction(page, stagingBase, 'POST', '/api/run', () => {})
+    assert.equal(page.listenerCount('request'), 0)
+    assert.equal(page.listenerCount('response'), 0)
+    assert.equal(page.listenerCount('console'), 0)
+    assert.deepEqual(Object.getOwnPropertySymbols(page), initialSymbols)
+    assert.equal(persisted.actions.actions.length, 1)
+  }
+})
