@@ -3,30 +3,30 @@
   "_ref": "5c930f5a",
   "chunks": {
     "App.css": 10405,
-    "App.js": 123281,
-    "ElementContextMenu.js": 34273,
+    "App.js": 123279,
+    "ElementContextMenu.js": 34272,
     "LeafPlatformScene.css": 494,
-    "LeafPlatformScene.js": 9064,
-    "OpsWorkspaceGround.js": 165676,
+    "LeafPlatformScene.js": 9061,
+    "OpsWorkspaceGround.js": 168719,
     "SheetsPage.css": 2583,
-    "SheetsPage.js": 5422,
-    "Viewer.js": 13584,
+    "SheetsPage.js": 5420,
+    "Viewer.js": 13583,
     "bridgeText.js": 21274,
     "index.css": 40176,
-    "index.js": 222813,
+    "index.js": 222810,
     "mockStageAuthority.js": 258,
-    "useAnnotations.js": 2026,
+    "useAnnotations.js": 2024,
     "vendor-react.js": 45884,
     "vendor-viewer.js": 123469,
     "worker-browser.js": 3824,
-    "LabGround.js": 26492,
+    "LabGround.js": 26491,
     "LabGround.css": 752,
-    "LabCanvas.js": 495979,
+    "LabCanvas.js": 495976,
     "string.js": 4533,
     "LabCanvas.css": 2547,
-    "hostBridge.js": 2624
+    "hostBridge.js": 2622
   },
-  "total": 1357433,
+  "total": 1360456,
   "total_allowance_bytes": 16384,
   "_allowance_basis": "12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0). Tighten once W2 lands real numbers.",
   "stem_caps": {
@@ -182,5 +182,41 @@
     },
     "allocated_at_head": "143872330d768b5fbff09561a3f7a33b62f6fb3c",
     "allocation_policy": "The measured 5621-byte feature budget is retained for subsequent source reductions; this allocation does not claim a new exact delta for those reductions."
+  },
+  "isolated_s106_measurement": {
+    "before_ref": "89c93ae74146805e13bc601dc89a90fca8f42d80",
+    "after_ref": "53a9f0c1e7d2be919a585b15902f6d11504e1b6e",
+    "build_identity": "53a9f0c1",
+    "method": "same-process Vite gzip-9; six web paths and eight vendor paths restored for before",
+    "before_total": 1370057,
+    "after_total": 1373080,
+    "delta": 3023,
+    "deltas": {
+      "index.js": -3,
+      "App.js": -2,
+      "SheetsPage.js": -2,
+      "LeafPlatformScene.js": -3,
+      "Viewer.js": -1,
+      "ElementContextMenu.js": -1,
+      "useAnnotations.js": -2,
+      "OpsWorkspaceGround.js": 3043,
+      "LabGround.js": -1,
+      "hostBridge.js": -2,
+      "LabCanvas.js": -3
+    },
+    "unrelated_drift_bytes": 12624,
+    "producer": {
+      "node": "v22.23.2",
+      "zlib": "1.2.12",
+      "platform": "darwin",
+      "arch": "arm64",
+      "versions": {
+        "vite": "6.4.3",
+        "rollup": "4.62.2",
+        "esbuild": "0.25.12"
+      }
+    },
+    "measurement_receipt_sha256": "573413ed139d82a88b3634ba8c38ee8f51a9cd6318245d2febb64005aef36e7d",
+    "mini_job": "e41209152df140e8b87d54d955298bfb"
   }
 }
