@@ -11,7 +11,7 @@
   ],
   "files": {
     "web/src/lab/widgets/widgetCatalog.js": "5d588a15cce37ce0607f601c4c09227170bfa2ce9eba074b3f28142792fd4968",
-    "web/src/lab/widgets/widgetDoc.js": "6b7a7ca233b9e241b931c8719da575c69b67f8d1215e9b5f24b86e71e08d3860",
+    "web/src/lab/widgets/widgetDoc.js": "25fde1e91e6a8737554c2afb63ac07641adc8909d16707c52ae253e8c05603b1",
     "web/src/lab/widgets/widgetRender.js": "f47d59a6673269efa93346aba41c14ed22a5f0eec4b6904193b968c68badbaca",
     "web/src/lab/widgets/widgetResolve.js": "df11f3da908e0a5f3bfff33d094a101b7cc79a932f36c5c27cdf54b5d7b7ca80",
     "web/src/lab/widgets/WidgetCard.jsx": "5cf0e1db2cdf2282e84895328d96c2372df12dc200697db1dcd8bd81399dedf0",

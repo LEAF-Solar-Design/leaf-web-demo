@@ -148,6 +148,7 @@ def test_every_postgres_selector_adds_its_complete_authority_contract():
 def _assert_lab_immutable_ledger_contract():
     selected = {"LEAF_LAB_STORE": "postgres"}
     columns = db.required_columns_for_selected_authorities(selected)
+    assert columns["lab_documents"] == {"tenant_id", "doc_id", "head", "published_revision", "kind"}
     assert columns["lab_blobs"] == {
         "tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count",
     }
@@ -155,6 +156,11 @@ def _assert_lab_immutable_ledger_contract():
         "tenant_id", "doc_id", "revision", "parent_revision", "author", "created_at", "sha256",
     }
     catalog = db.required_catalog_for_selected_authorities(selected)
+    assert catalog["constraints"]["lab_documents_kind_check"] == db._catalog_contract(
+        "lab_documents", "CHECK", "kind", "graph", "widget")
+    kind_migration = (db._PKG_DIR / "migrations/0086_lab_document_kind.sql").read_text(encoding="utf-8")
+    assert "kind TEXT NOT NULL DEFAULT 'graph'" in kind_migration
+    assert "CHECK (kind IN ('graph', 'widget'))" in kind_migration
     for table in ("lab_blobs", "lab_revisions", "lab_publish_receipts"):
         assert catalog["triggers"][table + "_immutable"] == db._catalog_contract(
             table, "BEFORE DELETE OR UPDATE", "FOR EACH ROW",

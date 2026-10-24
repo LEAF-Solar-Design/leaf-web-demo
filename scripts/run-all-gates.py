@@ -1308,6 +1308,8 @@ def build_suites() -> List[Suite]:
         Suite("server-lab-artifacts", "server tests/test_lab_artifacts.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_artifacts.py"), 51, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
+        Suite("server-lab-widgets", "server tests/test_lab_widgets.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_widgets.py"), 47),
         Suite("server-lab-run-store", "server tests/test_lab_run_store.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_run_store.py"), 22, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
@@ -3513,7 +3515,7 @@ def build_suites() -> List[Suite]:
         Suite("server-drawings-cross-tenant-canary", "server tests/test_drawings_cross_tenant_canary.py", "pytest", SERVER,
               _py_pytest("tests/test_drawings_cross_tenant_canary.py"), 10),
         Suite("server-router-authz-negative", "server tests/test_router_authz_negative.py", "pytest", SERVER,
-              _py_pytest("tests/test_router_authz_negative.py"), 39),
+              _py_pytest("tests/test_router_authz_negative.py"), 44),
         Suite("server-mutation-scope-diff", "server tests/test_mutation_scope_diff.py", "pytest", SERVER,
               _py_pytest("tests/test_mutation_scope_diff.py"), 20),
         # Registered WITH the file, per the #29 fix-then-register rule. The

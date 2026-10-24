@@ -22,6 +22,15 @@ const parity = fixture('parity/basic.json')
 const golden = fixture('geometry-golden.json')
 const clone = (value) => JSON.parse(JSON.stringify(value))
 
+it('accepts a pinned graph output binding and refuses incomplete references', () => {
+  const doc = clone(parity.doc)
+  const binding = { source: 'graph.output', doc_id: 'metrics', output: 'total', min_renderer: '1.0.0', scale: 'identity', tone: 'auto' }
+  doc.formats.la.els[1].binding = binding
+  expect(validateWidgetDoc(doc)).toEqual(doc)
+  delete binding.doc_id
+  expect(() => validateWidgetDoc(doc)).toThrow('Unknown binding.')
+})
+
 describe('frozen designer migration', () => {
   it('derives the fixture exactly from the frozen defaultDoc, without sample values', () => {
     const html = read('contract/fixtures/widget/sources/kashbot-widget-designer-v2.html')

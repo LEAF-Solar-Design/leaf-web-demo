@@ -446,7 +446,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
     "lab": {
         "lab_blobs": {"tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count"},
         "lab_revisions": {"tenant_id", "doc_id", "revision", "parent_revision", "author", "created_at", "sha256"},
-        "lab_documents": {"tenant_id", "doc_id", "head", "published_revision"},
+        "lab_documents": {"tenant_id", "doc_id", "head", "published_revision", "kind"},
         "lab_publish_receipts": {"receipt_id", "tenant_id", "doc_id", "expected_head", "new_head", "sha256", "author", "created_at"},
     },
     "jobs": {
@@ -1214,6 +1214,7 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
         "lab_blobs_pkey": _catalog_contract("lab_blobs", "PRIMARY KEY (tenant_id, sha256)"),
         "lab_revisions_pkey": _catalog_contract("lab_revisions", "PRIMARY KEY (tenant_id, doc_id, revision)"),
         "lab_documents_pkey": _catalog_contract("lab_documents", "PRIMARY KEY (tenant_id, doc_id)"),
+        "lab_documents_kind_check": _catalog_contract("lab_documents", "CHECK", "kind", "graph", "widget"),
         "lab_publish_receipts_pkey": _catalog_contract("lab_publish_receipts", "PRIMARY KEY (receipt_id)"),
         "lab_blobs_bytes_check": _catalog_contract(
             "lab_blobs", "CHECK", "canonical_bytes = convert_to(canonical_text, 'UTF8')",

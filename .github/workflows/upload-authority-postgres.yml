@@ -88,9 +88,12 @@ on:
       - 'server/ops_metrics_read.py'
       - 'server/platform_link.py'
       - 'server/lab_artifacts.py'
+      - 'server/lab_widget_doc.py'
+      - 'server/lab_widget_values.py'
       - 'server/lab_registry.py'
       - 'server/lab_run_store.py'
       - 'server/tests/test_lab_artifacts.py'
+      - 'server/tests/test_lab_widgets.py'
       - 'server/tests/test_lab_run_store.py'
       - 'server/routers/drawings.py'
       - 'server/routers/ops.py'
@@ -255,6 +258,7 @@ jobs:
           def proof(conn):
               for table in ("lab_runs", "lab_run_events", "lab_worker_status", "lab_worker_control"):
                   conn.execute("SELECT * FROM " + table + " LIMIT 0")
+              conn.execute("SELECT kind FROM lab_documents LIMIT 0")
           db.run_transaction(proof)
           PY
 

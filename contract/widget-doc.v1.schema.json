@@ -1229,6 +1229,27 @@
       }
     },
     "binding": {
+      "oneOf": [
+        { "$ref": "#/$defs/boardBinding" },
+        { "$ref": "#/$defs/graphBinding" }
+      ]
+    },
+    "graphBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "doc_id", "output", "min_renderer", "scale", "tone"],
+      "properties": {
+        "source": { "const": "graph.output" },
+        "doc_id": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$", "maxLength": 128 },
+        "output": { "type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$", "maxLength": 64 },
+        "field": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "min_renderer": { "$ref": "#/$defs/version" },
+        "scale": { "$ref": "#/$defs/boardBinding/properties/scale" },
+        "tone": { "$ref": "#/$defs/boardBinding/properties/tone" },
+        "window": { "const": "today-utc" }
+      }
+    },
+    "boardBinding": {
       "type": "object",
       "additionalProperties": false,
       "required": [

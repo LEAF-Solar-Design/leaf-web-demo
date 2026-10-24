@@ -1,4 +1,4 @@
-"""Bounded graph-only admission. Validation always precedes persistence."""
+"""Bounded ledger admission. Validation always precedes persistence."""
 from __future__ import annotations
 
 import json

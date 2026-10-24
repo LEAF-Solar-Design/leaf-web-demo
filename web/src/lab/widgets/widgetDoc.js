@@ -110,11 +110,15 @@ export function validateWidgetDoc(doc, renderer = RENDERER_VERSION) {
       if (e.text !== undefined && (e.kind !== 'text' || typeof e.text !== 'string' || e.text.length > 512)) throw new Error('Invalid text.')
       if (e.path !== undefined && (e.kind !== 'svg-path' || typeof e.path !== 'string' || e.path.length > 8192 || !/^[MmLlHhVvCcSsQqTtAaZz0-9., +\-]+$/.test(e.path))) throw new Error('Invalid SVG path.')
       if (e.binding !== undefined) {
-        closed(e.binding, ['source', 'field', 'min_renderer', 'scale', 'tone', 'window'])
         const b = e.binding
+        closed(b, b.source === 'graph.output' ? ['source', 'doc_id', 'output', 'field', 'min_renderer', 'scale', 'tone', 'window'] : ['source', 'field', 'min_renderer', 'scale', 'tone', 'window'])
         requireRenderer(b.min_renderer, renderer)
-        if (b.source !== 'kashbot.board' || !BINDING_FIELDS.includes(b.field)) throw new Error('Unknown binding.')
-        if (b.field === 'winRate' && b.window !== 'today-utc') throw new Error('Win rate requires the today-utc window field.')
+        if (b.source === 'graph.output') {
+          if (typeof b.doc_id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(b.doc_id) || b.doc_id.length > 128 || typeof b.output !== 'string' || !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(b.output) || b.output.length > 64 || (b.field !== undefined && (typeof b.field !== 'string' || !b.field.length || b.field.length > 512))) throw new Error('Unknown binding.')
+        } else {
+          if (b.source !== 'kashbot.board' || !BINDING_FIELDS.includes(b.field)) throw new Error('Unknown binding.')
+          if (b.field === 'winRate' && b.window !== 'today-utc') throw new Error('Win rate requires the today-utc window field.')
+        }
         if (b.window !== undefined && b.window !== 'today-utc') throw new Error('Unknown window field.')
         if (!['fraction', 'today-percent', 'open-count', 'identity'].includes(b.scale) || !['auto', 'ink', 'leaf', 'slate', 'loss'].includes(b.tone)) throw new Error('Invalid binding scale or tone.')
       }

@@ -28,6 +28,10 @@ class Conflict(ValueError):
     pass
 
 
+class KindFixed(Conflict):
+    pass
+
+
 class NotFound(LookupError):
     pass
 
@@ -57,7 +61,8 @@ def store_mode():
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS lab_documents (
  tenant_id TEXT NOT NULL, doc_id TEXT NOT NULL, head INTEGER NOT NULL,
- published_revision INTEGER, PRIMARY KEY (tenant_id, doc_id)
+ published_revision INTEGER, kind TEXT NOT NULL DEFAULT 'graph' CHECK (kind IN ('graph','widget')),
+ PRIMARY KEY (tenant_id, doc_id)
 );
 CREATE TABLE IF NOT EXISTS lab_blobs (
  tenant_id TEXT NOT NULL, sha256 TEXT NOT NULL, canonical_text TEXT NOT NULL,
@@ -129,6 +134,14 @@ def _run(tenant, operation, *, write=False):
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SQLITE_SCHEMA)
+        if "kind" not in {row["name"] for row in conn.execute("PRAGMA table_info(lab_documents)")}:
+            try:
+                conn.execute("ALTER TABLE lab_documents ADD COLUMN kind TEXT NOT NULL DEFAULT 'graph'"
+                             " CHECK (kind IN ('graph','widget'))")
+            except sqlite3.OperationalError:
+                # Another local connection may have completed the same expand.
+                if "kind" not in {row["name"] for row in conn.execute("PRAGMA table_info(lab_documents)")}:
+                    raise
         conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         result = operation(_SQL(conn, False))
         conn.commit()
@@ -148,7 +161,8 @@ def _head(sql, tenant, doc_id):
 
 def _revision(sql, tenant, doc_id, revision):
     row = sql.execute(
-        "SELECT r.*, b.canonical_text, b.canonical_bytes, b.byte_count FROM lab_revisions r"
+        "SELECT r.*, d.kind, b.canonical_text, b.canonical_bytes, b.byte_count FROM lab_revisions r"
+        " JOIN lab_documents d ON d.tenant_id=r.tenant_id AND d.doc_id=r.doc_id"
         " JOIN lab_blobs b ON b.tenant_id=r.tenant_id AND b.sha256=r.sha256"
         " WHERE r.tenant_id=? AND r.doc_id=? AND r.revision=?",
         (tenant, doc_id, revision)).fetchone()
@@ -170,7 +184,7 @@ def _check_head(sql, tenant, doc_id, expected):
     return current
 
 
-def _append(sql, tenant, doc_id, data, author, current, parent):
+def _append(sql, tenant, doc_id, data, author, current, parent, kind="graph"):
     count = sql.execute("SELECT COUNT(*) AS n FROM lab_documents WHERE tenant_id=?", (tenant,)).fetchone()["n"]
     revisions = sql.execute("SELECT COUNT(*) AS n FROM lab_revisions WHERE tenant_id=?", (tenant,)).fetchone()["n"]
     if (current is None and count >= MAX_TENANT_DOCS) or revisions >= MAX_TENANT_REVISIONS:
@@ -191,23 +205,35 @@ def _append(sql, tenant, doc_id, data, author, current, parent):
     sql.execute("INSERT INTO lab_revisions (tenant_id,doc_id,revision,parent_revision,author,created_at,sha256)"
                 " VALUES (?,?,?,?,?,?,?)", (tenant, doc_id, revision, parent, author, time.time(), digest))
     if current is None:
-        sql.execute("INSERT INTO lab_documents (tenant_id,doc_id,head) VALUES (?,?,?)", (tenant, doc_id, revision))
+        sql.execute("INSERT INTO lab_documents (tenant_id,doc_id,head,kind) VALUES (?,?,?,?)", (tenant, doc_id, revision, kind))
     else:
         sql.execute("UPDATE lab_documents SET head=? WHERE tenant_id=? AND doc_id=?", (revision, tenant, doc_id))
     return _revision(sql, tenant, doc_id, revision)
 
 
-def save(tenant, doc_id, graph, expected_head, author):
+def save(tenant, doc_id, graph, expected_head, author, kind="graph"):
     identifier(doc_id)
     validate_head(expected_head)
     if not isinstance(author, str) or not author or len(author) > 200:
         raise InvalidGraph("invalid_author")
     try:
-        data = validate_graph(graph)
+        if kind not in ("graph", "widget"):
+            raise InvalidGraph("invalid_document_kind")
+        if kind == "widget":
+            from lab_widget_doc import validate_widget
+
+            data = validate_widget(graph)
+        else:
+            data = validate_graph(graph)
 
         def operation(sql):
             current = _check_head(sql, tenant, doc_id, expected_head)
-            return _append(sql, tenant, doc_id, data, author, current, current)
+            if current is not None:
+                row = sql.execute("SELECT kind FROM lab_documents WHERE tenant_id=? AND doc_id=?",
+                                  (tenant, doc_id)).fetchone()
+                if row["kind"] != kind:
+                    raise KindFixed("lab_document_kind_fixed")
+            return _append(sql, tenant, doc_id, data, author, current, current, kind)
 
         return _run(tenant, operation, write=True)
     except Conflict:
@@ -247,8 +273,10 @@ def list_revisions(tenant, doc_id, *, limit=100, before=None):
     def operation(sql):
         if _head(sql, tenant, doc_id) is None:
             raise NotFound("lab_document_not_found")
-        rows = sql.execute("SELECT * FROM lab_revisions WHERE tenant_id=? AND doc_id=?"
-                           " AND revision<? ORDER BY revision DESC LIMIT ?",
+        rows = sql.execute("SELECT r.*, d.kind FROM lab_revisions r JOIN lab_documents d"
+                           " ON d.tenant_id=r.tenant_id AND d.doc_id=r.doc_id"
+                           " WHERE r.tenant_id=? AND r.doc_id=?"
+                           " AND r.revision<? ORDER BY r.revision DESC LIMIT ?",
                            (tenant, doc_id, before if before is not None else 9223372036854775807, limit)).fetchall()
         return [dict(row) for row in rows]
 
