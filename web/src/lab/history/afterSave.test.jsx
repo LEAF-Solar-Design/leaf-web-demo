@@ -32,21 +32,32 @@ const row = (patch = {}) => ({ state: 'finished', revision: 2, document_sha256: 
   blocks: [{ block_id: draft.blocks[0].id, registry_id: 'adjust-none', triggered: 0, reached: 0 }],
   attribution: [{ trade_id: 'trade-1', reason: 'Resized', candidate_cents: 999, live_cents: 500, delta_cents: 499 }], ...patch })
 
-function artifacts(lastSaved = saved) {
+function fakeArtifactsClient({ state: overrides = {}, ...methods } = {}) {
   const listeners = new Set()
+  let operation = 0
+  const state = { head: null, published: null, revisions: [], lastSaved: null, conflict: null,
+    restoredGraph: null, restoredKey: 0, events: [], saveTimes: [], requestTimes: [],
+    headLoaded: true, headLookupFailed: false, ...overrides }
   return {
-    state: { lastSaved, revisions: [{ revision: 1, graph: first }], restoredGraph: null, restoredKey: 0,
-      saveTimes: [], head: lastSaved?.revision, conflict: null },
+    state,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     update(patch) { Object.assign(this.state, patch); listeners.forEach(listener => listener()) },
-    currentDocId: () => 'strategy', takeGraph: vi.fn(), save: vi.fn(),
+    currentDocId: () => 'strategy', currentGeneration: () => 0,
+    beginGraphOperation: vi.fn(() => ++operation),
+    isCurrentOperation: token => token === operation,
+    captureMine: vi.fn(), setDocId: vi.fn(), takeGraph: vi.fn(), save: vi.fn(),
+    head: vi.fn(async () => { state.headLoaded = true; return { ok: true, revision: state.head } }),
+    revisions: vi.fn().mockResolvedValue({ ok: true, revisions: [] }),
     diff: vi.fn().mockResolvedValue({ ok: true, changes: [{ op: 'replace', path: '/blocks/0/settings/calibration_intercept', before: 0, after: 0.77 }] }),
     revision: vi.fn().mockResolvedValue({ ok: true, graph: draft }),
+    restore: vi.fn(), publish: vi.fn(),
+    ...methods,
   }
 }
 function fixture(lastSaved = saved) {
   const provider = createHostProvider({ framed: true })
-  const client = artifacts(lastSaved)
+  const client = fakeArtifactsClient({ state: { lastSaved, head: lastSaved?.revision,
+    revisions: [{ revision: 1, graph: first }] } })
   const afterSave = createAfterSaveClient({ provider, artifacts: client, now: () => at + 7000 })
   const announce = (...data) => provider.announce(data.map(value => ({ source: 'practice', data: value, as_of: at })))
   return { provider, client, afterSave, announce }
