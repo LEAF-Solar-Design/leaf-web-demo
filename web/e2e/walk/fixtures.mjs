@@ -20,10 +20,36 @@ import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readCont
 
 export { expect }
 
-export function redactSolarDiagnostic(value) {
+export function redactSolarDiagnostic(value, { maxLength = 300 } = {}) {
   if (!['string', 'number', 'boolean'].includes(typeof value)) return '[unavailable]'
   return String(value).replace(/eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/g, '[redacted]')
-    .replace(/lco1\.[A-Za-z0-9_.-]+/g, '[redacted]').trim().slice(0, 300)
+    .replace(/lco1\.[A-Za-z0-9_.-]+/g, '[redacted]').trim().slice(0, maxLength)
+}
+
+export async function walkClick(locator, label, { timeout = 15_000 } = {}) {
+  try {
+    await locator.click({ timeout })
+  } catch (error) {
+    let probe = '[unavailable]'
+    try {
+      probe = JSON.stringify(await locator.evaluate(node => {
+        const box = node.getBoundingClientRect()
+        const doc = node.ownerDocument
+        const view = doc.defaultView
+        const hit = doc.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+        const style = view.getComputedStyle(node)
+        return {
+          box: Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, Math.round(box[key])])),
+          viewport: { width: view.innerWidth, height: view.innerHeight },
+          hit: hit ? `${hit.tagName.toLowerCase()}${hit.id ? `#${hit.id}` : ''}${[...hit.classList].slice(0, 3).map(name => `.${name}`).join('')}` : null,
+          hitIsTarget: hit !== null && (hit === node || node.contains(hit)),
+          position: { position: style.position, top: style.top, left: style.left, zIndex: style.zIndex },
+        }
+      }, undefined, { timeout: 2_000 }))
+    } catch { /* Preserve the click failure when the target cannot be inspected. */ }
+    const reason = String(error?.message ?? error).split(/\r?\n/)[0].slice(0, 300)
+    throw new Error(redactSolarDiagnostic(`${label}: ${reason}\nClick target: ${probe}`, { maxLength: Infinity }), { cause: error })
+  }
 }
 
 export async function projectSolarRunDiagnostic(page, settings, start) {
@@ -1249,7 +1275,7 @@ export async function assertProjectSolarDrawing(runtime, assertions = expect) {
   const { page, projectSolar: { binding } } = runtime
   const toggle = page.locator('[data-testid="solar-flow-seat"] button.solar-flow-seat-toggle')
   if (await toggle.count() && await toggle.getAttribute('aria-expanded') === 'false') {
-    await toggle.click()
+    await walkClick(toggle, 'Expand Solar flow seat')
     await assertions(toggle).toHaveAttribute('aria-expanded', 'true')
   }
   await assertions(page.locator('.project-solar-workspace')).toBeVisible()
@@ -1306,8 +1332,8 @@ export async function openProjectSolar(runtime, assertions = expect) {
   solar.traffic = observeProjectTraffic(page, solar.apiBase)
   runtime.cleanup.push(async () => { try { await solar.traffic.drain() } finally { solar.traffic.dispose() } })
   await projectSolarStep(runtime, 'canonical material import', async () => {
-    await page.getByRole('tab', { name: 'Browser', exact: true }).click()
-    await page.getByRole('button', { name: 'Upload drawing', exact: true }).click()
+    await walkClick(page.getByRole('tab', { name: 'Browser', exact: true }), 'Open Browser tab')
+    await walkClick(page.getByRole('button', { name: 'Upload drawing', exact: true }), 'Upload drawing')
     const material = page.locator('[data-pane="material-intake"]')
     await assertions(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()
     const path = `/api/projects/${evidence.escapeProject.projectId}/drawing-versions/import`
@@ -1364,14 +1390,14 @@ export async function selectProjectSolarVersion(runtime, assertions = expect) {
     .locator('[data-tile="versions"] > strong'),
   `project ${solar.binding.project_id ?? solar.binding.input_version_id} did not open in the UI within 30 s`)
     .toHaveCount(1, { timeout: 30_000 })
-  await page.getByRole('button', { name: 'Open versions', exact: true }).click()
+  await walkClick(page.getByRole('button', { name: 'Open versions', exact: true }), 'Open versions')
   const version = page.locator('[data-pane="versions"]').getByRole('button', {
     name: new RegExp(`^v\\d+ .*${solar.binding.input_version_id}$`),
   })
   await assertions(version, `version ${solar.binding.input_version_id} is not listed in the Versions pane within 30 s`)
     .toBeVisible({ timeout: 30_000 })
   await version.click({ timeout: 30_000 })
-  await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+  await walkClick(page.getByRole('tab', { name: 'Solar CAD', exact: true }), 'Open Solar CAD tab')
   await assertProjectSolarDrawing(runtime, assertions)
 }
 
@@ -1379,20 +1405,20 @@ export async function openProjectSolarTool(runtime, tool, assertions = expect, {
   const { page } = runtime
   const editor = page.locator('.project-solar-workspace-editor')
   if (closeEditor && await editor.isVisible()) {
-    await editor.getByRole('button', { name: /^(Close|Cancel)$/ }).click()
+    await walkClick(editor.getByRole('button', { name: /^(Close|Cancel)$/ }), 'Close Solar editor')
     await assertions(editor).toHaveCount(0)
   }
-  await page.getByRole('tab', { name: 'Solar', exact: true }).click()
+  await walkClick(page.getByRole('tab', { name: 'Solar', exact: true }), 'Open Solar tab')
   const ribbon = page.getByTestId('drafting-ribbon').locator(`button[data-tool="${tool}"]`)
   const rail = page.locator(`#solar-step-${tool}`)
   const more = page.getByRole('button', { name: 'More panels', exact: true })
   await assertions.poll(async () => await ribbon.isVisible() || await more.isVisible() || await rail.isVisible(),
     { timeout: 30_000, message: `project Solar control ${tool} must render` }).toBe(true)
-  if (!await ribbon.isVisible() && await more.isVisible()) await more.click()
+  if (!await ribbon.isVisible() && await more.isVisible()) await walkClick(more, 'Open More panels')
   const control = await ribbon.isVisible() ? ribbon : rail
   if (allowDisabled && !await control.isEnabled()) return false
   await assertions(control).toBeEnabled()
-  await control.click()
+  await walkClick(control, `Open Solar tool ${tool}`)
   return true
 }
 
@@ -1402,13 +1428,13 @@ export async function takeProjectSolarCheckout(runtime, assertions = expect, act
   const path = `/api/projects/${solar.binding.project_id}/drawings/${solar.binding.drawing_id}/checkout`
   await projectSolarStep(runtime, 'take Project checkout', async () => {
     const response = await action(page, solar.apiBase, 'POST', path,
-      () => checkout().getByRole('button', { name: 'Take', exact: true }).click())
+      () => walkClick(checkout().getByRole('button', { name: 'Take', exact: true }), 'Take Project checkout'))
     const lease = await projectSolarResponse(response, 'Project checkout', [200])
     // Register release before validating the lease body so a later assertion
     // failure still relinquishes an acquired checkout through the UI.
     if (lease.acquired === true) runtime.cleanup.push(async () => {
       const released = await action(page, solar.apiBase, 'DELETE', path,
-        () => checkout().getByRole('button', { name: 'Release', exact: true }).click())
+        () => walkClick(checkout().getByRole('button', { name: 'Release', exact: true }), 'Release Project checkout'))
       const body = await projectSolarResponse(released, 'release Project checkout', [200])
       assertions(body.released).toBe(true)
       assertions(body.checkout).toBe(null)
@@ -1453,7 +1479,7 @@ export async function publishProjectSolar(runtime, assertions = expect, {
     let result
     try {
       result = await run({ page, expect: assertions, apiBase: solar.apiBase, traffic: solar.traffic,
-        binding: solar.binding, before: solar.context, tool: 'solar-settings', action: () => start.click(), checkParams: (params) => {
+        binding: solar.binding, before: solar.context, tool: 'solar-settings', action: () => walkClick(start, buttonName), checkParams: (params) => {
           if (initializing) assertions(params.initialize?.units?.drawing_units).toBe('m')
           assertions(params.changes?.panels_in_sequence).toBe(sequence)
         } })
