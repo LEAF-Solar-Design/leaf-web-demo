@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ReadableStream } from 'node:stream/web'
 import { TextEncoder, TextDecoder } from 'node:util'
-import { createIntegrationsClient, integrationOrigin, validateDatasetRegistration } from './client.js'
+import { createIntegrationsClient, integrationOrigin, validateDatasetRegistration, validateWorkflowSchedulePreview } from './client.js'
 
 vi.mock('../api.js', () => ({ authHeaders: vi.fn(), noteUnauthorized: vi.fn() }))
 import { authHeaders, noteUnauthorized } from '../api.js'
@@ -57,6 +57,65 @@ const receipt = { id: projectId, actor_id: projectId, binding_id: projectId,
   started_at: '2026-10-20T00:00:00Z', finished_at: '2026-10-20T00:00:01Z',
   connector_ref: ref, operation_ref: operationRef, dataset_ref: ref, transform_ref: { ...ref, id: 'orders-transform' },
   source_outcome: 'success', outcome: 'success', row_count: 2, failure_code: null }
+describe('daily schedule preview HTTP contract', () => {
+  const input = { schema_version: 1, schedule: { kind: 'daily', timezone: 'UTC', hour: 9, minute: 30 }, after: '2026-01-01T00:00:00Z' }
+  const occurrence = { scheduledLocalDate: '2026-01-01', instant: '2026-01-01T09:30:00Z', timezone: 'UTC', hour: 9, minute: 30,
+    occurrenceKey: JSON.stringify(['daily', 'UTC', 9, 30, '2026-01-01']) }
+  const result = { schema_version: 1, preview_only: true, occurrence }
+  it('sends one exact bounded authenticated POST and binds the public preview', async () => {
+    const { client, fetchImpl, options } = setup(result)
+    expect(await client.previewWorkflowSchedule(projectId, input, options)).toEqual(result)
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(fetchImpl.mock.calls[0]).toEqual([`https://ops.example/api/v1/projects/${projectId}/integrations/workflow-schedule-preview`,
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(input), signal: options.signal,
+        cache: 'no-store', redirect: 'error', credentials: 'omit', headers: expect.objectContaining({ Authorization: 'Bearer first' }) })])
+  })
+  it.each([
+    { extra: true }, { schema_version: 2 }, { after: '2026-02-30T00:00:00Z' }, { after: '2100-01-01T00:00:00Z' },
+    { after: '1999-12-31T00:00:00Z' }, { after: '2026-01-01T00:00Z' }, { after: '2026-01-01T00:00:00+00:00' },
+    { after: '2026-01-01T24:00:00Z' }, { after: '2026-01-01T00:00:00.1234Z' }, { after: '2026-01-01T00:00:00Z\n' },
+    ...[{ hour: 24 }, { hour: 1.5 }, { minute: -1 }, { minute: '30' }, { timezone: ' UTC' }, { timezone: '+01:00' }, { timezone: 'Invalid/Zone' },
+      { timezone: 'x'.repeat(101) }, { extra: true }, { kind: 'weekly' }].map((patch) => ({ schedule: { ...input.schedule, ...patch } })),
+  ])('rejects invalid inputs before transport %j', async (patch) => {
+    const { client, fetchImpl, options } = setup(result)
+    await expect(client.previewWorkflowSchedule(projectId, { ...input, ...patch }, options)).rejects.toThrow('invalid')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([
+    { preview_only: false }, { extra: true }, { schema_version: 2 },
+    ...[{ scheduledLocalDate: '2026-02-30' }, { instant: input.after }, { instant: '2026-01-01T00:00:00+00:00' },
+      { instant: '2026-02-30T09:30:00Z' }, { instant: '2100-01-01T09:30:00Z' }, { timezone: 'Etc/UTC' },
+      { hour: 10 }, { minute: 31 }, { occurrenceKey: 'private' }, { extra: true }].map((patch) => ({ occurrence: { ...occurrence, ...patch } })),
+  ])('rejects malformed or unbound previews at both boundaries %j', async (patch) => {
+    const value = { ...result, ...patch }
+    const { client, options } = setup(value)
+    await expect(client.previewWorkflowSchedule(projectId, input, options)).rejects.toThrow('invalid')
+    expect(() => validateWorkflowSchedulePreview(value, input)).toThrow('invalid')
+  })
+  it('accepts real leap dates, fractional cursors and recognized timezone aliases without changing the request', () => {
+    const leapInput = { ...input, schedule: { ...input.schedule, timezone: 'Etc/UTC' }, after: '2028-02-29T00:00:00.001Z' }
+    const leapResult = { ...result, occurrence: { ...occurrence, scheduledLocalDate: '2028-02-29', instant: '2028-02-29T09:30:00.000Z',
+      occurrenceKey: JSON.stringify(['daily', 'UTC', 9, 30, '2028-02-29']) } }
+    expect(validateWorkflowSchedulePreview(leapResult, leapInput)).toEqual(leapResult)
+  })
+  it('keeps response limits, fixed failures, authorization and abort handling without retry', async () => {
+    const { client, fetchImpl, options } = setup(result)
+    for (const settings of [{ raw: 'private' }, { type: 'text/html' }, { length: '262145' }, { raw: 'x'.repeat(262145) }]) {
+      fetchImpl.mockResolvedValueOnce(response(result, settings))
+      await expect(client.previewWorkflowSchedule(projectId, input, options)).rejects.toThrow('invalid')
+    }
+    for (const status of [401, 403, 404, 503]) {
+      fetchImpl.mockResolvedValueOnce(response({ private: 'secret' }, { status }))
+      await expect(client.previewWorkflowSchedule(projectId, input, options)).rejects.toMatchObject({ status })
+    }
+    fetchImpl.mockRejectedValueOnce(new Error('private credential'))
+    await expect(client.previewWorkflowSchedule(projectId, input, options)).rejects.toThrow('Integrations are unavailable. Please retry.')
+    const controller = new AbortController(); controller.abort()
+    await expect(client.previewWorkflowSchedule(projectId, input, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchImpl).toHaveBeenCalledTimes(9)
+  })
+})
+
 describe('first organization setup HTTP contract', () => {
   it('revokes only the exact connection with DELETE, fresh If-Match and no body', async () => {
     const revoked = { ...ownerSummary, state: 'revoked', revision: 8, health: { checked_at: null, code: 'revoked' } }
