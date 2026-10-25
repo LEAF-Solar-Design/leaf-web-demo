@@ -14,6 +14,7 @@ from uuid import UUID
 from fastapi import HTTPException
 
 import deps
+import dependency_health
 import entitlements
 import platform_link
 from demo_policy import demo_run_verdict
@@ -49,6 +50,7 @@ _FAILURES = {
     "SIP_R3_SERVICE_EVIDENCE_REQUIRED": (409, False), "SIP_R3_PROOF_REJECTED": (500, False),
     "SIP_R4_IDEMPOTENCY_KEY_REQUIRED": (400, False), "SIP_R4_IDEMPOTENCY_CONFLICT": (409, False),
     "SIP_R4_JOB_BINDING_MISMATCH": (409, False),
+    "SIP_R4_WORKER_UNAVAILABLE": (503, True),
 }
 _UNAVAILABLE = "Project Solar admission unavailable."
 _RESOLVER_MESSAGES = frozenset((
@@ -229,7 +231,7 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
 
 
 def project_catalog_availability(tool, *, enabled, admission=None):
-    """Project a policy result without resolving any request or reading state."""
+    """Project policy and required worker coverage without resolving a request."""
     entitled = engine = ready = checked = False
     error = detail = None
     entitlement_reason = None
@@ -241,6 +243,13 @@ def project_catalog_availability(tool, *, enabled, admission=None):
     elif admission is None:
         engine = True
         reason = "project_request_required"
+        try:
+            if not dependency_health.canonical_worker_covers(tool["name"]):
+                engine = False
+                reason = engine_reason = "SIP_R4_WORKER_UNAVAILABLE"
+        except dependency_health.DependencyUnavailable:
+            engine = False
+            reason = engine_reason = "SIP_R1_STORE_UNAVAILABLE"
     else:
         engine = checked = True
         error = deepcopy(admission["content"].get("error"))
@@ -252,6 +261,9 @@ def project_catalog_availability(tool, *, enabled, admission=None):
             reason = entitlement_reason = "entitlement_policy_unavailable"
         elif admission["content"].get("entitlement_required"):
             reason = entitlement_reason = "entitlement_required"
+        elif error and error.get("reason_code") == "SIP_R4_WORKER_UNAVAILABLE":
+            engine = False
+            reason = engine_reason = "SIP_R4_WORKER_UNAVAILABLE"
         else:
             reason = "capability_not_ready"
     return {
