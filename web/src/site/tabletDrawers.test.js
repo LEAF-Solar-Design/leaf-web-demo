@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const app = read('../App.jsx')
 const cockpit = read('./cockpit.css').replace(/\/\*[\s\S]*?\*\//g, '')
-const query = '(max-width: 600px), (max-width: 980px) and (min-height: 500px)'
+const query = '(max-width: 600px), (max-width: 1023px) and (min-height: 500px)'
 const scope = '.studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface]'
 const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const mediaBodies = (query) => [...cockpit.matchAll(new RegExp(
@@ -35,7 +35,7 @@ describe('tablet Studio drawers', () => {
   })
 
   it('reserves the tablet dock and drawer row below the drawing', () => {
-    const blocks = mediaBodies('(min-width: 601px) and (max-width: 980px) and (min-height: 500px)')
+    const blocks = mediaBodies('(min-width: 601px) and (max-width: 1023px) and (min-height: 500px)')
     const frame = blocks.find((body) => ruleBody(body, scope)?.includes('--ck-drawer:'))
     expect(frame).toBeDefined()
     const variables = ruleBody(frame, scope)

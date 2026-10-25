@@ -56,7 +56,7 @@ import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
 import { loadDemoSolve } from './site/intakeCache.js'
-const DRAWER_FRAME_QUERY = '(max-width: 600px), (max-width: 980px) and (min-height: 500px)'
+const DRAWER_FRAME_QUERY = '(max-width: 600px), (max-width: 1023px) and (min-height: 500px)'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -3529,10 +3529,10 @@ export default function App() {
   // View tab's Properties tool reopens it; while closed the canvas takes the
   // column (cockpit.css keys off the pane's absence, never a root attribute).
   const [paneOpen, setPaneOpen] = useState(true)
-  // <=980px the shell stacks into one column (styles.css) — a 44px spine
+  // <=1023px the shell stacks into one column (styles.css) — a 44px spine
   // there is a full-width sliver, so the posture neutralizes to expanded.
   const [wideViewport, setWideViewport] = useState(() => {
-    try { return window.matchMedia('(min-width: 981px)').matches } catch { return true }
+    try { return window.matchMedia('(min-width: 1024px)').matches } catch { return true }
   })
   const [drawerViewport, setDrawerViewport] = useState(() => {
     try { return window.matchMedia(DRAWER_FRAME_QUERY).matches } catch { return false }
@@ -3546,7 +3546,7 @@ export default function App() {
   }, [])
   useEffect(() => {
     let mq
-    try { mq = window.matchMedia('(min-width: 981px)') } catch { return undefined }
+    try { mq = window.matchMedia('(min-width: 1024px)') } catch { return undefined }
     const sync = () => setWideViewport(mq.matches)
     mq.addEventListener?.('change', sync)
     return () => mq.removeEventListener?.('change', sync)
@@ -5632,7 +5632,7 @@ export default function App() {
                   {propertyRowsEl}
                 </>
               ) : null
-              // wideViewport: <=980px stacks the console; the dock's
+              // wideViewport: <=1023px stacks the console; the dock's
               // floating placement has no home there, so the inline arm
               // (today's placement) renders instead of hiding the tools.
               // The Plan section is useful before a drawing or intake exists.

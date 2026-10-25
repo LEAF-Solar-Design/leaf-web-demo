@@ -2747,7 +2747,7 @@ function seatRulePlacementFailures(cssText) {
     const matches = rules.filter(({ header }) => header === maskSeatCss(selector))
     if (matches.length !== 1) failures.push('expected one rule for ' + selector)
     for (const { headers } of matches) {
-      if (!headers.some((header) => header.startsWith('@media ') && header.includes('min-width: 981px') && !header.includes('max-width'))) {
+      if (!headers.some((header) => header.startsWith('@media ') && header.includes('min-width: 1024px') && !header.includes('max-width'))) {
         failures.push('rule must be inside unrestricted desktop media: ' + selector)
       }
     }
@@ -2762,8 +2762,8 @@ function seatChildRuleFailures(cssText) {
   const matches = rules.filter(({ header }) => header === maskSeatCss(selector))
   if (matches.length !== 1) return failures.concat('expected exactly one direct-child seat rule, found ' + matches.length)
   const { headers, open } = matches[0]
-  if (headers.length !== 1 || headers[0] !== '@media (min-width: 981px)') {
-    failures.push('the direct-child seat rule must sit directly inside @media (min-width: 981px): ' + JSON.stringify(headers))
+  if (headers.length !== 1 || headers[0] !== '@media (min-width: 1024px)') {
+    failures.push('the direct-child seat rule must sit directly inside @media (min-width: 1024px): ' + JSON.stringify(headers))
   }
   const close = css.indexOf('}', open + 1)
   const body = close < 0 ? null : css.slice(open + 1, close).trim()
@@ -3231,10 +3231,10 @@ describe('Solar step rail wiring', () => {
     const startRule = '.studio-shell .app[data-start-open="true"] .solar-flow-seat { visibility: hidden; }'
     assert.equal(source.split(startRule).length - 1, 1)
     const withoutStart = source.replace(startRule, '')
-    const narrowHeader = '@media (max-width: 980px) {'
+    const narrowHeader = '@media (max-width: 1023px) {'
     assert.ok(withoutStart.includes(narrowHeader))
     const narrow = withoutStart.replace(narrowHeader, narrowHeader + '\n' + startRule)
-    const spoofed = withoutStart + '\n.probe::before { content: ";@media (min-width: 981px) { .dummy {"; }\n'
+    const spoofed = withoutStart + '\n.probe::before { content: ";@media (min-width: 1024px) { .dummy {"; }\n'
       + startRule + '\n.probe::after { content: "}}"; }\n'
     const print = withoutStart + '\n@media print {\n' + startRule + '\n}\n'
     for (const [name, mutated] of [['narrow', narrow], ['quoted spoof', spoofed], ['print', print]]) {
@@ -3249,7 +3249,7 @@ describe('Solar step rail wiring', () => {
     assert.deepEqual(failures, [])
     assert.ok(occurrences.length > 0, 'seat material rules must be present')
     for (const { index, headers } of occurrences) {
-      assert.ok(headers.some((header) => header.startsWith('@media ') && header.includes('min-width: 981px')), 'seat material outside desktop media at ' + index)
+      assert.ok(headers.some((header) => header.startsWith('@media ') && header.includes('min-width: 1024px')), 'seat material outside desktop media at ' + index)
     }
   })
 
@@ -3257,7 +3257,7 @@ describe('Solar step rail wiring', () => {
     const source = readFileSync(new URL('./solar/solarFlow.css', import.meta.url), 'utf8')
     assert.deepEqual(seatChildRuleFailures(source), [])
     const rule = '.studio-shell .workspace-card .solar-flow-seat > * { flex: 0 0 auto; }'
-    const outer = '@media (min-width: 981px) {'
+    const outer = '@media (min-width: 1024px) {'
     assert.equal(source.split(rule).length - 1, 1)
     assert.equal(source.split(outer).length - 1, 1)
     const without = source.replace(rule, '')
@@ -3265,9 +3265,9 @@ describe('Solar step rail wiring', () => {
     for (const [name, mutated] of [
       ['rule removed', without],
       ['rule outside media', without + '\n' + rule + '\n'],
-      ['outer media narrow only', source.replace(outer, '@media (max-width: 980px) {')],
-      ['outer media widened by a comma query', source.replace(outer, '@media (min-width: 981px), (orientation: portrait) {')],
-      ['rule nested in a narrow query', source.replace(rule, '@media (max-width: 980px) { ' + rule + ' }')],
+      ['outer media narrow only', source.replace(outer, '@media (max-width: 1023px) {')],
+      ['outer media widened by a comma query', source.replace(outer, '@media (min-width: 1024px), (orientation: portrait) {')],
+      ['rule nested in a narrow query', source.replace(rule, '@media (max-width: 1023px) { ' + rule + ' }')],
       ['second identical rule', source.replace(rule, rule + '\n' + rule)],
       ['declaration changed', swap('{ flex: 1 1 auto; }')],
       ['declaration removed', swap('{ }')],
@@ -3284,7 +3284,7 @@ describe('Solar step rail wiring', () => {
       ['a first-child rule', after(seat + ' > *:first-child { flex-shrink: 1; }')],
       ['a descendant rule that also matches a direct child', after(seat + ' * { flex-grow: 1; }')],
       ['a nested rule under the seat', after(seat + ' { & > * { flex-basis: 0; } }')],
-      ['a twin in a block that also applies below the boundary', source + '\n@media (min-width: 981px), (max-width: 980px) {\n' + seat + ' >* { flex: 0 0 auto; }\n}\n'],
+      ['a twin in a block that also applies below the boundary', source + '\n@media (min-width: 1024px), (max-width: 1023px) {\n' + seat + ' >* { flex: 0 0 auto; }\n}\n'],
     ]) {
       const found = seatChildRuleFailures(mutated)
       assert.equal(found.length, 1, name)
@@ -3311,9 +3311,9 @@ describe('Solar step rail wiring', () => {
       assert.equal(depth, 0)
       return css.slice(open + 1, end - 1)
     }
-    const band = mediaBlock('@media (min-width: 981px) and (max-width: 1199px)')
+    const band = mediaBlock('@media (min-width: 1024px) and (max-width: 1199px)')
     assert.ok(band.includes('.studio-shell .app[data-surface="solar"]:has(.solar-flow-seat):has(.properties-dock) .cad-overview { display: none; }'))
-    const narrow = mediaBlock('@media (max-width: 980px)')
+    const narrow = mediaBlock('@media (max-width: 1023px)')
     assert.ok(narrow.includes('.studio-shell .app[data-surface="solar"] .solar-flow-seat { display: contents; }'))
   })
 })
@@ -3322,9 +3322,9 @@ describe('Solar step rail wiring', () => {
 // must rise by the same amount. The amount is derived here from the three stylesheets that produce it.
 const DOCK_APP = '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])'
 const DOCK_RISE_RULE = DOCK_APP + ':has(#cockpit-engine-status-slot:not(:empty))'
-const DOCK_WIDE = '@media (min-width: 981px)'
-const DOCK_TABLET = '@media (min-width: 601px) and (max-width: 980px) and (min-height: 500px)'
-const DOCK_TABLET_FRAME = '@media (max-width: 980px) and (min-height: 500px)'
+const DOCK_WIDE = '@media (min-width: 1024px)'
+const DOCK_TABLET = '@media (min-width: 601px) and (max-width: 1023px) and (min-height: 500px)'
+const DOCK_TABLET_FRAME = '@media (max-width: 1023px) and (min-height: 500px)'
 const DOCK_FOLD = '@media (max-height: 760px)'
 const DOCK_RESERVATION = 'var(--tb-r, 100px)'
 
@@ -3474,7 +3474,7 @@ function dockClearanceFailures(cockpitCss, baseCss, structuralCss, otherSheets =
   for (const name of wideLine.keys()) {
     if (name.startsWith('padding-') || name.startsWith('margin-') || name.startsWith('border') || name.endsWith('height')) failures.push('the wide status line must not declare ' + name)
   }
-  // 601 to 980: one fixed line, no padding, no margin.
+  // 601 to 1023: one fixed line, no padding, no margin.
   const tabletLineRule = find(cockpit, '.studio-shell .cockpit-engine-status', [DOCK_TABLET], 'tablet status line rule')
   const tabletLine = tabletLineRule.declared
   const tabletHeight = dockPx(tabletLine.get('line-height'))
@@ -3544,7 +3544,7 @@ function dockClearanceFailures(cockpitCss, baseCss, structuralCss, otherSheets =
   }
   // The fourth 100px reservation is app padding in short landscape, outside
   // the tablet frame. Its viewport envelope and value must stay unchanged.
-  if (one(cockpit, DOCK_APP, ['@media (max-width: 980px) and (max-height: 499px)'], 'short landscape app padding').get('padding-bottom') !== '100px') {
+  if (one(cockpit, DOCK_APP, ['@media (max-width: 1023px) and (max-height: 499px)'], 'short landscape app padding').get('padding-bottom') !== '100px') {
     failures.push('short landscape app padding must stay 100px')
   }
   const foldedSheets = [['cockpit.css', cockpit], ['styles.css', base], ['structural.css', structural],
@@ -4901,14 +4901,14 @@ describe('App.jsx wiring', () => {
   it('binds the status bar regions to the width whose CSS styles them', () => {
     // P1 studio-shell pass. The three FootRegion wrappers are a WIDE-layout
     // construct: cockpit.css styles `.foot-region` only inside
-    // `@media (min-width: 981px)`. Below that the old shell's own rules do
+    // `@media (min-width: 1024px)`. Below that the old shell's own rules do
     // the work, and they are CHILD selectors — `footer.foot-bar > *`
     // (styles.css:776-777) — so a wrapper there would hide every segment
     // from the only rules that style it, and the narrow status bar would
     // lose its layout silently on a viewport no unit test renders at.
     //
     // The gate is therefore `wideViewport`, which is literally
-    // matchMedia('(min-width: 981px)') in this file: the same breakpoint,
+    // matchMedia('(min-width: 1024px)') in this file: the same breakpoint,
     // read once. Pinned in the transform (comments stripped) so the term
     // cannot be dropped as "redundant" by a later reader.
     assert.match(
@@ -5147,7 +5147,7 @@ describe('RAIL overview yields to the expanded job monitor', () => {
     const rule = '.studio-shell .app[data-surface="solar"]:has(aside.rail:not([data-spine])) .cad-overview { display: none; }'
     const panel = '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail:not([data-spine]) {'
     const blocks = []
-    for (let at = css.indexOf('@media (min-width: 981px) {'); at >= 0; at = css.indexOf('@media (min-width: 981px) {', at + 1)) {
+    for (let at = css.indexOf('@media (min-width: 1024px) {'); at >= 0; at = css.indexOf('@media (min-width: 1024px) {', at + 1)) {
       const open = css.indexOf('{', at)
       let depth = 1
       let end = open + 1

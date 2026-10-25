@@ -16,7 +16,7 @@ function initiallyCollapsed() {
     const saved = sessionStorage.getItem(STORAGE_KEY)
     if (saved === 'true' || saved === 'false') return saved === 'true'
   } catch { /* Storage may be unavailable in a private or embedded session. */ }
-  return typeof window !== 'undefined' && window.innerWidth <= 980
+  return typeof window !== 'undefined' && window.innerWidth <= 1023
 }
 
 export default function CadOverview({ viewerRef }) {

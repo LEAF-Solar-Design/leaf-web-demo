@@ -8,7 +8,7 @@ let matchMediaDescriptor
 
 function stubMatchMedia(matches = true) {
   window.matchMedia = vi.fn(() => ({
-    matches, media: '(min-width: 981px)', addEventListener() {}, removeEventListener() {},
+    matches, media: '(min-width: 1024px)', addEventListener() {}, removeEventListener() {},
   }))
 }
 
@@ -123,7 +123,7 @@ describe('SolarFlowSeat settings Start reveal', () => {
     expectStartInside()
   })
 
-  it('does nothing below 981px or outside the studio cockpit', () => {
+  it('does nothing below 1024px or outside the studio cockpit', () => {
     stubMatchMedia(false)
     const mobile = renderSeat()
     fireEvent.click(mobile.toggle)

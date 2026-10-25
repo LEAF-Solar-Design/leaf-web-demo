@@ -29,7 +29,7 @@ function parseBlocks(source) {
 function collectRules(source, desktop = false) {
   return parseBlocks(source).flatMap(({ header, body }) => {
     if (header.startsWith('@')) {
-      return collectRules(body, desktop || /^@media\s*\(min-width:\s*981px\)$/.test(header));
+      return collectRules(body, desktop || /^@media\s*\(min-width:\s*1024px\)$/.test(header));
     }
     return [{ selector: header, body, desktop }];
   });

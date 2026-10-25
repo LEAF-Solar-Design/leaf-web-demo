@@ -86,7 +86,7 @@ const decl = (body, prop) => {
 }
 const HOVER_GATE = (prelude) => /\(\s*hover\s*:\s*hover\s*\)/.test(prelude) && /\(\s*pointer\s*:\s*fine\s*\)/.test(prelude)
 const SAFE_BOTTOM = /env\(\s*safe-area-inset-bottom\b/
-const PHONE = (media) => media.some((p) => /max-width\s*:\s*980px/.test(p))
+const PHONE = (media) => media.some((p) => /max-width\s*:\s*1023px/.test(p))
 
 describe('A3/B13 viewport and safe area', () => {
   it('the viewport meta draws under the notch with viewport-fit=cover', () => {

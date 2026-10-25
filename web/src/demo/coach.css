@@ -103,12 +103,12 @@
   }
 }
 
-/* <=980px: landing.css hands the whole bottom half of the viewport to the
+/* <=1023px: landing.css hands the whole bottom half of the viewport to the
    rails (.tc-rail { top: 54%; bottom: 0; width: 50% }, .tc-rail-r at
    left: 50%), so there is NO placement for the card in this layout class.
    Belt only -- FirstRunCoach.jsx's matchMedia gate renders null (and installs
    no listeners) at these widths. */
-@media (max-width: 980px) {
+@media (max-width: 1023px) {
   .coach-root { display: none; }
 }
 

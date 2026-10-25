@@ -153,7 +153,7 @@ describe('rollback contract', () => {
     const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"]'
     const desktopBodies = []
     const outsideDesktop = []
-    const media = /@media\s*\([^{}]*min-width\s*:\s*981px[^{}]*\)\s*(?:and\s*\([^{}]*\)\s*)*\{/g
+    const media = /@media\s*\([^{}]*min-width\s*:\s*1024px[^{}]*\)\s*(?:and\s*\([^{}]*\)\s*)*\{/g
     let previousEnd = 0
     let match
     while ((match = media.exec(css))) {
@@ -238,7 +238,7 @@ describe('rollback contract', () => {
     const selector = '.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll > :is(.campaign-panel, .workspace-summary)'
     const desktopBodies = []
     const outsideDesktop = []
-    const media = /@media\s*\([^{}]*min-width\s*:\s*981px[^{}]*\)\s*(?:and\s*\([^{}]*\)\s*)*\{/g
+    const media = /@media\s*\([^{}]*min-width\s*:\s*1024px[^{}]*\)\s*(?:and\s*\([^{}]*\)\s*)*\{/g
     let previousEnd = 0
     let match
     while ((match = media.exec(css))) {
@@ -310,7 +310,7 @@ describe('rollback contract', () => {
     const selector = `${shell}:has(aside.nav:not([data-spine])) .drawing-navigation`
     const desktopBodies = []
     const outsideDesktop = []
-    const media = /@media\s*\(\s*min-width\s*:\s*981px\s*\)\s*\{/g
+    const media = /@media\s*\(\s*min-width\s*:\s*1024px\s*\)\s*\{/g
     let previousEnd = 0
     let match
     while ((match = media.exec(css))) {

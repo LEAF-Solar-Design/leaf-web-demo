@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 
-export const TABLET_DRAWER_QUERY = '(min-width: 601px) and (max-width: 980px) and (min-height: 500px)'
+export const TABLET_DRAWER_QUERY = '(min-width: 601px) and (max-width: 1023px) and (min-height: 500px)'
 export const DOCK_RISE_VAR = '--studio-dock-rise'
 
 // Publishes the command dock's rise (viewport bottom to the dock's top edge) as --studio-dock-rise on the app, on the tablet drawer frame only; fails closed (removes the property) anywhere else; one pending animation frame at most.

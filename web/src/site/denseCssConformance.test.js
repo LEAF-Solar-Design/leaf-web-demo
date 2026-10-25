@@ -108,7 +108,7 @@ describe('S4 dense targets and viewport bounds', () => {
 
   it('the tablet header flexes into available width and activity scrolls within its strip', () => {
     const tabletRules = rules['src/site/cockpit.css'].filter((rule) =>
-      rule.media.includes('(max-width: 980px) and (min-height: 500px)'))
+      rule.media.includes('(max-width: 1023px) and (min-height: 500px)'))
     const band = tabletRules.find((rule) => rule.selector === '.studio-shell .cockpit-band')
     expect(band?.declarations.flex).toBe('1 1 0')
     expect(band?.declarations.width).toBe('auto')
