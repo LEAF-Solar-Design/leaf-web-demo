@@ -40,6 +40,12 @@ export const ZOOM_OUT = 0.8
 // palette. Past this the cluster says how many more live in the pane.
 export const MAX_LAYER_TOOLS = 10
 
+export function humanizeToolName(name) {
+  if (typeof name !== 'string') return ''
+  const text = name.replace(/[-_]+/g, ' ').trim().replace(/\s+/g, ' ')
+  return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
 export const SOLAR_REFUSAL_REASONS = Object.freeze({
   invalid_pvcase_convert_request: 'Check the G33 source and graph revision in the conversion request',
   invalid_pvcase_solve_request: 'Check the graph revision in the G33 solve request',
@@ -402,7 +408,7 @@ function solarRailTools(rows, gate, { openName, onOpenForm }, onRun, solarTypedF
       return {
         id: row.name,
         label: row.name,
-        text: row.label || row.name,
+        text: row.label || humanizeToolName(row.name) || row.name,
         icon: toolIcon(row),
         size: toolPlacementSize(row),
         title: row.description || row.name,
@@ -702,7 +708,7 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
       return {
         id: tool.name,
         label: tool.name,
-        text: tool.label || tool.name,
+        text: tool.label || humanizeToolName(tool.name) || tool.name,
         // The record's own answer, with today's literals as the default.
         icon: toolIcon(tool),
         size: toolPlacementSize(tool),
