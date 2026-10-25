@@ -450,9 +450,10 @@ def run_once(owner, *, tool_name, lease_seconds=30.0, on_renew=None):
                 _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
                                           "fail_persist_error", exc=persist_exc)
             else:
-                if isinstance(outcome, str) and outcome not in ("failed", "retry", "duplicate"):
+                if not (isinstance(outcome, str) and outcome in ("failed", "retry", "duplicate")):
                     _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
-                                              "fail_not_settled", outcome=outcome)
+                                              "fail_not_settled",
+                                              outcome=outcome if isinstance(outcome, str) else None)
         else:
             _emit_unsettled_job_event(job_id, tool_name, attempt, owner, "lease_lost")
         return True
@@ -471,8 +472,10 @@ def run_once(owner, *, tool_name, lease_seconds=30.0, on_renew=None):
         # Uncertain persistence is recovered by readback/reclaim, never a false failure.
         _emit_unsettled_job_event(job_id, tool_name, attempt, owner, "complete_error", exc=exc)
     else:
-        if (isinstance(outcome, (tuple, list)) and len(outcome) == 2
-                and isinstance(outcome[0], str) and outcome[0] not in ("applied", "duplicate")):
+        paired = isinstance(outcome, (tuple, list)) and len(outcome) == 2
+        status = outcome[0] if paired else outcome
+        if not (paired and isinstance(status, str) and status in ("applied", "duplicate")):
             _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
-                                      "complete_not_settled", outcome=outcome[0])
+                                      "complete_not_settled",
+                                      outcome=status if isinstance(status, str) else None)
     return True

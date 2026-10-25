@@ -178,8 +178,8 @@ def test_no_claim(worker, capsys):
     assert worker.calls == ["claim"]
 
 
-@pytest.mark.parametrize("outcome", ["failed", "retry", "duplicate", None, True, ("not_owner", None)])
-def test_fail_settled_or_other_shape_is_silent(worker, capsys, outcome):
+@pytest.mark.parametrize("outcome", ["failed", "retry", "duplicate"])
+def test_fail_settled_is_silent(worker, capsys, outcome):
     worker.prepare_error = failure()
     worker.fail_outcome = outcome
     assert service.run_once(OWNER, tool_name=TOOL) is True
@@ -187,15 +187,35 @@ def test_fail_settled_or_other_shape_is_silent(worker, capsys, outcome):
     assert worker.calls == ["claim", "start", "prepare", "close", "fail"]
 
 
+@pytest.mark.parametrize("outcome", [None, True, ("not_owner", None)])
+def test_fail_other_shape_is_unsettled(worker, capsys, outcome):
+    worker.prepare_error = failure()
+    worker.fail_outcome = outcome
+    assert service.run_once(OWNER, tool_name=TOOL) is True
+    assert_event(capsys, "fail_not_settled")
+    assert worker.calls == ["claim", "start", "prepare", "close", "fail"]
+
+
 @pytest.mark.parametrize("tool", [TOOL, service.solve.TOOL_NAME])
-@pytest.mark.parametrize("outcome", [
-    ("applied", None), ["duplicate", None], None, True, "not_owner",
-    ("not_owner",), ("not_owner", None, None), (42, None), {"outcome": "not_owner"},
-])
-def test_complete_settled_or_other_shape_is_silent(worker, capsys, tool, outcome):
+@pytest.mark.parametrize("outcome", [("applied", None), ["duplicate", None]])
+def test_complete_settled_is_silent(worker, capsys, tool, outcome):
     worker.complete_outcome = outcome
     assert service.run_once(OWNER, tool_name=tool) is True
     assert capsys.readouterr() == ("", "")
+    assert worker.calls == ["claim", "start", "prepare", "close", "complete"]
+
+
+@pytest.mark.parametrize("tool", [TOOL, service.solve.TOOL_NAME])
+@pytest.mark.parametrize("outcome,expected", [
+    (None, None), (True, None), ("not_owner", "not_owner"),
+    (("not_owner",), None), (("not_owner", None, None), None),
+    ((42, None), None), ({"outcome": "not_owner"}, None),
+    (("applied",), None), ([1, 2], None),
+])
+def test_complete_other_shape_is_unsettled(worker, capsys, tool, outcome, expected):
+    worker.complete_outcome = outcome
+    assert service.run_once(OWNER, tool_name=tool) is True
+    assert_event(capsys, "complete_not_settled", tool=tool, outcome=expected)
     assert worker.calls == ["claim", "start", "prepare", "close", "complete"]
 
 
