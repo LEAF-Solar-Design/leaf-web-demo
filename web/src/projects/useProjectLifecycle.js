@@ -9,6 +9,8 @@
  * action's promise settles, so a component that re-renders on success is
  * already looking at post-mutation server truth — never at optimistic state
  * this hook invented.
+ * Export returns its completed artifact immediately and revalidates in the
+ * background so refresh latency cannot cause an export timeout.
  *
  * ADAPTERS, and why they exist: the snapshot's wire shape and the components'
  * prop shapes were built against each other but not identically.
@@ -268,7 +270,13 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
       return result
     },
     clone: (name) => runThenRefetch(() => cloneProject(projectId, name)),
-    export: (options) => runThenRefetch(() => exportProject(projectId, options)),
+    export: async (options) => {
+      const result = await exportProject(projectId, options)
+      // The artifact is ready. A slow or failed refresh must not turn this
+      // successful export into a timeout or encourage a duplicate export.
+      if (stillCurrent(projectId)) void load({ refresh: true })
+      return result
+    },
     reset: () => runThenRefetch(() => resetProject(projectId)),
     remove: () => deleteProject(projectId), // no refetch: the project is gone
   }), [bindingFor, data.project?.org_id, load, projectId, runThenRefetch, stillCurrent])

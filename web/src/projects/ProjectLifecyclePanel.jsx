@@ -133,7 +133,7 @@ export default function ProjectLifecyclePanel({
           role="alert"
         >
           <p>{lifecycle.error}</p>
-          <button type="button" className="chip-act" onClick={() => lifecycle.refetch()}>Try again</button>
+          <button type="button" className="chip-act" onClick={() => lifecycle.refetch({ refresh: lifecycle.status === 'ready' })}>Try again</button>
         </div>
       )}
 
@@ -174,7 +174,7 @@ export default function ProjectLifecyclePanel({
               // the copy, so the name is derived here and echoed back from the
               // server's own `project` in the response.
               onClone={async () => {
-                const result = remember(await actions.clone(`${name} (copy)`))
+                const result = remember(await actions.clone(`${Array.from(name).slice(0, 193).join('')} (copy)`))
                 return {
                   receipt_id: result?.receipt?.receipt_id,
                   project_id: result?.project?.project_id,
