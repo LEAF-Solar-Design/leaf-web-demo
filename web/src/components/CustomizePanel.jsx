@@ -167,6 +167,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   }
 
   const propose = useCallback(async () => {
+    if (submitting || landing || merging) return
     const cleaned = edits
       .map((e) => ({ path: e.path.trim(), content: e.content, delete: !!e.delete }))
       .filter((e) => e.path)
@@ -174,7 +175,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
       setErr('A title and at least one edit with a path are required.')
       return
     }
-    const version = ++selectionVersion.current
+    const version = selectionVersion.current
     setSubmitting(true); setErr(null); setLandConfirming(false); setMergeConfirming(false)
     try {
       const body = cleaned.map((e) => (e.delete
@@ -182,6 +183,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
         : { path: e.path, content: e.content }))
       const created = await proposePlatformChange(title.trim(), body)
       if (version !== selectionVersion.current) return
+      ++selectionVersion.current
       setRecord(created)
       // A new proposal can be acted on while the previous record settles.
       setLanding(false); setMerging(false)
@@ -191,7 +193,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
     } finally {
       setSubmitting(false)
     }
-  }, [title, edits])
+  }, [title, edits, submitting, landing, merging])
 
   const refresh = useCallback(async (changeId) => {
     if (submitting || merging || landing) return
@@ -328,7 +330,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
             >
               {edits.length >= MAX_EDITS ? `At the ${MAX_EDITS}-edit limit` : 'Add another edit'}
             </button>
-            <button className="chip-act" onClick={propose} disabled={submitting}>
+            <button className="chip-act" onClick={propose} disabled={submitting || landing || merging}>
               {submitting ? 'Proposing…' : 'Propose'}
             </button>
           </div>
@@ -410,7 +412,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
                 landConfirming === recordKey ? (
                   <span className="ops-confirm">
                     <span className="confirm-q">Land commit {String(record.commit_sha || '').slice(0, 12)}?</span>
-                    <button className="chip-act" onClick={land} disabled={landing}>
+                    <button className="chip-act" onClick={land} disabled={submitting || landing}>
                       {landing ? 'Landing…' : 'Land'}
                     </button>
                     <button className="chip-neutral" onClick={() => setLandConfirming(false)} disabled={landing}>
@@ -425,7 +427,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
                 mergeConfirming === recordKey ? (
                   <span className="ops-confirm">
                     <span className="confirm-q">Merge commit {String(record.commit_sha || '').slice(0, 12)} into main?</span>
-                    <button className="chip-act" onClick={merge} disabled={merging}>
+                    <button className="chip-act" onClick={merge} disabled={submitting || merging}>
                       {merging ? 'Merging…' : 'Merge'}
                     </button>
                     <button className="chip-neutral" onClick={() => setMergeConfirming(false)} disabled={merging}>

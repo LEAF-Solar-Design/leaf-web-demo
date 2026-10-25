@@ -35,6 +35,14 @@ function recordSection() {
   return within(screen.getByRole('region', { name: 'Change record' }))
 }
 
+// Batch clicks before the busy render to exercise overlapping completions
+// even though the rendered buttons block new requests once busy.
+function clickTogether(...buttons) {
+  act(() => {
+    for (const button of buttons) button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  })
+}
+
 beforeEach(() => {
   vi.resetAllMocks()
   localStorage.clear()
@@ -95,6 +103,10 @@ describe('self-edit confirmations and stale responses', () => {
     fireEvent.change(screen.getByLabelText('Path 1'), { target: { value: 'web/src/example.js' } })
     fireEvent.click(screen.getByRole('button', { name: 'Propose' }))
     expect(proposePlatformChange).toHaveBeenCalledTimes(1)
+    const mergeButton = screen.getByRole('button', { name: 'Merge' })
+    expect(mergeButton.disabled).toBe(true)
+    fireEvent.click(mergeButton)
+    expect(mergePlatformChange).not.toHaveBeenCalled()
     const refreshButton = screen.getByRole('button', { name: 'Refresh status' })
     expect(refreshButton.disabled).toBe(true)
     fireEvent.click(refreshButton)
@@ -127,12 +139,11 @@ describe('self-edit confirmations and stale responses', () => {
       render(<CustomizePanel tenant="test" />)
       await select(first)
       fireEvent.click(screen.getByRole('button', { name: action }))
-      fireEvent.click(screen.getByRole('button', { name: action }))
-      expect(mutate).toHaveBeenNthCalledWith(1, first.change_id, first.commit_sha)
       fireEvent.change(screen.getByLabelText('Title'), { target: { value: second.title } })
       fireEvent.change(screen.getByLabelText('Path 1'), { target: { value: 'web/src/example.js' } })
       proposePlatformChange.mockResolvedValue(proposed)
-      fireEvent.click(screen.getByRole('button', { name: 'Propose' }))
+      clickTogether(screen.getByRole('button', { name: action }), screen.getByRole('button', { name: 'Propose' }))
+      expect(mutate).toHaveBeenNthCalledWith(1, first.change_id, first.commit_sha)
       await screen.findByText(second.title, { selector: '.ops-section-copy' })
       expect(screen.getByRole('button', { name: action }).disabled).toBe(false)
       fireEvent.click(screen.getByRole('button', { name: action }))
@@ -168,9 +179,15 @@ describe('self-edit confirmations and stale responses', () => {
       mutate.mockReturnValue(pending.promise)
       render(<CustomizePanel tenant="test" />)
       await select(first)
+      fireEvent.change(screen.getByLabelText('Title'), { target: { value: second.title } })
+      fireEvent.change(screen.getByLabelText('Path 1'), { target: { value: 'web/src/example.js' } })
       fireEvent.click(screen.getByRole('button', { name: action }))
       fireEvent.click(screen.getByRole('button', { name: action }))
       expect(mutate).toHaveBeenCalledWith(first.change_id, first.commit_sha)
+      const proposeButton = screen.getByRole('button', { name: 'Propose' })
+      expect(proposeButton.disabled).toBe(true)
+      fireEvent.click(proposeButton)
+      expect(proposePlatformChange).not.toHaveBeenCalled()
       const refreshButton = screen.getByRole('button', { name: 'Refresh status' })
       expect(refreshButton.disabled).toBe(true)
       fireEvent.click(refreshButton)
@@ -184,6 +201,39 @@ describe('self-edit confirmations and stale responses', () => {
       expect(recordSection().queryByText(action === 'Land' ? 'Landed' : 'Merged', { selector: '.state' })).not.toBeNull()
       expect(recordSection().queryByText(first.title)).not.toBeNull()
       expect(screen.getByRole('button', { name: 'Refresh status' }).disabled).toBe(false)
+      expect(screen.getByRole('button', { name: 'Propose' }).disabled).toBe(false)
+    })
+
+    it(`applies a pending ${action} result after an overlapping proposal fails`, async () => {
+      const original = { ...first, state: action === 'Land' ? 'approved' : 'landed' }
+      getPlatformChange.mockResolvedValue(original)
+      const pending = deferred()
+      const proposal = deferred()
+      const mutate = action === 'Land' ? landPlatformChange : mergePlatformChange
+      mutate.mockReturnValue(pending.promise)
+      proposePlatformChange.mockReturnValue(proposal.promise)
+      render(<CustomizePanel tenant="test" />)
+      await select(first)
+      fireEvent.change(screen.getByLabelText('Title'), { target: { value: second.title } })
+      fireEvent.change(screen.getByLabelText('Path 1'), { target: { value: 'web/src/example.js' } })
+      fireEvent.click(screen.getByRole('button', { name: action }))
+      clickTogether(screen.getByRole('button', { name: action }), screen.getByRole('button', { name: 'Propose' }))
+      expect(mutate).toHaveBeenCalledWith(first.change_id, first.commit_sha)
+      expect(proposePlatformChange).toHaveBeenCalledTimes(1)
+      expect(screen.getByRole('button', { name: action }).disabled).toBe(true)
+      expect(screen.getByRole('button', { name: 'Refresh status' }).disabled).toBe(true)
+      await act(async () => { proposal.reject(new Error('The proposal could not be saved.')) })
+      expect(screen.queryByRole('alert')).not.toBeNull()
+      expect(recordSection().queryByText(first.title)).not.toBeNull()
+      expect(screen.getByRole('button', { name: 'Propose' }).disabled).toBe(true)
+      expect(screen.getByRole('button', { name: action }).disabled).toBe(true)
+      await act(async () => {
+        pending.resolve({ ...original, state: action === 'Land' ? 'landed' : 'merged' })
+      })
+      expect(recordSection().queryByText(action === 'Land' ? 'Landed' : 'Merged', { selector: '.state' })).not.toBeNull()
+      expect(recordSection().queryByText(first.title)).not.toBeNull()
+      expect(screen.getByRole('button', { name: 'Propose' }).disabled).toBe(false)
+      expect(screen.getByRole('button', { name: 'Refresh status' }).disabled).toBe(false)
     })
 
     for (const fails of [false, true]) {
@@ -196,12 +246,11 @@ describe('self-edit confirmations and stale responses', () => {
         render(<CustomizePanel tenant="test" />)
         await select(first)
         fireEvent.click(screen.getByRole('button', { name: action }))
-        fireEvent.click(screen.getByRole('button', { name: action }))
-        expect(mutate).toHaveBeenCalledWith(first.change_id, first.commit_sha)
         fireEvent.change(screen.getByLabelText('Title'), { target: { value: second.title } })
         fireEvent.change(screen.getByLabelText('Path 1'), { target: { value: 'web/src/example.js' } })
         proposePlatformChange.mockResolvedValue(second)
-        fireEvent.click(screen.getByRole('button', { name: 'Propose' }))
+        clickTogether(screen.getByRole('button', { name: action }), screen.getByRole('button', { name: 'Propose' }))
+        expect(mutate).toHaveBeenCalledWith(first.change_id, first.commit_sha)
         await screen.findByText(second.title, { selector: '.ops-section-copy' })
         await act(async () => {
           if (fails) pending.reject(new Error('The old change could not be saved.'))
