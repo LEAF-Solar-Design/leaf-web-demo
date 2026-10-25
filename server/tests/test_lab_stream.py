@@ -149,7 +149,7 @@ def test_fetch_route_cursors_and_snapshot_path(rig, monkeypatch):
     monkeypatch.setattr(stream, "event_stream", accelerated)
     with TestClient(rig.app) as client:
         response = client.get("/api/lab/stream/runs?runs=run&after_seq=0",
-                              headers={"Authorization": "Bearer header-only", "Last-Event-ID": "run:1"})
+                              headers={"Authorization": "Bearer t-1", "Last-Event-ID": "run:1"})
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
         assert "id: run:2\n" in response.text and "id: run:1\n" not in response.text
