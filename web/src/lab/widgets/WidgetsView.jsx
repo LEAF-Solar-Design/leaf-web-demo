@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import WidgetDesigner from './WidgetDesigner.jsx'
+import WidgetPreview from './WidgetPreview.jsx'
 import { createEditorState, createWidgetDoc, sameDocument, widgetEditorReducer } from './useWidgetEditor.js'
 import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 import { validateWidgetDoc } from './widgetDoc.js'
@@ -19,7 +20,7 @@ function validationError(doc) {
     return { detail: error.message, pointer: '/formats' }
   }
 }
-export function WidgetsView({ scopeKey, hidden = false }) {
+export function WidgetsView({ scopeKey, hidden = false, host = null }) {
   const local = typeof scopeKey === 'string' && scopeKey.trim().length > 0
   const [drafts, setDrafts] = useState(() => new Map())
   const [storeState, setStoreState] = useState(null)
@@ -105,6 +106,7 @@ export function WidgetsView({ scopeKey, hidden = false }) {
       {status === 'conflict' && <button type="button" onClick={() => load(loadedId)}>Reload</button>}
     </>}
     {state && <WidgetDesigner key={local ? scopeKey : loadedId ?? 'store'} state={state} dispatch={dispatch} local={local} hidden={hidden || (!local && status === 'loading')} invalid={Boolean(invalid)} onOutputs={onOutputs} graphOutputs={graphOutputs} />}
+    {!local && !hidden && status !== 'loading' && state && loadedId && head != null && !invalid && <WidgetPreview docId={loadedId} doc={state.doc} format={state.doc.active} host={host} />}
   </section>
 }
 export default WidgetsView

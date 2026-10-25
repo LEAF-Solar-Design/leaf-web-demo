@@ -15,7 +15,24 @@ const dormantMessages = {
 
 const EmbeddedCanvas = lazy(() => import('./canvas/LabCanvas.jsx'))
 
-function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
+function useHostSource({ enabled, createHostBridge }, onChange) {
+  const [provider, setProvider] = useState(null)
+  useEffect(() => {
+    if (!enabled || !createHostBridge) return undefined
+    const sourceProvider = createHostProvider({ framed: true, onChange })
+    setProvider(sourceProvider)
+    sourceProvider.start()
+    const connection = createHostBridge({ onSource: next => sourceProvider.announce(next) })
+    void connection.start()
+    return () => {
+      connection.stop()
+      sourceProvider.stop()
+    }
+  }, [enabled, createHostBridge, onChange])
+  return enabled && createHostBridge ? provider : null
+}
+
+function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSource }) {
   const bridge = useRef(null)
   const root = useRef(null)
   const restoration = useRef(null)
@@ -23,25 +40,14 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
   const actionAt = useRef(null)
   const [opened, setOpened] = useState(!hidden)
   const [revision, setRevision] = useState(0)
-  const [provider, setProvider] = useState(() => createHostProvider({ framed: true,
-    onChange: () => setRevision(value => value + 1) }))
-  const live = useLiveGraph({ provider, revision })
-  const graph = live.draft
-  const [restored, setRestored] = useState(null)
-  const [admitted, setAdmitted] = useState(false)
-  const [hostProposal, setHostProposal] = useState(null)
-  const [reloaded, setReloaded] = useState(false)
-  if (!hidden && !opened) setOpened(true)
-
-  useEffect(() => {
-    if (!enabled || !createHostBridge) return undefined
-    const sourceProvider = createHostProvider({ framed: true, onChange: () => setRevision(value => value + 1) })
-    setProvider(sourceProvider)
-    sourceProvider.start()
+  const sourceChanged = useCallback(() => setRevision(value => value + 1), [])
+  const [emptyProvider] = useState(() => createHostProvider({ framed: true }))
+  const retainedProvider = useRef(emptyProvider)
+  const connect = useCallback(({ onSource }) => {
     const connection = createHostBridge({
       onAdmitted: () => setAdmitted(true),
       onChange: ({ ready, problems }) => setHostProposal({ ready, problems }),
-      onSource: (next) => sourceProvider.announce(next),
+      onSource,
       onReload: () => { setReloaded(true); setAdmitted(false); onReload(true) },
       onRestore: (draft) => new Promise((resolve) => {
         restoration.current = resolve
@@ -52,17 +58,33 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge }) {
       }),
     })
     bridge.current = connection
-    void connection.start()
-    return () => {
-      connection.stop()
-      sourceProvider.stop()
-      if (bridge.current === connection) bridge.current = null
-      restoration.current?.()
-      restoration.current = null
-      setAdmitted(false)
-      setHostProposal(null)
+    return {
+      start: () => connection.start(),
+      stop: () => {
+        connection.stop()
+        if (bridge.current === connection) bridge.current = null
+        restoration.current?.()
+        restoration.current = null
+        setAdmitted(false)
+        setHostProposal(null)
+      },
     }
-  }, [enabled, onReload, createHostBridge])
+  }, [onReload, createHostBridge])
+  const source = useHostSource({ enabled, createHostBridge: createHostBridge ? connect : null }, sourceChanged)
+  if (source) retainedProvider.current = source
+  const provider = source || retainedProvider.current
+  const live = useLiveGraph({ provider, revision })
+  const graph = live.draft
+  const [restored, setRestored] = useState(null)
+  const [admitted, setAdmitted] = useState(false)
+  const [hostProposal, setHostProposal] = useState(null)
+  const [reloaded, setReloaded] = useState(false)
+  if (!hidden && !opened) setOpened(true)
+
+  useEffect(() => {
+    // Value-only announcements keep the provider identity but must refresh widgets.
+    onHostSource({ provider: source, revision })
+  }, [source, revision, onHostSource])
 
   const changed = useCallback((draft) => {
     live.onChange(draft)
@@ -113,6 +135,7 @@ export function LabWorkbench({ route, hidden = false, status, embedded = false, 
   const views = registerLabViews()
   const [liveStatus, setLiveStatus] = useState(null)
   const [hostReloaded, setHostReloaded] = useState(false)
+  const [hostSource, setHostSource] = useState(null)
   useEffect(() => {
     if (status !== undefined) return undefined
     let current = true
@@ -138,7 +161,8 @@ export function LabWorkbench({ route, hidden = false, status, embedded = false, 
         const inactive = hidden || !available || activeView !== id
         return (
           <div key={id} data-lab-view={id} role="region" aria-label={`${label} view`} hidden={inactive}>
-            {embedded && id === 'graph' ? <EmbeddedGraph hidden={inactive} enabled={available && !hidden} onReload={setHostReloaded} createHostBridge={createHostBridge} /> : <View hidden={inactive} />}
+            {embedded && id === 'graph' ? <EmbeddedGraph hidden={inactive} enabled={available && !hidden} onReload={setHostReloaded} createHostBridge={createHostBridge} onHostSource={setHostSource} />
+              : id === 'widgets' ? <View hidden={inactive} host={embedded && available && !hidden && createHostBridge ? hostSource?.provider ?? null : null} /> : <View hidden={inactive} />}
           </div>
         )
       })}
