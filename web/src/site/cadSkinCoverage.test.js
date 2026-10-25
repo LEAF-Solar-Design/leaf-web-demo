@@ -1,6 +1,6 @@
 // Slice 13b: the cad-skin scope (the same selector cockpit.css already uses
 // to declare --ck-*) must alias every --ck-* token the file actually
-// consumes via var(--ck-*), except ink and warn inherited from the v1 root,
+// consumes via var(--ck-*), except ink, warn and glass roles inherited from the v1 root,
 // so a token the skin references but the map
 // forgot fails this test loudly instead of silently inheriting whatever
 // --leaf-* value happens to be ambient outside the cad-skin scope.
@@ -134,7 +134,7 @@ describe('the cad-skin scope maps every --ck-* token cockpit.css consumes (slice
 
     const decls = declsFor(cockpit, CAD_SKIN_SELECTOR)
     const root = declsFor(read('src/standard/leaf-standard.css'), ':root')
-    const inherited = new Set(['--ck-ink', '--ck-warn'])
+    const inherited = new Set(['--ck-ink', '--ck-warn', '--ck-glass-band', '--ck-glass-panel', '--ck-glass-dock'])
     for (const token of inherited) {
       const role = token.replace('--ck-', '--leaf-')
       expect(root, `${role} must be declared by the vendored v1 root`).toHaveProperty(role)

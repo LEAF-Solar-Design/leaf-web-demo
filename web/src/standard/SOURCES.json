@@ -22,10 +22,10 @@
     {
       "path": "src/standard/leaf-standard.css",
       "source_repo": "LEAF-Solar-Design/leaf-design-system",
-      "ref": "leaf-standard-v1.0.0@124a05012a9f3304f738ac345e01d87fd0b7ed02",
+      "ref": "leaf-standard-v1.2.0@83c083b498eb1b154654e01a675fbf52e818b1ae",
       "upstream_path": "tokens/dist/leaf-standard.css",
-      "sha256": "d4dd1dc8ad44ba0fa1a1195e07b5047b7aeab588b340c45c5985656b04d05fec",
-      "bytes": 3249,
+      "sha256": "b0671e26ba5803c3e7166c2cafeb91138e4619de29fb844cabdfb13e1fd11d50",
+      "bytes": 6814,
       "license": "internal"
     },
     {

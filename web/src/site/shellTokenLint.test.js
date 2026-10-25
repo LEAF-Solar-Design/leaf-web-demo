@@ -3,12 +3,23 @@ import { describe, it, expect } from 'vitest'
 
 const read = (file) => readFileSync(new URL(file, import.meta.url), 'utf8')
 const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, '')
+const stripUrls = (css) => css.replace(/url\((?:\\.|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\\)'"])*\)/gi, '')
 const shells = ['cockpit.css', 'studioShell.css'].map((file) => [file, stripComments(read(`./${file}`))])
 
-describe('shell v1 token lint (LS-T2, LS-T3, LS-T4)', () => {
+describe('shell v1 token lint (LS-T1, LS-T2, LS-T3, LS-T4)', () => {
   for (const [file, css] of shells) {
     const declarations = [...css.matchAll(/(?:^|[;{}])\s*([\w-]+)\s*:\s*([^;}]+)/g)]
       .map(([, property, value]) => [property, value.trim()])
+
+    it(`${file} uses color tokens outside --leaf-* declarations (LS-T1)`, () => {
+      const colors = [...stripUrls(css).matchAll(/(?:^|[;{}])\s*([\w-]+)\s*:\s*([^;}]+)/g)]
+        .filter(([, property]) => !property.startsWith('--leaf-'))
+      expect(colors.length, file).toBeGreaterThan(0)
+      for (const [, property, value] of colors) {
+        expect(value, `${file} ${property}: ${value.trim()}`)
+          .not.toMatch(/#(?:[\da-f]{8}|[\da-f]{6}|[\da-f]{4}|[\da-f]{3})(?![\da-f])|\b(?:rgba?|hsla?)\(/i)
+      }
+    })
 
     it(`${file} uses layer tokens for z-index (LS-T4)`, () => {
       const layers = declarations.filter(([property]) => property === 'z-index')
@@ -38,6 +49,24 @@ describe('shell v1 token lint (LS-T2, LS-T3, LS-T4)', () => {
       }
     })
   }
+
+  it('the vendored standard declares the v1.1 CAD canvas and glass band roles', () => {
+    const css = stripComments(read('../standard/leaf-standard.css'))
+    expect(css).toMatch(/--leaf-cad-canvas:\s*#212830\s*;/)
+    expect(css).toMatch(/--leaf-glass-band:\s*rgba\(14, 17, 15, 0\.86\)\s*;/)
+  })
+
+  it('the vendored standard declares the v1.2 directional panel shadow roles', () => {
+    const css = stripComments(read('../standard/leaf-standard.css'))
+    expect(css).toMatch(/--leaf-shadow-panel-start:\s*-8px 0 24px rgba\(0, 0, 0, 0\.4\)\s*;/)
+    expect(css).toMatch(/--leaf-shadow-panel-end:\s*8px 0 24px rgba\(0, 0, 0, 0\.4\)\s*;/)
+  })
+
+  it('the shells use directional shadows for the five side panels', () => {
+    const css = shells.map(([, css]) => css).join('\n')
+    expect([...css.matchAll(/var\(--leaf-shadow-panel-start\)/g)]).toHaveLength(3)
+    expect([...css.matchAll(/var\(--leaf-shadow-panel-end\)/g)]).toHaveLength(2)
+  })
 
   it('the phone ribbon disclosure hides its text while retaining the pseudo-element label', () => {
     const css = shells.find(([file]) => file === 'cockpit.css')[1]
