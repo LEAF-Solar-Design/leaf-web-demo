@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { submitDemandCapture } from '../api.js'
+import { humanizeError } from '../errorHumanize.js'
 
 export function DemandCaptureCard({ compact = false }) {
   const [email, setEmail] = useState('')
@@ -14,9 +15,9 @@ export function DemandCaptureCard({ compact = false }) {
     try {
       await submitDemandCapture({ email, interest, org: null })
       setStatus('success')
-    } catch (caught) {
+    } catch {
       setStatus('idle')
-      setError(caught?.message || 'We could not save your request. Please try again.')
+      setError(humanizeError('Could not save your interest. Please try again.'))
     }
   }
 
