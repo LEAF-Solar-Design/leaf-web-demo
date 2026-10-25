@@ -130,6 +130,60 @@ describe('DraftingRibbon', () => {
     expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
   })
 
+  describe('measured fit', () => {
+    afterEach(() => {
+      cleanup()
+      vi.restoreAllMocks()
+    })
+
+    const renderMeasured = (widths) => {
+      const originalRect = HTMLElement.prototype.getBoundingClientRect
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        const rect = originalRect.call(this)
+        if (this.classList.contains('ribbon-more')) return { ...rect, width: 100 }
+        if (this.classList.contains('ribbon-cluster')) {
+          const groups = [...this.parentElement.querySelectorAll('.ribbon-cluster')]
+          return { ...rect, width: widths[groups.indexOf(this)] }
+        }
+        return rect
+      })
+      render(<DraftingRibbon clusters={widths.map((_, index) => ({
+        id: `cluster-${index}`,
+        label: `Cluster ${index}`,
+        tools: [{ id: `tool-${index}`, label: `Tool ${index}` }],
+      }))} />)
+      const ribbon = screen.getByRole('toolbar', { name: 'Drafting tools' })
+      Object.defineProperty(ribbon, 'clientWidth', { configurable: true, value: 1440 })
+      fireEvent(window, new Event('resize'))
+      return {
+        groups: [...ribbon.querySelectorAll('.ribbon-cluster')],
+        more: ribbon.querySelector('.ribbon-more'),
+      }
+    }
+
+    it('skips an oversize cluster so later clusters can fit', () => {
+      const { groups, more } = renderMeasured([100, 1500, 600, 100, 100])
+      expect(groups.map(group => group.hidden)).toEqual([false, true, false, false, false])
+      expect(more.hidden).toBe(false)
+      fireEvent.click(more)
+      expect(groups.map(group => group.hidden)).toEqual([false, false, false, false, false])
+      expect([...document.querySelectorAll('.ribbon-cluster')]).toEqual(groups)
+      expect(screen.getByRole('button', { name: 'Tool 1' })).toBeTruthy()
+    })
+
+    it('shows every cluster and hides More when all clusters fit', () => {
+      const { groups, more } = renderMeasured([100, 200, 300, 100, 100])
+      expect(groups.map(group => group.hidden)).toEqual([false, false, false, false, false])
+      expect(more.hidden).toBe(true)
+    })
+
+    it('skips multiple oversize clusters while retaining later clusters', () => {
+      const { groups, more } = renderMeasured([100, 1500, 1500, 100, 100])
+      expect(groups.map(group => group.hidden)).toEqual([false, true, true, false, false])
+      expect(more.hidden).toBe(false)
+    })
+  })
+
   describe('ROV the overflow closes on tool activation only', () => {
     const overflowClusters = (handlers = {}) => [
       { id: 'draw', label: 'Draw', tools: [{ id: 'line', label: 'Line', onClick: handlers.line }] },
