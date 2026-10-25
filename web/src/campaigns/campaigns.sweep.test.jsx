@@ -5,12 +5,16 @@ import useCampaigns from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
 import { subscribeUnauthorized } from '../api.js'
 import { getProjectLifecycle } from '../projects/api.js'
+import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 
 vi.mock('./useCampaigns.js', async importOriginal => ({ ...await importOriginal(), default: vi.fn() }))
 vi.mock('./api.js', async importOriginal => ({ ...await importOriginal(), uploadProjectInput: vi.fn() }))
+vi.mock('../auth.js', async importOriginal => ({ ...await importOriginal(), subscribeBeforeLogout: vi.fn(), subscribeTokenStored: vi.fn() }))
 
 let campaign
 beforeEach(() => {
+  subscribeBeforeLogout.mockReset().mockReturnValue(vi.fn())
+  subscribeTokenStored.mockReset().mockReturnValue(vi.fn())
   const row = { campaign_id: '33333333-3333-3333-3333-333333333333', title: 'Solar layout', prompt: 'Prepare the roof layout.', status: 'accepted' }
   campaign = {
     status: 'ready', campaigns: [row], selectedId: row.campaign_id, selected: row,
@@ -35,6 +39,54 @@ function show() {
 }
 
 describe('campaign sweep regressions', () => {
+  it('keeps account A recovery drafts private from account B and discards them on logout', () => {
+    const token = (sub, exp) => `header.${btoa(JSON.stringify({ sub, exp }))}.signature`
+    localStorage.setItem('leaf.jwt', token('account-a', 1))
+    const view = show()
+    const fields = ['Title', 'Prompt', 'Follow-up question', 'Release workflow']
+    const values = ['Roof draft', 'Keep this goal.', 'Which roof?', 'Keep this release.']
+    const typeDrafts = () => fields.forEach((label, index) => fireEvent.change(screen.getByLabelText(label), { target: { value: values[index] } }))
+    const expectDrafts = expected => fields.forEach((label, index) => expect(screen.getByLabelText(label).value).toBe(expected[index]))
+    const empty = ['', '', '', campaign.selected.prompt]
+    const rerender = signedIn => view.rerender(<CampaignPanel projectId="11111111-1111-1111-1111-111111111111" signedIn={signedIn} />)
+    typeDrafts()
+    localStorage.removeItem('leaf.jwt')
+    act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' })))
+    rerender(false)
+    localStorage.setItem('leaf.jwt', token('account-a', 2))
+    act(() => subscribeTokenStored.mock.calls.at(-1)[0]())
+    rerender(true)
+    expectDrafts(values)
+
+    localStorage.setItem('leaf.jwt', token('account-b', 3))
+    act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' })))
+    expectDrafts(empty)
+    localStorage.setItem('leaf.jwt', token('account-a', 4))
+    act(() => subscribeTokenStored.mock.calls.at(-1)[0]())
+    expectDrafts(empty)
+    typeDrafts()
+    act(() => subscribeBeforeLogout.mock.calls.at(-1)[0]())
+    expectDrafts(empty)
+    localStorage.removeItem('leaf.jwt')
+    rerender(false)
+    localStorage.setItem('leaf.jwt', token('account-a', 5))
+    act(() => subscribeTokenStored.mock.calls.at(-1)[0]())
+    rerender(true)
+    expectDrafts(empty)
+  })
+
+  it('unsubscribes from principal and logout changes when the panel unmounts', () => {
+    const remove = vi.spyOn(window, 'removeEventListener')
+    const view = show()
+    const offStored = subscribeTokenStored.mock.results.at(-1).value
+    const offLogout = subscribeBeforeLogout.mock.results.at(-1).value
+    view.unmount()
+    expect(offStored).toHaveBeenCalledTimes(1)
+    expect(offLogout).toHaveBeenCalledTimes(1)
+    expect(remove).toHaveBeenCalledWith('storage', expect.any(Function))
+    remove.mockRestore()
+  })
+
   it('restores typed drafts after the sign-in recovery prompt', () => {
     const view = show()
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Roof draft' } })

@@ -3,6 +3,8 @@ import useCampaigns, { releaseSource } from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
 import { useLoadingPhase } from '../lib/loadingTiming.js'
 import { humanizeError } from '../errorHumanize.js'
+import { authTenantScope } from '../drawing/drawingIdentity.js'
+import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import './campaigns.css'
 
 const conflictMessage = 'This question already has a different recorded answer. Reload to see it.'
@@ -13,6 +15,10 @@ const executionWords = value => ({ reconcile_required: 'Outcome unknown, reconci
 const nativeRelease = row => row.capability === 'campaign.native-release' || row.capability_link?.capability === 'campaign.native-release'
 
 const DraftContext = createContext(null)
+
+function readCampaignPrincipal() {
+  try { return authTenantScope(localStorage.getItem('leaf.jwt')) } catch { return null }
+}
 
 // Keep typed drafts in this project's panel while sign-in recovery hides its forms.
 function useDraft(key, initial) {
@@ -675,9 +681,37 @@ function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvid
 }
 
 function ProjectCampaignPanel({ projectId, projectName, signedIn, artifactUrlApi, authorityProvider }) {
-  const drafts = useRef(new Map())
-  return <DraftContext.Provider value={drafts}><section className="campaign-panel" aria-label="Campaign">
-    {signedIn ? <SignedInPanel key={projectId} projectId={projectId} projectName={projectName} artifactUrlApi={artifactUrlApi} authorityProvider={authorityProvider} />
+  const [storedPartition, setPartition] = useState(() => ({ principal: readCampaignPrincipal(), drafts: { current: new Map() }, generation: 0 }))
+  const principal = readCampaignPrincipal()
+  let partition = storedPartition
+  // A missing token can mean recovery. Only a new principal discards that draft.
+  if (principal !== null && principal !== partition.principal) {
+    partition = { principal, drafts: { current: new Map() }, generation: partition.generation + 1 }
+    setPartition(partition)
+  }
+  useEffect(() => {
+    const refresh = () => {
+      const next = readCampaignPrincipal()
+      if (next !== null) setPartition(previous => next === previous.principal ? previous
+        : { principal: next, drafts: { current: new Map() }, generation: previous.generation + 1 })
+    }
+    const offStored = subscribeTokenStored(refresh)
+    const offLogout = subscribeBeforeLogout(() => {
+      setPartition(previous => ({ ...previous, drafts: { current: new Map() }, generation: previous.generation + 1 }))
+    })
+    const onStorage = event => {
+      if (event.key === null || event.key === 'leaf.jwt') refresh()
+    }
+    window.addEventListener('storage', onStorage)
+    refresh()
+    return () => {
+      offStored()
+      offLogout()
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [])
+  return <DraftContext.Provider value={partition.drafts}><section className="campaign-panel" aria-label="Campaign">
+    {signedIn ? <SignedInPanel key={`${projectId}:${partition.generation}`} projectId={projectId} projectName={projectName} artifactUrlApi={artifactUrlApi} authorityProvider={authorityProvider} />
       : <p role="status">Sign in to submit a campaign.</p>}
   </section></DraftContext.Provider>
 }
