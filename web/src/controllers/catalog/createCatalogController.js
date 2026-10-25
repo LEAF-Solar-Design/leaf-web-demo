@@ -84,6 +84,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   // parameter carried into the one call the click authorised, so a click that
   // cannot dispatch authorises exactly nothing.
   let toolsRequest = 0
+  let dispatchGeneration = 0
   let catalogRequest = 0
   let catalogAbort = null
   let acceptedPreview = null
@@ -183,13 +184,14 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const invalidateProject = () => {
+    dispatchGeneration += 1
     catalogRequest += 1
     catalogAbort?.abort()
     acceptedPreview = null
     state = { ...state, ...resetProjectCatalog() }
     snapshot = null
     adapters.dismissDecision?.()
-    publish({ catalog: { families: [], source: null }, route: null, routeError: null, ...resetProjectCatalog() })
+    publish({ catalog: { families: [], source: null }, route: null, routeError: null, routing: false, ...resetProjectCatalog() })
   }
   const subscribeProject = () => {
     if (unsubscribeProject || !services.projectSolarClient) return
@@ -230,7 +232,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     draft = createComposerDraft({ storage, accountScope, route })
     draftGeneration += 1
     if (changed) {
-      publish({ prompt: '', route: null, routeError: null, secretRefusal: null })
+      dispatchGeneration += 1
+      publish({ prompt: '', route: null, routeError: null, secretRefusal: null, routing: false })
       adapters.onDraftScopeChanged?.()
     }
     return draft
@@ -538,6 +541,9 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     const activeDraft = ensureDraft()
     const text = (typeof override === 'string' ? override : state.prompt).trim()
     if (!text || state.routing || current.running) return undefined
+    const generation = ++dispatchGeneration
+    const scope = projectFingerprint()
+    const requestIsCurrent = () => generation === dispatchGeneration && scope === projectFingerprint()
     activeDraft.clear()
     if (text !== lastRefusedText) {
       lastRefusedText = null
@@ -580,6 +586,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     try {
       // A solve bound to a solver is a confirmable run of that tool (routedLane 'solve').
       const routed = await services.routePrompt(current.mock, text, state.tools, { allowSecretOnce })
+      if (!requestIsCurrent()) return undefined
       const decision = solveRunDecision(routed)
       if (decision.lane === 'run' && solarRefusal(decision.tool, decision.params)) {
         return commitDecision(decision, { requestText: text })
@@ -590,7 +597,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
 
       if (chipOnly) {
         commitDecision(decision, { requestText: text })
-        if (decision.lane === 'build') openAuthorFlow(text)
+        if (requestIsCurrent() && decision.lane === 'build') openAuthorFlow(text)
       } else {
         const hint = {
           lane: decision.lane,
@@ -599,13 +606,17 @@ export function createCatalogController({ services, adapters = {}, context = {} 
           rationale: decision.rationale || null,
         }
         publish({ agentBanner: null })
+        if (!requestIsCurrent()) return undefined
         if (decision.lane === 'run' && !!decision.tool &&
             (confidence >= thresholds.RACE_MIN || decision.routedLane === 'solve')) {
           commitDecision(decision, { requestText: text })
           try {
+            if (!requestIsCurrent()) return undefined
             await adapters.startAgentTurn(text, hint, { allowSecretOnce })
+            if (!requestIsCurrent()) return undefined
             publish({ agentMode: 'race' })
           } catch (error) {
+            if (!requestIsCurrent()) return undefined
             // A credential refusal is not an agent outage. It must reach the
             // outer catch, which renders it as the refusal notice; an agent
             // banner here would say "the assistant is unavailable" about a
@@ -615,18 +626,24 @@ export function createCatalogController({ services, adapters = {}, context = {} 
           }
         } else {
           try {
+            if (!requestIsCurrent()) return undefined
             await adapters.startAgentTurn(text, hint, { allowSecretOnce })
+            if (!requestIsCurrent()) return undefined
             publish({ agentMode: 'primary' })
           } catch (error) {
+            if (!requestIsCurrent()) return undefined
             if (isSecretRefused(error)) throw error
             commitDecision(decision, { requestText: text })
+            if (!requestIsCurrent()) return undefined
             if (decision.lane === 'build') openAuthorFlow(text)
+            if (!requestIsCurrent()) return undefined
             publish({ agentBanner: adapters.agentBannerFor?.(error) || null })
           }
         }
       }
       return decision
     } catch (error) {
+      if (!requestIsCurrent()) return undefined
       // The transport refused before anything left the browser. It is not a
       // routing failure, so it renders as the refusal notice and NOT as a red
       // route error; `route` is nulled so a stale decision strip cannot sit
@@ -638,7 +655,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       publish({ routeError: humanizeError(error) })
       return undefined
     } finally {
-      publish({ routing: false })
+      if (requestIsCurrent()) publish({ routing: false })
     }
   }
 
@@ -675,6 +692,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     openTool(tool) { publish({ openTool: tool || null }) },
     closeTool() { publish({ openTool: null }) },
     resetTransient() {
+      dispatchGeneration += 1
       lastRefusedText = null
       refusedCount = 0
       adapters.dismissDecision?.()
@@ -730,6 +748,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       void loadCatalog()
     },
     destroy() {
+      dispatchGeneration += 1
       started = false
       draft?.dispose()
       draft = null
@@ -766,6 +785,10 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const projectChanged = (previousProject || projectScope()) &&
         (previousProject !== projectScope() || modeChanged || previousFingerprint !== projectFingerprint())
       contextFingerprint = projectFingerprint()
+      if (modeChanged || drawingChanged || pausedChanged) {
+        dispatchGeneration += 1
+        publish({ routing: false, route: null, routeError: null, agentMode: null, agentBanner: null })
+      }
       if (started) restoreDraft()
       if (drawingChanged) {
         catalogRequest += 1

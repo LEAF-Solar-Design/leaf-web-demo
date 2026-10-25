@@ -5020,6 +5020,7 @@ export default function App() {
             <div
               className="strip-failed"
               role="alert"
+              aria-atomic="true"
               data-testid="unreadable-head-lock"
               data-head={unreadableHead.head}
               data-latest={unreadableHead.latest}
@@ -5029,6 +5030,9 @@ export default function App() {
               <button type="button" className="chip-act" onClick={retryUnreadableHead} disabled={drawing.refreshing}>
                 Retry loading
               </button>
+              {unreadableHead.retryAttempts > 0 && (
+                <span>Retry {unreadableHead.retryAttempts} failed. {humanizeError(unreadableHead.error)}</span>
+              )}
             </div>
           )}
           <SolarFlowSeat seated={solarFlowSeated}>
@@ -5468,9 +5472,10 @@ export default function App() {
           {/* X1: a failed post-write viewer refresh — red row + Retry + honest
               fallback note (the completion itself already toasted plainly). */}
           {refreshFail && (
-            <div className="inline-error" style={{ margin: '0 0 8px' }}>
-              Couldn’t refresh the viewer, showing the previous version
-              <button type="button" className="chip-act" onClick={onRetryViewerRefresh}>Retry</button>
+            <div className="inline-error" style={{ margin: '0 0 8px' }} role="alert" aria-atomic="true">
+              <span>Could not refresh the drawing. Showing the previous version. {humanizeError(refreshFail.error)}</span>
+              {refreshFail.retryAttempts > 0 && <span>Retry {refreshFail.retryAttempts} failed.</span>}
+              <button type="button" className="chip-act" onClick={onRetryViewerRefresh} disabled={drawing.refreshing}>Retry</button>
               {rTarget === 'refresh' && <span className="key" aria-hidden="true">R</span>}
             </div>
           )}
