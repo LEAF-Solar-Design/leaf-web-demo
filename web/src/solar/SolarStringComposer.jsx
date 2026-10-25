@@ -535,6 +535,8 @@ function StandaloneStringComposer({
   }, [view, search])
   const rowNames = useMemo(() => new Map((view?.rows ?? []).map((item) => [item.frameIndex, item.name])), [view])
   const disabled = checking || status === 'pending' || reloadRequired
+  const hostMatchesView = view?.ok && view.binding.drawingVersion === drawingVersion
+  const submitDisabled = disabled || !hostMatchesView || !preview.ok
   const bound = multi ? MAX_MULTI_REFS : MAX_SINGLE_REFS
   const addDisabled = disabled || queue.length >= bound
   const queueLast = Math.max(0, Math.ceil(queue.length / PAGE_SIZE) - 1)
@@ -555,7 +557,7 @@ function StandaloneStringComposer({
     setCheckReason(null)
   }
   const review = async () => {
-    if (lock.current || disabled || !preview.ok) return
+    if (lock.current || submitDisabled) return
     const token = { binding }
     lock.current = token
     const capturedParams = preview.params
@@ -570,7 +572,7 @@ function StandaloneStringComposer({
         const envelope = await Promise.resolve().then(() => (active() ? reader.current(drawingId, 'head') : SKIPPED))
         if (envelope === SKIPPED || !active()) return
         fresh = checkStringFreshness({ view: capturedView, drawingId,
-          drawingVersion: capturedView.binding.drawingVersion, envelope })
+          drawingVersion, envelope })
       } catch {
         fresh = { ok: false, reason: SOLAR_STRING_COMPOSER_REASONS.unavailable }
       }
@@ -594,6 +596,8 @@ function StandaloneStringComposer({
       ? SOLAR_STRING_COMPOSER_REASONS.failed : runRefusal.reason}</p>}
     {status === 'finished' && <p className="solar-step-note" role="status">{SOLAR_STRING_COMPOSER_REASONS.finished}</p>}
     {checkReason && <p className="solar-step-note" role="alert">{humanizeError(checkReason)}</p>}
+    {view?.ok && !hostMatchesView && <p className="solar-step-note" role="status">
+      {humanizeError('The drawing changed. Reopen this tool from the current drawing to continue.')}</p>}
     {reloadRequired && <button className="chip-act" disabled={checking || status === 'pending'} onClick={() => {
       latestBinding.current = binding
       setQueue([]); setSelected(null); setFirst(null); setLast(null); setLengthDraft(null)
@@ -619,8 +623,8 @@ function StandaloneStringComposer({
           setQueuePage={setQueuePage} preview={preview} sizes={sizes}
           shownPreviewPage={shownPreviewPage} setPreviewPage={setPreviewPage} />
       </>}
-    <button className="chip-act" disabled={disabled || !view?.ok || !preview.ok} onClick={review}>Review &amp; run</button>
-    {status === 'failed' && <button className="chip-act" disabled={disabled || !view?.ok || !preview.ok}
+    <button className="chip-act" disabled={submitDisabled} onClick={review}>Review &amp; run</button>
+    {status === 'failed' && <button className="chip-act" disabled={submitDisabled}
       onClick={review}>Retry</button>}
     {cancel}
   </div>

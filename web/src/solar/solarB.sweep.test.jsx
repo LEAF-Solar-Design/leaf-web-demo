@@ -56,8 +56,10 @@ it('S1-116 reloads the latest drawing and discards the stale selection queue', a
   expect(within(screen.getByRole('region', { name: 'Selection queue' })).queryAllByRole('listitem')).toHaveLength(0)
   expect(button('Review & run').disabled).toBe(true)
   addRange()
+  expect(button('Review & run').disabled).toBe(true)
   fireEvent.click(button('Review & run'))
-  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
+  await act(async () => {})
+  expect(onSubmit).not.toHaveBeenCalled()
 })
 
 it('S1-116 offers reload after a failed freshness read', async () => {
