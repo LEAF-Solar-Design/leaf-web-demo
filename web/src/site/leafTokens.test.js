@@ -159,6 +159,46 @@ it('shell declarations use v1 roles instead of the mapped old cockpit palette', 
   }
 })
 
+it('shell palette declares every non-viewer paper color using Stage roles and tints', () => {
+  const paper = declsFor(read('src/styles.css'), ':root')
+  const shell = declsFor(read('src/site/studioShell.css'), '.studio-shell .app[data-studio-shell="cockpit"][data-surface]')
+  const paperColors = Object.entries(paper).filter(([name, value]) =>
+    !name.startsWith('--cv-') && /#[0-9a-f]{3,8}\b|\brgba?\(|\b[\w-]*gradient\s*\(/i.test(value),
+  )
+  expect(paperColors.length).toBeGreaterThan(0)
+  for (const [name] of paperColors) {
+    expect(shell, `${name} must be declared in the shell palette`).toHaveProperty(name)
+  }
+  for (const name of [
+    '--card-grad', '--muted-2', '--status-success', '--status-warning', '--status-danger', '--status-info',
+    '--bar-well', '--bar-chip', '--bar-focus-ring', '--keycap', '--hairline', '--rail', '--input',
+    '--accent-tint', '--accent-tint-hover', '--warn-tint', '--danger-tint', '--sheet', '--code-bg',
+    '--grid-line', '--rule-strong', '--hover-tint', '--hover-tint-strong', '--shadow-pop',
+    '--well', '--well-border', '--well-chip', '--well-text', '--well-dim', '--well-faint',
+    '--well-accent', '--well-accent-tint',
+  ]) {
+    expect(shell, `${name} must be declared in the shell palette`).toHaveProperty(name)
+    expect(shell[name], `${name} must use a Stage role or tint`).not.toMatch(/#[0-9a-f]{3,8}\b/i)
+  }
+})
+
+it('shell palette re-declares root aliases that reference shell tokens', () => {
+  const paper = declsFor(read('src/styles.css'), ':root')
+  const selector = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'
+  const palette = [...stripComments(read('src/site/studioShell.css')).matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .find(([, selectors, body]) => selectors.trim() === selector && /--ck-font\s*:/.test(body))
+  expect(palette).toBeDefined()
+  expect(palette[2]).toMatch(/(?:^|;)\s*color\s*:\s*var\(--ck-ink\)\s*;/)
+  const shell = declsFor(palette[0], selector)
+  const aliases = Object.entries(paper).filter(([, value]) =>
+    [...value.matchAll(/var\(\s*(--[a-zA-Z0-9-]+)/g)].some(([, target]) => target in shell),
+  )
+  expect(aliases.length).toBeGreaterThan(0)
+  for (const [name] of aliases) {
+    expect(shell, `${name} must be re-declared in the shell palette`).toHaveProperty(name)
+  }
+})
+
 it('SSD1-24E light hover text', () => {
   const css = stripComments(read('src/site/landing.css'))
   const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
