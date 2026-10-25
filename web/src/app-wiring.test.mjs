@@ -4220,14 +4220,24 @@ describe('W4g S08-a: an explicit demo starts in mock', () => {
     const promptBox = appSource.match(/<PromptBox\s[\s\S]*?\/>/)?.[0]
     assert.ok(promptBox)
     assert.ok(promptBox.includes('mcpDiscoveryEnabled={!mock && !knownGuest}'))
+    assert.ok(promptBox.includes('liveCallsAllowed={signedIn && !mock && !knownGuest && !signedOut}'))
+    assert.ok(promptBox.includes('mock={mock}'))
   })
   it('decides explicit demo mode in the lazy initial state', () => {
     assert.match(appSource, new RegExp('useState\\(\\(\\) => config\\.mockDefault[\\s\\S]{0,200}explicitDemo\\(\\{'))
     assert.match(appSource, new RegExp("import \\{[^}]*\\bexplicitDemo\\b[^}]*\\} from './demoState\\.js'"))
   })
-  it('renders the operator probe once and only outside mock', () => {
+  it('renders the operator probe once and only when signed in outside mock and known guests', () => {
     assert.equal(appSource.split('<OperatorEntry />').length - 1, 1)
-    assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && <OperatorEntry />}')))
+    assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && !knownGuest && signedIn && <OperatorEntry />}')))
+  })
+  it('gates add-ons on sign-in and delegates click focus to the dialog-aware guard', () => {
+    assert.ok(appSource.includes('{!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel'))
+    assert.ok(appSource.includes('if (shouldSkipPromptFocus(t)) return'))
+    const stage = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
+    const promptBox = stage.match(/<PromptBox\s[\s\S]*?\/>/)?.[0]
+    assert.ok(promptBox?.includes('liveCallsAllowed={isSignedIn() && !transportMock}'))
+    assert.ok(promptBox?.includes('mock={PUBLIC_DEMO}'))
   })
   it('preserves the live session transitions and the 401 auto-demo hatch', () => {
     const identityStart = appSource.indexOf('    getSessionIdentity(false)')
