@@ -12,6 +12,7 @@
 // markers as its own. Contract: no listener of its own, no allocation per
 // key; the stack reads the close handler through a ref.
 
+import { useLayoutEffect, useRef } from 'react'
 import { STUDIO_DRAWERS } from './studioDrawers.js'
 import useEscapeOwner from './useEscapeOwner.js'
 
@@ -35,5 +36,39 @@ export function phoneDrawerOpen(state) {
  *   onClose  closes the drawer (the shell's own setter); read through a ref.
  */
 export default function usePhoneDrawerEscape(state, onClose) {
-  useEscapeOwner(PHONE_DRAWER_ESCAPE_ID, phoneDrawerOpen(state), onClose, { layer: 'drawer' })
+  const open = phoneDrawerOpen(state)
+  const name = state?.studioDrawer
+  const restoreFocus = useRef(null)
+  useLayoutEffect(() => {
+    if (!open) return undefined
+    const shell = document.querySelector('.app[data-studio-shell="cockpit"]')
+    if (!shell) return undefined
+    const selectors = {
+      nav: ':scope > aside.nav',
+      jobs: ':scope > .rail-stack > aside.rail',
+      result: '.result-block',
+      plan: '.studio-profile-info, main.center-scroll > section.ent-panel',
+    }
+    const panel = shell.querySelector(selectors[name])
+    const trigger = shell.querySelectorAll('.studio-drawer-tabs button')[STUDIO_DRAWERS.indexOf(name)]
+    if (!panel || !trigger) return undefined
+    const target = panel.querySelector('h1, h2, h3, h4, [role="heading"], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]') || panel
+    const previousTabIndex = target.getAttribute('tabindex')
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1')
+    target.focus({ preventScroll: true })
+    const restore = () => {
+      if (panel.contains(document.activeElement) && trigger.isConnected) trigger.focus({ preventScroll: true })
+    }
+    restoreFocus.current = restore
+    return () => {
+      restore()
+      restoreFocus.current = null
+      if (previousTabIndex === null) target.removeAttribute('tabindex')
+    }
+  }, [open, name])
+  useEscapeOwner(PHONE_DRAWER_ESCAPE_ID, open, () => {
+    // Hand focus back before the state update hides the focused content.
+    restoreFocus.current?.()
+    onClose?.()
+  }, { layer: 'drawer' })
 }
