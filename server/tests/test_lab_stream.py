@@ -525,7 +525,10 @@ def test_cancelled_slow_acquire_releases_committed_lease(rig, monkeypatch):
 
 
 @pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
-@pytest.mark.parametrize("reason,stop", [("max_age", 331), ("drain", 92), ("lease_expired", 15)])
+@pytest.mark.parametrize("reason,stop", [
+    ("max_age", 331), ("drain", 92), ("lease_expired", 15),
+    ("binding_changed", 1), ("binding_unavailable", 1),
+])
 def test_blocked_send_watchdog_holds_cap_and_enforces_close(rig, monkeypatch, caplog, spec_version, reason, stop):
     events(rig, [value("payload-secret")])
     original_renew = store.renew_stream
@@ -540,6 +543,16 @@ def test_blocked_send_watchdog_holds_cap_and_enforces_close(rig, monkeypatch, ca
         return original_renew(*args)
 
     monkeypatch.setattr(store, "renew_stream", renew)
+
+    def resolve(subject):
+        if rig.clock.value >= 1:
+            if reason == "binding_unavailable":
+                raise OSError("binding lookup unavailable")
+            if reason == "binding_changed":
+                return "another-tenant", "hosted_pro"
+        return rig.tenant, "hosted_pro"
+
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", resolve)
 
     async def blocked():
         for index in range(3):
@@ -569,6 +582,8 @@ def test_blocked_send_watchdog_holds_cap_and_enforces_close(rig, monkeypatch, ca
         try:
             await asyncio.wait_for(sending.wait(), 5)
             await asyncio.wait_for(ready.get(), 5)
+            with pytest.raises(store.TooLarge):
+                store.acquire_stream(rig.tenant, rig.tenant, "fifth", 45)
             for second in range(1, stop):
                 rig.clock.value = second
                 ticks.put_nowait(True)
@@ -587,7 +602,7 @@ def test_blocked_send_watchdog_holds_cap_and_enforces_close(rig, monkeypatch, ca
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, 5)
             assert response.lease.reason == reason
-            assert renewals[:2] == [15, 15]
+            assert renewals[:2] == ([] if reason.startswith("binding_") else [15, 15])
             assert response.lease.signal not in stream._streams
             assert store.acquire_stream(rig.tenant, rig.tenant, "fifth", 45)
         finally:
@@ -599,6 +614,7 @@ def test_blocked_send_watchdog_holds_cap_and_enforces_close(rig, monkeypatch, ca
     lines = [record.getMessage() for record in caplog.records
              if record.getMessage().startswith("lab_stream_closed ")]
     assert len(lines) == 1 and "payload-secret" not in lines[0]
+    assert json.loads(lines[0].split(" ", 1)[1])["reason"] == reason
 
 
 def test_latency_summary_has_counts_without_payload(rig, caplog):

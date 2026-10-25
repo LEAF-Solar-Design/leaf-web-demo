@@ -27,9 +27,23 @@ MAX_CURSOR = 2**53 - 1
 _streams = set()
 
 
+async def _binding_reason(tenant):
+    if (deps.auth_live() and isinstance(tenant, deps.TenantContext)
+            and not getattr(tenant, "verified_demo", False) and tenant.subject):
+        try:
+            active, _ = await asyncio.to_thread(
+                deps.resolve_active_platform_tenant_authority, tenant.subject)
+        except Exception:
+            return "binding_unavailable"
+        if active != str(tenant):
+            return "binding_changed"
+    return None
+
+
 class _StreamLease:
     def __init__(self, tenant, principal, stream_id, signal, cursors=()):
         self.tenant = str(tenant)
+        self.binding_context = tenant
         self.principal = principal
         self.stream_id = stream_id
         self.signal = signal
@@ -88,7 +102,9 @@ class _LeasedStreamingResponse(StreamingResponse):
                 reason = "max_age"
             elif drain_at is not None and now - drain_at > 30:
                 reason = "drain"
-            elif now >= renew_at:
+            else:
+                reason = await _binding_reason(self.lease.binding_context)
+            if reason is None and now >= renew_at:
                 renewed = False
                 for _ in range(2):
                     try:
@@ -211,15 +227,7 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
             return "max_age"
         if now >= binding_at:
             binding_at = now + 1
-            if (deps.auth_live() and isinstance(tenant, deps.TenantContext)
-                    and not getattr(tenant, "verified_demo", False) and tenant.subject):
-                try:
-                    active, _ = await asyncio.to_thread(
-                        deps.resolve_active_platform_tenant_authority, tenant.subject)
-                except Exception:
-                    return "binding_unavailable"
-                if active != str(tenant):
-                    return "binding_changed"
+            return await _binding_reason(tenant)
         return None
 
     try:
