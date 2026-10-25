@@ -56,6 +56,18 @@ describe('shell v1 token lint (LS-T1, LS-T2, LS-T3, LS-T4)', () => {
     expect(css).toMatch(/--leaf-glass-band:\s*rgba\(14, 17, 15, 0\.86\)\s*;/)
   })
 
+  it('the vendored standard declares the v1.2 directional panel shadow roles', () => {
+    const css = stripComments(read('../standard/leaf-standard.css'))
+    expect(css).toMatch(/--leaf-shadow-panel-start:\s*-8px 0 24px rgba\(0, 0, 0, 0\.4\)\s*;/)
+    expect(css).toMatch(/--leaf-shadow-panel-end:\s*8px 0 24px rgba\(0, 0, 0, 0\.4\)\s*;/)
+  })
+
+  it('the shells use directional shadows for the five side panels', () => {
+    const css = shells.map(([, css]) => css).join('\n')
+    expect([...css.matchAll(/var\(--leaf-shadow-panel-start\)/g)]).toHaveLength(3)
+    expect([...css.matchAll(/var\(--leaf-shadow-panel-end\)/g)]).toHaveLength(2)
+  })
+
   it('the phone ribbon disclosure hides its text while retaining the pseudo-element label', () => {
     const css = shells.find(([file]) => file === 'cockpit.css')[1]
     const phone = css.split('@media (max-width: 600px) {')[1]?.split('\n@media')[0]

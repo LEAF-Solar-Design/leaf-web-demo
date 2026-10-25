@@ -256,7 +256,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail[data-spine] .rail-spine-count { font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail:not([data-spine]) {
     position: fixed; right: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: calc(var(--leaf-layer-base) + 5);
-    width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: var(--leaf-shadow-popover);
+    width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: var(--leaf-shadow-panel-start);
     background: var(--ck-chrome);
   }
   /* On Solar CAD the expanded job monitor sits over the canvas's right edge (z 5); the floating drawing overview
@@ -891,7 +891,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.nav:not([data-spine]) {
     position: fixed; left: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: calc(var(--leaf-layer-base) + 5);
     width: 300px; margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
-    box-shadow: var(--leaf-shadow-popover); backdrop-filter: none; background: var(--ck-chrome);
+    box-shadow: var(--leaf-shadow-panel-end); backdrop-filter: none; background: var(--ck-chrome);
     overflow-y: auto;
   }
 }

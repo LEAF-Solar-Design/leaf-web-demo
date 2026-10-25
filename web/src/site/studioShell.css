@@ -183,7 +183,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .rail-spine-count { font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail:not([data-spine]) {
     position: fixed; right: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: calc(var(--leaf-layer-base) + 5);
-    width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: var(--leaf-shadow-popover);
+    width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: var(--leaf-shadow-panel-start);
     background: var(--ck-chrome);
   }
 }
@@ -238,7 +238,7 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] aside.rail:not([data-spine]) {
     position: static; inset: auto; z-index: auto;
-    width: var(--ck-rail-width); margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: var(--leaf-shadow-popover);
+    width: var(--ck-rail-width); margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: var(--leaf-shadow-panel-start);
     background: var(--ck-chrome);
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] :is(.cad-overview, .cockpit-cube-wrap, .cockpit-cube-wcs) {
@@ -458,7 +458,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.nav:not([data-spine]) {
     position: fixed; left: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: calc(var(--leaf-layer-base) + 5);
     width: var(--ck-nav-width); margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
-    box-shadow: var(--leaf-shadow-popover); backdrop-filter: none; background: var(--ck-chrome);
+    box-shadow: var(--leaf-shadow-panel-end); backdrop-filter: none; background: var(--ck-chrome);
     overflow-y: auto;
   }
 }
