@@ -1319,6 +1319,8 @@
 
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .viewer-toolbar { height: 46px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .viewer-toolbar > * { flex-shrink: 0; }
+  /* !important is needed only because LocalCadConnect sets these two properties inline. */
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .viewer-toolbar .local-cad-connect { flex-shrink: 0 !important; min-width: max-content !important; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .viewer-toolbar :is(.doc-tab-start, .viewer-title) { height: 44px; min-height: 44px; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .viewer-toolbar :is(.doc-tab-add, .doc-tab-close) { width: 44px; height: 44px; min-width: 44px; min-height: 44px; margin: 0; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .viewer-toolbar :is(.btn, .btn.ghost, .chip-act) { height: 44px; min-height: 44px; min-width: 44px; line-height: 42px; }

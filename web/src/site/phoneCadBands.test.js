@@ -20,6 +20,8 @@ describe('phone CAD bands (L1, L4)', () => {
     const strip = ruleBody(phone, `${scope} .viewer-toolbar`)
     expect(strip).toMatch(/(?:^|;)\s*height:\s*46px;/)
     expect(strip).toMatch(/overflow-x:\s*auto;/)
+    expect(ruleBody(phone, `${scope} .viewer-toolbar .local-cad-connect`))
+      .toMatch(/flex-shrink:\s*0\s*!important;/)
     expect(ruleBody(phone, `${scope} .viewer-toolbar :is(.doc-tab-add, .doc-tab-close)`))
       .toMatch(/min-height:\s*44px;/)
   })
