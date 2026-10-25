@@ -391,12 +391,14 @@
 }
 .doc-tab-start { order: 1; border: 0; background: transparent; cursor: pointer; }
 .doc-tab-start:hover { background: #2e2e2e; color: #fff; }
+/* Text on the accent is dark: --leaf-on-accent is #050706 (v1 :root); the console never carries .stage-root or .leaf-light, which re-alias it. Pinned in leafTokens.test.js. */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title {
   order: 2; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
   background: var(--ck-active); color: var(--leaf-on-accent); font-weight: 400;
   box-shadow: inset 0 1px 0 var(--ck-sel); padding-right: 6px;
 }
 /* The reference's tab carries a close glyph at its right edge. */
+/* Text on the accent is dark: --leaf-on-accent is #050706 (v1 :root); the console never carries .stage-root or .leaf-light, which re-alias it. Pinned in leafTokens.test.js. */
 .doc-tab-close {
   order: 2; align-self: center; width: 18px; height: 18px; margin: 0 4px 0 -2px; padding: 0;
   border: 0; border-radius: 2px; background: var(--ck-active); color: var(--leaf-on-accent);

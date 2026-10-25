@@ -85,6 +85,45 @@ it('SSD1-24E light text and tile boundaries meet WCAG contrast', () => {
   expect(contrast('border', 'card')).toBeLessThan(3)
 })
 
+it('cockpit accent backgrounds use dark text from the vendored v1 root', () => {
+  const root = declsFor(read('src/standard/leaf-standard.css'), ':root')
+  expect(root['--leaf-on-accent']).toBe('#050706')
+  expect(root['--leaf-accent']).toBe('#28d66f')
+
+  const luminance = (hex) => {
+    const channels = hex.slice(1).match(/../g).map((value) => {
+      const srgb = parseInt(value, 16) / 255
+      return srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4
+    })
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+  }
+  const contrast = (a, b) => {
+    const values = [a, b].map(luminance).sort((x, y) => y - x)
+    return (values[0] + 0.05) / (values[1] + 0.05)
+  }
+  expect(contrast(root['--leaf-on-accent'], root['--leaf-accent'])).toBeGreaterThanOrEqual(4.5)
+
+  for (const [file, css] of [['cockpit.css', cockpit], ['studioShell.css', read('src/site/studioShell.css')]]) {
+    const text = stripComments(css)
+    expect(text, `${file} must inherit --leaf-on-accent`).not.toMatch(/--leaf-on-accent\s*:/)
+    for (const [, selector, body] of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/(?:^|;)\s*background\s*:\s*var\(--ck-(?:active|cmd)\)\s*(?:;|$)/.test(body)) continue
+      const context = `${file} ${selector.trim()}`
+      const colors = [...body.matchAll(/(?:^|;)\s*color\s*:\s*([^;]+)/g)].map((match) => match[1].trim())
+      // Accent dots without a color declaration carry no text and are out of scope.
+      if (colors.length === 0) continue
+      for (const color of colors) {
+        expect(color, context).not.toMatch(/#fff\b|rgba\(\s*255\s*,\s*255\s*,\s*255\b/i)
+        if (color === 'var(--leaf-on-accent)') continue
+        expect(color, `${context} must use --leaf-on-accent or a dark literal`).toMatch(/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i)
+        const hex = color.length === 4 ? `#${[...color.slice(1)].map((channel) => channel.repeat(2)).join('')}` : color
+        expect(luminance(hex), context).toBeLessThan(luminance(root['--leaf-accent']))
+        expect(contrast(hex, root['--leaf-accent']), context).toBeGreaterThanOrEqual(4.5)
+      }
+    }
+  }
+})
+
 it('SSD1-24E light hover text', () => {
   const css = stripComments(read('src/site/landing.css'))
   const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
