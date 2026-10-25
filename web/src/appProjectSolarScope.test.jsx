@@ -228,6 +228,7 @@ describe('App project Solar scope ownership', () => {
       catalog: { families }, solarFlowFamiliesDrawingId: 'families-drawing', canOpenSolarSettingsForm,
       solarFlowPending: 'other-tool', solarFlowRuns: { drawingId: context.drawingId, runs },
       solarFlowRunsFor, solarFlowRunStatus, onOpenSolarFlowStep: vi.fn(), onSolarFlowChange: vi.fn(),
+      authConfigured: true, signedIn: false, onLogin: vi.fn(),
       solarFlow: { flow: 'layout' }, checkoutCapabilityRef: { current: vi.fn(() => 'capability') },
       refuseProjectSolar: vi.fn(() => false), SOLAR_SETTINGS_TOOL_NAME: 'solar-settings',
       loadCatalog: vi.fn(), seatCompletedVersion: vi.fn(), onRunCombinerPlacement: vi.fn(), catalogDigestOf: vi.fn(),
@@ -333,6 +334,8 @@ describe('App project Solar scope ownership', () => {
       expect(rail.openName).toBe(flowEditor.name)
       expect(rail.onOpenStep).toBe(inputs.onOpenSolarFlowStep)
       expect(rail.onFlowChange).toBe(inputs.onSolarFlowChange)
+      expect(rail.demo).toBe(mock)
+      expect(rail.onSignIn).toBe(mock ? inputs.onLogin : undefined)
       const editor = components.SolarStepEditor.mock.calls[0][0]
       expect(editor.row).toBe(flowEditor)
       expect(editor.drawingId).toBe(context.drawingId)

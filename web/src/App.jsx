@@ -5131,6 +5131,8 @@ export default function App() {
                 openName={solarFlowEditor?.name ?? solarFormTool?.name ?? null}
                 onOpenStep={onOpenSolarFlowStep}
                 onFlowChange={onSolarFlowChange}
+                demo={mock}
+                onSignIn={mock && authConfigured && !signedIn ? onLogin : undefined}
               />
               {!mock && (
                 <SolarWorkspaceTools
