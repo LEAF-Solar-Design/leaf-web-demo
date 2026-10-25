@@ -491,8 +491,7 @@
     max-height: none; overflow: visible;
   }
 }
-/* Every non-CAD surface keeps product tabs on their own row at every desktop width: the pinned header row overlaps controls below about 1780px, and the standard has no edge above 1440px. */
-@media (min-width: 1024px) {
+@media (min-width: 1024px) and (max-width: 1439px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 183px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-nav {
     position: relative; inset: auto; height: 28px; min-height: 28px; box-sizing: border-box;
@@ -501,12 +500,27 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; }
 }
-@media (min-width: 1024px) {
+@media (min-width: 1024px) and (max-width: 1439px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 185px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-nav {
     height: 30px; min-height: 30px; padding-top: 2px; align-items: flex-start;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-tabs { align-self: flex-start; }
+}
+/* Browser, Ops and the other non-CAD grounds keep the own-row tabs from 1440 px up, because the pinned header row overlaps the header controls below about 1780 px. iOS keeps the pinned row there until its ground window is measured with the own row. */
+@media (min-width: 1440px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) { --ck-canvas-top: 183px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-nav {
+    position: relative; inset: auto; height: 28px; min-height: 28px; box-sizing: border-box;
+    margin: 0; padding: 0 4px; display: flex; align-items: center;
+    overflow-x: auto; flex-wrap: nowrap; background: transparent; isolation: isolate; pointer-events: auto;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) { --ck-canvas-top: 185px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-nav {
+    height: 30px; min-height: 30px; padding-top: 2px; align-items: flex-start;
+  }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-tabs { align-self: flex-start; }
 }
 @media (pointer: coarse) and (max-width: 1439px), (max-width: 1023px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-ribbon: 151px; }
