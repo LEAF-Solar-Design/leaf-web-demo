@@ -3,7 +3,7 @@ import { fetchWithBudget } from '../../fetchBudget.js'
 import { labValueStore, terminalState } from './valueStore.js'
 
 const headersFor = accept => ({ accept, 'X-Tenant-Id': config.tenant, ...authHeaders() })
-async function request(path, { fetchImpl = globalThis.fetch, body, signal } = {}) {
+async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUnauthorized } = {}) {
   const headers = { ...headersFor('application/json'), 'content-type': 'application/json' }
   try {
     const response = await fetchWithBudget(fetchImpl, `${config.apiBase}/api/lab/${path}`, {
@@ -11,6 +11,7 @@ async function request(path, { fetchImpl = globalThis.fetch, body, signal } = {}
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
     noteUnauthorized(response, 'lab-runs', headers.Authorization)
+    if (response.status === 401) onUnauthorized?.(headers.Authorization)
     const data = await response.json().catch(() => ({}))
     return response.ok ? { ...data, ok: true } : { ok: false, status: response.status, detail: data.detail }
   } catch { return { ok: false, status: 0, detail: 'Run service unavailable' } }
@@ -32,18 +33,20 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
   now = Date.now, sleep = defaultSleep, random = Math.random }) {
   if (!runIds.length || runIds.length > 8) throw new Error('A stream requires one to eight runs')
   let stopped = false, paused = false, running = false, controller, waiting, currentReader, restartRequested = false, generation = 0
+  let authExpired = false, expiredAuthorization
+  const rememberUnauthorized = authorization => { authExpired = true; expiredAuthorization = authorization }
   const active = new Set(runIds.filter(id => !terminalState(store.getRun(id)?.state)))
   const pendingSnapshots = new Set()
   const transport = patch => active.forEach(id => store.setTransport(id, patch))
   async function snapshot(id, connectionSignal) {
     pendingSnapshots.add(id)
-    const row = await request(`runs/${encodeURIComponent(id)}`, { fetchImpl, signal: connectionSignal })
+    const row = await request(`runs/${encodeURIComponent(id)}`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized })
     if (stopped || connectionSignal.aborted) return
     if (!row.ok) { if (row.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot unavailable') }
     store.resetSnapshot(id, { state: row.state, graph_revision: row.graph_revision })
     let after = -1
     for (;;) {
-      const page = await request(`runs/${encodeURIComponent(id)}/events?after_seq=${after}&limit=500`, { fetchImpl, signal: connectionSignal })
+      const page = await request(`runs/${encodeURIComponent(id)}/events?after_seq=${after}&limit=500`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized })
       if (stopped || connectionSignal.aborted) return
       if (!page.ok) { if (page.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot events unavailable') }
       for (const event of page.events || []) store.apply(id, event)
@@ -79,6 +82,7 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
           if (stopped || epoch !== generation) break
           if (response.status === 401) {
             noteUnauthorized(response, 'lab-runs', headers.Authorization)
+            rememberUnauthorized(headers.Authorization)
             paused = true; transport({ status: 'auth_expired' }); break
           }
           if (response.status === 404) {
@@ -180,8 +184,14 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
   }
   const handle = { stop, retry() {
     if (stopped || signal?.aborted || !active.size) return
+    authExpired = false
     if (running) { if (paused) restartRequested = true; return }
     paused = false; void loop(++generation)
+  }, retryIfAuthChanged() {
+    if (stopped || signal?.aborted || !active.size || !paused || !authExpired
+      || authHeaders().Authorization === expiredAuthorization) return false
+    handle.retry()
+    return true
   } }
   if (signal?.aborted) stop()
   else { signal?.addEventListener('abort', stop, { once: true }); void loop(generation) }

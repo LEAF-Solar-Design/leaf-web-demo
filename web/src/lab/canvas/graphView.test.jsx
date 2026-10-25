@@ -178,7 +178,7 @@ describe('first-click live graph', () => {
     }
   })
 
-  it.each(['button', 'focus'])('resumes a 401-paused stream via %s with fresh authority and its cursor', async method => {
+  it.each(['button', 'focus', 'focus-race'])('resumes a 401-paused stream via %s with fresh authority and its cursor', async method => {
     const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
     const runId = `canvas-resume-${method}`
     const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
@@ -188,8 +188,10 @@ describe('first-click live graph', () => {
     const originalToken = ['fixture', 'before', method].join('-'), renewedToken = ['fixture', 'after', method].join('-')
     localStorage.setItem('leaf.jwt', originalToken)
     labValueStore.apply(runId, { seq: 7, kind: 'value', block_id: 'count-1', payload: { result: { data: 73 } } })
+    let resolveUnauthorized
     const fetchImpl = vi.fn().mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ run_id: runId, state: 'running' }) })
-      .mockResolvedValueOnce({ ok: false, status: 401 })
+      .mockImplementationOnce(() => method === 'focus-race'
+        ? new Promise(resolve => { resolveUnauthorized = resolve }) : Promise.resolve({ ok: false, status: 401 }))
       .mockResolvedValueOnce({ ok: true, status: 200, body: new ReadableStream({ start() {} }) })
     vi.stubGlobal('fetch', fetchImpl)
     const register = vi.spyOn(labValueStore, 'setStreamControl')
@@ -198,12 +200,20 @@ describe('first-click live graph', () => {
       const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
       await waitFor(() => expect(run).toBeEnabled())
       fireEvent.click(run)
+      if (method === 'focus-race') {
+        await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+        localStorage.setItem('leaf.jwt', renewedToken)
+        await act(async () => resolveUnauthorized({ ok: false, status: 401 }))
+      }
       expect(await screen.findByText('Sign in again, then resume')).toBeVisible()
       expect(register).toHaveBeenCalledWith(runId, expect.objectContaining({ retry: expect.any(Function), stop: expect.any(Function) }))
       const control = register.mock.calls.find(([id]) => id === runId)[1]
       const retry = vi.spyOn(control, 'retry')
-      fireEvent(window, new Event('focus'))
-      expect(retry).not.toHaveBeenCalled()
+      if (method !== 'focus-race') {
+        localStorage.setItem('leaf.jwt', originalToken)
+        fireEvent(window, new Event('focus'))
+        expect(retry).not.toHaveBeenCalled()
+      } else expect(localStorage.getItem('leaf.jwt')).toBe(renewedToken)
       expect(fetchImpl).toHaveBeenCalledTimes(2)
       localStorage.setItem('leaf.jwt', renewedToken)
       if (method === 'button') fireEvent.click(screen.getByRole('button', { name: 'Resume' }))

@@ -67,6 +67,10 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
       control.retry()
       return true
     },
+    resumeIfAuthChanged(id) {
+      if (runs.get(id)?.transport.status !== 'auth_expired') return false
+      return streamControls.get(id)?.retryIfAuthChanged?.() ?? false
+    },
     upsertRun(id, metadata = {}) {
       const run = ensure(id)
       runs.set(id, { ...run, ...metadata, state: nextState(run, metadata.state ?? run.state), id })

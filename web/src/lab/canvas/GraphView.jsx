@@ -210,10 +210,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   useEffect(() => {
     mounted.current = true
     const resumeOnFocus = () => streams.current.forEach(stream => {
-      if (stream.authExpired && !stream.focusResumed && authHeaders().Authorization !== stream.expiredAuthorization) {
-        stream.focusResumed = true
-        labValueStore.resume(stream.runId)
-      }
+      labValueStore.resumeIfAuthChanged(stream.runId)
     })
     window.addEventListener('focus', resumeOnFocus)
     return () => {
@@ -261,12 +258,6 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       labValueStore.setStreamControl(result.runId, stream)
       stream.unsubscribe = labValueStore.subscribeRun(result.runId, () => {
         const run = labValueStore.getRun(result.runId)
-        const authExpired = run?.transport.status === 'auth_expired'
-        if (authExpired && !stream.authExpired) {
-          stream.expiredAuthorization = authHeaders().Authorization
-          stream.focusResumed = false
-        }
-        stream.authExpired = authExpired
         if (!run || (terminalState(run.state) && ['finished', 'missing'].includes(run.transport.status))) {
           labValueStore.clearStreamControl(result.runId)
           stream.unsubscribe(); streams.current.delete(stream)
