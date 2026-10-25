@@ -4,6 +4,7 @@ import { pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
 import { createHostProvider } from '../host/hostProvider.js'
+import { evidenceFor } from '../code/hostEvidence.js'
 import { validateResidency } from '../host/hostResidency.js'
 import { createStudioSources, evaluateGraph, runtimeValue, sourceAge } from '../runtime/index.js'
 import LabSaveBar from '../history/LabSaveBar.jsx'
@@ -237,7 +238,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         <LabSaveBar document={live.draft?.document} ready={live.ready} client={client} onTakeTheirs={graph => client.takeGraph(graph)} />
         <LiveValues values={live.values} provider={provider} saveBar={false} />
         <Suspense fallback={<p role="status" aria-label="Loading dependency canvas">Loading dependency canvas…</p>}>
-          <LabCanvas key={restored.key} initialDocument={restored.graph || initialDocument} entries={live.entries} measurements={live.measurements} upstream={live.upstream} onChange={live.onChange} />
+          <LabCanvas key={restored.key} initialDocument={restored.graph || initialDocument} entries={live.entries} measurements={live.measurements} upstream={live.upstream} onChange={live.onChange} codeEvidence={block => evidenceFor(provider, block)} />
         </Suspense>
       </> : <p data-graph-placeholder>Open Strategy to load the dependency canvas.</p>}
     </div>
