@@ -566,10 +566,14 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     onPhysicalHeadChanged?.(value)
   }
 
-  const civilDisabled = busy || checkoutHeld !== true || Object.values(writers).some(Boolean)
-    || phase === 'refreshing' || phase === 'failed' || stagingPending
-  const physicalContention = Object.values(writers).some(Boolean)
-    ? TRACKER_ROWS_PANEL_REASONS.terrain_pending : civilDisabled ? 'A run is in progress, so wait for it to finish.' : null
+  const readDisabledReason = phase === 'failed' ? 'The drawing could not be refreshed. Refresh the drawing before continuing.'
+    : phase === 'refreshing' ? 'Wait for the drawing to finish refreshing.'
+      : stagingPending ? 'Wait for the tracking labels to finish being prepared.'
+        : Object.values(writers).some(Boolean) ? TRACKER_ROWS_PANEL_REASONS.terrain_pending
+          : busy ? 'A run is in progress, so wait for it to finish.' : null
+  const civilDisabledReason = checkoutHeld !== true ? 'Take the drawing checkout before running civil operations.' : readDisabledReason
+  const civilDisabled = !!civilDisabledReason
+  const physicalContention = civilDisabledReason
 
   function onImported(value) {
     const started = pendingImport.current
@@ -615,14 +619,14 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       {hasCivil && openPanel === 'civil' && <div className="solar-workspace-panel">
         <h3 tabIndex={-1} ref={civilHeading}>Civil operations</h3>
         <SolarCivilPanel drawingId={drawingId} projectId={projectId} client={scopeCivilClient}
-          headSignal={civilHeadSignal} disabled={civilDisabled} onPhysicalHeadChanged={onCivilChanged} />
+          headSignal={civilHeadSignal} disabled={civilDisabled} disabledReason={civilDisabledReason} onPhysicalHeadChanged={onCivilChanged} />
         <button type="button" onClick={() => { physicalCloseFocus.current = civilTrigger.current; setOpenPanel(null) }}>Close</button>
       </div>}
       {hasPhysicalRead && openPanel === 'physical-read' && <div className="solar-workspace-panel">
         <h3 tabIndex={-1} ref={readHeading}>Physical reads</h3>
         <SolarPhysicalReadPanel drawingId={drawingId} projectId={projectId} drawingVersion={drawingVersion}
           terrainClient={scopeTerrainClient} runRead={runRead} headSignal={readHeadSignal} catalogDigestOf={catalogDigestOf}
-          disabled={busy || Object.values(writers).some(Boolean) || phase === 'refreshing' || phase === 'failed'}
+          disabled={!!readDisabledReason} disabledReason={readDisabledReason}
           download={importClient.downloadArtifact} save={save} />
         <button type="button" onClick={() => { physicalCloseFocus.current = readTrigger.current; setOpenPanel(null) }}>Close</button>
       </div>}
