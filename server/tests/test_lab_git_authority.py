@@ -1,6 +1,7 @@
 """Git authority invariants, mirrored on SQLite and PostgreSQL."""
 from datetime import timedelta
 import os
+import sqlite3
 import uuid
 
 import pytest
@@ -170,26 +171,119 @@ def test_s1_authorization_scoped_and_transaction_local(tenant):
     authority(other)
     other_tid = transition(other)['transition_id']
     def wrong(sql):
-        store.authorize_exit(sql, other, other_tid)
-        mirror._update(sql, tenant, frozen=False)
+        with store.authorize_exit(sql, other, other_tid):
+            mirror._update(sql, tenant, frozen=False)
     with pytest.raises(Exception, match='lab_git_exit_refused'):
         store._run(tenant, wrong, write=True)
     def allowed(sql):
-        store.authorize_exit(sql, tenant, tid)
-        mirror._update(sql, tenant, frozen=False, mode='ledger')
-    store._run(tenant, allowed, write=True)
+        with store.authorize_exit(sql, tenant, tid):
+            mirror._update(sql, tenant, frozen=False, mode='ledger')
+    ledger._run(tenant, allowed, write=True)
     assert not mirror.mirror_status(tenant)['frozen']
     # Token was removed at commit; another transaction cannot reuse it.
     with pytest.raises(Exception, match='lab_git_exit_refused'):
         ledger._run(tenant, lambda sql: sql.execute('DELETE FROM lab_git_tenants WHERE tenant_id=?', (tenant,)), write=True)
     for mutation in ("UPDATE lab_git_tenants SET mode='ledger'", 'DELETE FROM lab_git_tenants'):
         def allowed_again(sql):
-            store.authorize_exit(sql, tenant, tid)
-            sql.execute(mutation + ' WHERE tenant_id=?', (tenant,))
+            with store.authorize_exit(sql, tenant, tid):
+                sql.execute(mutation + ' WHERE tenant_id=?', (tenant,))
+                if not sql.postgres:
+                    assert sql.execute('SELECT COUNT(*) AS n FROM lab_git_exit_token').fetchone()['n'] == 0
         store._run(tenant, allowed_again, write=True)
     assert store.advance(tenant, tid, 'owner', 'planned', 'done')
     with pytest.raises(ValueError, match='lab_git_exit_refused'):
         store.authority_delete(tenant, tid)
+
+
+def assert_no_exit_authorization(tenant):
+    def check(sql):
+        if sql.postgres:
+            row = sql.execute("SELECT current_setting('leaf.lab_git_writer', true) AS writer, "
+                              "current_setting('leaf.lab_git_transition', true) AS transition").fetchone()
+            assert not row['writer']
+            assert not row['transition']
+        else:
+            assert sql.execute('SELECT COUNT(*) AS n FROM lab_git_exit_token').fetchone()['n'] == 0
+    ledger._run(tenant, check)
+
+
+@pytest.mark.parametrize('mutation', ['UPDATE lab_git_tenants SET frozen=false', 'DELETE FROM lab_git_tenants'])
+def test_exit_authorization_unused_in_ledger_transaction_does_not_leak(tenant, mutation):
+    authority(tenant)
+    tid = transition(tenant)['transition_id']
+    def authorize_only(sql):
+        with store.authorize_exit(sql, tenant, tid):
+            if not sql.postgres:
+                assert sql.execute('SELECT tenant_id FROM lab_git_exit_token').fetchone()['tenant_id'] == tenant
+        if not sql.postgres:
+            assert sql.execute('SELECT COUNT(*) AS n FROM lab_git_exit_token').fetchone()['n'] == 0
+    ledger._run(tenant, authorize_only, write=True)
+    assert_no_exit_authorization(tenant)
+    with pytest.raises(Exception, match='lab_git_exit_refused'):
+        ledger._run(tenant, lambda sql: sql.execute(mutation + ' WHERE tenant_id=?', (tenant,)), write=True)
+
+
+@pytest.mark.parametrize('mutation', ["UPDATE lab_git_tenants SET mode='ledger'", 'DELETE FROM lab_git_tenants'])
+@pytest.mark.parametrize('tenant', ['sqlite'], indirect=True)
+def test_sqlite_exit_authorization_consumed_by_first_guarded_statement(tenant, mutation):
+    authority(tenant)
+    tid = transition(tenant)['transition_id']
+    def operation(sql):
+        with store.authorize_exit(sql, tenant, tid):
+            mirror._update(sql, tenant, frozen=False)
+            assert sql.execute('SELECT frozen FROM lab_git_tenants WHERE tenant_id=?', (tenant,)).fetchone()['frozen'] == 0
+            assert sql.execute('SELECT COUNT(*) AS n FROM lab_git_exit_token').fetchone()['n'] == 0
+            with pytest.raises(Exception, match='lab_git_exit_refused'):
+                sql.execute(mutation + ' WHERE tenant_id=?', (tenant,))
+    ledger._run(tenant, operation, write=True)
+    assert_no_exit_authorization(tenant)
+
+
+@pytest.mark.parametrize('update', [False, True])
+def test_exit_authorization_exception_rolls_back_ledger_transaction(tenant, update):
+    authority(tenant)
+    tid = transition(tenant)['transition_id']
+    def operation(sql):
+        with store.authorize_exit(sql, tenant, tid):
+            if update:
+                mirror._update(sql, tenant, frozen=False)
+            raise RuntimeError('abort authorized exit')
+    with pytest.raises(RuntimeError, match='abort authorized exit'):
+        ledger._run(tenant, operation, write=True)
+    assert mirror.mirror_status(tenant)['frozen']
+    assert_no_exit_authorization(tenant)
+
+
+@pytest.mark.parametrize('tenant', ['postgres'], indirect=True)
+def test_postgres_exit_authorization_remains_transaction_local(tenant):
+    authority(tenant)
+    tid = transition(tenant)['transition_id']
+    def operation(sql):
+        with store.authorize_exit(sql, tenant, tid):
+            mirror._update(sql, tenant, frozen=False)
+        # Context exit leaves PostgreSQL settings intact until transaction end.
+        mirror._update(sql, tenant, mode='ledger')
+        row = sql.execute("SELECT current_setting('leaf.lab_git_writer') AS writer, "
+                          "current_setting('leaf.lab_git_transition') AS transition").fetchone()
+        assert row == {'writer': tenant, 'transition': tid}
+    ledger._run(tenant, operation, write=True)
+    assert_no_exit_authorization(tenant)
+
+
+def test_exit_authorization_requires_transaction(tenant):
+    if ledger.store_mode() == 'postgres':
+        import psycopg
+        conn = psycopg.connect(os.environ['DATABASE_URL'], autocommit=True)
+        postgres = True
+    else:
+        conn = sqlite3.connect(':memory:', isolation_level=None)
+        postgres = False
+    try:
+        with pytest.raises(ValueError, match='lab_git_exit_requires_transaction'):
+            with store.authorize_exit(ledger._SQL(conn, postgres), tenant, uuid.uuid4().hex):
+                pytest.fail('authorization entered outside a transaction')
+    finally:
+        conn.close()
 
 
 def test_tenants_without_authority_unaffected_and_store_disabled(tenant):

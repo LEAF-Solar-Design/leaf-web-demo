@@ -1,4 +1,5 @@
 """Inert git authority substrate. All mutations share the ledger tenant lock."""
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 import re
@@ -63,20 +64,28 @@ CREATE TABLE IF NOT EXISTS lab_git_transitions (
 CREATE UNIQUE INDEX IF NOT EXISTS lab_git_transition_live_idx ON lab_git_transitions (tenant_id) WHERE state NOT IN ('done','reverted');
 CREATE TABLE IF NOT EXISTS lab_git_exit_token (
  singleton INTEGER PRIMARY KEY CHECK (singleton=1), tenant_id TEXT NOT NULL, transition_id TEXT NOT NULL);
-CREATE TRIGGER IF NOT EXISTS lab_git_tenants_guard_update BEFORE UPDATE ON lab_git_tenants
+DROP TRIGGER IF EXISTS lab_git_tenants_guard_update;
+CREATE TRIGGER lab_git_tenants_guard_update BEFORE UPDATE ON lab_git_tenants
  WHEN EXISTS (SELECT 1 FROM lab_git_authority WHERE tenant_id=OLD.tenant_id)
  AND (NEW.tenant_id IS NOT OLD.tenant_id OR NEW.frozen IS NOT 1 OR NEW.mode IS NOT 'mirror')
- AND (NEW.tenant_id IS NOT OLD.tenant_id OR NOT EXISTS (
+ BEGIN
+ SELECT RAISE(ABORT,'lab_git_exit_refused')
+ WHERE NEW.tenant_id IS NOT OLD.tenant_id OR NOT EXISTS (
  SELECT 1 FROM lab_git_exit_token e JOIN lab_git_transitions t
  ON t.tenant_id=e.tenant_id AND t.transition_id=e.transition_id
- WHERE e.tenant_id=OLD.tenant_id AND t.state NOT IN ('done','reverted')))
- BEGIN SELECT RAISE(ABORT,'lab_git_exit_refused'); END;
-CREATE TRIGGER IF NOT EXISTS lab_git_tenants_guard_delete BEFORE DELETE ON lab_git_tenants
+ WHERE e.tenant_id=OLD.tenant_id AND t.state NOT IN ('done','reverted'));
+ DELETE FROM lab_git_exit_token WHERE tenant_id=OLD.tenant_id;
+ END;
+DROP TRIGGER IF EXISTS lab_git_tenants_guard_delete;
+CREATE TRIGGER lab_git_tenants_guard_delete BEFORE DELETE ON lab_git_tenants
  WHEN EXISTS (SELECT 1 FROM lab_git_authority WHERE tenant_id=OLD.tenant_id)
- AND NOT EXISTS (SELECT 1 FROM lab_git_exit_token e JOIN lab_git_transitions t
+ BEGIN
+ SELECT RAISE(ABORT,'lab_git_exit_refused')
+ WHERE NOT EXISTS (SELECT 1 FROM lab_git_exit_token e JOIN lab_git_transitions t
  ON t.tenant_id=e.tenant_id AND t.transition_id=e.transition_id
- WHERE e.tenant_id=OLD.tenant_id AND t.state NOT IN ('done','reverted'))
- BEGIN SELECT RAISE(ABORT,'lab_git_exit_refused'); END;
+ WHERE e.tenant_id=OLD.tenant_id AND t.state NOT IN ('done','reverted'));
+ DELETE FROM lab_git_exit_token WHERE tenant_id=OLD.tenant_id;
+ END;
 """
 
 
@@ -156,23 +165,36 @@ def authority_set_mode(tenant, mode):
                 (mode, _now().isoformat(), tenant)).rowcount == 1, write=True)
 
 
+@contextmanager
 def authorize_exit(sql, tenant, transition_id):
-    """Authorize one store transaction; use _run so SQLite clears its token."""
+    """Authorize an exit in the caller's transaction; SQLite consumes one use."""
+    if sql.postgres:
+        if sql.conn.info.transaction_status.name != 'INTRANS':
+            raise ValueError('lab_git_exit_requires_transaction')
+        if sql.execute('SHOW transaction_read_only').fetchone()['transaction_read_only'] != 'off':
+            raise ValueError('lab_git_exit_requires_transaction')
+    elif not sql.conn.in_transaction:
+        raise ValueError('lab_git_exit_requires_transaction')
     row = _get(sql, 'lab_git_transitions', tenant, 'transition_id', transition_id)
     if row is None or row['state'] in ('done', 'reverted'):
         raise ValueError('lab_git_exit_refused')
     if sql.postgres:
         sql.execute("SELECT set_config('leaf.lab_git_writer', ?, true)", (tenant,))
         sql.execute("SELECT set_config('leaf.lab_git_transition', ?, true)", (transition_id,))
+        yield
     else:
         sql.execute('INSERT INTO lab_git_exit_token VALUES (1,?,?) ON CONFLICT (singleton) '
                     'DO UPDATE SET tenant_id=excluded.tenant_id,transition_id=excluded.transition_id', (tenant, transition_id))
+        try:
+            yield
+        finally:
+            sql.execute('DELETE FROM lab_git_exit_token WHERE tenant_id=? AND transition_id=?', (tenant, transition_id))
 
 
 def authority_delete(tenant, transition_id):
     def operation(sql):
-        authorize_exit(sql, tenant, transition_id)
-        return sql.execute('DELETE FROM lab_git_authority WHERE tenant_id=?', (tenant,)).rowcount == 1
+        with authorize_exit(sql, tenant, transition_id):
+            return sql.execute('DELETE FROM lab_git_authority WHERE tenant_id=?', (tenant,)).rowcount == 1
     return _run(tenant, operation, write=True)
 
 
