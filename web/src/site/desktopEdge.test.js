@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8')
 const sources = [
+  './landing.css',
   './cockpit.css',
   './studioShell.css',
   '../styles.css',
@@ -23,7 +24,10 @@ const sources = [
 
 describe('Studio desktop edge', () => {
   it.each(sources)('%s retires the previous tablet/desktop edge', (path) => {
-    const source = read(path)
+    // Landing's historical comments remain outside the breakpoint-only migration.
+    const source = path === './landing.css'
+      ? read(path).replace(/\/\*[\s\S]*?\*\//g, '')
+      : read(path)
     expect(source).not.toMatch(/98[01]px/)
     expect(source).not.toMatch(/innerWidth\s*<=\s*980\b/)
     expect(source).not.toMatch(/innerWidth\s*>=\s*981\b/)
