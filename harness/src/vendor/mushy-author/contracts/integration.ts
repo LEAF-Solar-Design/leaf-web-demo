@@ -1,5 +1,5 @@
 // Generated from packages/assistant-contract/src/integration.ts; do not edit.
-// SHA256: a673a162ab9585a78263817d4863f9d56a4ffeab0570e3fffd1f4569845ec648
+// SHA256: 8da36355b422b1cfcdc1d891f2c0d171ed9280acf43d5cfa1d989faf75c5b76b
 import { z } from "zod";
 
 // The final negative lookahead is an absolute end anchor; `$` alone permits a final newline.
@@ -676,3 +676,88 @@ export type DatasetElementV1 = z.infer<typeof DatasetElementV1>;
 
 export const IntegrationElementV1 = z.union([DatasetElementV1, IntegrationActionElementV1]);
 export type IntegrationElementV1 = z.infer<typeof IntegrationElementV1>;
+
+export const IntegrationManualWorkflowRunV2 = z.strictObject({
+  ...IntegrationManualWorkflowRunV1.shape,
+  schema_version: z.literal(2),
+  state: z.enum(["accepted", "running", "succeeded", "failed", "uncertain", "cancel_requested", "cancelled"]),
+  requested_at: Instant.optional(),
+}).superRefine((run, ctx) => {
+  const cancellation = run.state === "cancel_requested" || run.state === "cancelled";
+  if (cancellation ? run.requested_at === undefined : Object.prototype.hasOwnProperty.call(run, "requested_at")) {
+    ctx.addIssue({ code: "custom", path: ["requested_at"], message: "Request time is required exactly in cancellation states" });
+  }
+  if (!actionTimeOrdered(run.created_at, run.updated_at)) {
+    ctx.addIssue({ code: "custom", path: ["updated_at"], message: "Updated time must not precede creation" });
+  }
+  if (run.requested_at !== undefined && (!actionTimeOrdered(run.created_at, run.requested_at) ||
+      !actionTimeOrdered(run.requested_at, run.updated_at))) {
+    ctx.addIssue({ code: "custom", path: ["requested_at"], message: "Request time must be between creation and update" });
+  }
+}).describe("Opt-in V2 host evidence, never authority or an aggregate effect outcome. Time and state checks are runtime refinements. The host must persist cancellation before inspecting the frontier, keep requested_at immutable across cancellation history and never regress a cancellation to an ordinary state. These history guarantees cannot be proved by a standalone schema.");
+export type IntegrationManualWorkflowRunV2 = z.infer<typeof IntegrationManualWorkflowRunV2>;
+
+export const IntegrationManualWorkflowSnapshotV2 = z.strictObject({
+  definition: IntegrationManualWorkflowDefinitionV1,
+  run: IntegrationManualWorkflowRunV2,
+  steps: z.array(IntegrationManualWorkflowStepSnapshotV1).min(1).max(8),
+}).superRefine((snapshot, ctx) => {
+  const { requested_at, ...run } = snapshot.run;
+  const cancellation = run.state === "cancel_requested" || run.state === "cancelled";
+  // A detached validation-only projection reuses every V1 structural refinement.
+  // It neither mutates the snapshot nor changes the public parsed state.
+  const structural = IntegrationManualWorkflowSnapshotV1.safeParse({
+    ...snapshot,
+    run: { ...run, schema_version: 1, state: cancellation ? "running" : run.state },
+  });
+  if (!structural.success) for (const issue of structural.error.issues) ctx.addIssue({ ...issue });
+  if (run.state === "cancelled") snapshot.steps.forEach((step, index) => {
+    if (step.state === "action" && (step.action.run.state === "running" ||
+        step.action.run.state === "uncertain" || step.action.run.effect_outcome === "unknown")) {
+      ctx.addIssue({ code: "custom", path: ["steps", index, "action"], message: "Cancelled workflows cannot contain running or unknown child effects" });
+    }
+  });
+}).describe("V1 identity, order, exact references, successful prefix and frontier checks remain runtime refinements. Cancellation stops future admissions and claims; it does not abort or compensate claimed provider actions. A winning request remains cancel_requested while a child is running or unknown; explicit reconciliation may permit cancelled, while unsupported reconciliation may leave it pending. An all-applied prefix may settle cancelled with completed effects visible. Accepted/not_dispatched is safe only when the host atomically bars future claims. Pending never proves no effect. Schema checks prove neither private child identity lookup nor an atomic dispatch fence, hashes, input equality or append-only history. Original child receipts remain unchanged; this contract implements no fence or provider work.");
+export type IntegrationManualWorkflowSnapshotV2 = z.infer<typeof IntegrationManualWorkflowSnapshotV2>;
+
+export const IntegrationManualWorkflowCancellationRequestV1 = z.strictObject({
+  schema_version: z.literal(1),
+  run_id: ActionUuid,
+  expected_revision: ActionRevision,
+}).describe("Cancellation request shape only, granting no authority and settling no effect. The host reconciles repeated requests against the same parent and retains finish, expiry and reconciliation capability for already claimed children under unchanged authority.");
+export type IntegrationManualWorkflowCancellationRequestV1 = z.infer<typeof IntegrationManualWorkflowCancellationRequestV1>;
+
+export const IntegrationManualWorkflowCancellationResultV1 = z.strictObject({
+  status: z.enum(["recorded", "already_recorded", "already_terminal"]),
+  snapshot: IntegrationManualWorkflowSnapshotV2,
+}).superRefine(({ status, snapshot }, ctx) => {
+  const state = snapshot.run.state;
+  if (status === "already_terminal" ? state !== "succeeded" && state !== "failed" :
+      state !== "cancel_requested" && state !== "cancelled") {
+    ctx.addIssue({ code: "custom", path: ["snapshot", "run", "state"], message: "Snapshot state incompatible with cancellation result status" });
+  }
+}).describe("Runtime status/state checks only. Recorded may already be safely cancelled. Existing succeeded/failed parents return unchanged without a cancellation request time or invented cancellation receipt. Host and caller must bind this snapshot to the requested run and expected revision; this result alone cannot prove that binding. Error transport remains separate.");
+export type IntegrationManualWorkflowCancellationResultV1 = z.infer<typeof IntegrationManualWorkflowCancellationResultV1>;
+
+export const IntegrationDailyWorkflowScheduleV1 = z.strictObject({
+  kind: z.literal("daily"),
+  timezone: z.string().min(1).max(128)
+    .regex(/^[A-Za-z0-9_.+-]+(?:\/[A-Za-z0-9_.+-]+)*(?![\s\S])/)
+    .describe("Lexical ASCII timezone key, preserved exactly. The host must verify recognized IANA calendar support before accepting a persisted draft."),
+  hour: z.number().int().min(0).max(23),
+  minute: z.number().int().min(0).max(59),
+  gap_policy: z.literal("next_valid_minute"),
+  fold_policy: z.literal("first_occurrence"),
+}).describe("Daily calendar policy only, with no calendar calculation: a nonexistent local minute moves to the next valid local minute; an ambiguous local minute uses the first occurrence only. Parsing or saving this policy grants no execution authority.");
+export type IntegrationDailyWorkflowScheduleV1 = z.infer<typeof IntegrationDailyWorkflowScheduleV1>;
+
+export const IntegrationWorkflowScheduleDraftV1 = z.strictObject({
+  schema_version: z.literal(1),
+  id: Slug,
+  version: ActionRevision,
+  title: Title,
+  workflow_ref: IntegrationRefV1,
+  schedule: IntegrationDailyWorkflowScheduleV1,
+  state: z.literal("draft"),
+}).describe("Inert authoring draft recording intended immutable workflow identity and calendar policy. Parsing or saving it grants no execution authority. Reference existence, digest equality, immutable persistence, timezone support and eventual scheduling eligibility are host guarantees. A reference to a caller-bound manual definition does not make that definition eligible for unattended execution. This contract implements no persistence, timer, occurrence admission, activation, grant or execution path.");
+export type IntegrationWorkflowScheduleDraftV1 = z.infer<typeof IntegrationWorkflowScheduleDraftV1>;

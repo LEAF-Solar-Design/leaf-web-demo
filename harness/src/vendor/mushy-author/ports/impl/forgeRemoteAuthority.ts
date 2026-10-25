@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AuthoritativePublishRequest, TenantBareRepo } from "../index.js";
+import { LAB_GENERATION_REF, GitGenerationConflictError } from "../labDocumentPort.js";
 import { GitRefConflictError } from "./tenantChangeRepo.js";
 
 const MAIN = "refs/heads/main";
@@ -35,6 +36,41 @@ export class ForgePublicationError extends Error {
 }
 
 type Git = (args: string[], cwd?: string) => Promise<string>;
+
+export const validLabGeneration = (value: string): boolean => /^[1-9][0-9]{0,18}$(?![\s\S])/.test(value)
+  && BigInt(value) <= 9223372036854775807n;
+
+/** Share the exact ref and byte grammar across local writes and publication. */
+export async function readLabGeneration(git: (args: string[]) => Promise<Buffer>): Promise<{
+  generation: string | null; generationOid: string | null;
+}> {
+  const optional = async (args: string[]): Promise<Buffer | null> => {
+    try { return await git(args); }
+    catch (error) {
+      const failure = error as { code?: unknown; status?: unknown };
+      if (failure.code === 1 || failure.status === 1) return null;
+      throw error;
+    }
+  };
+  try {
+    if (await optional(["symbolic-ref", "--quiet", LAB_GENERATION_REF]) !== null) {
+      throw new GitGenerationConflictError("symbolic Lab generation ref");
+    }
+    if (await optional(["show-ref", "--verify", "--quiet", LAB_GENERATION_REF]) === null) {
+      return { generation: null, generationOid: null };
+    }
+    const entry = (await git(["show-ref", "--verify", LAB_GENERATION_REF])).toString("utf8");
+    const match = /^([0-9a-f]{40}) refs\/leaf\/lab-generation\n$(?![\s\S])/.exec(entry);
+    if (!match) throw new GitGenerationConflictError("invalid Lab generation ref");
+    const generationOid = match[1]!;
+    const raw = await git(["cat-file", "blob", generationOid]);
+    const generation = raw.toString("utf8");
+    if (raw.length > 19 || !validLabGeneration(generation)) throw new GitGenerationConflictError("invalid Lab generation");
+    return { generation, generationOid };
+  } catch {
+    throw new GitGenerationConflictError("invalid Lab generation");
+  }
+}
 
 /** Remote truth for Mushy's validated artifact lifecycle. No deployment or CI. */
 export class ForgeRemoteAuthority {
@@ -80,9 +116,21 @@ export class ForgeRemoteAuthority {
     });
   }
 
+  private executeRaw(args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      execFile("git", args, {
+        cwd, env, encoding: "buffer", timeout: this.timeoutMs,
+        maxBuffer: 1024 * 1024, windowsHide: true,
+      }, (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      });
+    });
+  }
+
   private async session<T>(
     tenantId: string, dir: string, sourceRef: string,
-    action: (git: Git, remote: string) => Promise<T>,
+    action: (git: Git, remote: string, rawLocal: (args: string[]) => Promise<Buffer>) => Promise<T>,
   ): Promise<T> {
     const remote = await this.canonicalRemote(tenantId, sourceRef);
     const scratch = await mkdtemp(join(tmpdir(), "leaf-forge-"));
@@ -130,7 +178,8 @@ export class ForgeRemoteAuthority {
       });
       return await action((args, cwd) => cwd === dir
         ? local(args)
-        : this.execute([...cfg, ...args], scratch, networkEnv), remote);
+        : this.execute([...cfg, ...args], scratch, networkEnv), remote,
+        (args) => this.executeRaw([...cfg, ...args], dir, env));
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
@@ -194,15 +243,29 @@ export class ForgeRemoteAuthority {
   /** Publish only the separate Lab document branch with exact remote CAS. */
   async publishRef(
     tenantId: string, dir: string, sourceRef: string, ref: string, expectedSha: string | null,
+    options?: { generation?: string; targetSha?: string },
   ): Promise<{ commit: string }> {
     if (ref !== "refs/heads/lab/main"
       || (expectedSha !== null && (!SHA.test(expectedSha) || expectedSha.length !== 40 || expectedSha === ZERO))) this.refuse();
-    return this.session(tenantId, dir, sourceRef, async (git, remote) => {
+    return this.session(tenantId, dir, sourceRef, async (git, remote, rawLocal) => {
       await git(["rev-parse", "--verify", `${MAIN}^{commit}`], dir);
-      const commit = await git(["rev-parse", "--verify", ref], dir);
-      if (!SHA.test(commit) || await git(["cat-file", "-t", commit]) !== "commit") this.refuse();
+      const localHead = await git(["rev-parse", "--verify", ref], dir);
+      if (!SHA.test(localHead) || await git(["cat-file", "-t", localHead]) !== "commit") this.refuse();
       const exactRef = await git(["for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)", ref], dir);
-      if (exactRef !== `${ref}\t${commit}`) this.refuse();
+      if (exactRef !== `${ref}\t${localHead}`) this.refuse();
+      let generation: string | null;
+      try { ({ generation } = await readLabGeneration(rawLocal)); }
+      catch { return this.refuse(); }
+      if (generation !== null && options?.generation !== generation) this.refuse();
+      const commit = options?.targetSha ?? localHead;
+      if (!SHA.test(commit) || commit.length !== 40) this.refuse();
+      if (options?.targetSha !== undefined) {
+        try {
+          if (await git(["cat-file", "-t", commit], dir) !== "commit") this.refuse();
+          await git(["merge-base", "--is-ancestor", commit, localHead], dir);
+        }
+        catch { return this.refuse(); }
+      }
       const entries = await git(["ls-tree", "-rz", "--full-tree", commit], dir);
       if (!entries) this.refuse();
       for (const entry of entries.split("\0").filter(Boolean)) {
@@ -213,6 +276,15 @@ export class ForgeRemoteAuthority {
       const separate = await git(["rev-list", "--count", commit, "--not", MAIN], dir);
       if (all !== separate) this.refuse();
       const before = await this.head(git, remote, ref);
+      if (options?.targetSha !== undefined && before !== null) {
+        if (before === commit) return { commit: before };
+        // Fetch the observed remote commit into the isolated transport so a
+        // newer remote head need not already be present in this tenant cache.
+        await git(["fetch", "--no-tags", "--no-write-fetch-head", remote, before]);
+        let contained = false;
+        try { await git(["merge-base", "--is-ancestor", commit, before]); contained = true; } catch { /* not contained */ }
+        if (contained) return { commit: before };
+      }
       if (before !== expectedSha) throw new GitRefConflictError(ref, expectedSha, before);
       if (expectedSha !== null) {
         try { await git(["merge-base", "--is-ancestor", expectedSha, commit], dir); }

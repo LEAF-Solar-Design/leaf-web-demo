@@ -69,6 +69,10 @@ describe("Lab inspect", () => {
       inspect: vi.fn(async () => empty),
       commit: vi.fn<LabDocumentPort["commit"]>(async () => ({ ref: LAB_DOCUMENT_REF, commit: "a".repeat(40) })),
       publishRef: vi.fn(async () => ({ commit: "a".repeat(40) })),
+      generation: vi.fn<LabDocumentPort["generation"]>(async () => ({ generation: null, generationOid: null, head: null })),
+      fence: vi.fn<LabDocumentPort["fence"]>(async () => { throw new Error("fence is not used by this route"); }),
+      lookupOps: vi.fn<LabDocumentPort["lookupOps"]>(async () => ({ ops: {} })),
+      changes: vi.fn<LabDocumentPort["changes"]>(async () => ({ commits: [], next: null })),
     };
   }
 
