@@ -387,5 +387,7 @@ export function useAppProjectSolarRuntime(props) {
     projectPending: state.projectPending, projectOutcome: state.projectOutcome,
     submissionSignal: m.owner?.abort.signal, busy: state.busy || !!inputs.externalBusy,
     notice: state.notice, publishedVersionId: state.publishedVersionId,
+    canRetryReadback: !!(m.transition && !m.transition.pending && m.transition.phase !== 'done' &&
+      entryCurrent() && transitionCurrent(m.transition)),
     visibleLayers: state.visibleLayers, setVisibleLayers }
 }

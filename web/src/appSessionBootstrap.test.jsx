@@ -71,7 +71,7 @@ function useBootstrap({ drawingId = 'legacy', mock = false, orgId = U(1), projec
   const requestedDrawingIdRef = useRef(drawingId)
   requestedDrawingIdRef.current = drawingId
   const env = {
-    useEffect, useMemo, useRef, mock, orgId, openProjectId: projectId,
+    useEffect, useMemo, useRef, useState, mock, orgId, openProjectId: projectId,
     session, sessionActions: session.actions, intakeRetryKey: retry,
     authHeaders, getSessionIdentity, getSession, setTenant, setTier, setOrg,
     setSignedIn, isSignedIn, adoptOrgId: noop, setLoadErr, humanizeError,
@@ -83,7 +83,7 @@ function useBootstrap({ drawingId = 'legacy', mock = false, orgId = U(1), projec
     seatIntake: noop, isEditFixture: false, getDrawingVersions,
     classifyDrawingLoadFailure, knownGuest: false,
   }
-  Function(...Object.keys(env), bootstrapSource)(...Object.values(env))
+  const identityFailure = Function(...Object.keys(env), `${bootstrapSource}; return identityFailure`)(...Object.values(env))
   // The production App projection feeds the real Solar scope owner.
   const solarSessionEnv = { mock, session, projectSolarAccountScope: 'actor-a' }
   const solarSession = Function(...Object.keys(solarSessionEnv),
@@ -91,7 +91,7 @@ function useBootstrap({ drawingId = 'legacy', mock = false, orgId = U(1), projec
   const solar = useProjectSolarScope({ projectMode: !mock && !!projectId,
     runContext: { orgId, projectId, drawingArtifactId: U(3), drawingId: U(4), drawingVersion: null },
     session: solarSession }, { createClient: createProjectSolarClient })
-  return { session, tenant, tier, org, signedIn, loadErr, drawingLoad, solar }
+  return { session, tenant, tier, org, signedIn, loadErr, drawingLoad, solar, identityFailure }
 }
 
 let fetchMock
@@ -173,7 +173,7 @@ it('an identity 200 activates before legacy intake finishes, and its proof wins'
   expect(result.current.tier).toBe('hosted_pro')
 })
 
-it.each(['404', 'network', 'non-json', 'timeout'])('identity %s is silent and leaves legacy proof available', async failure => {
+it.each(['404', 'network', 'non-json', 'timeout'])('identity %s offers recovery and leaves legacy proof available', async failure => {
   const legacy = deferred()
   fetchMock.mockImplementation(async url => {
     if (url.includes('/api/session?')) return legacy.promise
@@ -189,7 +189,7 @@ it.each(['404', 'network', 'non-json', 'timeout'])('identity %s is silent and le
   expect(result.current.loadErr).toBeNull()
 })
 
-it.each(['404', 'network', 'non-json', 'timeout'])('identity %s with no legacy request stays silent', async failure => {
+it.each(['404', 'network', 'non-json', 'timeout'])('identity %s with no legacy request exposes a recovery error', async failure => {
   fetchMock.mockImplementation(async () => {
     if (failure === '404') return json({}, 404)
     if (failure === 'non-json') return new Response('<html>fallback</html>')
@@ -199,6 +199,7 @@ it.each(['404', 'network', 'non-json', 'timeout'])('identity %s with no legacy r
   await act(async () => {})
   expect(result.current).toMatchObject({ loadErr: null, session: { status: 'checking', sources: [] } })
   expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(result.current.identityFailure.message).toEqual(expect.any(String))
 })
 
 it.each(['identity', 'legacy'])('a %s 401 requires auth and a later other-route 200 cannot reopen it', async refused => {

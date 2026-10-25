@@ -650,7 +650,7 @@ it('SolarToolForm renders only the visible keys', () => {
 })
 
 it('SolarToolForm submits defaults merged with edits once and closes', () => {
-  const onSubmit = vi.fn()
+  const onSubmit = vi.fn(() => ({ runIntent: { intentId: 'armed' } }))
   const onClose = vi.fn()
   render(<SolarToolForm tool={tool} onSubmit={onSubmit} onClose={onClose} />)
   fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '3' } })
@@ -939,7 +939,7 @@ it('TF11 a changed drawing or tool clears the automatic revision to the current 
 const presetRevisionField = () => screen.getByLabelText('Graph revision')
 
 it('FORM21 invalid Solar JSON blocks submit and close until corrected', () => {
-  const onSubmit = vi.fn(), onClose = vi.fn()
+  const onSubmit = vi.fn(() => ({ runIntent: { intentId: 'armed' } })), onClose = vi.fn()
   render(<SolarToolForm tool={tool} onSubmit={onSubmit} onClose={onClose} />)
   fireEvent.change(screen.getByLabelText('Changes'), { target: { value: '{' } })
   const run = screen.getByRole('button', { name: 'Review & run' })
@@ -981,7 +981,7 @@ const STALE = (label) => `${label} has a value this tool no longer accepts. Choo
 
 it('FORM32 a nullable boolean default submits and closes the Solar form', () => {
   const nullableTool = { ...tool, params: { properties: { x: { type: ['boolean', 'null'], default: null } } } }
-  const onSubmit = vi.fn(), onClose = vi.fn()
+  const onSubmit = vi.fn(() => ({ runIntent: { intentId: 'armed' } })), onClose = vi.fn()
   render(<SolarToolForm tool={nullableTool} onSubmit={onSubmit} onClose={onClose} />)
   const input = screen.getByLabelText('X')
   expect(input.getAttribute('aria-invalid')).toBe('false')
@@ -1015,7 +1015,7 @@ it('FORM43 a nullable sibling keeps revision intake automatic after another fiel
 })
 
 function openPresetRead(props = {}) {
-  const bound = { tool: presetTool, drawingId: 'd1', drawingVersion: 3, onSubmit: vi.fn(), onClose: vi.fn(), ...props }
+  const bound = { tool: presetTool, drawingId: 'd1', drawingVersion: 3, onSubmit: vi.fn(() => ({ runIntent: { intentId: 'armed' } })), onClose: vi.fn(), ...props }
   return { ...render(<SolarToolForm {...bound} />), props: bound }
 }
 const presetName = () => fireEvent.change(screen.getByLabelText('Preset name'), { target: { value: 'Alpha' } })

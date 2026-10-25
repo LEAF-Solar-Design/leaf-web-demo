@@ -468,7 +468,7 @@ function GenericSolarToolForm({ tool, onSubmit, onClose, readIntake, drawingId, 
       <SchemaForm schema={schema} values={values} onChange={change} onValidityChange={setFormValid} />
       <button type="button" className="chip-act" disabled={reading || !formValid}
         title={reading ? "Reading this drawing's design revision." : undefined}
-        onClick={() => { if (!reading && formValid) { onSubmit(tool, values); onClose() } }}>
+        onClick={() => { if (!reading && formValid) { const armed = onSubmit(tool, values); if (armed?.runIntent?.intentId) onClose() } }}>
         Review & run
       </button>
       <button type="button" className="chip-act" onClick={cancel}>Cancel</button>

@@ -12,10 +12,50 @@
  * client-side. Cloning/failed/done are internal UI state only, not server
  * truth, because they describe this one in-flight request.
  */
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 function errorMessage(e, fallback) {
-  return e?.body?.detail || e?.message || fallback
+  if (Array.isArray(e?.body?.detail)) {
+    return e.body.detail.map((detail) => humanizeError(
+      typeof detail?.msg === 'string' ? detail.msg : fallback,
+    )).join(' ') || humanizeError(fallback)
+  }
+  return humanizeError(typeof e?.body?.detail === 'string' ? e.body.detail : e || fallback)
+}
+
+export function useLifecycleDialog(open, onClose, id) {
+  const root = useRef(null)
+  useEscapeOwner(id, open, onClose, { layer: 'sheet', scope: root })
+  useLayoutEffect(() => {
+    if (!open || !root.current) return undefined
+    const previous = document.activeElement
+    const node = root.current
+    const focusable = () => [...node.querySelectorAll('button:not(:disabled), input:not(:disabled), a[href], [tabindex="0"]')]
+    const focusFirst = () => (focusable()[0] || node).focus()
+    const contain = (event) => {
+      if (!node.contains(event.target)) focusFirst()
+    }
+    const cycle = (event) => {
+      if (event.key !== 'Tab') return
+      const items = focusable()
+      const index = items.indexOf(document.activeElement)
+      if (!items.length || index < 0 || (event.shiftKey ? index === 0 : index === items.length - 1)) {
+        event.preventDefault()
+        ;(event.shiftKey ? items.at(-1) || node : items[0] || node).focus()
+      }
+    }
+    focusFirst()
+    document.addEventListener('focusin', contain)
+    node.addEventListener('keydown', cycle)
+    return () => {
+      document.removeEventListener('focusin', contain)
+      node.removeEventListener('keydown', cycle)
+      if (previous?.isConnected) previous.focus()
+    }
+  }, [open])
+  return root
 }
 
 export default function CloneDialog({
@@ -28,13 +68,12 @@ export default function CloneDialog({
   const [error, setError] = useState(null)
   const [receipt, setReceipt] = useState(null)
 
-  if (!open || !project) return null
-
   const startClone = async () => {
     if (status === 'cloning') return
     setStatus('cloning')
     setError(null)
     setReceipt(null)
+    dialogRef.current?.focus()
     try {
       const result = await onClone(project.project_id)
       setReceipt(result)
@@ -53,9 +92,13 @@ export default function CloneDialog({
     onClose?.()
   }
 
+  const dialogRef = useLifecycleDialog(!!open && !!project, closeAndReset, 'clone-project')
+
+  if (!open || !project) return null
+
   return (
     <div className="clone-dialog-backdrop" role="presentation">
-      <section className="clone-dialog" role="dialog" aria-modal="true" aria-label={`Clone ${project.name}`}>
+      <section ref={dialogRef} tabIndex={-1} className="clone-dialog" role="dialog" aria-modal="true" aria-label={`Clone ${project.name}`}>
         <div className="clone-dialog-head">
           <span className="clone-dialog-title">Clone "{project.name}"</span>
           <button

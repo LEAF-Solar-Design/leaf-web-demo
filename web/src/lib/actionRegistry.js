@@ -82,7 +82,7 @@ export const REASONS = Object.freeze({
   buildUnentitled: 'your plan does not include authoring tools',
   buildUnavailable: 'the authoring stage is off on this deployment',
   noDrawing: 'no drawing loaded',
-  noVersions: 'no versioned drawing',
+  noVersions: 'No saved versions yet',
   versionBusy: 'a version change is in flight',
   running: 'a run is in flight',
   previewing: 'viewing a version, read-only',

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import { getPlatformChange, landPlatformChange, mergePlatformChange, proposePlatformChange } from '../api.js'
+import { humanizeError } from '../errorHumanize.js'
 import './popovers.css'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 
@@ -56,7 +57,7 @@ function describeError(e) {
   }
   const reason = e?.body?.reason_code
   if (reason && REASON_COPY[reason]) return REASON_COPY[reason]
-  return String(e?.message || e)
+  return humanizeError(e)
 }
 
 // Recent ids are scoped per tenant so a multi-workspace admin never sees one

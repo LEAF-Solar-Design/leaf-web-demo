@@ -71,6 +71,7 @@ function proofHarness(mock = false, effect = proof) {
     getSessionIdentity: vi.fn(() => pending), setTenant: vi.fn(), setTier: vi.fn(), setOrg: vi.fn(),
     setSignedIn: vi.fn(), isSignedIn: () => true, adoptOrgId: vi.fn(),
     setLoadErr: vi.fn(), humanizeError: String, is401: error => error?.status === 401,
+    setIdentityFailure: vi.fn(),
     shouldAutoDemo: () => false, authConfigured: true, setMock: vi.fn(),
     useMemo: fn => fn(), REQUESTED_DRAWING_ID: 'legacy', DRAWING_SOURCE: 'legacy',
     requestedDrawingIdRef: { current: 'legacy' }, isScopeCurrent: () => true,
@@ -188,10 +189,13 @@ describe('App.jsx session controller adoption', () => {
     }
   })
 
-  it.each([404, 'network', 'non-json', 'timeout'])('keeps identity failure %s silent', async status => {
+  it.each([404, 'network', 'non-json', 'timeout'])('offers recovery for identity failure %s without rejecting the token', async status => {
     const h = proofHarness()
     await h.settle({ status }, true)
     expect(h.context.setLoadErr).not.toHaveBeenCalled()
+    expect(h.context.setIdentityFailure).toHaveBeenLastCalledWith({
+      scope: h.context.sessionProofScope, message: String({ status }),
+    })
     expect(h.context.sessionActions.requireAuth).not.toHaveBeenCalled()
     expect(h.context.sessionActions.activate).not.toHaveBeenCalled()
     h.cleanup()

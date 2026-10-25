@@ -23,25 +23,36 @@
 // placeholder revealing no readiness detail at all.
 
 import ShipReceipts from './ShipReceipts.jsx'
+import { humanizeError } from '../errorHumanize.js'
 import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
 
 const SHIP_APPROVE_REASONS = Object.freeze({
   owner: 'Only the project owner can approve a source revision',
-  noRevision: 'Select a canonical drawing version before approving',
+  noRevision: 'Select a drawing version before approving',
   busy: 'The approval is being recorded.',
 })
 
 const SHIP_PHASE_REASONS = Object.freeze({
   idle: 'Sign in and select an approved revision to launch.',
-  loading: 'Checking ship readiness.',
-  'setup-required': 'Complete the reported setup action before launching.',
-  launching: 'The ship launch is being submitted.',
+  loading: 'Checking whether you can start a build.',
+  'setup-required': 'Finish setup before starting a build.',
+  launching: 'The build is being submitted.',
   running: 'A build is already running.',
   succeeded: 'This build has succeeded.',
   failed: 'This build has failed.',
-  unavailable: 'The ship lane is unavailable.',
+  unavailable: 'Build status is unavailable. Try checking again.',
   ready: 'Launch the approved revision.',
 })
+
+function setupSentence(readiness) {
+  const state = readiness?.setupState
+  if (state === 'no-approved-revision') return 'Select a drawing version and ask the project owner to approve it.'
+  if (state === 'grant-not-ready') return 'Ask the project owner to connect the Apple account before starting a build.'
+  if (state === 'executor-busy') return 'Another build is using the build computer. Check again when it finishes.'
+  if (state === 'executor-unavailable') return 'The build computer is unavailable. Ask support to reconnect it, then check again.'
+  if (readiness?.setupAction) return 'Ask support to connect the Apple build service, then check again.'
+  return null
+}
 
 export function ShipStage({ ship, onLaunch }) {
   const { readiness, execution, receipt, phase, error } = ship
@@ -58,23 +69,23 @@ export function ShipStage({ ship, onLaunch }) {
   const launched = Boolean(execution)
   const rungs = [
     ['source', 'Source (approved revision)', setup === 'no-approved-revision' ? 'missing' : readiness?.approvedLaunch || launched ? 'ready' : 'missing'],
-    ['grant', 'Grant', setup === 'grant-not-ready' ? 'missing' : readiness?.grantStatus === 'healthy' || launched ? 'ready' : 'missing'],
-    ['executor', 'Executor', setup === 'executor-busy' ? 'busy' : setup === 'executor-unavailable' ? 'unavailable' : readiness?.dispatchAvailable || launched ? 'ready' : 'unavailable'],
+    ['grant', 'Apple account', setup === 'grant-not-ready' ? 'missing' : readiness?.grantStatus === 'healthy' || launched ? 'ready' : 'missing'],
+    ['executor', 'Build computer', setup === 'executor-busy' ? 'busy' : setup === 'executor-unavailable' ? 'unavailable' : readiness?.dispatchAvailable || launched ? 'ready' : 'unavailable'],
     ['build', 'Build', execution?.status === 'succeeded' ? 'ready' : execution?.status === 'failed' ? 'unavailable' : launched || phase === 'launching' ? 'busy' : 'missing'],
     ['delivery', 'Delivery', receipt ? 'ready' : execution?.status === 'failed' ? 'unavailable' : launched ? 'busy' : 'missing'],
   ]
   return (
     <div className="ios-ship-stage" data-state={phase}>
-      <p role="status">{phase}</p>
+      <p role="status">{SHIP_PHASE_REASONS[phase] || SHIP_PHASE_REASONS.unavailable}</p>
       <ol className="ground-lane" aria-label="Ship stage ladder" data-testid="ios-stage-ladder">
         {rungs.map(([id, label, state]) => (
           <li key={id} data-rung={id} data-state={state}>{label}: {state}</li>
         ))}
       </ol>
-      {setup && setup !== 'none' && readiness?.setupAction && <p>Setup required: {readiness.setupAction}</p>}
+      {setupSentence(readiness) && <p>{setupSentence(readiness)}</p>}
       {Array.isArray(ship.sources) && (
         <section className="ios-ship-sources" data-testid="ios-ship-sources" aria-label="Imported source revisions">
-          {ship.sync && ship.sync.status !== 'ok' && <p data-testid="ios-ship-sync">Provider catalog: {ship.sync.status}. Showing the stored sources.</p>}
+          {ship.sync && ship.sync.status !== 'ok' && <p data-testid="ios-ship-sync">Source updates are unavailable. Showing saved versions. Check again shortly.</p>}
           {ship.sources.length === 0 ? <p>No imported source revision yet.</p> : (
             <ul>
               {ship.sources.map((source) => {
@@ -94,21 +105,27 @@ export function ShipStage({ ship, onLaunch }) {
               })}
             </ul>
           )}
-          {ship.sourcesError && <p role="alert" data-testid="ios-ship-sources-error">{ship.sourcesError}</p>}
+          {ship.sourcesError && <p role="alert" data-testid="ios-ship-sources-error">{humanizeError(ship.sourcesError)}</p>}
         </section>
       )}
       {execution && (
         <p className="ios-execution-status">
-          {execution.failed_stage || execution.stage}
+          {humanizeStage(execution.failed_stage || execution.stage)}
           {execution.updated_at && <time dateTime={execution.updated_at}> {execution.updated_at}</time>}
         </p>
       )}
       {receipt && <ShipReceipts receipts={[receipt]} />}
-      {error && <p role="alert">{error}</p>}
+      {error && <p role="alert">{humanizeError(error)}</p>}
+      {ship.followStopped && ship.refresh && <button type="button" onClick={ship.refresh}>Resume status updates</button>}
+      {['succeeded', 'failed'].includes(phase) && ship.nextBuild && (
+        <button type="button" disabled={ship.loading} onClick={ship.nextBuild}>Check for next build</button>
+      )}
+      {['setup-required', 'unavailable'].includes(phase) && ship.refresh && (
+        <button type="button" disabled={ship.loading} onClick={ship.refresh}>Check build readiness</button>
+      )}
       {onLaunch && (
         <>
           <button type="button" disabled={phase !== 'ready'} title={SHIP_PHASE_REASONS[phase]} onClick={onLaunch}>Launch TestFlight build</button>
-          {phase !== 'ready' && <p>{SHIP_PHASE_REASONS[phase]}</p>}
         </>
       )}
     </div>
@@ -122,12 +139,18 @@ const STATE_LABEL = {
   'never-configured': 'Not yet configured',
 }
 
-// "MAC_ALLOCATED" -> "Mac allocated": echo the contract's own stage word in
-// readable form; never a synthesized fraction of done-ness.
+// Describe only known contract stages; never echo an unknown provider token.
 function humanizeStage(stage) {
   if (typeof stage !== 'string' || !stage) return null
-  const words = stage.toLowerCase().split('_').join(' ')
-  return words.charAt(0).toUpperCase() + words.slice(1)
+  return ({
+    SOURCE_APPROVED: 'Source approved', GRANT_READY: 'Apple account connected',
+    BUNDLE_READY: 'App files ready', MAC_ALLOCATED: 'Build computer ready',
+    APP_RECORD: 'App registered', BUILT: 'App built', UPLOADED: 'App uploaded',
+    XCODE_READY: 'Build software ready', SIGNING_READY: 'App signing ready',
+    COMPLIANCE: 'Checking app requirements', BETA_ASSIGNED: 'Testers assigned',
+    CREDENTIALS_SCRUBBED: 'Apple account details removed', MAC_RELEASED: 'Build computer released',
+    RECEIPT: 'Build confirmation ready',
+  })[stage] || 'Check the build details for the latest update.'
 }
 
 function deriveState(contract) {

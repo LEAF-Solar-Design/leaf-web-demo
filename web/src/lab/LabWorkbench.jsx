@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { LiveValues, useLiveGraph } from './canvas/GraphView.jsx'
 import { createHostProvider } from './host/hostProvider.js'
 import { guardSink } from './host/hostResidency.js'
-import { fetchLabStatus, formatLabRoute } from './labRoute.js'
+import { fetchLabStatus, formatLabRoute, parseLabRoute } from './labRoute.js'
 import { registerLabViews } from './views.js'
 import './lab.css'
 
@@ -139,6 +139,13 @@ export function LabWorkbench({ route, hidden = false, status, embedded = false, 
   const [hostReloaded, setHostReloaded] = useState(false)
   const [hostSource, setHostSource] = useState(null)
   const [bridge, setBridge] = useState(null)
+  const [viewRoute, setViewRoute] = useState(route)
+  useEffect(() => { setViewRoute(route) }, [route])
+  useEffect(() => {
+    const navigate = () => setViewRoute(parseLabRoute(window.location.pathname, window.location.search))
+    window.addEventListener('popstate', navigate)
+    return () => window.removeEventListener('popstate', navigate)
+  }, [])
   useEffect(() => {
     if (status !== undefined) return undefined
     let current = true
@@ -147,7 +154,7 @@ export function LabWorkbench({ route, hidden = false, status, embedded = false, 
   }, [status])
   const state = (status === undefined ? liveStatus : status)?.state || 'unavailable'
   const available = state === 'on'
-  const activeView = views.some(({ id }) => id === route?.view) ? route.view : 'graph'
+  const activeView = views.some(({ id }) => id === viewRoute?.view) ? viewRoute.view : 'graph'
 
   return (
     <section className="lab-workbench" aria-label="Lab" hidden={hidden}>
@@ -157,6 +164,12 @@ export function LabWorkbench({ route, hidden = false, status, embedded = false, 
       <nav aria-label="Lab views" hidden={!available}>
         {views.map(({ id, label, path }) => (
           <a key={id} href={embedded ? formatLabRoute({ view: id, params: { ...route?.params, embed: '1' } }) : path}
+            onClick={(event) => {
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+              event.preventDefault()
+              window.history.pushState(null, '', event.currentTarget.href)
+              setViewRoute({ ...viewRoute, view: id })
+            }}
             aria-current={activeView === id ? 'page' : undefined}>{label}</a>
         ))}
       </nav>

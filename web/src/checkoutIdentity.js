@@ -615,4 +615,13 @@ export function lockState({ mock, checkout, unknown, ownHolder, nowMs = Date.now
   }
 }
 
+// Display labels never replace the holder identity used to authorize a write.
+export function describeLockHolder(holder, ownHolderId) {
+  if (!holder || !String(holder).trim()) return 'another session'
+  if (holder === ownHolderId) return 'you in another tab'
+  if (holder === 'cad-edit-save') return 'a save in progress'
+  if (/^sess-/i.test(holder)) return 'another session'
+  return holder
+}
+
 export default getSessionHolderId
