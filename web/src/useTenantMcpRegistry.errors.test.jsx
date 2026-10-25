@@ -38,6 +38,35 @@ it('retains the previous list and exposes a readable error after a failed refres
   expect(result.current.loading).toBe(false)
 })
 
+it('retains the previous list after a malformed response and recovers to a valid empty list', async () => {
+  const api = await vi.importActual('./api.js')
+  listTenantMcpServers.mockImplementation(api.listTenantMcpServers)
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ servers }) })
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) })
+    .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ servers: [] }) }))
+  try {
+    const { result } = renderHook(() => useTenantMcpRegistry())
+    await waitFor(() => expect(result.current.servers).toEqual(servers))
+    expect(result.current.error).toBeNull()
+
+    await act(async () => { await result.current.refresh() })
+    expect(result.current.servers).toEqual(servers)
+    expect(result.current.error).toMatchObject({
+      kind: 'list', message: 'Linked services could not be loaded. Try again.',
+    })
+    expect(result.current.loading).toBe(false)
+
+    await act(async () => { expect(await result.current.refresh()).toEqual([]) })
+    expect(result.current.servers).toEqual([])
+    expect(result.current.error).toBeNull()
+    expect(result.current.loading).toBe(false)
+    expect(fetch).toHaveBeenCalledTimes(3)
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})
+
 it('shows a failed initial read and retries to a successful empty list', async () => {
   listTenantMcpServers.mockRejectedValueOnce(new Error('GET /api/tenant/mcp-servers -> 502'))
   render(<Drawer />)

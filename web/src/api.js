@@ -803,7 +803,8 @@ export async function unlinkClaudeGrant(accountId) {
 // List failures must remain distinguishable from a successful empty list.
 export async function listTenantMcpServers() {
   const body = await http('/api/tenant/mcp-servers', { headers: { 'X-Tenant-Id': TENANT } })
-  return Array.isArray(body?.servers) ? body.servers : []
+  if (!Array.isArray(body?.servers)) throw new Error('Linked services could not be loaded. Try again.')
+  return body.servers
 }
 
 export async function registerTenantMcpServer(url, label) {
