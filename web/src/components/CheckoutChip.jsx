@@ -1,6 +1,7 @@
 import './panels.css'
 import { absoluteWithZone, relativeUntil } from '../lib/railTime.js'
 import useRelativeNow from '../lib/useRelativeNow.js'
+import { describeLockHolder, getSessionHolderId } from '../checkoutIdentity.js'
 
 // Single-writer checkout line: shown near the version note when the drawing's
 // version manifest carries a non-null `checkout` lock held by SOMEONE ELSE
@@ -27,14 +28,14 @@ import useRelativeNow from '../lib/useRelativeNow.js'
 // clock disagrees (skew), or the record carries an `expires` we cannot read. The
 // browser clock never decides the lock is free (checkoutIdentity.js
 // `looksStale`), so the chip must keep rendering sanely when the two disagree.
-export default function CheckoutChip({ checkout }) {
+export default function CheckoutChip({ checkout, ownHolderId = getSessionHolderId() }) {
   const now = useRelativeNow()
   if (!checkout || !checkout.holder) return null
   const expires = Date.parse(checkout.expires)
   const until = relativeUntil(expires, now)
   return (
     <span className="checkout-chip" role="status" title={absoluteWithZone(expires)}>
-      Editing locked by <b>{checkout.holder}</b>
+      Editing locked by <b>{describeLockHolder(checkout.holder, ownHolderId)}</b>
       {until ? <> until <b className="t-rel">{until}</b></> : null}
       {/* No leading punctuation: .checkout-chip is inline-flex with a 6px gap
           (styles.css), so this note is its own flex item and a leading "." or
