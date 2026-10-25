@@ -63,7 +63,8 @@ describe('SiteRoot renders the one studio shell', () => {
     window.history.replaceState({ page: 'drawing' }, '', '/app?surface=cad&code=x&state=y&drawing=roof#details')
     const auth = await import('../auth.js')
     vi.spyOn(auth, 'isAuthRedirectCallback').mockReturnValue(true)
-    const callback = vi.spyOn(auth, 'handleRedirectCallback').mockImplementation(() => new Promise(() => {}))
+    let completeCallback
+    const callback = vi.spyOn(auth, 'handleRedirectCallback').mockImplementation(() => new Promise(resolve => { completeCallback = resolve }))
     let returnTo
     const login = vi.spyOn(auth, 'login').mockImplementation(async () => {
       returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`
@@ -82,6 +83,14 @@ describe('SiteRoot renders the one studio shell', () => {
     expect(savedUrl.searchParams.has('code')).toBe(false)
     expect(savedUrl.searchParams.has('state')).toBe(false)
     expect(window.history.state).toEqual({ page: 'drawing' })
+    await act(async () => { completeCallback(true) })
+    expect(login).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('alert').textContent).toBe("Sign-in couldn't be completed.")
+    expect(screen.queryByTestId('app-stub')).toBeNull()
+    expect(screen.queryByTestId('stage-stub')).toBeNull()
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe('/app?surface=cad&drawing=roof#details')
+    expect(new URL(window.location.href).searchParams.has('code')).toBe(false)
+    expect(new URL(window.location.href).searchParams.has('state')).toBe(false)
   }, 20_000)
 
   // Cold dynamic imports of the SiteRoot graph after vi.resetModules() can take several seconds on a loaded runner.

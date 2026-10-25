@@ -66,7 +66,7 @@ it('stops waiting after twenty seconds even if the callback never settles', asyn
   expect(screen.queryByText('Completing sign in')).toBeNull()
 })
 
-it('clears timeout feedback and reloads when sign-in succeeds after twenty seconds', async () => {
+it('keeps timeout feedback and ignores sign-in success after twenty seconds', async () => {
   vi.useFakeTimers()
   let complete
   const callback = vi.fn(() => new Promise(resolve => { complete = resolve }))
@@ -76,8 +76,8 @@ it('clears timeout feedback and reloads when sign-in succeeds after twenty secon
   expect(screen.getByRole('alert').textContent).toBe("Sign-in couldn't be completed.")
   expect(onReload).not.toHaveBeenCalled()
   await act(async () => { complete(true) })
-  expect(screen.queryByRole('alert')).toBeNull()
-  expect(onReload).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('alert').textContent).toBe("Sign-in couldn't be completed.")
+  expect(onReload).not.toHaveBeenCalled()
   expect(callback).toHaveBeenCalledTimes(1)
 })
 

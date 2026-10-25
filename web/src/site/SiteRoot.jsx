@@ -110,9 +110,7 @@ export default function SiteRoot() {
       setAuthError(humanizeError("Sign-in couldn't be completed."))
       setAuthCallbackPending(false)
     }
-    const timer = setTimeout(() => {
-      if (live) setAuthError(humanizeError("Sign-in couldn't be completed."))
-    }, 20000)
+    const timer = setTimeout(fail, 20000)
     Promise.resolve().then(() => handleRedirectCallback()).then((signedIn) => {
       if (!live) return
       clearTimeout(timer)
