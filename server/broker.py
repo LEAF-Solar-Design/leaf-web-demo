@@ -2930,9 +2930,49 @@ def blank_dwg_feasibility(req: BlankDwgFeasibilityRequest) -> JSONResponse:
     return broker_run(run)
 
 
+def _lab_refused(reason: str, status: int, tool: Dict[str, Any]) -> JSONResponse:
+    if status == 503:
+        env, _ = _classified_unavailable(reason, reason, tool=tool.get("name"))
+    else:
+        env = err_envelope(ErrorCode.FORBIDDEN if status == 403 else ErrorCode.BAD_PARAMS,
+                           reason, retryable=False, tool=tool.get("name"))
+        env["error"]["reason_code"] = reason
+    return JSONResponse(status_code=status, content=env)
+
+
 @app.post("/broker/run", dependencies=[Depends(require_broker_auth)])
 @_guard_demo_action
 def broker_run(req: BrokerRunRequest) -> JSONResponse:
+    if "lab_execution" in (req.tool or {}):
+        marker = req.tool["lab_execution"]
+        if (not isinstance(marker, dict) or not isinstance(marker.get("run_id"), str)
+                or not isinstance(marker.get("block_id"), str)
+                or type(marker.get("attempt")) is not int):
+            return _lab_refused("lab_execution_invalid", 422, req.tool)
+        if req.aps_live:
+            return _lab_refused("lab_aps_refused", 403, req.tool)
+        capabilities = req.tool.get("capabilities")
+        capability = req.tool.get("capability")
+        if ((capabilities is not None and (not isinstance(capabilities, list)
+                                         or any(not isinstance(item, str) for item in capabilities)))
+                or (capability is not None and not isinstance(capability, str))):
+            return _lab_refused("lab_write_refused", 403, req.tool)
+        capabilities = list(capabilities or [])
+        capabilities.append(capability)
+        if write_loop.is_write_tool(req.tool) or any(
+                isinstance(capability, str) and any(
+                    capability == prefix or capability.startswith(prefix + ".")
+                    for prefix in ("drawing.write", "solve", "cloud-proposal"))
+                for capability in capabilities):
+            return _lab_refused("lab_write_refused", 403, req.tool)
+        # Resolve at request time, including changes to provider configuration.
+        import tool_loader
+        try:
+            sandbox = tool_loader._sandbox_tier()
+        except Exception:
+            sandbox = None
+        if sandbox != "microvm":
+            return _lab_refused("lab_sandbox_unavailable", 503, req.tool)
     if (req.tool or {}).get("name") == PLAN_TOOL_NAME:
         return _broker_run(req)
     if not write_loop.is_write_tool(req.tool or {}):

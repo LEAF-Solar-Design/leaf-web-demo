@@ -1,8 +1,8 @@
 // Slice 13b (theming tokens): the --leaf-* namespace is aliases ONLY. Every
 // --leaf-* declaration in the site stylesheets must be a var() reference to
 // a token declared in the very same selector scope (this slice never spans
-// scopes), never a re-typed literal, so introducing the namespace changes no
-// pixel or shade on screen.
+// scopes), never a re-typed literal. The cockpit inherits --leaf-ink and
+// --leaf-warn from the vendored v1 package instead of aliasing them back.
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 
@@ -85,6 +85,80 @@ it('SSD1-24E light text and tile boundaries meet WCAG contrast', () => {
   expect(contrast('border', 'card')).toBeLessThan(3)
 })
 
+it('cockpit accent backgrounds use dark text from the vendored v1 root', () => {
+  const root = declsFor(read('src/standard/leaf-standard.css'), ':root')
+  expect(root['--leaf-on-accent']).toBe('#050706')
+  expect(root['--leaf-accent']).toBe('#28d66f')
+  expect(root['--leaf-accent-hover']).toBe('#3edb7e')
+
+  const luminance = (hex) => {
+    const channels = hex.slice(1).match(/../g).map((value) => {
+      const srgb = parseInt(value, 16) / 255
+      return srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4
+    })
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+  }
+  const contrast = (a, b) => {
+    const values = [a, b].map(luminance).sort((x, y) => y - x)
+    return (values[0] + 0.05) / (values[1] + 0.05)
+  }
+  expect(contrast(root['--leaf-on-accent'], root['--leaf-accent'])).toBeGreaterThanOrEqual(4.5)
+  expect(contrast(root['--leaf-on-accent'], root['--leaf-accent-hover'])).toBeGreaterThanOrEqual(4.5)
+
+  for (const [css, selector] of [
+    [cockpit, '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])'],
+    [read('src/site/studioShell.css'), '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'],
+  ]) {
+    const decls = declsFor(css, selector)
+    expect(decls['--primary-hover'], selector).toBe('var(--leaf-accent-hover)')
+    expect(decls['--on-accent'], selector).toBe('var(--leaf-on-accent)')
+  }
+
+  for (const [file, css] of [['cockpit.css', cockpit], ['studioShell.css', read('src/site/studioShell.css')]]) {
+    const text = stripComments(css)
+    expect(text, `${file} must inherit --leaf-on-accent`).not.toMatch(/--leaf-on-accent\s*:/)
+    for (const [, selector, body] of text.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/(?:^|;)\s*background\s*:\s*var\(--ck-(?:active|cmd)\)\s*(?:;|$)/.test(body)) continue
+      const context = `${file} ${selector.trim()}`
+      const colors = [...body.matchAll(/(?:^|;)\s*color\s*:\s*([^;]+)/g)].map((match) => match[1].trim())
+      // Accent dots without a color declaration carry no text and are out of scope.
+      if (colors.length === 0) continue
+      for (const color of colors) {
+        expect(color, context).not.toMatch(/#fff\b|rgba\(\s*255\s*,\s*255\s*,\s*255\b/i)
+        if (color === 'var(--leaf-on-accent)') continue
+        expect(color, `${context} must use --leaf-on-accent or a dark literal`).toMatch(/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i)
+        const hex = color.length === 4 ? `#${[...color.slice(1)].map((channel) => channel.repeat(2)).join('')}` : color
+        expect(luminance(hex), context).toBeLessThan(luminance(root['--leaf-accent']))
+        expect(contrast(hex, root['--leaf-accent']), context).toBeGreaterThanOrEqual(4.5)
+      }
+    }
+  }
+})
+
+it('shell declarations use v1 roles instead of the mapped old cockpit palette', () => {
+  const oldHex = /#(?:fff|ffffff|e6e6e6|d8d8d8|d4d4d4|d0d0d0|cfcfcf|9a9a9a|bdbdbd|8a8a8a|7a7a7a|6a6a6a|4a4a4a|444|424242|3f3f3f|3a3a3a|383838|2e2e2e|323232|2a2a2a|5a5a5a|2aa3de|1390cc|0b1a22|8fbf9f|c9a86a|d9a441|e24947)\b/i
+  const oldRgba = /rgba\(\s*240\s*,\s*242\s*,\s*240\s*,\s*0?\.72\s*\)/i
+  const palettes = [
+    ['cockpit.css', cockpit, '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])'],
+    ['studioShell.css', read('src/site/studioShell.css'), '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'],
+  ]
+  for (const [file, css, paletteSelector] of palettes) {
+    const rules = [...stripComments(css).matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    expect(rules.length, file).toBeGreaterThan(0)
+    for (const [, selector, body] of rules) {
+      const palette = selector.trim() === paletteSelector && /--ck-font\s*:/.test(body)
+      for (const [, property, value] of body.matchAll(/(?:^|;)\s*([\w-]+)\s*:\s*([^;]+)(?=;|$)/g)) {
+        // Only the two original palette blocks may retain literal definitions.
+        if (palette && property.startsWith('--')) continue
+        if (/^(?:box-shadow|text-shadow)$/i.test(property) || /\b[\w-]*gradient\s*\(/i.test(value)) continue
+        const context = `${file} ${selector.trim()} ${property}: ${value.trim()}`
+        expect(value, context).not.toMatch(oldHex)
+        expect(value, context).not.toMatch(oldRgba)
+      }
+    }
+  }
+})
+
 it('SSD1-24E light hover text', () => {
   const css = stripComments(read('src/site/landing.css'))
   const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
@@ -98,6 +172,21 @@ it('SSD1-24E light hover text', () => {
 })
 
 describe('the --leaf-* token namespace is alias-only (slice 13b)', () => {
+  it('inherits cockpit ink and warning roles from the vendored v1 root', () => {
+    const root = declsFor(read('src/standard/leaf-standard.css'), ':root')
+    for (const [css, selector] of [
+      [cockpit, '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])'],
+      [read('src/site/studioShell.css'), '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'],
+    ]) {
+      const decls = declsFor(css, selector)
+      for (const role of ['ink', 'warn']) {
+        expect(root).toHaveProperty(`--leaf-${role}`)
+        expect(decls).not.toHaveProperty(`--leaf-${role}`)
+        expect(decls[`--ck-${role}`]).toBe(`var(--leaf-${role})`)
+      }
+    }
+  })
+
   it('declares no --leaf-* literal colour or length, only var() references', () => {
     const literalRe = /#[0-9a-fA-F]{3,8}\b|\b\d+(\.\d+)?(px|em|rem|vh|vw|%)\b|rgba?\(|hsla?\(/
     for (const [file, css] of [['landing.css', landing], ['cockpit.css', cockpit]]) {

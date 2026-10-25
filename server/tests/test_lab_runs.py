@@ -83,6 +83,34 @@ def test_refuses_before_enqueue(rig, monkeypatch, kind, code):
     assert response.json() == {"detail": code}
 
 
+@pytest.mark.parametrize("flag,drawing,host,code", [
+    ("1", {"project_id": "project", "drawing_id": "drawing", "dwg_version": 1}, False, None),
+    ("1", {"project_id": "project", "drawing_id": "drawing", "dwg_version": 0}, False,
+     "lab_tool_drawing_required"),
+    ("1", None, False, "lab_tool_drawing_required"),
+    ("1", None, True, "lab_graph_host_refused"),
+    ("0", {"project_id": "project", "drawing_id": "drawing", "dwg_version": 1}, False,
+     "lab_graph_effect_refused"),
+])
+def test_tool_node_admission(rig, monkeypatch, flag, drawing, host, code):
+    from dataclasses import replace
+    from test_lab_tool_nodes import tool_graph
+    tool = tool_graph(monkeypatch)
+    tool.graph["blocks"][0]["settings"] = {"drawing": drawing} if drawing is not None else {}
+    if host:
+        monkeypatch.setitem(lab_runs.lab_registry.REGISTRY, (tool.trusted.kind, tool.trusted.version),
+                            replace(tool.trusted, residency="host"))
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", flag)
+    monkeypatch.setattr(lab_runs, "trusted_registry", lambda: tool.registry)
+    monkeypatch.setattr(ledger, "get", lambda *args: {**rig.artifact, "graph": tool.graph})
+    response = create(rig)
+    if code is None:
+        assert response.status_code == 202, response.text
+    else:
+        assert response.status_code == 422, response.text
+        assert response.json() == {"detail": code}
+
+
 def test_queue_full(rig):
     for _ in range(16):
         assert create(rig).status_code == 202

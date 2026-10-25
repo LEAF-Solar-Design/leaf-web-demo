@@ -83,6 +83,40 @@ def test_finishes_values_pins_and_status(rig):
     assert any(kind == "age" for kind, value in rig.metrics)
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_tool_node_flag_and_value_event(rig, monkeypatch, enabled):
+    from test_lab_tool_nodes import tool_graph
+    tool = tool_graph(monkeypatch)
+    monkeypatch.setattr(worker, "trusted_registry", lambda: tool.registry)
+    rig.artifact["graph"] = tool.graph
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1" if enabled else "0")
+    calls = []
+    class Adapter:
+        admissible = staticmethod(worker.lab_tool_nodes.tool_block_admissible)
+
+        def __init__(self, tenant, run_id, *, cancelled):
+            assert tenant == rig.tenant and run_id == "run"
+            self.cancelled = cancelled
+
+        def __call__(self, block_id, trusted, manifest, inputs, settings, *, deadline_s=None):
+            if deadline_s is not None:
+                assert isinstance(deadline_s, (int, float)) and deadline_s > 0
+            calls.append(block_id)
+            return {"outputs": {"result": 7}}
+
+    monkeypatch.setattr(worker.lab_tool_nodes, "ToolNodeAdapter", Adapter)
+    rig.create()
+    rig.make().tick()
+    terminal(rig, "finished" if enabled else "failed")
+    if enabled:
+        values = [event for event in events(rig) if event["kind"] == "value"]
+        assert calls == [tool.graph["blocks"][0]["id"]]
+        assert values[0]["payload"]["result"]["data"] == 7
+    else:
+        assert not calls
+        assert "lab_graph_effect_refused" in str(events(rig))
+
+
 def test_second_connection_cancel_and_stream_under_two_seconds(rig, monkeypatch):
     entered = threading.Event()
     cancellation_observed = threading.Event()

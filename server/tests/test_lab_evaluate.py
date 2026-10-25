@@ -55,6 +55,13 @@ def test_fixture_contract():
     assert len({item["name"] for item in CASES}) == len(CASES)
 
 
+def test_explicit_no_tool_adapter_keeps_effect_refusal(monkeypatch):
+    from test_lab_tool_nodes import tool_graph
+    tool = tool_graph(monkeypatch)
+    with pytest.raises(GraphRefused, match="lab_graph_effect_refused"):
+        evaluate_graph(tool.graph, tool.registry, tool_adapter=None)
+
+
 def test_integer_output_name_is_refused_before_execution():
     graph, registry = case("constant-number")
     manifest = registry["constant@1.0.0"]

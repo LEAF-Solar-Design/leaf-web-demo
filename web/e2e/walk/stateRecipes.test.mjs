@@ -3388,3 +3388,46 @@ test('staging evidence persists classification and action windows while preservi
     assert.equal(persisted.actions.actions.length, 1)
   }
 })
+
+for (const expectedStatus of ['skipped', 'passed']) {
+  test(`staging evidence preserves a named skip with expected status ${expectedStatus}`, async () => {
+    const page = new EventEmitter(), runtime = { page, evidence: { projectSolar: {} } }
+    const message = 'Test is skipped: SIZED_PANEL_GROUPS_REQUIRED'
+    const failure = new Error(message)
+    let persisted
+    await assert.rejects(stagingEvidenceStep(runtime, { title: 'named-skip', expectedStatus }, async () => {
+      emitStagingEvidenceResponse(page, '/api/tenant/claude-grant', 502)
+      throw failure
+    }, async evidence => { persisted = structuredClone(evidence) }), error => error === failure)
+    assert.equal(failure.message, message)
+    assert.equal(persisted.projectSolar.classification.status, 'skipped')
+    assert.equal(persisted.projectSolar.classification.barrierFailure, null)
+    assert.equal(persisted.projectSolar.skipReason, 'SIZED_PANEL_GROUPS_REQUIRED')
+    assert.equal(persisted.projectSolar.classification.observations[0].status, 502)
+  })
+}
+
+test('staging evidence preserves failures and appends diagnostics when the test is expected to pass', async () => {
+  const page = new EventEmitter(), runtime = { page, evidence: { projectSolar: {} } }
+  const failure = new Error('workspace hidden')
+  let persisted
+  await assert.rejects(stagingEvidenceStep(runtime, { title: 'failed-barrier', expectedStatus: 'passed' }, async () => {
+    emitStagingEvidenceResponse(page, '/api/projects/p1/context', 500, 'CONTEXT_FAILED')
+    throw failure
+  }, async evidence => { persisted = structuredClone(evidence) }), error => error === failure)
+  assert.match(failure.message, /workspace hidden\nStaging network:.*CONTEXT_FAILED/)
+  assert.match(failure.message, /\nStaging console:/)
+  assert.equal(persisted.projectSolar.classification.status, 'failed')
+  assert.equal(persisted.projectSolar.classification.barrierFailure, 'workspace hidden')
+  assert.equal(Object.hasOwn(persisted.projectSolar, 'skipReason'), false)
+})
+
+test('staging evidence records a passing action without a skip reason', async () => {
+  const page = new EventEmitter(), runtime = { page, evidence: { projectSolar: {} } }
+  let persisted
+  assert.equal(await stagingEvidenceStep(runtime, { title: 'passing-action', expectedStatus: 'passed' },
+    async () => 'passed', async evidence => { persisted = structuredClone(evidence) }), 'passed')
+  assert.equal(persisted.projectSolar.classification.status, 'passed')
+  assert.equal(persisted.projectSolar.classification.barrierFailure, null)
+  assert.equal(Object.hasOwn(persisted.projectSolar, 'skipReason'), false)
+})
