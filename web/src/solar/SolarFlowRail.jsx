@@ -164,13 +164,13 @@ function StandaloneSolarFlowRail({
     if (text) setAnnouncement(text)
   }, [runs, items])
 
-  // DEMOSOLAR: the demo catalog has no Solar tools, so every flow would read unavailable. Say why once and offer
-  // sign-in when the host passes it, instead of a picker of flows that cannot run.
+  // DEMOSOLAR: the demo catalog has no Solar tools and a signed-out guest reads no catalog, so every flow would read
+  // unavailable. Say why once and offer sign-in when the host passes it, instead of a picker of flows that cannot run.
   if (demo === true) {
     return (
       <nav aria-label="Solar design steps" data-testid="solar-flow-rail" className="solar-flow-rail" data-demo="true">
         <div className="solar-flow-unavailable" data-testid="solar-flow-demo">
-          <p className="solar-flow-reason">Solar design runs on your own drawings, so the demo has no Solar steps.</p>
+          <p className="solar-flow-reason">Solar design runs on your own drawings.</p>
           {typeof onSignIn === 'function' && (
             <button type="button" className="chip-act" onClick={() => onSignIn()}>Sign in to design</button>
           )}

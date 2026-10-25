@@ -158,6 +158,9 @@ export default function EntitlementGate({
   entitlements,
   loading,
   mock,
+  // GUESTVIEW: a signed-out visitor reads no plan by design, so the studio panel asks for sign-in instead of
+  // reporting the plan as unavailable.
+  guest = false,
   studioPresentation = false,
   // Defaulted from the build fence so every existing mount site is unchanged;
   // a prop only so the disabled arm has a spec that does not need a rebuild.
@@ -173,9 +176,9 @@ export default function EntitlementGate({
   const studioKnown = !mock && !loading && known
   const studioHead = mock ? START_BOARD_COPY.demoHead
     : loading ? START_BOARD_COPY.checkingHead
-      : known ? START_BOARD_COPY.checkedHead : START_BOARD_COPY.unavailableHead
+      : known ? START_BOARD_COPY.checkedHead : guest ? START_BOARD_COPY.guestHead : START_BOARD_COPY.unavailableHead
   const studioState = mock ? START_BOARD_COPY.demoState
-    : loading ? START_BOARD_COPY.checkingState : START_BOARD_COPY.unavailableState
+    : loading ? START_BOARD_COPY.checkingState : guest ? START_BOARD_COPY.guestState : START_BOARD_COPY.unavailableState
 
   return (
     <section className="ent-panel" aria-label="Entitlements">
@@ -209,7 +212,8 @@ export default function EntitlementGate({
         {mock ? <p className="ent-note">{START_BOARD_COPY.demoFooter}</p>
           : loading ? null
             : known ? <p className="ent-note">{START_BOARD_COPY.checkedFooter}</p>
-              : <p className="ent-note">{START_BOARD_COPY.unavailableFooter}</p>}
+              : guest ? <p className="ent-note">{START_BOARD_COPY.guestFooter}</p>
+                : <p className="ent-note">{START_BOARD_COPY.unavailableFooter}</p>}
       </>}
       {studioPresentation && (!studioKnown || allOn) ? null : !known ? (
         <p className="ent-note">

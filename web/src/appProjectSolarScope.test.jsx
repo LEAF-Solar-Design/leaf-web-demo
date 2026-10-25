@@ -228,7 +228,7 @@ describe('App project Solar scope ownership', () => {
       catalog: { families }, solarFlowFamiliesDrawingId: 'families-drawing', canOpenSolarSettingsForm,
       solarFlowPending: 'other-tool', solarFlowRuns: { drawingId: context.drawingId, runs },
       solarFlowRunsFor, solarFlowRunStatus, onOpenSolarFlowStep: vi.fn(), onSolarFlowChange: vi.fn(),
-      authConfigured: true, signedIn: false, onLogin: vi.fn(),
+      authConfigured: true, signedIn: false, onLogin: vi.fn(), knownGuest: false,
       solarFlow: { flow: 'layout' }, checkoutCapabilityRef: { current: vi.fn(() => 'capability') },
       refuseProjectSolar: vi.fn(() => false), SOLAR_SETTINGS_TOOL_NAME: 'solar-settings',
       loadCatalog: vi.fn(), seatCompletedVersion: vi.fn(), onRunCombinerPlacement: vi.fn(), catalogDigestOf: vi.fn(),

@@ -86,7 +86,7 @@ it('R13G2B-01 standalone ribbon and host keep their exact reference and bytes', 
   const adapter = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'ribbonClusters')
   const clusters = [{ tools: [{ id: 'solar-settings', onClick: () => {} }] }]
   assert.equal(r13Evaluate(adapter.init, { projectMode: false, ribbon: { clusters } }), clusters)
-  assert.equal(r13Hash(r13Text(r13ProjectHosts().branch.alternate)), 'b99dbb00eec9d9a956836540e8f824faa05f1a50cababaf5634116314dd84e40')
+  assert.equal(r13Hash(r13Text(r13ProjectHosts().branch.alternate)), '5685991ca1300d89f42b62dbece15a3a1a7100e9707c6e2829beadd6f51d994e')
   for (const [name, hash] of Object.entries({
     'solarSettingsStandalone.main-66759316.json': 'b8c58800aa04c0d5dae638b51efb037a7bec36b229d6a13fde7430d48e684af3',
     'solarStandaloneRequests.main-0c5a044e.json': '78777b38051c0c6bcd5da6973a81c8367bbeccbfc5a7893146e42e45696bb461',
@@ -442,7 +442,7 @@ describe('R13F project Solar execution and form ingresses', () => {
       }
       return value.replace(/\r\n/g, '\n')
     })
-    assert.equal(r13Hash(JSON.stringify(predecessor)), 'c4f978dcf01a76dd9dc75d7f17a52e2be04b74b056594f4d46ad02535c9936ee')
+    assert.equal(r13Hash(JSON.stringify(predecessor)), '3b88dc119a4b1bc97d78a6da0544341a10ac231ff16d04705328bf509d663d68')
     const callback = r13Callback('seatCompletedVersion')
     const arrow = r13Text(callback)
     const header = appSource.slice(callback.start, callback.body.start + 1).replace(/\r\n/g, '\n')
