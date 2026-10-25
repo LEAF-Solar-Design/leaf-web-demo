@@ -1,9 +1,10 @@
 import { authHeaders, config } from '../../api.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
+import { humanizeError } from '../../errorHumanize.js'
 
 export const SAVED_REVISION_EVENT = 'leaf.lab.saved-revision'
 function identifier(id) {
-  if (typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\s\S])/.test(id)) throw new Error('Test: document id refused')
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\s\S])/.test(id)) throw new Error('Enter a valid Document ID.')
 }
 const initial = () => ({ head: null, published: null, revisions: [], lastSaved: null, conflict: null,
   events: [], saveTimes: [], requestTimes: [], restoredGraph: null, restoredKey: 0, headLoaded: false, headLookupFailed: false })
@@ -31,14 +32,15 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       })
       const data = await response.json().catch(() => ({}))
       if (response.ok) return { ...data, ok: true }
+      const detail = humanizeError(data?.error?.message || (typeof data?.detail === 'string' ? data.detail : data?.detail?.message))
       if (response.status === 409 && resolveConflict) {
         if (fresh(token)) { readSeq += 1; applied = { head: readSeq, revisions: readSeq } }
         const head = await request(id, 'head', undefined, false, token)
         return { ok: false, conflict: true, head: head.ok ? head.revision : data.head ?? (current(token) ? state.conflict?.serverHead ?? state.head : null),
-          ...(!head.ok ? { headLookupFailed: true } : {}), status: 409, detail: data.detail }
+          ...(!head.ok ? { headLookupFailed: true } : {}), status: 409, detail }
       }
-      return { ok: false, status: response.status, detail: data.detail }
-    } catch { return { ok: false, status: 0, detail: 'Test: service unavailable' } }
+      return { ok: false, status: response.status, detail }
+    } catch (error) { return { ok: false, status: 0, detail: humanizeError(error) } }
     finally {
       if (current(token)) update({ requestTimes: [...state.requestTimes, Math.max(0, now() - started)].slice(-20) })
     }
@@ -49,7 +51,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
     if (current(token)) {
       writeSeq += 1
       update({ events: [...state.events, detail].slice(-20), head: maximum(state.head, revision),
-        ...(state.lastSaved && state.lastSaved.revision > revision ? {} : { lastSaved: { revision, sha256: row.sha256, at: detail.at } }),
+        ...(state.lastSaved && state.lastSaved.revision > revision ? {} : { lastSaved: { revision, sha256: row.sha256, at: detail.at, graph: row.graph ?? state.lastSaved?.graph } }),
         ...(kind === 'publish' ? { published: maximum(state.published, revision) } : { conflict: null, headLookupFailed: false, revisions: merge([row]) }),
         ...(kind === 'restore' && op === operation ? { restoredGraph: row.graph, restoredKey: state.restoredKey + 1 } : {}) })
     }
@@ -81,7 +83,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       const started = now()
       const result = await request(id, 'save', { graph: mine, expected_head: expectedHead }, true, token)
       if (current(token)) update({ saveTimes: [...state.saveTimes, Math.max(0, now() - started)].slice(-20) })
-      if (result.ok) saved(id, result, 'save', token, op)
+      if (result.ok) saved(id, { ...result, graph: mine }, 'save', token, op)
       else reconcile(result, token, mine)
       return result
     },
