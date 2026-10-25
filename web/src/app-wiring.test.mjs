@@ -5165,7 +5165,7 @@ describe('RAIL overview yields to the expanded job monitor', () => {
     // The overview sits above the expanded monitor (z 24 over z 5), which is why it must give way.
     const overviewCss = readFileSync(new URL('./site/cadOverview.css', import.meta.url), 'utf8')
     assert.match(overviewCss, /\.cad-overview \{[^}]*z-index: 24;/)
-    assert.match(owner[0].split(panel)[1].split('}')[0], /z-index: 5;/)
+    assert.match(owner[0].split(panel)[1].split('}')[0], /z-index: calc\(var\(--leaf-layer-base\) \+ 5\);/)
     // CAD keeps its overview: it reserves the monitor a grid column and moves the overview clear of it, so no
     // cockpit.css rule may hide the overview on CAD while the monitor is open.
     assert.equal(/data-surface="cad"[^{}]*:has\(aside\.rail:not\(\[data-spine\]\)\)[^{}]*\.cad-overview/.test(css), false)
