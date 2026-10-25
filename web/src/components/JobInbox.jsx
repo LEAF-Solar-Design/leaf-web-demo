@@ -87,7 +87,7 @@ export default function JobInbox({ bus } = {}) {
       {expanded && (
         visible.length === 0 ? (
           <div className="rail-note">
-            No notices yet. Nothing has been dispatched to this session's notification bus.
+            No notices yet. Run results and alerts appear here.
           </div>
         ) : (
           <div className="rail-ledger">
