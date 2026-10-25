@@ -59,6 +59,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
 })
 
 describe('landing issue sweep', () => {
@@ -106,6 +107,31 @@ describe('landing issue sweep', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
     expect(screen.queryByText('Solving')).toBeNull()
     expect(screen.queryByText(/Failed to fetch/)).toBeNull()
+  })
+
+  it.each([
+    ['an unsuccessful response', { ok: false, electrical: { max_modules_per_string: 28 } }],
+    ['a missing string length', { ok: true, electrical: {} }],
+  ])('refetches after %s and renders a good retry (S1-93)', async (_label, firstResponse) => {
+    vi.resetModules()
+    vi.stubEnv('VITE_MOCK', '1')
+    vi.stubEnv('VITE_TELEMETRY_DISABLED', '1')
+    const { loadDemoSolve } = await vi.importActual('./intakeCache.js')
+    const fetchSolve = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => firstResponse })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({
+        ok: true, solve: { electrical: { max_modules_per_string: 30 } },
+      }) })
+    vi.stubGlobal('fetch', fetchSolve)
+    mocks.solve.mockImplementation(loadDemoSolve)
+    render(<LandingCast />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('30')).toBeTruthy()
+    expect(mocks.solve).toHaveBeenCalledTimes(2)
+    expect(fetchSolve.mock.calls).toEqual([['/demo-solve.json'], ['/demo-solve.json']])
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByText('Solving')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
   })
 
   it('counts the cover and five sheets while preserving the pricing destination (S1-96)', () => {
