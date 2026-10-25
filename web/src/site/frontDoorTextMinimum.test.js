@@ -21,6 +21,15 @@ function fontSizes(css) {
 }
 
 describe('front door text minimum (L9)', () => {
+  it('keeps caption-sized product tab subtitles within the product nav height', () => {
+    const css = stripComments(read('./landing.css'))
+    const subtitle = css.match(/^\.tc-product-tabs small\s*\{([^{}]*)\}/m)?.[1]
+    const button = css.match(/^\.tc-product-tabs button\s*\{([^{}]*)\}/m)?.[1]
+    expect(subtitle).toMatch(/(?:^|;)\s*font-size:\s*var\(--leaf-size-caption\)\s*;/)
+    expect(subtitle).toMatch(/(?:^|;)\s*line-height:\s*1\s*;/)
+    expect(button).toMatch(/(?:^|;)\s*padding:\s*4px 9px\s*;/)
+  })
+
   it('landing.css uses no pixel font size below 12', () => {
     const css = stripComments(read('./landing.css'))
     const sizes = fontSizes(css)

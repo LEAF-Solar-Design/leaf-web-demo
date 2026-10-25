@@ -189,7 +189,7 @@
 .tc-account-signout:focus-visible { outline: 2px solid #f0997b; outline-offset: 2px; }
 .tc-product-tabs { display: flex; align-items: stretch; gap: 4px; }
 .tc-product-tabs button {
-  min-width: 112px; border: 0; border-radius: 7px; padding: 5px 9px;
+  min-width: 112px; border: 0; border-radius: 7px; padding: 4px 9px;
   display: grid; gap: 1px; text-align: left; cursor: pointer;
   color: #a1a1aa; background: transparent;
 }
@@ -198,7 +198,7 @@
 }
 .tc-product-tabs button[aria-selected="true"] { color: #fff; background: #27272a; }
 .tc-product-tabs button > span { font: 600 12.5px 'Inter Tight', sans-serif; }
-.tc-product-tabs small { color: #949494; font-size: var(--leaf-size-caption); }
+.tc-product-tabs small { color: #949494; font-size: var(--leaf-size-caption); line-height: 1; }
 .tc-product-tabs small[data-state="available"] { color: #4ade80; }
 .tc-product-tabs small[data-state="beta"] { color: #facc15; }
 .tc-product-shared { margin-left: auto; color: #949494; font-size: var(--leaf-size-caption); white-space: nowrap; }
