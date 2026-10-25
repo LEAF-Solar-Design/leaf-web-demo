@@ -170,7 +170,7 @@ function ResultBody({ result, solarBinding, authorityKey, projectClient, catalog
 function ErrorLine({ err, onRetry, retry, quota, toolName }) {
   const { message, code, nextAction, actor } = errParts(err)
   return (
-    <div className={`inline-error ${quota ? 'quota' : ''}`}>
+    <div className={`inline-error ${quota ? 'quota' : ''}`} role="alert">
       <span>
         {quota ? message : `Couldn't run ${toolName || 'the tool'}: ${message}`}
         {!quota && code && <> <code className="dim">{code}</code></>}
