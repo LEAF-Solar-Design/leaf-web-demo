@@ -3609,7 +3609,7 @@ describe('DOCK clearance', () => {
       ['tablet rise outside its block', swap(cockpit, tabletRise, '') + '\n' + tabletRise + '\n', base, structural],
       ['third rise rule', cockpit + '\n.probe { --ck-status-rise: 12px; }\n', base, structural],
       ['wide padding changed', swap(cockpit, widePadding, widePadding.replace('2px 8px;', '4px 8px;')), base, structural],
-      ['wide line height changed', swap(cockpit, 'font: 400 11px/18px var(--ck-font); color: rgba(240, 242, 240, .72);', 'font: 400 11px/20px var(--ck-font); color: rgba(240, 242, 240, .72);'), base, structural],
+      ['wide line height changed', swap(cockpit, 'font: 400 11px/18px var(--ck-font); color: var(--leaf-ink-muted);', 'font: 400 11px/20px var(--ck-font); color: var(--leaf-ink-muted);'), base, structural],
       ['tablet line height changed', swap(cockpit, 'margin: 0; line-height: 19px; white-space: nowrap;', 'margin: 0; line-height: 20px; white-space: nowrap;'), base, structural],
       ['tablet line may wrap', swap(cockpit, 'line-height: 19px; white-space: nowrap;', 'line-height: 19px;'), base, structural],
       ['tablet line padded', swap(cockpit, 'margin: 0; line-height: 19px;', 'margin: 0; padding: 2px 0; line-height: 19px;'), base, structural],

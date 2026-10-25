@@ -1,6 +1,7 @@
 // Slice 13b: the cad-skin scope (the same selector cockpit.css already uses
-// to declare --ck-*) must alias EVERY --ck-* token the file actually
-// consumes via var(--ck-*), so a token the skin references but the map
+// to declare --ck-*) must alias every --ck-* token the file actually
+// consumes via var(--ck-*), except ink and warn inherited from the v1 root,
+// so a token the skin references but the map
 // forgot fails this test loudly instead of silently inheriting whatever
 // --leaf-* value happens to be ambient outside the cad-skin scope.
 import { readFileSync } from 'node:fs'
@@ -124,7 +125,7 @@ describe('the cad-skin scope declares the ratified dock host contract', () => {
 })
 
 describe('the cad-skin scope maps every --ck-* token cockpit.css consumes (slice 13b)', () => {
-  it('has a --leaf-* alias for every var(--ck-*) reference in the file', () => {
+  it('has a --leaf-* alias or a vendored v1 role for every var(--ck-*) reference in the file', () => {
     const consumed = new Set()
     const usageRe = /var\((--ck-[a-zA-Z0-9-]+)\)/g
     let m
@@ -132,13 +133,21 @@ describe('the cad-skin scope maps every --ck-* token cockpit.css consumes (slice
     expect(consumed.size).toBeGreaterThan(0)
 
     const decls = declsFor(cockpit, CAD_SKIN_SELECTOR)
+    const root = declsFor(read('src/standard/leaf-standard.css'), ':root')
+    const inherited = new Set(['--ck-ink', '--ck-warn'])
+    for (const token of inherited) {
+      const role = token.replace('--ck-', '--leaf-')
+      expect(root, `${role} must be declared by the vendored v1 root`).toHaveProperty(role)
+      expect(decls).not.toHaveProperty(role)
+      expect(decls[token]).toBe(`var(${role})`)
+    }
     const mapped = new Set(
       Object.values(decls)
         .map((v) => v.match(/^var\((--ck-[a-zA-Z0-9-]+)\)$/))
         .filter(Boolean)
         .map((match) => match[1])
     )
-    const missing = [...consumed].filter((t) => !mapped.has(t))
+    const missing = [...consumed].filter((t) => !mapped.has(t) && !inherited.has(t))
     expect(missing, `cad-skin scope is missing a --leaf-* alias for: ${missing.join(', ')}`).toEqual([])
   })
 })
