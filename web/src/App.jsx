@@ -1048,7 +1048,7 @@ export default function App() {
   // Honest identity: tenant id and tier are DISTINCT. tenant defaults to "demo"
   // off-auth; tier is only known when the session echo carries it (auth live).
   const tenantLabel = tenant || 'demo'
-  const tierDisplay = tier || '·'
+  const tierDisplay = tier || 'not available'
   // Entitlement tier prefers the policy read (authoritative) over the session echo.
   const entTier = entitlements?.tier || tier || 'demo'
   const gateTier = entTier
