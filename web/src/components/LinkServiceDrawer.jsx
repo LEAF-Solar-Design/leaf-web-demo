@@ -4,6 +4,7 @@ import './popovers.css'
 import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
+import { humanizeError } from '../errorHumanize.js'
 
 // Standardization slice 8c. Reuses ClaudeAccountPanel.jsx's isolated-field
 // discipline verbatim: single-purpose fields (a URL and a label, nothing
@@ -51,6 +52,8 @@ export default function LinkServiceDrawer({
   const rootRef = useRef(null)
   const pop = useExit(open)
   const list = Array.isArray(servers) ? servers : []
+  const listFailed = error?.kind === 'list'
+  const mutationError = listFailed ? error.mutationError : error
 
   // S27: Escape is the owner stack's (menu layer: this is an anchored popover).
   useEscapeOwner('link-service', !!open && !mock, () => onToggle(false), { layer: 'menu', scope: rootRef })
@@ -93,7 +96,7 @@ export default function LinkServiceDrawer({
         window.open(startUrl, '_blank', 'noopener,noreferrer')
       }
     } catch (e) {
-      const reason = String(e?.body?.error?.message || e?.message || 'connect failed')
+      const reason = e?.body?.error?.message || humanizeError(e)
       setConnectErrors((current) => ({ ...current, [id]: reason }))
     }
   }
@@ -108,10 +111,16 @@ export default function LinkServiceDrawer({
   }
 
   const runUnlink = async (id) => {
-    await onUnlink(id)
-    setConfirmUnlink(null)
-    setConnectErrors((current) => { const next = { ...current }; delete next[id]; return next })
-    setHealthResults((current) => { const next = { ...current }; delete next[id]; return next })
+    try {
+      await onUnlink(id)
+      setConnectErrors((current) => { const next = { ...current }; delete next[id]; return next })
+      setHealthResults((current) => { const next = { ...current }; delete next[id]; return next })
+    } catch (e) {
+      const reason = e?.body?.error?.message || humanizeError(e)
+      setConnectErrors((current) => ({ ...current, [id]: reason }))
+    } finally {
+      setConfirmUnlink(null)
+    }
   }
 
   const chipClass = (state) => (
@@ -143,7 +152,7 @@ export default function LinkServiceDrawer({
       >
         <span className="ca-k">Linked services</span>
         <span className={`ca-state ${list.some((s) => s.state === 'connected') ? 'on' : ''}`}>
-          {loading ? 'checking' : `${list.length} linked`}
+          {loading ? 'checking' : listFailed ? 'Unavailable' : `${list.length} linked`}
         </span>
       </button>
 
@@ -155,7 +164,14 @@ export default function LinkServiceDrawer({
           </div>
 
           <div className="ca-linked">
-            {list.length === 0 && !loading && <p className="ca-copy">No services linked yet.</p>}
+            {listFailed && (
+              <div className="field-err" role="alert">
+                <p>Linked services could not be loaded.</p>
+                <p>{humanizeError(error)}</p>
+                <button className="chip-act" onClick={error.retry} disabled={loading}>Retry</button>
+              </div>
+            )}
+            {list.length === 0 && !loading && !listFailed && <p className="ca-copy">No services linked yet.</p>}
             <div className="ca-account-list">
               {list.map((server) => {
                 const connectErr = connectErrors[server.id]
@@ -227,7 +243,7 @@ export default function LinkServiceDrawer({
             </button>
             <p className="ca-note">Credentials and upstream tool names stay server-side and never appear in this panel.</p>
           </div>
-          {error && <div className="field-err" role="alert"><span className="dot red" />{error}</div>}
+          {mutationError && <div className="field-err" role="alert"><span className="dot red" />{humanizeError(mutationError)}</div>}
         </div>
       )}
     </span>
