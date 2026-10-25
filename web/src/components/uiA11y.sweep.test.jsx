@@ -1,22 +1,92 @@
 // @vitest-environment jsdom
-import { useState } from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { useEffect, useState } from 'react'
+import { readFileSync } from 'node:fs'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import JobInbox, { requestNoticeVersionView, takeNoticeVersionView } from './JobInbox.jsx'
+import JobInbox, { peekNoticeVersionView, requestNoticeVersionView, takeNoticeVersionView } from './JobInbox.jsx'
 import ProjectSwitcher from './ProjectSwitcher.jsx'
 import ToolsPanel from './ToolsPanel.jsx'
 import SchemaForm from './SchemaForm.jsx'
 import ShortcutSheet from './ShortcutSheet.jsx'
 import { createNotificationBus } from '../lib/notifications.js'
 import { moveRovingTab } from '../lib/roving.js'
+import { DrawingIdentityProvider, useDrawingIdentity } from '../drawing/DrawingIdentityProvider.jsx'
 
 afterEach(cleanup)
+
+// Exercise the production handoff with the real per-mode identity owner.
+const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8').replace(/\r\n/g, '\n')
+const noticeEffectStart = appSource.indexOf('  useEffect(() => {', appSource.indexOf('  const versionViewAction ='))
+  + '  useEffect(() => {\n'.length
+const noticeEffectEnd = appSource.indexOf('\n  }, [', noticeEffectStart)
+const runNoticeEffect = new Function('context', 'with (context) {\n'
+  + appSource.slice(noticeEffectStart, noticeEffectEnd) + '\n}')
+
+it('S1-68 View selects the operator roof from the demo console and previews v2 once ready', () => {
+  const before = window.location.href
+  const preview = vi.fn(), show = vi.fn(), consoleIds = []
+  let identity
+  function Probe({ mode, drawingState, versionBusy }) {
+    identity = useDrawingIdentity()
+    if (mode === 'console') consoleIds.push(identity.drawingId)
+    useEffect(() => {
+      if (mode !== 'console') return
+      runNoticeEffect({ peekNoticeVersionView, takeNoticeVersionView,
+        REQUESTED_DRAWING_ID: identity.drawingId, selectNoticeDrawing: identity.selectNoticeDrawing,
+        drawingState, versionBusy, onPreviewVersion: preview, viewViewer: show })
+    }, [mode, identity, drawingState, versionBusy])
+    return null
+  }
+  const tree = (mode, drawingState = { drawing_id: 'demo' }, versionBusy = false) => (
+    <DrawingIdentityProvider mode={mode} search="" publicDemo={false} liveDemo={false}
+      readLiveDrawingId={() => 'roof'} readAuthToken={() => null}>
+      <Probe mode={mode} drawingState={drawingState} versionBusy={versionBusy} />
+    </DrawingIdentityProvider>
+  )
+  try {
+    const view = render(tree('operator'))
+    expect(identity.drawingId).toBe('roof')
+    requestNoticeVersionView('roof', 2, identity.isScopeCurrent)
+    view.rerender(tree('console'))
+    expect(consoleIds[0]).toBe('demo')
+    expect(identity).toMatchObject({ drawingId: 'roof', source: 'roof', origin: 'stored' })
+    expect(preview).not.toHaveBeenCalled()
+    expect(peekNoticeVersionView()).toMatchObject({ drawingId: 'roof', version: 2 })
+    view.rerender(tree('console', { drawing_id: 'roof' }, true))
+    expect(preview).not.toHaveBeenCalled()
+    view.rerender(tree('console', { drawing_id: 'roof' }))
+    expect(preview).toHaveBeenCalledExactlyOnceWith(2)
+    expect(show).toHaveBeenCalledOnce()
+    expect(peekNoticeVersionView()).toBeNull()
+    view.rerender(tree('console', { drawing_id: 'roof' }))
+    expect(preview).toHaveBeenCalledOnce()
+  } finally {
+    takeNoticeVersionView('roof')
+    window.history.replaceState({}, '', before)
+  }
+})
+
+it('S1-68 an expired selector cannot reopen a drawing after a scope reset', () => {
+  let identity
+  function Probe() {
+    identity = useDrawingIdentity()
+    return null
+  }
+  render(<DrawingIdentityProvider mode="console" search="" publicDemo={false} liveDemo={false}
+    readAuthToken={() => null}><Probe /></DrawingIdentityProvider>)
+  const select = identity.selectNoticeDrawing
+  act(() => { identity.resetAll() })
+  act(() => { expect(select('roof')).toBeNull() })
+  expect(identity).toMatchObject({ drawingId: null, source: null, origin: 'reset' })
+})
 
 it('S1-68 carries View across scenes until the original drawing mounts', () => {
   const before = window.location.href
   try {
     requestNoticeVersionView('roof', 2)
     expect(window.location.pathname).toBe('/app')
+    expect(peekNoticeVersionView()).toMatchObject({ drawingId: 'roof', version: 2 })
+    expect(peekNoticeVersionView()).toMatchObject({ drawingId: 'roof', version: 2 })
     expect(takeNoticeVersionView('other')).toBeNull()
     expect(takeNoticeVersionView('roof')).toMatchObject({ drawingId: 'roof', version: 2 })
     expect(takeNoticeVersionView('roof')).toBeNull()
@@ -29,6 +99,7 @@ it('S1-68 drops a pending View when its drawing scope expires', () => {
   try {
     requestNoticeVersionView('roof', 2, () => current)
     current = false
+    expect(peekNoticeVersionView()).toBeNull()
     expect(takeNoticeVersionView('roof')).toBeNull()
   } finally { window.history.replaceState({}, '', before) }
 })

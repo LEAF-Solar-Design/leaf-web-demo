@@ -25,7 +25,7 @@ import { createViewHistory } from './lib/viewHistory.js'
 // rail it used to spell inline. Every shared chrome gate lives there now.
 import SurfaceFrame from './site/SurfaceFrame.jsx'
 import { useToastBus } from './lib/notifications.js'
-import { requestNoticeVersionView, takeNoticeVersionView } from './components/JobInbox.jsx'
+import { requestNoticeVersionView, peekNoticeVersionView, takeNoticeVersionView } from './components/JobInbox.jsx'
 import { createPreviewRunner, resolveVersionTransfer } from './lib/boardTransfer.js'
 import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
@@ -493,7 +493,7 @@ export default function App() {
   // this change moves ownership and nothing else. The console keeps its
   // module-const behavior — the seed is frozen at mount and nothing in this
   // shell promotes an upload only through the standalone adapter below.
-  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, setFromUpload, isScopeCurrent } = useDrawingIdentity()
+  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, setFromUpload, selectNoticeDrawing, isScopeCurrent } = useDrawingIdentity()
   const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
   // The same load fence carries local-source ownership and its generation.
   requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
@@ -2133,12 +2133,18 @@ export default function App() {
     } }
   }, [isScopeCurrent])
   useEffect(() => {
-    if (!drawingState?.drawing_id || versionBusy) return
+    const pending = peekNoticeVersionView()
+    if (!pending) return
+    if (REQUESTED_DRAWING_ID !== pending.drawingId) {
+      selectNoticeDrawing(pending.drawingId)
+      return
+    }
+    if (drawingState?.drawing_id !== pending.drawingId || versionBusy) return
     const request = takeNoticeVersionView(drawingState.drawing_id)
     if (!request) return
     void onPreviewVersion(request.version)
     viewViewer()
-  }, [drawingState, versionBusy, onPreviewVersion, viewViewer])
+  }, [REQUESTED_DRAWING_ID, selectNoticeDrawing, drawingState, versionBusy, onPreviewVersion, viewViewer])
 
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.

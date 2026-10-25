@@ -383,6 +383,7 @@ function r13Fixture({ project = true, context = null, rows = null } = {}) {
     setSettingsRunResult: record('settingsResult'), setSolarFlowRuns: record('flowRuns'),
     solarFlowRunOutcome: (value) => ({ ok: value?.ok === true }), solarFlowRecordRun: record('recordRun'),
     track: record('track'), showToast: record('toast'), onUndo: record('undo'),
+    versionUndoAction: () => ({ label: 'Undo', undo: true, onClick: env.onUndo }),
     loadUsage: record('usage'), rehydrate: record('rehydrate'),
     runToolAsync: record('runToolAsync', envelope), runTool: record('runTool', envelope),
     getDrawingIntake: record('head', envelope), saveEditedDrawingVersion: record('saveEdited'),

@@ -25,8 +25,12 @@ export function requestNoticeVersionView(drawingId, version, isCurrent = () => t
   pendingVersionView = { drawingId, version, isCurrent }
   navigate('/app')
 }
-export function takeNoticeVersionView(drawingId) {
+export function peekNoticeVersionView() {
   if (pendingVersionView && !pendingVersionView.isCurrent()) pendingVersionView = null
+  return pendingVersionView
+}
+export function takeNoticeVersionView(drawingId) {
+  peekNoticeVersionView()
   if (pendingVersionView?.drawingId !== drawingId) return null
   const request = pendingVersionView
   pendingVersionView = null

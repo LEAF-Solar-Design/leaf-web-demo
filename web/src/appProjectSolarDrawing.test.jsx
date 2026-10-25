@@ -327,6 +327,7 @@ it('R13G2A-08 legacy completion can settle without repainting the canonical View
   const legacy = intakeOf('completed.dwg'), getDrawingIntake = vi.fn(async () => ({ intake: legacy, version: 8, head: 8, latest: 8 }))
   const env = { projectModeRef, isScopeCurrent: () => true, mock: false, getDrawingIntake,
     onUndo: vi.fn(), showToast: vi.fn(), projectSolarRuntime: { complete: vi.fn() },
+    versionUndoAction: () => ({ label: 'Undo', undo: true, onClick: env.onUndo }),
     markRefreshFailure: vi.fn(), recordCommittedUnreadableHead: vi.fn() }
   env.seatVersion = callback('seatVersion', { ...env, seatDrawingVersion: (...args) => controller.result.current.actions.seatVersion(...args) })
   const complete = callback('seatCompletedVersion', env)
