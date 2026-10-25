@@ -26,6 +26,21 @@ async function review() {
 }
 const start = () => fireEvent.click(screen.getByRole('button', { name: 'Start workflow', exact: true }))
 const recover = () => fireEvent.click(screen.getByRole('button', { name: /Recover original request/ }))
+it('offers explicit abandonment after changed permissions block original-request recovery', async () => {
+  const { props, client } = setup()
+  client.submitManualWorkflow.mockRejectedValue(new Error('lost'))
+  render(<ManualWorkflowStartPanel {...props} />)
+  await review(); start()
+  await screen.findByRole('button', { name: /Recover original request/ })
+  client.getConnection.mockResolvedValue({ ...connection, grant_revision: 8 })
+  recover()
+  await screen.findByText(/Connection permissions changed/)
+  expect(screen.getByRole('button', { name: 'Load workflow review' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Leave recovery without cancelling' }))
+  expect(screen.getByRole('button', { name: 'Load workflow review' })).toBeEnabled()
+  expect(screen.getByLabelText('Workflow definition ID')).toHaveValue('')
+  expect(client.submitManualWorkflow).toHaveBeenCalledTimes(1)
+})
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 it('reviews fixed ordered actions using distinct connection reads and only submits explicitly', async () => {
@@ -93,7 +108,7 @@ it('retains uncertainty and original intent when authority drifts before recover
   await screen.findByText(/Outcome unknown/)
   client.getConnection.mockResolvedValue({ ...connection, grant_revision: 8 })
   recover()
-  await screen.findByText(/Recovery requires unchanged authority/)
+  await screen.findByText(/Connection permissions changed/)
   expect(screen.getByText(/Outcome unknown/)).toBeInTheDocument()
   expect(client.submitManualWorkflow).toHaveBeenCalledOnce()
   expect(crypto.randomUUID).toHaveBeenCalledOnce()

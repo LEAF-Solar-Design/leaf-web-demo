@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { IntegrationActionCatalogV1, IntegrationActionElementV1 } from '../../../vendor/assistant-contract/src/integration'
 import { boundedIntegrationBody } from './client.js'
+import { humanizeError } from '../errorHumanize.js'
 
 const blank = () => ({ id: '', title: '', action: null })
 const actionKey = (action) => boundedIntegrationBody(action)
@@ -14,10 +15,12 @@ export function ActionDefinitionPanel({ client, projectId, signal, guard, onForb
   const [recovery, setRecovery] = useState('')
   const [saved, setSaved] = useState(false)
   const binding = useRef(null)
+  const abandoned = useRef(new Set())
   const feedback = useRef(null)
   useLayoutEffect(() => {
     const ctx = { controller: new AbortController(), busy: false, intent: null, cursors: new Set() }
     binding.current = ctx
+    abandoned.current.clear()
     const clear = () => {
       ctx.controller.abort(); ctx.intent = null
       setDraft(blank()); setCatalog(null); setPending(''); setError(''); setRecovery(''); setSaved(false)
@@ -58,6 +61,7 @@ export function ActionDefinitionPanel({ client, projectId, signal, guard, onForb
         }
         let intended = ctx.intent
         if (!intended) {
+          if (abandoned.current.has(draft.id)) throw Object.assign(new Error('Choose a new form ID. The previous form may already exist.'), { localValidation: true })
           if (!draft.action) throw new Error('Choose an action.')
           intended = canonical({ schema_version: 1, id: draft.id, title: draft.title.trim(), kind: 'integration.action',
             connection_id: draft.action.connection_id, connector_ref: draft.action.connector_ref,
@@ -105,7 +109,7 @@ export function ActionDefinitionPanel({ client, projectId, signal, guard, onForb
         setRecovery('unknown'); setError('Save outcome unknown. Check the saved form before considering another create.')
       } else {
         ctx.intent = null
-        setError(kind === 'Load' || kind === 'Next' ? 'The action catalog is unavailable or could not be verified. Retry loading permitted actions.' :
+        setError(failure.localValidation ? humanizeError(failure) : kind === 'Load' || kind === 'Next' ? 'The action catalog is unavailable or could not be verified. Retry loading permitted actions.' :
           'The form was not saved. Enter a title, a stable lowercase slug ID, and choose a permitted action. Your draft is retained.')
       }
     } finally {
@@ -149,9 +153,17 @@ export function ActionDefinitionPanel({ client, projectId, signal, guard, onForb
     <div ref={feedback} tabIndex={-1} style={{ minWidth: 0 }}>
       <p role="status" aria-live="polite">{pending ? `${pending} in progress…` : saved ? 'Action form saved. No action was submitted.' :
         catalog ? `Permitted actions loaded. ${catalog.actions.length} actions on this page.` : ''}</p>
-      {error && <p role="alert">{error}</p>}
+      {error && <p role="alert">{humanizeError(error)}</p>}
     </div>
     {recovery && <button disabled={Boolean(pending)} onClick={() => operate('Check')}>Check saved form</button>}
     {recovery === 'missing' && <button disabled={Boolean(pending)} onClick={() => operate('Retry')}>Retry identical action form</button>}
+    {recovery && <p>The previous form may still exist. Leaving recovery does not delete it. Use a different form ID.</p>}
+    {(saved || recovery) && <button disabled={Boolean(pending)} onClick={() => {
+      const ctx = binding.current
+      if (!ctx || ctx.busy || ctx.controller.signal.aborted) return
+      if (ctx.intent) abandoned.current.add(JSON.parse(ctx.intent).id)
+      ctx.intent = null
+      setDraft(blank()); setSaved(false); setRecovery(''); setError('')
+    }}>{saved ? 'Create another' : 'Leave recovery and create a different form'}</button>}
   </section>
 }

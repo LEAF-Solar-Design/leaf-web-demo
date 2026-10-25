@@ -50,6 +50,24 @@ async function compose() {
 beforeEach(() => { vi.stubGlobal('TextEncoder', TextEncoder); vi.stubGlobal('TextDecoder', TextDecoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
+it('focuses a specific numeric field validation message', async () => {
+  const { props } = setup()
+  render(<ManualWorkflowDefinitionPanel {...props} />)
+  await compose(); change('Step 1 Count (required)', '11'); save()
+  expect(await screen.findByRole('alert')).toHaveTextContent('Step 1: Enter a number within the allowed range.')
+  await waitFor(() => expect(screen.getByLabelText('Step 1 Count (required)')).toHaveFocus())
+})
+
+it('copies the saved workflow reference with one click', async () => {
+  const writeText = vi.fn().mockResolvedValue()
+  vi.stubGlobal('navigator', { clipboard: { writeText } })
+  const { props } = setup()
+  render(<ManualWorkflowDefinitionPanel {...props} />)
+  await compose(); save()
+  fireEvent.click(await screen.findByRole('button', { name: 'Copy workflow reference' }))
+  expect(writeText).toHaveBeenCalledWith(JSON.stringify(reference))
+})
+
 it('opens only explicitly, renders catalog text safely and saves typed fixed data without execution', async () => {
   const { props, fetchImpl } = setup()
   render(<ManualWorkflowDefinitionPanel {...props} />)

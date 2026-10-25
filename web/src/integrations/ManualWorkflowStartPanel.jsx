@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 import { IntegrationRefV1, IntegrationManualWorkflowDefinitionV1, IntegrationManualWorkflowSubmissionV1,
   IntegrationManualWorkflowSubmissionResultV1 } from '../../../vendor/assistant-contract/src/integration'
 
@@ -123,8 +124,8 @@ export function ManualWorkflowStartPanel({ client, projectId, signal, guard, onF
         return
       }
       if (dispatched) setUnknown(true)
-      setError(dispatched ? 'The submission could not be verified.' :
-        'The workflow or current authority could not be verified. Load a new review before starting. Recovery requires unchanged authority.')
+      setError(ctx.intent && !dispatched ? 'Connection permissions changed or could not be verified. Recover the original request when access is restored, or leave recovery below.' : dispatched ? 'The submission could not be verified.' :
+        'The workflow or your permissions could not be verified. Load a new review before starting.')
     } finally {
       clearTimeout(timer)
       controller.signal.removeEventListener('abort', cancel)
@@ -160,13 +161,21 @@ export function ManualWorkflowStartPanel({ client, projectId, signal, guard, onF
     </section>}
     <p role="status" aria-live="polite">{pending ? `${pending} in progress…` : notice}</p>
     {unknown && <><p role="status">Outcome unknown. Work may have completed. The original request is retained only in this page session.</p>
-      <button disabled={Boolean(pending)} onClick={() => operate('Recover')}>Recover original request (may continue the original workflow)</button></>}
+      <button disabled={Boolean(pending)} onClick={() => operate('Recover')}>Recover original request (may continue the original workflow)</button>
+      <p>Leaving recovery does not cancel the original workflow. Check workflow history before starting again to avoid duplicate work.</p>
+      <button disabled={Boolean(pending)} onClick={() => {
+        const ctx = binding.current
+        if (!ctx || ctx.busy || ctx.controller.signal.aborted) return
+        ctx.intent = null; ctx.review = null
+        setReview(null); setInput({ id: '', version: '', digest: '' }); setLocked(false); setUnknown(false); setResolved(false); setError('')
+        setNotice('Recovery left. The original workflow may still run. Check workflow history before starting another.')
+      }}>Leave recovery without cancelling</button></>}
     {resolved && <button disabled={Boolean(pending)} onClick={() => {
       const ctx = binding.current
       if (!ctx || ctx.busy || ctx.controller.signal.aborted) return
       ctx.intent = null; ctx.review = null
       setReview(null); setLocked(false); setResolved(false); setNotice(''); setError('')
     }}>Review a new workflow intent</button>}
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert">{humanizeError(error)}</p>}
   </section>
 }
