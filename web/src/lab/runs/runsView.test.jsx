@@ -15,6 +15,15 @@ const seed = () => {
 }
 
 describe('Runs view', () => {
+  it('says the worker status is unavailable instead of offline when the store read failed', () => {
+    surface.current = { worker: { state: 'unavailable', reason: 'lab_store_unavailable' } }
+    render(<RunsView store={createValueStore()} />)
+    expect(screen.getByText('Lab worker status is unavailable right now.')).toBeVisible()
+    expect(screen.queryByText('Worker offline')).toBeNull()
+    expect(screen.queryByText('Worker paused')).toBeNull()
+    expect(screen.queryByText('Worker status unavailable')).toBeNull()
+    expect(screen.queryByText(/^Queue age/)).toBeNull()
+  })
   it('offers Resume for an auth-expired run and retries its registered stream once', () => {
     const store = seed(), retry = vi.fn()
     store.setStreamControl('r', { retry, stop: vi.fn() })

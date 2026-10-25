@@ -53,7 +53,12 @@ export async function fetchLabStatus({ fetchImpl = globalThis.fetch } = {}) {
       headers.Authorization,
     )
     if (response.status === 404) return { state: 'off', posture: null }
-    if (response.status === 503) return { state: 'auth-off', posture: null }
+    if (response.status === 503) {
+      const body = await response.json()
+      const message = body?.error?.message
+      return typeof message === 'string' && message.includes('lab_auth_live_required')
+        ? { state: 'auth-off', posture: null } : unavailable
+    }
     if (response.status === 401 || response.status === 403) return { state: 'signed-out', posture: null }
     if (!response.ok) return unavailable
     const data = await response.json()

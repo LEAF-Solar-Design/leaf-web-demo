@@ -366,7 +366,7 @@ def test_sip_r5_failure_projection(monkeypatch):
         "SIP_R3_TOOL_UNSUPPORTED": (409, False), "SIP_R3_TOOL_MANIFEST_MISMATCH": (409, False),
         "SIP_R3_SERVICE_EVIDENCE_REQUIRED": (409, False), "SIP_R3_PROOF_REJECTED": (500, False),
         "SIP_R4_IDEMPOTENCY_KEY_REQUIRED": (400, False), "SIP_R4_IDEMPOTENCY_CONFLICT": (409, False),
-        "SIP_R4_JOB_BINDING_MISMATCH": (409, False), "SIP_R4_WORKER_UNAVAILABLE": (503, True),
+        "SIP_R4_JOB_BINDING_MISMATCH": (409, False),
     }
     assert policy()._FAILURES == mappings
     for preview in (True, False):

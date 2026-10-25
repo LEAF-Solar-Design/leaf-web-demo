@@ -39,3 +39,18 @@ for (const file of ['./cockpit.css', './studioShell.css']) {
     })
   })
 }
+
+describe('./cadOverview.css live canvas top', () => {
+  const css = readFileSync(new URL('./cadOverview.css', import.meta.url), 'utf8')
+    .replace(/\r\n/g, '\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+
+  it('positions the overview with the live canvas top and static fallback', () => {
+    expect(css).toContain('top: calc(var(--ck-canvas-top-live, var(--ck-canvas-top, 140px)) + 124px)')
+  })
+
+  it('limits static canvas top references to the live fallback', () => {
+    const remaining = css.split('var(--ck-canvas-top-live, var(--ck-canvas-top, 140px))').join('')
+    expect(remaining).not.toContain('--ck-canvas-top')
+  })
+})
