@@ -4,7 +4,10 @@ import { afterEach, expect, it, vi } from 'vitest'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
 
 const binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
   project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
@@ -226,6 +229,147 @@ it('W1C-26 shows a refused proposal set without preparing a partial request', as
   expect(screen.getByText('4097 panels, angle 0.0°')).toBeTruthy()
   expect(action().disabled).toBe(true)
   expect(h.client.prepareRun).not.toHaveBeenCalled()
+})
+
+const advancePreview = async (milliseconds) => act(async () => { await vi.advanceTimersByTimeAsync(milliseconds) })
+async function armedPanelGroupPreview() {
+  vi.useFakeTimers()
+  const h = panelGroupHarness()
+  let mounted
+  await act(async () => { mounted = render(<ProjectSolarGraphForm {...h.props} />) })
+  fillGroupNumbers()
+  await advancePreview(300)
+  expect(action().disabled).toBe(false)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  return { h, mounted }
+}
+function changeGroupNumber(label, value) {
+  fireEvent.change(screen.getByRole('spinbutton', { name: label }), { target: { value } })
+}
+it('W1C-28 reuses context and previews only the final three numbers after 300 ms without input', async () => {
+  const { h } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '38.4688')
+  expect(action().disabled).toBe(true)
+  expect(screen.getByText('Reading the selected project drawing version.')).toBeTruthy()
+  await advancePreview(200)
+  changeGroupNumber('Module height across row', '76.9376')
+  await advancePreview(200)
+  changeGroupNumber('Alignment tolerance', '0.01')
+  await advancePreview(299)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  await advancePreview(1)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog.mock.calls[1][0].intents[0].params.groups).toEqual([
+    { name: 'Group 1', panel_refs: ['a', 'b'], module_width_along_row: 38.4688,
+      module_height_across_row: 76.9376, alignment_tolerance: 0.01 },
+    { name: 'Group 2', panel_refs: ['c', 'd'], module_width_along_row: 38.4688,
+      module_height_across_row: 76.9376, alignment_tolerance: 0.01 },
+  ])
+  expect(action().disabled).toBe(false)
+})
+it('W1C-28 previews separated input changes individually without reading context again', async () => {
+  const { h } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  await advancePreview(301)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
+  changeGroupNumber('Module height across row', '3')
+  await advancePreview(300)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(3)
+  expect(action().disabled).toBe(false)
+})
+it('W1C-28 Refresh immediately replaces the kept context', async () => {
+  const { h } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  h.graph = { ...h.graph, panels: h.graph.panels.filter(panel => panel.id !== 'e') }
+  await act(async () => { fireEvent.click(refresh()) })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(screen.getByText('0 singleton panels cannot be grouped.')).toBeTruthy()
+  expect(action().disabled).toBe(false)
+  await advancePreview(300)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  changeGroupNumber('Module width along row', '3')
+  await advancePreview(300)
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(3)
+})
+it('W1C-28 reads fresh context immediately when busy ends', async () => {
+  const { h, mounted } = await armedPanelGroupPreview()
+  mounted.rerender(<ProjectSolarGraphForm {...h.props} busy />)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  await act(async () => { mounted.rerender(<ProjectSolarGraphForm {...h.props} />) })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
+})
+it.each(['rejecting', 'non-ok'])('W1C-28 never reuses a %s context read', async (failure) => {
+  const { h } = await armedPanelGroupPreview()
+  if (failure === 'rejecting') h.client.readContext.mockRejectedValueOnce(new Error('Unreadable context'))
+  else h.client.readContext.mockResolvedValueOnce({ ok: false, status: 503 })
+  await act(async () => { fireEvent.click(refresh()) })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(screen.getByText('This project drawing version could not be read. Reload it and try again.')).toBeTruthy()
+  changeGroupNumber('Module width along row', '2')
+  await advancePreview(299)
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  await advancePreview(1)
+  expect(h.client.readContext).toHaveBeenCalledTimes(3)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
+})
+it('W1C-28 unmount cancels a waiting preview before preparation or catalog', async () => {
+  const { h, mounted } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  await advancePreview(299)
+  mounted.unmount()
+  await advancePreview(301)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+})
+it('W1C-28 a stale checkout discards kept context and cancels the waiting preview', async () => {
+  const { h } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  act(() => h.rotate())
+  await advancePreview(300)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  await act(async () => { changeGroupNumber('Module height across row', '3') })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
+})
+it('W1C-28 replacing the scope cancels its wait and immediately reads context for the new scope', async () => {
+  const { h, mounted } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  await act(async () => {
+    h.move(binding, 'authority-b')
+    mounted.rerender(<ProjectSolarGraphForm {...h.props} authorityKey="authority-b" />)
+  })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  await advancePreview(300)
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  expect(action().disabled).toBe(true)
+})
+it('W1C-28 a changed catalog digest immediately reads context again', async () => {
+  const { h, mounted } = await armedPanelGroupPreview()
+  const nextDigest = 'sha256:' + 'e'.repeat(64)
+  const nextCatalog = catalog(h.name)
+  nextCatalog.data.families[0].capabilities[0].catalog_digest = nextDigest
+  h.client.catalog.mockResolvedValueOnce(nextCatalog)
+  await act(async () => { mounted.rerender(<ProjectSolarGraphForm {...h.props} catalogDigest={nextDigest} />) })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
 })
 
 it('R13C-15 renders equipment assignment refusal', async () => {

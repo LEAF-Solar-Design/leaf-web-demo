@@ -232,7 +232,10 @@ it('PC22 accessible outcome', async () => {
   const run = screen.getByRole('button', { name: 'Run' })
   run.focus(); press()
   expect(screen.getByLabelText('Boundary')).toHaveAttribute('aria-invalid', 'true')
-  expect(screen.getByLabelText('Boundary')).toHaveAttribute('aria-describedby', 'civil-field-error')
+  expect(screen.getByLabelText('Boundary')).toHaveAttribute('aria-describedby', 'civil-boundary-hint civil-field-error')
+  for (const id of screen.getByLabelText('Boundary').getAttribute('aria-describedby').split(/\s+/)) {
+    expect(document.getElementById(id)).toBeInTheDocument()
+  }
   edit(); run.focus(); press()
   await ready()
   expect(callback).toHaveBeenCalledTimes(1)

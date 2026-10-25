@@ -3,6 +3,8 @@ import { buildTrackerRowsRequest, validateTrackerRowsResult } from './solarTrack
 import { TRACKER_ROWS_REASONS } from './solarTrackerRowsReasons.js'
 import { TRACKER_ROWS_CLIENT_REASONS } from './solarTrackerRowsClient.js'
 import { validateTerrainView } from './solarTerrainModel.js'
+import { civilReadReason } from './solarCivilClient.js'
+import { humanizeError } from '../errorHumanize.js'
 
 // R3's project-id rule (solarTrackerRowsClient.js isProjectId): 1 to 100 code points, at most 200 UTF-16 units,
 // URI-encodable (a lone surrogate is not). A graph whose project id fails it cannot read back a publication.
@@ -124,6 +126,7 @@ function PanelForScope({ drawingId, projectId = null, drawingVersion = null, cli
       const result = await terrainClient.getTerrain({ drawingId, projectId, signal: controller.signal })
       if (!current()) return
       const value = result?.ok === true ? validateTerrainView(result.value, { drawingId, projectId }) : null
+      if (!value) error = civilReadReason(result?.code, S.read_failed)
       if (value) {
         if (value.stored) {
           next = { head: value.head, units: value.terrain.frame.drawing_units }
@@ -153,7 +156,9 @@ function PanelForScope({ drawingId, projectId = null, drawingVersion = null, cli
           }
         }
       }
-    } catch { /* Closed read refusal; never render transport prose. */ }
+    } catch {
+      if (error === 'read_failed') error = civilReadReason('TERRAIN_CLIENT_NETWORK', S.read_failed)
+    }
     if (!current()) return
     clearTimeout(token.timer)
     read.current = null
@@ -270,7 +275,9 @@ function PanelForScope({ drawingId, projectId = null, drawingVersion = null, cli
     : receipt ? receipt.created ? 'published' : 'already-published'
       : reading ?? (uncertain ? recovery ?? 'unknown' : readError ? 'read-refused'
         : refusal ? 'refused' : gate ? 'disabled' : !confirmed ? 'loading' : !built.ok ? 'invalid' : 'ready')
-  const readText = readError ? Object.hasOwn(S, readError) ? S[readError] : sentence(readError) : null
+  const readText = readError ? Object.hasOwn(S, readError) ? S[readError]
+    : Object.hasOwn(TRACKER_ROWS_REASONS, readError) || Object.hasOwn(TRACKER_ROWS_CLIENT_REASONS, readError)
+      ? sentence(readError) : humanizeError(readError) : null
   const status = !usable ? sentence('TRACKER_ROWS_CLIENT_REQUEST_INVALID') : pending ? S.pending
     : receipt ? receipt.created ? S.published : S.retry
       : reading ? reading === 'units-loading' ? S.units_loading : S[reading]
@@ -323,6 +330,13 @@ function PanelForScope({ drawingId, projectId = null, drawingVersion = null, cli
     <button type="button" disabled={!eligible()} onClick={(event) => publish(false, event.currentTarget)}>Publish tracker rows</button>
     <button type="button" disabled={!usable || pending || !!reading || !active} onClick={() => load(true)}>Refresh physical state</button>
     {uncertain && <button type="button" disabled={!eligible(true)} onClick={(event) => publish(true, event.currentTarget)}>Retry original request</button>}
+    {uncertain && recovery === 'superseded' && <button type="button"
+      disabled={!confirmed || !!reading || pending || !!gate || !active} onClick={() => {
+        if (!confirmed || reading || lock.current || gate || !active) return
+        retained.current = null
+        setUncertain(null); setRecovery(null); setRefusal(null); setReceipt(null)
+        setRows([blankRow()]); setPower('')
+      }}>Start new request</button>}
     <button type="button" onClick={onClose}>Close</button>
     {(receipt || refusal) && <h4 tabIndex={-1} ref={resultHeading}>Tracker rows result</h4>}
     {refusal && <p role="alert">{sentence(refusal)}</p>}

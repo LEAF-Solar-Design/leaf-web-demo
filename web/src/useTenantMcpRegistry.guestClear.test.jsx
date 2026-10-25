@@ -19,6 +19,20 @@ beforeEach(() => {
 
 afterEach(cleanup)
 
+it('ignores a list failure that settles after switching to guest', async () => {
+  let rejectList
+  listTenantMcpServers.mockImplementationOnce(() => new Promise((resolve, reject) => { rejectList = reject }))
+  const { result, rerender } = renderHook(
+    ({ mock }) => useTenantMcpRegistry({ mock }),
+    { initialProps: { mock: false } },
+  )
+  rerender({ mock: true })
+  await act(async () => { rejectList(new TypeError('Failed to fetch')) })
+  expect(result.current.error).toBe(null)
+  expect(result.current.servers).toEqual([])
+  expect(result.current.loading).toBe(false)
+})
+
 it('clears signed-in servers when mock becomes true', async () => {
   const { result, rerender } = renderHook(
     ({ mock }) => useTenantMcpRegistry({ mock }),

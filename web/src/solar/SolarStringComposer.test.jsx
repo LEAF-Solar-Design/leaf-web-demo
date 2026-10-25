@@ -4,6 +4,7 @@ import path from 'node:path'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SolarStringComposer from './SolarStringComposer.jsx'
+import SolarStepEditor from './SolarStepEditor.jsx'
 import { createSolarProjectClient } from './solarProjectClient.js'
 import ground from './__fixtures__/stringComposerGround.json'
 import rooftop from './__fixtures__/stringComposerRooftop.json'
@@ -172,7 +173,7 @@ describe('SolarStringComposer', () => {
     await act(async () => { old.reject(new Error('read failed')) })
     expect(screen.getByLabelText('Search panels')).toBeTruthy()
     expect(screen.queryByText(SOLAR_STRING_COMPOSER_REASONS.unavailable)).toBeNull()
-    expect(readIntake.mock.calls).toEqual([['d1', 7], ['d1', 8], ['d1', 8]])
+    expect(readIntake.mock.calls).toEqual([['d1', 7], ['d1', 8], ['d1', 'head']])
   })
 
   it('CMP7 composes multi over two ranges and checks the head', async () => {
@@ -272,14 +273,15 @@ describe('SolarStringComposer', () => {
     expect(button('Remove selection 26')).toBeTruthy()
   })
 
-  it('CMP13 stale review keeps the queue and enables another check', async () => {
+  it('CMP13 stale review keeps the queue visible and requires reloading before another check', async () => {
     const readIntake = vi.fn().mockResolvedValueOnce(envelope()).mockResolvedValueOnce(envelope(ground, 8))
     const { props } = await mount(ground, { readIntake })
     addRange(); click('Review & run'); await act(async () => {})
     expect(screen.getByRole('alert').textContent).toBe(SOLAR_STRING_COMPOSER_REASONS.stale)
     expect(props.onSubmit).not.toHaveBeenCalled()
     expect(queueLabels()).toEqual(['Group 1 slots 1 to 3'])
-    expect(button('Review & run').disabled).toBe(false)
+    expect(button('Review & run').disabled).toBe(true)
+    expect(button('Reload drawing').disabled).toBe(false)
   })
 
   it('CMP14 rejected head read shows unavailable as an alert', async () => {
@@ -288,6 +290,38 @@ describe('SolarStringComposer', () => {
     addRange(); click('Review & run'); await act(async () => {})
     expect(screen.getByRole('alert').textContent).toBe(SOLAR_STRING_COMPOSER_REASONS.unavailable)
     expect(props.onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('blocks a reloaded head until the step editor submits with the matching drawing version', async () => {
+    const readIntake = vi.fn().mockResolvedValueOnce(envelope()).mockResolvedValue(envelope(ground, 8))
+    const submit = vi.fn()
+    const props = { row: { name: STRING_ADD_TOOL }, drawingId: 'd1', readIntake, onClose: vi.fn() }
+    const host = (version) => <SolarStepEditor {...props} drawingVersion={version}
+      onSubmit={(row, params) => submit(version, row, params)} />
+    const { rerender } = render(host(7))
+    await screen.findByRole('button', { name: 'Select row 1 Group 1' })
+    addRange(); click('Review & run')
+    await screen.findByRole('alert')
+    click('Reload drawing')
+    await screen.findByRole('button', { name: 'Select row 1 Group 1' })
+    expect(readIntake).toHaveBeenLastCalledWith('d1', 'head')
+    expect(queueLabels()).toEqual([])
+    addRange()
+    expect(button('Review & run').disabled).toBe(true)
+    click('Review & run')
+    await act(async () => {})
+    expect(submit).not.toHaveBeenCalled()
+    expect(screen.getByText('The drawing changed. Reopen this tool from the current drawing to continue.')).toBeTruthy()
+
+    rerender(host(8))
+    await waitFor(() => expect(readIntake).toHaveBeenLastCalledWith('d1', 8))
+    await screen.findByRole('button', { name: 'Select row 1 Group 1' })
+    expect(queueLabels()).toEqual([])
+    addRange()
+    expect(button('Review & run').disabled).toBe(false)
+    click('Review & run')
+    await waitFor(() => expect(submit).toHaveBeenCalledExactlyOnceWith(8, props.row,
+      expected(ground, STRING_ADD_TOOL, [range(0, 1, 3)])))
   })
 
   it('CMP14 ignores head reads after rebinding or unmounting', async () => {

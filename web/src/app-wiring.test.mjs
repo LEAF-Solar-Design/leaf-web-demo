@@ -110,7 +110,8 @@ it('R13G2B-01 standalone ribbon and host keep their exact reference and bytes', 
   const adapter = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'ribbonClusters')
   const clusters = [{ tools: [{ id: 'solar-settings', onClick: () => {} }] }]
   assert.equal(r13Evaluate(adapter.init, { projectMode: false, ribbon: { clusters } }), clusters)
-  assert.equal(r13Hash(r13Text(r13ProjectHosts().branch.alternate)), '5685991ca1300d89f42b62dbece15a3a1a7100e9707c6e2829beadd6f51d994e')
+  // Re-pinned 2026-10-25 for the solar edge acceptance wiring (SolarWorkspaceTools onStageSolarEdgeAccept, PR #2295).
+  assert.equal(r13Hash(r13Text(r13ProjectHosts().branch.alternate)), '712bcb89ad5dbb9c7647ec3cb819d0debadca184b6db17749df250616f9552db')
   for (const [name, hash] of Object.entries({
     'solarSettingsStandalone.main-66759316.json': 'b8c58800aa04c0d5dae638b51efb037a7bec36b229d6a13fde7430d48e684af3',
     'solarStandaloneRequests.main-0c5a044e.json': '78777b38051c0c6bcd5da6973a81c8367bbeccbfc5a7893146e42e45696bb461',
@@ -466,7 +467,8 @@ describe('R13F project Solar execution and form ingresses', () => {
       }
       return value.replace(/\r\n/g, '\n')
     })
-    assert.equal(r13Hash(JSON.stringify(predecessor)), '3b88dc119a4b1bc97d78a6da0544341a10ac231ff16d04705328bf509d663d68')
+    // Re-pinned 2026-10-25 for the solar edge acceptance wiring (SolarWorkspaceTools onStageSolarEdgeAccept, PR #2295).
+    assert.equal(r13Hash(JSON.stringify(predecessor)), 'e431cd546cdc7022a694cc342336a4dadb4a38aa15b7a79a94a9cf599cd12fb9')
     const callback = r13Callback('seatCompletedVersion')
     const arrow = r13Text(callback)
     const header = appSource.slice(callback.start, callback.body.start + 1).replace(/\r\n/g, '\n')
@@ -619,7 +621,8 @@ describe('R13F project Solar execution and form ingresses', () => {
       onAttachAgentJob: 3, onDispatch: 1 }
     const refusal = (node) => node.type === 'CallExpression' && node.callee.name === 'refuseProjectSolar'
     for (const [name, count] of Object.entries(sites)) assert.equal(r13Find(refusal, r13Callback(name)).length, count, name)
-    assert.equal(r13Find(refusal).length, 20)
+    // Re-pinned 2026-10-25 for the solar edge acceptance wiring (SolarWorkspaceTools onStageSolarEdgeAccept, PR #2295).
+    assert.equal(r13Find(refusal).length, 21)
     for (const [name, hash] of Object.entries({
       // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
       engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
@@ -1134,7 +1137,8 @@ describe('R13F project Solar catalog attachment', () => {
       const callback = r13WorkspaceProp(name)
       assert.equal(refusalCalls.filter((node) => node.start > callback.start && node.end < callback.end).length, 1, name)
     }
-    assert.equal(refusalCalls.length, 20, 'existing ingresses plus the two Solar workspace props')
+    // Re-pinned 2026-10-25 for the solar edge acceptance wiring (SolarWorkspaceTools onStageSolarEdgeAccept, PR #2295).
+    assert.equal(refusalCalls.length, 21, 'existing ingresses plus the two Solar workspace props')
   })
 
   it('R13F-06 catalog context branches on project mode and explicitly restores standalone scope', () => {
