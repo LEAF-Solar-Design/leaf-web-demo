@@ -8,16 +8,19 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import * as operatorClient from '../../operatorClient.js'
+import { humanizeError } from '../../errorHumanize.js'
 
 export default function AuditPanel({ onSignedOut }) {
   const [rows, setRows] = useState([])
   const [error, setError] = useState(null)
 
   const load = useCallback(async () => {
+    setError(null)
     try {
       setRows(await operatorClient.getAudit())
+      setError(null)
     } catch (e) {
-      setError(e?.body?.detail || e?.message || 'Could not load the audit log.')
+      setError(humanizeError(e))
       if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
     }
   }, [onSignedOut])
