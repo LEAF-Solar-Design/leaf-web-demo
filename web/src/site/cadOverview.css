@@ -1,5 +1,5 @@
 .cad-overview {
-  position: fixed; right: 18px; top: calc(var(--ck-canvas-top, 140px) + 124px); z-index: 24;
+  position: fixed; right: 18px; top: calc(var(--ck-canvas-top-live, var(--ck-canvas-top, 140px)) + 124px); z-index: 24;
   width: 182px; box-sizing: border-box; pointer-events: auto;
   color: var(--ck-ink, #e2e2e2); background: var(--ck-glass-panel, #1e2227);
   border: 1px solid var(--ck-edge, #424242); border-radius: 4px;
