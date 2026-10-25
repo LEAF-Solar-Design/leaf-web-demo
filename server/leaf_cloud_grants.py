@@ -117,12 +117,18 @@ def _resolve_m2m_grant(reference: str, tenant_id: str) -> CloudGrant:
         raw = os.environ.get("LEAF_CLOUD_M2M_GRANTS", "")
         if len(raw.encode("utf-8")) > 4096:
             raise ValueError()
-        grants = json.loads(raw)
-        if (not isinstance(grants, dict) or len(grants) > 16
-                or any(not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", key)
-                       or not isinstance(value, str) or not 1 <= len(value) <= 128
-                       for key, value in grants.items())
-                or reference not in grants):
+        pairs = raw.split(",")
+        if not 1 <= len(pairs) <= 16:
+            raise ValueError()
+        grants = {}
+        for pair in pairs:
+            key, value = pair.split("=")
+            if (not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", key)
+                    or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value)
+                    or key in grants):
+                raise ValueError()
+            grants[key] = value
+        if reference not in grants:
             raise ValueError()
     except (ValueError, TypeError, UnicodeError, RecursionError):
         invalid_allowlist = True

@@ -21,7 +21,7 @@ def staging(monkeypatch):
     for name, value in {
         "LEAF_CLOUD_GRANT_SOURCE": "m2m-staging",
         "LEAF_RUNTIME_ENV": "staging",
-        "LEAF_CLOUD_M2M_GRANTS": '{"g1":"tenant-a","g2":"tenant-b"}',
+        "LEAF_CLOUD_M2M_GRANTS": "g1=tenant-a,g2=tenant-b",
         "LEAF_CLOUD_M2M_CLIENT_ID": CLIENT_ID,
         "LEAF_CLOUD_M2M_CLIENT_SECRET": SECRET,
     }.items():
@@ -111,16 +111,44 @@ def test_absent_reference_and_tenant_mismatch(transport):
     transport[0].assert_not_called()
 
 
+@pytest.mark.parametrize("raw,reference,tenant", [
+    ("g1=tenant-a", "g1", "tenant-a"),
+    ("g1=tenant-a,g2=tenant-b", "g2", "tenant-b"),
+    ("staging-solver=4a0928c9-f687-50b4-b116-891a36f044b3", "staging-solver",
+     "4a0928c9-f687-50b4-b116-891a36f044b3"),
+    (",".join(f"g{i}=tenant-a" for i in range(16)), "g15", "tenant-a"),
+    ("A_0-" * 16 + "=" + "Z_9-" * 32, "A_0-" * 16, "Z_9-" * 32),
+    ("a=Z", "a", "Z"),
+], ids=["single", "multiple", "uuid", "max-pairs", "max-lengths", "min-lengths"])
+def test_valid_allowlist(monkeypatch, transport, raw, reference, tenant):
+    monkeypatch.setenv("LEAF_CLOUD_M2M_GRANTS", raw)
+    assert grants.resolve_grant(reference, tenant) == grants.CloudGrant(tenant, TOKEN)
+    transport[0].assert_called_once()
+
+
 @pytest.mark.parametrize("raw", [
     "", "{", '{"' + SECRET, "[]", "null", '{"g1":null}', '{"g1":1}', '{"g1":""}',
-    json.dumps({"g1": "a" * 129}), json.dumps({"bad/key": "tenant-a"}),
-    json.dumps({"a" * 65: "tenant-a"}),
-    json.dumps({f"g{i}": "tenant-a" for i in range(17)}),
-    " " * 4097, json.dumps({"g1": "tenant-a"}) + " " * 4096,
-    '{"g1":"tenant-a"}' + " " * 4080 + "é",
+    "g1=" + "a" * 129, "bad/key=tenant-a", "a" * 65 + "=tenant-a",
+    ",".join(f"g{i}=tenant-a" for i in range(17)),
+    " " * 4097, "g1=tenant-a" + "a" * 4096,
+    "g1=tenant-a" + " " * 4085 + "é",
+    '{"g1":"tenant-a"}', "g1=", "=tenant-a", "g1", "g1=tenant-a=extra",
+    "g1==tenant-a", ",g1=tenant-a", "g1=tenant-a,", "g1=tenant-a,,g2=tenant-b",
+    ",", "g1=tenant-a,g1=tenant-a", "g1=tenant-a,g1=tenant-b",
+    " g1=tenant-a", "g1=tenant-a ", "g1 =tenant-a", "g1= tenant-a",
+    "g1=tenant a", "g1=tenant-a, g2=tenant-b", "g1=tenant-a\t", "g1=tenant-a\n",
+    "g1=tenant\ra", "g1=tenant\va", "g1=tenant\fa", "g1=tenant\u00a0a",
+    "g1=tenant/a", "g1=tenant.a", "g1=ténant", "gé=tenant-a",
+    "g1=tenant-a,g2=bad/tenant",
 ], ids=["empty", "json", "secret", "array", "null", "null-tenant", "int-tenant",
         "empty-tenant", "long-tenant", "bad-key", "long-key", "many-grants",
-        "oversize-space", "oversize-json", "oversize-utf8"])
+        "oversize-space", "oversize-pair", "oversize-utf8", "json-object",
+        "missing-tenant", "missing-ref", "missing-equals", "extra-equals", "double-equals",
+        "leading-comma", "trailing-comma", "double-comma", "empty-items",
+        "duplicate-ref", "duplicate-conflict", "leading-space", "trailing-space",
+        "ref-space", "tenant-space", "inner-space", "item-space", "tab", "newline",
+        "return", "vertical-tab", "form-feed", "unicode-space", "tenant-slash",
+        "tenant-dot", "unicode-tenant", "unicode-ref", "bad-later-pair"])
 def test_malformed_allowlist(monkeypatch, transport, raw):
     monkeypatch.setenv("LEAF_CLOUD_M2M_GRANTS", raw)
     refused()
