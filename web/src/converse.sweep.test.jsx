@@ -137,6 +137,27 @@ describe('conversation issue sweep', () => {
     expect(input.readOnly).toBe(false)
   })
 
+  it('S1-42 shows an acknowledged stop for a started turn when completion is lost', async () => {
+    const input = await setup()
+    fireEvent.change(input, { target: { value: 'Count panels' } })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+    await push(event('turn_started', 'sent'))
+    expect(screen.getByTestId('converse-reasoning')).toHaveTextContent('thinking…')
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
+
+    expect(converse.cancelTurn).toHaveBeenCalledWith('session', 'sent')
+    expect(converse.openStream.mock.results.at(-1).value.reconcile).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Reply stopped.')).toBeTruthy()
+    expect(screen.queryByTestId('converse-reasoning')).toBeNull()
+    expect(screen.queryByText('thinking…')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull()
+    expect(input.readOnly).toBe(false)
+
+    await push(event('turn_complete', 'sent', { stop_reason: 'interrupted' }, 2))
+    expect(screen.queryByText('Reply stopped.')).toBeNull()
+  })
+
   it('S1-42 reports polling authentication failures instead of silently closing', async () => {
     const actual = await vi.importActual('./converse.js')
     vi.stubGlobal('EventSource', undefined)

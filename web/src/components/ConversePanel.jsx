@@ -1177,7 +1177,10 @@ export default function ConversePanel({
               <div className="converse-note"><span className="dim">{t.imageDescriptors.length} image attachment{t.imageDescriptors.length === 1 ? '' : 's'} sent. Preview is unavailable after reload.</span></div>
             )}
             {t.feed.map((item, i) => renderFeedItem(item, i, t.turnId))}
-            {reasoningPending(t) && (
+            {stoppedTurns.has(t.turnId) && !t.stopReason && (
+              <div className="converse-note"><span className="dim">Reply stopped.</span></div>
+            )}
+            {!stoppedTurns.has(t.turnId) && reasoningPending(t) && (
               // Reasoning between steps collapses to one pulse plus a verb;
               // a running step carries its own pulse and streaming prose is
               // its own evidence, so neither shows this row.
