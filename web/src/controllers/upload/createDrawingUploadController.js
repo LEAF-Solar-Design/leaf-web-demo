@@ -1,7 +1,16 @@
+import { humanizeError } from '../../errorHumanize.js'
+
 const DEFAULT_POLICY = { enabled: false, accepted: ['.dwg', '.dxf'], max_bytes: 25 * 1024 * 1024 }
+const POLICY_RETRY_MS = [2000, 5000]
 
 function message(error) {
-  return String(error?.message || error || 'Drawing upload failed.')
+  const raw = String(error?.message || error || 'Drawing upload failed.')
+  return humanizeError(/did not respond within \d+ ms\./i.test(raw) ? 'The connection timed out.' : error)
+}
+
+function retryablePoll(error) {
+  const status = Number(error?.status || String(error?.message || error).match(/->\s*(\d{3})\b/)?.[1])
+  return !status || status === 408 || status === 429 || (status >= 500 && status < 600)
 }
 
 // pollMs * maxPolls is the client's patience for a server-side extraction that
@@ -14,19 +23,28 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
   let snapshot = state
   let sequence = 0
   let policySequence = 0
+  let policyTimer = null
   let disposed = false
   const listeners = new Set()
   const readyListeners = new Set()
   const publish = (patch) => {
     if (disposed) return
+    if (patch.error != null) patch = { ...patch, error: message(patch.error) }
     state = { ...state, ...patch }
     snapshot = state
     listeners.forEach((listener) => listener())
   }
 
   const loadPolicy = async () => {
+    if (disposed) return null
+    clearTimeout(policyTimer)
+    policyTimer = null
     const run = ++policySequence
     publish({ policyLoading: true, error: null })
+    return readPolicy(run, 0)
+  }
+
+  const readPolicy = async (run, retry) => {
     try {
       const policy = await services.policy()
       if (run === policySequence) {
@@ -38,7 +56,16 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
       }
       return policy
     } catch (error) {
-      if (run === policySequence) publish({ policy: DEFAULT_POLICY, policyLoading: false, error: message(error) })
+      if (run === policySequence && !disposed) {
+        if (retry < POLICY_RETRY_MS.length) {
+          policyTimer = setTimeout(() => {
+            policyTimer = null
+            if (run === policySequence && !disposed) void readPolicy(run, retry + 1)
+          }, POLICY_RETRY_MS[retry])
+        } else {
+          publish({ policy: DEFAULT_POLICY, policyLoading: false, error })
+        }
+      }
       return null
     }
   }
@@ -61,11 +88,19 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
       if (run !== sequence) return null
       publish({ receipt, phase: receipt.status === 'ready' ? 'loading' : 'extracting' })
       let status = receipt
+      let failedPolls = 0
       for (let attempt = 0; status.status !== 'ready' && attempt < maxPolls; attempt += 1) {
         if (status.status === 'failed') throw new Error(status.error?.message || status.error || 'Drawing extraction failed.')
         await services.wait(pollMs)
         if (run !== sequence) return null
-        status = await services.status(receipt.drawing_id, receipt.guest_session, receipt.tenant_id)
+        try {
+          status = await services.status(receipt.drawing_id, receipt.guest_session, receipt.tenant_id)
+          failedPolls = 0
+        } catch (error) {
+          if (run !== sequence) return null
+          failedPolls += 1
+          if (!retryablePoll(error) || failedPolls >= 3) throw error
+        }
         if (run !== sequence) return null
       }
       if (status.status === 'failed') {
@@ -83,7 +118,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
       publish({ busy: false, phase: 'ready', error: null })
       return { receipt, status, view }
     } catch (error) {
-      if (run === sequence) publish({ busy: false, phase: 'failed', error: message(error) })
+      if (run === sequence) publish({ busy: false, phase: 'failed', error })
       return null
     }
   }
@@ -93,7 +128,7 @@ export function createDrawingUploadController({ services, onReady, pollMs = 500,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     subscribeReady(listener) { readyListeners.add(listener); return () => readyListeners.delete(listener) },
     start() { disposed = false },
-    dispose() { disposed = true; sequence += 1; policySequence += 1; readyListeners.clear() },
+    dispose() { disposed = true; sequence += 1; policySequence += 1; clearTimeout(policyTimer); policyTimer = null; readyListeners.clear() },
     loadPolicy,
     upload,
     setEngine(engine) {
