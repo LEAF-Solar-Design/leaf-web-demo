@@ -26,6 +26,40 @@ STREAM_BYTES = 2 * 1024 * 1024
 _streams = set()
 
 
+class _StreamLease:
+    def __init__(self, tenant, principal, stream_id, signal):
+        self.tenant = str(tenant)
+        self.principal = principal
+        self.stream_id = stream_id
+        self.signal = signal
+        self.release_task = None
+
+    async def _release(self):
+        _streams.discard(self.signal)
+        try:
+            await asyncio.to_thread(store.release_stream, self.tenant, self.principal, self.stream_id)
+        except Exception:
+            # A store outage cannot prevent close; the admission TTL is the fallback.
+            pass
+
+    async def release(self):
+        if self.release_task is None:
+            self.release_task = asyncio.create_task(self._release())
+        await asyncio.shield(self.release_task)
+
+
+class _LeasedStreamingResponse(StreamingResponse):
+    def __init__(self, content, lease, **kwargs):
+        super().__init__(content, **kwargs)
+        self.lease = lease
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self.lease.release()
+
+
 @router.on_event("shutdown")
 async def drain():
     for signal in tuple(_streams):
@@ -63,7 +97,9 @@ def _cursors(runs, after_seq, last_id):
 
 async def event_stream(tenant, cursors, principal, stream_id, signal, *,
                        clock=time.monotonic, sleep=asyncio.sleep,
-                       wall_clock=time.time, request=None):
+                       wall_clock=time.time, request=None, lease=None):
+    if lease is None:
+        lease = _StreamLease(tenant, principal, stream_id, signal)
     started = clock()
     binding_at = started
     heartbeat_at = started + 15
@@ -150,6 +186,8 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
                     byte_count += len(frame.encode())
                     record(run_id, event)
                     yield frame
+                if pending[run_id]:
+                    continue
                 try:
                     events = await asyncio.to_thread(store.list_events, str(tenant), run_id,
                                                      after_seq=cursors[run_id], limit=200)
@@ -163,6 +201,10 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
                         reason = closed
                         yield _frame("close", {"reason": reason})
                         return
+                    # Keep control events behind every deferred value, including
+                    # when the allowance was used exactly without a pending value.
+                    if event["kind"] != "value" and (pending[run_id] or rates[run_id] >= 50):
+                        break
                     stamp = store._date(event["created_at"]).timestamp()
                     newest = stamp if newest is None else max(newest, stamp)
                     frame = encode(run_id, event)
@@ -190,12 +232,8 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
         reason = "store_unavailable"
         yield _frame("close", {"reason": reason})
     finally:
-        _streams.discard(signal)
         try:
-            await asyncio.shield(asyncio.to_thread(store.release_stream, str(tenant), principal, stream_id))
-        except Exception:
-            # A store outage cannot prevent close; the admission TTL is the fallback.
-            pass
+            await lease.release()
         finally:
             summary = {}
             for run_id, samples in latencies.items():
@@ -217,14 +255,16 @@ async def runs(request: Request, runs: str = Query(...), after_seq: int = Query(
         await asyncio.to_thread(_call, store.get, str(tenant), run_id)
     principal = getattr(tenant, "subject", None) or "tenant:" + str(tenant)
     stream_id = uuid.uuid4().hex
+    signal = asyncio.Event()
+    lease = _StreamLease(tenant, principal, stream_id, signal)
     try:
         await asyncio.to_thread(store.acquire_stream, str(tenant), principal, stream_id, LEASE_TTL)
     except store.TooLarge:
         raise HTTPException(409, detail="lab_stream_limit") from None
     except Exception:
         raise HTTPException(503, detail="lab_store_unavailable") from None
-    signal = asyncio.Event()
     _streams.add(signal)
-    return StreamingResponse(event_stream(tenant, cursors, principal, stream_id, signal, request=request),
-                             media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return _LeasedStreamingResponse(
+        event_stream(tenant, cursors, principal, stream_id, signal, request=request, lease=lease), lease,
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

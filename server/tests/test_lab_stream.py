@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 import pytest
+from starlette.requests import Request
 
 import deps
 import lab_run_store as store
@@ -128,7 +129,8 @@ def test_fetch_route_cursors_and_snapshot_path(rig, monkeypatch):
             signal.set()
         return original(tenant, cursors, principal, stream_id, signal,
                         clock=rig.clock, sleep=sleep,
-                        wall_clock=lambda: rig.stamp.timestamp() + .125)
+                        wall_clock=lambda: rig.stamp.timestamp() + .125,
+                        lease=kwargs.get("lease"))
 
     monkeypatch.setattr(stream, "event_stream", accelerated)
     with TestClient(rig.app) as client:
@@ -263,6 +265,127 @@ def test_sixty_values_coalesce_and_control_passes(rig):
     assert values[-1]["coalesced"] == 10
     assert values[-1]["payload"] == {"out": 59}
     assert [row["payload"] for row in output if row["kind"] == "lease_takeover"] == [{}]
+
+
+def test_coalesced_values_precede_finished_in_sequence(rig):
+    events(rig, [value(i) for i in range(60)] + [{"kind": "finished"}])
+    output = collect(rig)
+    rows = frames(output, "run")
+    expected = list(range(50)) + [59, 60]
+    assert [row["seq"] for row in rows] == expected
+    assert [frame.splitlines()[0] for frame in output if frame.startswith("id: ")] == [
+        f"id: run:{seq}" for seq in expected]
+    assert rows[-2]["coalesced"] == 10
+    assert rows[-2]["payload"] == {"out": 59}
+    assert rows[-1]["kind"] == "finished"
+
+
+def test_resume_after_fifty_values_does_not_skip_deferred_values(rig):
+    events(rig, [value(i) for i in range(60)] + [{"kind": "finished"}])
+
+    async def disconnect():
+        signal = asyncio.Event()
+        store.acquire_stream(rig.tenant, rig.tenant, "stream", 45)
+        generator = stream.event_stream(
+            rig.context, {"run": -1}, rig.tenant, "stream", signal,
+            clock=rig.clock, sleep=rig.clock.sleep)
+        try:
+            return [await anext(generator) for _ in range(50)]
+        finally:
+            await generator.aclose()
+
+    first = asyncio.run(disconnect())
+    assert [row["seq"] for row in frames(first, "run")] == list(range(50))
+    last_id = first[-1].splitlines()[0].removeprefix("id: ")
+    resumed = frames(collect(rig, cursors=stream._cursors("run", -1, last_id)), "run")
+    assert [row["seq"] for row in resumed] == list(range(50, 61))
+    assert resumed[-2]["payload"] == {"out": 59}
+    assert resumed[-1]["kind"] == "finished"
+
+
+def test_pending_distinct_blocks_flush_in_order_within_allowance(rig):
+    events(rig, [value(i, str(i)) for i in range(170)] + [{"kind": "finished"}])
+    output = frames(collect(rig, stop=.75), "run")
+    assert [row["seq"] for row in output] == list(range(50))
+    for stop, expected_end in ((1.75, 100), (2.75, 150), (3.75, 171)):
+        rig.clock.value = 0
+        output = frames(collect(rig, stop=stop), "run")
+        assert [row["seq"] for row in output] == list(range(expected_end))
+        assert all(row["coalesced"] == 1 for row in output[50:min(expected_end, 170)])
+    assert output[-1]["kind"] == "finished"
+
+
+def test_disconnect_before_body_starts_releases_response_lease(rig, monkeypatch):
+    started = []
+
+    async def body(*args, **kwargs):
+        started.append(True)
+        yield "unexpected"
+
+    monkeypatch.setattr(stream, "event_stream", body)
+
+    async def disconnect():
+        for index in range(3):
+            store.acquire_stream(rig.tenant, rig.tenant, str(index), 45)
+        scope = {"type": "http", "asgi": {"spec_version": "2.0"},
+                 "query_string": b"runs=run", "headers": []}
+        response = await stream.runs(Request(scope), runs="run", after_seq=-1, tenant=rig.context)
+        signal = response.lease.signal
+        with pytest.raises(store.TooLarge):
+            store.acquire_stream(rig.tenant, rig.tenant, "fifth", 45)
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            assert message["type"] == "http.response.start"
+            await asyncio.Event().wait()
+
+        await response(scope, receive, send)
+        assert not started
+        assert signal not in stream._streams
+        assert store.acquire_stream(rig.tenant, rig.tenant, "fifth", 45)
+
+    asyncio.run(disconnect())
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_response_and_generator_release_exactly_once(rig, monkeypatch, failure):
+    released = []
+    original = store.release_stream
+
+    def release(*args):
+        released.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(store, "release_stream", release)
+
+    async def consume():
+        scope = {"type": "http", "asgi": {"spec_version": "2.4"},
+                 "query_string": b"runs=run", "headers": []}
+        response = await stream.runs(Request(scope), runs="run", after_seq=-1, tenant=rig.context)
+        response.lease.signal.set()
+
+        async def receive():
+            await asyncio.Event().wait()
+
+        async def send(message):
+            if failure and message["type"] == "http.response.body":
+                raise RuntimeError("send failed")
+
+        try:
+            if failure:
+                with pytest.raises(RuntimeError, match="send failed"):
+                    await response(scope, receive, send)
+            else:
+                await response(scope, receive, send)
+        finally:
+            await response.body_iterator.aclose()
+        await response.lease.release()
+        assert response.lease.signal not in stream._streams
+        assert released == [(rig.tenant, rig.tenant, response.lease.stream_id)]
+
+    asyncio.run(consume())
 
 
 def test_oversize_value_truncated(rig):
