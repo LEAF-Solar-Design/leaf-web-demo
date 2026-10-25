@@ -890,7 +890,7 @@
   transition: opacity .5s ease 1500ms !important;
 }
 
-@media (max-width: 1279px) {
+@media (max-width: 1439px) {
   .tc-rail { width: 250px; }
   .tc-bar-wrap { left: 270px; right: 270px; width: auto; max-width: 720px; margin-left: 0; margin-right: auto; }
   .tc-caption { left: 250px; right: 250px; }
@@ -913,7 +913,7 @@
   .stage-root[data-scene="tool"] > .drawer-layer { top: 52px; width: min(360px, 100%); }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 599px) {
   .tc-product-nav { padding-inline: 8px; }
   .tc-product-tabs button { min-width: 94px; }
   .tc-product-frame { padding: 28px 18px 48px; }
@@ -1251,7 +1251,7 @@
    until the cockpit layout owns both. */
 .studio-ground > [hidden] { display: none !important; }
 .studio-shell { --ground-left: 347px; --ground-right: 347px; --ground-top: 384px; --ground-window: 330px; }
-@media (max-width: 1200px) { .studio-shell { --ground-left: 247px; } }
+@media (max-width: 1439px) { .studio-shell { --ground-left: 247px; } }
 .studio-shell .tc-product-frame[data-surface="browser"],
 .studio-shell .tc-product-frame[data-surface="ios"] {
   background: transparent; border-color: transparent; box-shadow: none;
@@ -1465,7 +1465,7 @@
 .studio-shell header.top:has(.claude-pop) { z-index: 7; }
 /* on phones the header popover is position: fixed; a backdrop-filter here would make header.top its
    containing block and its overflow: hidden would clip the sheet, so cancel it while one is open */
-@media (max-width: 600px) {
+@media (max-width: 599px) {
   .studio-shell header.top:has(.claude-pop) { backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 .studio-shell header.top :is(.mark, .who, .who b, .proj .name, .switch) { color: rgba(240, 242, 240, .92); }
@@ -1997,7 +1997,7 @@
    positioned for a desktop stage; at 390px they clip and overlap. The block
    below reflows the statement to the viewport, drops the solver card and the
    index meta, and lets the tab strip scroll. Desktop rules above are untouched. */
-@media (max-width: 600px) {
+@media (max-width: 599px) {
   .lp-stmt { left: 16px; right: 16px; width: auto; top: 96px; gap: 14px; }
   .lp-headline { font-size: 30px; }
   .lp-sub { font-size: 15px; }
