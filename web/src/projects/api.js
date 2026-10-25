@@ -28,7 +28,7 @@
 // as plain-English messages that survive errorHumanize.js verbatim — a 403 must
 // not be laundered into "temporary problem, try again", which is a lie the
 // caller will retry forever.
-import { config } from '../api.js'
+import { config, noteUnauthorized } from '../api.js'
 import { WORKSPACE_ORG_KEY } from '../controllers/workspace/createWorkspaceController.js'
 
 const AUTH_KEY = 'leaf.jwt'
@@ -120,6 +120,7 @@ async function request(path, opts = {}) {
   const headers = { ...(opts.headers || {}), ...identityHeaders(opts.orgId) }
   const { orgId: _ignored, ...init } = opts
   const res = await fetch(`${config.apiBase}${path}`, { ...init, headers })
+  if (res.status === 401) noteUnauthorized(res, path, headers.Authorization)
   if (!res.ok) {
     let body = null
     try { body = await res.clone().json() } catch { /* non-JSON error body */ }
