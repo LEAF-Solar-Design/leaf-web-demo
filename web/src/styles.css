@@ -1083,6 +1083,13 @@ footer .warn-txt { color: var(--status-warning); }
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
+/* Form controls take the surrounding font. Browsers render button, input,
+   select and textarea in their own default (Arial, 13.33px); on staging 64
+   controls showed it. Zero specificity, so every rule that sets a control's
+   font still wins. */
+:where(button, input, select, textarea) {
+  font: inherit;
+}
 :is(button, [role="button"], [role="tab"], [role="menuitem"], summary):active:not(:disabled):not([aria-disabled="true"]):not(canvas, input[type="range"], [role="slider"]) {
   scale: .985;
   transition: scale 120ms ease;
