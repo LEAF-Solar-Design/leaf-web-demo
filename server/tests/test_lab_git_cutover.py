@@ -393,6 +393,66 @@ def test_rollback_uses_exit_token_in_the_deletion_transaction(world, monkeypatch
     assert calls == [(tenant, transitions(tenant)[-1]['transition_id'], 'draining')]
 
 
+@pytest.mark.parametrize('commit_count', [2, 3])
+def test_rollback_bounds_verified_walk_and_continues_on_takeover(world, monkeypatch, commit_count):
+    tenant, harness = world
+    base = git.cutover(tenant, 'operator')['verified_head']
+    commits = []
+    for index in range(commit_count):
+        save(tenant, 'bounded-' + str(index))
+        commits.append(harness.head)
+    monkeypatch.setattr(git, '_ROLLBACK_ADVANCE_BATCHES', 1)
+    original_step = git._step
+    original_advance = git.advance_verified_head
+    original_authorize = store.authorize_exit
+    lagged, batches, exits = [], [], []
+    def step(t, transition, target, operation=lambda sql, row: None):
+        result = original_step(t, transition, target, operation)
+        if target == 'drained' and not lagged:
+            # Simulate a recorded backlog at the drained boundary, after the
+            # outbox's independent cursor batch has already run.
+            store._run(t, lambda sql: sql.execute(
+                'UPDATE lab_git_authority SET verified_head=? WHERE tenant_id=?', (base, t)), write=True)
+            lagged.append(True)
+        return result
+    def advance(sql, t):
+        active = store.authority_get_sql(sql, t)
+        result = original_advance(sql, t, limit=2)
+        if lagged and active is not None and active['mode'] == 'draining':
+            batches.append(result)
+        return result
+    def authorize(sql, t, tid):
+        exits.append((t, tid, store.authority_get_sql(sql, t)['mode']))
+        return original_authorize(sql, t, tid)
+    monkeypatch.setattr(git, '_step', step)
+    monkeypatch.setattr(git, 'advance_verified_head', advance)
+    monkeypatch.setattr(store, 'authorize_exit', authorize)
+    if commit_count > 2:
+        with pytest.raises(git.MirrorError, match='^lab_rollback_continuing$'):
+            git.flip_back(tenant, 'operator')
+        transition = store.get_active(tenant)
+        assert transition['state'] == 'drained'
+        assert transition['barrier_head'] == commits[-1]
+        assert store._date(transition['lease_expires_at']) > store._now()
+        active = store.authority_get(tenant)
+        assert active['mode'] == 'draining' and active['verified_head'] == commits[1]
+        assert git.mirror_status(tenant)['frozen']
+        assert batches == [False] and exits == []
+        expire_transition(tenant)
+        git.background_tick(0)
+        assert transitions(tenant)[-1]['owner'] != transition['owner']
+        assert batches == [False, True]
+    else:
+        assert git.flip_back(tenant, 'operator')['mode'] == 'ledger'
+        assert batches == [True]
+    assert store.authority_get(tenant) is None
+    assert store.get_active(tenant) is None
+    terminal = transitions(tenant)[-1]
+    assert terminal['state'] == 'done'
+    assert exits == [(tenant, terminal['transition_id'], 'draining')]
+    assert not git.mirror_status(tenant)['frozen']
+
+
 def test_rollback_completes_landed_pending_in_parent_order(world):
     tenant, harness = world
     git.cutover(tenant, 'operator')

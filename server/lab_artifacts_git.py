@@ -22,6 +22,8 @@ import emf_metrics
 
 LOG = logging.getLogger(__name__)
 MAX_REPLAY_REVISIONS = 2000
+# At most this many 1000-commit advance_verified_head batches per _resume call; a later call continues.
+_ROLLBACK_ADVANCE_BATCHES = 4
 REF = "refs/heads/lab/main"
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _SQLITE_SCHEMA = """
@@ -1024,6 +1026,7 @@ def _resolve_barrier(tenant, transition):
         "SELECT op_id FROM lab_git_pending WHERE tenant_id=? AND state<>'abandoned' ORDER BY created_at,op_id",
         (tenant,)).fetchall()])
     found = []
+    # Unique index: at most one non-abandoned row per document, MAX_TENANT_DOCS documents, one /lab/ops and one paginated /lab/changes call each.
     for row in rows:
         lookup = _git_post(tenant, 'ops', {'op_ids': [row['op_id']], 'head': transition['barrier_head']})
         if not isinstance(lookup.get('ops'), dict) or row['op_id'] not in lookup['ops']:
@@ -1142,8 +1145,12 @@ def _resume(tenant, transition, *, takeover=False):
                 # continues it without discarding work on a proof failure.
                 active = store.authority_get_sql(sql, tenant)
                 _proof(sql, tenant, row['barrier_head'], authority=active)
-            while not store._run(tenant, lambda sql: advance_verified_head(sql, tenant), write=True):
+            for _ in range(_ROLLBACK_ADVANCE_BATCHES):
+                if store._run(tenant, lambda sql: advance_verified_head(sql, tenant), write=True):
+                    break
                 transition = _step(tenant, transition, 'drained')
+            else:
+                raise MirrorError('lab_rollback_continuing')
             try:
                 transition = _step(tenant, transition, 'proven', prove)
             except MirrorError as error:
