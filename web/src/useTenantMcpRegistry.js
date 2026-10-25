@@ -107,6 +107,6 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
   }, [mock])
 
   // SurfaceFrame forwards error unchanged; carry retry here without changing scene wiring.
-  const visibleError = error || (listError ? { kind: 'list', message: listError, retry: refresh } : null)
+  const visibleError = listError ? { kind: 'list', message: listError, retry: refresh, mutationError: error } : error
   return { servers, loading, busy, error: visibleError, refresh, register, connect, health, unlink }
 }

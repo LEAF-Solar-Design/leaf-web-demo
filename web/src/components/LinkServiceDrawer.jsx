@@ -53,6 +53,7 @@ export default function LinkServiceDrawer({
   const pop = useExit(open)
   const list = Array.isArray(servers) ? servers : []
   const listFailed = error?.kind === 'list'
+  const mutationError = listFailed ? error.mutationError : error
 
   // S27: Escape is the owner stack's (menu layer: this is an anchored popover).
   useEscapeOwner('link-service', !!open && !mock, () => onToggle(false), { layer: 'menu', scope: rootRef })
@@ -242,7 +243,7 @@ export default function LinkServiceDrawer({
             </button>
             <p className="ca-note">Credentials and upstream tool names stay server-side and never appear in this panel.</p>
           </div>
-          {error && !listFailed && <div className="field-err" role="alert"><span className="dot red" />{humanizeError(error)}</div>}
+          {mutationError && <div className="field-err" role="alert"><span className="dot red" />{humanizeError(mutationError)}</div>}
         </div>
       )}
     </span>
