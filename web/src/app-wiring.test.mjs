@@ -4203,9 +4203,9 @@ describe('W4g S08-a: an explicit demo starts in mock', () => {
     assert.match(appSource, new RegExp('useState\\(\\(\\) => config\\.mockDefault[\\s\\S]{0,200}explicitDemo\\(\\{'))
     assert.match(appSource, new RegExp("import \\{[^}]*\\bexplicitDemo\\b[^}]*\\} from './demoState\\.js'"))
   })
-  it('renders the operator probe once and only outside mock and known guests', () => {
+  it('renders the operator probe once and only when signed in outside mock and known guests', () => {
     assert.equal(appSource.split('<OperatorEntry />').length - 1, 1)
-    assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && !knownGuest && <OperatorEntry />}')))
+    assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && !knownGuest && signedIn && <OperatorEntry />}')))
   })
   it('gates add-ons on sign-in and delegates click focus to the dialog-aware guard', () => {
     assert.ok(appSource.includes('{!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel'))

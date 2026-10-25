@@ -6085,7 +6085,7 @@ export default function App() {
           mounted (LEAF_OPERATOR_ENABLED=1) AND this caller holds a grant.
           Tenant deployments never see it and never re-probe.
           The demo has no operator grant, so the probe would only produce the 404 the campaign counted. */}
-      {!mock && !knownGuest && <OperatorEntry />}
+      {!mock && !knownGuest && signedIn && <OperatorEntry />}
     </div>
     </SurfaceFrame>
     </DrawingObjectsProvider>

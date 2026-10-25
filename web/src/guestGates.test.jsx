@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
 import OperatorEntry from './components/operator/OperatorEntry.jsx'
 import { getDrawingVersions, listOperatorSessions, searchIndex } from './api.js'
 import { resetOperatorProbeForTests } from './operatorClient.js'
+import * as operatorClient from './operatorClient.js'
+import { isSignedIn } from './auth.js'
+import { consoleKnownGuest, consoleSignedOut } from './controllers/session/consoleGate.js'
 import { trackUsage } from './telemetry.js'
 
 vi.mock('./api.js', async (importOriginal) => ({
@@ -98,6 +102,46 @@ describe('guest command scopes', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(250) })
     expect(searchIndex).not.toHaveBeenCalled()
     expect(trackUsage).not.toHaveBeenCalled()
+  })
+})
+
+describe('operator mount gate', () => {
+  // Exercise App's production guard without mounting its WebGL controllers.
+  const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  const guard = source.match(/\{([^{}\n]+) && <OperatorEntry \/>\}/)[1]
+  const allowsOperator = new Function('mock', 'knownGuest', 'signedIn', 'signedOut', `return ${guard}`)
+
+  for (const authRequired of [false, true]) {
+    it(`never probes without a token when auth is unconfigured and authRequired is ${authRequired}`, async () => {
+      const probe = vi.spyOn(operatorClient, 'probeOperatorConsole')
+      const session = { mock: false, authConfigured: false, authRequired, isSignedIn, authCallback: false }
+      const signedIn = isSignedIn()
+      const knownGuest = consoleKnownGuest(session)
+      const signedOut = consoleSignedOut(session)
+      expect(signedIn).toBe(false)
+      expect(knownGuest).toBe(false)
+      expect(signedOut).toBe(authRequired)
+      const { container } = render(<>{allowsOperator(false, knownGuest, signedIn, signedOut) && <OperatorEntry />}</>)
+      await act(async () => { await Promise.resolve() })
+      expect(container.firstChild).toBeNull()
+      expect(probe).not.toHaveBeenCalled()
+      expect(fetch).not.toHaveBeenCalled()
+    })
+  }
+
+  it('mounts and probes for a signed-in visitor in live mode', async () => {
+    const probe = vi.spyOn(operatorClient, 'probeOperatorConsole').mockResolvedValue(true)
+    render(<>{allowsOperator(false, false, true, false) && <OperatorEntry />}</>)
+    expect(await screen.findByRole('button', { name: 'Open operator console' })).toBeTruthy()
+    expect(probe).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the operator unmounted in demo mode even when signed in', async () => {
+    const probe = vi.spyOn(operatorClient, 'probeOperatorConsole')
+    const { container } = render(<>{allowsOperator(true, false, true, false) && <OperatorEntry />}</>)
+    await act(async () => { await Promise.resolve() })
+    expect(container.firstChild).toBeNull()
+    expect(probe).not.toHaveBeenCalled()
   })
 })
 
