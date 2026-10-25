@@ -996,6 +996,7 @@ export default function App() {
     workspace,
     canonicalVersionId,
     workspaceLoading: wsLoading,
+    workspaceError: wsError,
     orgBusy,
     projectBusy,
     adoptOrgId,
@@ -1363,12 +1364,15 @@ export default function App() {
   // each derived its own answer and they contradicted each other in production.
   const workspaceProjectState = useMemo(() => deriveWorkspaceProjectState({
     openProjectId,
+    workspace,
+    workspaceLoading: wsLoading,
+    workspaceError: wsError,
     projectName: currentProjectName,
     drawingName,
     orgId,
     projectsUnavailable: projectsErr,
     mock,
-  }), [openProjectId, currentProjectName, drawingName, orgId, projectsErr, mock])
+  }), [openProjectId, workspace, wsLoading, wsError, currentProjectName, drawingName, orgId, projectsErr, mock])
 
   // color-by-layer, stable across renders (keyed to base intake identity)
   const colorForLayer = useMemo(() => {
@@ -4842,6 +4846,8 @@ export default function App() {
           <WorkspaceSummary
             workspace={workspace}
             loading={wsLoading}
+            error={wsError}
+            onRetry={() => onOpenProject(openProjectId)}
             selectedVersionId={canonicalVersionId}
             onSelectVersion={selectCanonicalVersion}
             onClose={onCloseProject}
@@ -4925,6 +4931,14 @@ export default function App() {
                 receipts={workspace?.receipts}
                 shipReceipts={workspace?.ship_receipts}
                 slots={{
+                  material: mock || !signedIn || !openProjectId
+                    ? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />
+                    : workspace ? <LiveProjectMaterialIntake
+                      key={openProjectId}
+                      project={workspace.project}
+                      artifacts={workspace.drawing_artifacts || []}
+                      onAttached={rehydrate}
+                    /> : <p>Material will be available after the project opens.</p>,
                   catalog: <ul>{railFamilies.map((family) => <li key={family.family_id}>{family.label}</li>)}</ul>,
                   conversation: <BoardPaneState pane="conversation" context={boardPaneContext}>
                     {!canConverse ? <EntitlementNotice required="converse" tier={entTier} />
@@ -4949,14 +4963,6 @@ export default function App() {
                 getContext={getStandaloneContext} onPolicy={publishStandalonePolicy}
                 onReady={onStandaloneReady} onBack={() => setProjectPane(null)}
               />}
-              {projectPane === 'material' && !standaloneMounted && (mock || !signedIn || !openProjectId
-                ? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />
-                : <LiveProjectMaterialIntake
-                  key={openProjectId}
-                  project={{ ...workspace?.project, project_id: openProjectId, name: currentProjectName }}
-                  artifacts={workspace?.drawing_artifacts || []}
-                  onAttached={rehydrate}
-                />)}
               {!mock && openProjectId && (
                 <CampaignPanel projectId={openProjectId} projectName={currentProjectName} signedIn={signedIn} authorityProvider={authorAuthorityProvider} />
               )}
@@ -4964,6 +4970,8 @@ export default function App() {
                 <WorkspaceSummary
                   workspace={workspace}
                   loading={wsLoading}
+                  error={wsError}
+                  onRetry={() => onOpenProject(openProjectId)}
                   selectedVersionId={canonicalVersionId}
                   onSelectVersion={selectCanonicalVersion}
                   onClose={onCloseProject}

@@ -13,6 +13,7 @@
 import { fmtWhen } from './JobRail.jsx'
 import EscCap from './EscCap.jsx'
 import ArloProjectJob from './ArloProjectJob.jsx'
+import { humanizeError } from '../errorHumanize.js'
 
 const JOB_STATE = {
   succeeded: { dot: 'dot', tint: 'ok', label: 'succeeded' },
@@ -23,8 +24,18 @@ const JOB_STATE = {
 }
 
 export default function WorkspaceSummary({
-  workspace, loading, selectedVersionId, onSelectVersion, onClose,
+  workspace, loading, error, onRetry, selectedVersionId, onSelectVersion, onClose,
 }) {
+  if (!workspace && (loading || error)) return (
+    <section className="card workspace-summary" aria-label="Project opening">
+      {loading ? <p role="status">Opening project...</p> : <>
+        <p role="alert">Could not open this project. {humanizeError(null)}</p>
+        <p>Retry to open the project, or close it and choose another.</p>
+        <button type="button" onClick={onRetry}>Retry</button>
+      </>}
+      <button type="button" onClick={onClose}>Close</button>
+    </section>
+  )
   if (!workspace) return null
   const project = workspace.project || {}
   const versions = workspace.drawing_versions || []

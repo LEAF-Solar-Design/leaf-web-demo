@@ -58,7 +58,7 @@ describe('workspace open hydration', () => {
     expect(await rehydrating).toBeNull()
     expect(services.openProject).toHaveBeenCalledTimes(1)
     expect(controller.getSnapshot()).toMatchObject({ openProjectId: 'p1', workspace: null,
-      workspaceLoading: false, projectsError: 'Open failed.' })
+      workspaceLoading: false, projectsError: null, workspaceError: 'Something went wrong. Try again.' })
     expect(callbacks.onWorkspaceOpened).not.toHaveBeenCalled()
     expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
     const workspace = { project: { project_id: 'p1' } }

@@ -2263,7 +2263,7 @@ describe('project board live pane wiring', () => {
     guard('LabWidgetsPreview', 'labEnabled')
     assert.equal(ownerExpression('LabWidgetsPreview').right, labSeat)
     assert.deepEqual(expression(elements('ProjectWorkspacePanels')[0], 'slots').properties.map(csuKey),
-      ['catalog', 'conversation', 'annotations', 'authoring', 'settings'])
+      ['material', 'catalog', 'conversation', 'annotations', 'authoring', 'settings'])
     const actions = expression(elements('SurfaceGrounds')[0], 'actions').consequent
     assert.deepEqual(actions.properties.map(csuKey), ['transferProjectId', 'transferStatus', 'onTransferVersion',
       'onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability', 'onOpenSettings'])
@@ -3744,9 +3744,9 @@ describe('J1 Browser composition', () => {
   it('J1 row5 the mounted material intake binds the open project before upload', () => {
     const live = mount('LiveProjectMaterialIntake')
     assert.match(live, /key:\s*openProjectId/)
-    assert.match(live, /project_id:\s*openProjectId/)
+    assert.match(live, /project:\s*workspace.project/)
     assert.match(live, /onAttached:\s*rehydrate/)
-    assert.match(live, /artifacts:\s*workspace\?\.drawing_artifacts \|\| \[\]/)
+    assert.match(live, /artifacts:\s*workspace\.drawing_artifacts \|\| \[\]/)
     assert.equal((compiled.match(/= useDrawingUploadController\(/g) || []).length, 2)
     assert.equal((compiled.match(/= useMaterialIntake\(/g) || []).length, 1)
 
@@ -3784,11 +3784,12 @@ describe('J1 Browser composition', () => {
     assert.equal(events[0][0], 'begin')
   })
 
-  it('J1 row6 demo material mounts the disabled component without an IO controller', () => {
+  it('J1 row6 demo material mounts its sample state without an IO controller', () => {
     const source = codeOnly(appSource)
-    assert.ok(source.includes("projectPane === 'material' && !standaloneMounted && (mock || !signedIn || !openProjectId"))
+    assert.ok(source.includes('material: mock || !signedIn || !openProjectId'))
     assert.ok(source.includes('? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />'))
-    assert.ok(source.includes(': <LiveProjectMaterialIntake'))
+    assert.ok(source.includes(': workspace ? <LiveProjectMaterialIntake'))
+    assert.equal((source.match(/<LiveProjectMaterialIntake/g) || []).length, 1)
     const appBody = source.slice(source.indexOf('export default function App()'))
     assert.doesNotMatch(appBody, /useDrawingUploadController\(/)
     assert.doesNotMatch(appBody, /useMaterialIntake\(/)
@@ -3854,7 +3855,7 @@ describe('J1 Browser composition', () => {
     const names = (props) => props.map((entry) => entry.split(':')[0].trim()).sort()
     for (const [name, expected] of Object.entries({
       CampaignPanel: ['projectId', 'projectName', 'signedIn', 'authorityProvider'],
-      WorkspaceSummary: ['workspace', 'loading', 'selectedVersionId', 'onSelectVersion', 'onClose'],
+      WorkspaceSummary: ['workspace', 'loading', 'error', 'onRetry', 'selectedVersionId', 'onSelectVersion', 'onClose'],
     })) {
       const [inline, board] = placements(name)
       assert.deepEqual(names(inline.props), [...expected].sort(), name + ' inline props')
