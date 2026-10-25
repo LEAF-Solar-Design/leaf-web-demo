@@ -137,7 +137,7 @@ export default function NavRail({
             <button type="button" className="chip-act" onClick={onRetryCatalog}>Retry</button>
             {retryTarget === 'catalog' && <span className="key" aria-hidden="true">R</span>}
           </div>
-          <div className="dim" style={{ margin: '0 4px 8px', fontSize: 11.5 }}>Showing the flat tool list instead.</div>
+          <div className="dim" style={{ margin: '0 4px 8px', fontSize: 'var(--leaf-size-caption)' }}>Showing the flat tool list instead.</div>
           <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={onToggleTools}>
             <ToolsPanel
               tools={tools}
