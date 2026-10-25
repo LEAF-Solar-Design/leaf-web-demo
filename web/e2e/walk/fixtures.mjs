@@ -517,7 +517,7 @@ const ribbonLayer = (page, name) => layerButtons(page).and(page.getByRole('butto
 export async function requireNoDrawing(page, assertions = expect) {
   // Solar can render a starter canvas without a seated, versioned drawing.
   const undo = page.getByRole('toolbar', { name: 'Quick access', exact: true }).getByRole('button', {
-    name: 'Undo version (unavailable: no versioned drawing)', exact: true,
+    name: 'Undo version (unavailable: No saved versions yet)', exact: true,
   })
   await assertions(undo).toBeVisible()
   await assertions(undo).toBeDisabled()

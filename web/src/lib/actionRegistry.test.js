@@ -958,7 +958,7 @@ describe('the accessible name', () => {
 
   it('composes the same name for a record the ribbon would render disabled', () => {
     const tool = ribbonTool(byId('undo'), { hasVersions: false })
-    expect(accessibleName(tool.label, tool.reason)).toBe('undo (unavailable: no versioned drawing)')
+    expect(accessibleName(tool.label, tool.reason)).toBe('undo (unavailable: No saved versions yet)')
   })
 })
 

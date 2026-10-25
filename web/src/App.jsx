@@ -61,14 +61,14 @@ const DRAWER_FRAME_QUERY = '(max-width: 599px), (max-width: 1023px) and (min-hei
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
 const WORKSPACE_QUICK_BEFORE = Object.freeze([
-  { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: 'new drawings start on the project board (Start tab)' },
-  { id: 'quick-import-dxf', dataTool: 'quick-import-dxf', label: 'Open DXF', icon: 'open', disabled: true, reason: 'Drawing upload is unavailable in this session' },
+  { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: "Start a new drawing from the project board's Start button" },
+  { id: 'quick-import-dxf', dataTool: 'quick-import-dxf', label: 'Open DXF', icon: 'open' },
   { id: 'quick-save-version', dataTool: 'quick-save-version', label: 'Save version', icon: 'save', disabled: true, reason: REASONS.noVersions },
   { id: 'quick-undo-edit', dataTool: 'quick-undo-edit', label: 'Undo edit', icon: 'undo', disabled: true, reason: REASONS.noVersions },
   { id: 'quick-redo-edit', dataTool: 'quick-redo-edit', label: 'Redo edit', icon: 'redo', disabled: true, reason: REASONS.noVersions },
 ])
 const WORKSPACE_QUICK_AFTER = Object.freeze([
-  { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: 'printing is not in the browser engine' },
+  { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: "Printing isn't available yet" },
   { id: 'sep-1', kind: 'sep' },
   { id: 'quick-undo', label: 'Undo version', icon: 'undo', disabled: true, reason: REASONS.noVersions },
   { id: 'quick-redo', label: 'Redo version', icon: 'redo', disabled: true, reason: REASONS.noVersions },
@@ -4111,8 +4111,12 @@ export default function App() {
       return { clusters: [], quickBefore: [], quickAfter: [], view: null, version: null, rail: [], author: null }
     }
     if (!drafting) {
+      const upload = profileTabs.flatMap((tab) => tab.clusters).flatMap((cluster) => cluster.tools || [])
+        .find((tool) => tool.id === 'files:upload')
       return { clusters: profileTabs.find((tab) => tab.id === activeRibbonTab)?.clusters || [],
-        quickBefore: WORKSPACE_QUICK_BEFORE, quickAfter: [
+        quickBefore: WORKSPACE_QUICK_BEFORE.map((tool) => tool.id === 'quick-import-dxf'
+          ? { ...tool, disabled: upload?.disabled ?? true, reason: upload?.reason ?? PROFILE_REASONS.uploadDrawing, onClick: upload?.onClick }
+          : tool), quickAfter: [
           ...WORKSPACE_QUICK_AFTER,
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar',
             expanded: drawerViewport ? studioDrawer === 'nav' : navExpanded,
@@ -4228,7 +4232,7 @@ export default function App() {
     const byTab = {
       solar: (profileTabs.find((tab) => tab.id === 'solar')?.clusters || []).map((cluster) => cluster.id === 'solar-panels'
         ? { ...cluster, extra: ENV_CAD_EDIT ? <div id="cockpit-solar-panels-slot" className="ribbon-slot" /> : null,
-          note: ENV_CAD_EDIT ? null : 'Panel placement needs the browser engine' }
+          note: ENV_CAD_EDIT ? null : 'Panel placement needs the drawing editor' }
         : cluster),
       // The Clipboard panel stays LAST, where the reference puts it. With
       // the flag ON it is an EMPTY cluster carrying a slot div, and the
@@ -4261,10 +4265,10 @@ export default function App() {
       // fewer set of live builder calls to keep in sync generally.
       view, version, rail, author,
       quickBefore: [
-        { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: 'new drawings start on the project board (Start tab)' },
+        { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: "Start a new drawing from the project board's Start button" },
       ],
       quickAfter: [
-        { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: 'printing is not in the browser engine' },
+        { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: "Printing isn't available yet" },
         { id: 'sep-1', kind: 'sep' },
         { ...undo, id: 'quick-undo', label: 'Undo version' },
         { ...redo, id: 'quick-redo', label: 'Redo version' },
