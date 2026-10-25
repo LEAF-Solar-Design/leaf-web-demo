@@ -119,6 +119,35 @@ describe('conversation issue sweep', () => {
     expect(input).toHaveFocus()
   })
 
+  it('S1-41 returns focus from Send and Stop to the composer', async () => {
+    const input = await setup()
+    fireEvent.change(input, { target: { value: 'Count panels' } })
+    const sendButton = screen.getByRole('button', { name: 'Send' })
+    sendButton.focus()
+    await act(async () => { fireEvent.click(sendButton) })
+    expect(input).toHaveFocus()
+    expect(input.readOnly).toBe(true)
+
+    await push(event('turn_started', 'sent'))
+    screen.getByRole('button', { name: 'Stop' }).focus()
+    await push(event('turn_complete', 'sent', { stop_reason: 'end_turn' }, 2))
+
+    expect(input).toHaveFocus()
+    expect(input.readOnly).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull()
+  })
+
+  it('S1-41 restores composer focus from the body when the turn ends', async () => {
+    const input = await setup()
+    await push(event('turn_started', 'running'))
+    expect(document.activeElement).toBe(document.body)
+
+    await push(event('turn_complete', 'running', { stop_reason: 'end_turn' }, 2))
+
+    expect(input).toHaveFocus()
+    expect(input.readOnly).toBe(false)
+  })
+
   it('S1-42 displays a retry state when the stream drops', async () => {
     await setup()
     act(() => handlers().onStreamDown())
@@ -159,21 +188,26 @@ describe('conversation issue sweep', () => {
     expect(screen.queryByText('Reply stopped.')).toBeNull()
   })
 
-  it('S1-42 reconciles an already ended turn without marking it stopped', async () => {
+  it('S1-42 unlocks an already ended turn with the stream down and no completion event', async () => {
     converse.cancelTurn.mockResolvedValueOnce({ status: 'already_ended' })
     const input = await setup()
     fireEvent.change(input, { target: { value: 'Count panels' } })
     await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
     await push(event('turn_started', 'sent'))
+    act(() => handlers().onStreamDown())
     expect(input.readOnly).toBe(true)
 
+    screen.getByRole('button', { name: 'Stop' }).focus()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
 
     expect(converse.cancelTurn).toHaveBeenCalledWith('session', 'sent')
     expect(converse.openStream.mock.results.at(-1).value.reconcile).toHaveBeenCalledTimes(1)
     expect(screen.queryByText('Reply stopped.')).toBeNull()
     expect(track).not.toHaveBeenCalledWith('conversation.truncated', expect.anything())
-    expect(input.readOnly).toBe(true)
+    expect(input.readOnly).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull()
+    expect(screen.queryByTestId('converse-reasoning')).toBeNull()
+    expect(input).toHaveFocus()
 
     await push(event('turn_complete', 'sent', { stop_reason: 'end_turn' }, 2))
     expect(input).not.toBeDisabled()

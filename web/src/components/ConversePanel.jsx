@@ -278,7 +278,16 @@ export default function ConversePanel({
   const [stopping, setStopping] = useState(false)  // an interrupt is in flight
   const [connectionState, setConnectionState] = useState('connecting')
   const [stoppedTurns, setStoppedTurns] = useState(new Set())
+  const [endedTurns, setEndedTurns] = useState(new Set())
   const streamRef = useRef(null)
+  const composerRef = useRef(null)
+  const composerActionRef = useRef(null)
+  const wasBusyRef = useRef(false)
+  const restoreComposerFocus = () => {
+    if (document.activeElement === document.body || document.activeElement === composerActionRef.current) {
+      composerRef.current?.focus()
+    }
+  }
   // S27: the turn an Escape already asked to stop. One Escape action per turn:
   // after it, the next Escape climbs to whatever is under the turn.
   const [escapeStoppedTurn, setEscapeStoppedTurn] = useState(null)
@@ -345,6 +354,7 @@ export default function ConversePanel({
     setEvents([]); setLocalTurns([]); setSendErr(null); clearAttachments()
     setDecidedLocal({}); setDeciding(null)
     setConnectionState('connecting'); setStoppedTurns(new Set())
+    setEndedTurns(new Set())
     setQuestionChoices({ sendingQuestionIds: [] })
     jobSeenRef.current = new Set()
     setQueueState(createQueuedTurnState())
@@ -598,6 +608,12 @@ export default function ConversePanel({
         else t.feed.push({ kind: 'error', code, message: humanizeError(STOP_NOTES[code] || data.error?.message || 'The assistant could not finish this reply. Try again.') })
       }
     }
+    // A stop can confirm completion before the terminal event is recovered.
+    for (const turnId of endedTurns) {
+      const t = turnOf(turnId)
+      if (!t.stopReason) t.stopReason = 'end_turn'
+      completed.add(turnId)
+    }
     // The turn an interrupt would end: started, not yet terminal. Held as the
     // turn ITSELF (not just a boolean) so Stop/Esc can name the exact turn_id
     // — the server refuses a stale one rather than ending its replacement.
@@ -609,7 +625,7 @@ export default function ConversePanel({
     for (const t of turns) if (t.usage) latestUsage = t.usage
     return { turns, decisions, completed, quota, quotaRetry, grant, active, latestUsage,
              activeTurnId: activeTurn ? activeTurn.turnId : null }
-  }, [events, stoppedTurns])
+  }, [events, stoppedTurns, endedTurns])
 
   // User bubbles come from the dispatching side (§3 has no user-message event):
   // App-dispatched turns + panel-sent follow-ups, keyed by turn_id.
@@ -635,6 +651,11 @@ export default function ConversePanel({
   const awaitingTurn = !!(lastUser && lastUser.turnId && !model.completed.has(lastUser.turnId) && !stoppedTurns.has(lastUser.turnId))
   const busy = sending || model.active || awaitingTurn
 
+  useEffect(() => {
+    if (wasBusyRef.current && !busy) restoreComposerFocus()
+    wasBusyRef.current = busy
+  }, [busy]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // The turn Stop/Esc would end. `model.activeTurnId` is the streaming turn;
   // before its first event lands there is still a dispatched turn to
   // interrupt, which is what the awaiting fallback covers.
@@ -648,7 +669,10 @@ export default function ConversePanel({
       const result = await cancelTurn(sessionId, stoppableTurnId)
       if (sessionIdRef.current !== sessionId) return
       void streamRef.current?.reconcile?.()
-      if (result?.status === 'already_ended') return
+      if (result?.status === 'already_ended') {
+        setEndedTurns((prev) => new Set([...prev, stoppableTurnId]))
+        return
+      }
       setStoppedTurns((prev) => new Set([...prev, stoppableTurnId]))
       track('conversation.truncated', { reason: 'user_stop' }) // P2: interrupt ends the turn's output early
       // Acknowledged cancellation unlocks this turn even if its final event
@@ -694,6 +718,7 @@ export default function ConversePanel({
     if ((!text && !(includeAttachments && attachments.length)) || busy) return false
     let delivered = false
     setSending(true); setSendErr(null)
+    restoreComposerFocus()
     const accept = (res, images) => {
       if (res.status === 'queued') {
         const queued = acceptQueuedTurn(queueStateRef.current, {
@@ -1258,6 +1283,7 @@ export default function ConversePanel({
 
       <div className="converse-input">
         <input
+          ref={composerRef}
           value={input}
           // Any edit retires the refusal, which was about the text that WAS
           // there; a notice outliving its text reads as a stuck error.
@@ -1291,6 +1317,7 @@ export default function ConversePanel({
           <button
             type="button"
             className="chip-neutral"
+            ref={composerActionRef}
             onClick={stop}
             disabled={stopping}
             title="Interrupt this turn (Esc)"
@@ -1304,7 +1331,7 @@ export default function ConversePanel({
           // postMessage received {text: "[object Object]"}). Wrapping it is
           // what makes the button send the input at all, and therefore what
           // puts it behind the credential guard.
-          <button type="button" className="chip-act" onClick={() => send()} disabled={busy || (!input.trim() && !attachments.length)}>
+          <button type="button" className="chip-act" ref={composerActionRef} onClick={() => send()} disabled={busy || (!input.trim() && !attachments.length)}>
             {sending ? 'Sending…' : 'Send'}
           </button>
         )}
