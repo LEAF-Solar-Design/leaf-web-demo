@@ -1382,6 +1382,7 @@ export default function App() {
   // and canonical project deep links. Share reply fences and publish only the
   // first proof, so an old token/project cannot publish into a new one.
   const sessionAuthorization = authHeaders().Authorization
+  const [identityFailure, setIdentityFailure] = useState(null)
   const sessionProofScope = useMemo(() => ({}), [mock, orgId, openProjectId,
     sessionAuthorization, session.tokenRevision, session.recoveries, intakeRetryKey])
   const sessionProofScopeRef = useRef(sessionProofScope)
@@ -1411,6 +1412,7 @@ export default function App() {
   useEffect(() => {
     let alive = true
     const current = () => alive && sessionProof.current(true)
+    setIdentityFailure(null)
     setTenant(null); setTier(null); setOrg(null)
     if (mock) return () => { alive = false }
     if (session.controller.getSnapshot().reason === 'signed_out') return () => { alive = false }
@@ -1427,6 +1429,8 @@ export default function App() {
           // Only the transport can invalidate a token; this reports the gate.
           sessionActions.requireAuth('/api/session/identity')
           if (shouldAutoDemo({ authRequired: true, authConfigured, mock, signedIn: isSignedIn() })) setMock(true)
+        } else if (session.controller.getSnapshot().status !== 'active') {
+          setIdentityFailure({ scope: sessionProofScope, message: humanizeError(e) })
         }
       })
     return () => { alive = false }
@@ -4809,7 +4813,18 @@ export default function App() {
             Restart guided tour
           </button>
         )}
-        {signedOut && authConfigured && (
+        {!mock && identityFailure?.scope === sessionProofScope && session.status !== 'active' && (
+          <div className="card enter">
+            <p role="alert">{identityFailure.message}</p>
+            <button type="button" className="btn primary" onClick={() => {
+              setIdentityFailure(null)
+              setIntakeRetryKey(key => key + 1)
+            }}>Retry</button>
+            {authConfigured && <button type="button" className="btn ghost" onClick={onLogin}>Sign in</button>}
+            <button type="button" className="btn ghost" onClick={() => setMock(true)}>Explore the demo</button>
+          </div>
+        )}
+        {signedOut && authConfigured && !identityFailure && (
           <SignedOutGate
             onDemo={() => {
               // P2 (pre-auth allowlisted): the stranger split at the front door.
