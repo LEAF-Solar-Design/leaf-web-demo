@@ -34,6 +34,7 @@ class CloudGrant:
 
 
 _M2M_AUDIENCE = "https://api.leafdesign.ai"
+_M2M_CALL_TIMEOUT = 10.0
 _m2m_lock = threading.Lock()
 
 
@@ -42,19 +43,32 @@ class _M2MCache:
     credential_digest: str
     token: str
     expires_at: float
+    refresh_at: float
     audience: str = _M2M_AUDIENCE
 
 
 _m2m_cache: _M2MCache | None = None
 
 
+@dataclass(repr=False)
+class _M2MOperation:
+    deadline: float
+    done: threading.Event = field(default_factory=threading.Event)
+    result: str | None = None
+
+
+_m2m_inflight: _M2MOperation | None = None
+_m2m_worker: threading.Thread | None = None
+
+
 def reset_m2m_grant_cache() -> None:
-    global _m2m_cache
+    global _m2m_cache, _m2m_inflight
     with _m2m_lock:
         _m2m_cache = None
+        _m2m_inflight = None
 
 
-def _mint_m2m_token(client_id: str, client_secret: str) -> tuple[str, float]:
+def _mint_m2m_token(client_id: str, client_secret: str) -> tuple[str, int]:
     started = time.monotonic()
     deadline = started + 10
 
@@ -66,6 +80,7 @@ def _mint_m2m_token(client_id: str, client_secret: str) -> tuple[str, float]:
 
     # stdlib DNS resolution (getaddrinfo) cannot be interrupted by a socket timeout.
     connection = http.client.HTTPSConnection("leafautomation.us.auth0.com", timeout=remaining())
+    connection.debuglevel = 0
     response = None
     try:
         connection.connect()
@@ -99,7 +114,7 @@ def _mint_m2m_token(client_id: str, client_secret: str) -> tuple[str, float]:
                 or type(expires_in) is not int or not 60 <= expires_in <= 2592000):
             raise ValueError()
         remaining()
-        return token, started + expires_in
+        return token, expires_in
     finally:
         try:
             if response is not None:
@@ -108,8 +123,95 @@ def _mint_m2m_token(client_id: str, client_secret: str) -> tuple[str, float]:
             connection.close()
 
 
+def _m2m_credentials() -> tuple[str, str, str]:
+    # Called only on the worker, including on cache hits and at publication.
+    client_id = os.environ.get("LEAF_CLOUD_M2M_CLIENT_ID", "")
+    client_secret = os.environ.get("LEAF_CLOUD_M2M_CLIENT_SECRET", "")
+    if any(not 1 <= len(value) <= 512 or any(not "!" <= c <= "~" for c in value)
+           for value in (client_id, client_secret)):
+        raise ValueError()
+    digest = hashlib.sha256((client_id + "\0" + client_secret).encode("utf-8")).hexdigest()
+    return client_id, client_secret, digest
+
+
+def _m2m_worker_result() -> tuple[bool, str | None, int | None, str]:
+    try:
+        # Cache validation also runs here: the caller must never read credentials.
+        client_id, client_secret, digest = _m2m_credentials()
+        with _m2m_lock:
+            cached = _m2m_cache
+            if (cached is not None and cached.credential_digest == digest
+                    and cached.audience == _M2M_AUDIENCE
+                    and time.monotonic() < cached.refresh_at):
+                return True, cached.token, None, digest
+        token, expires_in = _mint_m2m_token(client_id, client_secret)
+        return True, token, expires_in, digest
+    except BaseException:
+        # Parser/transport exceptions and their sensitive frames stay on this thread.
+        pass
+    return False, None, None, ""
+
+
+def _run_m2m_worker(operation: _M2MOperation) -> None:
+    global _m2m_cache, _m2m_inflight
+    token = None
+    try:
+        mint_time = time.monotonic()
+        ok, token, expires_in, digest = _m2m_worker_result()
+        with _m2m_lock:
+            if _m2m_inflight is operation:
+                current_digest = _m2m_credentials()[2] if ok else ""
+                if ok and digest == current_digest:
+                    if expires_in is not None:
+                        _m2m_cache = _M2MCache(
+                            digest, token, mint_time + expires_in,
+                            mint_time + expires_in - min(300, expires_in // 2))
+                    operation.result = token
+    except BaseException:
+        pass
+    finally:
+        with _m2m_lock:
+            if _m2m_inflight is operation:
+                _m2m_inflight = None
+            operation.done.set()
+
+
+def _m2m_token(deadline: float) -> str | None:
+    global _m2m_inflight, _m2m_worker
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not _m2m_lock.acquire(timeout=remaining):
+        return None
+    try:
+        if time.monotonic() >= deadline:
+            return None
+        operation = _m2m_inflight
+        if operation is not None:
+            if time.monotonic() >= operation.deadline:
+                return None
+            operation.deadline = max(operation.deadline, deadline)
+        else:
+            # A timed-out worker owns the slot until its thread actually exits.
+            if _m2m_worker is not None and _m2m_worker.is_alive():
+                return None
+            operation = _M2MOperation(deadline)
+            _m2m_inflight = operation
+            _m2m_worker = threading.Thread(target=_run_m2m_worker, args=(operation,), daemon=True)
+            try:
+                _m2m_worker.start()
+            except Exception:
+                _m2m_inflight = None
+                return None
+    finally:
+        _m2m_lock.release()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not operation.done.wait(remaining):
+        return None
+    if time.monotonic() >= deadline:
+        return None
+    return operation.result
+
+
 def _resolve_m2m_grant(reference: str, tenant_id: str) -> CloudGrant:
-    global _m2m_cache
     if os.environ.get("LEAF_RUNTIME_ENV") != "staging":
         raise CloudError("cloud_auth_missing", 401)
     invalid_allowlist = False
@@ -136,26 +238,11 @@ def _resolve_m2m_grant(reference: str, tenant_id: str) -> CloudGrant:
         raise CloudError("cloud_auth_missing", 401)
     if grants[reference] != tenant_id:
         raise CloudError("cloud_tenant_unauthorized", 403)
-    client_id = os.environ.get("LEAF_CLOUD_M2M_CLIENT_ID", "")
-    client_secret = os.environ.get("LEAF_CLOUD_M2M_CLIENT_SECRET", "")
-    if any(not 1 <= len(value) <= 512 or any(not "!" <= c <= "~" for c in value)
-           for value in (client_id, client_secret)):
+    deadline = time.monotonic() + _M2M_CALL_TIMEOUT
+    token = _m2m_token(deadline)
+    if token is None:
         raise CloudError("cloud_auth_missing", 401)
-    credential_digest = hashlib.sha256((client_id + "\0" + client_secret).encode("utf-8")).hexdigest()
-    with _m2m_lock:
-        if (_m2m_cache is None or _m2m_cache.credential_digest != credential_digest
-                or _m2m_cache.audience != _M2M_AUDIENCE
-                or time.monotonic() >= _m2m_cache.expires_at - 300):
-            mint_failed = False
-            try:
-                token, expires_at = _mint_m2m_token(client_id, client_secret)
-            except Exception:
-                # Transport and parser exceptions can contain response bodies or credentials.
-                mint_failed = True
-            if mint_failed:
-                raise CloudError("cloud_auth_missing", 401)
-            _m2m_cache = _M2MCache(credential_digest, token, expires_at)
-        return CloudGrant(tenant_id=tenant_id, access_token=_m2m_cache.token)
+    return CloudGrant(tenant_id=tenant_id, access_token=token)
 
 
 def resolve_grant(reference: str, tenant_id: str) -> CloudGrant:

@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import threading
+import time
 import traceback
 from unittest.mock import Mock
 
@@ -29,6 +30,9 @@ def staging(monkeypatch):
     monkeypatch.delenv("LEAF_CLOUD_GRANTS_FILE", raising=False)
     grants.reset_m2m_grant_cache()
     yield
+    if grants._m2m_worker is not None:
+        grants._m2m_worker.join(timeout=1)
+        assert not grants._m2m_worker.is_alive()
     grants.reset_m2m_grant_cache()
 
 
@@ -67,6 +71,13 @@ def refused(call=None, classification="cloud_auth_missing", status=401):
         assert private not in str(caught.value)
         assert private not in repr(caught.value)
         assert private not in formatted
+    frame = caught.value.__traceback__
+    while frame is not None:
+        if frame.tb_frame.f_globals.get("__name__") == grants.__name__:
+            for value in frame.tb_frame.f_locals.values():
+                if isinstance(value, str):
+                    assert value not in (CLIENT_ID, SECRET, TOKEN)
+        frame = frame.tb_next
     return caught.value
 
 
@@ -219,6 +230,7 @@ def test_mint_request_and_private_return(monkeypatch, transport):
         assert private not in repr(result)
         assert private not in repr(grants._m2m_cache)
     transport[1].close.assert_called_once()
+    assert transport[1].debuglevel == 0
 
 
 @pytest.mark.parametrize("patch", [
@@ -322,7 +334,8 @@ def test_secret_rotation_invalidates_cache(monkeypatch, transport):
     grants.resolve_grant("g1", "tenant-a")
     assert grants._m2m_cache.credential_digest == hashlib.sha256(
         (CLIENT_ID + "\0" + SECRET).encode()).hexdigest()
-    assert set(vars(grants._m2m_cache)) == {"credential_digest", "audience", "token", "expires_at"}
+    assert set(vars(grants._m2m_cache)) == {
+        "credential_digest", "audience", "token", "expires_at", "refresh_at"}
     grants.resolve_grant("g1", "tenant-a")
     assert transport[0].call_count == 1
     monkeypatch.setenv("LEAF_CLOUD_M2M_CLIENT_SECRET", "rotated-secret")
@@ -335,17 +348,52 @@ def test_secret_rotation_invalidates_cache(monkeypatch, transport):
     assert transport[0].call_count == 2
 
 
-def test_concurrent_callers_mint_once(transport):
-    start = threading.Barrier(8)
+@pytest.mark.parametrize("success", [True, False], ids=["success", "failure"])
+def test_concurrent_callers_mint_once(monkeypatch, transport, success):
+    start = threading.Barrier(10)
+    all_waiting = threading.Event()
+    release = threading.Event()
+    count_lock = threading.Lock()
+    waiting = [0]
+    operation_type = grants._M2MOperation
+
+    class CountedEvent(threading.Event):
+        def wait(self, timeout=None):
+            with count_lock:
+                waiting[0] += 1
+                if waiting[0] == 10:
+                    all_waiting.set()
+            return super().wait(timeout)
+
+    def operation(deadline):
+        return operation_type(deadline, done=CountedEvent())
+
+    monkeypatch.setattr(grants, "_M2MOperation", operation)
+    transport[1].connect.side_effect = lambda: release.wait(1)
+    transport[2].status = 200 if success else 500
 
     def resolve(_):
         start.wait(timeout=5)
-        return grants.resolve_grant("g1", "tenant-a")
+        if success:
+            return grants.resolve_grant("g1", "tenant-a")
+        return refused()
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(resolve, range(8)))
-    assert all(result.access_token == TOKEN for result in results)
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = [pool.submit(resolve, i) for i in range(10)]
+        try:
+            assert all_waiting.wait(1)
+        finally:
+            release.set()
+        results = [future.result(timeout=1) for future in futures]
+    if success:
+        assert all(result.access_token == TOKEN for result in results)
+    else:
+        assert all(result.status == 401 for result in results)
     assert transport[0].call_count == 1
+    if not success:
+        transport[2].status = 200
+        assert grants.resolve_grant("g1", "tenant-a").access_token == TOKEN
+        assert transport[0].call_count == 2
 
 
 def test_total_timeout_budget(monkeypatch, transport):
@@ -396,3 +444,120 @@ def test_deadline_before_request_fails_closed(monkeypatch, transport):
     refused()
     transport[1].request.assert_not_called()
     assert grants._m2m_cache is None
+
+
+@pytest.mark.parametrize("stage", ["connect", "request", "getresponse", "read1", "close"])
+def test_blocked_worker_bounds_callers(monkeypatch, transport, stage):
+    monkeypatch.setattr(grants, "_M2M_CALL_TIMEOUT", 0.04)
+    entered = threading.Event()
+    release = threading.Event()
+    target = transport[2] if stage == "read1" else transport[1]
+    original = getattr(target, stage).side_effect
+
+    def block(*args, **kwargs):
+        entered.set()
+        release.wait()
+        if original is not None:
+            return original(*args, **kwargs)
+        if stage == "getresponse":
+            return transport[2]
+
+    getattr(target, stage).side_effect = block
+    started = time.monotonic()
+    try:
+        refused()
+        assert entered.is_set()
+        assert time.monotonic() - started < 0.54
+        wait = Mock(wraps=grants._m2m_inflight.done.wait)
+        monkeypatch.setattr(grants._m2m_inflight.done, "wait", wait)
+        started = time.monotonic()
+        refused()
+        assert time.monotonic() - started < 0.5
+        wait.assert_not_called()
+        assert transport[0].call_count == 1
+        assert grants._m2m_worker.is_alive()
+        assert grants._m2m_worker.daemon
+    finally:
+        release.set()
+        grants._m2m_worker.join(timeout=1)
+    assert not grants._m2m_worker.is_alive()
+
+
+def test_caller_deadline_includes_state_lock(monkeypatch, transport):
+    monkeypatch.setattr(grants, "_M2M_CALL_TIMEOUT", 0.03)
+    grants._m2m_lock.acquire()
+    started = time.monotonic()
+    try:
+        refused()
+        assert time.monotonic() - started < 0.53
+    finally:
+        grants._m2m_lock.release()
+    transport[0].assert_not_called()
+
+
+def test_short_lived_token_reuses_half_its_life(monkeypatch, transport):
+    now = [1000.0]
+    monkeypatch.setattr(grants.time, "monotonic", lambda: now[0])
+    payload = {"access_token": TOKEN, "token_type": "Bearer", "expires_in": 120}
+    transport[3](payload)
+    assert grants.resolve_grant("g1", "tenant-a").access_token == TOKEN
+    assert grants._m2m_cache.refresh_at == 1060.0
+    now[0] = 1059.0
+    assert grants.resolve_grant("g1", "tenant-a").access_token == TOKEN
+    assert transport[0].call_count == 1
+    now[0] = 1061.0
+    transport[3](payload)
+    assert grants.resolve_grant("g1", "tenant-a").access_token == TOKEN
+    assert transport[0].call_count == 2
+
+
+@pytest.mark.parametrize("rotate", [False, True], ids=["unchanged", "rotated"])
+def test_late_worker_publishes_only_current_credentials(monkeypatch, transport, rotate):
+    monkeypatch.setattr(grants, "_M2M_CALL_TIMEOUT", 0.04)
+    release = threading.Event()
+    transport[1].connect.side_effect = lambda: release.wait()
+    try:
+        refused()
+        if rotate:
+            monkeypatch.setenv("LEAF_CLOUD_M2M_CLIENT_SECRET", "new-secret")
+    finally:
+        release.set()
+        grants._m2m_worker.join(timeout=1)
+    assert not grants._m2m_worker.is_alive()
+    assert grants._m2m_inflight is None
+    if rotate:
+        assert grants._m2m_cache is None
+        transport[3]({"access_token": "new-token", "token_type": "Bearer", "expires_in": 3600})
+        assert grants.resolve_grant("g1", "tenant-a").access_token == "new-token"
+        assert transport[0].call_count == 2
+    else:
+        assert grants._m2m_cache.token == TOKEN
+        assert grants.resolve_grant("g1", "tenant-a").access_token == TOKEN
+        assert transport[0].call_count == 1
+
+
+@pytest.mark.parametrize("body", [
+    ('{"access_token":"' + TOKEN + '","secret":"' + SECRET + '"').encode(),
+    (SECRET + TOKEN).encode() + b"\xff",
+], ids=["json-doc", "unicode-object"])
+def test_sensitive_parser_errors_stay_on_worker(transport, body):
+    transport[3](body)
+    refused()
+    assert grants._m2m_cache is None
+
+
+def test_credentials_are_read_only_on_worker_including_cache_hits(monkeypatch, transport):
+    caller = threading.get_ident()
+    readers = []
+
+    class Environment(dict):
+        def get(self, name, default=None):
+            if name in ("LEAF_CLOUD_M2M_CLIENT_ID", "LEAF_CLOUD_M2M_CLIENT_SECRET"):
+                readers.append(threading.get_ident())
+            return super().get(name, default)
+
+    monkeypatch.setattr(grants.os, "environ", Environment(grants.os.environ))
+    assert grants.resolve_grant("g1", "tenant-a").access_token == TOKEN
+    assert grants.resolve_grant("g1", "tenant-a").access_token == TOKEN
+    assert readers and all(reader != caller for reader in readers)
+    assert transport[0].call_count == 1
