@@ -1256,6 +1256,7 @@ describe('campaign panel in the project workspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Ask' }))
     await screen.findByText('Question recorded.')
     expect(campaign.ask).toHaveBeenCalledWith({ prompt: 'Which layout?' })
+    expect(screen.getByLabelText('Follow-up question').value).toBe('')
   })
 
   it('disables pending mutations and retains rows during a failed refresh', () => {

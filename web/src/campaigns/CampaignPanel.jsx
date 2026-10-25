@@ -1,15 +1,35 @@
-import { useEffect, useId, useImperativeHandle, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useId, useImperativeHandle, useRef, useState } from 'react'
 import useCampaigns, { releaseSource } from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
 import { useLoadingPhase } from '../lib/loadingTiming.js'
+import { humanizeError } from '../errorHumanize.js'
+import { authTenantScope } from '../drawing/drawingIdentity.js'
+import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import './campaigns.css'
 
 const conflictMessage = 'This question already has a different recorded answer. Reload to see it.'
-const messageOf = error => error?.code === 'answer_conflict' ? conflictMessage : error?.message || String(error)
+const messageOf = error => error?.code === 'answer_conflict' ? conflictMessage : humanizeError(error)
 const statusWords = { accepted: 'Accepted, not running', running: 'Running', succeeded: 'Succeeded', failed: 'Failed', cancelled: 'Cancelled' }
 const executionWords = value => ({ reconcile_required: 'Outcome unknown, reconciliation required', claimed: 'In progress', pending: 'Waiting' })[value]
   || String(value || '').replaceAll('_', ' ')
 const nativeRelease = row => row.capability === 'campaign.native-release' || row.capability_link?.capability === 'campaign.native-release'
+
+const DraftContext = createContext(null)
+
+function readCampaignPrincipal() {
+  try { return authTenantScope(localStorage.getItem('leaf.jwt')) } catch { return null }
+}
+
+// Keep typed drafts in this project's panel while sign-in recovery hides its forms.
+function useDraft(key, initial) {
+  const drafts = useContext(DraftContext)
+  const [value, setValue] = useState(() => drafts.current.has(key) ? drafts.current.get(key) : initial)
+  const update = next => {
+    drafts.current.set(key, next)
+    setValue(next)
+  }
+  return [value, update]
+}
 
 // A run-limit refusal (429 quota_exceeded) is a named state: nothing was sent, the
 // user's input stays in place, and only this explicit Try again sends it again.
@@ -65,11 +85,13 @@ function check(value, field, max) {
 
 function SubmitForm({ campaign, projectId, navigationRef, onBusyChange }) {
   const titleInput = useRef(null)
-  const [title, setTitle] = useState('')
-  const [prompt, setPrompt] = useState('')
-  const [mode, setMode] = useState('ordinary')
-  const [profile, setProfile] = useState('web_tool')
-  const [deadline, setDeadline] = useState('')
+  const fileInput = useRef(null)
+  const draftKey = `submit:${campaign.selectedId || 'new'}`
+  const [title, setTitle] = useDraft(`${draftKey}:title`, '')
+  const [prompt, setPrompt] = useDraft(`${draftKey}:prompt`, '')
+  const [mode, setMode] = useDraft(`${draftKey}:mode`, 'ordinary')
+  const [profile, setProfile] = useDraft(`${draftKey}:profile`, 'web_tool')
+  const [deadline, setDeadline] = useDraft(`${draftKey}:deadline`, '')
   const [input, setInput] = useState({ file: null, ready: null, error: null, busy: false })
   const inputLive = useRef(false)
   const inputLock = useRef(false)
@@ -121,11 +143,16 @@ function SubmitForm({ campaign, projectId, navigationRef, onBusyChange }) {
     </select></label>
     {mode === 'finish' && <DeliveryProfile value={profile} onChange={setProfile} disabled={busy} />}
     {mode === 'finish' && <div>
-      <label>Input file (optional)<input type="file" accept=".json,.dxf,.csv,.txt,.md" disabled={busy}
+      <label>Input file (optional)<input ref={fileInput} type="file" accept=".json,.dxf,.csv,.txt,.md" disabled={busy}
         onChange={event => setInput({ file: event.target.files?.[0] || null, ready: null, error: null, busy: false })} /></label>
       <p className="dim">JSON, ASCII DXF, CSV, TXT or MD. UTF-8 text, from 1 byte through 1 MiB.</p>
       <button type="button" className="chip-act" disabled={busy || !input.file || !!input.ready}
         aria-busy={input.busy} onClick={addInput}>Add to project</button>
+      {input.file && !input.ready && <button type="button" className="chip-act" disabled={busy} onClick={() => {
+        setInput({ file: null, ready: null, error: null, busy: false })
+        if (fileInput.current) fileInput.current.value = ''
+      }}>Remove selected file</button>}
+      {input.ready && <p className="dim">This file was added to the project and stays there.</p>}
       <p role="status">{input.busy ? 'Adding input to project…' : input.ready ? `${input.ready.name} added to this project. Ready for this release.`
         : input.file ? 'Add the selected input to this project before requesting a release.' : 'Existing project material will be used if no file is selected.'}</p>
       <Alert error={input.error} />
@@ -304,7 +331,8 @@ function RevisionForm({ campaign, release, action, busy }) {
 
 function CompletionPanel({ campaign, artifactUrlApi }) {
   const action = useAction()
-  const [profile, setProfile] = useState('web_tool')
+  const [profile, setProfile] = useDraft(`release:${campaign.selectedId}:profile`, 'web_tool')
+  const [workflow, setWorkflow] = useDraft(`release:${campaign.selectedId}:workflow`, campaign.selected?.prompt || '')
   const completion = campaign.completion !== undefined ? campaign.completion
     : campaign.execution?.completion ?? campaign.selected?.completion
   const release = completion?.release
@@ -313,9 +341,15 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
     <h3>Finish this project</h3>
     <p>Output unavailable. Define a bounded release for this campaign using the controls below. This does not close the whole project.</p>
     <DeliveryProfile value={profile} onChange={setProfile} disabled={busy} />
+    <label>Release workflow<textarea value={workflow} maxLength={2000} disabled={busy}
+      aria-invalid={action.error?.invalidField === 'workflow'} onChange={event => setWorkflow(event.target.value)} /></label>
+    <p className="dim">Describe what this release should do in 1 to 2000 characters. Shorten longer campaign goals before requesting a release.</p>
     <button type="button" className="btn primary" disabled={busy} aria-busy={busy}
-      onClick={() => action.run(() => campaign.createRelease({ delivery_profile: profile, intended_user: 'Project owner',
-        workflow: campaign.selected.prompt, artifact_refs: [] }), 'Release requested.')}>
+      onClick={() => action.run(() => {
+        check(workflow, 'workflow', 2000)
+        return campaign.createRelease({ delivery_profile: profile, intended_user: 'Project owner',
+          workflow, artifact_refs: [] })
+      }, 'Release requested.')}>
       Finish this project
     </button>
     <Alert error={action.error} onReload={campaign.refetch} onRetry={action.retry} />
@@ -408,17 +442,24 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
 }
 
 function AskForm({ campaign }) {
-  const [prompt, setPrompt] = useState('')
+  const [prompt, setPrompt] = useDraft(`question:${campaign.selectedId}`, '')
+  const draftRevision = useRef(0)
   const action = useAction()
   const busy = action.busy || !!campaign.pending.ask
   return <form noValidate onSubmit={event => {
     event.preventDefault()
-    action.run(() => {
+    const revision = draftRevision.current
+    action.run(async () => {
       check(prompt, 'question', 4096)
-      return campaign.ask({ prompt })
+      const result = await campaign.ask({ prompt })
+      if (result != null && draftRevision.current === revision) setPrompt('')
+      return result
     }, 'Question recorded.')
   }}>
-    <label>Follow-up question<textarea maxLength={4096} value={prompt} onChange={event => setPrompt(event.target.value)} /></label>
+    <label>Follow-up question<textarea maxLength={4096} value={prompt} onChange={event => {
+      draftRevision.current += 1
+      setPrompt(event.target.value)
+    }} /></label>
     <button type="submit" className="chip-act" disabled={busy} aria-busy={busy}>Ask</button>
     <Alert error={action.error} onReload={campaign.refetch} />
     <span role="status">{action.outcome}</span>
@@ -426,7 +467,7 @@ function AskForm({ campaign }) {
 }
 
 function AnswerForm({ question, campaign }) {
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useDraft(`answer:${question.question_id}`, '')
   const action = useAction()
   const busy = action.busy || !!campaign.pending[`answer:${question.question_id}`]
   return <form noValidate onSubmit={event => {
@@ -639,10 +680,44 @@ function SignedInPanel({ projectId, projectName, artifactUrlApi, authorityProvid
   </>
 }
 
+function ProjectCampaignPanel({ projectId, projectName, signedIn, artifactUrlApi, authorityProvider }) {
+  const [storedPartition, setPartition] = useState(() => ({ principal: readCampaignPrincipal(), drafts: { current: new Map() }, generation: 0 }))
+  const principal = readCampaignPrincipal()
+  let partition = storedPartition
+  // A missing token can mean recovery. Only a new principal discards that draft.
+  if (principal !== null && principal !== partition.principal) {
+    partition = { principal, drafts: { current: new Map() }, generation: partition.generation + 1 }
+    setPartition(partition)
+  }
+  useEffect(() => {
+    const refresh = () => {
+      const next = readCampaignPrincipal()
+      if (next !== null) setPartition(previous => next === previous.principal ? previous
+        : { principal: next, drafts: { current: new Map() }, generation: previous.generation + 1 })
+    }
+    const offStored = subscribeTokenStored(refresh)
+    const offLogout = subscribeBeforeLogout(() => {
+      setPartition(previous => ({ ...previous, drafts: { current: new Map() }, generation: previous.generation + 1 }))
+    })
+    const onStorage = event => {
+      if (event.key === null || event.key === 'leaf.jwt') refresh()
+    }
+    window.addEventListener('storage', onStorage)
+    refresh()
+    return () => {
+      offStored()
+      offLogout()
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [])
+  return <DraftContext.Provider value={partition.drafts}><section className="campaign-panel" aria-label="Campaign">
+    {signedIn ? <SignedInPanel key={`${projectId}:${partition.generation}`} projectId={projectId} projectName={projectName} artifactUrlApi={artifactUrlApi} authorityProvider={authorityProvider} />
+      : <p role="status">Sign in to submit a campaign.</p>}
+  </section></DraftContext.Provider>
+}
+
 export default function CampaignPanel({ projectId, projectName, signedIn, enabled = true, artifactUrlApi = globalThis.URL, authorityProvider }) {
   if (!enabled || !projectId) return null
-  return <section className="campaign-panel" aria-label="Campaign">
-    {signedIn ? <SignedInPanel key={projectId} projectId={projectId} projectName={projectName} artifactUrlApi={artifactUrlApi} authorityProvider={authorityProvider} />
-      : <p role="status">Sign in to submit a campaign.</p>}
-  </section>
+  return <ProjectCampaignPanel key={projectId} projectId={projectId} projectName={projectName} signedIn={signedIn}
+    artifactUrlApi={artifactUrlApi} authorityProvider={authorityProvider} />
 }
