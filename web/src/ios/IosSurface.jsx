@@ -45,6 +45,15 @@ const SHIP_PHASE_REASONS = Object.freeze({
 
 export function ShipStage({ ship, onLaunch }) {
   const { readiness, execution, receipt, phase, error } = ship
+  // IOSGUEST: an idle lane (the controller is off: signed out, the demo, or the flag) has no readiness to read, so say
+  // what unlocks it instead of a ladder of default "missing" rungs.
+  if (phase === 'idle') {
+    return (
+      <div className="ios-ship-stage" data-state="idle">
+        <p role="status">{SHIP_PHASE_REASONS.idle}</p>
+      </div>
+    )
+  }
   const setup = readiness?.setupState
   const launched = Boolean(execution)
   const rungs = [
