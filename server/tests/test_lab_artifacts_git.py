@@ -35,6 +35,8 @@ class Harness:
         self.lose_publish = False
 
     def post(self, tenant, endpoint, body):
+        if endpoint == 'generation':
+            return {'generation': None, 'generation_oid': None, 'head': self.head}
         self.calls.append((tenant, endpoint, body))
         if self.refused:
             raise mirror.MirrorError("lab_repository_refused")

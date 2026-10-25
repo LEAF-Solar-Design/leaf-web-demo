@@ -44,14 +44,46 @@ class StoreMigrating(RuntimeError):
     pass
 
 
-def _committed_write(tenant, operation):
+class GitConflict(Conflict):
+    pass
+
+
+class GitUnavailable(StoreUnavailable):
+    pass
+
+
+def _committed_write(tenant, operation, doc_id=None):
     import lab_artifacts_git as mirror
+    import lab_git_authority as authority
+
+    active = authority.authority_get(tenant)
+    if active is not None and active['mode'] != 'git':
+        raise GitUnavailable('lab_store_migrating')
+    if active is not None and doc_id is not None:
+        mirror.recover_document(tenant, doc_id)
 
     def guarded(sql):
-        mirror.check_frozen(sql, tenant)
-        return operation(sql)
+        active = authority.authority_get_sql(sql, tenant)
+        if active is None:
+            mirror.check_frozen(sql, tenant)
+        elif active['mode'] != 'git':
+            raise GitUnavailable('lab_store_migrating')
+        sql.git_authority = active
+        try:
+            result = operation(sql)
+        except Conflict as error:
+            if active and not isinstance(error, KindFixed):
+                raise GitConflict('lab_artifact_conflict') from None
+            raise
+        if active and 'receipt_id' in result:
+            state = mirror._state(sql, tenant)
+            authority.enqueue_sql(sql, tenant, 'publish', state['local_sha'],
+                {'target_sha': state['local_sha'], 'generation': str(active['generation'])})
+        return result
 
-    result = _run(tenant, guarded, write=True)
+    result = authority._run(tenant, guarded, write=True)
+    if result.get('_git_staged'):
+        return mirror.commit_pending(tenant, result, result['_generation'], author=result['_author'])
     try:
         mirror.after_write(tenant)
     except Exception:
@@ -209,6 +241,10 @@ def _check_head(sql, tenant, doc_id, expected):
 
 
 def _append(sql, tenant, doc_id, data, author, current, parent, kind="graph"):
+    if getattr(sql, 'git_authority', None) is not None:
+        from lab_artifacts_git import stage_write
+
+        return stage_write(sql, tenant, doc_id, data, author, current, parent, kind)
     count = sql.execute("SELECT COUNT(*) AS n FROM lab_documents WHERE tenant_id=?", (tenant,)).fetchone()["n"]
     revisions = sql.execute("SELECT COUNT(*) AS n FROM lab_revisions WHERE tenant_id=?", (tenant,)).fetchone()["n"]
     if (current is None and count >= MAX_TENANT_DOCS) or revisions >= MAX_TENANT_REVISIONS:
@@ -267,7 +303,7 @@ def save(tenant, doc_id, graph, expected_head, author, kind="graph"):
             payload = data if data is not None else validated_data(document_kind)
             return _append(sql, tenant, doc_id, payload, author, current, current, document_kind)
 
-        return _committed_write(tenant, operation)
+        return _committed_write(tenant, operation, doc_id)
     except Conflict:
         _event("lab_save_conflict", tenant, doc_id, expected_head, "stale_expected_head")
         raise
@@ -330,10 +366,10 @@ def restore(tenant, doc_id, revision, expected_head, author):
             raise NotFound("lab_document_not_found")
         _check_head(sql, tenant, doc_id, expected_head)
         source = _revision(sql, tenant, doc_id, revision)
-        return _append(sql, tenant, doc_id, source["canonical_text"].encode("utf-8"), author, current, revision)
+        return _append(sql, tenant, doc_id, source["canonical_text"].encode("utf-8"), author, current, revision, source['kind'])
 
     try:
-        return _committed_write(tenant, operation)
+        return _committed_write(tenant, operation, doc_id)
     except Conflict:
         _event("lab_save_conflict", tenant, doc_id, expected_head, "stale_expected_head")
         raise
@@ -366,7 +402,7 @@ def publish(tenant, doc_id, expected_head, author):
         return receipt
 
     try:
-        return _committed_write(tenant, operation)
+        return _committed_write(tenant, operation, doc_id)
     except Conflict:
         _event("lab_publish_cas_fail", tenant, doc_id, expected_head, "stale_expected_head")
         raise

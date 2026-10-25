@@ -373,6 +373,7 @@
     "server-lab-widgets",
     "server-lab-artifacts-git",
     "server-lab-git-authority",
+    "server-lab-git-write",
     "server-lab-run-store",
     "server-lab-runs",
     "server-lab-stream",

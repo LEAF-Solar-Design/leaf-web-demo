@@ -36,6 +36,13 @@ def _call(function, *args, _document_errors=False, **kwargs):
         raise HTTPException(404, detail="lab_document_not_found") from None
     except ledger.KindFixed:
         raise HTTPException(409, detail="lab_document_kind_fixed") from None
+    except ledger.GitConflict:
+        raise HTTPException(409, detail="lab_artifact_conflict") from None
+    except ledger.GitUnavailable as error:
+        code = str(error)
+        if code not in {'lab_store_migrating', 'lab_harness_capability_missing', 'lab_commit_pending'}:
+            code = 'lab_store_unavailable'
+        raise HTTPException(503, detail=code) from None
     except ledger.Conflict:
         raise HTTPException(409, detail="stale_expected_head") from None
     except ledger.StoreMigrating:

@@ -134,6 +134,27 @@ def test_outbox_identity_sequence_claim_and_retry(tenant):
     assert store.claim_due(tenant) == []
 
 
+def test_newest_publish_supersedes_older_due_rows_even_when_deferred(tenant):
+    first = store.enqueue(tenant, 'publish', 'one', {'target_sha': 'a' * 40})
+    notices = [store.enqueue(tenant, 'notify', identity, {'event': 'lab_commit_unknown'})
+               for identity in ('notice-one', 'notice-two')]
+    newest = store.enqueue(tenant, 'publish', 'two', {'target_sha': 'b' * 40})
+    other = tenant + '-other'
+    foreign = store.enqueue(other, 'publish', 'foreign', {})
+    assert store.defer(tenant, newest['outbox_id'], 60)
+    assert store.claim_due(tenant, 0) == []
+    assert store._run(tenant, lambda sql: store._get(sql, 'lab_git_outbox', tenant,
+        'outbox_id', first['outbox_id']))['done_at'] is None
+    claimed = store.claim_due(tenant)
+    assert [row['outbox_id'] for row in claimed] == [row['outbox_id'] for row in notices]
+    older = store._run(tenant, lambda sql: store._get(sql, 'lab_git_outbox', tenant,
+        'outbox_id', first['outbox_id']))
+    assert older['done_at'] is not None and older['attempts'] == 0
+    assert older['payload'] == {'target_sha': 'a' * 40, 'superseded_by': newest['sequence']}
+    assert store.claim_due(tenant) == []
+    assert [row['outbox_id'] for row in store.claim_due(other)] == [foreign['outbox_id']]
+
+
 def test_transition_uniqueness_cas_and_takeover(tenant):
     row = transition(tenant)
     tid = row['transition_id']
