@@ -55,10 +55,12 @@ import type { StoreReadiness } from "./storeReadiness.js";
 import { GrantPoolUnavailableError, GrantRequiredError } from "./ports/impl/oauthGrantProvider.js";
 import { GitRefConflictError } from "./ports/impl/tenantChangeRepo.js";
 import { ForgePublicationError } from "./vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
-import type { LabDocumentPort } from "./vendor/mushy-author/ports/labDocumentPort.js";
+import { LAB_GENERATION_CAPABILITY, type LabDocumentPort } from "./vendor/mushy-author/ports/labDocumentPort.js";
 import { handleLabCommit, LAB_COMMIT_MAX_BODY_BYTES } from "./lab/labCommit.js";
 import { handleLabInspect, LAB_INSPECT_MAX_BODY_BYTES } from "./lab/labInspect.js";
 import { handleLabPublish, LAB_PUBLISH_MAX_BODY_BYTES } from "./lab/labPublish.js";
+import { handleLabGeneration, handleLabFence, LAB_GENERATION_MAX_BODY_BYTES, LAB_FENCE_MAX_BODY_BYTES } from "./lab/labGeneration.js";
+import { handleLabOps, handleLabChanges, LAB_OPS_MAX_BODY_BYTES, LAB_CHANGES_MAX_BODY_BYTES } from "./lab/labHistory.js";
 import { classifyRoute } from "./routing.js";
 import {
   DEFAULT_TENANT,
@@ -841,6 +843,10 @@ export function createHarness(ports: HarnessPorts, opts?: {
     const requestUrl = new URL(req.url ?? "/", "http://leaf-harness.internal");
     const path = requestUrl.pathname;
     const method = req.method ?? "GET";
+    if (path.startsWith("/lab/")) {
+      res.setHeader("x-leaf-lab-capability", LAB_GENERATION_CAPABILITY);
+      res.setHeader("cache-control", "no-store");
+    }
     try {
       if (method === "GET" && path === "/health") {
         return send(res, 200, { ok: true, service: "leaf-tenant-author-harness" });
@@ -943,6 +949,31 @@ export function createHarness(ports: HarnessPorts, opts?: {
       const auth = explicitAuth ?? resolveHarnessAuth();
       const denial = harnessAuthDenial(req, auth);
       if (denial) return send(res, 401, denial);
+
+      const labRoutes: Record<string, { operation: string; cap: number; handle: typeof handleLabGeneration | typeof handleLabFence | typeof handleLabOps | typeof handleLabChanges }> = {
+        "/lab/generation": { operation: "generation", cap: LAB_GENERATION_MAX_BODY_BYTES, handle: handleLabGeneration },
+        "/lab/fence": { operation: "fence", cap: LAB_FENCE_MAX_BODY_BYTES, handle: handleLabFence },
+        "/lab/ops": { operation: "ops", cap: LAB_OPS_MAX_BODY_BYTES, handle: handleLabOps },
+        "/lab/changes": { operation: "changes", cap: LAB_CHANGES_MAX_BODY_BYTES, handle: handleLabChanges },
+      };
+      const labRoute = Object.hasOwn(labRoutes, path) ? labRoutes[path] : undefined;
+      if (method === "POST" && labRoute) {
+        const { operation, cap, handle } = labRoute;
+        if (!opts?.labDocuments) {
+          return send(res, 501, { error: { code: `lab_${operation}_unavailable`, message: `Lab ${operation} is unavailable` } });
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req, cap, true, false, true);
+        } catch (error) {
+          if (error instanceof AuthorLoopError && error.status === 413) {
+            return send(res, 413, { error: { code: "lab_body_too_large" } });
+          }
+          return send(res, 422, { error: { code: `lab_${operation}_invalid`, pointer: "", message: "Invalid JSON body" } });
+        }
+        const result = await handle(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
+        return send(res, result.status, result.body);
+      }
 
       if (method === "POST" && path === "/lab/inspect") {
         res.setHeader("cache-control", "no-store");

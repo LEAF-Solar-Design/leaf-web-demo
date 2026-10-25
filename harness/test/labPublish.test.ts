@@ -11,7 +11,7 @@ import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
 import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
-import { LAB_DOCUMENT_REF, TenantDocumentRepo, type LabDocumentPort, type TenantDocumentRepoOptions } from "../src/vendor/mushy-author/ports/labDocumentPort.js";
+import { GitGenerationConflictError, LAB_DOCUMENT_REF, TenantDocumentRepo, type LabDocumentPort, type TenantDocumentRepoOptions } from "../src/vendor/mushy-author/ports/labDocumentPort.js";
 import { ForgePublicationError, ForgeRemoteAuthority } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 import { HARNESS_IDENTITY } from "../src/vendor/mushy-author/registry/registerTool.js";
 
@@ -93,6 +93,7 @@ describe("Lab publish", () => {
         ...(secret === null ? {} : { "x-harness-secret": secret }),
       }, body: JSON.stringify(body),
     });
+    expect(response.headers.get("x-leaf-lab-capability")).toBe("lab-generation-v1");
     return { status: response.status, body: await response.json(), cacheControl: response.headers.get("cache-control") };
   }
 
@@ -135,6 +136,19 @@ describe("Lab publish", () => {
     expect(retried.body).toEqual({ ref: LAB_DOCUMENT_REF, published: second.commit });
   });
 
+  it("publishes a pinned ancestor with the active generation without advancing to local head", async () => {
+    const { port, cache, remote } = fixture();
+    const save = { tenantId: TENANT, documents: [{ path: "lab/graphs/one.json", content: "{}" }], message: "First" };
+    const first = await port.commit({ ...save, expectedSha: null });
+    const second = await port.commit({ ...save, expectedSha: first.commit, message: "Second" });
+    await port.fence(TENANT, { transitionId: "a".repeat(32), expectedGeneration: null, newGeneration: "1", expectedHead: second.commit });
+    const result = await post(listen(port), { expected_remote_sha: null, generation: "1", target_sha: first.commit });
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ ref: LAB_DOCUMENT_REF, published: first.commit });
+    expect(git(remote, ["rev-parse", LAB_DOCUMENT_REF])).toBe(first.commit);
+    expect(git(cache, ["rev-parse", LAB_DOCUMENT_REF])).toBe(second.commit);
+  });
+
   it("requires authentication, a configured port and a valid tenant header", async () => {
     const port = fakePort();
     const url = listen(port);
@@ -147,6 +161,38 @@ describe("Lab publish", () => {
       const result = await post(url, validBody(), tenant);
       expect(result.status).toBe(400);
       expect((result.body as { error: { code: string } }).error.code).toBe("lab_tenant_required");
+    }
+    expect(port.publishRef).not.toHaveBeenCalled();
+  });
+
+  it("passes optional generation and pinned target independently and maps generation conflict", async () => {
+    const port = fakePort();
+    const url = listen(port);
+    for (const fields of [{ generation: "1" }, { target_sha: SHA }, { generation: "1234567890123456789", target_sha: SHA }]) {
+      expect((await post(url, { ...validBody(), ...fields })).status).toBe(200);
+      expect(port.publishRef).toHaveBeenLastCalledWith(TENANT, null, {
+        ...("generation" in fields ? { generation: fields.generation } : {}),
+        ...("target_sha" in fields ? { targetSha: fields.target_sha } : {}),
+      });
+    }
+    vi.mocked(port.publishRef).mockRejectedValueOnce(new GitGenerationConflictError("private detail"));
+    const result = await post(url, { ...validBody(), generation: "2", target_sha: SHA });
+    expect(result.status).toBe(409);
+    expect(result.body).toEqual({ error: { code: "lab_generation_conflict" } });
+  });
+
+  it("validates generation and target_sha grammar with pointers", async () => {
+    const port = fakePort();
+    const url = listen(port);
+    for (const [field, values] of [
+      ["generation", [null, 1, "", "0", "01", "-1", "1.0", "1\n", "1".repeat(20)]],
+      ["target_sha", [null, 1, "a".repeat(39), "A".repeat(40), SHA + "\n"]],
+    ] as const) {
+      for (const value of values) {
+        const result = await post(url, { ...validBody(), [field]: value });
+        expect(result.status).toBe(422);
+        expect(result.body).toMatchObject({ error: { code: "lab_publish_invalid", pointer: `/${field}` } });
+      }
     }
     expect(port.publishRef).not.toHaveBeenCalled();
   });

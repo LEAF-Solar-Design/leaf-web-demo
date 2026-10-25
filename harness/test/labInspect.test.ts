@@ -93,6 +93,7 @@ describe("Lab inspect", () => {
         ...(secret === null ? {} : { "x-harness-secret": secret }),
       }, body: JSON.stringify(body),
     });
+    expect(response.headers.get("x-leaf-lab-capability")).toBe("lab-generation-v1");
     return { status: response.status, body: await response.json(), cacheControl: response.headers.get("cache-control") };
   }
 
