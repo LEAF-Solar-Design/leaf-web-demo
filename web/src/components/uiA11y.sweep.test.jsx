@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { useState } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import JobInbox, { requestNoticeVersionView, takeNoticeVersionView } from './JobInbox.jsx'
@@ -138,6 +139,25 @@ it('S1-199 focuses the shortcut switch on open and restores the opener on Escape
   fireEvent.keyDown(screen.getByRole('switch'), { key: 'Escape' })
   expect(opener).toHaveFocus()
   expect(onClose).toHaveBeenCalledOnce()
+})
+
+it('S1-199 restores the opener after clicking nonfocusable content outside the sheet', () => {
+  function Harness() {
+    const [open, setOpen] = useState(false)
+    return <>
+      <button onClick={() => setOpen(true)}>Help</button>
+      <p>Drawing workspace</p>
+      <ShortcutSheet open={open} onClose={() => setOpen(false)} />
+    </>
+  }
+  render(<Harness />)
+  const opener = screen.getByRole('button', { name: 'Help' })
+  opener.focus()
+  fireEvent.click(opener)
+  expect(screen.getByRole('switch')).toHaveFocus()
+  fireEvent.mouseDown(screen.getByText('Drawing workspace'))
+  expect(screen.queryByRole('dialog', { name: 'Keyboard shortcuts' })).toBeNull()
+  expect(opener).toHaveFocus()
 })
 
 it('S1-201 offers a live projects retry without demo reassurance', () => {

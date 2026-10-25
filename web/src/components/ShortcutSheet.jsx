@@ -41,7 +41,7 @@ export default function ShortcutSheet({ open, onClose }) {
   useEscapeOwner('shortcuts', open, close, { layer: 'sheet', scope: rootRef })
   useEffect(() => {
     if (!open) return undefined
-    const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) onClose?.() }
+    const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) close() }
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open, onClose])
