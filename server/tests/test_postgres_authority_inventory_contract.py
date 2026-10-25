@@ -24,7 +24,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 88)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 89)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "LEAF_LAB_RUN_STORE": "sqlite",
     "LEAF_LAB_STORE": "sqlite",
@@ -105,7 +105,7 @@ REQUIRED_AUTHORITY_FIELDS = {
     "current_selection",
 }
 REQUIRED_RUNTIME_TABLES_BY_SELECTOR = {
-    "LEAF_LAB_RUN_STORE": {"lab_runs", "lab_run_events", "lab_worker_status", "lab_worker_control"},
+    "LEAF_LAB_RUN_STORE": {"lab_runs", "lab_run_events", "lab_worker_status", "lab_worker_control", "lab_stream_leases"},
     "LEAF_LAB_STORE": {"lab_documents", "lab_blobs", "lab_revisions", "lab_publish_receipts", "lab_git_tenants", "lab_git_mirror"},
     "LEAF_DEMO_LIVE_ENABLED": {"demo_sessions", "demo_mint_counters", "identity_bindings",
                                "orgs", "projects", "project_member_bindings"},

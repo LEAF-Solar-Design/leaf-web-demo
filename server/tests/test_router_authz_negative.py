@@ -18,7 +18,7 @@ import deps  # noqa: E402
 import lab_artifacts as ledger  # noqa: E402
 import lab_run_store as run_store  # noqa: E402
 import tenancy  # noqa: E402
-from routers import deployment_identity, lab_artifacts, lab_router, lab_runs, lab_widgets  # noqa: E402
+from routers import deployment_identity, lab_artifacts, lab_router, lab_runs, lab_stream, lab_widgets  # noqa: E402
 from route_flatten import iter_leaf_routes  # noqa: E402
 from test_auth import _ENV, bearer, mint  # noqa: E402
 
@@ -112,6 +112,9 @@ def owner(client, tmp_path):
 
 def test_route_inventory_is_complete():
     # Pin the surface so adding a route requires adding its negative cases.
+    assert {(method, path)
+            for path, route in iter_leaf_routes(lab_stream.router.routes)
+            for method in route.methods} == {("GET", "/api/lab/stream/runs")}
     assert {(method, path)
             for path, route in iter_leaf_routes(deployment_identity.router.routes)
             for method in route.methods} == {("GET", "/api/deployment-identity")}
@@ -222,6 +225,33 @@ def test_runs_foreign_tenant_is_not_found(client, owner, method, suffix, body):
     assert run_store.get("tenant-a", "private-run") == row
     db, before = owner
     assert _owner_snapshot(db) == before
+
+
+@pytest.mark.parametrize("mode,status", [
+    ("rail-off", 404), ("auth-off", 503), ("anonymous", 401), ("no-build", 403),
+])
+def test_stream_admission_precedes_storage(client, monkeypatch, mode, status):
+    if mode == "rail-off":
+        monkeypatch.setenv("LEAF_LAB_SURFACE_ENABLED", "0")
+    elif mode == "auth-off":
+        monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    elif mode == "no-build":
+        monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                            lambda subject: ("tenant-b", "restricted"))
+    def forbidden(*args, **kwargs):
+        pytest.fail("closed stream admission reached storage")
+    monkeypatch.setattr(run_store, "_run", forbidden)
+    response = client.get("/api/lab/stream/runs?runs=private-run",
+                          headers={} if mode == "anonymous" else _h("tenant-b"))
+    assert response.status_code == status
+
+
+def test_stream_foreign_tenant_is_not_found(client, owner):
+    run_store.create("tenant-a", DOC, "private-run", 2, "a" * 64, "lab-ops.v1",
+                     "b" * 64, "lab-worker.v1", "abc1234")
+    response = client.get("/api/lab/stream/runs?runs=private-run", headers=_h("tenant-b"))
+    assert response.status_code == 404
+    assert MARKER not in response.text
 
 
 def test_deployment_identity_auth_off_is_public_and_tenant_independent(client, monkeypatch):

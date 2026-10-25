@@ -30,6 +30,7 @@ LAB_PATHS = [
     "/api/lab/runs/{run_id}/cancel",
     "/api/lab/runs/worker/pause",
     "/api/lab/runs/worker/resume",
+    "/api/lab/stream/runs",
 ]
 
 
@@ -237,11 +238,11 @@ def test_pinned_routers_match_the_included_set():
     app.include_router(lab_router.router)
     routes = [route for path, route in iter_leaf_routes(app.router.routes)
               if isinstance(route, APIRoute) and path.startswith("/api/lab")]
-    assert lab_router.PINNED_ROUTERS == ("lab_surface", "lab_artifacts", "lab_widgets", "lab_runs")
+    assert lab_router.PINNED_ROUTERS == ("lab_surface", "lab_artifacts", "lab_widgets", "lab_runs", "lab_stream")
     assert {route.endpoint.__module__.rsplit(".", 1)[-1]
             for route in routes} == set(lab_router.PINNED_ROUTERS)
     assert {tag for route in routes for tag in route.tags} == {
-        "lab_surface", "lab_artifacts", "lab_widgets", "lab_runs"}
+        "lab_surface", "lab_artifacts", "lab_widgets", "lab_runs", "lab_stream"}
     assert [route.path for route in routes] == LAB_PATHS
 
 

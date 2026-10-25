@@ -239,9 +239,9 @@ jobs:
           LEAF_LAB_RUN_STORE: postgres_required
         run: |
           test -n "${DATABASE_URL:-}"
-          # The suite applies 0085 and proves lab_worker_status and lab_worker_control
+          # The suites apply through 0088 and prove stream leases and worker control
           # alongside lab_runs and lab_run_events under the required selector.
-          if ! out=$(python -m pytest -q -rs tests/test_lab_run_store.py 2>&1); then
+          if ! out=$(python -m pytest -q -rs tests/test_lab_run_store.py tests/test_lab_stream.py 2>&1); then
             printf '%s\n' "$out"
             exit 1
           fi
@@ -256,7 +256,7 @@ jobs:
           db = platform_link.platform_db()
           db.assert_schema_current()
           def proof(conn):
-              for table in ("lab_runs", "lab_run_events", "lab_worker_status", "lab_worker_control"):
+              for table in ("lab_runs", "lab_run_events", "lab_worker_status", "lab_worker_control", "lab_stream_leases"):
                   conn.execute("SELECT * FROM " + table + " LIMIT 0")
               conn.execute("SELECT kind FROM lab_documents LIMIT 0")
               conn.execute("SELECT mode,frozen,remote_sha,local_sha,receipt,notified FROM lab_git_tenants LIMIT 0")

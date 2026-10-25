@@ -1371,7 +1371,7 @@ def test_lab_run_store_gate_registration():
     g = _load_runner()
     suite = next(s for s in g.build_suites() if s.id == "server-lab-run-store")
     assert suite.argv == g._py_pytest("tests/test_lab_run_store.py")
-    assert suite.kind == "pytest" and suite.expected == 25
+    assert suite.kind == "pytest" and suite.expected == 27
     assert suite.uses_database and not suite.db_gated
     assert suite.allowed_skip_reasons == ()
     assert suite.database_skip_reasons == (r"platform DB unreachable: .+",)

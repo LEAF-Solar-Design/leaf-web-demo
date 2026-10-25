@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS lab_run_events (
  FOREIGN KEY (tenant_id,run_id) REFERENCES lab_runs (tenant_id,run_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS lab_run_events_created_idx ON lab_run_events (created_at);
+CREATE TABLE IF NOT EXISTS lab_stream_leases (
+ principal TEXT NOT NULL, stream_id TEXT NOT NULL, tenant_id TEXT NOT NULL,
+ expires_at TEXT NOT NULL, PRIMARY KEY (principal, stream_id)
+);
 CREATE TABLE IF NOT EXISTS lab_worker_status (
  worker_id TEXT PRIMARY KEY, build_revision TEXT NOT NULL,
  color TEXT NOT NULL CHECK (color IN ('active','idle')), heartbeat_at TEXT NOT NULL,
@@ -138,6 +142,52 @@ def _run(tenant, operation, *, write=False):
 
 def _row(sql, tenant, run_id):
     return sql.execute("SELECT * FROM lab_runs WHERE tenant_id=? AND run_id=?", (tenant, run_id)).fetchone()
+
+
+def acquire_stream(tenant, principal, stream_id, ttl_s, *, limit=4):
+    _ttl(ttl_s)
+    _pin(stream_id)
+    if not isinstance(principal, str) or not principal or len(principal) > 512:
+        raise InvalidGraph("invalid_lab_stream_principal")
+    if type(limit) is not int or not 1 <= limit <= 4:
+        raise InvalidGraph("invalid_lab_stream_limit")
+
+    def operation(sql):
+        # Principals survive tenant moves: serialize across tenants as well.
+        if store_mode() == "postgres":
+            sql.execute("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                        ("lab-stream:" + principal,))
+        now = _now()
+        sql.execute("DELETE FROM lab_stream_leases WHERE principal=? AND expires_at<=?",
+                    (principal, now.isoformat()))
+        count = sql.execute("SELECT COUNT(*) AS count FROM lab_stream_leases WHERE principal=?",
+                            (principal,)).fetchone()["count"]
+        if count >= limit:
+            raise TooLarge("lab_stream_limit")
+        sql.execute("INSERT INTO lab_stream_leases (principal,stream_id,tenant_id,expires_at) VALUES (?,?,?,?)",
+                    (principal, stream_id, tenant, (now + timedelta(seconds=ttl_s)).isoformat()))
+        return True
+
+    return _run(tenant, operation, write=True)
+
+
+def renew_stream(tenant, principal, stream_id, ttl_s):
+    _ttl(ttl_s)
+
+    def operation(sql):
+        now = _now()
+        return sql.execute("UPDATE lab_stream_leases SET expires_at=? WHERE principal=? AND stream_id=? "
+                           "AND tenant_id=? AND expires_at>?",
+                           ((now + timedelta(seconds=ttl_s)).isoformat(), principal, stream_id,
+                            tenant, now.isoformat())).rowcount == 1
+
+    return _run(tenant, operation, write=True)
+
+
+def release_stream(tenant, principal, stream_id):
+    return _run(tenant, lambda sql: sql.execute(
+        "DELETE FROM lab_stream_leases WHERE principal=? AND stream_id=? AND tenant_id=?",
+        (principal, stream_id, tenant)).rowcount == 1, write=True)
 
 
 def create(tenant, doc_id, run_id, graph_revision, graph_sha256, ops_revision,
