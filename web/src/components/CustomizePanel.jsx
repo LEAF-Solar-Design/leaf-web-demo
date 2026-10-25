@@ -123,6 +123,12 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   const [landing, setLanding] = useState(false)
   const [mergeConfirming, setMergeConfirming] = useState(false)
   const [merging, setMerging] = useState(false)
+  // Invalidate pending mutations as soon as selection starts, even before
+  // its read completes or when the user returns to the same commit.
+  const selectionVersion = useRef(0)
+  const recordKey = record ? JSON.stringify([record.change_id, record.commit_sha]) : null
+  const currentRecordKey = useRef(null)
+  currentRecordKey.current = recordKey
 
   useEffect(() => {
     restoreRef.current = document.activeElement
@@ -166,16 +172,18 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
       setErr('A title and at least one edit with a path are required.')
       return
     }
-    setSubmitting(true); setErr(null); setLandConfirming(false)
+    const version = ++selectionVersion.current
+    setSubmitting(true); setErr(null); setLandConfirming(false); setMergeConfirming(false)
     try {
       const body = cleaned.map((e) => (e.delete
         ? { path: e.path, delete: true }
         : { path: e.path, content: e.content }))
       const created = await proposePlatformChange(title.trim(), body)
+      if (version !== selectionVersion.current) return
       setRecord(created)
       setRecent(rememberRecent(tenantRef.current, created))
     } catch (e) {
-      setErr(describeError(e))
+      if (version === selectionVersion.current) setErr(describeError(e))
     } finally {
       setSubmitting(false)
     }
@@ -184,46 +192,56 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   const refresh = useCallback(async (changeId) => {
     const id = changeId || record?.change_id
     if (!id) return
-    setRefreshing(true); setErr(null); setLandConfirming(false)
+    const version = ++selectionVersion.current
+    setRefreshing(true); setErr(null); setLandConfirming(false); setMergeConfirming(false)
     try {
-      setRecord(await getPlatformChange(id))
+      const updated = await getPlatformChange(id)
+      if (version === selectionVersion.current) setRecord(updated)
     } catch (e) {
-      setErr(describeError(e))
+      if (version === selectionVersion.current) setErr(describeError(e))
     } finally {
       setRefreshing(false)
     }
   }, [record])
 
   const land = useCallback(async () => {
-    if (!record?.change_id || !record?.commit_sha) return
+    if (!record?.change_id || !record?.commit_sha || landConfirming !== recordKey || refreshing || submitting || landing) return
+    const version = selectionVersion.current
+    const isCurrent = () => version === selectionVersion.current && currentRecordKey.current === recordKey
     setLanding(true); setErr(null)
     try {
       // The land ack is the EXACT recorded commit — never a re-read of the
       // mutable branch. The server enforces the same equality (409 on drift).
-      setRecord(await landPlatformChange(record.change_id, record.commit_sha))
+      const updated = await landPlatformChange(record.change_id, record.commit_sha)
+      if (!isCurrent()) return
+      setRecord(updated)
       setLandConfirming(false)
     } catch (e) {
-      setErr(describeError(e))
+      if (isCurrent()) setErr(describeError(e))
     } finally {
       setLanding(false)
     }
-  }, [record])
+  }, [record, recordKey, landConfirming, refreshing, submitting, landing])
 
   const merge = useCallback(async () => {
-    if (!record?.change_id || !record?.commit_sha) return
+    if (!record?.change_id || !record?.commit_sha || mergeConfirming !== recordKey || refreshing || submitting || merging) return
+    const version = selectionVersion.current
+    const isCurrent = () => version === selectionVersion.current && currentRecordKey.current === recordKey
     setMerging(true); setErr(null)
     try {
       // The merge ack is the EXACT recorded commit, same discipline as the
       // land ack; the server re-verifies review PASS + open PR + unmoved
       // head, then GitHub's sha-pinned merge refuses moved bytes.
-      setRecord(await mergePlatformChange(record.change_id, record.commit_sha))
+      const updated = await mergePlatformChange(record.change_id, record.commit_sha)
+      if (!isCurrent()) return
+      setRecord(updated)
       setMergeConfirming(false)
     } catch (e) {
-      setErr(describeError(e))
+      if (isCurrent()) setErr(describeError(e))
     } finally {
       setMerging(false)
     }
-  }, [record])
+  }, [record, recordKey, mergeConfirming, refreshing, submitting, merging])
 
   const state = record?.state
   const stateChip = STATE_LABEL[state] || ['', state || '']
@@ -382,7 +400,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
                 {refreshing ? 'Refreshing…' : 'Refresh status'}
               </button>
               {state === 'approved' && (
-                landConfirming ? (
+                landConfirming === recordKey ? (
                   <span className="ops-confirm">
                     <span className="confirm-q">Land commit {String(record.commit_sha || '').slice(0, 12)}?</span>
                     <button className="chip-act" onClick={land} disabled={landing}>
@@ -393,11 +411,11 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
                     </button>
                   </span>
                 ) : (
-                  <button className="chip-act" onClick={() => setLandConfirming(true)}>Land</button>
+                  <button className="chip-act" onClick={() => setLandConfirming(recordKey)} disabled={refreshing || submitting || landing}>Land</button>
                 )
               )}
               {state === 'landed' && record.review?.state === 'passed' && record.review?.pr_state === 'open' && (
-                mergeConfirming ? (
+                mergeConfirming === recordKey ? (
                   <span className="ops-confirm">
                     <span className="confirm-q">Merge commit {String(record.commit_sha || '').slice(0, 12)} into main?</span>
                     <button className="chip-act" onClick={merge} disabled={merging}>
@@ -408,7 +426,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
                     </button>
                   </span>
                 ) : (
-                  <button className="chip-act" onClick={() => setMergeConfirming(true)}>Merge</button>
+                  <button className="chip-act" onClick={() => setMergeConfirming(recordKey)} disabled={refreshing || submitting || merging}>Merge</button>
                 )
               )}
             </div>
