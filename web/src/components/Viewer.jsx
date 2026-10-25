@@ -52,7 +52,9 @@ export function addPickDescriptor(index, handle, descriptor) {
 
 function hitHandle(hit) {
   const ud = hit.object.userData
-  if (hit.object.parent?.visible === false) return null
+  for (let object = hit.object; object; object = object.parent) {
+    if (object.visible === false) return null
+  }
   const handle = ud.kind === 'polyfill' ? ud.triHandles[hit.faceIndex]
     : ud.kind === 'blocklines' ? ud.lineHandles[Math.floor(hit.index / 2)] : ud.handle
   return handle ?? null
@@ -121,6 +123,10 @@ function configureControls(controls, enabled, rotate) {
   controls.enabled = enabled !== false
   controls.enableRotate = rotate === true
   controls.screenSpacePanning = true
+  controls.touches = {
+    ONE: rotate ? THREE.TOUCH.ROTATE : THREE.TOUCH.PAN,
+    TWO: rotate ? THREE.TOUCH.DOLLY_ROTATE : THREE.TOUCH.DOLLY_PAN,
+  }
   controls.mouseButtons = rotate ? {
     LEFT: THREE.MOUSE.ROTATE,
     MIDDLE: THREE.MOUSE.DOLLY,
@@ -519,7 +525,15 @@ const Viewer = forwardRef(function Viewer(
 
     // --- inserts: block glyph at pt, rotated by rot (deg), scaled by scale ---
     const insertColor = new THREE.Color(tokens.insert)
-    const insertGroup = new THREE.Group()
+    const insertLayerGroups = new Map()
+    function entityLayerGroup(groups, layer) {
+      if (!groups.has(layer)) {
+        const group = new THREE.Group()
+        groups.set(layer, group)
+        scene.add(group)
+      }
+      return groups.get(layer)
+    }
     const hs = dataSpan * 0.02 // base half-size of the glyph
     let nInserts = 0
     const definitions = blockDefinitions(activeIntake)
@@ -550,16 +564,15 @@ const Viewer = forwardRef(function Viewer(
       olg.setAttribute('position', new THREE.Float32BufferAttribute(outline, 3))
       const olm = new THREE.LineBasicMaterial({ color: insertColor, transparent: true, opacity: 0.95 })
       mesh.add(new THREE.LineSegments(olg, olm))
-      insertGroup.add(mesh)
+      entityLayerGroup(insertLayerGroups, ins.layer).add(mesh)
       pickables.push(mesh)
       nInserts++
       addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx || 1, sy || 1], hs })
     }
-    scene.add(insertGroup)
 
     // --- 3DFACEs: filled triangle-pair surfaces -----------------------------
     const faceColor = new THREE.Color(tokens.face)
-    const faceGroup = new THREE.Group()
+    const faceLayerGroups = new Map()
     let nFaces = 0
     for (const f of faces3d) {
       const ring = [f.p1, f.p2, f.p3, f.p4].filter(Boolean)
@@ -574,6 +587,7 @@ const Viewer = forwardRef(function Viewer(
       })
       const mesh = new THREE.Mesh(g, m)
       mesh.userData = { kind: 'face', handle: f.handle }
+      const faceGroup = entityLayerGroup(faceLayerGroups, f.layer)
       faceGroup.add(mesh)
       pickables.push(mesh)
       nFaces++
@@ -589,7 +603,6 @@ const Viewer = forwardRef(function Viewer(
       faceGroup.add(new THREE.LineSegments(bg, bm))
       addPickDescriptor(pickIndex, f.handle, { kind: 'face', layer: f.layer, pts: ring })
     }
-    scene.add(faceGroup)
 
     // dynamic overlay containers (rebuilt on prop change)
     const highlightGroup = new THREE.Group(); scene.add(highlightGroup)
@@ -778,6 +791,10 @@ const Viewer = forwardRef(function Viewer(
       })
     }
     function startMarquee(e) {
+      if (e.pointerType === 'touch') {
+        clearMarquee()
+        return
+      }
       if (foreignPointer(e)) {
         e.stopPropagation()
         if (e.cancelable) e.preventDefault()
@@ -903,7 +920,7 @@ const Viewer = forwardRef(function Viewer(
 
     const sceneState = {
       intake: activeIntake, drawingKey: sceneDrawingKey,
-      scene, camera, renderer, controls, layerGroups, pickIndex,
+      scene, camera, renderer, controls, layerGroups, insertLayerGroups, faceLayerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens, sculpture,
@@ -1307,8 +1324,10 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => {
     const s = stateRef.current
     if (!s) return
-    for (const [layer, group] of s.layerGroups) {
-      group.visible = visibleLayers ? visibleLayers[layer] !== false : true
+    for (const groups of [s.layerGroups, s.insertLayerGroups, s.faceLayerGroups]) {
+      for (const [layer, group] of groups) {
+        group.visible = visibleLayers ? visibleLayers[layer] !== false : true
+      }
     }
   }, [visibleLayers, buildTick])
 
