@@ -41,6 +41,22 @@ describe('vendored Leaf standard v1', () => {
     expect(studioIndex).toBeGreaterThan(standardIndex)
   })
 
+  it('names the header mark independently of its two decorative lockups', () => {
+    const mark = read('src/App.jsx').match(/<div\b([^>]*\bclassName="mark"[^>]*)>([\s\S]*?)<\/div>/)
+    expect(mark).not.toBeNull()
+    expect(mark[1]).toMatch(/\brole="img"/)
+    expect(mark[1]).toMatch(/\baria-label="Leaf Automation"/)
+    const images = mark[2].match(/<img\b[^>]*>/g) || []
+    expect(images).toHaveLength(2)
+    expect(images.map((image) => image.match(/\bclassName="([^"]*)"/)?.[1].split(/\s+/)
+      .filter((name) => name === 'mark-lockup-light' || name === 'mark-lockup-dark')))
+      .toEqual([['mark-lockup-light'], ['mark-lockup-dark']])
+    for (const image of images) {
+      expect(image).toMatch(/\balt=""/)
+      expect(image).toMatch(/\baria-hidden="true"/)
+    }
+  })
+
   it('declares exactly four normal, swap Inter Tight faces with local font files', () => {
     const css = read('src/styles.css').replace(/\/\*[\s\S]*?\*\//g, '')
     const faces = [...css.matchAll(/@font-face\s*\{([^{}]*)\}/g)]

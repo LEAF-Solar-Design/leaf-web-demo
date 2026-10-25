@@ -4627,7 +4627,7 @@ export default function App() {
       }}
     >
       <header className="top">
-        <div className="mark"><img className="mark-lockup mark-lockup-light" src="/brand/leaf-automation-horizontal-on-light.svg" alt="Leaf Automation" height="20" /><img className="mark-lockup mark-lockup-dark" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="" aria-hidden="true" height="20" /></div>
+        <div className="mark" role="img" aria-label="Leaf Automation"><img className="mark-lockup mark-lockup-light" src="/brand/leaf-automation-horizontal-on-light.svg" alt="" aria-hidden="true" height="20" /><img className="mark-lockup mark-lockup-dark" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="" aria-hidden="true" height="20" /></div>
         {/* W4e: on the studio's drafting surfaces the header IS the
             reference's top band: quick access, then the ribbon tabs. The
             engine's Open/Save portal into the band's slot. Every other
