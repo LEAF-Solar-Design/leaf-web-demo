@@ -2669,6 +2669,16 @@ export default function App() {
     return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })?.runIntent?.intentId)
   }, [onRequestCatalogRun, tools, refuseProjectSolar])
 
+  const onStageSolarEdgeAccept = useCallback((params) => {
+    if (refuseProjectSolar('solar-solaredge-accept')) return false
+    const row = tools.find((tool) => tool.name === 'solar-solaredge-accept')
+    if (!row) {
+      setRunErr('Tracking label acceptance is not in this catalog.')
+      return false
+    }
+    return Boolean(onRequestCatalogRun(row, params, RIBBON_RATIONALE, 'ribbon', { complete: true })?.runIntent?.intentId)
+  }, [onRequestCatalogRun, tools, refuseProjectSolar])
+
   const onSubmitSolarFlowStep = useCallback((row, params) => {
     if (refuseProjectSolar(row?.name || SOLAR_SETTINGS_TOOL_NAME)) return
     const drawingId = catalogRunContextRef.current?.drawingId ?? null
@@ -5156,6 +5166,7 @@ export default function App() {
                     return seatCompletedVersion(...args)
                   }}
                   onRunPlacement={onRunCombinerPlacement}
+                  onStageSolarEdgeAccept={onStageSolarEdgeAccept}
                   catalogDigestOf={catalogDigestOf}
                 />
               )}
