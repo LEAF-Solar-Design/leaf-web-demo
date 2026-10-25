@@ -142,7 +142,7 @@ const useAdapter = Function('React', 'sameSolarDrawingBinding', 'useEscapeOwner'
     const { useRef, useLayoutEffect, useState } = React
     const { projectMode, projectModeRef, projectSolar, projectSolarRuntime, catalogState,
       ENV_SOLAR_FLOW_RAIL, ENV_CAD_EDIT, ENV_SOLAR_SETTINGS_FORM, drafting, surfaceSlots,
-      phoneViewport, setStudioDrawer, returnToDrawing, ribbon, activeRibbonTab,
+      drawerViewport, setStudioDrawer, returnToDrawing, ribbon, activeRibbonTab,
       onCloseSolarFlowStep, setSolarFormTool } = input
     ${text(refusalState)}
     ${text(refusalDerived)}
@@ -193,7 +193,7 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
   h.input = { projectMode: true, projectModeRef: { current: true }, projectSolar: h.owner,
     catalogState: { projectCatalog: h.receipt }, ENV_SOLAR_FLOW_RAIL: true, ENV_CAD_EDIT: true,
     ENV_SOLAR_SETTINGS_FORM: true, drafting: true, surfaceSlots: { toolbar: { profile: 'solar' } },
-    phoneViewport: false, activeRibbonTab: 'solar', ribbon: { clusters: [{ id: 'main', tools: h.originalTools }] },
+    drawerViewport: false, activeRibbonTab: 'solar', ribbon: { clusters: [{ id: 'main', tools: h.originalTools }] },
     externalBusy: false, ...changes }
   const completedVersionRef = { current: null }
   function Workspace(props) { h.workspaces.push(props); return <ProjectSolarWorkspace {...props} /> }
@@ -451,7 +451,7 @@ it('R13G2B-18 flow selection closes only the project editor', async () => {
   expect(screen.queryByTestId('solar-settings-form')).toBeNull(); noLegacy(h)
 })
 it('R13G2B-19 accepted phone opening closes the drawer and focuses the host', async () => {
-  const h = await setup({ phoneViewport: true }); await h.open('solar-settings')
+  const h = await setup({ drawerViewport: true }); await h.open('solar-settings')
   expect(h.drawer).toBe('none')
   expect(h.returnToDrawing).toHaveBeenCalledOnce()
   const host = document.getElementById('solar-tool-form')
@@ -481,7 +481,7 @@ it('R13G2B-20 scoped Escape restores the opener or connected host fallback', asy
   }
 })
 it('R13G2B-21 rejected phone opening preserves drawer and focus', async () => {
-  const h = await setup({ phoneViewport: true })
+  const h = await setup({ drawerViewport: true })
   const button = screen.getByTestId('ribbon-solar-settings'), retained = tool(h, 'solar-settings').onClick
   button.focus(); h.receiptToken.live = false
   act(() => retained())
@@ -505,7 +505,7 @@ it('R13G2B-23 re-activating the open tool moves focus into the workspace', async
 })
 
 it('R13G2B-24 a receipt that expires before activation is refused with a visible sentence', async () => {
-  const h = await setup({ phoneViewport: true })
+  const h = await setup({ drawerViewport: true })
   const button = screen.getByTestId('ribbon-solar-settings')
   expect(button.disabled).toBe(false)
   expect(tool(h, 'solar-settings').reason).toBe('')
@@ -541,7 +541,7 @@ it('R13G2B-25 the refusal sentence clears on the next successful open and on a s
     const sentence = projectSolarAppReason('project_tools_unavailable')
     const status = () => screen.queryByText(sentence, { selector: '[role="status"]' })
     expect(status()).toBeVisible()
-    await h.update({ phoneViewport: true }) // An unrelated render must retain the explanation.
+    await h.update({ drawerViewport: true }) // An unrelated render must retain the explanation.
     expect(status()).toBeVisible()
     if (change === 'success') {
       h.receiptToken.live = true
@@ -586,7 +586,7 @@ it('R13G2B-28 a refusal survives a scope object rebuilt with the same authority 
     await h.update({ projectSolar: h.owner })
     for (let i = 0; i < 3; i++) {
       if (shape === 'rebuilt-every-render') rebuild()
-      await h.update({ projectSolar: h.owner, phoneViewport: i % 2 === 0 })
+      await h.update({ projectSolar: h.owner, drawerViewport: i % 2 === 0 })
     }
     expect(status()).toBeVisible()
     expect(h.adapter.projectSolarRefusal).toEqual({ reason: sentence })
@@ -595,7 +595,7 @@ it('R13G2B-28 a refusal survives a scope object rebuilt with the same authority 
 })
 
 it('R13G2B-26 refusing an activation with an editor open preserves focus and drawer', async () => {
-  const h = await setup({ phoneViewport: true })
+  const h = await setup({ drawerViewport: true })
   await h.open('solar-settings')
   const row = h.runtime.openTool, button = screen.getByTestId('ribbon-cad-line')
   const retained = tool(h, 'solar-settings').onClick
@@ -616,7 +616,7 @@ it('R13G2B-26 refusing an activation with an editor open preserves focus and dra
 it('R13G2B-27 a disabled host or inactive project refuses silently', async () => {
   for (const change of [{ ENV_CAD_EDIT: false }, { projectMode: false, projectModeRef: { current: false } },
     { projectModeRef: { current: false } }]) {
-    const h = await setup({ phoneViewport: true, ...change })
+    const h = await setup({ drawerViewport: true, ...change })
     const button = screen.getByTestId('ribbon-cad-line')
     button.focus()
     act(() => { expect(h.adapter.onOpenProjectSolarTool(h.rows[0])).toBe(false) })

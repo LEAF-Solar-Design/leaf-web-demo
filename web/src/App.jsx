@@ -34,6 +34,7 @@ import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import useEscapeOwner from './lib/useEscapeOwner.js'
 import usePhoneDrawerEscape from './lib/usePhoneDrawerEscape.js'
+import useDockRise from './lib/useDockRise.js'
 import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
@@ -55,6 +56,7 @@ import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
 import { loadDemoSolve } from './site/intakeCache.js'
+const DRAWER_FRAME_QUERY = '(max-width: 600px), (max-width: 980px) and (min-height: 500px)'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
@@ -3532,13 +3534,13 @@ export default function App() {
   const [wideViewport, setWideViewport] = useState(() => {
     try { return window.matchMedia('(min-width: 981px)').matches } catch { return true }
   })
-  const [phoneViewport, setPhoneViewport] = useState(() => {
-    try { return window.matchMedia('(max-width: 600px)').matches } catch { return false }
+  const [drawerViewport, setDrawerViewport] = useState(() => {
+    try { return window.matchMedia(DRAWER_FRAME_QUERY).matches } catch { return false }
   })
   useEffect(() => {
     let mq
-    try { mq = window.matchMedia('(max-width: 600px)') } catch { return undefined }
-    const sync = () => setPhoneViewport(mq.matches)
+    try { mq = window.matchMedia(DRAWER_FRAME_QUERY) } catch { return undefined }
+    const sync = () => setDrawerViewport(mq.matches)
     mq.addEventListener?.('change', sync)
     return () => mq.removeEventListener?.('change', sync)
   }, [])
@@ -3737,7 +3739,7 @@ export default function App() {
     setProjectSolarFocusRequest(value => value + 1)
     setProjectSolarRefusalRecord(null)
     returnToDrawing()
-    if (phoneViewport) setStudioDrawer('none')
+    if (drawerViewport) setStudioDrawer('none')
     return true
   }
   function onCloseProjectSolarTool() {
@@ -3762,6 +3764,7 @@ export default function App() {
     }
   }, [drafting, surfaceSlots.toolbar.profile])
   const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
+  useDockRise(projectLayout.appRef, studioShell)
   // Build routing and "Open author flow" both use setAuthorOpen. The studio
   // must reveal the catalog too: its collapsed
   // spine omits the author section and therefore the persistent panel's seat.
@@ -3787,7 +3790,7 @@ export default function App() {
     const shell = {
       startOpen,
       drawer,
-      phoneViewport,
+      phoneViewport: drawerViewport,
       studioDrawer: studioShell ? studioDrawer : 'none',
       historyOpen,
       route,
@@ -3855,7 +3858,7 @@ export default function App() {
     const onKey = ladderListener(shell, ladderHandlers, markInstant)
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [startOpen, onReturnToDrawing, drawer, phoneViewport, studioShell, studioDrawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
+  }, [startOpen, onReturnToDrawing, drawer, drawerViewport, studioShell, studioDrawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
       interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
       onDismissSolarFlowRoute, drawingState, canUndo, canRedo, versionBusy, previewing, drawingMutationsBlocked, onUndo, onRedo])
@@ -3873,7 +3876,7 @@ export default function App() {
   // running turn below it, and still yields to a menu or a sheet above it
   // (lib/usePhoneDrawerEscape.js). The ladder's own drawer rung stays for a
   // key the stack hands back.
-  usePhoneDrawerEscape({ studioShell, phoneViewport, studioDrawer }, () => setStudioDrawer('none'))
+  usePhoneDrawerEscape({ studioShell, phoneViewport: drawerViewport, studioDrawer }, () => setStudioDrawer('none'))
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
   const projectSwitcherRef = useRef(null)
   // Each bump opens the header switcher on its inline create field.
@@ -4112,13 +4115,13 @@ export default function App() {
         quickBefore: WORKSPACE_QUICK_BEFORE, quickAfter: [
           ...WORKSPACE_QUICK_AFTER,
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar',
-            expanded: phoneViewport ? studioDrawer === 'nav' : navExpanded,
-            onClick: () => phoneViewport ? toggleStudioDrawer('nav') : setNavExpanded(!navExpanded) },
+            expanded: drawerViewport ? studioDrawer === 'nav' : navExpanded,
+            onClick: () => drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(!navExpanded) },
         ], view: null, version: null, rail: [], author: null }
     }
     const view = viewCluster({
-      viewerRef, hasDrawing: projectMode ? projectDrawing.mode === 'ready' : !!shown, paneOpen: phoneViewport ? studioDrawer === 'plan' : paneOpen,
-      onTogglePane: () => phoneViewport ? toggleStudioDrawer('plan') : setPaneOpen((open) => !open),
+      viewerRef, hasDrawing: projectMode ? projectDrawing.mode === 'ready' : !!shown, paneOpen: drawerViewport ? studioDrawer === 'plan' : paneOpen,
+      onTogglePane: () => drawerViewport ? toggleStudioDrawer('plan') : setPaneOpen((open) => !open),
       onBeforeJump: pushViewSnapshot,
     })
     const version = versionCluster({
@@ -4268,15 +4271,15 @@ export default function App() {
         // The tool rail's expand affordance rides the band on every tab
         // (the Manage tab carries it as a panel too), so the catalog is
         // always one click away while the rail hides behind the cockpit.
-        ...((navSpine || phoneViewport) ? [
+        ...((navSpine || drawerViewport) ? [
           { id: 'sep-2', kind: 'sep' },
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar', title: 'Expand the tool rail',
-            expanded: phoneViewport ? studioDrawer === 'nav' : navExpanded,
-            onClick: () => phoneViewport ? toggleStudioDrawer('nav') : setNavExpanded(true) },
+            expanded: drawerViewport ? studioDrawer === 'nav' : navExpanded,
+            onClick: () => drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(true) },
         ] : []),
       ],
     }
-  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, drafting, profileTabs, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, phoneViewport, studioDrawer,
+  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, drafting, profileTabs, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
     shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
@@ -5037,7 +5040,7 @@ export default function App() {
           {projectMode ? (
             solarFlowSeated ? (
               <div id="solar-tool-form" ref={projectSolarWorkspaceRef} tabIndex={-1}
-                style={phoneViewport ? { maxHeight: '40dvh', overflowY: 'auto', flexShrink: 0 } : undefined}>
+                style={drawerViewport ? { maxHeight: '40dvh', overflowY: 'auto', flexShrink: 0 } : undefined}>
                 <ProjectSolarWorkspace
                   key={JSON.stringify([projectSolar.scope.authorityKey, projectSolar.scope.binding])}
                   solarBinding={projectSolar.scope.binding}
@@ -5182,7 +5185,7 @@ export default function App() {
             <DraftingRibbon
               clusters={ribbonClusters}
               tab={activeRibbonTab}
-              catalogError={navSpine || (phoneViewport && studioDrawer !== 'nav') ? visibleCatalogErr : null}
+              catalogError={navSpine || (drawerViewport && studioDrawer !== 'nav') ? visibleCatalogErr : null}
               onRetryCatalog={loadCatalog}
             >
               {/* The engine's own panels (File, Draw, Modify) read the ONE

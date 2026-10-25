@@ -40,7 +40,7 @@ describe('signed-out Studio banners', () => {
 
   it('passes the visible catalog error to both shell surfaces and retains the ribbon condition', () => {
     expect(prop(opening('SurfaceFrame').node, 'catalogError')).toBe('visibleCatalogErr')
-    expect(prop(opening('DraftingRibbon').node, 'catalogError')).toBe("navSpine || (phoneViewport && studioDrawer !== 'nav') ? visibleCatalogErr : null")
+    expect(prop(opening('DraftingRibbon').node, 'catalogError')).toBe("navSpine || (drawerViewport && studioDrawer !== 'nav') ? visibleCatalogErr : null")
     expect(source).not.toContain('catalogError={catalogErr}')
   })
 

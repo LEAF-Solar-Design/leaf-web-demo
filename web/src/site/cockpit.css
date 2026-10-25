@@ -1297,6 +1297,27 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .viewer-wrap .legend { top: 50px; right: 8px; min-width: 0; max-width: 46vw; max-height: 34%; overflow: auto; padding: 6px 8px; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .selection-readout { left: 8px; bottom: calc(var(--ck-dock) + var(--ck-drawer) + 8px); min-width: 0; max-width: calc(100vw - 16px); }
 
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] footer.foot-bar > :is(span.dim, span[style], .foot-stat + .foot-stat) { display: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] footer.foot-bar > * { padding-right: 8px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] footer.foot-bar > * + * { padding-left: 8px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach {
+    background: var(--ck-chrome); color: var(--ck-ink); border: 1px solid var(--ck-edge);
+    border-radius: 4px; font-family: var(--ck-font); box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+  }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.tour-card-step, .tour-card-wait) { color: var(--ck-label); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-card-title { color: var(--leaf-ink); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.tour-card-body, .tour-card-prompt) { color: var(--leaf-ink); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-card-prompt { background: var(--ck-recess); border-color: var(--ck-edge); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.chip-neutral, .primary) { padding: 0 12px; font: 400 13px/1 var(--ck-font); border-radius: 4px; box-shadow: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .chip-neutral { background: var(--ck-title); color: var(--leaf-ink); border: 1px solid var(--leaf-line); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .chip-neutral:disabled { opacity: .7; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .primary { background: var(--ck-model); color: var(--leaf-ink); border: 1px solid var(--leaf-accent); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-coach-toggle { padding: 0 10px; font-size: 12px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-dot { background: var(--ck-ink-off); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-dot.on { background: var(--ck-cmd); }
+}
+
+@media (max-width: 600px), (max-width: 980px) and (min-height: 500px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs {
     position: fixed; inset: auto 0 var(--ck-dock); height: var(--ck-drawer); z-index: 35;
     display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1352,25 +1373,18 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .result-block :is(h3, h4, p, strong) { color: var(--ck-ink); }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > section.ent-panel :is(.ent-rows, .ent-note, .ent-consent) { display: block; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > section.ent-panel .ent-head { display: flex; }
+}
 
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] footer.foot-bar > :is(span.dim, span[style], .foot-stat + .foot-stat) { display: none; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] footer.foot-bar > * { padding-right: 8px; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] footer.foot-bar > * + * { padding-left: 8px; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach {
-    background: var(--ck-chrome); color: var(--ck-ink); border: 1px solid var(--ck-edge);
-    border-radius: 4px; font-family: var(--ck-font); box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+@media (min-width: 601px) and (max-width: 980px) and (min-height: 500px) {
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] {
+    --ck-drawer: 44px; --ck-dock: var(--studio-dock-rise, calc(66px + var(--tb-h, 32px) + var(--ck-status-rise, 0px)));
   }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.tour-card-step, .tour-card-wait) { color: var(--ck-label); }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-card-title { color: var(--leaf-ink); }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.tour-card-body, .tour-card-prompt) { color: var(--leaf-ink); }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-card-prompt { background: var(--ck-recess); border-color: var(--ck-edge); }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.chip-neutral, .primary) { padding: 0 12px; font: 400 13px/1 var(--ck-font); border-radius: 4px; box-shadow: none; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .chip-neutral { background: var(--ck-title); color: var(--leaf-ink); border: 1px solid var(--leaf-line); }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .chip-neutral:disabled { opacity: .7; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .primary { background: var(--ck-model); color: var(--leaf-ink); border: 1px solid var(--leaf-accent); }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-coach-toggle { padding: 0 10px; font-size: 12px; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-dot { background: var(--ck-ink-off); }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-dot.on { background: var(--ck-cmd); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .center-col {
+    bottom: calc(var(--ck-dock) + var(--ck-drawer) + env(safe-area-inset-bottom, 0px));
+  }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs {
+    bottom: calc(var(--ck-dock) + env(safe-area-inset-bottom, 0px));
+  }
 }
 
 @media (min-width: 1500px) {

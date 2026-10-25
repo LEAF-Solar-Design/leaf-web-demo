@@ -5485,13 +5485,13 @@ describe('KEYS-b the phone Studio drawer is an Escape owner', () => {
 
   it('KEYS-B13 App registers the open phone drawer with the owner stack exactly once', () => {
     assert.equal(keysCount("import usePhoneDrawerEscape from './lib/usePhoneDrawerEscape.js'"), 1)
-    const call = "usePhoneDrawerEscape({ studioShell, phoneViewport, studioDrawer }, () => setStudioDrawer('none'))"
+    const call = "usePhoneDrawerEscape({ studioShell, phoneViewport: drawerViewport, studioDrawer }, () => setStudioDrawer('none'))"
     assert.equal(keysCount(call), 1, 'one registration, closing exactly as the shell rung does')
     assert.equal(keysCount('usePhoneDrawerEscape('), 1, 'no second call site')
     const at = keysCode.indexOf(call)
     for (const declared of [
       'const [studioDrawer, setStudioDrawer] = useState(',
-      'const [phoneViewport, setPhoneViewport] = useState(',
+      'const [drawerViewport, setDrawerViewport] = useState(',
       'const studioShell = ',
     ]) {
       const where = keysCode.indexOf(declared)
@@ -5503,7 +5503,7 @@ describe('KEYS-b the phone Studio drawer is an Escape owner', () => {
   })
 
   it('KEYS-B14 the pin reads code, not a comment', () => {
-    const commented = "// usePhoneDrawerEscape({ studioShell, phoneViewport, studioDrawer }, () => setStudioDrawer('none'))"
+    const commented = "// usePhoneDrawerEscape({ studioShell, phoneViewport: drawerViewport, studioDrawer }, () => setStudioDrawer('none'))"
     assert.equal(codeOnly(commented).includes('usePhoneDrawerEscape('), false)
   })
 })
