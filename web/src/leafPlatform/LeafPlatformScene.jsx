@@ -257,6 +257,7 @@ export default function LeafPlatformScene() {
     if (!awaitingReady) return undefined
     setReadyTimedOut(false)
     const timer = setTimeout(() => {
+      setAwaitingReady(false)
       setReadyTimedOut(true)
       setActionMessage(humanizeError('AutoCAD has not confirmed the drawing connection. Check its status or reopen the palette.'))
     }, 10_000)
@@ -345,8 +346,9 @@ export default function LeafPlatformScene() {
         <h1 id="leaf-platform-title" ref={headingRef} tabIndex={-1}>Drawing connection</h1>
       </header>
       <p role="status" aria-live="polite" className="leaf-platform-status">{actionMessage}</p>
-      {awaitingReady && readyTimedOut && <section>
+      {readyTimedOut && <section>
         <button type="button" onClick={() => {
+          setReadyTimedOut(false)
           bridge.retryHello()
           setHelloAttempt((attempt) => attempt + 1)
         }}>Check connection status</button>
