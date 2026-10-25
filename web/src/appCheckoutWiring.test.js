@@ -164,11 +164,14 @@ describe('App.jsx checkout controller adoption', () => {
     // "You hold the edit lock" behind a dead capability.
     // ONE sign-in path: the project branch ends at its last currency check and the
     // standalone path releases in the else, so the single login follows both.
-    const statements = loginCallback().body.body
+    const guarded = loginCallback().body.body[0]
+    expect(guarded.type).toBe('TryStatement')
+    expect(appText(guarded.handler)).toContain('showToast')
+    const statements = guarded.block.body
     expect(statements).toHaveLength(2)
     expect(statements[0].type).toBe('IfStatement')
     expect(appText(statements[0].test)).toBe('projectModeRef.current')
-    expect(appText(statements[0].consequent.body.at(-1))).toBe('if (!stillCurrent()) return')
+    expect(appText(statements[0].consequent.body.at(-1))).toBe("if (!stillCurrent()) throw new Error('Sign-in scope changed')")
     expect(appText(statements[0].consequent)).not.toContain('login(')
     expect(appText(statements[0].alternate)).toBe('if (checkout.actions.getCapability()) await checkout.actions.release()')
     expect(appText(statements[1])).toBe('await login()')
@@ -217,8 +220,8 @@ describe('App.jsx checkout controller adoption', () => {
     const checkout = { actions: { getCapability: capability, release: legacyRelease } }
     const login = vi.fn(async () => { sequence.push('login') })
     const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
-      'sameSolarDrawingBinding', `return (${appText(loginCallback())})`)(
-      projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding)
+      'sameSolarDrawingBinding', 'showToast', 'humanizeError', `return (${appText(loginCallback())})`)(
+      projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding, vi.fn(), String)
     const binding = { kind: 'project',
       organization_id: '11111111-1111-1111-1111-111111111111',
       project_id: '22222222-2222-2222-2222-222222222222',
@@ -361,8 +364,8 @@ describe('App.jsx checkout controller adoption', () => {
       const login = vi.fn(async () => {})
       const checkout = { actions: { getCapability: vi.fn(() => null), release: vi.fn(async () => {}) } }
       const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
-        'sameSolarDrawingBinding', `return (${appText(loginCallback())})`)(
-        projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding)
+        'sameSolarDrawingBinding', 'showToast', 'humanizeError', `return (${appText(loginCallback())})`)(
+        projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding, vi.fn(), String)
       const pending = onLogin()
       await vi.waitFor(() => expect(settle).toBeTypeOf('function'))
       if (roundTrip) {

@@ -217,13 +217,16 @@ describe('App.jsx session controller adoption', () => {
     )
   })
 
-  it('leaves the Auth0 return leg untouched', () => {
+  it('keeps the Auth0 exchange and reload with bounded failure feedback', () => {
     // ACCEPTANCE route matrix, the sacred row: the code exchange stores
     // leaf.jwt and reloads, and NOTHING may reorder it into the session
     // controller or make it await controller state.
-    expect(stripped).toMatch(
-      /handleRedirectCallback\(\)\.then\(\(stored\) => \{\s*if \(stored\) window\.location\.reload\(\);?\s*\}\)/,
-    )
+    const callback = text(effectCalling('handleRedirectCallback'))
+    expect(callback).toContain('if (stored) { live = false; window.location.reload() }')
+    expect(callback).toContain('setTimeout(fail, 20000)')
+    expect(callback).toContain('.catch(fail)')
+    expect(callback).toContain('else fail()')
+    expect(callback).toContain("Sign-in couldn't be completed.")
     expect(stripped).not.toMatch(/handleRedirectCallback\(\)[\s\S]{0,120}sessionActions/)
   })
 

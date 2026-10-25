@@ -4274,7 +4274,7 @@ describe('W4g bleed-2b: profile presentation preserves the engine document', () 
     const commit = appSource.slice(commitStart, commitEnd)
     assert.match(commit, /setActiveSurface\(id\)/)
     assert.match(commit, /searchForProductSurface\(window\.location\.search, id\)/)
-    assert.match(commit, /window\.history\.replaceState/)
+    assert.match(commit, /window\.history\.pushState/)
     assert.match(appSource, /committed: activeSurface, onCommit, isDrafting: groundShowsDrawing/)
   })
   it('settles presentation at drawing actions and exposes phases only in the studio', () => {

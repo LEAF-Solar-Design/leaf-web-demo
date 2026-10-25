@@ -507,7 +507,7 @@ export default function App() {
     setActiveSurface(id)
     try {
       const next = searchForProductSurface(window.location.search, id)
-      window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
+      window.history.pushState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
     } catch { /* URL sync is a convenience; state alone still switches the tab */ }
   }, [])
   const { phase, request, settle, exitPending } = useStudioTransition({
@@ -552,6 +552,17 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const labStatus = useLabSurfaceStatus(mock)
+  useEffect(() => {
+    const restoreSurface = () => {
+      const value = new URLSearchParams(window.location.search).get('surface')
+      const surface = productSurfaceFromSearch(window.location.search, labStatus)
+      if (value && value !== surface) return
+      settle()
+      setActiveSurface(surface)
+    }
+    window.addEventListener('popstate', restoreSurface)
+    return () => window.removeEventListener('popstate', restoreSurface)
+  }, [labStatus, settle])
   useEffect(() => { setActiveSurface(window.location.pathname.startsWith('/app/lab') && parseLabRoute(window.location.pathname, window.location.search) ? 'lab' : productSurfaceFromSearch(window.location.search, labStatus)) }, [labStatus])
   const [loadErr, setLoadErr] = useState(null)
   const [drawingLoad, setDrawingLoad] = useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })
@@ -568,7 +579,7 @@ export default function App() {
   const localCadEpochRef = useRef(null)
   const localCadHistoryRestoredRef = useRef(false)
   const [localCadStatus, setLocalCadStatus] = useState({ status: 'stopped' })
-  const stopLocalCad = useCallback(({ discard = false, clear = false } = {}) => {
+  const stopLocalCad = useCallback(({ discard = false, clear = false, forget = false } = {}) => {
     const seated = !!localCadSnapshotRef.current
     if (discard) {
       localCadSnapshotRef.current = null
@@ -577,7 +588,10 @@ export default function App() {
     localCadBridgeRef.current?.stop()
     if (!discard || (seated && clear)) localCadRestoreRef.current?.({ discard })
     setLocalCadActive(false)
-    try { localStorage.removeItem('leaf.localCad.connect') } catch { /* storage may be unavailable */ }
+    localCadStartedRef.current = false
+    if (forget) {
+      try { localStorage.removeItem('leaf.localCad.connect') } catch { /* storage may be unavailable */ }
+    }
   }, [])
   const connectLocalCad = useCallback(() => {
     localCadStartedRef.current = true
@@ -1020,6 +1034,17 @@ export default function App() {
   const [boardJob, setBoardJob] = useState(null)
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
   const boardPreviewRunRef = useRef(null)
+  const boardTransferScopeRef = useRef(null)
+  useLayoutEffect(() => {
+    const previous = boardTransferScopeRef.current
+    if (!previous || previous.projectId !== openProjectId || previous.drawingId !== drawingState?.drawing_id
+      || previous.requestedDrawingId !== REQUESTED_DRAWING_ID || (previous.previewing && !previewing)) {
+      boardTransferScopeRef.current = { projectId: openProjectId, drawingId: drawingState?.drawing_id,
+        requestedDrawingId: REQUESTED_DRAWING_ID, previewing }
+      boardPreviewRunRef.current = null
+      setBoardTransferStatus('')
+    } else previous.previewing = previewing
+  }, [openProjectId, drawingState?.drawing_id, REQUESTED_DRAWING_ID, previewing])
   useEffect(() => {
     setProjectPane(null)
     setBoardJob(null)
@@ -1589,8 +1614,21 @@ export default function App() {
   // finish the exchange + store leaf.jwt, then reload so the fresh loads send
   // the token and land a 200 session (no gate). No-op in mock / when unconfigured.
   useEffect(() => {
-    if (mock) return
-    handleRedirectCallback().then((stored) => { if (stored) window.location.reload() })
+    if (mock || !isAuthRedirectCallback()) return
+    let live = true
+    const fail = () => {
+      if (!live) return
+      live = false
+      showToast({ text: humanizeError("Sign-in couldn't be completed."), action: { label: 'Sign in', onClick: onLogin } })
+    }
+    const timer = setTimeout(fail, 20000)
+    Promise.resolve().then(() => handleRedirectCallback()).then((stored) => {
+      if (!live) return
+      clearTimeout(timer)
+      if (stored) { live = false; window.location.reload() }
+      else fail()
+    }).catch(fail)
+    return () => { live = false; clearTimeout(timer) }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A 401 clears leaf.jwt in api.js. Mirror that transport event into render
@@ -1635,6 +1673,7 @@ export default function App() {
   // on the way to sign-in lands unknown + read-failed, which is fail-closed.
   // Byte-identical to /try's signInWithCheckoutRelease.
   const onLogin = useCallback(async () => {
+    try {
     if (projectModeRef.current) {
       const captured = projectSolarLoginRef.current
       const owner = captured.projectSolar
@@ -1666,16 +1705,19 @@ export default function App() {
           && snapshot.authorityKey === owner.scope.authorityKey
       }
 
-      if (!stillCurrent()) return
+      if (!stillCurrent()) throw new Error('Sign-in scope changed')
       if (owner.ready && owner.checkout.canRelease) {
         await client.releaseCheckout()
       }
-      if (!stillCurrent()) return
+      if (!stillCurrent()) throw new Error('Sign-in scope changed')
     } else if (checkout.actions.getCapability()) await checkout.actions.release()
 
     // ONE sign-in path: both branches end their checkout authority above, then log in here.
     await login()
-  }, [checkout.actions])
+    } catch {
+      showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
+    }
+  }, [checkout.actions, showToast])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
@@ -4881,7 +4923,10 @@ export default function App() {
                 })
                 if (result.ok) {
                   boardPreviewRunRef.current ??= createPreviewRunner()
-                  boardPreviewRunRef.current(result.seq, onPreviewVersionTracked, setBoardTransferStatus)
+                  const scope = boardTransferScopeRef.current
+                  boardPreviewRunRef.current(result.seq, onPreviewVersionTracked, (message) => {
+                    if (boardTransferScopeRef.current === scope) setBoardTransferStatus(message)
+                  })
                 } else {
                   setBoardTransferStatus(result.message)
                 }
@@ -5355,7 +5400,7 @@ export default function App() {
                 +
               </button>
             )}
-            {localCadEligible && <LocalCadConnect {...localCadStatus} onConnect={connectLocalCad} onDisconnect={stopLocalCad} />}
+            {localCadEligible && <LocalCadConnect {...localCadStatus} onConnect={connectLocalCad} onDisconnect={() => stopLocalCad({ forget: true })} />}
             <div className="viewer-actions">
               {/* Slice 11a: the running-count badge. Renders nothing at zero
                   and where the contract declares no build card, so the idle

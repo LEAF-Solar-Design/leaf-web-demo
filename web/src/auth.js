@@ -92,7 +92,7 @@ async function client() {
         clientId: CLIENT_ID,
         authorizationParams: { audience: AUDIENCE, redirect_uri: window.location.origin },
         cacheLocation: 'localstorage',
-      }))
+      })).catch((error) => { _clientP = null; throw error })
   }
   return _clientP
 }
@@ -140,11 +140,11 @@ export async function handleRedirectCallback() {
   if (!authConfigured) return false
   const q = window.location.search
   if (!isAuthRedirectCallback(q)) return false
-  const c = await client()
-  if (!c) return false
   let returnTo = window.location.pathname
   const clean = () => window.history.replaceState({}, document.title, safeLocalReturnTo(returnTo, '/'))
   try {
+    const c = await client()
+    if (!c) return false
     const result = await c.handleRedirectCallback()
     returnTo = result?.appState?.returnTo || returnTo
     const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
@@ -164,7 +164,8 @@ export async function handleRedirectCallback() {
     const reloadForCheckout = recoverableAuthError && completeCheckoutAuthReturn()
     clean()
     trackAuthCompleted(false)
-    return reloadForCheckout
+    if (reloadForCheckout) return true
+    throw error
   }
 }
 

@@ -33,7 +33,8 @@ import { enterWorkspace } from './LandingCast.jsx'
 import ContinuityStore from './ContinuityStore.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { consoleWorkspaceMount } from '../controllers/workspaceMount.js'
-import { handleRedirectCallback, isSignedIn } from '../auth.js'
+import { handleRedirectCallback, isSignedIn, login } from '../auth.js'
+import { humanizeError } from '../errorHumanize.js'
 import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
 import {
   DRAWING_MODE_CONSOLE,
@@ -80,6 +81,7 @@ export default function SiteRoot() {
   // Armed by the callback QUERY on ANY path, not just /try: the redirect_uri is
   // the bare origin, so /try is the one landing this never sees. See authBoot.js.
   const [authCallbackPending, setAuthCallbackPending] = useState(shouldDeferForAuthCallback)
+  const [authError, setAuthError] = useState('')
   const { path } = useRoute()
   const scene = bootApp ? 'app' : sceneForPath(path)
   // Sheets leave for the marketing hub on app-only hosts. The
@@ -101,12 +103,20 @@ export default function SiteRoot() {
   useEffect(() => {
     if (!authCallbackPending) return
     let live = true
-    handleRedirectCallback().then((signedIn) => {
+    const fail = () => {
       if (!live) return
-      if (signedIn) window.location.reload()
-      else setAuthCallbackPending(false)
-    })
-    return () => { live = false }
+      live = false
+      setAuthError(humanizeError("Sign-in couldn't be completed."))
+      setAuthCallbackPending(false)
+    }
+    const timer = setTimeout(fail, 20000)
+    Promise.resolve().then(() => handleRedirectCallback()).then((signedIn) => {
+      if (!live) return
+      clearTimeout(timer)
+      if (signedIn) { live = false; window.location.reload() }
+      else fail()
+    }).catch(fail)
+    return () => { live = false; clearTimeout(timer) }
   }, [authCallbackPending])
 
   // Keyboard recasts — ONLY in scenes site|tool (listener not registered in
@@ -193,6 +203,14 @@ export default function SiteRoot() {
   // 401s, the session controller latches `required`, and the token that lands
   // 700ms later can no longer be used by this page load.
   if (authCallbackPending) return <div className="site-auth-callback" role="status">Completing sign in</div>
+  if (authError) return <div className="site-auth-callback">
+    <p role="alert">{authError}</p>
+    <button type="button" onClick={async () => {
+      try { await login() } catch {
+        setAuthError(humanizeError("Sign-in couldn't start. Check your connection and try again."))
+      }
+    }}>Sign in</button>
+  </div>
 
   // ONE provider, at the root of every arm, so React reconciles it across
   // scene changes instead of unmounting it. `mode` follows the scene; the
