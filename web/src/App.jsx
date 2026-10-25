@@ -4643,6 +4643,11 @@ export default function App() {
         {studioShell && surfaceSlots.toolbar.ribbon && (
           <CockpitTopBand tabs={profileTabs} tab={activeRibbonTab} onTab={setRibbonTab} before={ribbon.quickBefore} after={ribbon.quickAfter} />
         )}
+        {projectMode && (
+          <>
+            {projectSolarRuntime.canRetryReadback && !projectSolarRuntime.busy && <button type="button" className="chip-act" disabled={projectSolarRuntime.busy} onClick={projectSolarRuntime.retryReadback}>Refresh</button>}
+          </>
+        )}
         <div className="proj" ref={projectSwitcherRef}>
           <ProjectSwitcher
             mock={mock}
