@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import json
+import logging
 import os
 import uuid
 
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS lab_activations (
  state TEXT NOT NULL CHECK (state IN ('active','paused','expired','stopped','off')),
  reason TEXT, lease_expires_at TEXT NOT NULL, next_due_at TEXT NOT NULL,
  in_flight_run_id TEXT, coalesced_ticks INTEGER NOT NULL DEFAULT 0,
+ failure_count INTEGER NOT NULL DEFAULT 0, last_started_at TEXT,
  last_output TEXT, last_summary TEXT, created_by TEXT NOT NULL,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
  PRIMARY KEY (tenant_id, activation_id)
@@ -60,6 +62,10 @@ def _run(tenant, operation, *, write=False):
             for statement in _SQLITE_SCHEMA.split(";"):
                 if statement.strip():
                     sql.execute(statement)
+            columns = {row["name"] for row in sql.execute("PRAGMA table_info(lab_activations)").fetchall()}
+            for name, definition in (("failure_count", "INTEGER NOT NULL DEFAULT 0"), ("last_started_at", "TEXT")):
+                if name not in columns:
+                    sql.execute("ALTER TABLE lab_activations ADD COLUMN " + name + " " + definition)
         return operation(sql)
     return lab_run_store._run(tenant, transaction, write=write)
 
@@ -72,8 +78,10 @@ def _row(sql, tenant, activation_id):
     return dict(row)
 
 
-def _transition(sql, row, state, reason, actor, now):
+def _transition(sql, row, state, reason, actor, now, cancellations=None):
     tenant, aid = row["tenant_id"], row["activation_id"]
+    if row.get("state") == "active" and state != "active" and row.get("in_flight_run_id"):
+        cancellations.append(row["in_flight_run_id"])
     seq = sql.execute("SELECT MAX(seq) AS seq FROM lab_activation_transitions"
                       " WHERE tenant_id=? AND activation_id=?", (tenant, aid)).fetchone()["seq"]
     seq = 1 if seq is None else seq + 1
@@ -85,6 +93,16 @@ def _transition(sql, row, state, reason, actor, now):
     sql.execute("UPDATE lab_activations SET state=?,reason=?,updated_at=? WHERE tenant_id=? AND activation_id=?",
                 (state, reason, now.isoformat(), tenant, aid))
     row.update(state=state, reason=reason)
+
+
+def _cancel_committed(tenant, cancellations):
+    # The public API takes its own tenant lock. Only call it after commit;
+    # holds_run prevents evaluation if the process exits before cancellation.
+    for run_id in cancellations:
+        try:
+            lab_run_store.request_cancel(tenant, run_id, "activation")
+        except Exception as error:
+            logging.getLogger(__name__).warning("lab_activation_cancel_failed class=%s", type(error).__name__)
 
 
 def _admit_graph(graph):
@@ -137,15 +155,16 @@ def readmit(row):
     return None
 
 
-def _public(sql, row):
+def _public(sql, row, transitions=None):
     result = {key: value for key, value in row.items() if key not in {"principal", "created_by"}}
     result["principal_bound"] = bool(row["principal"] and not row["principal"].startswith("tenant:"))
     for key in ("last_output", "last_summary"):
         if isinstance(result[key], str):
             result[key] = json.loads(result[key])
-    transitions = sql.execute("SELECT seq,from_state,to_state,reason,at FROM lab_activation_transitions"
-                              " WHERE tenant_id=? AND activation_id=? ORDER BY seq DESC LIMIT 20",
-                              (row["tenant_id"], row["activation_id"])).fetchall()
+    if transitions is None:
+        transitions = sql.execute("SELECT seq,from_state,to_state,reason,at FROM lab_activation_transitions"
+                                  " WHERE tenant_id=? AND activation_id=? ORDER BY seq DESC LIMIT 20",
+                                  (row["tenant_id"], row["activation_id"])).fetchall()
     result["transitions"] = [dict(item) for item in transitions]
     return result
 
@@ -179,6 +198,8 @@ def create(tenant, doc_id, interval_s, principal, actor):
         row = _row(sql, tenant, aid)
         reason = readmit(row)
         if reason:
+            if reason == "entitlement_revoked":
+                raise Refused("lab_activation_entitlement_required", 403)
             raise Refused(reason, 409)
         row["state"] = None
         _transition(sql, row, "active", "created", actor, now)
@@ -187,14 +208,41 @@ def create(tenant, doc_id, interval_s, principal, actor):
 
 
 def list(tenant):
-    return _run(tenant, lambda sql: [_public(sql, dict(row)) for row in sql.execute(
-        "SELECT * FROM lab_activations WHERE tenant_id=? ORDER BY created_at DESC,activation_id",
-        (tenant,)).fetchall()])
+    def operation(sql):
+        rows = [dict(row) for row in sql.execute(
+            "SELECT * FROM lab_activations WHERE tenant_id=? AND (state IN ('active','paused','expired')"
+            " OR activation_id IN (SELECT activation_id FROM lab_activations WHERE tenant_id=?"
+            " AND state IN ('stopped','off') ORDER BY created_at DESC,activation_id LIMIT 20))"
+            " ORDER BY created_at DESC,activation_id", (tenant, tenant)).fetchall()]
+        if not rows:
+            return []
+        ids = [row["activation_id"] for row in rows]
+        transitions = sql.execute(
+            "SELECT activation_id,seq,from_state,to_state,reason,at FROM ("
+            "SELECT activation_id,seq,from_state,to_state,reason,at,"
+            "ROW_NUMBER() OVER (PARTITION BY activation_id ORDER BY seq DESC) AS rank"
+            " FROM lab_activation_transitions WHERE tenant_id=? AND activation_id IN ("
+            + ",".join("?" for _ in ids) + ")) AS latest WHERE rank<=20 ORDER BY seq DESC",
+            (tenant, *ids)).fetchall()
+        grouped = {aid: [] for aid in ids}
+        for item in transitions:
+            item = dict(item)
+            grouped[item.pop("activation_id")].append(item)
+        return [_public(sql, row, grouped[row["activation_id"]]) for row in rows]
+    return _run(tenant, operation)
+
+
+def holds_run(tenant, run_id):
+    return _run(tenant, lambda sql: sql.execute(
+        "SELECT 1 FROM lab_activations WHERE tenant_id=? AND in_flight_run_id=? AND state='active' LIMIT 1",
+        (tenant, run_id)).fetchone() is not None)
 
 
 def _control(tenant, activation_id, action, actor):
     identifier(activation_id)
+    cancellations = []
     def operation(sql):
+        cancellations.clear()
         row, now = _row(sql, tenant, activation_id), _now()
         allowed = {"pause": {"active"}, "resume": {"active", "paused"},
                    "renew": {"active", "paused", "expired"},
@@ -202,22 +250,26 @@ def _control(tenant, activation_id, action, actor):
         if row["state"] not in allowed[action]:
             raise Refused("lab_activation_state_conflict", 409)
         if action == "resume" and lab_run_store._date(row["lease_expires_at"]) <= now:
-            _transition(sql, row, "expired", "lease_expired", actor, now)
+            _transition(sql, row, "expired", "lease_expired", actor, now, cancellations)
             return _public(sql, _row(sql, tenant, activation_id))
         if action in {"resume", "renew"}:
             reason = readmit(row)
             if reason:
-                _transition(sql, row, "stopped", reason, actor, now)
+                _transition(sql, row, "stopped", reason, actor, now, cancellations)
                 return _public(sql, _row(sql, tenant, activation_id))
             if action == "renew":
                 sql.execute("UPDATE lab_activations SET lease_expires_at=? WHERE tenant_id=? AND activation_id=?",
                             ((now + timedelta(hours=24)).isoformat(), tenant, activation_id))
+            due = now
+            if row["last_started_at"]:
+                due = max(now, lab_run_store._date(row["last_started_at"]) + timedelta(seconds=row["interval_s"]))
             sql.execute("UPDATE lab_activations SET next_due_at=? WHERE tenant_id=? AND activation_id=?",
-                        (now.isoformat(), tenant, activation_id))
+                        (due.isoformat(), tenant, activation_id))
         state = {"pause": "paused", "resume": "active", "renew": "active", "off": "off"}[action]
-        _transition(sql, row, state, action, actor, now)
+        _transition(sql, row, state, action, actor, now, cancellations)
         return _public(sql, _row(sql, tenant, activation_id))
     result = _run(tenant, operation, write=True)
+    _cancel_committed(tenant, cancellations)
     if action == "resume" and result["state"] == "expired":
         raise Refused("lab_activation_state_conflict", 409)
     return result
@@ -240,28 +292,57 @@ def off(tenant, activation_id, actor):
 
 
 def _harvest(sql, row, run):
-    graph = lab_artifacts.get(row["tenant_id"], row["doc_id"], row["revision"])["graph"]
-    values = {}
-    events = sql.execute("SELECT block_id,payload FROM lab_run_events WHERE tenant_id=? AND run_id=?"
-                         " AND kind='value' ORDER BY seq", (row["tenant_id"], run["run_id"])).fetchall()
+    unavailable = False
+    try:
+        graph = lab_artifacts.get(row["tenant_id"], row["doc_id"], row["revision"])["graph"]
+    except lab_artifacts.NotFound:
+        graph, unavailable = {}, True
+    outputs = graph.get("outputs", {})
+    blocks = sorted({ref["node"] for ref in outputs.values()})
+    values, decoded, truncated = {}, {}, False
+    events = []
+    if blocks:
+        size = "octet_length(CAST(payload AS TEXT))" if sql.postgres else "length(CAST(payload AS BLOB))"
+        # Cast JSONB to text so even PostgreSQL's driver cannot decode it first.
+        events = sql.execute(
+            "SELECT block_id,CASE WHEN " + size + "<=65536 THEN CAST(payload AS TEXT) ELSE NULL END AS payload"
+            " FROM lab_run_events WHERE tenant_id=? AND run_id=? AND seq IN ("
+            "SELECT MAX(seq) FROM lab_run_events WHERE tenant_id=? AND run_id=? AND kind='value'"
+            " AND block_id IN (" + ",".join("?" for _ in blocks) + ") GROUP BY block_id)",
+            (row["tenant_id"], run["run_id"], row["tenant_id"], run["run_id"], *blocks)).fetchall()
     for event in events:
-        payload = event["payload"]
-        values[event["block_id"]] = json.loads(payload) if isinstance(payload, str) else payload
-    output = {name: values.get(ref["node"], {}).get(ref["port"])
-              for name, ref in graph.get("outputs", {}).items()}
+        values[event["block_id"]] = event["payload"]
+    output, used = {}, 2
+    for name, ref in outputs.items():
+        node = ref["node"]
+        if node in values and values[node] is None:
+            truncated = True
+            break
+        if node not in decoded:
+            decoded[node] = json.loads(values[node]) if node in values else {}
+        value = decoded[node].get(ref["port"])
+        item_size = len(json.dumps({name: value}, allow_nan=False).encode("utf-8")) - 2
+        if used + item_size + (2 if output else 0) > 65536:
+            truncated = True
+            break
+        output[name] = value
+        used += item_size + (2 if len(output) > 1 else 0)
+    if truncated:
+        output = {"truncated": True}
     encoded = json.dumps(output, allow_nan=False)
-    if len(encoded.encode("utf-8")) > 65536:
-        encoded = json.dumps({"truncated": True})
     finished = run["finished_at"]
     summary = json.dumps({"run_id": run["run_id"], "state": run["state"],
                           "finished_at": finished.isoformat() if hasattr(finished, "isoformat") else finished,
                           "duration_s": max(0, (lab_run_store._date(finished) -
                                               lab_run_store._date(run["created_at"])).total_seconds())
-                          if finished else None, "coalesced_ticks": row["coalesced_ticks"]})
+                          if finished else None, "coalesced_ticks": row["coalesced_ticks"],
+                          "harvest": "unavailable" if unavailable else "available"})
     placeholder = "?::jsonb" if sql.postgres else "?"
     sql.execute("UPDATE lab_activations SET last_output=" + placeholder + ",last_summary=" + placeholder +
                 ",in_flight_run_id=NULL,coalesced_ticks=0 WHERE tenant_id=? AND activation_id=?",
                 (encoded, summary, row["tenant_id"], row["activation_id"]))
+    row["in_flight_run_id"] = None
+    return unavailable
 
 
 def _enqueue(sql, row, now):
@@ -287,37 +368,55 @@ def tick(now, *, limit=20):
     now = lab_run_store._date(now)
     if type(limit) is not int or not 1 <= limit <= 1000:
         raise ValueError("invalid_lab_activation_limit")
+    cutoff = (now - timedelta(days=7)).isoformat()
+    terminal = _run("lab-activation-scheduler", lambda sql: [dict(row) for row in sql.execute(
+        "SELECT tenant_id,activation_id FROM lab_activations WHERE state IN ('stopped','off')"
+        " AND updated_at<? ORDER BY updated_at,tenant_id,activation_id LIMIT 100", (cutoff,)).fetchall()])
+    for candidate in terminal:
+        def purge(sql):
+            row = _row(sql, candidate["tenant_id"], candidate["activation_id"])
+            if row["state"] in {"stopped", "off"} and lab_run_store._date(row["updated_at"]) < lab_run_store._date(cutoff):
+                args = (row["tenant_id"], row["activation_id"])
+                sql.execute("DELETE FROM lab_activation_transitions WHERE tenant_id=? AND activation_id=?", args)
+                sql.execute("DELETE FROM lab_activations WHERE tenant_id=? AND activation_id=?", args)
+        try:
+            _run(candidate["tenant_id"], purge, write=True)
+        except Exception as error:
+            logging.getLogger(__name__).warning("lab_activation_purge_failed class=%s", type(error).__name__)
     due = _run("lab-activation-scheduler", lambda sql: [dict(row) for row in sql.execute(
         "SELECT tenant_id,activation_id FROM lab_activations WHERE state='active' AND next_due_at<=?"
         " ORDER BY next_due_at,tenant_id,activation_id LIMIT ?", (now.isoformat(), limit)).fetchall()])
     for candidate in due:
         tenant, aid = candidate["tenant_id"], candidate["activation_id"]
+        cancellations = []
         def operation(sql):
             row = _row(sql, tenant, aid)
             if row["state"] != "active" or lab_run_store._date(row["next_due_at"]) > now:
                 return
             if lab_run_store._date(row["lease_expires_at"]) <= now:
-                _transition(sql, row, "expired", "lease_expired", "scheduler", now)
+                _transition(sql, row, "expired", "lease_expired", "scheduler", now, cancellations)
                 return
             if row["in_flight_run_id"]:
                 run = lab_run_store._row(sql, tenant, row["in_flight_run_id"])
                 if run is None:
-                    _transition(sql, row, "stopped", "run_unavailable", "scheduler", now)
+                    _transition(sql, row, "stopped", "run_unavailable", "scheduler", now, cancellations)
                     return
                 if run["state"] not in {"finished", "failed", "cancelled"}:
                     reason = readmit(row)
                     if reason:
-                        _transition(sql, row, "stopped", reason, "scheduler", now)
+                        _transition(sql, row, "stopped", reason, "scheduler", now, cancellations)
                         return
                     sql.execute("UPDATE lab_activations SET coalesced_ticks=coalesced_ticks+1,next_due_at=?,"
                                 "updated_at=? WHERE tenant_id=? AND activation_id=?",
                                 ((lab_run_store._date(row["next_due_at"]) + timedelta(seconds=row["interval_s"])).isoformat(),
                                  now.isoformat(), tenant, aid))
                     return
-                _harvest(sql, row, run)
+                if _harvest(sql, row, run):
+                    _transition(sql, row, "stopped", "publication_changed", "scheduler", now, cancellations)
+                    return
             reason = readmit(row)
             if reason:
-                _transition(sql, row, "stopped", reason, "scheduler", now)
+                _transition(sql, row, "stopped", reason, "scheduler", now, cancellations)
                 return
             try:
                 run_id = _enqueue(sql, row, now)
@@ -326,7 +425,34 @@ def tick(now, *, limit=20):
                             "updated_at=? WHERE tenant_id=? AND activation_id=?",
                             ((now + timedelta(seconds=row["interval_s"])).isoformat(), now.isoformat(), tenant, aid))
                 return
-            sql.execute("UPDATE lab_activations SET in_flight_run_id=?,next_due_at=?,updated_at=?"
+            sql.execute("UPDATE lab_activations SET in_flight_run_id=?,next_due_at=?,updated_at=?,last_started_at=?"
                         " WHERE tenant_id=? AND activation_id=?",
-                        (run_id, (now + timedelta(seconds=row["interval_s"])).isoformat(), now.isoformat(), tenant, aid))
-        _run(tenant, operation, write=True)
+                        (run_id, (now + timedelta(seconds=row["interval_s"])).isoformat(), now.isoformat(),
+                         now.isoformat(), tenant, aid))
+        def successful(sql):
+            cancellations.clear()
+            operation(sql)
+            sql.execute("UPDATE lab_activations SET failure_count=0 WHERE tenant_id=? AND activation_id=?", (tenant, aid))
+        try:
+            _run(tenant, successful, write=True)
+        except Exception as error:
+            cancellations.clear()
+            logging.getLogger(__name__).warning("lab_activation_tick_failed class=%s", type(error).__name__)
+            def failed(sql):
+                cancellations.clear()
+                row = _row(sql, tenant, aid)
+                if row["state"] != "active" or lab_run_store._date(row["next_due_at"]) > now:
+                    return
+                failures = row["failure_count"] + 1
+                sql.execute("UPDATE lab_activations SET failure_count=?,next_due_at=?,updated_at=?"
+                            " WHERE tenant_id=? AND activation_id=?",
+                            (failures, (now + timedelta(seconds=row["interval_s"])).isoformat(),
+                             now.isoformat(), tenant, aid))
+                if failures >= 3:
+                    _transition(sql, row, "stopped", "readmit_unavailable", "scheduler", now, cancellations)
+            try:
+                _run(tenant, failed, write=True)
+            except Exception as failure_error:
+                cancellations.clear()
+                logging.getLogger(__name__).warning("lab_activation_failure_record_failed class=%s", type(failure_error).__name__)
+        _cancel_committed(tenant, cancellations)

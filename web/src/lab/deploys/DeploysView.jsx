@@ -21,8 +21,10 @@ function Activations({ client, published, fetchImpl }) {
   const changing = useRef(false)
   useEffect(() => {
     let current = true
+    let loading = false
     async function load() {
-      if (changing.current) return
+      if (changing.current || loading || document.visibilityState === 'hidden') return
+      loading = true
       const token = ++generation.current
       try {
         const data = await request()
@@ -30,9 +32,10 @@ function Activations({ client, published, fetchImpl }) {
       } catch (failure) {
         if (current && token === generation.current) setError(failure.message)
       }
+      finally { loading = false }
     }
     load()
-    const timer = globalThis.setInterval(load, 5000)
+    const timer = globalThis.setInterval(load, 15000)
     return () => { current = false; generation.current += 1; globalThis.clearInterval(timer) }
   }, [fetchImpl])
   async function request(path = '', body) {

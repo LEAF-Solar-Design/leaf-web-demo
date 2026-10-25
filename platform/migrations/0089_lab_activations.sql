@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS lab_activations (
     state TEXT NOT NULL CHECK (state IN ('active','paused','expired','stopped','off')),
     reason TEXT, lease_expires_at TIMESTAMPTZ NOT NULL, next_due_at TIMESTAMPTZ NOT NULL,
     in_flight_run_id TEXT, coalesced_ticks INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0, last_started_at TIMESTAMPTZ,
     last_output JSONB, last_summary JSONB, created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (tenant_id, activation_id)

@@ -119,7 +119,7 @@ describe('Deploys', () => {
     let poll, staleResponse
     const setInterval = globalThis.setInterval
     vi.spyOn(globalThis, 'setInterval').mockImplementation((callback, delay) => {
-      if (delay === 5000) poll = callback
+      if (delay === 15000) poll = callback
       return setInterval(callback, delay)
     })
     const fetchImpl = vi.fn()
@@ -137,6 +137,31 @@ describe('Deploys', () => {
     })
     expect(screen.getByRole('button', { name: 'Resume' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Pause' })).toBeDisabled()
+  })
+
+  it('F3 polls at fifteen second intervals only while visible', async () => {
+    const { client } = ledger()
+    let poll
+    const timer = vi.spyOn(globalThis, 'setInterval').mockImplementation((callback, delay) => {
+      expect(delay).toBeGreaterThanOrEqual(15000)
+      poll = callback
+      return 123
+    })
+    const clear = vi.spyOn(globalThis, 'clearInterval')
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    const fetchImpl = vi.fn(emptyActivations)
+    const view = render(<DeploysView client={client} fetchImpl={fetchImpl} />)
+    await act(async () => {})
+    expect(timer).toHaveBeenCalledWith(expect.any(Function), 15000)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    visibility.mockReturnValue('hidden')
+    await act(async () => { await poll() })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    visibility.mockReturnValue('visible')
+    await act(async () => { await poll() })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    view.rerender(<DeploysView hidden client={client} fetchImpl={fetchImpl} />)
+    expect(clear).toHaveBeenCalledWith(123)
   })
 
   it('creates, lists and controls activations and shows errors plainly', async () => {

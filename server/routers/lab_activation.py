@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 import deps
+import entitlements
 import lab_activation as store
 from lab_artifacts import NotFound
 from lab_doc_validators import InvalidGraph, TooLarge
@@ -29,7 +30,12 @@ def _call(function, *args):
 
 @router.post("", status_code=202)
 async def create(request: Request, tenant=Depends(deps.require_tenant)):
-    _admit(tenant, "deploy")
+    try:
+        allowed = entitlements.entitlements_for(entitlements.resolve_tier(tenant)).get("deploy", False)
+    except entitlements.EntitlementsError:
+        raise HTTPException(503, detail="lab_policy_unavailable") from None
+    if not allowed:
+        raise HTTPException(403, detail="lab_activation_entitlement_required")
     body = await _body(request, ("doc_id", "interval_s"))
     principal = getattr(tenant, "subject", None) or "tenant:" + str(tenant)
     return await run_in_threadpool(_call, store.create, str(tenant), body["doc_id"],

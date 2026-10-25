@@ -223,7 +223,8 @@ def test_lab_run_schema_proof(mode):
         "lab_activations", "(state, next_due_at)")
     activation_migration = (db._PKG_DIR / "migrations/0089_lab_activations.sql").read_text(encoding="utf-8")
     for fragment in ("CREATE TABLE IF NOT EXISTS lab_activations", "CREATE TABLE IF NOT EXISTS lab_activation_transitions",
-                     "CHECK (interval_s BETWEEN 60 AND 86400)", "last_output JSONB", "last_summary JSONB"):
+                     "CHECK (interval_s BETWEEN 60 AND 86400)", "last_output JSONB", "last_summary JSONB",
+                     "failure_count INTEGER NOT NULL DEFAULT 0", "last_started_at TIMESTAMPTZ"):
         assert fragment in activation_migration
     assert catalog["constraints"]["lab_stream_leases_pkey"] == db._catalog_contract(
         "lab_stream_leases", "PRIMARY KEY (principal, stream_id)")

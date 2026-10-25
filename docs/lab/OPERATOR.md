@@ -147,6 +147,8 @@ Deploys can activate only a published revision, with trusted pure, read or
 simulate blocks. Host, compute and effectful blocks are refused. Read and
 simulate also require `LEAF_LAB_TOOL_NODES=1`; activation runs use a restricted
 adapter that never admits compute. The activating subject is stored privately.
+Creation requires deploy entitlement from the tier alone: roles and elevation
+cannot supply it (`403 lab_activation_entitlement_required`).
 
 An activation starts `active`. Pause moves active to `paused`; resume re-admits
 a paused activation. Off moves active, paused, expired or stopped to terminal
@@ -156,6 +158,14 @@ re-admits now, grants 24 hours from renewal and lands in active. Stopped and off
 cannot renew or resume; create a fresh activation after resolving the cause.
 An expired paused lease also requires renewal. Controls and scheduler state
 changes append transitions; the store keeps 200 and the UI shows the latest 20.
+Every move out of active requests cancellation of the in-flight run as actor
+`activation` after the activation transaction commits. Cancellation failures log
+only the exception class and do not undo the transition. Before evaluation, the
+worker cancels an activation run with `activation_inactive` unless an active
+activation holds it.
+This guard also covers a process exit between the transition and cancellation.
+Resume and renew preserve the interval after `last_started_at`; neither can
+schedule a second run sooner than one full interval after the last start.
 
 Each due tick checks the principal's current binding and deploy entitlement,
 the published revision and graph hash, registry/catalog digest, operations
@@ -167,6 +177,12 @@ tool activations with `lab_activation_tools_disabled`; newly inadmissible
 blocks produce `lab_activation_effect_refused`. Missing retained runs stop
 with `run_unavailable`. Auth-off and tenant-only principals skip subject binding
 and entitlement resolution, matching the existing tenant-context behavior.
+Artifact/store exceptions skip the activation's tick without enqueueing and
+increment `failure_count`. Three consecutive failures stop it with
+`readmit_unavailable`; a successful tick resets the count. Each activation is
+processed in its own tenant transaction, so a failure does not abort other
+tenants' ticks. A missing pinned artifact during harvest records
+`last_summary.harvest=unavailable` and stops with `publication_changed`.
 
 Intervals are integers from 60 to 86400 seconds. A tenant may have at most ten
 active, paused or expired activations. There is one run in flight per activation;
@@ -175,6 +191,13 @@ also coalesces. The next successful harvest replaces the prior declared output
 and summary (run id, terminal state, finish time, duration and coalesced ticks).
 Output retention is capped at 64 KiB; overflow becomes `{"truncated": true}`.
 It does not retain output history or undeclared intermediate values.
+Harvest selects only the latest value event for each declared output block in
+one bounded query. Stored payloads above 64 KiB are marked truncated without
+decoding; outputs are added only while the combined size remains within 64 KiB.
+Listing includes active, paused and expired rows plus the newest 20 stopped or
+off rows, with the latest 20 transitions fetched together. Each tick purges at
+most 100 stopped/off rows older than seven days and their transitions. Deploys
+polls every 15 seconds while the view and browser document are visible.
 
 Use the global worker pause (`POST /api/lab/runs/worker/pause`) to pause all
 activation ticks, including expiry processing. Resume the worker through

@@ -105,6 +105,7 @@ def test_activation_tick_colour_guards_and_five_second_cadence(rig, monkeypatch,
 
 
 def test_activation_run_uses_read_simulate_adapter(rig, monkeypatch):
+    monkeypatch.setattr(worker.lab_activation, "holds_run", lambda tenant, run_id: True)
     from test_lab_tool_nodes import tool_graph
     tool = tool_graph(monkeypatch)
     monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
@@ -121,6 +122,36 @@ def test_activation_run_uses_read_simulate_adapter(rig, monkeypatch):
     rig.make().tick()
     terminal(rig)
     assert len(adapters) == 1 and adapters[0].effects == ("read", "simulate")
+
+
+@pytest.mark.parametrize("state", ["paused", "stopped", "expired", "off", "missing", "wrong_run"])
+def test_K3_inactive_activation_run_is_cancelled_without_evaluation(rig, monkeypatch, state):
+    activation = worker.lab_activation
+    aid = "activation-test"
+    now = store._now().isoformat()
+    def setup(sql):
+        if state != "missing":
+            sql.execute("INSERT INTO lab_activations (tenant_id,activation_id,doc_id,revision,graph_sha256,"
+                        "registry_digest,ops_revision,input_digest,principal,interval_s,state,lease_expires_at,"
+                        "next_due_at,in_flight_run_id,created_by,created_at,updated_at)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (rig.tenant, aid, "doc", 1, "a" * 64, store.registry_digest(), worker.OPS_REVISION,
+                         "b" * 64, "tenant:local", 60, "active" if state == "wrong_run" else state,
+                         now, now, "other" if state == "wrong_run" else "run", "actor", now, now))
+    activation._run(rig.tenant, setup, write=True)
+    evaluated = []
+    monkeypatch.setattr(worker, "evaluate_graph", lambda *args, **kwargs: evaluated.append(True))
+    monkeypatch.setattr(activation, "tick", lambda now: None)
+    store.create(rig.tenant, "doc", "run", 1, "a" * 64, worker.OPS_REVISION,
+                 "b" * 64, "lab-activation.v1", "abc1234")
+    try:
+        rig.make().tick()
+        terminal(rig, "cancelled")
+        assert evaluated == []
+        assert events(rig)[-1]["payload"] == {"reason": "activation_inactive"}
+    finally:
+        activation._run(rig.tenant, lambda sql: sql.execute(
+            "DELETE FROM lab_activations WHERE tenant_id=?", (rig.tenant,)), write=True)
 
 
 @pytest.mark.parametrize("enabled", [True, False])

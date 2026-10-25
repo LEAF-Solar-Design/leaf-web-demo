@@ -216,6 +216,9 @@ class LabWorker:
         try:
             renewer.start()
             row = run.row
+            if row["adapter_revision"] == "lab-activation.v1" and not lab_activation.holds_run(row["tenant_id"], row["run_id"]):
+                self._terminal(run, "cancelled", "activation_inactive")
+                return
             artifact = self.artifacts.get(row["tenant_id"], row["doc_id"], row["graph_revision"])
             if self.clock() - started >= 600:
                 raise RunBudgetExceeded()
@@ -239,6 +242,9 @@ class LabWorker:
             elapsed = max(0, self.clock() - started)
             if elapsed >= 600:
                 raise RunBudgetExceeded()
+            if row["adapter_revision"] == "lab-activation.v1" and not lab_activation.holds_run(row["tenant_id"], row["run_id"]):
+                self._terminal(run, "cancelled", "activation_inactive")
+                return
 
             def on_block(block_id, values):
                 with run.lock:
