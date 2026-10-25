@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 import deps
+import entitlements
 import lab_run_store
 from routers.lab_artifacts import _call
 
@@ -55,6 +56,23 @@ def require_auth_live() -> None:
 
 @router.get("/api/lab/status")
 def status(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
+    response = {
+        "ok": True,
+        "schema": "leaf.lab-status.v1",
+        "rail": "on",
+        "posture": lab_posture(),
+        "tenant": str(getattr(tenant, "tenant_id", tenant)),
+    }
+    try:
+        tier = entitlements.resolve_tier(tenant)
+        roles, elevated = entitlements.resolve_roles(tenant)
+        allowed = entitlements.entitlements_for(tier, roles, elevated).get("build", False)
+    except Exception:
+        # Optional worker details fail closed without hiding the surface state.
+        return response
+    if not allowed:
+        return response
+
     workers = []
     for row in _call(lab_run_store.worker_status, 60):
         heartbeat = row["heartbeat_at"]
@@ -65,12 +83,8 @@ def status(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
             "heartbeat_age_s": max(0, (datetime.now(timezone.utc) - heartbeat).total_seconds()),
             "active_runs": row["active_runs"], "queued_runs": row["queued_runs"],
         })
-    return {
-        "ok": True,
-        "schema": "leaf.lab-status.v1",
-        "rail": "on",
-        "posture": lab_posture(),
-        "tenant": str(getattr(tenant, "tenant_id", tenant)),
-        "worker": {"paused": _call(lab_run_store.paused), "workers": workers,
-                   "queue_age_max_s": _call(lab_run_store.oldest_queued_age_s)},
+    response["worker"] = {
+        "paused": _call(lab_run_store.paused), "workers": workers,
+        "queue_age_max_s": _call(lab_run_store.oldest_queued_age_s),
     }
+    return response

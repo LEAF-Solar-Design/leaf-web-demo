@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from route_flatten import iter_leaf_routes
 
 import deps
+import entitlements
 from routers import lab_router, lab_surface
 
 LAB_PATHS = [
@@ -34,6 +35,7 @@ LAB_PATHS = [
 
 @pytest.fixture(autouse=True)
 def _environment(monkeypatch):
+    monkeypatch.delenv("LEAF_ENTITLEMENTS_FILE", raising=False)
     monkeypatch.setattr(lab_surface.lab_run_store, "worker_status", lambda age: [])
     monkeypatch.setattr(lab_surface.lab_run_store, "paused", lambda: False)
     monkeypatch.setattr(lab_surface.lab_run_store, "oldest_queued_age_s", lambda: None)
@@ -168,22 +170,56 @@ def test_verified_token_without_tenant_claim_is_forbidden(monkeypatch):
 @pytest.mark.parametrize("runtime,posture", [
     ("staging", "staging"), ("production", "production"), ("test", "local"),
 ])
-def test_status_contract_contains_only_public_fields(monkeypatch, runtime, posture):
+@pytest.mark.parametrize("tier,build", [("hosted_pro", True), ("restricted", False)])
+def test_status_contract_contains_only_public_fields(monkeypatch, runtime, posture, tier, build):
     monkeypatch.setenv("LEAF_RUNTIME_ENV", runtime)
     monkeypatch.setenv(lab_surface.FLAG_LAB_SURFACE, "1")
-    response = _client().get("/api/lab/status")
+    if not build:
+        def forbidden(*args):
+            pytest.fail("unentitled status accessed worker state")
+        for name in ("worker_status", "paused", "oldest_queued_age_s"):
+            monkeypatch.setattr(lab_surface.lab_run_store, name, forbidden)
+    client = _client()
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier=tier)
+    response = client.get("/api/lab/status")
     assert response.status_code == 200
     body = response.json()
-    assert body == {
+    expected = {
         "ok": True, "schema": "leaf.lab-status.v1", "rail": "on",
         "posture": posture, "tenant": "tenant-a",
-        "worker": {"paused": False, "workers": [], "queue_age_max_s": None},
     }
+    if build:
+        expected["worker"] = {"paused": False, "workers": [], "queue_age_max_s": None}
+    assert body == expected
     secret_key = re.compile(
         r"password|credential|secret|token|jwt|auth|cookie|session|host|^sub$", re.I)
     assert not any(secret_key.search(key) for key in body)
     assert not any(lab_surface_value.startswith("eyJ") for lab_surface_value in body.values()
                    if isinstance(lab_surface_value, str))
+
+
+@pytest.mark.parametrize("lookup", ["resolve_tier", "resolve_roles", "entitlements_for"])
+@pytest.mark.parametrize("error", [entitlements.EntitlementsError, RuntimeError])
+def test_status_omits_worker_when_entitlement_lookup_fails(monkeypatch, lookup, error):
+    def unavailable(*args):
+        raise error("policy lookup unavailable")
+
+    def forbidden(*args):
+        pytest.fail("failed entitlement lookup accessed worker state")
+
+    monkeypatch.setattr(entitlements, lookup, unavailable)
+    for name in ("worker_status", "paused", "oldest_queued_age_s"):
+        monkeypatch.setattr(lab_surface.lab_run_store, name, forbidden)
+    client = _client()
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier="hosted_pro")
+    response = client.get("/api/lab/status")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True, "schema": "leaf.lab-status.v1", "rail": "on",
+        "posture": "staging", "tenant": "tenant-a",
+    }
 
 
 def test_status_serializes_only_tenant_id_from_verified_context():
