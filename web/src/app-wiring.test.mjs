@@ -1035,7 +1035,7 @@ describe('project checkout toolbar row', () => {
       assert.ok(group.includes(declaration + ';'), declaration)
     }
     const status = rule(scope + ' p[role="status"]')
-    for (const declaration of ['margin: 0', 'min-width: 0', 'white-space: nowrap', 'overflow: hidden', 'text-overflow: ellipsis', 'max-width: 320px', 'font: 400 11px/20px var(--ck-font)']) {
+    for (const declaration of ['margin: 0', 'min-width: 0', 'white-space: nowrap', 'overflow: hidden', 'text-overflow: ellipsis', 'max-width: 320px', 'font: 400 var(--leaf-size-caption)/20px var(--ck-font)']) {
       assert.ok(status.includes(declaration + ';'), declaration)
     }
     assert.match(readCss('./styles.css'), /\.checkout-controls\s*>\s*p\s*\{\s*margin:\s*0;\s*\}/)
@@ -3609,7 +3609,7 @@ describe('DOCK clearance', () => {
       ['tablet rise outside its block', swap(cockpit, tabletRise, '') + '\n' + tabletRise + '\n', base, structural],
       ['third rise rule', cockpit + '\n.probe { --ck-status-rise: 12px; }\n', base, structural],
       ['wide padding changed', swap(cockpit, widePadding, widePadding.replace('2px 8px;', '4px 8px;')), base, structural],
-      ['wide line height changed', swap(cockpit, 'font: 400 11px/18px var(--ck-font); color: var(--leaf-ink-muted);', 'font: 400 11px/20px var(--ck-font); color: var(--leaf-ink-muted);'), base, structural],
+      ['wide line height changed', swap(cockpit, 'font: 400 var(--leaf-size-caption)/18px var(--ck-font); color: var(--leaf-ink-muted);', 'font: 400 var(--leaf-size-caption)/20px var(--ck-font); color: var(--leaf-ink-muted);'), base, structural],
       ['tablet line height changed', swap(cockpit, 'margin: 0; line-height: 19px; white-space: nowrap;', 'margin: 0; line-height: 20px; white-space: nowrap;'), base, structural],
       ['tablet line may wrap', swap(cockpit, 'line-height: 19px; white-space: nowrap;', 'line-height: 19px;'), base, structural],
       ['tablet line padded', swap(cockpit, 'margin: 0; line-height: 19px;', 'margin: 0; padding: 2px 0; line-height: 19px;'), base, structural],
