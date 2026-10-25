@@ -71,6 +71,20 @@ it('keeps unanswered health neutral and turns green only after a live response',
   expect(screen.getByText('Service live').className).toBe('ok-txt')
 })
 
+it('shows sign-in required for a 401 session while health is unanswered', () => {
+  render(<ServiceStatus authRequired={true} health={null} />)
+  expect(screen.getByText('Sign-in required').className).toBe('warn-txt')
+  expect(screen.queryByText('Checking service...')).toBeNull()
+  expect(screen.queryByText('Service unreachable')).toBeNull()
+})
+
+it('shows sign-in required for a 401 session even when health failed', () => {
+  render(<ServiceStatus authRequired={true} health={null} healthError="Failed to fetch" />)
+  expect(screen.getByText('Sign-in required').className).toBe('warn-txt')
+  expect(screen.queryByText('Checking service...')).toBeNull()
+  expect(screen.queryByText('Service unreachable')).toBeNull()
+})
+
 it('shows Copy failed when the real run action cannot write to the clipboard', async () => {
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
     writeText: vi.fn().mockRejectedValue(new Error('denied')),

@@ -15,9 +15,9 @@ const PHONE_QUERY = '(max-width: 639px)'
 
 export function ServiceStatus({ mock, health, healthError, authRequired }) {
   const [label, tone] = mock ? ['Demo (sample data)', 'dim']
-    : healthError ? ['Service unreachable', 'warn-txt']
-      : !health ? ['Checking service...', 'dim']
-        : authRequired ? ['Sign-in required', 'warn-txt']
+    : authRequired ? ['Sign-in required', 'warn-txt']
+      : healthError ? ['Service unreachable', 'warn-txt']
+        : !health ? ['Checking service...', 'dim']
           : health.aps_live ? ['Service live', 'ok-txt'] : ['Local only', 'warn-txt']
   return <span className="foot-stat"><span className={tone === 'ok-txt' ? 'dot' : 'dot square'} aria-hidden="true" /><span className={tone}>{label}</span></span>
 }
