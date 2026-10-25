@@ -243,13 +243,14 @@ def _rebase(tenant, row, inspection):
     import lab_git_authority as store
 
     head = inspection['head']
-    _changes(tenant, row['expected_parents'][-1], head)
+    history = _changes(tenant, row['expected_parents'][-1], head)
     blobs = [doc.get('blob') for doc in inspection['documents'] if doc.get('path') == _path(row)]
     if (len(blobs) > 1 or (blobs[0] if blobs else None) != row['base_blob']
             or not store.charge_rebase(tenant, row['op_id'], row['fence'], head)):
         raise MirrorError('lab_ref_conflict')
     return {**row, 'expected_parents': row['expected_parents'] + [head],
-            'rebase_count': row['rebase_count'] + 1}
+            'rebase_count': row['rebase_count'] + 1,
+            '_history': history + row.get('_history', [])}
 
 
 def _quarantine_sql(sql, tenant, row, reason):
@@ -271,8 +272,13 @@ def _quarantine_sql(sql, tenant, row, reason):
     return True
 
 
-def _complete_pending(tenant, row, generation, commit, parent, author='git-recovery'):
+def _complete_pending(tenant, row, generation, commit, parent, author='git-recovery', *, history=()):
     import lab_git_authority as store
+
+    proven = {entry['commit']: entry for entry in history}
+
+    class CompletionConflict(Exception):
+        pass
 
     def operation(sql):
         active = store.authority_get_sql(sql, tenant)
@@ -287,15 +293,63 @@ def _complete_pending(tenant, row, generation, commit, parent, author='git-recov
         result = ledger._append(sql, tenant, row['doc_id'], row['canonical_text'].encode('utf-8'),
                                 author, current, row['parent_revision'], row['kind'])
         store.record_sql(sql, tenant, commit, row['op_id'], row['doc_id'], row['revision'], row['kind'], parent)
-        _update(sql, tenant, local_sha=commit)
-        sql.execute('UPDATE lab_git_authority SET verified_head=?,updated_at=? '
-                    'WHERE tenant_id=? AND generation=? AND verified_head=?',
-                    (commit, store._now().isoformat(), tenant, active['generation'], parent))
+        local = _state(sql, tenant)['local_sha']
+        moved = False
+        def is_ancestor(older, newer):
+            seen = set()
+            while newer != older:
+                if newer in seen:
+                    return False
+                seen.add(newer)
+                known = store._get(sql, 'lab_git_commits', tenant, 'commit', newer) or proven.get(newer)
+                if not known:
+                    return False
+                newer = known['parent']
+            return True
+
+        # Rebase/recovery history is proved by _changes. Bring the local cursor
+        # through that proof before applying the completed commit's parent CAS.
+        if local != parent and is_ancestor(local, parent):
+            if sql.execute('UPDATE lab_git_tenants SET local_sha=? WHERE tenant_id=? AND local_sha=?',
+                           (parent, tenant, local)).rowcount != 1:
+                raise CompletionConflict()
+            local = parent
+        if local == parent:
+            if sql.execute('UPDATE lab_git_tenants SET local_sha=?,updated_at=CURRENT_TIMESTAMP '
+                           'WHERE tenant_id=? AND local_sha=?', (commit, tenant, parent)).rowcount != 1:
+                raise CompletionConflict()
+            local, moved = commit, True
+        else:
+            # An earlier completion can arrive after its recorded descendants.
+            # It may fill a ledger gap, but must never rewind the local cursor.
+            if not is_ancestor(commit, local):
+                raise CompletionConflict()
+        verified = active['verified_head']
+        for _ in range(1000):
+            successors = sql.execute('SELECT "commit" FROM lab_git_commits WHERE tenant_id=? '
+                'AND (parent=? OR (parent IS NULL AND CAST(? AS TEXT) IS NULL)) LIMIT 2',
+                (tenant, verified, verified)).fetchall()
+            if not successors:
+                break
+            if len(successors) != 1:
+                raise CompletionConflict()
+            successor = successors[0]['commit']
+            if sql.execute('UPDATE lab_git_authority SET verified_head=?,updated_at=? '
+                           'WHERE tenant_id=? AND generation=? AND '
+                           '(verified_head=? OR (verified_head IS NULL AND CAST(? AS TEXT) IS NULL))',
+                           (successor, store._now().isoformat(), tenant, active['generation'],
+                            verified, verified)).rowcount != 1:
+                raise CompletionConflict()
+            verified = successor
         if not store.complete_conditional_sql(sql, tenant, row['op_id'], row['fence']):
-            raise ledger.GitConflict('lab_artifact_conflict')
-        store.enqueue_sql(sql, tenant, 'publish', commit, {'target_sha': commit, 'generation': str(generation)})
+            raise CompletionConflict()
+        if moved:
+            store.enqueue_sql(sql, tenant, 'publish', local, {'target_sha': local, 'generation': str(generation)})
         return result
-    return store._run(tenant, operation, write=True)
+    try:
+        return store._run(tenant, operation, write=True)
+    except CompletionConflict:
+        return None
 
 
 def commit_pending(tenant, row, generation, author='git-recovery', *, uncertain=False):
@@ -320,7 +374,8 @@ def commit_pending(tenant, row, generation, author='git-recovery', *, uncertain=
             commit = result.get('commit')
             if not isinstance(commit, str) or not _SHA.fullmatch(commit):
                 raise MirrorError('unknown')
-            completed = _complete_pending(tenant, row, generation, commit, row['expected_parents'][-1], author)
+            completed = _complete_pending(tenant, row, generation, commit, row['expected_parents'][-1], author,
+                                          history=row.get('_history', ()))
             if completed is None:
                 raise ledger.GitConflict('lab_artifact_conflict')
             return completed
@@ -386,7 +441,7 @@ def _recover_row(tenant, row):
                     'Lab-Op': row['op_id'], 'Lab-Doc': row['doc_id'],
                     'Lab-Revision': str(row['revision']), 'Lab-Sha256': row['sha256']}.items()):
                 raise MirrorError('lab_ops_ambiguous')
-            return _complete_pending(tenant, row, generation, entry['commit'], entry['parent'], author)
+            return _complete_pending(tenant, row, generation, entry['commit'], entry['parent'], author, history=history)
         if inspected['head'] not in row['expected_parents']:
             row = _rebase(tenant, row, inspected)
         return commit_pending(tenant, row, generation, author, uncertain=True)

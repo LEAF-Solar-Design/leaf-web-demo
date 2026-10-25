@@ -336,6 +336,20 @@ def claim_due(tenant, limit=100):
     if type(limit) is not int or limit < 0:
         raise ValueError('lab_git_invalid_limit')
     def operation(sql):
+        if limit == 0:
+            return []
+        newest = sql.execute("SELECT sequence FROM lab_git_outbox WHERE tenant_id=? AND kind='publish' "
+            'AND done_at IS NULL ORDER BY sequence DESC LIMIT 1', (tenant,)).fetchone()
+        if newest:
+            older = sql.execute("SELECT outbox_id FROM lab_git_outbox WHERE tenant_id=? AND kind='publish' "
+                'AND done_at IS NULL AND sequence<?', (tenant, newest['sequence'])).fetchall()
+            for row in older:
+                payload = _get(sql, 'lab_git_outbox', tenant, 'outbox_id', row['outbox_id'])['payload']
+                payload = {**payload, 'superseded_by': newest['sequence']}
+                cast = 'CAST(? AS jsonb)' if sql.postgres else '?'
+                sql.execute('UPDATE lab_git_outbox SET done_at=?,payload=' + cast +
+                    ' WHERE tenant_id=? AND outbox_id=? AND done_at IS NULL',
+                    (_now().isoformat(), json.dumps(payload), tenant, row['outbox_id']))
         rows = sql.execute('SELECT outbox_id FROM lab_git_outbox WHERE tenant_id=? AND done_at IS NULL '
             'AND next_attempt_at<=? ORDER BY sequence LIMIT ?', (tenant, _now().isoformat(), limit)).fetchall()
         result = []

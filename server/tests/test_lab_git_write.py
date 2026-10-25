@@ -1,5 +1,7 @@
 """Generation-fenced writes and crash recovery against a stateful harness twin."""
 from datetime import timedelta
+from itertools import permutations
+from types import SimpleNamespace
 import hashlib
 import json
 import os
@@ -270,6 +272,110 @@ def test_crash_after_commit_recovers_same_revision_without_recommit(world):
     assert len(harness.commits) == 1 and pending(tenant) == []
 
 
+def test_late_recovery_does_not_rewind_completed_descendant(world):
+    tenant, harness = world
+    harness.unknown_after_commit = True
+    with pytest.raises(ledger.GitUnavailable):
+        save(tenant)
+    earlier = harness.head
+    op = pending(tenant)[0]['op_id']
+    save(tenant, 'other')
+    newest = harness.head
+    assert git.mirror_status(tenant)['local_sha'] == newest
+    assert store.authority_get(tenant)['verified_head'] == BASE
+    queued = outbox(tenant)
+    expire(tenant)
+    git.recover_pending(tenant)
+    assert git.mirror_status(tenant)['local_sha'] == newest
+    assert store.authority_get(tenant)['verified_head'] == newest
+    assert store.commit_get(tenant, earlier)['op_id'] == op
+    assert ledger.get(tenant, 'x')['revision'] == 1
+    assert store.get(tenant, op) is None
+    assert outbox(tenant) == queued
+    assert [row['identity'] for row in queued if row['kind'] == 'publish'] == [newest]
+
+
+@pytest.mark.parametrize('order', list(permutations(range(3))))
+def test_completion_orders_converge_through_recorded_commit_gaps(world, monkeypatch, order):
+    tenant, harness = world
+    complete = git._complete_pending
+    monkeypatch.setattr(git, '_complete_pending', lambda *args, **kwargs: None)
+    ops, commits = [], []
+    for doc in ('one', 'two', 'three'):
+        with pytest.raises(ledger.GitConflict):
+            save(tenant, doc)
+        ops.append(next(row['op_id'] for row in pending(tenant) if row['doc_id'] == doc))
+        commits.append(harness.head)
+    monkeypatch.setattr(git, '_complete_pending', complete)
+    completed = set()
+    for index in order:
+        expire(tenant)
+        assert git._recover_row(tenant, store.get(tenant, ops[index]))['revision'] == 1
+        completed.add(index)
+        contiguous = -1
+        while contiguous + 1 in completed:
+            contiguous += 1
+        assert store.authority_get(tenant)['verified_head'] == (BASE if contiguous < 0 else commits[contiguous])
+        assert git.mirror_status(tenant)['local_sha'] == commits[max(completed)]
+    assert pending(tenant) == []
+    assert all(store.commit_get(tenant, commit) for commit in commits)
+
+
+@pytest.mark.parametrize('statement', ['UPDATE lab_git_tenants SET local_sha=',
+    'UPDATE lab_git_authority SET verified_head=', 'DELETE FROM lab_git_pending'])
+def test_failed_completion_condition_preserves_pending_and_rolls_back(world, monkeypatch, statement):
+    tenant, harness = world
+    row = crash_staged(tenant, harness)
+    execute = ledger._SQL.execute
+    def refuse(sql, query, params=()):
+        if query.startswith(statement):
+            return SimpleNamespace(rowcount=0)
+        return execute(sql, query, params)
+    monkeypatch.setattr(ledger._SQL, 'execute', refuse)
+    assert git._complete_pending(tenant, row, '1', 'b' * 40, BASE) is None
+    assert store.get(tenant, row['op_id']) == row
+    assert store.commit_get(tenant, 'b' * 40) is None
+    assert git.mirror_status(tenant)['local_sha'] == BASE
+    assert store.authority_get(tenant)['verified_head'] == BASE
+    assert outbox(tenant) == []
+    with pytest.raises(ledger.NotFound):
+        ledger.get(tenant, 'x')
+
+
+def test_completion_without_forward_or_ancestor_proof_leaves_pending(world):
+    tenant, harness = world
+    row = crash_staged(tenant, harness)
+    ledger._run(tenant, lambda sql: git._update(sql, tenant, local_sha='c' * 40), write=True)
+    assert git._complete_pending(tenant, row, '1', 'b' * 40, BASE) is None
+    assert store.get(tenant, row['op_id']) == row
+    assert store.commit_get(tenant, 'b' * 40) is None
+    assert git.mirror_status(tenant)['local_sha'] == 'c' * 40
+    assert store.authority_get(tenant)['verified_head'] == BASE
+    assert outbox(tenant) == []
+    with pytest.raises(ledger.NotFound):
+        ledger.get(tenant, 'x')
+
+
+def test_verified_head_walk_is_bounded_and_resumes_on_next_completion(world):
+    tenant, harness = world
+    row = crash_staged(tenant, harness)
+    commits = [f'{index:040x}' for index in range(1, 1003)]
+    def record_descendants(sql):
+        for index in range(1, len(commits)):
+            store.record_sql(sql, tenant, commits[index], uuid.uuid4().hex, 'descendant',
+                             index, 'graph', commits[index - 1])
+        git._update(sql, tenant, local_sha=commits[-1])
+    store._run(tenant, record_descendants, write=True)
+    assert git._complete_pending(tenant, row, '1', commits[0], BASE)['revision'] == 1
+    assert store.authority_get(tenant)['verified_head'] == commits[999]
+    assert git.mirror_status(tenant)['local_sha'] == commits[-1]
+    assert outbox(tenant) == []
+    next_row = store.stage(tenant, uuid.uuid4().hex, 'next', 1, None, 'graph', row['canonical_text'],
+                           row['sha256'], expected_parents=[commits[-1]], new_document=True)
+    assert git._complete_pending(tenant, next_row, '1', 'b' * 40, commits[-1])['revision'] == 1
+    assert store.authority_get(tenant)['verified_head'] == 'b' * 40
+
+
 def test_unknown_commit_stays_ambiguous_until_proven(world):
     tenant, harness = world
     harness.unknown_after_commit = True
@@ -324,29 +430,72 @@ def test_reservations_prevent_overcommitting_last_slot(world, monkeypatch, cap):
     assert len(pending(tenant)) == 1
 
 
-def test_outbox_publishes_in_order_and_defers_with_one_notification(world, monkeypatch):
+def test_outbox_supersedes_older_publish_and_defers_with_one_notification(world, monkeypatch):
     tenant, harness = world
     save(tenant)
     save(tenant, 'other')
     harness.fail = 'publish'
     assert git.process_outbox(tenant) == 0
     rows = outbox(tenant)
-    assert len([row for row in rows if row['kind'] == 'notify']) == 2
-    assert all(row['attempts'] == 1 for row in rows if row['kind'] == 'publish')
+    publishes = [row for row in rows if row['kind'] == 'publish']
+    assert publishes[0]['done_at'] is not None and publishes[0]['attempts'] == 0
+    assert publishes[0]['payload']['superseded_by'] == publishes[1]['sequence']
+    assert publishes[1]['done_at'] is None and publishes[1]['attempts'] == 1
+    assert len([row for row in rows if row['kind'] == 'notify']) == 1
     # Reclaim immediately to prove retries retain one alert identity per commit.
     store._run(tenant, lambda sql: sql.execute('UPDATE lab_git_outbox SET next_attempt_at=? WHERE tenant_id=?',
         ((store._now() - timedelta(seconds=1)).isoformat(), tenant)), write=True)
     events = []
     monkeypatch.setattr(git, '_notify', lambda t, event, identity: events.append((event, identity)))
     git.process_outbox(tenant)
-    assert len([row for row in outbox(tenant) if row['kind'] == 'notify']) == 2
+    assert len([row for row in outbox(tenant) if row['kind'] == 'notify']) == 1
     store._run(tenant, lambda sql: sql.execute('UPDATE lab_git_outbox SET next_attempt_at=? WHERE tenant_id=?',
         ((store._now() - timedelta(seconds=1)).isoformat(), tenant)), write=True)
     harness.fail = None
     git.process_outbox(tenant)
     published = [body['target_sha'] for endpoint, body in harness.calls if endpoint == 'publish'][-2:]
-    assert published == [row['identity'] for row in rows if row['kind'] == 'publish']
-    assert harness.remote == harness.head and len(events) == 2
+    assert published == [harness.head, harness.head]
+    assert harness.remote == harness.head and len(events) == 1
+    assert all(row['done_at'] is not None for row in outbox(tenant))
+
+
+def test_deferred_old_publish_does_not_block_new_head_or_notifications(world, monkeypatch):
+    tenant, harness = world
+    save(tenant)
+    older = outbox(tenant)[0]
+    harness.fail = 'publish'
+    assert git.process_outbox(tenant) == 0
+    save(tenant, 'other')
+    newest = harness.head
+    store.enqueue(tenant, 'notify', 'independent', {'event': 'lab_replay_divergence'})
+    events = []
+    monkeypatch.setattr(git, '_notify', lambda t, event, identity: events.append((event, identity)))
+    harness.fail = None
+    assert git.process_outbox(tenant) == 3
+    published = [body['target_sha'] for endpoint, body in harness.calls if endpoint == 'publish']
+    assert published == [older['identity'], newest]
+    assert harness.remote == newest
+    rows = outbox(tenant)
+    newer = next(row for row in rows if row['kind'] == 'publish' and row['identity'] == newest)
+    assert rows[0]['payload']['superseded_by'] == newer['sequence']
+    assert all(row['done_at'] is not None for row in rows)
+    assert set(events) == {('lab_commit_unknown', older['identity']), ('lab_replay_divergence', 'independent')}
+
+
+def test_superseded_publish_failure_is_never_attempted(world, monkeypatch):
+    tenant, harness = world
+    save(tenant)
+    older = harness.head
+    save(tenant, 'other')
+    original = harness.post
+    def fail_old(t, endpoint, body):
+        if endpoint == 'publish' and body['target_sha'] == older:
+            raise git.MirrorError('unknown', capability=CAP)
+        return original(t, endpoint, body)
+    monkeypatch.setattr(git, '_post', fail_old)
+    assert git.process_outbox(tenant) == 1
+    assert [body['target_sha'] for endpoint, body in harness.calls if endpoint == 'publish'] == [harness.head]
+    assert harness.remote == harness.head
     assert all(row['done_at'] is not None for row in outbox(tenant))
 
 
@@ -535,7 +684,7 @@ def test_outbox_retry_after_lost_publish_response_cannot_regress_remote(world):
     save(tenant, 'other')
     # A different worker published the newest commit before persisting its receipt.
     harness.remote = harness.head
-    assert git.process_outbox(tenant) == 2
+    assert git.process_outbox(tenant) == 1
     assert harness.remote == harness.head and harness.remote != old_head
     assert ledger.get(tenant, 'x')['sha256'] == first['sha256']
     assert all(row['done_at'] is not None for row in outbox(tenant))
