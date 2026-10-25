@@ -87,6 +87,25 @@ describe('S4 dense targets and viewport bounds', () => {
     expect(controls?.declarations['min-width']).toBe('44px')
   })
 
+  it('phone shell controls have 44px targets in the drawer scope', () => {
+    const scope = '.studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface]'
+    const targets = [
+      '.tc-product-tabs [role="tab"]',
+      'header.top :is(.chip-act, .chip-neutral, .claude-trigger, .link-svc-trigger, .tc-account-signout)',
+      ':is(.ribbon-more, .doc-tab-start)',
+      '.bar-command-line :is(.bar-field, .bar-input input)',
+      'header.top label.switch',
+    ]
+    for (const [index, target] of targets.entries()) {
+      const rule = rules['src/site/cockpit.css'].find((candidate) =>
+        candidate.selector === `${scope} ${target}` && candidate.media.includes('(max-width: 600px)') &&
+        candidate.declarations['min-height'] === '44px')
+      expect(rule?.declarations['min-height'], target).toBe('44px')
+      if (index < 3) expect(rule?.declarations['min-width'], target).toBe('44px')
+      if (index >= 4) expect(rule?.declarations['min-width'], target).toBe('44px')
+    }
+  })
+
   it.each(files)('%s carries no 100vh viewport bound', (file) => {
     expect(sheets[file]).not.toMatch(/\b100vh\b/)
   })

@@ -16,7 +16,8 @@ test('advisory staging sweep', async ({ browser }) => {
   const rows = []
   for (const surface of pages) {
     for (const [width, height] of WIDTHS) {
-      const context = await browser.newContext({ viewport: { width, height } })
+      const context = await browser.newContext({ viewport: { width, height },
+        ...(width <= 430 ? { hasTouch: true, isMobile: true } : {}) })
       const row = { id: surface.id, base: surface.base, path: surface.path, tab: surface.tab ?? null,
         width, height, tabSwitched: false }
       const errors = []
