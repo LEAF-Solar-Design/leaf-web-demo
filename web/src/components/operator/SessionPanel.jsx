@@ -111,7 +111,7 @@ export default function SessionPanel({ onSignedOut }) {
     const text = draft.trim()
     if (!text || !activeId || sending) return
     const sessionId = activeId
-    const generation = ++transcriptRequest.current.generation
+    let generation = transcriptRequest.current.generation
     const isCurrent = () => transcriptRequest.current.sessionId === sessionId && transcriptRequest.current.generation === generation
     setSending(true)
     setError(null)
@@ -119,6 +119,7 @@ export default function SessionPanel({ onSignedOut }) {
       await operatorClient.postMessage(sessionId, text)
       if (!isCurrent()) return
       setDraft('')
+      generation = ++transcriptRequest.current.generation
       const nextEvents = await operatorClient.getEvents(sessionId)
       if (isCurrent()) setEvents(nextEvents)
     } catch (e) {

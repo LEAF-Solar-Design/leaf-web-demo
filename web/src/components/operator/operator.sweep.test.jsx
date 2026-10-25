@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 import SessionPanel from './SessionPanel.jsx'
+import AuditPanel from './AuditPanel.jsx'
 import RunbooksPanel from './RunbooksPanel.jsx'
 import * as operatorClient from '../../operatorClient.js'
 
@@ -38,6 +39,57 @@ async function renderSessions() {
 }
 
 describe('S1-81: transcript selection', () => {
+  it('preserves an initial transcript that arrives after a rejected send', async () => {
+    const initialRead = deferred()
+    const write = deferred()
+    vi.spyOn(operatorClient, 'getEvents').mockReturnValue(initialRead.promise)
+    vi.spyOn(operatorClient, 'postMessage').mockReturnValue(write.promise)
+    await renderSessions()
+    fireEvent.click(screen.getByRole('button', { name: /Alpha/ }))
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Hello' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await act(async () => { write.reject(new Error('Could not send the message.')) })
+    await screen.findByRole('alert')
+    await act(async () => { initialRead.resolve(event('alpha-event')) })
+    expect(screen.getByText('alpha-event')).toBeTruthy()
+    expect(screen.getByLabelText('Message').value).toBe('Hello')
+    expect(operatorClient.getEvents).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the initial transcript while a send is pending and retains it if the send fails', async () => {
+    const initialRead = deferred()
+    const write = deferred()
+    vi.spyOn(operatorClient, 'getEvents').mockReturnValue(initialRead.promise)
+    vi.spyOn(operatorClient, 'postMessage').mockReturnValue(write.promise)
+    await renderSessions()
+    fireEvent.click(screen.getByRole('button', { name: /Alpha/ }))
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Hello' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await act(async () => { initialRead.resolve(event('alpha-event')) })
+    expect(screen.getByText('alpha-event')).toBeTruthy()
+    await act(async () => { write.reject(new Error('Could not send the message.')) })
+    expect(screen.getByText('alpha-event')).toBeTruthy()
+    expect(screen.getByRole('alert')).toBeTruthy()
+  })
+
+  it('supersedes the initial transcript only after a successful send starts its refresh', async () => {
+    const initialRead = deferred()
+    const refresh = deferred()
+    vi.spyOn(operatorClient, 'getEvents')
+      .mockReturnValueOnce(initialRead.promise)
+      .mockReturnValueOnce(refresh.promise)
+    vi.spyOn(operatorClient, 'postMessage').mockResolvedValue({})
+    await renderSessions()
+    fireEvent.click(screen.getByRole('button', { name: /Alpha/ }))
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'Hello' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(operatorClient.getEvents).toHaveBeenCalledTimes(2))
+    await act(async () => { refresh.resolve(event('alpha-reply')) })
+    await act(async () => { initialRead.resolve(event('stale-alpha-event')) })
+    expect(screen.getByText('alpha-reply')).toBeTruthy()
+    expect(screen.queryByText('stale-alpha-event')).toBeNull()
+  })
+
   it('ignores an older read even after returning to the same session', async () => {
     const oldRead = deferred()
     vi.spyOn(operatorClient, 'getEvents')
@@ -101,6 +153,48 @@ describe('S1-81: transcript selection', () => {
     await screen.findByText('beta-event')
     await act(async () => { oldRead.reject(new Error('Could not load the earlier session.')) })
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+describe('S1-81: overlapping audit refreshes', () => {
+  it('ignores an older failure after the latest refresh succeeds', async () => {
+    const oldRead = deferred()
+    vi.spyOn(operatorClient, 'getAudit')
+      .mockReturnValueOnce(oldRead.promise)
+      .mockResolvedValueOnce([{ ts: '2026-10-25T12:00:00Z', action: 'Latest approval' }])
+    render(<AuditPanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await screen.findByText('Latest approval')
+    await act(async () => { oldRead.reject(new Error('Could not load the audit log.')) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText('Latest approval')).toBeTruthy()
+  })
+
+  it('ignores an older success after the latest refresh fails', async () => {
+    const oldRead = deferred()
+    vi.spyOn(operatorClient, 'getAudit')
+      .mockReturnValueOnce(oldRead.promise)
+      .mockRejectedValueOnce(new Error('Could not load the audit log.'))
+    render(<AuditPanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    const alert = await screen.findByRole('alert')
+    const message = alert.textContent
+    await act(async () => { oldRead.resolve([{ ts: '2026-10-25T11:00:00Z', action: 'Older approval' }]) })
+    expect(screen.getByRole('alert').textContent).toBe(message)
+    expect(screen.queryByText('Older approval')).toBeNull()
+  })
+
+  it('keeps the latest rows when an older successful refresh finishes last', async () => {
+    const oldRead = deferred()
+    vi.spyOn(operatorClient, 'getAudit')
+      .mockReturnValueOnce(oldRead.promise)
+      .mockResolvedValueOnce([{ ts: '2026-10-25T12:00:00Z', action: 'Latest approval' }])
+    render(<AuditPanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await screen.findByText('Latest approval')
+    await act(async () => { oldRead.resolve([{ ts: '2026-10-25T11:00:00Z', action: 'Older approval' }]) })
+    expect(screen.getByText('Latest approval')).toBeTruthy()
+    expect(screen.queryByText('Older approval')).toBeNull()
   })
 })
 
