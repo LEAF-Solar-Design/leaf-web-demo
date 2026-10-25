@@ -11,6 +11,7 @@ import { addBlock, emptyGraph } from './graphDoc.js'
 import { registry } from './registry.js'
 import { setLayoutEngineLoader } from './dependencyLayout.js'
 import { createLabArtifactsClient } from '../history/labArtifactsClient.js'
+import { labValueStore } from '../runs/valueStore.js'
 
 const elkImport = vi.hoisted(() => vi.fn())
 vi.mock('elkjs/lib/elk.bundled.js', () => {
@@ -81,6 +82,241 @@ afterEach(async () => {
 })
 
 describe('first-click live graph', () => {
+  it('F2 renders only the affected memoised block for a value event without rendering GraphView', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
+    client.setDocId('render-isolation')
+    labValueStore.upsertRun('render-isolation', { state: 'running', doc_id: 'render-isolation', graph_revision: 4 })
+    const renderProbe = vi.fn()
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} renderProbe={renderProbe} />)
+    try {
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Run saved revision r4' })).toBeEnabled())
+      await act(async () => {})
+      renderProbe.mockClear()
+      act(() => labValueStore.apply('render-isolation', { seq: 0, kind: 'value', block_id: 'count-1', payload: { result: { data: 81 } } }))
+      expect(within(cardNamed('Count')).getByText('81')).toBeVisible()
+      expect(renderProbe.mock.calls).toEqual([['block:count-1']])
+    } finally {
+      view.unmount()
+      labValueStore.upsertRun('render-isolation', { state: 'finished' })
+    }
+  })
+
+  it.each(['failed', 'suspended'])('F4 renders a first %s block event without a value', async kind => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
+    const runId = `first-error-${kind}`
+    client.setDocId(runId)
+    labValueStore.upsertRun(runId, { state: 'running', doc_id: runId, graph_revision: 4 })
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    try {
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Run saved revision r4' })).toBeEnabled())
+      act(() => labValueStore.apply(runId, { seq: 0, kind, block_id: 'count-1', payload: { reason: 'worker-refused' } }))
+      expect(within(cardNamed('Count')).getByText('error: worker-refused')).toBeVisible()
+      expect(cardNamed('Count')).toHaveAttribute('data-value-kind', 'empty')
+    } finally {
+      view.unmount()
+      labValueStore.upsertRun(runId, { state: 'finished' })
+    }
+  })
+
+  it('F5 serialises concurrent clicks at 19 active runs and admits another after one finishes', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
+    client.setDocId('concurrent-runs')
+    labValueStore.getRuns().filter(run => run.id !== 'local').forEach(run => labValueStore.upsertRun(run.id, { state: 'finished' }))
+    for (let n = 0; n < 19; n++) labValueStore.upsertRun(`concurrent-${n}`, { state: 'running' })
+    let accept
+    const fetchImpl = vi.fn((url, init) => init.method === 'POST'
+      ? new Promise(resolve => { accept = resolve })
+      : Promise.resolve({ ok: true, status: 200, body: new ReadableStream({ start() {} }) }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    try {
+      const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
+      await waitFor(() => expect(run).toBeEnabled())
+      act(() => { fireEvent.click(run); fireEvent.click(run) })
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+      expect(run).toBeDisabled()
+      await act(async () => accept({ ok: true, status: 202, json: async () => ({ run_id: 'concurrent-19', state: 'queued' }) }))
+      await waitFor(() => expect(run).toBeEnabled())
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+      act(() => labValueStore.upsertRun('concurrent-0', { state: 'finished' }))
+      fireEvent.click(run)
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3))
+      await act(async () => accept({ ok: true, status: 202, json: async () => ({ run_id: 'concurrent-20', state: 'queued' }) }))
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(4))
+      for (const id of ['concurrent-19', 'concurrent-20']) {
+        expect(labValueStore.getRun(id)).toBeDefined()
+        expect(fetchImpl.mock.calls.some(([url]) => url.includes(`runs=${id}&`))).toBe(true)
+      }
+    } finally {
+      view.unmount()
+      labValueStore.getRuns().filter(run => run.id.startsWith('concurrent-')).forEach(run => labValueStore.upsertRun(run.id, { state: 'finished' }))
+    }
+  })
+
+  it('F5 refuses to submit at the hard cap and explains the active run limit', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
+    client.setDocId('hard-cap')
+    labValueStore.getRuns().filter(run => run.id !== 'local').forEach(run => labValueStore.upsertRun(run.id, { state: 'finished' }))
+    for (let n = 0; n < 20; n++) labValueStore.upsertRun(`hard-cap-${n}`, { state: 'running' })
+    const fetchImpl = vi.fn(); vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    try {
+      const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
+      await waitFor(() => expect(run).toBeEnabled())
+      fireEvent.click(run)
+      expect(screen.getByText('Too many active runs (20). Wait for one to finish.')).toBeVisible()
+      expect(fetchImpl).not.toHaveBeenCalled()
+      expect(run).toBeEnabled()
+      for (let n = 0; n < 20; n++) expect(labValueStore.getRun(`hard-cap-${n}`).state).toBe('running')
+    } finally {
+      view.unmount()
+      for (let n = 0; n < 20; n++) labValueStore.upsertRun(`hard-cap-${n}`, { state: 'finished' })
+    }
+  })
+
+  it.each(['button', 'focus', 'focus-race'])('resumes a 401-paused stream via %s with fresh authority and its cursor', async method => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const runId = `canvas-resume-${method}`
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 4 } : { revision: 4, graph } })) })
+    client.setDocId(`resume-${method}`)
+    const previousToken = localStorage.getItem('leaf.jwt')
+    const originalToken = ['fixture', 'before', method].join('-'), renewedToken = ['fixture', 'after', method].join('-')
+    localStorage.setItem('leaf.jwt', originalToken)
+    labValueStore.apply(runId, { seq: 7, kind: 'value', block_id: 'count-1', payload: { result: { data: 73 } } })
+    let resolveUnauthorized
+    const fetchImpl = vi.fn().mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ run_id: runId, state: 'running' }) })
+      .mockImplementationOnce(() => method === 'focus-race'
+        ? new Promise(resolve => { resolveUnauthorized = resolve }) : Promise.resolve({ ok: false, status: 401 }))
+      .mockResolvedValueOnce({ ok: true, status: 200, body: new ReadableStream({ start() {} }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    const register = vi.spyOn(labValueStore, 'setStreamControl')
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    try {
+      const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
+      await waitFor(() => expect(run).toBeEnabled())
+      fireEvent.click(run)
+      if (method === 'focus-race') {
+        await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+        localStorage.setItem('leaf.jwt', renewedToken)
+        await act(async () => resolveUnauthorized({ ok: false, status: 401 }))
+      }
+      expect(await screen.findByText('Sign in again, then resume')).toBeVisible()
+      expect(register).toHaveBeenCalledWith(runId, expect.objectContaining({ retry: expect.any(Function), stop: expect.any(Function) }))
+      const control = register.mock.calls.find(([id]) => id === runId)[1]
+      const retry = vi.spyOn(control, 'retry')
+      if (method !== 'focus-race') {
+        localStorage.setItem('leaf.jwt', originalToken)
+        fireEvent(window, new Event('focus'))
+        expect(retry).not.toHaveBeenCalled()
+      } else expect(localStorage.getItem('leaf.jwt')).toBe(renewedToken)
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+      localStorage.setItem('leaf.jwt', renewedToken)
+      if (method === 'button') fireEvent.click(screen.getByRole('button', { name: 'Resume' }))
+      else {
+        fireEvent(window, new Event('focus'))
+        fireEvent(window, new Event('focus'))
+      }
+      await waitFor(() => expect(labValueStore.getRun(runId).transport.status).toBe('connected'))
+      expect(retry).toHaveBeenCalledTimes(1)
+      expect(fetchImpl).toHaveBeenCalledTimes(3)
+      expect(fetchImpl.mock.calls[1][1].headers.Authorization).toBe(['Bearer', originalToken].join(' '))
+      expect(fetchImpl.mock.calls[2][1].headers.Authorization).toBe(['Bearer', renewedToken].join(' '))
+      expect(fetchImpl.mock.calls[2][1].headers['Last-Event-ID']).toBe(`${runId}:7`)
+      expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
+      view.unmount()
+      labValueStore.setTransport(runId, { status: 'auth_expired' })
+      expect(labValueStore.resume(runId)).toBe(false)
+      fireEvent(window, new Event('focus'))
+      expect(retry).toHaveBeenCalledTimes(1)
+    } finally {
+      view.unmount()
+      labValueStore.upsertRun(runId, { state: 'finished' })
+      if (previousToken === null) localStorage.removeItem('leaf.jwt')
+      else localStorage.setItem('leaf.jwt', previousToken)
+    }
+  })
+
+  it('keeps Run disabled until a saved head has loaded', async () => {
+    let resolveHead
+    const client = createLabArtifactsClient({ fetchImpl: () => new Promise(resolve => { resolveHead = resolve }) })
+    const provider = hostProvider()
+    render(<GraphView client={client} provider={provider} initialDocument={graphOf(provider, ['host-source', 'count'])} />)
+    await waitFor(() => expect(cardNamed('Count')).toBeVisible())
+    expect(screen.getByRole('button', { name: 'Run graph' })).toBeDisabled()
+    await act(async () => resolveHead({ ok: false, status: 404, json: async () => ({}) }))
+    expect(screen.getByRole('button', { name: 'Run graph' })).toBeDisabled()
+  })
+
+  it('shows Save before running and submits nothing when the draft differs from the saved revision', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const saved = { ...graph, outputs: {} }
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 3 } : { revision: 3, graph: saved } })) })
+    client.setDocId('run-different')
+    const fetchImpl = vi.fn(); vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r3' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    expect(await screen.findByText('Save before running')).toBeVisible()
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('submits the matching saved revision and streams its block values into LiveValues', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 4 } : { revision: 4, graph } })) })
+    client.setDocId('run-matching')
+    const events = [
+      { run_id: 'canvas-stream', seq: 0, kind: 'value', block_id: 'count-1', at: now, payload: { result: { data: 73, as_of: now } } },
+      { run_id: 'canvas-stream', seq: 1, kind: 'finished', at: now, payload: {} },
+    ].map(value => `event: run\ndata: ${JSON.stringify(value)}\n\n`).join('')
+    const fetchImpl = vi.fn().mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ run_id: 'canvas-stream', state: 'queued' }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, body: new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(events)); controller.close()
+      } }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('73')).toBeVisible())
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${config.apiBase}/api/lab/runs`)
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ doc_id: 'run-matching', graph_revision: 4 })
+    expect(labValueStore.getBlock('canvas-stream', 'count-1').value.result.data).toBe(73)
+  })
+
+  it('renders a worker refusal code from a 422', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 5 } : { revision: 5, graph } })) })
+    client.setDocId('run-refused')
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 422, json: async () => ({ detail: 'lab_graph_host_refused' }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r5' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    expect(await screen.findByText('lab_graph_host_refused')).toBeVisible()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads local block displays and budget measurements from the shared local run', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn().mockResolvedValue({ ok: false, status: 404 }) })
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('1')).toBeVisible())
+    const original = labValueStore.getBlock('local', 'count-1').value.result
+    expect(labValueStore.getRun('local').timing.times.length).toBeGreaterThan(0)
+    act(() => labValueStore.setLocal([{ ...original, display: 91 }], labValueStore.getRun('local').timing))
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('91')).toBeVisible())
+  })
+
   it.each(['matching', 'other kind', 'other version', 'malformed'])('reads %s host Code evidence through the selected inspector', async scenario => {
     const provider = createHostProvider({ framed: true })
     const digest = 'a'.repeat(64)
