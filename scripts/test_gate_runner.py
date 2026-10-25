@@ -131,7 +131,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 239  # +1 demo inventory/migration contract regression.
     assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
-    assert suites["gate-runner-selftest"].expected == 243  # W1C commit registration.
+    assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4263,7 +4263,7 @@ def test_R14C_32_mandatory_registration():
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
     assert mandatory[-3:-1] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 243  # W1C commit registration.
+    assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4359,7 +4359,7 @@ def test_sip_r3e_gate_registration():
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
     # LD1b adds one demo classification regression to the 1178 platform rows.
     assert suites["platform"].expected == 1205
-    assert suites["gate-runner-selftest"].expected == 243  # W1C commit registration.
+    assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
 
 
 def test_demo_actor_gate_registration():
@@ -4464,4 +4464,16 @@ def test_w1c_commit_solve_gate_registration():
             uses_database=database, db_gated=database,
             database_skip_reasons=((r"PostgreSQL integration test requires DATABASE_URL",) if database else ()))
         assert selection["mandatory_suite_ids"].count(suite_id) == 1
-    assert suites["gate-runner-selftest"].expected == 243
+    assert suites["gate-runner-selftest"].expected == 244
+
+
+def test_lab_git_mirror_gate_registration():
+    runner = _load_runner()
+    suite = next(s for s in runner.build_suites() if s.id == "server-lab-artifacts-git")
+    assert suite == runner.Suite(
+        "server-lab-artifacts-git", "server Lab git mirror and stage policy", "pytest",
+        REPO / "server", runner._py_pytest("tests/test_lab_artifacts_git.py") +
+        ["tests/test_lab_stage_policy.py"], 24,
+        uses_database=True, database_skip_reasons=(r"platform DB unreachable: .+",))
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    assert selection["mandatory_suite_ids"].count(suite.id) == 1

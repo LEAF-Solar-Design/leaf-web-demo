@@ -40,6 +40,27 @@ class StoreUnavailable(RuntimeError):
     pass
 
 
+class StoreMigrating(RuntimeError):
+    pass
+
+
+def _committed_write(tenant, operation):
+    import lab_artifacts_git as mirror
+
+    def guarded(sql):
+        mirror.check_frozen(sql, tenant)
+        return operation(sql)
+
+    result = _run(tenant, guarded, write=True)
+    try:
+        mirror.after_write(tenant)
+    except Exception:
+        # No failure after commit may turn a successful ledger write into an
+        # apparent failure that the caller would retry.
+        pass
+    return result
+
+
 def _event(name, tenant, doc_id, revision, reason):
     # Never log exceptions, SQL, configuration, request bodies or host values.
     LOG.warning(name, extra={"tenant": tenant, "doc_id": doc_id,
@@ -134,6 +155,9 @@ def _run(tenant, operation, *, write=False):
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SQLITE_SCHEMA)
+        from lab_artifacts_git import _SQLITE_SCHEMA as mirror_schema
+
+        conn.executescript(mirror_schema)
         if "kind" not in {row["name"] for row in conn.execute("PRAGMA table_info(lab_documents)")}:
             try:
                 conn.execute("ALTER TABLE lab_documents ADD COLUMN kind TEXT NOT NULL DEFAULT 'graph'"
@@ -243,7 +267,7 @@ def save(tenant, doc_id, graph, expected_head, author, kind="graph"):
             payload = data if data is not None else validated_data(document_kind)
             return _append(sql, tenant, doc_id, payload, author, current, current, document_kind)
 
-        return _run(tenant, operation, write=True)
+        return _committed_write(tenant, operation)
     except Conflict:
         _event("lab_save_conflict", tenant, doc_id, expected_head, "stale_expected_head")
         raise
@@ -309,7 +333,7 @@ def restore(tenant, doc_id, revision, expected_head, author):
         return _append(sql, tenant, doc_id, source["canonical_text"].encode("utf-8"), author, current, revision)
 
     try:
-        return _run(tenant, operation, write=True)
+        return _committed_write(tenant, operation)
     except Conflict:
         _event("lab_save_conflict", tenant, doc_id, expected_head, "stale_expected_head")
         raise
@@ -342,7 +366,7 @@ def publish(tenant, doc_id, expected_head, author):
         return receipt
 
     try:
-        return _run(tenant, operation, write=True)
+        return _committed_write(tenant, operation)
     except Conflict:
         _event("lab_publish_cas_fail", tenant, doc_id, expected_head, "stale_expected_head")
         raise

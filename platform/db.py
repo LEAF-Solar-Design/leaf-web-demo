@@ -444,6 +444,8 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "lab_worker_control": {"id", "paused", "reason", "updated_by", "updated_at"},
     },
     "lab": {
+        "lab_git_tenants": {"tenant_id", "mode", "frozen", "remote_sha", "local_sha", "receipt", "notified", "updated_at"},
+        "lab_git_mirror": {"tenant_id", "doc_id", "revision", "commit", "sha256"},
         "lab_blobs": {"tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count"},
         "lab_revisions": {"tenant_id", "doc_id", "revision", "parent_revision", "author", "created_at", "sha256"},
         "lab_documents": {"tenant_id", "doc_id", "head", "published_revision", "kind"},
@@ -1211,6 +1213,9 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "REFERENCES lab_runs(tenant_id, run_id)", "ON DELETE CASCADE"),
     },
     "lab": {
+        "lab_git_tenants_pkey": _catalog_contract("lab_git_tenants", "PRIMARY KEY (tenant_id)"),
+        "lab_git_tenants_mode_check": _catalog_contract("lab_git_tenants", "CHECK", "mode", "ledger", "replaying", "mirror"),
+        "lab_git_mirror_pkey": _catalog_contract("lab_git_mirror", "PRIMARY KEY (tenant_id, doc_id, revision)"),
         "lab_blobs_pkey": _catalog_contract("lab_blobs", "PRIMARY KEY (tenant_id, sha256)"),
         "lab_revisions_pkey": _catalog_contract("lab_revisions", "PRIMARY KEY (tenant_id, doc_id, revision)"),
         "lab_documents_pkey": _catalog_contract("lab_documents", "PRIMARY KEY (tenant_id, doc_id)"),

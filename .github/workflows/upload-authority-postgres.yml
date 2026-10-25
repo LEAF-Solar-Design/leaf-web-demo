@@ -222,7 +222,7 @@ jobs:
         working-directory: server
         run: |
           test -n "${DATABASE_URL:-}"
-          if ! out=$(python -m pytest -q -rs tests/test_lab_artifacts.py 2>&1); then
+          if ! out=$(python -m pytest -q -rs tests/test_lab_artifacts.py tests/test_lab_artifacts_git.py tests/test_lab_stage_policy.py 2>&1); then
             printf '%s\n' "$out"
             exit 1
           fi
@@ -259,6 +259,8 @@ jobs:
               for table in ("lab_runs", "lab_run_events", "lab_worker_status", "lab_worker_control"):
                   conn.execute("SELECT * FROM " + table + " LIMIT 0")
               conn.execute("SELECT kind FROM lab_documents LIMIT 0")
+              conn.execute("SELECT mode,frozen,remote_sha,local_sha,receipt,notified FROM lab_git_tenants LIMIT 0")
+              conn.execute('SELECT tenant_id,doc_id,revision,"commit",sha256 FROM lab_git_mirror LIMIT 0')
           db.run_transaction(proof)
           PY
 
