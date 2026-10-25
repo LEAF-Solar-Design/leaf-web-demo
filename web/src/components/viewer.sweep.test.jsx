@@ -45,6 +45,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
   gl.renderers.length = 0
   gl.controls.length = 0
@@ -66,9 +67,11 @@ function visible(object) {
   for (let node = object; node; node = node.parent) if (!node.visible) return false
   return true
 }
-function pointer(canvas, type, pointerType, pointerId, x = 10) {
+function pointer(canvas, type, pointerType, pointerId, x = 10, isPrimary = true) {
   const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: 10 })
-  Object.defineProperties(event, { pointerType: { value: pointerType }, pointerId: { value: pointerId } })
+  Object.defineProperties(event, {
+    pointerType: { value: pointerType }, pointerId: { value: pointerId }, isPrimary: { value: isPrimary },
+  })
   fireEvent(canvas, event)
   return event
 }
@@ -139,5 +142,38 @@ describe('viewer issue sweep', () => {
     expect(view.container.querySelector('.viewer-marquee')).toBeNull()
     expect(controls.enabled).toBe(true)
     expect(received).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not select an entity when a stationary secondary touch ends before the primary touch', () => {
+    const select = vi.fn()
+    const view = mountViewer({ marqueeGate: () => true, onMarqueeSelect: vi.fn(), onSelectEntity: select })
+    const canvas = view.container.querySelector('canvas')
+    const hits = vi.spyOn(THREE.Raycaster.prototype, 'intersectObjects').mockReturnValue([{ object: entity('INS1') }])
+    pointer(canvas, 'pointerdown', 'touch', 1)
+    pointer(canvas, 'pointerdown', 'touch', 2, 60, false)
+    pointer(canvas, 'pointerup', 'touch', 2, 60, false)
+    expect(select).not.toHaveBeenCalled()
+    pointer(canvas, 'pointerup', 'touch', 1)
+    expect(select).not.toHaveBeenCalled()
+    expect(hits).not.toHaveBeenCalled()
+  })
+
+  it('suppresses later touches in the same gesture and restores picking after all touches cancel', () => {
+    const select = vi.fn()
+    const view = mountViewer({ marqueeGate: () => true, onMarqueeSelect: vi.fn(), onSelectEntity: select })
+    const canvas = view.container.querySelector('canvas')
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 100, height: 100 })
+    vi.spyOn(THREE.Raycaster.prototype, 'intersectObjects').mockReturnValue([{ object: entity('INS1') }])
+    pointer(canvas, 'pointerdown', 'touch', 1)
+    pointer(canvas, 'pointerdown', 'touch', 2, 60, false)
+    pointer(canvas, 'pointerup', 'touch', 2, 60, false)
+    pointer(canvas, 'pointerdown', 'touch', 3, 60, false)
+    pointer(canvas, 'pointerup', 'touch', 3, 60, false)
+    pointer(window, 'pointercancel', 'touch', 1)
+    expect(select).not.toHaveBeenCalled()
+    pointer(canvas, 'pointerdown', 'touch', 4)
+    pointer(canvas, 'pointerup', 'touch', 4)
+    expect(select).toHaveBeenCalledTimes(1)
+    expect(select).toHaveBeenCalledWith('INS1', { additive: false })
   })
 })

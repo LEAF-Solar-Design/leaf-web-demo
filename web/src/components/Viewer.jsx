@@ -719,9 +719,12 @@ const Viewer = forwardRef(function Viewer(
     const raycaster = new THREE.Raycaster()
     const ndc = new THREE.Vector2()
     let down = null // { x, y, t, pointerId }
+    const activeTouches = new Set()
+    let suppressTouchPick = false
     const stackedPick = createStackedPickCycle()
     function onPointerDown(e) {
       if (e.button !== 0) return // only left-click selects
+      if (e.pointerType === 'touch' && (suppressTouchPick || e.isPrimary === false)) return
       if (down && down.pointerId !== e.pointerId && e.isPrimary === false) return
       down = { x: e.clientX, y: e.clientY, t: performance.now(), pointerId: e.pointerId }
     }
@@ -792,6 +795,8 @@ const Viewer = forwardRef(function Viewer(
     }
     function startMarquee(e) {
       if (e.pointerType === 'touch') {
+        activeTouches.add(e.pointerId)
+        if (activeTouches.size > 1) suppressTouchPick = true
         clearMarquee()
         return
       }
@@ -872,6 +877,11 @@ const Viewer = forwardRef(function Viewer(
       clearMarquee()
     }
     function orphanRelease(e) {
+      if (activeTouches.delete(e.pointerId)) {
+        // Window capture runs before picking, including releases outside the canvas.
+        if (suppressTouchPick || e.type === 'pointercancel') down = null
+        if (activeTouches.size === 0) suppressTouchPick = false
+      }
       const active = marquee || candidate
       if (active && e.pointerId === active.pointerId && !mount.contains(e.target)) clearMarquee()
     }
