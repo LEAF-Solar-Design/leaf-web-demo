@@ -51,6 +51,28 @@ it('shows a failed initial read and retries to a successful empty list', async (
   expect(screen.getByText('0 linked')).toBeInTheDocument()
 })
 
+it('shows registration validation after an initial list failure and keeps the fields editable', async () => {
+  listTenantMcpServers.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+  registerTenantMcpServer.mockRejectedValue({ body: { error: { message: 'Choose a different service label.' } } })
+  render(<Drawer />)
+  await screen.findByText('Linked services could not be loaded.')
+  const label = screen.getByLabelText('Service label')
+  const url = screen.getByLabelText('Service URL')
+  fireEvent.change(label, { target: { value: 'Roof scanner' } })
+  fireEvent.change(url, { target: { value: 'https://example.test' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Link service' }))
+  expect(await screen.findByText('Choose a different service label.')).toBeInTheDocument()
+  expect(screen.getByRole('alert')).toHaveTextContent('Choose a different service label.')
+  expect(registerTenantMcpServer).toHaveBeenCalledWith('https://example.test', 'Roof scanner')
+  expect(label).toHaveValue('Roof scanner')
+  expect(url).toHaveValue('https://example.test')
+  expect(label).toBeEnabled()
+  expect(url).toBeEnabled()
+  fireEvent.change(label, { target: { value: 'Roof scanner 2' } })
+  expect(label).toHaveValue('Roof scanner 2')
+  expect(screen.getByRole('button', { name: 'Link service' })).toBeEnabled()
+})
+
 it('records a failed unlink and catches the rejection in the click handler', async () => {
   unlinkTenantMcpServer.mockRejectedValue(new TypeError('Failed to fetch'))
   render(<Drawer />)
