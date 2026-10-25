@@ -11,9 +11,10 @@ afterEach(cleanup)
 // Exercise the App-owned adapters with the real ribbon model and rendered band.
 // This follows the production-source seam in appProjectSolarDrawing.test.jsx.
 const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
-const readbackControl = source.split('\n').find(line => line.includes('onClick={projectSolarRuntime.retryReadback}')).trim().slice(1, -1)
-const readbackTree = parseExpression(readbackControl, { plugins: ['jsx'] })
-function renderReadbackControl(projectSolarRuntime) {
+const readbackControls = source.split('\n').filter(line => line.includes('onClick={projectSolarRuntime.retryReadback}')).map(line => line.trim().slice(1, -1))
+function renderReadbackControl(projectSolarRuntime, controlIndex = 0) {
+  const readbackControl = readbackControls[controlIndex]
+  const readbackTree = parseExpression(readbackControl, { plugins: ['jsx'] })
   function evaluate(node) {
     if (node.type === 'LogicalExpression' && node.operator === '&&') return evaluate(node.left) && evaluate(node.right)
     if (node.type === 'JSXText') return node.value
@@ -84,6 +85,26 @@ it('hides output Refresh after completed publication with a later notice and whi
   for (const state of [{ canRetryReadback: false, busy: false }, { canRetryReadback: true, busy: true }]) {
     const view = renderReadbackControl({ publishedVersionId: 'published-output', notice: 'Take the project checkout before changing this drawing.',
       retryReadback, ...state })
+    expect(screen.queryByRole('button')).toBeNull()
+    view.unmount()
+  }
+  expect(retryReadback).not.toHaveBeenCalled()
+})
+
+it('offers status-line readback retry for failed output readback while idle', () => {
+  const retryReadback = vi.fn()
+  renderReadbackControl({ publishedVersionId: 'published-output', canRetryReadback: true, busy: false, retryReadback }, 1)
+  const button = screen.getByRole('button')
+  expect(button.disabled).toBe(false)
+  fireEvent.click(button)
+  expect(retryReadback).toHaveBeenCalledOnce()
+})
+
+it('hides status-line readback retry after completed publication with a later checkout notice', () => {
+  const retryReadback = vi.fn()
+  for (const state of [{ canRetryReadback: false, busy: false }, { canRetryReadback: false, busy: true }]) {
+    const view = renderReadbackControl({ publishedVersionId: 'published-output', notice: 'Take the project checkout before changing this drawing.',
+      retryReadback, ...state }, 1)
     expect(screen.queryByRole('button')).toBeNull()
     view.unmount()
   }

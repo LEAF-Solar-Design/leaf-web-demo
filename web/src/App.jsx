@@ -5511,7 +5511,7 @@ export default function App() {
                   <p role="status" aria-live="polite">
                     {projectSolarRuntime.notice || projectSolarAppReason(projectSolar.scope.reason || 'scope_pending')}
                     {projectSolarRuntime.publishedVersionId && <code>{projectSolarRuntime.publishedVersionId}</code>}
-                    {projectSolarRuntime.publishedVersionId && <button type="button" className="chip-act" disabled={projectSolarRuntime.busy} onClick={projectSolarRuntime.retryReadback}>Retry</button>}
+                    {projectSolarRuntime.canRetryReadback && <button type="button" className="chip-act" disabled={projectSolarRuntime.busy} onClick={projectSolarRuntime.retryReadback}>Retry</button>}
                   </p>
                 )}
               </>
