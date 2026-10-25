@@ -1168,7 +1168,7 @@
 @media (max-width: 600px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] {
     --ck-top: 132px; --ck-status: 46px; --ck-drawer: 44px;
-    --phone-command-height: 106px;
+    --phone-command-height: 122px;
     --ck-dock: calc(var(--phone-command-height) + var(--ck-status) + 4px);
     --ck-canvas-top: var(--cockpit-stack-top, 208px);
     --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));
@@ -1193,7 +1193,7 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-quick > *,
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-ribbon-tabs [role="tab"] { flex-shrink: 0; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .start-board-gloss { display: none; }
-  /* The outer dock reserves a 44px engine prompt above the 62px input well.
+  /* The outer dock reserves a 44px engine prompt above the 78px input well.
      Its fixed height and status offset also anchor the headings, drawing and
      drawers, so profile-specific children cannot move the command bar's top. */
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .bar-dock {
@@ -1207,11 +1207,11 @@
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .cockpit-prompt-slot:empty { display: none; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .bar.bar-command-line {
-    flex: 0 0 62px; height: 62px; min-height: 62px; box-sizing: border-box; margin: 0;
+    flex: 0 0 78px; height: 78px; min-height: 78px; box-sizing: border-box; margin: 0;
     flex-direction: column; flex-wrap: nowrap; align-items: stretch;
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .bar-command-line .bar-input {
-    flex: 0 0 36px; height: 36px; min-height: 0; box-sizing: border-box; padding: 4px 8px; gap: 8px;
+    flex: 0 0 52px; height: 52px; min-height: 0; box-sizing: border-box; padding: 4px 8px; gap: 8px;
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .bar-command-line .bar-field {
     min-width: 0; min-height: 0; max-height: 28px;
@@ -1231,6 +1231,33 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > * { flex: 0 0 auto; min-width: 0; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tc-product-nav { top: auto; height: 44px; min-height: 44px; flex-shrink: 0; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tc-product-tabs [role="tab"] { min-width: 0; padding: 4px 10px 3px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tc-product-tabs [role="tab"],
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] { min-height: 44px; min-width: 44px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top :is(.chip-act, .chip-neutral, .claude-trigger, .link-svc-trigger, .tc-account-signout),
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top :is(.chip-act, .chip-neutral, .claude-trigger, .link-svc-trigger, .tc-account-signout) { min-height: 44px; min-width: 44px; box-sizing: border-box; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] :is(.ribbon-more, .doc-tab-start),
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] :is(.ribbon-more, .doc-tab-start) { min-height: 44px; min-width: 44px; box-sizing: border-box; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .bar-command-line :is(.bar-field, .bar-input input),
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line :is(.bar-field, .bar-input input) { min-height: 44px; box-sizing: border-box; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top label.switch,
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top label.switch { min-height: 44px; min-width: 44px; box-sizing: border-box; position: relative; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top label.switch input,
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top label.switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; z-index: 1; }
+  /* Preserve the 32x18 track and 14px knob while the input covers the label. */
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top label.switch span,
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top label.switch span { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top label.switch span::before,
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top label.switch span::before { content: ''; width: 32px; height: 18px; flex: none; border-radius: 9px; background: var(--ck-ink-off); box-shadow: inset 0 0 0 1px var(--leaf-line); transition: background 180ms ease; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top label.switch span::after,
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top label.switch span::after { content: ''; position: absolute; top: calc(50% - 7px); left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--card); transition: transform 180ms ease, background 180ms ease; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top label.switch input:checked + span::before,
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top label.switch input:checked + span::before { background: var(--primary); box-shadow: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top label.switch input:checked + span::after,
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top label.switch input:checked + span::after { transform: translateX(14px); background: var(--on-accent); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] header.top label.switch input:focus-visible + span::before,
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top label.switch input:focus-visible + span::before { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--primary); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tc-product-tabs,
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { height: 44px; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > .workspace-card { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .workspace-card > * { flex: 0 0 auto; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .workspace-card > .solar-flow-seat > * { flex: 0 0 auto; }
@@ -1241,7 +1268,7 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon { height: auto; min-height: 0; padding: 2px 4px; align-items: center; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon:not([data-overflow-open="true"]) { overflow: hidden; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon:not([data-overflow-open="true"]) .ribbon-cluster { min-width: 100vw; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 40px; margin: 0; padding: 0 10px; font-size: 0; line-height: 0; text-align: left; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more { flex: 1 1 auto; width: 100%; margin: 0; padding: 0 10px; font-size: 0; line-height: 0; text-align: left; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more::before { content: 'Tools'; font: 500 13px/1 var(--ck-font); color: var(--ck-ink); }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more[aria-expanded="true"]::before { content: 'Hide tools'; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-empty { padding: 12px 6px; }
