@@ -18,7 +18,7 @@ const PATHY = /\/api\/|\bhttps?:\/\//i
 const STATUS_ARROW = /->\s*\d{3}\b/
 const JOBBY = /\block job\b|\blost job\b|\bjob [0-9a-z-]{6,}\b/i
 
-const NETWORKY = /failed to fetch|networkerror|network error|err_(connection|network)|load failed|fetch failed|connection refused|econnrefused|timed? ?out|aborted/i
+const NETWORKY = /failed to fetch|networkerror|network error|err_(connection|network)|\bload failed|fetch failed|connection refused|econnrefused|timed? ?out|aborted/i
 
 // A message we are willing to show verbatim: already a plain sentence, with no
 // plumbing in it. Kept deliberately conservative.

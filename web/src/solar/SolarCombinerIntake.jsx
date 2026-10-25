@@ -1,16 +1,18 @@
 import { useId, useLayoutEffect, useRef, useState } from 'react'
 import { COMBINER_INTAKE_MAX_BYTES, combinerIntakeReason } from './solarCombinerIntakeClient.js'
 import { placementParams, validateHardware } from './solarCombinerIntakeModel.js'
+import { humanizeError } from '../errorHumanize.js'
 
 const IMPORT_FIRST = 'Import the combiner intake for this drawing first'
 const FIELDS = [
-  ['model', 'Model'], ['max_dc_voltage', 'DC voltage'], ['max_ac_power_kw', 'AC power'],
+  ['model', 'Model'], ['max_dc_voltage', 'DC voltage (V)'], ['max_ac_power_kw', 'AC power (kW)'],
 ]
 
 export default function SolarCombinerIntake({ drawingId, projectId, client, onStored, onRunPlacement, disabled = false }) {
   const id = useId()
   const [file, setFile] = useState(null)
   const [raw, setRaw] = useState({ model: '', max_dc_voltage: '', max_ac_power_kw: '' })
+  const [touched, setTouched] = useState({})
   const [stored, setStored] = useState(null)
   const [pending, setPending] = useState(false)
   const [announcement, setAnnouncement] = useState('')
@@ -40,7 +42,8 @@ export default function SolarCombinerIntake({ drawingId, projectId, client, onSt
   // Validate each field independently so every invalid input has its own reason.
   const errors = Object.fromEntries(FIELDS.map(([field]) => {
     const result = validateHardware({ model: 'Combiner', max_dc_voltage: '480', max_ac_power_kw: '10', [field]: raw[field] })
-    return [field, result.ok ? null : result.reason]
+    return [field, result.ok || !touched[field] ? null : humanizeError(field === 'model'
+      ? 'Enter a model with 1 to 128 characters, including at least one that is not a space.' : result.reason)]
   }))
 
   async function importFile() {
@@ -86,6 +89,7 @@ export default function SolarCombinerIntake({ drawingId, projectId, client, onSt
             <label htmlFor={`${id}-${field}`}>{label}</label>
             <input id={`${id}-${field}`} type="text" value={raw[field]}
               aria-invalid={Boolean(errors[field])} aria-describedby={errors[field] ? `${id}-${field}-reason` : undefined}
+              onBlur={() => setTouched((previous) => ({ ...previous, [field]: true }))}
               onChange={(event) => setRaw((previous) => ({ ...previous, [field]: event.target.value }))} />
             {errors[field] && <p id={`${id}-${field}-reason`}>{errors[field]}</p>}
           </div>

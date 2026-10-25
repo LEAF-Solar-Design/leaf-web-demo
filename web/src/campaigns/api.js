@@ -1,4 +1,4 @@
-import { authHeaders, config } from '../api.js'
+import { authHeaders, config, noteUnauthorized } from '../api.js'
 
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const messages = {
@@ -63,6 +63,7 @@ async function request(path, options = {}, binary = false) {
   } catch (cause) {
     throw Object.assign(new Error('Campaigns could not be reached. Try again.'), { status: 0, retryable: true, cause })
   }
+  if (response.status === 401) noteUnauthorized(response, path, headers.Authorization)
   if (!response.ok) {
     let body = null
     try { body = await response.json() } catch { /* Use the status message. */ }
