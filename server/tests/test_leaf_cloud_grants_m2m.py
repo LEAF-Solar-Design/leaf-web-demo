@@ -1,7 +1,9 @@
 """Staging machine grants: tenant boundary, bounded minting, and process cache."""
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import threading
+import traceback
 from unittest.mock import Mock
 
 import pytest
@@ -58,13 +60,17 @@ def refused(call=None, classification="cloud_auth_missing", status=401):
         (call or (lambda: grants.resolve_grant("g1", "tenant-a")))()
     assert caught.value.classification == classification
     assert caught.value.status == status
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+    formatted = "".join(traceback.format_exception(caught.value))
     for private in (CLIENT_ID, SECRET, TOKEN):
         assert private not in str(caught.value)
         assert private not in repr(caught.value)
+        assert private not in formatted
     return caught.value
 
 
-@pytest.mark.parametrize("source", [None, ""])
+@pytest.mark.parametrize("source", [None, ""], ids=["unset", "empty"])
 def test_default_source_keeps_file_behavior(monkeypatch, tmp_path, source):
     if source is None:
         monkeypatch.delenv("LEAF_CLOUD_GRANT_SOURCE")
@@ -83,14 +89,15 @@ def test_default_source_keeps_file_behavior(monkeypatch, tmp_path, source):
     ("LEAF_CLOUD_GRANT_SOURCE", "M2M-STAGING"),
     ("LEAF_RUNTIME_ENV", "production"), ("LEAF_RUNTIME_ENV", "Staging"),
     ("LEAF_RUNTIME_ENV", ""),
-])
+], ids=["unknown", "uppercase", "production", "mixed-case", "empty"])
 def test_source_and_environment_fail_closed(monkeypatch, transport, name, value):
     monkeypatch.setenv(name, value)
     refused()
     transport[0].assert_not_called()
 
 
-@pytest.mark.parametrize("reference", [None, "", "../g1", "g 1", "a" * 65, 1])
+@pytest.mark.parametrize("reference", [None, "", "../g1", "g 1", "a" * 65, 1],
+                         ids=["none", "empty", "path", "space", "long", "integer"])
 def test_reference_is_checked_first(monkeypatch, transport, reference):
     monkeypatch.setenv("LEAF_CLOUD_GRANT_SOURCE", "unknown")
     refused(lambda: grants.resolve_grant(reference, "tenant-a"))
@@ -105,21 +112,25 @@ def test_absent_reference_and_tenant_mismatch(transport):
 
 
 @pytest.mark.parametrize("raw", [
-    "", "{", "[]", "null", '{"g1":null}', '{"g1":1}', '{"g1":""}',
+    "", "{", '{"' + SECRET, "[]", "null", '{"g1":null}', '{"g1":1}', '{"g1":""}',
     json.dumps({"g1": "a" * 129}), json.dumps({"bad/key": "tenant-a"}),
     json.dumps({"a" * 65: "tenant-a"}),
     json.dumps({f"g{i}": "tenant-a" for i in range(17)}),
     " " * 4097, json.dumps({"g1": "tenant-a"}) + " " * 4096,
     '{"g1":"tenant-a"}' + " " * 4080 + "é",
-])
+], ids=["empty", "json", "secret", "array", "null", "null-tenant", "int-tenant",
+        "empty-tenant", "long-tenant", "bad-key", "long-key", "many-grants",
+        "oversize-space", "oversize-json", "oversize-utf8"])
 def test_malformed_allowlist(monkeypatch, transport, raw):
     monkeypatch.setenv("LEAF_CLOUD_M2M_GRANTS", raw)
     refused()
     transport[0].assert_not_called()
 
 
-@pytest.mark.parametrize("name", ["LEAF_CLOUD_M2M_CLIENT_ID", "LEAF_CLOUD_M2M_CLIENT_SECRET"])
-@pytest.mark.parametrize("value", [None, "", "has space", "tab\t", "newline\n", "a" * 513])
+@pytest.mark.parametrize("name", ["LEAF_CLOUD_M2M_CLIENT_ID", "LEAF_CLOUD_M2M_CLIENT_SECRET"],
+                         ids=["id", "secret"])
+@pytest.mark.parametrize("value", [None, "", "has space", "tab\t", "newline\n", "a" * 513],
+                         ids=["unset", "empty", "space", "tab", "newline", "long"])
 def test_invalid_credentials(monkeypatch, transport, name, value):
     if value is None:
         monkeypatch.delenv(name)
@@ -133,7 +144,9 @@ def test_mint_request_and_private_return(monkeypatch, transport):
     monkeypatch.setenv("LEAF_CLOUD_GRANTS_FILE", "/ignored/file")
     result = grants.resolve_grant("g1", "tenant-a")
     assert result == grants.CloudGrant("tenant-a", TOKEN)
-    transport[0].assert_called_once_with("leafautomation.us.auth0.com", timeout=10)
+    transport[0].assert_called_once()
+    assert transport[0].call_args.args == ("leafautomation.us.auth0.com",)
+    assert 0 < transport[0].call_args.kwargs["timeout"] <= 10
     args, kwargs = transport[1].request.call_args
     assert args == ("POST", "/oauth/token")
     assert json.loads(kwargs["body"]) == {
@@ -152,7 +165,9 @@ def test_mint_request_and_private_return(monkeypatch, transport):
     {"token_type": "Basic"}, {"token_type": None},
     {"expires_in": 59}, {"expires_in": 2592001}, {"expires_in": 3600.0},
     {"expires_in": "3600"}, {"expires_in": True}, {"expires_in": None},
-])
+], ids=["null-token", "empty-token", "space-token", "newline-token", "long-token",
+        "basic-type", "null-type", "short-ttl", "long-ttl", "float-ttl",
+        "string-ttl", "bool-ttl", "null-ttl"])
 def test_invalid_mint_fields(transport, patch):
     payload = {"access_token": TOKEN, "token_type": "Bearer", "expires_in": 3600}
     payload.update(patch)
@@ -160,22 +175,25 @@ def test_invalid_mint_fields(transport, patch):
     refused()
 
 
-@pytest.mark.parametrize("body", [b"{", b"[]", b"null", b"{}", b"\xff", b"x" * 65537])
+@pytest.mark.parametrize("body", [b"{", b"[]", b"null", b"{}", b"\xff", b"x" * 65537],
+                         ids=["json", "array", "null", "empty", "utf8", "oversize"])
 def test_bad_response_body(transport, body):
     transport[3](body)
     refused()
     assert grants._m2m_cache is None
 
 
-@pytest.mark.parametrize("status", [201, 301, 400, 401, 500])
+@pytest.mark.parametrize("status", [201, 301, 400, 401, 500],
+                         ids=["201", "301", "400", "401", "500"])
 def test_non_200(transport, status):
     transport[2].status = status
     refused()
     transport[2].read1.assert_not_called()
 
 
-@pytest.mark.parametrize("stage", ["connect", "request", "getresponse", "read1"])
-@pytest.mark.parametrize("error", [TimeoutError, OSError])
+@pytest.mark.parametrize("stage", ["connect", "request", "getresponse", "read1"],
+                         ids=["connect", "request", "response", "read"])
+@pytest.mark.parametrize("error", [TimeoutError, OSError], ids=["timeout", "os"])
 def test_transport_failures_are_private(transport, stage, error):
     target = transport[2] if stage == "read1" else transport[1]
     getattr(target, stage).side_effect = error(SECRET + TOKEN + CLIENT_ID)
@@ -184,7 +202,21 @@ def test_transport_failures_are_private(transport, stage, error):
     transport[1].close.assert_called_once()
 
 
-@pytest.mark.parametrize("expires_in", [60, 2592000])
+@pytest.mark.parametrize("stage", ["constructor", "settimeout", "response_close", "close"],
+                         ids=["init", "timeout", "response", "close"])
+def test_other_transport_failures_are_private(transport, stage):
+    target = {
+        "constructor": transport[0],
+        "settimeout": transport[1].sock.settimeout,
+        "response_close": transport[2].close,
+        "close": transport[1].close,
+    }[stage]
+    target.side_effect = OSError(SECRET + TOKEN + CLIENT_ID)
+    refused()
+    assert grants._m2m_cache is None
+
+
+@pytest.mark.parametrize("expires_in", [60, 2592000], ids=["min", "max"])
 def test_valid_mint_limits(transport, expires_in):
     transport[3]({"access_token": "x" * 16384, "token_type": "bEaReR",
                   "expires_in": expires_in})
@@ -224,6 +256,23 @@ def test_reset_and_client_change_invalidate(monkeypatch, transport):
     assert transport[0].call_count == 3
 
 
+def test_secret_rotation_invalidates_cache(monkeypatch, transport):
+    grants.resolve_grant("g1", "tenant-a")
+    assert grants._m2m_cache.credential_digest == hashlib.sha256(
+        (CLIENT_ID + "\0" + SECRET).encode()).hexdigest()
+    assert set(vars(grants._m2m_cache)) == {"credential_digest", "audience", "token", "expires_at"}
+    grants.resolve_grant("g1", "tenant-a")
+    assert transport[0].call_count == 1
+    monkeypatch.setenv("LEAF_CLOUD_M2M_CLIENT_SECRET", "rotated-secret")
+    transport[3]({"access_token": "rotated-token", "token_type": "Bearer", "expires_in": 3600})
+    assert grants.resolve_grant("g1", "tenant-a").access_token == "rotated-token"
+    assert grants._m2m_cache.credential_digest == hashlib.sha256(
+        (CLIENT_ID + "\0rotated-secret").encode()).hexdigest()
+    assert json.loads(transport[1].request.call_args.kwargs["body"])["client_secret"] == "rotated-secret"
+    assert grants.resolve_grant("g1", "tenant-a").access_token == "rotated-token"
+    assert transport[0].call_count == 2
+
+
 def test_concurrent_callers_mint_once(transport):
     start = threading.Barrier(8)
 
@@ -246,3 +295,42 @@ def test_total_timeout_budget(monkeypatch, transport):
     refused()
     assert [call.args[0] for call in transport[1].sock.settimeout.call_args_list] == [6.0, 2.0]
     transport[2].read1.assert_not_called()
+
+
+def test_timeout_values_share_one_deadline(monkeypatch, transport):
+    now = [1000.0]
+    monkeypatch.setattr(grants.time, "monotonic", lambda: now[0])
+
+    def advance():
+        now[0] += 1
+
+    def create_connection(*args, **kwargs):
+        advance()
+        return transport[1]
+
+    transport[0].side_effect = create_connection
+    transport[1].connect.side_effect = advance
+    transport[1].request.side_effect = lambda *args, **kwargs: advance()
+    transport[1].getresponse.side_effect = lambda: advance() or transport[2]
+    read_body = transport[2].read1.side_effect
+
+    def read(size):
+        advance()
+        return read_body(size)
+
+    transport[2].read1.side_effect = read
+    assert grants.resolve_grant("g1", "tenant-a").access_token == TOKEN
+    values = [transport[0].call_args.kwargs["timeout"]]
+    values.extend(call.args[0] for call in transport[1].sock.settimeout.call_args_list)
+    assert values == [10.0, 8.0, 7.0, 6.0, 5.0]
+    assert all(0 < value <= 10 for value in values)
+    assert values == sorted(values, reverse=True)
+
+
+def test_deadline_before_request_fails_closed(monkeypatch, transport):
+    now = [1000.0]
+    monkeypatch.setattr(grants.time, "monotonic", lambda: now[0])
+    transport[1].connect.side_effect = lambda: now.__setitem__(0, 1011.0)
+    refused()
+    transport[1].request.assert_not_called()
+    assert grants._m2m_cache is None

@@ -9,6 +9,7 @@ to staging and the tenant bindings in LEAF_CLOUD_M2M_GRANTS.
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import math
@@ -38,7 +39,7 @@ _m2m_lock = threading.Lock()
 
 @dataclass(frozen=True, repr=False)
 class _M2MCache:
-    client_id: str
+    credential_digest: str
     token: str
     expires_at: float
     audience: str = _M2M_AUDIENCE
@@ -56,15 +57,17 @@ def reset_m2m_grant_cache() -> None:
 def _mint_m2m_token(client_id: str, client_secret: str) -> tuple[str, float]:
     started = time.monotonic()
     deadline = started + 10
-    connection = http.client.HTTPSConnection("leafautomation.us.auth0.com", timeout=10)
+
+    def remaining() -> float:
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise TimeoutError()
+        return value
+
+    # stdlib DNS resolution (getaddrinfo) cannot be interrupted by a socket timeout.
+    connection = http.client.HTTPSConnection("leafautomation.us.auth0.com", timeout=remaining())
     response = None
     try:
-        def remaining() -> float:
-            value = deadline - time.monotonic()
-            if value <= 0:
-                raise TimeoutError()
-            return value
-
         connection.connect()
         transport_socket = connection.sock
         transport_socket.settimeout(remaining())
@@ -95,6 +98,7 @@ def _mint_m2m_token(client_id: str, client_secret: str) -> tuple[str, float]:
                 or not isinstance(token_type, str) or token_type.lower() != "bearer"
                 or type(expires_in) is not int or not 60 <= expires_in <= 2592000):
             raise ValueError()
+        remaining()
         return token, started + expires_in
     finally:
         try:
@@ -108,6 +112,7 @@ def _resolve_m2m_grant(reference: str, tenant_id: str) -> CloudGrant:
     global _m2m_cache
     if os.environ.get("LEAF_RUNTIME_ENV") != "staging":
         raise CloudError("cloud_auth_missing", 401)
+    invalid_allowlist = False
     try:
         raw = os.environ.get("LEAF_CLOUD_M2M_GRANTS", "")
         if len(raw.encode("utf-8")) > 4096:
@@ -120,7 +125,9 @@ def _resolve_m2m_grant(reference: str, tenant_id: str) -> CloudGrant:
                 or reference not in grants):
             raise ValueError()
     except (ValueError, TypeError, UnicodeError, RecursionError):
-        raise CloudError("cloud_auth_missing", 401) from None
+        invalid_allowlist = True
+    if invalid_allowlist:
+        raise CloudError("cloud_auth_missing", 401)
     if grants[reference] != tenant_id:
         raise CloudError("cloud_tenant_unauthorized", 403)
     client_id = os.environ.get("LEAF_CLOUD_M2M_CLIENT_ID", "")
@@ -128,16 +135,20 @@ def _resolve_m2m_grant(reference: str, tenant_id: str) -> CloudGrant:
     if any(not 1 <= len(value) <= 512 or any(c.isspace() for c in value)
            for value in (client_id, client_secret)):
         raise CloudError("cloud_auth_missing", 401)
+    credential_digest = hashlib.sha256((client_id + "\0" + client_secret).encode("utf-8")).hexdigest()
     with _m2m_lock:
-        if (_m2m_cache is None or _m2m_cache.client_id != client_id
+        if (_m2m_cache is None or _m2m_cache.credential_digest != credential_digest
                 or _m2m_cache.audience != _M2M_AUDIENCE
                 or time.monotonic() >= _m2m_cache.expires_at - 300):
+            mint_failed = False
             try:
                 token, expires_at = _mint_m2m_token(client_id, client_secret)
             except Exception:
                 # Transport and parser exceptions can contain response bodies or credentials.
-                raise CloudError("cloud_auth_missing", 401) from None
-            _m2m_cache = _M2MCache(client_id, token, expires_at)
+                mint_failed = True
+            if mint_failed:
+                raise CloudError("cloud_auth_missing", 401)
+            _m2m_cache = _M2MCache(credential_digest, token, expires_at)
         return CloudGrant(tenant_id=tenant_id, access_token=_m2m_cache.token)
 
 
