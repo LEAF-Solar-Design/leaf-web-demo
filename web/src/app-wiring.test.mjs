@@ -4161,12 +4161,12 @@ describe('W4g S08-c: the Details drawer carries sanitized diagnostics', () => {
   })
 
   it('includes served identity and sanitized diagnostics in session details', () => {
-    const start = appSource.indexOf('const openSessionDetails = useCallback(')
+    const start = appSource.indexOf('const sessionDetails = useMemo(')
     assert.notEqual(start, -1)
     const end = appSource.indexOf('}, [', start)
     assert.notEqual(end, -1)
     const body = appSource.slice(start, end)
-    for (const literal of ['served ', 'taskRevisionOf(', 'diagnostics: composeDiagnostics({', 'collectRefusals(document)']) {
+    for (const literal of ['servedSourceSha:', 'taskRevisionOf(', 'diagnostics: composeDiagnostics({', 'collectRefusals(document)']) {
       assert.ok(body.includes(literal), `missing session diagnostics: ${literal}`)
     }
   })
@@ -5129,7 +5129,7 @@ describe('Conversion surface wiring', () => {
     assert.match(form, /drawingVersion: catalogRunContext\?\.drawingVersion \?\? null/)
   })
 
-  it('CW2 the result card gets the Solar refusal sentence behind the engine flag and Details keeps the raw code', () => {
+  it('CW2 the result card gets the Solar refusal sentence behind the engine flag and Details humanizes errors', () => {
     const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
     const panel = live.search(/React\.createElement\(\s*ResultPanel,/)
     assert.ok(panel >= 0)
@@ -5137,6 +5137,7 @@ describe('Conversion surface wiring', () => {
     assert.match(live, /const shownResult = useMemo\(\s*\(\) => ENV_CAD_EDIT \? solarRefusalEnvelope\(result, selectedTool\) : result,\s*\[result, selectedTool\]\s*\)/)
     const details = live.slice(live.indexOf('const openRunDetails = useCallback'), live.indexOf('const shownResult = useMemo'))
     assert.match(details, /const env = result;/)
+    assert.match(details, /humanizeError\(env.error\)/)
   })
 })
 describe('RAIL overview yields to the expanded job monitor', () => {
@@ -5207,7 +5208,7 @@ describe('S24 the URL keeps tool, drawer, own selection and camera view', () => 
     assert.ok(appSource.includes('useCameraViewParam(viewerRef, ' + LB + ' ready: drawingIntake != null ' + RB + ')'))
     const start = appSource.indexOf('const openSessionDetails = useCallback(')
     const body = appSource.slice(start, appSource.indexOf(RB + ', [', start))
-    assert.ok(body.includes("urlKey: 'details',"), 'the session Details drawer is the one the URL names')
+    assert.ok(body.includes("urlKey: 'details'"), 'the session Details drawer is the one the URL names')
     // The bounded in-memory default stays; a URL drawer arrives through the seat's restore.
     assert.ok(appSource.includes("const [studioDrawer, setStudioDrawer] = useState('none')"))
   })

@@ -13,6 +13,15 @@ import './detailsDrawerSheet.css'
 
 const PHONE_QUERY = '(max-width: 639px)'
 
+export function ServiceStatus({ mock, health, healthError, authRequired }) {
+  const [label, tone] = mock ? ['Demo (sample data)', 'dim']
+    : healthError ? ['Service unreachable', 'warn-txt']
+      : !health ? ['Checking service...', 'dim']
+        : authRequired ? ['Sign-in required', 'warn-txt']
+          : health.aps_live ? ['Service live', 'ok-txt'] : ['Local only', 'warn-txt']
+  return <span className="foot-stat"><span className={tone === 'ok-txt' ? 'dot' : 'dot square'} aria-hidden="true" /><span className={tone}>{label}</span></span>
+}
+
 export default function DetailsDrawer({ data, onClose }) {
   // M1 exit: hold the last payload through the 180 ms .exit fade (useExit
   // follows Toast.jsx's pattern), then unmount.
@@ -28,6 +37,24 @@ export default function DetailsDrawer({ data, onClose }) {
   const [copyLabel, setCopyLabel] = useState('Copy diagnostics')
   const copyTimer = useRef(null)
   const copyGeneration = useRef(0)
+  const [jobCopyLabel, setJobCopyLabel] = useState(null)
+  const jobCopyGeneration = useRef(0)
+  useEffect(() => {
+    setJobCopyLabel(null)
+    return () => { jobCopyGeneration.current += 1 }
+  }, [data?.action?.copyText, open])
+
+  const copyJob = async () => {
+    const generation = ++jobCopyGeneration.current
+    setJobCopyLabel('Copying...')
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable')
+      await navigator.clipboard.writeText(shown.action.copyText)
+      if (generation === jobCopyGeneration.current) setJobCopyLabel('Copied')
+    } catch {
+      if (generation === jobCopyGeneration.current) setJobCopyLabel('Copy failed')
+    }
+  }
 
   useEffect(() => {
     const media = window.matchMedia?.(PHONE_QUERY)
@@ -132,8 +159,8 @@ export default function DetailsDrawer({ data, onClose }) {
             <button type="button" className="chip-act drawer-act" data-testid="copy-diagnostics" onClick={copy}>{copyLabel}</button>
           </>}
           {action && (
-            <button type="button" className="chip-act drawer-act" onClick={action.onClick}>
-              {action.label}
+            <button type="button" className="chip-act drawer-act" disabled={action.disabled || jobCopyLabel === 'Copying...'} onClick={action.copyText != null ? copyJob : action.onClick} aria-live="polite">
+              {action.copyText != null ? jobCopyLabel || action.label : action.label}
             </button>
           )}
         </div>
