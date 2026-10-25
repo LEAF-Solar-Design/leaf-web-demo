@@ -32,7 +32,7 @@ function useHostSource({ enabled, createHostBridge }, onChange) {
   return enabled && createHostBridge ? provider : null
 }
 
-function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSource }) {
+function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSource, onBridge }) {
   const bridge = useRef(null)
   const root = useRef(null)
   const restoration = useRef(null)
@@ -58,18 +58,20 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
       }),
     })
     bridge.current = connection
+    onBridge(connection)
     return {
       start: () => connection.start(),
       stop: () => {
         connection.stop()
         if (bridge.current === connection) bridge.current = null
+        onBridge(null)
         restoration.current?.()
         restoration.current = null
         setAdmitted(false)
         setHostProposal(null)
       },
     }
-  }, [onReload, createHostBridge])
+  }, [onReload, createHostBridge, onBridge])
   const source = useHostSource({ enabled, createHostBridge: createHostBridge ? connect : null }, sourceChanged)
   if (source) retainedProvider.current = source
   const provider = source || retainedProvider.current
@@ -136,6 +138,7 @@ export function LabWorkbench({ route, hidden = false, status, embedded = false, 
   const [liveStatus, setLiveStatus] = useState(null)
   const [hostReloaded, setHostReloaded] = useState(false)
   const [hostSource, setHostSource] = useState(null)
+  const [bridge, setBridge] = useState(null)
   useEffect(() => {
     if (status !== undefined) return undefined
     let current = true
@@ -161,8 +164,8 @@ export function LabWorkbench({ route, hidden = false, status, embedded = false, 
         const inactive = hidden || !available || activeView !== id
         return (
           <div key={id} data-lab-view={id} role="region" aria-label={`${label} view`} hidden={inactive}>
-            {embedded && id === 'graph' ? <EmbeddedGraph hidden={inactive} enabled={available && !hidden} onReload={setHostReloaded} createHostBridge={createHostBridge} onHostSource={setHostSource} />
-              : id === 'widgets' ? <View hidden={inactive} host={embedded && available && !hidden && createHostBridge ? hostSource?.provider ?? null : null} /> : <View hidden={inactive} />}
+            {embedded && id === 'graph' ? <EmbeddedGraph hidden={inactive} enabled={available && !hidden} onReload={setHostReloaded} createHostBridge={createHostBridge} onHostSource={setHostSource} onBridge={setBridge} />
+              : id === 'widgets' ? <View hidden={inactive} host={embedded && available && !hidden && createHostBridge ? hostSource?.provider ?? null : null} requestPublication={embedded && bridge ? (request) => bridge.publishWidget(request) : undefined} /> : <View hidden={inactive} />}
           </div>
         )
       })}
