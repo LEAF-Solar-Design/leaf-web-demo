@@ -268,7 +268,7 @@ describe('rollback contract', () => {
     expect(css).toContain('--ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));')
   })
 
-  it('puts the Solar surface tabs on their own row from 1500 to 1799px', () => {
+  it('puts the Solar surface tabs on their own row from 1440px up', () => {
     const css = read('./studioShell.css')
     const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"]'
     const mediaBlocks = []
@@ -286,7 +286,7 @@ describe('rollback contract', () => {
       mediaBlocks.push({ header: match[0].slice(0, -1).trim(), body: css.slice(start, end - 1) })
       media.lastIndex = end
     }
-    const block = mediaBlocks.find(block => block.header === '@media (min-width: 1500px) and (max-width: 1799px)')
+    const block = mediaBlocks.find(block => block.header === '@media (min-width: 1440px)')
     expect(block).toBeDefined()
     const rules = [...block.body.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
     const nav = rules.find(rule => rule[1].trim() === `${shell} .tc-product-nav`)

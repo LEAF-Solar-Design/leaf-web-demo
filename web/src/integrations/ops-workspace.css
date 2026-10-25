@@ -21,7 +21,7 @@
 .integration-setup input[type="checkbox"] { width: 24px; min-height: 24px; flex: 0 0 24px; }
 .integration-setup button:disabled { cursor: default; }
 .integration-setup :focus-visible { outline: 2px solid var(--leaf-ring, #2468c8); outline-offset: 3px; }
-@media (max-width: 600px) {
+@media (max-width: 599px) {
   .integration-setup-grid { grid-template-columns: minmax(0, 1fr); }
   .integration-setup button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 }

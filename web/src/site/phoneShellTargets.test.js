@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const cockpit = read('./cockpit.css').replace(/\/\*[\s\S]*?\*\//g, '')
 const scope = '.studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface]'
-const phoneBlocks = [...cockpit.matchAll(/@media \(max-width: 600px\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g)]
+const phoneBlocks = [...cockpit.matchAll(/@media \(max-width: 599px\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g)]
 const phone = phoneBlocks[0]?.[1] || ''
 const rules = [...phone.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
 const ruleBody = (selector) => rules

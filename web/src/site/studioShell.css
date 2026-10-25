@@ -479,7 +479,7 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; }
 }
-@media (max-width: 1499px) {
+@media (max-width: 1439px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon { overflow: hidden; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool-label {
     hyphens: none; overflow-wrap: normal; word-break: normal;
@@ -491,7 +491,7 @@
     max-height: none; overflow: visible;
   }
 }
-@media (min-width: 1024px) and (max-width: 1499px) {
+@media (min-width: 1024px) and (max-width: 1439px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 183px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-nav {
     position: relative; inset: auto; height: 28px; min-height: 28px; box-sizing: border-box;
@@ -500,14 +500,14 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; }
 }
-@media (min-width: 1024px) and (max-width: 1499px) {
+@media (min-width: 1024px) and (max-width: 1439px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 185px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-nav {
     height: 30px; min-height: 30px; padding-top: 2px; align-items: flex-start;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-tabs { align-self: flex-start; }
 }
-@media (pointer: coarse) and (max-width: 1499px), (max-width: 1023px) {
+@media (pointer: coarse) and (max-width: 1439px), (max-width: 1023px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-ribbon: 151px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool {
     min-width: 44px; min-height: 44px; box-sizing: border-box;
@@ -516,7 +516,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-tools { grid-template-rows: repeat(3, 44px); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] { height: 132px; justify-content: center; }
 }
-@media (min-width: 1024px) and (max-width: 1499px) and (pointer: coarse) {
+@media (min-width: 1024px) and (max-width: 1439px) and (pointer: coarse) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) { --ck-canvas-top: 241px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-status: 46px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region { height: 44px; }
@@ -595,7 +595,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-instruments::before {
   background: var(--ck-glass-dock); backdrop-filter: none;
 }
-@media (max-width: 1499px) {
+@media (max-width: 1439px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav::before {
     content: ''; position: absolute; inset: 0; z-index: calc(var(--leaf-layer-base) - 1);
     pointer-events: none; border-radius: inherit;
@@ -606,7 +606,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar { background: var(--ck-glass-dock); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon::before,
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar::before { content: none; }
-@media (max-width: 1499px) {
+@media (max-width: 1439px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav { background: var(--ck-glass-band); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav::before { content: none; }
 }
@@ -686,7 +686,7 @@
 }
 
 /* The guided state is a chip on every studio profile, including tablets. */
-@media (min-width: 601px) and (max-width: 1023px) {
+@media (min-width: 600px) and (max-width: 1023px) {
   .studio-shell .app[data-studio-shell="cockpit"] .tour-banner {
     top: auto; bottom: 116px; left: auto; right: 8px; width: auto;
     max-width: calc(100vw - 16px); padding: 4px 8px; border: 1px solid var(--ck-edge);
@@ -733,10 +733,9 @@
   }
 }
 
-/* TOPBAR3: on Solar the pinned top-row surface tabs overlap the ribbon and header controls until about 1780px.
-   From 1500 to 1799px Solar keeps the own-row nav it already uses at 1499px (measured on staging: 3 overlaps at
-   1600px and 2 at 1700px before, none after). */
-@media (min-width: 1500px) and (max-width: 1799px) {
+/* TOPBAR3: Solar keeps its surface tabs on their own row at every width from 1440px up to avoid overlap
+   with the ribbon and header controls, since the standard has no edge above 1440px. */
+@media (min-width: 1440px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"] { --ck-canvas-top: 185px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"] .tc-product-nav {
     position: relative; inset: auto; height: 30px; min-height: 30px; box-sizing: border-box;

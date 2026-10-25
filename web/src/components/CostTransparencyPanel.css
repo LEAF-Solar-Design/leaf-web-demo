@@ -11,4 +11,4 @@
 .cost-panel small { display: block; margin-top: .3rem; font-weight: normal; }
 .cost-panel caption { text-align: left; margin-bottom: .5rem; }
 .cost-footnote { overflow-wrap: anywhere; font-size: .875rem; }
-@media (max-width: 600px) { .cost-panel { inset: 1rem; padding: 1rem; } .cost-close { float: none; margin: 0 0 1rem; } .cost-use { grid-template-columns: 1fr; } .cost-use dd { margin-bottom: .5rem; } }
+@media (max-width: 599px) { .cost-panel { inset: 1rem; padding: 1rem; } .cost-close { float: none; margin: 0 0 1rem; } .cost-use { grid-template-columns: 1fr; } .cost-use dd { margin-bottom: .5rem; } }

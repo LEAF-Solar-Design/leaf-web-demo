@@ -56,7 +56,7 @@ import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
 import { entityGeometry } from './lib/entityMetrics.js'
 import { setCredentialMountAvailable } from './lib/secretGuardTransport.js'
 import { loadDemoSolve } from './site/intakeCache.js'
-const DRAWER_FRAME_QUERY = '(max-width: 600px), (max-width: 1023px) and (min-height: 500px)'
+const DRAWER_FRAME_QUERY = '(max-width: 599px), (max-width: 1023px) and (min-height: 500px)'
 // The 3D viewer drags in `three`; loading it lazily (mirroring the auth.js
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))

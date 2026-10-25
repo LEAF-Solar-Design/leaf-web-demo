@@ -33,7 +33,7 @@ describe('header popover layout', () => {
     // Match whole media bodies, including their immediate rule blocks, so a
     // matching selector outside the phone breakpoint cannot satisfy the pin.
     const phoneBlocks = [...styles.matchAll(
-      /@media\s*\(\s*max-width\s*:\s*600px\s*\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g,
+      /@media\s*\(\s*max-width\s*:\s*599px\s*\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g,
     )]
     const popover = phoneBlocks.map((block) => block[1].match(
       /(?:^|\})\s*header\.top \.claude-pop\s*\{([^{}]*)\}/,
