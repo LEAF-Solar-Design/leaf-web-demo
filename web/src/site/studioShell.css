@@ -144,10 +144,10 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .spacer { flex: 1; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .who { gap: 4px; flex: 0 0 auto; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top :is(.chip-act, .tc-account-signout, .switch) {
-  height: 20px; padding: 0 8px; font: 500 11px var(--ck-font); line-height: 20px;
+  height: 20px; padding: 0 8px; font: 500 var(--leaf-size-caption) var(--ck-font); line-height: 20px;
   background: var(--ck-title); border: 1px solid var(--leaf-line); border-radius: 3px; color: var(--ck-ink);
 }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .chip-act .key { font-size: 9px; padding: 0 4px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .chip-act .key { font-size: var(--leaf-size-caption); padding: 0 4px; }
 @media (max-width: 980px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar > span[style] { order: 1; }
 }
@@ -160,13 +160,13 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] {
     height: 22px; padding: 0 8px; gap: 5px; border-radius: 3px; border: 1px solid transparent;
-    font: 400 11px var(--ck-font); color: var(--leaf-ink-muted); background: transparent; box-shadow: none; align-items: center;
+    font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink-muted); background: transparent; box-shadow: none; align-items: center;
   }
 @media (hover: hover) and (pointer: fine) { .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"]:hover { background: var(--ck-hover); color: var(--leaf-ink); } }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"][aria-selected="true"] {
     background: var(--ck-title); border-color: var(--leaf-line); color: var(--leaf-ink); box-shadow: none;
   }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] small { font: 400 10px var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-label); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] small { font: 400 var(--leaf-size-caption) var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-label); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav .tc-account-signout { display: none; }
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll { padding: 0; }
@@ -181,9 +181,9 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .rail-spine { flex-direction: row; gap: 6px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .spine-btn {
-    width: 22px; height: 20px; font-size: 11px; border-radius: 3px; background: var(--ck-title); border-color: var(--leaf-line);
+    width: 22px; height: 20px; font-size: var(--leaf-size-caption); border-radius: 3px; background: var(--ck-title); border-color: var(--leaf-line);
   }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .rail-spine-count { font: 400 11px var(--ck-font); color: var(--leaf-ink); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .rail-spine-count { font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail:not([data-spine]) {
     position: fixed; right: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: 5;
     width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: -8px 0 24px rgba(0, 0, 0, .4);
@@ -288,7 +288,7 @@
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-label {
   grid-row: 2; align-self: end; justify-content: center; margin: 0; padding: 0 2px; gap: 0;
-  font: 400 10px/15px var(--ck-font); letter-spacing: 0; text-transform: none;
+  font: 400 var(--leaf-size-caption)/15px var(--ck-font); letter-spacing: 0; text-transform: none;
   color: var(--ck-label); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-label.as-button { color: var(--leaf-ink-muted); }
@@ -303,7 +303,7 @@
   width: 26px; height: 26px; padding: 0; margin: 0;
   display: inline-flex; align-items: center; justify-content: center; gap: 0;
   border: 0; border-radius: 3px; background: transparent;
-  font: 400 10px/11px var(--ck-font); color: var(--ck-ink); white-space: nowrap;
+  font: 400 var(--leaf-size-caption)/13px var(--ck-font); color: var(--ck-ink); white-space: nowrap;
   text-decoration: none; cursor: pointer;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool.write { border: 0; }
@@ -317,15 +317,15 @@
   flex-direction: column; justify-content: space-between; padding: 5px 2px 4px; gap: 3px;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] .ribbon-tool-label {
-  display: block; width: 100%; font: 400 10px/11px var(--ck-font); color: var(--leaf-ink);
-  white-space: normal; text-align: center; max-height: 22px; overflow: hidden;
+  display: block; width: 100%; font: 400 var(--leaf-size-caption)/13px var(--ck-font); color: var(--leaf-ink);
+  white-space: normal; text-align: center; max-height: 26px; overflow: hidden;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"]:disabled .ribbon-tool-label { color: var(--ck-ink-off); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"] {
   width: 104px; height: 26px; justify-content: flex-start; padding: 0 4px; gap: 5px;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"] .ribbon-tool-label {
-  display: inline; font: 400 11px var(--ck-font); overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  display: inline; font: 400 var(--leaf-size-caption) var(--ck-font); overflow: hidden; text-overflow: ellipsis; min-width: 0;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-pressed="true"] { background: var(--leaf-raised); border: 0; box-shadow: inset 0 0 0 1px var(--ck-active); color: var(--ck-ink); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-pressed="false"] { text-decoration: none; color: var(--ck-ink-dim); }
@@ -350,7 +350,7 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-caret::after {
     content: '>'; display: inline-flex; align-items: center; justify-content: center;
-    width: 14px; height: 17px; margin-left: 6px; font-size: 11px; color: var(--leaf-ink-muted);
+    width: 14px; height: 17px; margin-left: 6px; font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted);
     background: var(--leaf-raised); border: 1px solid var(--leaf-line);
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line :is(.bar-field, .bar-input input) {
@@ -361,7 +361,7 @@
     flex: 0 0 auto; height: 23px; padding: 0 3px 0 0; gap: 3px; align-items: center;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-controls :is(.bar-add, .bar-scope, .bar-proj, .key, .chip-act, .bar-lanes) {
-    height: 18px; padding: 0 6px; font: 400 10px/18px var(--ck-font); border-radius: 2px;
+    height: 18px; padding: 0 6px; font: 400 var(--leaf-size-caption)/18px var(--ck-font); border-radius: 2px;
     background: transparent; color: var(--leaf-ink-muted); border: 1px solid transparent;
   }
 @media (hover: hover) and (pointer: fine) { .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-controls :is(.bar-add, .bar-scope, .chip-act):hover:not(:disabled) { background: var(--ck-title); color: var(--ck-ink); } }
@@ -369,14 +369,14 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-controls .bar-proj { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .converse-note {
     position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 4px; padding: 2px 8px;
-    font: 400 11px var(--ck-font); background: var(--ck-recess); border: 1px solid var(--leaf-line);
+    font: 400 var(--leaf-size-caption) var(--ck-font); background: var(--ck-recess); border: 1px solid var(--leaf-line);
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar {
     height: var(--ck-status); min-height: 0; box-sizing: border-box;
     display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: stretch;
     padding: 0 0 0 30px; gap: 0; overflow: hidden;
     background: transparent; backdrop-filter: none; border-top: 2px solid var(--leaf-line);
-    font: 400 11px var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--leaf-ink);
+    font: 400 var(--leaf-size-caption) var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--leaf-ink);
     font-variant-numeric: tabular-nums;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] :is(footer.foot-bar > :not(.foot-region), .foot-region > *) {
@@ -387,7 +387,8 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-docs { justify-content: flex-start; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system {
-    justify-content: flex-end; overflow: hidden; padding: 0 10px;
+    /* row-gap is at least the region's 29 px height, so a wrapped row starts at or below the clip line whatever the first row's height. */
+    justify-content: flex-end; overflow: hidden; flex-wrap: wrap; align-content: flex-start; row-gap: 29px; padding: 0 10px;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system > * + * { border-left: 1px solid var(--leaf-line); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-instruments {
@@ -397,7 +398,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar :is(.dim, .foot-stat, .ok-txt, .warn-txt) { color: var(--leaf-ink); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .chip-act,
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .chip-neutral {
-    height: 20px; padding: 0 8px; font: 400 11px var(--ck-font); line-height: 20px; margin: 0 4px;
+    height: 20px; padding: 0 8px; font: 400 var(--leaf-size-caption) var(--ck-font); line-height: 20px; margin: 0 4px;
     background: var(--ck-title); border: 1px solid var(--leaf-line); border-radius: 3px; color: var(--ck-ink);
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-model-tab {
@@ -412,10 +413,10 @@
 @media (min-width: 981px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-docs { padding: 0; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .cockpit-status-tabs { padding: 0; gap: 0; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system :is(.foot-stat, .dim) { color: var(--leaf-ink-muted); font-size: 10.5px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system :is(.foot-stat, .dim) { color: var(--leaf-ink-muted); font-size: var(--leaf-size-caption); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .ok-txt { color: var(--leaf-ok); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .warn-txt { color: var(--leaf-warn); }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system > span[style] { color: var(--leaf-ink-muted); font-size: 10.5px; margin-left: 0 !important; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .foot-region-system > span[style] { color: var(--leaf-ink-muted); font-size: var(--leaf-size-caption); margin-left: 0 !important; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-model-tab,
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-tab,
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-add {
