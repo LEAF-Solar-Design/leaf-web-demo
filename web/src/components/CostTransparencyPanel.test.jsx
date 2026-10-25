@@ -237,6 +237,36 @@ describe('cost transparency', () => {
     expect(screen.getByRole('button', { name: title })).toHaveFocus()
   })
 
+  it.each(['Month', 'From month', 'To month'])('discards a valid %s draft on Escape without requesting costs', async (label) => {
+    const fetchMock = vi.fn(async (url) => new Response(JSON.stringify(
+      String(url).includes('/api/cost/history?') ? historyFixture : fixture,
+    ), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await openPanel()
+    if (label !== 'Month') {
+      fireEvent.click(screen.getByRole('button', { name: 'History' }))
+    }
+    const month = await screen.findByLabelText(label)
+    const committed = month.value
+    const previous = new Date(`${committed}-01T00:00:00Z`)
+    previous.setUTCMonth(previous.getUTCMonth() - 1)
+    const draft = previous.toISOString().slice(0, 7)
+    const requestCount = fetchMock.mock.calls.length
+    // Also exercise browsers where month inputs fall back to editable text.
+    month.setAttribute('type', 'text')
+    act(() => month.focus())
+    fireEvent.change(month, { target: { value: draft } })
+    expect(month).toHaveValue(draft)
+    await act(async () => { fireEvent.keyDown(month, { key: 'Escape' }) })
+    expect(screen.queryByRole('region', { name: title })).not.toBeInTheDocument()
+    const trigger = screen.getByRole('button', { name: title })
+    expect(trigger).toHaveFocus()
+    expect(fetchMock).toHaveBeenCalledTimes(requestCount)
+    fireEvent.click(trigger)
+    expect(await screen.findByLabelText(label)).toHaveValue(committed)
+    expect(fetchMock).toHaveBeenCalledTimes(requestCount)
+  })
+
   it('KEYS-B12 the open cost panel owns Escape from its own trigger and from the page, above a lower owner', async () => {
     respond()
     const below = vi.fn()

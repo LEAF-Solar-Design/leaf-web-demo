@@ -67,24 +67,33 @@ async function getCostHistory(from, to) {
   }
 }
 
-function MonthInput({ value, min, max, onCommit }) {
+function MonthInput({ value, min, max, onCommit, onCancel }) {
   const [draft, setDraft] = useState(value)
+  const inputRef = useRef(null)
+  const cancelled = useRef(false)
   useEffect(() => { setDraft(value) }, [value])
+  // Handle Escape before the panel returns focus and blur can commit the draft.
+  useEscapeOwner('cost-month', true, () => {
+    cancelled.current = true
+    setDraft(value)
+    onCancel()
+  }, { layer: 'menu', scope: inputRef, scoped: true })
   const commit = () => {
+    if (cancelled.current) return
     if (/^\d{4}-(0[1-9]|1[0-2])$/.test(draft) && (!min || draft >= min) && (!max || draft <= max)) {
       onCommit(draft)
     } else {
       setDraft(value)
     }
   }
-  return <input type="month" value={draft} min={min} max={max}
-    onChange={(event) => setDraft(event.target.value)} onBlur={commit}
+  return <input ref={inputRef} type="month" value={draft} min={min} max={max}
+    onChange={(event) => { cancelled.current = false; setDraft(event.target.value) }} onBlur={commit}
     onKeyDown={(event) => {
       if (event.key === 'Enter' && !isCompositionKey(event)) { event.preventDefault(); commit() }
     }} />
 }
 
-function HistoryView({ data, loading, from, to, currentMonth, onFrom, onTo, onRetry }) {
+function HistoryView({ data, loading, from, to, currentMonth, onFrom, onTo, onRetry, onCancel }) {
   if (loading) return <p role="status">Loading cost history...</p>
   if (!data) return <>
     <p role="status">Cost history is unavailable.</p>
@@ -95,8 +104,8 @@ function HistoryView({ data, loading, from, to, currentMonth, onFrom, onTo, onRe
   const latestTo = latestAllowedTo < currentMonth ? latestAllowedTo : currentMonth
   return <>
     <div>
-      <label>From month <MonthInput value={from} min={earliestFrom} max={to} onCommit={onFrom} /></label>
-      <label>To month <MonthInput value={to} min={from} max={latestTo} onCommit={onTo} /></label>
+      <label>From month <MonthInput value={from} min={earliestFrom} max={to} onCommit={onFrom} onCancel={onCancel} /></label>
+      <label>To month <MonthInput value={to} min={from} max={latestTo} onCommit={onTo} onCancel={onCancel} /></label>
     </div>
     <h3>Months</h3>
     <ul aria-label="Cost history months">{(data.months || []).map((month) => <li key={month.period}>
@@ -201,8 +210,8 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
             from={historyFrom} to={historyTo} currentMonth={currentMonth}
             onFrom={(value) => { if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value >= shiftMonth(historyTo, -23) && value <= historyTo) setHistoryFrom(value) }}
             onTo={(value) => { if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value >= historyFrom && value <= shiftMonth(historyFrom, 23) && value <= currentMonth) setHistoryTo(value) }}
-            onRetry={() => setHistoryRetry((value) => value + 1)} /> : <>
-          <label>Month <MonthInput value={period} max={currentMonth} onCommit={setPeriod} /></label>
+            onRetry={() => setHistoryRetry((value) => value + 1)} onCancel={close} /> : <>
+          <label>Month <MonthInput value={period} max={currentMonth} onCommit={setPeriod} onCancel={close} /></label>
           {loading ? <p role="status">Loading costs…</p> : !data ? <>
             <p role="status">Costs are unavailable for this month.</p>
             <button type="button" className="chip-neutral" onClick={() => setRetry((value) => value + 1)}>Retry costs</button>
