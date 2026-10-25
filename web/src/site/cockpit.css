@@ -776,9 +776,9 @@
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-dot.on { background: var(--ck-cmd); }
 }
 
-@media (min-width: 1024px) and (max-width: 1199px) {
-  /* Dock 250 + result lane 458 + seat 280 + overview 200 do not fit below 1200px: while the Solar flow seat is
-     mounted beside an open Properties dock, the drawing overview gives way to it. Flag-fenced by the seat itself. */
+@media (min-width: 1024px) and (max-width: 1439px) {
+  /* Across the whole desktop band below the 1440px wide edge, the drawing overview gives way to the Solar flow
+     seat while it is mounted beside an open Properties dock. Flag-fenced by the seat itself. */
   .studio-shell .app[data-surface="solar"]:has(.solar-flow-seat):has(.properties-dock) .cad-overview { display: none; }
 }
 
@@ -937,7 +937,7 @@
   display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%;
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon[data-overflow-open="true"] .ribbon-tool[data-size="large"] { height: 76px; }
-@media (max-width: 1499px) {
+@media (max-width: 1439px) {
   .studio-shell .cockpit-band { display: flex; align-items: center; flex-wrap: nowrap; height: var(--ck-top); min-width: 0; }
   .studio-shell .cockpit-band > * { flex-shrink: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-canvas-top: 183px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
@@ -959,7 +959,7 @@
     max-height: none; overflow: visible;
   }
 }
-@media (min-width: 1024px) and (max-width: 1499px) {
+@media (min-width: 1024px) and (max-width: 1439px) {
   /* The second tablist starts 2px below the 28px Ribbon tablist. The
      extra space belongs to the band, including its canvas compensation. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-canvas-top: 185px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
@@ -968,7 +968,7 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { align-self: flex-start; }
 }
-@media (pointer: coarse) and (max-width: 1499px), (max-width: 1023px) {
+@media (pointer: coarse) and (max-width: 1439px), (max-width: 1023px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-ribbon: 151px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button {
@@ -979,7 +979,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"] { height: 132px; justify-content: center; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles { display: inline-flex; flex-wrap: nowrap; }
 }
-@media (min-width: 1024px) and (max-width: 1499px) and (pointer: coarse) {
+@media (min-width: 1024px) and (max-width: 1439px) and (pointer: coarse) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-canvas-top: 241px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); --ck-status: 46px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region { height: 44px; }
 }
@@ -1059,7 +1059,7 @@
    as on the wide frame, and the status line is one 19px line. So the dock's rise is exact:
    19px plus the dock's 8px gap and its 8px sibling margin. Short landscape and the phone
    drawer keep their own layouts. */
-@media (min-width: 601px) and (max-width: 1023px) and (min-height: 500px) {
+@media (min-width: 600px) and (max-width: 1023px) and (min-height: 500px) {
   /* 68px of dock spacing plus the bar's absolute height (32px when unfolded).
      The phone frame keeps 100px; short landscape's app padding stays below. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --tb-r: calc(68px + var(--tb-h, 32px)); }
@@ -1134,7 +1134,7 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-instruments::before {
   background: var(--ck-glass-dock); backdrop-filter: none;
 }
-@media (max-width: 1499px) {
+@media (max-width: 1439px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav::before {
     content: ''; position: absolute; inset: 0; z-index: calc(var(--leaf-layer-base) - 1);
     pointer-events: none; border-radius: inherit;
@@ -1149,7 +1149,7 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock::before,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon::before,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar::before { content: none; }
-@media (max-width: 1499px) {
+@media (max-width: 1439px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav { background: var(--ck-glass-band); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav::before { content: none; }
 }
@@ -1167,7 +1167,7 @@
 
 /* One phone layout for every studio profile. The four headings share one
    row above the command bar. Only the last opened drawer gets body space. */
-@media (max-width: 600px) {
+@media (max-width: 599px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] {
     --ck-top: 132px; --ck-status: 46px; --ck-drawer: 44px;
     --phone-command-height: 140px;
@@ -1320,7 +1320,7 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-dot.on { background: var(--ck-cmd); }
 }
 
-@media (max-width: 600px), (max-width: 1023px) and (min-height: 500px) {
+@media (max-width: 599px), (max-width: 1023px) and (min-height: 500px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs {
     position: fixed; inset: auto 0 var(--ck-dock); height: var(--ck-drawer); z-index: calc(var(--leaf-layer-header) + 5);
     display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1378,7 +1378,7 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > section.ent-panel .ent-head { display: flex; }
 }
 
-@media (min-width: 601px) and (max-width: 1023px) and (min-height: 500px) {
+@media (min-width: 600px) and (max-width: 1023px) and (min-height: 500px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] {
     --ck-drawer: 44px; --ck-dock: var(--studio-dock-rise, calc(66px + var(--tb-h, 32px) + var(--ck-status-rise, 0px) + env(safe-area-inset-bottom, 0px)));
   }
@@ -1387,7 +1387,7 @@
   }
 }
 
-@media (min-width: 1500px) {
+@media (min-width: 1440px) {
   .studio-shell .app[data-surface="solar"] .solar-flow-seat { width: 360px; }
 }
 

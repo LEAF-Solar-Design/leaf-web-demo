@@ -22,7 +22,25 @@ const sources = [
   '../solar/SolarFlowSeat.jsx',
 ]
 
+const phoneAndWideSources = [
+  '../App.jsx',
+  '../lib/useDockRise.js',
+  './cockpit.css',
+  './studioShell.css',
+  './cadOverview.css',
+  '../components/CostTransparencyPanel.css',
+  '../integrations/ops-workspace.css',
+  './projectBoard.css',
+  '../styles.css',
+]
+
 describe('Studio desktop edge', () => {
+  it.each(phoneAndWideSources)('%s retires the previous phone, wide and special bands', (path) => {
+    const source = read(path)
+    expect(source).not.toMatch(/max-width\s*:\s*600px\s*\)/)
+    expect(source).not.toMatch(/(?:min|max)-width\s*:\s*(?:601|1199|1499|1500|1799)px\s*\)/)
+  })
+
   it.each(sources)('%s retires the previous tablet/desktop edge', (path) => {
     // Landing's historical comments remain outside the breakpoint-only migration.
     const source = path === './landing.css'

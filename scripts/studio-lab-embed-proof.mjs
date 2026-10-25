@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const root = new URL('../', import.meta.url);
-const GOLDEN_SHA256 = 'dca101515348b1bb0bd6899a48e6e825f946185f6bf72581280bcc99bdaa92e3';
+const GOLDEN_SHA256 = '9e519c04540d70209a184a4e1b67b72dfe0994293bdb60274749a3a6925bbe45';
 const sha = value => typeof value === 'string' && /^[a-f0-9]{7,40}$/i.test(value);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const requireThat = (condition, message) => {

@@ -98,7 +98,7 @@ describe('S4 dense targets and viewport bounds', () => {
     ]
     for (const [index, target] of targets.entries()) {
       const rule = rules['src/site/cockpit.css'].find((candidate) =>
-        candidate.selector === `${scope} ${target}` && candidate.media.includes('(max-width: 600px)') &&
+        candidate.selector === `${scope} ${target}` && candidate.media.includes('(max-width: 599px)') &&
         candidate.declarations['min-height'] === '44px')
       expect(rule?.declarations['min-height'], target).toBe('44px')
       if (index < 3) expect(rule?.declarations['min-width'], target).toBe('44px')

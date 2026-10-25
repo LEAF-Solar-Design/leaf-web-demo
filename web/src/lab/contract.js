@@ -199,7 +199,7 @@ export function createContract(bundle) {
     for (const key of ['channel', 'principal_proof', 'source_sha', 'proposal_revision', 'proposal_hash']) if (message[key] !== context[key]) fail('Test: host binding mismatch');
     const now = context.now_ms;
     if (!nonnegativeInteger(now) || !nonnegativeInteger(state.sequence) || !Array.isArray(state.accepted_at_ms) || state.accepted_at_ms.some(time => !nonnegativeInteger(time) || time > now) || message.sent_at_ms > now || message.expires_at_ms <= now || message.expires_at_ms <= message.sent_at_ms || message.expires_at_ms - message.sent_at_ms > 30000 || message.sequence <= state.sequence) fail('Test: replay refused');
-    const limit = message.kind === 'source.value' ? 262144 : 4096;
+    const limit = message.kind === 'source.value' ? 262144 : message.kind === 'widget.publish-request' ? 40960 : 4096;
     if (bytes(message) > limit || (context.wire_bytes !== undefined && (!nonnegativeInteger(context.wire_bytes) || context.wire_bytes > limit))) fail('Test: message byte limit');
     const recent = state.accepted_at_ms.filter(time => time > now - 1000);
     if (recent.length >= 20) fail('Test: message rate limit');

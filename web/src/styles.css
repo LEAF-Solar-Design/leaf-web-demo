@@ -1083,6 +1083,15 @@ footer .warn-txt { color: var(--status-warning); }
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
+/* Form controls take the surrounding font family. Browsers render button,
+   input, select and textarea in their own default (Arial); on staging 64
+   controls showed it. Only the family is inherited: a control with no font
+   size of its own keeps the browser's 13.33px, because inheriting the size
+   too widened tab rows into the product nav (PR #2266 CI). Zero specificity,
+   so every rule that sets a control's font still wins. */
+:where(button, input, select, textarea) {
+  font-family: inherit;
+}
 :is(button, [role="button"], [role="tab"], [role="menuitem"], summary):active:not(:disabled):not([aria-disabled="true"]):not(canvas, input[type="range"], [role="slider"]) {
   scale: .985;
   transition: scale 120ms ease;
@@ -1435,7 +1444,7 @@ footer .warn-txt { color: var(--status-warning); }
   background: var(--card); border: 1px solid var(--border); border-radius: 6px;
   box-shadow: var(--shadow-pop); padding: 12px; text-align: left;
 }
-@media (max-width: 600px) {
+@media (max-width: 599px) {
   header.top .claude-pop {
     position: fixed; top: auto; bottom: calc(64px + env(safe-area-inset-bottom, 0px));
     left: 8px; right: 8px; width: auto; max-width: none;

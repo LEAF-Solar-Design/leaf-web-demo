@@ -3311,7 +3311,7 @@ describe('Solar step rail wiring', () => {
       assert.equal(depth, 0)
       return css.slice(open + 1, end - 1)
     }
-    const band = mediaBlock('@media (min-width: 1024px) and (max-width: 1199px)')
+    const band = mediaBlock('@media (min-width: 1024px) and (max-width: 1439px)')
     assert.ok(band.includes('.studio-shell .app[data-surface="solar"]:has(.solar-flow-seat):has(.properties-dock) .cad-overview { display: none; }'))
     const narrow = mediaBlock('@media (max-width: 1023px)')
     assert.ok(narrow.includes('.studio-shell .app[data-surface="solar"] .solar-flow-seat { display: contents; }'))
@@ -3323,7 +3323,7 @@ describe('Solar step rail wiring', () => {
 const DOCK_APP = '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])'
 const DOCK_RISE_RULE = DOCK_APP + ':has(#cockpit-engine-status-slot:not(:empty))'
 const DOCK_WIDE = '@media (min-width: 1024px)'
-const DOCK_TABLET = '@media (min-width: 601px) and (max-width: 1023px) and (min-height: 500px)'
+const DOCK_TABLET = '@media (min-width: 600px) and (max-width: 1023px) and (min-height: 500px)'
 const DOCK_TABLET_FRAME = '@media (max-width: 1023px) and (min-height: 500px)'
 const DOCK_FOLD = '@media (max-height: 760px)'
 const DOCK_RESERVATION = 'var(--tb-r, 100px)'
@@ -3474,7 +3474,7 @@ function dockClearanceFailures(cockpitCss, baseCss, structuralCss, otherSheets =
   for (const name of wideLine.keys()) {
     if (name.startsWith('padding-') || name.startsWith('margin-') || name.startsWith('border') || name.endsWith('height')) failures.push('the wide status line must not declare ' + name)
   }
-  // 601 to 1023: one fixed line, no padding, no margin.
+  // 600 to 1023: one fixed line, no padding, no margin.
   const tabletLineRule = find(cockpit, '.studio-shell .cockpit-engine-status', [DOCK_TABLET], 'tablet status line rule')
   const tabletLine = tabletLineRule.declared
   const tabletHeight = dockPx(tabletLine.get('line-height'))
