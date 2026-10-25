@@ -138,7 +138,7 @@ def _resolve_m2m_grant(reference: str, tenant_id: str) -> CloudGrant:
         raise CloudError("cloud_tenant_unauthorized", 403)
     client_id = os.environ.get("LEAF_CLOUD_M2M_CLIENT_ID", "")
     client_secret = os.environ.get("LEAF_CLOUD_M2M_CLIENT_SECRET", "")
-    if any(not 1 <= len(value) <= 512 or any(c.isspace() for c in value)
+    if any(not 1 <= len(value) <= 512 or any(not "!" <= c <= "~" for c in value)
            for value in (client_id, client_secret)):
         raise CloudError("cloud_auth_missing", 401)
     credential_digest = hashlib.sha256((client_id + "\0" + client_secret).encode("utf-8")).hexdigest()

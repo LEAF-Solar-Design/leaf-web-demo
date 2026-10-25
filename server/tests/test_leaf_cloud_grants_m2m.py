@@ -168,6 +168,40 @@ def test_invalid_credentials(monkeypatch, transport, name, value):
     transport[0].assert_not_called()
 
 
+@pytest.mark.parametrize("name", ["LEAF_CLOUD_M2M_CLIENT_ID", "LEAF_CLOUD_M2M_CLIENT_SECRET"],
+                         ids=["id", "secret"])
+@pytest.mark.parametrize("character", ["\ud800", "\udcff", "\u00e9", "\t", "\x7f", "\x01", " "],
+                         ids=["high-surrogate", "surrogateescape", "non-ascii", "tab", "del",
+                              "control", "space"])
+def test_non_printable_ascii_credentials_are_private(monkeypatch, transport, name, character):
+    planted = "planted-private-credential" + character + "suffix"
+    # A mapping also models surrogates that the host environment API cannot store.
+    monkeypatch.setattr(grants.os, "environ", {**grants.os.environ, name: planted})
+    digest = Mock()
+    monkeypatch.setattr(grants.hashlib, "sha256", digest)
+    error = refused()
+    formatted = "".join(traceback.format_exception(error))
+    for rendered in (str(error), repr(error), formatted):
+        assert planted not in rendered
+        assert repr(planted) not in rendered
+        assert "planted-private-credential" not in rendered
+    digest.assert_not_called()
+    transport[0].assert_not_called()
+    assert grants._m2m_cache is None
+
+
+@pytest.mark.parametrize("value", ["!", "~", "!" * 512,
+                                  "".join(chr(code) for code in range(0x21, 0x7f))],
+                         ids=["min-character", "max-character", "max-length", "all-printable"])
+def test_printable_ascii_credentials_are_accepted(monkeypatch, transport, value):
+    monkeypatch.setenv("LEAF_CLOUD_M2M_CLIENT_ID", value)
+    monkeypatch.setenv("LEAF_CLOUD_M2M_CLIENT_SECRET", value)
+    assert grants.resolve_grant("g1", "tenant-a").access_token == TOKEN
+    payload = json.loads(transport[1].request.call_args.kwargs["body"])
+    assert payload["client_id"] == value
+    assert payload["client_secret"] == value
+
+
 def test_mint_request_and_private_return(monkeypatch, transport):
     monkeypatch.setenv("LEAF_CLOUD_GRANTS_FILE", "/ignored/file")
     result = grants.resolve_grant("g1", "tenant-a")
