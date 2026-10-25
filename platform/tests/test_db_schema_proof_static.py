@@ -152,6 +152,21 @@ def _assert_lab_immutable_ledger_contract():
         "tenant_id", "mode", "frozen", "remote_sha", "local_sha", "receipt", "notified", "updated_at",
     }
     assert columns["lab_git_mirror"] == {"tenant_id", "doc_id", "revision", "commit", "sha256"}
+    authority_columns = {
+        "lab_git_generations": {"tenant_id", "generation"},
+        "lab_git_authority": {"tenant_id", "mode", "generation", "base_head", "verified_head", "updated_at"},
+        "lab_git_pending": {"op_id", "tenant_id", "doc_id", "revision", "parent_revision", "kind", "canonical_text",
+                            "sha256", "base_blob", "expected_parents", "rebase_count", "fence", "lease_owner",
+                            "lease_expires_at", "state", "reserved_bytes", "new_document", "created_at"},
+        "lab_git_commits": {"tenant_id", "commit", "op_id", "doc_id", "revision", "kind", "parent", "recorded_at"},
+        "lab_git_outbox": {"outbox_id", "tenant_id", "kind", "identity", "sequence", "payload", "attempts", "next_attempt_at", "done_at"},
+        "lab_git_quarantine": {"tenant_id", "op_id", "doc_id", "revision", "canonical_text", "sha256", "reason", "detected_at"},
+        "lab_git_transitions": {"tenant_id", "transition_id", "kind", "from_generation", "to_generation", "barrier_head",
+                                "owner", "lease_expires_at", "state", "created_at", "updated_at"},
+    }
+    for table, expected in authority_columns.items():
+        assert columns[table] == expected
+        assert table not in db.required_columns_for_selected_authorities({})
     assert columns["lab_documents"] == {"tenant_id", "doc_id", "head", "published_revision", "kind"}
     assert columns["lab_blobs"] == {
         "tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count",
@@ -160,6 +175,20 @@ def _assert_lab_immutable_ledger_contract():
         "tenant_id", "doc_id", "revision", "parent_revision", "author", "created_at", "sha256",
     }
     catalog = db.required_catalog_for_selected_authorities(selected)
+    for table in authority_columns:
+        assert table + "_pkey" in catalog["constraints"]
+    assert catalog["triggers"]["lab_git_commits_immutable"] == db._catalog_contract(
+        "lab_git_commits", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_reject_git_commit_mutation()")
+    assert catalog["triggers"]["lab_git_tenants_exit_guard"] == db._catalog_contract(
+        "lab_git_tenants", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_lab_git_guard_exit()")
+    assert "lab_git_pending_live_idx" in catalog["indexes"]
+    assert "lab_git_transition_live_idx" in catalog["indexes"]
+    authority_migration = (db._PKG_DIR / "migrations/0090_lab_git_authority.sql").read_text(encoding="utf-8")
+    assert "current_setting('leaf.lab_git_writer', true)" in authority_migration
+    assert "current_setting('leaf.lab_git_transition', true)" in authority_migration
+    assert "IS DISTINCT FROM OLD.tenant_id" in authority_migration
     assert catalog["constraints"]["lab_git_tenants_mode_check"] == db._catalog_contract(
         "lab_git_tenants", "CHECK", "mode", "ledger", "replaying", "mirror")
     for table in ("lab_git_tenants", "lab_git_mirror"):

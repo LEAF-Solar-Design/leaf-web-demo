@@ -453,6 +453,13 @@ _AUTHORITY_REQUIRED_COLUMNS = {
     "lab": {
         "lab_git_tenants": {"tenant_id", "mode", "frozen", "remote_sha", "local_sha", "receipt", "notified", "updated_at"},
         "lab_git_mirror": {"tenant_id", "doc_id", "revision", "commit", "sha256"},
+        "lab_git_generations": {"tenant_id", "generation"},
+        "lab_git_authority": {"tenant_id", "mode", "generation", "base_head", "verified_head", "updated_at"},
+        "lab_git_pending": {"op_id", "tenant_id", "doc_id", "revision", "parent_revision", "kind", "canonical_text", "sha256", "base_blob", "expected_parents", "rebase_count", "fence", "lease_owner", "lease_expires_at", "state", "reserved_bytes", "new_document", "created_at"},
+        "lab_git_commits": {"tenant_id", "commit", "op_id", "doc_id", "revision", "kind", "parent", "recorded_at"},
+        "lab_git_outbox": {"outbox_id", "tenant_id", "kind", "identity", "sequence", "payload", "attempts", "next_attempt_at", "done_at"},
+        "lab_git_quarantine": {"tenant_id", "op_id", "doc_id", "revision", "canonical_text", "sha256", "reason", "detected_at"},
+        "lab_git_transitions": {"tenant_id", "transition_id", "kind", "from_generation", "to_generation", "barrier_head", "owner", "lease_expires_at", "state", "created_at", "updated_at"},
         "lab_blobs": {"tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count"},
         "lab_revisions": {"tenant_id", "doc_id", "revision", "parent_revision", "author", "created_at", "sha256"},
         "lab_documents": {"tenant_id", "doc_id", "head", "published_revision", "kind"},
@@ -1231,6 +1238,20 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
         "lab_git_tenants_pkey": _catalog_contract("lab_git_tenants", "PRIMARY KEY (tenant_id)"),
         "lab_git_tenants_mode_check": _catalog_contract("lab_git_tenants", "CHECK", "mode", "ledger", "replaying", "mirror"),
         "lab_git_mirror_pkey": _catalog_contract("lab_git_mirror", "PRIMARY KEY (tenant_id, doc_id, revision)"),
+        "lab_git_generations_pkey": _catalog_contract("lab_git_generations", "PRIMARY KEY (tenant_id)"),
+        "lab_git_authority_pkey": _catalog_contract("lab_git_authority", "PRIMARY KEY (tenant_id)"),
+        "lab_git_pending_pkey": _catalog_contract("lab_git_pending", "PRIMARY KEY (op_id)"),
+        "lab_git_commits_pkey": _catalog_contract("lab_git_commits", "PRIMARY KEY (tenant_id, commit)"),
+        "lab_git_outbox_pkey": _catalog_contract("lab_git_outbox", "PRIMARY KEY (outbox_id)"),
+        "lab_git_quarantine_pkey": _catalog_contract("lab_git_quarantine", "PRIMARY KEY (tenant_id, op_id)"),
+        "lab_git_transitions_pkey": _catalog_contract("lab_git_transitions", "PRIMARY KEY (tenant_id, transition_id)"),
+        "lab_git_generations_generation_check": _catalog_contract("lab_git_generations", "CHECK", "generation > 0"),
+        "lab_git_authority_mode_check": _catalog_contract("lab_git_authority", "CHECK", "mode", "git", "draining"),
+        "lab_git_pending_expected_parents_check": _catalog_contract("lab_git_pending", "CHECK", "leaf_lab_git_parents_valid(expected_parents)"),
+        "lab_git_pending_rebase_count_check": _catalog_contract("lab_git_pending", "CHECK", "rebase_count >= 0", "rebase_count <= 3"),
+        "lab_git_pending_state_check": _catalog_contract("lab_git_pending", "CHECK", "state", "staged", "committing", "ambiguous", "abandoned"),
+        "lab_git_outbox_tenant_id_kind_identity_key": _catalog_contract("lab_git_outbox", "UNIQUE (tenant_id, kind, identity)"),
+        "lab_git_transitions_state_check": _catalog_contract("lab_git_transitions", "CHECK", "state", "planned", "fenced", "resolved", "drained", "proven", "done", "reverted"),
         "lab_blobs_pkey": _catalog_contract("lab_blobs", "PRIMARY KEY (tenant_id, sha256)"),
         "lab_revisions_pkey": _catalog_contract("lab_revisions", "PRIMARY KEY (tenant_id, doc_id, revision)"),
         "lab_documents_pkey": _catalog_contract("lab_documents", "PRIMARY KEY (tenant_id, doc_id)"),
@@ -1689,6 +1710,12 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
 }
 
 _AUTHORITY_REQUIRED_INDEXES = {
+    "lab": {
+        "lab_git_pending_live_idx": _catalog_contract(
+            "lab_git_pending", "CREATE UNIQUE INDEX", "(tenant_id, doc_id)", "WHERE", "state <> 'abandoned'"),
+        "lab_git_transition_live_idx": _catalog_contract(
+            "lab_git_transitions", "CREATE UNIQUE INDEX", "(tenant_id)", "WHERE", "state", "done", "reverted"),
+    },
     "lab_runs": {
         "lab_activations_due_idx": _catalog_contract("lab_activations", "(state, next_due_at)"),
         "lab_runs_doc_created_idx": _catalog_contract(
@@ -1838,10 +1865,21 @@ _AUTHORITY_REQUIRED_INDEXES = {
 # Contracts compare against the deparse, never the migration source.
 _AUTHORITY_REQUIRED_TRIGGERS = {
     "lab": {
+        "lab_git_commits_immutable": _catalog_contract(
+            "lab_git_commits", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+            "EXECUTE FUNCTION leaf_reject_git_commit_mutation()"),
+        "lab_git_generations_retained": _catalog_contract(
+            "lab_git_generations", "BEFORE DELETE", "FOR EACH ROW",
+            "EXECUTE FUNCTION leaf_retain_git_generation()"),
+        "lab_git_tenants_exit_guard": _catalog_contract(
+            "lab_git_tenants", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+            "EXECUTE FUNCTION leaf_lab_git_guard_exit()"),
+        **{
         name + "_immutable": _catalog_contract(
             name, "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
             "EXECUTE FUNCTION leaf_reject_lab_mutation()")
         for name in ("lab_blobs", "lab_revisions", "lab_publish_receipts")
+        },
     },
     "broker": {
         "broker_terminal_intent_write_once": _catalog_contract(
