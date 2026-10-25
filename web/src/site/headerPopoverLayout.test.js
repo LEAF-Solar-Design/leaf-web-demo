@@ -60,7 +60,7 @@ describe('header popover layout', () => {
 
   it('cancels the header backdrop filter on phones so the fixed sheet escapes the header', () => {
     const phoneBlocks = [...landing.matchAll(
-      /@media\s*\(\s*max-width\s*:\s*600px\s*\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g,
+      /@media\s*\(\s*max-width\s*:\s*599px\s*\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g,
     )]
     const header = phoneBlocks.map((block) => block[1].match(
       /(?:^|\})\s*\.studio-shell header\.top:has\(\.claude-pop\)\s*\{([^{}]*)\}/,
