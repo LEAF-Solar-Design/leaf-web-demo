@@ -1,6 +1,6 @@
 """In-process Lab executor: 2 runs per process, 4 active per tenant, queue 16
-per tenant, 600 s per run, per-block budgets from lab_evaluate; host and
-effectful graphs are refused; claims only on the adopted revision unless idle
+per tenant, 600 s per run, per-block budgets from lab_evaluate; host graphs are
+refused, and tool nodes require explicit admission; claims only on the adopted revision unless idle
 claims are explicitly enabled and labelled.
 """
 from __future__ import annotations
@@ -16,6 +16,7 @@ import uuid
 import emf_metrics
 import lab_artifacts
 import lab_run_store
+import lab_tool_nodes
 from dependency_health import _source_revision
 from lab_evaluate import (Budget, GraphRefused, RunBudgetExceeded, RunCancelled,
                           evaluate_graph, export_value, trusted_registry)
@@ -246,8 +247,13 @@ class LabWorker:
                                                               for port, value in values.items()}}]):
                             raise RunCancelled()
 
+            tool_options = {}
+            if lab_tool_nodes.enabled():
+                tool_options["tool_adapter"] = lab_tool_nodes.ToolNodeAdapter(
+                    row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run))
             evaluate_graph(artifact["graph"], trusted_registry(), budget=Budget(run_wall_s=600 - elapsed),
-                           clock=self.clock, cancelled=lambda: self._cancelled(run), on_block=on_block)
+                           clock=self.clock, cancelled=lambda: self._cancelled(run), on_block=on_block,
+                           **tool_options)
             # Refresh cancellation at the terminal boundary, even for a one-block graph.
             with run.lock:
                 run.checked_at = float("-inf")
