@@ -14,7 +14,7 @@ import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
 import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
 import {
-  LAB_DOCUMENT_REF, TenantDocumentRepo,
+  GitGenerationConflictError, LAB_DOCUMENT_REF, TenantDocumentRepo,
   type LabDocumentPort, type TenantDocumentRepoOptions,
 } from "../src/vendor/mushy-author/ports/labDocumentPort.js";
 import { ForgePublicationError, ForgeRemoteAuthority } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
@@ -89,6 +89,7 @@ describe("Lab commit", () => {
       },
       body: JSON.stringify(body),
     });
+    expect(response.headers.get("x-leaf-lab-capability")).toBe("lab-generation-v1");
     return { status: response.status, body: await response.json() as LabCommitResponseBody, cacheControl: response.headers.get("cache-control") };
   }
 
@@ -232,6 +233,35 @@ describe("Lab commit", () => {
     expect(git(cache, "rev-parse", "main")).toBe(main);
     expect(git(cache, "rev-list", "--count", LAB_DOCUMENT_REF)).toBe("1");
     expect(git(cache, "show", `${okBody(result).commit}:lab/graphs/one.json`)).toBe(validBody().documents[0]!.content);
+  });
+
+  it("passes generation through and maps generation refusals including inline publication", async () => {
+    const port = fakePort();
+    const url = listen(port);
+    expect((await post(url, { ...validBody(), generation: "1234567890123456789", publish: { expected_remote_sha: null } })).status).toBe(200);
+    expect(port.commit).toHaveBeenCalledExactlyOnceWith({
+      tenantId: TENANT, expectedSha: null, documents: validBody().documents, message: validBody().message, generation: "1234567890123456789",
+    });
+    expect(port.publishRef).toHaveBeenCalledExactlyOnceWith(TENANT, null, { generation: "1234567890123456789", targetSha: SHA });
+    vi.mocked(port.commit).mockRejectedValueOnce(new GitGenerationConflictError("private detail"));
+    const refused = await post(url, { ...validBody(), generation: "1" });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toEqual({ error: { code: "lab_generation_conflict" } });
+    vi.mocked(port.publishRef).mockRejectedValueOnce(new GitGenerationConflictError("private detail"));
+    const publishRefused = await post(url, { ...validBody(), generation: "1", publish: { expected_remote_sha: null } });
+    expect(publishRefused.status).toBe(409);
+    expect(publishRefused.body).toEqual({ error: { code: "lab_generation_conflict" }, committed: SHA });
+  });
+
+  it("rejects generation grammar violations at /generation", async () => {
+    const port = fakePort();
+    const url = listen(port);
+    for (const generation of [null, 1, "", "0", "01", "-1", "1.0", "1\n", "1".repeat(20)]) {
+      const result = await post(url, { ...validBody(), generation });
+      expect(result.status).toBe(422);
+      expect(result.body).toMatchObject({ error: { code: "lab_commit_invalid", pointer: "/generation" } });
+    }
+    expect(port.commit).not.toHaveBeenCalled();
   });
 
   it("returns a conflict for a stale local ref", async () => {

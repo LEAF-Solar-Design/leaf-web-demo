@@ -1,4 +1,4 @@
-import { LAB_DOCUMENT_REF, type LabDocumentPort } from "../vendor/mushy-author/ports/labDocumentPort.js";
+import { GitGenerationConflictError, LAB_DOCUMENT_REF, type LabDocumentPort } from "../vendor/mushy-author/ports/labDocumentPort.js";
 import { GitRefConflictError } from "../vendor/mushy-author/ports/impl/tenantChangeRepo.js";
 import { ForgePublicationError } from "../vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 
@@ -39,9 +39,12 @@ export async function handleLabCommit(
   });
   if (!isObject(body)) return invalid("", "Expected an object");
   for (const key of Object.keys(body)) {
-    if (!["expected_sha", "documents", "message", "publish"].includes(key)) {
+    if (!["expected_sha", "documents", "message", "publish", "generation"].includes(key)) {
       return invalid(`/${pointerKey(key)}`, "Unknown field");
     }
+  }
+  if (Object.hasOwn(body, "generation") && (typeof body.generation !== "string" || !/^[1-9][0-9]{0,18}$(?![\s\S])/.test(body.generation))) {
+    return invalid("/generation", "Expected a decimal generation of 1 to 19 digits without leading zero");
   }
   if (!isSha(body.expected_sha) || body.expected_sha === "0".repeat(40)) {
     return invalid("/expected_sha", "Expected null or a nonzero lowercase commit SHA");
@@ -89,17 +92,23 @@ export async function handleLabCommit(
   });
   let commit: string;
   try {
-    ({ commit } = await port.commit({ tenantId, expectedSha: body.expected_sha, documents, message: body.message }));
+    ({ commit } = await port.commit({ tenantId, expectedSha: body.expected_sha, documents, message: body.message,
+      ...(typeof body.generation === "string" ? { generation: body.generation } : {}),
+    }));
   } catch (error) {
+    if (error instanceof GitGenerationConflictError) return { status: 409, body: { error: { code: "lab_generation_conflict" } } };
     if (error instanceof GitRefConflictError) return { status: 409, body: { error: conflict(error, "lab_ref_conflict") } };
     if (error instanceof ForgePublicationError) return { status: 403, body: { error: { code: "lab_repository_refused" } } };
     return failed();
   }
   if (!publish) return { status: 200, body: { ref: LAB_DOCUMENT_REF, commit, published: null } };
   try {
-    const published = await port.publishRef(tenantId, publish.expectedSha);
+    const published = typeof body.generation === "string"
+      ? await port.publishRef(tenantId, publish.expectedSha, { generation: body.generation, targetSha: commit })
+      : await port.publishRef(tenantId, publish.expectedSha);
     return { status: 200, body: { ref: LAB_DOCUMENT_REF, commit, published: published.commit } };
   } catch (error) {
+    if (error instanceof GitGenerationConflictError) return { status: 409, body: { error: { code: "lab_generation_conflict" }, committed: commit } };
     if (error instanceof GitRefConflictError) return { status: 409, body: { error: conflict(error, "lab_publish_conflict"), committed: commit } };
     if (error instanceof ForgePublicationError) {
       const status = { "not-published": 503, refused: 403, unknown: 502 }[error.state];
