@@ -8,8 +8,18 @@ function Select({ label, value, options, onChange }) {
   return <label>{label}<select value={value} onChange={(e) => onChange(e.target.value)}>{options.map((v) => <option key={v} value={v}>{v}</option>)}</select></label>
 }
 function NumberField({ label, value, min, max, step = 1, onChange, type = 'number' }) {
-  return <label>{label}<input type={type} value={value} min={min} max={max} step={step} onChange={(e) => {
-    if (e.target.value !== '' && Number.isFinite(Number(e.target.value))) onChange(Math.max(min, Math.min(max, Number(e.target.value))))
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => { setDraft(String(value)) }, [value])
+  function commit() {
+    const next = draft.trim() === '' || !Number.isFinite(Number(draft)) ? value : Math.max(min, Math.min(max, Number(draft)))
+    setDraft(String(next))
+    if (next !== value) onChange(next)
+  }
+  return <label>{label}<input type={type} value={type === 'range' ? value : draft} min={min} max={max} step={step} onChange={(e) => {
+    if (type === 'range') onChange(Number(e.target.value))
+    else setDraft(e.target.value)
+  }} onBlur={type === 'range' ? undefined : commit} onKeyDown={(e) => {
+    if (type !== 'range' && e.key === 'Enter') { e.preventDefault(); commit() }
   }} /></label>
 }
 function BindingPicker({ element, edit, local, onOutputs, graphOutputs }) {
@@ -83,7 +93,7 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local, onOu
       <button type="button" onClick={() => { if (resetAt !== null && Date.now() - resetAt < 3000) { dispatch({ type: 'reset' }); setResetAt(null) } else setResetAt(Date.now()) }}>{resetAt !== null ? 'Click again to reset' : 'Reset this format'}</button>
     </> : <>
       <h3>{PRESETS[element.preset]?.n ?? element.kind}</h3>
-      <div className="widget-geometry">{['x', 'y', 'w', 'h'].map((key) => <NumberField key={key} label={key.toUpperCase()} value={element[key]}
+      <div className="widget-geometry">{['x', 'y', 'w', 'h'].map((key) => <NumberField key={`${element.id}:${key}`} label={key.toUpperCase()} value={element[key]}
         min={key === 'w' ? Math.min(6, W - element.x) : key === 'h' ? Math.min(element.preset === 'divider' ? 1 : 6, surface.h - element.y) : 0}
         max={key === 'x' ? W - element.w : key === 'y' ? surface.h - element.h : key === 'w' ? W - element.x : surface.h - element.y} onChange={(value) => edit({ [key]: value })} />)}</div>
       <NumberField label="Scale" type="range" value={element.scale} min={0.4} max={2} step={0.02} onChange={(scale) => edit({ scale })} />

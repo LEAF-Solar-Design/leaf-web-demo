@@ -142,7 +142,7 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
   assert.deepEqual(declaration.init.arguments[0].elements.map(element => element.value), [
     'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
     'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
-    'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing',
+    'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
     'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
     'solar-electrical-schedules', 'solar-cable-export',
   ])
@@ -568,7 +568,7 @@ describe('R13F project Solar execution and form ingresses', () => {
         }
       }
     }
-    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), 'efbcbfe1a68a117368579c9455804ad9b3aae7b848903752ecb351a38a5c033c')
+    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), '688612676474cf1de98e15efd6249ec92f57c9b3ec0809aa2df56fa2fdc320b8')
   })
 
   it('R13F-20 App retains one refusal helper and admits the project workspace', () => {
@@ -621,8 +621,8 @@ describe('R13F project Solar execution and form ingresses', () => {
     for (const [name, count] of Object.entries(sites)) assert.equal(r13Find(refusal, r13Callback(name)).length, count, name)
     assert.equal(r13Find(refusal).length, 20)
     for (const [name, hash] of Object.entries({
-      // SCB3e adds suspension guards so retained saves cannot write while AutoCAD owns the canvas.
-      engineSaveTarget: '554d758464edee7a4a66e37073b5644e4cd6d6a4023b2a07a34061c118a70702',
+      // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
+      engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
       onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
       onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
       retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
@@ -675,10 +675,10 @@ describe('R13F project Solar execution and form ingresses', () => {
     other.callback('onRequestCatalogRun')({ name: 'cad-read' }, other.params)
     assert.equal(other.calls('commit').length, 1)
     assert.deepEqual(other.errors, [])
-    const anchor = '{!running && (runErr || routeErr) && ('
+    const anchor = '{(runErr || routeErr) && ('
     assert.equal(appSource.split(anchor).length - 1, 1)
     const strip = r13One((node) => node.type === 'LogicalExpression' && node.operator === '&&'
-      && node.right.type === 'JSXElement' && appSource.slice(node.start, node.end).startsWith('!running && (runErr || routeErr)'))
+      && node.right.type === 'JSXElement' && appSource.slice(node.start, node.end).startsWith('(runErr || routeErr)'))
     const sentence = r13One((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'span'
       && node.openingElement.attributes.some((attr) => attr.name?.name === 'className' && attr.value?.value === 'strip-sentence'), strip.right)
     const text = sentence.children.find((node) => node.type === 'JSXExpressionContainer').expression
@@ -710,9 +710,9 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.deepEqual(h.errors, [])
     const other = r13Fixture({ rows: [] })
     const missing = { lane: 'run', tool: 'cad-missing' }
-    assert.equal(other.callback('armDecision')(missing), missing)
+    assert.equal(other.callback('armDecision')(missing), undefined)
     assert.equal(other.calls('lookup').length, 1)
-    assert.deepEqual(other.errors, [])
+    assert.deepEqual(other.errors, ['This tool is no longer in your catalog. Choose another tool to run.'])
   })
 
   it('R13F-11 slash dispatch refuses project Solar before routing', () => {
@@ -4220,14 +4220,24 @@ describe('W4g S08-a: an explicit demo starts in mock', () => {
     const promptBox = appSource.match(/<PromptBox\s[\s\S]*?\/>/)?.[0]
     assert.ok(promptBox)
     assert.ok(promptBox.includes('mcpDiscoveryEnabled={!mock && !knownGuest}'))
+    assert.ok(promptBox.includes('liveCallsAllowed={signedIn && !mock && !knownGuest && !signedOut}'))
+    assert.ok(promptBox.includes('mock={mock}'))
   })
   it('decides explicit demo mode in the lazy initial state', () => {
     assert.match(appSource, new RegExp('useState\\(\\(\\) => config\\.mockDefault[\\s\\S]{0,200}explicitDemo\\(\\{'))
     assert.match(appSource, new RegExp("import \\{[^}]*\\bexplicitDemo\\b[^}]*\\} from './demoState\\.js'"))
   })
-  it('renders the operator probe once and only outside mock', () => {
+  it('renders the operator probe once and only when signed in outside mock and known guests', () => {
     assert.equal(appSource.split('<OperatorEntry />').length - 1, 1)
-    assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && <OperatorEntry />}')))
+    assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && !knownGuest && signedIn && <OperatorEntry />}')))
+  })
+  it('gates add-ons on sign-in and delegates click focus to the dialog-aware guard', () => {
+    assert.ok(appSource.includes('{!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel'))
+    assert.ok(appSource.includes('if (shouldSkipPromptFocus(t)) return'))
+    const stage = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
+    const promptBox = stage.match(/<PromptBox\s[\s\S]*?\/>/)?.[0]
+    assert.ok(promptBox?.includes('liveCallsAllowed={isSignedIn() && !transportMock}'))
+    assert.ok(promptBox?.includes('mock={PUBLIC_DEMO}'))
   })
   it('preserves the live session transitions and the 401 auto-demo hatch', () => {
     const identityStart = appSource.indexOf('    getSessionIdentity(false)')
@@ -4682,21 +4692,22 @@ const DECLARED_AND_USED = [
 
 describe('App.jsx wiring', () => {
   it('names the drawing refresh wait when interrupting a finished job', () => {
-    const start = stripped.indexOf('onInterruptRun: () => {')
-    const end = stripped.indexOf('onClearSelection:', start)
+    const start = stripped.indexOf('onStopRun = useCallback')
+    const end = stripped.indexOf('const anyFamilyOpen', start)
     assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
     const handler = stripped.slice(start, end)
     assert.match(handler, new RegExp('showToast\\(result != null\\s*\\?\\s*\\{\\s*text:\\s*`Stopped waiting for the drawing to refresh after \\$\\{tool\\}\\.`'))
-    assert.match(stripped, /interruptRun,\s*currentJob\?\.tool,\s*currentJob\?\.job_id,\s*result,\s*mock,\s*showToast/)
+    assert.match(stripped, /interruptRun,\s*selectedTool\?\.label,\s*currentJob\?\.job_id,\s*result,\s*mock,\s*showToast/)
+    assert.match(stripped, /onInterruptRun: onStopRun/)
   })
 
   it('acknowledges interrupting live and mock runs after detaching', () => {
-    const start = stripped.indexOf('onInterruptRun: () => {')
-    const end = stripped.indexOf('onClearSelection:', start)
+    const start = stripped.indexOf('onStopRun = useCallback')
+    const end = stripped.indexOf('const anyFamilyOpen', start)
     assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
     const handler = stripped.slice(start, end)
     assert.match(handler, /interruptRun\(\);[\s\S]*showToast\(/)
-    assert.match(handler, /typeof currentJob\?\.tool === "string" && currentJob\.tool\.trim\(\) \? currentJob\.tool : "the run"/)
+    assert.match(handler, /selectedTool\?\.label \|\| "the run"/)
     assert.match(handler, new RegExp('text:\\s*mock\\s*\\?\\s*`Stopped waiting for \\$\\{tool\\}\\.`\\s*:\\s*currentJob\\?\\.job_id\\s*\\?\\s*`Stopped following \\$\\{tool\\}\\. It keeps running; find it in Jobs\\.`\\s*:\\s*`Stopped waiting for \\$\\{tool\\} to be accepted\\. If the server accepts it, it will appear in Jobs\\.`'))
   })
 
@@ -5026,7 +5037,7 @@ describe('App.jsx wiring', () => {
       assert.notEqual(refusal, -1, 'onRun must read engineDirtyRef.current')
       assert.notEqual(run, -1)
       assert.ok(refusal < run, 'the dirty refusal must precede runJob')
-      assert.match(onRunBody.slice(refusal, run), /REASONS\.unsavedEngineEdits[\s\S]*return null/)
+      assert.match(onRunBody.slice(refusal, run), /Save or discard your drawing edits before running[\s\S]*return null/)
     })
 
     it('the ref and the ribbon state are written by the one dirty-change callback the provider gets', () => {
@@ -5049,7 +5060,7 @@ describe('App.jsx wiring', () => {
     it('armDecision and onRun share the one write predicate', () => {
       const armStart = stripped.indexOf('armDecision = useCallback')
       assert.notEqual(armStart, -1)
-      assert.match(stripped.slice(armStart, armStart + 1600), /isWrite = isWriteTool\(catalogTool\)/)
+      assert.match(stripped.slice(armStart, armStart + 2000), /isWrite = isWriteTool\(catalogTool\)/)
       assert.match(onRunBody, /isWrite = isWriteTool\(tool\)/)
     })
 
@@ -5057,7 +5068,8 @@ describe('App.jsx wiring', () => {
       const armStart = stripped.indexOf('armDecision = useCallback')
       assert.notEqual(armStart, -1)
       const armBody = stripped.slice(armStart, armStart + 5200)
-      assert.ok(armBody.includes('if (!mock && session.status !== "active") return'))
+      assert.ok(armBody.includes('if (!mock && session.status !== "active")'))
+      assert.ok(armBody.includes('Sign in to run tools.'))
       assert.equal(armBody.includes('if (!mock && !tenant) return'), false)
       const dependencyStart = armBody.indexOf('[tools, mock, session.status')
       assert.notEqual(dependencyStart, -1)
@@ -5538,8 +5550,8 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
   const hashes = {
     onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
     onRedo: '6061cdf05fef2e3119473e0e3639a1a6997c90e4d2b73c7b514508468853ecff',
-    // SCB3e adds suspension guards so retained saves cannot write while AutoCAD owns the canvas.
-    engineSaveTarget: '554d758464edee7a4a66e37073b5644e4cd6d6a4023b2a07a34061c118a70702',
+    // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
+    engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
     onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
     onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
     retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',

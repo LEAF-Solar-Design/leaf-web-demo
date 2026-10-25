@@ -3,7 +3,7 @@
  *
  * Card B-U4 acceptance:
  *   Export streams/downloads the sanitized artifact; progress bounded with
- *   timeout surfaced as retryable error; receipt id shown.
+ *   timeout surfaced as an unknown outcome; receipt id shown.
  *
  * Purely props-driven for its data contract (Membership.jsx pattern): the
  * caller supplies `onExport`, the only thing that talks to a server. This
@@ -12,22 +12,24 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import EscCap from '../components/EscCap.jsx'
+import { humanizeError } from '../errorHumanize.js'
+import { useLifecycleDialog } from './CloneDialog.jsx'
 
 // Own timeout class (mirrors fetchBudget.js's FetchTimeoutError) so a caller
 // can tell "the export hung past its bound" apart from any other rejection.
 export class ExportTimeoutError extends Error {
   constructor(timeoutMs) {
-    super(`Export did not complete within ${timeoutMs} ms.`)
+    super('We could not confirm whether the export finished. Check the project history before exporting again.')
     this.name = 'ExportTimeoutError'
     this.timeoutMs = timeoutMs
-    this.retryable = true
+    this.retryable = false
   }
 }
 
 function describeExportError(e) {
-  if (e?.name === 'ExportTimeoutError') return { message: e.message, retryable: true }
+  if (e?.name === 'ExportTimeoutError') return { message: humanizeError(e), retryable: false }
   const retryable = e?.retryable != null ? !!e.retryable : true
-  const message = e?.body?.error?.message || e?.message || String(e || '') || 'Export failed.'
+  const message = humanizeError(e?.body?.error?.message || e)
   return { message, retryable }
 }
 
@@ -38,7 +40,7 @@ export default function ExportDialog({
   title = 'Export project',
 }) {
   const [status, setStatus] = useState('idle') // idle | exporting | complete | error
-  const [progress, setProgress] = useState(0)
+  const [progress, setProgress] = useState(null)
   const [error, setError] = useState(null)
   const [receiptId, setReceiptId] = useState(null)
   const [downloadUrl, setDownloadUrl] = useState(null)
@@ -48,6 +50,7 @@ export default function ExportDialog({
   // completion must never overwrite a newer one's state.
   const generationRef = useRef(0)
   const urlRef = useRef(null)
+  const dialogRef = useLifecycleDialog(true, () => onDismiss?.(), 'export-project')
 
   const revokeDownload = useCallback(() => {
     if (!urlRef.current) return
@@ -67,16 +70,17 @@ export default function ExportDialog({
     const generation = ++generationRef.current
     revokeDownload()
     setStatus('exporting')
-    setProgress(0)
+    setProgress(null)
     setError(null)
     setReceiptId(null)
     setDownloadUrl(null)
+    dialogRef.current?.focus()
 
     const controller = new AbortController()
     let timer = null
     // The whole export is bounded by timeoutMs — never an indefinite spinner.
     // Firing it both aborts the in-flight call (cooperative cancellation) and
-    // wins the race below with an explicit, retryable timeout error.
+    // wins the race below with an unknown outcome, not permission to retry.
     const timeoutPromise = new Promise((_, reject) => {
       timer = setTimeout(() => {
         controller.abort()
@@ -87,7 +91,7 @@ export default function ExportDialog({
     const onProgress = (fraction) => {
       if (generationRef.current !== generation) return
       const n = Number(fraction)
-      setProgress(Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0)
+      setProgress(Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : null)
     }
 
     try {
@@ -114,10 +118,11 @@ export default function ExportDialog({
     } finally {
       clearTimeout(timer)
     }
-  }, [onExport, revokeDownload, status, timeoutMs])
+  }, [dialogRef, onExport, revokeDownload, status, timeoutMs])
 
   return (
-    <section className="export-dialog" role="dialog" aria-modal="true" aria-label={title}>
+    <div className="export-dialog-backdrop" role="presentation">
+    <section ref={dialogRef} tabIndex={-1} className="export-dialog" role="dialog" aria-modal="true" aria-label={title}>
       <div className="export-dialog-head">
         <span className="export-dialog-title">{title}</span>
         {onDismiss && (
@@ -140,13 +145,14 @@ export default function ExportDialog({
         <div className="export-dialog-progress">
           <progress
             role="progressbar"
-            aria-valuenow={Math.round(progress * 100)}
+            aria-label="Export progress"
+            aria-valuenow={progress == null ? undefined : Math.round(progress * 100)}
             aria-valuemin={0}
             aria-valuemax={100}
-            value={progress}
+            value={progress == null ? undefined : progress}
             max={1}
           />
-          <span className="export-dialog-progress-label">{Math.round(progress * 100)}%</span>
+          <span className="export-dialog-progress-label">{progress == null ? 'Preparing download...' : `${Math.round(progress * 100)}%`}</span>
         </div>
       )}
 
@@ -171,5 +177,6 @@ export default function ExportDialog({
         </div>
       )}
     </section>
+    </div>
   )
 }

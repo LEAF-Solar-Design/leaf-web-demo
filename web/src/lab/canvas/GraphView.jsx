@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { lazy, memo, Suspense, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { registry } from './registry.js'
 import { pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
@@ -205,6 +205,18 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const streams = useRef(new Set())
   const mounted = useRef(false)
   const latest = useRef(null)
+  const saveHintId = useId()
+  const draftBaseline = useRef(null)
+  const draftDocument = live.draft?.document
+  if (draftDocument && draftBaseline.current === null) draftBaseline.current = canonicalJSON(draftDocument)
+  const cleanDocument = client.state.lastSaved?.graph || restored.graph || initialDocument
+  const dirty = Boolean(draftDocument && canonicalJSON(draftDocument) !== (cleanDocument ? canonicalJSON(cleanDocument) : draftBaseline.current))
+  useEffect(() => {
+    if (!dirty) return undefined
+    const warn = event => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
   latest.current = { document: live.draft?.document, head: client.state.head, docId: client.currentDocId() }
   useEffect(() => client.subscribe(() => refreshHead(value => value + 1)), [client])
   useEffect(() => {
@@ -331,8 +343,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
           <p role="status">{validDocument ? 'Ready' : 'No valid graph'}</p>
           {live.problems.length > 0 && <ul>{live.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
           <button type="button" disabled={!validDocument || (!onRun && (!client.state.headLoaded || client.state.head == null || submitting))}
+            aria-describedby={!onRun && client.state.head == null ? saveHintId : undefined}
             onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
             {onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
+          {!onRun && client.state.head == null && <p id={saveHintId}>Save this graph before running it</p>}
           {runMessage && <p role="status">{runMessage}</p>}
           {activeRunStatus.endsWith('/auth_expired') && <p>Sign in again, then resume <button type="button" onClick={() => labValueStore.resume(valueRunId)}>Resume</button></p>}
         </section>

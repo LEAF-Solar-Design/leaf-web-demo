@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 import AuditPanel from './AuditPanel.jsx'
 import * as operatorClient from '../../operatorClient.js'
+import { MSG_SERVICE } from '../../errorHumanize.js'
 
 afterEach(cleanup)
 
@@ -36,5 +37,42 @@ describe('acceptance #4: signed-out reset', () => {
     const onSignedOut = vi.fn()
     render(<AuditPanel onSignedOut={onSignedOut} />)
     await waitFor(() => expect(onSignedOut).toHaveBeenCalled())
+  })
+})
+
+describe('S1-81: audit error recovery', () => {
+  it('clears the previous error as soon as a refresh starts', async () => {
+    let resolveRefresh
+    const refresh = new Promise((resolve) => { resolveRefresh = resolve })
+    vi.spyOn(operatorClient, 'getAudit')
+      .mockRejectedValueOnce(new Error('Could not load the audit log.'))
+      .mockReturnValueOnce(refresh)
+    render(<AuditPanel />)
+    expect(await screen.findByRole('alert')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(screen.queryByRole('alert')).toBeNull()
+    await act(async () => { resolveRefresh([]) })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows successful refresh rows without retaining the previous error', async () => {
+    vi.spyOn(operatorClient, 'getAudit')
+      .mockRejectedValueOnce(new Error('Could not load the audit log.'))
+      .mockResolvedValueOnce([
+        { ts: '2026-10-25T12:00:00Z', action: 'Pause approved', decision: 'Approved', reason: 'Requested' },
+      ])
+    render(<AuditPanel />)
+    await screen.findByRole('alert')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByText('Pause approved')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('humanizes audit transport errors before displaying them', async () => {
+    vi.spyOn(operatorClient, 'getAudit').mockRejectedValue(new Error('GET /api/operator/audit -> 500'))
+    render(<AuditPanel />)
+    expect((await screen.findByRole('alert')).textContent).toBe(MSG_SERVICE)
   })
 })

@@ -5,20 +5,28 @@
  * secret-handle metadata surface (never a value) when the audit `extra`
  * payload names one, and to the session it belongs to.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import * as operatorClient from '../../operatorClient.js'
+import { humanizeError } from '../../errorHumanize.js'
 
 export default function AuditPanel({ onSignedOut }) {
   const [rows, setRows] = useState([])
   const [error, setError] = useState(null)
+  const auditRequest = useRef(0)
 
   const load = useCallback(async () => {
+    const generation = ++auditRequest.current
+    setError(null)
     try {
-      setRows(await operatorClient.getAudit())
+      const nextRows = await operatorClient.getAudit()
+      if (auditRequest.current !== generation) return
+      setRows(nextRows)
+      setError(null)
     } catch (e) {
-      setError(e?.body?.detail || e?.message || 'Could not load the audit log.')
       if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
+      if (auditRequest.current !== generation) return
+      setError(humanizeError(e))
     }
   }, [onSignedOut])
 

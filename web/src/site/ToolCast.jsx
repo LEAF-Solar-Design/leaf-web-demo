@@ -103,7 +103,7 @@ import { agentBannerFor as agentBannerForKind, OPERATOR_AGENT_BANNER_COPY } from
 import { moveRovingTab } from '../lib/roving.js'
 import { selectEntity } from '../lib/selectEntity.js'
 import { countEntitiesByLayer } from '../lib/layerCounts.js'
-import { getSessionHolderId } from '../checkoutIdentity.js'
+import { describeLockHolder, getSessionHolderId } from '../checkoutIdentity.js'
 import DemoTour from '../demo/DemoTour.jsx'
 import DemoConversationPanel, { demoReplyFor } from '../demo/DemoConversationPanel.jsx'
 import FirstRunCoach from '../demo/FirstRunCoach.jsx'
@@ -814,7 +814,7 @@ export default function ToolCast({
     : drawing.mutationsBlocked
       ? 'the committed drawing head is unreadable; editing is locked until it is readable or you recover a historical version.'
       : checkout.lockedByOther?.holder
-        ? `editing is locked by ${checkout.lockedByOther.holder}; this write tool is paused.`
+        ? `Editing is locked by ${describeLockHolder(checkout.lockedByOther.holder, checkoutHolder)}; this write tool is paused.`
         : previewLocked
           ? `you are viewing v${drawing.previewing.version} read-only. Choose “Back to head” in Version history to edit again.`
           : 'editing is paused while Leaf checks the drawing lock.'
@@ -946,7 +946,7 @@ export default function ToolCast({
       setError(drawing.mutationsBlocked
         ? 'Editing is locked until the committed drawing head becomes readable or you recover a historical version.'
         : checkout.lockedByOther?.holder
-        ? `Editing is locked by ${checkout.lockedByOther.holder}. Read tools still run.`
+        ? `Editing is locked by ${describeLockHolder(checkout.lockedByOther.holder, checkoutHolder)}. Read tools still run.`
         : previewLocked
         ? `Editing is paused while you view v${drawing.previewing.version} read-only. Choose “Back to head” in Version history to edit again. Read tools still run.`
         : 'Editing is paused while Leaf checks the drawing lock. Read tools still run.')
@@ -999,7 +999,7 @@ export default function ToolCast({
       setError(drawing.mutationsBlocked
         ? 'Editing is locked until the committed drawing head becomes readable or you recover a historical version. The write did not run.'
         : checkout.lockedByOther?.holder
-        ? `Editing is locked by ${checkout.lockedByOther.holder}. The write did not run.`
+        ? `Editing is locked by ${describeLockHolder(checkout.lockedByOther.holder, checkoutHolder)}. The write did not run.`
         : previewLocked
         ? `Editing is paused while you view v${drawing.previewing.version} read-only. Choose “Back to head” in Version history to edit again. The write did not run.`
         : 'Editing is paused while Leaf checks the drawing lock. The write did not run.')
@@ -1796,6 +1796,9 @@ export default function ToolCast({
             // line ~768 (transportMock excluded there is not relevant here:
             // discovery is harmless idle in mock mode either way).
             mcpDiscoveryEnabled={isSignedIn() && platform.isEntitled('converse')}
+            liveCallsAllowed={isSignedIn() && !transportMock}
+            mock={PUBLIC_DEMO}
+            drawingId={MODE_DRAWING_ID || drawingId}
             connectedMcpServers={connectedMcpServers}
             paletteActions={stagePaletteActions}
             commandLine

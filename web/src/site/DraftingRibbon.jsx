@@ -317,8 +317,8 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
       let used = 0
       const limit = available - more.getBoundingClientRect().width
       groups.forEach((group, index) => {
-        used += widths[index]
-        const hide = needsOverflow && (visiblePanelCount !== null ? index >= visiblePanelCount : used > limit)
+        const hide = needsOverflow && (visiblePanelCount !== null ? index >= visiblePanelCount : used + widths[index] > limit)
+        if (!hide) used += widths[index]
         if (hide && group.contains(document.activeElement)) more.focus()
         group.hidden = hide
       })

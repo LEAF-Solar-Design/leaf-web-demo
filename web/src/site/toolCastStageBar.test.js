@@ -122,7 +122,7 @@ describe('slice 5a: the stage mounts PromptBox where its .tc-bar rows stood', ()
   // fixture cannot observe the stage bar at all (a sentinel render prop,
   // surfaceFrame.render.test.jsx:103), which is why the pin lives here.
   it('the phone breakpoint restores the right-edge push onto .tc-run itself', () => {
-    const phoneBlock = landing.slice(landing.indexOf('@media (max-width: 600px)'), landing.indexOf('@media (max-height: 650px)'))
+    const phoneBlock = landing.slice(landing.indexOf('@media (max-width: 599px)'), landing.indexOf('@media (max-height: 650px)'))
     expect(phoneBlock).toMatch(/^  \.tc-bar \.bar-controls \.tc-run \{ margin-left: auto; \}$/m)
   })
 })

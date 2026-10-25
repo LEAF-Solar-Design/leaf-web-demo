@@ -21,7 +21,7 @@ const B = {
 const D = 'sha256:' + 'c'.repeat(64)
 const STEP = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
-const GRAPH = ['solar-panels-from-drawing', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
+const GRAPH = ['solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
 const READ = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']
 const JOB = '55555555-5555-4555-8555-555555555555'
 const accepted = () => ({ ok: true, status: 202, data: { job_id: JOB, status: 'submitted' } })

@@ -196,7 +196,7 @@ describe('LabWorkbench', () => {
   it('does not grant widget scope or forward authority from route params or extra props', () => {
     render(<LabWorkbench route={{ view: 'widgets', params: { scopeKey: 'untrusted', tenant: 'other' } }}
       status={on} scopeKey="untrusted" token="untrusted" />)
-    expect(screen.getByText('Choose a project to create a text widget.')).toBeVisible()
+    expect(screen.getByText('Enter a Document ID, then choose New or Load.')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Add text' })).not.toBeInTheDocument()
   })
 

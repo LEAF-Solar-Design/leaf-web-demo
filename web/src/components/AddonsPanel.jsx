@@ -3,6 +3,7 @@ import { ADDON_LABELS, getAddons, getStatement, setAddonMode } from '../addons.j
 import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import EscCap from './EscCap.jsx'
+import { humanizeError } from '../errorHumanize.js'
 import './popovers.css'
 
 const MODES = [['managed', 'Managed'], ['byo', 'Your own'], ['off', 'Off']]
@@ -23,7 +24,7 @@ function AddonRow({ orgId, addon, setting }) {
       await setAddonMode(orgId, addon, mode, mode === 'byo' ? name : undefined)
       setSaved(true)
     } catch (failure) {
-      setError(failure.message)
+      setError(humanizeError(failure))
     } finally {
       setBusy(false)
     }
@@ -69,7 +70,7 @@ function AddonsContent({ orgId }) {
     setState({ loading: true })
     getAddons(orgId)
       .then((addons) => { if (active) setState({ addons }) })
-      .catch((error) => { if (active) setState({ error: error.message }) })
+      .catch((error) => { if (active) setState({ error: humanizeError(error) }) })
     return () => { active = false }
   }, [orgId, attempt])
   useEffect(() => {
@@ -78,7 +79,7 @@ function AddonsContent({ orgId }) {
     const period = new Date().toISOString().slice(0, 7)
     getStatement(orgId, period)
       .then((statement) => { if (active) setStatementState({ statement }) })
-      .catch((error) => { if (active) setStatementState({ error: error.message }) })
+      .catch((error) => { if (active) setStatementState({ error: humanizeError(error) }) })
     return () => { active = false }
   }, [orgId, attempt, statementAttempt])
   if (state.loading) return <p className="ca-copy" role="status">Loading add-ons...</p>
@@ -143,7 +144,8 @@ export default function AddonsPanel({ mock, orgId, open, onToggle }) {
         <div className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Add-ons"
           style={{ maxHeight: '70vh', overflowY: 'auto' }}>
           <div className="ca-head"><span>Studio Add-ons</span><EscCap onClick={() => onToggle(false)} label="Close add-ons panel" /></div>
-          <AddonsContent key={orgId} orgId={orgId} />
+          {orgId ? <AddonsContent key={orgId} orgId={orgId} />
+            : <p className="ca-copy">Choose a workspace to manage add-ons.</p>}
         </div>
       )}
     </span>

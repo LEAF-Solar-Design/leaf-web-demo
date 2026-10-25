@@ -25,7 +25,7 @@ function jsonResponse(body, ok = true, status = 200) {
 
 function Composer({ initialValue = '', ...props }) {
   const [value, setValue] = useState(initialValue)
-  return <PromptBox value={value} onChange={setValue} onDispatch={noop} projectName="cat-panels" {...props} />
+  return <PromptBox liveCallsAllowed value={value} onChange={setValue} onDispatch={noop} projectName="cat-panels" {...props} />
 }
 
 function openScope(container, label) {
