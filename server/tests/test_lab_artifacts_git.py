@@ -191,9 +191,11 @@ def test_crash_resumes_after_durable_receipt(world, monkeypatch):
     crash_replay(tenant, harness, monkeypatch)
     state = mirror.mirror_status(tenant)
     assert state["receipt"]["ordinal"] == 1 and state["frozen"]
+    assert state["receipt"]["base_head"] is None
     with pytest.raises(ledger.StoreMigrating):
         save(tenant, "blocked")
     assert mirror.enable_mirror(tenant, "operator")["mode"] == "mirror"
+    assert mirror.mirror_status(tenant)["receipt"]["base_head"] is None
     assert len(harness.commits) == 2
 
 
@@ -295,6 +297,16 @@ def test_lost_success_response_is_reconciled_on_retry(world, endpoint):
     mirror.catch_up(tenant)
     assert len(harness.commits) == 2
     assert mirror.mirror_status(tenant)["remote_sha"] == harness.head
+    recorded = ledger._run(tenant, lambda sql: sql.execute(
+        'SELECT "commit" FROM lab_git_mirror WHERE tenant_id=? AND doc_id=? AND revision=?',
+        (tenant, "x", 2)).fetchone()["commit"])
+    assert recorded == harness.head
+    # Exercise the recorded-commit proof independently of the verified head.
+    state = mirror.mirror_status(tenant)
+    ledger._run(tenant, lambda sql: mirror._update(sql, tenant, receipt={
+        key: value for key, value in state["receipt"].items() if key != "verified_head"
+    }), write=True)
+    assert mirror.flip_back(tenant, "operator")["mode"] == "ledger"
 
 
 def test_two_document_race_preserves_ledger_order(world):
@@ -323,6 +335,83 @@ def test_flip_back_requires_equal_documents_and_known_revisions(world):
         with pytest.raises(mirror.MirrorError, match="lab_flip_back_refused"):
             mirror.flip_back(tenant, "operator")
     assert events == ["divergence"]
+
+
+@pytest.mark.parametrize("valid_trailers", [False, True])
+def test_flip_back_refuses_unrecorded_commit_with_equal_documents(world, valid_trailers):
+    tenant, harness, events = world
+    save(tenant)
+    mirror.enable_mirror(tenant, "operator")
+    message = harness.commits[0]["message"] if valid_trailers else "Git writer change"
+    harness.post(tenant, "commit", {"expected_sha": harness.head,
+        "documents": [], "message": message})
+    for _ in range(2):
+        with pytest.raises(mirror.MirrorError, match="lab_flip_back_refused"):
+            mirror.flip_back(tenant, "operator")
+    assert mirror.mirror_status(tenant)["mode"] == "mirror"
+    assert events == ["divergence"]
+
+
+@pytest.mark.parametrize("trailer_change", ["doc", "revision", "duplicate_doc", "duplicate_revision"])
+def test_flip_back_recorded_commit_requires_matching_unique_trailers(world, trailer_change):
+    tenant, harness, events = world
+    save(tenant)
+    save(tenant, "other")
+    save(tenant, expected=1)
+    state = mirror.enable_mirror(tenant, "operator")
+    ledger._run(tenant, lambda sql: mirror._update(sql, tenant, receipt={
+        key: value for key, value in state["receipt"].items() if key != "verified_head"
+    }), write=True)
+    message = harness.commits[0]["message"]
+    if trailer_change == "doc":
+        message = message.replace("Lab-Doc: x", "Lab-Doc: other")
+    elif trailer_change == "revision":
+        message = message.replace("Lab-Revision: 2", "Lab-Revision: 1")
+    else:
+        message += "\n" + ("Lab-Doc: x" if trailer_change == "duplicate_doc" else "Lab-Revision: 2")
+    harness.commits[0]["message"] = message
+    with pytest.raises(mirror.MirrorError, match="lab_flip_back_refused"):
+        mirror.flip_back(tenant, "operator")
+    assert events == ["divergence"]
+
+
+@pytest.mark.parametrize("initial_commit", [False, True])
+@pytest.mark.parametrize("verified", [False, True])
+def test_flip_back_accepts_mirror_from_empty_or_untrailed_base(world, initial_commit, verified):
+    tenant, harness, events = world
+    if initial_commit:
+        harness.post(tenant, "commit", {"expected_sha": None,
+            "documents": [], "message": "Initial repository commit"})
+    base_head = harness.head
+    save(tenant)
+    state = mirror.enable_mirror(tenant, "operator")
+    assert state["receipt"]["base_head"] == base_head
+    if not verified:
+        ledger._run(tenant, lambda sql: mirror._update(sql, tenant, receipt={
+            key: value for key, value in state["receipt"].items() if key != "verified_head"
+        }), write=True)
+    assert mirror.flip_back(tenant, "operator")["mode"] == "ledger"
+    assert events == []
+
+
+@pytest.mark.parametrize("verified", [False, True])
+def test_flip_back_legacy_receipt_requires_verified_head(world, verified):
+    tenant, harness, events = world
+    save(tenant)
+    state = mirror.enable_mirror(tenant, "operator")
+    receipt = {key: value for key, value in state["receipt"].items() if key != "base_head"}
+    if not verified:
+        receipt["verified_head"] = None
+    ledger._run(tenant, lambda sql: mirror._update(sql, tenant, receipt=receipt), write=True)
+    if verified:
+        assert receipt["verified_head"] == harness.head
+        assert mirror.flip_back(tenant, "operator")["mode"] == "ledger"
+        assert events == []
+    else:
+        with pytest.raises(mirror.MirrorError, match="lab_flip_back_refused"):
+            mirror.flip_back(tenant, "operator")
+        assert mirror.mirror_status(tenant)["mode"] == "mirror"
+        assert events == ["divergence"]
 
 
 @pytest.mark.parametrize("head_already_mirrored", [False, True])

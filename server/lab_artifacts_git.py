@@ -293,6 +293,7 @@ def enable_mirror(tenant, actor):
         watermark = {row["doc_id"]: row["head"] for row in rows}
         receipt = {"schema": "leaf.lab-replay.v1", "tenant": tenant,
                    "watermark": watermark, "ordinal": 0,
+                   "base_head": inspection["head"],
                    "last_commit": inspection["head"], "started_at": _now(),
                    "status": "in_progress"}
         commits = inspection["commits"]
@@ -417,6 +418,27 @@ def flip_back(tenant, actor):
         # window and extended exclusively by our CAS commits.
         if commits and commits[-1].get("parent") is not None and not proven:
             return inspected["head"]
+        if not proven:
+            if "base_head" not in receipt:
+                return inspected["head"]
+            for commit in commits:
+                if commit["commit"] == receipt["base_head"]:
+                    break
+                row = sql.execute('SELECT doc_id,revision FROM lab_git_mirror'
+                    ' WHERE tenant_id=? AND "commit"=?',
+                    (tenant, commit["commit"])).fetchone()
+                pairs = re.findall(r"^(Lab-[A-Za-z0-9-]+): (.*)$", commit["message"], re.MULTILINE)
+                if row is None or any(sum(key == name for key, _ in pairs) != 1
+                                      for name in ("Lab-Doc", "Lab-Revision")):
+                    return inspected["head"]
+                trailers = dict(pairs)
+                try:
+                    matches = (trailers["Lab-Doc"] == row["doc_id"]
+                               and int(trailers["Lab-Revision"]) == row["revision"])
+                except ValueError:
+                    return inspected["head"]
+                if not matches:
+                    return inspected["head"]
         if not _known_revisions(sql, tenant, commits):
             return inspected["head"]
         _update(sql, tenant, mode="ledger", frozen=False)
