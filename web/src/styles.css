@@ -1436,6 +1436,7 @@ footer .warn-txt { color: var(--status-warning); }
   box-shadow: var(--shadow-pop); padding: 12px; text-align: left;
 }
 @media (max-width: 599px) {
+  .legend-row { min-height: 44px; box-sizing: border-box; }
   header.top .claude-pop {
     position: fixed; top: auto; bottom: calc(64px + env(safe-area-inset-bottom, 0px));
     left: 8px; right: 8px; width: auto; max-width: none;
