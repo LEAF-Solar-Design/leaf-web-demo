@@ -27,11 +27,11 @@ export function enterDemo() {
 }
 
 const SHEETS = [
-  { code: '02', label: '02 The problem' },
-  { code: '03', label: '03 How Branch works' },
-  { code: '04', label: '04 Proof' },
-  { code: '05', label: '05 Pricing' },
-  { code: '06', label: '06 Docs' },
+  { code: '02', target: 'a-101', label: '02 The problem' },
+  { code: '03', target: 'a-102', label: '03 How Branch works' },
+  { code: '04', target: 'e-401', label: '04 Proof' },
+  { code: '05', target: 'c-201', label: '05 Pricing' },
+  { code: '06', target: 's-501', label: '06 Docs' },
 ]
 
 export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = enterDemo }) {
@@ -146,7 +146,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
             key={s.code}
             type="button"
             className="lp-tab"
-            onClick={() => navigate(`/sheets#${s.code}`)}
+            onClick={() => navigate(`/sheets#${s.target}`)}
           >
             {s.label}
           </button>
