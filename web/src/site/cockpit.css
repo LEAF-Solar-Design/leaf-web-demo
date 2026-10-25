@@ -120,6 +120,8 @@
   --card: var(--ck-recess);
   --border: var(--ck-title);
   --primary: var(--ck-cmd);
+  --primary-hover: var(--leaf-accent-hover);
+  --on-accent: var(--leaf-on-accent);
   --foreground: var(--ck-ink);
   --muted: var(--ck-label);
   --font-label: var(--ck-font);

@@ -89,6 +89,7 @@ it('cockpit accent backgrounds use dark text from the vendored v1 root', () => {
   const root = declsFor(read('src/standard/leaf-standard.css'), ':root')
   expect(root['--leaf-on-accent']).toBe('#050706')
   expect(root['--leaf-accent']).toBe('#28d66f')
+  expect(root['--leaf-accent-hover']).toBe('#3edb7e')
 
   const luminance = (hex) => {
     const channels = hex.slice(1).match(/../g).map((value) => {
@@ -102,6 +103,16 @@ it('cockpit accent backgrounds use dark text from the vendored v1 root', () => {
     return (values[0] + 0.05) / (values[1] + 0.05)
   }
   expect(contrast(root['--leaf-on-accent'], root['--leaf-accent'])).toBeGreaterThanOrEqual(4.5)
+  expect(contrast(root['--leaf-on-accent'], root['--leaf-accent-hover'])).toBeGreaterThanOrEqual(4.5)
+
+  for (const [css, selector] of [
+    [cockpit, '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])'],
+    [read('src/site/studioShell.css'), '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'],
+  ]) {
+    const decls = declsFor(css, selector)
+    expect(decls['--primary-hover'], selector).toBe('var(--leaf-accent-hover)')
+    expect(decls['--on-accent'], selector).toBe('var(--leaf-on-accent)')
+  }
 
   for (const [file, css] of [['cockpit.css', cockpit], ['studioShell.css', read('src/site/studioShell.css')]]) {
     const text = stripComments(css)
