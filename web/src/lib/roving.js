@@ -12,6 +12,7 @@ const ROVING_KEYS = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
 export function moveRovingTab(event) {
   if (!ROVING_KEYS.includes(event.key)) return
   const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')]
+    .filter((tab) => !tab.matches(':disabled, [aria-disabled="true"]') && !tab.closest('[inert]'))
   if (!tabs.length) return
   const current = Math.max(0, tabs.indexOf(document.activeElement))
   let next = current
