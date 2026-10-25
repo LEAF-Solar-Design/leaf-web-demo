@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 import { PROJECT_SOLAR_GRAPH_TOOLS, projectSolarGraphReason, parseProjectSolarInsertionPoint,
   deriveProjectSolarGraphFormState, buildProjectSolarGraphRequest, exactProjectSolarGraphPreview,
-  projectSolarGraphFeedback } from './solarProjectGraphFormModel.js'
+  projectSolarGraphFeedback, proposePanelGroups, validatePanelGroups } from './solarProjectGraphFormModel.js'
 
 function labelFor(tool) {
   switch (tool) {
     case 'solar-panels-from-drawing': return 'Import panels from drawing'
+    case 'solar-panel-groups': return 'Panel groups'
     case 'solar-homeruns': return 'Homeruns'
     case 'solar-feeders': return 'Feeders'
     case 'solar-schedule': return 'Schedule'
@@ -38,9 +39,20 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
   }
   const scope = owner.current
   const [draft, setDraft] = useState(null)
+  const [panelDraft, setPanelDraft] = useState(null)
+  const [panelContext, setPanelContext] = useState(null)
+  const panelInputs = panelDraft?.scope === scope ? panelDraft : { names: {}, numbers: {} }
+  const panelGraph = panelContext?.scope === scope ? panelContext.graph : null
+  const panelProposals = proposePanelGroups(panelGraph)
+  const panelInputKey = name === 'solar-panel-groups' ? JSON.stringify([panelInputs.names, panelInputs.numbers]) : ''
+  function groupInputs(proposals) {
+    return proposals.map((proposal, index) => ({ key: proposal.key,
+      name: panelInputs.names[proposal.key] ?? `Group ${index + 1}` }))
+  }
+  const proposalKey = (proposals) => JSON.stringify(proposals.map(({ key, panel_refs }) => [key, panel_refs]))
   const insertionPointText = draft?.scope === scope ? draft.text : ''
   const parsed = name === 'solar-schedule' ? parseProjectSolarInsertionPoint(insertionPointText) : null
-  const coordinateKey = name === 'solar-schedule' ? (parsed?.ok ? JSON.stringify(parsed.point) : null) : ''
+  const coordinateKey = name === 'solar-schedule' ? (parsed?.ok ? JSON.stringify(parsed.point) : null) : panelInputKey
   const [refresh, setRefresh] = useState(0)
   const [view, setView] = useState(null)
   const [, repaint] = useState(0)
@@ -128,17 +140,28 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
         const state = outcome?.ok === true ? deriveProjectSolarGraphFormState({ binding, contextView: outcome.data })
           : { mode: 'refused', reason: 'context_unreadable' }
         if (state.mode !== 'edit') { setCurrent({ reason: state.reason }, pending.generation); return }
+        let groups
+        let proposals
+        if (name === 'solar-panel-groups') {
+          const graph = outcome.data.intake.solar_design_graph
+          setPanelContext({ scope, graph })
+          proposals = proposePanelGroups(graph).proposals
+          const checked = validatePanelGroups(graph, groupInputs(proposals), panelInputs.numbers)
+          if (!checked.ok) { setCurrent({ state, reason: checked.reason }, pending.generation); return }
+          groups = checked.value
+        }
         const validate = buildProjectSolarGraphRequest({ tool: name, binding, state, currentState: state,
-          insertionPointText, catalogDigest, idempotencyKey: 'candidate-validation' })
+          insertionPointText, groups, catalogDigest, idempotencyKey: 'candidate-validation' })
         if (!validate.ok) { setCurrent({ state, reason: validate.reason }, pending.generation); return }
         phase = 'prepare'
         const fingerprint = JSON.stringify([validate.request, state.intakeSha256])
         let candidate = scope.candidate
         if (!candidate || candidate.fingerprint !== fingerprint) {
           const built = buildProjectSolarGraphRequest({ tool: name, binding, state, currentState: state,
-            insertionPointText, catalogDigest, idempotencyKey: latest.current.newProjectIntentKey() })
+            insertionPointText, groups, catalogDigest, idempotencyKey: latest.current.newProjectIntentKey() })
           if (!built.ok) { setCurrent({ state, reason: built.reason }, pending.generation); return }
-          candidate = { fingerprint, state, intent: projectClient.prepareRun(built.request) }
+          candidate = { fingerprint, state, proposalKey: proposals ? proposalKey(proposals) : null,
+            intent: projectClient.prepareRun(built.request) }
           scope.candidate = candidate
         }
         if (!pending.current() || latest.current.busy) return
@@ -208,8 +231,22 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
       if (!pending.current() || latest.current.busy || scope.armed !== armed) return
       const currentState = outcome?.ok === true ? deriveProjectSolarGraphFormState({ binding, contextView: outcome.data })
         : { mode: 'refused', reason: 'context_unreadable' }
+      let groups
+      if (name === 'solar-panel-groups' && currentState.mode === 'edit') {
+        const graph = outcome.data.intake.solar_design_graph
+        const proposed = proposePanelGroups(graph)
+        const checked = validatePanelGroups(graph, groupInputs(proposed.proposals), panelInputs.numbers)
+        const reason = proposalKey(proposed.proposals) !== armed.candidate.proposalKey ? 'panel_groups_stale'
+          : !checked.ok ? checked.reason : null
+        if (reason) {
+          scope.armed = null
+          setCurrent({ reason }, pending.generation)
+          return
+        }
+        groups = checked.value
+      }
       const built = buildProjectSolarGraphRequest({ tool: name, binding, state: armed.candidate.state,
-        currentState, insertionPointText, catalogDigest, idempotencyKey: armed.candidate.intent.idempotencyKey })
+        currentState, insertionPointText, groups, catalogDigest, idempotencyKey: armed.candidate.intent.idempotencyKey })
       if (!built.ok) {
         scope.armed = null
         setCurrent({ reason: built.reason }, pending.generation)
@@ -278,6 +315,35 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
   return <section aria-label={labelFor(name)} data-testid="project-solar-graph-form">
     <h3>{labelFor(name)}</h3>
     {currentView?.state && <p>Graph revision {currentView.state.rev}</p>}
+    {name === 'solar-panel-groups' && <fieldset disabled={busy || Boolean(scope.lock) || scope.blocked}>
+      <legend>Proposed panel groups</legend>
+      {panelProposals.proposals.map((proposal, index) => <div key={proposal.key}>
+        <label>Group {index + 1} name
+          <input type="text" value={panelInputs.names[proposal.key] ?? `Group ${index + 1}`}
+            onChange={(event) => {
+              invalidate()
+              setPanelDraft({ scope, names: { ...panelInputs.names, [proposal.key]: event.target.value },
+                numbers: panelInputs.numbers })
+            }} />
+        </label>
+        <span>{proposal.count} panels, angle {proposal.angle_key}°</span>
+      </div>)}
+      {[
+        ['module_width_along_row', 'Module width along row'],
+        ['module_height_across_row', 'Module height across row'],
+        ['alignment_tolerance', 'Alignment tolerance'],
+      ].map(([key, label]) => <label key={key}>{label}
+        <input type="number" required min="0" max="1000000" step="any" value={panelInputs.numbers[key] ?? ''}
+          onChange={(event) => {
+            invalidate()
+            setPanelDraft({ scope, names: panelInputs.names, numbers: { ...panelInputs.numbers, [key]: event.target.value } })
+          }} />
+      </label>)}
+      <p role="status">{panelProposals.singletons} singleton panels cannot be grouped.</p>
+      {panelProposals.invalid_handles > 0 && <p role="status">
+        {panelProposals.invalid_handles} panels have a drawing handle that cannot be grouped.
+      </p>}
+    </fieldset>}
     {name === 'solar-schedule' && <label>
       Insertion point (x, y, optional z)
       <input type="text" maxLength={160} value={insertionPointText} disabled={busy || Boolean(scope.lock) || scope.blocked}

@@ -449,7 +449,7 @@ function StandaloneMaterialUpload({ token, pane, selection, getContext, onPolicy
 const PROJECT_SOLAR_SUPPORTED_TOOLS = new Set([
   'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
   'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
-  'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing',
+  'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
   'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
   'solar-electrical-schedules', 'solar-cable-export',
 ])
