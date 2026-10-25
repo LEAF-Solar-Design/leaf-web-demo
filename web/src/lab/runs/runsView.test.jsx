@@ -15,6 +15,19 @@ const seed = () => {
 }
 
 describe('Runs view', () => {
+  it('offers Resume for an auth-expired run and retries its registered stream once', () => {
+    const store = seed(), retry = vi.fn()
+    store.setStreamControl('r', { retry, stop: vi.fn() })
+    const view = render(<RunsView store={store} mock />)
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
+    act(() => store.setTransport('r', { status: 'auth_expired' }))
+    expect(screen.getByText('Sign in again, then resume')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+    act(() => store.setTransport('r', { status: 'connected' }))
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
+    view.unmount()
+  })
   it('renders worker offline, paused, transport lag and stale source as separate indicators', () => {
     surface.current = { worker: { paused: true, workers: [{ heartbeat_age_s: 61 }], queue_age_max_s: 17 } }
     const store = seed(); store.setTransport('r', { status: 'connected', lagMs: 12 })

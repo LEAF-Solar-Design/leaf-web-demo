@@ -41,6 +41,7 @@ const RunResult = memo(function RunResult({ store, runId, fetchImpl, now }) {
     <h3>{run.id}</h3><p>{run.state} · revision {run.graph_revision ?? 'local'}</p>
     <p>Events: {run.events.length} · Dropped: {run.dropped}</p>
     <p>Stream: {run.transport.status} · lag: {run.transport.lagMs == null ? 'unknown' : `${run.transport.lagMs} ms`}</p>
+    {run.transport.status === 'auth_expired' && <p>Sign in again, then resume <button type="button" onClick={() => store.resume(runId)}>Resume</button></p>}
     {run.gaps.map((gap, index) => <p key={index}>{gap.recovered ? 'Recovered from a snapshot after a gap' : 'Gap detected; recovering snapshot'}</p>)}
     {['queued', 'running'].includes(run.state) && <button type="button" disabled={cancelling} onClick={cancel}>Cancel</button>}
     {message && <p role="status">{message}</p>}

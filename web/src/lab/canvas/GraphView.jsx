@@ -203,12 +203,24 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   useEffect(() => client.subscribe(() => refreshHead(value => value + 1)), [client])
   useEffect(() => {
     mounted.current = true
-    return () => { mounted.current = false; streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() }); streams.current.clear() }
+    const resumeOnFocus = () => streams.current.forEach(stream => {
+      if (stream.authExpired && !stream.focusResumed && authHeaders().Authorization !== stream.expiredAuthorization) {
+        stream.focusResumed = true
+        labValueStore.resume(stream.runId)
+      }
+    })
+    window.addEventListener('focus', resumeOnFocus)
+    return () => {
+      mounted.current = false
+      window.removeEventListener('focus', resumeOnFocus)
+      streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() }); streams.current.clear()
+    }
   }, [])
   const runSnapshot = () => labValueStore.getRuns().filter(run => run.id !== 'local' && run.doc_id === client.currentDocId()
     && run.graph_revision === client.state.head).map(run => run.id).join(',')
   const matchingRuns = useSyncExternalStore(labValueStore.subscribeRuns, runSnapshot)
   const valueRunId = matchingRuns.split(',')[0] || 'local'
+  const activeRun = useRun(labValueStore, valueRunId)
   const localTiming = useRun(labValueStore, 'local')?.timing
   async function runSaved() {
     if (submitting || !client.state.headLoaded || client.state.head == null || !live.ready) return
@@ -235,9 +247,20 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       }
       labValueStore.upsertRun(result.runId, { state: result.state, graph_revision: head, doc_id: docId })
       const stream = openRunStream({ runIds: [result.runId], store: labValueStore })
+      stream.runId = result.runId
+      const stop = stream.stop
+      stream.stop = () => { labValueStore.clearStreamControl(result.runId); stop() }
+      labValueStore.setStreamControl(result.runId, stream)
       stream.unsubscribe = labValueStore.subscribeRun(result.runId, () => {
         const run = labValueStore.getRun(result.runId)
+        const authExpired = run?.transport.status === 'auth_expired'
+        if (authExpired && !stream.authExpired) {
+          stream.expiredAuthorization = authHeaders().Authorization
+          stream.focusResumed = false
+        }
+        stream.authExpired = authExpired
         if (!run || (terminalState(run.state) && ['finished', 'missing'].includes(run.transport.status))) {
+          labValueStore.clearStreamControl(result.runId)
           stream.unsubscribe(); streams.current.delete(stream)
         }
       })
@@ -312,6 +335,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
             onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
             {onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
           {runMessage && <p role="status">{runMessage}</p>}
+          {activeRun?.transport.status === 'auth_expired' && <p>Sign in again, then resume <button type="button" onClick={() => labValueStore.resume(valueRunId)}>Resume</button></p>}
         </section>
         <LabSaveBar document={live.draft?.document} ready={live.ready} client={client} onTakeTheirs={graph => client.takeGraph(graph)} />
         <LiveValues values={live.values} provider={provider} saveBar={false} runId={onRun ? 'local' : valueRunId} />

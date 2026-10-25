@@ -82,6 +82,59 @@ afterEach(async () => {
 })
 
 describe('first-click live graph', () => {
+  it.each(['button', 'focus'])('resumes a 401-paused stream via %s with fresh authority and its cursor', async method => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const runId = `canvas-resume-${method}`
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 4 } : { revision: 4, graph } })) })
+    client.setDocId(`resume-${method}`)
+    const previousToken = localStorage.getItem('leaf.jwt')
+    const originalToken = ['fixture', 'before', method].join('-'), renewedToken = ['fixture', 'after', method].join('-')
+    localStorage.setItem('leaf.jwt', originalToken)
+    labValueStore.apply(runId, { seq: 7, kind: 'value', block_id: 'count-1', payload: { result: { data: 73 } } })
+    const fetchImpl = vi.fn().mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ run_id: runId, state: 'running' }) })
+      .mockResolvedValueOnce({ ok: false, status: 401 })
+      .mockResolvedValueOnce({ ok: true, status: 200, body: new ReadableStream({ start() {} }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    const register = vi.spyOn(labValueStore, 'setStreamControl')
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    try {
+      const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
+      await waitFor(() => expect(run).toBeEnabled())
+      fireEvent.click(run)
+      expect(await screen.findByText('Sign in again, then resume')).toBeVisible()
+      expect(register).toHaveBeenCalledWith(runId, expect.objectContaining({ retry: expect.any(Function), stop: expect.any(Function) }))
+      const control = register.mock.calls.find(([id]) => id === runId)[1]
+      const retry = vi.spyOn(control, 'retry')
+      fireEvent(window, new Event('focus'))
+      expect(retry).not.toHaveBeenCalled()
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+      localStorage.setItem('leaf.jwt', renewedToken)
+      if (method === 'button') fireEvent.click(screen.getByRole('button', { name: 'Resume' }))
+      else {
+        fireEvent(window, new Event('focus'))
+        fireEvent(window, new Event('focus'))
+      }
+      await waitFor(() => expect(labValueStore.getRun(runId).transport.status).toBe('connected'))
+      expect(retry).toHaveBeenCalledTimes(1)
+      expect(fetchImpl).toHaveBeenCalledTimes(3)
+      expect(fetchImpl.mock.calls[1][1].headers.Authorization).toBe(['Bearer', originalToken].join(' '))
+      expect(fetchImpl.mock.calls[2][1].headers.Authorization).toBe(['Bearer', renewedToken].join(' '))
+      expect(fetchImpl.mock.calls[2][1].headers['Last-Event-ID']).toBe(`${runId}:7`)
+      expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
+      view.unmount()
+      labValueStore.setTransport(runId, { status: 'auth_expired' })
+      expect(labValueStore.resume(runId)).toBe(false)
+      fireEvent(window, new Event('focus'))
+      expect(retry).toHaveBeenCalledTimes(1)
+    } finally {
+      view.unmount()
+      labValueStore.upsertRun(runId, { state: 'finished' })
+      if (previousToken === null) localStorage.removeItem('leaf.jwt')
+      else localStorage.setItem('leaf.jwt', previousToken)
+    }
+  })
+
   it('keeps Run disabled until a saved head has loaded', async () => {
     let resolveHead
     const client = createLabArtifactsClient({ fetchImpl: () => new Promise(resolve => { resolveHead = resolve }) })
