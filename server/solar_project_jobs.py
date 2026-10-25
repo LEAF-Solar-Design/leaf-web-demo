@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import platform_link
+import dependency_health
 from demo_actor import is_demo_context
 from demo_policy import demo_run_verdict
 import solar_project_context as project
@@ -163,6 +164,12 @@ def submit_project_graph_job(
     with project.write_loop.drawing_mutation_refusal_guard() as refusal:
         if refusal is not None:
             project.refuse("WRITES_DRAINED")
+        try:
+            covered = dependency_health.canonical_worker_covers(tool_name)
+        except dependency_health.DependencyUnavailable:
+            project.refuse("STORE_UNAVAILABLE")
+        if not covered:
+            raise project.ProjectContextError("SIP_R4_WORKER_UNAVAILABLE")
         if preview:
             return {"admissible": True, "replay": False}
         return platform_link.platform_db().run_transaction(lambda conn:

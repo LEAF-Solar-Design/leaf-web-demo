@@ -61,6 +61,30 @@ it('main keeps telemetry first and installs the proof bridge once after render u
 
 const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
 
+it('S1-143 refresh failures show the real humanized error and announce each failed retry', () => {
+  const start = appSource.indexOf('{refreshFail && (')
+  assert.notEqual(start, -1)
+  const strip = appSource.slice(start, appSource.indexOf('</div>', start))
+  assert.match(strip, /role="alert"/)
+  assert.match(strip, /aria-atomic="true"/)
+  assert.match(strip, /humanizeError\(refreshFail\.error\)/)
+  assert.match(strip, /Retry \{refreshFail\.retryAttempts\} failed\./)
+  assert.match(strip, /onClick=\{onRetryViewerRefresh\} disabled=\{drawing\.refreshing\}>Retry<\/button>/)
+})
+
+it('S1-143 unreadable drawing failures announce the retry error and keep the recovery control', () => {
+  const start = appSource.indexOf('{unreadableHead && !unreadableHead.pending && (')
+  assert.notEqual(start, -1)
+  const strip = appSource.slice(start, appSource.indexOf('</div>', start))
+  assert.match(strip, /role="alert"/)
+  assert.match(strip, /aria-atomic="true"/)
+  assert.match(strip, /humanizeError\(unreadableHead\.error\)/)
+  assert.match(strip, /Retry \{unreadableHead\.retryAttempts\} failed\./)
+  assert.match(strip, /onClick=\{retryUnreadableHead\} disabled=\{drawing\.refreshing\}/)
+  assert.match(strip, /Retry loading/)
+  assert.match(strip, /unreadableHead\.message/)
+})
+
 const r13Tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
 function r13Find(predicate, tree = r13Tree) {
   const found = []

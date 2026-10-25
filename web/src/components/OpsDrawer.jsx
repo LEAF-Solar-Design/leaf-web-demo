@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import { getAccountControls, getOpsUsage, setTenantDisabled, updateAccountControls } from '../api.js'
 import { formatUsageCount, formatUsageUsd, normalizeOpsUsage } from './opsUsage.js'
+import { humanizeError } from '../errorHumanize.js'
 import './popovers.css'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 
@@ -29,6 +30,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   const [platform, setPlatform] = useState(null)
   const [selectedTenantId, setSelectedTenantId] = useState(null)
   const [err, setErr] = useState(null)
+  const [actionErr, setActionErr] = useState(null)
   const [forbidden, setForbidden] = useState(false)
   const [loading, setLoading] = useState(false)
   const [confirming, setConfirming] = useState(null) // tenant_id awaiting confirm
@@ -43,7 +45,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   const [accountActing, setAccountActing] = useState(false)
 
   const load = useCallback(async () => {
-    setLoading(true); setErr(null); setForbidden(false)
+    setLoading(true); setErr(null); setActionErr(null); setForbidden(false)
     try {
       const snapshot = normalizeOpsUsage(await getOpsUsage())
       setTenants(snapshot.tenants)
@@ -58,7 +60,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
     } catch (e) {
       setPlatform(null)
       if (e && [401, 403, 404].includes(e.status)) { setForbidden(true); setTenants(null) }
-      else { setErr(String(e.message || e)); setTenants(null) }
+      else { setErr(humanizeError(e)); setTenants(null) }
     } finally {
       setLoading(false)
     }
@@ -74,7 +76,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
       // so 401 is the COMMON case; leaving it to the error branch printed the
       // raw "GET /api/admin/account-controls -> 401" at an operator.
       if (e && (e.status === 401 || e.status === 403)) { setAccountDenied(e.status); setAccountControls(null) }
-      else { setAccountErr(String(e.message || e)); setAccountControls(null) }
+      else { setAccountErr(humanizeError(e)); setAccountControls(null) }
     } finally {
       setAccountLoading(false)
     }
@@ -113,7 +115,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
   }
 
   const act = useCallback(async (tid, disabled) => {
-    setActing(tid); setConfirming(null); setErr(null)
+    setActing(tid); setConfirming(null); setActionErr(null)
     try {
       await setTenantDisabled(tid, disabled)
       // The disable/enable ack is authoritative for THIS tenant's kill-switch
@@ -125,7 +127,7 @@ export default function OpsDrawer({ onDismiss, exiting }) {
       setTenants((prev) => (prev || []).map((t) => (t.tenant_id === tid ? { ...t, disabled } : t)))
     } catch (e) {
       if (e && [401, 403, 404].includes(e.status)) setForbidden(true)
-      else setErr(String(e.message || e))
+      else setActionErr(humanizeError(e))
     } finally {
       setActing(null)
     }
@@ -143,9 +145,9 @@ export default function OpsDrawer({ onDismiss, exiting }) {
       if (e && (e.status === 401 || e.status === 403)) setAccountDenied(e.status)
       else if (e && e.status === 409) {
         setAccountConfirming(false)
-        setAccountErr('Account controls changed elsewhere. Refresh before trying again.')
+        setAccountErr(humanizeError('Account controls changed elsewhere. Refresh before trying again.'))
       }
-      else setAccountErr(String(e.message || e))
+      else setAccountErr(humanizeError(e))
     } finally {
       setAccountActing(false)
     }
@@ -274,6 +276,10 @@ export default function OpsDrawer({ onDismiss, exiting }) {
 
         {!forbidden && !err && tenants && tenants.length === 0 && (
           <div className="ops-note">No tenants recorded yet.</div>
+        )}
+
+        {actionErr && !forbidden && !err && (
+          <div className="field-err" role="alert"><span className="dot red" />{actionErr}</div>
         )}
 
         {!forbidden && !err && tenants && tenants.length > 0 && (

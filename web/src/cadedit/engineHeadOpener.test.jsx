@@ -340,7 +340,7 @@ describe('EngineHeadOpener', () => {
     const fetchDxf = vi.fn(async () => answer(3))
     const studio = mount({ fetchDxf })
     // While the bytes are in flight the ribbon says so.
-    expect(note()).toBe('opening rooftop_demo in the browser engine...')
+    expect(note()).toBe('Opening the drawing...')
     await settle()
     expect(fetchDxf).toHaveBeenCalledTimes(1)
     expect(fetchDxf).toHaveBeenCalledWith('rooftop_demo')
@@ -363,7 +363,7 @@ describe('EngineHeadOpener', () => {
     const studio = mount({ fetchDxf })
     await settle()
     expect(studio.context.reach.state).toBe(REACH_STATE.FAILED)
-    expect(note()).toBe('the drawing could not be opened in the browser engine: GET /api/drawings/rooftop_demo/dxf -> 503; import a DXF instead')
+    expect(note()).toBe('The drawing service is temporarily unavailable. Try again in a moment.')
     expect(screen.getByRole('button', { name: /^line/ })).toBeDisabled()
     studio.rerender({})
     await settle()
@@ -761,7 +761,7 @@ describe('EngineHeadOpener', () => {
     await settle()
     expect(fetchDxf).toHaveBeenCalledTimes(1)
     expect(studio.context.reach.state).toBe(REACH_STATE.FAILED)
-    expect(note()).toBe('the drawing could not be opened in the browser engine: GET /api/drawings/rooftop_demo/dxf -> 503; import a DXF instead')
+    expect(note()).toBe('The drawing service is temporarily unavailable. Try again in a moment.')
   })
 
   it('one fetch: a new head after a shared fetch starts its own fetch', async () => {
