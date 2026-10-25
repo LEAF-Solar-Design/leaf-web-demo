@@ -35,11 +35,6 @@ export async function handleLabPublish(
       return { status: 409, body: { error: { code: "lab_publish_conflict", expected_sha: error.expectedSha, observed_sha: error.observedSha } } };
     }
     if (error instanceof ForgePublicationError) {
-      // The vendored port has no separate mapping-error type; this fixed marker
-      // identifies its mapping check. Never return the exception message.
-      if (error.state === "refused" && error.message === "Lab tenant repository mapping refused") {
-        return { status: 403, body: { error: { code: "lab_repository_refused" } } };
-      }
       const status = { "not-published": 503, refused: 403, unknown: 502 }[error.state];
       const code = { "not-published": "lab_publish_not_published", refused: "lab_publish_refused", unknown: "lab_publish_unknown" }[error.state];
       return { status, body: { error: { code } } };

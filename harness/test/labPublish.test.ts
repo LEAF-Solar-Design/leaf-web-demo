@@ -201,10 +201,10 @@ describe("Lab publish", () => {
     expect(port.inspect).not.toHaveBeenCalled();
   });
 
-  it("maps repository mapping refusal separately", async () => {
+  it("maps repository mapping refusal to lab_publish_refused", async () => {
     const { port, cache } = fixture();
     git(cache, ["config", "remote.origin.url", "refused"]);
-    expect(await handleLabPublish(port, TENANT, validBody())).toEqual({ status: 403, body: { error: { code: "lab_repository_refused" } } });
+    expect(await handleLabPublish(port, TENANT, validBody())).toEqual({ status: 403, body: { error: { code: "lab_publish_refused" } } });
   });
 
   it("scrubs unexpected failures and permits retry without a commit", async () => {
