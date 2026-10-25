@@ -70,7 +70,7 @@ describe('shell v1 token lint (LS-T1, LS-T2, LS-T3, LS-T4)', () => {
 
   it('the phone ribbon disclosure hides its text while retaining the pseudo-element label', () => {
     const css = shells.find(([file]) => file === 'cockpit.css')[1]
-    const phone = css.split('@media (max-width: 600px) {')[1]?.split('\n@media')[0]
+    const phone = css.split('@media (max-width: 599px) {')[1]?.split('\n@media')[0]
     expect(phone).toBeDefined()
     const selector = '.studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more'
     const rule = [...phone.matchAll(/([^{}]+)\{([^{}]*)\}/g)]

@@ -44,7 +44,7 @@
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 599px) {
   .studio-ground-board .ground-pane-head {
     flex-direction: column;
   }

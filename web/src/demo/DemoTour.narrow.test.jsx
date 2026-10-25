@@ -23,7 +23,7 @@ function setViewport(width, height) {
   Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: width })
   Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: height })
   vi.stubGlobal('matchMedia', vi.fn((query) => ({
-    matches: /max-width: 600px/.test(query) ? width <= 600 : false,
+    matches: /max-width: 599px/.test(query) ? width <= 599 : false,
     media: query,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
