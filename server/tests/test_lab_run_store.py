@@ -44,6 +44,44 @@ def create(tenant, run_id="run", doc_id="doc"):
     return store.create(tenant, doc_id, run_id, 1, "a" * 64, "ops:1", "b" * 64, "adapter-1", "build_1")
 
 
+def test_stream_cap_is_atomic_across_connections_and_tenants(authority):
+    barrier = threading.Barrier(8)
+
+    def acquire(index):
+        barrier.wait(timeout=10)
+        try:
+            return store.acquire_stream(authority + str(index % 2), authority, str(index), 45)
+        except store.TooLarge as error:
+            assert str(error) == "lab_stream_limit"
+            return False
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            assert list(pool.map(acquire, range(8))).count(True) == 4
+    finally:
+        for index in range(8):
+            store.release_stream(authority + str(index % 2), authority, str(index))
+
+
+def test_stream_lease_validation_and_tenant_isolation(authority, monkeypatch):
+    for ttl in (0, -1, True, float("inf")):
+        with pytest.raises(ValueError):
+            store.acquire_stream(authority, authority, "s", ttl)
+    for limit in (0, 5, True):
+        with pytest.raises(store.InvalidGraph):
+            store.acquire_stream(authority, authority, "s", 45, limit=limit)
+    assert store.acquire_stream(authority, authority, "s", 45)
+    try:
+        store.release_stream(authority + "-foreign", authority, "s")
+        assert store.renew_stream(authority, authority, "s", 45)
+        later = store._now() + timedelta(seconds=46)
+        monkeypatch.setattr(store, "_now", lambda: later)
+        assert not store.renew_stream(authority, authority, "s", 45)
+        assert store.acquire_stream(authority, authority, "s", 45)
+    finally:
+        store.release_stream(authority, authority, "s")
+
+
 def event(index, block="block"):
     return {"kind": "progress", "block_id": block, "payload": {"index": index}}
 

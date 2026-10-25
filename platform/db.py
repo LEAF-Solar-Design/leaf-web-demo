@@ -434,6 +434,7 @@ _REQUIRED_COLUMNS = {
 # still write PostgreSQL, so they require the same proof as canonical reads.
 _AUTHORITY_REQUIRED_COLUMNS = {
     "lab_runs": {
+        "lab_stream_leases": {"principal", "stream_id", "tenant_id", "expires_at"},
         "lab_runs": {"tenant_id", "doc_id", "run_id", "graph_revision", "graph_sha256",
                      "registry_digest", "ops_revision", "input_digest", "adapter_revision",
                      "build_revision", "state", "lease_owner", "lease_fence", "lease_expires_at",
@@ -1200,6 +1201,7 @@ _REQUIRED_TRIGGERS = {
 _AUTHORITY_REQUIRED_CONSTRAINTS = {
     "lab_runs": {
         "lab_runs_pkey": _catalog_contract("lab_runs", "PRIMARY KEY (tenant_id, run_id)"),
+        "lab_stream_leases_pkey": _catalog_contract("lab_stream_leases", "PRIMARY KEY (principal, stream_id)"),
         "lab_runs_claimed_color_check": _catalog_contract("lab_runs", "CHECK", "claimed_color", "active", "idle"),
         "lab_worker_status_pkey": _catalog_contract("lab_worker_status", "PRIMARY KEY (worker_id)"),
         "lab_worker_status_color_check": _catalog_contract("lab_worker_status", "CHECK", "color", "active", "idle"),

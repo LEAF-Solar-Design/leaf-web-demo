@@ -56,6 +56,52 @@ age with absent heartbeats calls for worker and pause-state inspection.
 Staging has no paging alarm on these metrics. Inspect status, run events, and
 EMF output directly during staging operation and recovery.
 
+## Stream and rail recovery
+
+Use fetch with `Authorization: Bearer ...` for
+`GET /api/lab/stream/runs?runs=<run_id>[,<run_id>...]&after_seq=-1`.
+Native EventSource cannot supply this header. Query credentials (`token`,
+`jwt`, `ticket`, `access_token`) are refused. Subscribe to 1–8 distinct runs;
+each must belong to the caller. Keep the last sequence for each run and send
+`Last-Event-ID: <run_id>:<seq>,<run_id>:<seq>` on reconnect. These per-run
+cursors override the shared `after_seq` default.
+
+An `event: gap` means retained events no longer cover the cursor. Fetch the
+run snapshot and page its events starting with `after_seq=-1` (including seq
+0), replace the displayed state, and reconnect from the recovered cursors.
+Do the same after reopening a disabled Lab rail. A `coalesced` field on a
+value reports deferred values folded into the latest value for its block;
+intermediate values are observations, not a durable work queue.
+
+`event: close` reasons `max_age` (300 seconds) and `drain` require reconnect
+with the saved cursors. `binding_changed` and `binding_unavailable` require
+refreshing the authenticated tenant binding before reconnect. `run_missing`
+requires refreshing run access. `lease_expired` and `store_unavailable`
+require checking store health and retrying with backoff. The binding is
+rechecked every second. A comment `: hb` and `event: health` arrive every
+15 seconds. Health `lag_ms` measures the newest observed event's store age
+(null until an event is seen); it is separate from source `as_of` in values.
+
+Each principal can hold four streams across processes and tenant moves;
+the fifth returns `409 lab_stream_limit`. A subject is the principal when
+available, otherwise the tenant is. Closing releases the lease; after a
+crash it expires after 45 seconds without renewal. Reconnect with backoff
+instead of deleting leases. Rollback disables the rail and retains migration
+0088's table; expired admission rows are removed on the next acquisition.
+
+Each run emits at most 50 values per second. Deferred values coalesce by
+block; control events continue through. Value payloads above 64 KiB become
+`{"truncated":true,"size":<original_bytes>}`. The stream has a 2 MiB/second
+wire budget; clients needing full values should recover via snapshots.
+
+Latency targets from store timestamp to emission are local p95 below 500 ms
+and staging p95 below 1500 ms. `lab_stream_closed` logs one structured summary
+with per-run counts and rolling p50/p95 milliseconds, without value payloads.
+The injected-clock fixture in `test_latency_summary_has_counts_without_payload`
+asserts p50 = p95 = 125 ms for one event on each store authority. This is a
+deterministic fixture expectation, not a measured local or staging runtime
+result. Live local and staging measurements remain to be recorded from the
+close summaries before rollout; no live latency measurement is claimed here.
 ## Tool nodes
 
 `LEAF_LAB_TOOL_NODES=1` enables server-side tool nodes; the default is off.

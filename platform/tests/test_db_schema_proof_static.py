@@ -205,7 +205,14 @@ def test_lab_run_schema_proof(mode):
         "worker_id", "build_revision", "color", "heartbeat_at", "active_runs", "queued_runs",
     }
     assert columns["lab_worker_control"] == {"id", "paused", "reason", "updated_by", "updated_at"}
+    assert columns["lab_stream_leases"] == {"principal", "stream_id", "tenant_id", "expires_at"}
     catalog = db.required_catalog_for_selected_authorities(selected)
+    assert catalog["constraints"]["lab_stream_leases_pkey"] == db._catalog_contract(
+        "lab_stream_leases", "PRIMARY KEY (principal, stream_id)")
+    stream_migration = (db._PKG_DIR / "migrations/0088_lab_stream_leases.sql").read_text(encoding="utf-8")
+    for fragment in ("CREATE TABLE IF NOT EXISTS lab_stream_leases", "expires_at TIMESTAMPTZ NOT NULL",
+                     "PRIMARY KEY (principal, stream_id)"):
+        assert fragment in stream_migration
     assert catalog["constraints"]["lab_runs_pkey"] == db._catalog_contract(
         "lab_runs", "PRIMARY KEY (tenant_id, run_id)")
     assert catalog["constraints"]["lab_run_events_pkey"] == db._catalog_contract(
