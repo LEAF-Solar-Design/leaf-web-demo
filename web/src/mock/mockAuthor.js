@@ -4,6 +4,8 @@
 // delete), mirroring the "Stub allowed" note in CONTRACT §6. Marked
 // provenance author=agent, kind=script so it is runnable by the mock engine.
 
+import { parseLayer } from './mockNlPrompt.js'
+
 // Greedy WHOLE-WORD slug: join words with '-', appending the next word only
 // while the result stays <=40 chars. If the very first word exceeds 40, keep
 // just that first word sliced to 40. Never cut mid-word or leave a trailing '-'.
@@ -40,6 +42,7 @@ function parseDistance(desc) {
 }
 
 const WRITE_VERBS = /\b(delete|remove|erase|move|insert|add)\b/
+const DELETE_INTENT = /^(?:please\s+)?(?:delete|remove|erase)\s+(?:(?:the|a|one|marked|selected)\s+)*(?:panel|module)\b/
 const SELECT_VERBS = /\b(select(?:s|ed|ing)?|highlight(?:s|ed|ing)?|mark(?:s|ed|ing)?|show(?:s|ed|ing)?|pick(?:s|ed|ing)?)\b/
 const ORDINALS = new Map([
   ['second', 2], ['third', 3], ['fourth', 4], ['fifth', 5],
@@ -56,13 +59,15 @@ function parseStride(desc) {
 }
 
 function classify(desc) {
-  const d = desc.toLowerCase()
+  const d = desc.replace(LEAD, '').toLowerCase().trim()
   const stride = parseStride(d)
-  if (stride && WRITE_VERBS.test(d)) return null
+  // Adding up is arithmetic; other unsupported edits must never become deletes.
+  const editText = d.replace(/\badd\s+up\b/g, 'sum')
+  if (WRITE_VERBS.test(editText)) {
+    if (!stride && DELETE_INTENT.test(d) && !/\b(move|insert|add)\b/.test(editText)) return 'delete_marked_panel'
+    return null
+  }
   if (stride && SELECT_VERBS.test(d)) return 'select_every_nth'
-  // Write verbs win first — a "delete panels near the edge" request is a write,
-  // not a read-only near-edge highlight.
-  if (WRITE_VERBS.test(d)) return 'delete_marked_panel'
   if (/(area|square|sqft|sq ft|size|coverage)/.test(d)) return 'measure_area'
   if (/(edge|perimeter|within|near|setback|border|inches|distance)/.test(d)) return 'highlight_near_edge'
   if (/(count|how many|number of|tally)/.test(d)) return 'count_by_layer'
@@ -119,9 +124,9 @@ const TEMPLATES = {
       properties: { layer: { type: 'string', title: 'Layer', default: 'Panels' } },
       required: ['layer'],
     },
-    code: (n) => `; ${n}: generated LISP (script) tool
+    code: (n, layer = 'Panels') => `; ${n}: generated LISP (script) tool
 (defun c:${n.replace(/-/g, '')} ( / lyr ss)
-  (setq lyr (leaf:param "layer" "Panels"))
+  (setq lyr (leaf:param "layer" ${JSON.stringify(layer)}))
   (setq ss (ssget "X" (list (cons 8 lyr))))
     (leaf:highlight ss))`,
   },
@@ -180,6 +185,12 @@ export function authorMock(description) {
   // typed instead of the hardcoded 60. Build a fresh params object so the shared
   // template is never mutated.
   let params = tmpl.params
+  if (op === 'select_by_layer') {
+    params = {
+      ...tmpl.params,
+      properties: { layer: { ...tmpl.params.properties.layer, default: parseLayer(description)?.trim() || 'Panels' } },
+    }
+  }
   if (op === 'highlight_near_edge') {
     const dist = parseDistance(description)
     params = {
@@ -217,7 +228,7 @@ export function authorMock(description) {
   }
   const codeArg = op === 'select_every_nth'
     ? params.properties?.stride?.default
-    : params.properties?.distance_in?.default
+    : op === 'select_by_layer' ? params.properties.layer.default : params.properties?.distance_in?.default
   const code = tmpl.code(name, codeArg)
   const preview = isWrite
     ? `Generated a "${op}" script tool from your description.\n` +
