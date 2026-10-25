@@ -106,14 +106,17 @@ export default function SiteRoot() {
     const fail = () => {
       if (!live) return
       live = false
+      clearTimeout(timer)
       setAuthError(humanizeError("Sign-in couldn't be completed."))
       setAuthCallbackPending(false)
     }
-    const timer = setTimeout(fail, 20000)
+    const timer = setTimeout(() => {
+      if (live) setAuthError(humanizeError("Sign-in couldn't be completed."))
+    }, 20000)
     Promise.resolve().then(() => handleRedirectCallback()).then((signedIn) => {
       if (!live) return
       clearTimeout(timer)
-      if (signedIn) { live = false; window.location.reload() }
+      if (signedIn) { live = false; setAuthError(''); window.location.reload() }
       else fail()
     }).catch(fail)
     return () => { live = false; clearTimeout(timer) }
@@ -202,7 +205,6 @@ export default function SiteRoot() {
   // while the code exchange is still in flight is the whole defect: the burst
   // 401s, the session controller latches `required`, and the token that lands
   // 700ms later can no longer be used by this page load.
-  if (authCallbackPending) return <div className="site-auth-callback" role="status">Completing sign in</div>
   if (authError) return <div className="site-auth-callback">
     <p role="alert">{authError}</p>
     <button type="button" onClick={async () => {
@@ -211,6 +213,7 @@ export default function SiteRoot() {
       }
     }}>Sign in</button>
   </div>
+  if (authCallbackPending) return <div className="site-auth-callback" role="status">Completing sign in</div>
 
   // ONE provider, at the root of every arm, so React reconciles it across
   // scene changes instead of unmounting it. `mode` follows the scene; the

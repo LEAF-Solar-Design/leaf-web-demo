@@ -43,12 +43,13 @@ it('shows feedback when starting sign-in fails', async () => {
   expect(screen.getByRole('alert').textContent).toBe("Sign-in couldn't start. Check your connection and try again.")
 })
 
-function CallbackHarness({ callback }) {
+function CallbackHarness({ callback, onReload }) {
   const [pending, setAuthCallbackPending] = useState(true)
   const [message, setAuthError] = useState('')
-  useEffect(() => Function('authCallbackPending', 'handleRedirectCallback', 'setAuthCallbackPending', 'setAuthError', 'humanizeError',
-    `return (${returnBody})()`)(pending, callback, setAuthCallbackPending, setAuthError, humanizeError), [pending, callback])
-  return pending ? <p>Completing sign in</p> : <p role="alert">{message}</p>
+  useEffect(() => Function('authCallbackPending', 'handleRedirectCallback', 'setAuthCallbackPending', 'setAuthError', 'humanizeError', 'window',
+    `return (${returnBody})()`)(pending, callback, setAuthCallbackPending, setAuthError, humanizeError,
+    { location: { reload: onReload } }), [pending, callback, onReload])
+  return message ? <p role="alert">{message}</p> : pending ? <p>Completing sign in</p> : null
 }
 
 it('clears pending feedback when the callback rejects', async () => {
@@ -63,4 +64,33 @@ it('stops waiting after twenty seconds even if the callback never settles', asyn
   await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
   expect(screen.getByRole('alert').textContent).toBe("Sign-in couldn't be completed.")
   expect(screen.queryByText('Completing sign in')).toBeNull()
+})
+
+it('clears timeout feedback and reloads when sign-in succeeds after twenty seconds', async () => {
+  vi.useFakeTimers()
+  let complete
+  const callback = vi.fn(() => new Promise(resolve => { complete = resolve }))
+  const onReload = vi.fn()
+  render(<CallbackHarness callback={callback} onReload={onReload} />)
+  await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
+  expect(screen.getByRole('alert').textContent).toBe("Sign-in couldn't be completed.")
+  expect(onReload).not.toHaveBeenCalled()
+  await act(async () => { complete(true) })
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(onReload).toHaveBeenCalledTimes(1)
+  expect(callback).toHaveBeenCalledTimes(1)
+})
+
+it('ignores callback completion after unmount', async () => {
+  vi.useFakeTimers()
+  let complete
+  const callback = vi.fn(() => new Promise(resolve => { complete = resolve }))
+  const onReload = vi.fn()
+  const { unmount } = render(<CallbackHarness callback={callback} onReload={onReload} />)
+  await act(async () => {})
+  unmount()
+  await act(async () => { complete(true); await vi.advanceTimersByTimeAsync(20000) })
+  expect(onReload).not.toHaveBeenCalled()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(vi.getTimerCount()).toBe(0)
 })
