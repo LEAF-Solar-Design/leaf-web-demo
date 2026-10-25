@@ -1,5 +1,7 @@
 import { canonicalJSON } from '../contract.js'
 import { hostOrigins } from './hostOrigins.js'
+import { validateWidgetDoc } from '../widgets/widgetDoc.js'
+import { RENDERER_VERSION } from '../widgets/widgetCatalog.js'
 
 const HASH = /^[0-9a-f]{64}$/
 const GIT_SHA = /^(?:[0-9a-f]{7,40}|[0-9a-f]{64})$/
@@ -100,6 +102,7 @@ export function createLabHostBridge({
   function post(kind, payload, triggeredAt, proposal = false) {
     if (stopped || !admitted) return false
     const message = envelope(kind, payload, triggeredAt, proposal)
+    if (kind === 'widget.publish-request' && new TextEncoder().encode(canonicalJSON(message)).length > 40960) return false
     if (kind === 'proposal') {
       const bytes = new TextEncoder().encode(canonicalJSON(message)).length
       if (bytes > 4096) {
@@ -210,6 +213,29 @@ export function createLabHostBridge({
         revision += 1
         return post('proposal', payload, triggeredAt, true)
       })
+    },
+    publishWidget({ doc, source } = {}) {
+      if (!admitted || stopped) return Promise.resolve({ ok: false, reason: 'not_admitted' })
+      let validated
+      try {
+        validated = validateWidgetDoc(doc)
+        canonicalJSON(validated)
+      }
+      catch { return Promise.resolve({ ok: false, reason: 'invalid_doc' }) }
+      if (!source || typeof source !== 'object' || Array.isArray(source)
+        || Reflect.ownKeys(source).length !== 3
+        || !['artifact_id', 'revision', 'digest'].every((key) => Object.hasOwn(source, key))
+        || typeof source.artifact_id !== 'string' || !/^(?![\s\S]*\n)[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(source.artifact_id)
+        || !Number.isSafeInteger(source.revision) || source.revision < 1
+        || typeof source.digest !== 'string' || !/^(?![\s\S]*\n)[0-9a-f]{64}$/.test(source.digest)) {
+        return Promise.resolve({ ok: false, reason: 'invalid_source' })
+      }
+      const payload = { doc: validated, source: { artifact_id: source.artifact_id, revision: source.revision, digest: source.digest }, renderer_version: RENDERER_VERSION }
+      return enqueue(() => {
+        if (!admitted || stopped) return { ok: false, reason: 'not_admitted' }
+        return post('widget.publish-request', payload, null)
+          ? { ok: true } : { ok: false, reason: 'too_large' }
+      }).then((result) => result || { ok: false, reason: 'not_admitted' })
     },
     run(triggeredAt = clock()) {
       if (!admitted || stopped) return Promise.resolve(false)

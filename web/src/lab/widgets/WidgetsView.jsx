@@ -20,13 +20,15 @@ function validationError(doc) {
     return { detail: error.message, pointer: '/formats' }
   }
 }
-export function WidgetsView({ scopeKey, hidden = false, host = null }) {
+export function WidgetsView({ scopeKey, hidden = false, host = null, requestPublication }) {
   const local = typeof scopeKey === 'string' && scopeKey.trim().length > 0
   const [drafts, setDrafts] = useState(() => new Map())
   const [storeState, setStoreState] = useState(null)
   const [docId, setDocId] = useState('')
   const [loadedId, setLoadedId] = useState(null)
   const [head, setHead] = useState(null)
+  const [sha256, setSha256] = useState(null)
+  const [publication, setPublication] = useState(null)
   const [status, setStatus] = useState('empty')
   const [failure, setFailure] = useState(null)
   const [graphOutputs, setGraphOutputs] = useState(() => new Map())
@@ -66,27 +68,28 @@ export function WidgetsView({ scopeKey, hidden = false, host = null }) {
   }, [state?.doc, graphOutputs])
   async function load(id = docId) {
     const ticket = ++requestGeneration.current
-    setStatus('loading'); setFailure(null)
+    setStatus('loading'); setFailure(null); setPublication(null)
     const result = await loadWidget(id)
     if (ticket !== requestGeneration.current) return
     if (!result.ok) { setStatus('error'); setFailure(result); return }
     try {
       const doc = result.doc ? validateWidgetDoc(result.doc) : createWidgetDoc(DESIGNER_DEFAULT_DOC)
       dispatch({ type: 'load', doc }); setLoadedId(id); setDocId(id); setHead(result.revision ?? null)
+      setSha256(result.sha256 ?? null)
       setStatus(result.doc ? 'saved' : 'editing')
     } catch (error) { setStatus('invalid'); setFailure({ detail: error.message, pointer: '/graph' }) }
   }
   function newDocument() {
     requestGeneration.current += 1
-    dispatch({ type: 'load', doc: createWidgetDoc(DESIGNER_DEFAULT_DOC) }); setLoadedId(docId); setHead(null); setFailure(null); setStatus('editing')
+    dispatch({ type: 'load', doc: createWidgetDoc(DESIGNER_DEFAULT_DOC) }); setLoadedId(docId); setHead(null); setSha256(null); setPublication(null); setFailure(null); setStatus('editing')
   }
   async function save() {
     if (local || invalid || !state || state.transaction || !validId(loadedId ?? '')) return
     const ticket = ++requestGeneration.current, sentDoc = state.doc
-    setStatus('saving'); setFailure(null)
+    setStatus('saving'); setFailure(null); setPublication(null)
     const result = await saveWidget(loadedId, sentDoc, head)
     if (ticket !== requestGeneration.current) return
-    if (result.ok) { setHead(result.revision); setStatus(sameDocument(storeRef.current?.doc, sentDoc) ? 'saved' : 'editing') }
+    if (result.ok) { setHead(result.revision); setSha256(result.sha256 ?? null); setStatus(sameDocument(storeRef.current?.doc, sentDoc) ? 'saved' : 'editing') }
     else if (result.status === 422 && !sameDocument(storeRef.current?.doc, sentDoc)) { setStatus('editing') }
     else { setFailure(result); setStatus(result.status === 409 ? 'conflict' : result.status === 422 ? 'invalid' : 'error') }
   }
@@ -100,7 +103,13 @@ export function WidgetsView({ scopeKey, hidden = false, host = null }) {
         <button type="button" disabled={!validId(docId) || status === 'loading' || status === 'saving'} onClick={() => load()}>Load</button>
         <button type="button" disabled={!validId(docId) || status === 'loading' || status === 'saving'} onClick={newDocument}>New</button>
         {state && <button type="button" onClick={save} disabled={Boolean(invalid) || status === 'invalid' || status === 'loading' || status === 'saving' || status === 'conflict' || docId !== loadedId}>Save</button>}
+        {requestPublication && <button type="button" disabled={!loadedId || !head || !sha256 || status !== 'saved' || Boolean(invalid) || Boolean(state?.transaction) || docId !== loadedId}
+          onClick={async () => {
+            const result = await requestPublication({ doc: state.doc, source: { artifact_id: loadedId, revision: head, digest: sha256 } })
+            setPublication(result.ok ? 'Publication requested' : result.reason)
+          }}>Request publication</button>}
       </div>
+      {publication && <p role="status" aria-label="Publication request">{publication}</p>}
       <p role="status">{({ empty: 'Choose a project to create a text widget.', loading: 'Loading widget…', saving: 'Saving widget…', saved: `Saved revision ${head ?? ''}.`, editing: 'Local edits. Save when ready.', invalid: 'Invalid widget. Correct the indicated field before saving.', conflict: 'Conflict: the document changed. Your local edits are kept. Reload to use the stored revision.', error: 'The document request failed. Your local edits are kept.' })[displayedStatus]}</p>
       {problem && <p role="alert">{typeof problem.detail === 'string' ? problem.detail : JSON.stringify(problem.detail)}{problem.pointer ? ` (${problem.pointer})` : ''}</p>}
       {status === 'conflict' && <button type="button" onClick={() => load(loadedId)}>Reload</button>}

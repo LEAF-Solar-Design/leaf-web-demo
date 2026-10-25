@@ -6,6 +6,9 @@ import graphSchema from '../contract/lab-graph.v1.schema.json'
 import manifestSchema from '../contract/leaf-block-manifest.v1.schema.json'
 import { createLabHostBridge, mintChannel, sessionPrincipalProof, sourceShaFromGit, studioSourceSha } from './hostBridge.js'
 import { DEFAULT_HOST_ORIGINS, hostOrigins } from './hostOrigins.js'
+import { createWidgetDoc, newElement } from '../widgets/useWidgetEditor.js'
+import { validateWidgetDoc } from '../widgets/widgetDoc.js'
+import { RENDERER_VERSION } from '../widgets/widgetCatalog.js'
 
 const document = { schema: 'leaf.lab-graph.v1', blocks: [], pipes: [], outputs: {} }
 const draft = { document, ready: true, problems: [] }
@@ -146,6 +149,80 @@ describe('Studio host bootstrap', () => {
 })
 
 describe('admitted Lab channel', () => {
+  it('refuses publication before admission and validates the document and exact source', async () => {
+    const h = harness()
+    const request = { doc: createWidgetDoc(), source: { artifact_id: 'widget-1', revision: 1, digest: '0'.repeat(64) } }
+    expect(await h.bridge.publishWidget(request)).toEqual({ ok: false, reason: 'not_admitted' })
+    await h.bridge.start()
+    expect(await h.bridge.publishWidget(request)).toEqual({ ok: false, reason: 'not_admitted' })
+    await h.admit()
+    expect(await h.bridge.publishWidget({ ...request, doc: {} })).toEqual({ ok: false, reason: 'invalid_doc' })
+    const invalidUnicode = createWidgetDoc()
+    invalidUnicode.formats.la.els = [{ ...newElement(invalidUnicode), text: '\ud800' }]
+    expect(await h.bridge.publishWidget({ ...request, doc: invalidUnicode })).toEqual({ ok: false, reason: 'invalid_doc' })
+    for (const source of [null, {}, { ...request.source, extra: true }, { ...request.source, digest: 'A'.repeat(64) },
+      { ...request.source, revision: 0 }, { ...request.source, revision: 1.5 },
+      { ...request.source, revision: Number.MAX_SAFE_INTEGER + 1 }, { ...request.source, artifact_id: '../widget' },
+      { ...request.source, artifact_id: 'widget\n' }, { ...request.source, digest: '0'.repeat(64) + '\n' }]) {
+      expect(await h.bridge.publishWidget({ ...request, source })).toEqual({ ok: false, reason: 'invalid_source' })
+    }
+    expect(h.sent()).toEqual([])
+    await h.bridge.proposal(draft)
+    expect(await h.bridge.publishWidget(request)).toEqual({ ok: true })
+    expect(await h.bridge.publishWidget(request)).toEqual({ ok: true })
+    expect(h.sent().map(({ sequence }) => sequence)).toEqual([1, 2, 3])
+    const message = h.sent()[1]
+    expect(message).toMatchObject({ kind: 'widget.publish-request', payload: { ...request, renderer_version: RENDERER_VERSION } })
+    expect(h.parent.postMessage.mock.calls.at(-1)[1]).toBe(DEFAULT_HOST_ORIGINS[0])
+    expect(() => schema.schema(message, 'lab-embed.v1.schema.json')).not.toThrow()
+    for (const payload of [{ ...message.payload, extra: true }, { ...message.payload, doc: [] },
+      { ...message.payload, renderer_version: '1.0' }, { ...message.payload, source: { ...request.source, revision: 0 } },
+      { ...message.payload, source: { ...request.source, digest: 'bad' } },
+      { ...message.payload, source: { ...request.source, artifact_id: 'widget\n' } },
+      { ...message.payload, source: { ...request.source, digest: '0'.repeat(64) + '\n' } },
+      { ...message.payload, renderer_version: '1.0.0\n' },
+      { ...message.payload, source: { ...request.source, extra: true } }]) {
+      expect(() => schema.schema({ ...message, payload }, 'lab-embed.v1.schema.json')).toThrow()
+    }
+    h.bridge.stop()
+    expect(await h.bridge.publishWidget(request)).toEqual({ ok: false, reason: 'not_admitted' })
+  })
+
+  it.each([4097, 40960, 40961])('checks the full canonical UTF-8 publication envelope at %i bytes', async (bytes) => {
+    const h = harness()
+    await h.bridge.start()
+    await h.admit()
+    const doc = createWidgetDoc()
+    const { text, preset, ...element } = newElement(doc)
+    doc.formats.la.els = Array.from({ length: 6 }, (_, index) => ({ ...element, id: `path${index}`, kind: 'svg-path', path: 'M' }))
+    doc.formats.la.els.push({ ...newElement(doc), id: 'unicode', text: 'é' })
+    const request = { doc, source: { artifact_id: 'widget', revision: 1, digest: '0'.repeat(64) } }
+    const message = { ...h.hello(), kind: 'widget.publish-request', sequence: 1,
+      payload: { ...request, renderer_version: RENDERER_VERSION } }
+    let padding = bytes - new TextEncoder().encode(canonicalJSON(message)).length
+    for (const e of doc.formats.la.els.slice(0, 6)) {
+      const length = Math.min(padding, 8191)
+      e.path += ' '.repeat(length)
+      padding -= length
+    }
+    expect(padding).toBe(0)
+    expect(() => validateWidgetDoc(doc)).not.toThrow()
+    expect(new TextEncoder().encode(canonicalJSON(message)).length).toBe(bytes)
+    const context = { ...message, authenticated: true, origin: DEFAULT_HOST_ORIGINS[0],
+      eventOrigin: DEFAULT_HOST_ORIGINS[0], source: h.parent, eventSource: h.parent, now_ms: 1000 }
+    const state = { sequence: 0, accepted_at_ms: [] }
+    if (bytes <= 40960) expect(() => schema.embed(message, context, state)).not.toThrow()
+    else {
+      expect(() => schema.embed(message, context, state)).toThrow('message byte limit')
+      expect(state).toEqual({ sequence: 0, accepted_at_ms: [] })
+    }
+    expect(await h.bridge.publishWidget(request)).toEqual(bytes <= 40960 ? { ok: true } : { ok: false, reason: 'too_large' })
+    expect(h.sent()).toHaveLength(bytes <= 40960 ? 1 : 0)
+    if (bytes <= 40960) expect(new TextEncoder().encode(canonicalJSON(h.sent()[0])).length).toBe(bytes)
+    expect(await h.bridge.proposal(draft)).toBe(true)
+    h.bridge.stop()
+  })
+
   it.each([4096, 4097])('checks the full canonical UTF-8 proposal envelope at %i bytes and recovers', async (bytes) => {
     const onChange = vi.fn()
     const h = harness({ onChange })

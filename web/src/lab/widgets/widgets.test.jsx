@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WidgetsView from './WidgetsView.jsx'
 import WidgetPreview from './WidgetPreview.jsx'
@@ -11,6 +11,43 @@ const text = (value) => fireEvent.change(screen.getByLabelText('Text'), { target
 const preview = () => screen.getByRole('region', { name: 'Preview' })
 
 describe('scoped widget designer', () => {
+  it('hides publication in standalone Studio', () => {
+    render(<WidgetsView />)
+    expect(screen.queryByRole('button', { name: 'Request publication' })).not.toBeInTheDocument()
+  })
+
+  it('requests publication only for a saved clean document, retaining load and save digests', async () => {
+    const doc = createWidgetDoc()
+    const loadedDigest = 'a'.repeat(64), savedDigest = 'b'.repeat(64)
+    const response = (body) => ({ ok: true, json: async () => body })
+    const fetchImpl = vi.fn().mockResolvedValueOnce(response({ graph: doc, revision: 1, sha256: loadedDigest, kind: 'widget' }))
+      .mockResolvedValueOnce(response({ revision: 2, sha256: savedDigest }))
+      .mockResolvedValue(response({ values: [] }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const requestPublication = vi.fn().mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: false, reason: 'not_admitted' })
+    render(<WidgetsView requestPublication={requestPublication} />)
+    const button = screen.getByRole('button', { name: 'Request publication' })
+    expect(button).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'widget' } })
+    fireEvent.click(screen.getByRole('button', { name: 'New' }))
+    expect(button).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Load', exact: true }))
+    await waitFor(() => expect(button).toBeEnabled())
+    fireEvent.click(button)
+    expect(requestPublication).toHaveBeenLastCalledWith({ doc, source: { artifact_id: 'widget', revision: 1, digest: loadedDigest } })
+    expect(await screen.findByLabelText('Publication request')).toHaveTextContent('Publication requested')
+    add()
+    expect(button).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(button).toBeEnabled())
+    fireEvent.click(button)
+    await waitFor(() => expect(screen.getByLabelText('Publication request')).toHaveTextContent('not_admitted'))
+    expect(requestPublication).toHaveBeenLastCalledWith({ doc: expect.objectContaining({ formats: expect.any(Object) }), source: { artifact_id: 'widget', revision: 2, digest: savedDigest } })
+    expect(requestPublication.mock.calls[1][0].doc.formats.la.els).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'New' }))
+    expect(button).toBeDisabled()
+  })
+
   it('edits and previews literal text and removes it', () => {
     render(<WidgetsView scopeKey="a/p" />)
     expect(preview().querySelectorAll('[data-element-id]')).toHaveLength(0)

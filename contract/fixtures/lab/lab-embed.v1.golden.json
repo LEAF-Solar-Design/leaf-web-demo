@@ -143,6 +143,30 @@
       "payload": {
         "rows": []
       }
+    },
+    {
+      "schema": "leaf.lab-embed.v1",
+      "channel": "00000000000000000000000000000000",
+      "version": 1,
+      "principal_proof": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source_sha": "0000000000000000000000000000000000000000000000000000000000000000",
+      "proposal_revision": 0,
+      "proposal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sequence": 1,
+      "sent_at_ms": 1000,
+      "expires_at_ms": 2000,
+      "latency_us": 10,
+      "kind": "widget.publish-request",
+      "payload": {
+        "doc": {
+          "schema": "widget-doc.v1",
+          "min_renderer": "1.0.0",
+          "active": "la",
+          "formats": {"la": {"h": 160, "radius": 22, "bg": "black", "vibrant": false, "ship": true, "els": []}}
+        },
+        "source": {"artifact_id": "widget", "revision": 1, "digest": "0000000000000000000000000000000000000000000000000000000000000000"},
+        "renderer_version": "1.0.0"
+      }
     }
   ]
 }

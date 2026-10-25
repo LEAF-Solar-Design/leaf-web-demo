@@ -267,7 +267,7 @@ def validate_embed(message, context, state):
             or message["expires_at_ms"] - message["sent_at_ms"] > 30000
             or message["sequence"] <= state["sequence"]):
         raise ValueError("Test: replay refused")
-    limit = 262144 if message["kind"] == "source.value" else 4096
+    limit = 262144 if message["kind"] == "source.value" else 40960 if message["kind"] == "widget.publish-request" else 4096
     wire_bytes = context.get("wire_bytes", 0)
     if (len(canonical_json(message).encode()) > limit
             or not nonnegative_integer(wire_bytes) or wire_bytes > limit):
@@ -323,6 +323,33 @@ def run_case(case, value):
         validate_block(value, trusted, BLOCKS[0] if case.get("previous") else None)
     else:
         validate_embed(value["message"], value["context"], value["state"])
+
+
+def publish_request_cases():
+    """Exercise identical publication boundaries and patterns in both twins."""
+    payload = {"doc": {"padding": "é"},
+               "source": {"artifact_id": "widget", "revision": 1, "digest": "0" * 64},
+               "renderer_version": "1.0.0"}
+    message = dict(GOLDEN["messages"][0], kind="widget.publish-request", payload=payload)
+    base_size = len(canonical_json(message).encode("utf-8"))
+    for size in (4097, 40960, 40961):
+        padded = copy.deepcopy(payload)
+        padded["doc"]["padding"] += "x" * (size - base_size)
+        assert len(canonical_json(dict(message, payload=padded)).encode("utf-8")) == size
+        yield {"name": f"publish-request-{size}-bytes", "target": "embed", "expected": size <= 40960,
+               **({"contains": "byte limit"} if size > 40960 else {}),
+               "changes": [{"op": "set", "path": "/message/kind", "value": "widget.publish-request"},
+                           {"op": "set", "path": "/message/payload", "value": padded}]}
+    for field in ("artifact_id", "digest", "renderer_version"):
+        invalid = copy.deepcopy(payload)
+        target = invalid if field == "renderer_version" else invalid["source"]
+        target[field] += "\n"
+        yield {"name": f"publish-request-{field}-newline", "target": "embed", "expected": False,
+               "changes": [{"op": "set", "path": "/message/kind", "value": "widget.publish-request"},
+                           {"op": "set", "path": "/message/payload", "value": invalid}]}
+
+
+CASES = [*CASES, *publish_request_cases()]
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
