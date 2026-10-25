@@ -3,29 +3,29 @@
 .studio-shell .studio-drawer-tabs { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"] .result-block:has(.result-panel > p.panel-sub) { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] {
-  --ck-font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --ck-chrome: #2a2a2a;
-  --ck-glass-band: rgba(30, 34, 39, .86);
-  --ck-glass-panel: rgba(30, 34, 39, .90);
-  --ck-glass-dock: rgba(30, 34, 39, .92);
+  --ck-font: var(--leaf-font-text);
+  --ck-chrome: var(--leaf-surface);
+  --ck-glass-band: rgba(14, 17, 15, .86);
+  --ck-glass-panel: rgba(14, 17, 15, .90);
+  --ck-glass-dock: rgba(14, 17, 15, .92);
   --ck-glass-blur: blur(6px);
-  --ck-recess: #232323;
-  --ck-title: #3c3c3c;
-  --ck-field: #232323;
+  --ck-recess: var(--leaf-ground);
+  --ck-title: var(--leaf-line);
+  --ck-field: var(--leaf-ground);
   --ck-canvas: #212830;
-  --ck-active: #1390cc;
+  --ck-active: var(--leaf-accent);
   --ck-model: #0f74a6;
   --ck-sel: #00b4ff;
-  --ck-cmd: #04b255;
-  --ck-label: #b8b8b8; 
-  --ck-ink: #e2e2e2;
-  --ck-ink-dim: #b8b8b8;
+  --ck-cmd: var(--leaf-accent);
+  --ck-label: var(--leaf-ink-muted);
+  --ck-ink: var(--leaf-ink);
+  --ck-ink-dim: var(--leaf-ink-muted);
   --ck-ink-off: #767676;
-  --ck-edge: #424242;
-  --ck-divider: #3a3a3a;
-  --ck-hover: #3c3c3c;
+  --ck-edge: var(--leaf-line);
+  --ck-divider: var(--leaf-line);
+  --ck-hover: var(--leaf-raised);
   --ck-bulb: #f2c94c;
-  --ck-warn: #f0c97b;
+  --ck-warn: var(--leaf-warn);
   --ck-top: 28px;
   --ck-ribbon: 95px;
   --ck-doctabs: 32px;
@@ -50,14 +50,12 @@
   --leaf-sel: var(--ck-sel);
   --leaf-cmd: var(--ck-cmd);
   --leaf-label: var(--ck-label);
-  --leaf-ink: var(--ck-ink);
   --leaf-ink-dim: var(--ck-ink-dim);
   --leaf-ink-off: var(--ck-ink-off);
   --leaf-edge: var(--ck-edge);
   --leaf-divider: var(--ck-divider);
   --leaf-hover: var(--ck-hover);
   --leaf-bulb: var(--ck-bulb);
-  --leaf-warn: var(--ck-warn);
   --leaf-top: var(--ck-top);
   --leaf-ribbon: var(--ck-ribbon);
   --leaf-doctabs: var(--ck-doctabs);
@@ -276,7 +274,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"] .ribbon-tool-label {
   display: inline; font: 400 11px var(--ck-font); overflow: hidden; text-overflow: ellipsis; min-width: 0;
 }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-pressed="true"] { background: #1f4a63; border: 0; box-shadow: inset 0 0 0 1px var(--ck-active); color: var(--ck-ink); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-pressed="true"] { background: var(--leaf-raised); border: 0; box-shadow: inset 0 0 0 1px var(--ck-active); color: var(--ck-ink); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-pressed="false"] { text-decoration: none; color: var(--ck-ink-dim); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"][aria-pressed="true"] { background: transparent; box-shadow: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"][aria-pressed="true"] .ci { color: var(--ck-bulb); }

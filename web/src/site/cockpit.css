@@ -39,29 +39,29 @@
    ========================================================================= */
 
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) {
-  --ck-font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --ck-chrome: #2a2a2a;
-  --ck-glass-band: rgba(30, 34, 39, .86);
-  --ck-glass-panel: rgba(30, 34, 39, .90);
-  --ck-glass-dock: rgba(30, 34, 39, .92);
+  --ck-font: var(--leaf-font-text);
+  --ck-chrome: var(--leaf-surface);
+  --ck-glass-band: rgba(14, 17, 15, .86);
+  --ck-glass-panel: rgba(14, 17, 15, .90);
+  --ck-glass-dock: rgba(14, 17, 15, .92);
   --ck-glass-blur: blur(6px);
-  --ck-recess: #232323;
-  --ck-title: #3c3c3c;
-  --ck-field: #232323;
+  --ck-recess: var(--leaf-ground);
+  --ck-title: var(--leaf-line);
+  --ck-field: var(--leaf-ground);
   --ck-canvas: #212830;
-  --ck-active: #1390cc;
+  --ck-active: var(--leaf-accent);
   --ck-model: #0f74a6;
   --ck-sel: #00b4ff;
-  --ck-cmd: #04b255;
-  --ck-label: #b8b8b8; /* Over glass on white geometry: #949494 is 3.39:1; #b8b8b8 is 5.18:1. */
-  --ck-ink: #e2e2e2;
-  --ck-ink-dim: #b8b8b8;
+  --ck-cmd: var(--leaf-accent);
+  --ck-label: var(--leaf-ink-muted);
+  --ck-ink: var(--leaf-ink);
+  --ck-ink-dim: var(--leaf-ink-muted);
   --ck-ink-off: #767676;
-  --ck-edge: #424242;
-  --ck-divider: #3a3a3a;
-  --ck-hover: #3c3c3c;
+  --ck-edge: var(--leaf-line);
+  --ck-divider: var(--leaf-line);
+  --ck-hover: var(--leaf-raised);
   --ck-bulb: #f2c94c;
-  --ck-warn: #f0c97b;
+  --ck-warn: var(--leaf-warn);
   --ck-top: 28px;
   --ck-dock: 112px; /* phone bottom dock and drawer heading heights; the phone block overrides both */
   --ck-drawer: 44px;
@@ -96,14 +96,12 @@
   --leaf-sel: var(--ck-sel);
   --leaf-cmd: var(--ck-cmd);
   --leaf-label: var(--ck-label);
-  --leaf-ink: var(--ck-ink);
   --leaf-ink-dim: var(--ck-ink-dim);
   --leaf-ink-off: var(--ck-ink-off);
   --leaf-edge: var(--ck-edge);
   --leaf-divider: var(--ck-divider);
   --leaf-hover: var(--ck-hover);
   --leaf-bulb: var(--ck-bulb);
-  --leaf-warn: var(--ck-warn);
   --leaf-top: var(--ck-top);
   --leaf-ribbon: var(--ck-ribbon);
   --leaf-doctabs: var(--ck-doctabs);
@@ -361,7 +359,7 @@
 }
 /* Layer rows: the bulb is lit (amber) when the layer shows, dark when hidden;
    no strike-through, the reference reads state from the bulb. */
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="true"] { background: #1f4a63; border: 0; box-shadow: inset 0 0 0 1px var(--ck-active); color: var(--ck-ink); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="true"] { background: var(--leaf-raised); border: 0; box-shadow: inset 0 0 0 1px var(--ck-active); color: var(--ck-ink); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-pressed="false"] { text-decoration: none; color: var(--ck-ink-dim); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="row"][aria-pressed="true"] { background: transparent; box-shadow: none; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="row"][aria-pressed="true"] .ci { color: var(--ck-bulb); }
@@ -395,13 +393,13 @@
 .doc-tab-start:hover { background: #2e2e2e; color: #fff; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title {
   order: 2; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
-  background: var(--ck-active); color: #fff; font-weight: 400;
+  background: var(--ck-active); color: var(--leaf-on-accent); font-weight: 400;
   box-shadow: inset 0 1px 0 var(--ck-sel); padding-right: 6px;
 }
 /* The reference's tab carries a close glyph at its right edge. */
 .doc-tab-close {
   order: 2; align-self: center; width: 18px; height: 18px; margin: 0 4px 0 -2px; padding: 0;
-  border: 0; border-radius: 2px; background: var(--ck-active); color: rgba(255, 255, 255, .85);
+  border: 0; border-radius: 2px; background: var(--ck-active); color: var(--leaf-on-accent);
   font: 400 13px/1 var(--ck-font); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
 }
 .doc-tab-close:hover { background: #2aa3de; color: #fff; }
@@ -833,7 +831,7 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button:hover:not(:disabled) { background: var(--ck-hover); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button:disabled { color: var(--ck-ink-off); cursor: not-allowed; }
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button[aria-pressed="true"] { background: #1f4a63; box-shadow: inset 0 0 0 1px var(--ck-active); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button[aria-pressed="true"] { background: var(--leaf-raised); box-shadow: inset 0 0 0 1px var(--ck-active); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
   /* The reference's menu glyph at the far left. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar::after {
@@ -1365,7 +1363,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-cluster[data-note] .ribbon-cluster-label.as-button:hover { color: var(--ck-warn); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool:hover:not(:disabled):not([aria-expanded="true"]) { background: transparent; }
   .doc-tab-start:hover { background: transparent; color: #d4d4d4; }
-  .doc-tab-close:hover { background: var(--ck-active); color: rgba(255, 255, 255, .85); }
+  .doc-tab-close:hover { background: var(--ck-active); color: var(--leaf-on-accent); }
   @media (min-width: 981px) {
     .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"]:hover:not([aria-selected="true"]) { background: transparent; color: #9a9a9a; }
     .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button:hover { background: transparent; }

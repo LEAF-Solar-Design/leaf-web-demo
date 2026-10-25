@@ -1,8 +1,8 @@
 // Slice 13b (theming tokens): the --leaf-* namespace is aliases ONLY. Every
 // --leaf-* declaration in the site stylesheets must be a var() reference to
 // a token declared in the very same selector scope (this slice never spans
-// scopes), never a re-typed literal, so introducing the namespace changes no
-// pixel or shade on screen.
+// scopes), never a re-typed literal. The cockpit inherits --leaf-ink and
+// --leaf-warn from the vendored v1 package instead of aliasing them back.
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 
@@ -98,6 +98,21 @@ it('SSD1-24E light hover text', () => {
 })
 
 describe('the --leaf-* token namespace is alias-only (slice 13b)', () => {
+  it('inherits cockpit ink and warning roles from the vendored v1 root', () => {
+    const root = declsFor(read('src/standard/leaf-standard.css'), ':root')
+    for (const [css, selector] of [
+      [cockpit, '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])'],
+      [read('src/site/studioShell.css'), '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'],
+    ]) {
+      const decls = declsFor(css, selector)
+      for (const role of ['ink', 'warn']) {
+        expect(root).toHaveProperty(`--leaf-${role}`)
+        expect(decls).not.toHaveProperty(`--leaf-${role}`)
+        expect(decls[`--ck-${role}`]).toBe(`var(--leaf-${role})`)
+      }
+    }
+  })
+
   it('declares no --leaf-* literal colour or length, only var() references', () => {
     const literalRe = /#[0-9a-fA-F]{3,8}\b|\b\d+(\.\d+)?(px|em|rem|vh|vw|%)\b|rgba?\(|hsla?\(/
     for (const [file, css] of [['landing.css', landing], ['cockpit.css', cockpit]]) {
