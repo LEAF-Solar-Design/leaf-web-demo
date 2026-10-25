@@ -83,6 +83,155 @@ def test_finishes_values_pins_and_status(rig):
     assert any(kind == "age" for kind, value in rig.metrics)
 
 
+@pytest.mark.parametrize("mode", ["active", "idle", "disabled", "paused", "rail-off"])
+def test_activation_tick_colour_guards_and_five_second_cadence(rig, monkeypatch, mode):
+    calls, clock = [], [0.0]
+    monkeypatch.setattr(worker.lab_activation, "tick", lambda now: calls.append(now))
+    if mode == "idle":
+        rig.create(build="other-build")
+    elif mode == "disabled":
+        rig.env["LEAF_LAB_WORKER_DISABLED"] = "1"
+    elif mode == "paused":
+        store.set_paused(True, "test", "actor")
+    elif mode == "rail-off":
+        monkeypatch.setattr(worker, "lab_surface_enabled", lambda: False)
+    instance = rig.make(clock=lambda: clock[0], wall=lambda: 1234 + clock[0])
+    instance.tick()
+    clock[0] = 4.99
+    instance.tick()
+    clock[0] = 5
+    instance.tick()
+    assert calls == ([1234, 1239] if mode == "active" else [])
+
+
+def test_activation_run_uses_read_simulate_adapter(rig, monkeypatch):
+    monkeypatch.setattr(worker.lab_activation, "holds_run", lambda tenant, run_id: True)
+    from test_lab_tool_nodes import tool_graph
+    tool = tool_graph(monkeypatch)
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+    adapters = []
+    def evaluate(graph, registry, *, tool_adapter, **kwargs):
+        adapters.append(tool_adapter)
+        assert not tool_adapter.admissible(tool.trusted)  # worker => compute
+        from dataclasses import replace
+        assert tool_adapter.admissible(replace(tool.trusted, effect="read", execution_class="inline"))
+        assert tool_adapter.admissible(replace(tool.trusted, effect="simulate", execution_class="inline", capability="simulate.value"))
+    monkeypatch.setattr(worker, "evaluate_graph", evaluate)
+    store.create(rig.tenant, "doc", "run", 1, "a" * 64, worker.OPS_REVISION,
+                 "b" * 64, "lab-activation.v1", "abc1234")
+    rig.make().tick()
+    terminal(rig)
+    assert len(adapters) == 1 and adapters[0].effects == ("read", "simulate")
+
+
+@pytest.mark.parametrize("state", ["paused", "stopped", "expired", "off", "missing", "wrong_run"])
+def test_K3_inactive_activation_run_is_cancelled_without_evaluation(rig, monkeypatch, state):
+    activation = worker.lab_activation
+    aid = "activation-test"
+    now = store._now().isoformat()
+    def setup(sql):
+        if state != "missing":
+            sql.execute("INSERT INTO lab_activations (tenant_id,activation_id,doc_id,revision,graph_sha256,"
+                        "registry_digest,ops_revision,input_digest,principal,interval_s,state,lease_expires_at,"
+                        "next_due_at,in_flight_run_id,created_by,created_at,updated_at)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (rig.tenant, aid, "doc", 1, "a" * 64, store.registry_digest(), worker.OPS_REVISION,
+                         "b" * 64, "tenant:local", 60, "active" if state == "wrong_run" else state,
+                         now, now, "other" if state == "wrong_run" else "run", "actor", now, now))
+    activation._run(rig.tenant, setup, write=True)
+    evaluated = []
+    monkeypatch.setattr(worker, "evaluate_graph", lambda *args, **kwargs: evaluated.append(True))
+    monkeypatch.setattr(activation, "tick", lambda now: None)
+    store.create(rig.tenant, "doc", "run", 1, "a" * 64, worker.OPS_REVISION,
+                 "b" * 64, "lab-activation.v1", "abc1234")
+    try:
+        rig.make().tick()
+        terminal(rig, "cancelled")
+        assert evaluated == []
+        assert events(rig)[-1]["payload"] == {"reason": "activation_inactive"}
+    finally:
+        activation._run(rig.tenant, lambda sql: sql.execute(
+            "DELETE FROM lab_activations WHERE tenant_id=?", (rig.tenant,)), write=True)
+
+
+@pytest.mark.parametrize("failure", ["cancel_request", "holds_run"])
+def test_executing_activation_read_stops_when_cancellation_refresh_loses_hold(rig, monkeypatch, caplog, failure):
+    from dataclasses import replace
+    from test_lab_tool_nodes import tool_graph
+    activation = worker.lab_activation
+    tool = tool_graph(monkeypatch)
+    read = replace(tool.trusted, effect="read", execution_class="inline")
+    monkeypatch.setattr(activation.lab_registry, "lookup", lambda *args: read)
+    monkeypatch.setattr(worker, "trusted_registry", lambda: tool.registry)
+    monkeypatch.setattr(activation, "tick", lambda now: None)
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+    rig.artifact["graph"] = tool.graph
+    entered = threading.Event()
+    release = threading.Event()
+    observed = threading.Event()
+
+    class Adapter:
+        admissible = staticmethod(worker.lab_tool_nodes.tool_block_admissible)
+
+        def __init__(self, tenant, run_id, *, cancelled, effects):
+            assert (tenant, run_id, effects) == (rig.tenant, "run", ("read", "simulate"))
+            self.cancelled = cancelled
+
+        def __call__(self, *args, **kwargs):
+            assert not self.cancelled()
+            entered.set()
+            assert release.wait(30)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if self.cancelled():
+                    observed.set()
+                    raise RunCancelled()
+                time.sleep(0.01)
+            raise AssertionError("activation cancellation not observed")
+
+    monkeypatch.setattr(worker.lab_tool_nodes, "ToolNodeAdapter", Adapter)
+    now = store._now().isoformat()
+    def setup(sql):
+        sql.execute("INSERT INTO lab_activations (tenant_id,activation_id,doc_id,revision,graph_sha256,"
+                    "registry_digest,ops_revision,input_digest,principal,interval_s,state,lease_expires_at,"
+                    "next_due_at,in_flight_run_id,created_by,created_at,updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (rig.tenant, "activation-test", "doc", 1, "a" * 64, store.registry_digest(),
+                     worker.OPS_REVISION, "b" * 64, "tenant:local", 60, "active", now, now,
+                     "run", "actor", now, now))
+    activation._run(rig.tenant, setup, write=True)
+    store.create(rig.tenant, "doc", "run", 1, "a" * 64, worker.OPS_REVISION,
+                 "b" * 64, "lab-activation.v1", "abc1234")
+    instance = rig.make()
+    try:
+        instance.tick()
+        assert entered.wait(30)
+        assert store.get(rig.tenant, "run")["state"] == "running"
+        def unavailable(*args):
+            raise RuntimeError("private store failure")
+        if failure == "cancel_request":
+            monkeypatch.setattr(store, "request_cancel", unavailable)
+            assert activation.pause(rig.tenant, "activation-test", "actor")["state"] == "paused"
+            assert not store.cancel_requested(rig.tenant, "run")
+        else:
+            monkeypatch.setattr(activation, "holds_run", unavailable)
+        released_at = time.monotonic()
+        release.set()
+        assert observed.wait(30)
+        assert time.monotonic() - released_at < 2
+        terminal(rig, "cancelled")
+        assert [event["kind"] for event in events(rig)] == ["cancelled"]
+        assert events(rig)[-1]["payload"] == {"reason": "activation_inactive"}
+        assert "private store failure" not in caplog.text
+    finally:
+        release.set()
+        eventually(lambda: all(run.future.done() for run in instance._runs.values()))
+        activation._run(rig.tenant, lambda sql: sql.execute(
+            "DELETE FROM lab_activation_transitions WHERE tenant_id=?", (rig.tenant,)), write=True)
+        activation._run(rig.tenant, lambda sql: sql.execute(
+            "DELETE FROM lab_activations WHERE tenant_id=?", (rig.tenant,)), write=True)
+
+
 @pytest.mark.parametrize("enabled", [True, False])
 def test_tool_node_flag_and_value_event(rig, monkeypatch, enabled):
     from test_lab_tool_nodes import tool_graph

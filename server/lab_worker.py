@@ -15,6 +15,7 @@ import uuid
 
 import emf_metrics
 import lab_artifacts
+import lab_activation
 import lab_run_store
 import lab_tool_nodes
 from dependency_health import _source_revision
@@ -36,6 +37,7 @@ class _Run:
     suspended: bool = False
     terminal: bool = False
     cancel: bool = False
+    cancel_reason: str | None = None
     checked_at: float = float("-inf")
     future: object = None
 
@@ -59,6 +61,7 @@ class LabWorker:
         self._thread = None
         self._pool = ThreadPoolExecutor(max_workers=slots, thread_name_prefix="lab-run")
         self._status_at = float("-inf")
+        self._activation_at = float("-inf")
 
     def start(self):
         with self._lock:
@@ -129,6 +132,9 @@ class LabWorker:
             reason = self._off_reason()
             latest = self.store.latest_build_revision()
             color = "active" if latest is None or latest == self.revision else "idle"
+            if not reason and color == "active" and self.clock() - self._activation_at >= 5:
+                self._activation_at = self.clock()
+                lab_activation.tick(self.wall())
             if reason:
                 for run in self._runs.values():
                     self._suspend(run, reason)
@@ -157,6 +163,15 @@ class LabWorker:
                 self.emit.emit_lab_queue_age_max(0 if age is None else age)
                 self._status_at = now
 
+    def _activation_inactive(self, run):
+        if run.row["adapter_revision"] != "lab-activation.v1":
+            return False
+        try:
+            return not lab_activation.holds_run(run.row["tenant_id"], run.row["run_id"])
+        except Exception as exc:
+            _LOG.warning("lab_worker_activation_check_failed class=%s", type(exc).__name__)
+            return True
+
     def _cancelled(self, run):
         with run.lock:
             reason = self._off_reason()
@@ -166,7 +181,11 @@ class LabWorker:
                 return True
             now = time.monotonic()
             if now - run.checked_at >= 0.25:
-                run.cancel = self.store.cancel_requested(run.row["tenant_id"], run.row["run_id"])
+                if self._activation_inactive(run):
+                    run.cancel = True
+                    run.cancel_reason = "activation_inactive"
+                else:
+                    run.cancel = self.store.cancel_requested(run.row["tenant_id"], run.row["run_id"])
                 run.checked_at = now
             return run.cancel
 
@@ -211,6 +230,9 @@ class LabWorker:
         try:
             renewer.start()
             row = run.row
+            if self._activation_inactive(run):
+                self._terminal(run, "cancelled", "activation_inactive")
+                return
             artifact = self.artifacts.get(row["tenant_id"], row["doc_id"], row["graph_revision"])
             if self.clock() - started >= 600:
                 raise RunBudgetExceeded()
@@ -234,6 +256,9 @@ class LabWorker:
             elapsed = max(0, self.clock() - started)
             if elapsed >= 600:
                 raise RunBudgetExceeded()
+            if self._activation_inactive(run):
+                self._terminal(run, "cancelled", "activation_inactive")
+                return
 
             def on_block(block_id, values):
                 with run.lock:
@@ -249,8 +274,10 @@ class LabWorker:
 
             tool_options = {}
             if lab_tool_nodes.enabled():
+                effects = ({"effects": ("read", "simulate")}
+                           if row["adapter_revision"] == "lab-activation.v1" else {})
                 tool_options["tool_adapter"] = lab_tool_nodes.ToolNodeAdapter(
-                    row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run))
+                    row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run), **effects)
             evaluate_graph(artifact["graph"], trusted_registry(), budget=Budget(run_wall_s=600 - elapsed),
                            clock=self.clock, cancelled=lambda: self._cancelled(run), on_block=on_block,
                            **tool_options)
@@ -264,7 +291,7 @@ class LabWorker:
             self._terminal(run, "finished")
         except RunCancelled:
             if run.cancel:
-                self._terminal(run, "cancelled")
+                self._terminal(run, "cancelled", run.cancel_reason)
             elif self._stop.is_set():
                 self._suspend(run, "worker_disabled")
         except RunBudgetExceeded:

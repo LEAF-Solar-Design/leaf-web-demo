@@ -1305,9 +1305,12 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_lab_ops_conformance.py"), 188),
         Suite("server-lab-evaluate", "server tests/test_lab_evaluate.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_evaluate.py"), 119),
-        # 42 collected: 25 execute without DATABASE_URL, 17 PostgreSQL twins skip.
+        # 54 collected: 31 execute without DATABASE_URL, 23 PostgreSQL twins skip.
         Suite("server-lab-worker", "server tests/test_lab_worker.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_worker.py"), 25, uses_database=True,
+              _py_pytest("tests/test_lab_worker.py"), 31, uses_database=True,
+              database_skip_reasons=(r"platform DB unreachable: .+",)),
+        Suite("server-lab-activation", "server tests/test_lab_activation.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_activation.py"), 49, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_surface.py"), 36),
@@ -1331,7 +1334,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_lab_stream.py"), 30, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-tool-nodes", "server tests/test_lab_tool_nodes.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_tool_nodes.py"), 56),
+              _py_pytest("tests/test_lab_tool_nodes.py"), 58),
         Suite("server-broker-lab-sandbox", "server tests/test_broker_lab_sandbox.py", "pytest", SERVER,
               _py_pytest("tests/test_broker_lab_sandbox.py"), 21),
         Suite("server-lab-diff", "server tests/test_lab_diff.py", "pytest", SERVER,
@@ -3537,7 +3540,7 @@ def build_suites() -> List[Suite]:
         Suite("server-drawings-cross-tenant-canary", "server tests/test_drawings_cross_tenant_canary.py", "pytest", SERVER,
               _py_pytest("tests/test_drawings_cross_tenant_canary.py"), 10),
         Suite("server-router-authz-negative", "server tests/test_router_authz_negative.py", "pytest", SERVER,
-              _py_pytest("tests/test_router_authz_negative.py"), 73),
+              _py_pytest("tests/test_router_authz_negative.py"), 102),
         Suite("server-mutation-scope-diff", "server tests/test_mutation_scope_diff.py", "pytest", SERVER,
               _py_pytest("tests/test_mutation_scope_diff.py"), 20),
         # Registered WITH the file, per the #29 fix-then-register rule. The
