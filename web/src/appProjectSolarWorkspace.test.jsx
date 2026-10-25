@@ -219,7 +219,8 @@ async function setup({ names = ['solar-settings', ...STEP, ...GRAPH, ...READ], .
       onCloseSolarFlowStep: h.legacy.close, solarFormTool: null, solarFlowEditor: null,
       solarFlowPending: null, catalog: { families: [] }, solarFlowFamiliesDrawingId: null, mock: true,
       catalogRunContext: {}, canOpenSolarSettingsForm: () => false, solarFlowRunsFor: () => ({}),
-      solarFlowRuns: {}, running: false, onOpenSolarFlowStep: h.legacy.run, onSolarFlowChange: h.legacy.flow }
+      solarFlowRuns: {}, running: false, onOpenSolarFlowStep: h.legacy.run, onSolarFlowChange: h.legacy.flow,
+      authConfigured: false, signedIn: false, onLogin: () => {} }
     return <><div data-testid="seat">{element(hostBranch, bindings, { ProjectSolarWorkspace: Workspace,
       ProjectSolarGraphForm: Graph, SolarStepEditor: Step, SolarFlowRail: Rail })}</div>
       {element(hostStatus, bindings)}

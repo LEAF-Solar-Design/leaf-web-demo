@@ -128,6 +128,7 @@ function ProjectSolarFlowRail({ solarBinding, authorityKey, projectClient, proje
 function StandaloneSolarFlowRail({
   families, familiesDrawingId, drawingId = null, pendingTool = null, runs, openName = null, openSettingsForm, onOpenStep, onFlowChange,
   workspacePanelsByFlow = {},
+  demo = false, onSignIn,
 }) {
   const [flowId, setFlowId] = useState(DEFAULT_SOLAR_FLOW)
   const options = useMemo(() => solarFlowOptions(families, undefined, workspacePanelsByFlow), [families, workspacePanelsByFlow])
@@ -162,6 +163,21 @@ function StandaloneSolarFlowRail({
     }
     if (text) setAnnouncement(text)
   }, [runs, items])
+
+  // DEMOSOLAR: the demo catalog has no Solar tools, so every flow would read unavailable. Say why once and offer
+  // sign-in when the host passes it, instead of a picker of flows that cannot run.
+  if (demo === true) {
+    return (
+      <nav aria-label="Solar design steps" data-testid="solar-flow-rail" className="solar-flow-rail" data-demo="true">
+        <div className="solar-flow-unavailable" data-testid="solar-flow-demo">
+          <p className="solar-flow-reason">Solar design runs on your own drawings, so the demo has no Solar steps.</p>
+          {typeof onSignIn === 'function' && (
+            <button type="button" className="chip-act" onClick={() => onSignIn()}>Sign in to design</button>
+          )}
+        </div>
+      </nav>
+    )
+  }
 
   return (
     <nav aria-label="Solar design steps" data-testid="solar-flow-rail" className="solar-flow-rail" data-flow={selection.flow}>
