@@ -42,6 +42,16 @@ for (const [width, height] of WIDTHS) {
   })
 }
 
+for (const [width, height] of [[390, 844], [1440, 900]]) {
+  test(`sr-only fixture at ${width}x${height}`, async ({ page }) => {
+    await page.setViewportSize({ width, height })
+    await page.setContent(fixture('sr-only'))
+    const audit = await page.evaluate(auditPage)
+    for (const field of [...countFields, 'ellipsisCount']) expect(audit[field], field).toBe(0)
+    expect(audit.pageScrollsX).toBe(false)
+  })
+}
+
 test('summarize totals and worst rows', () => {
   const first = { id: 'first', pageScrollsX: true, offscreenCount: 2, clippedCount: 0,
     ellipsisCount: 1, smallTextCount: 4, smallTargetsCount: 1 }
