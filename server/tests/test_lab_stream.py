@@ -189,15 +189,19 @@ def test_gap_then_public_events(rig, monkeypatch):
     assert any(row["kind"] == "coalesced" for row in frames(output, "run"))
 
 
-@pytest.mark.parametrize("failure", ["binding_changed", "binding_unavailable"])
-def test_binding_rechecked_each_tick(rig, monkeypatch, failure):
+@pytest.mark.parametrize("failure, lookup_error", [
+    ("binding_changed", None),
+    ("binding_unavailable", HTTPException(503, "unavailable")),
+    ("binding_unavailable", OSError("unavailable")),
+])
+def test_binding_rechecked_each_tick(rig, monkeypatch, failure, lookup_error):
     calls = []
     def resolve(subject):
         calls.append(rig.clock.value)
         if rig.clock.value < 1:
             return rig.tenant, "hosted_pro"
-        if failure == "binding_unavailable":
-            raise HTTPException(503, "unavailable")
+        if lookup_error is not None:
+            raise lookup_error
         return "another-tenant", "hosted_pro"
     monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", resolve)
     output = collect(rig, stop=3)

@@ -144,7 +144,7 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
                 try:
                     active, _ = await asyncio.to_thread(
                         deps.resolve_active_platform_tenant_authority, tenant.subject)
-                except HTTPException:
+                except Exception:
                     return "binding_unavailable"
                 if active != str(tenant):
                     return "binding_changed"
