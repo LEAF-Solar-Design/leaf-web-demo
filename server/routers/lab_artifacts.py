@@ -38,6 +38,8 @@ def _call(function, *args, _document_errors=False, **kwargs):
         raise HTTPException(409, detail="lab_document_kind_fixed") from None
     except ledger.Conflict:
         raise HTTPException(409, detail="stale_expected_head") from None
+    except ledger.StoreMigrating:
+        raise HTTPException(409, detail="lab_store_migrating") from None
     except TooLarge:
         raise HTTPException(413, detail="lab_capacity_exceeded") from None
     except InvalidGraph as error:

@@ -148,6 +148,10 @@ def test_every_postgres_selector_adds_its_complete_authority_contract():
 def _assert_lab_immutable_ledger_contract():
     selected = {"LEAF_LAB_STORE": "postgres"}
     columns = db.required_columns_for_selected_authorities(selected)
+    assert columns["lab_git_tenants"] == {
+        "tenant_id", "mode", "frozen", "remote_sha", "local_sha", "receipt", "notified", "updated_at",
+    }
+    assert columns["lab_git_mirror"] == {"tenant_id", "doc_id", "revision", "commit", "sha256"}
     assert columns["lab_documents"] == {"tenant_id", "doc_id", "head", "published_revision", "kind"}
     assert columns["lab_blobs"] == {
         "tenant_id", "sha256", "canonical_text", "canonical_bytes", "byte_count",
@@ -156,6 +160,14 @@ def _assert_lab_immutable_ledger_contract():
         "tenant_id", "doc_id", "revision", "parent_revision", "author", "created_at", "sha256",
     }
     catalog = db.required_catalog_for_selected_authorities(selected)
+    assert catalog["constraints"]["lab_git_tenants_mode_check"] == db._catalog_contract(
+        "lab_git_tenants", "CHECK", "mode", "ledger", "replaying", "mirror")
+    for table in ("lab_git_tenants", "lab_git_mirror"):
+        assert table + "_pkey" in catalog["constraints"]
+        assert table not in db.required_columns_for_selected_authorities({})
+    mirror_migration = (db._PKG_DIR / "migrations/0087_lab_git_mirror.sql").read_text(encoding="utf-8")
+    assert "receipt JSONB NOT NULL" in mirror_migration
+    assert "notified JSONB NOT NULL" in mirror_migration
     assert catalog["constraints"]["lab_documents_kind_check"] == db._catalog_contract(
         "lab_documents", "CHECK", "kind", "graph", "widget")
     kind_migration = (db._PKG_DIR / "migrations/0086_lab_document_kind.sql").read_text(encoding="utf-8")

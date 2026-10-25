@@ -370,6 +370,7 @@
     "server-lab-evaluate",
     "server-lab-artifacts",
     "server-lab-widgets",
+    "server-lab-artifacts-git",
     "server-lab-run-store",
     "server-lab-runs",
     "server-lab-diff",

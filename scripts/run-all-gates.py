@@ -1316,6 +1316,10 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-widgets", "server tests/test_lab_widgets.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_widgets.py"), 47),
+        # 44 collected: 24 dependency-free cases and 20 PostgreSQL twins.
+        Suite("server-lab-artifacts-git", "server Lab git mirror and stage policy", "pytest", SERVER,
+              _py_pytest("tests/test_lab_artifacts_git.py") + ["tests/test_lab_stage_policy.py"], 24,
+              uses_database=True, database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-run-store", "server tests/test_lab_run_store.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_run_store.py"), 25, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
@@ -3171,7 +3175,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-14: PP-3 record A adds one registration row (237 -> 238).
               # 2026-10-19: su-a4a adds one production proof registration row (238 -> 239).
               # W1C-3 adds the commit suite registration contract.
-              ["test_studio_walk_regression_gate.py"], 243),
+              # SEL-303b adds the mirror/stage-policy registration contract.
+              ["test_studio_walk_regression_gate.py"], 244),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

@@ -308,6 +308,13 @@ def test_http_save_restore_publish_diff_and_tenant_boundary():
         assert other.get("/api/lab/docs/strategy/" + path).status_code == 404
     assert other.post("/api/lab/docs/strategy/restore", json={"revision": 1, "expected_head": 1}).status_code == 404
     assert other.post("/api/lab/docs/strategy/publish", json={"expected_head": 1}).status_code == 404
+    import lab_artifacts_git as mirror
+
+    ledger._run("tenant-a", lambda sql: (
+        mirror._state(sql, "tenant-a"), mirror._update(sql, "tenant-a", frozen=True)), write=True)
+    response = http.post("/api/lab/docs/strategy/save", json={"graph": GRAPH, "expected_head": 2})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "lab_store_migrating"}
 
 
 @pytest.mark.parametrize("stored_kind", ["widget", "graph"])

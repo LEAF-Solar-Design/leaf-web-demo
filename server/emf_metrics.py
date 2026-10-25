@@ -422,6 +422,25 @@ def emit_submit_latency(
             pass
 
 
+def _emit_lab_mirror_event(event: str) -> None:
+    if _DISABLED or event not in {"lab_replay_divergence", "lab_commit_unknown"}:
+        return
+    try:
+        _emit([{"Namespace": NAMESPACE, "Dimensions": [["event"]],
+                "Metrics": [{"Name": "LabMirrorEvent", "Unit": "Count"}]}],
+              {"event": event, "LabMirrorEvent": 1})
+    except Exception:
+        pass
+
+
+def emit_lab_replay_divergence() -> None:
+    _emit_lab_mirror_event("lab_replay_divergence")
+
+
+def emit_lab_commit_unknown() -> None:
+    _emit_lab_mirror_event("lab_commit_unknown")
+
+
 if __name__ == "__main__":
     # Smoke test: emit sample docs; validate they are JSON, single-publish, and
     # that an out-of-allowlist status is clamped.
