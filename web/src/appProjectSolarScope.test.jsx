@@ -251,7 +251,7 @@ describe('App project Solar scope ownership', () => {
                   reset()
                   const solarFlowSeated = ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && ENV_SOLAR_FLOW_RAIL && profile === 'solar'
                   const variant = { ...inputs, projectMode: true, solarFlowSeated, projectSolar: { ready, scope: { authorityKey: 'test', binding: null } },
-                    projectSolarWorkspaceRef: { current: null }, phoneViewport: false, catalogState: {}, projectSolarRuntime: {},
+                    projectSolarWorkspaceRef: { current: null }, drawerViewport: false, catalogState: {}, projectSolarRuntime: {},
                     mintCorrelationId: vi.fn(), onOpenProjectSolarTool: vi.fn(), onCloseProjectSolarTool: vi.fn(), running, routeErr,
                     surfaceSlots: { toolbar: { profile } }, ENV_CAD_EDIT, ENV_SOLAR_SETTINGS_FORM, ENV_SOLAR_FLOW_RAIL }
                   const view = render(React.createElement(React.Fragment, null,
