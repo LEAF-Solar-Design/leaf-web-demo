@@ -32,6 +32,7 @@ describe('phone shell targets (L8, L9)', () => {
     const controls = ruleBody(' .bar-command-line .bar-controls')
     expect(controls).toMatch(/flex:\s*0 0 44px;/)
     expect(controls).toMatch(/(?:^|;)\s*height:\s*44px;/)
+    expect(controls).toMatch(/(?:^|;)\s*padding:\s*0 8px;/)
     expect(controls).toMatch(/flex-wrap:\s*nowrap;/)
     expect(controls).toMatch(/overflow-x:\s*auto;/)
     expect(controls).toMatch(/overflow-y:\s*hidden;/)

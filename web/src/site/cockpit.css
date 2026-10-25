@@ -1224,7 +1224,7 @@
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .bar-command-line .bar-controls {
     flex: 0 0 44px; height: 44px; min-width: 0; box-sizing: border-box;
-    flex-wrap: nowrap; padding: 0 8px 4px; gap: 6px;
+    flex-wrap: nowrap; padding: 0 8px; gap: 6px;
     overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .bar-command-line .bar-controls :is(button, .chip-act, .bar-add, .bar-scope) {
