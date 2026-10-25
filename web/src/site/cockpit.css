@@ -1377,13 +1377,10 @@
 
 @media (min-width: 601px) and (max-width: 980px) and (min-height: 500px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] {
-    --ck-drawer: 44px; --ck-dock: var(--studio-dock-rise, calc(66px + var(--tb-h, 32px) + var(--ck-status-rise, 0px)));
+    --ck-drawer: 44px; --ck-dock: var(--studio-dock-rise, calc(66px + var(--tb-h, 32px) + var(--ck-status-rise, 0px) + env(safe-area-inset-bottom, 0px)));
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .center-col {
-    bottom: calc(var(--ck-dock) + var(--ck-drawer) + env(safe-area-inset-bottom, 0px));
-  }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs {
-    bottom: calc(var(--ck-dock) + env(safe-area-inset-bottom, 0px));
+    bottom: calc(var(--ck-dock) + var(--ck-drawer));
   }
 }
 

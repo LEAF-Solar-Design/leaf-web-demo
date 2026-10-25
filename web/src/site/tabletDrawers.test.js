@@ -40,8 +40,10 @@ describe('tablet Studio drawers', () => {
     expect(frame).toBeDefined()
     const variables = ruleBody(frame, scope)
     expect(variables).toMatch(/--ck-drawer:\s*44px;/)
-    expect(variables).toContain('--ck-dock: var(--studio-dock-rise, calc(66px + var(--tb-h, 32px) + var(--ck-status-rise, 0px)));')
-    expect(ruleBody(frame, `${scope} .center-col`)).toContain('bottom: calc(var(--ck-dock) + var(--ck-drawer) + env(safe-area-inset-bottom, 0px));')
-    expect(ruleBody(frame, `${scope} .studio-drawer-tabs`)).toContain('bottom: calc(var(--ck-dock) + env(safe-area-inset-bottom, 0px));')
+    const dockDeclaration = '--ck-dock: var(--studio-dock-rise, calc(66px + var(--tb-h, 32px) + var(--ck-status-rise, 0px) + env(safe-area-inset-bottom, 0px)));'
+    expect(variables).toContain(dockDeclaration)
+    expect(ruleBody(frame, `${scope} .center-col`).trim()).toBe('bottom: calc(var(--ck-dock) + var(--ck-drawer));')
+    expect(ruleBody(frame, `${scope} .studio-drawer-tabs`)).toBeUndefined()
+    expect(frame.replace(dockDeclaration, '')).not.toContain('env(safe-area-inset-bottom')
   })
 })
