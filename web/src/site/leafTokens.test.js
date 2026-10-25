@@ -135,6 +135,30 @@ it('cockpit accent backgrounds use dark text from the vendored v1 root', () => {
   }
 })
 
+it('shell declarations use v1 roles instead of the mapped old cockpit palette', () => {
+  const oldHex = /#(?:fff|ffffff|e6e6e6|d8d8d8|d4d4d4|d0d0d0|cfcfcf|9a9a9a|bdbdbd|8a8a8a|7a7a7a|6a6a6a|4a4a4a|444|424242|3f3f3f|3a3a3a|383838|2e2e2e|323232|2a2a2a|5a5a5a|2aa3de|1390cc|0b1a22|8fbf9f|c9a86a|d9a441|e24947)\b/i
+  const oldRgba = /rgba\(\s*240\s*,\s*242\s*,\s*240\s*,\s*0?\.72\s*\)/i
+  const palettes = [
+    ['cockpit.css', cockpit, '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])'],
+    ['studioShell.css', read('src/site/studioShell.css'), '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'],
+  ]
+  for (const [file, css, paletteSelector] of palettes) {
+    const rules = [...stripComments(css).matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    expect(rules.length, file).toBeGreaterThan(0)
+    for (const [, selector, body] of rules) {
+      const palette = selector.trim() === paletteSelector && /--ck-font\s*:/.test(body)
+      for (const [, property, value] of body.matchAll(/(?:^|;)\s*([\w-]+)\s*:\s*([^;]+)(?=;|$)/g)) {
+        // Only the two original palette blocks may retain literal definitions.
+        if (palette && property.startsWith('--')) continue
+        if (/^(?:box-shadow|text-shadow)$/i.test(property) || /\b[\w-]*gradient\s*\(/i.test(value)) continue
+        const context = `${file} ${selector.trim()} ${property}: ${value.trim()}`
+        expect(value, context).not.toMatch(oldHex)
+        expect(value, context).not.toMatch(oldRgba)
+      }
+    }
+  }
+})
+
 it('SSD1-24E light hover text', () => {
   const css = stripComments(read('src/site/landing.css'))
   const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
