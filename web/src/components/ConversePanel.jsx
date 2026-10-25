@@ -41,6 +41,7 @@ import { listEngineChanges } from '../engineChanges.js'
 import { moveRovingTab } from '../lib/roving.js'
 import EngineChangesTab from './EngineChangesTab.jsx'
 import { isCompositionKey } from '../lib/keyComposition.js'
+import { humanizeError } from '../errorHumanize.js'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -190,11 +191,11 @@ function fmtUsage(u) {
 // Honest, calm stop-reason notes (turn_complete). end_turn renders nothing;
 // llm_quota_exhausted is the banner's job, not a per-turn note.
 const STOP_NOTES = {
-  awaiting_approval: 'waiting on your decision above',
-  cap_hit: 'turn hit its token cap',
-  llm_rate_limited: 'rate-limited. Try again shortly',
-  error: 'the turn ended with an error',
-  timeout: 'the turn timed out',
+  awaiting_approval: 'Waiting on your decision above.',
+  cap_hit: 'The reply reached its length limit. Ask the assistant to continue.',
+  llm_rate_limited: 'The assistant is busy. Try again shortly.',
+  error: 'The assistant could not finish this reply. Try again.',
+  timeout: 'The reply took too long. Try again.',
 }
 
 // Local send/approve failure -> the same calm degraded copy the App banner uses.
@@ -202,16 +203,18 @@ function bannerFor(e) {
   const kind = classifyAgentError(e)
   const fallbacks = {
     quota: 'AI paused. Your built tools keep working.',
-    rate_limited: 'AI rate-limited. Retry shortly.',
+    rate_limited: 'The assistant is busy. Try again shortly.',
     grant: 'Chat needs a linked Claude account.',
-    busy: 'A turn is already in flight. Wait for it to finish.',
+    authentication: 'Your session has expired. Sign in again to continue.',
+    workspace: 'Your account cannot access this workspace. Ask your workspace administrator for access.',
+    busy: 'The assistant is working. Wait for the reply to finish.',
     entitlement: 'Chat isn’t included in your plan.',
     approval_stale: 'That request was already decided. Ask the assistant to propose it again.',
     confirmation_expired: 'That confirmation expired. Ask the assistant to propose it again.',
     too_large: 'That message is too large. Try fewer or smaller images.',
   }
   const fallback = fallbacks[kind] || 'Couldn’t reach the assistant. Your built tools keep working.'
-  return { kind, ...errorPresentation(e, fallback), message: fallback }
+  return { kind, ...errorPresentation(e, fallback), message: humanizeError(fallback) }
 }
 
 const publicationString = (value) =>
@@ -273,6 +276,18 @@ export default function ConversePanel({
   const [pendingApprovalsError, setPendingApprovalsError] = useState(false)
   const [questionChoices, setQuestionChoices] = useState({ sendingQuestionIds: [] })
   const [stopping, setStopping] = useState(false)  // an interrupt is in flight
+  const [connectionState, setConnectionState] = useState('connecting')
+  const [stoppedTurns, setStoppedTurns] = useState(new Set())
+  const [endedTurns, setEndedTurns] = useState(new Set())
+  const streamRef = useRef(null)
+  const composerRef = useRef(null)
+  const composerActionRef = useRef(null)
+  const wasBusyRef = useRef(false)
+  const restoreComposerFocus = () => {
+    if (document.activeElement === document.body || document.activeElement === composerActionRef.current) {
+      composerRef.current?.focus()
+    }
+  }
   // S27: the turn an Escape already asked to stop. One Escape action per turn:
   // after it, the next Escape climbs to whatever is under the turn.
   const [escapeStoppedTurn, setEscapeStoppedTurn] = useState(null)
@@ -338,13 +353,18 @@ export default function ConversePanel({
     if (!sessionId) return undefined
     setEvents([]); setLocalTurns([]); setSendErr(null); clearAttachments()
     setDecidedLocal({}); setDeciding(null)
+    setConnectionState('connecting'); setStoppedTurns(new Set())
+    setEndedTurns(new Set())
     setQuestionChoices({ sendingQuestionIds: [] })
     jobSeenRef.current = new Set()
     setQueueState(createQueuedTurnState())
     track('conversation.opened') // P2: panel opened/reopened a session — no session id in labels (identity is server-stamped)
     let active = true
     const stream = openStream(sessionId, 0, {
+      onStreamDown: () => { if (active) setConnectionState('retrying') },
+      onConnectionState: (state) => { if (active) setConnectionState(state) },
       onEvent: (env) => {
+        if (!active) return
         notifyCatalogPublication(env, sessionId, active, sessionIdRef, onCatalogChangedRef, consumeCatalogPublicationRef)
         const queued = reconcileQueuedTurn(queueStateRef.current, env)
         setQueueState(queued.state)
@@ -358,7 +378,8 @@ export default function ConversePanel({
         setEvents((prev) => [...prev, env])
       },
     })
-    return () => { active = false; stream.close() }
+    streamRef.current = stream
+    return () => { active = false; streamRef.current = null; stream.close() }
   }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -541,7 +562,7 @@ export default function ConversePanel({
       } else if (type === 'tool_call') {
         // `args` is OPTIONAL on the wire: when the backend sends it the chip
         // becomes expandable, otherwise the chip is exactly what it is today.
-        const chip = { tool: data.tool, summary: data.args_summary || '', ok: null, result: null, args: data.args }
+        const chip = { id: data.call_id || env.seq || t.feed.length, tool: data.tool, summary: data.args_summary || '', ok: null, result: null, args: data.args }
         t.openCalls.push(chip)
         t.feed.push({ kind: 'tool', chip })
       } else if (type === 'tool_result') {
@@ -549,7 +570,7 @@ export default function ConversePanel({
         const open = t.openCalls.find((c) => c.tool === data.tool && c.ok === null)
         const writtenBy = writtenByOf(data)
         if (open) { open.ok = data.ok !== false; open.result = data.summary || ''; open.fullResult = data.result; open.writtenBy = writtenBy }
-        else t.feed.push({ kind: 'tool', chip: { tool: data.tool, summary: '', ok: data.ok !== false, result: data.summary || '', fullResult: data.result, writtenBy } })
+        else t.feed.push({ kind: 'tool', chip: { id: data.call_id || env.seq || t.feed.length, tool: data.tool, summary: '', ok: data.ok !== false, result: data.summary || '', fullResult: data.result, writtenBy } })
       } else if (type === 'job_linked') {
         t.feed.push({ kind: 'job', jobId: data.job_id, tool: data.tool || null })
       } else if (type === 'proposed_run') {
@@ -584,13 +605,19 @@ export default function ConversePanel({
               ? new Date(retryTime).toISOString() : null }
             : null
         } else if (code === 'grant_required') grant = true
-        else t.feed.push({ kind: 'error', code, message: data.error?.message || 'turn error' })
+        else t.feed.push({ kind: 'error', code, message: humanizeError(STOP_NOTES[code] || data.error?.message || 'The assistant could not finish this reply. Try again.') })
       }
+    }
+    // A stop can confirm completion before the terminal event is recovered.
+    for (const turnId of endedTurns) {
+      const t = turnOf(turnId)
+      if (!t.stopReason) t.stopReason = 'end_turn'
+      completed.add(turnId)
     }
     // The turn an interrupt would end: started, not yet terminal. Held as the
     // turn ITSELF (not just a boolean) so Stop/Esc can name the exact turn_id
     // — the server refuses a stale one rather than ending its replacement.
-    const activeTurn = turns.find((t) => t.started && !t.stopReason) || null
+    const activeTurn = turns.find((t) => t.started && !t.stopReason && !stoppedTurns.has(t.turnId)) || null
     const active = !!activeTurn
     // Latest usage tick wins the status strip: context% is a running session
     // reading, not a per-turn one, so the newest turn_usage is the truth.
@@ -598,7 +625,7 @@ export default function ConversePanel({
     for (const t of turns) if (t.usage) latestUsage = t.usage
     return { turns, decisions, completed, quota, quotaRetry, grant, active, latestUsage,
              activeTurnId: activeTurn ? activeTurn.turnId : null }
-  }, [events])
+  }, [events, stoppedTurns, endedTurns])
 
   // User bubbles come from the dispatching side (§3 has no user-message event):
   // App-dispatched turns + panel-sent follow-ups, keyed by turn_id.
@@ -619,10 +646,15 @@ export default function ConversePanel({
   const knownTurnIds = useMemo(() => new Set(model.turns.map((t) => t.turnId)), [model])
   const pendingUserTurns = allUserTurns.filter((u) => u.turnId && u.text && !knownTurnIds.has(u.turnId))
 
-  // Input is closed while any turn is in flight (turn_complete re-enables it).
+  // Keep focus while a turn runs, but prevent edits and duplicate sends.
   const lastUser = allUserTurns[allUserTurns.length - 1] || null
-  const awaitingTurn = !!(lastUser && lastUser.turnId && !model.completed.has(lastUser.turnId))
+  const awaitingTurn = !!(lastUser && lastUser.turnId && !model.completed.has(lastUser.turnId) && !stoppedTurns.has(lastUser.turnId))
   const busy = sending || model.active || awaitingTurn
+
+  useEffect(() => {
+    if (wasBusyRef.current && !busy) restoreComposerFocus()
+    wasBusyRef.current = busy
+  }, [busy]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // The turn Stop/Esc would end. `model.activeTurnId` is the streaming turn;
   // before its first event lands there is still a dispatched turn to
@@ -634,12 +666,17 @@ export default function ConversePanel({
     if (!stoppableTurnId || stopping) return
     setStopping(true); setSendErr(null)
     try {
-      await cancelTurn(sessionId, stoppableTurnId)
+      const result = await cancelTurn(sessionId, stoppableTurnId)
+      if (sessionIdRef.current !== sessionId) return
+      void streamRef.current?.reconcile?.()
+      if (result?.status === 'already_ended') {
+        setEndedTurns((prev) => new Set([...prev, stoppableTurnId]))
+        return
+      }
+      setStoppedTurns((prev) => new Set([...prev, stoppableTurnId]))
       track('conversation.truncated', { reason: 'user_stop' }) // P2: interrupt ends the turn's output early
-      // No optimistic local state: the server appends
-      // turn_complete{stop_reason:'interrupted'} and the stream reconciles,
-      // so the panel shows the turn ending for the SAME reason a spontaneous
-      // completion would — one code path, not two.
+      // Acknowledged cancellation unlocks this turn even if its final event
+      // was lost. A bounded transcript refresh recovers the durable ending.
     } catch (e) {
       setSendErr(bannerFor(e))
       // A refused stop leaves the turn running: Escape may ask again.
@@ -649,8 +686,7 @@ export default function ConversePanel({
     }
   }
 
-  // Esc interrupts, matching the terminal client. Page-wide because the reply
-  // input is disabled while a turn runs (a disabled control receives no keys).
+  // Esc interrupts, matching the terminal client, wherever focus is in the page.
   // S27: through the one owner stack at the run layer. Every menu, sheet,
   // drawer, open card or proposal above it closes first, the stack consumes
   // the key so App's ladder never also reads it, and it is an owner only while
@@ -662,12 +698,14 @@ export default function ConversePanel({
 
   const attachmentPayloads = async () => Promise.all(attachments.map((image) => new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onerror = () => reject(new Error('Could not read the image attachment.'))
+    const fail = () => reject(Object.assign(new Error('Could not read the image attachment. Remove it and attach it again.'), { attachmentRead: true }))
+    reader.onerror = fail
+    reader.onabort = fail
     reader.onload = () => {
       const data = String(reader.result || '').split(',', 2)[1] || ''
       resolve({ media_type: image.media_type, data })
     }
-    reader.readAsDataURL(image.file)
+    try { reader.readAsDataURL(image.file) } catch { fail() }
   })))
 
   // allowSecretOnce is the "Send anyway" click's authorisation, carried as a
@@ -680,6 +718,7 @@ export default function ConversePanel({
     if ((!text && !(includeAttachments && attachments.length)) || busy) return false
     let delivered = false
     setSending(true); setSendErr(null)
+    restoreComposerFocus()
     const accept = (res, images) => {
       if (res.status === 'queued') {
         const queued = acceptQueuedTurn(queueStateRef.current, {
@@ -723,6 +762,7 @@ export default function ConversePanel({
       // failure banner ("the assistant is unavailable" would be a lie about a
       // client-side decision). It renders as this composer's own notice.
       if (isSecretRefused(e)) setSecretNotice(e.refusal)
+      else if (e.attachmentRead) setAttachmentError(humanizeError(e))
       else setSendErr(bannerFor(e))
     } finally {
       setSending(false)
@@ -745,8 +785,9 @@ export default function ConversePanel({
   }
 
   const onPaste = (e) => {
+    if (busy) { e.preventDefault(); return }
     const result = clipboardImagesToAttachments(e.clipboardData?.items, attachments)
-    if (result.error) { e.preventDefault(); setAttachmentError(result.error); return }
+    if (result.error) { e.preventDefault(); setAttachmentError(humanizeError(result.error)); return }
     if (!result.attachments.length) return
     e.preventDefault()
     setAttachmentError(null)
@@ -883,7 +924,7 @@ export default function ConversePanel({
     )
   }
 
-  const renderFeedItem = (item, i) => {
+  const renderFeedItem = (item, i, turnId) => {
     if (item.kind === 'text') {
       // Assistant prose renders through the element-only markdown path
       // (Markdown.jsx / markdown.js): fenced code, lists and links become
@@ -903,7 +944,7 @@ export default function ConversePanel({
       // args_summary keeps exactly today's one-line chip (no dead affordance).
       const detail = c.args ?? c.fullResult
       const expandable = detail !== undefined && detail !== null
-      const key = `${i}:${c.tool}`
+      const key = JSON.stringify([turnId, c.id, c.tool])
       const open = !!expandedTools[key]
       const st = stepState(c)
       const verb = stepVerb(c.tool)
@@ -1072,7 +1113,8 @@ export default function ConversePanel({
       return (
         <div key={i} className="converse-note">
           <span className="dot square" aria-hidden="true" />
-          <span className="dim">{item.message}{item.code ? ` · ${item.code}` : ''}</span>
+          <span className="dim">{item.message}</span>
+          {item.code && <details><summary>Error details</summary><code>{item.code}</code></details>}
         </div>
       )
     }
@@ -1090,6 +1132,16 @@ export default function ConversePanel({
 
   const conversation = (
     <>
+      {connectionState !== 'connected' && connectionState !== 'connecting' && (
+        <div className="banner" role="status">
+          <span>{humanizeError(connectionState === 'authentication'
+            ? 'Your session has expired. Sign in again to continue.'
+            : connectionState === 'workspace'
+              ? 'Your account cannot access this workspace. Ask your workspace administrator for access.'
+              : 'The conversation connection was interrupted. Retrying. You can stop the current reply.')}</span>
+          {connectionState === 'retrying' && <button type="button" className="chip-neutral" onClick={() => { void streamRef.current?.reconcile?.() }}>Retry connection</button>}
+        </div>
+      )}
       {showQuota && (
         <div className="banner"><span><b>AI paused</b>. Your built tools keep working.
           {model.quotaRetry && <>{' '}The affected provider reported a retry interval of {model.quotaRetry.seconds} seconds.
@@ -1108,8 +1160,8 @@ export default function ConversePanel({
       {showOtherErr && (
         <div className="banner">
           <span>{sendErr.message}</span>
-          {sendErr.code && <code className="dim">{sendErr.code}</code>}
-          {sendErr.nextAction && <span className="dim">Next: {sendErr.nextAction}</span>}
+          {sendErr.code && <details><summary>Error details</summary><code className="dim">{sendErr.code}</code></details>}
+          {sendErr.nextAction && <span className="dim">Next: {humanizeError(sendErr.nextAction)}</span>}
           {sendErr.actor && <span className="key">{errorActorLabel(sendErr.actor)}</span>}
         </div>
       )}
@@ -1150,8 +1202,11 @@ export default function ConversePanel({
             {t.imageDescriptors?.length > 0 && (
               <div className="converse-note"><span className="dim">{t.imageDescriptors.length} image attachment{t.imageDescriptors.length === 1 ? '' : 's'} sent. Preview is unavailable after reload.</span></div>
             )}
-            {t.feed.map(renderFeedItem)}
-            {reasoningPending(t) && (
+            {t.feed.map((item, i) => renderFeedItem(item, i, t.turnId))}
+            {stoppedTurns.has(t.turnId) && !t.stopReason && (
+              <div className="converse-note"><span className="dim">Reply stopped.</span></div>
+            )}
+            {!stoppedTurns.has(t.turnId) && reasoningPending(t) && (
               // Reasoning between steps collapses to one pulse plus a verb;
               // a running step carries its own pulse and streaming prose is
               // its own evidence, so neither shows this row.
@@ -1163,7 +1218,7 @@ export default function ConversePanel({
             {(t.usage || (t.stopReason && STOP_NOTES[t.stopReason])) && (
               <div className="converse-turnfoot">
                 {t.stopReason && STOP_NOTES[t.stopReason] && (
-                  <span className="dim">{STOP_NOTES[t.stopReason]}</span>
+                  <span className="dim">{humanizeError(STOP_NOTES[t.stopReason])}</span>
                 )}
                 {t.usage && <span className="converse-usage">{fmtUsage(t.usage)}</span>}
               </div>
@@ -1183,8 +1238,8 @@ export default function ConversePanel({
               <img key={`${u.turnId}-pending-image-${index}`} src={src} alt="Pending image attachment" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />
             ))}
             <div className="converse-note">
-              <span className="dot live pulse" aria-hidden="true" />
-              <span className="dim">thinking…</span>
+              {!stoppedTurns.has(u.turnId) && <span className="dot live pulse" aria-hidden="true" />}
+              <span className="dim">{stoppedTurns.has(u.turnId) ? 'Reply stopped.' : 'thinking…'}</span>
             </div>
           </div>
         ))}
@@ -1228,6 +1283,7 @@ export default function ConversePanel({
 
       <div className="converse-input">
         <input
+          ref={composerRef}
           value={input}
           // Any edit retires the refusal, which was about the text that WAS
           // there; a notice outliving its text reads as a stuck error.
@@ -1238,13 +1294,14 @@ export default function ConversePanel({
           }}
           onPaste={onPaste}
           placeholder={busy ? 'Assistant is working…' : 'Reply to the assistant…'}
-          disabled={busy}
+          readOnly={busy}
           spellCheck={false}
           aria-label="Reply to the assistant"
         />
         {(attachmentError || attachments.length > 0) && (
           <span className="dim" role={attachmentError ? 'alert' : undefined}>
-            {attachmentError || attachments.map((image) => (
+            {attachmentError && <span>{attachmentError}</span>}
+            {attachments.map((image) => (
               <span key={image.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 4 }}>
                 <img src={image.thumbnailUrl} alt="Pending image attachment" width="24" height="24" style={{ objectFit: 'cover' }} />
                 <button type="button" className="chip-neutral" onClick={() => removeAttachment(image.id)} aria-label="Remove image attachment">Remove</button>
@@ -1253,13 +1310,14 @@ export default function ConversePanel({
           </span>
         )}
         {busy && stoppableTurnId ? (
-          // While a turn runs, Send has nothing to do (the input is disabled),
+          // While a turn runs, Send has nothing to do (the input is read-only),
           // so the primary control becomes Stop — the terminal client's Esc,
           // given a visible affordance because a browser has no status line to
           // advertise the shortcut.
           <button
             type="button"
             className="chip-neutral"
+            ref={composerActionRef}
             onClick={stop}
             disabled={stopping}
             title="Interrupt this turn (Esc)"
@@ -1273,7 +1331,7 @@ export default function ConversePanel({
           // postMessage received {text: "[object Object]"}). Wrapping it is
           // what makes the button send the input at all, and therefore what
           // puts it behind the credential guard.
-          <button type="button" className="chip-act" onClick={() => send()} disabled={busy || (!input.trim() && !attachments.length)}>
+          <button type="button" className="chip-act" ref={composerActionRef} onClick={() => send()} disabled={busy || (!input.trim() && !attachments.length)}>
             {sending ? 'Sending…' : 'Send'}
           </button>
         )}
@@ -1287,7 +1345,7 @@ export default function ConversePanel({
       <div className="converse-head">
         <span className={model.active || busy ? 'dot live pulse' : 'dot'} aria-hidden="true" />
         <span className="converse-title">Assistant</span>
-        <span className="dim">plans and explains, deterministic tools do the work</span>
+        <span className="dim">Ask questions and run your design tools</span>
         <span className="converse-spacer" />
         {/* Status strip — the terminal client's persistent model/context/cost
             reading, as a component rather than a shell script. Every field is

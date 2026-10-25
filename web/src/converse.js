@@ -104,6 +104,12 @@ async function get(path) {
 // are lowercase on the wire, like the existing quota_exceeded).
 export function classifyAgentError(err) {
   const code = String(err?.errorCode || '').toLowerCase()
+  // Body-only codes describe access failures, but must not authorize busy retries.
+  const accessCode = code || String(err?.body?.error?.error_code || '').toLowerCase()
+  if (['unauthenticated', 'authentication_required', 'session_expired'].includes(accessCode)) return 'authentication'
+  if (accessCode === 'grant_required' || err?.body?.grant_required === true) return 'grant'
+  if (accessCode === 'entitlement_required' || err?.body?.entitlement_required === true) return 'entitlement'
+  if (['workspace_binding_required', 'identity_binding_required', 'tenant_binding_required'].includes(accessCode)) return 'workspace'
   if (code === 'llm_quota_exhausted') return 'quota'
   if (code === 'llm_rate_limited') return 'rate_limited'
   if (code === 'turn_in_progress') return 'busy'
@@ -121,8 +127,8 @@ export function classifyAgentError(err) {
   // the payload is too big. That is a thing the user can act on (send fewer or
   // smaller images), and an outage is not.
   if (err?.status === 413) return 'too_large'
-  if (err?.status === 401 || code === 'grant_required' || !!(err?.body && err.body.grant_required)) return 'grant'
-  if (err?.status === 403 || code === 'entitlement_required' || !!(err?.body && err.body.entitlement_required)) return 'entitlement'
+  if (err?.status === 401) return 'authentication'
+  if (err?.status === 403) return 'workspace'
   return 'unreachable'
 }
 
@@ -489,6 +495,9 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
   let retryMs = 1000
   let pollTimer = null
   let pollLimit = POLL_LIMIT
+  let polling = null
+  let pollController = null
+  const connection = (state) => { if (!closed) handlers.onConnectionState?.(state) }
 
   const deliver = (envelope) => {
     if (closed || !envelope || !envelope.type) return
@@ -517,10 +526,11 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
     } catch { es = null; return } // construction failed; the poll covers it
     const onEvt = (ev) => {
       const env = parse(ev.data)
-      if (env) { retryMs = 1000; deliver(env) }
+      if (env) { retryMs = 1000; connection('connected'); deliver(env) }
     }
     for (const t of STREAM_EVENT_TYPES) es.addEventListener(t, onEvt)
     es.onmessage = onEvt // defensive: unnamed frames still carry the envelope
+    es.onopen = () => { void reconcile() }
     es.onerror = () => {
       // Reconnect with after_seq replay; backoff caps at 10s. The transcript
       // poll keeps events flowing while the SSE leg is down.
@@ -528,6 +538,7 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
       es = null
       if (closed) return
       if (handlers.onStreamDown) handlers.onStreamDown()
+      connection('retrying')
       trackStreamDown(1)  // P2: streaming reliability as users feel it (capped 10/session)
       reconnectTimer = setTimeout(openEs, retryMs)
       retryMs = Math.min(retryMs * 2, 10000)
@@ -536,23 +547,28 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
 
   const pollOnce = async () => {
     if (closed) return
+    pollController = new AbortController()
+    const timeout = setTimeout(() => pollController?.abort(), 8000)
     try {
       for (;;) {
         if (closed) return
         const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
         const res = noteUnauthorized(await fetch(
           `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/transcript?limit=${pollLimit}`,
-          { headers },
+          { headers, signal: pollController.signal },
         ), `/api/sessions/${sessionId}/transcript`, headers.Authorization)
         if (res.status === 401) {
+          connection('authentication')
           closed = true
           if (es) { try { es.close() } catch { /* noop */ } es = null }
           if (reconnectTimer) clearTimeout(reconnectTimer)
           if (pollTimer) clearInterval(pollTimer)
           return
         }
-        if (!res.ok) return // transient / 404 — the SSE leg is authoritative
+        if (!res.ok) { connection(res.status === 403 ? 'workspace' : 'retrying'); return }
         const body = await res.json().catch(() => null)
+        if (closed) return
+        if (!Array.isArray(body?.events)) { connection('retrying'); return }
         const events = (body && body.events) || [] // ascending seq
         // The transcript window is the most recent N only: a first seq beyond
         // lastSeq+1 means events between fell off the front of the window.
@@ -566,19 +582,27 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
           continue
         }
         for (const env of events) deliver(env)
+        connection('connected')
         pollLimit = POLL_LIMIT // caught up — back to the cheap window
         return
       }
-    } catch { /* transient */ }
+    } catch { connection('retrying') }
+    finally { clearTimeout(timeout); pollController = null }
+  }
+  const reconcile = () => {
+    if (!polling) polling = pollOnce().finally(() => { polling = null })
+    return polling
   }
 
   openEs()
-  pollTimer = setInterval(pollOnce, 2500)
-  pollOnce()
+  pollTimer = setInterval(reconcile, 2500)
+  reconcile()
 
   return {
+    reconcile,
     close() {
       closed = true
+      pollController?.abort()
       if (es) { try { es.close() } catch { /* noop */ } es = null }
       if (reconnectTimer) clearTimeout(reconnectTimer)
       if (pollTimer) clearInterval(pollTimer)
