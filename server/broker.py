@@ -176,18 +176,24 @@ class EgressBlocked(Exception):
     pass
 
 
+def _configured_host_matches(host: str, env_name: str) -> bool:
+    try:
+        configured = urllib.parse.urlsplit(os.environ.get(env_name, ""))
+        _ = configured.port  # Validate the port before allowing the hostname.
+        if configured.scheme in {"http", "https"} and configured.hostname:
+            return host.lower() == configured.hostname.lower()
+    except ValueError:
+        pass
+    return False
+
+
 def _egress_allowed(host: str) -> bool:
     if host in ALLOWED_HOSTS:
         return True
-    # Allow the configured harness host because tenant grant routes call it.
-    try:
-        harness = urllib.parse.urlsplit(os.environ.get("LEAF_AUTHOR_HARNESS_URL", ""))
-        _ = harness.port  # Validate the port before allowing the hostname.
-        if harness.scheme in {"http", "https"} and harness.hostname:
-            if host.lower() == harness.hostname.lower():
-                return True
-    except ValueError:
-        pass
+    if _configured_host_matches(host, "LEAF_AUTHOR_HARNESS_URL"):
+        return True
+    if _configured_host_matches(host, "BROKER_URL"):
+        return True
     return any(host.endswith(sfx) for sfx in ALLOWED_SUFFIXES)
 
 
