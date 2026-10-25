@@ -50,6 +50,18 @@ async function compose() {
 beforeEach(() => { vi.stubGlobal('TextEncoder', TextEncoder); vi.stubGlobal('TextDecoder', TextDecoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
+it('allows Save before the catalog loads and shows the missing action validation', async () => {
+  const { props, fetchImpl } = setup()
+  render(<ManualWorkflowDefinitionPanel {...props} />)
+  change('Definition title', 'Order workflow'); change('Definition stable ID', 'workflow')
+  const button = screen.getByRole('button', { name: 'Save workflow definition' })
+  expect(button).not.toBeDisabled()
+  fireEvent.click(button)
+  expect(await screen.findByRole('alert')).toHaveTextContent('Step 1: Choose a catalog action.')
+  await waitFor(() => expect(screen.getByLabelText('Step 1 action')).toHaveFocus())
+  expect(fetchImpl).not.toHaveBeenCalled()
+})
+
 it('focuses a specific numeric field validation message', async () => {
   const { props } = setup()
   render(<ManualWorkflowDefinitionPanel {...props} />)
@@ -72,7 +84,7 @@ it('opens only explicitly, renders catalog text safely and saves typed fixed dat
   const { props, fetchImpl } = setup()
   render(<ManualWorkflowDefinitionPanel {...props} />)
   expect(fetchImpl).not.toHaveBeenCalled()
-  expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeEnabled()
   await compose()
   change('Step 1 Nullable presence', 'null')
   expect(document.querySelector('img')).toBeNull()
@@ -91,7 +103,7 @@ it('opens only explicitly, renders catalog text safely and saves typed fixed dat
   expect(document.activeElement).toContainElement(screen.getByRole('region', { name: 'Saved immutable definition' }))
   fireEvent.click(screen.getByRole('button', { name: 'Compose a new definition' }))
   expect(screen.getByLabelText('Definition stable ID')).toHaveValue('')
-  expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeEnabled()
 })
 it('mounts an inert schedule form only below the saved immutable definition and removes it on composer reset', async () => {
   vi.stubGlobal('crypto', { randomUUID: vi.fn(() => projectId) })
@@ -145,7 +157,7 @@ it('honestly handles an empty catalog and bounds explicit pagination with retain
   render(<ManualWorkflowDefinitionPanel {...props} />)
   await open()
   expect(screen.getByText(/No actions are available/)).toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeEnabled()
   expect(fetchImpl).toHaveBeenCalledOnce()
   fetchImpl.mockResolvedValueOnce(response({ actions: [other], next_cursor: 'page_2' }))
   fireEvent.click(screen.getByRole('button', { name: 'Next action catalog page' }))
@@ -333,7 +345,7 @@ it('clears an ambiguous original intent when the binding signal changes', async 
   rerender(<ManualWorkflowDefinitionPanel {...props} signal={new AbortController().signal} />)
   expect(screen.getByLabelText('Definition stable ID')).toHaveValue('')
   expect(screen.queryByRole('button', { name: 'Retry identical workflow definition' })).toBeNull()
-  expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeEnabled()
 })
 it.each(['catalog', 'save', 'preflight', 'completion'])('suppresses late %s continuations after context abort', async (kind) => {
   const { props, fetchImpl, controller } = setup()

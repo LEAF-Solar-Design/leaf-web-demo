@@ -167,7 +167,7 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
     <p>Fields are saved business data. Credentials belong in connection setup. The host validates business semantics. Saving a definition does not start a run.</p>
     <button disabled={locked} onClick={() => operate('Open')}>Open action catalog</button>
     {catalog && <>
-      {!catalog.actions.length && <p>No actions are available on this catalog page. Saving is disabled.</p>}
+      {!catalog.actions.length && <p>No actions are available on this catalog page. Choose an action before saving.</p>}
       {catalog.next_cursor && <button disabled={locked || binding.current?.cursors.has(catalog.next_cursor) || binding.current?.cursors.size >= 20}
         onClick={() => operate('Next')}>Next action catalog page</button>}
     </>}
@@ -219,7 +219,7 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
           const key = binding.current.nextStep++
           setDraft({ ...draft, steps: [...draft.steps, { key, id: `step-${key}`, action: null, fields: {} }] })
         }}>Add step</button>
-        <button disabled={!catalog?.actions.length}>Save workflow definition</button>
+        <button disabled={Boolean(pending)}>Save workflow definition</button>
       </fieldset>
     </form>
     <div ref={feedback} tabIndex={-1} style={{ minWidth: 0 }}>
