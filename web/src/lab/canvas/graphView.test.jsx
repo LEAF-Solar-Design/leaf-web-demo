@@ -11,6 +11,7 @@ import { addBlock, emptyGraph } from './graphDoc.js'
 import { registry } from './registry.js'
 import { setLayoutEngineLoader } from './dependencyLayout.js'
 import { createLabArtifactsClient } from '../history/labArtifactsClient.js'
+import { labValueStore } from '../runs/valueStore.js'
 
 const elkImport = vi.hoisted(() => vi.fn())
 vi.mock('elkjs/lib/elk.bundled.js', () => {
@@ -81,6 +82,82 @@ afterEach(async () => {
 })
 
 describe('first-click live graph', () => {
+  it('keeps Run disabled until a saved head has loaded', async () => {
+    let resolveHead
+    const client = createLabArtifactsClient({ fetchImpl: () => new Promise(resolve => { resolveHead = resolve }) })
+    const provider = hostProvider()
+    render(<GraphView client={client} provider={provider} initialDocument={graphOf(provider, ['host-source', 'count'])} />)
+    await waitFor(() => expect(cardNamed('Count')).toBeVisible())
+    expect(screen.getByRole('button', { name: 'Run graph' })).toBeDisabled()
+    await act(async () => resolveHead({ ok: false, status: 404, json: async () => ({}) }))
+    expect(screen.getByRole('button', { name: 'Run graph' })).toBeDisabled()
+  })
+
+  it('shows Save before running and submits nothing when the draft differs from the saved revision', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const saved = { ...graph, outputs: {} }
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 3 } : { revision: 3, graph: saved } })) })
+    client.setDocId('run-different')
+    const fetchImpl = vi.fn(); vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r3' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    expect(await screen.findByText('Save before running')).toBeVisible()
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('submits the matching saved revision and streams its block values into LiveValues', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 4 } : { revision: 4, graph } })) })
+    client.setDocId('run-matching')
+    const events = [
+      { run_id: 'canvas-stream', seq: 0, kind: 'value', block_id: 'count-1', at: now, payload: { result: { data: 73, as_of: now } } },
+      { run_id: 'canvas-stream', seq: 1, kind: 'finished', at: now, payload: {} },
+    ].map(value => `event: run\ndata: ${JSON.stringify(value)}\n\n`).join('')
+    const fetchImpl = vi.fn().mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ run_id: 'canvas-stream', state: 'queued' }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, body: new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(events)); controller.close()
+      } }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('73')).toBeVisible())
+    expect(fetchImpl.mock.calls[0][0]).toBe(`${config.apiBase}/api/lab/runs`)
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ doc_id: 'run-matching', graph_revision: 4 })
+    expect(labValueStore.getBlock('canvas-stream', 'count-1').value.result.data).toBe(73)
+  })
+
+  it('renders a worker refusal code from a 422', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 5 } : { revision: 5, graph } })) })
+    client.setDocId('run-refused')
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 422, json: async () => ({ detail: 'lab_graph_host_refused' }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r5' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    expect(await screen.findByText('lab_graph_host_refused')).toBeVisible()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads local block displays and budget measurements from the shared local run', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn().mockResolvedValue({ ok: false, status: 404 }) })
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('1')).toBeVisible())
+    const original = labValueStore.getBlock('local', 'count-1').value.result
+    expect(labValueStore.getRun('local').timing.times.length).toBeGreaterThan(0)
+    act(() => labValueStore.setLocal([{ ...original, display: 91 }], labValueStore.getRun('local').timing))
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('91')).toBeVisible())
+  })
+
   it.each(['matching', 'other kind', 'other version', 'malformed'])('reads %s host Code evidence through the selected inspector', async scenario => {
     const provider = createHostProvider({ framed: true })
     const digest = 'a'.repeat(64)

@@ -1,0 +1,214 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
+import * as api from '../../api.js'
+import { createValueStore, useBlockValue } from './valueStore.js'
+import { cancelRun, openRunStream, submitRun } from './runStream.js'
+
+const handles = []
+const open = options => { const handle = openRunStream(options); handles.push(handle); return handle }
+const event = (seq, block_id = 'a', payload = { result: seq }) => ({ seq, kind: 'value', block_id, at: seq, payload })
+const frame = (kind, value) => `id: ${value.run_id || 'r'}:${value.seq ?? 0}\nevent: ${kind}\ndata: ${JSON.stringify(value)}\n\n`
+const runFrame = seq => frame('run', { ...event(seq), run_id: 'r' })
+const json = (data, status = 200) => ({ ok: status < 400, status, json: async () => data })
+function stream(chunks, hold = false) {
+  return { ok: true, status: 200, body: new ReadableStream({ start(controller) {
+    chunks.forEach(chunk => controller.enqueue(typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk))
+    if (!hold) controller.close()
+  } }) }
+}
+const parked = () => stream([], true)
+afterEach(() => { cleanup(); handles.splice(0).forEach(handle => handle.stop()); localStorage.removeItem('leaf.jwt'); vi.restoreAllMocks() })
+
+describe('bounded shared values', () => {
+  it('retains 10000 events after 10500, counting the oldest drops', () => {
+    const store = createValueStore()
+    for (let seq = 0; seq < 10500; seq++) store.apply('r', event(seq))
+    expect(store.getEvents()).toHaveLength(10000)
+    expect(store.getRun('r').events).toHaveLength(10000)
+    expect(store.getRun('r').events[0].seq).toBe(500)
+    expect(store.dropped).toBe(500)
+    expect(store.getRun('r').dropped).toBe(500)
+  })
+  it('deduplicates and notifies only the affected block and run', () => {
+    const store = createValueStore(), a = vi.fn(), b = vi.fn(), other = vi.fn()
+    store.subscribeBlock('r', 'a', a); store.subscribeBlock('r', 'b', b); store.subscribeRun('other', other)
+    store.apply('r', event(0)); store.apply('r', event(0)); store.apply('r', event(-1))
+    expect(a).toHaveBeenCalledTimes(1); expect(b).not.toHaveBeenCalled(); expect(other).not.toHaveBeenCalled()
+    expect(store.getBlock('r', 'a').seq).toBe(0)
+  })
+  it('bounds the log across runs and evicts the oldest finished run before active ones', () => {
+    const store = createValueStore({ maxEvents: 2, maxRuns: 2 })
+    store.upsertRun('active', { state: 'running' })
+    store.apply('done', event(0)); store.apply('done', { seq: 1, kind: 'finished' })
+    store.upsertRun('next', { state: 'queued' })
+    expect(store.getRun('done')).toBeUndefined()
+    expect(store.getRun('active')).toBeDefined()
+    store.apply('active', event(0)); store.apply('next', event(0)); store.apply('next', event(1))
+    expect(store.getEvents()).toHaveLength(2)
+    expect(store.getRun('active').dropped).toBe(1)
+  })
+  it('stores local values and budget timing together', () => {
+    const store = createValueStore(), value = { id: 'a', port: 'result', display: 7 }
+    store.setLocal([value], { times: [2, 3] })
+    expect(store.getBlock('local', 'a').value.result).toBe(value)
+    expect(store.getRun('local').timing.times).toEqual([2, 3])
+  })
+  it('refuses admission when every retained run is active rather than evicting one', () => {
+    const store = createValueStore({ maxRuns: 2 })
+    store.upsertRun('a', { state: 'running' }); store.upsertRun('b', { state: 'queued' })
+    expect(store.canAddRun()).toBe(false)
+    expect(() => store.upsertRun('c', { state: 'queued' })).toThrow('Too many active runs')
+    expect(store.getRuns().map(run => run.id)).toEqual(['b', 'a'])
+  })
+  it('rerenders only the affected block hook once for one value event', () => {
+    const store = createValueStore(), renders = { a: 0, b: 0 }
+    renderHook(() => { renders.a++; return useBlockValue(store, 'r', 'a') })
+    renderHook(() => { renders.b++; return useBlockValue(store, 'r', 'b') })
+    const before = { ...renders }
+    act(() => store.apply('r', event(0)))
+    expect(renders.a - before.a).toBe(1)
+    expect(renders.b - before.b).toBe(0)
+  })
+})
+
+describe('authenticated run requests and SSE', () => {
+  it('submits exactly the saved identity and cancels by POST', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(json({ run_id: 'r', state: 'queued' }, 202))
+    expect(await submitRun({ docId: 'strategy', graphRevision: 3, fetchImpl })).toEqual({ ok: true, runId: 'r', state: 'queued' })
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ doc_id: 'strategy', graph_revision: 3 })
+    await cancelRun({ runId: 'r', fetchImpl })
+    expect(fetchImpl.mock.calls[1][0]).toContain('/runs/r/cancel')
+    expect(fetchImpl.mock.calls[1][1].method).toBe('POST')
+  })
+  it('returns refusal details and reports a request 401 with the sent authority', async () => {
+    const note = vi.spyOn(api, 'noteUnauthorized')
+    const fetchImpl = vi.fn().mockResolvedValueOnce(json({ detail: 'lab_graph_effect_refused' }, 422)).mockResolvedValueOnce(json({}, 401))
+    expect(await submitRun({ docId: 'strategy', graphRevision: 3, fetchImpl })).toMatchObject({ ok: false, status: 422, detail: 'lab_graph_effect_refused' })
+    await submitRun({ docId: 'strategy', graphRevision: 3, fetchImpl })
+    expect(note).toHaveBeenLastCalledWith(expect.objectContaining({ status: 401 }), 'lab-runs', undefined)
+  })
+  it('parses frames split across chunks, with header-only authority and tenant', async () => {
+    const token = ['fixture', 'authority'].join('-')
+    localStorage.setItem('leaf.jwt', token)
+    const text = ': hb\r\n' + runFrame(0).replaceAll('\n', '\r\n') + frame('health', { lag_ms: 12 })
+    const fetchImpl = vi.fn().mockResolvedValue(stream([...text], true)), store = createValueStore()
+    open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(store.getRun('r')?.transport.lagMs).toBe(12))
+    expect(store.getBlock('r', 'a').value.result).toBe(0)
+    const [url, init] = fetchImpl.mock.calls[0]
+    expect(init.headers.Authorization).toBe(['Bearer', token].join(' '))
+    expect(init.headers['X-Tenant-Id']).toBe(api.config.tenant)
+    expect(url).not.toMatch(/token|jwt|ticket|authority/)
+    expect(url).toContain('after_seq=-1')
+  })
+  it('resumes every run cursor and ignores replayed duplicates', async () => {
+    const store = createValueStore(), block = vi.fn()
+    store.apply('s', event(9)); store.subscribeBlock('r', 'a', block)
+    const sleep = vi.fn().mockResolvedValue()
+    const fetchImpl = vi.fn().mockResolvedValueOnce(stream([runFrame(0)])).mockResolvedValueOnce(stream([runFrame(0), runFrame(1)], true))
+    open({ runIds: ['r', 's'], store, fetchImpl, sleep, random: () => 0 })
+    await waitFor(() => expect(store.getRun('r')?.lastSeq).toBe(1))
+    expect(fetchImpl.mock.calls[1][1].headers['Last-Event-ID']).toBe('r:0,s:9')
+    expect(block).toHaveBeenCalledTimes(2)
+  })
+  it('decodes a multibyte value split at every byte and joins data lines', async () => {
+    const store = createValueStore()
+    const bytes = new TextEncoder().encode('event: run\ndata: {"run_id":"r","seq":0,"kind":"value",\ndata: "block_id":"a","payload":{"result":"café☀"}}\n\n')
+    const fetchImpl = vi.fn().mockResolvedValue(stream(Array.from(bytes, byte => Uint8Array.of(byte)), true))
+    open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(store.getBlock('r', 'a')?.value.result).toBe('café☀'))
+  })
+  it('recovers a gap through the row and paged snapshot, then reconnects at the snapshot cursor', async () => {
+    const store = createValueStore(); store.apply('r', event(2))
+    const page = Array.from({ length: 500 }, (_, seq) => event(seq))
+    const fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('gap', { run_id: 'r', from: 3, to: 500 })]))
+      .mockResolvedValueOnce(json({ state: 'running', graph_revision: 7 }))
+      .mockResolvedValueOnce(json({ events: page }))
+      .mockResolvedValueOnce(json({ events: [event(500)] })).mockResolvedValueOnce(parked())
+    open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(5))
+    expect(fetchImpl.mock.calls[2][0]).toContain('/events?after_seq=-1&limit=500')
+    expect(fetchImpl.mock.calls[3][0]).toContain('/events?after_seq=499&limit=500')
+    expect(fetchImpl.mock.calls[4][1].headers['Last-Event-ID']).toBe('r:500')
+    expect(store.getRun('r').gaps.at(-1).recovered).toBe(true)
+  })
+  it.each(['max_age', 'drain'])('reconnects immediately on %s', async reason => {
+    const sleep = vi.fn(), fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('close', { reason })])).mockResolvedValueOnce(parked())
+    open({ runIds: ['r'], store: createValueStore(), fetchImpl, sleep })
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+    expect(sleep).not.toHaveBeenCalled()
+  })
+  it.each(['binding_changed', 'binding_unavailable'])('stops on %s', async reason => {
+    const store = createValueStore(), fetchImpl = vi.fn().mockResolvedValue(stream([frame('close', { reason })]))
+    open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(store.getRun('r')?.transport.status).toBe(reason))
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+  it('stops on 401, reports the sent token, and retries with fresh authority only on retry', async () => {
+    const token = ['expired', 'fixture'].join('-'); localStorage.setItem('leaf.jwt', token)
+    const note = vi.spyOn(api, 'noteUnauthorized'), store = createValueStore()
+    const fetchImpl = vi.fn().mockResolvedValueOnce(json({}, 401)).mockResolvedValueOnce(parked())
+    const handle = open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(store.getRun('r')?.transport.status).toBe('auth_expired'))
+    expect(note).toHaveBeenCalledWith(expect.objectContaining({ status: 401 }), 'lab-runs', ['Bearer', token].join(' '))
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    localStorage.setItem('leaf.jwt', 'replacement-fixture'); handle.retry()
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+    expect(fetchImpl.mock.calls[1][1].headers.Authorization).toBe(['Bearer', 'replacement-fixture'].join(' '))
+  })
+  it('waits 15 seconds on stream limit', async () => {
+    const sleep = vi.fn().mockResolvedValue(), fetchImpl = vi.fn().mockResolvedValueOnce(json({ detail: 'lab_stream_limit' }, 409)).mockResolvedValueOnce(parked())
+    open({ runIds: ['r'], store: createValueStore(), fetchImpl, sleep })
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+    expect(sleep).toHaveBeenCalledWith(15000, expect.any(AbortSignal))
+  })
+  it('backs off 1, 2, 4 seconds for network failures', async () => {
+    const sleep = vi.fn().mockResolvedValue(), fetchImpl = vi.fn().mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('offline')).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(parked())
+    open({ runIds: ['r'], store: createValueStore(), fetchImpl, sleep, random: () => 0 })
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(4))
+    expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([1000, 2000, 4000])
+  })
+  it('aborts an outstanding fetch and never reconnects after stop', async () => {
+    const fetchImpl = vi.fn((url, init) => new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')))))
+    const handle = open({ runIds: ['r'], store: createValueStore(), fetchImpl })
+    handle.stop()
+    expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true)
+    await Promise.resolve(); expect(fetchImpl).toHaveBeenCalledTimes(1)
+    handle.retry(); expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+  it('rejects a frame larger than 256 KiB and reconnects', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(stream(['data: ' + 'x'.repeat(256 * 1024) + '\n\n'])).mockResolvedValueOnce(parked())
+    open({ runIds: ['r'], store: createValueStore(), fetchImpl, sleep: vi.fn().mockResolvedValue() })
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+  })
+  it.each(['finished', 'failed', 'cancelled'])('removes %s runs and stops when none remain', async kind => {
+    const store = createValueStore(), sleep = vi.fn(), fetchImpl = vi.fn().mockResolvedValue(stream([frame('run', { run_id: 'r', seq: 0, kind })]))
+    open({ runIds: ['r'], store, fetchImpl, sleep })
+    await waitFor(() => expect(store.getRun('r')?.state).toBe(kind))
+    expect(sleep).not.toHaveBeenCalled(); expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+  it('marks a missing run and stops on a 404', async () => {
+    const store = createValueStore(), fetchImpl = vi.fn().mockResolvedValue(json({}, 404))
+    open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(store.getRun('r')?.state).toBe('missing'))
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+  it('removes a terminal run from the next subscription while continuing the other run', async () => {
+    const store = createValueStore()
+    const fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('run', { run_id: 'r', seq: 0, kind: 'finished' })]))
+      .mockResolvedValueOnce(parked())
+    open({ runIds: ['r', 'other'], store, fetchImpl })
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+    expect(fetchImpl.mock.calls[1][0]).toContain('runs=other&')
+    expect(fetchImpl.mock.calls[1][1].headers['Last-Event-ID']).toBe('other:-1')
+  })
+  it('marks a run_missing close explicitly', async () => {
+    const store = createValueStore()
+    const fetchImpl = vi.fn().mockResolvedValue(stream([frame('close', { reason: 'run_missing', run_id: 'r' })]))
+    open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(store.getRun('r')?.state).toBe('missing'))
+    expect(store.getRun('r').transport.status).toBe('missing')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+})
