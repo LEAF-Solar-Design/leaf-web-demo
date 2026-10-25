@@ -45,6 +45,11 @@ _CACHE_CONDITION = threading.Condition()
 _CACHE_RESULT: Optional[Dict[str, Any]] = None
 _CACHE_AT = 0.0
 _CACHE_RUNNING = False
+_WORKER_COVERAGE_TTL_S = 5.0
+_WORKER_COVERAGE_MAX_ENTRIES = 64
+_WORKER_COVERAGE_LOCK = threading.Lock()
+_WORKER_COVERAGE_CACHE: Dict[
+    tuple[str, Optional[str], float], tuple[bool, float]] = {}
 
 
 def _try_acquire_probe_slot() -> bool:
@@ -301,6 +306,57 @@ def _worker_probe(
         raise DependencyUnavailable() from exc
 
 
+def _expected_worker_revision(env: Mapping[str, str]) -> Optional[str]:
+    revision = env.get("LEAF_EXPECTED_WORKER_REVISION", "").strip().lower() or None
+    if revision is not None and not _REVISION_RE.fullmatch(revision):
+        return "__invalid__"
+    return revision
+
+
+def reset_worker_coverage_cache() -> None:
+    """Clear process-local coverage results, including between test stores."""
+    with _WORKER_COVERAGE_LOCK:
+        _WORKER_COVERAGE_CACHE.clear()
+
+
+def canonical_worker_covers(
+        tool_name: str, env: Optional[Mapping[str, str]] = None) -> bool:
+    """Check required per-tool coverage with the readiness probe's query bounds.
+
+    Missing, stale, future or wrong-revision heartbeats mean no coverage;
+    store failures remain DependencyUnavailable so callers can distinguish them.
+    Local stacks that do not require a worker perform no lookup.
+    Definite results are cached for five seconds, with at most 64 entries.
+    """
+    current = os.environ if env is None else env
+    if not _truthy(current, "LEAF_CANONICAL_WORKER_REQUIRED"):
+        return True
+    max_age = _bounded_float(
+        current, "LEAF_WORKER_HEARTBEAT_MAX_AGE_S", 30.0, 1.0, 300.0)
+    revision = _expected_worker_revision(current)
+    key = (tool_name, revision, max_age)
+    # Serialize misses as well as cache access so concurrent callers share a probe.
+    with _WORKER_COVERAGE_LOCK:
+        cached = _WORKER_COVERAGE_CACHE.get(key)
+        if cached is not None:
+            if time.monotonic() - cached[1] < _WORKER_COVERAGE_TTL_S:
+                return cached[0]
+            del _WORKER_COVERAGE_CACHE[key]
+        try:
+            _worker_probe(_timeout_seconds(current), tool_name, max_age, revision)
+        except DependencyDegraded:
+            covered = False
+        else:
+            covered = True
+        _WORKER_COVERAGE_CACHE[key] = (covered, time.monotonic())
+        if len(_WORKER_COVERAGE_CACHE) > _WORKER_COVERAGE_MAX_ENTRIES:
+            oldest = min(
+                _WORKER_COVERAGE_CACHE,
+                key=lambda item: _WORKER_COVERAGE_CACHE[item][1])
+            del _WORKER_COVERAGE_CACHE[oldest]
+        return covered
+
+
 def _durability_cycle(directory: Path) -> None:
     if not directory.is_dir():
         raise DependencyUnavailable()
@@ -377,11 +433,7 @@ def default_specs(
         _truthy(current, "LEAF_AUTHORED_EXECUTION") or bool(harness_base)
     )
     build_required = _truthy(current, "LEAF_BUILD_REVISION_REQUIRED")
-    expected_worker_revision = current.get(
-        "LEAF_EXPECTED_WORKER_REVISION", "").strip().lower() or None
-    if (expected_worker_revision is not None and
-            not _REVISION_RE.fullmatch(expected_worker_revision)):
-        expected_worker_revision = "__invalid__"
+    expected_worker_revision = _expected_worker_revision(current)
 
     def unavailable_or_degraded(required: bool) -> None:
         if required:
