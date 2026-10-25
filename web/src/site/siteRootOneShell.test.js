@@ -268,6 +268,33 @@ describe('rollback contract', () => {
     expect(css).toContain('--ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));')
   })
 
+  it('non-CAD surfaces keep the own-row product nav at every desktop width', () => {
+    const css = read('./studioShell.css')
+    const selector = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-nav'
+    const mediaBlocks = []
+    const media = /@media\s*([^{}]+)\{/g
+    let match
+    while ((match = media.exec(css))) {
+      const start = media.lastIndex
+      let depth = 1
+      let end = start
+      for (; end < css.length && depth; end++) {
+        if (css[end] === '{') depth++
+        if (css[end] === '}') depth--
+      }
+      expect(depth).toBe(0)
+      mediaBlocks.push({ header: match[0].slice(0, -1).trim(), start, end })
+    }
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(rule => rule[1].trim() === selector)
+    expect(rules.some(rule => /position:\s*relative;/.test(rule[2]))).toBe(true)
+    for (const rule of rules) {
+      const enclosing = mediaBlocks.filter(block => block.start <= rule.index && rule.index < block.end).pop()
+      expect(enclosing).toBeDefined()
+      expect(enclosing.header).not.toMatch(/max-width/)
+    }
+  })
+
   it('puts the Solar surface tabs on their own row from 1440px up', () => {
     const css = read('./studioShell.css')
     const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"]'
