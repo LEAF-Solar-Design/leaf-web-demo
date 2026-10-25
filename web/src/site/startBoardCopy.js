@@ -20,9 +20,12 @@ export const START_BOARD_COPY = Object.freeze({
   checkingHead: 'Checking plan',
   checkingState: 'Checking',
   unavailableHead: 'Plan details unavailable',
+  guestHead: 'Sign in to see your plan',
+  guestState: 'Sign in',
   unavailableState: 'Not verified',
   checkedHead: 'Plan permissions checked',
   demoFooter: 'Offline demo: you cannot save edits to a live drawing or create a workspace project. Local drawing changes stay in this browser session.',
   unavailableFooter: 'Plan details are unavailable. We cannot confirm which tools are included.',
+  guestFooter: 'Sign in to see which tools your plan includes.',
   checkedFooter: 'These permissions describe your plan. A drawing and connected services may still be required.',
 })

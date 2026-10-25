@@ -13,7 +13,7 @@ describe('SolarFlowRail demo mode', () => {
   it('explains once and offers sign-in instead of unavailable flows', () => {
     const spy = vi.fn()
     render(<SolarFlowRail families={[]} drawingId="demo-drawing" familiesDrawingId="demo-drawing" demo onSignIn={spy} />)
-    expect(screen.getByTestId('solar-flow-demo').textContent).toContain('Solar design runs on your own drawings, so the demo has no Solar steps.')
+    expect(screen.getByTestId('solar-flow-demo').textContent).toContain('Solar design runs on your own drawings.')
     expect(screen.getByTestId('solar-flow-rail').getAttribute('data-demo')).toBe('true')
     expect(screen.queryByRole('combobox')).toBeNull()
     expect(screen.queryByText(SOLAR_FLOW_UNAVAILABLE_REASONS.rooftop_steps_missing)).toBeNull()
@@ -25,7 +25,7 @@ describe('SolarFlowRail demo mode', () => {
 
   it('shows the note without a button when no sign-in handler is passed', () => {
     render(<SolarFlowRail families={[]} drawingId="demo-drawing" familiesDrawingId="demo-drawing" demo />)
-    expect(screen.getByTestId('solar-flow-demo').textContent).toContain('Solar design runs on your own drawings, so the demo has no Solar steps.')
+    expect(screen.getByTestId('solar-flow-demo').textContent).toContain('Solar design runs on your own drawings.')
     expect(screen.queryByRole('button')).toBeNull()
   })
 
@@ -42,7 +42,7 @@ describe('SolarFlowRail demo mode', () => {
     const rail = source.indexOf('<SolarFlowRail')
     const props = source.slice(rail, source.indexOf('/>', rail))
     expect(source.split('<SolarFlowRail').length).toBe(2)
-    expect(props).toContain('demo={mock}')
-    expect(props).toContain('onSignIn={mock && authConfigured && !signedIn ? onLogin : undefined}')
+    expect(props).toContain('demo={mock || knownGuest}')
+    expect(props).toContain('onSignIn={(mock || knownGuest) && authConfigured && !signedIn ? onLogin : undefined}')
   })
 })

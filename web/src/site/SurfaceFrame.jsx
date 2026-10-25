@@ -368,6 +368,7 @@ function Entitlement({ at = 'inline' }) {
       entitlements={ent.entitlements}
       loading={ent.loading}
       mock={ent.mock}
+      guest={ent.guest === true}
       studioPresentation={frame.studioPresentation}
     />
   )

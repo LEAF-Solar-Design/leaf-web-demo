@@ -4515,6 +4515,7 @@ export default function App() {
         entitlements,
         loading: entLoading,
         mock,
+        guest: knownGuest,
         // The ONE declaration of where the gate renders. Both mounts used to
         // spell `studioGround && drafting && wideViewport` themselves: the
         // dock hosts it on a wide drafting surface, main hosts it everywhere
@@ -5131,8 +5132,8 @@ export default function App() {
                 openName={solarFlowEditor?.name ?? solarFormTool?.name ?? null}
                 onOpenStep={onOpenSolarFlowStep}
                 onFlowChange={onSolarFlowChange}
-                demo={mock}
-                onSignIn={mock && authConfigured && !signedIn ? onLogin : undefined}
+                demo={mock || knownGuest}
+                onSignIn={(mock || knownGuest) && authConfigured && !signedIn ? onLogin : undefined}
               />
               {!mock && (
                 <SolarWorkspaceTools
