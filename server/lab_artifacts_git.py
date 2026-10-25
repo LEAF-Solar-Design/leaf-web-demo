@@ -239,9 +239,13 @@ def _git_inspect(tenant):
     return result
 
 
-def _rebase(tenant, row, inspection):
+def _rebase(tenant, row, inspection=None):
     import lab_git_authority as store
 
+    if inspection is None:
+        inspection = _git_inspect(tenant)
+    # The blob and ancestry proof must use this same snapshot, even if the
+    # live head advances while /changes is being paginated.
     head = inspection['head']
     history = _changes(tenant, row['expected_parents'][-1], head)
     blobs = [doc.get('blob') for doc in inspection['documents'] if doc.get('path') == _path(row)]
@@ -384,7 +388,7 @@ def commit_pending(tenant, row, generation, author='git-recovery', *, uncertain=
         except MirrorError as error:
             if error.code == 'lab_ref_conflict':
                 try:
-                    row = _rebase(tenant, row, _git_inspect(tenant))
+                    row = _rebase(tenant, row)
                     continue
                 except MirrorError as refused:
                     if refused.code == 'lab_harness_capability_missing':

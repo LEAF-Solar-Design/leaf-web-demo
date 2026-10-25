@@ -27,6 +27,7 @@ class Harness:
         self.commits = []
         self.calls = []
         self.before_commit = None
+        self.after_inspect = None
         self.crash_after_commit = False
         self.unknown_after_commit = False
         self.fail = None
@@ -56,6 +57,9 @@ class Harness:
                 'documents': [{'path': path, 'blob': git._blob(content.encode()),
                     'sha256': hashlib.sha256(content.encode()).hexdigest()}
                     for path, content in self.documents.items()]}
+            hook, self.after_inspect = self.after_inspect, None
+            if hook:
+                hook()
         elif endpoint == 'commit':
             hook, self.before_commit = self.before_commit, None
             if hook:
@@ -90,9 +94,10 @@ class Harness:
         elif endpoint == 'changes':
             if self.history_error:
                 raise git.MirrorError(self.history_error, capability=self.capability)
-            assert body['head'] == self.head
             history = []
-            for entry in self.commits:
+            start = (len(self.commits) if body['head'] == BASE else
+                     next(i for i, entry in enumerate(self.commits) if entry['commit'] == body['head']))
+            for entry in self.commits[start:]:
                 if entry['commit'] == body['since']:
                     break
                 history.append(entry)
@@ -226,6 +231,72 @@ def test_change_then_restore_rebases_using_head_blob_and_paginates(world):
     assert save(tenant, expected=1)['revision'] == 2
     pages = [body for endpoint, body in harness.calls if endpoint == 'changes']
     assert len(pages) == 2 and 'after' in pages[-1]
+
+
+@pytest.mark.parametrize('target_changes', [False, True])
+def test_rebase_pins_inspect_head_when_head_moves_before_changes(world, target_changes):
+    tenant, harness = world
+    first = save(tenant)
+    parent = harness.head
+    harness.calls.clear()
+    inspected = []
+    advanced = []
+    def conflict():
+        harness.foreign()
+        inspected.append(harness.foreign())
+    def advance():
+        path = 'lab/graphs/x.json' if target_changes else 'lab/graphs/other.json'
+        advanced.append(harness.foreign(path, '{}'))
+    harness.before_commit = conflict
+    harness.after_inspect = advance
+    if target_changes:
+        with pytest.raises(ledger.GitConflict):
+            save(tenant, expected=1)
+        assert ledger.get(tenant, 'x')['revision'] == first['revision']
+    else:
+        assert save(tenant, expected=1)['revision'] == 2
+    commits = [body for endpoint, body in harness.calls if endpoint == 'commit']
+    assert [body['expected_sha'] for body in commits] == (
+        [parent, inspected[0]] if target_changes else [parent, inspected[0], advanced[0]])
+    pages = [body for endpoint, body in harness.calls if endpoint == 'changes']
+    assert [body['head'] for body in pages[:2]] == inspected * 2
+    assert all(body['since'] == parent for body in pages[:2])
+    assert 'after' not in pages[0] and 'after' in pages[1]
+    assert pages[2]['head'] == advanced[0] and pages[2]['since'] == inspected[0]
+    if target_changes:
+        row = store._run(tenant, lambda sql: dict(sql.execute(
+            'SELECT * FROM lab_git_pending WHERE tenant_id=? AND revision=2', (tenant,)).fetchone()))
+        assert row['rebase_count'] == 1 and row['state'] == 'abandoned'
+    else:
+        assert git.mirror_status(tenant)['local_sha'] == harness.head
+    assert pending(tenant) == []
+
+
+@pytest.mark.parametrize('different_head', ['older', 'newer'])
+def test_rebase_refuses_changes_for_a_different_head(world, monkeypatch, different_head):
+    tenant, harness = world
+    heads = []
+    def conflict():
+        heads.append(harness.foreign())
+        heads.append(harness.foreign())
+    harness.before_commit = conflict
+    harness.after_inspect = lambda: heads.append(harness.foreign())
+    post = harness.post
+    def wrong_history(tenant, endpoint, body):
+        if endpoint == 'changes':
+            assert body['head'] == heads[1]
+            body = {**body, 'head': heads[0] if different_head == 'older' else heads[2]}
+        return post(tenant, endpoint, body)
+    monkeypatch.setattr(git, '_post', wrong_history)
+    with pytest.raises(ledger.GitConflict):
+        save(tenant)
+    assert len([1 for endpoint, _ in harness.calls if endpoint == 'commit']) == 1
+    row = store._run(tenant, lambda sql: dict(sql.execute(
+        'SELECT * FROM lab_git_pending WHERE tenant_id=?', (tenant,)).fetchone()))
+    assert row['rebase_count'] == 0 and row['state'] == 'abandoned'
+    assert pending(tenant) == []
+    with pytest.raises(ledger.NotFound):
+        ledger.get(tenant, 'x')
 
 
 def test_four_unrelated_conflicts_exhaust_durable_budget(world):
