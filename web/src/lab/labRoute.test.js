@@ -65,12 +65,25 @@ describe('fetchLabStatus', () => {
     expect(fetchImpl.mock.calls[1][1].headers.Authorization).toBe('Bearer second-token')
   })
 
-  it.each([[404, 'off'], [503, 'auth-off'], [401, 'signed-out'], [403, 'signed-out'],
+  it.each([[404, 'off'], [401, 'signed-out'], [403, 'signed-out'],
     [500, 'unavailable']])('maps HTTP %s to %s without reading its body', async (code, state) => {
     const result = response(code)
     result.json = vi.fn(() => { throw new Error('must not parse an error body') })
     expect(await fetchLabStatus({ fetchImpl: async () => result })).toEqual({ state, posture: null })
     expect(result.json).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["{'ok': False, 'status': 'refused', 'reason': 'lab_auth_live_required'}", 'auth-off'],
+    ['lab_store_unavailable', 'unavailable'],
+  ])('maps HTTP 503 reason %s to %s', async (message, state) => {
+    const fetchImpl = async () => response(503, { ok: false, error: { error_code: 'INTERNAL', message, retryable: true } })
+    expect(await fetchLabStatus({ fetchImpl })).toEqual({ state, posture: null })
+  })
+
+  it('maps HTTP 503 with a non-JSON body to unavailable', async () => {
+    const fetchImpl = async () => ({ ...response(503), json: async () => { throw new SyntaxError('bad JSON') } })
+    expect(await fetchLabStatus({ fetchImpl })).toEqual({ state: 'unavailable', posture: null })
   })
 
   it.each(['local', 'staging', 'production'])('accepts the %s posture', async (posture) => {
