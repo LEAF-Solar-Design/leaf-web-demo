@@ -645,10 +645,11 @@ export default function ConversePanel({
     if (!stoppableTurnId || stopping) return
     setStopping(true); setSendErr(null)
     try {
-      await cancelTurn(sessionId, stoppableTurnId)
+      const result = await cancelTurn(sessionId, stoppableTurnId)
       if (sessionIdRef.current !== sessionId) return
-      setStoppedTurns((prev) => new Set([...prev, stoppableTurnId]))
       void streamRef.current?.reconcile?.()
+      if (result?.status === 'already_ended') return
+      setStoppedTurns((prev) => new Set([...prev, stoppableTurnId]))
       track('conversation.truncated', { reason: 'user_stop' }) // P2: interrupt ends the turn's output early
       // Acknowledged cancellation unlocks this turn even if its final event
       // was lost. A bounded transcript refresh recovers the durable ending.
