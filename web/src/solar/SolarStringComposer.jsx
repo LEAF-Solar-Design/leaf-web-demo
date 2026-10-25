@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 import {
   SOLAR_STRING_COMPOSER_REASONS, STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL,
   MAX_SINGLE_REFS, MAX_MULTI_REFS, MAX_STRING_LENGTH, stringComposerView,
@@ -476,6 +477,8 @@ function StandaloneStringComposer({
   const [previewPage, setPreviewPage] = useState(0)
   const [checking, setChecking] = useState(false)
   const [checkReason, setCheckReason] = useState(null)
+  const [reloadRequired, setReloadRequired] = useState(false)
+  const latestBinding = useRef(null)
 
   useEffect(() => {
     mounted.current = true
@@ -485,7 +488,7 @@ function StandaloneStringComposer({
   useEffect(() => {
     setQueue([]); setSelected(null); setFirst(null); setLast(null); setLengthDraft(null)
     setSearch(''); setSourcePage(0); setQueuePage(0); setPreviewPage(0)
-    setCheckReason(null); setChecking(false); lock.current = null
+    setCheckReason(null); setChecking(false); setReloadRequired(false); lock.current = null
   }, [binding])
 
   useEffect(() => {
@@ -495,9 +498,10 @@ function StandaloneStringComposer({
     const active = () => mounted.current && current.current === binding && generation.current === number
     // The reader runs only while this load is still the current one: a scope change, an unmount or a
     // second StrictMode setup before the microtask runs starts no read for the obsolete binding.
-    Promise.resolve().then(() => (active() ? reader.current(drawingId, drawingVersion) : SKIPPED)).then((envelope) => {
+    const latest = latestBinding.current === binding
+    Promise.resolve().then(() => (active() ? reader.current(drawingId, latest ? 'head' : drawingVersion) : SKIPPED)).then((envelope) => {
       if (envelope === SKIPPED || !active()) return
-      const view = stringComposerView({ envelope, drawingId, drawingVersion, projectId })
+      const view = stringComposerView({ envelope, drawingId, drawingVersion: latest ? envelope?.version : drawingVersion, projectId })
       setLoaded({ binding, view })
     }, () => {
       if (active()) setLoaded({ binding, view: { ok: false,
@@ -530,7 +534,7 @@ function StandaloneStringComposer({
         item.frameName.toLowerCase().includes(needle))
   }, [view, search])
   const rowNames = useMemo(() => new Map((view?.rows ?? []).map((item) => [item.frameIndex, item.name])), [view])
-  const disabled = checking || status === 'pending'
+  const disabled = checking || status === 'pending' || reloadRequired
   const bound = multi ? MAX_MULTI_REFS : MAX_SINGLE_REFS
   const addDisabled = disabled || queue.length >= bound
   const queueLast = Math.max(0, Math.ceil(queue.length / PAGE_SIZE) - 1)
@@ -565,12 +569,13 @@ function StandaloneStringComposer({
         // The head read starts only while this review still holds the lock for the current binding.
         const envelope = await Promise.resolve().then(() => (active() ? reader.current(drawingId, 'head') : SKIPPED))
         if (envelope === SKIPPED || !active()) return
-        fresh = checkStringFreshness({ view: capturedView, drawingId, drawingVersion, envelope })
+        fresh = checkStringFreshness({ view: capturedView, drawingId,
+          drawingVersion: capturedView.binding.drawingVersion, envelope })
       } catch {
         fresh = { ok: false, reason: SOLAR_STRING_COMPOSER_REASONS.unavailable }
       }
       if (!active()) return
-      if (!fresh.ok) setCheckReason(fresh.reason)
+      if (!fresh.ok) { setCheckReason(fresh.reason); setReloadRequired(true) }
       else onSubmit?.(capturedRow, capturedParams)
     } finally {
       if (active()) { lock.current = null; setChecking(false) }
@@ -588,11 +593,22 @@ function StandaloneStringComposer({
     {runRefusal && <p className="solar-step-note" role="alert">{runRefusal.code === 'failed'
       ? SOLAR_STRING_COMPOSER_REASONS.failed : runRefusal.reason}</p>}
     {status === 'finished' && <p className="solar-step-note" role="status">{SOLAR_STRING_COMPOSER_REASONS.finished}</p>}
-    {checkReason && <p className="solar-step-note" role="alert">{checkReason}</p>}
+    {checkReason && <p className="solar-step-note" role="alert">{humanizeError(checkReason)}</p>}
+    {reloadRequired && <button className="chip-act" disabled={checking || status === 'pending'} onClick={() => {
+      latestBinding.current = binding
+      setQueue([]); setSelected(null); setFirst(null); setLast(null); setLengthDraft(null)
+      setSearch(''); setSourcePage(0); setQueuePage(0); setPreviewPage(0)
+      setCheckReason(null); setReloadRequired(false); setLoaded(null)
+      setReload((value) => value + 1)
+    }}>Reload drawing</button>}
     {!view ? <p className="solar-step-note" role="status">{SOLAR_STRING_COMPOSER_REASONS.loading}</p>
       : !view.ok ? <>
         <p className="solar-step-note" role="status">{view.reason}</p>
-        <button className="chip-act" disabled={disabled} onClick={() => setReload((value) => value + 1)}>Reload drawing</button>
+        <button className="chip-act" disabled={disabled} onClick={() => {
+          latestBinding.current = binding
+          setQueue([]); setSelected(null); setFirst(null); setLast(null); setLengthDraft(null)
+          setCheckReason(null); setLoaded(null); setReload((value) => value + 1)
+        }}>Reload drawing</button>
       </> : <>
         <StringSelection view={view} search={search} setSearch={setSearch} setSourcePage={setSourcePage}
           sources={sources} sourcePage={sourcePage} disabled={disabled} setSelected={setSelected}

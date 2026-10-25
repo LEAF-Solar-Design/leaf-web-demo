@@ -172,7 +172,7 @@ describe('SolarStringComposer', () => {
     await act(async () => { old.reject(new Error('read failed')) })
     expect(screen.getByLabelText('Search panels')).toBeTruthy()
     expect(screen.queryByText(SOLAR_STRING_COMPOSER_REASONS.unavailable)).toBeNull()
-    expect(readIntake.mock.calls).toEqual([['d1', 7], ['d1', 8], ['d1', 8]])
+    expect(readIntake.mock.calls).toEqual([['d1', 7], ['d1', 8], ['d1', 'head']])
   })
 
   it('CMP7 composes multi over two ranges and checks the head', async () => {
@@ -272,14 +272,15 @@ describe('SolarStringComposer', () => {
     expect(button('Remove selection 26')).toBeTruthy()
   })
 
-  it('CMP13 stale review keeps the queue and enables another check', async () => {
+  it('CMP13 stale review keeps the queue visible and requires reloading before another check', async () => {
     const readIntake = vi.fn().mockResolvedValueOnce(envelope()).mockResolvedValueOnce(envelope(ground, 8))
     const { props } = await mount(ground, { readIntake })
     addRange(); click('Review & run'); await act(async () => {})
     expect(screen.getByRole('alert').textContent).toBe(SOLAR_STRING_COMPOSER_REASONS.stale)
     expect(props.onSubmit).not.toHaveBeenCalled()
     expect(queueLabels()).toEqual(['Group 1 slots 1 to 3'])
-    expect(button('Review & run').disabled).toBe(false)
+    expect(button('Review & run').disabled).toBe(true)
+    expect(button('Reload drawing').disabled).toBe(false)
   })
 
   it('CMP14 rejected head read shows unavailable as an alert', async () => {
