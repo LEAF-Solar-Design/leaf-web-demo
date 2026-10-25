@@ -11,14 +11,20 @@ const listen = (map, key, listener) => {
 export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
   const runs = new Map(), runListeners = new Map(), blockListeners = new Map(), listeners = new Set()
   const streamControls = new Map()
+  const recovering = new Set()
+  const nextState = (run, state) => terminalState(run.state) && !terminalState(state) ? run.state : state
+  const clearTerminalControl = id => {
+    const run = runs.get(id)
+    if (terminalState(run?.state) && !recovering.has(id) && run.transport.status !== 'auth_expired') streamControls.delete(id)
+  }
   let list = [], events = [], dropped = 0, order = 0
   maxEvents = Math.max(0, Math.floor(maxEvents))
-  maxRuns = Math.max(1, Math.floor(maxRuns))
+  maxRuns = Math.min(40, Math.max(1, Math.floor(maxRuns)))
   const publishList = () => { list = [...runs.values()].sort((a, b) => b.order - a.order); notify(listeners) }
   const publish = id => { notify(runListeners.get(id)); publishList() }
   function trim() {
     while ([...runs.keys()].filter(id => id !== 'local').length > maxRuns) {
-      const oldest = [...runs.values()].filter(run => run.id !== 'local' && terminalState(run.state)).sort((a, b) => a.order - b.order)[0]
+      const oldest = [...runs.values()].filter(run => run.id !== 'local' && terminalState(run.state) && !recovering.has(run.id) && run.transport.status !== 'auth_expired').sort((a, b) => a.order - b.order)[0]
       if (!oldest) break // Active runs are never evicted, even when capacity is exhausted.
       runs.delete(oldest.id)
       streamControls.delete(oldest.id)
@@ -29,13 +35,15 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
   }
   function ensure(id, metadata = {}) {
     if (!runs.has(id) && id !== 'local' && [...runs.keys()].filter(key => key !== 'local').length >= maxRuns) {
-      const oldest = [...runs.values()].filter(run => run.id !== 'local' && terminalState(run.state)).sort((a, b) => a.order - b.order)[0]
-      if (!oldest) throw new Error('Too many active runs')
-      runs.delete(oldest.id)
-      streamControls.delete(oldest.id)
-      events = events.filter(event => event.runId !== oldest.id)
-      notify(runListeners.get(oldest.id))
-      Object.keys(oldest.blocks).forEach(block => notify(blockListeners.get(`${oldest.id}/${block}`)))
+      const oldest = [...runs.values()].filter(run => run.id !== 'local' && terminalState(run.state) && !recovering.has(run.id) && run.transport.status !== 'auth_expired').sort((a, b) => a.order - b.order)[0]
+      if (!oldest && [...runs.keys()].filter(key => key !== 'local').length >= 40) throw new Error('Too many active runs')
+      if (oldest) {
+        runs.delete(oldest.id)
+        streamControls.delete(oldest.id)
+        events = events.filter(event => event.runId !== oldest.id)
+        notify(runListeners.get(oldest.id))
+        Object.keys(oldest.blocks).forEach(block => notify(blockListeners.get(`${oldest.id}/${block}`)))
+      }
     }
     if (!runs.has(id)) runs.set(id, { id, state: 'queued', graph_revision: null, lastSeq: -1,
       blocks: {}, events: [], dropped: 0, gaps: [], transport: { status: 'idle', lagMs: null, lastEventAt: null }, order: ++order, ...metadata })
@@ -44,13 +52,13 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
   const store = {
     getRun: id => runs.get(id), getBlock: (id, block) => runs.get(id)?.blocks[block],
     getRuns: () => list, getEvents: () => events, get dropped() { return dropped },
-    canAddRun: () => [...runs.keys()].filter(id => id !== 'local').length < maxRuns
-      || [...runs.values()].some(run => run.id !== 'local' && terminalState(run.state)),
+    canAddRun: () => [...runs.keys()].filter(id => id !== 'local').length < 40
+      || [...runs.values()].some(run => run.id !== 'local' && terminalState(run.state) && !recovering.has(run.id) && run.transport.status !== 'auth_expired'),
     subscribeBlock: (id, block, listener) => listen(blockListeners, `${id}/${block}`, listener),
     subscribeRun: (id, listener) => listen(runListeners, id, listener),
     subscribeRuns(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     setStreamControl(id, control) {
-      if (runs.has(id) && !terminalState(runs.get(id).state)) streamControls.set(id, control)
+      if (runs.has(id) && (!terminalState(runs.get(id).state) || recovering.has(id) || runs.get(id).transport.status === 'auth_expired')) streamControls.set(id, control)
     },
     clearStreamControl(id) { streamControls.delete(id) },
     resume(id) {
@@ -61,14 +69,15 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
     },
     upsertRun(id, metadata = {}) {
       const run = ensure(id)
-      runs.set(id, { ...run, ...metadata, id })
-      if (terminalState(runs.get(id).state)) streamControls.delete(id)
+      runs.set(id, { ...run, ...metadata, state: nextState(run, metadata.state ?? run.state), id })
+      clearTerminalControl(id)
       trim(); publish(id)
       return runs.get(id)
     },
     setTransport(id, patch) {
       const run = ensure(id)
       runs.set(id, { ...run, transport: { ...run.transport, ...patch } }); publish(id)
+      clearTerminalControl(id)
     },
     addGap(id, gap) {
       const run = ensure(id)
@@ -81,11 +90,16 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
     // events are removed so recovery does not duplicate the visible log.
     resetSnapshot(id, metadata) {
       const run = ensure(id)
+      recovering.add(id)
       events = events.filter(event => event.runId !== id)
-      runs.set(id, { ...run, ...metadata, id, lastSeq: -1, blocks: {}, events: [] })
-      if (terminalState(runs.get(id).state)) streamControls.delete(id)
+      runs.set(id, { ...run, ...metadata, state: nextState(run, metadata.state ?? run.state), id, lastSeq: -1, blocks: {}, events: [] })
       Object.keys(run.blocks).forEach(block => notify(blockListeners.get(`${id}/${block}`)))
       publish(id)
+    },
+    finishSnapshot(id) {
+      recovering.delete(id)
+      clearTerminalControl(id)
+      trim(); publish(id)
     },
     apply(id, event) {
       const run = ensure(id)
@@ -98,7 +112,7 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
       runs.set(id, { ...run, blocks, lastSeq: event.seq, events: [...run.events, retained],
         state: ['finished', 'failed', 'cancelled'].includes(event.kind) && !block ? event.kind : run.state === 'queued' ? 'running' : run.state,
         transport: { ...run.transport, lastEventAt: event.at } })
-      if (terminalState(runs.get(id).state)) streamControls.delete(id)
+      clearTerminalControl(id)
       while (events.length > maxEvents) {
         const removed = events.shift(); dropped += 1
         const owner = runs.get(removed.runId)
@@ -133,6 +147,13 @@ export function useBlockValue(store, runId, blockId) {
 export function useRun(store, runId) {
   return useSyncExternalStore(useCallback(listener => store.subscribeRun(runId, listener), [store, runId]),
     useCallback(() => store.getRun(runId), [store, runId]))
+}
+export function useRunStatus(store, runId) {
+  return useSyncExternalStore(useCallback(listener => store.subscribeRun(runId, listener), [store, runId]),
+    useCallback(() => {
+      const run = store.getRun(runId)
+      return run ? `${run.state}/${run.transport.status}` : ''
+    }, [store, runId]))
 }
 export function useRuns(store = labValueStore) {
   return useSyncExternalStore(store.subscribeRuns, store.getRuns)

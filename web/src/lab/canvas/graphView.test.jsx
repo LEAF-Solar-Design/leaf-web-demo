@@ -82,6 +82,99 @@ afterEach(async () => {
 })
 
 describe('first-click live graph', () => {
+  it('F2 renders only the affected memoised block for a value event without rendering GraphView', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
+    client.setDocId('render-isolation')
+    labValueStore.upsertRun('render-isolation', { state: 'running', doc_id: 'render-isolation', graph_revision: 4 })
+    const renderProbe = vi.fn()
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} renderProbe={renderProbe} />)
+    try {
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Run saved revision r4' })).toBeEnabled())
+      await act(async () => {})
+      renderProbe.mockClear()
+      act(() => labValueStore.apply('render-isolation', { seq: 0, kind: 'value', block_id: 'count-1', payload: { result: { data: 81 } } }))
+      expect(within(cardNamed('Count')).getByText('81')).toBeVisible()
+      expect(renderProbe.mock.calls).toEqual([['block:count-1']])
+    } finally {
+      view.unmount()
+      labValueStore.upsertRun('render-isolation', { state: 'finished' })
+    }
+  })
+
+  it.each(['failed', 'suspended'])('F4 renders a first %s block event without a value', async kind => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
+    const runId = `first-error-${kind}`
+    client.setDocId(runId)
+    labValueStore.upsertRun(runId, { state: 'running', doc_id: runId, graph_revision: 4 })
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    try {
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Run saved revision r4' })).toBeEnabled())
+      act(() => labValueStore.apply(runId, { seq: 0, kind, block_id: 'count-1', payload: { reason: 'worker-refused' } }))
+      expect(within(cardNamed('Count')).getByText('error: worker-refused')).toBeVisible()
+      expect(cardNamed('Count')).toHaveAttribute('data-value-kind', 'empty')
+    } finally {
+      view.unmount()
+      labValueStore.upsertRun(runId, { state: 'finished' })
+    }
+  })
+
+  it('F5 serialises concurrent clicks at 19 active runs and tracks each accepted submission', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
+    client.setDocId('concurrent-runs')
+    labValueStore.getRuns().filter(run => run.id !== 'local').forEach(run => labValueStore.upsertRun(run.id, { state: 'finished' }))
+    for (let n = 0; n < 19; n++) labValueStore.upsertRun(`concurrent-${n}`, { state: 'running' })
+    let accept
+    const fetchImpl = vi.fn((url, init) => init.method === 'POST'
+      ? new Promise(resolve => { accept = resolve })
+      : Promise.resolve({ ok: true, status: 200, body: new ReadableStream({ start() {} }) }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    try {
+      const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
+      await waitFor(() => expect(run).toBeEnabled())
+      act(() => { fireEvent.click(run); fireEvent.click(run) })
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+      expect(run).toBeDisabled()
+      await act(async () => accept({ ok: true, status: 202, json: async () => ({ run_id: 'concurrent-19', state: 'queued' }) }))
+      await waitFor(() => expect(run).toBeEnabled())
+      expect(fetchImpl).toHaveBeenCalledTimes(2)
+      fireEvent.click(run)
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3))
+      await act(async () => accept({ ok: true, status: 202, json: async () => ({ run_id: 'concurrent-20', state: 'queued' }) }))
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(4))
+      for (const id of ['concurrent-19', 'concurrent-20']) {
+        expect(labValueStore.getRun(id)).toBeDefined()
+        expect(fetchImpl.mock.calls.some(([url]) => url.includes(`runs=${id}&`))).toBe(true)
+      }
+    } finally {
+      view.unmount()
+      for (let n = 0; n <= 20; n++) labValueStore.upsertRun(`concurrent-${n}`, { state: 'finished' })
+    }
+  })
+
+  it('F5 refuses to submit at the hard cap and explains the active run limit', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
+    client.setDocId('hard-cap')
+    labValueStore.getRuns().filter(run => run.id !== 'local').forEach(run => labValueStore.upsertRun(run.id, { state: 'finished' }))
+    for (let n = 0; n < 40; n++) labValueStore.upsertRun(`hard-cap-${n}`, { state: 'running' })
+    const fetchImpl = vi.fn(); vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    try {
+      const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
+      await waitFor(() => expect(run).toBeEnabled())
+      fireEvent.click(run)
+      expect(screen.getByText('Too many active runs. Wait for a run to finish.')).toBeVisible()
+      expect(fetchImpl).not.toHaveBeenCalled()
+    } finally {
+      view.unmount()
+      for (let n = 0; n < 40; n++) labValueStore.upsertRun(`hard-cap-${n}`, { state: 'finished' })
+    }
+  })
+
   it.each(['button', 'focus'])('resumes a 401-paused stream via %s with fresh authority and its cursor', async method => {
     const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
     const runId = `canvas-resume-${method}`

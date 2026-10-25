@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { registry } from './registry.js'
 import { pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
@@ -12,7 +12,7 @@ import { labArtifactsClient } from '../history/labArtifactsClient.js'
 import AfterSavePanel from '../history/AfterSavePanel.jsx'
 import { createAfterSaveClient } from '../history/afterSaveClient.js'
 import { canonicalJSON } from '../contract.js'
-import { labValueStore, terminalState, useBlockValue, useRun } from '../runs/valueStore.js'
+import { labValueStore, terminalState, useBlockValue, useRun, useRunStatus } from '../runs/valueStore.js'
 import { openRunStream, submitRun } from '../runs/runStream.js'
 
 // Both mounts pass the values returned by useLiveGraph to LiveValues. Keep
@@ -110,7 +110,7 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
     measurements, upstream, badges: values, values, onChange }
 }
 
-export function LiveValues({ values, provider, saveBar = true, runId = 'local', store = labValueStore }) {
+export function LiveValues({ values, provider, saveBar = true, runId = 'local', store = labValueStore, renderProbe }) {
   const state = provider.state
   const context = displayContexts.get(values)
   return <>
@@ -120,12 +120,13 @@ export function LiveValues({ values, provider, saveBar = true, runId = 'local', 
         : `Dashboard sources: ${state.sources.join(', ')}`}</p>
     <section aria-label="Values">
       {[...new Set(values.map(value => value.id))].map(id => <StoredBlockValues key={id} id={id} runId={runId}
-        store={store} templates={values.filter(value => value.id === id)} />)}
+        store={store} templates={values.filter(value => value.id === id)} renderProbe={renderProbe} />)}
     </section>
   </>
 }
 
-function StoredBlockValues({ id, runId, store, templates }) {
+const StoredBlockValues = memo(function StoredBlockValues({ id, runId, store, templates, renderProbe }) {
+  renderProbe?.('block:' + id)
   const block = useBlockValue(store, runId, id)
   const values = Object.entries(block?.value || {}).map(([port, raw]) => {
     if (runId === 'local') return raw
@@ -140,7 +141,9 @@ function StoredBlockValues({ id, runId, store, templates }) {
     as_of: value.as_of, age_ms: Number.isFinite(value.as_of) ? Math.max(0, Date.now() - value.as_of) : null, stale: value.stale, simulated: value.simulated,
     truncated: value.truncated, host_tainted: value.host_tainted }
   })
-  return values.map(value => {
+  return <>
+    {block?.error && !values.length && <article data-value-kind="empty"><h3>{templates[0]?.title || id}</h3><p>error: {block.error}</p></article>}
+    {values.map(value => {
         const low = Math.min(...value.series)
         const high = Math.max(...value.series)
         return <article key={`${value.id}/${value.port}`} data-value-kind={value.kind}>
@@ -156,8 +159,9 @@ function StoredBlockValues({ id, runId, store, templates }) {
           {value.host_tainted && <span data-badge>host data</span>}
           <span data-badge>p50 {value.p50_us / 1000} ms · p99 {value.p99_us / 1000} ms</span>
         </article>
-      })
-}
+      })}
+  </>
+})
 
 function AfterSaveDisplay({ provider, context, saveBar }) {
   const { artifacts, document, ready } = context
@@ -186,7 +190,8 @@ export function setGraphCanvasLoader(loader = loadLabCanvas) {
   LabCanvas = lazy(loader)
 }
 
-export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false, client = labArtifactsClient }) {
+export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false, client = labArtifactsClient, renderProbe }) {
+  renderProbe?.('graph')
   const [restored, setRestored] = useState(() => ({ graph: client.state.restoredGraph, key: client.state.restoredKey }))
   const [opened, setOpened] = useState(!hidden)
   const [localRevision, setRevision] = useState(0)
@@ -196,6 +201,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const [, refreshHead] = useState(0)
   const [runMessage, setRunMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const submissionPending = useRef(false)
   const streams = useRef(new Set())
   const mounted = useRef(false)
   const latest = useRef(null)
@@ -220,11 +226,12 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     && run.graph_revision === client.state.head).map(run => run.id).join(',')
   const matchingRuns = useSyncExternalStore(labValueStore.subscribeRuns, runSnapshot)
   const valueRunId = matchingRuns.split(',')[0] || 'local'
-  const activeRun = useRun(labValueStore, valueRunId)
+  const activeRunStatus = useRunStatus(labValueStore, valueRunId)
   const localTiming = useRun(labValueStore, 'local')?.timing
   async function runSaved() {
-    if (submitting || !client.state.headLoaded || client.state.head == null || !live.ready) return
+    if (submissionPending.current || !client.state.headLoaded || client.state.head == null || !live.ready) return
     if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs. Wait for a run to finish.'); return }
+    submissionPending.current = true
     setSubmitting(true); setRunMessage('')
     const { docId, head, document } = latest.current
     try {
@@ -238,6 +245,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         || canonicalJSON(saved.graph) !== canonicalJSON(latest.current.document)) {
         setRunMessage('Save before running'); return
       }
+      if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs. Wait for a run to finish.'); return }
       const result = await submitRun({ docId, graphRevision: head })
       if (!mounted.current) return
       if (!result.ok) {
@@ -266,7 +274,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       })
       streams.current.add(stream)
     } catch { if (mounted.current) setRunMessage('Run unavailable') }
-    finally { if (mounted.current) setSubmitting(false) }
+    finally { submissionPending.current = false; if (mounted.current) setSubmitting(false) }
   }
   useEffect(() => {
     if (hidden || !live.ready) return undefined
@@ -335,10 +343,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
             onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
             {onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
           {runMessage && <p role="status">{runMessage}</p>}
-          {activeRun?.transport.status === 'auth_expired' && <p>Sign in again, then resume <button type="button" onClick={() => labValueStore.resume(valueRunId)}>Resume</button></p>}
+          {activeRunStatus.endsWith('/auth_expired') && <p>Sign in again, then resume <button type="button" onClick={() => labValueStore.resume(valueRunId)}>Resume</button></p>}
         </section>
         <LabSaveBar document={live.draft?.document} ready={live.ready} client={client} onTakeTheirs={graph => client.takeGraph(graph)} />
-        <LiveValues values={live.values} provider={provider} saveBar={false} runId={onRun ? 'local' : valueRunId} />
+        <LiveValues values={live.values} provider={provider} saveBar={false} runId={onRun ? 'local' : valueRunId} renderProbe={renderProbe} />
         <Suspense fallback={<p role="status" aria-label="Loading dependency canvas">Loading dependency canvas…</p>}>
           <LabCanvas key={restored.key} initialDocument={restored.graph || initialDocument} entries={live.entries} measurements={localTiming?.measurements || live.measurements} upstream={live.upstream} onChange={live.onChange} codeEvidence={block => evidenceFor(provider, block)} />
         </Suspense>

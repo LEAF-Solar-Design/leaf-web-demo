@@ -33,8 +33,10 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
   if (!runIds.length || runIds.length > 8) throw new Error('A stream requires one to eight runs')
   let stopped = false, paused = false, running = false, controller, waiting, currentReader, restartRequested = false, generation = 0
   const active = new Set(runIds.filter(id => !terminalState(store.getRun(id)?.state)))
+  const pendingSnapshots = new Set()
   const transport = patch => active.forEach(id => store.setTransport(id, patch))
   async function snapshot(id, connectionSignal) {
+    pendingSnapshots.add(id)
     const row = await request(`runs/${encodeURIComponent(id)}`, { fetchImpl, signal: connectionSignal })
     if (stopped || connectionSignal.aborted) return
     if (!row.ok) { if (row.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot unavailable') }
@@ -50,10 +52,12 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
       if (next <= after) throw new Error('Snapshot cursor did not advance')
       after = next
     }
-    // The authoritative row wins over the replay's intermediate states.
-    store.upsertRun(id, { state: row.state })
     store.addGap(id, { recovered: true })
-    if (terminalState(row.state)) { store.setTransport(id, { status: 'finished' }); active.delete(id) }
+    if (terminalState(store.getRun(id)?.state)) {
+      store.setTransport(id, { status: 'finished' }); active.delete(id)
+    }
+    pendingSnapshots.delete(id)
+    store.finishSnapshot(id)
   }
   async function loop(epoch) {
     running = true
@@ -63,6 +67,8 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
         controller = new AbortController()
         let reader, delay = null, immediate = false
         try {
+          for (const id of pendingSnapshots) await snapshot(id, controller.signal)
+          if (!active.size || stopped || paused) break
           const ids = [...active]
           const headers = headersFor('text/event-stream')
           headers['Last-Event-ID'] = ids.map(id => `${id}:${store.getRun(id)?.lastSeq ?? -1}`).join(',')
@@ -86,8 +92,7 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
             reader = response.body.getReader()
             currentReader = reader
             const decoder = new TextDecoder()
-            const encoder = new TextEncoder()
-            let line = '', frameBytes = 0, type = 'message', data = [], frameId = '', skipLF = false
+            let line = '', lineBytes = [], frameBytes = 0, type = 'message', data = [], frameId = '', pendingCR = false
             const frame = async () => {
               if (!data.length) { type = 'message'; frameId = ''; frameBytes = 0; return }
               const value = JSON.parse(data.join('\n')), kind = type
@@ -96,8 +101,9 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
               type = 'message'; data = []; frameId = ''; frameBytes = 0; failures = 0
               if (kind === 'run' && active.has(value.run_id)) {
                 store.apply(value.run_id, value)
-                if (terminalState(store.getRun(value.run_id)?.state)) {
-                  store.setTransport(value.run_id, { status: 'finished' }); active.delete(value.run_id)
+                if (terminalState(store.getRun(value.run_id)?.state) || (!value.block_id && terminalState(value.kind))) {
+                  if (store.getRun(value.run_id)) store.setTransport(value.run_id, { status: 'finished' })
+                  active.delete(value.run_id)
                   immediate = true
                 }
               } else if (kind === 'health') transport({ lagMs: value.lag_ms, lastEventAt: now() })
@@ -116,6 +122,8 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
               }
             }
             const consumeLine = async () => {
+              line = decoder.decode(Uint8Array.from(lineBytes))
+              lineBytes = []
               if (!line) await frame()
               else if (!line.startsWith(':')) {
                 const colon = line.indexOf(':'), name = colon < 0 ? line : line.slice(0, colon)
@@ -130,16 +138,17 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
             while (!stopped && !paused && active.size && !immediate) {
               const chunk = await reader.read()
               if (stopped || controller.signal.aborted) break
-              if (chunk.done) break
-              // Count UTF-8 bytes, not JS characters. CR, LF and CRLF may
-              // themselves straddle chunks; a CR consumes its following LF.
-              for (const character of decoder.decode(chunk.value, { stream: true })) {
-                if (skipLF && character === '\n') { skipLF = false; continue }
-                skipLF = false
-                frameBytes += encoder.encode(character).length
+              if (chunk.done) { if (pendingCR) await consumeLine(); break }
+              // Delay CR line splitting so a following LF is counted in the
+              // same frame, even when the pair straddles chunks.
+              for (const byte of chunk.value) {
+                if (pendingCR && byte !== 10) { pendingCR = false; await consumeLine() }
+                if (stopped || paused || !active.size || immediate) break
+                frameBytes += 1
                 if (frameBytes > 256 * 1024) { transport({ status: 'protocol_error' }); throw new Error('Frame too large') }
-                if (character === '\r' || character === '\n') { await consumeLine(); skipLF = character === '\r' }
-                else line += character
+                if (byte === 13) pendingCR = true
+                else if (byte === 10) { pendingCR = false; await consumeLine() }
+                else lineBytes.push(byte)
                 if (stopped || paused || !active.size || immediate) break
               }
             }
