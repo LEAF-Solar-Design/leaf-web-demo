@@ -178,6 +178,9 @@ describe('admitted Lab channel', () => {
     for (const payload of [{ ...message.payload, extra: true }, { ...message.payload, doc: [] },
       { ...message.payload, renderer_version: '1.0' }, { ...message.payload, source: { ...request.source, revision: 0 } },
       { ...message.payload, source: { ...request.source, digest: 'bad' } },
+      { ...message.payload, source: { ...request.source, artifact_id: 'widget\n' } },
+      { ...message.payload, source: { ...request.source, digest: '0'.repeat(64) + '\n' } },
+      { ...message.payload, renderer_version: '1.0.0\n' },
       { ...message.payload, source: { ...request.source, extra: true } }]) {
       expect(() => schema.schema({ ...message, payload }, 'lab-embed.v1.schema.json')).toThrow()
     }
@@ -185,7 +188,7 @@ describe('admitted Lab channel', () => {
     expect(await h.bridge.publishWidget(request)).toEqual({ ok: false, reason: 'not_admitted' })
   })
 
-  it.each([40960, 40961])('checks the full canonical UTF-8 publication envelope at %i bytes', async (bytes) => {
+  it.each([4097, 40960, 40961])('checks the full canonical UTF-8 publication envelope at %i bytes', async (bytes) => {
     const h = harness()
     await h.bridge.start()
     await h.admit()
@@ -205,9 +208,17 @@ describe('admitted Lab channel', () => {
     expect(padding).toBe(0)
     expect(() => validateWidgetDoc(doc)).not.toThrow()
     expect(new TextEncoder().encode(canonicalJSON(message)).length).toBe(bytes)
-    expect(await h.bridge.publishWidget(request)).toEqual(bytes === 40960 ? { ok: true } : { ok: false, reason: 'too_large' })
-    expect(h.sent()).toHaveLength(bytes === 40960 ? 1 : 0)
-    if (bytes === 40960) expect(new TextEncoder().encode(canonicalJSON(h.sent()[0])).length).toBe(bytes)
+    const context = { ...message, authenticated: true, origin: DEFAULT_HOST_ORIGINS[0],
+      eventOrigin: DEFAULT_HOST_ORIGINS[0], source: h.parent, eventSource: h.parent, now_ms: 1000 }
+    const state = { sequence: 0, accepted_at_ms: [] }
+    if (bytes <= 40960) expect(() => schema.embed(message, context, state)).not.toThrow()
+    else {
+      expect(() => schema.embed(message, context, state)).toThrow('message byte limit')
+      expect(state).toEqual({ sequence: 0, accepted_at_ms: [] })
+    }
+    expect(await h.bridge.publishWidget(request)).toEqual(bytes <= 40960 ? { ok: true } : { ok: false, reason: 'too_large' })
+    expect(h.sent()).toHaveLength(bytes <= 40960 ? 1 : 0)
+    if (bytes <= 40960) expect(new TextEncoder().encode(canonicalJSON(h.sent()[0])).length).toBe(bytes)
     expect(await h.bridge.proposal(draft)).toBe(true)
     h.bridge.stop()
   })

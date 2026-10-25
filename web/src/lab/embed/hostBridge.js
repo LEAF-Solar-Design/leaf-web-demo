@@ -225,9 +225,9 @@ export function createLabHostBridge({
       if (!source || typeof source !== 'object' || Array.isArray(source)
         || Reflect.ownKeys(source).length !== 3
         || !['artifact_id', 'revision', 'digest'].every((key) => Object.hasOwn(source, key))
-        || typeof source.artifact_id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\s\S])/.test(source.artifact_id)
+        || typeof source.artifact_id !== 'string' || !/^(?![\s\S]*\n)[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(source.artifact_id)
         || !Number.isSafeInteger(source.revision) || source.revision < 1
-        || typeof source.digest !== 'string' || !/^[0-9a-f]{64}(?![\s\S])/.test(source.digest)) {
+        || typeof source.digest !== 'string' || !/^(?![\s\S]*\n)[0-9a-f]{64}$/.test(source.digest)) {
         return Promise.resolve({ ok: false, reason: 'invalid_source' })
       }
       const payload = { doc: validated, source: { artifact_id: source.artifact_id, revision: source.revision, digest: source.digest }, renderer_version: RENDERER_VERSION }

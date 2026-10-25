@@ -27,12 +27,12 @@
         "source": {
           "type": "object", "additionalProperties": false, "required": ["artifact_id", "revision", "digest"],
           "properties": {
-            "artifact_id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"},
+            "artifact_id": {"type": "string", "pattern": "^(?![\\s\\S]*\\n)[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"},
             "revision": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
-            "digest": {"$ref": "#/$defs/hash"}
+            "digest": {"type": "string", "pattern": "^(?![\\s\\S]*\\n)[0-9a-f]{64}$"}
           }
         },
-        "renderer_version": {"type": "string", "pattern": "^\\d{1,4}\\.\\d{1,4}\\.\\d{1,4}$"}
+        "renderer_version": {"type": "string", "pattern": "^(?![\\s\\S]*\\n)\\d{1,4}\\.\\d{1,4}\\.\\d{1,4}$"}
       }
     }}}},
     {"if": {"properties": {"kind": {"const": "source.value"}}}, "then": {"properties": {"payload": {"type": "object", "additionalProperties": false, "required": ["rows"], "properties": {"rows": {"type": "array", "maxItems": 200, "items": {"type": "object"}}}}}}},
