@@ -32,6 +32,19 @@ for (const [name, detector] of pairs) {
   })
 }
 
+test('clipped-target positive and negative fixtures', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.setContent(fixture('clipped-target-positive'))
+  const positive = await page.evaluate(auditPage)
+  expect(positive.smallTargetsCount).toBeGreaterThanOrEqual(1)
+  expect(positive.smallTargets[0].visibleHeight).toBeLessThan(44)
+  expect(positive.smallTargets[0].height).toBe(44)
+
+  await page.setContent(fixture('clipped-target-negative'))
+  const negative = await page.evaluate(auditPage)
+  for (const field of countFields) expect(negative[field], field).toBe(0)
+})
+
 for (const [width, height] of WIDTHS) {
   test(`clean fixture at ${width}x${height}`, async ({ page }) => {
     await page.setViewportSize({ width, height })

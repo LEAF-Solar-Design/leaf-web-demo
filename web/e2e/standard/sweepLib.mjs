@@ -66,10 +66,29 @@ export function auditPage() {
       result.smallTextCount++
       sample(result.smallText, element, { fontSize })
     }
-    if (vw <= 430 && element.matches('a[href], button, [role=button], input, select, textarea, [role=tab]') &&
-        (rect.width < 44 || rect.height < 44)) {
-      result.smallTargetsCount++
-      sample(result.smallTargets, element, { width: rect.width, height: rect.height })
+    if (vw <= 430 && element.matches('a[href], button, [role=button], input, select, textarea, [role=tab]')) {
+      let left = Math.max(rect.left, 0)
+      let top = Math.max(rect.top, 0)
+      let right = Math.min(rect.right, vw)
+      let bottom = Math.min(rect.bottom, innerHeight)
+      for (let parent = element.parentElement; parent && right > left && bottom > top; parent = parent.parentElement) {
+        const parentStyle = getComputedStyle(parent)
+        if (parentStyle.overflowX !== 'visible' || parentStyle.overflowY !== 'visible') {
+          const parentRect = parent.getBoundingClientRect()
+          const paddingLeft = parentRect.left + parent.clientLeft
+          const paddingTop = parentRect.top + parent.clientTop
+          left = Math.max(left, paddingLeft)
+          top = Math.max(top, paddingTop)
+          right = Math.min(right, paddingLeft + parent.clientWidth)
+          bottom = Math.min(bottom, paddingTop + parent.clientHeight)
+        }
+      }
+      const visibleWidth = Math.max(0, right - left)
+      const visibleHeight = Math.max(0, bottom - top)
+      if (visibleWidth > 0 && visibleHeight > 0 && (visibleWidth < 44 || visibleHeight < 44)) {
+        result.smallTargetsCount++
+        sample(result.smallTargets, element, { width: rect.width, height: rect.height, visibleWidth, visibleHeight })
+      }
     }
   }
   return result
