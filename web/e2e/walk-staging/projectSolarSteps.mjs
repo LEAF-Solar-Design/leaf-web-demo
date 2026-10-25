@@ -130,10 +130,17 @@ export async function stagingEvidenceStep(runtime, testInfo, action, persist = p
   runtime.page.on('console', onConsole)
   const finish = observeStagingNetwork(runtime.page, records, recorder)
   let failure = null
+  let skipReason
   try {
     return await action()
   } catch (error) {
     failure = error
+    const message = String(error?.message ?? error)
+    const skipPrefix = 'Test is skipped:'
+    if (testInfo?.expectedStatus === 'skipped' || message.startsWith(skipPrefix)) {
+      skipReason = (message.startsWith(skipPrefix)
+        ? message.slice(skipPrefix.length).trim() : message.split(/\r?\n/, 1)[0]).slice(0, 200) || 'skipped'
+    }
     throw error
   } finally {
     delete runtime.page[stagingActionRecorder]
@@ -141,8 +148,10 @@ export async function stagingEvidenceStep(runtime, testInfo, action, persist = p
     await finish()
     recorder.end()
     runtime.evidence.projectSolar.actions = recorder.snapshot()
-    runtime.evidence.projectSolar.classification = classifyStagingOutcome({ error: failure, network: records })
-    if (failure instanceof Error) failure.message += `\n${stagingNetworkFailure(records, consoleMessages)}`
+    runtime.evidence.projectSolar.classification = classifyStagingOutcome({ error: skipReason ? null : failure,
+      skipped: skipReason, network: records })
+    if (skipReason) runtime.evidence.projectSolar.skipReason = skipReason
+    if (!skipReason && failure instanceof Error) failure.message += `\n${stagingNetworkFailure(records, consoleMessages)}`
     try {
       await persist(runtime.evidence, testInfo.title)
     } catch { /* Evidence IO must not replace the step's verdict. */ }
